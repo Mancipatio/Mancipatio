@@ -1,0 +1,17 @@
+# Markdown files and the top-level docs/ directories are not tracked.
+# The docs/ rules are anchored so application routes such as front/app/docs
+# stay tracked.
+*.md
+/docs/
+/front/docs/
+/program/docs/
+
+# Local env files and wallet keypairs are never committed.
+.env
+.env.*
+!.env.example
+*-keypair.json
+id.json
+id-*.json
+
+.DS_Store

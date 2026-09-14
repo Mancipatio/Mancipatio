@@ -1,0 +1,85 @@
+# Program CI — fresh SBF build, tests and IDL generation for program/.
+name: Program CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "program/**"
+      - ".github/workflows/program-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "program/**"
+      - ".github/workflows/program-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: program-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: program
+
+jobs:
+  check:
+    name: Fresh SBF build + tests + IDL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      RUSTUP_TOOLCHAIN: 1.89.0
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+        with:
+          components: rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: program
+          # Reuse downloaded Cargo dependencies, never a prior deploy artifact.
+          cache-targets: false
+
+      - name: Install pinned Anchor / Agave tooling
+        run: bash scripts/install-ci-toolchain.sh
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Build both SBF programs from this checkout
+        run: cargo build-sbf --workspace --tools-version v1.52 -- --locked
+
+      - name: Test the freshly built artifacts
+        run: cargo test --workspace --locked
+
+      - name: Generate IDL from source with the pinned host compiler
+        run: |
+          mkdir -p target/idl
+          anchor idl build -p asset_registry -o "$PWD/target/idl/asset_registry.json" -- --locked --lib
+          anchor idl build -p transfer_hook -o "$PWD/target/idl/transfer_hook.json" -- --locked --lib
+
+      - name: Record tested artifact identity
+        run: |
+          {
+            printf 'commit: %s\n' "$GITHUB_SHA"
+            rustc --version
+            solana --version
+            cargo build-sbf --version
+            anchor --version
+            sha256sum target/deploy/asset_registry.so target/deploy/transfer_hook.so target/idl/asset_registry.json target/idl/transfer_hook.json
+          } > target/tested-artifacts.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tested-programs-${{ github.sha }}
+          path: |
+            program/target/deploy/asset_registry.so
+            program/target/deploy/transfer_hook.so
+            program/target/idl/asset_registry.json
+            program/target/idl/transfer_hook.json
+            program/target/tested-artifacts.txt
+          if-no-files-found: error

@@ -1,0 +1,1093 @@
+{
+  "address": "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy",
+  "metadata": {
+    "name": "transfer_hook",
+    "version": "0.1.0",
+    "spec": "0.1.0",
+    "description": "Mancipatio transfer hook — per-transfer blocklist / sanctions enforcement (Token-2022)"
+  },
+  "instructions": [
+    {
+      "name": "accept_blocklist_authority",
+      "discriminator": [
+        145,
+        184,
+        100,
+        65,
+        33,
+        121,
+        252,
+        89
+      ],
+      "accounts": [
+        {
+          "name": "new_authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "add_to_blocklist",
+      "docs": [
+        "Adds a wallet to the blocklist. Only the `BlocklistAuthority` may call it."
+      ],
+      "discriminator": [
+        201,
+        138,
+        75,
+        216,
+        252,
+        201,
+        26,
+        106
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "block_entry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "wallet"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "wallet",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "initialize_blocklist_authority",
+      "docs": [
+        "Creates the singleton blocklist authority. Call once at deployment; set",
+        "`authority` to the Mancipatio admin multisig."
+      ],
+      "discriminator": [
+        137,
+        193,
+        13,
+        68,
+        81,
+        77,
+        181,
+        8
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "upgrade_authority",
+          "docs": [
+            "Deployment authority authorizes the initial blocklist administrator."
+          ],
+          "signer": true
+        },
+        {
+          "name": "program",
+          "address": "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+        },
+        {
+          "name": "program_data"
+        }
+      ],
+      "args": [
+        {
+          "name": "authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "initialize_extra_account_meta_list",
+      "docs": [
+        "Writes the `ExtraAccountMetaList` PDA that tells Token-2022 which extra",
+        "accounts to resolve and pass to `Execute`. The list content is fixed by",
+        "this program (and by the mint's `restriction_mode`), so the instruction",
+        "needs no authority gate. Creation is pre-fund-safe: a PDA that already",
+        "holds lamports (griefing transfer) is topped up / allocated / assigned",
+        "rather than `create_account`-ed, so it can never block initialization.",
+        "",
+        "Always emits idx 5: the source-owner `BlockEntry` PDA (resolved from",
+        "the source token account at Execute idx 0, data offset 32).",
+        "",
+        "In `KycGated` mode it also emits the accounts needed to check the",
+        "receiver's KYC:",
+        "* idx 6 — this program's `TransferHookConfig` self-PDA (`[\"hook_cfg\", mint]`),",
+        "* idx 7 — the `KycRegistry`, baked from `config.kyc_registry`,",
+        "* idx 8 — the `asset_registry` program (owner of the KYC accounts),",
+        "* idx 9 — the receiver `KycEntry` external PDA `[\"kyc\", registry, holder]`,",
+        "whose `holder` is read from the destination token account's `owner`",
+        "field (Execute idx 2, data offset 32),",
+        "* idx 10 — the destination-owner `EscrowMarker` external PDA",
+        "`[\"escrow_marker\", dest owner]` (same AccountData source as idx 9),",
+        "* idx 11 — the source-owner `EscrowMarker` external PDA",
+        "`[\"escrow_marker\", source owner]` (source token account, Execute",
+        "idx 0, data offset 32)."
+      ],
+      "discriminator": [
+        92,
+        197,
+        174,
+        197,
+        41,
+        124,
+        19,
+        3
+      ],
+      "accounts": [
+        {
+          "name": "payer",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "config",
+          "docs": [
+            "Per-mint config — its `restriction_mode` / `kyc_registry` fix the shape",
+            "of the meta list written here."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  111,
+                  107,
+                  95,
+                  99,
+                  102,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "extra_account_meta_list",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  116,
+                  114,
+                  97,
+                  45,
+                  97,
+                  99,
+                  99,
+                  111,
+                  117,
+                  110,
+                  116,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "initialize_transfer_hook_config",
+      "docs": [
+        "Creates the per-mint transfer-hook config.",
+        "",
+        "Gated: the registry-owned `ShareClass` account must co-sign. Only the",
+        "`asset_registry` program can produce that signature (CPI with the",
+        "ShareClass PDA seeds), so an external wallet can no longer front-run a",
+        "mint's config and fix its mode."
+      ],
+      "discriminator": [
+        169,
+        224,
+        202,
+        10,
+        67,
+        62,
+        216,
+        135
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "share_class",
+          "docs": [
+            "The `asset_registry`-owned `ShareClass` account for this mint, as a",
+            "co-signer. A `ShareClass` is a PDA — it has no private key — so this",
+            "signature can only come from the asset_registry program's own CPI",
+            "(`invoke_signed` with the ShareClass seeds). The discriminator check",
+            "rejects registry-owned-but-keypair-signable shells created via system",
+            "`allocate`+`assign` (their data is all zeros)."
+          ],
+          "signer": true
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  111,
+                  107,
+                  95,
+                  99,
+                  102,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "blocklist",
+          "type": "pubkey"
+        },
+        {
+          "name": "restriction_mode",
+          "type": {
+            "defined": {
+              "name": "RestrictionMode"
+            }
+          }
+        },
+        {
+          "name": "kyc_registry",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
+    },
+    {
+      "name": "propose_blocklist_authority",
+      "docs": [
+        "Stages an operational authority change; does not affect ProgramData."
+      ],
+      "discriminator": [
+        127,
+        135,
+        141,
+        118,
+        167,
+        128,
+        150,
+        173
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "blocklist_authority"
+          ]
+        },
+        {
+          "name": "blocklist_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "remove_from_blocklist",
+      "docs": [
+        "Removes a wallet from the blocklist. Only the `BlocklistAuthority` may call it."
+      ],
+      "discriminator": [
+        132,
+        125,
+        30,
+        120,
+        139,
+        22,
+        210,
+        90
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "block_entry",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "wallet"
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "wallet",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "update_transfer_hook_config",
+      "docs": [
+        "Switches a mint's `restriction_mode` (Open ↔ KycGated) after creation",
+        "and rewrites the `ExtraAccountMetaList` to the matching shape — a",
+        "super-admin operation gated by the `BlocklistAuthority`.",
+        "",
+        "The meta-list account is resized in place: grown (topped up to",
+        "rent-exemption by `authority`) for Open → KycGated, shrunk for",
+        "KycGated → Open (no lamport refund — the account simply stays above",
+        "its rent-exempt minimum)."
+      ],
+      "discriminator": [
+        143,
+        24,
+        119,
+        189,
+        12,
+        223,
+        226,
+        26
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "Must be the `BlocklistAuthority.authority` (Mancipatio admin multisig);",
+            "pays the rent top-up when the meta list grows."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "mint"
+        },
+        {
+          "name": "config",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  111,
+                  107,
+                  95,
+                  99,
+                  102,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "extra_account_meta_list",
+          "docs": [
+            "program, i.e. initialized); resized and rewritten in the handler."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  120,
+                  116,
+                  114,
+                  97,
+                  45,
+                  97,
+                  99,
+                  99,
+                  111,
+                  117,
+                  110,
+                  116,
+                  45,
+                  109,
+                  101,
+                  116,
+                  97,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "restriction_mode",
+          "type": {
+            "defined": {
+              "name": "RestrictionMode"
+            }
+          }
+        },
+        {
+          "name": "kyc_registry",
+          "type": {
+            "option": "pubkey"
+          }
+        }
+      ]
+    }
+  ],
+  "accounts": [
+    {
+      "name": "BlockEntry",
+      "discriminator": [
+        160,
+        179,
+        255,
+        246,
+        122,
+        148,
+        254,
+        143
+      ]
+    },
+    {
+      "name": "BlocklistAuthority",
+      "discriminator": [
+        43,
+        125,
+        116,
+        230,
+        242,
+        105,
+        11,
+        43
+      ]
+    },
+    {
+      "name": "BlocklistAuthorityTransfer",
+      "discriminator": [
+        171,
+        162,
+        208,
+        78,
+        168,
+        214,
+        135,
+        50
+      ]
+    },
+    {
+      "name": "TransferHookConfig",
+      "discriminator": [
+        168,
+        122,
+        191,
+        221,
+        204,
+        201,
+        149,
+        88
+      ]
+    }
+  ],
+  "errors": [
+    {
+      "code": 6000,
+      "name": "KycRegistryRequired",
+      "msg": "KycGated restriction mode requires a kyc_registry"
+    },
+    {
+      "code": 6001,
+      "name": "InvalidInstruction",
+      "msg": "Unsupported transfer-hook instruction"
+    },
+    {
+      "code": 6002,
+      "name": "MissingExtraAccount",
+      "msg": "Expected extra account was not provided"
+    },
+    {
+      "code": 6003,
+      "name": "SenderBlocked",
+      "msg": "Sender is on the blocklist"
+    },
+    {
+      "code": 6004,
+      "name": "Unauthorized",
+      "msg": "Signer is not the blocklist authority"
+    },
+    {
+      "code": 6005,
+      "name": "ReceiverNotApproved",
+      "msg": "Receiver has no approved KYC entry in the registry"
+    },
+    {
+      "code": 6006,
+      "name": "HolderKycExpired",
+      "msg": "Receiver's KYC entry has expired"
+    },
+    {
+      "code": 6007,
+      "name": "JurisdictionBlocked",
+      "msg": "Receiver's jurisdiction is not allowed by the registry"
+    },
+    {
+      "code": 6008,
+      "name": "InvalidKycEntry",
+      "msg": "KYC entry account is malformed or truncated"
+    },
+    {
+      "code": 6009,
+      "name": "InvalidKycRegistry",
+      "msg": "KYC registry account is malformed, truncated, or unexpected"
+    },
+    {
+      "code": 6010,
+      "name": "MetaListNotInitialized",
+      "msg": "ExtraAccountMetaList must be initialized before it can be updated"
+    },
+    {
+      "code": 6011,
+      "name": "ImmutableOwnerRequired",
+      "msg": "Share-token recipients must have the Token-2022 ImmutableOwner extension"
+    },
+    {
+      "code": 6012,
+      "name": "InvalidTokenAccount",
+      "msg": "Expected a Token-2022 token account"
+    },
+    {
+      "code": 6013,
+      "name": "InvalidBlockEntry",
+      "msg": "BlockEntry must be derived from the source token-account owner"
+    },
+    {
+      "code": 6014,
+      "name": "InvalidProposedAuthority",
+      "msg": "Proposed authority must be a different nonzero key"
+    },
+    {
+      "code": 6015,
+      "name": "InvalidAuthorityTransfer",
+      "msg": "Authority proposal does not match current authority and accepting signer"
+    }
+  ],
+  "types": [
+    {
+      "name": "BlockEntry",
+      "docs": [
+        "Blocklist entry. Existence of this PDA = the wallet is blocked.",
+        "Seeds: `[\"blocked\", wallet]`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "wallet",
+            "type": "pubkey"
+          },
+          {
+            "name": "added_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlocklistAuthority",
+      "docs": [
+        "Singleton — the wallet authorised to administer the blocklist (a Mancipatio",
+        "admin multisig). Seeds: `[\"blocklist_authority\"]`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlocklistAuthorityTransfer",
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "current_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RestrictionMode",
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Open"
+          },
+          {
+            "name": "KycGated"
+          }
+        ]
+      }
+    },
+    {
+      "name": "TransferHookConfig",
+      "docs": [
+        "Per-mint transfer-hook config. Seeds: `[\"hook_cfg\", mint]`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_class",
+            "type": "pubkey"
+          },
+          {
+            "name": "blocklist",
+            "docs": [
+              "Blocklist registry consulted on every transfer (sanctions / court order)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "restriction_mode",
+            "type": {
+              "defined": {
+                "name": "RestrictionMode"
+              }
+            }
+          },
+          {
+            "name": "kyc_registry",
+            "docs": [
+              "Required when `restriction_mode == KycGated`; otherwise `None`."
+            ],
+            "type": {
+              "option": "pubkey"
+            }
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    }
+  ]
+}

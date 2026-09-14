@@ -1,0 +1,45 @@
+[package]
+name = "asset_registry"
+version = "0.1.0"
+description = "Mancipatio asset registry — issuers, assets, share classes, KYC (Faza 1)"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "asset_registry"
+
+[features]
+default = []
+cpi = ["no-entrypoint"]
+no-entrypoint = []
+no-idl = []
+no-log-ix-name = []
+idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
+anchor-debug = []
+custom-heap = []
+custom-panic = []
+
+[dependencies]
+anchor-lang = { version = "1.0.0", features = ["init-if-needed"] }
+anchor-spl = "1.0.0"
+solana-sha256-hasher = "3.1.0"
+# Same crate/version the transfer_hook program uses to build the
+# ExtraAccountMetaList — `util::require_receiver_kyc_for_mint_to` sizes the
+# list's Open shape with it (no crate dependency on the hook itself).
+spl-tlv-account-resolution = "0.11.1"
+
+[dev-dependencies]
+litesvm = "0.10.0"
+solana-clock = "3.1.0"
+solana-message = "3.0.1"
+solana-transaction = "3.0.2"
+solana-signer = "3.0.0"
+solana-keypair = "3.0.1"
+spl-token-2022-interface = "3.0.0"
+spl-associated-token-account-interface = "2.0.0"
+# Host integration tests link both libraries; only the registry exports an
+# entrypoint there. Normal SBF builds do not activate dev-dependency features.
+transfer_hook = { path = "../transfer_hook", features = ["no-entrypoint"] }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(target_os, values("solana"))'] }

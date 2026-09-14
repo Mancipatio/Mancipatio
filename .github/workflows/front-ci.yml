@@ -1,0 +1,97 @@
+# Front CI — typecheck, lint, unit tests and program IDL/SDK drift for front/.
+# No build (Next build is a deploy concern and needs env secrets this workflow
+# deliberately avoids). The drift job also watches program/ because the client
+# SDK in front/lib/generated is derived from the program source.
+name: Front CI
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "front/**"
+      - "program/**"
+      - ".github/workflows/front-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "front/**"
+      - "program/**"
+      - ".github/workflows/front-ci.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: front-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: front
+
+jobs:
+  check:
+    name: tsc + eslint + vitest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Lint
+        run: npx eslint .
+
+      - name: Install local PostgreSQL integration tooling
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-16
+
+      - name: Unit tests and isolated PostgreSQL regressions
+        env:
+          RUN_LOCAL_POSTGRES_TESTS: '1'
+          POSTGRES_BIN: /usr/lib/postgresql/16/bin
+        run: npm run test
+
+      - name: Check generated SDK against committed IDL
+        run: npm run check:codegen
+
+  program-drift:
+    name: Program IDL + SDK drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: program
+          cache-targets: false
+
+      - name: Install pinned Anchor / Agave tooling
+        working-directory: program
+        run: bash scripts/install-ci-toolchain.sh
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Regenerate Rust IDL from program/ and compare both client layers
+        run: npm run check:idl -- --program-dir ../program

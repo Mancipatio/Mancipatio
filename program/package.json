@@ -1,0 +1,18 @@
+{
+  "name": "mancipatio-program",
+  "version": "0.1.0",
+  "private": true,
+  "license": "ISC",
+  "scripts": {
+    "lint:fix": "prettier */*.js \"*/**/*{.js,.ts}\" -w",
+    "lint": "prettier */*.js \"*/**/*{.js,.ts}\" --check",
+    "idl:upload": "node scripts/idl-upload-sequential.cjs"
+  },
+  "dependencies": {},
+  "devDependencies": {
+    "@solana-program/program-metadata": "^0.8.0",
+    "@solana-program/system": "^0.13.0",
+    "@solana/kit": "^7.0.0",
+    "prettier": "^3.3.3"
+  }
+}

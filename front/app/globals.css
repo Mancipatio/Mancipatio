@@ -1,0 +1,1049 @@
+@import "tailwindcss";
+
+/* Mancipatio — one green palette for public pages and every workspace. */
+:root {
+  --background: #f6f8f7;
+  --foreground: #192b2a;
+  --brand-50:  #f0f6ef;
+  --brand-100: #e1efdf;
+  --brand-200: #c3ddc5;
+  --brand-300: #9ac8a4;
+  --brand-400: #6ca67f;
+  --brand-500: #3f8058;
+  --brand-600: #2e6545;
+  --brand-700: #244d34;
+  --brand-800: #1c3e2a;
+  --brand-900: #173326;
+  --ink-950: #112d2a;
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-brand-50:  var(--brand-50);
+  --color-brand-100: var(--brand-100);
+  --color-brand-200: var(--brand-200);
+  --color-brand-300: var(--brand-300);
+  --color-brand-400: var(--brand-400);
+  --color-brand-500: var(--brand-500);
+  --color-brand-600: var(--brand-600);
+  --color-brand-700: var(--brand-700);
+  --color-brand-800: var(--brand-800);
+  --color-brand-900: var(--brand-900);
+  --color-ink-950: var(--ink-950);
+  /* Existing neutral utilities now share the workspace's green-grey tones. */
+  --color-slate-50: #f6f8f7;
+  --color-slate-100: #eef2ef;
+  --color-slate-200: #dfe7e1;
+  --color-slate-300: #c7d4ca;
+  --color-slate-400: #718378;
+  --color-slate-500: #657267;
+  --color-slate-600: #506357;
+  --color-slate-700: #3c5145;
+  --color-slate-800: #293f34;
+  --color-slate-900: #192b2a;
+  --color-slate-950: #112d2a;
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  /* Finer two-pass shadow — flat enough to feel modern, just enough lift
+     to separate cards from the canvas. */
+  --shadow-card: 0 1px 2px rgb(25 43 42 / 0.03);
+  --shadow-card-lg: 0 10px 28px -20px rgb(25 43 42 / 0.18);
+  --shadow-card-brand: 0 1px 0 rgb(46 101 69 / 0.06),
+    0 10px 28px -18px rgb(46 101 69 / 0.2);
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-geist-sans), -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  /* Tighter base text size so admin tables don't blow up the viewport. */
+  font-size: 14px;
+}
+
+/* Reusable utility classes — apply once via @apply so admin pages get
+   a consistent shell without each one re-spelling padding + shadow. */
+
+@layer components {
+  .panel {
+    @apply rounded-xl border border-slate-200/80 bg-white shadow-card;
+  }
+  .panel-tight {
+    @apply rounded-lg border border-slate-200/80 bg-white shadow-card;
+  }
+  .panel-pad {
+    @apply p-4 sm:p-5;
+  }
+  .panel-pad-sm {
+    @apply p-3 sm:p-4;
+  }
+
+  /* KPI tile — single class instead of repeating border + shadow + padding.
+     Accent top-line + icon slot give it a visual anchor; tabular numerals
+     keep big numbers from jittering when they update. */
+  .kpi {
+    @apply relative overflow-hidden rounded-xl border border-slate-200/80
+      bg-white px-4 py-3.5 shadow-card transition-all
+      hover:-translate-y-px hover:shadow-card-lg;
+  }
+  .kpi::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    right: 0;
+    top: 0;
+    height: 2px;
+    background: linear-gradient(
+      90deg,
+      var(--brand-400) 0%,
+      var(--brand-600) 100%
+    );
+    opacity: 0.65;
+  }
+  .kpi-quiet::before {
+    background: linear-gradient(
+      90deg,
+      rgb(148 163 184) 0%,
+      rgb(100 116 139) 100%
+    );
+    opacity: 0.5;
+  }
+  .kpi-good::before {
+    background: linear-gradient(
+      90deg,
+      rgb(52 211 153) 0%,
+      rgb(5 150 105) 100%
+    );
+  }
+  .kpi-warn::before {
+    background: linear-gradient(
+      90deg,
+      rgb(251 191 36) 0%,
+      rgb(217 119 6) 100%
+    );
+  }
+  .kpi-bad::before {
+    background: linear-gradient(
+      90deg,
+      rgb(248 113 113) 0%,
+      rgb(220 38 38) 100%
+    );
+  }
+  .kpi-label {
+    @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500;
+  }
+  .kpi-value {
+    @apply mt-1 text-[24px] font-semibold leading-none text-slate-900;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.01em;
+  }
+  .kpi-sub {
+    @apply mt-1 text-[11px] text-slate-500;
+  }
+  .kpi-icon {
+    @apply absolute right-3 top-3 flex h-7 w-7 items-center justify-center
+      rounded-md bg-slate-50 text-slate-500;
+  }
+
+  /* Page hero: smaller eyebrow + heading scale; tighter top margin. */
+  .page-eyebrow {
+    @apply text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500;
+  }
+  .page-title {
+    @apply mt-1 text-[22px] font-semibold leading-tight text-slate-900;
+    letter-spacing: -0.015em;
+  }
+  .page-sub {
+    @apply mt-1.5 max-w-3xl text-[13px] leading-relaxed text-slate-600;
+  }
+  /* Tighter form input baseline. */
+  .input-base {
+    @apply w-full rounded-md border border-slate-300 bg-white px-2.5 py-1.5
+      text-[13px] text-slate-900 placeholder:text-slate-400 focus:border-slate-400
+      focus:outline-none focus:ring-0;
+  }
+
+  /* Primary brand button — for hero actions. Existing slate-900 buttons stay. */
+  .btn-brand {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md
+      bg-brand-600 px-3.5 py-1.5 text-[13px] font-medium text-white
+      shadow-sm transition-colors hover:bg-brand-700
+      focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2
+      focus-visible:outline-brand-500 disabled:bg-slate-300 disabled:text-slate-500;
+  }
+  .btn-ghost {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md
+      border border-slate-200 bg-white px-3.5 py-1.5 text-[13px] font-medium
+      text-slate-700 transition-colors hover:border-slate-300 hover:bg-slate-50
+      disabled:opacity-50;
+  }
+  .btn-dark {
+    @apply inline-flex items-center justify-center gap-1.5 rounded-md
+      bg-slate-900 px-3.5 py-1.5 text-[13px] font-medium text-white
+      transition-colors hover:bg-slate-800 disabled:opacity-50;
+  }
+
+  /* Section header on hero cards (Platform / Alerts on overview). */
+  .card-head {
+    @apply flex items-baseline justify-between gap-3 border-b
+      border-slate-100 px-5 py-3;
+  }
+
+  /* Marketing typography scale — used only on public-facing pages.
+     `clamp()` keeps the type fluid between mobile and desktop without
+     extra breakpoints. */
+  .text-display-1 {
+    font-size: clamp(48px, 7vw, 96px);
+    font-weight: 600;
+    letter-spacing: -0.04em;
+    line-height: 1.02;
+  }
+  .text-display-2 {
+    font-size: clamp(32px, 4.5vw, 48px);
+    font-weight: 600;
+    letter-spacing: -0.025em;
+    line-height: 1.1;
+  }
+  .text-lead {
+    font-size: clamp(17px, 1.4vw, 20px);
+    line-height: 1.55;
+    color: rgb(71 85 105);
+  }
+  .text-mono-eyebrow {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.28em;
+    text-transform: uppercase;
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════
+   MARKETING DESIGN SYSTEM — "mx"
+   ═══════════════════════════════════════════════════════════════════════
+   Port of the structural prototype (revision 2): paper canvas, hairline
+   rules, mono data, sharp corners, no shadows, no gradients.
+
+   SCOPE. The mx primitives serve guides, public markets and application
+   forms. Their tokens use the same green palette as every app workspace.
+   Rules remain scoped to `[data-mx]` or `.mx-*` classes so dense operating
+   tables retain their layout.
+
+   Tokens are exposed to Tailwind as `mx-*` colours (bg-mx-paper,
+   text-mx-ink-soft, border-mx-rule …) and `max-w-mx` (1120px). The `mx-`
+   prefix is deliberate: it keeps `--color-ink-950` and the brand ramp
+   unambiguous, and it makes it obvious at a glance whether a class belongs
+   to the marketing site or the app.
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  --mx-paper: #f6f8f7;
+  --mx-surface: #ffffff;
+  --mx-ink: #192b2a;
+  --mx-ink-soft: #506357;
+  --mx-ink-faint: #657267;
+  --mx-rule: #e2e9e6;
+  --mx-rule-strong: #c7d4ca;
+  /* Keep the mx token names compatible with existing guide components. */
+  --mx-indigo: var(--brand-600);
+  --mx-indigo-soft: var(--brand-50);
+  --mx-amber: #9e5a1e;
+  --mx-amber-soft: #fbf2e7;
+  --mx-amber-rule: #e0c4a2;
+  --mx-dark: #193c2b;
+  --mx-dark-surface: #264c38;
+  --mx-dark-rule: #3c644a;
+  --mx-dark-text: #f2f7ec;
+  --mx-dark-soft: #d0dfc4;
+  /* Support tones the prototype uses inside dark bands and tables. */
+  --mx-dark-eyebrow: #bccfac;
+  --mx-dark-link: #d6efbe;
+  --mx-dark-bullet: #a7c693;
+  --mx-table-head: #f4f5f2;
+  --mx-table-hover: #fafbf8;
+}
+
+@theme inline {
+  --color-mx-paper: var(--mx-paper);
+  --color-mx-surface: var(--mx-surface);
+  --color-mx-ink: var(--mx-ink);
+  --color-mx-ink-soft: var(--mx-ink-soft);
+  --color-mx-ink-faint: var(--mx-ink-faint);
+  --color-mx-rule: var(--mx-rule);
+  --color-mx-rule-strong: var(--mx-rule-strong);
+  --color-mx-indigo: var(--mx-indigo);
+  --color-mx-indigo-soft: var(--mx-indigo-soft);
+  --color-mx-amber: var(--mx-amber);
+  --color-mx-amber-soft: var(--mx-amber-soft);
+  --color-mx-amber-rule: var(--mx-amber-rule);
+  --color-mx-dark: var(--mx-dark);
+  --color-mx-dark-surface: var(--mx-dark-surface);
+  --color-mx-dark-rule: var(--mx-dark-rule);
+  --color-mx-dark-text: var(--mx-dark-text);
+  --color-mx-dark-soft: var(--mx-dark-soft);
+  /* Page measure — one number, used by .mx-wrap and available as max-w-mx. */
+  --container-mx: 1120px;
+}
+
+/* Shared guide/form primitives; workspace containers can use a transparent canvas. */
+[data-mx] {
+  background: var(--mx-paper);
+  color: var(--mx-ink);
+  /* body is 14px for dense admin tables; the prototype's px scale assumes 16. */
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+[data-mx] :focus-visible,
+.mx-head :focus-visible {
+  outline: 2px solid var(--mx-indigo);
+  outline-offset: 3px;
+  border-radius: 2px;
+}
+
+/* components/skeleton.tsx is shared with the brand-* app surfaces, so its
+   defaults stay slate; these hooks retokenise it wherever the mx language
+   is active (unlayered, so they win over the Tailwind utility layer). */
+[data-mx] .skeleton {
+  border-radius: 3px;
+  background-color: var(--mx-rule);
+}
+[data-mx] .skeleton-card {
+  border-radius: 3px;
+  border-color: var(--mx-rule);
+  background-color: var(--mx-surface);
+  box-shadow: none;
+}
+[data-mx] .skeleton-head {
+  border-color: var(--mx-rule);
+  background-color: var(--mx-paper);
+}
+[data-mx] .skeleton-row {
+  border-color: var(--mx-rule);
+}
+
+@layer components {
+  /* ── typography ─────────────────────────────────────────────────── */
+  .mx-eyebrow {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 11px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--mx-ink-faint);
+  }
+  .mx-h1 {
+    font-size: clamp(34px, 5.4vw, 58px);
+    line-height: 1.04;
+    letter-spacing: -0.028em;
+    font-weight: 650;
+    color: var(--mx-ink);
+  }
+  .mx-h2 {
+    font-size: clamp(24px, 3.1vw, 34px);
+    line-height: 1.14;
+    letter-spacing: -0.02em;
+    font-weight: 650;
+    color: var(--mx-ink);
+  }
+  .mx-h3 {
+    font-size: 16.5px;
+    font-weight: 650;
+    letter-spacing: -0.008em;
+    color: var(--mx-ink);
+  }
+  .mx-lede {
+    font-size: clamp(16.5px, 1.5vw, 19px);
+    color: var(--mx-ink-soft);
+    line-height: 1.52;
+    max-width: 40em;
+  }
+  .mx-body {
+    color: var(--mx-ink-soft);
+    max-width: 38em;
+  }
+  .mx-strong {
+    color: var(--mx-ink);
+    font-weight: 650;
+  }
+  .mx-small {
+    font-size: 13px;
+    color: var(--mx-ink-faint);
+  }
+
+  /* ── layout ─────────────────────────────────────────────────────── */
+  .mx-wrap {
+    max-width: var(--container-mx);
+    margin: 0 auto;
+    padding: 0 24px;
+  }
+  .mx-sec {
+    padding: 64px 0;
+    border-top: 1px solid var(--mx-rule);
+  }
+  .mx-sec--first {
+    padding-top: 52px;
+    border-top: none;
+  }
+  .mx-sec--dark {
+    background: var(--mx-dark);
+    color: var(--mx-dark-text);
+    border-top: none;
+  }
+  .mx-grid {
+    display: grid;
+    gap: 16px;
+  }
+  .mx-g2 {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .mx-g3 {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  .mx-g4 {
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+  }
+  @media (max-width: 940px) {
+    .mx-g3,
+    .mx-g4 {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 640px) {
+    .mx-g2,
+    .mx-g3,
+    .mx-g4 {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .mx-two {
+    display: grid;
+    gap: 16px;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+  @media (max-width: 720px) {
+    .mx-two {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+
+  /* ── header ─────────────────────────────────────────────────────── */
+  .mx-head {
+    position: sticky;
+    top: 0;
+    z-index: 60;
+    background: var(--mx-paper);
+    border-bottom: 1px solid var(--mx-rule);
+    color: var(--mx-ink);
+    font-size: 16px;
+    line-height: 1.55;
+  }
+  .mx-head-in {
+    max-width: var(--container-mx);
+    margin: 0 auto;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 18px;
+  }
+  .mx-logo {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 12.5px;
+    letter-spacing: 0.16em;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    color: var(--mx-ink);
+  }
+  .mx-nav {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    margin-left: auto;
+  }
+  .mx-navlink {
+    padding: 7px 10px;
+    font-size: 14px;
+    color: var(--mx-ink-soft);
+    border-radius: 4px;
+    white-space: nowrap;
+  }
+  .mx-navlink:hover {
+    color: var(--mx-ink);
+    background: rgb(0 0 0 / 0.04);
+  }
+  .mx-navlink[aria-current="page"],
+  .mx-navlink.is-on {
+    color: var(--mx-ink);
+    font-weight: 600;
+  }
+  .mx-drop {
+    position: relative;
+  }
+  .mx-drop-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    width: 296px;
+    background: var(--mx-surface);
+    border: 1px solid var(--mx-rule);
+    box-shadow: 0 12px 32px rgb(20 24 29 / 0.13);
+    padding: 6px;
+  }
+  .mx-drop-menu a {
+    display: block;
+    width: 100%;
+    padding: 8px 10px;
+    font-size: 14px;
+    border-radius: 3px;
+    color: var(--mx-ink);
+  }
+  .mx-drop-menu a:hover {
+    background: rgb(0 0 0 / 0.04);
+  }
+  .mx-drop-sep {
+    border-top: 1px solid var(--mx-rule);
+    margin: 5px 0;
+  }
+  .mx-drop-all {
+    color: var(--mx-indigo);
+    font-weight: 600;
+  }
+  .mx-mobile {
+    border-bottom: 1px solid var(--mx-rule);
+    background: var(--mx-surface);
+    padding: 8px 24px 14px;
+    max-height: calc(100vh - 58px);
+    overflow-y: auto;
+  }
+  .mx-mobile a {
+    display: block;
+    width: 100%;
+    padding: 9px 4px;
+    font-size: 15px;
+    border-bottom: 1px solid var(--mx-rule);
+    color: var(--mx-ink);
+  }
+  .mx-mobile a:last-child {
+    border-bottom: none;
+  }
+  .mx-mobile-cta {
+    color: var(--mx-indigo);
+    font-weight: 650;
+  }
+  .mx-burger {
+    display: none;
+    font-size: 19px;
+    padding: 6px 9px;
+    line-height: 1;
+  }
+  @media (max-width: 1000px) {
+    .mx-collapse {
+      display: none;
+    }
+    .mx-burger {
+      display: block;
+    }
+  }
+
+  /* ── buttons & links ────────────────────────────────────────────── */
+  .mx-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 11px 18px;
+    font-size: 14.5px;
+    font-weight: 600;
+    border: 1px solid var(--mx-ink);
+    background: var(--mx-ink);
+    color: var(--mx-paper);
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .mx-btn:hover {
+    opacity: 0.86;
+  }
+  .mx-btn:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .mx-btn--ghost {
+    background: transparent;
+    color: var(--mx-ink);
+    border-color: var(--mx-rule-strong);
+  }
+  .mx-btn--ghost:hover {
+    border-color: var(--mx-ink);
+    opacity: 1;
+  }
+  .mx-btn--sm {
+    padding: 8px 13px;
+    font-size: 13.5px;
+  }
+  .mx-btns {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px;
+    margin-top: 26px;
+  }
+  .mx-link {
+    color: var(--mx-indigo);
+    font-size: 14.5px;
+    font-weight: 600;
+  }
+  .mx-link:hover {
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+
+  /* ── badges ─────────────────────────────────────────────────────── */
+  .mx-badge {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 4px 8px;
+    border: 1px solid var(--mx-rule-strong);
+    color: var(--mx-ink-faint);
+    border-radius: 2px;
+    white-space: nowrap;
+    display: inline-block;
+  }
+  .mx-badge--stage {
+    color: var(--mx-amber);
+    border-color: var(--mx-amber-rule);
+    background: var(--mx-amber-soft);
+  }
+
+  /* ── cards ──────────────────────────────────────────────────────── */
+  .mx-card {
+    background: var(--mx-surface);
+    border: 1px solid var(--mx-rule);
+    padding: 21px;
+    display: block;
+    width: 100%;
+  }
+  .mx-card > h3 {
+    margin-bottom: 7px;
+  }
+  .mx-card p {
+    font-size: 14.5px;
+    color: var(--mx-ink-soft);
+  }
+  .mx-card--link:hover {
+    border-color: var(--mx-ink);
+  }
+  .mx-card--attention {
+    border-color: var(--mx-amber-rule);
+    background: var(--mx-amber-soft);
+  }
+
+  /* ── steps ──────────────────────────────────────────────────────── */
+  .mx-step {
+    display: grid;
+    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 14px;
+    padding: 16px 0;
+    border-top: 1px solid var(--mx-rule);
+  }
+  .mx-step:last-child {
+    border-bottom: 1px solid var(--mx-rule);
+  }
+  .mx-step-n {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--mx-indigo);
+    padding-top: 3px;
+  }
+  .mx-step h3 {
+    margin-bottom: 4px;
+  }
+  .mx-step p {
+    font-size: 14.5px;
+    color: var(--mx-ink-soft);
+    max-width: 46em;
+  }
+
+  /* ── facts (dark tiles) ─────────────────────────────────────────── */
+  .mx-facts {
+    display: grid;
+    gap: 12px;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+  @media (max-width: 940px) {
+    .mx-facts {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+  }
+  @media (max-width: 640px) {
+    .mx-facts {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+  .mx-fact {
+    border: 1px solid var(--mx-dark-rule);
+    background: var(--mx-dark-surface);
+    padding: 16px 18px;
+    font-size: 14.5px;
+    display: flex;
+    gap: 11px;
+    color: var(--mx-dark-text);
+  }
+  .mx-fact::before {
+    content: "";
+    width: 5px;
+    height: 5px;
+    background: var(--mx-dark-bullet);
+    flex: none;
+    margin-top: 8px;
+  }
+
+  /* ── bullets ────────────────────────────────────────────────────── */
+  .mx-bullets {
+    list-style: none;
+    padding: 0;
+  }
+  .mx-bullets li {
+    padding-left: 17px;
+    position: relative;
+    font-size: 14.5px;
+    color: var(--mx-ink-soft);
+    margin-bottom: 9px;
+  }
+  .mx-bullets li::before {
+    content: "";
+    position: absolute;
+    left: 0;
+    top: 9px;
+    width: 5px;
+    height: 5px;
+    background: var(--mx-rule-strong);
+  }
+
+  /* ── instrument card — the one distinctive device ───────────────── */
+  .mx-inst {
+    background: var(--mx-surface);
+    border: 1.5px solid var(--mx-ink);
+    max-width: 520px;
+  }
+  .mx-inst-head {
+    padding: 12px 18px;
+    border-bottom: 1.5px solid var(--mx-ink);
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 10px;
+  }
+  .mx-inst-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 16px;
+    padding: 10px 18px;
+    border-top: 1px solid var(--mx-rule);
+    align-items: baseline;
+  }
+  .mx-inst-row:first-of-type {
+    border-top: none;
+  }
+  .mx-inst-k {
+    font-size: 13.5px;
+    color: var(--mx-ink-soft);
+  }
+  .mx-inst-v {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 12.5px;
+    text-align: right;
+    color: var(--mx-ink);
+  }
+
+  /* ── table ──────────────────────────────────────────────────────── */
+  .mx-tablewrap {
+    overflow-x: auto;
+    border: 1px solid var(--mx-rule);
+    background: var(--mx-surface);
+  }
+  .mx-table {
+    border-collapse: collapse;
+    width: 100%;
+    font-size: 13px;
+  }
+  .mx-table th,
+  .mx-table td {
+    text-align: left;
+    padding: 11px 13px;
+    border-bottom: 1px solid var(--mx-rule);
+    vertical-align: top;
+  }
+  .mx-table thead th {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--mx-ink-faint);
+    font-weight: 400;
+    background: var(--mx-table-head);
+  }
+  .mx-table tbody th {
+    font-weight: 650;
+    font-size: 13.5px;
+    white-space: nowrap;
+    color: var(--mx-ink);
+  }
+  .mx-table td {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 12px;
+    color: var(--mx-ink-soft);
+  }
+  .mx-table tbody tr:hover {
+    background: var(--mx-table-hover);
+  }
+
+  /* Value tones shared by the instrument card and the table.
+     `mx-na`      — genuinely not applicable to this instrument ("—").
+     `mx-pending` — INTERNAL PREVIEW ONLY. An unconfirmed fact must not be
+                    published; drop the row/column instead. */
+  .mx-na {
+    color: var(--mx-ink-faint);
+  }
+  .mx-pending {
+    color: var(--mx-amber);
+  }
+
+  /* ── empty state ────────────────────────────────────────────────── */
+  .mx-empty {
+    border: 1px dashed var(--mx-rule-strong);
+    padding: 42px 20px;
+    text-align: center;
+    color: var(--mx-ink-faint);
+    font-size: 14.5px;
+    background: var(--mx-surface);
+  }
+
+  /* ── forms ──────────────────────────────────────────────────────── */
+  .mx-field {
+    margin-bottom: 15px;
+  }
+  .mx-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    margin-bottom: 6px;
+    color: var(--mx-ink);
+  }
+  .mx-input {
+    width: 100%;
+    padding: 10px 12px;
+    font: inherit;
+    font-size: 14.5px;
+    border: 1px solid var(--mx-rule-strong);
+    background: var(--mx-surface);
+    color: var(--mx-ink);
+    border-radius: 3px;
+  }
+  .mx-input:focus {
+    border-color: var(--mx-ink);
+    outline: none;
+  }
+  .mx-input::placeholder {
+    color: var(--mx-ink-faint);
+  }
+  .mx-hint {
+    font-size: 12.5px;
+    color: var(--mx-ink-faint);
+    margin-top: 6px;
+  }
+
+  /* ── footer ─────────────────────────────────────────────────────── */
+  .mx-foot {
+    border-top: 1px solid var(--mx-rule);
+    padding: 44px 0 28px;
+    background: var(--mx-surface);
+    color: var(--mx-ink);
+  }
+  .mx-foot-cols {
+    display: grid;
+    grid-template-columns: 1.5fr 1fr 1fr 1fr;
+    gap: 28px;
+  }
+  @media (max-width: 820px) {
+    .mx-foot-cols {
+      grid-template-columns: 1fr 1fr;
+    }
+  }
+  .mx-foot h4 {
+    font-family: var(--font-mono), ui-monospace, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--mx-ink-faint);
+    font-weight: 400;
+    margin-bottom: 11px;
+  }
+  .mx-foot-link {
+    display: block;
+    font-size: 14px;
+    color: var(--mx-ink-soft);
+    padding: 3px 0;
+  }
+  .mx-foot-link:hover {
+    color: var(--mx-ink);
+    text-decoration: underline;
+    text-underline-offset: 3px;
+  }
+  .mx-foot-base {
+    margin-top: 32px;
+    padding-top: 18px;
+    border-top: 1px solid var(--mx-rule);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 14px;
+    justify-content: space-between;
+  }
+  .mx-disclaim {
+    font-size: 12.5px;
+    color: var(--mx-ink-faint);
+    max-width: 52em;
+    line-height: 1.5;
+  }
+
+  /* ── dark-band overrides (prototype .mx-sec--dark cascade) ──────── */
+  .mx-sec--dark .mx-eyebrow {
+    color: var(--mx-dark-eyebrow);
+  }
+  .mx-sec--dark .mx-h1,
+  .mx-sec--dark .mx-h2,
+  .mx-sec--dark .mx-h3 {
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-body,
+  .mx-sec--dark .mx-lede,
+  .mx-sec--dark .mx-small,
+  .mx-sec--dark .mx-bullets li {
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark .mx-strong {
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-bullets li::before {
+    background: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-btn {
+    background: var(--mx-dark-text);
+    color: var(--mx-dark);
+    border-color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-btn--ghost {
+    background: transparent;
+    color: var(--mx-dark-text);
+    border-color: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-btn--ghost:hover {
+    border-color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-link {
+    color: var(--mx-dark-link);
+  }
+  .mx-sec--dark .mx-badge {
+    color: var(--mx-dark-soft);
+    border-color: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-card {
+    background: var(--mx-dark-surface);
+    border-color: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-card > h3 {
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-card p {
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark .mx-step,
+  .mx-sec--dark .mx-step:last-child {
+    border-color: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-step h3 {
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-step p {
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark .mx-step-n {
+    color: var(--mx-dark-bullet);
+  }
+  .mx-sec--dark .mx-inst {
+    background: var(--mx-dark-surface);
+    border-color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-inst-head {
+    border-bottom-color: var(--mx-dark-text);
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-inst-row {
+    border-top-color: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-inst-k {
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark .mx-inst-v {
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-tablewrap {
+    border-color: var(--mx-dark-rule);
+    background: var(--mx-dark-surface);
+  }
+  .mx-sec--dark .mx-table th,
+  .mx-sec--dark .mx-table td {
+    border-bottom-color: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-table thead th {
+    background: var(--mx-dark);
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark .mx-table tbody th {
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-table td {
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark .mx-table tbody tr:hover {
+    background: rgb(255 255 255 / 0.03);
+  }
+  .mx-sec--dark .mx-na {
+    color: var(--mx-dark-rule);
+  }
+  .mx-sec--dark .mx-empty {
+    background: var(--mx-dark-surface);
+    border-color: var(--mx-dark-rule);
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark .mx-label {
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-input {
+    background: var(--mx-dark-surface);
+    border-color: var(--mx-dark-rule);
+    color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-input:focus {
+    border-color: var(--mx-dark-text);
+  }
+  .mx-sec--dark .mx-hint,
+  .mx-sec--dark .mx-disclaim {
+    color: var(--mx-dark-soft);
+  }
+  .mx-sec--dark :focus-visible {
+    outline-color: var(--mx-dark-link);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  [data-mx] *,
+  .mx-head * {
+    transition: none !important;
+    animation: none !important;
+  }
+}

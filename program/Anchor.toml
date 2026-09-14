@@ -1,0 +1,23 @@
+[toolchain]
+package_manager = "npm"
+
+[features]
+resolution = true
+skip-lint = false
+
+[programs.localnet]
+asset_registry = "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
+transfer_hook = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+
+[programs.devnet]
+asset_registry = "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
+transfer_hook = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+
+[provider]
+cluster = "devnet"
+wallet = "~/.config/solana/id-devnet.json"
+
+[scripts]
+test = "cargo test"
+
+[hooks]

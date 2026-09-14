@@ -1,0 +1,43 @@
+{
+  "name": "mancipatio-front",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "eslint",
+    "test": "vitest run",
+    "codegen": "node codegen.mjs",
+    "check:codegen": "node codegen.mjs --check",
+    "check:idl": "node scripts/check-program-idl.mjs"
+  },
+  "dependencies": {
+    "@solana-program/token-2022": "^0.7.0",
+    "@solana/client": "^1.7.0",
+    "@solana/kit": "^5.5.1",
+    "@solana/react-hooks": "^1.4.1",
+    "@supabase/supabase-js": "^2.106.2",
+    "next": "16.3.4",
+    "react": "19.2.4",
+    "react-dom": "19.2.4",
+    "server-only": "^0.0.1"
+  },
+  "devDependencies": {
+    "@codama/nodes-from-anchor": "^1.4.1",
+    "@codama/renderers-js": "^1.7.0",
+    "@tailwindcss/postcss": "^4",
+    "@types/node": "^20",
+    "@types/react": "^19",
+    "@types/react-dom": "^19",
+    "codama": "^1.6.0",
+    "eslint": "^9",
+    "eslint-config-next": "16.3.4",
+    "tailwindcss": "^4",
+    "typescript": "^5",
+    "vitest": "^4.1.10"
+  },
+  "engines": {
+    "node": "22.x"
+  }
+}

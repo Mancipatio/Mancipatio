@@ -1,0 +1,84 @@
+# Verifiable build — hermetic Docker build of both programs via solana-verify.
+#
+# Why CI and not the dev machine: the reproducible build needs Docker
+# (solanafoundation/solana-verifiable-build image), which the dev Mac does not
+# run. Ubuntu runners have it, so this workflow IS the canonical builder for
+# release artifacts: the .so files it uploads are the bytes that go to
+# mainnet, and anyone can re-run `solana-verify verify-from-repo` against the
+# deployed program and this repository to reproduce the hash. The programs
+# live in the program/ subdirectory of this monorepo, so pass
+# `--mount-path program` to verify-from-repo.
+#
+# Base image is PINNED to the agave release the workspace targets (matches the
+# local `solana-cli 3.1.13` toolchain). Bump it together with the toolchain —
+# a different image produces a different (still valid) hash.
+#
+# Trigger: manual (Run workflow) or a release tag push. Artifacts:
+# verifiable-programs.zip with both .so files + hashes.txt.
+name: Verifiable build
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  BASE_IMAGE: solanafoundation/solana-verifiable-build:3.1.13
+
+defaults:
+  run:
+    working-directory: program
+
+jobs:
+  build:
+    name: solana-verify build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: program
+          cache-targets: false # only ~/.cargo (solana-verify install), not target/
+
+      - name: Install solana-verify
+        run: cargo install solana-verify --version 0.5.1 --locked
+
+      - name: Verifiable build — asset_registry
+        run: solana-verify build --library-name asset_registry -b "$BASE_IMAGE"
+
+      - name: Verifiable build — transfer_hook
+        run: solana-verify build --library-name transfer_hook -b "$BASE_IMAGE"
+
+      - name: Test the exact reproducible release artifacts
+        run: |
+          sha256sum target/deploy/asset_registry.so target/deploy/transfer_hook.so > sbf-sha256.txt
+          cargo test --workspace --locked --no-fail-fast
+          sha256sum --check sbf-sha256.txt
+
+      - name: Executable hashes
+        run: |
+          {
+            echo "base image: $BASE_IMAGE"
+            echo "commit: $GITHUB_SHA"
+            echo -n "asset_registry: "
+            solana-verify get-executable-hash target/deploy/asset_registry.so
+            echo -n "transfer_hook: "
+            solana-verify get-executable-hash target/deploy/transfer_hook.so
+          } | tee hashes.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: verifiable-programs
+          path: |
+            program/target/deploy/asset_registry.so
+            program/target/deploy/transfer_hook.so
+            program/hashes.txt
+            program/sbf-sha256.txt
+          if-no-files-found: error

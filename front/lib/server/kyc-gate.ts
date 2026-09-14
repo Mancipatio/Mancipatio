@@ -1,0 +1,196 @@
+// SERVER-ONLY — shared client-KYC gate for signed write routes.
+//
+// One source of truth for "is this wallet an onboarded, KYC-verified
+// client?". Extracted from app/api/applications/_lib.ts (which re-exports
+// these names so the /api/applications/* routes are untouched) so every
+// investor-facing write route — applications submit/resubmit, launchpad
+// commit, launchpad record-purchase, OTC create, resell create, delivery
+// create, conversion create, vesting-series create — enforces the same
+// server-side gate instead of trusting client-side eligibility checks.
+//
+// The gate is bound to the ACTIVE NETWORK and to the verdict's EXPIRY
+// (2026-09-08 e2e §3 / F01): a dossier is eligible only when
+//   * it belongs to the network this deployment serves (clients.network ===
+//     detectNetwork() — the same resolver verifySigned binds signatures to),
+//   * kyc_status === 'verified', and
+//   * kyc_expires_at is a valid timestamp strictly in the future.
+// Everything else fails closed — including a verified row with a NULL or
+// unparsable expiry, and a verified row of another network.
+//
+// The verdict/message mapping is split into pure helpers (evaluateKycLookup,
+// kycGateMessage) so tests/kyc-gate.test.ts can pin the status mapping
+// without a Supabase client.
+
+import "server-only";
+
+import type { SupabaseClient } from "@supabase/supabase-js";
+import { SiwsError } from "@/lib/server/siws";
+import { detectNetwork } from "@/lib/network";
+
+export type ClientKycLookup = {
+  hasClient: boolean;
+  kycStatus: string | null;
+  /** clients.kyc_expires_at as stored (ISO), null when never stamped. */
+  kycExpiresAt: string | null;
+  /**
+   * True when the status says 'verified' but the verdict is not live: the
+   * expiry is missing, unparsable, or not in the future. Lets the UI copy
+   * say "expired" instead of "status verified but not eligible".
+   */
+  expired: boolean;
+  eligible: boolean;
+};
+
+/** The columns the gate reads off a `clients` row. */
+export type ClientKycRow = {
+  kyc_status: string | null;
+  kyc_expires_at: string | null;
+};
+
+/**
+ * Pure half of the lookup: maps a `clients` row (or its absence) onto the
+ * gate verdict. Only kyc_status === 'verified' WITH an expiry strictly after
+ * `now` is eligible — every other status (pending / more_info / rejected /
+ * suspended / expired / null) fails the gate, and so does a verified row
+ * whose kyc_expires_at is null, unparsable or already past (fail closed).
+ */
+export function evaluateKycLookup(
+  row: ClientKycRow | null,
+  now: Date = new Date(),
+): ClientKycLookup {
+  if (!row) {
+    return {
+      hasClient: false,
+      kycStatus: null,
+      kycExpiresAt: null,
+      expired: false,
+      eligible: false,
+    };
+  }
+  const kycStatus = row.kyc_status ?? null;
+  const kycExpiresAt = row.kyc_expires_at ?? null;
+  const verified = kycStatus === "verified";
+  const expiryMs = kycExpiresAt === null ? NaN : Date.parse(kycExpiresAt);
+  const live = Number.isFinite(expiryMs) && expiryMs > now.getTime();
+  return {
+    hasClient: true,
+    kycStatus,
+    kycExpiresAt,
+    expired: verified && !live,
+    eligible: verified && live,
+  };
+}
+
+/**
+ * Pure half of the gate: the 403 message for a failed lookup, or null when
+ * the wallet passes. `context` is the gerund phrase naming the blocked
+ * action ("applying", "committing to this raise", …) so each route's error
+ * reads naturally while keeping the recognizable "KYC verification
+ * required" lead.
+ */
+export function kycGateMessage(
+  kyc: ClientKycLookup,
+  context: string,
+): string | null {
+  if (kyc.eligible) return null;
+  if (!kyc.hasClient) {
+    return `Onboarding required — no client profile is linked to this wallet. Please contact us to get onboarded before ${context}.`;
+  }
+  if (kyc.expired) {
+    const expiryMs = kyc.kycExpiresAt === null ? NaN : Date.parse(kyc.kycExpiresAt);
+    return Number.isFinite(expiryMs)
+      ? `KYC verification expired on ${new Date(expiryMs).toISOString().slice(0, 10)} — please renew your verification before ${context}.`
+      : `KYC verification required before ${context} — your verified status has no recorded expiry. Please contact us to complete re-verification.`;
+  }
+  return `KYC verification required before ${context} — your current status is "${kyc.kycStatus ?? "unknown"}".`;
+}
+
+/** Dossier states only compliance can lift (mirrors app/api/clients/_helpers). */
+const TERMINAL_KYC_STATUSES: readonly string[] = ["suspended", "rejected"];
+
+type FetchedClientRow = ClientKycRow & { id: string };
+
+/**
+ * Fetch the clients row that speaks for `wallet` ON THE ACTIVE NETWORK.
+ *
+ * Network binding: a `verified` dossier recorded for another cluster must not
+ * satisfy this deployment's gate, so the read is filtered by
+ * clients.network === detectNetwork() — the same resolver every signed
+ * route already binds the SIWS payload to. Rows of other networks are not
+ * read at all, so a historical terminal row elsewhere cannot deny (or
+ * grant) anything here.
+ *
+ * FAIL-CLOSED on duplicates: migration 0041 adds a unique index on
+ * clients.wallet, but it is SKIPPED on databases that already hold duplicate
+ * rows, and historic data may carry an admin-invited row plus a self-service
+ * one. Reading only the oldest row (the previous behaviour, mirroring
+ * lib/clients.ts findClientByWallet) meant compliance could suspend the row
+ * carrying the documents while an older `pending`/`verified` row kept
+ * answering every gate. So: any TERMINAL row (suspended / rejected) wins;
+ * otherwise the oldest row does, as before.
+ *
+ * Internal: the row id must NOT travel through lookupClientKyc, whose result
+ * the unsigned /api/applications/eligibility route returns verbatim to any
+ * caller.
+ */
+async function fetchClientRow(
+  sb: SupabaseClient,
+  wallet: string,
+): Promise<FetchedClientRow | null> {
+  const network = detectNetwork();
+  const { data, error } = await sb
+    .from("clients")
+    .select("id, kyc_status, kyc_expires_at")
+    .eq("wallet", wallet)
+    .eq("network", network)
+    .order("created_at", { ascending: true });
+  if (error) {
+    console.error("[kyc-gate] client lookup failed:", error.message);
+    throw new SiwsError(500, "Client lookup failed");
+  }
+  const rows = (data ?? []) as FetchedClientRow[];
+  if (rows.length === 0) return null;
+  if (rows.length > 1) {
+    console.warn(
+      `[kyc-gate] ${rows.length} client rows share wallet ${wallet} on ${network} — dedupe them (see migration 0041)`,
+    );
+  }
+  return (
+    rows.find(
+      (r) => r.kyc_status !== null && TERMINAL_KYC_STATUSES.includes(r.kyc_status),
+    ) ?? rows[0]
+  );
+}
+
+/**
+ * Look up the client row linked to `wallet` on the active network and report
+ * KYC eligibility. Returns only the non-PII verdict shape (no row id) — safe
+ * to expose through the unsigned eligibility route.
+ */
+export async function lookupClientKyc(
+  sb: SupabaseClient,
+  wallet: string,
+): Promise<ClientKycLookup> {
+  return evaluateKycLookup(await fetchClientRow(sb, wallet));
+}
+
+/**
+ * Apply gate: the SIWS-verified signing wallet must belong to an onboarded
+ * client row of the active network with kyc_status === 'verified' and a
+ * live kyc_expires_at. Throws SiwsError(403) otherwise — the calling pages
+ * show the same gate client-side, this is the authoritative check. Resolves
+ * with the verified clients row id so routes that stamp `client_id` (e.g.
+ * /api/delivery/create) can reuse this single gate instead of keeping an
+ * inline copy of the lookup.
+ */
+export async function requireVerifiedClient(
+  sb: SupabaseClient,
+  wallet: string,
+  context = "applying",
+): Promise<{ clientId: string }> {
+  const row = await fetchClientRow(sb, wallet);
+  const message = kycGateMessage(evaluateKycLookup(row), context);
+  if (message) throw new SiwsError(403, message);
+  // A null message means eligible, and eligible implies the row exists.
+  return { clientId: (row as FetchedClientRow).id };
+}

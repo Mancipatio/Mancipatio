@@ -1,0 +1,201 @@
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { address, createNoopSigner, type Address } from "@solana/kit";
+const mocks = vi.hoisted(() => ({
+  platform: vi.fn(),
+  issuer: vi.fn(),
+  admin: vi.fn(),
+  permission: vi.fn(),
+  transfer: vi.fn(),
+  hook: vi.fn(),
+  hookTransfer: vi.fn(),
+}));
+vi.mock("@/lib/generated/asset_registry", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  fetchMaybePlatform: mocks.platform,
+  fetchMaybeIssuer: mocks.issuer,
+  fetchMaybeAdmin: mocks.admin,
+  fetchMaybeIssuerPermissions: mocks.permission,
+  fetchMaybeAuthorityTransfer: mocks.transfer,
+}));
+vi.mock("@/lib/generated/transfer_hook", async (importOriginal) => ({
+  ...(await importOriginal<object>()),
+  fetchMaybeBlocklistAuthority: mocks.hook,
+  fetchMaybeBlocklistAuthorityTransfer: mocks.hookTransfer,
+}));
+import {
+  ASSET_REGISTRY_PROGRAM_ADDRESS,
+  findPlatformPda,
+  findAdminRecordPda,
+  getSetIssuerPermissionsInstructionDataDecoder,
+} from "@/lib/generated/asset_registry";
+import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
+import {
+  buildAcceptOperationalAuthority,
+  buildProposeOperationalAuthority,
+  loadOperationalAuthority,
+} from "@/lib/operational-authority";
+import {
+  findIssuerPermissionsAddress,
+  loadIssuerPermission,
+  resolveIssuerPermission,
+  buildSetIssuerPermissions,
+} from "@/lib/issuer-permissions";
+const current = address("11111111111111111111111111111111"),
+  next = address("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"),
+  issuer = address("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+  rpc = {} as Parameters<typeof loadOperationalAuthority>[0];
+const account = (
+  data: object,
+  owner: Address = ASSET_REGISTRY_PROGRAM_ADDRESS,
+) => ({ exists: true, programAddress: owner, data });
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.platform.mockResolvedValue(account({ admin: current }));
+  mocks.issuer.mockResolvedValue(account({ authority: current }));
+  mocks.admin.mockResolvedValue({ exists: false });
+  mocks.permission.mockResolvedValue(
+    account({ issuer, authority: current, capabilities: 2 }),
+  );
+  mocks.transfer.mockResolvedValue({ exists: false });
+  mocks.hook.mockResolvedValue(
+    account({ authority: current }, TRANSFER_HOOK_PROGRAM_ADDRESS),
+  );
+  mocks.hookTransfer.mockResolvedValue({ exists: false });
+});
+describe("live operational authority builders", () => {
+  it.each(["platform", "blocklist"] as const)(
+    "requires current %s proposer and proposed accepting wallet",
+    async (kind) => {
+      const ix = await buildProposeOperationalAuthority(
+        rpc,
+        kind,
+        createNoopSigner(current),
+        next,
+      );
+      expect(ix.accounts[0].address).toBe(current);
+      await expect(
+        buildProposeOperationalAuthority(
+          rpc,
+          kind,
+          createNoopSigner(next),
+          issuer,
+        ),
+      ).rejects.toThrow("current operational");
+      const [platform] = await findPlatformPda();
+      if (kind === "platform")
+        mocks.transfer.mockResolvedValue(
+          account({
+            target: platform,
+            currentAuthority: current,
+            newAuthority: next,
+          }),
+        );
+      else
+        mocks.hookTransfer.mockResolvedValue(
+          account(
+            { currentAuthority: current, newAuthority: next },
+            TRANSFER_HOOK_PROGRAM_ADDRESS,
+          ),
+        );
+      await expect(
+        buildAcceptOperationalAuthority(rpc, kind, createNoopSigner(current)),
+      ).rejects.toThrow("proposed");
+      const accept = await buildAcceptOperationalAuthority(
+        rpc,
+        kind,
+        createNoopSigner(next),
+      );
+      expect(accept.accounts[0].address).toBe(next);
+      if (kind === "platform") {
+        const [oldRecord] = await findAdminRecordPda({ authority: current }),
+          [newRecord] = await findAdminRecordPda({ authority: next });
+        expect(accept.accounts.slice(3, 5).map((a) => a.address)).toEqual([
+          oldRecord,
+          newRecord,
+        ]);
+      }
+    },
+  );
+  it("rejects cross-target, stale and wrong-owner proposals", async () => {
+    const [target] = await findPlatformPda();
+    for (const data of [
+      { target: issuer, currentAuthority: current, newAuthority: next },
+      { target, currentAuthority: next, newAuthority: issuer },
+    ]) {
+      mocks.transfer.mockResolvedValue(account(data));
+      await expect(loadOperationalAuthority(rpc, "platform")).rejects.toThrow(
+        "stale or invalid",
+      );
+    }
+    mocks.platform.mockResolvedValue(
+      account({ admin: current }, TRANSFER_HOOK_PROGRAM_ADDRESS),
+    );
+    await expect(loadOperationalAuthority(rpc, "platform")).rejects.toThrow(
+      "owner",
+    );
+  });
+});
+describe("issuer-scoped permission proofs", () => {
+  it("uses issuer+current authority scoped proof and immediately observes revocation", async () => {
+    const scoped = await findIssuerPermissionsAddress(issuer, current);
+    expect(await resolveIssuerPermission(rpc, issuer, current, 2)).toBe(scoped);
+    await expect(
+      resolveIssuerPermission(rpc, issuer, current, 1),
+    ).rejects.toThrow("required scoped");
+    mocks.permission.mockResolvedValue(
+      account({ issuer, authority: current, capabilities: 0 }),
+    );
+    await expect(
+      resolveIssuerPermission(rpc, issuer, current, 2),
+    ).rejects.toThrow("required scoped");
+    expect(mocks.permission).toHaveBeenCalledTimes(3);
+  });
+  it("retains global Admin capability but never permits a different issuer signer", async () => {
+    mocks.admin.mockResolvedValue(account({ admin: current }));
+    expect(
+      (await loadIssuerPermission(rpc, issuer, current)).capabilities,
+    ).toBe(7);
+    await expect(loadIssuerPermission(rpc, issuer, next)).rejects.toThrow(
+      "current authority",
+    );
+  });
+  it("rejects another issuer or owner in a scoped account", async () => {
+    mocks.permission.mockResolvedValue(
+      account({ issuer: next, authority: current, capabilities: 7 }),
+    );
+    await expect(loadIssuerPermission(rpc, issuer, current)).rejects.toThrow(
+      "Invalid issuer",
+    );
+    mocks.permission.mockResolvedValue(
+      account(
+        { issuer, authority: current, capabilities: 7 },
+        TRANSFER_HOOK_PROGRAM_ADDRESS,
+      ),
+    );
+    await expect(loadIssuerPermission(rpc, issuer, current)).rejects.toThrow(
+      "Invalid issuer",
+    );
+  });
+  it("grants/revokes only through the live Super Admin, bound to issuer authority PDA", async () => {
+    const ix = await buildSetIssuerPermissions(
+      rpc,
+      issuer,
+      createNoopSigner(current),
+      0,
+    );
+    expect(
+      getSetIssuerPermissionsInstructionDataDecoder().decode(ix.data)
+        .capabilities,
+    ).toBe(0);
+    expect(ix.accounts[3].address).toBe(
+      await findIssuerPermissionsAddress(issuer, current),
+    );
+    mocks.platform.mockResolvedValue(account({ admin: next }));
+    await expect(
+      buildSetIssuerPermissions(rpc, issuer, createNoopSigner(current), 7),
+    ).rejects.toThrow("current Super Admin");
+    await expect(
+      buildSetIssuerPermissions(rpc, issuer, createNoopSigner(next), 8),
+    ).rejects.toThrow("Invalid issuer capability");
+  });
+});
