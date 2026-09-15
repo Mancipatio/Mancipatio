@@ -173,7 +173,7 @@ export default function AdminPage() {
         </p>
         <h1 className="mt-2 text-3xl font-semibold">Platform console</h1>
         <p className="mt-3 text-slate-600">
-          The Platform singleton governs Mancipatio on the selected network — super admin, the
+          The Platform singleton governs Manci on the selected network — super admin, the
           pause switch and a reserved fee field (nothing is charged on-chain;
           pricing is agreed per engagement).
         </p>

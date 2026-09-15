@@ -89,14 +89,14 @@ export async function POST(request: Request) {
       if (client.email) {
         await sendEmail({
           to: client.email,
-          subject: "Your Mancipatio investor passport has been issued",
+          subject: "Your Manci investor passport has been issued",
           html:
             `<p>Hi${client.display_name ? ` ${escapeHtml(client.display_name)}` : ""},</p>` +
             `<p>Good news — your on-chain investor passport has been issued` +
             (expiresAt ? ` and is valid until <strong>${expiresAt.slice(0, 10)}</strong>` : "") +
             `.</p>` +
             `<p>You can now invest in gated offerings from your portfolio.</p>` +
-            `<p style="color:#64748b;font-size:12px;">— The Mancipatio team</p>`,
+            `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`,
         });
       }
     } else {
@@ -119,12 +119,12 @@ export async function POST(request: Request) {
       if (client.email) {
         await sendEmail({
           to: client.email,
-          subject: "Your Mancipatio investor passport has been revoked",
+          subject: "Your Manci investor passport has been revoked",
           html:
             `<p>Hi${client.display_name ? ` ${escapeHtml(client.display_name)}` : ""},</p>` +
             `<p>Your on-chain investor passport has been revoked and your account is suspended. ` +
-            `Contact the Mancipatio compliance team for details.</p>` +
-            `<p style="color:#64748b;font-size:12px;">— The Mancipatio team</p>`,
+            `Contact the Manci compliance team for details.</p>` +
+            `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`,
         });
       }
     }

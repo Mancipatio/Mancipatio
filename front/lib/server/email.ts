@@ -53,7 +53,7 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   const from =
     input.from ??
     process.env.EMAIL_FROM ??
-    "Mancipatio <onboarding@resend.dev>";
+    "Manci <onboarding@resend.dev>";
   const to = Array.isArray(input.to) ? input.to : [input.to];
 
   try {

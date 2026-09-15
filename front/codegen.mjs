@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 const root = path.dirname(fileURLToPath(import.meta.url));
 const check = process.argv.includes("--check");
 const outputRoot = check
-  ? mkdtempSync(path.join(tmpdir(), "mancipatio-codegen-"))
+  ? mkdtempSync(path.join(tmpdir(), "manci-codegen-"))
   : path.join(root, "lib/generated");
 
 function files(directory, prefix = "") {

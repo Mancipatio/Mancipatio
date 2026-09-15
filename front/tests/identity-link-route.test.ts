@@ -9,7 +9,7 @@ import { POST } from "@/app/api/clients/link-wallet/route";
 
 const keys = generateKeyPairSync("ed25519");
 const wallet = getBase58Decoder().decode(keys.publicKey.export({ type: "spki", format: "der" }).subarray(-32));
-const origin = "https://mancipatio.test";
+const origin = "https://manci.test";
 const token = "fixture-invitation-secret";
 const id = "10000000-0000-4000-8000-000000000001";
 function body(overrides: Partial<SiwsPayload> = {}) {

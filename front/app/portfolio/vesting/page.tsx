@@ -22,7 +22,7 @@ import {
   VestingSeriesStatus,
   VestingTimingMode,
 } from "@/lib/generated/asset_registry";
-import { hookTransferMetas, mintHasMancipatioHook } from "@/lib/hook-metas";
+import { hookTransferMetas, mintHasManciHook } from "@/lib/hook-metas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
@@ -209,7 +209,7 @@ export default function PortfolioVestingPage() {
             tokenProgram: program,
             positionIndex: position.account.index,
           });
-      const metas = (await mintHasMancipatioHook(client.runtime.rpc, mint))
+      const metas = (await mintHasManciHook(client.runtime.rpc, mint))
         ? await hookTransferMetas(client.runtime.rpc, mint, {
             sourceTokenAccount: series.escrow,
             destTokenAccount: ata,

@@ -4,8 +4,8 @@ import { SkeletonTable } from "@/components/skeleton";
 import { ResellBoard } from "./resell-board";
 
 export const metadata = {
-  title: "Resell board · Mancipatio",
-  description: "Holder listings and live OTC offers for tokenized assets on Mancipatio.",
+  title: "Resell board · Manci",
+  description: "Holder listings and live OTC offers for tokenized assets on Manci.",
 };
 
 export default function ResellPage() {

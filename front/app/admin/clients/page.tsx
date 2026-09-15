@@ -53,7 +53,7 @@ export default function ClientsPage() {
         <p className="page-eyebrow">Clients</p>
         <h1 className="page-title">KYC&apos;d clients directory</h1>
         <p className="page-sub">
-          Every issuer, investor, delegate and officer onboarded on Mancipatio.
+          Every issuer, investor, delegate and officer onboarded on Manci.
           Add new clients manually or wait for them to complete self-service
           onboarding.
         </p>

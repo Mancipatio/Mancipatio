@@ -12,7 +12,7 @@ import {
 } from "@/components/mx";
 
 export const metadata = {
-  title: "Issuing an asset · Mancipatio",
+  title: "Issuing an asset · Manci",
   description:
     "The shared issuer process: onboarding, application, review, documentation, registration and distribution.",
 };

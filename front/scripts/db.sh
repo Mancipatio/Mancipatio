@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Supabase migration / query helper for Mancipatio.
+# Supabase migration / query helper for Manci.
 # Reads the DB password from .env.local (gitignored) at runtime — no secrets stored here.
 # The direct host (db.<ref>.supabase.co) no longer resolves over IPv4; we use the
 # Supavisor session pooler in eu-west-1.

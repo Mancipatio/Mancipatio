@@ -267,7 +267,7 @@ function LaunchpadInner() {
       } else {
         toast.showError(
           "SPV issuance NOT booked",
-          `The sale closed on-chain, but booking ${amount.toLocaleString("en-US")} against the SPV annual cap was rejected (cap reached or database unreachable). Please contact the Mancipatio team so it can be recorded.`,
+          `The sale closed on-chain, but booking ${amount.toLocaleString("en-US")} against the SPV annual cap was rejected (cap reached or database unreachable). Please contact the Manci team so it can be recorded.`,
         );
       }
     } catch (err) {

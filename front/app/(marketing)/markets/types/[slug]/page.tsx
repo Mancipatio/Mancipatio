@@ -44,10 +44,10 @@ export async function generateMetadata({
   const { slug } = await params;
   const instrument = instrumentBySlug(slug);
   if (!instrument) {
-    return { title: "Instrument · Mancipatio" };
+    return { title: "Instrument · Manci" };
   }
   return {
-    title: `${instrument.label} · Mancipatio`,
+    title: `${instrument.label} · Manci`,
     description: instrument.lede,
   };
 }

@@ -561,10 +561,10 @@ function ShareClassActions({
             ) : (
               <>
                 <p className="font-medium text-slate-800">
-                  Mint initialized — treasury minting handled by Mancipatio
+                  Mint initialized — treasury minting handled by Manci
                 </p>
                 <p className="mt-1 text-[13px]">
-                  The Mancipatio team mints your allocation to the treasury and
+                  The Manci team mints your allocation to the treasury and
                   locks supply. Contact us if you need a change to the schedule.
                 </p>
               </>

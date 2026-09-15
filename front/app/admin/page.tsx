@@ -80,7 +80,7 @@ export default function AdminOverview() {
         <p className="page-eyebrow">Command center</p>
         <h1 className="page-title">Platform overview</h1>
         <p className="page-sub">
-          Live state of the Mancipatio tokenization platform — health, KPIs,
+          Live state of the Manci tokenization platform — health, KPIs,
           alerts and operational shortcuts.
         </p>
       </div>

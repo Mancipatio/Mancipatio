@@ -298,7 +298,7 @@ export default function MyOffersPage() {
           onClick={() => setShowCreate(true)}
           title={
             myShareClasses.length === 0
-              ? "You need to hold at least one Mancipatio share-class token before posting an offer."
+              ? "You need to hold at least one Manci share-class token before posting an offer."
               : undefined
           }
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
@@ -793,7 +793,7 @@ function Empty({
         </button>
       ) : (
         <p className="mt-2 text-xs text-slate-400">
-          You need to hold at least one Mancipatio share-class token first.
+          You need to hold at least one Manci share-class token first.
         </p>
       )}
     </div>

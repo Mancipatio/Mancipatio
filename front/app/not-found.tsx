@@ -1,7 +1,7 @@
 import Link from "next/link";
 
 export const metadata = {
-  title: "Not found — Mancipatio",
+  title: "Not found — Manci",
 };
 
 export default function NotFound() {

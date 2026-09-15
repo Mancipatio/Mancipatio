@@ -23,9 +23,9 @@ import {
  * changed. Legal wording is not edited here.
  */
 export const metadata: Metadata = {
-  title: "Terms of Service — Mancipatio",
+  title: "Terms of Service — Manci",
   description:
-    "Terms governing access to and use of the Mancipatio tokenization platform.",
+    "Terms governing access to and use of the Manci tokenization platform.",
 };
 
 const LAST_UPDATED = "2026-05-25";
@@ -36,7 +36,7 @@ export default function TermsPage() {
       <PageHeader
         eyebrow="Legal"
         title="Terms of Service"
-        lede="Terms governing access to and use of the Mancipatio tokenization platform."
+        lede="Terms governing access to and use of the Manci tokenization platform."
       >
         <Small className="mt-5">Last updated: {LAST_UPDATED}</Small>
       </PageHeader>
@@ -60,7 +60,7 @@ export default function TermsPage() {
         <Clause title="1. Acceptance" first>
           <Body>
             By connecting a wallet or registering an issuer entity on
-            mancipatio.io (&quot;Mancipatio&quot;, &quot;Service&quot;), you
+            mancipatio.io (&quot;Manci&quot;, &quot;Service&quot;), you
             agree to these Terms. If you don&apos;t agree, do not connect or
             register.
           </Body>
@@ -84,7 +84,7 @@ export default function TermsPage() {
             characterization of any token issued or transacted on it.
           </Body>
           <Body className="mt-3.5">
-            Mancipatio does not solicit or facilitate the offer or sale of
+            Manci does not solicit or facilitate the offer or sale of
             securities to the public in any jurisdiction in which such offer
             would require registration with a securities regulator unless we
             have explicitly enabled the relevant compliance flow for that
@@ -107,7 +107,7 @@ export default function TermsPage() {
             items={[
               "Take responsibility for the security of your own wallet, private keys and any seed phrases.",
               "Pass the KYC step on any transaction touching the platform's compliance touchpoints (initial sale, on-platform OTC, delivery, conversion).",
-              "Understand that tokens are bearer instruments — off-platform transfers and self-custody mean Mancipatio cannot recover them if they leave your control.",
+              "Understand that tokens are bearer instruments — off-platform transfers and self-custody mean Manci cannot recover them if they leave your control.",
             ]}
           />
         </Clause>
@@ -132,7 +132,7 @@ export default function TermsPage() {
 
         <Clause title="8. Custody and asset risk">
           <Body>
-            Mancipatio acts as an <em>escrow agent</em> for custody flows — the
+            Manci acts as an <em>escrow agent</em> for custody flows — the
             platform&apos;s custody program holds tokens in PDA-owned escrows
             during conversion, delivery and redemption. We do not take legal
             title to off-chain assets backing tokens.

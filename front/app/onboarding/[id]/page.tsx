@@ -263,7 +263,7 @@ function Consumer({ id }: { id: string }) {
     <div className="space-y-6">
       <div>
         <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
-          Mancipatio onboarding
+          Manci onboarding
         </p>
         <h1 className="mt-1 text-3xl font-semibold text-slate-900">
           Welcome, {client.display_name}
@@ -271,7 +271,7 @@ function Consumer({ id }: { id: string }) {
         <p className="mt-2 text-sm text-slate-600">
           You&apos;ve been invited to onboard as a{" "}
           <strong>{TYPE_LABEL[client.type] ?? client.type}</strong> on
-          Mancipatio. One step here: connect the Solana wallet you want to use
+          Manci. One step here: connect the Solana wallet you want to use
           long-term, and we&apos;ll link it to your account.
         </p>
       </div>
@@ -326,7 +326,7 @@ function Consumer({ id }: { id: string }) {
           ) : (
             <>
               <p className="mt-2 text-sm text-slate-600">
-                Onboarding requires accepting the Mancipatio Terms of Service.
+                Onboarding requires accepting the Manci Terms of Service.
                 Please read them before continuing:{" "}
                 <a
                   href="/legal/terms"
@@ -346,7 +346,7 @@ function Consumer({ id }: { id: string }) {
                   className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-slate-900"
                 />
                 <span className="text-sm text-slate-700">
-                  I have read and accept the Mancipatio Terms of Service.
+                  I have read and accept the Manci Terms of Service.
                 </span>
               </label>
               {/* Already-linked clients (pre-ToS-gate) accept in place. */}
@@ -369,7 +369,7 @@ function Consumer({ id }: { id: string }) {
       {!!wallet && !alreadyConnected && !linked && (
         <Card>
           <h2 className="text-lg font-semibold text-slate-900">
-            Link this wallet to your Mancipatio account
+            Link this wallet to your Manci account
           </h2>
           <p className="mt-2 text-sm text-slate-600">
             Connecting this wallet will associate it with your invitation. After

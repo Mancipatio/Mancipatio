@@ -22,7 +22,7 @@ function bind(id = ID1, token = TOKEN1, wallet = WALLET1, network = "devnet") {
   return `select public.link_client_wallet('${id}', '${token}', '${wallet}', '${network}')::text;`;
 }
 function nonce(id = "10000000-0000-4000-8000-000000000099") {
-  return `select public.consume_siws_nonce('https://mancipatio.test', 'devnet', '${WALLET1}', '${id}', now() + interval '5 minutes');`;
+  return `select public.consume_siws_nonce('https://manci.test', 'devnet', '${WALLET1}', '${id}', now() + interval '5 minutes');`;
 }
 
 describe.skipIf(!enabled)("0044 identity and RLS on isolated PostgreSQL", () => {
@@ -73,10 +73,10 @@ describe.skipIf(!enabled)("0044 identity and RLS on isolated PostgreSQL", () => 
 
   it("denies expired nonces and keeps cleanup from making a valid nonce reusable", () => {
     expect(sql(nonce())).toBe("t");
-    sql(`insert into public.siws_nonces values ('https://mancipatio.test', 'devnet', '${WALLET2}', '10000000-0000-4000-8000-000000000098', now() - interval '1 hour', now());`);
+    sql(`insert into public.siws_nonces values ('https://manci.test', 'devnet', '${WALLET2}', '10000000-0000-4000-8000-000000000098', now() - interval '1 hour', now());`);
     expect(sql(nonce())).toBe("f");
     expect(sql("select count(*) from public.siws_nonces;")).toBe("1");
-    expect(sql(`select public.consume_siws_nonce('https://mancipatio.test','devnet','${WALLET1}','10000000-0000-4000-8000-000000000097',now()-interval '1 second');`)).toBe("f");
+    expect(sql(`select public.consume_siws_nonce('https://manci.test','devnet','${WALLET1}','10000000-0000-4000-8000-000000000097',now()-interval '1 second');`)).toBe("f");
   });
 
   it("atomically admits one wallet for an invitation and never overwrites it", async () => {

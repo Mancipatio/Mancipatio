@@ -103,7 +103,7 @@ export default function IssuerProfilePage({
         </p>
         <h1 className="mt-1 text-2xl font-semibold text-mx-ink">Not found</h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
-          No issuer with this legal entity ID is registered on Mancipatio
+          No issuer with this legal entity ID is registered on Manci
           (devnet).
         </p>
         <Link

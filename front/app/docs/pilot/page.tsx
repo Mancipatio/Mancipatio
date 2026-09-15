@@ -10,7 +10,7 @@ import {
   TextLink,
 } from "@/components/mx";
 export const metadata = {
-  title: "Pilot operator guide · Mancipatio",
+  title: "Pilot operator guide · Manci",
   description:
     "Check a test release, prepare approved actions and recover pending records without repeating payments.",
 };

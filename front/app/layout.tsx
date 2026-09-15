@@ -20,9 +20,9 @@ export const metadata: Metadata = {
   metadataBase: new URL(
     process.env.NEXT_PUBLIC_SITE_URL || "https://mancipatio.io",
   ),
-  title: "Mancipatio — on-chain tokenization",
+  title: "Manci — on-chain tokenization",
   description:
-    "Mancipatio issues, custodies, trades and vests tokenized real-world assets and investments on Solana.",
+    "Manci issues, custodies, trades and vests tokenized real-world assets and investments on Solana.",
   // Devnet only — no indexing until mainnet launch.
   robots: {
     index: false,

@@ -100,14 +100,14 @@ export function AppShell({ children, section = "overview" }: {
         <nav aria-label="Main app">
           <p className="app-nav-label">MARKETPLACE</p>{navItems(primary)}
           <p className="app-nav-label">YOUR WORKSPACE</p>{navItems(portfolio)}
-          <p className="app-nav-label">BUILD ON MANCIPATIO</p>
+          <p className="app-nav-label">BUILD ON MANCI</p>
           <Link href="/issuer" className={`app-nav-link ${section === "issuer" ? "is-active" : ""}`}><IconBuilding className="h-[18px] w-[18px]" />Issuer workspace</Link>
           <Link href="/docs" className={`app-nav-link ${section === "documentation" ? "is-active" : ""}`} aria-current={section === "documentation" ? "location" : undefined}><IconFile className="h-[18px] w-[18px]" />Documentation</Link>
           {section === "admin" && <Link href="/admin" className="app-nav-link is-active" aria-current="location"><IconBuilding className="h-[18px] w-[18px]" />Administration</Link>}
         </nav>
         <div className="app-sidebar-bottom">
           <div className="app-issue-card"><span className="app-issue-symbol">↗</span><strong>Bring your asset on-chain.</strong><p>Start an equity raise or explore tokenization.</p><Link href="/apply">Create a raise <IconArrowUpRight className="h-4 w-4" /></Link></div>
-          <div className="app-sidebar-foot"><Link href="/about">About Mancipatio ↗</Link><span><i />Solana · {networkLabel(network)}</span></div>
+          <div className="app-sidebar-foot"><Link href="/about">About Manci ↗</Link><span><i />Solana · {networkLabel(network)}</span></div>
         </div>
       </aside>
       <div className="app-body">
@@ -121,7 +121,7 @@ export function AppShell({ children, section = "overview" }: {
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
           {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{children}</div> : children}
         </Content>
-        <footer className="app-footer"><span>Mancipatio <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/contact">Support ↗</Link></div></footer>
+        <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/contact">Support ↗</Link></div></footer>
       </div>
       {!["documentation", "admin", "onboarding", "application"].includes(section) && !path.startsWith("/markets/") && <TosGate />}
     </div>

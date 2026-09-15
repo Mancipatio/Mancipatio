@@ -75,7 +75,7 @@ export default function LaunchpadPage() {
           Primary sales
         </h1>
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
-          Every primary sale on Mancipatio — price, raised, status and lifecycle
+          Every primary sale on Manci — price, raised, status and lifecycle
           actions (open, buy, close).
         </p>
       </div>

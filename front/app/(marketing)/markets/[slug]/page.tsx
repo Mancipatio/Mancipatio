@@ -15,11 +15,11 @@ export async function generateMetadata({
   const { slug } = await params;
   const record = assetTypeBySlug(slug);
   if (!record) {
-    return { title: "Market · Mancipatio" };
+    return { title: "Market · Manci" };
   }
   return {
-    title: `${record.title} · Live market · Mancipatio`,
-    description: `Published ${record.title.toLowerCase()} listings on Mancipatio. ${record.oneLine}`,
+    title: `${record.title} · Live market · Manci`,
+    description: `Published ${record.title.toLowerCase()} listings on Manci. ${record.oneLine}`,
   };
 }
 

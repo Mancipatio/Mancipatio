@@ -200,7 +200,7 @@ export default function PortfolioOverviewPage() {
     };
   }, [data]);
 
-  // Match each holding to the Mancipatio share class by mint.
+  // Match each holding to the Manci share class by mint.
   const enriched = useMemo<EnrichedHolding[]>(() => {
     if (!data || !holdings) return [];
     const out: EnrichedHolding[] = [];
@@ -254,7 +254,7 @@ export default function PortfolioOverviewPage() {
         </p>
         <h1 className="mt-1 text-2xl font-semibold text-slate-900">Holdings</h1>
         <p className="mt-2 text-sm text-slate-600">
-          Every Mancipatio share-class token held by{" "}
+          Every Manci share-class token held by{" "}
           <code className="font-mono text-xs">
             {wallet.toString().slice(0, 6)}…{wallet.toString().slice(-4)}
           </code>
@@ -813,7 +813,7 @@ function Empty() {
   return (
     <div className="mt-4 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
-        No Mancipatio holdings yet.
+        No Manci holdings yet.
       </p>
       <p className="mt-1 text-xs text-slate-400">
         Buy on a primary sale or take an OTC offer to see balances here.

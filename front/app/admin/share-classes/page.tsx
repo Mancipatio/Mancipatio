@@ -114,7 +114,7 @@ export default function ShareClassesPage() {
           Share class lifecycle
         </h1>
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
-          Every share class on Mancipatio — Token-2022 mint state, supply,
+          Every share class on Manci — Token-2022 mint state, supply,
           rights bitfield and lifecycle actions.
         </p>
       </div>

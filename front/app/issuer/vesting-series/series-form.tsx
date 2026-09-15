@@ -437,7 +437,7 @@ export function SeriesForm({
                 }`}
               >
                 {mintCheck.status === "idle"
-                  ? "Supported: Token program mints, and Token-2022 mints whose only extensions are close authority, metadata / metadata pointer, group / group member (or their pointers) or a Mancipatio registry transfer hook. Any other extension (transfer fee, confidential transfer, non-transferable, interest-bearing, default account state, a bare permanent delegate, a foreign hook, …) is refused."
+                  ? "Supported: Token program mints, and Token-2022 mints whose only extensions are close authority, metadata / metadata pointer, group / group member (or their pointers) or a Manci registry transfer hook. Any other extension (transfer fee, confidential transfer, non-transferable, interest-bearing, default account state, a bare permanent delegate, a foreign hook, …) is refused."
                   : mintCheck.status === "checking"
                     ? "Verifying mint support…"
                     : mintCheck.result.ok

@@ -4,8 +4,8 @@ import { DocumentationFrame } from "@/components/documentation-frame";
 import { DocumentationIndex } from "@/components/documentation-index";
 
 export const metadata: Metadata = {
-  title: "Documentation · Mancipatio",
-  description: "Guides to Mancipatio assets, issuance, trading, vesting, controls and issuer disclosures.",
+  title: "Documentation · Manci",
+  description: "Guides to Manci assets, issuance, trading, vesting, controls and issuer disclosures.",
 };
 
 export default function DocumentationPage() {

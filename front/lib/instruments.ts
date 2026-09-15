@@ -4,7 +4,7 @@ import { CATEGORY_SLUGS, type CategorySlug } from "@/lib/asset-types";
  * Public copy for the eight instruments — the comparison table at
  * `/markets/types` and the eight fact-sheet pages at `/markets/types/[slug]`.
  *
- * Ported from *Mancipatio — structural prototype, revision 2*. Two rules from
+ * Ported from *Manci — structural prototype, revision 2*. Two rules from
  * that document govern every value below and are not negotiable:
  *
  * 1. **"Spec notes" never ship.** The prototype's annotation blocks are notes
@@ -214,7 +214,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         heading: "The instrument",
         points: [
           "A corporate bond is simple: you give a company money, and when the term lapses it returns the money and pays interest",
-          "Bonds are one of the most basic financial instruments — Mancipatio brings their issuance on-chain",
+          "Bonds are one of the most basic financial instruments — Manci brings their issuance on-chain",
           "The platform supports bonds and other debt instruments of every kind",
         ],
       },
@@ -341,7 +341,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         points: [
           "Some intellectual property generates revenue all by itself",
           "A book can sell a million copies — then a game or a show gets built on top of it, and every layer generates income",
-          "Mancipatio tokenises that income stream",
+          "Manci tokenises that income stream",
         ],
       },
       {
@@ -477,7 +477,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
           "Deliverable assets can be redeemed: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
           "If a delivery is cancelled, the tokens are returned to the holder",
           "Redemption is available to onboarded holders only",
-          "Mancipatio doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
+          "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
         ],
       },
     ],
@@ -533,7 +533,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
           "Deliverable assets can be redeemed: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
           "If a delivery is cancelled, the token is returned to the holder",
           "Redemption is available to onboarded holders only",
-          "Mancipatio doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
+          "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
         ],
       },
     ],

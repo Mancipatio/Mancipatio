@@ -13,7 +13,7 @@ import {
 } from "@/components/mx";
 
 export const metadata: Metadata = {
-  title: "Investor guide — Mancipatio",
+  title: "Investor guide — Manci",
   description:
     "Find an asset, review its documents, connect your wallet and use the sale, OTC and portfolio screens.",
 };

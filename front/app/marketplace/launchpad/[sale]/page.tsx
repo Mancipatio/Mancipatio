@@ -496,7 +496,7 @@ export default function DealPage({
           Sale not found
         </h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
-          No on-chain sale with this address is registered on Mancipatio
+          No on-chain sale with this address is registered on Manci
           (devnet).
         </p>
         <Link

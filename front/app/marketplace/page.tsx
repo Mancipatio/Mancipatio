@@ -118,7 +118,7 @@ export default function MarketplacePage() {
       <PageHeader
         eyebrow="Marketplace"
         title="Discover tokenized assets"
-        lede="Every asset registered on Mancipatio — equity, debt, revenue share, real estate and more — backed by an on-chain custodial flow and a verified issuer."
+        lede="Every asset registered on Manci — equity, debt, revenue share, real estate and more — backed by an on-chain custodial flow and a verified issuer."
       />
 
       {/* Live stats */}

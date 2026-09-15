@@ -2,8 +2,8 @@
 
 // Mode-aware transfer-hook account tails for share-class mint transfers.
 //
-// Every `transfer_checked` of a Mancipatio share-class mint (Token-2022 with
-// the Mancipatio transfer_hook) needs the hook's extra accounts appended after
+// Every `transfer_checked` of a Manci share-class mint (Token-2022 with
+// the Manci transfer_hook) needs the hook's extra accounts appended after
 // the four standard transfer accounts. The required shape depends on the
 // mint's `TransferHookConfig.restriction_mode`:
 //
@@ -65,10 +65,10 @@ type Rpc = SolanaClient["runtime"]["rpc"];
 
 export type HookTransferMeta = { address: Address; role: AccountRole };
 
-/** True when `mint` is wired to the Mancipatio transfer hook (a share-class
+/** True when `mint` is wired to the Manci transfer hook (a share-class
  *  mint). Vesting escrows accept ANY mint — hook metas may only be appended
  *  when this is true; a mint without the hook rejects the extra accounts. */
-export async function mintHasMancipatioHook(
+export async function mintHasManciHook(
   rpc: Rpc,
   mint: Address,
 ): Promise<boolean> {

@@ -8,9 +8,9 @@ import {
 } from "@/components/mx";
 
 export const metadata = {
-  title: "Quick answers — Mancipatio",
+  title: "Quick answers — Manci",
   description:
-    "Find the right guide for buying, verification, token documents, vesting and issuing on Mancipatio.",
+    "Find the right guide for buying, verification, token documents, vesting and issuing on Manci.",
 };
 
 const QUESTIONS = [

@@ -3,7 +3,7 @@
 import { WalletRequired } from "@/components/wallet-required";
 
 // Holder resell posts — "Token holders can post about the tokens they have and
-// want to sell on Mancipatio" (Flows doc, Company Ownership step 12 et al.).
+// want to sell on Manci" (Flows doc, Company Ownership step 12 et al.).
 // Posts are off-chain classifieds; settlement happens through the on-chain OTC
 // escrow (/portfolio/offers) or directly between the parties.
 
@@ -507,7 +507,7 @@ function PostListingModal({
                 {holdings === null
                   ? "Loading holdings…"
                   : holdings.length === 0
-                    ? "No Mancipatio holdings in this wallet"
+                    ? "No Manci holdings in this wallet"
                     : "Select a holding…"}
               </option>
               {(holdings ?? []).map((h) => (

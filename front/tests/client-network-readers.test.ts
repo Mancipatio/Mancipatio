@@ -41,7 +41,7 @@ beforeEach(() => {
   state.params = { id: "10000000-0000-4000-8000-000000000001", wallet: "11111111111111111111111111111111", document_id: 1, display_name: "Fixture" };
 });
 afterEach(() => vi.unstubAllEnvs());
-const request = () => new Request("https://mancipatio.test/api/client", { method: "POST" });
+const request = () => new Request("https://manci.test/api/client", { method: "POST" });
 
 describe("existing client routes enforce the active network", () => {
   it("does not expose admin detail, documents or mutate identity from another network", async () => {
@@ -59,7 +59,7 @@ describe("existing client routes enforce the active network", () => {
   it("does not let an invitation stamp Terms for an unrelated or unlinked wallet", async () => {
     state.rowNetwork = "devnet";
     const input = { client_id: "10000000-0000-4000-8000-000000000001", token: "tok", wallet: "22222222222222222222222222222222" };
-    const req = () => new Request("https://mancipatio.test/api/clients/accept-tos", { method: "POST", body: JSON.stringify(input) });
+    const req = () => new Request("https://manci.test/api/clients/accept-tos", { method: "POST", body: JSON.stringify(input) });
     expect((await acceptTos(req())).status).toBe(401);
     state.linkedWallet = null;
     expect((await acceptTos(req())).status).toBe(401);

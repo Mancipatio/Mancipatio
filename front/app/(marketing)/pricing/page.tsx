@@ -12,7 +12,7 @@ import {
 } from "@/components/mx";
 
 export const metadata: Metadata = {
-  title: "Pricing — Mancipatio",
+  title: "Pricing — Manci",
   description:
     "No platform fees during the launch phase. SPV incorporation, legal drafting and regulatory filings are third-party costs, quoted per engagement before any work starts.",
 };

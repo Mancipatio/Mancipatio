@@ -3,12 +3,12 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 
 export const runtime = "nodejs";
-export const alt = "Mancipatio — on-chain tokenization on Solana";
+export const alt = "Manci — on-chain tokenization on Solana";
 export const size = { width: 1200, height: 630 };
 export const contentType = "image/png";
 
 export default async function OG() {
-  const logo = await readFile(join(process.cwd(), "public/brand/mancipatio-logo.png"));
+  const logo = await readFile(join(process.cwd(), "public/brand/manci-logo.png"));
 
   return new ImageResponse(
     (
@@ -27,7 +27,7 @@ export default async function OG() {
         }}
       >
         {/* ImageResponse renders native images from embedded data. */}
-        <img src={`data:image/png;base64,${logo.toString("base64")}`} alt="Mancipatio" width={440} height={440 * 472 / 1050} />
+        <img src={`data:image/png;base64,${logo.toString("base64")}`} alt="Manci" width={300} height={300 * 730 / 1320} />
 
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div

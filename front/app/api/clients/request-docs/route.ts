@@ -146,7 +146,7 @@ export async function POST(request: Request) {
         .join("");
       await sendEmail({
         to: client.email,
-        subject: "Mancipatio KYC — documents requested",
+        subject: "Manci KYC — documents requested",
         html:
           `<p>Hi${client.display_name ? ` ${escapeHtml(client.display_name)}` : ""},</p>` +
           `<p>Our compliance team needs the following document(s) to continue your KYC review:</p>` +
@@ -154,7 +154,7 @@ export async function POST(request: Request) {
           (uploadUrl
             ? `<p>Upload them from your onboarding page:<br/><a href="${uploadUrl}">${uploadUrl}</a></p>`
             : `<p>We will send your personal upload link separately — please reply to this email if you do not receive it.</p>`) +
-          `<p style="color:#64748b;font-size:12px;">— The Mancipatio team</p>`,
+          `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`,
       });
     }
 

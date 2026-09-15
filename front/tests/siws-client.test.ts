@@ -48,7 +48,7 @@ describe("canonicalJson", () => {
 describe("siwsMessage", () => {
   const payload: SiwsPayload = {
     v: 2,
-    origin: "https://mancipatio.test",
+    origin: "https://manci.test",
     network: "devnet",
     action: "clients.create",
     wallet: "11111111111111111111111111111111",
@@ -64,7 +64,7 @@ describe("siwsMessage", () => {
         '{"action":"clients.create",' +
         '"network":"devnet",' +
         '"nonce":"8e7a1b2c-0000-4000-8000-000000000001",' +
-        '"origin":"https://mancipatio.test",' +
+        '"origin":"https://manci.test",' +
         '"params":{"amount":"1000","note":"hi"},' +
         '"ts":"2026-07-20T00:00:00.000Z",' +
         '"v":2,' +

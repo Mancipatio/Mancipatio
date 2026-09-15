@@ -57,7 +57,7 @@ export default function IssuersPage() {
           Issuer directory
         </h1>
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
-          Every legal entity registered on Mancipatio, with KYB status, asset
+          Every legal entity registered on Manci, with KYB status, asset
           count and review actions.
         </p>
       </div>

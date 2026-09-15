@@ -545,7 +545,7 @@ export default function MyRightsPage() {
 
           <p className="text-xs text-slate-400">
             This page lets you claim vested milestones and vote directly from
-            your wallet. Issuers and the Mancipatio team manage the underlying
+            your wallet. Issuers and the Manci team manage the underlying
             milestones and payout vaults.
           </p>
         </div>

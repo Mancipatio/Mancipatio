@@ -11,7 +11,7 @@ import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 const addr = getAddressEncoder();
 const seed = (s: string) => new TextEncoder().encode(s);
 
-/** The Mancipatio transfer_hook program. */
+/** The Manci transfer_hook program. */
 export const TRANSFER_HOOK_PROGRAM =
   "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy" as Address;
 

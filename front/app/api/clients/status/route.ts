@@ -35,12 +35,12 @@ function verdictEmail(
   const reasonBlock = reason
     ? `<p style="margin:12px 0;padding:12px;border-left:3px solid #cbd5e1;color:#334155;white-space:pre-wrap;">${escapeHtml(reason)}</p>`
     : "";
-  const footer = `<p style="color:#64748b;font-size:12px;">— The Mancipatio team</p>`;
+  const footer = `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`;
 
   switch (kycStatus) {
     case "verified":
       return {
-        subject: "Your Mancipatio KYC verification is complete",
+        subject: "Your Manci KYC verification is complete",
         html:
           hi +
           `<p>Good news — your KYC review is complete and your account is <strong>verified</strong>.</p>` +
@@ -49,7 +49,7 @@ function verdictEmail(
       };
     case "rejected":
       return {
-        subject: "Update on your Mancipatio KYC review",
+        subject: "Update on your Manci KYC review",
         html:
           hi +
           `<p>After review, your KYC application was <strong>not approved</strong>.</p>` +
@@ -62,7 +62,7 @@ function verdictEmail(
       };
     case "suspended":
       return {
-        subject: "Your Mancipatio account has been suspended",
+        subject: "Your Manci account has been suspended",
         html:
           hi +
           `<p>Your account has been <strong>suspended</strong>. Contact the compliance team for details.</p>` +
@@ -71,7 +71,7 @@ function verdictEmail(
       };
     case "more_info":
       return {
-        subject: "Mancipatio KYC — additional information required",
+        subject: "Manci KYC — additional information required",
         html:
           hi +
           `<p>Our compliance team needs additional information to continue your KYC review.</p>` +

@@ -138,7 +138,7 @@ export async function POST(request: Request) {
         );
       }
       await requireProfileOwner(wallet,assetPda,"asset");
-      // SPV assignment is a Mancipatio-team operation (SPVs are incorporated
+      // SPV assignment is a Manci-team operation (SPVs are incorporated
       // and linked to a client by admins, and each issuance is booked against
       // that SPV's EUR 3M annual cap). An issuer must not be able to point
       // their asset at another client's SPV, so silently drop any spv_id an

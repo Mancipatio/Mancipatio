@@ -12,7 +12,7 @@ const keys = generateKeyPairSync("ed25519");
 const wallet = getBase58Decoder().decode(
   keys.publicKey.export({ type: "spki", format: "der" }).subarray(-32),
 );
-const origin = "https://mancipatio.test";
+const origin = "https://manci.test";
 const consumed = new Set<string>();
 function envelope(overrides: Partial<SiwsPayload> = {}): SiwsRequestBody {
   const payload: SiwsPayload = {
@@ -111,7 +111,7 @@ describe("SIWS v2 authorization", () => {
   it("requires an explicit HTTPS production origin and ignores a forged Host", async () => {
     vi.stubEnv("NEXT_PUBLIC_SITE_URL", "");
     await expect(verifySigned(request(), "test.private")).rejects.toMatchObject({ status: 503 });
-    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "http://mancipatio.test");
+    vi.stubEnv("NEXT_PUBLIC_SITE_URL", "http://manci.test");
     await expect(verifySigned(request(), "test.private")).rejects.toMatchObject({ status: 503 });
     expect(rpc).not.toHaveBeenCalled();
   });

@@ -912,7 +912,7 @@ function WhitepaperCard({
 
       <p className="mt-2 text-[12.5px] leading-relaxed text-slate-500">
         A proper whitepaper is the preferred option and is published on the
-        Mancipatio website. Without one, the platform publishes the submitted
+        Manci website. Without one, the platform publishes the submitted
         form information as the token&apos;s official basic information.
       </p>
 
@@ -1045,7 +1045,7 @@ function WhitepaperCard({
               </span>
             </div>
             <span className="mt-1 block text-[11px] text-slate-400">
-              Securities Commission statuses are managed by Mancipatio and
+              Securities Commission statuses are managed by Manci and
               cannot be changed here.
             </span>
           </div>
@@ -1067,7 +1067,7 @@ function WhitepaperCard({
               Some tokens issued in Serbia need Securities Commission approval
               for the whitepaper.
               {!isAdmin &&
-                " SSC statuses are set by Mancipatio once the Commission decides."}
+                " SSC statuses are set by Manci once the Commission decides."}
             </span>
           </label>
         )}
@@ -1141,7 +1141,7 @@ function WhitepaperCard({
               </span>
             </>
           ) : (
-            // SPV assignment is a Mancipatio-team operation (server-enforced:
+            // SPV assignment is a Manci-team operation (server-enforced:
             // /api/profiles/upsert drops issuer-path spv_id changes). Show the
             // linked SPV read-only.
             <div className="mt-1 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-600">
@@ -1178,7 +1178,7 @@ function WhitepaperCard({
               )}
               <span className="mt-1 block text-[11px] text-slate-400">
                 Serbian SPV this issuance runs through (EUR 3M/year cap) —
-                assigned by the Mancipatio team.
+                assigned by the Manci team.
               </span>
             </div>
           )}

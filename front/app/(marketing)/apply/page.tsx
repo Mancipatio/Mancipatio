@@ -788,7 +788,7 @@ export default function ApplyPage() {
           lede={
             !eligibility.hasClient ? (
               <>
-                Applying to raise on Mancipatio requires an onboarded client
+                Applying to raise on Manci requires an onboarded client
                 profile with verified KYC. Your connected wallet isn&apos;t
                 linked to a client profile yet — please{" "}
                 <TextLink href={MX_ROUTES.contact}>contact us</TextLink> to get

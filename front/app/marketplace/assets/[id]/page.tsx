@@ -151,7 +151,7 @@ export default function AssetDetailPage({
           Not found
         </h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
-          No asset with this ID is registered on Mancipatio (devnet).
+          No asset with this ID is registered on Manci (devnet).
         </p>
         <Link
           href="/marketplace"
@@ -321,7 +321,7 @@ function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null
           <p className="text-sm leading-relaxed text-mx-ink-soft">
             This token has no separate whitepaper. The information on this page
             is the token&apos;s official basic information published by
-            Mancipatio.
+            Manci.
           </p>
         )}
         {profile.spv_name && (

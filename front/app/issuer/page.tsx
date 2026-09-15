@@ -472,7 +472,7 @@ function NotRegistered() {
         Welcome — your wallet is not yet an issuer
       </h1>
       <p className="mt-2 max-w-prose text-sm text-slate-600">
-        Mancipatio issuers tokenize companies, instruments and real-world assets
+        Manci issuers tokenize companies, instruments and real-world assets
         on Solana. Onboarding takes a single on-chain registration plus an
         off-chain KYB review by the Super Admin.
       </p>

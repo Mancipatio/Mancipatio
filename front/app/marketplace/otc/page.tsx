@@ -102,7 +102,7 @@ export default function PublicOtcPage() {
         </h1>
         <p className="mt-2 max-w-2xl text-sm text-mx-ink-soft">
           Buy share-class units from existing holders. Settlement runs through
-          the Mancipatio transfer hook with the issuer-set whitelist still
+          the Manci transfer hook with the issuer-set whitelist still
           enforced.
         </p>
       </div>

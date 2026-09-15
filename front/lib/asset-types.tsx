@@ -172,7 +172,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           heading: "The instrument",
           points: [
             "A corporate bond is simple: you give a company money, and when the term lapses it returns the money and pays interest",
-            "Bonds are one of the most basic financial instruments — Mancipatio brings their issuance on-chain",
+            "Bonds are one of the most basic financial instruments — Manci brings their issuance on-chain",
             "The platform supports bonds and other debt instruments of every kind",
           ],
         },
@@ -230,7 +230,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           points: [
             "Rental income is a major driver of real-estate investing — but managing property is much harder work than people think",
             "Buying a whole property is capital-intensive; buying a portion of one is far more achievable",
-            "Mancipatio tokenises rental income streams — a portion of the income is sent to holder wallets monthly or quarterly",
+            "Manci tokenises rental income streams — a portion of the income is sent to holder wallets monthly or quarterly",
             "Freely transferable and tradeable",
             "If the issuer avoids paying holders their share of the income, there is legal recourse",
           ],
@@ -278,7 +278,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           points: [
             "Some intellectual property generates revenue all by itself",
             "A book can sell a million copies — then a game (The Witcher) or a show (Game of Thrones) gets built on top of it, and every layer generates income",
-            "Mancipatio tokenises that income stream",
+            "Manci tokenises that income stream",
           ],
         },
         {
@@ -319,7 +319,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           points: [
             "Real projects exist to generate revenue — and most need investment to get there",
             "In traditional finance, investing is ultimately a claim on future revenue, whether through dividends or capital gains",
-            "Mancipatio tokenises that claim directly: a token can grant, say, 0.1% of all revenue received within three years of issuance",
+            "Manci tokenises that claim directly: a token can grant, say, 0.1% of all revenue received within three years of issuance",
             "Ideal for projects that expect revenue early — YouTube channels, outsourcing companies, fast-food restaurants",
           ],
         },
@@ -388,7 +388,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           points: [
             "Deliverable assets can be redeemed through the platform: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
             "If a delivery is cancelled, the tokens are returned to the holder",
-            "Mancipatio doesn't handle the logistics itself, but the delivery system can be arranged in cooperation with Mancipatio",
+            "Manci doesn't handle the logistics itself, but the delivery system can be arranged in cooperation with Manci",
           ],
         },
       ],
@@ -436,7 +436,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
           points: [
             "Deliverable assets can be redeemed through the platform: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
             "If a delivery is cancelled, the token is returned to the holder",
-            "Mancipatio doesn't handle the logistics itself, but the delivery system can be arranged in cooperation with Mancipatio",
+            "Manci doesn't handle the logistics itself, but the delivery system can be arranged in cooperation with Manci",
           ],
         },
       ],

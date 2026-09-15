@@ -3,7 +3,7 @@ import { Body, PageHeader, Section } from "@/components/mx";
 import { WhitepapersBoard } from "./whitepapers-board";
 
 export const metadata: Metadata = {
-  title: "Whitepapers & disclosures — Mancipatio",
+  title: "Whitepapers & disclosures — Manci",
   description:
     "Browse published issuer whitepapers and basic asset information, with document fingerprints and recorded approval references where available.",
 };

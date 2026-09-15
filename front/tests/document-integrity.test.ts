@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { describe,expect,it } from "vitest";
 import { documentDestination,assertDocumentBytes,DOCUMENT_MAX_BYTES } from "@/lib/document-integrity";
 const asset="11111111111111111111111111111111";
-const bytes=Buffer.from("%PDF-1.7\nMancipatio terms — version 1");
+const bytes=Buffer.from("%PDF-1.7\nManci terms — version 1");
 const sha=createHash("sha256").update(bytes).digest("hex");
 describe("immutable document integrity",()=>{
   it("binds the full hash and network in the whitepaper path",()=>{

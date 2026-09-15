@@ -120,7 +120,7 @@ export async function fetchVestingMintTokenProgram(
       hook.authority !== hooked.data.shareClass
     )
       throw new Error(
-        "The mint does not have a verified Mancipatio transfer-hook configuration",
+        "The mint does not have a verified Manci transfer-hook configuration",
       );
     const share = await fetchMaybeShareClass(
       rpc,

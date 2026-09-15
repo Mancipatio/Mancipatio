@@ -1,10 +1,10 @@
 "use client";
 
 // Vesting series — client self-serve token vesting (spec: "11. Vesting —
-// Mancipatio"). Off-chain intake/review wrappers + on-chain readers + the
+// Manci"). Off-chain intake/review wrappers + on-chain readers + the
 // mirror of the program's vesting math (util.rs). A series is CLIENT-owned:
 // the client's wallet is the on-chain authority for approval, recovery and
-// cancellation — Mancipatio holds no key over the escrow.
+// cancellation — Manci holds no key over the escrow.
 
 import {
   type Address,

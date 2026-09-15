@@ -577,7 +577,7 @@ function Builder() {
           </table>
         </div>
         <p className="mt-3 text-xs text-slate-500">
-          Mancipatio&apos;s on-chain Rights program publishes one milestone at a
+          Manci&apos;s on-chain Rights program publishes one milestone at a
           time. Use the dates above to drive your publish cadence — paste each
           row&apos;s amount into &quot;Publish milestone&quot; in{" "}
           <Link href="/admin/rights" className="underline">

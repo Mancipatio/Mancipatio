@@ -71,7 +71,7 @@ if (run("anchor", ["--version"]) !== `anchor-cli ${toolchain.anchorVersion}`) {
     `IDL verification requires Anchor CLI ${toolchain.anchorVersion}.`,
   );
 }
-const temp = mkdtempSync(path.join(tmpdir(), "mancipatio-idl-check-"));
+const temp = mkdtempSync(path.join(tmpdir(), "manci-idl-check-"));
 try {
   for (const name of ["asset_registry", "transfer_hook"]) {
     const output = path.join(temp, `${name}.json`);

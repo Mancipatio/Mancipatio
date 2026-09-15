@@ -10,9 +10,9 @@ import {
 } from "@/components/mx";
 
 export const metadata: Metadata = {
-  title: "Legal structure — Mancipatio",
+  title: "Legal structure — Manci",
   description:
-    "The legal structure behind a Mancipatio token: a Serbian SPV, an instrument that binds the issuer, a share pledge registered in holders' favour where the instrument allows one, and a documented route to enforcement.",
+    "The legal structure behind a Manci token: a Serbian SPV, an instrument that binds the issuer, a share pledge registered in holders' favour where the instrument allows one, and a documented route to enforcement.",
 };
 
 /**

@@ -12,7 +12,7 @@ export default function ErrorPage({
 }) {
   useEffect(() => {
     // Surface unexpected errors in browser/server logs.
-    console.error("[mancipatio:error]", error);
+    console.error("[manci:error]", error);
   }, [error]);
 
   return (

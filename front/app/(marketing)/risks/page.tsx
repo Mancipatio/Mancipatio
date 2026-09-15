@@ -20,7 +20,7 @@ import {
  * hedged with a reassurance.
  */
 export const metadata: Metadata = {
-  title: "Risk disclosure — Mancipatio",
+  title: "Risk disclosure — Manci",
   description:
     "Illiquidity, issuer default, conversion friction, regulatory change and the current development stage — including the possibility of total loss.",
 };
@@ -91,7 +91,7 @@ export default function RisksPage() {
           before buying.
         </Body>
         <Body className="mt-3.5">
-          Mancipatio does not move the goods. Delivery is arranged with the
+          Manci does not move the goods. Delivery is arranged with the
           issuer, and a cancelled delivery returns the tokens rather than the
           asset.
         </Body>

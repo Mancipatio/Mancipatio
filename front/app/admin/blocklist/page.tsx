@@ -38,7 +38,7 @@ export default function BlocklistPage() {
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
           On-chain sender blocklist enforced by the transfer_hook program on
           every Token-2022 transfer. A wallet on this list cannot move any
-          Mancipatio token — add entries for sanctions hits and court orders,
+          Manci token — add entries for sanctions hits and court orders,
           remove them once the restriction lifts.
         </p>
       </div>
@@ -320,7 +320,7 @@ function BlocklistOps() {
               <span className="font-mono text-xs">
                 {target.slice(0, 8)}…{target.slice(-6)}
               </span>{" "}
-              will be unable to send any Mancipatio token — every transfer
+              will be unable to send any Manci token — every transfer
               where it is the source authority will fail on-chain. Provide the
               sanctions / legal basis; it lands in the audit log.
             </p>
@@ -345,7 +345,7 @@ function BlocklistOps() {
                 {confirmRemove.entry.wallet.slice(0, 8)}…
                 {confirmRemove.entry.wallet.slice(-6)}
               </span>{" "}
-              regains the ability to transfer Mancipatio tokens. Provide the
+              regains the ability to transfer Manci tokens. Provide the
               reason for lifting the restriction; it lands in the audit log.
             </p>
           }

@@ -11,7 +11,7 @@ import {
 import { ContactForm } from "./contact-form";
 
 export const metadata = {
-  title: "Contact · Custom tokenization · Mancipatio",
+  title: "Contact · Custom tokenization · Manci",
   description:
     "Have an idea that needs tokenization infrastructure? Tell us about it — we evaluate the idea, propose a solution and design a dedicated process together.",
 };

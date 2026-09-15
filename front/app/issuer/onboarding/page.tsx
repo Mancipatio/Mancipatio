@@ -156,7 +156,7 @@ export default function IssuerOnboardingPage() {
           Onboarding
         </p>
         <h1 className="mt-1 text-2xl font-semibold text-slate-900">
-          Become a Mancipatio issuer
+          Become a Manci issuer
         </h1>
         <p className="mt-2 text-sm text-slate-600">
           A four-step setup: identify the legal entity, declare its

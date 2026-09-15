@@ -59,16 +59,16 @@ const TEMPLATES: { slug: string; label: string; subject: string; body: string }[
   {
     slug: "welcome",
     label: "Welcome",
-    subject: "Welcome to Mancipatio",
+    subject: "Welcome to Manci",
     body:
-      "Hi {{name}},\n\nThanks for joining Mancipatio. You can finish onboarding by linking your wallet at the magic-link we sent you.\n\n— The Mancipatio team",
+      "Hi {{name}},\n\nThanks for joining Manci. You can finish onboarding by linking your wallet at the magic-link we sent you.\n\n— The Manci team",
   },
   {
     slug: "kyc-reminder",
     label: "KYC reminder",
     subject: "Action required: finish KYC verification",
     body:
-      "Hi {{name}},\n\nYour Mancipatio account is still in pending-KYC status. Until KYB is verified you can browse the marketplace but cannot create assets or take primary sales.\n\nReply to this email if you need help.",
+      "Hi {{name}},\n\nYour Manci account is still in pending-KYC status. Until KYB is verified you can browse the marketplace but cannot create assets or take primary sales.\n\nReply to this email if you need help.",
   },
   {
     slug: "sale-launch",
@@ -168,7 +168,7 @@ function NotificationsOps() {
             Resend not configured
           </p>
           <p className="mt-1 text-xs text-amber-900/90">
-            Drafts and schedules are stored, but no email leaves Mancipatio
+            Drafts and schedules are stored, but no email leaves Manci
             until you wire the Resend integration in{" "}
             <a href="/admin/integrations" className="underline">
               /admin/integrations

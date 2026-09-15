@@ -78,7 +78,7 @@ export default function ServicesPage() {
     <section className="min-w-0 flex-1">
       <h1 className="text-2xl font-semibold">Services</h1>
       <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
-        Everything Mancipatio offers — each service maps to an on-chain
+        Everything Manci offers — each service maps to an on-chain
         operation in this panel.
       </p>
 

@@ -10,9 +10,9 @@ import {
 } from "@/components/mx";
 
 export const metadata: Metadata = {
-  title: "Security & compliance — Mancipatio",
+  title: "Security & compliance — Manci",
   description:
-    "Understand transfer checks, custody rules and operational authorities in the Mancipatio app.",
+    "Understand transfer checks, custody rules and operational authorities in the Manci app.",
 };
 
 // Describe supported controls without claiming local changes are already deployed.

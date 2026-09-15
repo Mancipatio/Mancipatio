@@ -26,7 +26,7 @@ import {
 } from "@/lib/instruments";
 
 export const metadata = {
-  title: "The eight instruments · Mancipatio",
+  title: "The eight instruments · Manci",
   description:
     "Company ownership, debt, real estate, royalty rights, revenue share, fungible and non-fungible assets — compared side by side. One issuance process; what changes is the right the token carries.",
 };

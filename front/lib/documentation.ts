@@ -181,7 +181,7 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
       },
       {
         href: "/about",
-        title: "About Mancipatio",
+        title: "About Manci",
         description: "The project, its purpose and current stage.",
       },
       {

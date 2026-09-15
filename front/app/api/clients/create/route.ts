@@ -108,13 +108,13 @@ export async function POST(request: Request) {
       const inviteUrl = `${origin}/onboarding/${(data as { id: string }).id}?t=${token}`;
       await sendEmail({
         to: email,
-        subject: "You're invited to onboard on Mancipatio",
+        subject: "You're invited to onboard on Manci",
         html:
           `<p>Hi ${escapeHtml(displayName)},</p>` +
-          `<p>You've been invited to onboard on Mancipatio. Open your personal ` +
+          `<p>You've been invited to onboard on Manci. Open your personal ` +
           `onboarding link, connect a Solana wallet and upload any requested documents:</p>` +
           `<p><a href="${inviteUrl}">${inviteUrl}</a></p>` +
-          `<p style="color:#64748b;font-size:12px;">The link is valid for 14 days. — The Mancipatio team</p>`,
+          `<p style="color:#64748b;font-size:12px;">The link is valid for 14 days. — The Manci team</p>`,
       });
     }
 

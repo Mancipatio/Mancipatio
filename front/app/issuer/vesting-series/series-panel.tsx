@@ -3,7 +3,7 @@
 // On-chain management panel for a created vesting series: funding (deposit),
 // tranche approvals (Approval mode), position recovery, cancellation +
 // unvested withdrawal. Every action signs with the CLIENT wallet — the
-// on-chain authority (Mancipatio holds no key).
+// on-chain authority (Manci holds no key).
 
 import { useCallback, useEffect, useState } from "react";
 import {
@@ -45,7 +45,7 @@ import {
   groupDigits,
   parseBaseUnits,
 } from "@/lib/vesting-amounts";
-import { hookTransferMetas, mintHasMancipatioHook } from "@/lib/hook-metas";
+import { hookTransferMetas, mintHasManciHook } from "@/lib/hook-metas";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
@@ -365,7 +365,7 @@ export function SeriesPanel({
         })
       )[0],
     });
-    const metas = (await mintHasMancipatioHook(client.runtime.rpc, mint))
+    const metas = (await mintHasManciHook(client.runtime.rpc, mint))
       ? await hookTransferMetas(client.runtime.rpc, mint, {
           sourceTokenAccount: fromAta,
           destTokenAccount: escrow,
@@ -494,7 +494,7 @@ export function SeriesPanel({
             })
           )[0],
         });
-        const metas = (await mintHasMancipatioHook(client.runtime.rpc, mint))
+        const metas = (await mintHasManciHook(client.runtime.rpc, mint))
           ? await hookTransferMetas(client.runtime.rpc, mint, {
               sourceTokenAccount: series.escrow,
               destTokenAccount: toAta,

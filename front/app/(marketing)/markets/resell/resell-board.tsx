@@ -334,7 +334,7 @@ export function ResellBoard() {
 
       {/* Holder posts — off-chain classifieds from token holders who want to
           sell ("Token holders can post about the tokens they have and want to
-          sell on Mancipatio"). Negotiation happens off-platform or via the
+          sell on Manci"). Negotiation happens off-platform or via the
           contact below; settlement can use the on-chain OTC escrow. */}
       <section className="pt-4">
         <div className="flex items-baseline justify-between gap-3">
@@ -367,7 +367,7 @@ export function ResellBoard() {
               </p>
             ) : (
               <p className="text-[13px] text-slate-500">
-                No holder posts yet. Holding Mancipatio tokens?{" "}
+                No holder posts yet. Holding Manci tokens?{" "}
                 <Link
                   href="/portfolio/listings"
                   className="font-medium text-brand-700 hover:underline"

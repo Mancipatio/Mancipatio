@@ -147,7 +147,7 @@ async function notifyDealCreated(
     `The escrow contract for ${label} (${row.amount} units for ${row.price} ` +
     `payment units) is live on-chain` +
     (dealPda ? ` at ${dealPda}` : "") +
-    `. Open Portfolio → Deals on Mancipatio to deposit your leg — the swap ` +
+    `. Open Portfolio → Deals on Manci to deposit your leg — the swap ` +
     `settles automatically once both legs are funded.`;
 
   for (const partyWallet of [row.seller_wallet, row.buyer_wallet]) {

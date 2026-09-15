@@ -109,7 +109,7 @@ export function TosGate() {
         </div>
         <div className="space-y-3 px-5 py-4 text-sm leading-relaxed text-slate-700">
           <p>
-            To use the Mancipatio marketplace and portfolio with this wallet,
+            To use the Manci marketplace and portfolio with this wallet,
             you must accept the current Terms of Service (v{TOS_VERSION}).
           </p>
           <ul className="list-disc space-y-1 pl-5 text-xs text-slate-600">

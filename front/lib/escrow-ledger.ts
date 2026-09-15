@@ -2,7 +2,7 @@
  * lib/escrow-ledger.ts — the deposit-ledger arithmetic the UI shares with the
  * asset_registry program.
  *
- * Background. Every Mancipatio escrow (offer escrow, OTC deal escrows, custody
+ * Background. Every Manci escrow (offer escrow, OTC deal escrows, custody
  * vault escrow) is an ordinary Token-2022 account: anyone holding the mint can
  * `transfer_checked` into it and nothing on-chain records who did. So the
  * program keeps its OWN ledger of what each counterparty actually deposited

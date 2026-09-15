@@ -137,7 +137,7 @@ export async function POST(request: Request) {
           : "";
         await sendEmail({
           to: email,
-          subject: "Update on your Mancipatio investor passport application",
+          subject: "Update on your Manci investor passport application",
           html:
             `<p>Hi,</p>` +
             `<p>After review, your investor passport application for wallet ` +
@@ -146,7 +146,7 @@ export async function POST(request: Request) {
             (dossierTerminal
               ? `<p>Your KYC dossier is ${escapeHtml(client?.kyc_status ?? "")} — self-service reapplication is disabled. Please contact the compliance team if you believe this is a mistake.</p>`
               : `<p>You are welcome to reapply from your portfolio once the issue is addressed.</p>`) +
-            `<p style="color:#64748b;font-size:12px;">— The Mancipatio team</p>`,
+            `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`,
         });
       }
     }

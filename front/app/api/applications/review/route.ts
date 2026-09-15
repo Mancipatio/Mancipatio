@@ -38,13 +38,13 @@ function decisionEmail(
 ): { subject: string; html: string } {
   const hi = `<p>Hi${founderName ? ` ${escapeHtml(founderName)}` : ""},</p>`;
   const reasonBlock = `<p style="margin:12px 0;padding:12px;border-left:3px solid #cbd5e1;color:#334155;white-space:pre-wrap;">${escapeHtml(reason)}</p>`;
-  const footer = `<p style="color:#64748b;font-size:12px;">— The Mancipatio team</p>`;
+  const footer = `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`;
   const co = escapeHtml(company);
 
   switch (decision) {
     case "approved":
       return {
-        subject: `Your Mancipatio application for ${company} was approved`,
+        subject: `Your Manci application for ${company} was approved`,
         html:
           hi +
           `<p>Good news — your launch application for <strong>${co}</strong> has been approved.</p>` +
@@ -54,7 +54,7 @@ function decisionEmail(
       };
     case "needs_changes":
       return {
-        subject: `Changes requested on your Mancipatio application for ${company}`,
+        subject: `Changes requested on your Manci application for ${company}`,
         html:
           hi +
           `<p>Our team reviewed your launch application for <strong>${co}</strong> and needs a few changes before it can move forward:</p>` +
@@ -64,7 +64,7 @@ function decisionEmail(
       };
     case "rejected":
       return {
-        subject: `Update on your Mancipatio application for ${company}`,
+        subject: `Update on your Manci application for ${company}`,
         html:
           hi +
           `<p>Thank you for applying. After review, we decided not to move forward with your launch application for <strong>${co}</strong>.</p>` +

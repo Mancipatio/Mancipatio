@@ -28,9 +28,9 @@ import {
  * platform actually is.
  */
 export const metadata: Metadata = {
-  title: "About — Mancipatio",
+  title: "About — Manci",
   description:
-    "Why Mancipatio starts with the legal structure rather than the token, and where the platform actually is today.",
+    "Why Manci starts with the legal structure rather than the token, and where the platform actually is today.",
 };
 
 /** Short, checkable statements only — the dark band's whole value. */
@@ -49,17 +49,18 @@ export default function AboutPage() {
       <PageHeader
         eyebrow="About"
         title="Ownership, transferred properly."
-        lede="Mancipatio is tokenization infrastructure on Solana — built so that issuing, regulating and trading a real asset on-chain is as rigorous as doing it on paper, and far faster."
+        lede="Manci is tokenization infrastructure on Solana — built so that issuing, regulating and trading a real asset on-chain is as rigorous as doing it on paper, and far faster."
       />
 
       <Section>
         <H2>The name</H2>
         <Body className="mt-4">
-          In Roman law, <em>mancipatio</em> was the formal ceremony that
-          transferred ownership of the most valuable kinds of property — land,
-          buildings, the things that mattered. It was deliberate, witnessed and
-          final. We took the name because that is what tokenized ownership
-          should be: a transfer that is precise, transparent and binding.
+          Manci is short for <em>mancipatio</em>, the formal ceremony in Roman
+          law that transferred ownership of the most valuable kinds of property —
+          land, buildings, the things that mattered. It was deliberate,
+          witnessed and final. We took the name because that is what tokenized
+          ownership should be: a transfer that is precise, transparent and
+          binding.
         </Body>
 
         <H2 className="mt-10">The mission</H2>

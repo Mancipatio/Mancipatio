@@ -1,5 +1,5 @@
 // Read SPL Token-2022 holdings of a wallet via getTokenAccountsByOwner.
-// We restrict to Mancipatio share-class mints (everything else is dropped).
+// We restrict to Manci share-class mints (everything else is dropped).
 
 "use client";
 

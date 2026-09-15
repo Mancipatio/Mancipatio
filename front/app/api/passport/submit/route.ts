@@ -418,14 +418,14 @@ export async function POST(request: Request) {
         new URL(request.url).origin;
       await sendEmail({
         to: client.email,
-        subject: "Your Mancipatio investor passport application",
+        subject: "Your Manci investor passport application",
         html:
           `<p>Hi,</p>` +
           `<p>We received your investor passport application for wallet ` +
           `<code>${escapeHtml(wallet)}</code>.</p>` +
           `<p>To speed up the review, upload the requested documents here:<br/>` +
           `<a href="${origin}${onboardingPath}">${origin}${onboardingPath}</a></p>` +
-          `<p style="color:#64748b;font-size:12px;">— The Mancipatio team</p>`,
+          `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`,
       });
     }
 

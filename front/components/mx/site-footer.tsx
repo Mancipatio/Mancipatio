@@ -42,12 +42,12 @@ export function SiteFooter() {
 
         <div className="mx-foot-base">
           <Disclaimer>
-            Mancipatio provides tokenization infrastructure and legal
+            Manci provides tokenization infrastructure and legal
             structuring. Nothing on this site is investment advice or an offer
             to sell securities. Tokenized instruments carry risk, including
             total loss. Read the risk disclosure before participating.
           </Disclaimer>
-          <FootNote>© {new Date().getFullYear()} Mancipatio</FootNote>
+          <FootNote>© {new Date().getFullYear()} Manci</FootNote>
         </div>
       </Wrap>
     </footer>

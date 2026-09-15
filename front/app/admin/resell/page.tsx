@@ -2,7 +2,7 @@
 
 // Admin moderation for holder resell posts (off-chain classifieds).
 // Doc basis: "Token holders can post about the tokens they have and want to
-// sell on Mancipatio" — the platform moderates the public board.
+// sell on Manci" — the platform moderates the public board.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWalletConnection } from "@solana/react-hooks";

@@ -93,7 +93,7 @@ const STATUS_BADGE: Record<ConversionStatus, string> = {
 };
 
 const STATUS_HINT: Record<ConversionStatus, string> = {
-  requested: "Waiting for Mancipatio to review your request.",
+  requested: "Waiting for Manci to review your request.",
   vault_opened: "Escrow vault is ready — deposit your tokens to continue.",
   deposited:
     "Tokens are in escrow — the off-chain conversion is being executed.",
@@ -375,7 +375,7 @@ export default function ConversionPage() {
         toast.dismiss(pendingId);
         toast.showError(
           "Escrow vault is not active",
-          "The conversion vault was closed on-chain (cancelled or expired) — depositing now would strand your tokens. Contact Mancipatio.",
+          "The conversion vault was closed on-chain (cancelled or expired) — depositing now would strand your tokens. Contact Manci.",
         );
         void loadRequests();
         return;
@@ -388,7 +388,7 @@ export default function ConversionPage() {
         toast.dismiss(pendingId);
         toast.showError(
           "This vault is not yours to fund",
-          `The conversion vault names ${vaultBefore.data.beneficiary} as beneficiary, and only the beneficiary may deposit into it. Contact Mancipatio.`,
+          `The conversion vault names ${vaultBefore.data.beneficiary} as beneficiary, and only the beneficiary may deposit into it. Contact Manci.`,
         );
         void loadRequests();
         return;
@@ -709,7 +709,7 @@ export default function ConversionPage() {
       {kycStatus !== undefined && !eligible && (
         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           Conversion is available to onboarded clients only. Your wallet
-          isn&apos;t linked to a KYC-verified client — contact Mancipatio to
+          isn&apos;t linked to a KYC-verified client — contact Manci to
           complete onboarding before requesting conversion.
         </div>
       )}
@@ -906,7 +906,7 @@ export default function ConversionPage() {
       )}
 
       <p className="mt-6 text-xs text-slate-400">
-        After Mancipatio approves your request and opens the escrow vault,
+        After Manci approves your request and opens the escrow vault,
         deposit your tokens here. They are returned if the conversion is
         cancelled and burned once the off-chain conversion is executed.
       </p>
@@ -985,7 +985,7 @@ function RequestConversionModal({
     toast.show({
       kind: "success",
       title: "Conversion requested",
-      description: "Mancipatio will review your request.",
+      description: "Manci will review your request.",
     });
     onSuccess();
   }
@@ -1060,7 +1060,7 @@ function RequestConversionModal({
             <input
               value={contact}
               onChange={(e) => setContact(e.target.value)}
-              placeholder="How Mancipatio reaches you about this conversion"
+              placeholder="How Manci reaches you about this conversion"
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
             />
           </label>
@@ -1073,7 +1073,7 @@ function RequestConversionModal({
               value={note}
               rows={3}
               onChange={(e) => setNote(e.target.value)}
-              placeholder="Anything Mancipatio should know — registry details, timing, counsel…"
+              placeholder="Anything Manci should know — registry details, timing, counsel…"
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
             />
           </label>

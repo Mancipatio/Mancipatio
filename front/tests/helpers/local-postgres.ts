@@ -26,10 +26,10 @@ export class LocalPostgres {
   }
   initialize() {
     if (this.dir) throw new Error("This isolated PostgreSQL cluster is already initialized");
-    this.dir = mkdtempSync(join(tmpdir(), "mancipatio-pg-test-"));
+    this.dir = mkdtempSync(join(tmpdir(), "manci-pg-test-"));
     this.data = join(this.dir, "data");
     // Keep socket paths short enough for macOS's Unix-domain socket limit.
-    this.socket = mkdtempSync("/tmp/mancipatio-pg-");
+    this.socket = mkdtempSync("/tmp/manci-pg-");
     try {
       this.command("initdb", ["-D", this.data, "--username=postgres", "--auth=trust", "--no-locale", "--encoding=UTF8", "--no-sync"]);
       appendFileSync(join(this.data, "postgresql.conf"), `\nlisten_addresses = ''\nunix_socket_directories = '${this.socket.replaceAll("'", "''")}'\nfsync = off\n`);

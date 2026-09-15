@@ -19,7 +19,7 @@ export const SOLUTIONS: Solution[] = [
       },
       {
         step: "Review",
-        note: "A Mancipatio admin runs KYB due diligence off-chain.",
+        note: "A Manci admin runs KYB due diligence off-chain.",
       },
       {
         step: "Verify",

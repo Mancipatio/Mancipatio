@@ -305,7 +305,7 @@ function ReportsOps() {
               : []
           }
           onExport={() =>
-            downloadCsv(`mancipatio-kyc-${from}-to-${to}.csv`, [
+            downloadCsv(`manci-kyc-${from}-to-${to}.csv`, [
               ["metric", "value"],
               ["verified_in_window", kycReport.verifiedInWindow],
               ["pending", kycReport.pending],
@@ -334,7 +334,7 @@ function ReportsOps() {
           }
           onExport={() =>
             issuerReport &&
-            downloadCsv(`mancipatio-issuers-${from}-to-${to}.csv`, [
+            downloadCsv(`manci-issuers-${from}-to-${to}.csv`, [
               ["metric", "value"],
               ["total_issuers", issuerReport.totalIssuers],
               ["verified_kyb", issuerReport.verifiedIssuers],
@@ -371,7 +371,7 @@ function ReportsOps() {
           }
           onExport={() =>
             volumeReport &&
-            downloadCsv(`mancipatio-volume-lifetime.csv`, [
+            downloadCsv(`manci-volume-lifetime.csv`, [
               ["metric", "value"],
               ["primary_sale_gross", volumeReport.primarySaleVolume],
               ["primary_sale_units", volumeReport.primarySaleUnits],
@@ -399,7 +399,7 @@ function ReportsOps() {
             String(a.totalCirculating),
           ])}
           onExport={() =>
-            downloadCsv(`mancipatio-top-assets.csv`, [
+            downloadCsv(`manci-top-assets.csv`, [
               ["name", "asset_id", "share_classes", "total_circulating"],
               ...topAssets.map((a) => [
                 a.name,

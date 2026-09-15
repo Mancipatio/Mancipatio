@@ -132,7 +132,7 @@ const SIG =
 const EXPIRES_AT = "2027-09-08T12:00:00.000Z";
 
 function request() {
-  return new Request("https://mancipatio.test/api/clients/passport-sync", {
+  return new Request("https://manci.test/api/clients/passport-sync", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),

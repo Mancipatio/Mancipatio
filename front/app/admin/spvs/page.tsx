@@ -64,7 +64,7 @@ export default function SpvsPage() {
         <h1 className="page-title">SPV registry</h1>
         <p className="page-sub">
           Serbian special-purpose vehicles used for token issuance. Issuers
-          without a Serbian company get an SPV incorporated by Mancipatio.
+          without a Serbian company get an SPV incorporated by Manci.
           Each SPV may issue at most EUR 3,000,000 per calendar year.
         </p>
       </div>
@@ -1103,7 +1103,7 @@ function AddSpvModal({
         <div className="space-y-4 px-5 py-4">
           <p className="text-sm text-slate-600">
             SPV pipeline: planned → incorporating → active. If the issuer has
-            no Serbian company, Mancipatio incorporates the SPV on their
+            no Serbian company, Manci incorporates the SPV on their
             behalf. The annual issuance cap of EUR 3,000,000 applies per SPV.
           </p>
           <div className="grid gap-3 sm:grid-cols-2">

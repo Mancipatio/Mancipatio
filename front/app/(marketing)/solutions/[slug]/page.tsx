@@ -328,7 +328,7 @@ export async function generateMetadata({
   const { slug } = await params;
   const solution = getSolution(slug);
   return {
-    title: solution ? `${solution.name} — Mancipatio` : "Mancipatio",
+    title: solution ? `${solution.name} — Manci` : "Manci",
     description: GUIDES[slug]?.intro,
   };
 }

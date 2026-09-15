@@ -245,7 +245,7 @@ export default function TakeOfferPage({
           Offer not found
         </h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
-          No on-chain OTC offer with this address is registered on Mancipatio
+          No on-chain OTC offer with this address is registered on Manci
           (devnet).
         </p>
         <Link
@@ -585,7 +585,7 @@ export default function TakeOfferPage({
           <p className="mb-6 max-w-2xl text-sm leading-relaxed text-mx-ink-soft">
             Filling this offer pays the maker the full price and releases the
             escrowed share units to your wallet. Settlement runs through the
-            Mancipatio transfer hook, so the issuer-set eligibility whitelist is
+            Manci transfer hook, so the issuer-set eligibility whitelist is
             still enforced at the moment of transfer.
           </p>
 

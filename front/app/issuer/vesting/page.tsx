@@ -101,7 +101,7 @@ export default function IssuerVestingPage() {
           <p className="mt-2 max-w-2xl text-sm text-slate-600">
             Your asset&apos;s vesting schedules — how a chunk unlocks over time
             and who gets what. Schedule design and on-chain milestone publishing
-            are currently coordinated with the Mancipatio team; reach out via
+            are currently coordinated with the Manci team; reach out via
             support to set one up.
           </p>
         </div>
@@ -199,7 +199,7 @@ function EmptyState() {
       </p>
       <p className="mt-2 text-xs text-slate-500">
         Vesting schedules unlock entitlements to your investors over time. Setup
-        is currently coordinated with the Mancipatio team — reach out via support
+        is currently coordinated with the Manci team — reach out via support
         to design one for your asset.
       </p>
     </div>

@@ -7,9 +7,9 @@ import {
 } from "@/components/mx";
 
 export const metadata: Metadata = {
-  title: "Privacy Policy — Mancipatio",
+  title: "Privacy Policy — Manci",
   description:
-    "How Mancipatio collects, uses and protects personal data of issuers, investors and visitors.",
+    "How Manci collects, uses and protects personal data of issuers, investors and visitors.",
 };
 
 const LAST_UPDATED = "2026-05-25";
@@ -24,7 +24,7 @@ export default function PrivacyPage() {
       <div>
         <Section title="1. Who we are">
           <p>
-            Mancipatio (&quot;we&quot;, &quot;us&quot;, &quot;the platform&quot;) operates a tokenization
+            Manci (&quot;we&quot;, &quot;us&quot;, &quot;the platform&quot;) operates a tokenization
             and custody infrastructure for real-world assets and investments on
             Solana. This Privacy Policy describes how we collect, use and
             protect personal data when you visit mancipatio.io or use the
@@ -113,7 +113,7 @@ export default function PrivacyPage() {
         <Section title="4. Who sees it">
           <ul>
             <li>
-              <strong>Mancipatio operators</strong> (Super Admin and Admin
+              <strong>Manci operators</strong> (Super Admin and Admin
               roles) — for KYB review and incident response.
             </li>
             <li>

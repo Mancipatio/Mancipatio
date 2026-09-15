@@ -2,7 +2,7 @@
 
 import { WalletRequired } from "@/components/wallet-required";
 
-// Issuer — Vesting series (spec: "11. Vesting — Mancipatio"). The full
+// Issuer — Vesting series (spec: "11. Vesting — Manci"). The full
 // self-serve flow: fill the form → team review → create the on-chain series
 // (your wallet is the authority) → deposit → approve tranches / recover /
 // cancel. One series = one token + one schedule.
@@ -417,7 +417,7 @@ export default function IssuerVestingSeriesPage() {
             your schedule. One series = one token + one schedule; for another
             token or schedule, create a new series. Positions are
             non-transferable — for transferable vesting rights, ask the
-            Mancipatio team about the Rights Token.
+            Manci team about the Rights Token.
           </p>
         </div>
         <button

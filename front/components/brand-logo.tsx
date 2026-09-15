@@ -4,7 +4,7 @@ import Image from "next/image";
 export function BrandLogo() {
   return (
     <span className="brand-logo">
-      <Image src="/brand/mancipatio-logo.png" width={1050} height={472} alt="Mancipatio" className="brand-logo-image" sizes="198px" loading="eager" />
+      <Image src="/brand/manci-logo.png" width={1320} height={730} alt="Manci" className="brand-logo-image" sizes="140px" loading="eager" />
     </span>
   );
 }
