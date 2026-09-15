@@ -96,7 +96,6 @@ export function AppShell({ children, section = "overview" }: {
       {menuOpen && <button className="app-sidebar-backdrop" aria-label="Close navigation" onClick={() => { setMenuOpen(false); menuButton.current?.focus(); }} />}
       <aside ref={sidebar} id="app-sidebar" className={`app-sidebar ${menuOpen ? "is-open" : ""}`} aria-label="Application navigation">
         <Link href="/" className="app-wordmark"><BrandLogo /></Link>
-        <button className="app-menu-close" onClick={() => { setMenuOpen(false); menuButton.current?.focus(); }}>Close menu <span aria-hidden="true">×</span></button>
         <nav aria-label="Main app">
           <p className="app-nav-label">MARKETPLACE</p>{navItems(primary)}
           <p className="app-nav-label">YOUR WORKSPACE</p>{navItems(portfolio)}
