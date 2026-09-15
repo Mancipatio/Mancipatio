@@ -17,7 +17,7 @@
 /* The white artwork needs the same green contrast as the app navigation. */
 .mx-logo .brand-logo { width:84px; padding:6px 10px; background:#112d2a; border-radius:6px; }
 .mx-foot .brand-logo { width:140px; padding:12px; }
-.app-nav-label { margin:8px 12px 6px; font-size:10px; letter-spacing:1.7px; font-weight:600; color:#fff; }
+.app-nav-label { margin:8px 12px 6px; font-size:10px; letter-spacing:1.7px; font-weight:600; color:#bfead0; }
 .app-nav-label:not(:first-child) { margin-top:16px; }
 .app-nav-link { display:flex; align-items:center; gap:12px; padding:10px 13px; margin:3px 0; min-height:41px; border-radius:6px; font-size:13px; transition:background .15s,color .15s; }
 .app-nav-link svg { opacity:.78; flex-shrink:0; }
