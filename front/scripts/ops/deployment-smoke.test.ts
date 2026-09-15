@@ -53,7 +53,7 @@ beforeAll(async () => {
   // Stop if this canonical deployment has moved to a different environment.
   const page = await response.text();
   expect(page).toContain("Devnet");
-  expect(page).toContain("Test assets and transactions");
+  expect(page).toContain('title="Connected to Solana Devnet"');
 });
 
 describe("deployed devnet release: public access and SIWS boundaries", () => {

@@ -115,7 +115,6 @@ export function AppShell({ children, section = "overview" }: {
           <div className="app-breadcrumb"><button ref={menuButton} className="app-menu-button" aria-label="Open navigation" aria-expanded={menuOpen} aria-controls="app-sidebar" onClick={() => setMenuOpen(true)}>☰</button><span className="app-breadcrumb-root">Workspace</span><span className="app-breadcrumb-separator">/</span><span>{currentTitle}</span></div>
           <div className="app-topbar-actions"><NetworkBadge /><div className="app-account"><AccountMenu /></div></div>
         </header>
-        {network !== "mainnet" && <div className="app-network-notice"><span className="app-notice-dot" /><strong>{networkLabel(network)} environment</strong><span>Test assets and transactions. No real-world value.</span><Link href="/security">How it works <span aria-hidden="true">↗</span></Link></div>}
         <LegacyAccountsNotice />
         {tabs && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
