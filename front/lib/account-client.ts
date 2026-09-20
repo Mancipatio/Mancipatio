@@ -1,17 +1,21 @@
 import type { WalletSession } from "@solana/client";
-import type { AccountResponse } from "@/lib/account";
+import { isAddress } from "@solana/kit";
+import type { AccountResponse, AccountWalletLinkAttempt } from "@/lib/account";
+import { isAccountId, validWalletLinkAttempt } from "@/lib/account-wallet-link";
 import { detectNetwork, type Network } from "@/lib/network";
 import { signedFetch } from "@/lib/siws-client";
+import { invalidateTransactionWalletPolicy } from "@/lib/transaction-wallet-policy";
 
 export type AccountRequestContext = {
   session: WalletSession;
   network: Network;
   isCurrent: () => boolean;
+  accountId?: string;
 };
 
 export class AccountSessionChangedError extends Error {
   constructor() {
-    super("The connected wallet or network changed. Open your account again.");
+    super("Your wallet, account or network changed. Reload this page and open your account again.");
     this.name = "AccountSessionChangedError";
   }
 }
@@ -22,6 +26,12 @@ function assertCurrent(context: AccountRequestContext) {
   }
 }
 
+const ACCOUNT_BOUND_ACTIONS = new Set([
+  "account.update", "account.email.request", "account.email.cancel",
+  "account.google.start", "account.google.unlink", "account.wallets.start",
+  "account.wallets.primary", "account.wallets.remove",
+]);
+
 async function request<T>(
   context: AccountRequestContext,
   path: string,
@@ -29,6 +39,12 @@ async function request<T>(
   params: Record<string, unknown> = {},
 ): Promise<T> {
   assertCurrent(context);
+  // The intended account must be part of the signature. A response-only check
+  // is too late if this wallet moved to another account while a request waited.
+  if (ACCOUNT_BOUND_ACTIONS.has(action)) {
+    if (!isAccountId(context.accountId)) throw new Error("ACCOUNT_ID_REQUIRED");
+    params = { ...params, account_id: context.accountId };
+  }
   const signMessage = context.session.signMessage;
   if (!signMessage) throw new Error("ACCOUNT_MESSAGE_SIGNING_UNAVAILABLE");
   // signedFetch signs before it POSTs. A wallet switch during the signature
@@ -54,9 +70,17 @@ async function profileRequest(
   params: Record<string, unknown> = {},
 ) {
   const response = await request<AccountResponse>(context, path, action, params);
+  const profile = response?.profile;
+  const wallets = profile?.wallets;
   if (
-    response.profile.wallet !== context.session.account.address.toString() ||
-    response.profile.network !== context.network
+    !profile || profile.wallet !== context.session.account.address.toString() ||
+    profile.network !== context.network || !isAccountId(profile.id) ||
+    (context.accountId !== undefined && profile.id !== context.accountId) ||
+    !Array.isArray(wallets) || wallets.length < 1 || wallets.length > 10 ||
+    wallets.some((entry) => !entry || typeof entry.wallet !== "string" || !isAddress(entry.wallet)) ||
+    new Set(wallets.map((entry) => entry.wallet)).size !== wallets.length ||
+    !wallets.some((entry) => entry.wallet === profile.wallet) ||
+    !wallets.some((entry) => entry.wallet === profile.primary_wallet)
   ) {
     throw new AccountSessionChangedError();
   }
@@ -91,10 +115,63 @@ export function unlinkAccountGoogle(context: AccountRequestContext) {
   return profileRequest(context, "/api/account/google/unlink", "account.google.unlink");
 }
 
+export async function startAccountWalletLink(context: AccountRequestContext, targetWallet: string) {
+  if (!isAddress(targetWallet) || targetWallet === context.session.account.address.toString()) {
+    throw new Error("ACCOUNT_LINK_TARGET_INVALID");
+  }
+  const attempt = await request<AccountWalletLinkAttempt>(context, "/api/account/wallets/start", "account.wallets.start", { target_wallet: targetWallet });
+  if (!validWalletLinkAttempt(attempt) || attempt.requested_by !== context.session.account.address.toString() ||
+    attempt.target_wallet !== targetWallet || (context.accountId && attempt.account_id !== context.accountId)) {
+    throw new AccountSessionChangedError();
+  }
+  return attempt;
+}
+
+export async function completeAccountWalletLink(context: AccountRequestContext, attempt: AccountWalletLinkAttempt) {
+  if (!validWalletLinkAttempt(attempt) || attempt.target_wallet !== context.session.account.address.toString()) {
+    throw new Error("ACCOUNT_LINK_TARGET_INVALID");
+  }
+  const response = await profileRequest({ ...context, accountId: attempt.account_id }, "/api/account/wallets/complete", "account.wallets.complete", {
+    token: attempt.token, account_id: attempt.account_id,
+    requested_by: attempt.requested_by, target_wallet: attempt.target_wallet,
+  });
+  invalidateTransactionWalletPolicy();
+  return response;
+}
+
+export async function cancelAccountWalletLink(context: AccountRequestContext, attempt: AccountWalletLinkAttempt) {
+  const actor = context.session.account.address.toString();
+  if (!validWalletLinkAttempt(attempt) || (actor !== attempt.requested_by && actor !== attempt.target_wallet)) {
+    throw new Error("ACCOUNT_LINK_TARGET_INVALID");
+  }
+  const response = await request<{ cancelled: boolean }>(context, "/api/account/wallets/cancel", "account.wallets.cancel", {
+    token: attempt.token, account_id: attempt.account_id,
+    requested_by: attempt.requested_by, target_wallet: attempt.target_wallet,
+  });
+  if (response?.cancelled !== true) throw new Error("Wallet link cancellation was not confirmed");
+  return response;
+}
+
+export async function setAccountPrimaryWallet(context: AccountRequestContext, wallet: string) {
+  const response = await profileRequest(context, "/api/account/wallets/primary", "account.wallets.primary", { wallet });
+  invalidateTransactionWalletPolicy();
+  return response;
+}
+
+export async function removeAccountWallet(context: AccountRequestContext, wallet: string) {
+  const response = await profileRequest(context, "/api/account/wallets/remove", "account.wallets.remove", { wallet });
+  invalidateTransactionWalletPolicy();
+  return response;
+}
+
 /** Show useful next steps without reflecting provider messages or secrets. */
 export function accountErrorMessage(error: unknown, fallback: string) {
   if (error instanceof AccountSessionChangedError) return error.message;
   const message = error instanceof Error ? error.message.toLowerCase() : "";
+  if (message === "your linked account changed. reload your account and try again." ||
+      message === "this wallet no longer has access to the selected account.") {
+    return "Your linked account changed. Reload this page and open your account again.";
+  }
   if (message.includes("account_message_signing_unavailable") || message.includes("does not support message signing")) {
     return "This wallet cannot sign messages. Connect a wallet that supports message signing to open your account.";
   }
@@ -107,5 +184,7 @@ export function accountErrorMessage(error: unknown, fallback: string) {
   if (message === "email verification is not available yet.") {
     return "Email verification is not available on this deployment yet.";
   }
+  if (message === "account_link_target_invalid") return "Connect the exact wallet shown in this link request, or start a new request.";
+  if (message === "account_id_required") return "Open your account again before making changes.";
   return fallback;
 }

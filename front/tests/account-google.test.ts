@@ -19,6 +19,7 @@ const state = vi.hoisted(() => ({
   getToken: vi.fn(),
   verifyIdToken: vi.fn(),
   getAccountProfile: vi.fn(),
+  callAccountMutation: vi.fn(),
   consumeAccountRateLimit: vi.fn(),
   accountResponse: vi.fn(),
   rpc: vi.fn(),
@@ -44,6 +45,7 @@ vi.mock("@/lib/server/account-profile", async () => {
   const { NextResponse: Response } = await import("next/server");
   return {
     getAccountProfile: state.getAccountProfile,
+    callAccountMutation: state.callAccountMutation,
     consumeAccountRateLimit: state.consumeAccountRateLimit,
     accountResponse: state.accountResponse,
     accountErrorResponse: (error: unknown) => Response.json({ ok: false, error: error instanceof SiwsError ? error.message : "Account unavailable" },
@@ -87,6 +89,7 @@ import { SiwsError } from "@/lib/server/siws";
 const ORIGIN = "https://www.mancipatio.io";
 const CALLBACK = `${ORIGIN}/api/account/google/callback`;
 const WALLET = "11111111111111111111111111111111";
+const ACCOUNT_ID = "00000000-0000-4000-8000-000000000001";
 const OAUTH_STATE = "A".repeat(43);
 const BROWSER_TOKEN = "B".repeat(43);
 const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -107,7 +110,7 @@ function callback(query: Record<string, string> = {}, cookie: string | null = BR
 function stored(overrides: Row = {}) {
   const row = {
     state_hash: sha256(OAUTH_STATE), browser_hash: sha256(BROWSER_TOKEN), wallet: WALLET,
-    network: "devnet", code_verifier: "V".repeat(43), redirect_uri: CALLBACK,
+    account_id: ACCOUNT_ID, network: "devnet", code_verifier: "V".repeat(43), redirect_uri: CALLBACK,
     expires_at: new Date(Date.now() + 600_000).toISOString(), ...overrides,
   };
   state.rows.push(row);
@@ -135,9 +138,15 @@ beforeEach(() => {
   vi.stubEnv("GOOGLE_CLIENT_SECRET", "google-secret");
   state.rows = []; state.inserts = []; state.mutations = []; state.clientOptions = [];
   state.selectError = null; state.insertError = null; state.cleanupError = null;
-  state.verifySigned.mockResolvedValue({ wallet: WALLET, params: {} });
-  state.getAccountProfile.mockResolvedValue({ wallet: WALLET, network: "devnet" });
+  state.verifySigned.mockResolvedValue({ wallet: WALLET, params: { account_id: ACCOUNT_ID } });
+  state.getAccountProfile.mockResolvedValue({ id: ACCOUNT_ID, wallet: WALLET, network: "devnet" });
   state.consumeAccountRateLimit.mockResolvedValue(undefined);
+  state.callAccountMutation.mockImplementation(async (wallet: string, network: string, accountId: string) => {
+    if (accountId !== ACCOUNT_ID) throw new SiwsError(403, "Account changed");
+    const result = await state.rpc("unlink_account_google", { p_wallet: wallet, p_network: network });
+    if (result.error) throw new SiwsError(503, "Account unavailable");
+    return result.data;
+  });
   state.accountResponse.mockImplementation(async (wallet, network) => NextResponse.json({ ok: true, data: { wallet, network } },
     { headers: { "Cache-Control": "no-store" } }));
   state.generateAuthUrl.mockReturnValue("https://accounts.google.com/o/oauth2/v2/auth?test=1");
@@ -173,7 +182,7 @@ describe("wallet-authorized Google linking start", () => {
     expect(options.state).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(cookie.value).toMatch(/^[A-Za-z0-9_-]{43}$/);
     expect(options.state).not.toBe(cookie.value);
-    expect(row).toMatchObject({ wallet: WALLET, network: "devnet", state_hash: sha256(options.state), browser_hash: sha256(cookie.value), redirect_uri: CALLBACK });
+    expect(row).toMatchObject({ account_id: ACCOUNT_ID, wallet: WALLET, network: "devnet", state_hash: sha256(options.state), browser_hash: sha256(cookie.value), redirect_uri: CALLBACK });
     expect(options.nonce).toBe(nonce(options.state));
     expect(options.code_challenge).toBe(createHash("sha256").update(String(row.code_verifier)).digest("base64url"));
     expect(cookie).toMatchObject({ httpOnly: true, secure: true, sameSite: "lax", path: "/api/account/google", maxAge: 600 });
@@ -184,7 +193,7 @@ describe("wallet-authorized Google linking start", () => {
     expect(await response.json()).toEqual({ ok: true, data: { url: state.generateAuthUrl.mock.results[0].value } });
   });
 
-  it.each([{ wallet: "attacker" }, { email: "attacker@example.com" }, { google_sub: "attacker" }, { network: "mainnet" }, { redirect_uri: "https://evil.example" }])
+  it.each([{ wallet: "attacker" }, { account_id: "attacker-account" }, { email: "attacker@example.com" }, { google_sub: "attacker" }, { network: "mainnet" }, { redirect_uri: "https://evil.example" }])
   ("rejects frontend identity or redirect input %j", async (params) => {
     state.verifySigned.mockResolvedValue({ wallet: WALLET, params });
     expect((await startGoogleLink(post())).status).toBe(400);
@@ -197,6 +206,30 @@ describe("wallet-authorized Google linking start", () => {
     expect((await startGoogleLink(post())).status).toBe(401);
     expect(state.inserts).toEqual([]);
     expect(state.getAccountProfile).not.toHaveBeenCalled();
+  });
+
+  it("binds a linked member's Google attempt to the resolved shared account", async () => {
+    const member = "2".repeat(32);
+    state.verifySigned.mockResolvedValue({ wallet: member, params: { account_id: ACCOUNT_ID } });
+    state.getAccountProfile.mockResolvedValue({ id: ACCOUNT_ID, wallet: member, primary_wallet: WALLET, network: "devnet" });
+    expect((await startGoogleLink(post())).status).toBe(200);
+    expect(state.getAccountProfile).toHaveBeenCalledWith(member, "devnet");
+    expect(state.inserts[0]).toMatchObject({ account_id: ACCOUNT_ID, wallet: member, network: "devnet" });
+  });
+
+  it("does not create a Google attempt for a different account after the wallet was relocated", async () => {
+    state.getAccountProfile.mockResolvedValue({ id: "00000000-0000-4000-8000-000000000002", wallet: WALLET, network: "devnet" });
+    expect((await startGoogleLink(post())).status).toBe(403);
+    expect(state.inserts).toEqual([]);
+    expect(state.generateAuthUrl).not.toHaveBeenCalled();
+  });
+
+  it.each(["start", "unlink"] as const)("requires a signed account ID for Google %s", async (action) => {
+    state.verifySigned.mockResolvedValue({ wallet: WALLET, params: {} });
+    const response = action === "start" ? await startGoogleLink(post()) : await unlinkGoogle(post("unlink"));
+    expect(response.status).toBe(400);
+    expect(state.inserts).toEqual([]);
+    expect(state.callAccountMutation).not.toHaveBeenCalled();
   });
 
   it.each(["GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"])("fails closed when %s is not configured", async (key) => {
@@ -370,6 +403,7 @@ describe("wallet-authorized unlink", () => {
     const response = await unlinkGoogle(post("unlink"));
     expect(response.status).toBe(200);
     expect(state.verifySigned).toHaveBeenCalledWith(expect.any(Request), "account.google.unlink");
+    expect(state.callAccountMutation).toHaveBeenCalledExactlyOnceWith(WALLET, "devnet", ACCOUNT_ID, "google.unlink", {});
     expect(state.rpc).toHaveBeenCalledExactlyOnceWith("unlink_account_google", { p_wallet: WALLET, p_network: "devnet" });
     expect(state.accountResponse).toHaveBeenCalledWith(WALLET, "devnet");
     expect(state.rows).toEqual([]);
@@ -381,6 +415,14 @@ describe("wallet-authorized unlink", () => {
     expect((await unlinkGoogle(post("unlink"))).status).toBe(401);
     state.verifySigned.mockResolvedValueOnce({ wallet: WALLET, params: { wallet: "other-wallet" } });
     expect((await unlinkGoogle(post("unlink"))).status).toBe(400);
+    expect(state.rpc).not.toHaveBeenCalled();
+  });
+
+  it("keeps the signed account ID at the atomic unlink boundary", async () => {
+    const wrongAccount = "00000000-0000-4000-8000-000000000002";
+    state.verifySigned.mockResolvedValue({ wallet: WALLET, params: { account_id: wrongAccount } });
+    expect((await unlinkGoogle(post("unlink"))).status).toBe(403);
+    expect(state.callAccountMutation).toHaveBeenCalledExactlyOnceWith(WALLET, "devnet", wrongAccount, "google.unlink", {});
     expect(state.rpc).not.toHaveBeenCalled();
   });
 

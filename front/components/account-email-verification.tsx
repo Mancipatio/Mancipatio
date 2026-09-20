@@ -21,7 +21,7 @@ export function AccountEmailVerification() {
 
   return <div className="account-page account-verify-page">
     <header className="account-heading"><div><p className="account-eyebrow">YOUR ACCOUNT</p><h1>Confirm your email<span>.</span></h1><p>One final step to verify your contact address.</p></div></header>
-    {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p> : !conn.connected || !conn.wallet ? validToken ? <WalletRequired context="Connect the same wallet you used to request this email change. Opening the link does not confirm your email automatically." /> : <MissingConfirmationLink /> : <EmailConfirmation key={`${network}:${conn.wallet.account.address}:${conn.wallet.connector.id}`} session={conn.wallet} network={network} token={validToken ? token : null} />}
+    {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p> : !conn.connected || !conn.wallet ? validToken ? <WalletRequired context="Connect a wallet linked to the account that requested this email change. Opening the link does not confirm your email automatically." /> : <MissingConfirmationLink /> : <EmailConfirmation key={`${network}:${conn.wallet.account.address}:${conn.wallet.connector.id}`} session={conn.wallet} network={network} token={validToken ? token : null} />}
   </div>;
 }
 
@@ -42,15 +42,15 @@ function EmailConfirmation({ session, network, token }: { session: WalletSession
       // Remove the one-time token from this history entry after confirmation.
       // replaceState does not load a URL or perform any account mutation.
       window.history.replaceState(window.history.state, "", "/account/verify");
-    }, "This link could not be confirmed. Check that you connected the wallet that requested it, or request a new link from your account.");
+    }, "This link could not be confirmed. Check that your connected wallet belongs to the account that requested it, or request a new link from your account.");
   }
 
-  if (confirmed && (!token || token === confirmed.token)) return <section className="account-card account-unlock"><span className="account-feature-icon"><IconCheck size={26} /></span><p className="account-eyebrow">ALL SET</p><h2>Your email is verified.</h2><p className="account-confirmed-address">{confirmed.email}</p><p>This address is now saved as the contact email for your wallet profile.</p><Link href="/account" className="account-button account-button--primary">Back to your account<IconArrowUpRight size={16} /></Link></section>;
+  if (confirmed && (!token || token === confirmed.token)) return <section className="account-card account-unlock"><span className="account-feature-icon"><IconCheck size={26} /></span><p className="account-eyebrow">ALL SET</p><h2>Your email is verified.</h2><p className="account-confirmed-address">{confirmed.email}</p><p>This address is now saved as the contact email for your shared account.</p><Link href="/account" className="account-button account-button--primary">Back to your account<IconArrowUpRight size={16} /></Link></section>;
   if (!token) return <MissingConfirmationLink />;
 
   return <section className="account-card account-unlock">
     <span className="account-feature-icon"><IconLock size={23} /></span>
-    <h2>Confirm with your wallet.</h2><p>Use the same wallet that requested this change. Approve a message to verify the email address from this link.</p>
+    <h2>Confirm with your wallet.</h2><p>Use a wallet linked to the account that requested this change. Approve a message to verify the email address from this link.</p>
     <div className="account-wallet-preview"><span>Connected wallet · {networkLabel(network)}</span><code>{session.account.address.toString()}</code></div>
     <AccountFeedback notice={notice} />
     {!canSign && <p className="account-unavailable">This wallet cannot sign messages. Connect a wallet that supports message signing.</p>}

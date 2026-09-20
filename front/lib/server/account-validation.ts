@@ -1,5 +1,6 @@
 import "server-only";
 import { SiwsError } from "@/lib/server/siws";
+import { address } from "@solana/kit";
 
 export function accountParams(params: Record<string, unknown>, allowed: readonly string[]): void {
   if (Object.keys(params).some((key) => !allowed.includes(key))) {
@@ -36,6 +37,18 @@ export function accountEmail(value: unknown): string {
 export function accountEmailToken(value: unknown): string {
   if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
     throw new SiwsError(400, "This verification link is invalid or expired");
+  }
+  return value;
+}
+
+export function accountWalletAddress(value: unknown): string {
+  if (typeof value !== "string" || value.length < 32 || value.length > 44) throw new SiwsError(400, "Enter a valid Solana wallet address");
+  try { return address(value); } catch { throw new SiwsError(400, "Enter a valid Solana wallet address"); }
+}
+
+export function accountId(value: unknown): string {
+  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value)) {
+    throw new SiwsError(400, "Invalid account link request");
   }
   return value;
 }

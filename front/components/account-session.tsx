@@ -9,7 +9,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 export type AccountNotice = { tone: "success" | "error" | "info"; text: string };
 
 /** One explicit operation at a time, bound to the exact connected session. */
-export function useAccountOperation(session: WalletSession, network: Network) {
+export function useAccountOperation(session: WalletSession, network: Network, accountId?: string) {
   const client = useSolanaClient();
   const mounted = useRef(false);
   const inFlight = useRef(false);
@@ -39,7 +39,7 @@ export function useAccountOperation(session: WalletSession, network: Network) {
     setPending(operation);
     setNotice(null);
     try {
-      const value = await task({ session, network, isCurrent });
+      const value = await task({ session, network, isCurrent, accountId });
       if (!isCurrent()) return;
       apply(value);
       if (success) setNotice({ tone: "success", text: success });

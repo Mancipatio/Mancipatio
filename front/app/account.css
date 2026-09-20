@@ -88,6 +88,35 @@
 .account-verify-page { max-width:700px; }
 .account-verify-page .account-unlock { max-width:600px; }
 .account-unlock>p.account-confirmed-address { color:#3b6740; font-weight:550; overflow-wrap:anywhere; }
+.account-wallet-count { color:#8a977d; font-size:11px; font-weight:400; letter-spacing:0; margin-left:6px; white-space:nowrap; }
+.account-wallet-list { display:flex; flex-direction:column; border:1px solid #e2e8d9; border-radius:8px; overflow:hidden; margin-bottom:14px; }
+.account-wallet-row { padding:17px; background:#fbfcf8; }
+.account-wallet-row+.account-wallet-row { border-top:1px solid #e5eadf; }
+.account-wallet-row-labels { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
+.account-wallet-row-labels:empty { display:none; }
+.account-wallet-row>code,.account-link-addresses code,.account-primary-notice code { display:block; color:#4c6445; font-size:11px; line-height:1.9; overflow-wrap:anywhere; user-select:all; }
+.account-wallet-row-actions { display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:18px; margin-top:9px; }
+.account-wallet-confirm { padding:15px; margin-top:14px; border:1px solid #e7ddcc; border-radius:7px; background:#fbf7ed; }
+.account-wallet-confirm>p { font-size:12px; color:#8a7555; line-height:1.8; }
+.account-wallet-confirm .account-wallet-row-actions { justify-content:flex-start; }
+.account-add-wallet { border-top:1px solid #e5eadf; margin-top:23px; padding-top:23px; }
+.account-link-addresses { display:grid; gap:13px; width:100%; border:1px solid #dfe7d7; padding:16px; border-radius:7px; background:#f7faf1; margin:18px 0 8px; }
+.account-link-addresses>div+div { padding-top:12px; border-top:1px solid #e1e8d8; }
+.account-link-addresses span { display:block; margin-bottom:5px; font-size:10px; font-weight:500; color:#7a8c68; }
+.account-link-flow { max-width:690px; padding:30px; }
+.account-link-flow>.account-feature-icon { margin-bottom:20px; }
+.account-link-flow>h2 { font-size:27px; line-height:1.3; margin-top:7px; }
+.account-link-switch { border:1px solid #e3e8d9; border-radius:8px; padding:18px; background:#fbfcf7; margin-top:23px; }
+.account-link-switch h3 { font-size:13px; font-weight:550; color:#46613c; }
+.account-link-switch>p { font-size:12px; line-height:1.8; color:#7e8a6d; margin:7px 0 15px; }
+.account-link-switch>.flex { flex-wrap:wrap; }
+.account-link-ready { display:flex; align-items:center; gap:7px; color:#527d3b; font-size:12px; line-height:1.8; margin:22px 0 17px; }
+.account-primary-notice { margin-bottom:22px; padding:19px 21px; border:1px solid #dce5c8; border-radius:9px; background:#f3f7e9; }
+.account-primary-notice strong { font-size:13px; color:#567040; font-weight:550; }
+.account-primary-notice p { color:#7b8965; font-size:11px; line-height:1.8; margin:7px 0; }
+.account-primary-notice details { margin-top:10px; }
+.account-primary-notice summary { cursor:pointer; font-size:12px; font-weight:550; color:#527040; padding:5px 0; }
+.account-primary-notice details>.flex { flex-wrap:wrap; }
 @media(max-width:1100px) {
   .account-grid { grid-template-columns:minmax(0,1fr) 280px; gap:17px; }
   .account-card,.account-portfolio-card { padding:21px; }
@@ -117,6 +146,10 @@
   .account-text-button { min-height:40px; }
   .account-unlock { padding:24px; }
   .account-unlock>h2 { font-size:27px; }
+  .account-wallet-row { padding:14px; }
+  .account-wallet-row-actions { gap:16px; }
+  .account-primary-notice { padding:17px; }
+  .account-link-flow { padding:24px; }
 }
 @media(max-width:500px) {
   .account-side-column { display:flex; }
@@ -127,4 +160,8 @@
   .account-form-actions { align-items:stretch; flex-direction:column; gap:6px; }
   .account-form-actions>.account-text-button { justify-content:center; }
   .account-identity { padding:15px; }
+  .account-link-flow { padding:21px 18px; }
+  .account-link-flow>h2 { font-size:23px; }
+  .account-link-switch { padding:15px; }
+  .account-wallet-confirm .account-button { width:100%; }
 }

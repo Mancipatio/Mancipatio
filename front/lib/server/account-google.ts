@@ -7,7 +7,8 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { boundedRequest } from "@/lib/server/bounded-request";
 import { SiwsError, verifySigned } from "@/lib/server/siws";
 import { accountSiteOrigin } from "@/lib/server/account-origin";
-import { accountErrorResponse, accountResponse, consumeAccountRateLimit, getAccountProfile } from "@/lib/server/account-profile";
+import { accountErrorResponse, accountResponse, callAccountMutation, consumeAccountRateLimit, getAccountProfile } from "@/lib/server/account-profile";
+import { accountId, accountParams } from "@/lib/server/account-validation";
 
 const COOKIE = "manci_google_link";
 const COOKIE_PATH = "/api/account/google";
@@ -41,20 +42,22 @@ function googleClient(redirectUri: string) {
   });
 }
 
-function assertEmptyParams(params: Record<string, unknown>) {
-  if (Object.keys(params).length) throw new SiwsError(400, "Unexpected account fields");
+function googleAccountId(params: Record<string, unknown>) {
+  accountParams(params, ["account_id"]);
+  return accountId(params.account_id);
 }
 
 export async function startGoogleLink(request: Request) {
   try {
     const { wallet, params } = await verifySigned(await boundedRequest(request, 8192), "account.google.start");
-    assertEmptyParams(params);
+    const expectedAccountId = googleAccountId(params);
     const network = detectNetwork();
     const origin = accountSiteOrigin(request);
     const redirectUri = origin + CALLBACK_PATH;
     const client = googleClient(redirectUri);
     await consumeAccountRateLimit(`google-start:${network}:${wallet}`, 5, TTL_SECONDS);
-    await getAccountProfile(wallet, network);
+    const profile = await getAccountProfile(wallet, network);
+    if (profile.id !== expectedAccountId) throw new SiwsError(403, "This wallet no longer has access to the selected account.");
 
     const state = randomBytes(32).toString("base64url");
     const browserToken = randomBytes(32).toString("base64url");
@@ -66,6 +69,7 @@ export async function startGoogleLink(request: Request) {
     if (cleanup.error) throw new SiwsError(503, "Google connection is temporarily unavailable.");
     const { error } = await sb.from("account_google_states").insert({
       state_hash: hash(state), browser_hash: hash(browserToken), wallet, network,
+      account_id: profile.id,
       code_verifier: verifier, redirect_uri: redirectUri,
       expires_at: new Date(Date.now() + TTL_SECONDS * 1000).toISOString(),
     });
@@ -182,11 +186,10 @@ async function discardState(stateHash: string, browserHash: string, network: str
 export async function unlinkGoogle(request: Request) {
   try {
     const { wallet, params } = await verifySigned(await boundedRequest(request, 8192), "account.google.unlink");
-    assertEmptyParams(params);
+    const expectedAccountId = googleAccountId(params);
     const network = detectNetwork();
-    await getAccountProfile(wallet, network);
-    const { data, error } = await getSupabaseAdmin().rpc("unlink_account_google", { p_wallet: wallet, p_network: network });
-    if (error || data !== true) throw new SiwsError(503, "Could not disconnect Google. Please try again.");
+    const unlinked = await callAccountMutation<boolean>(wallet, network, expectedAccountId, "google.unlink", {});
+    if (unlinked !== true) throw new SiwsError(503, "Could not disconnect Google. Please try again.");
     return await accountResponse(wallet, network);
   } catch (error) { return noStore(accountErrorResponse(error)); }
 }

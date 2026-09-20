@@ -10,6 +10,13 @@ import {
 import { detectNetwork } from "@/lib/network";
 import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 
+// This suite verifies the RPC boundary; policy response validation and refusal
+// are exercised separately in transaction-wallet-policy.test.ts.
+vi.mock("@/lib/transaction-wallet-policy", async (importOriginal) => ({
+  ...await importOriginal<typeof import("@/lib/transaction-wallet-policy")>(),
+  requestTransactionWalletPolicy: vi.fn(async () => undefined),
+}));
+
 afterEach(() => {
   vi.unstubAllGlobals();
   vi.unstubAllEnvs();
@@ -128,8 +135,11 @@ describe("network identity", () => {
 describe("transaction helper boundary", () => {
   function clientFor(hash: string) {
     const { rpc, send } = genesisRpc(hash);
+    const wallet = "11111111111111111111111111111111";
+    const session = { account: { address: wallet } };
+    const prepared = { feePayer: wallet, instructions: [], message: { feePayer: { address: wallet } } };
     const transaction = {
-      prepare: vi.fn(),
+      prepare: vi.fn(async () => prepared),
       sign: vi.fn(),
       toWire: vi.fn(),
       send: vi.fn(),
@@ -139,11 +149,13 @@ describe("transaction helper boundary", () => {
       runtime: { rpc },
       transaction,
       helpers: { transaction },
+      store: { getState: () => ({ wallet: { status: "connected", session } }) },
     } as unknown as SolanaClient;
     return {
       guarded: withVerifiedTransactions(client, "devnet"),
       transaction,
       send,
+      wallet,
     };
   }
 
@@ -163,15 +175,14 @@ describe("transaction helper boundary", () => {
   );
 
   it("rechecks the network for every transaction attempt, including prepared sends", async () => {
-    const { guarded, transaction, send } = clientFor(
+    const { guarded, transaction, send, wallet } = clientFor(
       CLUSTER_GENESIS_HASHES.devnet,
     );
-    await guarded.transaction.prepareAndSend({ instructions: [] });
-    await guarded.transaction.send(
-      {} as Parameters<typeof guarded.transaction.send>[0],
-    );
+    await guarded.transaction.prepareAndSend({ instructions: [], feePayer: wallet });
+    const prepared = await guarded.transaction.prepare({ instructions: [], feePayer: wallet });
+    await guarded.transaction.send(prepared);
     expect(transaction.prepareAndSend).toHaveBeenCalledOnce();
     expect(transaction.send).toHaveBeenCalledOnce();
-    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledTimes(3);
   });
 });
