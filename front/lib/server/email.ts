@@ -1,8 +1,8 @@
 // SERVER-ONLY — outbound email via the Resend REST API (plain fetch, no SDK).
 //
 // Graceful no-op: if RESEND_API_KEY is unset, logs and returns { sent: false }
-// — callers must treat email as best-effort and NEVER fail the request over an
-// email problem. This function does not throw.
+// — callers decide whether delivery is optional. Verification flows must check
+// `sent` before reporting success. This function does not throw.
 //
 // Env:
 //   RESEND_API_KEY  — required to actually send
@@ -25,6 +25,8 @@ export type SendEmailInput = {
   html: string;
   /** Optional override; defaults to env EMAIL_FROM or the Resend onboarding sender. */
   from?: string;
+  /** Verification emails must not expose recipient/token diagnostics in logs. */
+  redactErrors?: boolean;
 };
 
 export type SendEmailResult = {
@@ -59,6 +61,7 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
+      signal: AbortSignal.timeout(15_000),
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
@@ -74,15 +77,16 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
       } catch {
         // Non-JSON error body — keep the status-only detail.
       }
-      console.error(`[email] Resend rejected "${input.subject}" — ${detail}`);
-      return { sent: false, error: detail };
+      const safeDetail = input.redactErrors ? `HTTP ${res.status}` : detail;
+      console.error(`[email] Resend rejected "${input.subject}" — ${safeDetail}`);
+      return { sent: false, error: safeDetail };
     }
 
     const body = (await res.json()) as { id?: string };
     return { sent: true, id: body?.id };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error(`[email] network failure sending "${input.subject}":`, err);
-    return { sent: false, error: message };
+    console.error(`[email] network failure sending "${input.subject}":`, input.redactErrors ? "Delivery failed" : err);
+    return { sent: false, error: input.redactErrors ? "Delivery failed" : message };
   }
 }

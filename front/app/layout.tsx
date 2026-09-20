@@ -4,6 +4,7 @@ import "./globals.css";
 import "./workspace.css";
 import "./documentation.css";
 import "./document-library.css";
+import "./account.css";
 import { Providers } from "./providers";
 
 const geistSans = Geist({

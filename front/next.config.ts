@@ -4,6 +4,16 @@ const nextConfig: NextConfig = {
   // The local preview uses this exact loopback hostname; production is unchanged.
   allowedDevOrigins: ["127.0.0.1"],
   poweredByHeader: false,
+  async headers() {
+    return ["/account/:path*", "/api/account/:path*"].map((source) => ({
+      source,
+      headers: [
+        { key: "Cache-Control", value: "no-store" },
+        { key: "Referrer-Policy", value: "no-referrer" },
+        { key: "X-Robots-Tag", value: "noindex, nofollow" },
+      ],
+    }));
+  },
   async redirects() {
     return [
       // Absorbed into the homepage. Note: redirect destinations can't carry a

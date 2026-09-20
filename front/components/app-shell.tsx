@@ -8,7 +8,7 @@ import { BrandLogo } from "@/components/brand-logo";
 import { NetworkBadge } from "@/components/network-badge";
 import { LegacyAccountsNotice } from "@/components/legacy-accounts-notice";
 import { TosGate } from "@/components/tos-gate";
-import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight } from "@/components/icons";
+import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
 import { detectNetwork, networkLabel } from "@/lib/network";
 
 const primary = [
@@ -18,6 +18,7 @@ const primary = [
   { href: "/marketplace/otc", label: "OTC market", icon: IconRepeat },
 ];
 const portfolio = [
+  { href: "/account", label: "Your account", icon: IconUsers },
   { href: "/portfolio", label: "My portfolio", icon: IconWallet },
   { href: "/portfolio/vesting", label: "Vesting", icon: IconLock },
   { href: "/portfolio/rights", label: "Income & claims", icon: IconCoins },
@@ -46,7 +47,7 @@ function activePath(path: string, href: string) {
 
 export function AppShell({ children, section = "overview" }: {
   children: ReactNode;
-  section?: "overview" | "marketplace" | "portfolio" | "issuer" | "documentation" | "admin" | "application" | "onboarding";
+  section?: "overview" | "marketplace" | "portfolio" | "issuer" | "documentation" | "admin" | "application" | "onboarding" | "account";
 }) {
   const path = usePathname();
   const [menuOpen, setMenuOpen] = useState(false);
@@ -121,7 +122,7 @@ export function AppShell({ children, section = "overview" }: {
         </Content>
         <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/contact">Support ↗</Link></div></footer>
       </div>
-      {!["documentation", "admin", "onboarding", "application"].includes(section) && !path.startsWith("/markets/") && <TosGate />}
+      {!["documentation", "admin", "onboarding", "application", "account"].includes(section) && !path.startsWith("/markets/") && <TosGate />}
     </div>
   );
 }

@@ -45,6 +45,7 @@ export function AccountMenu() {
     balance.lamports != null ? (Number(balance.lamports) / 1e9).toFixed(3) : "…";
 
   const links: { label: string; href: string }[] = [
+    { label: "Your account", href: "/account" },
     { label: "Portfolio", href: "/portfolio" },
   ];
   if (isIssuer) links.push({ label: "Issuer dashboard", href: "/issuer" });
