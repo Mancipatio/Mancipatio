@@ -33,15 +33,18 @@
 .app-sidebar-foot { display:flex; flex-direction:column; gap:20px; padding:22px 10px 3px; font-size:11px; }
 .app-sidebar-foot>span { color:#87a398; display:flex; align-items:center; gap:7px; font-size:10px; }
 .app-sidebar-foot i { width:5px; height:5px; border-radius:50%; background:#86d3a9; }
-.app-body { margin-left:232px; min-height:100vh; display:flex; flex-direction:column; }
-.app-topbar { height:60px; display:flex; align-items:center; justify-content:space-between; gap:12px; padding:0 32px; background:#fff; border-bottom:1px solid var(--app-line); }
+.app-body { position:relative; margin-left:232px; min-height:100vh; display:flex; flex-direction:column; }
+.app-topbar { display:none; height:60px; align-items:center; justify-content:space-between; gap:12px; padding:0 32px; background:#fff; border-bottom:1px solid var(--app-line); }
 .app-breadcrumb,.app-topbar-actions { display:flex; align-items:center; gap:15px; font-size:12px; }
 .app-breadcrumb-root { color:#657267; }
 .app-breadcrumb-separator { color:#ccd3cf; }
 .app-topbar-actions { gap:18px; }
 .app-account { border-left:1px solid var(--app-line); padding-left:18px; }
 .app-content { padding:31px 32px 24px; flex:1; min-width:0; width:100%; max-width:1660px; margin:0 auto; outline:none; }
-.app-content.app-content--overview { padding-top:12px; }
+.app-content.app-content--overview { padding-top:22px; }
+.app-floating-account { position:absolute; top:22px; right:32px; z-index:20; }
+.app-section-tabs ~ .app-floating-account, .app-floating-account:has(~ .app-section-tabs) { top:7px; }
+.overview-account { display:flex; align-items:center; }
 .app-content--portfolio>main,.app-content--issuer>main { width:100%; min-width:0; }
 .app-admin-layout { display:grid; grid-template-columns:190px minmax(0,1fr); gap:28px; align-items:start; }
 .app-admin-menu { position:sticky; top:24px; max-height:calc(100vh - 48px); overflow:auto; scrollbar-width:thin; }
@@ -81,7 +84,7 @@
   .wallet-access-description { font-size:13px; }
   .app-admin-menu nav.is-open { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
-.app-section-tabs { padding:0 32px; background:#fff; border-bottom:1px solid var(--app-line); display:flex; gap:23px; overflow-x:auto; }
+.app-section-tabs { padding:0 250px 0 32px; background:#fff; border-bottom:1px solid var(--app-line); display:flex; gap:23px; overflow-x:auto; }
 .app-section-tabs>a { font-size:12px; padding:14px 0; border-bottom:2px solid transparent; color:var(--app-muted); white-space:nowrap; }
 .app-section-tabs>a.is-active { border-color:var(--app-green); color:var(--app-green); }
 .app-footer { padding:18px 32px; display:flex; justify-content:space-between; gap:14px; color:#657267; font-size:11px; border-top:1px solid var(--app-line); }
@@ -229,3 +232,5 @@
 @media(max-width:760px) { .app-sidebar { visibility:hidden; transform:translateX(-100%); width:240px; transition:transform .2s; } .app-sidebar.is-open { visibility:visible; transform:translateX(0); } .app-body { margin-left:0; } .app-menu-button { display:block; font-size:17px; padding:4px; } .app-sidebar-backdrop { display:block; position:fixed; inset:0; z-index:25; background:#0b221aaa; } .app-topbar { height:56px; padding:0 17px; } .app-topbar-actions { gap:8px; } .app-account { padding-left:8px; } .app-account span,.app-account button { font-size:10px; } .app-breadcrumb { gap:10px; } .app-breadcrumb-root,.app-breadcrumb-separator { display:none; } .app-content { padding:24px 17px; } .app-section-tabs { padding:0 17px; } .app-footer { padding:17px; flex-wrap:wrap; font-size:10px; } .app-skip { left:20px; } .overview-heading { align-items:center; } .overview-eyebrow { font-size:10px; letter-spacing:1.25px; } .overview-heading h1 { font-size:29px; } .overview-heading p { max-width:260px; line-height:1.6; } .overview-heading-actions .overview-button-dark { display:none; } .overview-heading-actions .overview-button { padding:8px 10px; font-size:11px; } .overview-stats { grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px; margin-bottom:20px; } .overview-stat-label { font-size:12px; } .overview-stat-label svg { display:block; } .overview-stat-number { font-size:29px; } .overview-stat-detail { font-size:10px; } .overview-categories { grid-template-columns:repeat(4,minmax(0,1fr)); gap:7px; } .overview-category { display:flex; padding:12px 7px; } .overview-category-icon { margin-bottom:10px; } .overview-category strong { font-size:10px; white-space:normal; } .overview-category>span:last-child { font-size:11px; } .overview-section-heading h2 { font-size:13px; } .overview-section-heading>a { font-size:10px; text-align:right; } .overview-panel-heading { padding:17px 15px; } .overview-market-tabs { gap:19px; padding:0 15px; } .overview-filters { padding:14px 15px; } .overview-filters select { flex:1; max-width:none; } .overview-search input { font-size:12px; } .overview-table th,.overview-table td { padding-left:15px; padding-right:15px; } .overview-journey-grid { gap:8px; } .overview-journey-grid>a { padding:13px; } .overview-journey-grid h3 { font-size:11px; } .overview-journey-grid p { font-size:10px; } }
 @media(max-width:450px) { .overview-right-column { grid-template-columns:1fr; } .overview-heading h1 { font-size:27px; } .overview-heading p { font-size:11px; } .overview-journey-grid { grid-template-columns:1fr; } .overview-journey-grid>a { display:grid; grid-template-columns:25px 1fr; gap:5px 10px; } .overview-journey-grid>a>svg { grid-row:span 2; margin:3px 0 0; } .overview-journey-grid p { margin:0; font-size:11px; } .overview-journey-grid h3 { font-size:12px; } .overview-market-tabs>button { font-size:11px; } .overview-table-footer { flex-wrap:wrap; } .app-account { border:0; padding:0; } }
 @media(prefers-reduced-motion:reduce) { [data-app] *,[data-app] *::before,[data-app] *::after { animation:none!important; transition:none!important; } }
+@media(max-width:1250px) { .app-floating-account { right:23px; } .app-section-tabs { padding-left:23px; } }
+@media(max-width:760px) { .app-topbar { display:flex; } .app-floating-account,.overview-account { display:none; } .app-section-tabs { padding:0 17px; } }

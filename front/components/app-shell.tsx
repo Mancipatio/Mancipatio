@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AccountMenu } from "@/components/account-menu";
 import { BrandLogo } from "@/components/brand-logo";
-import { NetworkBadge } from "@/components/network-badge";
 import { LegacyAccountsNotice } from "@/components/legacy-accounts-notice";
 import { TosGate } from "@/components/tos-gate";
 import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
@@ -79,8 +78,6 @@ export function AppShell({ children, section = "overview" }: {
     return () => { document.removeEventListener("keydown", onKey); desktop.removeEventListener("change", onViewportChange); document.body.style.overflow = originalOverflow; };
   }, [menuOpen]);
   const tabs = section === "portfolio" ? portfolioTabs : section === "issuer" ? issuerTabs : section === "marketplace" ? marketTabs : null;
-  const currentTitle = [...primary, ...portfolio].find((item) => activePath(path, item.href))?.label
-    ?? (section === "documentation" ? "Documentation" : section === "admin" ? "Administration" : section === "application" ? "Create a raise" : section === "onboarding" ? "Onboarding" : section === "issuer" ? "Issuer workspace" : section === "portfolio" ? "My portfolio" : "Marketplace");
   const network = detectNetwork();
   // Existing holder and issuer pages own their main landmark.
   const Content = section === "portfolio" || section === "issuer" ? "div" : "main";
@@ -111,10 +108,13 @@ export function AppShell({ children, section = "overview" }: {
         </div>
       </aside>
       <div className="app-body">
+        {/* Mobile only: the sidebar toggle needs a home once the sidebar is hidden. */}
         <header className="app-topbar">
-          <div className="app-breadcrumb"><button ref={menuButton} className="app-menu-button" aria-label="Open navigation" aria-expanded={menuOpen} aria-controls="app-sidebar" onClick={() => setMenuOpen(true)}>☰</button><span className="app-breadcrumb-root">Workspace</span><span className="app-breadcrumb-separator">/</span><span>{currentTitle}</span></div>
-          <div className="app-topbar-actions"><NetworkBadge /><div className="app-account"><AccountMenu /></div></div>
+          <button ref={menuButton} className="app-menu-button" aria-label="Open navigation" aria-expanded={menuOpen} aria-controls="app-sidebar" onClick={() => setMenuOpen(true)}>☰</button>
+          <div className="app-account"><AccountMenu /></div>
         </header>
+        {/* Desktop: the overview heading hosts the wallet menu inline; elsewhere it floats top-right. */}
+        {path !== "/" && <div className="app-floating-account"><AccountMenu /></div>}
         <LegacyAccountsNotice />
         {tabs && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>

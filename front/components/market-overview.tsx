@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { AccountMenu } from "@/components/account-menu";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { WalletRequired } from "@/components/wallet-required";
@@ -137,7 +138,7 @@ export function MarketOverview() {
   const filtered = category !== "all" || market !== "all" || !!query;
   return (
     <div className="overview">
-      <div className="overview-heading"><div><div className="overview-eyebrow"><span /> THE REAL-WORLD ASSET WORKSPACE</div><h1>Market overview<span>.</span></h1><p>Explore assets. Find your next opportunity. Manage what you own.</p></div><div className="overview-heading-actions"><button className="overview-button" onClick={() => void refresh()} disabled={loading}><span className={loading ? "overview-refresh-spin" : ""} aria-hidden="true">↻</span>{loading ? "Refreshing" : "Refresh"}</button><Link href="/portfolio" className="overview-button overview-button-dark"><IconWallet size={16} />My portfolio <span aria-hidden="true">↗</span></Link></div></div>
+      <div className="overview-heading"><div><div className="overview-eyebrow"><span /> THE REAL-WORLD ASSET WORKSPACE</div><h1>Market overview<span>.</span></h1><p>Explore assets. Find your next opportunity. Manage what you own.</p></div><div className="overview-heading-actions"><button className="overview-button" onClick={() => void refresh()} disabled={loading}><span className={loading ? "overview-refresh-spin" : ""} aria-hidden="true">↻</span>{loading ? "Refreshing" : "Refresh"}</button><Link href="/portfolio" className="overview-button overview-button-dark"><IconWallet size={16} />My portfolio <span aria-hidden="true">↗</span></Link><div className="overview-account"><AccountMenu /></div></div></div>
       <div className="overview-stats">{statItems.map(({ label, value, detail, icon: Icon, href }) => <Link className="overview-stat" href={href} key={label}><div className="overview-stat-label">{label}<Icon size={18} /></div><div className="overview-stat-number">{value === undefined ? <span className="overview-value-placeholder">{failed ? "Unavailable" : "…"}</span> : value.toLocaleString("en")}</div><div className="overview-stat-detail">{detail}<span aria-hidden="true">↗</span></div></Link>)}</div>
       <div className="overview-section-heading"><h2>Explore by asset class</h2><Link href="/markets/types">Compare rights & structures <span aria-hidden="true">↗</span></Link></div>
       <div className="overview-categories" aria-label="Filter assets by category">{ASSET_TYPES.map((type) => <button key={type.slug} className={`overview-category ${category === String(type.enumValue) ? "is-selected" : ""}`} aria-pressed={category === String(type.enumValue)} onClick={() => setCategoryFilter(category === String(type.enumValue) ? "all" : String(type.enumValue))}><span className={`overview-category-icon category-${type.slug}`}>{type.icon}</span><strong>{categoryCopy[type.slug].label}</strong><span>{overview ? `${overview.rows.filter((row) => row.asset.assetType === type.enumValue).length} assets` : "Explore"}</span></button>)}</div>
