@@ -111,7 +111,7 @@
 .overview-button-dark { background:#193e31; color:#fff; border-color:#193e31; }
 .app-wallet-menu { font-variant-numeric:tabular-nums; }
 .app-wallet-menu:hover { background:#224f3f; border-color:#224f3f; }
-.app-wallet-menu>span[aria-hidden] { font-size:10px; opacity:.75; }
+.app-wallet-chevron { opacity:.75; margin-left:-3px; }
 .overview-heading-actions .overview-button>span:first-child { font-size:17px; line-height:1; }
 .overview-stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:20px; }
 .overview-stat { background:#fff; border:1px solid var(--app-line); border-radius:9px; padding:18px 18px 15px; transition:border-color .2s; }

@@ -59,7 +59,7 @@ export function AccountMenu() {
         aria-expanded={open}
         className="overview-button overview-button-dark app-wallet-menu"
       >
-        <IconWallet size={16} />{truncate(address)} · {sol} SOL<span aria-hidden="true">▾</span>
+        <IconWallet size={16} />{truncate(address)} · {sol} SOL<svg className="app-wallet-chevron" width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
       </button>
       {open && (
         <div
