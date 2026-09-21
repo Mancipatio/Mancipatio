@@ -109,6 +109,9 @@
 .overview-button { display:inline-flex; align-items:center; justify-content:center; gap:9px; background:#fff; border:1px solid #dfe6e1; border-radius:6px; min-height:37px; padding:9px 13px; font-size:12px; font-weight:500; white-space:nowrap; }
 .overview-button:hover { border-color:#82a590; }
 .overview-button-dark { background:#193e31; color:#fff; border-color:#193e31; }
+.app-wallet-menu { font-variant-numeric:tabular-nums; }
+.app-wallet-menu:hover { background:#224f3f; border-color:#224f3f; }
+.app-wallet-menu>span[aria-hidden] { font-size:10px; opacity:.75; }
 .overview-heading-actions .overview-button>span:first-child { font-size:17px; line-height:1; }
 .overview-stats { display:grid; grid-template-columns:repeat(4,minmax(0,1fr)); gap:14px; margin-bottom:20px; }
 .overview-stat { background:#fff; border:1px solid var(--app-line); border-radius:9px; padding:18px 18px 15px; transition:border-color .2s; }

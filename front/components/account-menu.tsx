@@ -5,8 +5,7 @@ import { useEffect, useRef, useState } from "react";
 import { useBalance, useWalletConnection } from "@solana/react-hooks";
 import { useRole } from "@/lib/auth";
 import { WalletButton } from "@/app/wallet-button";
-
-const PILL = "rounded-full border px-3 py-1.5 text-xs font-mono transition-colors";
+import { IconWallet } from "@/components/icons";
 
 function truncate(address: string) {
   return `${address.slice(0, 4)}…${address.slice(-4)}`;
@@ -58,9 +57,9 @@ export function AccountMenu() {
         onClick={() => setOpen((v) => !v)}
         aria-haspopup="menu"
         aria-expanded={open}
-        className={`${PILL} border-slate-300 text-slate-700 hover:border-slate-400`}
+        className="overview-button overview-button-dark app-wallet-menu"
       >
-        {truncate(address)} · {sol} SOL
+        <IconWallet size={16} />{truncate(address)} · {sol} SOL<span aria-hidden="true">▾</span>
       </button>
       {open && (
         <div
