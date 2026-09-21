@@ -194,3 +194,59 @@ export async function requireVerifiedClient(
   // A null message means eligible, and eligible implies the row exists.
   return { clientId: (row as FetchedClientRow).id };
 }
+
+// ── Company (KYB) gate ─────────────────────────────────────────────────────
+// Raising capital on Manci is a company act: /apply requires an APPROVED KYB
+// (client_verification_details kind 'kyb', status 'verified'), never the
+// dossier's individual KYC status. A terminal dossier (suspended/rejected)
+// still blocks everything.
+
+export type CompanyKybStatus = "none" | "pending" | "more_info" | "verified" | "rejected" | "suspended";
+
+export type CompanyKybLookup = {
+  hasClient: boolean;
+  /** Company verification state; "more_info" = documents still requested. */
+  kybStatus: CompanyKybStatus;
+  /** Kept for the /apply UI, which shows the status under this name. */
+  kycStatus: string | null;
+  eligible: boolean;
+};
+
+async function evaluateCompanyKyb(sb: SupabaseClient, row: FetchedClientRow | null): Promise<CompanyKybLookup> {
+  if (!row) return { hasClient: false, kybStatus: "none", kycStatus: null, eligible: false };
+  if (row.kyc_status !== null && TERMINAL_KYC_STATUSES.includes(row.kyc_status)) {
+    const status = row.kyc_status === "suspended" ? "suspended" : "rejected";
+    return { hasClient: true, kybStatus: status, kycStatus: status, eligible: false };
+  }
+  const { data, error } = await sb.from("client_verification_details")
+    .select("status").eq("client_id", row.id).eq("kind", "kyb").maybeSingle();
+  if (error) {
+    console.error("[kyc-gate] KYB lookup failed:", error.message);
+    throw new SiwsError(500, "Company verification lookup failed");
+  }
+  let kybStatus: CompanyKybStatus = !data ? "none" : (data.status as CompanyKybStatus);
+  if (kybStatus === "pending") {
+    const { data: open } = await sb.from("kyc_requirements").select("id")
+      .eq("client_id", row.id).eq("status", "requested").limit(1);
+    if (open && open.length > 0) kybStatus = "more_info";
+  }
+  return { hasClient: true, kybStatus, kycStatus: kybStatus, eligible: kybStatus === "verified" };
+}
+
+/** Non-PII KYB verdict for the unsigned /api/applications/eligibility route. */
+export async function lookupCompanyKyb(sb: SupabaseClient, wallet: string): Promise<CompanyKybLookup> {
+  return evaluateCompanyKyb(sb, await fetchClientRow(sb, wallet));
+}
+
+/** Authoritative /apply gate: the signer's company verification is approved. */
+export async function requireVerifiedCompany(sb: SupabaseClient, wallet: string): Promise<{ clientId: string }> {
+  const row = await fetchClientRow(sb, wallet);
+  const verdict = await evaluateCompanyKyb(sb, row);
+  if (!verdict.eligible) {
+    const reason = verdict.kybStatus === "none" ? "Verify your company (KYB) at /verify before applying."
+      : verdict.kybStatus === "pending" || verdict.kybStatus === "more_info" ? "Your company verification (KYB) is still under review."
+      : `Your company verification is ${verdict.kybStatus} — contact the compliance team.`;
+    throw new SiwsError(403, `Company verification required to apply. ${reason}`);
+  }
+  return { clientId: (row as FetchedClientRow).id };
+}

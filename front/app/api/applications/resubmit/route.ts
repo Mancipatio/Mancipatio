@@ -14,7 +14,7 @@ import { detectNetwork } from "@/lib/network";
 import {
   insertApplicationEvent,
   narrowApplication,
-  requireVerifiedClient,
+  requireVerifiedCompany,
 } from "../_lib";
 
 const UUID_RE =
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
     if (!UUID_RE.test(id)) throw new SiwsError(400, "id must be an application UUID");
 
     const sb = getSupabaseAdmin();
-    await requireVerifiedClient(sb, wallet);
+    await requireVerifiedCompany(sb, wallet);
 
     const { data: row, error: readError } = await sb
       .from("launch_applications")

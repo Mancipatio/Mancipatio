@@ -29,6 +29,7 @@ import {
   KYC_VALIDITY_DAYS,
   type ClientDocument,
   type ClientVerificationDetails,
+  adminDecideKyb,
   type ClientKycStatus,
   type ClientNote,
   type ClientRow,
@@ -135,6 +136,8 @@ function ClientDetail({ id }: { id: string }) {
   const [requirements, setRequirements] = useState<KycRequirement[]>([]);
   const [documents, setDocuments] = useState<ClientDocument[]>([]);
   const [verification, setVerification] = useState<ClientVerificationDetails[]>([]);
+  const [kybBusy, setKybBusy] = useState(false);
+  const [kybNote, setKybNote] = useState("");
   const [noteBody, setNoteBody] = useState("");
   const [confirm, setConfirm] = useState<
     null | "approve" | "reject" | "suspend"
@@ -1217,6 +1220,29 @@ function ClientDetail({ id }: { id: string }) {
                     ))}
                   </dl>
                   <p className="mt-2 break-all font-mono text-[11px] text-slate-400">by {v.submitted_by_wallet}</p>
+                  {v.kind === "kyb" && (
+                    <div className="mt-3 border-t border-slate-200 pt-3">
+                      <p className="text-sm">
+                        KYB decision:{" "}
+                        <span className={`font-semibold ${v.status === "verified" ? "text-emerald-700" : v.status === "rejected" ? "text-red-700" : "text-amber-700"}`}>
+                          {v.status === "verified" ? "Approved" : v.status === "rejected" ? "Rejected" : "Pending review"}
+                        </span>
+                        {v.reviewed_at && <span className="ml-2 text-xs text-slate-500">{new Date(v.reviewed_at).toLocaleString("en-GB")}</span>}
+                      </p>
+                      {v.review_note && <p className="mt-1 text-xs text-slate-600">{v.review_note}</p>}
+                      <p className="mt-1 text-xs text-slate-500">Approving KYB lets this wallet submit raise applications. Review the company documents first.</p>
+                      <input value={kybNote} onChange={(e) => setKybNote(e.target.value)} maxLength={1000} placeholder="Note / reason (optional, saved to the dossier)"
+                        className="mt-2 w-full rounded-md border border-slate-300 px-2 py-1 text-xs" aria-label="KYB decision note" />
+                      <div className="mt-2 flex flex-wrap gap-2">
+                        {v.status !== "verified" && <button type="button" disabled={kybBusy} className="rounded-md bg-emerald-600 px-3 py-1 text-xs font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                          onClick={async () => { setKybBusy(true); try { await adminDecideKyb(conn.wallet, id, "verified", kybNote.trim() || undefined); setKybNote(""); toast.show({ kind: "success", title: "KYB approved" }); await refresh(); } catch (e) { toast.show({ kind: "error", title: e instanceof Error ? e.message : "Could not approve KYB" }); } finally { setKybBusy(false); } }}>Approve KYB</button>}
+                        {v.status !== "rejected" && <button type="button" disabled={kybBusy} className="rounded-md border border-red-300 bg-red-50 px-3 py-1 text-xs font-medium text-red-800 hover:bg-red-100 disabled:opacity-50"
+                          onClick={async () => { setKybBusy(true); try { await adminDecideKyb(conn.wallet, id, "rejected", kybNote.trim() || undefined); setKybNote(""); toast.show({ kind: "success", title: "KYB rejected" }); await refresh(); } catch (e) { toast.show({ kind: "error", title: e instanceof Error ? e.message : "Could not reject KYB" }); } finally { setKybBusy(false); } }}>Reject KYB</button>}
+                        {v.status !== "pending" && <button type="button" disabled={kybBusy} className="rounded-md border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+                          onClick={async () => { setKybBusy(true); try { await adminDecideKyb(conn.wallet, id, "pending"); toast.show({ kind: "success", title: "KYB reopened" }); await refresh(); } catch (e) { toast.show({ kind: "error", title: e instanceof Error ? e.message : "Could not reopen KYB" }); } finally { setKybBusy(false); } }}>Reopen</button>}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })}

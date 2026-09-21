@@ -104,7 +104,14 @@ export async function POST(request: Request) {
     // Resolve (or re-issue) the signer's own document-upload link.
     let onboardingPath: string | null = null;
     let onboardingNotice: string | null = null;
-    if (row && UPLOADABLE_STATUSES.has(String(row.kyc_status))) {
+    let openDocuments = false;
+    if (row && String(row.kyc_status) === "verified") {
+      // A KYC-verified dossier can still owe company (KYB) documents.
+      const { data: open } = await sb.from("kyc_requirements").select("id")
+        .eq("client_id", String(row.id)).eq("status", "requested").limit(1);
+      openDocuments = !!open && open.length > 0;
+    }
+    if (row && (UPLOADABLE_STATUSES.has(String(row.kyc_status)) || openDocuments)) {
       let token =
         typeof row.onboarding_token === "string" ? row.onboarding_token : null;
       const createdAt = String(row.created_at);

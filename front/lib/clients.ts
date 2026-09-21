@@ -204,7 +204,23 @@ export type ClientVerificationDetails = {
   representative_role: string | null;
   submitted_by_wallet: string;
   submitted_at: string;
+  status: "pending" | "verified" | "rejected";
+  reviewed_at: string | null;
+  reviewed_by: string | null;
+  review_note: string | null;
 };
+
+/** Admin: approve / reject / reopen a company verification (KYB). */
+export async function adminDecideKyb(
+  session: WalletSession | null | undefined,
+  clientId: string,
+  decision: "verified" | "rejected" | "pending",
+  note?: string,
+): Promise<void> {
+  await signedFetch(session, "/api/clients/kyb-decision", "clients.kybDecision", {
+    client_id: clientId, decision, ...(note ? { note } : {}),
+  });
+}
 
 export type ClientDetail = {
   client: ClientRow;

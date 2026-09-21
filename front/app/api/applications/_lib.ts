@@ -15,7 +15,9 @@ import { SiwsError } from "@/lib/server/siws";
 // original error copy for submit/resubmit.
 export {
   lookupClientKyc,
+  lookupCompanyKyb,
   requireVerifiedClient,
+  requireVerifiedCompany,
   type ClientKycLookup,
 } from "@/lib/server/kyc-gate";
 

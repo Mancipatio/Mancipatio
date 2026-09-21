@@ -75,6 +75,8 @@ export async function ensureClientDossier(
   jurisdiction: number,
   role: "investor" | "issuer" = "investor",
   source = "passport-request",
+  /** Issue an upload link even for a KYC-verified dossier (KYB documents). */
+  forceToken = false,
 ): Promise<{
   client: ClientLite;
   token: string | null;
@@ -191,7 +193,7 @@ export async function ensureClientDossier(
   // Re-issue the magic-link when it is gone and documents may still be needed
   // (a verified client keeps no token — nothing to upload).
   let token = row.onboarding_token;
-  if (!token && row.kyc_status !== "verified") {
+  if (!token && (row.kyc_status !== "verified" || forceToken)) {
     token = randomOnboardingToken();
     patch.onboarding_token = token;
     patch.onboarding_token_expires_at = onboardingTokenExpiry();
@@ -282,3 +284,40 @@ export async function ensureStandardRequirements(
   }
 }
 
+
+/**
+ * Request each listed document that has no open (requested/submitted) row
+ * with the same label yet. Unlike ensureStandardRequirements this runs for a
+ * KYC-verified dossier too (company documents are a separate review) and
+ * never touches a verified dossier's kyc_status. Best-effort — never throws.
+ */
+export async function requestMissingDocuments(
+  sb: SupabaseClient,
+  client: ClientLite,
+  requirements: readonly { doc_kind: string; label: string }[],
+  note: string,
+  requestedBy: string,
+): Promise<void> {
+  if (isTerminalKycStatus(client.kyc_status)) return;
+  const { data: open, error } = await sb.from("kyc_requirements").select("label")
+    .eq("client_id", client.id).in("status", ["requested", "submitted"]);
+  if (error) {
+    console.warn("[kyc-dossier] open requirements check failed:", error.message);
+    return;
+  }
+  const have = new Set((open ?? []).map((r: { label: string }) => r.label));
+  const missing = requirements.filter((r) => !have.has(r.label));
+  if (missing.length === 0) return;
+  const { error: insertErr } = await sb.from("kyc_requirements").insert(missing.map((r) => ({
+    client_id: client.id, doc_kind: r.doc_kind, label: r.label, note, requested_by: requestedBy,
+  })));
+  if (insertErr) {
+    console.warn("[kyc-dossier] requirements insert failed:", insertErr.message);
+    return;
+  }
+  if (client.kyc_status !== "verified") {
+    try { await applyClientStatus(sb, client.id, "more_info"); } catch (err) {
+      console.warn("[kyc-dossier] more_info flip failed:", err);
+    }
+  }
+}

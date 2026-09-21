@@ -14,7 +14,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { clientIpOf, DEGRADED_TTL_MESSAGE, insertNote, rateLimited } from "../../clients/_helpers";
 import {
-  ensureClientDossier, ensureStandardRequirements,
+  ensureClientDossier, ensureStandardRequirements, requestMissingDocuments,
   STANDARD_COMPANY_REQUIREMENTS, STANDARD_INVESTOR_REQUIREMENTS,
 } from "@/lib/server/kyc-dossier";
 
@@ -113,11 +113,13 @@ export async function POST(request: Request) {
     // company's country (KYB); both must be in the approved set.
     const jurisdiction = isKyb ? details.company_country! : residence;
     const { client, token, created, linkUnusable } = await ensureClientDossier(
-      sb, wallet, jurisdiction, isKyb ? "issuer" : "investor", isKyb ? "verification-kyb" : "verification-kyc",
+      sb, wallet, jurisdiction, isKyb ? "issuer" : "investor", isKyb ? "verification-kyb" : "verification-kyc", isKyb,
     );
 
     const { error: detailsErr } = await sb.from("client_verification_details").upsert({
       client_id: client.id, ...details, submitted_by_wallet: wallet, submitted_at: new Date().toISOString(),
+      // New or changed details always go back to review (KYB approval is its own decision).
+      status: "pending", reviewed_at: null, reviewed_by: null, review_note: null,
     }, { onConflict: "client_id,kind" });
     if (detailsErr) {
       console.error("[api/verification/submit] details upsert failed:", detailsErr.code);
@@ -137,9 +139,13 @@ export async function POST(request: Request) {
       if (patchErr) console.warn("[api/verification/submit] dossier patch failed:", patchErr.code);
     }
 
-    await ensureStandardRequirements(sb, client, isKyb ? STANDARD_COMPANY_REQUIREMENTS : STANDARD_INVESTOR_REQUIREMENTS,
-      isKyb ? "Requested with your company (KYB) verification." : "Requested with your identity (KYC) verification.",
-      isKyb ? "system:verification-kyb" : "system:verification-kyc");
+    if (isKyb) {
+      await requestMissingDocuments(sb, client, STANDARD_COMPANY_REQUIREMENTS,
+        "Requested with your company (KYB) verification.", "system:verification-kyb");
+    } else {
+      await ensureStandardRequirements(sb, client, STANDARD_INVESTOR_REQUIREMENTS,
+        "Requested with your identity (KYC) verification.", "system:verification-kyc");
+    }
 
     if (!isKyb) {
       // One undecided passport request per wallet feeds the /admin/kyc queue.

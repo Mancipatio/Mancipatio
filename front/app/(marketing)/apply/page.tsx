@@ -787,21 +787,22 @@ export default function ApplyPage() {
       <>
         <PageHeader
           eyebrow="Application"
-          title={checking ? "Checking your verification…" : !walletAddress ? "Verification required" : inProgress ? "Your verification is in progress" : "Your account is not verified"}
+          title={checking ? "Checking your company verification…" : !walletAddress ? "Company verification required" : inProgress ? "Your company verification is in progress" : status === "rejected" || status === "suspended" ? "Company verification not approved" : "Your company is not verified"}
           lede={
             checking ? "One moment while we check your account." : !walletAddress ? (
-              <>Raising capital on Manci requires a verified account (KYC). Connect your wallet to check your status or start verification.</>
+              <>Raising capital on Manci requires a verified company (KYB). Connect your wallet to check your status or start company verification.</>
             ) : inProgress ? (
-              <>We are reviewing your verification{status === "more_info" ? " and still need some documents" : ""}. Once it is approved you can submit your application here.</>
+              <>We are reviewing your company verification (KYB){status === "more_info" ? " and still need some documents" : ""}. Once it is approved you can submit your application here.</>
+            ) : status === "rejected" || status === "suspended" ? (
+              <>Your company verification was not approved. Please contact the compliance team.</>
             ) : (
-              <>A verified account (KYC) is required for these services. Complete verification first — it takes a few minutes — and then come back to submit your application.</>
+              <>A verified company (KYB) is required to raise on Manci. Verify your company first — it takes a few minutes — and then come back to submit your application.</>
             )
           }
         >
           {!checking && (walletAddress ? (
             <ButtonRow>
-              <Button href={`/verify?type=kyc&next=/apply`}>{inProgress ? "Continue verification" : "Complete KYC"}</Button>
-              <Button variant="ghost" href={`/verify?type=kyb&next=/apply`}>Raising as a company? Verify company (KYB)</Button>
+              {status !== "rejected" && status !== "suspended" && <Button href={`/verify?type=kyb&next=/apply`}>{inProgress ? "Continue company verification" : "Verify your company (KYB)"}</Button>}
               {latestApp ? (
                 <Button variant="ghost" onClick={() => { setStartNew(false); setEditingApp(null); }}>View my existing application</Button>
               ) : null}

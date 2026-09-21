@@ -76,18 +76,26 @@ export async function getAccountVerification(wallet: string, network: Network): 
     id: string; kyc_status: string; kyc_expires_at: string | null; type: string; types: string[] | null;
   };
   const [details, requirements] = await Promise.all([
-    sb.from("client_verification_details").select("kind").eq("client_id", row.id),
+    sb.from("client_verification_details").select("kind,status").eq("client_id", row.id),
     sb.from("kyc_requirements").select("id").eq("client_id", row.id).eq("status", "requested"),
   ]);
   if (details.error || requirements.error) return null;
-  const kinds = new Set((details.data ?? []).map((d: { kind: string }) => d.kind));
+  const byKind = new Map((details.data ?? []).map((d: { kind: string; status: string }) => [d.kind, d.status]));
   const roles = new Set(Array.isArray(row.types) && row.types.length ? row.types : [row.type]);
+  const documentsRequested = (requirements.data ?? []).length;
+  const terminal = row.kyc_status === "suspended" || row.kyc_status === "rejected";
   const expired = row.kyc_status === "verified" && row.kyc_expires_at !== null && Date.parse(row.kyc_expires_at) <= Date.now();
   const status = (expired ? "expired" : (row.kyc_status in KYC_RANK ? row.kyc_status : "pending")) as AccountWalletKycStatus;
+  // KYB has its own review decision; it never inherits the individual KYC verdict.
+  const kybRow = byKind.get("kyb");
+  const kyb: AccountWalletKycStatus = terminal ? (row.kyc_status as AccountWalletKycStatus)
+    : !kybRow ? "none"
+    : kybRow === "verified" ? "verified" : kybRow === "rejected" ? "rejected"
+    : documentsRequested > 0 ? "more_info" : "pending";
   return {
-    kyc: kinds.has("kyc") || roles.has("investor") ? status : "none",
-    kyb: kinds.has("kyb") || roles.has("issuer") ? status : "none",
-    documents_requested: (requirements.data ?? []).length,
+    kyc: byKind.has("kyc") || roles.has("investor") ? status : "none",
+    kyb,
+    documents_requested: documentsRequested,
   };
 }
 

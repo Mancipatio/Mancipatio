@@ -5,7 +5,7 @@ const m = vi.hoisted(() => ({
   params: {} as Record<string, unknown>,
   calls: [] as { table: string; op: string; value?: unknown }[],
   openRequests: [] as unknown[],
-  ensureDossier: vi.fn(), ensureReqs: vi.fn(),
+  ensureDossier: vi.fn(), ensureReqs: vi.fn(), missingDocs: vi.fn(),
 }));
 vi.mock("@/lib/server/siws", async (orig) => ({
   ...(await orig<typeof import("@/lib/server/siws")>()),
@@ -16,7 +16,7 @@ vi.mock("@/app/api/clients/_helpers", () => ({
   clientIpOf: () => "1.1.1.1", rateLimited: () => false, insertNote: vi.fn(), DEGRADED_TTL_MESSAGE: "degraded",
 }));
 vi.mock("@/lib/server/kyc-dossier", () => ({
-  ensureClientDossier: m.ensureDossier, ensureStandardRequirements: m.ensureReqs,
+  ensureClientDossier: m.ensureDossier, ensureStandardRequirements: m.ensureReqs, requestMissingDocuments: m.missingDocs,
   STANDARD_COMPANY_REQUIREMENTS: [{ doc_kind: "incorporation", label: "x" }],
   STANDARD_INVESTOR_REQUIREMENTS: [{ doc_kind: "passport", label: "y" }],
 }));
@@ -55,6 +55,7 @@ beforeEach(() => {
   m.calls.length = 0; m.openRequests = [];
   m.ensureDossier.mockReset().mockResolvedValue({ client: { id: "c1", email: null, kyc_status: "pending" }, token: "tok", created: true, linkUnusable: false });
   m.ensureReqs.mockReset().mockResolvedValue(undefined);
+  m.missingDocs.mockReset().mockResolvedValue(undefined);
 });
 
 describe("/api/verification/submit", () => {
@@ -62,8 +63,8 @@ describe("/api/verification/submit", () => {
     const { status, json } = await call(kyc);
     expect(status).toBe(200);
     expect(json.data.onboarding_path).toBe("/onboarding/c1?t=tok");
-    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), expect.any(String), 688, "investor", "verification-kyc");
-    expect(m.calls.find((c) => c.table === "client_verification_details")?.value).toMatchObject({ kind: "kyc", legal_name: "Ana Anić", company_name: null });
+    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), expect.any(String), 688, "investor", "verification-kyc", false);
+    expect(m.calls.find((c) => c.table === "client_verification_details")?.value).toMatchObject({ kind: "kyc", legal_name: "Ana Anić", company_name: null, status: "pending", reviewed_at: null });
     expect(m.calls.some((c) => c.table === "passport_requests" && c.op === "insert")).toBe(true);
     expect(m.calls.find((c) => c.table === "clients")?.value).toMatchObject({ email: "ana@example.com", display_name: "Ana Anić" });
   });
@@ -71,7 +72,11 @@ describe("/api/verification/submit", () => {
   it("provisions a company (issuer) dossier for KYB without a passport request", async () => {
     const { status } = await call(kyb);
     expect(status).toBe(200);
-    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), expect.any(String), 688, "issuer", "verification-kyb");
+    // KYB always gets an upload link and its own document set, even on a KYC-verified dossier.
+    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), expect.any(String), 688, "issuer", "verification-kyb", true);
+    expect(m.missingDocs).toHaveBeenCalledOnce();
+    expect(m.ensureReqs).not.toHaveBeenCalled();
+    expect(m.calls.find((c) => c.table === "client_verification_details")?.value).toMatchObject({ kind: "kyb", status: "pending" });
     expect(m.calls.some((c) => c.table === "passport_requests")).toBe(false);
   });
 

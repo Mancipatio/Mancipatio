@@ -13,7 +13,7 @@ import { detectNetwork } from "@/lib/network";
 import {
   insertApplicationEvent,
   narrowApplication,
-  requireVerifiedClient,
+  requireVerifiedCompany,
 } from "../_lib";
 
 export async function POST(request: Request) {
@@ -21,7 +21,7 @@ export async function POST(request: Request) {
     const { wallet, params } = await verifySigned(request, "applications.submit");
 
     const sb = getSupabaseAdmin();
-    await requireVerifiedClient(sb, wallet);
+    await requireVerifiedCompany(sb, wallet);
 
     const application = narrowApplication(params.application);
 
