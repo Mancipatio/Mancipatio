@@ -184,11 +184,34 @@ export async function lookupClientByWallet(
   return data.client ?? null;
 }
 
+/** Self-service KYC/KYB intake from /verify (client_verification_details). */
+export type ClientVerificationDetails = {
+  kind: "kyc" | "kyb";
+  legal_name: string;
+  date_of_birth: string | null;
+  nationality: number | null;
+  residence_country: number;
+  address_line: string;
+  city: string;
+  postal_code: string;
+  phone: string | null;
+  email: string | null;
+  company_name: string | null;
+  company_reg_number: string | null;
+  company_country: number | null;
+  company_address: string | null;
+  company_website: string | null;
+  representative_role: string | null;
+  submitted_by_wallet: string;
+  submitted_at: string;
+};
+
 export type ClientDetail = {
   client: ClientRow;
   notes: ClientNote[];
   requirements: KycRequirement[];
   documents: ClientDocument[];
+  verification?: ClientVerificationDetails[];
 };
 
 /**

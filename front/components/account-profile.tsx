@@ -8,6 +8,7 @@ import { useWalletConnection } from "@solana/react-hooks";
 import { WalletRequired } from "@/components/wallet-required";
 import { WalletButton } from "@/app/wallet-button";
 import { AccountWallets } from "@/components/account-wallets";
+import { AccountVerificationCard } from "@/components/account-verification";
 import { AccountWalletLinkFlow } from "@/components/account-wallet-link-flow";
 import { AccountFeedback, useAccountOperation } from "@/components/account-session";
 import { IconArrowUpRight, IconCheck, IconLock, IconUsers, IconWallet } from "@/components/icons";
@@ -233,6 +234,7 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
       {busy && <p className="account-operation-status" role="status">Approve the message in your wallet, then wait for confirmation.</p>}
       <div className="account-grid" aria-busy={busy}>
         <div className="account-main-column">
+          <AccountVerificationCard verification={data.verification} />
           <AccountWallets data={data} operation={operation} onProfile={applyProfile} onStartLink={onStartLink} />
           <section className="account-card" aria-labelledby="account-profile-heading">
             <div className="account-card-heading"><div><p className="account-eyebrow">THE BASICS</p><h2 id="account-profile-heading">Profile details</h2></div><IconUsers size={21} /></div>

@@ -165,3 +165,22 @@
   .account-link-switch { padding:15px; }
   .account-wallet-confirm .account-button { width:100%; }
 }
+.verification-rows { display:flex; flex-direction:column; gap:12px; }
+.verification-row { display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; align-items:center; gap:14px; padding:15px; border:1px solid #e7ede3; border-radius:9px; background:#fbfcf9; }
+.verification-row .account-feature-icon { margin:0; }
+.verification-row-text strong { display:block; color:#25432f; font-size:13px; font-weight:550; }
+.verification-row-text p { color:#677767; font-size:12px; line-height:1.6; margin-top:3px; }
+.verify-page { max-width:860px; }
+.verify-kinds { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-bottom:22px; }
+.verify-kind { text-align:left; padding:16px; border:1px solid #dfe6da; border-radius:9px; background:#fff; cursor:pointer; }
+.verify-kind strong { display:block; color:#25432f; font-size:14px; font-weight:550; margin-top:8px; }
+.verify-kind span { color:#6d7b6b; font-size:12px; line-height:1.6; }
+.verify-kind[aria-pressed="true"] { border-color:#234d38; box-shadow:0 0 0 1px #234d38; background:#f5f9f2; }
+.verify-grid { display:grid; grid-template-columns:1fr 1fr; gap:16px 18px; }
+.verify-grid .verify-wide { grid-column:1/-1; }
+.verify-field { display:flex; flex-direction:column; }
+.account-form select { width:100%; min-height:44px; padding:10px 12px; border:1px solid #d9e2d3; border-radius:6px; background:#fdfefb; color:#243e2c; font:inherit; font-size:14px; }
+.verify-section-title { color:#35543d; font-size:12px; letter-spacing:1.4px; font-weight:550; margin:22px 0 12px; }
+.verify-consent { display:flex !important; gap:10px; align-items:flex-start !important; font-weight:400 !important; color:#556553 !important; line-height:1.7; margin-top:18px; }
+.verify-consent input { width:auto !important; min-height:0 !important; margin-top:4px; }
+@media(max-width:760px) { .verification-row { grid-template-columns:auto minmax(0,1fr); } .verification-row .account-status,.verification-row .account-button { grid-column:2; justify-self:start; } .verify-kinds,.verify-grid { grid-template-columns:1fr; } }

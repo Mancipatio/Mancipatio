@@ -1,7 +1,7 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
-import type { AccountFeatures, AccountProfile, AccountWalletKyc, AccountWalletKycStatus } from "@/lib/account";
+import type { AccountFeatures, AccountProfile, AccountVerification, AccountWalletKyc, AccountWalletKycStatus } from "@/lib/account";
 import type { Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { SiwsError } from "@/lib/server/siws";
@@ -65,12 +65,40 @@ export async function getAccountWalletKyc(wallets: string[], network: Network): 
   });
 }
 
+/** KYC (individual) and KYB (company) state of the connected wallet's dossier. */
+export async function getAccountVerification(wallet: string, network: Network): Promise<AccountVerification | null> {
+  const sb = getSupabaseAdmin();
+  const { data: rows, error } = await sb.from("clients")
+    .select("id,kyc_status,kyc_expires_at,type,types").eq("network", network).eq("wallet", wallet);
+  if (error || !Array.isArray(rows)) return null;
+  if (rows.length === 0) return { kyc: "none", kyb: "none", documents_requested: 0 };
+  const row = [...rows].sort((a, b) => (KYC_RANK[b.kyc_status] ?? 0) - (KYC_RANK[a.kyc_status] ?? 0))[0] as {
+    id: string; kyc_status: string; kyc_expires_at: string | null; type: string; types: string[] | null;
+  };
+  const [details, requirements] = await Promise.all([
+    sb.from("client_verification_details").select("kind").eq("client_id", row.id),
+    sb.from("kyc_requirements").select("id").eq("client_id", row.id).eq("status", "requested"),
+  ]);
+  if (details.error || requirements.error) return null;
+  const kinds = new Set((details.data ?? []).map((d: { kind: string }) => d.kind));
+  const roles = new Set(Array.isArray(row.types) && row.types.length ? row.types : [row.type]);
+  const expired = row.kyc_status === "verified" && row.kyc_expires_at !== null && Date.parse(row.kyc_expires_at) <= Date.now();
+  const status = (expired ? "expired" : (row.kyc_status in KYC_RANK ? row.kyc_status : "pending")) as AccountWalletKycStatus;
+  return {
+    kyc: kinds.has("kyc") || roles.has("investor") ? status : "none",
+    kyb: kinds.has("kyb") || roles.has("issuer") ? status : "none",
+    documents_requested: (requirements.data ?? []).length,
+  };
+}
+
 export async function accountResponse(wallet: string, network: Network): Promise<NextResponse> {
   const profile = await getAccountProfile(wallet, network);
   let kyc: AccountWalletKyc[] | null = null;
+  let verification: AccountVerification | null = null;
   try { kyc = await getAccountWalletKyc(profile.wallets.map((entry) => entry.wallet), network); } catch { kyc = null; }
+  try { verification = await getAccountVerification(wallet, network); } catch { verification = null; }
   return NextResponse.json({ ok: true, data: {
-    profile, features: accountFeatures(), kyc,
+    profile, features: accountFeatures(), kyc, verification,
   } }, { headers: { "Cache-Control": "no-store" } });
 }
 

@@ -34,7 +34,7 @@ export async function POST(request: Request) {
     if (clientErr) throw new SiwsError(500, "Client lookup failed");
     if (!client) throw new SiwsError(404, "Client not found");
 
-    const [notesRes, reqRes, docsRes] = await Promise.all([
+    const [notesRes, reqRes, docsRes, verificationRes] = await Promise.all([
       sb
         .from("client_notes")
         .select("*")
@@ -50,8 +50,13 @@ export async function POST(request: Request) {
         .select("*")
         .eq("client_id", id)
         .order("created_at", { ascending: false }),
+      sb
+        .from("client_verification_details")
+        .select("*")
+        .eq("client_id", id)
+        .order("kind", { ascending: true }),
     ]);
-    if (notesRes.error || reqRes.error || docsRes.error) {
+    if (notesRes.error || reqRes.error || docsRes.error || verificationRes.error) {
       throw new SiwsError(500, "Could not load the client record");
     }
 
@@ -62,6 +67,7 @@ export async function POST(request: Request) {
         notes: notesRes.data ?? [],
         requirements: reqRes.data ?? [],
         documents: docsRes.data ?? [],
+        verification: verificationRes.data ?? [],
       },
     });
   } catch (err) {

@@ -3,7 +3,7 @@
 import { WALLET_CONNECT_LABEL, WALLET_CONNECT_DESCRIPTION } from "@/lib/wallet-copy";
 
 import Link from "next/link";
-import { use, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, use, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { type Address } from "@solana/kit";
 import type { WalletSession } from "@solana/client";
 import {
@@ -28,6 +28,7 @@ import {
   KYC_DOC_KINDS,
   KYC_VALIDITY_DAYS,
   type ClientDocument,
+  type ClientVerificationDetails,
   type ClientKycStatus,
   type ClientNote,
   type ClientRow,
@@ -133,6 +134,7 @@ function ClientDetail({ id }: { id: string }) {
   const [notes, setNotes] = useState<ClientNote[]>([]);
   const [requirements, setRequirements] = useState<KycRequirement[]>([]);
   const [documents, setDocuments] = useState<ClientDocument[]>([]);
+  const [verification, setVerification] = useState<ClientVerificationDetails[]>([]);
   const [noteBody, setNoteBody] = useState("");
   const [confirm, setConfirm] = useState<
     null | "approve" | "reject" | "suspend"
@@ -176,6 +178,7 @@ function ClientDetail({ id }: { id: string }) {
       setNotes(detail.notes);
       setRequirements(detail.requirements);
       setDocuments(detail.documents);
+      setVerification(detail.verification ?? []);
     } catch (err) {
       console.warn("[admin/clients] detail load failed:", err);
     }
@@ -1182,6 +1185,44 @@ function ClientDetail({ id }: { id: string }) {
           </dl>
         )}
       </section>
+
+      {/* Self-service verification details (/verify) */}
+      {verification.length > 0 && (
+        <section className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-card">
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
+            Submitted verification details
+          </p>
+          <div className="mt-4 grid gap-4 md:grid-cols-2">
+            {verification.map((v) => {
+              const pad = (n: number | null) => (n == null ? null : String(n).padStart(3, "0"));
+              const rows: [string, string | null][] = v.kind === "kyb"
+                ? [["Company", v.company_name], ["Registration no.", v.company_reg_number], ["Country", countryName(pad(v.company_country))],
+                   ["Registered address", v.company_address], ["Website", v.company_website], ["Representative", `${v.legal_name}${v.representative_role ? ` · ${v.representative_role}` : ""}`],
+                   ["Representative residence", countryName(pad(v.residence_country))], ["Representative address", `${v.address_line}, ${v.postal_code} ${v.city}`],
+                   ["Email", v.email], ["Phone", v.phone]]
+                : [["Legal name", v.legal_name], ["Date of birth", v.date_of_birth], ["Nationality", countryName(pad(v.nationality))],
+                   ["Residence", countryName(pad(v.residence_country))], ["Address", `${v.address_line}, ${v.postal_code} ${v.city}`],
+                   ["Email", v.email], ["Phone", v.phone]];
+              return (
+                <div key={v.kind} className="rounded-lg border border-slate-200 bg-slate-50 px-4 py-3">
+                  <p className="text-sm font-semibold text-slate-900">
+                    {v.kind === "kyb" ? "Company (KYB)" : "Individual (KYC)"}
+                    <span className="ml-2 text-xs font-normal text-slate-500">
+                      submitted {new Date(v.submitted_at).toLocaleString("en-GB")}
+                    </span>
+                  </p>
+                  <dl className="mt-2 grid grid-cols-[150px_1fr] gap-x-3 gap-y-1 text-sm">
+                    {rows.filter(([, value]) => value).map(([label, value]) => (
+                      <Fragment key={label}><dt className="text-slate-500">{label}</dt><dd className="break-words text-slate-800">{value}</dd></Fragment>
+                    ))}
+                  </dl>
+                  <p className="mt-2 break-all font-mono text-[11px] text-slate-400">by {v.submitted_by_wallet}</p>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
 
       {/* KYC Documents & Requirements */}
       <section className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-card">

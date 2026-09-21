@@ -779,51 +779,39 @@ export default function ApplyPage() {
   // client profile. Existing-application status panels above stay reachable.
   // eligibility === null (check unavailable) fails open — the signed submit
   // route enforces the gate authoritatively either way.
-  if (walletAddress && eligibility && !eligibility.eligible) {
+  if (!walletAddress || (eligibilityLoading && !eligibility) || (eligibility && !eligibility.eligible)) {
+    const checking = !!walletAddress && eligibilityLoading && !eligibility;
+    const status = eligibility?.kycStatus ?? null;
+    const inProgress = status === "pending" || status === "more_info";
     return (
       <>
         <PageHeader
           eyebrow="Application"
-          title="Onboarding & KYC required"
+          title={checking ? "Checking your verification…" : !walletAddress ? "Verification required" : inProgress ? "Your verification is in progress" : "Your account is not verified"}
           lede={
-            !eligibility.hasClient ? (
-              <>
-                Applying to raise on Manci requires an onboarded client
-                profile with verified KYC. Your connected wallet isn&apos;t
-                linked to a client profile yet — please{" "}
-                <TextLink href={MX_ROUTES.contact}>contact us</TextLink> to get
-                onboarded. Once your KYC is verified, come back here to submit
-                your application.
-              </>
+            checking ? "One moment while we check your account." : !walletAddress ? (
+              <>Raising capital on Manci requires a verified account (KYC). Connect your wallet to check your status or start verification.</>
+            ) : inProgress ? (
+              <>We are reviewing your verification{status === "more_info" ? " and still need some documents" : ""}. Once it is approved you can submit your application here.</>
             ) : (
-              <>
-                Your client profile isn&apos;t KYC-verified yet (current status:{" "}
-                <span className="font-mono text-[0.9em] text-mx-ink">
-                  {eligibility.kycStatus ?? "unknown"}
-                </span>
-                ). Complete onboarding via the link you received, or{" "}
-                <TextLink href={MX_ROUTES.contact}>contact us</TextLink> if you
-                need help. Once verified, you can submit your application here.
-              </>
+              <>A verified account (KYC) is required for these services. Complete verification first — it takes a few minutes — and then come back to submit your application.</>
             )
           }
         >
-          <FootNote className="mt-5">
-            Connected wallet:{" "}
-            <span className="font-mono break-all">{walletAddress}</span>
-          </FootNote>
-          {latestApp ? (
+          {!checking && (walletAddress ? (
             <ButtonRow>
-              <Button
-                variant="ghost"
-                onClick={() => {
-                  setStartNew(false);
-                  setEditingApp(null);
-                }}
-              >
-                View my existing application
-              </Button>
+              <Button href={`/verify?type=kyc&next=/apply`}>{inProgress ? "Continue verification" : "Complete KYC"}</Button>
+              <Button variant="ghost" href={`/verify?type=kyb&next=/apply`}>Raising as a company? Verify company (KYB)</Button>
+              {latestApp ? (
+                <Button variant="ghost" onClick={() => { setStartNew(false); setEditingApp(null); }}>View my existing application</Button>
+              ) : null}
             </ButtonRow>
+          ) : <WalletRequired className="mt-6" />)}
+          {walletAddress && !checking ? (
+            <FootNote className="mt-5">
+              Connected wallet: <span className="font-mono break-all">{walletAddress}</span>
+              {status ? <> · status: <span className="font-mono">{status}</span></> : null}
+            </FootNote>
           ) : null}
         </PageHeader>
       </>

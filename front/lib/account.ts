@@ -46,9 +46,18 @@ export type AccountWalletKycStatus =
   | "none" | "pending" | "more_info" | "verified" | "expired" | "suspended" | "rejected";
 export type AccountWalletKyc = { wallet: string; status: AccountWalletKycStatus; expires_at: string | null };
 
+/** Verification state of the connected wallet's dossier (one dossier per wallet). */
+export type AccountVerification = {
+  kyc: AccountWalletKycStatus;
+  kyb: AccountWalletKycStatus;
+  /** Documents still requested from the applicant. */
+  documents_requested: number;
+};
+
 export type AccountResponse = {
   profile: AccountProfile;
   features: AccountFeatures;
   /** Null when the dossier directory could not be read; the profile still loads. */
   kyc?: AccountWalletKyc[] | null;
+  verification?: AccountVerification | null;
 };
