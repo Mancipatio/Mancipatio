@@ -39,4 +39,16 @@ export type AccountTransactionWallet = {
 };
 
 export type AccountFeatures = { google: boolean; email: boolean };
-export type AccountResponse = { profile: AccountProfile; features: AccountFeatures };
+
+/** Off-chain KYC dossier status of one linked wallet. KYC stays per wallet:
+ * linking a wallet never shares or transfers a passport. */
+export type AccountWalletKycStatus =
+  | "none" | "pending" | "more_info" | "verified" | "expired" | "suspended" | "rejected";
+export type AccountWalletKyc = { wallet: string; status: AccountWalletKycStatus; expires_at: string | null };
+
+export type AccountResponse = {
+  profile: AccountProfile;
+  features: AccountFeatures;
+  /** Null when the dossier directory could not be read; the profile still loads. */
+  kyc?: AccountWalletKyc[] | null;
+};

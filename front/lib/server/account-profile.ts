@@ -1,11 +1,11 @@
 import "server-only";
 import { createHash, randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
-import type { AccountFeatures, AccountProfile } from "@/lib/account";
+import type { AccountFeatures, AccountProfile, AccountWalletKyc, AccountWalletKycStatus } from "@/lib/account";
 import type { Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { SiwsError } from "@/lib/server/siws";
-import { sendEmail, escapeHtml } from "@/lib/server/email";
+import { sendEmail, escapeHtml, emailConfigured } from "@/lib/server/email";
 import { accountSiteOrigin } from "@/lib/server/account-origin";
 
 const PROFILE_FIELDS = [
@@ -16,7 +16,7 @@ const PROFILE_FIELDS = [
 export function accountFeatures(): AccountFeatures {
   return {
     google: Boolean(process.env.GOOGLE_CLIENT_ID?.trim() && process.env.GOOGLE_CLIENT_SECRET?.trim()),
-    email: Boolean(process.env.RESEND_API_KEY?.trim() && process.env.EMAIL_FROM?.trim()),
+    email: emailConfigured(),
   };
 }
 
@@ -41,9 +41,36 @@ export async function getAccountProfile(wallet: string, network: Network): Promi
   return projectAccountProfile(data as Record<string, unknown>);
 }
 
+// Higher rank wins when a wallet has several dossiers: a terminal status must
+// never be masked by an older active row.
+const KYC_RANK: Record<string, number> = { suspended: 5, rejected: 4, verified: 3, more_info: 2, pending: 1 };
+
+/** Per-wallet dossier status for the account's own wallets. Read-only; a
+ * failure degrades to null instead of hiding the profile. */
+export async function getAccountWalletKyc(wallets: string[], network: Network): Promise<AccountWalletKyc[] | null> {
+  if (wallets.length === 0) return [];
+  const { data, error } = await getSupabaseAdmin().from("clients")
+    .select("wallet,kyc_status,kyc_expires_at").eq("network", network).in("wallet", wallets);
+  if (error || !Array.isArray(data)) return null;
+  const now = Date.now();
+  return wallets.map((wallet) => {
+    let best: { kyc_status: string; kyc_expires_at: string | null } | null = null;
+    for (const row of data as { wallet: string; kyc_status: string; kyc_expires_at: string | null }[]) {
+      if (row.wallet !== wallet || !(row.kyc_status in KYC_RANK)) continue;
+      if (!best || KYC_RANK[row.kyc_status] > KYC_RANK[best.kyc_status]) best = row;
+    }
+    if (!best) return { wallet, status: "none", expires_at: null };
+    const expired = best.kyc_status === "verified" && best.kyc_expires_at !== null && Date.parse(best.kyc_expires_at) <= now;
+    return { wallet, status: (expired ? "expired" : best.kyc_status) as AccountWalletKycStatus, expires_at: best.kyc_expires_at };
+  });
+}
+
 export async function accountResponse(wallet: string, network: Network): Promise<NextResponse> {
+  const profile = await getAccountProfile(wallet, network);
+  let kyc: AccountWalletKyc[] | null = null;
+  try { kyc = await getAccountWalletKyc(profile.wallets.map((entry) => entry.wallet), network); } catch { kyc = null; }
   return NextResponse.json({ ok: true, data: {
-    profile: await getAccountProfile(wallet, network), features: accountFeatures(),
+    profile, features: accountFeatures(), kyc,
   } }, { headers: { "Cache-Control": "no-store" } });
 }
 

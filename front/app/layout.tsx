@@ -19,7 +19,7 @@ const geistMono = Geist_Mono({
 
 export const metadata: Metadata = {
   metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL || "https://mancipatio.io",
+    process.env.NEXT_PUBLIC_SITE_URL || "https://www.manci.io",
   ),
   title: "Manci — on-chain tokenization",
   description:

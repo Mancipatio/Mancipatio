@@ -380,7 +380,7 @@ function AddClientModal({
 
   const inviteLink =
     createdToken && createdId
-      ? `${typeof window !== "undefined" ? window.location.origin : "https://mancipatio.io"}/onboarding/${createdId}?t=${createdToken}`
+      ? `${typeof window !== "undefined" ? window.location.origin : "https://www.manci.io"}/onboarding/${createdId}?t=${createdToken}`
       : null;
   // After-create success view shows up either when we have an invite link
   // (no wallet supplied) or a pre-linked wallet (skipping the magic-link).

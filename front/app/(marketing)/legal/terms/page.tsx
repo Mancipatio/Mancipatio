@@ -60,7 +60,7 @@ export default function TermsPage() {
         <Clause title="1. Acceptance" first>
           <Body>
             By connecting a wallet or registering an issuer entity on
-            mancipatio.io (&quot;Manci&quot;, &quot;Service&quot;), you
+            manci.io (&quot;Manci&quot;, &quot;Service&quot;), you
             agree to these Terms. If you don&apos;t agree, do not connect or
             register.
           </Body>

@@ -10,7 +10,8 @@ const mocks = vi.hoisted(() => ({
   row: {} as Record<string, unknown>,
 }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ rpc: mocks.rpc, from: mocks.from }) }));
-vi.mock("@/lib/server/email", () => ({ sendEmail: mocks.sendEmail, escapeHtml: (value: string) => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;") }));
+vi.mock("@/lib/server/email", () => ({ sendEmail: mocks.sendEmail,
+  emailConfigured: () => Boolean(process.env.RESEND_API_KEY?.trim() && process.env.EMAIL_FROM?.trim()), escapeHtml: (value: string) => value.replaceAll("&", "&amp;").replaceAll('"', "&quot;") }));
 
 import {
   accountResponse, accountErrorResponse, consumeAccountRateLimit,
@@ -123,7 +124,8 @@ describe("private account API", () => {
     expect(json.data.features).toEqual({ google: true, email: true });
     expect(JSON.stringify(json)).not.toMatch(/private-provider-subject|private-token-hash|kyc_status|CRM/);
     expect(mocks.rpc).toHaveBeenCalledWith("ensure_account_profile", { p_wallet: wallet, p_network: "devnet" });
-    expect(mocks.from).not.toHaveBeenCalled();
+    // Only the read-only per-wallet KYC status lookup may touch a table directly.
+    expect(mocks.from.mock.calls.every(([table]) => table === "clients")).toBe(true);
     expect(json.data.profile.wallets[0]).not.toHaveProperty("private_note");
   });
 
@@ -329,7 +331,8 @@ describe("two-wallet link API", () => {
     expect(mocks.rpc).toHaveBeenCalledWith("mutate_account_profile", { p_wallet: wallet, p_network: "devnet", p_account_id: mocks.row.id, p_action: "wallets.primary", p_params: { wallet: other } });
     expect((await removeWallet(request(envelope("account.wallets.remove", { wallet: other })))).status).toBe(200);
     expect(mocks.rpc).toHaveBeenCalledWith("mutate_account_profile", { p_wallet: wallet, p_network: "devnet", p_account_id: mocks.row.id, p_action: "wallets.remove", p_params: { wallet: other } });
-    expect(mocks.from).not.toHaveBeenCalled();
+    // Only the read-only per-wallet KYC status lookup may touch a table directly.
+    expect(mocks.from.mock.calls.every(([table]) => table === "clients")).toBe(true);
   });
 
   it("transaction intent returns only the acting/primary wallet and account identity", async () => {
@@ -351,5 +354,31 @@ describe("two-wallet link API", () => {
   it("rejects a profile response that lacks the acting wallet membership", async () => {
     mocks.row.wallets = [{ wallet: other, linked_at: "2026-09-20T10:00:00Z" }];
     expect((await readAccount(request())).status).toBe(503);
+  });
+});
+
+describe("per-wallet KYC status", () => {
+  it("reports dossier status per linked wallet, terminal rows win and expiry is derived", async () => {
+    const { getAccountWalletKyc } = await import("@/lib/server/account-profile");
+    const other = "So11111111111111111111111111111111111111112";
+    const rows = [
+      { wallet, kyc_status: "pending", kyc_expires_at: null },
+      { wallet, kyc_status: "suspended", kyc_expires_at: null },
+      { wallet: other, kyc_status: "verified", kyc_expires_at: "2000-01-01T00:00:00Z" },
+    ];
+    const chain = { select: () => chain, eq: () => chain, in: () => Promise.resolve({ data: rows, error: null }) };
+    mocks.from.mockReturnValue(chain);
+    expect(await getAccountWalletKyc([wallet, other, "Third1111111111111111111111111111"], "devnet")).toEqual([
+      { wallet, status: "suspended", expires_at: null },
+      { wallet: other, status: "expired", expires_at: "2000-01-01T00:00:00Z" },
+      { wallet: "Third1111111111111111111111111111", status: "none", expires_at: null },
+    ]);
+  });
+
+  it("degrades to null when the dossier directory cannot be read", async () => {
+    const { getAccountWalletKyc } = await import("@/lib/server/account-profile");
+    const chain = { select: () => chain, eq: () => chain, in: () => Promise.resolve({ data: null, error: { code: "x" } }) };
+    mocks.from.mockReturnValue(chain);
+    expect(await getAccountWalletKyc([wallet], "devnet")).toBeNull();
   });
 });

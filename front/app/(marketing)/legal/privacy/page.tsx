@@ -27,7 +27,7 @@ export default function PrivacyPage() {
             Manci (&quot;we&quot;, &quot;us&quot;, &quot;the platform&quot;) operates a tokenization
             and custody infrastructure for real-world assets and investments on
             Solana. This Privacy Policy describes how we collect, use and
-            protect personal data when you visit mancipatio.io or use the
+            protect personal data when you visit manci.io or use the
             issuer / investor consoles.
           </p>
           <p>

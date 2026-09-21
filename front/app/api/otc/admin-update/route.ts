@@ -11,7 +11,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
-import { sendEmail } from "@/lib/server/email";
+import { sendEmail, escapeHtml } from "@/lib/server/email";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
@@ -169,7 +169,7 @@ async function notifyDealCreated(
         subject,
         html:
           `<p>${body}</p>` +
-          `<p><a href="https://mancipatio.io/portfolio/deals">Open your deals</a></p>`,
+          `<p><a href="${escapeHtml(new URL("/portfolio/deals", process.env.NEXT_PUBLIC_SITE_URL || "https://www.manci.io").toString())}">Open your deals</a></p>`,
       });
       emailSent = res.sent;
       providerRef = res.id ?? null;

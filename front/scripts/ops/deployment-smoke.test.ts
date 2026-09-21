@@ -6,7 +6,7 @@ import { siwsMessage, type SiwsPayload } from "@/lib/siws-client";
 
 // No existing wallet or Solana asset mutation is used. The worker may update
 // verified DB records. This key lives only in memory and has no funds/roles.
-const origin = "https://www.mancipatio.io";
+const origin = process.env.SMOKE_ORIGIN ?? "https://www.manci.io";
 const ephemeral = generateKeyPairSync("ed25519");
 const wallet = getAddressDecoder().decode(
   ephemeral.publicKey.export({ format: "der", type: "spki" }).subarray(-32),

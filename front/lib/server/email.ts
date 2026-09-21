@@ -1,14 +1,61 @@
-// SERVER-ONLY — outbound email via the Resend REST API (plain fetch, no SDK).
+// SERVER-ONLY — outbound email over SMTP (preferred) or the Resend REST API.
 //
-// Graceful no-op: if RESEND_API_KEY is unset, logs and returns { sent: false }
+// Graceful no-op: if no transport is configured, logs and returns { sent: false }
 // — callers decide whether delivery is optional. Verification flows must check
 // `sent` before reporting success. This function does not throw.
 //
 // Env:
-//   RESEND_API_KEY  — required to actually send
-//   EMAIL_FROM      — optional sender, defaults to Resend's onboarding sender
+//   SMTP_HOST, SMTP_USER, SMTP_PASS — SMTP transport (used when all three are set)
+//   SMTP_PORT       — optional, defaults to 465 (implicit TLS); 587 uses STARTTLS
+//   RESEND_API_KEY  — fallback transport when SMTP is not configured
+//   EMAIL_FROM      — sender; required for SMTP, optional for Resend
 
 import "server-only";
+import nodemailer from "nodemailer";
+
+type SmtpConfig = { host: string; port: number; user: string; pass: string };
+
+function smtpConfig(): SmtpConfig | null {
+  const host = process.env.SMTP_HOST?.trim();
+  const user = process.env.SMTP_USER?.trim();
+  const pass = process.env.SMTP_PASS;
+  if (!host || !user || !pass) return null;
+  const port = Number(process.env.SMTP_PORT?.trim() || 465);
+  return { host, user, pass, port: Number.isInteger(port) && port > 0 ? port : 465 };
+}
+
+/** True when a transport and sender are configured, so delivery can succeed. */
+export function emailConfigured(): boolean {
+  const from = Boolean(process.env.EMAIL_FROM?.trim());
+  if (smtpConfig()) return from;
+  return Boolean(process.env.RESEND_API_KEY?.trim()) && from;
+}
+
+async function sendSmtp(config: SmtpConfig, input: SendEmailInput): Promise<SendEmailResult> {
+  const from = input.from ?? process.env.EMAIL_FROM?.trim();
+  if (!from) {
+    console.warn(`[email] EMAIL_FROM not set — skipping email "${input.subject}"`);
+    return { sent: false, error: "EMAIL_FROM not configured" };
+  }
+  try {
+    const transport = nodemailer.createTransport({
+      host: config.host, port: config.port, secure: config.port === 465,
+      requireTLS: config.port !== 465,
+      auth: { user: config.user, pass: config.pass },
+      connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 15_000,
+    });
+    const info = await transport.sendMail({
+      from, to: input.to, subject: input.subject, html: input.html,
+    });
+    return { sent: true, id: info.messageId };
+  } catch (err) {
+    const code = (err as { responseCode?: number; code?: string })?.responseCode ??
+      (err as { code?: string })?.code ?? "unknown";
+    // SMTP errors can echo recipients; keep logs to the status code.
+    console.error(`[email] SMTP failure sending "${input.subject}" — ${code}`);
+    return { sent: false, error: input.redactErrors ? "Delivery failed" : `SMTP ${code}` };
+  }
+}
 
 /** Escape user-supplied text for interpolation into email HTML. */
 export function escapeHtml(s: string): string {
@@ -41,15 +88,17 @@ export type SendEmailResult = {
  * Send a transactional email. Best-effort: never throws.
  *
  * @returns { sent: true, id } on success; { sent: false, error } otherwise
- *          (including when RESEND_API_KEY is not configured).
+ *          (including when no transport is configured).
  */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
+  const smtp = smtpConfig();
+  if (smtp) return sendSmtp(smtp, input);
   const apiKey = process.env.RESEND_API_KEY;
   if (!apiKey) {
     console.warn(
-      `[email] RESEND_API_KEY not set — skipping email "${input.subject}"`,
+      `[email] no SMTP or RESEND_API_KEY configured — skipping email "${input.subject}"`,
     );
-    return { sent: false, error: "RESEND_API_KEY not configured" };
+    return { sent: false, error: "Email transport not configured" };
   }
 
   const from =

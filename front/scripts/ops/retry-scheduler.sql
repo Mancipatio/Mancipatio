@@ -85,7 +85,7 @@ begin
       -- http 1.6's legacy setting can override curl's timeout; pin both.
       perform pg_catalog.set_config('http.timeout_msec','55000',true);
       select * into result from extensions.http((
-        'POST','https://www.mancipatio.io/api/internal/retry?limit=10',
+        'POST','https://www.manci.io/api/internal/retry?limit=10',
         array[('Authorization','Bearer '||worker_secret)::extensions.http_header],
         'application/json','{}'
       )::extensions.http_request);

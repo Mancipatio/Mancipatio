@@ -24,7 +24,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("private synchrono
       create function extensions.http_reset_curlopt() returns boolean language plpgsql as $$ begin delete from extensions.curl_options;return true;end;$$;
       create function extensions.http_set_curlopt(n text,v text) returns boolean language plpgsql as $$ begin insert into extensions.curl_options values(n,v);return true;end;$$;
       create function extensions.http(r extensions.http_request) returns extensions.http_response language plpgsql as $$ declare m record;begin
-        if r.uri<>'https://www.mancipatio.io/api/internal/retry?limit=10' or r.method<>'POST'
+        if r.uri<>'https://www.manci.io/api/internal/retry?limit=10' or r.method<>'POST'
           or r.content_type<>'application/json' or r.content<>'{}'
           or (r.headers[1]).field<>'Authorization' or (r.headers[1]).value<>'Bearer '||repeat('x',64) then raise exception 'Unexpected request';end if;
         update extensions.mock_response set last_options=(select jsonb_object_agg(name,value) from extensions.curl_options);

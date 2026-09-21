@@ -79,7 +79,7 @@ export default async function OG() {
           >
             DEVNET
           </div>
-          <div>mancipatio.io</div>
+          <div>manci.io</div>
         </div>
       </div>
     ),
