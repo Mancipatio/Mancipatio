@@ -16,6 +16,7 @@
 
 import type { WalletSession } from "@solana/client";
 import { detectNetwork, type Network } from "@/lib/network";
+import { isSessionReadAction, SESSION_TTL_MS } from "@/lib/siws-session";
 
 /** Prefix prepended to the canonical JSON before signing. */
 export const SIWS_MESSAGE_PREFIX = "mancipatio:v2:";
@@ -127,7 +128,98 @@ export async function createSignedRequest(
   };
 }
 
-/** Sign and POST to a same-origin API; mutations still need semantic idempotency. */
+// ── Wallet session (read-only requests) ──────────────────────────────────────
+// One signature ("auth.session") sets an httpOnly cookie; read-only actions
+// then skip the wallet prompt. The browser only remembers WHICH wallet the
+// cookie belongs to and until when — the server re-verifies every request.
+
+const SESSION_HINT_KEY = "manci:wallet-session:v1";
+let sessionHint: { wallet: string; network: string; origin: string; exp: number } | null = null;
+let sessionInFlight: { wallet: string; promise: Promise<boolean> } | null = null;
+
+function loadHint() {
+  if (sessionHint) return sessionHint;
+  try {
+    const raw = window.localStorage.getItem(SESSION_HINT_KEY);
+    if (raw) sessionHint = JSON.parse(raw);
+  } catch { sessionHint = null; }
+  return sessionHint;
+}
+
+function saveHint(hint: typeof sessionHint) {
+  sessionHint = hint;
+  try {
+    if (hint) window.localStorage.setItem(SESSION_HINT_KEY, JSON.stringify(hint));
+    else window.localStorage.removeItem(SESSION_HINT_KEY);
+  } catch { /* storage may be blocked; the in-memory hint still works */ }
+}
+
+function hasSession(wallet: string): boolean {
+  const hint = loadHint();
+  return !!hint && hint.wallet === wallet && hint.network === detectNetwork() &&
+    hint.origin === window.location.origin && hint.exp > Date.now() + 60_000;
+}
+
+/** Forget the session (wallet disconnect or switch). Best-effort cookie clear. */
+export function clearWalletSession() {
+  saveHint(null);
+  if (typeof window !== "undefined") void fetch("/api/auth/session", { method: "DELETE", cache: "no-store" }).catch(() => {});
+}
+
+async function startSession(session: WalletSession): Promise<boolean> {
+  const wallet = session.account.address.toString();
+  if (sessionInFlight?.wallet === wallet) return sessionInFlight.promise;
+  const promise = (async () => {
+    try {
+      const body = await createSignedRequest(session, "auth.session", {});
+      const res = await fetch("/api/auth/session", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body), cache: "no-store",
+      });
+      const json = (await res.json().catch(() => null)) as { ok?: boolean; data?: { expires_at?: string } } | null;
+      if (!res.ok || json?.ok !== true) return false;
+      const exp = Date.parse(json.data?.expires_at ?? "");
+      saveHint({ wallet, network: detectNetwork(), origin: window.location.origin,
+        exp: Number.isFinite(exp) ? exp : Date.now() + SESSION_TTL_MS });
+      return true;
+    } finally {
+      sessionInFlight = null;
+    }
+  })();
+  sessionInFlight = { wallet, promise };
+  return promise;
+}
+
+async function postEnvelope<T>(path: string, body: unknown): Promise<{ status: number; ok: boolean; data?: T; error?: string }> {
+  const res = await fetch(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  type Envelope = { ok?: boolean; data?: unknown; error?: string };
+  let json: Envelope | null = null;
+  try {
+    json = (await res.json()) as Envelope;
+  } catch {
+    // A proxy can return a non-JSON error response.
+  }
+  if (!res.ok || !json || json.ok !== true) {
+    return { status: res.status, ok: false, error: json?.error ?? `Request failed (${res.status} ${res.statusText})` };
+  }
+  return { status: res.status, ok: true, data: json.data as T };
+}
+
+function unsignedPayload(session: WalletSession, action: string, params: Record<string, unknown>): SiwsPayload {
+  return {
+    v: 2, origin: window.location.origin, network: detectNetwork(), action,
+    wallet: session.account.address.toString(), ts: new Date().toISOString(),
+    nonce: crypto.randomUUID(), params,
+  };
+}
+
+/** Sign and POST to a same-origin API; mutations still need semantic idempotency.
+ * Read-only actions use the wallet session and only prompt once per session. */
 export async function signedFetch<T = unknown>(
   session: WalletSession | null | undefined,
   path: string,
@@ -141,25 +233,20 @@ export async function signedFetch<T = unknown>(
   if (destination.origin !== window.location.origin) {
     throw new Error("Signed requests must stay on the app origin");
   }
+  if (session && isSessionReadAction(action)) {
+    const wallet = session.account.address.toString();
+    let ready = hasSession(wallet);
+    if (!ready && session.signMessage) ready = await startSession(session);
+    if (ready) {
+      const result = await postEnvelope<T>(path, { payload: unsignedPayload(session, action, params), session: true });
+      if (result.ok) return result.data as T;
+      if (result.status !== 401) throw new Error(result.error);
+      // Session expired or rejected server-side: forget it and sign this one.
+      saveHint(null);
+    }
+  }
   const body = await createSignedRequest(session, action, params);
-  const res = await fetch(path, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-
-  type Envelope = { ok?: boolean; data?: unknown; error?: string };
-  let json: Envelope | null = null;
-  try {
-    json = (await res.json()) as Envelope;
-  } catch {
-    // A proxy can return a non-JSON error response.
-  }
-  if (!res.ok || !json || json.ok !== true) {
-    throw new Error(
-      json?.error ?? `Request failed (${res.status} ${res.statusText})`,
-    );
-  }
-  return json.data as T;
+  const result = await postEnvelope<T>(path, body);
+  if (!result.ok) throw new Error(result.error);
+  return result.data as T;
 }

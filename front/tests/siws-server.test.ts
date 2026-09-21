@@ -124,3 +124,57 @@ describe("SIWS v2 authorization", () => {
     await expect(verifySigned(request(body, local, `${local}/api/private`), "test.private")).resolves.toHaveProperty("wallet", wallet);
   });
 });
+
+describe("wallet session for read-only actions", () => {
+  const secret = "s".repeat(40);
+  async function sessionRequest(action: string, cookie: string | null, overrides: Partial<SiwsPayload> = {}) {
+    const payload: SiwsPayload = {
+      v: 2, origin, network: "devnet", action, wallet,
+      nonce: crypto.randomUUID(), ts: new Date().toISOString(), params: {}, ...overrides,
+    };
+    const headers: Record<string, string> = { "Content-Type": "application/json", origin };
+    if (cookie) headers.cookie = `manci_session=${cookie}`;
+    return new Request(`${origin}/api/private`, { method: "POST", headers, body: JSON.stringify({ payload, session: true }) });
+  }
+  async function token(w = wallet, n = "devnet", o = origin) {
+    const { issueSessionToken } = await import("@/lib/server/siws-session");
+    return issueSessionToken(w, n, o)!.token;
+  }
+
+  it("accepts a valid cookie for an allowlisted read and still consumes the nonce", async () => {
+    vi.stubEnv("SESSION_SECRET", secret);
+    const req = await sessionRequest("clients.me", await token());
+    await expect(verifySigned(req, "clients.me")).resolves.toEqual({ wallet, params: {} });
+    expect(rpc).toHaveBeenCalledTimes(1);
+  });
+
+  it("never lets a session authorize a write action", async () => {
+    vi.stubEnv("SESSION_SECRET", secret);
+    await expect(verifySigned(await sessionRequest("clients.update", await token()), "clients.update"))
+      .rejects.toMatchObject({ status: 401 });
+    expect(rpc).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["missing cookie", null],
+    ["tampered cookie", "x.y"],
+  ] as const)("rejects a %s", async (_label, cookie) => {
+    vi.stubEnv("SESSION_SECRET", secret);
+    await expect(verifySigned(await sessionRequest("clients.me", cookie), "clients.me")).rejects.toMatchObject({ status: 401 });
+  });
+
+  it("rejects a cookie issued for another wallet, network or origin", async () => {
+    vi.stubEnv("SESSION_SECRET", secret);
+    const other = "So11111111111111111111111111111111111111112";
+    for (const t of [await token(other), await token(wallet, "mainnet"), await token(wallet, "devnet", "https://evil.test")]) {
+      await expect(verifySigned(await sessionRequest("clients.me", t), "clients.me")).rejects.toMatchObject({ status: 401 });
+    }
+  });
+
+  it("is disabled without SESSION_SECRET", async () => {
+    vi.stubEnv("SESSION_SECRET", "");
+    const { issueSessionToken } = await import("@/lib/server/siws-session");
+    expect(issueSessionToken(wallet, "devnet", origin)).toBeNull();
+    await expect(verifySigned(await sessionRequest("clients.me", "a.b"), "clients.me")).rejects.toMatchObject({ status: 401 });
+  });
+});

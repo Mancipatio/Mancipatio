@@ -30,6 +30,8 @@ import {
 } from "@/lib/siws-client";
 import { detectNetwork } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { isSessionReadAction } from "@/lib/siws-session";
+import { readSessionToken, sessionCookieFrom } from "@/lib/server/siws-session";
 
 /** Error carrying an HTTP status; `siwsErrorResponse` maps it to JSON. */
 export class SiwsError extends Error {
@@ -148,17 +150,23 @@ export async function verifySigned(
   }
   if (!isPlainObject(body)) throw new SiwsError(400, "Invalid request body");
 
-  const { payload, signature, publicKey } = body as {
+  const { payload, signature, publicKey, session } = body as {
     payload?: unknown;
     signature?: unknown;
     publicKey?: unknown;
+    session?: unknown;
   };
   if (!isPlainObject(payload)) throw new SiwsError(400, "Missing payload");
-  if (typeof signature !== "string" || signature.length === 0) {
-    throw new SiwsError(400, "Missing signature");
-  }
-  if (typeof publicKey !== "string" || publicKey.length === 0) {
-    throw new SiwsError(400, "Missing publicKey");
+  // Read-only requests may ride on a wallet session cookie instead of a
+  // fresh signature (see lib/siws-session.ts). Everything else must sign.
+  const viaSession = session === true;
+  if (!viaSession) {
+    if (typeof signature !== "string" || signature.length === 0) {
+      throw new SiwsError(400, "Missing signature");
+    }
+    if (typeof publicKey !== "string" || publicKey.length === 0) {
+      throw new SiwsError(400, "Missing publicKey");
+    }
   }
 
   const { v, origin, network, action, wallet, ts, nonce, params } = payload as {
@@ -185,7 +193,7 @@ export async function verifySigned(
   if (action !== expectedAction) {
     throw new SiwsError(401, "Signed action does not match this endpoint");
   }
-  if (publicKey !== wallet) {
+  if (!viaSession && publicKey !== wallet) {
     throw new SiwsError(401, "publicKey does not match payload wallet");
   }
 
@@ -195,6 +203,18 @@ export async function verifySigned(
     throw new SiwsError(401, "Signature expired or timestamp invalid");
   }
 
+  if (viaSession) {
+    if (!isSessionReadAction(action)) {
+      throw new SiwsError(401, "This action requires a wallet signature");
+    }
+    const claims = readSessionToken(sessionCookieFrom(request), now);
+    if (!claims || claims.w !== wallet || claims.n !== network || claims.o !== origin) {
+      throw new SiwsError(401, "Wallet session expired — sign in again");
+    }
+    await consumeNonce(payload as SiwsPayload, tsMs + SIWS_MAX_AGE_MS);
+    return { wallet, params };
+  }
+
   // Verify the exact signed context and params before touching the nonce store.
   // Invalid signatures must never reserve another wallet's nonce.
   const messageBytes = new TextEncoder().encode(
@@ -202,7 +222,7 @@ export async function verifySigned(
   );
   let sigBytes: Uint8Array;
   try {
-    sigBytes = new Uint8Array(Buffer.from(signature, "base64"));
+    sigBytes = new Uint8Array(Buffer.from(signature as string, "base64"));
     if (sigBytes.length !== 64) throw new Error("bad length");
   } catch {
     throw new SiwsError(400, "Signature is not valid base64 ed25519");

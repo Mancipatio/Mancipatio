@@ -6,6 +6,7 @@ import { useBalance, useWalletConnection } from "@solana/react-hooks";
 import { useRole } from "@/lib/auth";
 import { WalletButton } from "@/app/wallet-button";
 import { IconWallet } from "@/components/icons";
+import { clearWalletSession } from "@/lib/siws-client";
 
 function truncate(address: string) {
   return `${address.slice(0, 4)}…${address.slice(-4)}`;
@@ -88,6 +89,7 @@ export function AccountMenu() {
             role="menuitem"
             onClick={() => {
               setOpen(false);
+              clearWalletSession();
               void conn.disconnect();
             }}
             className="block w-full border-t border-slate-100 px-3 py-2 text-left text-sm text-slate-600 hover:bg-slate-50"

@@ -22,6 +22,9 @@ import {
 import type { SiwsRequestBody } from "@/lib/siws-client";
 import { transactionWalletPolicyRevision } from "@/lib/transaction-wallet-policy";
 
+// These tests cover the signed-envelope contract; wallet sessions have their own tests.
+vi.mock("@/lib/siws-session", async (original) => ({ ...(await original<typeof import("@/lib/siws-session")>()), isSessionReadAction: () => false }));
+
 const wallet = address("11111111111111111111111111111111");
 const otherWallet = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 const signature = new Uint8Array(64).fill(7);
