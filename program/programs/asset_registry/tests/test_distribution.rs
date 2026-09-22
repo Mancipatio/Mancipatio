@@ -1115,19 +1115,21 @@ fn committed_batch_retries_are_noops_and_modified_payloads_cannot_spend_again() 
         &recipients[..1],
         proofs[0].clone(),
     );
-    assert!(try_send(&mut svm, &[&ctx.payer], &[altered.clone()])
-        .unwrap_err()
-        .contains("InvalidMerkleProof"));
+    assert!(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&altered))
+            .unwrap_err()
+            .contains("InvalidMerkleProof")
+    );
     send(
         &mut svm,
         &[&ctx.payer],
-        &[first.clone()],
+        std::slice::from_ref(&first),
         "pay committed first batch",
     );
     send(
         &mut svm,
         &[&ctx.payer],
-        &[first.clone()],
+        std::slice::from_ref(&first),
         "same-payload retry is a no-op",
     );
     assert_eq!(token_balance(&svm, &recipients[0]), 100_000);

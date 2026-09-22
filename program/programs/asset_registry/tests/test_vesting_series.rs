@@ -106,7 +106,6 @@ struct SeriesCtx {
     client_ata: Pubkey,
     r0_ata: Pubkey,
     r1_ata: Pubkey,
-    series_id: u64,
 }
 
 fn series_pdas(program_id: &Pubkey, client: &Pubkey, series_id: u64) -> (Pubkey, Pubkey) {
@@ -211,7 +210,6 @@ fn setup_draft_series(
         client_ata,
         r0_ata,
         r1_ata,
-        series_id,
     };
     for (idx, (wallet, alloc)) in [(ctx.r0.pubkey(), 100u64), (ctx.r1.pubkey(), 300u64)]
         .iter()
@@ -516,7 +514,7 @@ fn recovery_repoints_the_position_and_zeroes_the_old_wallet() {
         .data(),
     };
     assert_vesting_error(
-        &try_send(&mut svm, &[&ctx.client], &[ix.clone()]).unwrap_err(),
+        &try_send(&mut svm, &[&ctx.client], std::slice::from_ref(&ix)).unwrap_err(),
         asset_registry::error::RegistryError::VestingNotActive,
     );
     assert_eq!(
@@ -608,7 +606,12 @@ fn cancel_mid_schedule_keeps_vested_and_returns_only_unvested() {
         .to_account_metas(None),
         data: ixd::WithdrawUnvested {}.data(),
     };
-    send(&mut svm, &[&ctx.client], &[ix.clone()], "withdraw_unvested");
+    send(
+        &mut svm,
+        &[&ctx.client],
+        std::slice::from_ref(&ix),
+        "withdraw_unvested",
+    );
     assert_eq!(token_balance(&svm, &ctx.client_ata), 300);
     assert_eq!(token_balance(&svm, &ctx.escrow), 0);
     // Nothing left to withdraw.

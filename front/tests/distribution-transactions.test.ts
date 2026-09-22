@@ -153,7 +153,9 @@ describe("distribution v2 real builders and receipts", () => {
     expect(vestingTransactionBytes([funding], f.signer)).toBeLessThanOrEqual(
       1232,
     );
-  }, 15_000);
+    // Building 5000 recipients takes 8–15 s on shared CI runners; 60 s keeps
+    // the size assertion from timing out without masking a real regression.
+  }, 60_000);
   it("resumes only exact receipt identities, never paid-count offsets or newly scanned holders", async () => {
     const f = await fixture(),
       batch = f.plan.batches[1];

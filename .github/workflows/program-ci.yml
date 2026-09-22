@@ -36,7 +36,7 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.89.0
         with:
-          components: rustfmt
+          components: rustfmt, clippy
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -55,6 +55,12 @@ jobs:
 
       - name: Test the freshly built artifacts
         run: cargo test --workspace --locked
+
+      # After build-sbf: the LiteSVM tests include_bytes! the fresh .so files.
+      # too_many_arguments is the Anchor handler shape and diverging_sub_expression
+      # comes from the #[program] expansion; everything else is denied.
+      - name: Clippy
+        run: cargo clippy --workspace --locked --all-targets -- -D warnings -A clippy::too_many_arguments -A clippy::diverging_sub_expression
 
       - name: Generate IDL from source with the pinned host compiler
         run: |

@@ -2747,9 +2747,11 @@ fn issuer_scoped_permissions_are_capability_bound_revocable_and_not_global_admin
         }
         .to_account_metas(None),
     );
-    assert!(try_send(&mut svm, &[&ctx.payer], &[metadata.clone()])
-        .unwrap_err()
-        .contains("Unauthorized"));
+    assert!(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&metadata))
+            .unwrap_err()
+            .contains("Unauthorized")
+    );
     send(
         &mut svm,
         &[&new_root],
@@ -3276,9 +3278,11 @@ fn empty_asset_cannot_activate_and_scoped_issuer_initializes_mint_without_global
         &[verify_issuer_ix(ctx.payer.pubkey(), ctx.issuer_pda, false)],
         "temporarily revoke KYB",
     );
-    assert!(try_send(&mut svm, &[&ctx.payer], &[add_class.clone()])
-        .unwrap_err()
-        .contains("IssuerNotVerified"));
+    assert!(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&add_class))
+            .unwrap_err()
+            .contains("IssuerNotVerified")
+    );
     send(
         &mut svm,
         &[&ctx.payer],
@@ -3325,9 +3329,11 @@ fn empty_asset_cannot_activate_and_scoped_issuer_initializes_mint_without_global
         &[verify_issuer_ix(new_root.pubkey(), ctx.issuer_pda, false)],
         "revoke before mint initialization",
     );
-    assert!(try_send(&mut svm, &[&ctx.payer], &[init_mint.clone()])
-        .unwrap_err()
-        .contains("IssuerNotVerified"));
+    assert!(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&init_mint))
+            .unwrap_err()
+            .contains("IssuerNotVerified")
+    );
     assert!(try_send(
         &mut svm,
         &[&new_root],
@@ -3579,9 +3585,11 @@ fn hooked_vesting_deposits_without_pda_kyc_and_screens_both_delivery_modes() {
             ixd::PushVested { position_index: 0 }.data()
         };
         let release = Instruction::new_with_bytes(ctx.program_id, &data, metas);
-        assert!(try_send(&mut svm, &[&ctx.buyer], &[release.clone()])
-            .unwrap_err()
-            .contains("ReceiverNotApproved"));
+        assert!(
+            try_send(&mut svm, &[&ctx.buyer], std::slice::from_ref(&release))
+                .unwrap_err()
+                .contains("ReceiverNotApproved")
+        );
         assert_eq!(token_balance(&svm, &escrow), 4);
         approve_kyc(&mut svm, &ctx, &ctx.buyer.pubkey());
         send(
@@ -3886,9 +3894,11 @@ fn original_full_v1_share_class_prepares_size_only_and_keeps_custody_refund_whil
     metas.extend(open_hook_metas(&ctx, &vault));
     let refund =
         Instruction::new_with_bytes(ctx.program_id, &ixd::ReturnCustodyVault {}.data(), metas);
-    assert!(try_send(&mut svm, &[&ctx.payer], &[refund.clone()])
-        .unwrap_err()
-        .contains("AccountDidNotDeserialize"));
+    assert!(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&refund))
+            .unwrap_err()
+            .contains("AccountDidNotDeserialize")
+    );
     send(
         &mut svm,
         &[&ctx.buyer],
