@@ -124,9 +124,9 @@ export function VerificationForm() {
         {loading && <p className="account-loading" role="status">Loading your verification status…</p>}
 
         {done && <div className="account-notice account-notice--success" role="status">
-          <strong>Details received.</strong> Next, upload the requested documents so our compliance team can review your {kind === "kyc" ? "identity" : "company"}.
+          <strong>Details received.</strong> Next, start the verification: accept the terms and upload the requested documents so our compliance team can review your {kind === "kyc" ? "identity" : "company"}.
           <div className="account-form-actions" style={{ marginTop: 12 }}>
-            {done.path ? <Link href={done.path} className="account-button account-button--primary">Upload documents<IconArrowUpRight size={15} /></Link> : <span>{done.notice}</span>}
+            {done.path ? <Link href={done.path} className="account-button account-button--primary">Start verification<IconArrowUpRight size={15} /></Link> : <span>{done.notice}</span>}
             {safeNext && <Link href={safeNext} className="account-text-button">Back to where you were</Link>}
           </div>
         </div>}
@@ -136,7 +136,7 @@ export function VerificationForm() {
         {!loading && !done && inProgress && !editing && <div className="account-notice account-notice--info">
           {current === "more_info" ? "We are waiting for your documents." : "Your submission is being reviewed."}
           <div className="account-form-actions" style={{ marginTop: 12 }}>
-            <button type="button" className="account-button account-button--primary" onClick={() => void openDocuments()}>Upload documents<IconArrowUpRight size={15} /></button>
+            <button type="button" className="account-button account-button--primary" onClick={() => void openDocuments()}>Continue verification<IconArrowUpRight size={15} /></button>
             <button type="button" className="account-text-button" onClick={() => setEditing(true)}>Update my details</button>
           </div>
         </div>}

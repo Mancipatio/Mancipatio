@@ -160,6 +160,12 @@ function hasSession(wallet: string): boolean {
     hint.origin === window.location.origin && hint.exp > Date.now() + 60_000;
 }
 
+/** True when this browser holds a live read session for `wallet` (no prompt needed). */
+export function hasWalletSession(wallet: string): boolean {
+  if (typeof window === "undefined") return false;
+  return hasSession(wallet);
+}
+
 /** Forget the session (wallet disconnect or switch). Best-effort cookie clear. */
 export function clearWalletSession() {
   saveHint(null);

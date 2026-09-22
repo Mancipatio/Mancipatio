@@ -12,7 +12,7 @@ export const VERIFICATION_LABEL: Record<AccountWalletKycStatus, string> = {
 function Row({ kind, status, documents }: { kind: "kyc" | "kyb"; status: AccountWalletKycStatus; documents: number }) {
   const company = kind === "kyb";
   const action = status === "none" || status === "expired" ? (company ? "Verify your company" : "Verify your identity")
-    : status === "pending" || status === "more_info" ? (documents > 0 ? "Upload documents" : "View progress") : null;
+    : status === "pending" || status === "more_info" ? (documents > 0 ? "Continue verification" : "View progress") : null;
   return <div className="verification-row">
     <span className="account-feature-icon">{company ? <IconBuilding size={19} /> : <IconUsers size={19} />}</span>
     <div className="verification-row-text">

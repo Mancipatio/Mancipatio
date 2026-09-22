@@ -34,9 +34,9 @@ const NEXT_STEP: Record<string, { title: string; body: string; href: string }> =
     href: "/issuer/onboarding",
   },
   investor: {
-    title: "Apply for your investor passport",
-    body: "Upload any requested documents above, then apply for your on-chain investor passport from the portfolio page — gated offerings require it. The compliance team reviews your dossier and issues the passport.",
-    href: "/portfolio",
+    title: "Complete your verification",
+    body: "Upload the requested documents above. Our compliance team reviews them and verifies your account — you will see the status in Your account and receive an email once it is done.",
+    href: "/account",
   },
   delegate: {
     title: "Wait for an operating role",
@@ -311,14 +311,14 @@ function Consumer({ id }: { id: string }) {
       {!!wallet && (
         <Card>
           <h2 className="text-lg font-semibold text-slate-900">
-            Terms of Service
+            Terms of Service &amp; Privacy Policy
           </h2>
           {tosAccepted ? (
             <p className="mt-2 flex items-center gap-2 text-sm text-emerald-700">
               <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-xs">
                 ✓
               </span>
-              ToS v{client.tos_version ?? TOS_VERSION} accepted on{" "}
+              Terms of Service v{client.tos_version ?? TOS_VERSION} and Privacy Policy accepted on{" "}
               {client.tos_accepted_at
                 ? new Date(client.tos_accepted_at).toISOString().slice(0, 10)
                 : "—"}
@@ -326,8 +326,8 @@ function Consumer({ id }: { id: string }) {
           ) : (
             <>
               <p className="mt-2 text-sm text-slate-600">
-                Onboarding requires accepting the Manci Terms of Service.
-                Please read them before continuing:{" "}
+                Onboarding requires accepting the Manci Terms of Service and
+                Privacy Policy. Please read them before continuing:{" "}
                 <a
                   href="/legal/terms"
                   target="_blank"
@@ -335,6 +335,15 @@ function Consumer({ id }: { id: string }) {
                   className="font-medium text-slate-900 underline underline-offset-2 hover:text-slate-700"
                 >
                   Terms of Service (v{TOS_VERSION}) ↗
+                </a>{" "}
+                and{" "}
+                <a
+                  href="/legal/privacy"
+                  target="_blank"
+                  rel="noreferrer"
+                  className="font-medium text-slate-900 underline underline-offset-2 hover:text-slate-700"
+                >
+                  Privacy Policy ↗
                 </a>
               </p>
               <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5">
@@ -346,7 +355,7 @@ function Consumer({ id }: { id: string }) {
                   className="mt-0.5 h-4 w-4 rounded border-slate-300 accent-slate-900"
                 />
                 <span className="text-sm text-slate-700">
-                  I have read and accept the Manci Terms of Service.
+                  I have read and accept the Manci Terms of Service and Privacy Policy.
                 </span>
               </label>
               {/* Already-linked clients (pre-ToS-gate) accept in place. */}
@@ -389,7 +398,7 @@ function Consumer({ id }: { id: string }) {
           </button>
           {!tosAccepted && !tosChecked && (
             <p className="mt-2 text-xs text-slate-500">
-              Accept the Terms of Service above to enable linking.
+              Accept the Terms of Service and Privacy Policy above to enable linking.
             </p>
           )}
         </Card>

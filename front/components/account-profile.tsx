@@ -23,6 +23,7 @@ import {
   updateAccount,
 } from "@/lib/account-client";
 import { detectNetwork, networkLabel, type Network } from "@/lib/network";
+import { hasWalletSession } from "@/lib/siws-client";
 
 const GOOGLE_RETURN_MESSAGES: Record<string, string> = {
   connected: "Returned from Google. Open your account to check the saved connection.",
@@ -150,6 +151,16 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
     void run("open", openAccount, applyProfile,
       "Your account could not be opened. Please try again in a moment.");
   }
+
+  // Already signed in this session: open straight away, no wallet prompt.
+  const [autoOpened, setAutoOpened] = useState(false);
+  useEffect(() => {
+    if (data || autoOpened || !hasWalletSession(wallet)) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAutoOpened(true);
+    open();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, autoOpened, wallet]);
 
   function saveName(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();

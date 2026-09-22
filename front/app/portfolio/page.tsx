@@ -262,13 +262,13 @@ export default function PortfolioOverviewPage() {
         </p>
       </div>
 
-      {/* Investor passport card */}
+      {/* Verification (investor passport) card */}
       <section className="mt-8">
         <PassportCard
           state={passport}
           now={now}
           openRequest={openRequest}
-          onApply={() => setRequestModalOpen(true)}
+          onApply={() => router.push("/verify?type=kyc")}
           onResumeUpload={() => void resumeUpload()}
           resumeBusy={resumeBusy}
         />
@@ -381,10 +381,10 @@ function PassportCard({
     return (
       <div className="rounded-xl border border-brand-100 bg-brand-50 p-5 shadow-card">
         <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-brand-500">
-          Investor passport
+          Verification
         </p>
         <p className="mt-2 text-[14px] font-semibold text-slate-800">
-          No investor passport yet
+          Not verified yet
         </p>
         <p className="mt-1 text-[13px] text-slate-500">
           Complete KYC to invest in gated offerings.
@@ -399,7 +399,7 @@ function PassportCard({
                 disabled={resumeBusy}
                 className="inline-flex items-center gap-1 rounded-md border border-brand-200 bg-white px-3 py-1.5 font-mono text-[11px] font-semibold text-brand-700 transition-colors hover:bg-brand-50 disabled:opacity-50"
               >
-                {resumeBusy ? "Opening…" : "Resume document upload →"}
+                {resumeBusy ? "Opening…" : "Continue verification →"}
               </button>
               <p className="mt-1 text-[11px] text-slate-400">
                 Signs a message with your wallet to reopen your personal
@@ -413,7 +413,7 @@ function PassportCard({
             onClick={onApply}
             className="mt-3 inline-flex items-center gap-1 rounded-md border border-brand-200 bg-white px-3 py-1.5 font-mono text-[11px] font-semibold text-brand-700 transition-colors hover:bg-brand-50"
           >
-            Apply for passport →
+            Start verification →
           </button>
         )}
       </div>
@@ -485,7 +485,7 @@ function PassportCard({
     <div className={`rounded-xl border bg-white p-5 shadow-card ${cfg.border}`}>
       <div className="flex items-center justify-between">
         <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-slate-400">
-          Investor passport
+          Verification
         </p>
         <span
           className={`inline-flex items-center gap-1.5 rounded-full border px-2.5 py-0.5 font-mono text-[11px] font-semibold ${cfg.badge}`}
@@ -522,8 +522,8 @@ function PassportCard({
         <div className="mt-4 rounded-lg border border-slate-100 bg-slate-50 px-3 py-2">
           <p className="text-[12px] text-slate-500">
             {entry.status === KycStatus.Revoked
-              ? "Your passport has been revoked. Contact support or reapply."
-              : "Your passport has expired. Please reapply to continue investing in gated offerings."}
+              ? "Your verification has been revoked. Contact support or verify again."
+              : "Your verification has expired. Renew it to continue investing in gated offerings."}
             {" "}
             {openRequest ? (
               <>
@@ -536,7 +536,7 @@ function PassportCard({
                   disabled={resumeBusy}
                   className="font-medium text-brand-600 underline-offset-2 hover:underline disabled:opacity-50"
                 >
-                  {resumeBusy ? "Opening…" : "Resume document upload →"}
+                  {resumeBusy ? "Opening…" : "Continue verification →"}
                 </button>
               </>
             ) : (
@@ -545,7 +545,7 @@ function PassportCard({
                 onClick={onApply}
                 className="font-medium text-brand-600 hover:underline underline-offset-2"
               >
-                Reapply →
+                Renew verification →
               </button>
             )}
           </p>
@@ -565,7 +565,7 @@ function PendingRequestNote({ request }: { request: OpenPassportRequest }) {
     <div className="mt-3 inline-flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-1.5">
       <span className="h-1.5 w-1.5 rounded-full bg-amber-400" />
       <p className="text-[12px] text-amber-800">
-        Passport application submitted {submitted} —{" "}
+        Verification submitted {submitted} —{" "}
         {request.status === "in_review" ? "in review" : "awaiting review"}.
       </p>
     </div>
@@ -640,7 +640,7 @@ function PassportRequestModalInner({
       });
       toast.show({
         kind: "success",
-        title: "Passport application submitted",
+        title: "Verification submitted",
         description: "Our compliance team will review it and get back to you.",
       });
       onSubmitted();
@@ -676,7 +676,7 @@ function PassportRequestModalInner({
           </div>
           <div className="space-y-3 px-5 py-4">
             <p className="text-sm leading-relaxed text-slate-700">
-              Your passport application is in the review queue.
+              Your verification is in the review queue.
             </p>
             {submittedPath ? (
               <p className="text-sm leading-relaxed text-slate-700">
@@ -733,7 +733,7 @@ function PassportRequestModalInner({
             id="passport-request-title"
             className="text-sm font-semibold uppercase tracking-wide text-brand-700"
           >
-            Apply for investor passport
+            Start verification
           </p>
         </div>
         <div className="space-y-4 px-5 py-4">
@@ -742,7 +742,7 @@ function PassportRequestModalInner({
             <code className="font-mono text-xs">
               {wallet.slice(0, 6)}…{wallet.slice(-4)}
             </code>
-            . The compliance team reviews it and issues your on-chain passport.
+            . The compliance team reviews it and verifies your wallet.
           </p>
           <div>
             <label htmlFor="passport-jurisdiction" className="mb-1 block">
