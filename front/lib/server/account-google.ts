@@ -11,6 +11,7 @@ import { accountErrorResponse, accountResponse, callAccountMutation, consumeAcco
 import { accountId, accountParams } from "@/lib/server/account-validation";
 import { readAccountSession } from "@/lib/server/account-auth";
 import { assertSameSite, withAccountSession } from "@/lib/server/auth-login";
+import { assertWritable, getMaintenance } from "@/lib/server/maintenance";
 
 const COOKIE = "manci_google_link";
 const COOKIE_PATH = "/api/account/google";
@@ -108,6 +109,8 @@ export async function startGoogleSignIn(request: Request) {
     if (mode === "link") {
       const session = readAccountSession(request);
       if (!session) throw new SiwsError(401, "Please sign in again.");
+      // Connecting Google changes the account; signing in stays available.
+      await assertWritable(network);
       linkAccountId = session.a;
     }
     const state = randomBytes(32).toString("base64url");
@@ -167,6 +170,11 @@ async function finishGoogleSignIn(request: NextRequest, origin: string, network:
   if (request.nextUrl.searchParams.has("error")) {
     return callbackRedirect(origin, request.nextUrl.searchParams.get("error") === "access_denied" ? "cancelled" : "failed", true);
   }
+  // A link started before maintenance must not finish during it; signing in
+  // (below) stays available.
+  if (stored.link_account_id && (await getMaintenance(network)).enabled) {
+    return callbackRedirect(origin, "maintenance", true);
+  }
   try {
     const code = request.nextUrl.searchParams.get("code");
     if (!code || code.length > 4096) throw new Error("Invalid authorization code");
@@ -195,7 +203,7 @@ type GoogleState = {
   expires_at: string;
 };
 
-type GoogleResult = "connected" | "signed_in" | "in_use" | "cancelled" | "expired" | "unavailable" | "failed";
+type GoogleResult = "connected" | "signed_in" | "in_use" | "cancelled" | "expired" | "unavailable" | "maintenance" | "failed";
 
 function callbackRedirect(origin: string, result: GoogleResult, clearCookie: boolean) {
   const response = noStore(NextResponse.redirect(new URL(`/account?google=${result}`, origin), 303));
@@ -241,6 +249,11 @@ export async function finishGoogleLink(request: NextRequest) {
     if (request.nextUrl.searchParams.has("error")) {
       await discardState(stateHash, browserHash, network);
       return callbackRedirect(origin, request.nextUrl.searchParams.get("error") === "access_denied" ? "cancelled" : "failed", true);
+    }
+    // Started before maintenance began: the account is not changed during it.
+    if ((await getMaintenance(network)).enabled) {
+      await discardState(stateHash, browserHash, network);
+      return callbackRedirect(origin, "maintenance", true);
     }
     const code = request.nextUrl.searchParams.get("code");
     if (!code || code.length > 4096) throw new Error("Invalid authorization code");

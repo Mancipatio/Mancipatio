@@ -26,6 +26,8 @@ import {
   createSignedRequest,
 } from "@/lib/siws-client";
 import { TOS_VERSION } from "@/lib/tos-version";
+import { MAINTENANCE_CODE, maintenanceRefusal } from "@/lib/maintenance";
+import { detectNetwork } from "@/lib/network";
 
 /** Current Terms-of-Service version (single source: lib/tos-version.ts). */
 export { TOS_VERSION };
@@ -545,8 +547,10 @@ export async function acceptTos(
       body: JSON.stringify({ client_id: clientId, token, wallet: wallet || null }),
     });
     const json = (await res.json().catch(() => null)) as
-      | { ok?: boolean; error?: string }
+      | { ok?: boolean; error?: string; code?: string; message?: string }
       | null;
+    // Maintenance: show the banner, so the failed step explains itself.
+    if (json?.code === MAINTENANCE_CODE) maintenanceRefusal(json.message, detectNetwork());
     if (!res.ok || !json || json.ok !== true) {
       console.warn("[clients] acceptTos failed:", json?.error ?? res.status);
       return false;
@@ -784,12 +788,16 @@ export async function reviewRequirement(
 
 // ── Document uploads (private bucket, server-side) ──────────────────────────
 
-type UploadResult = { ok: boolean; recomputed: ClientKycStatus | null };
+/** `error` is set only for a failure worded for users (maintenance). */
+type UploadResult = { ok: boolean; recomputed: ClientKycStatus | null; error?: string };
 
 function parseUploadResponse(
-  json: { ok?: boolean; error?: string; data?: { recomputed?: string | null } } | null,
+  json: { ok?: boolean; error?: string; code?: string; message?: string; data?: { recomputed?: string | null } } | null,
   resOk: boolean,
 ): UploadResult {
+  if (json?.code === MAINTENANCE_CODE) {
+    return { ok: false, recomputed: null, error: maintenanceRefusal(json.message, detectNetwork()).message };
+  }
   if (!resOk || !json || json.ok !== true) {
     console.warn("[client_docs] upload failed:", json?.error ?? "request failed");
     return { ok: false, recomputed: null };

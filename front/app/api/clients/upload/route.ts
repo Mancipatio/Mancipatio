@@ -14,6 +14,8 @@
 //     `wallet` form field, if sent, is ignored — form input must not shape
 //     the audit trail). Per-IP rate limited.
 //
+// Both modes are refused with 503 while the network is in maintenance.
+//
 // Side effects: client_documents row insert; when requirement_id is given the
 // requirement flips to `submitted` with the document linked, and the parent
 // client's kyc_status is recomputed (more_info → pending when nothing open).
@@ -23,6 +25,8 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
+import { assertWritable } from "@/lib/server/maintenance";
+import { detectNetwork } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import {
   MAX_UPLOAD_BYTES,
@@ -114,6 +118,9 @@ export async function POST(request: Request) {
       if (rateLimited(`upload:${clientIpOf(request)}`, 20, 60_000)) {
         throw new SiwsError(429, "Too many uploads — slow down");
       }
+      // No signature, so verifySigned never runs: refuse maintenance here,
+      // before any storage or database write (admin mode is refused there).
+      await assertWritable(detectNetwork());
       clientId = assertUuid(formString(form, "client_id"), "client_id");
       const clientRow = await requireClientToken(sb, clientId, formString(form, "token"));
       const kindRaw = formString(form, "kind");

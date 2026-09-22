@@ -44,6 +44,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
     it("applies every actual migration in order", () => {
       expect(applied[0]).toBe("0001_audit_events.sql");
       expect(applied).toContain("0049_launchpad_network_links.sql");
+      expect(applied).toContain("0061_maintenance_mode.sql");
       expect(
         db.query(
           "select count(*) from information_schema.tables where table_schema='public'",
@@ -84,6 +85,24 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
             ).toThrow(/permission denied/);
         }
       }
+    });
+    it("publishes the maintenance flag read-only, without the operator, and re-applies cleanly", () => {
+      const table = "public.platform_maintenance";
+      db.query(readFileSync(join(process.cwd(), "supabase/migrations/0061_maintenance_mode.sql"), "utf8"));
+      db.query(`set role service_role;insert into ${table}(network,enabled,message,updated_by) values ('devnet',true,'Upgrade','ops')`);
+      for (const role of ["anon", "authenticated"]) {
+        expect(db.query(`set role ${role};select network,enabled,message from ${table}`)).toBe("devnet|t|Upgrade");
+        expect(() => db.query(`set role ${role};select updated_by from ${table}`)).toThrow(/permission denied/);
+        for (const write of [
+          `insert into ${table}(network) values ('mainnet')`,
+          `update ${table} set enabled=false`,
+          `delete from ${table}`,
+        ])
+          expect(() => db.query(`set role ${role};${write}`)).toThrow(/permission denied/);
+      }
+      expect(() => db.query(`insert into ${table}(network) values ('prod')`)).toThrow(/check constraint/);
+      expect(() => db.query(`update ${table} set message=repeat('x',501)`)).toThrow(/check constraint/);
+      db.query(`delete from ${table}`);
     });
   },
 );

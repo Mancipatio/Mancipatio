@@ -23,7 +23,18 @@ const state = vi.hoisted(() => ({
   consumeAccountRateLimit: vi.fn(),
   accountResponse: vi.fn(),
   rpc: vi.fn(),
+  signInRows: [] as Row[],
+  maintenance: { enabled: false, message: null as string | null },
 }));
+
+vi.mock("@/lib/server/maintenance", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/server/maintenance")>();
+  return {
+    ...actual,
+    getMaintenance: async () => ({ ...state.maintenance }),
+    assertWritable: async () => { if (state.maintenance.enabled) throw new actual.MaintenanceError(state.maintenance.message); },
+  };
+});
 
 vi.mock("@/lib/server/siws", async (importOriginal) => ({
   ...await importOriginal<typeof import("@/lib/server/siws")>(),
@@ -72,7 +83,7 @@ vi.mock("@/lib/supabase-server", () => ({
           return { data: null, error: state.insertError };
         },
         // These tests cover the wallet link flow; the sign-in state table is empty.
-        maybeSingle: async () => table === "auth_google_states" ? { data: null, error: null }
+        maybeSingle: async () => table === "auth_google_states" ? { data: state.signInRows.find(matches) ?? null, error: null }
           : ({ data: state.rows.find(matches) ?? null, error: state.selectError }),
         then: (resolve: (result: unknown) => unknown, reject?: (error: unknown) => unknown) => {
           state.mutations.push({ operation, table, filters: [...filters] });
@@ -139,6 +150,7 @@ beforeEach(() => {
   vi.stubEnv("GOOGLE_CLIENT_ID", "google-client");
   vi.stubEnv("GOOGLE_CLIENT_SECRET", "google-secret");
   state.rows = []; state.inserts = []; state.mutations = []; state.clientOptions = [];
+  state.signInRows = []; state.maintenance = { enabled: false, message: null };
   state.selectError = null; state.insertError = null; state.cleanupError = null;
   state.verifySigned.mockResolvedValue({ wallet: WALLET, params: { account_id: ACCOUNT_ID } });
   state.getAccountProfile.mockResolvedValue({ id: ACCOUNT_ID, wallet: WALLET, network: "devnet" });
@@ -433,5 +445,58 @@ describe("wallet-authorized unlink", () => {
     state.rpc.mockResolvedValue(result);
     expect((await unlinkGoogle(post("unlink"))).status).toBe(503);
     expect(state.accountResponse).not.toHaveBeenCalled();
+  });
+});
+
+describe("Google callbacks in maintenance", () => {
+  function signInState(linkAccountId: string | null) {
+    state.signInRows.push({
+      state_hash: sha256(OAUTH_STATE), browser_hash: sha256(BROWSER_TOKEN), network: "devnet",
+      code_verifier: "V".repeat(43), redirect_uri: CALLBACK, link_account_id: linkAccountId,
+      expires_at: new Date(Date.now() + 600_000).toISOString(),
+    });
+  }
+
+  it("does not complete a wallet-signed link started before maintenance, and discards it", async () => {
+    stored();
+    state.maintenance = { enabled: true, message: "Program upgrade" };
+    redirect(await finishGoogleLink(callback()), "maintenance");
+    expect(state.getToken).not.toHaveBeenCalled();
+    expect(state.rpc).not.toHaveBeenCalled();
+    expect(state.rows).toEqual([]);
+  });
+
+  it("does not link Google to an email account during maintenance", async () => {
+    signInState(ACCOUNT_ID);
+    state.maintenance = { enabled: true, message: "Program upgrade" };
+    redirect(await finishGoogleLink(callback()), "maintenance");
+    expect(state.getToken).not.toHaveBeenCalled();
+    expect(state.rpc).not.toHaveBeenCalled();
+    expect(state.mutations).toContainEqual(expect.objectContaining({ operation: "delete", table: "auth_google_states" }));
+  });
+
+  it("still lets people sign in with Google", async () => {
+    signInState(null);
+    state.maintenance = { enabled: true, message: "Program upgrade" };
+    await finishGoogleLink(callback());
+    expect(state.getToken).toHaveBeenCalledOnce();
+    expect(state.rpc).toHaveBeenCalledWith("login_account_google", expect.objectContaining({ p_network: "devnet" }));
+  });
+
+  it("refuses to start an email-account link, but not a sign-in", async () => {
+    vi.stubEnv("SESSION_SECRET", "s".repeat(40));
+    const { startGoogleSignIn } = await import("@/lib/server/account-google");
+    const { issueAccountSession } = await import("@/lib/server/account-auth");
+    const { token } = issueAccountSession(ACCOUNT_ID, "devnet", ORIGIN);
+    state.maintenance = { enabled: true, message: "Program upgrade" };
+    const start = (mode: string) => startGoogleSignIn(new Request(`${ORIGIN}/api/auth/google/start`, {
+      method: "POST", body: JSON.stringify({ mode }),
+      headers: { "content-type": "application/json", origin: ORIGIN, "sec-fetch-site": "same-origin", cookie: `manci_account=${token}` },
+    }));
+    const refused = await start("link");
+    expect(refused.status).toBe(503);
+    expect(state.inserts).toEqual([]);
+    expect((await start("login")).status).toBe(200);
+    expect(state.inserts).toHaveLength(1);
   });
 });

@@ -7,6 +7,7 @@
 
 import { useSyncExternalStore } from "react";
 import { detectNetwork } from "@/lib/network";
+import { MAINTENANCE_CODE, maintenanceRefusal } from "@/lib/maintenance";
 
 export type SignedInAccount = { id: string; email: string | null; display_name: string; primary_wallet: string | null };
 type State = { status: "loading" | "signed_out" | "signed_in"; account: SignedInAccount | null };
@@ -23,7 +24,8 @@ async function post<T>(path: string, body: unknown): Promise<T> {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
     cache: "no-store", credentials: "same-origin",
   });
-  const json = (await res.json().catch(() => null)) as { ok?: boolean; data?: T; error?: string } | null;
+  const json = (await res.json().catch(() => null)) as { ok?: boolean; data?: T; error?: string; code?: string; message?: string } | null;
+  if (json?.code === MAINTENANCE_CODE) throw maintenanceRefusal(json.message, detectNetwork());
   if (!res.ok || !json || json.ok !== true) throw new Error(json?.error ?? `Request failed (${res.status})`);
   return json.data as T;
 }

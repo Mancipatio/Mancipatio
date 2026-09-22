@@ -33,6 +33,7 @@ const GOOGLE_RETURN_MESSAGES: Record<string, string> = {
   cancelled: "Google connection was cancelled. You can connect again when ready.",
   expired: "The Google connection request expired. Open your account to try again.",
   unavailable: "Google connection is currently unavailable. Your wallet account is still available.",
+  maintenance: "Manci is in maintenance, so Google was not connected. Connect it again once maintenance ends.",
   failed: "Google could not be connected. Open your account to try again.",
 };
 

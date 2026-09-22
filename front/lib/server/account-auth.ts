@@ -13,6 +13,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { detectNetwork } from "@/lib/network";
 import { SIWS_MAX_AGE_MS, type SiwsPayload } from "@/lib/siws-client";
 import { assertRequestContext, consumeNonce, SiwsError, verifySigned } from "@/lib/server/siws";
+import { assertActionWritable } from "@/lib/server/maintenance";
 
 export const ACCOUNT_COOKIE = "manci_account";
 export const ACCOUNT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -98,6 +99,8 @@ export async function readActor(request: Request, action: string): Promise<Actor
   if (!Number.isFinite(tsMs) || Math.abs(Date.now() - tsMs) > SIWS_MAX_AGE_MS) throw new SiwsError(401, "Request expired");
   const session = readAccountSession(request);
   if (!session || session.o !== origin) throw new SiwsError(401, "Please sign in again.");
+  // Same maintenance rule as wallet requests, before the nonce is spent.
+  await assertActionWritable(action, detectNetwork());
   await consumeNonce({ v: 2, origin: origin as string, network: network as SiwsPayload["network"], action,
     wallet: `account:${session.a}`, ts, nonce, params: params as Record<string, unknown> }, tsMs + SIWS_MAX_AGE_MS);
   return { kind: "account", accountId: session.a, params: params as Record<string, unknown> };

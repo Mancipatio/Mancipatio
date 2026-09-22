@@ -32,6 +32,7 @@ import {
   expectedGenesisHash,
 } from "@/lib/network-identity";
 import type { Network } from "@/lib/network";
+import { assertSiteWritable } from "@/lib/maintenance";
 import type { fetchMintTokenProgram } from "@/lib/transaction-builders";
 type Rpc = Parameters<typeof fetchMintTokenProgram>[0];
 /** Only typed recovery terms are imported. The transaction is rebuilt locally;
@@ -227,6 +228,9 @@ export async function signIssuerRecovery(
     throw new Error(
       "This wallet must support signing without sending to collect both approvals",
     );
+  // Outside the verified client and never seen by the server, so the
+  // maintenance check fails closed: no fresh "off", no wallet prompt.
+  await assertSiteWritable({ failClosed: true });
   await assertRecoveryLive(rpc, e);
   const transaction = await compileIssuerRecovery(e);
   const signed = await signer.signTransactions([transaction]),
@@ -246,6 +250,7 @@ export async function submitIssuerRecovery(
   rpc: Rpc,
   e: IssuerRecoveryEnvelope,
 ) {
+  await assertSiteWritable({ failClosed: true });
   await assertRecoveryLive(rpc, e);
   const transaction = await compileIssuerRecovery(e);
   assertIsFullySignedTransaction(transaction);

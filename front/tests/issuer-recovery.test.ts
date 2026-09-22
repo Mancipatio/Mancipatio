@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   address,
   generateKeyPairSigner,
@@ -74,7 +74,20 @@ async function fixture() {
   });
   return { admin, next, rpc, envelope, sendTransaction };
 }
-beforeEach(() => vi.clearAllMocks());
+// Recovery reads the maintenance flag in the browser before signing and
+// before sending (fail closed); by default the site is not in maintenance.
+const flag = vi.hoisted(() => ({ state: { enabled: false, message: null } as { enabled: boolean; message: string | null } | "down" }));
+const maintenanceFetch = vi.fn(async () => {
+  if (flag.state === "down") throw new TypeError("Failed to fetch");
+  return Response.json({ ...flag.state, network: "devnet" });
+});
+beforeEach(() => {
+  vi.clearAllMocks();
+  flag.state = { enabled: false, message: null };
+  vi.stubGlobal("window", { dispatchEvent: () => true });
+  vi.stubGlobal("fetch", maintenanceFetch);
+});
+afterEach(() => vi.unstubAllGlobals());
 describe("issuer recovery co-signing", () => {
   it("collects two real signatures on one locally reconstructed recovery and sends only after both", async () => {
     const f = await fixture(),
@@ -177,5 +190,29 @@ describe("issuer recovery co-signing", () => {
         signTransactions: async () => wrong,
       }),
     ).rejects.toThrow("does not match");
+  });
+  it("in maintenance, neither prompts the wallet nor sends", async () => {
+    const f = await fixture(),
+      one = await signIssuerRecovery(f.rpc, f.envelope, f.admin),
+      two = await signIssuerRecovery(f.rpc, one, f.next);
+    flag.state = { enabled: true, message: "Program upgrade" };
+    const signer = { address: f.next.address, signTransactions: vi.fn(f.next.signTransactions) };
+    await expect(signIssuerRecovery(f.rpc, f.envelope, signer)).rejects.toThrow("Manci is in maintenance: Program upgrade");
+    expect(signer.signTransactions).not.toHaveBeenCalled();
+    await expect(submitIssuerRecovery(f.rpc, two)).rejects.toThrow("Manci is in maintenance");
+    expect(f.sendTransaction).not.toHaveBeenCalled();
+  });
+  it("fails closed when the maintenance flag cannot be read (the server never sees recovery)", async () => {
+    const f = await fixture(),
+      one = await signIssuerRecovery(f.rpc, f.envelope, f.admin),
+      two = await signIssuerRecovery(f.rpc, one, f.next);
+    flag.state = "down";
+    await expect(submitIssuerRecovery(f.rpc, two)).rejects.toThrow("could not confirm");
+    maintenanceFetch.mockResolvedValueOnce(new Response("{}", { status: 503 }));
+    await expect(signIssuerRecovery(f.rpc, f.envelope, f.next)).rejects.toThrow("could not confirm");
+    expect(f.sendTransaction).not.toHaveBeenCalled();
+    flag.state = { enabled: false, message: null };
+    await submitIssuerRecovery(f.rpc, two);
+    expect(f.sendTransaction).toHaveBeenCalledOnce();
   });
 });
