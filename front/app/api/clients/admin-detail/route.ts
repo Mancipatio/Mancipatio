@@ -9,6 +9,7 @@ import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { getRaiseCapacity } from "@/lib/server/raise-limits";
 
 const CLIENT_COLUMNS =
   "id,created_at,updated_at,network,type,types,tier,tags,source,email," +
@@ -34,7 +35,7 @@ export async function POST(request: Request) {
     if (clientErr) throw new SiwsError(500, "Client lookup failed");
     if (!client) throw new SiwsError(404, "Client not found");
 
-    const [notesRes, reqRes, docsRes, verificationRes] = await Promise.all([
+    const [notesRes, reqRes, docsRes, verificationRes, limitsRes] = await Promise.all([
       sb
         .from("client_notes")
         .select("*")
@@ -55,6 +56,7 @@ export async function POST(request: Request) {
         .select("*")
         .eq("client_id", id)
         .order("kind", { ascending: true }),
+      sb.from("client_raise_limits").select("*").eq("client_id", id).maybeSingle(),
     ]);
     if (notesRes.error || reqRes.error || docsRes.error || verificationRes.error) {
       throw new SiwsError(500, "Could not load the client record");
@@ -68,6 +70,11 @@ export async function POST(request: Request) {
         requirements: reqRes.data ?? [],
         documents: docsRes.data ?? [],
         verification: verificationRes.data ?? [],
+        raise_limits: limitsRes.error ? null : limitsRes.data ?? null,
+        // Effective yearly capacity for the dossier's wallet (null without a wallet).
+        raise_capacity: typeof (client as unknown as { wallet?: unknown }).wallet === "string"
+          ? await getRaiseCapacity(sb, (client as unknown as { wallet: string }).wallet, detectNetwork()).catch(() => null)
+          : null,
       },
     });
   } catch (err) {

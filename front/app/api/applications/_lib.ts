@@ -18,6 +18,8 @@ export {
   lookupCompanyKyb,
   requireVerifiedClient,
   requireVerifiedCompany,
+  lookupApplicant,
+  requireVerifiedApplicant,
   type ClientKycLookup,
 } from "@/lib/server/kyc-gate";
 
@@ -154,7 +156,7 @@ export async function insertApplicationEvent(
   input: {
     application_id: string;
     actor: "admin" | "applicant";
-    action: "submitted" | "resubmitted" | "approved" | "rejected" | "needs_changes";
+    action: "submitted" | "resubmitted" | "approved" | "rejected" | "needs_changes" | "terms_adjusted";
     reason?: string | null;
     actor_wallet?: string | null;
   },

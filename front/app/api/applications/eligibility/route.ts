@@ -8,12 +8,12 @@
 // the service role (the browser can no longer read clients directly).
 //
 // The authoritative gate lives in the signed submit/resubmit routes
-// (requireVerifiedCompany — approved KYB); this endpoint is UX only.
+// (requireVerifiedApplicant — approved KYB or live KYC); this endpoint is UX only.
 
 import { NextResponse } from "next/server";
 import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { lookupCompanyKyb } from "../_lib";
+import { lookupApplicant } from "../_lib";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -77,9 +77,9 @@ export async function POST(request: Request) {
       throw new SiwsError(400, "wallet must be a base58 address");
     }
 
-    // Raising is a company act: /apply is gated on an approved KYB.
-    const kyb = await lookupCompanyKyb(getSupabaseAdmin(), wallet);
-    return NextResponse.json({ ok: true, data: kyb });
+    // Approved KYB (company) or live KYC (individual — Manci opens the company).
+    const verdict = await lookupApplicant(getSupabaseAdmin(), wallet);
+    return NextResponse.json({ ok: true, data: verdict });
   } catch (err) {
     return siwsErrorResponse(err);
   }

@@ -14,8 +14,9 @@ import { detectNetwork } from "@/lib/network";
 import {
   insertApplicationEvent,
   narrowApplication,
-  requireVerifiedCompany,
+  requireVerifiedApplicant,
 } from "../_lib";
+import { assertWithinCapacity, getRaiseCapacity, raiseLimitError } from "@/lib/server/raise-limits";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -28,7 +29,7 @@ export async function POST(request: Request) {
     if (!UUID_RE.test(id)) throw new SiwsError(400, "id must be an application UUID");
 
     const sb = getSupabaseAdmin();
-    await requireVerifiedCompany(sb, wallet);
+    const { kind } = await requireVerifiedApplicant(sb, wallet);
 
     const { data: row, error: readError } = await sb
       .from("launch_applications")
@@ -52,11 +53,15 @@ export async function POST(request: Request) {
     }
 
     const application = narrowApplication(params.application);
+    // This application's own amount does not count against itself.
+    assertWithinCapacity(await getRaiseCapacity(sb, wallet, detectNetwork(), id), application.raise_amount, application.equity_offered);
 
     const { data: updated, error } = await sb
       .from("launch_applications")
       .update({
         ...application,
+        applicant_kind: kind,
+        company_formation_requested: kind === "individual" || params.company_formation_requested === true,
         status: "pending",
         submitted_at: new Date().toISOString(),
         revision_count: ((row.revision_count as number | null) ?? 0) + 1,
@@ -65,6 +70,8 @@ export async function POST(request: Request) {
       .eq("network", detectNetwork())
       .eq("status", row.status)
       .select("id").maybeSingle();
+    const limit = raiseLimitError(error);
+    if (limit) throw limit;
     if (error) {
       console.error("[applications] resubmit update failed:", error.message);
       throw new SiwsError(500, "Could not save the resubmission");

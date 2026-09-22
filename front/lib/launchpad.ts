@@ -23,7 +23,8 @@ export type ApplicationEventAction =
   | "resubmitted"
   | "approved"
   | "rejected"
-  | "needs_changes";
+  | "needs_changes"
+  | "terms_adjusted";
 
 export type ApplicationEvent = {
   id: number;
@@ -39,6 +40,9 @@ export type LaunchApplication = {
   id: string;
   created_at: string;
   applicant_wallet: string;
+  /** company = approved KYB; individual = verified KYC, Manci opens the company. */
+  applicant_kind?: "company" | "individual" | null;
+  company_formation_requested?: boolean;
   raise_type: RaiseType;
   company_name: string;
   one_liner: string;
@@ -125,7 +129,27 @@ export type ApplyEligibility = {
   hasClient: boolean;
   kycStatus: string | null;
   eligible: boolean;
+  /** Company verification (KYB) state. */
+  kybStatus?: "none" | "pending" | "more_info" | "verified" | "rejected" | "suspended";
+  /** Individual KYC state of the same dossier. */
+  individualKycStatus?: string | null;
+  /** How the wallet may apply: approved company, or verified individual (Manci opens the company). */
+  applicantKind?: "company" | "individual" | null;
 };
+
+/** The signer's raise capacity this calendar year (admin-configurable limits). */
+export type RaiseCapacity = {
+  year: number; cap: number; used: number; remaining: number;
+  max_equity_percent: number; cap_source: "platform" | "client";
+};
+
+export async function getMyRaiseCapacity(
+  session: WalletSession | null | undefined,
+  excludeApplicationId?: string | null,
+): Promise<RaiseCapacity> {
+  return await signedFetch<RaiseCapacity>(session, "/api/applications/capacity", "applications.capacity",
+    excludeApplicationId ? { exclude: excludeApplicationId } : {});
+}
 
 /**
  * Server-side apply-gate check: does this wallet have an onboarded client
@@ -531,4 +555,34 @@ export async function commitmentAggregate(
   } catch {
     return UNKNOWN_COMMITMENTS;
   }
+}
+
+
+// ── Admin: raise limits & per-application terms ──────────────────────────────
+
+export type PlatformRaiseLimits = {
+  network: string;
+  annual_raise_cap_eur: number;
+  max_equity_percent: number;
+  updated_at: string | null;
+  updated_by: string | null;
+};
+
+export async function adminGetRaiseLimits(session: WalletSession | null | undefined): Promise<PlatformRaiseLimits> {
+  return await signedFetch<PlatformRaiseLimits>(session, "/api/admin-config/raise-limits", "adminConfig.raiseLimitsRead", {});
+}
+
+export async function adminUpdateRaiseLimits(
+  session: WalletSession | null | undefined,
+  input: { annual_raise_cap_eur: number; max_equity_percent: number },
+): Promise<PlatformRaiseLimits> {
+  return await signedFetch<PlatformRaiseLimits>(session, "/api/admin-config/raise-limits", "adminConfig.raiseLimitsUpdate", input);
+}
+
+export async function adminAdjustApplicationTerms(
+  session: WalletSession | null | undefined,
+  id: string,
+  input: { raise_amount: number; equity_offered: number; note?: string },
+): Promise<void> {
+  await signedFetch(session, "/api/applications/adjust-terms", "applications.adjustTerms", { id, ...input });
 }

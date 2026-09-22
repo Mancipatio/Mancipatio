@@ -11,9 +11,11 @@ export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "account.me",
   "account.wallets.transaction",
+  "adminConfig.raiseLimitsRead",
   "adminConfig.read",
   "applications.adminEvents",
   "applications.adminList",
+  "applications.capacity",
   "applications.mine",
   "audit.list",
   "clients.adminDetail",

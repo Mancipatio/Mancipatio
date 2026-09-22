@@ -35,6 +35,7 @@ import {
 } from "@/lib/launch-math";
 import {
   checkApplyEligibility,
+  getMyRaiseCapacity,
   getMyApplicationWithEvents,
   listMyApplications,
   submitApplication,
@@ -42,6 +43,7 @@ import {
   type ApplicationEvent,
   type ApplicationStatus,
   type ApplyEligibility,
+  type RaiseCapacity,
   type LaunchApplication,
   type NewApplication,
   type RaiseType,
@@ -148,6 +150,7 @@ const EVENT_LABEL: Record<ApplicationEvent["action"], string> = {
   approved: "Approved",
   rejected: "Rejected",
   needs_changes: "Changes requested",
+  terms_adjusted: "Terms adjusted",
 };
 
 const STATUS_TITLE: Record<ApplicationStatus, string> = {
@@ -382,6 +385,8 @@ export default function ApplyPage() {
   // client-side; the signed submit route enforces the gate authoritatively.
   const [eligibility, setEligibility] = useState<ApplyEligibility | null>(null);
   const [eligibilityLoading, setEligibilityLoading] = useState(false);
+  // Yearly raise capacity (admin-configurable limits, 0056). null = unknown.
+  const [capacity, setCapacity] = useState<RaiseCapacity | null>(null);
   // Set when the founder chose "Start a new application" from a status panel.
   const [startNew, setStartNew] = useState(false);
   // Set when the founder is editing & resubmitting an existing application.
@@ -453,6 +458,25 @@ export default function ApplyPage() {
     };
   }, [walletAddress, conn.wallet, readAttempt]);
 
+  useEffect(() => {
+    if (!conn.wallet || !eligibility?.eligible) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCapacity(null);
+      return;
+    }
+    let cancelled = false;
+    getMyRaiseCapacity(conn.wallet, editingApp?.id ?? null)
+      .then((c) => { if (!cancelled) setCapacity(c); })
+      .catch(() => { if (!cancelled) setCapacity(null); });
+    return () => { cancelled = true; };
+  }, [conn.wallet, eligibility?.eligible, editingApp?.id]);
+
+  const isIndividual = eligibility?.applicantKind === "individual";
+  // Slider bounds follow the limits set in the admin console.
+  const raiseMax = capacity ? Math.max(0, Math.floor(capacity.remaining / 50000) * 50000) : 3000000;
+  const equityMax = capacity ? Math.min(100, capacity.max_equity_percent) : 30;
+  const capacityBlocked = capacity !== null && raiseMax < 50000;
+
   const latestApp = myApps?.[0] ?? null;
 
   const set = <K extends keyof Form>(k: K, v: Form[K]) =>
@@ -467,7 +491,7 @@ export default function ApplyPage() {
     step === 0 ? !!form.raiseType
     : step === 1 ? !!form.companyName.trim() && !!form.oneLiner.trim() && !!form.category && isOptionalUrl(form.website)
     : step === 2 ? !!form.stage && !!form.valuation.trim() && !!form.problemOrWhy.trim()
-    : step === 3 ? !!form.raiseStructure
+    : step === 3 ? !!form.raiseStructure && !capacityBlocked
     : step === 4 ? !!form.founderName.trim() && isEmail(form.founderEmail) && !!form.founderWhy.trim() && isOptionalUrl(form.founderLinkedin) && isOptionalUrl(form.pitchDeck)
     : true;
 
@@ -518,13 +542,13 @@ export default function ApplyPage() {
       website: form.website || null,
       category: form.category,
       stage: form.stage || null,
-      incorporation: form.incorporation || null,
+      incorporation: isIndividual ? "Not yet" : form.incorporation || null,
       valuation: form.valuation || null,
       annual_revenue: form.annualRevenue || null,
       existing_investors: form.existingInvestors || null,
       problem_or_why: form.problemOrWhy || null,
-      raise_amount: form.raiseAmount,
-      equity_offered: form.equityOffered,
+      raise_amount: Math.min(form.raiseAmount, Math.max(raiseMax, 50000)),
+      equity_offered: Math.min(form.equityOffered, equityMax),
       min_ticket: form.minTicket || null,
       raise_structure: form.raiseStructure || null,
       cliff_months: form.cliffMonths,
@@ -781,28 +805,31 @@ export default function ApplyPage() {
   // route enforces the gate authoritatively either way.
   if (!walletAddress || (eligibilityLoading && !eligibility) || (eligibility && !eligibility.eligible)) {
     const checking = !!walletAddress && eligibilityLoading && !eligibility;
-    const status = eligibility?.kycStatus ?? null;
-    const inProgress = status === "pending" || status === "more_info";
+    const kyc = eligibility?.individualKycStatus ?? null;
+    const kyb = eligibility?.kybStatus ?? "none";
+    const blocked = kyb === "suspended" || kyb === "rejected" || kyc === "suspended";
+    const inProgress = !blocked && (kyc === "pending" || kyc === "more_info" || kyb === "pending" || kyb === "more_info");
     return (
       <>
         <PageHeader
           eyebrow="Application"
-          title={checking ? "Checking your company verification…" : !walletAddress ? "Company verification required" : inProgress ? "Your company verification is in progress" : status === "rejected" || status === "suspended" ? "Company verification not approved" : "Your company is not verified"}
+          title={checking ? "Checking your verification…" : !walletAddress ? "Verification required" : blocked ? "Verification not approved" : inProgress ? "Your verification is in progress" : "Your account is not verified"}
           lede={
             checking ? "One moment while we check your account." : !walletAddress ? (
-              <>Raising capital on Manci requires a verified company (KYB). Connect your wallet to check your status or start company verification.</>
+              <>Applying on Manci requires a verified account. Connect your wallet to check your status or start verification.</>
+            ) : blocked ? (
+              <>Your verification was not approved. Please contact the compliance team.</>
             ) : inProgress ? (
-              <>We are reviewing your company verification (KYB){status === "more_info" ? " and still need some documents" : ""}. Once it is approved you can submit your application here.</>
-            ) : status === "rejected" || status === "suspended" ? (
-              <>Your company verification was not approved. Please contact the compliance team.</>
+              <>We are reviewing your verification{kyc === "more_info" || kyb === "more_info" ? " and still need some documents" : ""}. Once it is approved you can submit your application here.</>
             ) : (
-              <>A verified company (KYB) is required to raise on Manci. Verify your company first — it takes a few minutes — and then come back to submit your application.</>
+              <>A verified account is required for these services. As an <strong>individual</strong>, complete identity verification (KYC) — once approved, we open the company for you and tokenize your raise. Already have a company? Verify it (KYB) instead.</>
             )
           }
         >
           {!checking && (walletAddress ? (
-            <ButtonRow>
-              {status !== "rejected" && status !== "suspended" && <Button href={`/verify?type=kyb&next=/apply`}>{inProgress ? "Continue company verification" : "Verify your company (KYB)"}</Button>}
+            !blocked && <ButtonRow>
+              <Button href={`/verify?type=kyc&next=/apply`}>{kyc === "pending" || kyc === "more_info" ? "Continue identity verification" : "Complete KYC"}</Button>
+              <Button variant="ghost" href={`/verify?type=kyb&next=/apply`}>{kyb === "pending" || kyb === "more_info" ? "Continue company verification" : "I have a company — verify it (KYB)"}</Button>
               {latestApp ? (
                 <Button variant="ghost" onClick={() => { setStartNew(false); setEditingApp(null); }}>View my existing application</Button>
               ) : null}
@@ -811,7 +838,6 @@ export default function ApplyPage() {
           {walletAddress && !checking ? (
             <FootNote className="mt-5">
               Connected wallet: <span className="font-mono break-all">{walletAddress}</span>
-              {status ? <> · status: <span className="font-mono">{status}</span></> : null}
             </FootNote>
           ) : null}
         </PageHeader>
@@ -841,6 +867,16 @@ export default function ApplyPage() {
           ) : null}
 
           {!walletAddress && <WalletRequired className="mb-8" />}
+
+          {isIndividual ? (
+            <Card className="mb-8" title="Applying as an individual">
+              <p>
+                Your identity is verified. We will open the company (a Serbian SPV) for you and tokenize your raise
+                {capacity ? <> — up to <span className="mx-strong">{fmtEur(raiseMax)}</span> in {capacity.year}</> : null}.
+                Tell us about the business below.
+              </p>
+            </Card>
+          ) : null}
 
           <Progress current={step} total={STEPS.length} />
           <StepLedger steps={STEPS} current={step} />
@@ -1016,12 +1052,15 @@ export default function ApplyPage() {
               <Field
                 id="incorporation"
                 label="Incorporation"
-                hint="Company ownership, debt and revenue share are issued through a Serbian SPV. If you don't have a Serbian company, we incorporate one."
+                hint={isIndividual
+                  ? "You are applying as an individual, so Manci incorporates the company (a Serbian SPV) for you."
+                  : "Company ownership, debt and revenue share are issued through a Serbian SPV. If you don't have a Serbian company, we incorporate one."}
               >
                 <Select
                   id="incorporation"
                   name="incorporation"
-                  value={form.incorporation}
+                  value={isIndividual ? "Not yet" : form.incorporation}
+                  disabled={isIndividual}
                   onChange={(e) => set("incorporation", e.target.value)}
                 >
                   {INCORP.map((opt) => (
@@ -1130,13 +1169,22 @@ export default function ApplyPage() {
                   <Req />
                 </label>
                 <p className="mb-2 text-[12.5px] text-mx-ink-faint">
-                  Annual equity sale, maximum EUR 3 million.
+                  {capacity
+                    ? capacity.used > 0
+                      ? `You can raise up to ${fmtEur(raiseMax)} more in ${capacity.year} (limit ${fmtEur(capacity.cap)} per calendar year, ${fmtEur(capacity.used)} already in applications).`
+                      : `Up to ${fmtEur(capacity.cap)} per calendar year (${capacity.year}).`
+                    : "Annual equity sale, maximum EUR 3 million per calendar year."}
                 </p>
+                {capacityBlocked && (
+                  <p className="mb-2 text-[12.5px] text-mx-ink">
+                    You have reached this year&apos;s raise limit. Contact us if your case needs a different limit.
+                  </p>
+                )}
                 <Range
                   id="raiseAmount"
-                  value={form.raiseAmount}
+                  value={Math.min(form.raiseAmount, Math.max(raiseMax, 50000))}
                   min={50000}
-                  max={3000000}
+                  max={Math.max(raiseMax, 50000)}
                   step={50000}
                   format={fmtM}
                   onChange={(v) => set("raiseAmount", v)}
@@ -1149,13 +1197,13 @@ export default function ApplyPage() {
                   <Req />
                 </label>
                 <p className="mb-2 text-[12.5px] text-mx-ink-faint">
-                  What percentage of the company are you selling for this raise?
+                  What percentage of the company are you selling for this raise?{capacity ? ` Maximum ${equityMax}%.` : ""}
                 </p>
                 <Range
                   id="equityOffered"
-                  value={form.equityOffered}
+                  value={Math.min(form.equityOffered, equityMax)}
                   min={1}
-                  max={30}
+                  max={equityMax}
                   step={0.5}
                   format={(v) => `${v}%`}
                   onChange={(v) => set("equityOffered", v)}

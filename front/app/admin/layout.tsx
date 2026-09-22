@@ -54,6 +54,7 @@ const GROUPS: Array<{
       { href: "/admin/issuers", label: "Issuers", icon: <IconBuilding /> },
       { href: "/admin/spvs", label: "SPVs", icon: <IconScale /> },
       { href: "/admin/applications", label: "Applications", icon: <IconClipboard /> },
+      { href: "/admin/limits", label: "Raise limits", icon: <IconScale /> },
       { href: "/admin/assets", label: "Assets", icon: <IconBox /> },
       { href: "/admin/share-classes", label: "Share classes", icon: <IconLayers /> },
       { href: "/admin/launchpad", label: "Launchpad", icon: <IconRocket /> },

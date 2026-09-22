@@ -250,3 +250,33 @@ export async function requireVerifiedCompany(sb: SupabaseClient, wallet: string)
   }
   return { clientId: (row as FetchedClientRow).id };
 }
+
+// ── Applicant gate (/apply) ────────────────────────────────────────────────
+// A verified company (approved KYB) applies as a company. A verified
+// individual (live KYC) may apply too: Manci then opens the company for them
+// (company_formation_requested). Anything else is refused.
+
+export type ApplicantLookup = CompanyKybLookup & {
+  /** Individual KYC state of the same dossier (verified = live KYC). */
+  individualKycStatus: string | null;
+  applicantKind: "company" | "individual" | null;
+};
+
+export async function lookupApplicant(sb: SupabaseClient, wallet: string): Promise<ApplicantLookup> {
+  const row = await fetchClientRow(sb, wallet);
+  const kyb = await evaluateCompanyKyb(sb, row);
+  const kyc = evaluateKycLookup(row);
+  const applicantKind = kyb.eligible ? "company" : kyc.eligible ? "individual" : null;
+  return { ...kyb, eligible: applicantKind !== null, individualKycStatus: kyc.expired ? "expired" : kyc.kycStatus, applicantKind };
+}
+
+export async function requireVerifiedApplicant(
+  sb: SupabaseClient, wallet: string,
+): Promise<{ clientId: string; kind: "company" | "individual" }> {
+  const verdict = await lookupApplicant(sb, wallet);
+  if (!verdict.applicantKind) {
+    throw new SiwsError(403, "Verification required to apply: complete identity verification (KYC) as an individual or company verification (KYB) at /verify.");
+  }
+  const row = await fetchClientRow(sb, wallet);
+  return { clientId: (row as FetchedClientRow).id, kind: verdict.applicantKind };
+}

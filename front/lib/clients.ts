@@ -228,7 +228,28 @@ export type ClientDetail = {
   requirements: KycRequirement[];
   documents: ClientDocument[];
   verification?: ClientVerificationDetails[];
+  raise_limits?: ClientRaiseLimits | null;
+  raise_capacity?: { year: number; cap: number; used: number; remaining: number; max_equity_percent: number; cap_source: "platform" | "client" } | null;
 };
+
+/** Per-client ("case by case") override of the raise limits (0056). */
+export type ClientRaiseLimits = {
+  client_id: string;
+  annual_raise_cap_eur: number | null;
+  max_equity_percent: number | null;
+  note: string | null;
+  updated_at: string;
+  updated_by: string | null;
+};
+
+/** Admin: set (or clear) a client's raise-limit override. */
+export async function adminSetClientRaiseLimits(
+  session: WalletSession | null | undefined,
+  clientId: string,
+  input: { annual_raise_cap_eur: number | null; max_equity_percent: number | null; note?: string } | { clear: true },
+): Promise<void> {
+  await signedFetch(session, "/api/clients/raise-limits", "clients.raiseLimits", { client_id: clientId, ...input });
+}
 
 /**
  * Admin reads one client's full record — row, internal notes, KYC requirements

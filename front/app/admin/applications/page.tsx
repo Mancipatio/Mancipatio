@@ -13,6 +13,7 @@ import {
   listApplications,
   adminListApplicationEvents,
   reviewApplication,
+  adminAdjustApplicationTerms,
   type ApplicationEvent,
   type ApplicationStatus,
   type LaunchApplication,
@@ -42,6 +43,7 @@ const EVENT_LABEL: Record<ApplicationEvent["action"], string> = {
   approved: "Approved",
   rejected: "Rejected",
   needs_changes: "Changes requested",
+  terms_adjusted: "Terms adjusted",
 };
 
 const fmtDate = (s: string | null) =>
@@ -262,6 +264,27 @@ function ApplicationDetail({
   const [confirm, setConfirm] = useState<Decision | null>(null);
   const [busy, setBusy] = useState(false);
   const [events, setEvents] = useState<ApplicationEvent[] | null>(null);
+  const [termsRaise, setTermsRaise] = useState(String(app.raise_amount));
+  const [termsEquity, setTermsEquity] = useState(String(app.equity_offered));
+  const [termsNote, setTermsNote] = useState("");
+  const [termsBusy, setTermsBusy] = useState(false);
+
+  async function saveTerms() {
+    const raise = Number(termsRaise.replace(/[^\d.]/g, ""));
+    const equity = Number(termsEquity);
+    setTermsBusy(true);
+    try {
+      await adminAdjustApplicationTerms(session, app.id, { raise_amount: raise, equity_offered: equity, note: termsNote.trim() || undefined });
+      toast.show({ kind: "success", title: "Terms updated" });
+      setTermsNote("");
+      await onRefresh();
+      await loadEvents();
+    } catch (e) {
+      toast.show({ kind: "error", title: e instanceof Error ? e.message : "Could not update the terms" });
+    } finally {
+      setTermsBusy(false);
+    }
+  }
 
   const loadEvents = useCallback(async () => {
     setEvents(await adminListApplicationEvents(session, app.id));
@@ -358,6 +381,30 @@ function ApplicationDetail({
         <Field label="Raise structure" value={app.raise_structure ?? "—"} />
         <Field label="Cliff (months)" value={String(app.cliff_months)} />
         <Field label="Vesting (months)" value={String(app.vesting_months)} />
+        <Field label="Applicant" value={app.applicant_kind === "individual" ? "Individual (KYC) — Manci opens the company" : app.applicant_kind === "company" ? "Company (KYB)" : "—"} />
+        {app.company_formation_requested ? <Field label="Company formation" value="Requested — Manci incorporates the SPV" /> : null}
+      </Section>
+
+      {/* Case-by-case terms */}
+      <Section label="Adjust terms">
+        <div className="col-span-full grid gap-3 md:grid-cols-3">
+          <label className="text-xs text-slate-600">Raise amount (EUR)
+            <input value={termsRaise} onChange={(e) => setTermsRaise(e.target.value)} inputMode="decimal"
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
+          <label className="text-xs text-slate-600">Equity offered (%)
+            <input value={termsEquity} onChange={(e) => setTermsEquity(e.target.value)} inputMode="decimal"
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
+          <label className="text-xs text-slate-600">Reason (timeline)
+            <input value={termsNote} onChange={(e) => setTermsNote(e.target.value)} maxLength={1000}
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
+          <div className="md:col-span-3 flex items-center gap-3">
+            <button type="button" disabled={termsBusy} onClick={() => void saveTerms()}
+              className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              {termsBusy ? "Saving…" : "Save terms"}
+            </button>
+            <span className="text-xs text-slate-500">The applicant&apos;s yearly cap and max equity still apply — raise the client&apos;s limit on the client page if this case needs more.</span>
+          </div>
+        </div>
       </Section>
 
       {/* Founder */}

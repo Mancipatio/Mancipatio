@@ -30,6 +30,8 @@ import {
   type ClientDocument,
   type ClientVerificationDetails,
   adminDecideKyb,
+  adminSetClientRaiseLimits,
+  type ClientDetail as ClientDetailData,
   type ClientKycStatus,
   type ClientNote,
   type ClientRow,
@@ -138,6 +140,12 @@ function ClientDetail({ id }: { id: string }) {
   const [verification, setVerification] = useState<ClientVerificationDetails[]>([]);
   const [kybBusy, setKybBusy] = useState(false);
   const [kybNote, setKybNote] = useState("");
+  const [raiseLimits, setRaiseLimits] = useState<ClientDetailData["raise_limits"]>(null);
+  const [raiseCapacity, setRaiseCapacity] = useState<ClientDetailData["raise_capacity"]>(null);
+  const [limitCap, setLimitCap] = useState("");
+  const [limitEquity, setLimitEquity] = useState("");
+  const [limitNote, setLimitNote] = useState("");
+  const [limitBusy, setLimitBusy] = useState(false);
   const [noteBody, setNoteBody] = useState("");
   const [confirm, setConfirm] = useState<
     null | "approve" | "reject" | "suspend"
@@ -182,6 +190,11 @@ function ClientDetail({ id }: { id: string }) {
       setRequirements(detail.requirements);
       setDocuments(detail.documents);
       setVerification(detail.verification ?? []);
+      setRaiseLimits(detail.raise_limits ?? null);
+      setRaiseCapacity(detail.raise_capacity ?? null);
+      setLimitCap(detail.raise_limits?.annual_raise_cap_eur != null ? String(Number(detail.raise_limits.annual_raise_cap_eur)) : "");
+      setLimitEquity(detail.raise_limits?.max_equity_percent != null ? String(Number(detail.raise_limits.max_equity_percent)) : "");
+      setLimitNote(detail.raise_limits?.note ?? "");
     } catch (err) {
       console.warn("[admin/clients] detail load failed:", err);
     }
@@ -1187,6 +1200,48 @@ function ClientDetail({ id }: { id: string }) {
             />
           </dl>
         )}
+      </section>
+
+      {/* Raise limits — case-by-case override of the platform defaults */}
+      <section className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-card">
+        <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Raise limits (this client)</p>
+        {raiseCapacity ? (
+          <p className="mt-3 text-sm text-slate-700">
+            {raiseCapacity.year}: <span className="font-semibold">€{Number(raiseCapacity.used).toLocaleString("en-US")}</span> of{" "}
+            <span className="font-semibold">€{Number(raiseCapacity.cap).toLocaleString("en-US")}</span> used · max equity{" "}
+            <span className="font-semibold">{Number(raiseCapacity.max_equity_percent)}%</span>
+            <span className="ml-2 text-xs text-slate-500">({raiseCapacity.cap_source === "client" ? "client override" : "platform default"})</span>
+          </p>
+        ) : <p className="mt-3 text-sm text-slate-500">No wallet linked — limits apply once the client has a wallet.</p>}
+        <div className="mt-4 grid gap-3 md:grid-cols-3">
+          <label className="text-xs text-slate-600">Annual cap (EUR)
+            <input value={limitCap} onChange={(e) => setLimitCap(e.target.value)} inputMode="decimal" placeholder="platform default"
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
+          <label className="text-xs text-slate-600">Max equity (%)
+            <input value={limitEquity} onChange={(e) => setLimitEquity(e.target.value)} inputMode="decimal" placeholder="platform default"
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
+          <label className="text-xs text-slate-600">Reason
+            <input value={limitNote} onChange={(e) => setLimitNote(e.target.value)} maxLength={1000} placeholder="e.g. legal opinion ref."
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
+        </div>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <button type="button" disabled={limitBusy} className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+            onClick={async () => {
+              const cap = limitCap.trim() ? Number(limitCap.replace(/[^\d.]/g, "")) : null;
+              const eq = limitEquity.trim() ? Number(limitEquity) : null;
+              setLimitBusy(true);
+              try { await adminSetClientRaiseLimits(conn.wallet, id, { annual_raise_cap_eur: cap, max_equity_percent: eq, note: limitNote.trim() || undefined }); toast.show({ kind: "success", title: "Client limits saved" }); await refresh(); }
+              catch (e) { toast.show({ kind: "error", title: e instanceof Error ? e.message : "Could not save the limits" }); }
+              finally { setLimitBusy(false); }
+            }}>Save client limits</button>
+          {raiseLimits && <button type="button" disabled={limitBusy} className="rounded-md border border-slate-300 px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+            onClick={async () => {
+              setLimitBusy(true);
+              try { await adminSetClientRaiseLimits(conn.wallet, id, { clear: true }); toast.show({ kind: "success", title: "Back to platform defaults" }); await refresh(); }
+              catch (e) { toast.show({ kind: "error", title: e instanceof Error ? e.message : "Could not clear the limits" }); }
+              finally { setLimitBusy(false); }
+            }}>Use platform defaults</button>}
+        </div>
       </section>
 
       {/* Self-service verification details (/verify) */}
