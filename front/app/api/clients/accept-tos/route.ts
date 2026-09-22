@@ -12,6 +12,8 @@
 import { NextResponse } from "next/server";
 import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { assertWritable } from "@/lib/server/maintenance";
+import { detectNetwork } from "@/lib/network";
 import { TOS_VERSION } from "@/lib/tos-version";
 import {
   assertBase58Wallet,
@@ -37,6 +39,10 @@ export async function POST(request: Request) {
       wallet === undefined || wallet === null || wallet === ""
         ? null
         : assertBase58Wallet(wallet, "wallet");
+
+    // Token-authed, not signed: the maintenance refusal (503) happens here.
+    // Browsing keeps working; the wallet-level ToS gate is /api/tos/accept.
+    await assertWritable(detectNetwork());
 
     const sb = getSupabaseAdmin();
     const client = await requireClientToken(sb, clientId, token);

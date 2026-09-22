@@ -5,7 +5,7 @@ import type { AccountFeatures, AccountProfile, AccountVerification, AccountWalle
 import type { Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { SiwsError } from "@/lib/server/siws";
-import { MaintenanceError, maintenanceResponse } from "@/lib/server/maintenance";
+import { getMaintenance, MaintenanceError, maintenanceResponse } from "@/lib/server/maintenance";
 import { sendEmail, escapeHtml, emailConfigured } from "@/lib/server/email";
 import { accountSiteOrigin } from "@/lib/server/account-origin";
 
@@ -46,10 +46,29 @@ export async function getAccountProfile(who: AccountWho, network: Network): Prom
     return projectAccountProfile(data as Record<string, unknown>);
   }
   const wallet = who;
+  const maintenance = await getMaintenance(network);
+  if (maintenance.enabled) return readWalletProfile(wallet, network, maintenance.message);
   const { data, error } = await getSupabaseAdmin().rpc("ensure_account_profile", { p_wallet: wallet, p_network: network });
   if (error || !data || typeof data !== "object" || Array.isArray(data) || data.wallet !== wallet || data.network !== network ||
       !Array.isArray(data.wallets) || !data.wallets.some((member: { wallet?: unknown }) => member?.wallet === wallet)) throw accountUnavailable();
   return projectAccountProfile(data as Record<string, unknown>);
+}
+
+/** Maintenance: the wallet's profile without ensure_account_profile's lazy
+ * create, so a first visit writes nothing while the site is paused. */
+async function readWalletProfile(wallet: string, network: Network, message: string | null): Promise<AccountProfile> {
+  const sb = getSupabaseAdmin();
+  const { data: member, error: memberError } = await sb.from("account_wallets").select("account_id")
+    .eq("network", network).eq("wallet", wallet).maybeSingle();
+  if (memberError) throw accountUnavailable();
+  const accountId = (member as { account_id?: unknown } | null)?.account_id;
+  // A wallet without an account gets one once maintenance ends.
+  if (typeof accountId !== "string") throw new MaintenanceError(message);
+  const { data, error } = await sb.rpc("get_account_profile", { p_account_id: accountId, p_network: network });
+  if (error || !data || typeof data !== "object" || Array.isArray(data) || data.id !== accountId || data.network !== network ||
+      !Array.isArray(data.wallets) || !data.wallets.some((entry: { wallet?: unknown }) => entry?.wallet === wallet)) throw accountUnavailable();
+  // Same shape as ensure_account_profile, which reports the acting wallet.
+  return projectAccountProfile({ ...(data as Record<string, unknown>), wallet });
 }
 
 // Higher rank wins when a wallet has several dossiers: a terminal status must

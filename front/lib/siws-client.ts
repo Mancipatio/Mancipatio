@@ -17,7 +17,7 @@
 import type { WalletSession } from "@solana/client";
 import { detectNetwork, type Network } from "@/lib/network";
 import { isSessionReadAction, SESSION_TTL_MS } from "@/lib/siws-session";
-import { MAINTENANCE_CODE, maintenanceRefusal } from "@/lib/maintenance";
+import { assertNotInKnownMaintenance, MAINTENANCE_CODE, maintenanceRefusal, refusedInMaintenance } from "@/lib/maintenance";
 
 /** Prefix prepended to the canonical JSON before signing. */
 export const SIWS_MESSAGE_PREFIX = "mancipatio:v2:";
@@ -108,6 +108,9 @@ export async function createSignedRequest(
   if (typeof window === "undefined") {
     throw new Error("Wallet requests must be signed from the app");
   }
+  // Don't ask for a signature the server would refuse: once the page knows
+  // maintenance is on (banner poll or an earlier refusal), stop here.
+  if (refusedInMaintenance(action)) assertNotInKnownMaintenance();
 
   const payload: SiwsPayload = {
     v: 2,

@@ -1,9 +1,18 @@
 #!/usr/bin/env bash
 # Maintenance mode switch (public.platform_maintenance, migration 0061).
 # While it is on, signed API writes and wallet transactions are refused with
-# 503 and every page shows the message; reads, sign-in, the indexer webhook
-# and /api/internal/retry keep running. Servers pick up a change within ~5 s,
-# open pages within ~30 s (or on focus).
+# 503 and every page shows the message; reads, sign-in, receipts of
+# transactions that already landed, the indexer webhook and
+# /api/internal/retry keep running. Open pages show it within ~30 s (or on
+# focus).
+#
+# Switching it on does not stop writes at once: each server instance keeps
+# its cached flag for up to 5 s, and a request that already passed the check
+# keeps writing until it finishes (routes that set maxDuration allow up to
+# 60 s; the others are bounded only by the platform default). Wait about
+# 70 s after `on` before starting work that must not race user writes, longer
+# if the function logs still show requests running. The flag only works once
+# a front that reads it (migration 0061 and later) is deployed.
 #
 # Usage:
 #   bash scripts/ops/maintenance.sh devnet on "Program upgrade in progress, back in about 15 minutes."
@@ -49,6 +58,7 @@ on conflict (network) do update
   set enabled = true, message = excluded.message, updated_at = excluded.updated_at, updated_by = excluded.updated_by;
 $status_sql
 SQL
+    echo "Maintenance is on. Writes already in flight can still land: wait about 70 s (5 s flag cache + 60 s slowest route) before starting work." >&2
     ;;
   off)
     [ $# -eq 2 ] || usage

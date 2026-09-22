@@ -11,8 +11,9 @@ import { assertSiteWritable } from "@/lib/maintenance";
  * must originate here so they retain exact session/RPC provenance.
  * Explicit issuer recovery collects its required authorities separately and
  * does not use this default-primary flow; linked profiles confer no roles.
- * Maintenance mode is read fresh before preparing and before any wallet
- * prompt, so no transaction is offered while the site is paused. */
+ * Maintenance mode is read (at most a few seconds old) before preparing and
+ * before any wallet prompt, so no transaction is offered while the site is
+ * paused; the server's refusal of the policy check backs it up. */
 export function withVerifiedTransactions(
   client: SolanaClient,
   network: Network,

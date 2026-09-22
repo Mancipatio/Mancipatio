@@ -187,7 +187,7 @@ function Consumer({ id }: { id: string }) {
     const walletStr = wallet.toString();
     setUploading((prev) => ({ ...prev, [req.id]: true }));
     try {
-      const { ok } = await uploadClientDocumentWithToken(
+      const { ok, error } = await uploadClientDocumentWithToken(
         client.id,
         token,
         walletStr,
@@ -212,7 +212,7 @@ function Consumer({ id }: { id: string }) {
         if (el) el.value = "";
         await refreshRequirements(client.id);
       } else {
-        toast.showError("Upload failed", "Could not upload the document. Please try again.");
+        toast.showError("Upload failed", error ?? "Could not upload the document. Please try again.");
       }
     } catch (err) {
       toast.showError(

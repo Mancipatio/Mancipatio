@@ -24,6 +24,9 @@
 //     the response carries `onboarding_notice` and NO path: the fallback TTL
 //     is created_at + 14d, so the link would 401 on the very next click for
 //     any dossier older than two weeks.
+//
+// In maintenance this stays a pure read: an expired link is not re-issued
+// (a notice instead), since uploads are refused until it ends anyway.
 
 import { NextResponse } from "next/server";
 import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -31,6 +34,7 @@ import { readActor } from "@/lib/server/account-auth";
 import { accountIdForWallet } from "@/lib/server/kyc-dossier";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { getMaintenance } from "@/lib/server/maintenance";
 import {
   DEGRADED_TTL_MESSAGE,
   isMissingTtlColumnError,
@@ -65,6 +69,9 @@ const SELF_KEYS = [
   "tos_accepted_at",
   "tos_version",
 ] as const;
+
+const MAINTENANCE_LINK_NOTICE =
+  "Manci is in maintenance, so your document upload link is paused. It will be available again once maintenance ends.";
 
 /** Statuses with an active document pipeline (upload link makes sense). */
 const UPLOADABLE_STATUSES = new Set(["pending", "more_info"]);
@@ -137,7 +144,13 @@ export async function POST(request: Request) {
           ? row.onboarding_token_expires_at
           : null,
       );
-      if (!token || !live) {
+      if ((!token || !live) && (await getMaintenance(detectNetwork())).enabled) {
+        // This read never writes during maintenance (uploads are paused too);
+        // the link is re-issued on the first load after it ends.
+        token = null;
+        live = false;
+        onboardingNotice = MAINTENANCE_LINK_NOTICE;
+      } else if (!token || !live) {
         // Mint a fresh token for the proven wallet owner so the upload flow
         // can always be resumed. Best-effort: on failure the path is null.
         const fresh = randomOnboardingToken();

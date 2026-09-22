@@ -75,6 +75,9 @@ beforeEach(() => {
     const query = {
       select(fields: string) { entry.fields = fields; return query; },
       eq(field: string, value: unknown) { entry.filters.push([field, value]); return query; },
+      abortSignal() { return query; },
+      // Only the maintenance flag is read this way here; no row = not in maintenance.
+      maybeSingle: async () => ({ data: null, error: null }),
       single: async () => ({ data: mocks.row, error: null }),
       then: (resolve: (value: unknown) => unknown) => Promise.resolve({ error: null }).then(resolve),
       upsert: mocks.upsert,
@@ -124,8 +127,9 @@ describe("private account API", () => {
     expect(json.data.features).toEqual({ google: true, email: true });
     expect(JSON.stringify(json)).not.toMatch(/private-provider-subject|private-token-hash|kyc_status|CRM/);
     expect(mocks.rpc).toHaveBeenCalledWith("ensure_account_profile", { p_wallet: wallet, p_network: "devnet" });
-    // Only the read-only per-wallet KYC status lookup may touch a table directly.
-    expect(mocks.from.mock.calls.every(([table]) => table === "clients")).toBe(true);
+    // Only the read-only per-wallet KYC status lookup (and the maintenance
+    // flag) may touch a table directly.
+    expect(mocks.from.mock.calls.every(([table]) => table === "clients" || table === "platform_maintenance")).toBe(true);
     expect(json.data.profile.wallets[0]).not.toHaveProperty("private_note");
   });
 
@@ -331,8 +335,9 @@ describe("two-wallet link API", () => {
     expect(mocks.rpc).toHaveBeenCalledWith("mutate_account_profile", { p_wallet: wallet, p_network: "devnet", p_account_id: mocks.row.id, p_action: "wallets.primary", p_params: { wallet: other } });
     expect((await removeWallet(request(envelope("account.wallets.remove", { wallet: other })))).status).toBe(200);
     expect(mocks.rpc).toHaveBeenCalledWith("mutate_account_profile", { p_wallet: wallet, p_network: "devnet", p_account_id: mocks.row.id, p_action: "wallets.remove", p_params: { wallet: other } });
-    // Only the read-only per-wallet KYC status lookup may touch a table directly.
-    expect(mocks.from.mock.calls.every(([table]) => table === "clients")).toBe(true);
+    // Only the read-only per-wallet KYC status lookup (and the maintenance
+    // flag) may touch a table directly.
+    expect(mocks.from.mock.calls.every(([table]) => table === "clients" || table === "platform_maintenance")).toBe(true);
   });
 
   it("transaction intent returns only the acting/primary wallet and account identity", async () => {

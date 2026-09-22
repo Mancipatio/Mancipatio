@@ -53,18 +53,29 @@ describe("maintenance flag", () => {
     expect(message).toMatch(/upgrade in progress/);
   });
 
+  it("treats a missing table (migration 0061 not applied) as a definite off", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    for (const code of ["42P01", "PGRST205"]) {
+      vi.resetModules();
+      server = await import("@/lib/server/maintenance");
+      m.reply = { data: null, error: { code, message: "relation does not exist" } };
+      await expect(server.readMaintenance("devnet")).resolves.toEqual({ enabled: false, message: null, fresh: true });
+    }
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/relation does not exist/);
+  });
+
   it.each([
-    ["a PostgREST error (missing table)", { data: null, error: { code: "42P01", message: "relation does not exist" } }],
+    ["a PostgREST error", { data: null, error: { code: "57014", message: "canceling statement due to statement timeout" } }],
     ["a thrown network error", new Error("fetch failed: secret-host")],
-  ])("fails open on %s and warns once per outage without details", async (_label, reply) => {
+  ])("fails open on %s when the flag was never read, and warns once per outage without details", async (_label, reply) => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     m.reply = reply;
-    await expect(server.getMaintenance("devnet")).resolves.toEqual({ enabled: false, message: null });
+    await expect(server.readMaintenance("devnet")).resolves.toEqual({ enabled: false, message: null, fresh: false });
     vi.setSystemTime(Date.now() + 6_000);
     await expect(server.getMaintenance("devnet")).resolves.toEqual({ enabled: false, message: null });
     await expect(server.assertWritable("devnet")).resolves.toBeUndefined();
     expect(warn).toHaveBeenCalledOnce();
-    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/secret-host|relation does not exist/);
+    expect(JSON.stringify(warn.mock.calls)).not.toMatch(/secret-host|statement timeout/);
     // Recovery resets the warning, so the next outage is reported again.
     m.reply = { data: null, error: null };
     vi.setSystemTime(Date.now() + 6_000);
@@ -73,6 +84,30 @@ describe("maintenance flag", () => {
     vi.setSystemTime(Date.now() + 6_000);
     await server.getMaintenance("devnet");
     expect(warn).toHaveBeenCalledTimes(2);
+  });
+
+  it("keeps maintenance on through failed reads until a read succeeds", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    m.reply = { data: { enabled: true, message: "Upgrade" }, error: null };
+    await server.getMaintenance("devnet");
+    // The database is slow or restarting mid-maintenance.
+    m.reply = new Error("timeout");
+    vi.setSystemTime(Date.now() + 6_000);
+    await expect(server.readMaintenance("devnet")).resolves.toEqual({ enabled: true, message: "Upgrade", fresh: false });
+    await expect(server.assertWritable("devnet")).rejects.toBeInstanceOf(server.MaintenanceError);
+    // A failed read is retried after a second, not cached for the full window.
+    const reads = m.reads;
+    vi.setSystemTime(Date.now() + 500);
+    await server.getMaintenance("devnet");
+    expect(m.reads).toBe(reads);
+    vi.setSystemTime(Date.now() + 600);
+    await expect(server.getMaintenance("devnet")).resolves.toMatchObject({ enabled: true });
+    expect(m.reads).toBe(reads + 1);
+    // Only a successful read switches it off.
+    m.reply = { data: { enabled: false, message: null }, error: null };
+    vi.setSystemTime(Date.now() + 1_100);
+    await expect(server.readMaintenance("devnet")).resolves.toEqual({ enabled: false, message: null, fresh: true });
+    await expect(server.assertWritable("devnet")).resolves.toBeUndefined();
   });
 
   it("caches per network for about five seconds and coalesces concurrent reads", async () => {
@@ -104,11 +139,15 @@ describe("maintenance flag", () => {
     expect(error).toMatchObject({ status: 503, message: "Manci is in maintenance: Upgrade", maintenanceMessage: "Upgrade" });
   });
 
-  it("classifies reads, sign-in, ToS acceptance and indexer repairs as allowed, everything else as refused", () => {
+  it("classifies reads, sign-in, ToS acceptance, indexer repairs and receipts as allowed, everything else as refused", () => {
     for (const action of ["clients.me", "account.me", "applications.mine", "auth.session", "tos.accept", "admin.reconcile", "admin.retryIndexer", "admin.reconcilePurchases"]) {
       expect(server.refusedInMaintenance(action)).toBe(false);
     }
-    for (const action of ["account.wallets.transaction", "clients.create", "launchpad.recordPurchase", "account.update", "verification.submit", "unknown.action"]) {
+    // Receipts of transactions that already landed are recorded, never lost.
+    for (const action of ["launchpad.recordPurchase", "vesting-series.record-step", "conversion.deposited", "conversion.reclaim", "delivery.deposited", "delivery.reclaim"]) {
+      expect(server.refusedInMaintenance(action)).toBe(false);
+    }
+    for (const action of ["account.wallets.transaction", "clients.create", "launchpad.commit", "clients.passport-sync", "account.update", "verification.submit", "unknown.action"]) {
       expect(server.refusedInMaintenance(action)).toBe(true);
     }
   });
@@ -136,11 +175,11 @@ describe("maintenance responses", () => {
     }
   });
 
-  it("GET /api/maintenance reports the deployment network, uncached", async () => {
+  it("GET /api/maintenance reports the deployment network, shareable by the CDN for a few seconds only", async () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
     const { GET } = await import("@/app/api/maintenance/route");
     let res = await GET();
-    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    expect(res.headers.get("Cache-Control")).toBe("public, max-age=0, s-maxage=5, stale-while-revalidate=5");
     await expect(res.json()).resolves.toEqual({ enabled: false, message: null, network: "devnet" });
     m.reply = { data: { enabled: true, message: "Upgrade" }, error: null };
     vi.setSystemTime(Date.now() + 6_000);
@@ -149,13 +188,19 @@ describe("maintenance responses", () => {
     expect(m.filters.at(-1)).toEqual(["network", "devnet"]);
   });
 
-  it("GET /api/maintenance stays up when the flag cannot be read", async () => {
+  it("GET /api/maintenance answers 503 uncached when the flag cannot be read, instead of 'off'", async () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
     vi.spyOn(console, "warn").mockImplementation(() => {});
-    m.reply = new Error("database down");
     const { GET } = await import("@/app/api/maintenance/route");
+    m.reply = { data: { enabled: true, message: "Upgrade" }, error: null };
+    expect((await GET()).status).toBe(200);
+    m.reply = new Error("database down");
+    vi.setSystemTime(Date.now() + 6_000);
     const res = await GET();
-    expect(res.status).toBe(200);
-    await expect(res.json()).resolves.toEqual({ enabled: false, message: null, network: "mainnet" });
+    expect(res.status).toBe(503);
+    expect(res.headers.get("Cache-Control")).toBe("no-store");
+    const body = await res.json();
+    expect(body).toMatchObject({ ok: false });
+    expect(body).not.toHaveProperty("enabled");
   });
 });

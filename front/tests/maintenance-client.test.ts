@@ -2,7 +2,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SolanaClient, TransactionPrepared, TransactionPrepareRequest, WalletSession } from "@solana/client";
 import type { Address, TransactionSigner } from "@solana/kit";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
-import { assertSiteWritable, fetchMaintenance, MAINTENANCE_EVENT, MaintenanceModeError } from "@/lib/maintenance";
+import {
+  assertNotInKnownMaintenance, assertSiteWritable, fetchMaintenance, MAINTENANCE_EVENT, MaintenanceModeError, MaintenanceUnknownError,
+} from "@/lib/maintenance";
 import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 import { requestTransactionWalletPolicy } from "@/lib/transaction-wallet-policy";
 import { explainSendError } from "@/lib/tx-error";
@@ -15,7 +17,7 @@ const WALLET = "11111111111111111111111111111111" as Address;
 const ORIGIN = "https://manci.test";
 let flag: { enabled: boolean; message: string | null } | "down" = { enabled: false, message: null };
 const serverFetch = vi.fn(async (input: unknown, init?: RequestInit) => {
-  expect(input).toBe("/api/maintenance");
+  expect(String(input)).toMatch(/^\/api\/maintenance(\?fresh=\d+)?$/);
   expect(init?.cache).toBe("no-store");
   if (flag === "down") throw new TypeError("Failed to fetch");
   return Response.json({ ...flag, network: "devnet" });
@@ -49,13 +51,15 @@ function fixture() {
   return { guarded: withVerifiedTransactions(client, "devnet"), request, transaction, session: current };
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   flag = { enabled: false, message: null };
-  serverFetch.mockClear();
-  dispatchEvent.mockClear();
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
   vi.stubGlobal("window", { location: { origin: ORIGIN }, dispatchEvent });
   vi.stubGlobal("fetch", serverFetch);
+  // Every test starts from a page that last saw maintenance off.
+  await fetchMaintenance();
+  serverFetch.mockClear();
+  dispatchEvent.mockClear();
   remote.signedFetch.mockReset().mockResolvedValue({ wallet: WALLET, network: "devnet", account_id: "10000000-0000-4000-8000-000000000001", primary_wallet: WALLET });
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.unstubAllGlobals(); });
@@ -83,6 +87,40 @@ describe("browser maintenance check", () => {
   ])("lets transactions continue when the flag is %s (the server still enforces)", async (_label, setup) => {
     setup();
     await expect(assertSiteWritable()).resolves.toBeUndefined();
+  });
+
+  it("keeps a known maintenance through a failed read", async () => {
+    flag = { enabled: true, message: "Program upgrade" };
+    await fetchMaintenance();
+    flag = "down";
+    await expect(assertSiteWritable()).rejects.toBeInstanceOf(MaintenanceModeError);
+    serverFetch.mockResolvedValueOnce(new Response("{}", { status: 503 }));
+    await expect(assertSiteWritable()).rejects.toThrow("Manci is in maintenance: Program upgrade");
+    flag = { enabled: false, message: null };
+    await expect(assertSiteWritable()).resolves.toBeUndefined();
+  });
+
+  it("fails closed when asked to, reading past the CDN", async () => {
+    await expect(assertSiteWritable({ failClosed: true })).resolves.toBeUndefined();
+    expect(String(serverFetch.mock.calls[0][0])).toMatch(/^\/api\/maintenance\?fresh=\d+$/);
+    flag = "down";
+    await expect(assertSiteWritable({ failClosed: true })).rejects.toBeInstanceOf(MaintenanceUnknownError);
+    serverFetch.mockResolvedValueOnce(new Response("{}", { status: 503 }));
+    await expect(assertSiteWritable({ failClosed: true })).rejects.toBeInstanceOf(MaintenanceUnknownError);
+    flag = { enabled: true, message: "Program upgrade" };
+    await expect(assertSiteWritable({ failClosed: true })).rejects.toBeInstanceOf(MaintenanceModeError);
+  });
+
+  it("still reads the flag in browsers without AbortSignal.timeout", async () => {
+    const timeout = AbortSignal.timeout;
+    Object.defineProperty(AbortSignal, "timeout", { value: undefined, configurable: true });
+    try {
+      flag = { enabled: true, message: "Program upgrade" };
+      await expect(fetchMaintenance()).resolves.toMatchObject({ enabled: true });
+      expect(serverFetch.mock.calls[0][1]?.signal).toBeInstanceOf(AbortSignal);
+    } finally {
+      Object.defineProperty(AbortSignal, "timeout", { value: timeout, configurable: true });
+    }
   });
 
   it("never fetches outside the browser", async () => {
@@ -139,6 +177,32 @@ describe("maintenance refusals from signed and account requests", () => {
     expect(error).toBeInstanceOf(MaintenanceModeError);
     expect((error as Error).message).toBe(refused.error);
     expect((dispatchEvent.mock.calls[0][0] as CustomEvent).detail).toMatchObject({ enabled: true, message: "Program upgrade" });
+  });
+
+  it("does not prompt the wallet for a refused write once the page knows maintenance is on", async () => {
+    const { signedFetch, createSignedRequest } = await vi.importActual<typeof import("@/lib/siws-client")>("@/lib/siws-client");
+    flag = { enabled: true, message: "Program upgrade" };
+    await fetchMaintenance();
+    const refusedFetch = vi.fn(async () => Response.json(refused, { status: 503 }));
+    vi.stubGlobal("fetch", refusedFetch);
+    const s = session();
+    await expect(signedFetch(s, "/api/clients/create", "clients.create", {})).rejects.toBeInstanceOf(MaintenanceModeError);
+    await expect(createSignedRequest(s, "clients.upload", {})).rejects.toThrow("Manci is in maintenance: Program upgrade");
+    expect(s.signMessage).not.toHaveBeenCalled();
+    expect(refusedFetch).not.toHaveBeenCalled();
+    expect(() => assertNotInKnownMaintenance()).toThrow(MaintenanceModeError);
+    // Signing in and receipts of landed transactions still reach the wallet.
+    await createSignedRequest(s, "auth.session", {});
+    await createSignedRequest(s, "launchpad.recordPurchase", {});
+    expect(s.signMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it("prompts normally when the page last saw maintenance off (no extra request)", async () => {
+    const { createSignedRequest } = await vi.importActual<typeof import("@/lib/siws-client")>("@/lib/siws-client");
+    const s = session();
+    await createSignedRequest(s, "clients.create", {});
+    expect(s.signMessage).toHaveBeenCalledOnce();
+    expect(serverFetch).not.toHaveBeenCalled();
   });
 
   it("account-session requests throw the same error and keep its wording", async () => {
