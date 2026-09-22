@@ -104,9 +104,15 @@ export function explainSendError(err: unknown): string {
 
   // Walk the error chain and collect any program logs.
   const logs: string[] = [];
-  let cursor: unknown = err;
+  const nestedMessages: string[] = [];
+  // Breadth-first over the cause chain AND the instruction-plan tree: a failed
+  // plan (kit error 7618003) wraps the real transaction error several levels
+  // down (context.transactionPlanResult → plans[] → error → cause/context).
+  const queue: unknown[] = [err];
   const seen = new Set<unknown>();
-  while (cursor != null && typeof cursor === "object" && !seen.has(cursor)) {
+  while (queue.length > 0 && seen.size < 200) {
+    const cursor = queue.shift();
+    if (cursor == null || typeof cursor !== "object" || seen.has(cursor)) continue;
     seen.add(cursor);
     const obj = cursor as AnyRecord;
     gatherLogs(obj.transactionPlanResult, logs);
@@ -115,7 +121,16 @@ export function explainSendError(err: unknown): string {
     if (Array.isArray(obj.logs)) {
       for (const l of obj.logs) if (typeof l === "string") logs.push(l);
     }
-    cursor = obj.cause;
+    if (cursor !== err && cursor instanceof Error && cursor.message) nestedMessages.push(cursor.message);
+    for (const key of ["cause", "error", "context", "transactionPlanResult", "plans", "simulationResponse"]) {
+      const next = obj[key];
+      if (Array.isArray(next)) queue.push(...next);
+      else if (next && typeof next === "object") queue.push(next);
+    }
+  }
+  // "already in use" = an `init` account exists (e.g. granting an admin twice).
+  if (logs.some((l) => /already in use/i.test(l))) {
+    return "This account already exists on-chain (the action was already done — e.g. this wallet is already an admin).";
   }
 
   // A known custom program error beats any raw log line.
@@ -134,6 +149,8 @@ export function explainSendError(err: unknown): string {
   if (logs.length > 0) {
     return `${message} — ${logs[logs.length - 1]}`;
   }
+  const inner = nestedMessages.find((m) => m !== message && !/transaction plan/i.test(m));
+  if (inner) return `${message} — ${inner}`;
 
   // Hint specifically for blockhash mismatch (Phantom on wrong network).
   if (/blockhash|expired|0x1771|signature verification/i.test(message)) {

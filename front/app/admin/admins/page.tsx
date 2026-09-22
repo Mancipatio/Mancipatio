@@ -48,6 +48,19 @@ export default function AdminsPage() {
   async function grant(reason: string) {
     if (!wallet || !conn.wallet || !grantAddr.trim()) return;
     const target = grantAddr.trim();
+    // add_admin creates the Admin record with `init`: an existing admin makes
+    // the transaction fail with an opaque wrapper error, so check first.
+    try {
+      const [existingPda] = await findSuperAdminRecordPda({ admin: target as Address });
+      const existing = await fetchMaybeAdmin(client.runtime.rpc, existingPda);
+      if (existing.exists) {
+        toast.showError("Already an admin", `${target.slice(0, 6)}…${target.slice(-4)} already has an admin record — nothing to grant.`);
+        setConfirmGrant(false);
+        return;
+      }
+    } catch {
+      // Lookup failure: fall through; the transaction still enforces the rule.
+    }
     const pendingId = toast.showPending(
       `Granting admin ${target.slice(0, 6)}…`,
       reason,
