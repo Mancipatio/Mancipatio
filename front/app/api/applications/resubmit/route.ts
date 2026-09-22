@@ -61,6 +61,8 @@ export async function POST(request: Request) {
       .update({
         ...application,
         applicant_kind: kind,
+        // An individual has no company yet: Manci incorporates it.
+        ...(kind === "individual" ? { incorporation: "Not yet" } : {}),
         company_formation_requested: kind === "individual" || params.company_formation_requested === true,
         status: "pending",
         submitted_at: new Date().toISOString(),

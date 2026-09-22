@@ -35,6 +35,8 @@ export async function POST(request: Request) {
       .insert({
         ...application, applicant_wallet: wallet, network,
         applicant_kind: kind,
+        // An individual has no company yet: Manci incorporates it.
+        ...(kind === "individual" ? { incorporation: "Not yet" } : {}),
         // Individuals always ask Manci to open the company that will issue.
         company_formation_requested: kind === "individual" || params.company_formation_requested === true,
       })
