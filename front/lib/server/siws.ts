@@ -53,7 +53,7 @@ export type VerifiedRequest = {
 const NONCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 /** Never derive production trust from a caller-controlled Host/forwarded header. */
-function assertRequestContext(request: Request, origin: unknown, network: unknown) {
+export function assertRequestContext(request: Request, origin: unknown, network: unknown) {
   if (typeof origin !== "string" || origin.length > 255) {
     throw new SiwsError(400, "Missing or invalid signed origin");
   }
@@ -106,7 +106,7 @@ function assertRequestContext(request: Request, origin: unknown, network: unknow
   }
 }
 
-async function consumeNonce(payload: SiwsPayload, expiresAt: number): Promise<void> {
+export async function consumeNonce(payload: SiwsPayload, expiresAt: number): Promise<void> {
   try {
     const { data, error } = await getSupabaseAdmin().rpc("consume_siws_nonce", {
       p_origin: payload.origin,

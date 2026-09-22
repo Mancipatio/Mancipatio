@@ -43,7 +43,10 @@ export async function POST(request: Request) {
     // A token may acknowledge this invitation's Terms; it cannot stamp an
     // arbitrary address into wallet-level acceptance/audit records.
     const walletStr = client.wallet;
-    if (!walletStr || (requestedWallet !== null && requestedWallet !== walletStr)) {
+    // A dossier owned by a wallet-less (email/Google) account accepts through
+    // its token alone; a wallet dossier still binds acceptance to that wallet.
+    const accountOwned = !walletStr && !!client.account_id;
+    if (!accountOwned && (!walletStr || (requestedWallet !== null && requestedWallet !== walletStr))) {
       throw new SiwsError(401, "Link this invitation's wallet before accepting Terms");
     }
 

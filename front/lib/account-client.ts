@@ -4,10 +4,14 @@ import type { AccountResponse, AccountWalletLinkAttempt } from "@/lib/account";
 import { isAccountId, validWalletLinkAttempt } from "@/lib/account-wallet-link";
 import { detectNetwork, type Network } from "@/lib/network";
 import { signedFetch } from "@/lib/siws-client";
+import { accountFetch } from "@/lib/account-login";
 import { invalidateTransactionWalletPolicy } from "@/lib/transaction-wallet-policy";
 
 export type AccountRequestContext = {
-  session: WalletSession;
+  /** The connected wallet (wallet mode); null when signed in by email/Google. */
+  session: WalletSession | null;
+  /** "account" = authorized by the email/Google session cookie, no signature. */
+  mode?: "wallet" | "account";
   network: Network;
   isCurrent: () => boolean;
   accountId?: string;
@@ -45,6 +49,11 @@ async function request<T>(
     if (!isAccountId(context.accountId)) throw new Error("ACCOUNT_ID_REQUIRED");
     params = { ...params, account_id: context.accountId };
   }
+  if (context.mode === "account" || !context.session) {
+    const response = await accountFetch<T>(path, action, params);
+    assertCurrent(context);
+    return response;
+  }
   const signMessage = context.session.signMessage;
   if (!signMessage) throw new Error("ACCOUNT_MESSAGE_SIGNING_UNAVAILABLE");
   // signedFetch signs before it POSTs. A wallet switch during the signature
@@ -72,15 +81,19 @@ async function profileRequest(
   const response = await request<AccountResponse>(context, path, action, params);
   const profile = response?.profile;
   const wallets = profile?.wallets;
+  const accountMode = context.mode === "account" || !context.session;
   if (
-    !profile || profile.wallet !== context.session.account.address.toString() ||
-    profile.network !== context.network || !isAccountId(profile.id) ||
+    !profile || profile.network !== context.network || !isAccountId(profile.id) ||
     (context.accountId !== undefined && profile.id !== context.accountId) ||
-    !Array.isArray(wallets) || wallets.length < 1 || wallets.length > 10 ||
+    !Array.isArray(wallets) || wallets.length > 10 ||
     wallets.some((entry) => !entry || typeof entry.wallet !== "string" || !isAddress(entry.wallet)) ||
     new Set(wallets.map((entry) => entry.wallet)).size !== wallets.length ||
-    !wallets.some((entry) => entry.wallet === profile.wallet) ||
-    !wallets.some((entry) => entry.wallet === profile.primary_wallet)
+    (accountMode
+      // Signed in by email/Google: no acting wallet; the primary is optional.
+      ? profile.wallet !== null || (profile.primary_wallet !== null && !wallets.some((entry) => entry.wallet === profile.primary_wallet))
+      : profile.wallet !== context.session!.account.address.toString() || wallets.length < 1 ||
+        !wallets.some((entry) => entry.wallet === profile.wallet) ||
+        !wallets.some((entry) => entry.wallet === profile.primary_wallet))
   ) {
     throw new AccountSessionChangedError();
   }
@@ -116,7 +129,7 @@ export function unlinkAccountGoogle(context: AccountRequestContext) {
 }
 
 export async function startAccountWalletLink(context: AccountRequestContext, targetWallet: string) {
-  if (!isAddress(targetWallet) || targetWallet === context.session.account.address.toString()) {
+  if (!context.session || !isAddress(targetWallet) || targetWallet === context.session.account.address.toString()) {
     throw new Error("ACCOUNT_LINK_TARGET_INVALID");
   }
   const attempt = await request<AccountWalletLinkAttempt>(context, "/api/account/wallets/start", "account.wallets.start", { target_wallet: targetWallet });
@@ -128,7 +141,7 @@ export async function startAccountWalletLink(context: AccountRequestContext, tar
 }
 
 export async function completeAccountWalletLink(context: AccountRequestContext, attempt: AccountWalletLinkAttempt) {
-  if (!validWalletLinkAttempt(attempt) || attempt.target_wallet !== context.session.account.address.toString()) {
+  if (!context.session || !validWalletLinkAttempt(attempt) || attempt.target_wallet !== context.session.account.address.toString()) {
     throw new Error("ACCOUNT_LINK_TARGET_INVALID");
   }
   const response = await profileRequest({ ...context, accountId: attempt.account_id }, "/api/account/wallets/complete", "account.wallets.complete", {
@@ -140,6 +153,7 @@ export async function completeAccountWalletLink(context: AccountRequestContext, 
 }
 
 export async function cancelAccountWalletLink(context: AccountRequestContext, attempt: AccountWalletLinkAttempt) {
+  if (!context.session) throw new Error("ACCOUNT_LINK_TARGET_INVALID");
   const actor = context.session.account.address.toString();
   if (!validWalletLinkAttempt(attempt) || (actor !== attempt.requested_by && actor !== attempt.target_wallet)) {
     throw new Error("ACCOUNT_LINK_TARGET_INVALID");
@@ -187,4 +201,11 @@ export function accountErrorMessage(error: unknown, fallback: string) {
   if (message === "account_link_target_invalid") return "Connect the exact wallet shown in this link request, or start a new request.";
   if (message === "account_id_required") return "Open your account again before making changes.";
   return fallback;
+}
+
+/** Signed in by email/Google: add the connected wallet (it signs, the cookie proves the account). */
+export async function attachWalletToAccount(session: WalletSession, accountId: string): Promise<AccountResponse> {
+  const response = await signedFetch<AccountResponse>(session, "/api/account/wallets/attach", "account.wallets.attach", { account_id: accountId });
+  invalidateTransactionWalletPolicy();
+  return response;
 }

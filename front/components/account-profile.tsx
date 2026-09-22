@@ -24,9 +24,12 @@ import {
 } from "@/lib/account-client";
 import { detectNetwork, networkLabel, type Network } from "@/lib/network";
 import { hasWalletSession } from "@/lib/siws-client";
+import { signOutAccount, startGoogleSignIn, useSignedInAccount } from "@/lib/account-login";
 
 const GOOGLE_RETURN_MESSAGES: Record<string, string> = {
   connected: "Returned from Google. Open your account to check the saved connection.",
+  signed_in: "You are signed in with Google.",
+  in_use: "That Google account is already connected to another Manci account.",
   cancelled: "Google connection was cancelled. You can connect again when ready.",
   expired: "The Google connection request expired. Open your account to try again.",
   unavailable: "Google connection is currently unavailable. Your wallet account is still available.",
@@ -48,6 +51,7 @@ export function AccountProfile() {
 
 function AccountWorkspace({ network }: { network: Network }) {
   const conn = useWalletConnection();
+  const signedIn = useSignedInAccount();
   const searchParams = useSearchParams();
   const [attempt, setAttempt] = useState<AccountWalletLinkAttempt | null>(null);
   const [restored, setRestored] = useState(false);
@@ -108,12 +112,31 @@ function AccountWorkspace({ network }: { network: Network }) {
         <Link href="/portfolio" className="account-button account-button--secondary"><IconWallet size={16} />My portfolio<IconArrowUpRight size={15} /></Link>
       </header>
       {flowMessage && <AccountFeedback notice={{ tone: "info", text: flowMessage }} />}
-      {!restored || !conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p> : attempt ? <AccountWalletLinkFlow attempt={attempt} network={network} onComplete={completeLink} onCancel={() => { clearAttempt(); setFlowMessage("The wallet link request has been cancelled."); }} onClose={() => { clearAttempt(); setFlowMessage("Setup closed. The outstanding link request will expire automatically; closing setup does not revoke it."); }} /> : !conn.connected || !conn.wallet ? (
-        <div className="account-connect"><WalletRequired context="Connect any wallet linked to your account to manage your shared profile, contact email and Google connection." /></div>
+      {signedIn.status === "signed_in" && signedIn.account && !attempt ? (
+        <ConnectedAccount
+          key={`account:${signedIn.account.id}`}
+          session={conn.connected && conn.wallet ? conn.wallet : null}
+          mode="account"
+          accountId={signedIn.account.id}
+          network={network}
+          googleReturn={googleReturn}
+          onStartLink={startLink}
+        />
+      ) : !restored || !conn.isReady || signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p> : attempt ? <AccountWalletLinkFlow attempt={attempt} network={network} onComplete={completeLink} onCancel={() => { clearAttempt(); setFlowMessage("The wallet link request has been cancelled."); }} onClose={() => { clearAttempt(); setFlowMessage("Setup closed. The outstanding link request will expire automatically; closing setup does not revoke it."); }} /> : !conn.connected || !conn.wallet ? (
+        <div className="account-connect">
+          <section className="account-card account-unlock">
+            <p className="account-eyebrow">SIGN IN</p>
+            <h2>Sign in with email or Google.</h2>
+            <p>No wallet needed to create your account, get verified and manage your details. Add wallets whenever you are ready.</p>
+            <Link href="/login?next=/account" className="account-button account-button--primary">Sign in<IconArrowUpRight size={16} /></Link>
+          </section>
+          <WalletRequired context="Or connect a wallet that is already linked to your account." />
+        </div>
       ) : (
         <ConnectedAccount
           key={`${network}:${conn.wallet.account.address}:${conn.wallet.connector.id}`}
           session={conn.wallet}
+          mode="wallet"
           network={network}
           googleReturn={googleReturn}
           initialData={completion?.session === conn.wallet ? completion.data : undefined}
@@ -124,8 +147,10 @@ function AccountWorkspace({ network }: { network: Network }) {
   );
 }
 
-function ConnectedAccount({ session, network, googleReturn, initialData, onStartLink }: {
-  session: WalletSession;
+function ConnectedAccount({ session, mode, accountId: signedInAccountId, network, googleReturn, initialData, onStartLink }: {
+  session: WalletSession | null;
+  mode: "wallet" | "account";
+  accountId?: string;
   network: Network;
   googleReturn?: string;
   initialData?: AccountResponse;
@@ -135,11 +160,12 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
   const [displayName, setDisplayName] = useState(initialData?.profile.display_name ?? "");
   const [email, setEmail] = useState("");
   const [copied, setCopied] = useState(false);
-  const operation = useAccountOperation(session, network, data?.profile.id);
+  const operation = useAccountOperation(session, network, data?.profile.id ?? signedInAccountId, mode);
   const { pending, notice, run } = operation;
-  const wallet = session.account.address.toString();
+  const accountMode = mode === "account";
+  const wallet = session ? session.account.address.toString() : "";
   const busy = pending !== null;
-  const canSign = typeof session.signMessage === "function";
+  const canSign = accountMode || typeof session?.signMessage === "function";
 
   function applyProfile(value: AccountResponse) {
     setData(value);
@@ -155,7 +181,7 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
   // Already signed in this session: open straight away, no wallet prompt.
   const [autoOpened, setAutoOpened] = useState(false);
   useEffect(() => {
-    if (data || autoOpened || !hasWalletSession(wallet)) return;
+    if (data || autoOpened || (!accountMode && !hasWalletSession(wallet))) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setAutoOpened(true);
     open();
@@ -181,6 +207,10 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
 
   function connectGoogle() {
     if (!data?.features.google) return;
+    if (accountMode) {
+      void run("google", () => startGoogleSignIn("link"), () => undefined, "Google connection could not be started. Please try again later.");
+      return;
+    }
     void run("google", startAccountGoogle, ({ url }) => {
       const destination = new URL(url);
       if (destination.protocol !== "https:" || destination.hostname !== "accounts.google.com") {
@@ -198,6 +228,10 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
       // The complete address remains selectable when clipboard access is unavailable.
       setCopied(false);
     }
+  }
+
+  if (!data && accountMode) {
+    return <><AccountFeedback notice={notice} /><p className="account-loading" role="status">Opening your account…</p></>;
   }
 
   if (!data) {
@@ -237,16 +271,17 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
     <>
       <section className="account-identity" aria-label="Account identity">
         <span className="account-avatar" aria-hidden="true">{profile.display_name ? profile.display_name.slice(0, 1).toUpperCase() : <IconUsers size={24} />}</span>
-        <div className="account-identity-details"><h2>{profile.display_name || "Your wallet account"}</h2><div><code>{wallet}</code><button type="button" onClick={() => void copyWallet()} className="account-text-button" aria-label="Copy wallet address">{copied ? "Copied" : "Copy"}</button></div></div>
+        <div className="account-identity-details"><h2>{profile.display_name || (accountMode ? "Your Manci account" : "Your wallet account")}</h2><div>{accountMode ? <code>{profile.email ?? profile.google_email ?? "Signed in"}</code> : <><code>{wallet}</code><button type="button" onClick={() => void copyWallet()} className="account-text-button" aria-label="Copy wallet address">{copied ? "Copied" : "Copy"}</button></>}</div></div>
         <span className="account-badge"><span />{networkLabel(network)}</span>
+        {accountMode && <button type="button" className="account-text-button" onClick={() => void signOutAccount()}>Sign out</button>}
       </section>
-      {profile.wallet !== profile.primary_wallet && <section className="account-primary-notice" aria-label="Primary transaction wallet"><div><strong>Connect your primary wallet to transact.</strong><p>You can manage this profile with your connected wallet. Transactions require the primary wallet below.</p><code>{profile.primary_wallet}</code></div><details><summary>Switch wallet</summary><p>Disconnect, select your primary account in the wallet extension, then reconnect.</p><WalletButton /></details></section>}
+      {!accountMode && profile.wallet !== profile.primary_wallet && <section className="account-primary-notice" aria-label="Primary transaction wallet"><div><strong>Connect your primary wallet to transact.</strong><p>You can manage this profile with your connected wallet. Transactions require the primary wallet below.</p><code>{profile.primary_wallet}</code></div><details><summary>Switch wallet</summary><p>Disconnect, select your primary account in the wallet extension, then reconnect.</p><WalletButton /></details></section>}
       <AccountFeedback notice={notice} />
-      {busy && <p className="account-operation-status" role="status">Approve the message in your wallet, then wait for confirmation.</p>}
+      {busy && !accountMode && <p className="account-operation-status" role="status">Approve the message in your wallet, then wait for confirmation.</p>}
       <div className="account-grid" aria-busy={busy}>
         <div className="account-main-column">
           <AccountVerificationCard verification={data.verification} />
-          <AccountWallets data={data} operation={operation} onProfile={applyProfile} onStartLink={onStartLink} />
+          <AccountWallets data={data} operation={operation} onProfile={applyProfile} onStartLink={onStartLink} mode={mode} connectedSession={session} />
           <section className="account-card" aria-labelledby="account-profile-heading">
             <div className="account-card-heading"><div><p className="account-eyebrow">THE BASICS</p><h2 id="account-profile-heading">Profile details</h2></div><IconUsers size={21} /></div>
             <form onSubmit={saveName} className="account-form">
@@ -261,7 +296,7 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
             <div className="account-card-heading"><div><p className="account-eyebrow">STAY IN TOUCH</p><h2 id="account-email-heading">Contact email</h2></div><span className={`account-status ${profile.email_verified_at ? "account-status--verified" : ""}`}>{profile.email_verified_at ? <><IconCheck size={13} />Verified</> : "Not added"}</span></div>
             <p className="account-card-description">Choose the address we can contact you on. This is separate from your Google connection.</p>
             {profile.email && <div className="account-saved-email"><strong>{profile.email}</strong><span>{profile.email_verified_at ? `Verified${dateLabel(profile.email_verified_at) ? ` · ${dateLabel(profile.email_verified_at)}` : ""}` : "Awaiting verification"}</span></div>}
-            {profile.pending_email && <div className="account-pending-email"><span className="account-status">Awaiting confirmation</span><strong>{profile.pending_email}</strong><p>Open the confirmation link sent to this address, then approve it with any wallet linked to this account.{profile.email_verified_at ? " Your current verified email stays active until then." : ""}</p>{profile.pending_email_expires_at && dateLabel(profile.pending_email_expires_at) && <p>Link expires {dateLabel(profile.pending_email_expires_at, true)} (UTC). A new link replaces the previous one.</p>}<div className="account-pending-actions"><button type="button" className="account-text-button" disabled={busy || !features.email} onClick={() => void run("resend", (context) => requestAccountEmail(context, profile.pending_email!), applyProfile, "We could not resend the email. Please wait a moment and try again.", "A new confirmation email has been sent. Use the latest link.")}>{pending === "resend" ? "Sending…" : "Resend email"}</button><button type="button" className="account-text-button account-text-button--muted" disabled={busy} onClick={() => void run("cancel-email", cancelAccountEmail, applyProfile, "The email change could not be cancelled. Please try again.", "The pending email change has been cancelled.")}>Cancel change</button></div></div>}
+            {profile.pending_email && <div className="account-pending-email"><span className="account-status">Awaiting confirmation</span><strong>{profile.pending_email}</strong><p>{accountMode ? "Open the confirmation link sent to this address while signed in." : "Open the confirmation link sent to this address, then approve it with any wallet linked to this account."}{profile.email_verified_at ? " Your current verified email stays active until then." : ""}</p>{profile.pending_email_expires_at && dateLabel(profile.pending_email_expires_at) && <p>Link expires {dateLabel(profile.pending_email_expires_at, true)} (UTC). A new link replaces the previous one.</p>}<div className="account-pending-actions"><button type="button" className="account-text-button" disabled={busy || !features.email} onClick={() => void run("resend", (context) => requestAccountEmail(context, profile.pending_email!), applyProfile, "We could not resend the email. Please wait a moment and try again.", "A new confirmation email has been sent. Use the latest link.")}>{pending === "resend" ? "Sending…" : "Resend email"}</button><button type="button" className="account-text-button account-text-button--muted" disabled={busy} onClick={() => void run("cancel-email", cancelAccountEmail, applyProfile, "The email change could not be cancelled. Please try again.", "The pending email change has been cancelled.")}>Cancel change</button></div></div>}
             {!features.email && <p className="account-unavailable">Email verification is not available on this deployment yet. You can add or change your contact email once it is enabled.</p>}
             <form onSubmit={sendEmail} className="account-form">
               <label htmlFor="account-contact-email">{profile.email || profile.pending_email ? "New contact email" : "Email address"}</label>
@@ -276,13 +311,13 @@ function ConnectedAccount({ session, network, googleReturn, initialData, onStart
           <section className="account-card" aria-labelledby="account-google-heading">
             <div className="account-card-heading"><span className="account-google-mark" aria-hidden="true">G</span><span className={`account-status ${profile.google_linked_at ? "account-status--verified" : ""}`}>{profile.google_linked_at ? "Connected" : "Not connected"}</span></div>
             <h2 id="account-google-heading">Google account</h2>
-            <p className="account-card-description">Link Google to your shared profile. A linked wallet remains required to access your account.</p>
+            <p className="account-card-description">{accountMode ? "Sign in with Google next time, or keep using your email link." : "Link Google to your shared profile. A linked wallet remains required to access your account."}</p>
             {profile.google_email && <div className="account-saved-email"><strong>{profile.google_email}</strong>{profile.google_linked_at && dateLabel(profile.google_linked_at) && <span>Connected {dateLabel(profile.google_linked_at)}</span>}</div>}
             {profile.google_linked_at ? <button type="button" className="account-button account-button--secondary account-button--full" disabled={busy} onClick={() => void run("unlink-google", unlinkAccountGoogle, applyProfile, "Google could not be disconnected. Please try again.", "Google has been disconnected. Your contact email is unchanged.")}>{pending === "unlink-google" ? "Disconnecting…" : "Disconnect Google"}</button> : <><button type="button" className="account-button account-button--secondary account-button--full" disabled={busy || !features.google} onClick={connectGoogle}>{pending === "google" ? "Opening Google…" : "Connect Google"}<IconArrowUpRight size={15} /></button>{!features.google && <p className="account-unavailable">Google connection is not available on this deployment yet.</p>}</>}
-            <p className="account-fineprint account-google-note">Google linking does not change your contact email or provide wallet recovery.</p>
+            <p className="account-fineprint account-google-note">{accountMode ? "Google sign-in does not change your contact email." : "Google linking does not change your contact email or provide wallet recovery."}</p>
           </section>
           <section className="account-portfolio-card"><span className="account-feature-icon"><IconWallet size={21} /></span><p className="account-eyebrow">YOUR NEXT MOVE</p><h2>Everything you own.<br />One place.</h2><p>Review your holdings, income and pending actions in your portfolio.</p><Link href="/portfolio" className="account-button account-button--primary account-button--full">Open portfolio<IconArrowUpRight size={16} /></Link></section>
-          <p className="account-signature-note"><IconLock size={15} />Saving account changes asks for a wallet message signature. No transaction fee.</p>
+          {!accountMode && <p className="account-signature-note"><IconLock size={15} />Saving account changes asks for a wallet message signature. No transaction fee.</p>}
         </aside>
       </div>
     </>

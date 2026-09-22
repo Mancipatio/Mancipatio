@@ -10,6 +10,7 @@ import { AccountFeedback, useAccountOperation } from "@/components/account-sessi
 import { IconArrowUpRight, IconCheck, IconLock } from "@/components/icons";
 import { verifyAccountEmail } from "@/lib/account-client";
 import { detectNetwork, networkLabel, type Network } from "@/lib/network";
+import { useSignedInAccount } from "@/lib/account-login";
 
 export function AccountEmailVerification() {
   const conn = useWalletConnection();
@@ -18,10 +19,12 @@ export function AccountEmailVerification() {
   const token = searchParams.getAll("token").length === 1 ? searchParams.get("token") : null;
   const validToken = token !== null && /^[A-Za-z0-9_-]{43}$/.test(token);
   const network = detectNetwork();
+  const signedIn = useSignedInAccount();
 
   return <div className="account-page account-verify-page">
     <header className="account-heading"><div><p className="account-eyebrow">YOUR ACCOUNT</p><h1>Confirm your email<span>.</span></h1><p>One final step to verify your contact address.</p></div></header>
-    {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p> : !conn.connected || !conn.wallet ? validToken ? <WalletRequired context="Connect a wallet linked to the account that requested this email change. Opening the link does not confirm your email automatically." /> : <MissingConfirmationLink /> : <EmailConfirmation key={`${network}:${conn.wallet.account.address}:${conn.wallet.connector.id}`} session={conn.wallet} network={network} token={validToken ? token : null} />}
+    {signedIn.status === "signed_in" ? <EmailConfirmation key={`account:${signedIn.account?.id}`} session={null} network={network} token={validToken ? token : null} />
+      : !conn.isReady || signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p> : !conn.connected || !conn.wallet ? validToken ? <WalletRequired context="Connect a wallet linked to the account that requested this email change. Opening the link does not confirm your email automatically." /> : <MissingConfirmationLink /> : <EmailConfirmation key={`${network}:${conn.wallet.account.address}:${conn.wallet.connector.id}`} session={conn.wallet} network={network} token={validToken ? token : null} />}
   </div>;
 }
 
@@ -29,10 +32,11 @@ function MissingConfirmationLink() {
   return <section className="account-card account-unlock"><span className="account-feature-icon"><IconLock size={23} /></span><h2>A confirmation link is needed.</h2><p>Open the full link from your confirmation email. If it has expired, request a new email from your account.</p><Link href="/account" className="account-button account-button--primary">Go to your account<IconArrowUpRight size={16} /></Link></section>;
 }
 
-function EmailConfirmation({ session, network, token }: { session: WalletSession; network: Network; token: string | null }) {
+function EmailConfirmation({ session, network, token }: { session: WalletSession | null; network: Network; token: string | null }) {
   const [confirmed, setConfirmed] = useState<{ email: string; token: string } | null>(null);
-  const { pending, notice, run } = useAccountOperation(session, network);
-  const canSign = typeof session.signMessage === "function";
+  const accountMode = session === null;
+  const { pending, notice, run } = useAccountOperation(session, network, undefined, accountMode ? "account" : "wallet");
+  const canSign = accountMode || typeof session?.signMessage === "function";
 
   function confirm() {
     if (!token) return;
@@ -50,8 +54,8 @@ function EmailConfirmation({ session, network, token }: { session: WalletSession
 
   return <section className="account-card account-unlock">
     <span className="account-feature-icon"><IconLock size={23} /></span>
-    <h2>Confirm with your wallet.</h2><p>Use a wallet linked to the account that requested this change. Approve a message to verify the email address from this link.</p>
-    <div className="account-wallet-preview"><span>Connected wallet · {networkLabel(network)}</span><code>{session.account.address.toString()}</code></div>
+    <h2>{accountMode ? "Confirm your email." : "Confirm with your wallet."}</h2><p>{accountMode ? "You are signed in. Confirm to verify the email address from this link." : "Use a wallet linked to the account that requested this change. Approve a message to verify the email address from this link."}</p>
+    {session && <div className="account-wallet-preview"><span>Connected wallet · {networkLabel(network)}</span><code>{session.account.address.toString()}</code></div>}
     <AccountFeedback notice={notice} />
     {!canSign && <p className="account-unavailable">This wallet cannot sign messages. Connect a wallet that supports message signing.</p>}
     <button type="button" className="account-button account-button--primary" onClick={confirm} disabled={!!pending || !canSign}>{pending ? "Confirming…" : "Confirm email"}<IconCheck size={16} /></button>

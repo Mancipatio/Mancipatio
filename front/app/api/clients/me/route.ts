@@ -26,7 +26,9 @@
 //     any dossier older than two weeks.
 
 import { NextResponse } from "next/server";
-import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { readActor } from "@/lib/server/account-auth";
+import { accountIdForWallet } from "@/lib/server/kyc-dossier";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import {
@@ -69,9 +71,12 @@ const UPLOADABLE_STATUSES = new Set(["pending", "more_info"]);
 
 export async function POST(request: Request) {
   try {
-    const { wallet } = await verifySigned(request, "clients.me");
+    const actor = await readActor(request, "clients.me");
+    const wallet = actor.kind === "wallet" ? actor.wallet : null;
 
     const sb = getSupabaseAdmin();
+    // The dossier belongs to the account; legacy dossiers are keyed by wallet.
+    const ownerAccount = actor.kind === "account" ? actor.accountId : await accountIdForWallet(sb, actor.wallet);
     // 0041 adds a unique index on clients.wallet, but historic databases may
     // still hold duplicates (the index creation is skipped when they exist),
     // so read ALL rows for the wallet rather than just the oldest.
@@ -81,23 +86,34 @@ export async function POST(request: Request) {
     // would be invisible to the whole pipeline. Otherwise the oldest row wins
     // (mirrors findClientByWallet / ensureClientDossier). select("*") so the
     // row also carries the token fields regardless of 0041.
-    const { data, error } = await sb
-      .from("clients")
-      .select("*")
-      .eq("wallet", wallet)
-      .eq("network", detectNetwork())
-      .order("created_at", { ascending: true });
-    if (error) {
-      console.error("[api/clients/me] query failed:", error.message);
-      throw new SiwsError(500, "Could not load your client record");
+    let rows: Record<string, unknown>[] = [];
+    if (ownerAccount) {
+      const byAccount = await sb.from("clients").select("*")
+        .eq("account_id", ownerAccount).eq("network", detectNetwork()).order("created_at", { ascending: true });
+      if (byAccount.error) {
+        console.error("[api/clients/me] account query failed:", byAccount.error.message);
+        throw new SiwsError(500, "Could not load your client record");
+      }
+      rows = (byAccount.data ?? []) as Record<string, unknown>[];
     }
-
-    const rows = (data ?? []) as Record<string, unknown>[];
+    if (rows.length === 0 && wallet) {
+      const { data, error } = await sb
+        .from("clients")
+        .select("*")
+        .eq("wallet", wallet)
+        .eq("network", detectNetwork())
+        .order("created_at", { ascending: true });
+      if (error) {
+        console.error("[api/clients/me] query failed:", error.message);
+        throw new SiwsError(500, "Could not load your client record");
+      }
+      rows = (data ?? []) as Record<string, unknown>[];
+    }
     const row =
       rows.find((r) => isTerminalKycStatus(r.kyc_status)) ?? rows[0] ?? null;
     if (rows.length > 1) {
       console.warn(
-        `[api/clients/me] ${rows.length} client rows share wallet ${wallet} — dedupe them (see migration 0041)`,
+        `[api/clients/me] ${rows.length} client rows share one owner — dedupe them (see migration 0041)`,
       );
     }
 

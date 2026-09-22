@@ -12,6 +12,7 @@ import { COUNTRIES } from "@/lib/countries";
 import { getMyOnboardingPath } from "@/lib/clients";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { signedFetch } from "@/lib/siws-client";
+import { accountFetch, useSignedInAccount } from "@/lib/account-login";
 
 type Kind = "kyc" | "kyb";
 type Fields = Record<string, string>;
@@ -43,21 +44,28 @@ export function VerificationForm() {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState<{ path: string | null; notice: string | null } | null>(null);
+  const signedIn = useSignedInAccount();
+  // Signed in by email/Google: the account verifies itself, no wallet needed.
+  const accountMode = signedIn.status === "signed_in";
   const session = conn.wallet;
   const wallet = session?.account.address.toString();
+  const actorKey = accountMode ? `account:${signedIn.account?.id}` : wallet ?? null;
+  const actorFetch = <T,>(path: string, action: string, params: Record<string, unknown> = {}): Promise<T> =>
+    accountMode ? accountFetch<T>(path, action, params) : signedFetch<T>(session, path, action, params);
 
   useEffect(() => {
-    if (!session) return;
+    if (!actorKey) return;
     let cancelled = false;
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoading(true);
-    void signedFetch<AccountResponse>(session, "/api/account/me", "account.me").then((data) => {
+    void actorFetch<AccountResponse>("/api/account/me", "account.me").then((data) => {
       if (cancelled) return;
       if (data.verification) setStatus({ kyc: data.verification.kyc, kyb: data.verification.kyb });
       if (data.profile.email) setFields((f) => (f.email ? f : { ...f, email: data.profile.email! }));
     }).catch(() => { if (!cancelled) setStatus(null); }).finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, [session]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [actorKey]);
 
   const current = status?.[kind] ?? "none";
   const inProgress = current === "pending" || current === "more_info";
@@ -66,10 +74,13 @@ export function VerificationForm() {
   const maxDob = useMemo(() => { const d = new Date(); d.setFullYear(d.getFullYear() - 18); return d.toISOString().slice(0, 10); }, []);
 
   async function openDocuments() {
-    if (!session) return;
+    if (!actorKey) return;
     setError(null);
     try {
-      const result = await getMyOnboardingPath(session);
+      const result = accountMode
+        ? await accountFetch<{ onboarding_path: string | null; onboarding_notice?: string | null }>("/api/clients/me", "clients.me")
+          .then((d) => ({ path: d.onboarding_path ?? null, notice: d.onboarding_notice ?? null }))
+        : await getMyOnboardingPath(session);
       if (result.path) router.push(result.path);
       else setError(result.notice ?? "No documents are waiting for upload. We will contact you if anything else is needed.");
     } catch (e) {
@@ -79,7 +90,7 @@ export function VerificationForm() {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!session || !consent) return;
+    if (!actorKey || !consent) return;
     setSubmitting(true);
     setError(null);
     const keys = kind === "kyc"
@@ -92,8 +103,8 @@ export function VerificationForm() {
       params[key] = ["nationality", "residence_country", "company_country"].includes(key) ? Number.parseInt(value, 10) : value;
     }
     try {
-      const data = await signedFetch<{ onboarding_path: string | null; onboarding_notice: string | null }>(
-        session, "/api/verification/submit", "verification.submit", params);
+      const data = await actorFetch<{ onboarding_path: string | null; onboarding_notice: string | null }>(
+        "/api/verification/submit", "verification.submit", params);
       setDone({ path: data.onboarding_path, notice: data.onboarding_notice });
       setStatus((s) => ({ kyc: s?.kyc ?? "none", kyb: s?.kyb ?? "none", [kind]: "more_info" }));
       setEditing(false);
@@ -109,7 +120,15 @@ export function VerificationForm() {
       <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>Verification unlocks investing, raising and issuing on Manci. It takes a few minutes.</p></div>
     </header>
     {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p>
-      : !wallet ? <div className="account-connect"><WalletRequired context="Connect the wallet you want to verify. Verification belongs to that wallet." /></div>
+      : signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p>
+      : !actorKey ? <div className="account-connect">
+          <section className="account-card account-unlock">
+            <h2>Sign in to get verified.</h2>
+            <p>Use your email or Google — no wallet needed. Your verification will cover every wallet you add later.</p>
+            <Link href="/login?next=/verify" className="account-button account-button--primary">Sign in<IconArrowUpRight size={16} /></Link>
+          </section>
+          <WalletRequired context="Or connect a wallet that is linked to your account." />
+        </div>
       : <section className="account-card">
         <div className="verify-kinds" role="group" aria-label="What do you want to verify?">
           {(["kyc", "kyb"] as const).map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
@@ -176,7 +195,7 @@ export function VerificationForm() {
             <button className="account-button account-button--primary" disabled={submitting || !consent}>{submitting ? "Submitting…" : "Submit and continue"}<IconShield size={15} /></button>
             {editing && <button type="button" className="account-text-button" onClick={() => setEditing(false)}>Cancel</button>}
           </div>
-          <p className="account-field-help">Your wallet will ask you to approve this submission.</p>
+          {!accountMode && <p className="account-field-help">Your wallet will ask you to approve this submission.</p>}
         </form>}
       </section>}
   </div>;

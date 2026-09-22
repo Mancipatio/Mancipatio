@@ -148,7 +148,22 @@ async function fetchClientRow(
     console.error("[kyc-gate] client lookup failed:", error.message);
     throw new SiwsError(500, "Client lookup failed");
   }
-  const rows = (data ?? []) as FetchedClientRow[];
+  let rows = (data ?? []) as FetchedClientRow[];
+  if (rows.length === 0) {
+    // Verification belongs to the account: a linked wallet without its own
+    // dossier answers with the account's dossier.
+    const { data: member } = await sb.from("account_wallets").select("account_id")
+      .eq("network", network).eq("wallet", wallet).maybeSingle();
+    if (member?.account_id) {
+      const byAccount = await sb.from("clients").select("id, kyc_status, kyc_expires_at")
+        .eq("account_id", member.account_id).eq("network", network).order("created_at", { ascending: true });
+      if (byAccount.error) {
+        console.error("[kyc-gate] account dossier lookup failed:", byAccount.error.message);
+        throw new SiwsError(500, "Client lookup failed");
+      }
+      rows = (byAccount.data ?? []) as FetchedClientRow[];
+    }
+  }
   if (rows.length === 0) return null;
   if (rows.length > 1) {
     console.warn(

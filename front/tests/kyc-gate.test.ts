@@ -56,6 +56,8 @@ function stubSupabase(result: QueryResult) {
       calls.order = args;
       return builder;
     },
+    // Account fallback lookup (account_wallets): no linked account in these tests.
+    maybeSingle: async () => ({ data: null, error: null }),
     // PostgREST builders resolve when awaited — no terminal call needed.
     then: (
       resolve: (value: QueryResult) => unknown,

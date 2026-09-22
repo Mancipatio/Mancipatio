@@ -33,8 +33,18 @@ function accountUnavailable(): SiwsError {
   return new SiwsError(503, "Your account is temporarily unavailable. Please try again.");
 }
 
+/** Who is acting: a wallet (SIWS / wallet session) or a signed-in account (email/Google). */
+export type AccountWho = string | { accountId: string };
+
 /** A new wallet gets a contact profile only; never creates or changes KYC/CRM. */
-export async function getAccountProfile(wallet: string, network: Network): Promise<AccountProfile> {
+export async function getAccountProfile(who: AccountWho, network: Network): Promise<AccountProfile> {
+  if (typeof who !== "string") {
+    const { data, error } = await getSupabaseAdmin().rpc("get_account_profile", { p_account_id: who.accountId, p_network: network });
+    if (error || !data || typeof data !== "object" || Array.isArray(data) || data.id !== who.accountId ||
+        data.network !== network || !Array.isArray(data.wallets)) throw new SiwsError(401, "Please sign in again.");
+    return projectAccountProfile(data as Record<string, unknown>);
+  }
+  const wallet = who;
   const { data, error } = await getSupabaseAdmin().rpc("ensure_account_profile", { p_wallet: wallet, p_network: network });
   if (error || !data || typeof data !== "object" || Array.isArray(data) || data.wallet !== wallet || data.network !== network ||
       !Array.isArray(data.wallets) || !data.wallets.some((member: { wallet?: unknown }) => member?.wallet === wallet)) throw accountUnavailable();
@@ -65,12 +75,21 @@ export async function getAccountWalletKyc(wallets: string[], network: Network): 
   });
 }
 
-/** KYC (individual) and KYB (company) state of the connected wallet's dossier. */
-export async function getAccountVerification(wallet: string, network: Network): Promise<AccountVerification | null> {
+/** KYC (individual) and KYB (company) state of the account's dossier. The
+ * dossier belongs to the account; legacy dossiers are found by a linked wallet. */
+export async function getAccountVerification(profile: AccountProfile, network: Network): Promise<AccountVerification | null> {
   const sb = getSupabaseAdmin();
-  const { data: rows, error } = await sb.from("clients")
-    .select("id,kyc_status,kyc_expires_at,type,types").eq("network", network).eq("wallet", wallet);
-  if (error || !Array.isArray(rows)) return null;
+  const cols = "id,kyc_status,kyc_expires_at,type,types";
+  const byAccount = await sb.from("clients").select(cols).eq("network", network).eq("account_id", profile.id);
+  if (byAccount.error) return null;
+  let rows = byAccount.data ?? [];
+  const wallets = profile.wallets.map((w) => w.wallet);
+  if (rows.length === 0 && wallets.length > 0) {
+    const byWallet = await sb.from("clients").select(cols).eq("network", network).in("wallet", wallets);
+    if (byWallet.error) return null;
+    rows = byWallet.data ?? [];
+  }
+  if (!Array.isArray(rows)) return null;
   if (rows.length === 0) return { kyc: "none", kyb: "none", documents_requested: 0 };
   const row = [...rows].sort((a, b) => (KYC_RANK[b.kyc_status] ?? 0) - (KYC_RANK[a.kyc_status] ?? 0))[0] as {
     id: string; kyc_status: string; kyc_expires_at: string | null; type: string; types: string[] | null;
@@ -99,12 +118,12 @@ export async function getAccountVerification(wallet: string, network: Network): 
   };
 }
 
-export async function accountResponse(wallet: string, network: Network): Promise<NextResponse> {
-  const profile = await getAccountProfile(wallet, network);
+export async function accountResponse(who: AccountWho, network: Network): Promise<NextResponse> {
+  const profile = await getAccountProfile(who, network);
   let kyc: AccountWalletKyc[] | null = null;
   let verification: AccountVerification | null = null;
   try { kyc = await getAccountWalletKyc(profile.wallets.map((entry) => entry.wallet), network); } catch { kyc = null; }
-  try { verification = await getAccountVerification(wallet, network); } catch { verification = null; }
+  try { verification = await getAccountVerification(profile, network); } catch { verification = null; }
   return NextResponse.json({ ok: true, data: {
     profile, features: accountFeatures(), kyc, verification,
   } }, { headers: { "Cache-Control": "no-store" } });
@@ -122,11 +141,18 @@ function hash(value: string): string {
 }
 
 /** Atomically bind a delayed signed mutation to the account the user approved. */
-export async function callAccountMutation<T = unknown>(wallet: string, network: Network, expectedAccountId: string,
+export async function callAccountMutation<T = unknown>(who: AccountWho, network: Network, expectedAccountId: string,
   action: string, params: Record<string, unknown>): Promise<T> {
-  const { data, error } = await getSupabaseAdmin().rpc("mutate_account_profile", {
-    p_wallet: wallet, p_network: network, p_account_id: expectedAccountId, p_action: action, p_params: params,
-  });
+  if (typeof who !== "string" && who.accountId !== expectedAccountId) {
+    throw new SiwsError(403, "Your signed-in account changed. Reload your account and try again.");
+  }
+  const { data, error } = typeof who === "string"
+    ? await getSupabaseAdmin().rpc("mutate_account_profile", {
+      p_wallet: who, p_network: network, p_account_id: expectedAccountId, p_action: action, p_params: params,
+    })
+    : await getSupabaseAdmin().rpc("mutate_account_by_id", {
+      p_account_id: who.accountId, p_network: network, p_action: action, p_params: params,
+    });
   if (error || !data || typeof data !== "object" || typeof data.ok !== "boolean") throw accountUnavailable();
   if (!data.ok) throw new SiwsError(403, "Your linked account changed. Reload your account and try again.");
   if (!("result" in data)) throw accountUnavailable();
@@ -141,16 +167,16 @@ export async function consumeAccountRateLimit(key: string, limit: number, window
   if (!data) throw new SiwsError(429, "Too many requests. Please try again later.");
 }
 
-export async function updateAccountName(wallet: string, network: Network, displayName: string, expectedAccountId: string): Promise<void> {
+export async function updateAccountName(wallet: AccountWho, network: Network, displayName: string, expectedAccountId: string): Promise<void> {
   const data = await callAccountMutation<boolean>(wallet, network, expectedAccountId, "update", { display_name: displayName });
   if (data !== true) throw new SiwsError(403, "This wallet no longer has access to the account.");
 }
 
-export async function cancelAccountEmail(wallet: string, network: Network, tokenHash: string | null, expectedAccountId: string): Promise<void> {
+export async function cancelAccountEmail(wallet: AccountWho, network: Network, tokenHash: string | null, expectedAccountId: string): Promise<void> {
   await callAccountMutation<boolean>(wallet, network, expectedAccountId, "email.cancel", { token_hash: tokenHash });
 }
 
-export async function requestAccountEmail(request: Request, wallet: string, network: Network, email: string, expectedAccountId: string): Promise<void> {
+export async function requestAccountEmail(request: Request, wallet: AccountWho, network: Network, email: string, expectedAccountId: string): Promise<void> {
   if (!accountFeatures().email) throw new SiwsError(503, "Email verification is not available yet.");
   const origin = accountSiteOrigin(request);
   const token = randomBytes(32).toString("base64url");
@@ -170,7 +196,7 @@ export async function requestAccountEmail(request: Request, wallet: string, netw
       redactErrors: true,
       subject: "Verify your Manci email",
       html: `<p>Confirm this email address for your Manci account:</p><p><a href="${escapeHtml(link.toString())}">Verify email address</a></p>` +
-        "<p>This link expires in 30 minutes. Open it with a wallet linked to the same Manci account. If you did not request this, you can ignore this email.</p>",
+        "<p>This link expires in 30 minutes. Open it while signed in to the same Manci account (or with a wallet linked to it). If you did not request this, you can ignore this email.</p>",
     })).sent;
   } catch { /* A transport adapter must not expose provider diagnostics. */ }
   if (!sent) {
@@ -181,7 +207,15 @@ export async function requestAccountEmail(request: Request, wallet: string, netw
   }
 }
 
-export async function verifyAccountEmail(wallet: string, network: Network, token: string): Promise<void> {
+export async function verifyAccountEmail(wallet: AccountWho, network: Network, token: string): Promise<void> {
+  if (typeof wallet !== "string") {
+    const { data, error } = await getSupabaseAdmin().rpc("mutate_account_by_id", {
+      p_account_id: wallet.accountId, p_network: network, p_action: "email.verify", p_params: { token_hash: hash(token) },
+    });
+    if (error || !data || typeof data !== "object" || data.ok !== true) throw accountUnavailable();
+    if (data.result !== true) throw new SiwsError(400, "This verification link is invalid or expired, or the email is used by another account.");
+    return;
+  }
   const { data, error } = await getSupabaseAdmin().rpc("verify_account_email", {
     p_wallet: wallet, p_network: network, p_token_hash: hash(token),
   });

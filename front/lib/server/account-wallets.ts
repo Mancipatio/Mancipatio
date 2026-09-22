@@ -4,7 +4,7 @@ import { NextResponse } from "next/server";
 import type { Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { SiwsError } from "@/lib/server/siws";
-import { callAccountMutation } from "@/lib/server/account-profile";
+import { callAccountMutation, type AccountWho } from "@/lib/server/account-profile";
 
 function unavailable(): SiwsError { return new SiwsError(503, "Wallet linking is temporarily unavailable. Please try again."); }
 function tokenHash(token: string): string { return createHash("sha256").update(token).digest("hex"); }
@@ -52,15 +52,28 @@ export async function cancelAccountWalletLink(wallet: string, network: Network, 
   if (data !== true) throw new SiwsError(403, "This wallet cannot cancel that link request.");
 }
 
-export async function setAccountPrimaryWallet(wallet: string, network: Network, primaryWallet: string, expectedAccountId: string): Promise<void> {
+export async function setAccountPrimaryWallet(wallet: AccountWho, network: Network, primaryWallet: string, expectedAccountId: string): Promise<void> {
   const data = await callAccountMutation<string>(wallet, network, expectedAccountId, "wallets.primary", { wallet: primaryWallet });
   if (data !== "updated") throw new SiwsError(403, "The primary wallet must be linked to your account.");
 }
 
-export async function removeAccountWallet(wallet: string, network: Network, targetWallet: string, expectedAccountId: string): Promise<void> {
+export async function removeAccountWallet(wallet: AccountWho, network: Network, targetWallet: string, expectedAccountId: string): Promise<void> {
   const data = await callAccountMutation<string>(wallet, network, expectedAccountId, "wallets.remove", { wallet: targetWallet });
   if (data === "self") throw new SiwsError(409, "Connect another linked wallet before removing this wallet.");
   if (data === "primary") throw new SiwsError(409, "Choose another primary wallet before removing this wallet.");
   if (data === "last") throw new SiwsError(409, "Your account must keep at least one linked wallet.");
   if (data !== "removed") throw new SiwsError(403, "This wallet is not linked to your account.");
+}
+
+/** Add a wallet to the signed-in account: the wallet signed the request and
+ * the account session cookie is live. */
+export async function attachAccountWallet(accountId: string, network: Network, wallet: string): Promise<void> {
+  const { data, error } = await getSupabaseAdmin().rpc("attach_account_wallet", {
+    p_account_id: accountId, p_network: network, p_wallet: wallet,
+  });
+  if (error) throw unavailable();
+  if (data === "same_wallet") throw new SiwsError(409, "This wallet is already linked to your account.");
+  if (data === "wallet_limit") throw new SiwsError(409, "You can link up to 10 wallets to one account.");
+  if (data === "account_conflict") throw new SiwsError(409, "This wallet already belongs to another account with its own data. Existing accounts cannot be merged.");
+  if (data !== "linked") throw unavailable();
 }

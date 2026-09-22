@@ -185,6 +185,7 @@ export type DbClientRow = {
   onboarding_token: string | null;
   onboarding_token_expires_at?: string | null;
   wallet: string | null;
+  account_id?: string | null;
   email: string | null;
   kyc_status: string;
   tos_accepted_at: string | null;

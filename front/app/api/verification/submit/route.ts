@@ -8,13 +8,14 @@
 // Verification itself stays a compliance decision in the admin console.
 
 import { NextResponse } from "next/server";
-import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { readActor } from "@/lib/server/account-auth";
 import { boundedRequest } from "@/lib/server/bounded-request";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { clientIpOf, DEGRADED_TTL_MESSAGE, insertNote, rateLimited } from "../../clients/_helpers";
 import {
-  ensureClientDossier, ensureStandardRequirements, requestMissingDocuments,
+  accountIdForWallet, ensureClientDossier, ensureStandardRequirements, requestMissingDocuments,
   STANDARD_COMPANY_REQUIREMENTS, STANDARD_INVESTOR_REQUIREMENTS,
 } from "@/lib/server/kyc-dossier";
 
@@ -60,14 +61,18 @@ function country(params: Record<string, unknown>, key: string, required: boolean
 
 export async function POST(request: Request) {
   try {
-    const { wallet, params } = await verifySigned(await boundedRequest(request, 8192), "verification.submit");
+    // A wallet (signature) or the signed-in email/Google account may verify.
+    const actor = await readActor(await boundedRequest(request, 8192), "verification.submit");
+    const params = actor.params;
+    const wallet = actor.kind === "wallet" ? actor.wallet : null;
+    const actorKey = wallet ?? `account:${actor.kind === "account" ? actor.accountId : ""}`;
     for (const key of Object.keys(params)) {
       if (!(DETAIL_KEYS as readonly string[]).includes(key)) throw new SiwsError(400, `Unknown field: ${key}`);
     }
     const kind = params.kind;
     if (kind !== "kyc" && kind !== "kyb") throw new SiwsError(400, "kind must be kyc or kyb");
     const ip = clientIpOf(request);
-    if (rateLimited(`verification:ip:${ip}`, 10, 60_000) || rateLimited(`verification:wallet:${wallet}`, 6, 3_600_000)) {
+    if (rateLimited(`verification:ip:${ip}`, 10, 60_000) || rateLimited(`verification:owner:${actorKey}`, 6, 3_600_000)) {
       throw new SiwsError(429, "Too many submissions — try again later");
     }
 
@@ -112,12 +117,16 @@ export async function POST(request: Request) {
     // The on-chain passport jurisdiction is the residence (KYC) or the
     // company's country (KYB); both must be in the approved set.
     const jurisdiction = isKyb ? details.company_country! : residence;
+    const owner = actor.kind === "account"
+      ? { accountId: actor.accountId, wallet: null }
+      : { accountId: await accountIdForWallet(sb, actor.wallet), wallet: actor.wallet };
     const { client, token, created, linkUnusable } = await ensureClientDossier(
-      sb, wallet, jurisdiction, isKyb ? "issuer" : "investor", isKyb ? "verification-kyb" : "verification-kyc", isKyb,
+      sb, owner, jurisdiction, isKyb ? "issuer" : "investor", isKyb ? "verification-kyb" : "verification-kyc", isKyb,
     );
 
     const { error: detailsErr } = await sb.from("client_verification_details").upsert({
-      client_id: client.id, ...details, submitted_by_wallet: wallet, submitted_at: new Date().toISOString(),
+      client_id: client.id, ...details, submitted_by_wallet: wallet,
+      submitted_by_account: actor.kind === "account" ? actor.accountId : owner.accountId, submitted_at: new Date().toISOString(),
       // New or changed details always go back to review (KYB approval is its own decision).
       status: "pending", reviewed_at: null, reviewed_by: null, review_note: null,
     }, { onConflict: "client_id,kind" });
@@ -147,8 +156,9 @@ export async function POST(request: Request) {
         "Requested with your identity (KYC) verification.", "system:verification-kyc");
     }
 
-    if (!isKyb) {
+    if (!isKyb && wallet) {
       // One undecided passport request per wallet feeds the /admin/kyc queue.
+      // A wallet-less account gets its request when it adds a wallet.
       const { data: open } = await sb.from("passport_requests").select("id")
         .eq("wallet", wallet).in("status", ["new", "in_review"]).limit(1);
       if (!open || open.length === 0) {
@@ -157,7 +167,7 @@ export async function POST(request: Request) {
       }
     }
 
-    await insertNote(sb, client.id, wallet,
+    await insertNote(sb, client.id, wallet ?? actorKey,
       `${isKyb ? "Company (KYB)" : "Identity (KYC)"} details submitted from /verify${created ? " — dossier auto-provisioned" : ""}.`,
       "kyc-event");
 

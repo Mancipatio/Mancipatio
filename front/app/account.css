@@ -184,3 +184,5 @@
 .verify-consent { display:flex !important; gap:10px; align-items:flex-start !important; font-weight:400 !important; color:#556553 !important; line-height:1.7; margin-top:18px; }
 .verify-consent input { width:auto !important; min-height:0 !important; margin-top:4px; }
 @media(max-width:760px) { .verification-row { grid-template-columns:auto minmax(0,1fr); } .verification-row .account-status,.verification-row .account-button { grid-column:2; justify-self:start; } .verify-kinds,.verify-grid { grid-template-columns:1fr; } }
+.sign-in-divider { display:flex; align-items:center; gap:12px; margin:20px 0; color:#8a9587; font-size:11px; letter-spacing:1px; text-transform:uppercase; }
+.sign-in-divider::before,.sign-in-divider::after { content:""; flex:1; height:1px; background:#e3e9df; }

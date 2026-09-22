@@ -17,6 +17,7 @@ vi.mock("@/app/api/clients/_helpers", () => ({
 }));
 vi.mock("@/lib/server/kyc-dossier", () => ({
   ensureClientDossier: m.ensureDossier, ensureStandardRequirements: m.ensureReqs, requestMissingDocuments: m.missingDocs,
+  accountIdForWallet: async () => "acc-1",
   STANDARD_COMPANY_REQUIREMENTS: [{ doc_kind: "incorporation", label: "x" }],
   STANDARD_INVESTOR_REQUIREMENTS: [{ doc_kind: "passport", label: "y" }],
 }));
@@ -63,7 +64,7 @@ describe("/api/verification/submit", () => {
     const { status, json } = await call(kyc);
     expect(status).toBe(200);
     expect(json.data.onboarding_path).toBe("/onboarding/c1?t=tok");
-    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), expect.any(String), 688, "investor", "verification-kyc", false);
+    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), { accountId: "acc-1", wallet: expect.any(String) }, 688, "investor", "verification-kyc", false);
     expect(m.calls.find((c) => c.table === "client_verification_details")?.value).toMatchObject({ kind: "kyc", legal_name: "Ana Anić", company_name: null, status: "pending", reviewed_at: null });
     expect(m.calls.some((c) => c.table === "passport_requests" && c.op === "insert")).toBe(true);
     expect(m.calls.find((c) => c.table === "clients")?.value).toMatchObject({ email: "ana@example.com", display_name: "Ana Anić" });
@@ -73,7 +74,7 @@ describe("/api/verification/submit", () => {
     const { status } = await call(kyb);
     expect(status).toBe(200);
     // KYB always gets an upload link and its own document set, even on a KYC-verified dossier.
-    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), expect.any(String), 688, "issuer", "verification-kyb", true);
+    expect(m.ensureDossier).toHaveBeenCalledWith(expect.anything(), { accountId: "acc-1", wallet: expect.any(String) }, 688, "issuer", "verification-kyb", true);
     expect(m.missingDocs).toHaveBeenCalledOnce();
     expect(m.ensureReqs).not.toHaveBeenCalled();
     expect(m.calls.find((c) => c.table === "client_verification_details")?.value).toMatchObject({ kind: "kyb", status: "pending" });

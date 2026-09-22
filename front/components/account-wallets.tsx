@@ -4,7 +4,9 @@ import { useState, type FormEvent } from "react";
 import Link from "next/link";
 import { isAddress } from "@solana/kit";
 import type { AccountResponse, AccountWalletKycStatus, AccountWalletLinkAttempt } from "@/lib/account";
-import { removeAccountWallet, setAccountPrimaryWallet, startAccountWalletLink } from "@/lib/account-client";
+import type { WalletSession } from "@solana/client";
+import { attachWalletToAccount, removeAccountWallet, setAccountPrimaryWallet, startAccountWalletLink } from "@/lib/account-client";
+import { WalletButton } from "@/app/wallet-button";
 import { useAccountOperation } from "@/components/account-session";
 import { IconArrowUpRight, IconCheck, IconWallet } from "@/components/icons";
 
@@ -13,6 +15,10 @@ type Props = {
   operation: ReturnType<typeof useAccountOperation>;
   onProfile: (value: AccountResponse) => void;
   onStartLink: (attempt: AccountWalletLinkAttempt) => void;
+  /** "account" = signed in by email/Google (no acting wallet). */
+  mode?: "wallet" | "account";
+  /** The wallet connected in the browser (account mode: can be added). */
+  connectedSession?: WalletSession | null;
 };
 
 const KYC_LABEL: Record<AccountWalletKycStatus, string> = {
@@ -20,7 +26,8 @@ const KYC_LABEL: Record<AccountWalletKycStatus, string> = {
   expired: "KYC expired", suspended: "KYC suspended", rejected: "KYC rejected",
 };
 
-export function AccountWallets({ data, operation, onProfile, onStartLink }: Props) {
+export function AccountWallets({ data, operation, onProfile, onStartLink, mode = "wallet", connectedSession = null }: Props) {
+  const accountMode = mode === "account";
   const [adding, setAdding] = useState(false);
   const [targetWallet, setTargetWallet] = useState("");
   const [removeWallet, setRemoveWallet] = useState<string | null>(null);
@@ -49,12 +56,12 @@ export function AccountWallets({ data, operation, onProfile, onStartLink }: Prop
 
   return <section className="account-card" aria-labelledby="account-wallets-heading">
     <div className="account-card-heading"><div><p className="account-eyebrow">ONE ACCOUNT, YOUR WALLETS</p><h2 id="account-wallets-heading">Linked wallets <span className="account-wallet-count">{profile.wallets.length} / 10</span></h2></div><IconWallet size={21} /></div>
-    <p className="account-card-description">Any linked wallet can open and edit this shared profile. Your assets and balances stay with each wallet.</p>
+    <p className="account-card-description">{accountMode ? "Add as many wallets as you like. Your verification covers all of them; assets and balances stay with each wallet." : "Any linked wallet can open and edit this shared profile. Your assets and balances stay with each wallet."}</p>
     <div className="account-wallet-list">
       {profile.wallets.map(({ wallet }) => {
         const connected = wallet === profile.wallet;
         const primary = wallet === profile.primary_wallet;
-        const canRemove = !connected && !primary && profile.wallets.length > 1;
+        const canRemove = accountMode ? (!primary || profile.wallets.length === 1) : !connected && !primary && profile.wallets.length > 1;
         return <div className="account-wallet-row" key={wallet}>
           <div className="account-wallet-row-labels">{primary && <span className="account-status account-status--verified"><IconCheck size={12} />Primary for transactions</span>}{connected && <span className="account-status">Connected</span>}{kycOf(wallet) && <span className={`account-status${kycOf(wallet) === "verified" ? " account-status--verified" : ""}`}>{KYC_LABEL[kycOf(wallet)!]}</span>}</div>
           <code>{wallet}</code>
@@ -79,7 +86,19 @@ export function AccountWallets({ data, operation, onProfile, onStartLink }: Prop
           ? <>KYC for your primary wallet is {primaryKyc === "pending" ? "in review" : "waiting for documents"}. {profile.wallet === profile.primary_wallet && <Link href="/portfolio" className="account-text-button">Open Portfolio</Link>}</>
           : <>KYC for your primary wallet is {primaryKyc}. Contact the compliance team.</>}
     </div>}
-    {adding ? <form className="account-form account-add-wallet" onSubmit={start}>
+    {accountMode ? (() => {
+      const connectedAddress = connectedSession?.account.address.toString() ?? null;
+      const alreadyLinked = !!connectedAddress && profile.wallets.some((entry) => entry.wallet === connectedAddress);
+      return <div className="account-form-actions">
+        {profile.wallets.length === 0 && <p className="account-field-help">No wallet yet. You can verify and manage your account without one; a wallet is needed to buy, trade or receive tokens.</p>}
+        {!connectedAddress ? <><WalletButton /><p className="account-field-help">Connect a wallet in your browser, then add it here with one signature.</p></>
+          : alreadyLinked ? <p className="account-field-help">The connected wallet <code>{connectedAddress.slice(0, 4)}…{connectedAddress.slice(-4)}</code> is already linked. Switch to another wallet in your extension to add it.</p>
+          : <button type="button" className="account-button account-button--primary" disabled={busy || profile.wallets.length >= 10}
+              onClick={() => void run("attach-wallet", () => attachWalletToAccount(connectedSession!, profile.id), onProfile,
+                "The wallet could not be added. It may already belong to another account with its own data.", "Wallet added to your account.")}>
+              {pending === "attach-wallet" ? "Approve in wallet…" : `Add connected wallet ${connectedAddress.slice(0, 4)}…${connectedAddress.slice(-4)}`}<IconArrowUpRight size={15} /></button>}
+      </div>;
+    })() : adding ? <form className="account-form account-add-wallet" onSubmit={start}>
       <label htmlFor="account-link-target">Wallet address to add</label>
       <input id="account-link-target" value={targetWallet} onChange={(event) => setTargetWallet(event.target.value)} placeholder="Solana wallet address" maxLength={44} autoComplete="off" autoCapitalize="off" spellCheck={false} disabled={busy} required aria-describedby="account-link-help" />
       <p id="account-link-help" className="account-field-help">First approve with your connected wallet. Then switch to this exact new wallet and approve there. Both signatures are required.</p>

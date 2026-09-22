@@ -40,6 +40,10 @@ function sb(rows: Row[]) {
     order() {
       return query;
     },
+    // Account fallback lookup (account_wallets): no linked account here.
+    async maybeSingle() {
+      return { data: null, error: null };
+    },
     then(
       resolve: (value: { data: Record<string, unknown>[]; error: null }) => unknown,
       reject?: (reason: unknown) => unknown,
@@ -56,7 +60,8 @@ function sb(rows: Row[]) {
   };
   const client = {
     from(table: string) {
-      if (table !== "clients") throw new Error("Unexpected table");
+      // account_wallets = the account fallback lookup; nothing is linked here.
+      if (table !== "clients" && table !== "account_wallets") throw new Error("Unexpected table");
       return query;
     },
   };

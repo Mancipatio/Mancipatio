@@ -48,7 +48,7 @@ export type ClientLite = {
 
 /** Projection every dossier read in this route shares. */
 export const SELECT_COLS =
-  "id, created_at, email, jurisdiction, kyc_status, onboarding_token, onboarding_token_expires_at, types, type";
+  "id, created_at, email, jurisdiction, kyc_status, onboarding_token, onboarding_token_expires_at, types, type, account_id";
 
 function assertNotTerminal(client: Pick<ClientLite, "kyc_status">): void {
   if (isTerminalKycStatus(client.kyc_status)) {
@@ -69,9 +69,19 @@ function assertNotTerminal(client: Pick<ClientLite, "kyc_status">): void {
  * only the oldest let a suspension recorded on the newer dossier be bypassed
  * by re-applying — see the helper's docblock.
  */
+/** The account a wallet belongs to on the active network, or null. */
+export async function accountIdForWallet(sb: SupabaseClient, wallet: string): Promise<string | null> {
+  const { data } = await sb.from("account_wallets").select("account_id")
+    .eq("network", detectNetworkServer()).eq("wallet", wallet).maybeSingle();
+  return (data?.account_id as string | undefined) ?? null;
+}
+
+/** Who owns a dossier: the account (preferred) and/or a wallet (legacy). */
+export type DossierOwner = { accountId: string | null; wallet: string | null };
+
 export async function ensureClientDossier(
   sb: SupabaseClient,
-  wallet: string,
+  ownerOrWallet: string | DossierOwner,
   jurisdiction: number,
   role: "investor" | "issuer" = "investor",
   source = "passport-request",
@@ -88,14 +98,24 @@ export async function ensureClientDossier(
    */
   linkUnusable: boolean;
 }> {
-  await assertWalletNotTerminal(sb, wallet);
-  const { data: existing, error: lookupErr } = await sb
-    .from("clients")
-    .select(SELECT_COLS)
-    .eq("wallet", wallet)
-    .order("created_at", { ascending: true })
-    .limit(1)
-    .maybeSingle();
+  const owner: DossierOwner = typeof ownerOrWallet === "string"
+    ? { wallet: ownerOrWallet, accountId: await accountIdForWallet(sb, ownerOrWallet) }
+    : ownerOrWallet;
+  const wallet = owner.wallet;
+  if (wallet) await assertWalletNotTerminal(sb, wallet);
+  // The account's dossier first (one per account); else the wallet's (legacy).
+  let existing: unknown = null;
+  let lookupErr: { message: string } | null = null;
+  if (owner.accountId) {
+    const r = await sb.from("clients").select(SELECT_COLS).eq("account_id", owner.accountId)
+      .order("created_at", { ascending: true }).limit(1).maybeSingle();
+    existing = r.data; lookupErr = r.error;
+  }
+  if (!existing && !lookupErr && wallet) {
+    const r = await sb.from("clients").select(SELECT_COLS).eq("wallet", wallet)
+      .order("created_at", { ascending: true }).limit(1).maybeSingle();
+    existing = r.data; lookupErr = r.error;
+  }
   if (lookupErr) {
     console.error("[kyc-dossier] client lookup failed:", lookupErr.message);
     throw new SiwsError(500, "Client lookup failed");
@@ -109,10 +129,11 @@ export async function ensureClientDossier(
       network: detectNetworkServer(),
       type: role,
       types: [role],
-      display_name: `${role === "issuer" ? "Issuer" : "Investor"} ${wallet.slice(0, 6)}…${wallet.slice(-4)}`,
+      display_name: wallet ? `${role === "issuer" ? "Issuer" : "Investor"} ${wallet.slice(0, 6)}…${wallet.slice(-4)}` : `${role === "issuer" ? "Issuer" : "Investor"} (account)`,
       jurisdiction: jurisdictionStr,
       source,
       wallet,
+      account_id: owner.accountId,
       // Wallet is already known, but the magic-link token is still needed —
       // it is the credential for the /onboarding/{id} document uploads.
       onboarding_token: token,
@@ -143,7 +164,7 @@ export async function ensureClientDossier(
       const { data: winner, error: rereadErr } = await sb
         .from("clients")
         .select(SELECT_COLS)
-        .eq("wallet", wallet)
+        .eq(owner.accountId ? "account_id" : "wallet", owner.accountId ?? wallet)
         .order("created_at", { ascending: true })
         .limit(1)
         .maybeSingle();
@@ -184,6 +205,8 @@ export async function ensureClientDossier(
   // these. No status change, no token issuance, no request row.
   assertNotTerminal(row);
   const patch: Record<string, unknown> = {};
+  // Attach a legacy wallet dossier to its account.
+  if (owner.accountId && !(row as ClientLite & { account_id?: string | null }).account_id) patch.account_id = owner.accountId;
   // Fill jurisdiction when the dossier has none (never overwrite admin data).
   if (!row.jurisdiction) patch.jurisdiction = jurisdictionStr;
   // Make sure the dossier carries the requested role.

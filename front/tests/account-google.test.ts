@@ -71,7 +71,9 @@ vi.mock("@/lib/supabase-server", () => ({
           if (!state.insertError) state.rows.push({ ...row });
           return { data: null, error: state.insertError };
         },
-        maybeSingle: async () => ({ data: state.rows.find(matches) ?? null, error: state.selectError }),
+        // These tests cover the wallet link flow; the sign-in state table is empty.
+        maybeSingle: async () => table === "auth_google_states" ? { data: null, error: null }
+          : ({ data: state.rows.find(matches) ?? null, error: state.selectError }),
         then: (resolve: (result: unknown) => unknown, reject?: (error: unknown) => unknown) => {
           state.mutations.push({ operation, table, filters: [...filters] });
           if (operation === "delete" && !state.cleanupError) state.rows = state.rows.filter((row) => !matches(row));
