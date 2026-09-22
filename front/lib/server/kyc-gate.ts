@@ -3,10 +3,21 @@
 // One source of truth for "is this wallet an onboarded, KYC-verified
 // client?". Extracted from app/api/applications/_lib.ts (which re-exports
 // these names so the /api/applications/* routes are untouched) so every
-// investor-facing write route — applications submit/resubmit, launchpad
-// commit, launchpad record-purchase, OTC create, resell create, delivery
-// create, conversion create, vesting-series create — enforces the same
-// server-side gate instead of trusting client-side eligibility checks.
+// write route that needs a verified client enforces the same server-side
+// gate instead of trusting client-side eligibility checks.
+//
+// WHERE KYC IS REQUIRED (product policy, 2026-09-23): buying and trading
+// tokens does NOT require identity verification. KYC is required when a
+// token is turned into something off-chain — converted into company equity
+// (/api/conversion/create) or redeemed for a physical good
+// (/api/delivery/create) — plus the issuer-side tools (/apply via the
+// applicant/KYB gates below, /api/vesting-series/create). The sales and
+// trading routes (/api/launchpad/commit, /api/otc/create,
+// /api/resell/create) only run refuseTerminalClient: a dossier compliance
+// has explicitly suspended or rejected is still refused there. A class the
+// issuer/platform switched to KycGated keeps its passport requirement
+// ON-CHAIN (transfer hook + asset_registry receiver checks), independent of
+// these off-chain gates.
 //
 // The gate is bound to the ACTIVE NETWORK and to the verdict's EXPIRY
 // (2026-09-08 e2e §3 / F01): a dossier is eligible only when
@@ -208,6 +219,52 @@ export async function requireVerifiedClient(
   if (message) throw new SiwsError(403, message);
   // A null message means eligible, and eligible implies the row exists.
   return { clientId: (row as FetchedClientRow).id };
+}
+
+// ── Terminal-status screen (sales & trading, no KYC required) ───────────────
+// Buying, OTC trading and resell listings do not require KYC (policy
+// 2026-09-23), so a wallet with NO dossier, or a pending / more_info /
+// expired one, passes. What still fails is a dossier compliance has closed
+// on purpose: `suspended` (sanctions hit, fraud, court order, ongoing
+// investigation) or `rejected` (compliance refused the person). Those are
+// decisions about the PERSON, not missing paperwork — letting such a wallet
+// keep transacting through the platform's own off-chain services simply by
+// not being asked for KYC would turn "KYC is not required to buy" into
+// "compliance decisions are ignored when buying". Only compliance can lift
+// them (mirrors app/api/clients/_helpers TERMINAL_KYC_STATUSES), and the
+// fail-closed row pick in fetchClientRow means a terminal row wins over any
+// older live one. On-chain sanctions enforcement (the transfer-hook
+// blocklist) is separate and applies in every mode.
+
+/**
+ * Pure half of the terminal screen: the 403 message for a terminal dossier
+ * status, or null when the wallet may proceed (no dossier, or any
+ * non-terminal status — KYC is not required here).
+ */
+export function terminalKycMessage(
+  kycStatus: string | null,
+  context: string,
+): string | null {
+  if (kycStatus === null || !TERMINAL_KYC_STATUSES.includes(kycStatus)) return null;
+  return `Your client profile is ${kycStatus} by compliance — contact the compliance team before ${context}.`;
+}
+
+/**
+ * Sales/trading gate: refuse ONLY a wallet whose dossier (on the active
+ * network, own or account-level) is suspended or rejected. Does not require
+ * a client row or KYC. Resolves with the linked clients row id when one
+ * exists (null otherwise) so a route can optionally link the record to a
+ * client without making the link a precondition.
+ */
+export async function refuseTerminalClient(
+  sb: SupabaseClient,
+  wallet: string,
+  context: string,
+): Promise<{ clientId: string | null }> {
+  const row = await fetchClientRow(sb, wallet);
+  const message = terminalKycMessage(row?.kyc_status ?? null, context);
+  if (message) throw new SiwsError(403, message);
+  return { clientId: row?.id ?? null };
 }
 
 // ── Company (KYB) gate ─────────────────────────────────────────────────────

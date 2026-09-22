@@ -454,11 +454,13 @@ export async function listUpdates(salePubkey: string): Promise<LaunchUpdate[]> {
 /**
  * Records an off-chain soft commitment via the signed route. The server
  * requires the SIWS-verified wallet to equal `investorWallet` — you can only
- * commit as yourself — and enforces the KYC client gate. Returns the row id.
+ * commit as yourself. No KYC is required to commit (KYC applies at
+ * conversion/delivery); the server only refuses a wallet whose client
+ * profile compliance has suspended or rejected. Returns the row id.
  *
- * @throws Error with the server's message (the 403 KYC/onboarding copy,
- *         validation, transport) — callers must surface it to the user, not
- *         swallow it into a generic "unavailable" excuse.
+ * @throws Error with the server's message (the 403 compliance copy,
+ *         document-terms 409, validation, transport) — callers must surface
+ *         it to the user, not swallow it into a generic "unavailable" excuse.
  */
 export async function createCommitment(
   session: WalletSession | null | undefined,

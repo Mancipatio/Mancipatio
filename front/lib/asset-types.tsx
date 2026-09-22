@@ -79,7 +79,11 @@ export type CategorySlug = (typeof CATEGORY_SLUGS)[number];
 /** Shared "How issuance works" steps. Every category starts the same way;
  *  the SPV step is inserted where Serbian law requires one, and each
  *  category appends its own ending (payouts, delivery, conversion…). */
-const FLOW_ONBOARD = "Onboard with KYC and accept the Terms of Service.";
+// Issuer-side: /apply requires an approved KYB (company) or live KYC
+// (individual founder). Buyers need no KYC to buy or trade (policy
+// 2026-09-23) — only to convert into equity or take delivery.
+const FLOW_ONBOARD =
+  "The issuer onboards with company verification (KYB), or identity verification (KYC) as an individual founder, and accepts the Terms of Service.";
 // Equity launchpad raises have a self-serve application wizard (/apply); every
 // other asset category is scoped with the team via the contact form, which
 // feeds the same review. Keep these accurate so no page promises a universal
@@ -94,11 +98,11 @@ const FLOW_SPV =
 const FLOW_MINT =
   "Tokens are minted to the issuer's treasury and distributed from there (to you, or sold via the launchpad).";
 const FLOW_TRADE =
-  "Trade freely — transfer to any wallet, post on the resell board, and settle through the OTC escrow.";
+  "Trade freely — buying and selling need no identity verification unless the class is KYC-gated: transfer to another wallet, post on the resell board, and settle through the OTC escrow.";
 const FLOW_PAYOUT =
   "When a payout is due, the issuer funds it and every holder wallet automatically receives its proportionate share.";
 const FLOW_DELIVERY =
-  "Request delivery — deposit your tokens into escrow; they're returned if the delivery is cancelled and burned once delivery is confirmed.";
+  "Request delivery — complete identity verification (KYC), then deposit your tokens into escrow; they're returned if the delivery is cancelled and burned once delivery is confirmed.";
 
 export const ASSET_TYPES: AssetTypeRecord[] = [
   {
@@ -151,7 +155,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
       FLOW_SPV,
       FLOW_MINT,
       FLOW_TRADE,
-      "Register a share pledge in your favour, and convert into real shares at a time of your choosing — conversion is initiated through the platform's conversion-request flow (deposit into a conversion vault, then burn + on-chain attestation); the legal share transfer itself remains off-chain.",
+      "Register a share pledge in your favour, and convert into real shares at a time of your choosing — conversion requires identity verification (KYC) and is initiated through the platform's conversion-request flow (deposit into a conversion vault, then burn + on-chain attestation); the legal share transfer itself remains off-chain.",
     ],
   },
   {
@@ -217,7 +221,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
       "SPV reference",
       "Square meters",
       "Income share",
-      "KYB-gated transfers",
+      "Optional KYC-gated transfers",
     ],
     fact: "Rental income streamed to holder wallets monthly or quarterly",
     example: "Downtown Belgrade office building",
@@ -386,7 +390,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
         {
           heading: "Physical delivery",
           points: [
-            "Deliverable assets can be redeemed through the platform: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
+            "Deliverable assets can be redeemed through the platform by an identity-verified (KYC) holder: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
             "If a delivery is cancelled, the tokens are returned to the holder",
             "Manci doesn't handle the logistics itself, but the delivery system can be arranged in cooperation with Manci",
           ],
@@ -434,7 +438,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
         {
           heading: "Physical delivery",
           points: [
-            "Deliverable assets can be redeemed through the platform: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
+            "Deliverable assets can be redeemed through the platform by an identity-verified (KYC) holder: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
             "If a delivery is cancelled, the token is returned to the holder",
             "Manci doesn't handle the logistics itself, but the delivery system can be arranged in cooperation with Manci",
           ],

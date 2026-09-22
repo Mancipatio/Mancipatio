@@ -2,15 +2,25 @@
 // Signed (SIWS). The signing wallet must be one of the two parties
 // (buyer-initiated OR seller-initiated — a listing owner may request escrow
 // against an interested buyer wallet), and requested_by is always stamped
-// with the VERIFIED wallet, never taken from the payload. The server also
-// re-checks the KYC gate (the requesting wallet must belong to a KYC-verified
-// client) — mirrors /api/delivery/create; the OTC settle leg is exempt from
-// the on-chain receiver-KYC hook via its EscrowMarker, so the platform must
-// vet the parties off-chain before the escrow exists.
+// with the VERIFIED wallet, never taken from the payload.
+//
+// NO KYC REQUIRED (product policy 2026-09-23): OTC trading does not require
+// identity verification — only conversion into company equity and physical
+// delivery do. This is safe for KycGated classes too: the escrow's
+// EscrowMarker only exempts the ROUTING legs from the transfer hook, and
+// asset_registry::settle_otc_deal re-derives the buyer's receiver KYC
+// on-chain (util::require_receiver_kyc), so a KycGated deal cannot settle
+// to a wallet without a valid passport whatever this route accepts.
+//
+// Compliance screen kept (refuseTerminalClient): the platform mediates this
+// deal (an admin opens the escrow), so it refuses to set one up when EITHER
+// party's dossier has been SUSPENDED or REJECTED by compliance — sanctions /
+// fraud decisions, not missing KYC. The counterparty refusal is generic and
+// does not name the status.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireVerifiedClient } from "@/lib/server/kyc-gate";
+import { refuseTerminalClient } from "@/lib/server/kyc-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 
@@ -20,10 +30,12 @@ export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "otc.create");
 
-    // Server-side KYC gate — requesting an OTC escrow is for onboarded,
-    // KYC-verified clients only.
+    // Compliance screen, not a KYC gate: no client profile or KYC is needed
+    // to request an escrow; only suspended/rejected dossiers are refused
+    // (both parties — see header). The counterparty check runs after the
+    // party validation below.
     const sb = getSupabaseAdmin();
-    await requireVerifiedClient(sb, wallet, "requesting an OTC escrow");
+    await refuseTerminalClient(sb, wallet, "requesting an OTC escrow");
 
     const shareClassPda =
       typeof params.share_class_pda === "string" ? params.share_class_pda : "";
@@ -75,6 +87,22 @@ export async function POST(request: Request) {
     }
     if (expiresAt !== null && Number.isNaN(new Date(expiresAt).getTime())) {
       throw new SiwsError(400, "expires_at is not a valid timestamp");
+    }
+
+    // The other party of a platform-mediated deal gets the same terminal
+    // screen. Generic copy: the requester is not told the counterparty's
+    // compliance status.
+    const counterparty = wallet === sellerWallet ? buyerWallet : sellerWallet;
+    try {
+      await refuseTerminalClient(sb, counterparty, "trading");
+    } catch (err) {
+      if (err instanceof SiwsError && err.status === 403) {
+        throw new SiwsError(
+          403,
+          "This OTC request cannot be accepted for the counterparty wallet — contact the compliance team.",
+        );
+      }
+      throw err;
     }
 
     const { data, error } = await sb

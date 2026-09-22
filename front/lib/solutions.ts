@@ -139,7 +139,7 @@ export const SOLUTIONS: Solution[] = [
       },
       {
         step: "Investors buy",
-        note: "Eligible buyers accept the displayed document version and sign the atomic purchase.",
+        note: "Buyers accept the displayed document version and sign the atomic purchase — no identity verification unless the class is KYC-gated.",
       },
       {
         step: "Proceeds escrow",

@@ -14,7 +14,9 @@ import {
   evaluateKycLookup,
   kycGateMessage,
   lookupClientKyc,
+  refuseTerminalClient,
   requireVerifiedClient,
+  terminalKycMessage,
   type ClientKycLookup,
 } from "@/lib/server/kyc-gate";
 import { SiwsError } from "@/lib/server/siws";
@@ -413,5 +415,66 @@ describe("requireVerifiedClient", () => {
     expect((err as SiwsError).message).toContain("Onboarding required");
     // Default context preserves the original /api/applications copy.
     expect((err as SiwsError).message).toContain("before applying");
+  });
+});
+
+// ── terminal screen (sales & trading — no KYC required, policy 2026-09-23) ──
+describe("terminalKycMessage", () => {
+  it.each([null, "pending", "more_info", "verified", "expired"])(
+    "lets %s through (KYC is not required for sales and trading)",
+    (status) => {
+      expect(terminalKycMessage(status, "posting a resell listing")).toBeNull();
+    },
+  );
+
+  it.each(["suspended", "rejected"])("refuses %s with the compliance copy", (status) => {
+    const msg = terminalKycMessage(status, "committing to a raise");
+    expect(msg).toContain(`is ${status} by compliance`);
+    expect(msg).toContain("committing to a raise");
+  });
+});
+
+describe("refuseTerminalClient", () => {
+  it("resolves with a null client id when the wallet has no dossier", async () => {
+    const { sb } = stubSupabase({ data: [], error: null });
+    await expect(refuseTerminalClient(sb, WALLET, "trading")).resolves.toEqual({
+      clientId: null,
+    });
+  });
+
+  it("resolves with the linked client id for a non-terminal dossier (optional link)", async () => {
+    const { sb } = stubSupabase({
+      data: [{ id: "c1", kyc_status: "pending", kyc_expires_at: null }],
+      error: null,
+    });
+    await expect(refuseTerminalClient(sb, WALLET, "trading")).resolves.toEqual({
+      clientId: "c1",
+    });
+  });
+
+  it("throws SiwsError(403) when any row of the wallet is terminal", async () => {
+    const { sb } = stubSupabase({
+      data: [verifiedRow("old"), { id: "new", kyc_status: "rejected", kyc_expires_at: null }],
+      error: null,
+    });
+    const err = await refuseTerminalClient(sb, WALLET, "requesting an OTC escrow").then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(SiwsError);
+    expect((err as SiwsError).status).toBe(403);
+    expect((err as SiwsError).message).toContain("rejected");
+  });
+
+  it("fails closed (500) when the client lookup errors", async () => {
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { sb } = stubSupabase({ data: null, error: { message: "boom" } });
+      await expect(refuseTerminalClient(sb, WALLET, "trading")).rejects.toMatchObject({
+        status: 500,
+      });
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

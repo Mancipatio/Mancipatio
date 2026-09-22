@@ -140,8 +140,16 @@ export default function DealPage({
   const [failed, setFailed] = useState(false);
   const [activeTab, setActiveTab] = useState<Tab>("overview");
 
-  // eligibility gate state
-  type EligibilityState = { gated: boolean; eligible: boolean; reason: string };
+  // eligibility gate state. Open classes (the default) need no identity
+  // verification to buy; only a KycGated class needs the buyer's investor
+  // passport, which the program re-checks on-chain. `unverified` marks the
+  // fail-closed case where the class's mode itself could not be read.
+  type EligibilityState = {
+    gated: boolean;
+    eligible: boolean;
+    reason: string;
+    unverified?: boolean;
+  };
   const [eligibility, setEligibility] = useState<EligibilityState>({
     gated: false,
     eligible: true,
@@ -345,6 +353,7 @@ export default function DealPage({
             eligible: false,
             reason:
               "Could not verify this sale's eligibility rules. Please try again.",
+            unverified: true,
           });
           setEligibilityChecked(true);
         }
@@ -974,9 +983,10 @@ export default function DealPage({
       setShowConfirm(false);
       setCommitted(true);
     } catch (err) {
-      // Surface the server's message — the 403 KYC/onboarding copy from
-      // /api/launchpad/commit must reach the user, not a generic
-      // "unavailable" excuse that sends them into a retry loop.
+      // Surface the server's message — the 403 compliance copy (suspended /
+      // rejected client profile; no KYC is required to commit) or the 409
+      // document-terms copy from /api/launchpad/commit must reach the user,
+      // not a generic "unavailable" excuse that sends them into a retry loop.
       toast.showError(
         "Could not record commitment",
         err instanceof Error && err.message
@@ -1504,17 +1514,29 @@ export default function DealPage({
             {!!walletAddress && eligibility.gated && !eligibility.eligible && (
               <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-3">
                 <p className="text-[13px] font-semibold text-amber-800">
-                  Verified investor passport required
+                  {eligibility.unverified
+                    ? "Could not check this class's transfer rules"
+                    : "KYC-gated class — investor passport required"}
                 </p>
                 <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
                   {eligibility.reason}
                 </p>
-                <Link
-                  href="/portfolio"
-                  className="mt-2 inline-flex items-center gap-1 rounded-[3px] border border-amber-300 bg-white px-2.5 py-1 font-mono text-[11px] font-semibold text-amber-800 transition-colors hover:bg-amber-50"
-                >
-                  View investor passport →
-                </Link>
+                {!eligibility.unverified && (
+                  <>
+                    <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
+                      Most classes can be bought without identity
+                      verification. This one was restricted by its issuer or
+                      the platform, so buying and receiving it requires an
+                      approved investor passport.
+                    </p>
+                    <Link
+                      href="/portfolio"
+                      className="mt-2 inline-flex items-center gap-1 rounded-[3px] border border-amber-300 bg-white px-2.5 py-1 font-mono text-[11px] font-semibold text-amber-800 transition-colors hover:bg-amber-50"
+                    >
+                      View investor passport →
+                    </Link>
+                  </>
+                )}
               </div>
             )}
 
@@ -1550,7 +1572,9 @@ export default function DealPage({
                 {!saleOpen
                   ? "Sale closed"
                   : eligibility.gated && !eligibility.eligible
-                    ? "KYC required to invest"
+                    ? eligibility.unverified
+                      ? "Eligibility check failed"
+                      : "Investor passport required"
                     : belowMin
                       ? `Minimum ${app?.min_ticket}`
                       : settlesOnChain && parsed > 0 && paymentDecimals === null

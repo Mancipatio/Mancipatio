@@ -17,8 +17,8 @@ function Row({ kind, status, documents }: { kind: "kyc" | "kyb"; status: Account
     <span className="account-feature-icon">{company ? <IconBuilding size={19} /> : <IconUsers size={19} />}</span>
     <div className="verification-row-text">
       <strong>{company ? "Company verification (KYB)" : "Identity verification (KYC)"}</strong>
-      <p>{status === "verified" ? (company ? "Your company is verified for issuing and raising on Manci." : "You can invest in verified offerings and receive deliveries.")
-        : status === "none" ? (company ? "Needed to create a raise or issue assets as a company." : "Needed to invest, trade gated assets and receive deliveries.")
+      <p>{status === "verified" ? (company ? "Your company is verified for issuing and raising on Manci." : "You can convert tokens into company shares, take delivery of physical goods and buy or receive KYC-gated classes.")
+        : status === "none" ? (company ? "Needed to create a raise or issue assets as a company." : "Needed to convert tokens into company shares, take delivery of physical goods, and buy or receive KYC-gated classes. Buying and trading other tokens does not require it.")
         : status === "more_info" ? `We need ${documents || "some"} document${documents === 1 ? "" : "s"} before we can review.`
         : status === "pending" ? "Our compliance team is reviewing your submission."
         : status === "expired" ? "Your verification has expired. Renew it to keep access."
@@ -33,7 +33,7 @@ export function AccountVerificationCard({ verification }: { verification: Accoun
   return <section className="account-card" aria-labelledby="account-verification-heading">
     <div className="account-card-heading"><div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h2 id="account-verification-heading">Verification</h2></div><IconShield size={21} /></div>
     {!verification ? <p className="account-card-description">Verification status is temporarily unavailable. Refresh the page to try again.</p> : <>
-      <p className="account-card-description">Verification is optional for browsing. It is required to invest, raise capital or issue assets. It applies to the wallet you are connected with.</p>
+      <p className="account-card-description">Buying and trading tokens does not require verification. It is required to convert tokens into company shares, take delivery of physical goods, buy or receive KYC-gated classes, raise capital or issue assets. It applies to the wallet you are connected with.</p>
       <div className="verification-rows">
         <Row kind="kyc" status={verification.kyc} documents={verification.documents_requested} />
         <Row kind="kyb" status={verification.kyb} documents={verification.documents_requested} />

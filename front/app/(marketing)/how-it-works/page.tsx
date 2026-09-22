@@ -40,7 +40,7 @@ const STEPS = [
   },
   {
     title: "Distribute the tokens",
-    body: "Use the agreed sale or allocation process. Investors review the issuance terms and complete the checks required for that transaction.",
+    body: "Use the agreed sale or allocation process. Investors review the issuance terms; buying and trading need no identity verification unless you make the class KYC-gated. Holders verify their identity when they convert tokens into company shares or take delivery of a physical good.",
   },
 ];
 

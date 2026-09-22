@@ -2,16 +2,25 @@
 //
 // Signed route: the SIWS-verified wallet IS the committing investor. The
 // client passes investor_wallet redundantly and the server requires equality —
-// nobody can record a commitment on someone else's behalf. The server also
-// re-checks the KYC gate (wallet must belong to a KYC-verified client) instead
-// of trusting the client-side eligibility check — mirrors /api/delivery/create.
+// nobody can record a commitment on someone else's behalf.
+//
+// NO KYC REQUIRED (product policy 2026-09-23): buying tokens — including a
+// soft commitment to a raise — does not require identity verification; KYC
+// is required only when tokens are converted into company equity
+// (/api/conversion/create) or redeemed for a physical good
+// (/api/delivery/create). The one compliance screen kept here is
+// refuseTerminalClient: a wallet whose dossier compliance has SUSPENDED or
+// REJECTED (sanctions / fraud decisions only compliance can lift) is still
+// refused — "no KYC for buying" must not mean "compliance decisions are
+// ignored for buying". A KycGated class keeps its passport requirement
+// on-chain (the buy/settlement legs re-check the receiver).
 // Inserts a `pending` commitments row and returns its id.
 //
 // Client wrapper: createCommitment() in lib/launchpad.ts ("launchpad.commit").
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireVerifiedClient } from "@/lib/server/kyc-gate";
+import { refuseTerminalClient } from "@/lib/server/kyc-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { publishedSaleDocument } from "@/lib/server/sale-document";
@@ -27,11 +36,10 @@ export async function POST(request: Request) {
     const signedCopy=request.clone();
     const { wallet, params } = await verifySigned(request, "launchpad.commit");
 
-    // Server-side KYC gate — writing to the gated commitments table is for
-    // onboarded, KYC-verified clients only. Recording an already-authorized
-    // chain purchase separately proves the transaction even if KYC later expires.
+    // Compliance screen, not a KYC gate: no client profile or KYC is needed
+    // to commit; only a suspended/rejected dossier is refused (see header).
     const sb = getSupabaseAdmin();
-    await requireVerifiedClient(sb, wallet, "committing to a raise");
+    await refuseTerminalClient(sb, wallet, "committing to a raise");
 
     const salePubkey =
       typeof params.sale_pubkey === "string" ? params.sale_pubkey.trim() : "";

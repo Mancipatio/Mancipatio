@@ -68,7 +68,7 @@ const TEMPLATES: { slug: string; label: string; subject: string; body: string }[
     label: "KYC reminder",
     subject: "Action required: finish KYC verification",
     body:
-      "Hi {{name}},\n\nYour Manci account is still in pending-KYC status. Until KYB is verified you can browse the marketplace but cannot create assets or take primary sales.\n\nReply to this email if you need help.",
+      "Hi {{name}},\n\nYour Manci verification is not complete yet. You can already browse, buy and trade tokens; verification is required before you can convert tokens into company shares, take delivery of physical goods, or raise capital and issue assets.\n\nReply to this email if you need help.",
   },
   {
     slug: "sale-launch",

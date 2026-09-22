@@ -22,8 +22,12 @@ const PILLARS: Array<{ title: string; body: string }> = [
     body: "The transfer hook checks the source token-account owner against the blocklist, including delegated transfers. KYC-gated classes also check the receiver’s passport. Destinations use immutable token-account ownership; narrow program-controlled recovery paths have their own checks.",
   },
   {
-    title: "Issuance is gated too",
-    body: "A primary sale mints rather than transfers, and minting does not invoke the transfer hook — so on a KYC-gated class the program checks the buyer's passport itself, and refuses the purchase outright if the proof accounts are absent. The gate cannot be skipped by leaving them out.",
+    title: "Primary sales follow the class's mode",
+    body: "Buying an Open class in a primary sale needs no identity verification. A primary sale mints rather than transfers, and minting does not invoke the transfer hook — so on a KYC-gated class the program checks the buyer's passport itself, and refuses the purchase outright if the proof accounts are absent. The gate cannot be skipped by leaving them out.",
+  },
+  {
+    title: "Verification at conversion and delivery",
+    body: "Identity verification (KYC) is required when a token becomes something off-chain: converting it into shares of the company, or redeeming it for a physical good. The platform checks a live, verified client profile before it accepts either request. Commitments, OTC escrow requests and resell listings need no verification, but still refuse a client profile that compliance has suspended or rejected.",
   },
   {
     title: "Permanent delegate",
@@ -60,6 +64,19 @@ export default function SecurityPage() {
         title="Compliance enforced by the chain."
         lede="Understand the controls used by the app and confirm the selected network and release before testing privileged actions."
       />
+
+      <Section>
+        <H2>When verification is required</H2>
+        <Body className="mt-4">
+          Buying and trading tokens does not require identity verification:
+          primary sales, OTC offers and resell listings of an Open class need
+          none. Verification (KYC) is required when you convert tokens into
+          shares of the company or take delivery of a physical good. The
+          issuer or the platform can make a class KYC-gated; buying, receiving
+          and transferring that class then requires an approved investor
+          passport.
+        </Body>
+      </Section>
 
       <Section>
         <H2>Transfer checks depend on the class</H2>

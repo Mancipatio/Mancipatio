@@ -29,9 +29,11 @@ export async function POST(request: Request) {
     const { wallet, params } = await verifySigned(request, "delivery.create");
 
     // Server-side KYC gate — the shared gate in lib/server/kyc-gate.ts (same
-    // as applications / launchpad / OTC / resell; one source of truth, no
-    // inline copy to drift). It also resolves the verified clients row id
-    // for the client_id stamp on the insert below.
+    // as conversion / vesting-series; one source of truth, no inline copy to
+    // drift). Redeeming a token for a physical good is one of the two points
+    // where KYC is REQUIRED (policy 2026-09-23 — buying and trading are not).
+    // It also resolves the verified clients row id for the client_id stamp
+    // on the insert below.
     const sb = getSupabaseAdmin();
     const { clientId } = await requireVerifiedClient(
       sb,

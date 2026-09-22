@@ -33,8 +33,8 @@ const STEPS = [
     ],
   },
   {
-    title: "03 · Connect and check verification",
-    body: "Connect a Solana wallet using the app's wallet control. Open Portfolio to review your investor passport and follow any verification steps shown for your wallet or chosen offering.",
+    title: "03 · Connect your wallet",
+    body: "Connect a Solana wallet using the app's wallet control. Buying and trading tokens does not require identity verification. You verify (KYC) later, if you convert tokens into company shares or take delivery of a physical good. A class marked KYC-gated also requires an approved investor passport, shown in Portfolio.",
     links: [
       { label: "Open Portfolio", href: "/portfolio" },
       { label: "Verification rules", href: MX_ROUTES.security },
@@ -42,7 +42,7 @@ const STEPS = [
   },
   {
     title: "04 · Review a purchase",
-    body: "Review the units, payment token, price and eligibility. For a primary sale, read and accept the displayed document version before signing; the purchase records its version and file hash.",
+    body: "Review the units, payment token, price and whether the class is KYC-gated. For a primary sale, read and accept the displayed document version before signing; the purchase records its version and file hash.",
     links: [
       { label: "Primary sales", href: "/marketplace/launchpad" },
       { label: "OTC offers", href: "/marketplace/otc" },

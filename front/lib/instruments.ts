@@ -158,6 +158,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         heading: "Becoming a shareholder",
         points: [
           "Holders can convert at a time of their choosing",
+          "Buying, holding and selling the token needs no identity verification; converting into shares requires it (KYC)",
           "Conversion goes through the standard legal share-transfer procedure",
           "If the company or its founders fail to facilitate the transfer, holders have legal recourse",
           "Holders can sell instead of converting — the right travels with the token",
@@ -476,7 +477,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         points: [
           "Deliverable assets can be redeemed: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
           "If a delivery is cancelled, the tokens are returned to the holder",
-          "Redemption is available to onboarded holders only",
+          "Redemption requires identity verification (KYC); buying and trading the token does not",
           "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
         ],
       },
@@ -496,8 +497,8 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
     typicalUse:
       "a stored agricultural commodity, or bottled output from a producer.",
     differs: [
-      "Issuance follows the same six steps. What's specific here is redemption: an onboarded holder deposits the tokens into escrow, and once delivery is confirmed the tokens are burned. If the delivery is cancelled they're returned. We don't move the goods ourselves.",
-      "Transfers are not restricted, so a token can reach a wallet that has not onboarded. That wallet can hold and sell it, but cannot redeem it until it onboards.",
+      "Issuance follows the same six steps. What's specific here is redemption: an identity-verified holder deposits the tokens into escrow, and once delivery is confirmed the tokens are burned. If the delivery is cancelled they're returned. We don't move the goods ourselves.",
+      "Transfers are not restricted and buying needs no identity verification, so a token can reach a wallet that has not verified. That wallet can hold and sell it, but cannot redeem it until its holder completes identity verification (KYC).",
     ],
     closingCtas: [APPLY, LEGAL_STRUCTURE],
   },
@@ -532,7 +533,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         points: [
           "Deliverable assets can be redeemed: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
           "If a delivery is cancelled, the token is returned to the holder",
-          "Redemption is available to onboarded holders only",
+          "Redemption requires identity verification (KYC); buying and trading the token does not",
           "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
         ],
       },
@@ -550,8 +551,8 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       },
     ],
     differs: [
-      "Issuance follows the same six steps. What's specific here is redemption: an onboarded holder deposits the token into escrow, and once delivery is confirmed the token is burned. If the delivery is cancelled it's returned. We don't move the item ourselves.",
-      "Transfers are not restricted, so a token can reach a wallet that has not onboarded. That wallet can hold and sell it, but cannot redeem it until it onboards.",
+      "Issuance follows the same six steps. What's specific here is redemption: an identity-verified holder deposits the token into escrow, and once delivery is confirmed the token is burned. If the delivery is cancelled it's returned. We don't move the item ourselves.",
+      "Transfers are not restricted and buying needs no identity verification, so a token can reach a wallet that has not verified. That wallet can hold and sell it, but cannot redeem it until its holder completes identity verification (KYC).",
     ],
     closingCtas: [APPLY, LEGAL_STRUCTURE],
   },

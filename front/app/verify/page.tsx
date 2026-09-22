@@ -5,7 +5,7 @@ import { VerificationForm } from "@/components/verification-form";
 
 export const metadata: Metadata = {
   title: "Verification · Manci",
-  description: "Verify your identity (KYC) or your company (KYB) to invest, raise and issue on Manci.",
+  description: "Verify your identity (KYC) to convert tokens into company shares or take delivery, or your company (KYB) to raise and issue on Manci.",
 };
 
 export default function VerifyPage() {

@@ -5,12 +5,16 @@
 //   - `share_class_pda` must be the real ShareClass account behind the mint
 //     (it powers the resell board's "Request OTC escrow" funnel, which was
 //     previously dead because the column was never populated).
-// The server also re-checks the KYC gate (the listing wallet must belong to a
-// KYC-verified client) — mirrors /api/delivery/create.
+// NO KYC REQUIRED (product policy 2026-09-23): trading tokens does not
+// require identity verification — only conversion into company equity and
+// physical delivery do. The listing wallet is screened by
+// refuseTerminalClient only: a dossier compliance has SUSPENDED or REJECTED
+// (sanctions / fraud decisions) is still refused. Whether the eventual buyer
+// may receive a KycGated class is enforced on-chain at settlement.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireVerifiedClient } from "@/lib/server/kyc-gate";
+import { refuseTerminalClient } from "@/lib/server/kyc-gate";
 import {
   getToken2022Balance,
   verifyShareClassMint,
@@ -25,10 +29,10 @@ export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "resell.create");
 
-    // Server-side KYC gate — posting a resell listing is for onboarded,
-    // KYC-verified clients only.
+    // Compliance screen, not a KYC gate: no client profile or KYC is needed
+    // to list; only a suspended/rejected dossier is refused (see header).
     const sb = getSupabaseAdmin();
-    await requireVerifiedClient(sb, wallet, "posting a resell listing");
+    await refuseTerminalClient(sb, wallet, "posting a resell listing");
 
     const mint = typeof params.mint === "string" ? params.mint : "";
     const shareClassPda =
