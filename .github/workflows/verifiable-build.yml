@@ -56,7 +56,12 @@ jobs:
       - name: Verifiable build — transfer_hook
         run: solana-verify build --library-name transfer_hook -b "$BASE_IMAGE"
 
+      # The Docker build leaves target/ owned by root, so host cargo writes its
+      # own build products elsewhere. The tests still include_bytes! the release
+      # .so files from program/target/deploy (paths are source-relative).
       - name: Test the exact reproducible release artifacts
+        env:
+          CARGO_TARGET_DIR: ${{ runner.temp }}/host-target
         run: |
           sha256sum target/deploy/asset_registry.so target/deploy/transfer_hook.so > sbf-sha256.txt
           cargo test --workspace --locked --no-fail-fast

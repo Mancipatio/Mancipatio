@@ -2014,9 +2014,11 @@ fn original_v1_terminal_payout_and_vote_keep_refund_entitlement_after_size_only_
         }
         .to_account_metas(None),
     );
-    assert!(try_send(&mut svm, &[&ctx.buyer], &[refund.clone()])
-        .unwrap_err()
-        .contains("AccountDidNotDeserialize"));
+    assert!(
+        try_send(&mut svm, &[&ctx.buyer], std::slice::from_ref(&refund))
+            .unwrap_err()
+            .contains("AccountDidNotDeserialize")
+    );
     send(
         &mut svm,
         &[&ctx.buyer],
@@ -2040,7 +2042,7 @@ fn original_v1_terminal_payout_and_vote_keep_refund_entitlement_after_size_only_
     send(
         &mut svm,
         &[&ctx.buyer],
-        &[refund.clone()],
+        std::slice::from_ref(&refund),
         "legacy terminal claim preserves original PDA and entitlement",
     );
     assert_eq!(

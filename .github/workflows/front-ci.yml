@@ -1,6 +1,7 @@
-# Front CI — typecheck, lint, unit tests and program IDL/SDK drift for front/.
-# No build (Next build is a deploy concern and needs env secrets this workflow
-# deliberately avoids). The drift job also watches program/ because the client
+# Front CI — typecheck, lint, unit tests, a production build and program
+# IDL/SDK drift for front/. The build runs without deployment secrets (only the
+# public network name is set), so a merge that would break the Vercel build is
+# caught here first. The drift job also watches program/ because the client
 # SDK in front/lib/generated is derived from the program source.
 name: Front CI
 
@@ -65,6 +66,28 @@ jobs:
 
       - name: Check generated SDK against committed IDL
         run: npm run check:codegen
+
+  build:
+    name: next build (no secrets)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      NEXT_TELEMETRY_DISABLED: '1'
+      NEXT_PUBLIC_NETWORK: devnet
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Production build
+        run: npx next build
 
   program-drift:
     name: Program IDL + SDK drift
