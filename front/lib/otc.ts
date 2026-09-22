@@ -7,6 +7,8 @@
 //   otc.adminUpdate — admin status flips (on-chain admin gate); flipping to
 //                     'created' also emails both parties (when known) and
 //                     writes in-app notifications rows server-side.
+//   otc.adminScreen — admin re-screen of both parties (suspended dossier?)
+//                     right before the escrow is opened (read-only).
 
 import type { SolanaClient, WalletSession } from "@solana/client";
 import type { Address } from "@solana/kit";
@@ -128,6 +130,31 @@ export type OtcAdminPatch = {
   /** Stamp decided_by/decided_at with the signing admin + now (server-side). */
   decide?: boolean;
 };
+
+export type OtcPartyScreen = {
+  /** True only when neither party's client profile is suspended. */
+  cleared: boolean;
+  seller: "clear" | "suspended";
+  buyer: "clear" | "suspended";
+};
+
+/**
+ * Admin compliance re-screen of a queued request's two parties, run right
+ * before the on-chain escrow is opened (a party may have been suspended
+ * while the request waited). THROWS on any failure — callers must treat an
+ * unavailable screen as "do not open the escrow".
+ */
+export async function adminScreenOtcRequest(
+  session: WalletSession | null | undefined,
+  id: string,
+): Promise<OtcPartyScreen> {
+  return signedFetch<OtcPartyScreen>(
+    session,
+    "/api/otc/admin-screen",
+    "otc.adminScreen",
+    { id },
+  );
+}
 
 /**
  * Admin status flip (signed + on-chain admin gate on the server). Setting

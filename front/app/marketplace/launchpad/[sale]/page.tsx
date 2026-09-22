@@ -1225,7 +1225,9 @@ export default function DealPage({
           <div className="rounded-[3px] border border-mx-rule bg-white p-6">
             <p className="mb-2 text-xs text-mx-ink-faint">
               {isStartup
-                ? "Pledged commitments · not paid"
+                ? agg.unverifiedPledged !== null
+                  ? "Pledged by verified investors · not paid"
+                  : "Pledged commitments · not paid"
                 : "Verified payments · payment token units"}
             </p>
             <div className="mb-4 flex items-baseline justify-between">
@@ -1259,6 +1261,20 @@ export default function DealPage({
                 Payment totals are temporarily unavailable.
               </p>
             )}
+            {/* Pledging needs no KYC (policy 2026-09-23), so pledges from
+                wallets without a live verification are not counted above
+                (commitment_totals, migration 0061) — shown here instead. */}
+            {agg.available &&
+              isStartup &&
+              agg.unverifiedPledgers !== null &&
+              agg.unverifiedPledgers > 0 && (
+                <p className="mb-2 text-xs text-mx-ink-faint">
+                  Not counted: {fmtMoney(agg.unverifiedPledged ?? 0)} pledged
+                  from {agg.unverifiedPledgers}{" "}
+                  {agg.unverifiedPledgers === 1 ? "wallet" : "wallets"} without
+                  identity verification.
+                </p>
+              )}
             {agg.available && agg.unverified > 0 && (
               <p className="text-xs text-amber-800">
                 Historical payment records awaiting verification are excluded.
@@ -1281,7 +1297,11 @@ export default function DealPage({
             <div className="mt-5 flex items-center justify-between border-t border-mx-rule pt-4">
               <div className="text-center">
                 <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
-                  {isStartup ? "Pledgers" : "Buyers"}
+                  {isStartup
+                    ? agg.unverifiedPledged !== null
+                      ? "Verified pledgers"
+                      : "Pledgers"
+                    : "Buyers"}
                 </p>
                 <p className="mt-1 text-[15px] font-semibold text-mx-ink">
                   {!agg.available
@@ -1525,9 +1545,9 @@ export default function DealPage({
                   <>
                     <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
                       Most classes can be bought without identity
-                      verification. This one was restricted by its issuer or
-                      the platform, so buying and receiving it requires an
-                      approved investor passport.
+                      verification. The platform made this one KYC-gated, so
+                      buying and receiving it requires an approved investor
+                      passport for your wallet.
                     </p>
                     <Link
                       href="/portfolio"

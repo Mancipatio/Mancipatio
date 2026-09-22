@@ -9,18 +9,26 @@
 // is required only when tokens are converted into company equity
 // (/api/conversion/create) or redeemed for a physical good
 // (/api/delivery/create). The one compliance screen kept here is
-// refuseTerminalClient: a wallet whose dossier compliance has SUSPENDED or
-// REJECTED (sanctions / fraud decisions only compliance can lift) is still
+// refuseSuspendedClient: a wallet whose dossier compliance has SUSPENDED
+// (sanctions / fraud / investigation — only compliance can lift it) is still
 // refused — "no KYC for buying" must not mean "compliance decisions are
-// ignored for buying". A KycGated class keeps its passport requirement
-// on-chain (the buy/settlement legs re-check the receiver).
+// ignored for buying". A rejected KYC application is not a sanction and is
+// not refused (see lib/server/kyc-gate.ts). A KycGated class keeps its
+// passport requirement on-chain (the buy/settlement legs re-check the
+// receiver).
+//
+// Pledges from wallets without a live verification are recorded, but the
+// PUBLIC progress figures (commitment_totals, migration 0061) count only
+// pledges whose wallet resolves to a live verified dossier and report the
+// rest separately — a free SIWS signature from a throwaway wallet must not
+// be able to push a raise to "100% pledged".
 // Inserts a `pending` commitments row and returns its id.
 //
 // Client wrapper: createCommitment() in lib/launchpad.ts ("launchpad.commit").
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { refuseTerminalClient } from "@/lib/server/kyc-gate";
+import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { publishedSaleDocument } from "@/lib/server/sale-document";
@@ -37,9 +45,9 @@ export async function POST(request: Request) {
     const { wallet, params } = await verifySigned(request, "launchpad.commit");
 
     // Compliance screen, not a KYC gate: no client profile or KYC is needed
-    // to commit; only a suspended/rejected dossier is refused (see header).
+    // to commit; only a suspended dossier is refused (see header).
     const sb = getSupabaseAdmin();
-    await refuseTerminalClient(sb, wallet, "committing to a raise");
+    await refuseSuspendedClient(sb, wallet, "committing to a raise");
 
     const salePubkey =
       typeof params.sale_pubkey === "string" ? params.sale_pubkey.trim() : "";

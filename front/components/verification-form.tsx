@@ -117,7 +117,7 @@ export function VerificationForm() {
 
   return <div className="account-page verify-page">
     <header className="account-heading">
-      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, buy or receive KYC-gated classes, raise capital or issue assets. It takes a few minutes.</p></div>
+      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes.</p></div>
     </header>
     {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p>
       : signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p>
@@ -134,7 +134,7 @@ export function VerificationForm() {
           {(["kyc", "kyb"] as const).map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
             {k === "kyc" ? <IconUsers size={20} /> : <IconBuilding size={20} />}
             <strong>{k === "kyc" ? "Individual (KYC)" : "Company (KYB)"}</strong>
-            <span>{k === "kyc" ? "Verify yourself to convert tokens into shares or take delivery." : "Verify your company to raise capital or issue assets."}</span>
+            <span>{k === "kyc" ? "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder." : "Verify your company to raise capital or issue assets."}</span>
             {status && <span className={`account-status ${status[k] === "verified" ? "account-status--verified" : ""}`} style={{ marginTop: 10 }}>{VERIFICATION_LABEL[status[k]]}</span>}
           </button>)}
         </div>

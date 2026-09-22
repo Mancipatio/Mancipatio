@@ -33,6 +33,7 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "fees.list",
   "inquiries.list",
   "issuer-profiles.read",
+  "otc.adminScreen",
   "otc.list",
   "passport.list",
   "payout-snapshots.adminRead",

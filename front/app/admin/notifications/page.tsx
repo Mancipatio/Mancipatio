@@ -66,9 +66,9 @@ const TEMPLATES: { slug: string; label: string; subject: string; body: string }[
   {
     slug: "kyc-reminder",
     label: "KYC reminder",
-    subject: "Action required: finish KYC verification",
+    subject: "Finish your KYC verification",
     body:
-      "Hi {{name}},\n\nYour Manci verification is not complete yet. You can already browse, buy and trade tokens; verification is required before you can convert tokens into company shares, take delivery of physical goods, or raise capital and issue assets.\n\nReply to this email if you need help.",
+      "Hi {{name}},\n\nYour Manci verification is not complete yet. You can already browse, buy and trade tokens, except KYC-gated classes, which need an investor passport; verification is required before you can convert tokens into company shares, take delivery of physical goods, or raise capital and issue assets.\n\nReply to this email if you need help.",
   },
   {
     slug: "sale-launch",

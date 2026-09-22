@@ -29,4 +29,17 @@ describe("honest aggregate states",()=>{
   it("does not turn malformed totals into a valid zero",()=>{
     expect(parseCommitmentTotals({pledged:"NaN",confirmed:"0",settled:"0",backers:0,pledgers:0,unverified:0,paymentMint:null}).available).toBe(false);
   });
+  it("reads the verified-only pledge split (0061) and tolerates an older server without it",()=>{
+    const base={pledged:"100",confirmed:"0",settled:"0",backers:0,pledgers:1,unverified:0,paymentMint:null};
+    expect(parseCommitmentTotals(base)).toMatchObject({available:true,unverifiedPledged:null,unverifiedPledgers:null});
+    expect(parseCommitmentTotals({...base,unverifiedPledged:"2500",unverifiedPledgers:40}))
+      .toMatchObject({available:true,pledged:100,pledgers:1,unverifiedPledged:2500,unverifiedPledgers:40});
+  });
+  it("does not accept a malformed or half-present verified-only split",()=>{
+    const base={pledged:"100",confirmed:"0",settled:"0",backers:0,pledgers:1,unverified:0,paymentMint:null};
+    expect(parseCommitmentTotals({...base,unverifiedPledged:"x",unverifiedPledgers:1}).available).toBe(false);
+    expect(parseCommitmentTotals({...base,unverifiedPledged:"10",unverifiedPledgers:-1}).available).toBe(false);
+    expect(parseCommitmentTotals({...base,unverifiedPledged:"10"}).available).toBe(false);
+    expect(parseCommitmentTotals({...base,unverifiedPledgers:3}).available).toBe(false);
+  });
 });

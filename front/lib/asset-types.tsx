@@ -98,7 +98,7 @@ const FLOW_SPV =
 const FLOW_MINT =
   "Tokens are minted to the issuer's treasury and distributed from there (to you, or sold via the launchpad).";
 const FLOW_TRADE =
-  "Trade freely — buying and selling need no identity verification unless the class is KYC-gated: transfer to another wallet, post on the resell board, and settle through the OTC escrow.";
+  "Trade freely — transfer to another wallet, post on the resell board, and settle through the OTC escrow. Buying needs no identity verification unless the class is KYC-gated, in which case the receiving wallet needs an investor passport.";
 const FLOW_PAYOUT =
   "When a payout is due, the issuer funds it and every holder wallet automatically receives its proportionate share.";
 const FLOW_DELIVERY =

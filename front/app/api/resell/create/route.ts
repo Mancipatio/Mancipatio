@@ -8,13 +8,13 @@
 // NO KYC REQUIRED (product policy 2026-09-23): trading tokens does not
 // require identity verification — only conversion into company equity and
 // physical delivery do. The listing wallet is screened by
-// refuseTerminalClient only: a dossier compliance has SUSPENDED or REJECTED
-// (sanctions / fraud decisions) is still refused. Whether the eventual buyer
+// refuseSuspendedClient only: a dossier compliance has SUSPENDED (sanctions /
+// fraud / investigation) is still refused. Whether the eventual buyer
 // may receive a KycGated class is enforced on-chain at settlement.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { refuseTerminalClient } from "@/lib/server/kyc-gate";
+import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import {
   getToken2022Balance,
   verifyShareClassMint,
@@ -30,9 +30,9 @@ export async function POST(request: Request) {
     const { wallet, params } = await verifySigned(request, "resell.create");
 
     // Compliance screen, not a KYC gate: no client profile or KYC is needed
-    // to list; only a suspended/rejected dossier is refused (see header).
+    // to list; only a suspended dossier is refused (see header).
     const sb = getSupabaseAdmin();
-    await refuseTerminalClient(sb, wallet, "posting a resell listing");
+    await refuseSuspendedClient(sb, wallet, "posting a resell listing");
 
     const mint = typeof params.mint === "string" ? params.mint : "";
     const shareClassPda =

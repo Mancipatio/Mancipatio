@@ -95,7 +95,7 @@ export async function POST(request: Request) {
             `<p>Good news — your on-chain investor passport has been issued` +
             (expiresAt ? ` and is valid until <strong>${expiresAt.slice(0, 10)}</strong>` : "") +
             `.</p>` +
-            `<p>You can now buy and receive KYC-gated classes, convert tokens into company shares and request delivery of physical goods from your portfolio.</p>` +
+            `<p>You can now buy and receive KYC-gated classes with this wallet in the marketplace. Converting tokens into company shares and requesting delivery of physical goods are available from your portfolio while your identity verification is current.</p>` +
             `<p style="color:#64748b;font-size:12px;">— The Manci team</p>`,
         });
       }

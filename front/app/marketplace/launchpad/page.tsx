@@ -31,6 +31,8 @@ type DealCard = {
   raised: number;
   settled: string;
   totalsAvailable: boolean;
+  /** True when the server counts only verified investors' pledges (0061). */
+  verifiedPledgesOnly: boolean;
   soldPercent: number;
   backers: number;
   equity: number | null;
@@ -125,6 +127,7 @@ export default function PublicLaunchpadPage() {
             raised,
             settled: agg.settled,
             totalsAvailable: agg.available,
+            verifiedPledgesOnly: agg.unverifiedPledged !== null,
             soldPercent: progressPct(
               Number(sale.sold),
               Number(sale.totalForSale),
@@ -263,6 +266,7 @@ function DealCard({ card }: { card: DealCard }) {
     raised,
     settled,
     totalsAvailable,
+    verifiedPledgesOnly,
     soldPercent,
     backers,
     equity,
@@ -335,7 +339,7 @@ function DealCard({ card }: { card: DealCard }) {
         </div>
         <p className="text-[11px] text-mx-ink-faint">
           {totalsAvailable
-            ? `${pct}% ${isStartup ? "pledged" : "of share units sold"}`
+            ? `${pct}% ${isStartup ? (verifiedPledgesOnly ? "pledged by verified investors" : "pledged") : "of share units sold"}`
             : "Payment totals unavailable"}
           {isStartup && target > 0 && ` · target ${fmtMoney(target)}`}
         </p>
@@ -345,7 +349,11 @@ function DealCard({ card }: { card: DealCard }) {
       <div className="mt-auto flex items-end justify-between border-t border-mx-rule pt-3">
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-mx-ink-faint">
-            {isStartup ? "Pledged (not paid)" : "Verified payments"}
+            {isStartup
+              ? verifiedPledgesOnly
+                ? "Verified pledges (not paid)"
+                : "Pledged (not paid)"
+              : "Verified payments"}
           </p>
           <p className="mt-0.5 font-mono text-[14px] font-semibold text-mx-indigo">
             {!totalsAvailable
@@ -374,7 +382,11 @@ function DealCard({ card }: { card: DealCard }) {
 
         <div className="text-center">
           <p className="text-[10px] font-semibold uppercase tracking-[0.1em] text-mx-ink-faint">
-            {isStartup ? "Pledgers" : "Buyers"}
+            {isStartup
+              ? verifiedPledgesOnly
+                ? "Verified pledgers"
+                : "Pledgers"
+              : "Buyers"}
           </p>
           <p className="mt-0.5 font-mono text-[14px] font-semibold text-mx-ink">
             {totalsAvailable ? backers : "—"}

@@ -456,7 +456,9 @@ export async function listUpdates(salePubkey: string): Promise<LaunchUpdate[]> {
  * requires the SIWS-verified wallet to equal `investorWallet` — you can only
  * commit as yourself. No KYC is required to commit (KYC applies at
  * conversion/delivery); the server only refuses a wallet whose client
- * profile compliance has suspended or rejected. Returns the row id.
+ * profile compliance has suspended. Pledges from wallets without a live
+ * verification are recorded but not counted in the public progress totals
+ * (commitment_totals, migration 0061). Returns the row id.
  *
  * @throws Error with the server's message (the 403 compliance copy,
  *         document-terms 409, validation, transport) — callers must surface

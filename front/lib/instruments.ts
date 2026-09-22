@@ -158,7 +158,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         heading: "Becoming a shareholder",
         points: [
           "Holders can convert at a time of their choosing",
-          "Buying, holding and selling the token needs no identity verification; converting into shares requires it (KYC)",
+          "Buying the token needs no identity verification unless the class is KYC-gated (then the receiving wallet needs an investor passport); converting into shares requires it (KYC)",
           "Conversion goes through the standard legal share-transfer procedure",
           "If the company or its founders fail to facilitate the transfer, holders have legal recourse",
           "Holders can sell instead of converting — the right travels with the token",
@@ -477,7 +477,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         points: [
           "Deliverable assets can be redeemed: deposit the tokens into escrow, receive the goods, and the tokens are burned on confirmed delivery",
           "If a delivery is cancelled, the tokens are returned to the holder",
-          "Redemption requires identity verification (KYC); buying and trading the token does not",
+          "Redemption requires identity verification (KYC); buying and trading the token do not, unless the class is KYC-gated",
           "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
         ],
       },
@@ -533,7 +533,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
         points: [
           "Deliverable assets can be redeemed: deposit the token into escrow, receive the item, and the token is burned on confirmed delivery",
           "If a delivery is cancelled, the token is returned to the holder",
-          "Redemption requires identity verification (KYC); buying and trading the token does not",
+          "Redemption requires identity verification (KYC); buying and trading the token do not, unless the class is KYC-gated",
           "Manci doesn't handle the logistics, but a delivery arrangement can be set up alongside us",
         ],
       },

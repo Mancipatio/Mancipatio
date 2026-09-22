@@ -13,11 +13,13 @@
 // (/api/delivery/create) — plus the issuer-side tools (/apply via the
 // applicant/KYB gates below, /api/vesting-series/create). The sales and
 // trading routes (/api/launchpad/commit, /api/otc/create,
-// /api/resell/create) only run refuseTerminalClient: a dossier compliance
-// has explicitly suspended or rejected is still refused there. A class the
-// issuer/platform switched to KycGated keeps its passport requirement
-// ON-CHAIN (transfer hook + asset_registry receiver checks), independent of
-// these off-chain gates.
+// /api/resell/create) only run refuseSuspendedClient: a dossier compliance
+// has SUSPENDED is still refused there (a `rejected` KYC application is not —
+// see the section comment below). A class the platform switched to KycGated
+// (only the BlocklistAuthority can, via transfer_hook
+// update_transfer_hook_config — the issuer cannot on its own) keeps its
+// passport requirement ON-CHAIN (transfer hook + asset_registry receiver
+// checks), independent of these off-chain gates.
 //
 // The gate is bound to the ACTIVE NETWORK and to the verdict's EXPIRY
 // (2026-09-08 e2e §3 / F01): a dossier is eligible only when
@@ -137,8 +139,14 @@ type FetchedClientRow = ClientKycRow & { id: string };
  * one. Reading only the oldest row (the previous behaviour, mirroring
  * lib/clients.ts findClientByWallet) meant compliance could suspend the row
  * carrying the documents while an older `pending`/`verified` row kept
- * answering every gate. So: any TERMINAL row (suspended / rejected) wins;
- * otherwise the oldest row does, as before.
+ * answering every gate. So: any TERMINAL row wins — a `suspended` one ahead
+ * of a `rejected` one (suspension is the stronger, operator-imposed state,
+ * and the sales/trading screen refuses only suspension) — otherwise the
+ * oldest row does, as before.
+ *
+ * Every read FAILS CLOSED on a query error (SiwsError 500), including the
+ * account_wallets membership read: the sales/trading screen treats "no row"
+ * as "allowed", so a swallowed error there would fail open.
  *
  * Internal: the row id must NOT travel through lookupClientKyc, whose result
  * the unsigned /api/applications/eligibility route returns verbatim to any
@@ -163,8 +171,12 @@ async function fetchClientRow(
   if (rows.length === 0) {
     // Verification belongs to the account: a linked wallet without its own
     // dossier answers with the account's dossier.
-    const { data: member } = await sb.from("account_wallets").select("account_id")
+    const { data: member, error: memberError } = await sb.from("account_wallets").select("account_id")
       .eq("network", network).eq("wallet", wallet).maybeSingle();
+    if (memberError) {
+      console.error("[kyc-gate] account membership lookup failed:", memberError.message);
+      throw new SiwsError(500, "Client lookup failed");
+    }
     if (member?.account_id) {
       const byAccount = await sb.from("clients").select("id, kyc_status, kyc_expires_at")
         .eq("account_id", member.account_id).eq("network", network).order("created_at", { ascending: true });
@@ -182,9 +194,11 @@ async function fetchClientRow(
     );
   }
   return (
+    rows.find((r) => r.kyc_status === "suspended") ??
     rows.find(
       (r) => r.kyc_status !== null && TERMINAL_KYC_STATUSES.includes(r.kyc_status),
-    ) ?? rows[0]
+    ) ??
+    rows[0]
   );
 }
 
@@ -221,50 +235,74 @@ export async function requireVerifiedClient(
   return { clientId: (row as FetchedClientRow).id };
 }
 
-// ── Terminal-status screen (sales & trading, no KYC required) ───────────────
+// ── Suspension screen (sales & trading, no KYC required) ───────────────────
 // Buying, OTC trading and resell listings do not require KYC (policy
 // 2026-09-23), so a wallet with NO dossier, or a pending / more_info /
-// expired one, passes. What still fails is a dossier compliance has closed
-// on purpose: `suspended` (sanctions hit, fraud, court order, ongoing
-// investigation) or `rejected` (compliance refused the person). Those are
-// decisions about the PERSON, not missing paperwork — letting such a wallet
-// keep transacting through the platform's own off-chain services simply by
-// not being asked for KYC would turn "KYC is not required to buy" into
-// "compliance decisions are ignored when buying". Only compliance can lift
-// them (mirrors app/api/clients/_helpers TERMINAL_KYC_STATUSES), and the
-// fail-closed row pick in fetchClientRow means a terminal row wins over any
-// older live one. On-chain sanctions enforcement (the transfer-hook
-// blocklist) is separate and applies in every mode.
+// expired / rejected one, passes. What still fails is a dossier compliance
+// has SUSPENDED: the operator action taken for a sanctions hit, fraud, a
+// court order or an ongoing investigation (a revoked on-chain passport also
+// maps to it — see /api/clients/passport-sync). Letting such a wallet keep
+// transacting through the platform's own off-chain services simply because
+// KYC is not asked for would turn "KYC is not required to buy" into
+// "compliance decisions are ignored when buying". Only compliance can lift a
+// suspension, and the row pick in fetchClientRow means a suspended row wins
+// over every other row of the wallet.
+//
+// `rejected` is deliberately NOT refused here: in this codebase it means a
+// KYC APPLICATION that was not approved (see the verdict email in
+// /api/clients/status), not a sanction. Refusing it would penalise someone
+// for having tried to verify while a wallet that never applied goes
+// through. When a rejection is really about the person, compliance
+// suspends the dossier. Conversion and delivery (requireVerifiedClient)
+// still refuse `rejected`, like every non-verified status. On-chain
+// sanctions enforcement (the transfer-hook blocklist) is separate and
+// applies in every mode.
 
 /**
- * Pure half of the terminal screen: the 403 message for a terminal dossier
- * status, or null when the wallet may proceed (no dossier, or any
- * non-terminal status — KYC is not required here).
+ * Pure half of the suspension screen: the 403 message for a suspended
+ * dossier, or null when the wallet may proceed (no dossier, or any other
+ * status — KYC is not required here).
  */
-export function terminalKycMessage(
+export function suspendedClientMessage(
   kycStatus: string | null,
   context: string,
 ): string | null {
-  if (kycStatus === null || !TERMINAL_KYC_STATUSES.includes(kycStatus)) return null;
-  return `Your client profile is ${kycStatus} by compliance — contact the compliance team before ${context}.`;
+  if (kycStatus !== "suspended") return null;
+  return `Your client profile is suspended by compliance — contact the compliance team before ${context}.`;
 }
 
 /**
  * Sales/trading gate: refuse ONLY a wallet whose dossier (on the active
- * network, own or account-level) is suspended or rejected. Does not require
- * a client row or KYC. Resolves with the linked clients row id when one
- * exists (null otherwise) so a route can optionally link the record to a
- * client without making the link a precondition.
+ * network, own or account-level) is suspended. Does not require a client
+ * row or KYC. Resolves with the linked clients row id when one exists (null
+ * otherwise) so a route can optionally link the record to a client without
+ * making the link a precondition. Throws SiwsError(500) when any lookup
+ * fails — it never allows on error.
  */
-export async function refuseTerminalClient(
+export async function refuseSuspendedClient(
   sb: SupabaseClient,
   wallet: string,
   context: string,
 ): Promise<{ clientId: string | null }> {
   const row = await fetchClientRow(sb, wallet);
-  const message = terminalKycMessage(row?.kyc_status ?? null, context);
+  const message = suspendedClientMessage(row?.kyc_status ?? null, context);
   if (message) throw new SiwsError(403, message);
   return { clientId: row?.id ?? null };
+}
+
+/**
+ * Non-throwing form of the suspension screen for admin pre-checks (e.g.
+ * /api/otc/admin-screen before an escrow is opened): true when the wallet's
+ * dossier on the active network — own or account-level — is suspended.
+ * Lookup errors still throw SiwsError(500): callers must not read an
+ * unavailable screen as "clear".
+ */
+export async function clientIsSuspended(
+  sb: SupabaseClient,
+  wallet: string,
+): Promise<boolean> {
+  const row = await fetchClientRow(sb, wallet);
+  return suspendedClientMessage(row?.kyc_status ?? null, "") !== null;
 }
 
 // ── Company (KYB) gate ─────────────────────────────────────────────────────

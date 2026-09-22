@@ -11,12 +11,13 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 
 import {
+  clientIsSuspended,
   evaluateKycLookup,
   kycGateMessage,
   lookupClientKyc,
-  refuseTerminalClient,
+  refuseSuspendedClient,
   requireVerifiedClient,
-  terminalKycMessage,
+  suspendedClientMessage,
   type ClientKycLookup,
 } from "@/lib/server/kyc-gate";
 import { SiwsError } from "@/lib/server/siws";
@@ -42,7 +43,16 @@ type QueryResult = {
   error: { message: string } | null;
 };
 
-function stubSupabase(result: QueryResult) {
+type MembershipResult = {
+  data: { account_id: string } | null;
+  error: { message: string } | null;
+};
+
+function stubSupabase(
+  result: QueryResult,
+  // Account fallback lookup (account_wallets): no linked account by default.
+  membership: MembershipResult = { data: null, error: null },
+) {
   const calls: Record<string, unknown[]> = {};
   const eqCalls: unknown[][] = [];
   const builder = {
@@ -58,8 +68,7 @@ function stubSupabase(result: QueryResult) {
       calls.order = args;
       return builder;
     },
-    // Account fallback lookup (account_wallets): no linked account in these tests.
-    maybeSingle: async () => ({ data: null, error: null }),
+    maybeSingle: async () => membership,
     // PostgREST builders resolve when awaited — no terminal call needed.
     then: (
       resolve: (value: QueryResult) => unknown,
@@ -418,63 +427,126 @@ describe("requireVerifiedClient", () => {
   });
 });
 
-// ── terminal screen (sales & trading — no KYC required, policy 2026-09-23) ──
-describe("terminalKycMessage", () => {
-  it.each([null, "pending", "more_info", "verified", "expired"])(
-    "lets %s through (KYC is not required for sales and trading)",
+// ── suspension screen (sales & trading — no KYC required, policy 2026-09-23) ──
+describe("suspendedClientMessage", () => {
+  it.each([null, "pending", "more_info", "verified", "expired", "rejected"])(
+    "lets %s through (KYC is not required for sales and trading; a rejected application is not a sanction)",
     (status) => {
-      expect(terminalKycMessage(status, "posting a resell listing")).toBeNull();
+      expect(suspendedClientMessage(status, "posting a resell listing")).toBeNull();
     },
   );
 
-  it.each(["suspended", "rejected"])("refuses %s with the compliance copy", (status) => {
-    const msg = terminalKycMessage(status, "committing to a raise");
-    expect(msg).toContain(`is ${status} by compliance`);
+  it("refuses a suspended dossier with the compliance copy", () => {
+    const msg = suspendedClientMessage("suspended", "committing to a raise");
+    expect(msg).toContain("is suspended by compliance");
     expect(msg).toContain("committing to a raise");
   });
 });
 
-describe("refuseTerminalClient", () => {
+describe("refuseSuspendedClient", () => {
   it("resolves with a null client id when the wallet has no dossier", async () => {
     const { sb } = stubSupabase({ data: [], error: null });
-    await expect(refuseTerminalClient(sb, WALLET, "trading")).resolves.toEqual({
+    await expect(refuseSuspendedClient(sb, WALLET, "trading")).resolves.toEqual({
       clientId: null,
     });
   });
 
-  it("resolves with the linked client id for a non-terminal dossier (optional link)", async () => {
+  it("resolves with the linked client id for a non-suspended dossier (optional link)", async () => {
     const { sb } = stubSupabase({
       data: [{ id: "c1", kyc_status: "pending", kyc_expires_at: null }],
       error: null,
     });
-    await expect(refuseTerminalClient(sb, WALLET, "trading")).resolves.toEqual({
+    await expect(refuseSuspendedClient(sb, WALLET, "trading")).resolves.toEqual({
       clientId: "c1",
     });
   });
 
-  it("throws SiwsError(403) when any row of the wallet is terminal", async () => {
+  it("lets a rejected KYC application through", async () => {
     const { sb } = stubSupabase({
       data: [verifiedRow("old"), { id: "new", kyc_status: "rejected", kyc_expires_at: null }],
       error: null,
     });
-    const err = await refuseTerminalClient(sb, WALLET, "requesting an OTC escrow").then(
+    await expect(refuseSuspendedClient(sb, WALLET, "trading")).resolves.toEqual({
+      clientId: "new",
+    });
+  });
+
+  it("throws SiwsError(403) when any row of the wallet is suspended", async () => {
+    const { sb } = stubSupabase({
+      data: [verifiedRow("old"), { id: "new", kyc_status: "suspended", kyc_expires_at: null }],
+      error: null,
+    });
+    const err = await refuseSuspendedClient(sb, WALLET, "requesting an OTC escrow").then(
       () => null,
       (e: unknown) => e,
     );
     expect(err).toBeInstanceOf(SiwsError);
     expect((err as SiwsError).status).toBe(403);
-    expect((err as SiwsError).message).toContain("rejected");
+    expect((err as SiwsError).message).toContain("suspended");
+  });
+
+  it("a suspended row wins over an OLDER rejected one", async () => {
+    // Before, the first terminal row in created_at order answered — a
+    // rejected row would have hidden the suspension from this screen.
+    const { sb } = stubSupabase({
+      data: [
+        { id: "older", kyc_status: "rejected", kyc_expires_at: null },
+        { id: "newer", kyc_status: "suspended", kyc_expires_at: null },
+      ],
+      error: null,
+    });
+    await expect(refuseSuspendedClient(sb, WALLET, "trading")).rejects.toMatchObject({
+      status: 403,
+    });
+    await expect(clientIsSuspended(sb, WALLET)).resolves.toBe(true);
+    // The KYC gate still refuses, now naming the stronger status.
+    await expect(requireVerifiedClient(sb, WALLET)).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringContaining('"suspended"'),
+    });
   });
 
   it("fails closed (500) when the client lookup errors", async () => {
     const spy = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       const { sb } = stubSupabase({ data: null, error: { message: "boom" } });
-      await expect(refuseTerminalClient(sb, WALLET, "trading")).rejects.toMatchObject({
+      await expect(refuseSuspendedClient(sb, WALLET, "trading")).rejects.toMatchObject({
         status: 500,
       });
     } finally {
       spy.mockRestore();
     }
+  });
+
+  it("fails closed (500) when the account membership lookup errors", async () => {
+    // No own dossier -> the account_wallets read decides whether an
+    // account-level (possibly suspended) dossier answers. "No row" means
+    // "allowed" on this screen, so a swallowed error would fail OPEN.
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const { sb } = stubSupabase(
+        { data: [], error: null },
+        { data: null, error: { message: "timeout" } },
+      );
+      await expect(refuseSuspendedClient(sb, WALLET, "trading")).rejects.toMatchObject({
+        status: 500,
+      });
+      await expect(clientIsSuspended(sb, WALLET)).rejects.toMatchObject({ status: 500 });
+      await expect(requireVerifiedClient(sb, WALLET)).rejects.toMatchObject({ status: 500 });
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("clientIsSuspended", () => {
+  it.each([
+    [[], false],
+    [[{ id: "c1", kyc_status: "rejected", kyc_expires_at: null }], false],
+    [[{ id: "c1", kyc_status: "pending", kyc_expires_at: null }], false],
+    [[{ id: "c1", kyc_status: "suspended", kyc_expires_at: null }], true],
+  ] as Array<[ClientStubRow[], boolean]>)("rows %j -> %s", async (rows, expected) => {
+    const { sb } = stubSupabase({ data: rows, error: null });
+    await expect(clientIsSuspended(sb, WALLET)).resolves.toBe(expected);
   });
 });

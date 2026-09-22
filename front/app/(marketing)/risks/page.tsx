@@ -85,9 +85,10 @@ export default function RisksPage() {
       <Section>
         <SectionHead title="Conversion and delivery require verification" />
         <Body className="mt-4">
-          Tokens are bearer instruments and can be bought and traded without
-          identity verification, but converting them into company shares or
-          redeeming a physical asset requires it. A token can therefore reach
+          Tokens are bearer instruments and, unless the class is KYC-gated,
+          can be bought and traded without identity verification, but
+          converting them into company shares or redeeming a physical asset
+          requires it. A token can therefore reach
           a wallet that cannot convert or redeem it until its holder passes
           verification, and a buyer who expects to convert or redeem should
           check that they can before buying.

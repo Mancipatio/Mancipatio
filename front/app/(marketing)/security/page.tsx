@@ -27,7 +27,7 @@ const PILLARS: Array<{ title: string; body: string }> = [
   },
   {
     title: "Verification at conversion and delivery",
-    body: "Identity verification (KYC) is required when a token becomes something off-chain: converting it into shares of the company, or redeeming it for a physical good. The platform checks a live, verified client profile before it accepts either request. Commitments, OTC escrow requests and resell listings need no verification, but still refuse a client profile that compliance has suspended or rejected.",
+    body: "Identity verification (KYC) is required when a token becomes something off-chain: converting it into shares of the company, or redeeming it for a physical good. The platform checks a live, verified client profile before it accepts either request. Commitments, OTC escrow requests and resell listings need no verification, but still refuse a client profile that compliance has suspended.",
   },
   {
     title: "Permanent delegate",
@@ -72,9 +72,11 @@ export default function SecurityPage() {
           primary sales, OTC offers and resell listings of an Open class need
           none. Verification (KYC) is required when you convert tokens into
           shares of the company or take delivery of a physical good. The
-          issuer or the platform can make a class KYC-gated; buying, receiving
-          and transferring that class then requires an approved investor
-          passport.
+          platform checks it before it accepts a conversion or delivery
+          request; it is not an on-chain check. The platform can switch a
+          class to KYC-gated, for example at the issuer&apos;s request; buying
+          or receiving that class then requires an approved investor passport,
+          because every transfer checks the receiving wallet.
         </Body>
       </Section>
 

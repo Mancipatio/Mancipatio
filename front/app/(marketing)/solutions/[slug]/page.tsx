@@ -134,7 +134,7 @@ const GUIDES: Record<string, ToolGuide> = {
     details: [
       {
         title: "When verification is required",
-        body: "Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good. The issuer or the platform can make a class KYC-gated; buying and receiving that class then requires an approved investor passport.",
+        body: "Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good. The platform can make a class KYC-gated, for example at the issuer's request; buying or receiving that class then requires an approved investor passport for the receiving wallet.",
       },
       {
         title: "Before receiving units",
