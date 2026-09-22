@@ -1263,7 +1263,7 @@ export default function DealPage({
             )}
             {/* Pledging needs no KYC (policy 2026-09-23), so pledges from
                 wallets without a live verification are not counted above
-                (commitment_totals, migration 0061) — shown here instead. */}
+                (commitment_totals, migration 0062) — shown here instead. */}
             {agg.available &&
               isStartup &&
               agg.unverifiedPledgers !== null &&

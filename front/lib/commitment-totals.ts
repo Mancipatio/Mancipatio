@@ -1,11 +1,11 @@
 /**
  * Public commitment totals for one sale (commitment_totals RPC).
  *
- * Since migration 0061, `pledged` / `confirmed` / `pledgers` count only
+ * Since migration 0062, `pledged` / `confirmed` / `pledgers` count only
  * pledges from wallets with a live verified dossier, and
  * `unverifiedPledged` / `unverifiedPledgers` report the rest (pledging needs
  * no KYC since policy 2026-09-23, so those figures are not social proof).
- * Both are null when the server predates 0061; the UI then labels the
+ * Both are null when the server predates 0062; the UI then labels the
  * totals as before.
  */
 export type CommitAggregate = { available:boolean; pledged:number; confirmed:number; settled:string; backers:number; pledgers:number; paymentMint:string|null; unverified:number;
@@ -22,7 +22,7 @@ export function parseCommitmentTotals(value:unknown):CommitAggregate {
   }
   for(const key of ["backers","pledgers","unverified"]){if(!isCount(v[key]))return UNKNOWN_COMMITMENTS;}
   if(v.paymentMint!==null && typeof v.paymentMint!=="string")return UNKNOWN_COMMITMENTS;
-  // Verified-only split (0061): absent on an older server; when present it
+  // Verified-only split (0062): absent on an older server; when present it
   // must be well formed, and both keys travel together.
   const hasSplit=v.unverifiedPledged!==undefined || v.unverifiedPledgers!==undefined;
   if(hasSplit && (!isDecimal(v.unverifiedPledged) || !isCount(v.unverifiedPledgers))) return UNKNOWN_COMMITMENTS;

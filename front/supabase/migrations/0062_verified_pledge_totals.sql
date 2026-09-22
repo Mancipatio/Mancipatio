@@ -25,7 +25,7 @@
 -- Evaluated at read time: a pledger who verifies later starts counting, and
 -- one whose verification lapses or is suspended stops counting.
 -- Deploy order does not matter: the front treats missing unverified* keys
--- as "server predates 0061" and shows the totals as before.
+-- as "server predates 0062" and shows the totals as before.
 begin;
 
 create or replace function public.commitment_totals(p_network text,p_sale text) returns jsonb language sql stable set search_path='' as $$

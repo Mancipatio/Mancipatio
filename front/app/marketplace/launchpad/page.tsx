@@ -31,7 +31,7 @@ type DealCard = {
   raised: number;
   settled: string;
   totalsAvailable: boolean;
-  /** True when the server counts only verified investors' pledges (0061). */
+  /** True when the server counts only verified investors' pledges (0062). */
   verifiedPledgesOnly: boolean;
   soldPercent: number;
   backers: number;

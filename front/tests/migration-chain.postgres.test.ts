@@ -45,6 +45,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied[0]).toBe("0001_audit_events.sql");
       expect(applied).toContain("0049_launchpad_network_links.sql");
       expect(applied).toContain("0061_maintenance_mode.sql");
+      expect(applied).toContain("0062_verified_pledge_totals.sql");
       expect(
         db.query(
           "select count(*) from information_schema.tables where table_schema='public'",

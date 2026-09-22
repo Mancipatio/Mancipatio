@@ -1,11 +1,11 @@
-// Migration 0061 — public launchpad pledge totals count only pledges whose
+// Migration 0062 — public launchpad pledge totals count only pledges whose
 // wallet resolves to a LIVE verified dossier (own, or the linked account's),
 // mirroring lib/server/kyc-gate.ts fetchClientRow + evaluateKycLookup. Since
 // policy 2026-09-23 a pledge needs no KYC, so anonymous pledges are reported
 // separately instead of as social proof.
 //
 // Minimal stand-in tables carry only the columns the function reads; the
-// full-schema application of 0061 is covered by
+// full-schema application of 0062 is covered by
 // tests/migration-chain.postgres.test.ts.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -25,7 +25,7 @@ const client = (wallet: string | null, status: string, expires: string | null, o
 const FUTURE = "2099-01-01T00:00:00Z", PAST = "2000-01-01T00:00:00Z";
 const ACCOUNT = "20000000-0000-4000-8000-000000000001";
 
-describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0061 verified-only public pledge totals", () => {
+describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0062 verified-only public pledge totals", () => {
   beforeAll(() => {
     try {
       db.initialize();
@@ -38,7 +38,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0061 verified-onl
         create table account_wallets(network text not null,wallet text not null,account_id uuid not null,primary key(network,wallet));
         -- Supabase grants service_role full table access by default.
         grant all on commitments,clients,account_wallets to service_role;`);
-      sql(readFileSync(join(process.cwd(), "supabase/migrations/0061_verified_pledge_totals.sql"), "utf8"));
+      sql(readFileSync(join(process.cwd(), "supabase/migrations/0062_verified_pledge_totals.sql"), "utf8"));
     } catch (error) { db.close(); throw error; }
   }, 30_000);
   afterAll(() => db.close());

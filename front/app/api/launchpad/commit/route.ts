@@ -18,7 +18,7 @@
 // receiver).
 //
 // Pledges from wallets without a live verification are recorded, but the
-// PUBLIC progress figures (commitment_totals, migration 0061) count only
+// PUBLIC progress figures (commitment_totals, migration 0062) count only
 // pledges whose wallet resolves to a live verified dossier and report the
 // rest separately — a free SIWS signature from a throwaway wallet must not
 // be able to push a raise to "100% pledged".

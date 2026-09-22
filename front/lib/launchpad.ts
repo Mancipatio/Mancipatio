@@ -458,7 +458,7 @@ export async function listUpdates(salePubkey: string): Promise<LaunchUpdate[]> {
  * conversion/delivery); the server only refuses a wallet whose client
  * profile compliance has suspended. Pledges from wallets without a live
  * verification are recorded but not counted in the public progress totals
- * (commitment_totals, migration 0061). Returns the row id.
+ * (commitment_totals, migration 0062). Returns the row id.
  *
  * @throws Error with the server's message (the 403 compliance copy,
  *         document-terms 409, validation, transport) — callers must surface
