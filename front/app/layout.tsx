@@ -6,6 +6,7 @@ import "./documentation.css";
 import "./document-library.css";
 import "./account.css";
 import { Providers } from "./providers";
+import { MaintenanceBanner } from "@/components/maintenance-banner";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -48,6 +49,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
+        <MaintenanceBanner />
         <Providers>{children}</Providers>
       </body>
     </html>

@@ -3,13 +3,16 @@ import { createNetworkVerifier } from "@/lib/network-identity";
 import { detectNetwork, type Network } from "@/lib/network";
 import { guardTransactionGraph } from "@/lib/transaction-session-guard";
 import { requestTransactionWalletPolicy, transactionWalletPolicyRevision, TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
+import { assertSiteWritable } from "@/lib/maintenance";
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
  * wallet sign-and-send and caller-supplied blockhashes. Prepared transactions
  * must originate here so they retain exact session/RPC provenance.
  * Explicit issuer recovery collects its required authorities separately and
- * does not use this default-primary flow; linked profiles confer no roles. */
+ * does not use this default-primary flow; linked profiles confer no roles.
+ * Maintenance mode is read fresh before preparing and before any wallet
+ * prompt, so no transaction is offered while the site is paused. */
 export function withVerifiedTransactions(
   client: SolanaClient,
   network: Network,
@@ -65,6 +68,8 @@ export function withVerifiedTransactions(
   }
 
   async function authorize(context: Context) {
+    await assertSiteWritable();
+    context.assertCurrent();
     await requestTransactionWalletPolicy(context.session, network, context.assertCurrent);
     context.assertCurrent();
   }
@@ -81,6 +86,7 @@ export function withVerifiedTransactions(
   const transaction: SolanaClient["transaction"] = Object.freeze({
     prepare: async (request) => {
       const context = capture();
+      await assertSiteWritable();
       await assertNetwork(context);
       checkAuthority(request, context);
       // Preparation does not prompt for a message signature. The server policy

@@ -9,6 +9,7 @@ import {
   ASSET_REGISTRY_ERROR__VAULT_NOT_ACCEPTING_DEPOSITS,
 } from "@/lib/generated/asset_registry";
 import { detectNetwork } from "@/lib/network";
+import { MaintenanceModeError } from "@/lib/maintenance";
 
 // Pull a human-readable cause out of a @solana/react-hooks send() error.
 // Those errors wrap the real RPC simulation logs inside `transactionPlanResult`
@@ -90,6 +91,11 @@ function customErrorHint(text: string): string | null {
 
 export function explainSendError(err: unknown): string {
   if (err == null) return "Unknown error";
+
+  // Maintenance refusals are already worded for users; SDK hooks may wrap them.
+  for (let cursor: unknown = err, depth = 0; cursor instanceof Error && depth < 6; cursor = cursor.cause, depth++) {
+    if (cursor instanceof MaintenanceModeError) return cursor.message;
+  }
 
   // Common case: a wallet-side rejection.
   if (typeof err === "object" && err !== null) {

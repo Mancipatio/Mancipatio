@@ -11,6 +11,7 @@ import { accountErrorResponse, accountResponse, callAccountMutation, consumeAcco
 import { accountId, accountParams } from "@/lib/server/account-validation";
 import { readAccountSession } from "@/lib/server/account-auth";
 import { assertSameSite, withAccountSession } from "@/lib/server/auth-login";
+import { assertWritable } from "@/lib/server/maintenance";
 
 const COOKIE = "manci_google_link";
 const COOKIE_PATH = "/api/account/google";
@@ -108,6 +109,8 @@ export async function startGoogleSignIn(request: Request) {
     if (mode === "link") {
       const session = readAccountSession(request);
       if (!session) throw new SiwsError(401, "Please sign in again.");
+      // Connecting Google changes the account; signing in stays available.
+      await assertWritable(network);
       linkAccountId = session.a;
     }
     const state = randomBytes(32).toString("base64url");

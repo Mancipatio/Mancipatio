@@ -285,6 +285,37 @@ body {
   --container-mx: 1120px;
 }
 
+/* Maintenance banner (components/maintenance-banner.tsx), on every page. It
+   sticks to the top; the fixed sidebar and sticky headers move down by its
+   measured height, --maintenance-banner-h. Modals (z-40+) still cover it. */
+.maintenance-region {
+  position: sticky;
+  top: 0;
+  z-index: 35;
+}
+.maintenance-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
+  padding: 9px 20px;
+  background: var(--mx-amber-soft);
+  border-bottom: 1px solid var(--mx-amber-rule);
+  color: var(--mx-ink);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.maintenance-banner strong {
+  color: var(--mx-amber);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.maintenance-banner-note {
+  color: var(--mx-ink-soft);
+}
+
 /* Shared guide/form primitives; workspace containers can use a transparent canvas. */
 [data-mx] {
   background: var(--mx-paper);
@@ -429,7 +460,7 @@ body {
   /* ── header ─────────────────────────────────────────────────────── */
   .mx-head {
     position: sticky;
-    top: 0;
+    top: var(--maintenance-banner-h, 0px);
     z-index: 60;
     background: var(--mx-paper);
     border-bottom: 1px solid var(--mx-rule);

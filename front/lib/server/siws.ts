@@ -32,16 +32,10 @@ import { detectNetwork } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isSessionReadAction } from "@/lib/siws-session";
 import { readSessionToken, sessionCookieFrom } from "@/lib/server/siws-session";
+import { SiwsError } from "@/lib/server/siws-error";
+import { assertActionWritable, MaintenanceError, maintenanceResponse } from "@/lib/server/maintenance";
 
-/** Error carrying an HTTP status; `siwsErrorResponse` maps it to JSON. */
-export class SiwsError extends Error {
-  readonly status: number;
-  constructor(status: number, message: string) {
-    super(message);
-    this.name = "SiwsError";
-    this.status = status;
-  }
-}
+export { SiwsError };
 
 export type VerifiedRequest = {
   /** Base58 wallet address whose ed25519 signature verified. */
@@ -211,6 +205,8 @@ export async function verifySigned(
     if (!claims || claims.w !== wallet || claims.n !== network || claims.o !== origin) {
       throw new SiwsError(401, "Wallet session expired — sign in again");
     }
+    // Maintenance refuses before the nonce is spent (lib/server/maintenance.ts).
+    await assertActionWritable(action, detectNetwork());
     await consumeNonce(payload as SiwsPayload, tsMs + SIWS_MAX_AGE_MS);
     return { wallet, params };
   }
@@ -243,6 +239,10 @@ export async function verifySigned(
     throw new SiwsError(401, "Signature verification failed");
   }
 
+  // Writes (and the pre-send policy check) wait out maintenance. A refused
+  // request does not spend its nonce; its signature still expires with ts.
+  await assertActionWritable(action, detectNetwork());
+
   // Retain a future-dated request until its actual signed validity ends.
   await consumeNonce(payload as SiwsPayload, tsMs + SIWS_MAX_AGE_MS);
 
@@ -255,6 +255,7 @@ export async function verifySigned(
  * message (details logged server-side, never leaked to the client).
  */
 export function siwsErrorResponse(err: unknown): NextResponse {
+  if (err instanceof MaintenanceError) return maintenanceResponse(err);
   if (err instanceof SiwsError) {
     return NextResponse.json(
       { ok: false, error: err.message },

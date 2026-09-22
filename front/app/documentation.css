@@ -1,7 +1,7 @@
 /* Documentation extends the workspace rather than adding a separate site. */
 .app-content--documentation { padding-top:25px; }
 .docs-layout { display:grid; grid-template-columns:185px minmax(0,1fr); gap:30px; align-items:start; }
-.docs-navigation { position:sticky; top:24px; max-height:calc(100vh - 48px); overflow-y:auto; padding-right:13px; scrollbar-width:thin; scrollbar-color:#d2dfd3 transparent; }
+.docs-navigation { position:sticky; top:calc(24px + var(--maintenance-banner-h,0px)); max-height:calc(100vh - 48px - var(--maintenance-banner-h,0px)); overflow-y:auto; padding-right:13px; scrollbar-width:thin; scrollbar-color:#d2dfd3 transparent; }
 .docs-nav-brand { display:flex; align-items:center; gap:10px; margin:2px 0 20px; }
 .docs-nav-brand>span { display:grid; place-items:center; width:34px; height:36px; color:#5c815f; background:#eaf0e5; border:1px solid #dce7d8; border-radius:8px; }
 .docs-nav-brand strong { font-size:14px; font-weight:600; }

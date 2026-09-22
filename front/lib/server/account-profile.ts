@@ -5,6 +5,7 @@ import type { AccountFeatures, AccountProfile, AccountVerification, AccountWalle
 import type { Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { SiwsError } from "@/lib/server/siws";
+import { MaintenanceError, maintenanceResponse } from "@/lib/server/maintenance";
 import { sendEmail, escapeHtml, emailConfigured } from "@/lib/server/email";
 import { accountSiteOrigin } from "@/lib/server/account-origin";
 
@@ -131,6 +132,7 @@ export async function accountResponse(who: AccountWho, network: Network): Promis
 
 /** Account handlers never log provider responses, identity fields or tokens. */
 export function accountErrorResponse(error: unknown): NextResponse {
+  if (error instanceof MaintenanceError) return maintenanceResponse(error);
   const known = error instanceof SiwsError;
   return NextResponse.json({ ok: false, error: known ? error.message : "Your account is temporarily unavailable. Please try again." },
     { status: known ? error.status : 503, headers: { "Cache-Control": "no-store" } });

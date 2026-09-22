@@ -2,6 +2,7 @@ import type { WalletSession } from "@solana/client";
 import { isAddress } from "@solana/kit";
 import type { Network } from "@/lib/network";
 import { signedFetch } from "@/lib/siws-client";
+import { MaintenanceModeError } from "@/lib/maintenance";
 
 export type TransactionWalletPolicy = {
   wallet: string;
@@ -55,7 +56,7 @@ export async function requestTransactionWalletPolicy(
     response = await signedFetch(guardedSession, "/api/account/wallets/transaction", "account.wallets.transaction", {});
   } catch (error) {
     assertCurrent();
-    if (error instanceof TransactionWalletChangedError) throw error;
+    if (error instanceof TransactionWalletChangedError || error instanceof MaintenanceModeError) throw error;
     throw new Error("We could not verify your primary transaction wallet. Approve the wallet verification and try again.");
   }
   assertCurrent();
