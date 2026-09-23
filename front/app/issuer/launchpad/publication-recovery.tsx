@@ -8,6 +8,7 @@ import {
   listSalePublications,
   assertSaleIntentUnsent,
   clearSalePublication,
+  isPermanentPublicationError,
   SALE_PUBLICATION_EVENT,
   type PendingSalePublication,
 } from "@/lib/sale-publication-recovery";
@@ -19,7 +20,9 @@ export function SalePublicationRecovery() {
     wallet = conn.wallet?.account.address;
   const [items, setItems] = useState<PendingSalePublication[]>([]),
     [busy, setBusy] = useState(false),
-    [error, setError] = useState<string | null>(null);
+    [error, setError] = useState<string | null>(null),
+    // salePda → a refusal no retry can fix (the intent may then be dropped).
+    [permanent, setPermanent] = useState<Record<string, string>>({});
   const reload = useCallback(() => {
     try {
       setItems(wallet ? listSalePublications(network, wallet) : []);
@@ -55,13 +58,32 @@ export function SalePublicationRecovery() {
       clearSalePublication(item);
       toast.show({ kind: "success", title: "Existing sale published" });
     } catch (error) {
-      toast.showError(
-        "Publication pending",
-        error instanceof Error ? error.message : undefined,
-      );
+      const message = error instanceof Error ? error.message : undefined;
+      if (isPermanentPublicationError(message))
+        setPermanent((current) => ({ ...current, [item.salePda]: message! }));
+      toast.showError("Publication pending", message);
     } finally {
       setBusy(false);
     }
+  }
+  // The sale is on-chain but its listing can never be saved as recorded:
+  // forget the intent so it no longer blocks opening other sales. The sale
+  // itself is untouched; an admin can still publish a listing for it.
+  function dropRefused(item: PendingSalePublication) {
+    if (item.wallet !== wallet || item.network !== network || busy) return;
+    if (
+      !window.confirm(
+        "Drop this pending publication? The sale stays open on-chain; only this browser's unpublished listing intent is removed.",
+      )
+    )
+      return;
+    clearSalePublication(item);
+    setPermanent((current) => {
+      const next = { ...current };
+      delete next[item.salePda];
+      return next;
+    });
+    toast.show({ kind: "info", title: "Pending publication dropped" });
   }
   async function discardUnsent(item: PendingSalePublication) {
     if (item.wallet !== wallet || item.network !== network || busy) return;
@@ -135,6 +157,22 @@ export function SalePublicationRecovery() {
               Check and remove unsent intent
             </button>
           </div>
+          {permanent[item.salePda] && (
+            <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-2 text-amber-900">
+              <p>
+                This listing cannot be published as saved:{" "}
+                {permanent[item.salePda]}
+              </p>
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => dropRefused(item)}
+                className="mt-2 font-semibold underline"
+              >
+                Drop this pending publication
+              </button>
+            </div>
+          )}
         </div>
       ))}
     </section>

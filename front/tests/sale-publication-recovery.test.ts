@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import {
+  isPermanentPublicationError,
   listSalePublications,
   saveSalePublication,
   clearSalePublication,
@@ -87,4 +88,18 @@ it("requires absence in a finalized bank past expiry, avoiding a separate later-
     "exists on-chain",
   );
   expect(getBlock).not.toHaveBeenCalled();
+});
+
+it("tells a refusal no retry can fix from a transient failure", () => {
+  for (const message of [
+    "application does not belong to this issuer",
+    "application is already linked to another sale",
+    "a linked application cannot be replaced",
+    "application must be approved on this network",
+  ]) expect(isPermanentPublicationError(message)).toBe(true);
+  for (const message of [
+    "Sale listing publication unavailable. Retry publishing the existing sale",
+    "Network request failed",
+    undefined,
+  ]) expect(isPermanentPublicationError(message)).toBe(false);
 });

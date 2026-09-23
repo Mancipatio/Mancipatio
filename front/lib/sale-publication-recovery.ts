@@ -58,6 +58,23 @@ export function saveSalePublication(value: PendingSalePublication) {
   );
   window.dispatchEvent(new Event(SALE_PUBLICATION_EVENT));
 }
+/**
+ * Publication refusals that no retry can fix (the listing route's 403/404 and
+ * 0049/0066 save_launch_listing's P0001 messages): the sale exists on-chain
+ * but this listing can never be saved as recorded, so the saved intent may be
+ * dropped instead of blocking every later sale opening in this browser.
+ */
+const PERMANENT_PUBLICATION_ERRORS = [
+  /application does not belong to this issuer/i,
+  /application is already linked to another sale/i,
+  /a linked application cannot be replaced/i,
+  /application must be approved on this network/i,
+  /A verified on-chain sale is required/i,
+  /Only the platform admin or sale issuer may edit this listing/i,
+];
+export function isPermanentPublicationError(message: string | null | undefined): boolean {
+  return !!message && PERMANENT_PUBLICATION_ERRORS.some((re) => re.test(message));
+}
 export function clearSalePublication(value: PendingSalePublication) {
   window.localStorage.removeItem(
     prefix(value.network, value.wallet) + value.salePda,

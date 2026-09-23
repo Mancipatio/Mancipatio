@@ -38,6 +38,7 @@ import { detectNetwork } from "@/lib/network";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
 import { useChainClock } from "@/lib/use-chain-clock";
+import { ManualSaleApprovals } from "@/app/admin/applications/sale-approvals";
 
 type SaleLifecycle = "open" | "closing-soon" | "expired-open" | "closed";
 type StatusFilter = "all" | SaleLifecycle;
@@ -177,6 +178,7 @@ function SalesOps() {
 
   return (
     <div className="mt-8 space-y-6">
+      <ManualSaleApprovals />
       <div className="flex flex-wrap items-center gap-3">
         <input
           value={query}
@@ -793,7 +795,8 @@ function OpenSaleModal({
                 <code className="rounded bg-amber-100 px-1">
                   /admin/applications
                 </code>{" "}
-                first.
+                first, or (super admin, no application) with &ldquo;Approve
+                sale (no application)&rdquo; above.
               </p>
             )}
             {approval && (

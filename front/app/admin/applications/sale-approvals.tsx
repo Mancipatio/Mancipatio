@@ -1,6 +1,8 @@
 "use client";
 
-// Admin sale approvals for one approved application (program package 2B).
+// Admin sale approvals for one approved application (program package 2B),
+// and the super admin's approvals without an application
+// (ManualSaleApprovals, on /admin/launchpad).
 //
 // "Approve sale": reserve the EUR value against the raise cap (server, under a
 // per-subject lock) → approve_sale (this admin's wallet) → confirm (server
@@ -12,7 +14,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import type { WalletSession } from "@solana/client";
 import { type Address } from "@solana/kit";
-import { useSendTransaction, useSolanaClient } from "@solana/react-hooks";
+import { useSendTransaction, useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import {
   findAssetPda,
   findIssuerPda,
@@ -27,7 +29,8 @@ import { findShareClassPda } from "@/lib/pdas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { recordAudit } from "@/lib/supabase";
-import type { useToast } from "@/lib/toast";
+import { useToast } from "@/lib/toast";
+import { useRole } from "@/lib/auth";
 import type { LaunchApplication } from "@/lib/launchpad";
 import {
   confirmSaleApproval,
@@ -57,36 +60,25 @@ const STATUS_LABEL: Record<ReservationRow["status"], string> = {
   released: "Released",
 };
 
-export function SaleApprovalsSection({
-  app,
+/** Reservation rows with Revoke for the unused ones (any admin; rent returns to the approver). */
+function ApprovalRows({
+  rows,
   session,
   adminWallet,
   toast,
+  label,
+  applicationId,
+  onChanged,
 }: {
-  app: LaunchApplication;
+  rows: ReservationRow[];
   session: WalletSession | null | undefined;
   adminWallet: string;
   toast: Toast;
+  label: string;
+  applicationId: string | null;
+  onChanged: () => void;
 }) {
-  const client = useSolanaClient();
   const tx = useSendTransaction();
-  const [rows, setRows] = useState<ReservationRow[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [showApprove, setShowApprove] = useState(false);
-
-  const load = useCallback(async () => {
-    try {
-      setRows(await listSaleReservations(session, { application_id: app.id }));
-      setError(null);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load the approvals");
-    }
-  }, [session, app.id]);
-
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void load();
-  }, [load]);
 
   async function revoke(row: ReservationRow) {
     if (!session || !row.approval_pda) return;
@@ -106,22 +98,89 @@ export function SaleApprovalsSection({
         ix_name: "revoke_sale_approval",
         category: "launchpad",
         actor_wallet: adminWallet,
-        reason: `Revoked the sale approval for ${app.company_name}`,
+        reason: `Revoked the sale approval for ${label}`,
         target_label: row.approval_pda,
         tx_signature: sig,
-        metadata: { application_id: app.id, reservation_id: row.id, sale_id: String(row.sale_id) },
+        metadata: { application_id: applicationId, reservation_id: row.id, sale_id: String(row.sale_id) },
       });
       try {
         await releaseSaleApproval(session, row.id, "revoked");
       } catch {
         // The worker releases it once the closed account is visible.
       }
-      await load();
+      onChanged();
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError("Revoke failed", explainSendError(err));
     }
   }
+
+  return (
+    <ul className="mt-3 space-y-2">
+      {rows.map((row) => (
+        <li key={row.id} className="rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span>
+              <span className="font-medium text-slate-900">Sale #{String(row.sale_id)}</span> ·{" "}
+              {STATUS_LABEL[row.status]}
+              {row.release_reason ? ` (${row.release_reason})` : ""} · counted{" "}
+              {eur(Number(row.booked_amount_eur ?? row.amount_eur))}
+              {row.expires_at && row.status === "reserved"
+                ? ` · open by ${new Date(row.expires_at).toLocaleDateString("en-GB")}`
+                : ""}
+              {applicationId === null && (
+                <span className="block break-all font-mono text-[10px] text-slate-500">
+                  Share class {row.share_class_pda}
+                </span>
+              )}
+            </span>
+            {row.status === "reserved" && row.kind === "sale" && (
+              <button
+                type="button"
+                disabled={tx.isSending}
+                onClick={() => void revoke(row)}
+                className="text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
+              >
+                Revoke
+              </button>
+            )}
+          </div>
+          {row.last_error && <p className="mt-1 text-amber-700">{row.last_error}</p>}
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+export function SaleApprovalsSection({
+  app,
+  session,
+  adminWallet,
+  toast,
+}: {
+  app: LaunchApplication;
+  session: WalletSession | null | undefined;
+  adminWallet: string;
+  toast: Toast;
+}) {
+  const client = useSolanaClient();
+  const [rows, setRows] = useState<ReservationRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showApprove, setShowApprove] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setRows(await listSaleReservations(session, { application_id: app.id }));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the approvals");
+    }
+  }, [session, app.id]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
 
   return (
     <div className="mt-6 border-t border-slate-100 pt-5">
@@ -145,38 +204,118 @@ export function SaleApprovalsSection({
           No sale approved yet. The issuer can only open a sale after Manci approves it on-chain.
         </p>
       ) : (
-        <ul className="mt-3 space-y-2">
-          {(rows ?? []).map((row) => (
-            <li key={row.id} className="rounded-md border border-slate-200 px-3 py-2 text-xs text-slate-700">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <span>
-                  <span className="font-medium text-slate-900">Sale #{String(row.sale_id)}</span> ·{" "}
-                  {STATUS_LABEL[row.status]}
-                  {row.release_reason ? ` (${row.release_reason})` : ""} · counted{" "}
-                  {eur(Number(row.booked_amount_eur ?? row.amount_eur))}
-                  {row.expires_at && row.status === "reserved"
-                    ? ` · open by ${new Date(row.expires_at).toLocaleDateString("en-GB")}`
-                    : ""}
-                </span>
-                {row.status === "reserved" && row.kind === "sale" && (
-                  <button
-                    type="button"
-                    disabled={tx.isSending}
-                    onClick={() => void revoke(row)}
-                    className="text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
-                  >
-                    Revoke
-                  </button>
-                )}
-              </div>
-              {row.last_error && <p className="mt-1 text-amber-700">{row.last_error}</p>}
-            </li>
-          ))}
-        </ul>
+        <ApprovalRows
+          rows={rows ?? []}
+          session={session}
+          adminWallet={adminWallet}
+          toast={toast}
+          label={app.company_name}
+          applicationId={app.id}
+          onChanged={() => void load()}
+        />
       )}
       {showApprove && (
         <ApproveSaleModal
           app={app}
+          session={session}
+          adminWallet={adminWallet}
+          toast={toast}
+          rpc={client.runtime.rpc}
+          onClose={() => setShowApprove(false)}
+          onDone={() => {
+            setShowApprove(false);
+            void load();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Sale approvals WITHOUT a reviewed application: a super-admin decision with
+ * a committed reason (for example a platform SPV issuer's own sale). Any admin
+ * sees and can revoke them; only the super admin approves (the server
+ * enforces it too).
+ */
+export function ManualSaleApprovals() {
+  const client = useSolanaClient();
+  const conn = useWalletConnection();
+  const toast = useToast();
+  const role = useRole();
+  const session = conn.wallet;
+  const adminWallet = conn.wallet?.account.address ?? "";
+  const [rows, setRows] = useState<ReservationRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showApprove, setShowApprove] = useState(false);
+  const [open, setOpen] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      setRows(await listSaleReservations(session, { manual: true }));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the approvals");
+    }
+  }, [session]);
+
+  useEffect(() => {
+    if (!open) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load, open]);
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="text-left text-sm font-semibold text-slate-800"
+          aria-expanded={open}
+        >
+          {open ? "▾" : "▸"} Sale approvals without an application
+        </button>
+        {role.isSuperAdmin && (
+          <button
+            type="button"
+            onClick={() => {
+              setOpen(true);
+              setShowApprove(true);
+            }}
+            className="rounded-lg bg-emerald-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-emerald-700"
+          >
+            Approve sale (no application)
+          </button>
+        )}
+      </div>
+      {open && (
+        <>
+          <p className="mt-1 text-xs text-slate-500">
+            A super-admin approval with a recorded reason, counted against the same raise limit. Sales from an
+            application are approved on /admin/applications.
+          </p>
+          {error && <p className="mt-2 text-xs text-red-600">{error}</p>}
+          {rows === null && !error ? (
+            <p className="mt-2 text-xs text-slate-400">Loading approvals…</p>
+          ) : rows && rows.length === 0 ? (
+            <p className="mt-2 text-xs text-slate-500">No approval without an application.</p>
+          ) : (
+            <ApprovalRows
+              rows={rows ?? []}
+              session={session}
+              adminWallet={adminWallet}
+              toast={toast}
+              label="a sale without an application"
+              applicationId={null}
+              onChanged={() => void load()}
+            />
+          )}
+        </>
+      )}
+      {showApprove && (
+        <ApproveSaleModal
+          app={null}
           session={session}
           adminWallet={adminWallet}
           toast={toast}
@@ -201,7 +340,8 @@ function ApproveSaleModal({
   onClose,
   onDone,
 }: {
-  app: LaunchApplication;
+  /** null: a super-admin approval without an application (reason required). */
+  app: LaunchApplication | null;
   session: WalletSession | null | undefined;
   adminWallet: string;
   toast: Toast;
@@ -223,24 +363,39 @@ function ApproveSaleModal({
   const [capacity, setCapacity] = useState<Capacity | null>(null);
   const [capacityError, setCapacityError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const raiseType = app.raise_type === "startup" ? "startup" : "mature";
+  // Without an application the super admin sets the raise type, the payout
+  // schedule and the reason (committed in the approval's hash).
+  const [manualType, setManualType] = useState<"mature" | "startup">("mature");
+  const [manualCliff, setManualCliff] = useState("0");
+  const [manualVesting, setManualVesting] = useState("12");
+  const [reason, setReason] = useState("");
+  const manual = app === null;
+  const raiseType = manual ? manualType : app.raise_type === "startup" ? "startup" : "mature";
   // The payout schedule the approval fixes on-chain: the application's for a
   // startup raise, none (0/0) for a mature one.
-  const cliffMonths = raiseType === "startup" ? app.cliff_months : 0;
-  const vestingMonths = raiseType === "startup" ? app.vesting_months : 0;
+  const cliffMonths = raiseType !== "startup" ? 0 : manual ? Number(manualCliff) : app.cliff_months;
+  const vestingMonths = raiseType !== "startup" ? 0 : manual ? Number(manualVesting) : app.vesting_months;
+  const scheduleValid =
+    raiseType === "mature" ||
+    (Number.isInteger(cliffMonths) && Number.isInteger(vestingMonths) && cliffMonths >= 0 && vestingMonths > cliffMonths && vestingMonths <= 255);
+  const reasonValid = !manual || (reason.trim().length >= 5 && reason.trim().length <= 1000);
+  const subjectLabel = app ? app.company_name : "a sale without an application";
+  const applicantWallet = app?.applicant_wallet ?? null;
+  const linkedIssuer = app?.linked_issuer ?? null;
 
   // The applicant's issuer(s): share classes whose issuer authority is the
   // applicant wallet (or the wallet already linked to the application). The
-  // server re-checks every linked wallet of the applicant's account.
+  // server re-checks every linked wallet of the applicant's account. Without
+  // an application: every share class (the server requires a verified issuer).
   useEffect(() => {
     let cancelled = false;
     void (async () => {
       try {
         const data = await loadNetworkPreferIndexer(() => loadNetwork(rpc));
-        const owners = new Set([app.applicant_wallet, app.linked_issuer].filter(Boolean) as string[]);
+        const owners = new Set([applicantWallet, linkedIssuer].filter(Boolean) as string[]);
         const out: ClassOption[] = [];
         for (const issuer of data.issuers) {
-          if (!owners.has(issuer.authority.toString())) continue;
+          if (applicantWallet !== null && !owners.has(issuer.authority.toString())) continue;
           const [issuerPda] = await findIssuerPda({ legalEntityId: issuer.legalEntityId });
           for (const asset of data.assets) {
             if (asset.issuer !== issuerPda) continue;
@@ -272,7 +427,7 @@ function ApproveSaleModal({
     return () => {
       cancelled = true;
     };
-  }, [rpc, session, app.applicant_wallet, app.linked_issuer]);
+  }, [rpc, session, applicantWallet, linkedIssuer]);
 
   // Capacity panel + the next free sale id for the chosen share class.
   useEffect(() => {
@@ -309,10 +464,11 @@ function ApproveSaleModal({
   const daysNum = Number(days);
   const daysValid = Number.isInteger(daysNum) && daysNum >= 1 && daysNum <= 89;
   const termsValid =
-    gross !== null && gross > BigInt(0) && min !== null && min > BigInt(0) && max !== null && min <= max && daysValid;
+    gross !== null && gross > BigInt(0) && min !== null && min > BigInt(0) && max !== null && min <= max && daysValid &&
+    scheduleValid && reasonValid;
   const grossEur = gross !== null && rate ? Math.ceil(Number(fromBaseUnits(gross, rate.decimals)) * Number(rate.eur_per_token) * 100) / 100 : null;
   const overCap = grossEur !== null && capacity !== null && grossEur > capacity.remaining;
-  const overApplication = grossEur !== null && grossEur > Number(app.raise_amount);
+  const overApplication = app !== null && grossEur !== null && grossEur > Number(app.raise_amount);
 
   async function approve() {
     if (!session || !termsValid || gross === null || min === null || max === null || !/^\d+$/.test(saleId)) return;
@@ -324,7 +480,7 @@ function ApproveSaleModal({
     try {
       const expiresAt = Math.floor(Date.now() / 1000) + Math.min(daysNum * 86_400, SALE_APPROVAL_MAX_TTL_SECS - 3_600);
       const reserved = await reserveSaleApproval(session, {
-        application_id: app.id,
+        ...(app ? { application_id: app.id } : { application_id: null, reason: reason.trim() }),
         share_class: shareClass,
         sale_id: saleId,
         payment_mint: paymentMint,
@@ -372,10 +528,15 @@ function ApproveSaleModal({
         ix_name: "approve_sale",
         category: "launchpad",
         actor_wallet: adminWallet,
-        reason: `Approved sale #${saleId} for ${app.company_name}: up to ${eur(reserved.amount_eur)}`,
+        reason: manual
+          ? `Approved sale #${saleId} without an application: up to ${eur(reserved.amount_eur)}. ${reason.trim()}`
+          : `Approved sale #${saleId} for ${subjectLabel}: up to ${eur(reserved.amount_eur)}`,
         target_label: reserved.approval_pda,
         tx_signature: sig,
-        metadata: { application_id: app.id, reservation_id: reservationId, application_hash: reserved.application_hash },
+        metadata: {
+          application_id: app?.id ?? null, reservation_id: reservationId, application_hash: reserved.application_hash,
+          share_class: shareClass,
+        },
       });
       try {
         await confirmSaleApproval(session, reservationId, sig);
@@ -416,7 +577,7 @@ function ApproveSaleModal({
       <div className="mx-auto w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
         <div className="border-b border-slate-100 px-5 py-4">
           <p className="text-sm font-semibold uppercase tracking-wide text-slate-700">
-            Approve a sale for {app.company_name}
+            {app ? `Approve a sale for ${app.company_name}` : "Approve a sale without an application (super admin)"}
           </p>
           <p className="mt-1 text-xs text-slate-500">
             The approval is recorded on-chain; the issuer can open exactly one sale within these terms before it expires.
@@ -426,11 +587,13 @@ function ApproveSaleModal({
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Share class</span>
             {classes === null ? (
-              <p className="mt-1 text-xs text-slate-400">Loading the applicant&apos;s share classes…</p>
+              <p className="mt-1 text-xs text-slate-400">Loading the share classes…</p>
             ) : classes.length === 0 ? (
               <>
                 <p className="mt-1 text-xs text-amber-700">
-                  No initialized share class found for the applicant&apos;s wallet. Enter the share class address:
+                  {app
+                    ? "No initialized share class found for the applicant's wallet. Enter the share class address:"
+                    : "No initialized share class found. Enter the share class address:"}
                 </p>
                 <input
                   value={shareClass}
@@ -507,22 +670,64 @@ function ApproveSaleModal({
               <input value={days} inputMode="numeric" onChange={(e) => setDays(e.target.value.replace(/\D/g, ""))}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm" />
             </label>
-            <div className="text-xs text-slate-600">
-              <span className="block font-medium uppercase tracking-wide text-slate-500">Raise type</span>
-              <span className="mt-2 block">
-                {raiseType === "startup"
-                  ? `Startup — ${app.vesting_months} months vesting, ${app.cliff_months} months cliff (from the application)`
-                  : "Established (from the application)"}
-              </span>
-            </div>
+            {app ? (
+              <div className="text-xs text-slate-600">
+                <span className="block font-medium uppercase tracking-wide text-slate-500">Raise type</span>
+                <span className="mt-2 block">
+                  {raiseType === "startup"
+                    ? `Startup — ${app.vesting_months} months vesting, ${app.cliff_months} months cliff (from the application)`
+                    : "Established (from the application)"}
+                </span>
+              </div>
+            ) : (
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Raise type</span>
+                <select
+                  value={manualType}
+                  onChange={(e) => setManualType(e.target.value === "startup" ? "startup" : "mature")}
+                  className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"
+                >
+                  <option value="mature">Established (no payout schedule)</option>
+                  <option value="startup">Startup (vesting payouts)</option>
+                </select>
+              </label>
+            )}
           </div>
+          {manual && raiseType === "startup" && (
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Cliff (months)</span>
+                <input value={manualCliff} inputMode="numeric" onChange={(e) => setManualCliff(e.target.value.replace(/\D/g, ""))}
+                  className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm" />
+              </label>
+              <label className="block">
+                <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Vesting (months, above the cliff)</span>
+                <input value={manualVesting} inputMode="numeric" onChange={(e) => setManualVesting(e.target.value.replace(/\D/g, ""))}
+                  className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm" />
+              </label>
+            </div>
+          )}
+          {manual && (
+            <label className="block">
+              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                Reason (recorded and committed on-chain in the approval hash, 5–1000 characters)
+              </span>
+              <textarea
+                value={reason}
+                onChange={(e) => setReason(e.target.value)}
+                rows={3}
+                maxLength={1000}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm"
+              />
+            </label>
+          )}
           <div className={`rounded-md border px-4 py-3 text-xs ${overCap || overApplication ? "border-red-200 bg-red-50 text-red-900" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
             <p className="font-semibold">Raise limit (rolling 12 months)</p>
             {capacityError ? (
               <p className="mt-1">{capacityError}</p>
             ) : capacity ? (
               <p className="mt-1">
-                {capacity.cap_source === "spv" ? "SPV" : "Issuer"} limit {eur(capacity.cap)} · used {eur(capacity.used)} (
+                {capacity.cap_source === "spv" ? "SPV" : capacity.cap_source === "client" ? "Issuer (client override)" : "Issuer"} limit {eur(capacity.cap)} · used {eur(capacity.used)} (
                 {eur(capacity.reserved)} reserved) · remaining {eur(capacity.remaining)}
               </p>
             ) : (
@@ -532,14 +737,16 @@ function ApproveSaleModal({
               <p className="mt-1">
                 This approval counts {eur(grossEur)}
                 {overCap ? " — more than the remaining limit" : ""}
-                {overApplication ? ` — more than the application's raise of ${eur(Number(app.raise_amount))}` : ""}.
+                {overApplication && app ? ` — more than the application's raise of ${eur(Number(app.raise_amount))}` : ""}.
               </p>
             )}
           </div>
           {!termsValid && (maxGross || minPrice || maxPrice) && (
             <p className="text-xs text-red-600">
               Enter a max raise above zero and a min price at least one base unit and not above the max price
-              {decimals !== null ? ` (at most ${decimals} decimals)` : ""}.
+              {decimals !== null ? ` (at most ${decimals} decimals)` : ""}
+              {!scheduleValid ? "; startup vesting months must be above the cliff (at most 255)" : ""}
+              {!reasonValid ? "; a reason of 5–1000 characters is required" : ""}.
             </p>
           )}
         </div>
