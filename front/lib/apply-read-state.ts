@@ -7,12 +7,16 @@
 // shown as such, with a retry, never as "you have no applications".
 // These helpers are framework-free so the page's behaviour is unit-testable.
 
+import { OffchainMessageLimitError } from "@/lib/siws-offchain";
+import { HardwareWalletSigningError } from "@/lib/siws-signing";
+
 /** What the page is waiting on while the private read is in flight. */
 export type ApplicationReadPhase = "signing" | "loading" | "ready" | "error";
 
 export type ApplicationReadFailureKind =
   | "signature_rejected"
   | "signing_unsupported"
+  | "hardware_wallet"
   | "transport"
   | "server";
 
@@ -81,6 +85,11 @@ export function classifyApplicationReadError(
   error: unknown,
 ): ApplicationReadFailure {
   const detail = errorText(error);
+  // The wallet or its Ledger could not produce a usable signature; the
+  // message says what to do (retrying unchanged will not help a limit error).
+  if (error instanceof HardwareWalletSigningError || error instanceof OffchainMessageLimitError) {
+    return { kind: "hardware_wallet", message: error.message, detail };
+  }
   if (error && typeof error === "object") {
     const code = (error as { code?: unknown }).code;
     if (code === 4001 || code === "WALLET_REJECTED") {

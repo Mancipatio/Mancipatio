@@ -24,6 +24,14 @@ import { transactionWalletPolicyRevision } from "@/lib/transaction-wallet-policy
 
 // These tests cover the signed-envelope contract; wallet sessions have their own tests.
 vi.mock("@/lib/siws-session", async (original) => ({ ...(await original<typeof import("@/lib/siws-session")>()), isSessionReadAction: () => false }));
+// These fake wallets return placeholder signatures for a placeholder key, so
+// stub only the signing strategy (the client now refuses to send a signature
+// it can prove invalid); formats and local checks: tests/siws-signing.test.ts.
+vi.mock("@/lib/siws-signing", async (original) => ({
+  ...(await original<typeof import("@/lib/siws-signing")>()),
+  signSiwsMessage: async (walletSession: WalletSession, sign: NonNullable<WalletSession["signMessage"]>, message: string) =>
+    ({ signature: await sign.call(walletSession, new TextEncoder().encode(message)), sigFormat: "raw" as const }),
+}));
 
 const wallet = address("11111111111111111111111111111111");
 const otherWallet = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";

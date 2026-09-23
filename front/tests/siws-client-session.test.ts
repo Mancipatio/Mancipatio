@@ -3,6 +3,14 @@ import { address } from "@solana/kit";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const wallet = address("11111111111111111111111111111111");
+// These fake wallets return placeholder signatures for a placeholder key, so
+// stub only the signing strategy (the client now refuses to send a signature
+// it can prove invalid); formats and local checks: tests/siws-signing.test.ts.
+vi.mock("@/lib/siws-signing", async (original) => ({
+  ...(await original<typeof import("@/lib/siws-signing")>()),
+  signSiwsMessage: async (walletSession: WalletSession, sign: NonNullable<WalletSession["signMessage"]>, message: string) =>
+    ({ signature: await sign.call(walletSession, new TextEncoder().encode(message)), sigFormat: "raw" as const }),
+}));
 const store = new Map<string, string>();
 const fetchMock = vi.fn<typeof fetch>();
 const signMessage = vi.fn(async () => new Uint8Array(64).fill(1));

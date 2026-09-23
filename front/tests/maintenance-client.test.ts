@@ -12,6 +12,14 @@ import { accountErrorMessage } from "@/lib/account-client";
 
 const remote = vi.hoisted(() => ({ signedFetch: vi.fn() }));
 vi.mock("@/lib/siws-client", () => ({ signedFetch: remote.signedFetch }));
+// These fake wallets return placeholder signatures for a placeholder key, so
+// stub only the signing strategy (the client now refuses to send a signature
+// it can prove invalid); formats and local checks: tests/siws-signing.test.ts.
+vi.mock("@/lib/siws-signing", async (original) => ({
+  ...(await original<typeof import("@/lib/siws-signing")>()),
+  signSiwsMessage: async (walletSession: WalletSession, sign: NonNullable<WalletSession["signMessage"]>, message: string) =>
+    ({ signature: await sign.call(walletSession, new TextEncoder().encode(message)), sigFormat: "raw" as const }),
+}));
 
 const WALLET = "11111111111111111111111111111111" as Address;
 const ORIGIN = "https://manci.test";

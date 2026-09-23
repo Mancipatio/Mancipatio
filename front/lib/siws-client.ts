@@ -4,7 +4,12 @@
 //   payload = { v: 2, origin, network, action, wallet, ts, nonce, params }
 //   message = "mancipatio:v2:" + canonicalJson(payload)   (sorted keys, no whitespace)
 //   signature = ed25519 sign of the UTF-8 message bytes by the connected wallet
-//   POST { payload, signature: base64, publicKey: wallet } to the route
+//               — or, for a Ledger, of a Solana off-chain message whose body is
+//               that message with non-ASCII characters \u-escaped, so the device
+//               shows it in full (lib/siws-offchain.ts, lib/siws-signing.ts)
+//   POST { payload, signature: base64, publicKey: wallet, sigFormat } to the route
+//   (sigFormat: "raw" | "offchain-v0" | "offchain-v0-legacy"; absent = "raw";
+//   a hint only — the server rebuilds and tries every accepted byte string)
 //
 // The server half lives in lib/server/siws.ts (`verifySigned`). Both sides share
 // `canonicalJson` and `SIWS_MESSAGE_PREFIX` from THIS file — do not fork the
@@ -18,6 +23,8 @@ import type { WalletSession } from "@solana/client";
 import { detectNetwork, type Network } from "@/lib/network";
 import { isSessionReadAction, SESSION_TTL_MS } from "@/lib/siws-session";
 import { assertNotInKnownMaintenance, MAINTENANCE_CODE, maintenanceRefusal, refusedInMaintenance } from "@/lib/maintenance";
+import type { SiwsSignatureFormat } from "@/lib/siws-offchain";
+import { signSiwsMessage } from "@/lib/siws-signing";
 
 /** Prefix prepended to the canonical JSON before signing. */
 export const SIWS_MESSAGE_PREFIX = "mancipatio:v2:";
@@ -47,10 +54,14 @@ export type SiwsPayload = {
 /** Wire shape POSTed to signed routes. */
 export type SiwsRequestBody = {
   payload: SiwsPayload;
-  /** Base64-encoded 64-byte ed25519 signature over the message bytes. */
+  /** Base64-encoded 64-byte ed25519 signature over the bytes `sigFormat` names. */
   signature: string;
   /** Redundant copy of payload.wallet (server requires equality). */
   publicKey: string;
+  /** Which bytes were signed: the message itself ("raw", the default) or a
+   * Solana off-chain message around it. A hint: the server rebuilds and
+   * tries every accepted byte string, the named one first. */
+  sigFormat?: SiwsSignatureFormat;
 };
 
 /**
@@ -122,13 +133,16 @@ export async function createSignedRequest(
     nonce: crypto.randomUUID(),
     params,
   };
-  const signature = await signMessage(
-    new TextEncoder().encode(siwsMessage(payload)),
+  // One prompt; a Ledger that refuses raw bytes gets one off-chain retry.
+  // Throws instead of returning a signature it has proved the server rejects.
+  const { signature, sigFormat } = await signSiwsMessage(
+    session, signMessage, siwsMessage(payload), payload.wallet,
   );
   return {
     payload,
     signature: toBase64(signature),
     publicKey: payload.wallet,
+    sigFormat,
   };
 }
 
