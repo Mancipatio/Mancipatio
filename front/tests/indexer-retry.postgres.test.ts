@@ -23,7 +23,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
   beforeAll(async () => {
     try {
       db.initialize(); db.query("create role anon; create role authenticated; create role service_role bypassrls;");
-      for (const file of ["0002_indexer.sql", "0014_asset_profiles.sql", "0015_issuer_profiles.sql", "0037_indexer_integrity.sql", "0038_indexer_composite_key.sql", "0039_indexer_events_wallets.sql", "0040_indexer_kyc.sql", "0042_indexer_deposit_ledgers.sql", "0047_indexer_retry.sql", "0063_platform_pause_flags.sql"]) {
+      for (const file of ["0002_indexer.sql", "0014_asset_profiles.sql", "0015_issuer_profiles.sql", "0037_indexer_integrity.sql", "0038_indexer_composite_key.sql", "0039_indexer_events_wallets.sql", "0040_indexer_kyc.sql", "0042_indexer_deposit_ledgers.sql", "0047_indexer_retry.sql", "0064_platform_pause_flags.sql"]) {
         db.query(readFileSync(join(process.cwd(), "supabase/migrations", file), "utf8"));
       }
       for (const fixture of indexerFixtures()) {
