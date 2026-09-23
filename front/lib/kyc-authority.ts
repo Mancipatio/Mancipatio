@@ -96,6 +96,26 @@ export function selectKycRegistry(
   return { registry: null, ambiguous: true, pinnedMissing: false };
 }
 
+/**
+ * Why no registry could be resolved, for operator-facing copy: a configured
+ * pin that is absent on this network (fix the pin, do NOT create a registry),
+ * or several registries with no pin. Null when there is simply no registry
+ * yet (or one was resolved).
+ */
+export function kycRegistryUnavailableReason(
+  ctx: Pick<KycAuthorityContext, "registry" | "pinned" | "pinnedMissing" | "ambiguous" | "registries">,
+  network: string,
+): string | null {
+  if (ctx.registry) return null;
+  if (ctx.pinnedMissing && ctx.pinned) {
+    return `Pinned KYC registry ${ctx.pinned} not found on ${network} — check NEXT_PUBLIC_KYC_REGISTRY.`;
+  }
+  if (ctx.ambiguous) {
+    return `${ctx.registries.length} KYC registries exist and none could be selected — pin the platform registry with NEXT_PUBLIC_KYC_REGISTRY.`;
+  }
+  return null;
+}
+
 export type KycGates = {
   /** Wallet equals the live `KycRegistry.authority` → may issue/revoke passports. */
   isKycProvider: boolean;

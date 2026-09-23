@@ -10,7 +10,12 @@ vi.mock("@/lib/generated/asset_registry", async (importOriginal) => {
 });
 
 import { ASSET_REGISTRY_PROGRAM_ADDRESS, getKycRegistryEncoder } from "@/lib/generated/asset_registry";
-import { loadKycAuthorityContext, selectKycRegistry, type KycRegistryRecord } from "@/lib/kyc-authority";
+import {
+  kycRegistryUnavailableReason,
+  loadKycAuthorityContext,
+  selectKycRegistry,
+  type KycRegistryRecord,
+} from "@/lib/kyc-authority";
 import { configuredKycRegistry, parseKycRegistryPin } from "@/lib/kyc-registry-pin";
 import {
   bitmapCodeStrings,
@@ -77,6 +82,8 @@ function rpcWithAccount(account: { owner: string; bytes: Uint8Array } | null) {
 beforeEach(() => {
   vi.clearAllMocks();
   calls.platform.mockResolvedValue({ exists: true, data: { admin: ADMIN } });
+  // Tests opt into a pin explicitly; never inherit one from the shell.
+  vi.stubEnv("NEXT_PUBLIC_KYC_REGISTRY", "");
 });
 afterEach(() => {
   vi.unstubAllEnvs();
@@ -216,5 +223,21 @@ describe("registry panel helpers", () => {
     });
     expect(jurisdictionDiff(current, current).unchanged).toBe(true);
     expect([...bitmapCodeStrings(jurisdictionBitmap([40, 999]))]).toEqual(["040", "999"]);
+  });
+});
+
+describe("kycRegistryUnavailableReason", () => {
+  const base = { registry: null, pinned: null, pinnedMissing: false, ambiguous: false, registries: [] };
+  it("names a missing pin and never suggests creating a registry", () => {
+    const msg = kycRegistryUnavailableReason({ ...base, pinned: PINNED, pinnedMissing: true }, "devnet");
+    expect(msg).toContain(PINNED);
+    expect(msg).toContain("NEXT_PUBLIC_KYC_REGISTRY");
+    expect(msg).not.toMatch(/create/i);
+  });
+  it("explains an ambiguous scan and is null when there is simply none yet", () => {
+    expect(kycRegistryUnavailableReason({ ...base, ambiguous: true, registries: [{}, {}] as never }, "devnet")).toMatch(
+      /2 KYC registries/,
+    );
+    expect(kycRegistryUnavailableReason(base, "devnet")).toBeNull();
   });
 });

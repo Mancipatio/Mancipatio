@@ -2,7 +2,7 @@
 // platform admin (Platform.admin) are separate on-chain roles. The UI must
 // resolve the live registry from chain — not derive it from Platform.admin —
 // and must gate passport actions on the registry authority only.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { address, getBase64Decoder, type Address } from "@solana/kit";
 
 const calls = vi.hoisted(() => ({ platform: vi.fn() }));
@@ -78,6 +78,13 @@ function encoded(authority: Address, entries = 3): Uint8Array {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The default `pinned` is the ambient NEXT_PUBLIC_KYC_REGISTRY: pin it
+  // unset so a value exported in the shell cannot switch these tests onto
+  // the pinned path.
+  vi.stubEnv("NEXT_PUBLIC_KYC_REGISTRY", "");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe("kycGates", () => {

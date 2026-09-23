@@ -97,6 +97,69 @@ export function assertBuildTurnstile(
   }
 }
 
+const BASE58_ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/**
+ * True when `value` is base58 that decodes to exactly 32 bytes — the same
+ * test @solana/kit's isAddress applies (lib/kyc-registry-pin.ts), spelled out
+ * here because this file takes no runtime imports.
+ */
+export function isBase58Address(value: string): boolean {
+  if (value.length < 32 || value.length > 44) return false;
+  let n = BigInt(0);
+  for (const ch of value) {
+    const digit = BASE58_ALPHABET.indexOf(ch);
+    if (digit < 0) return false;
+    n = n * BigInt(58) + BigInt(digit);
+  }
+  let leadingZeros = 0;
+  while (leadingZeros < value.length && value[leadingZeros] === "1") leadingZeros++;
+  const bodyBytes = n === BigInt(0) ? 0 : Math.ceil(n.toString(16).length / 2);
+  return leadingZeros + bodyBytes === 32;
+}
+
+/**
+ * NEXT_PUBLIC_KYC_REGISTRY pins the platform KYC registry BY ADDRESS
+ * (lib/kyc-registry-pin.ts). It is inlined at build time, and at runtime a
+ * malformed value fails closed across every KYC surface (/admin/kyc errors,
+ * the passport-sync gate answers 503, portfolio passports and share-class
+ * gating are hidden), while an unset one falls back to the scan heuristic,
+ * which cannot tell a rotated platform registry from a second registry. So in
+ * a production build:
+ *   - a set-but-malformed value fails (any environment);
+ *   - an unset value fails a MAINNET build and a Vercel PRODUCTION build
+ *     (VERCEL_ENV=production), and only warns on other Vercel builds
+ *     (Preview). Local builds, CI, `next dev` and tests are unaffected.
+ */
+export function assertBuildKycRegistry(
+  phase: string,
+  env: Record<string, string | undefined> = process.env,
+  warn: (message: string) => void = console.warn,
+): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  const pin = env.NEXT_PUBLIC_KYC_REGISTRY?.trim() ?? "";
+  if (pin) {
+    if (!isBase58Address(pin)) {
+      throw new Error(
+        `NEXT_PUBLIC_KYC_REGISTRY="${pin}" is not a valid address. Set it to the platform KYC registry's ` +
+          "address for this network (never a derived PDA), or leave it unset for a local build.",
+      );
+    }
+    return;
+  }
+  const network = env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() ?? "";
+  const onVercel = env.VERCEL === "1" || Boolean(env.VERCEL_ENV);
+  const why =
+    "is not set: KYC surfaces would fall back to scanning for a registry, which cannot tell the " +
+    "platform registry from any other after a rotation. Set it to the registry address for this network.";
+  if (network === "mainnet" || env.VERCEL_ENV === "production") {
+    throw new Error(
+      `NEXT_PUBLIC_KYC_REGISTRY ${why} (NEXT_PUBLIC_NETWORK=${network || "unset"}, VERCEL_ENV=${env.VERCEL_ENV ?? "unset"})`,
+    );
+  }
+  if (onVercel) warn(`NEXT_PUBLIC_KYC_REGISTRY ${why}`);
+}
+
 // Site-wide browser hardening. No Content-Security-Policy yet: it needs the
 // wallet, RPC and Supabase origins per network and a nonce for Next's inline
 // scripts, and ships separately (report-only first).
@@ -178,5 +241,6 @@ const nextConfig: NextConfig = {
 export default function config(phase: string): NextConfig {
   assertBuildNetwork(phase);
   assertBuildTurnstile(phase);
+  assertBuildKycRegistry(phase);
   return nextConfig;
 }

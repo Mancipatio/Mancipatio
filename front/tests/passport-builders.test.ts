@@ -22,7 +22,7 @@ import {
   findKycRegistryTransferPda,
   jurisdictionBitmap,
 } from "@/lib/passport";
-import { decodeIndexerAccount, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
+import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
 import {
   explainSendError,
   INVALID_KYC_REGISTRY_HINT,
@@ -141,6 +141,13 @@ describe("indexer keys kyc_registries by snapshot address", () => {
     expect(result).toMatchObject({ table: "kyc_registries", row: { pda: REGISTRY } });
   });
 
+  it("has no seed fallback: a decode without the snapshot address throws", async () => {
+    const f = indexerFixtures().find((x) => x.table === "kyc_registries")!;
+    const entity = INDEXER_ENTITIES.find((e) => e.table === "kyc_registries")!;
+    await expect(entity.decode(f.bytes, null)).rejects.toThrow(/snapshot address/);
+    await expect(entity.decode(f.bytes, REGISTRY)).resolves.toMatchObject({ pda: REGISTRY });
+  });
+
   it("still rejects a wrong PDA for derived entities", async () => {
     const f = indexerFixtures().find((x) => x.table === "share_classes")!;
     await expect(decodeIndexerAccount(REGISTRY, INDEXER_PROGRAM, f.bytes)).rejects.toThrow(/PDA/);
@@ -171,6 +178,21 @@ describe("KYC registry tx-error hints", () => {
     expect(
       explainSendError(withLogs(["Program log: AnchorError occurred. Error Code: InvalidKycRegistry. Error Number: 6009."])),
     ).toBe(INVALID_KYC_REGISTRY_HINT);
+  });
+
+  it("gives the same neutral InvalidKycRegistry hint for asset_registry's buy / clawback", () => {
+    // asset_registry's own InvalidKycRegistry (6072), e.g. buy's receiver
+    // check or clawback_from_holder with a registry the hook config does not
+    // name — the name matches the hook's 6009 deliberately.
+    const hint = explainSendError(
+      withLogs([
+        "Program FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS invoke [1]",
+        "Program log: AnchorError thrown in programs/asset_registry/src/util.rs:700. Error Code: InvalidKycRegistry. Error Number: 6072. Error Message: KYC registry account is malformed, truncated, or unexpected.",
+      ]),
+    );
+    expect(hint).toBe(INVALID_KYC_REGISTRY_HINT);
+    expect(hint).toMatch(/hook config names/);
+    expect(hint).not.toMatch(/registry named \(/);
   });
 
   it("explains 6112 / 6113 by hex", () => {

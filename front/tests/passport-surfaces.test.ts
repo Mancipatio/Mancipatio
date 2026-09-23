@@ -99,6 +99,26 @@ describe("KYC registry by address (2C-1)", () => {
     expect(page).toContain("kycRegistryAccount: kycRegistry");
     expect(page).toContain("ctx.pinnedMissing");
   });
+  it("a registry change on /admin/kyc refreshes every card that caches the registry", () => {
+    const page = read("app/admin/kyc/page.tsx");
+    // One page-level version, bumped by the panel and by create.
+    expect(page).toContain("<KycRegistryBootstrap registryVersion={registryVersion} onChanged={registryChanged} />");
+    expect(page).toContain("<KycRegistryAuthorityCard registryVersion={registryVersion} onChanged={registryChanged} />");
+    expect(page).toContain("<PassportRequests registryVersion={registryVersion} />");
+    expect(page).toContain("onChanged={onChanged}");
+    // The queue re-reads only the registry context (no signed admin read).
+    expect(page).toMatch(/if \(registryVersion > 0\) void loadRegistryContext\(\);/);
+    // The card reports a load error / missing pin instead of rendering nothing.
+    expect(page).toContain("kycRegistryUnavailableReason(ctx, detectNetwork())");
+  });
+  it("a missing pin is never reported as 'create a registry'", () => {
+    const client = read("app/admin/clients/[id]/page.tsx");
+    expect(client).toContain("!kycCtx.pinnedMissing");
+    expect(client).toContain("kycRegistryUnavailableReason(kycCtx, detectNetwork())");
+    const platform = read("app/admin/platform/page.tsx");
+    expect(platform).toContain("kycProviderNote ?? \"no KYC registry yet\"");
+    expect(platform).not.toContain("no instruction rotates the KYC authority");
+  });
   it("the registry panel is gated on on-chain roles, never on app roles", () => {
     const panel = read("components/kyc-registry-panel.tsx");
     expect(panel).toContain("kycRegistryActions(wallet, authority, state)");

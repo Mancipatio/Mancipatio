@@ -4,7 +4,14 @@
 // approved for mainnet (MAINNET_LEGAL_COPY_APPROVED=true). Local builds, CI
 // (NEXT_PUBLIC_NETWORK=devnet), `next dev` and tests keep working.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import config, { assertBuildNetwork, assertBuildTurnstile } from "@/next.config";
+import { isAddress } from "@solana/kit";
+import config, {
+  assertBuildKycRegistry,
+  assertBuildNetwork,
+  assertBuildTurnstile,
+  isBase58Address,
+} from "@/next.config";
+import { parseKycRegistryPin } from "@/lib/kyc-registry-pin";
 
 const BUILD = "phase-production-build";
 const DEV = "phase-development-server";
@@ -123,6 +130,54 @@ describe("assertBuildTurnstile", () => {
   });
 });
 
+const PIN = "5MofiJNCoCRkNg1f2Yd7368WkjiNxkZZmUTaQo7xLhku";
+
+describe("assertBuildKycRegistry", () => {
+  it("fails any production build whose pin is set but malformed", () => {
+    for (const bad of ["garbage", "5MofiJNCoCRkNg1f2Yd7368WkjiNxkZZmUTaQo7xLhk0", PIN.slice(0, 30)]) {
+      expect(() => assertBuildKycRegistry(BUILD, { NEXT_PUBLIC_KYC_REGISTRY: bad })).toThrow(/not a valid address/);
+    }
+    expect(() => assertBuildKycRegistry(BUILD, { NEXT_PUBLIC_KYC_REGISTRY: ` ${PIN} ` })).not.toThrow();
+  });
+
+  it("requires a pin for mainnet and Vercel production, only warns on Preview", () => {
+    expect(() => assertBuildKycRegistry(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet" })).toThrow(/is not set/);
+    expect(() =>
+      assertBuildKycRegistry(BUILD, { NEXT_PUBLIC_NETWORK: "devnet", VERCEL: "1", VERCEL_ENV: "production" }),
+    ).toThrow(/is not set/);
+    const warn = vi.fn();
+    assertBuildKycRegistry(BUILD, { NEXT_PUBLIC_NETWORK: "devnet", VERCEL: "1", VERCEL_ENV: "preview" }, warn);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/NEXT_PUBLIC_KYC_REGISTRY is not set/));
+    const quiet = vi.fn();
+    assertBuildKycRegistry(BUILD, { NEXT_PUBLIC_NETWORK: "devnet" }, quiet); // local / CI
+    expect(quiet).not.toHaveBeenCalled();
+  });
+
+  it("never checks outside a production build", () => {
+    expect(() => assertBuildKycRegistry(DEV, { NEXT_PUBLIC_KYC_REGISTRY: "garbage" })).not.toThrow();
+    expect(() => assertBuildKycRegistry(SERVER, { NEXT_PUBLIC_NETWORK: "mainnet" })).not.toThrow();
+  });
+
+  it("agrees with the runtime parser (@solana/kit isAddress)", () => {
+    const samples = [
+      PIN,
+      "11111111111111111111111111111111",
+      "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+      "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy",
+      "1111111111111111111111111111111",
+      "111111111111111111111111111111111",
+      "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz",
+      "5MofiJNCoCRkNg1f2Yd7368WkjiNxkZZmUTaQo7xLhkO",
+      "not-an-address",
+    ];
+    for (const value of samples) {
+      expect(isBase58Address(value), value).toBe(isAddress(value));
+      if (isAddress(value)) expect(parseKycRegistryPin(value)).toBe(value);
+      else expect(() => parseKycRegistryPin(value)).toThrow();
+    }
+  });
+});
+
 describe("next.config default export", () => {
   it("runs the guard against process.env and returns the config", () => {
     vi.stubEnv("VERCEL", "1");
@@ -140,6 +195,10 @@ describe("next.config default export", () => {
     expect(() => config(BUILD)).toThrow(/NEXT_PUBLIC_TURNSTILE_SITE_KEY is not/);
 
     vi.stubEnv("TURNSTILE_SECRET_KEY", "");
+    vi.stubEnv("NEXT_PUBLIC_KYC_REGISTRY", "");
+    expect(() => config(BUILD)).toThrow(/NEXT_PUBLIC_KYC_REGISTRY is not set/);
+
+    vi.stubEnv("NEXT_PUBLIC_KYC_REGISTRY", PIN);
     const resolved = config(BUILD);
     expect(resolved.poweredByHeader).toBe(false);
     expect(typeof resolved.headers).toBe("function");

@@ -182,9 +182,15 @@ export const NO_PENDING_AUTHORITY_TRANSFER_HINT = "No pending authority transfer
 /** transfer_hook: Open mode named a registry (KycRegistryNotAllowed, 6016). */
 export const KYC_REGISTRY_NOT_ALLOWED_HINT =
   "An Open mint must not name a KYC registry — choose KYC-gated, or clear the registry (KycRegistryNotAllowed).";
-/** transfer_hook: the named registry account is not a real/matching KycRegistry (InvalidKycRegistry, 6009). */
+/**
+ * InvalidKycRegistry exists in BOTH programs under the same name: the hook's
+ * 6009 (update_transfer_hook_config: the named account is not a genuine,
+ * matching registry) and asset_registry's 6072 (buy / claim / clawback: the
+ * registry passed is malformed or is not the one the mint's hook config
+ * names). The wording is neutral so it is true for either.
+ */
 export const INVALID_KYC_REGISTRY_HINT =
-  "The KYC registry account is not a Manci KycRegistry, or is not the registry named (InvalidKycRegistry).";
+  "The KYC registry account is not a Manci KycRegistry, or is not the registry expected here (the one this mint's transfer-hook config names, or the one being set). Reload and retry; if it persists, check NEXT_PUBLIC_KYC_REGISTRY (InvalidKycRegistry).";
 
 function customErrorHint(text: string): string | null {
   // PlatformPaused is 6000 (0x1770) — the same number as the transfer hook's

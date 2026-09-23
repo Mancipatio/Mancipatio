@@ -150,6 +150,9 @@ async function post(params: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
+  // No ambient pin: the route's gate must not switch to the pinned path
+  // because NEXT_PUBLIC_KYC_REGISTRY happens to be exported in the shell.
+  vi.stubEnv("NEXT_PUBLIC_KYC_REGISTRY", "");
   chain.adminGate.mockClear();
   chain.platformAdmin = NEW_SUPER_ADMIN;
   chain.registryAuthority = PROVIDER;

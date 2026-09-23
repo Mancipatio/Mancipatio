@@ -106,8 +106,9 @@ export default function PortfolioOverviewPage() {
         return;
       }
       try {
-        // The live registry is bound to its original provider key, not to the
-        // current platform admin — resolve it from chain, never via Platform.admin.
+        // The registry is resolved BY ADDRESS (the NEXT_PUBLIC_KYC_REGISTRY
+        // pin, or an unpinned scan) — never derived from Platform.admin or
+        // from the registry's current (rotatable) authority.
         const ctx = await loadKycAuthorityContext(client.runtime.rpc);
         if (!ctx.registry) {
           if (!cancelled) setPassport({ phase: "none" });
