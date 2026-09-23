@@ -248,7 +248,7 @@ describe("server verification of off-chain SIWS signatures", () => {
   it("accepts a Kit-signed v0 envelope over the exact canonical text, once", async () => {
     const payload = payloadFor();
     const b = body(payload, await kitSiws(payload), "offchain-v0");
-    await expect(verifySigned(request(b), "test.private")).resolves.toEqual({ wallet, params: payload.params });
+    await expect(verifySigned(request(b), "test.private")).resolves.toEqual({ wallet, params: payload.params, via: "signature" });
     expect(rpc).toHaveBeenCalledTimes(1);
     await expect(verifySigned(request(b), "test.private")).rejects.toMatchObject({ status: 401 });
   });
