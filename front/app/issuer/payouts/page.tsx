@@ -54,6 +54,8 @@ import {
   type PayoutSchedule,
 } from "@/lib/payout-schedules";
 import { walletSigner } from "@/lib/wallet-signer";
+import { features } from "@/lib/features";
+import { issuerSyncInstructions, issuerVaultsFor } from "@/lib/issuer-authority";
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -62,6 +64,7 @@ import { useToast } from "@/lib/toast";
 // Payment mint is classic SPL Token (USDC is classic-SPL).
 const TOKEN_CLASSIC_ADDRESS =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
+const ISSUER_ROTATION = features().issuerRotation;
 
 type VaultLink = {
   record: PayoutVaultRecord;
@@ -69,6 +72,10 @@ type VaultLink = {
   shareClass: ShareClass | undefined;
   assetName: string | undefined;
   assetId: string | undefined;
+  /** The vault's founder is an earlier issuer key (2C-2): sync before acting. */
+  founderOutOfSync: boolean;
+  /** The Issuer PDA (for the sync instruction). */
+  issuer: string | undefined;
 };
 
 export default function IssuerPayoutsPage() {
@@ -209,12 +216,17 @@ export default function IssuerPayoutsPage() {
       );
   }, [distributions, myIssuerPda, assetByScPda]);
 
-  // Only vaults whose founder is the connected wallet.
+  // Vaults whose founder is the connected wallet, plus (2C-2) vaults of this
+  // issuer's share classes still naming an earlier issuer key.
   const myVaults = useMemo<VaultLink[]>(() => {
     if (!vaults || !wallet) return [];
-    return vaults
-      .filter((r) => r.vault.founder.toString() === wallet.toString())
-      .map((record) => {
+    return issuerVaultsFor(vaults, {
+      wallet: wallet.toString(),
+      issuer: myIssuerPda,
+      issuerOfShareClass: (sc) => assetByScPda.get(sc)?.issuer,
+      rotation: ISSUER_ROTATION,
+    })
+      .map(({ record, founderOutOfSync }) => {
         const sale = saleByPda.get(record.vault.sale.toString());
         const shareClass = scByPda.get(record.vault.shareClass.toString());
         const meta = assetByScPda.get(record.vault.shareClass.toString());
@@ -224,10 +236,12 @@ export default function IssuerPayoutsPage() {
           shareClass,
           assetName: meta?.name,
           assetId: meta?.assetId,
+          founderOutOfSync,
+          issuer: meta?.issuer,
         };
       })
       .sort((a, b) => Number(b.record.vault.startTs - a.record.vault.startTs));
-  }, [vaults, wallet, saleByPda, scByPda, assetByScPda]);
+  }, [vaults, wallet, myIssuerPda, saleByPda, scByPda, assetByScPda]);
 
   const selectedLink = useMemo(
     () => myVaults.find((v) => v.record.address.toString() === selected) ?? null,
@@ -307,6 +321,11 @@ export default function IssuerPayoutsPage() {
                         sale #{vl.sale ? String(vl.sale.saleId) : "?"} ·{" "}
                         {vl.assetId ?? "—"}
                       </p>
+                      {vl.founderOutOfSync && (
+                        <p className="mt-0.5 text-[11px] font-medium text-amber-700">
+                          Founder out of sync: open to sync
+                        </p>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-slate-700">
                       {v.tranchesReleased}/{v.numTranches}
@@ -541,6 +560,39 @@ function VaultDetail({
   const [updateText, setUpdateText] = useState("");
   const [confirmRelease, setConfirmRelease] = useState(false);
 
+  // 2C-2: the vault still names an earlier issuer key. Every founder action
+  // below prepends the permissionless sync (atomic with the action).
+  const founderSyncIxs = () =>
+    link.founderOutOfSync && wallet && link.issuer && link.shareClass
+      ? issuerSyncInstructions({
+          issuer: link.issuer as Address,
+          issuerAuthority: wallet,
+          vaults: [
+            {
+              address: link.record.address,
+              shareClass: v.shareClass,
+              asset: link.shareClass.asset,
+              founder: v.founder,
+            },
+          ],
+        })
+      : [];
+
+  async function syncFounder() {
+    if (!wallet || !conn.wallet) return;
+    const pendingId = toast.showPending("Syncing the vault founder…");
+    try {
+      const signer = walletSigner(conn.wallet);
+      const sig = await tx.send({ instructions: founderSyncIxs(), feePayer: signer });
+      toast.dismiss(pendingId);
+      toast.showTx(sig, { title: "Vault founder synced" });
+      await onRefresh();
+    } catch (err) {
+      toast.dismiss(pendingId);
+      toast.showError("Failed to sync the vault founder", explainSendError(err));
+    }
+  }
+
   const updateDue = nextUpdateDue(v, now);
   const releaseReady = nextReleaseReady(v, now);
   const overdue = periodsOverdue(v, now);
@@ -563,7 +615,7 @@ function VaultDetail({
         vault: vaultPda,
         contentHash,
       });
-      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      const sig = await tx.send({ instructions: [...founderSyncIxs(), ix], feePayer: signer });
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Update posted" });
       setShowUpdate(false);
@@ -608,7 +660,10 @@ function VaultDetail({
         founderAccount,
         paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
       });
-      const sig = await tx.send({ instructions: [createAtaIx, ix], feePayer: signer });
+      const sig = await tx.send({
+        instructions: [...founderSyncIxs(), createAtaIx, ix],
+        feePayer: signer,
+      });
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Tranche released" });
       setConfirmRelease(false);
@@ -646,6 +701,21 @@ function VaultDetail({
           Close ✕
         </button>
       </div>
+
+      {link.founderOutOfSync && (
+        <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          This vault still names an earlier issuer key as its founder. Updates, releases and yield claims
+          below sync it first; you can also sync it on its own.{" "}
+          <button
+            type="button"
+            disabled={tx.isSending}
+            onClick={() => void syncFounder()}
+            className="ml-1 rounded-md bg-amber-700 px-2.5 py-1 font-medium text-white hover:bg-amber-800 disabled:opacity-50"
+          >
+            Sync founder
+          </button>
+        </div>
+      )}
 
       {/* Tranche progress */}
       {v.numTranches > 0 && (

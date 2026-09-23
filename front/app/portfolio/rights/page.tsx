@@ -70,6 +70,11 @@ import {
 } from "@/lib/pdas";
 import { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { walletSigner } from "@/lib/wallet-signer";
+import { features } from "@/lib/features";
+import { issuerSyncInstructions, resolveIssuerChain } from "@/lib/issuer-authority";
+import type { Instruction } from "@solana/kit";
+
+const ISSUER_ROTATION = features().issuerRotation;
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
@@ -572,7 +577,41 @@ function VaultCard({
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
 
-  const isFounder = wallet?.toString() === vault.founder.toString();
+  // 2C-2: after an issuer key rotation the vault still names the earlier
+  // key until `sync_payout_founder` runs. When this wallet is the issuer's
+  // CURRENT key, it is the founder in all but the snapshot: the founder
+  // actions below prepend the (permissionless) sync.
+  const [founderSync, setFounderSync] = useState<Instruction[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    if (!ISSUER_ROTATION || !wallet || wallet.toString() === vault.founder.toString()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFounderSync([]);
+      return;
+    }
+    void (async () => {
+      try {
+        const [chain, vaultPda] = await Promise.all([
+          resolveIssuerChain(client.runtime.rpc, vault.shareClass),
+          payoutVaultPda(vault.sale),
+        ]);
+        if (cancelled || chain.issuerAuthority !== wallet.toString()) return;
+        setFounderSync(
+          issuerSyncInstructions({
+            issuer: chain.issuer,
+            issuerAuthority: chain.issuerAuthority,
+            vaults: [{ address: vaultPda, shareClass: vault.shareClass, asset: chain.asset, founder: vault.founder }],
+          }),
+        );
+      } catch {
+        // Not resolvable: this wallet simply is not the founder.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, wallet, vault]);
+  const isFounder = wallet?.toString() === vault.founder.toString() || founderSync.length > 0;
   const [yieldProof, setYieldProof] = useState<
     SnapshotProof | "loading" | "missing"
   >("loading");
@@ -728,7 +767,7 @@ function VaultCard({
         founderAccount: founderAta,
         paymentTokenProgram: payTokenProgram,
       });
-      return { instructions: [createAta, ix] };
+      return { instructions: [...founderSync, createAta, ix] };
     });
   }
 
