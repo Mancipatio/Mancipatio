@@ -25,6 +25,7 @@ import {
   prepareIssuerRecovery,
   signIssuerRecovery,
   submitIssuerRecovery,
+  recoveryPathFor,
 } from "@/lib/issuer-recovery";
 const issuer = address("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
   previousAuthority = address("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
@@ -214,5 +215,15 @@ describe("issuer recovery co-signing", () => {
     flag.state = { enabled: false, message: null };
     await submitIssuerRecovery(f.rpc, two);
     expect(f.sendTransaction).toHaveBeenCalledOnce();
+  });
+});
+
+describe("recoveryPathFor", () => {
+  it("sends only unused Pending / Rejected registrations down the instant two-signer path", () => {
+    expect(recoveryPathFor({ kybStatus: KybStatus.Pending, assetsCount: BigInt(0) })).toBe("registration");
+    expect(recoveryPathFor({ kybStatus: KybStatus.Rejected, assetsCount: 0 })).toBe("registration");
+    expect(recoveryPathFor({ kybStatus: KybStatus.Verified, assetsCount: BigInt(0) })).toBe("timelocked");
+    expect(recoveryPathFor({ kybStatus: KybStatus.Pending, assetsCount: BigInt(1) })).toBe("timelocked");
+    expect(recoveryPathFor({ kybStatus: KybStatus.Rejected, assetsCount: 3 })).toBe("timelocked");
   });
 });

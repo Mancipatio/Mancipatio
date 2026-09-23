@@ -724,6 +724,57 @@ pub mod asset_registry {
         instructions::handle_cancel_kyc_registry_authority_transfer(ctx)
     }
 
+    // ── Issuer authority rotation (2C-2) ─────────────────────────────────────
+
+    /// The current issuer authority proposes a new authority (regular rotation).
+    pub fn propose_issuer_authority(
+        ctx: Context<ProposeIssuerAuthority>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
+        instructions::handle_propose_issuer_authority(ctx, new_authority)
+    }
+
+    /// The proposed key accepts; the old grant's capabilities move to it.
+    pub fn accept_issuer_authority(ctx: Context<AcceptIssuerAuthority>) -> Result<()> {
+        instructions::handle_accept_issuer_authority(ctx)
+    }
+
+    /// The current issuer authority cancels a pending proposal.
+    pub fn cancel_issuer_authority_transfer(
+        ctx: Context<CancelIssuerAuthorityTransfer>,
+    ) -> Result<()> {
+        instructions::handle_cancel_issuer_authority_transfer(ctx)
+    }
+
+    /// The super admin proposes recovering a lost issuer key, executable after
+    /// a 7-day timelock.
+    pub fn propose_issuer_recovery(
+        ctx: Context<ProposeIssuerRecovery>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
+        instructions::handle_propose_issuer_recovery(ctx, new_authority)
+    }
+
+    /// The current issuer authority or the super admin cancels a recovery.
+    pub fn cancel_issuer_recovery(ctx: Context<CancelIssuerRecovery>) -> Result<()> {
+        instructions::handle_cancel_issuer_recovery(ctx)
+    }
+
+    /// The recovered key executes a recovery once its timelock has passed.
+    pub fn execute_issuer_recovery(ctx: Context<ExecuteIssuerRecovery>) -> Result<()> {
+        instructions::handle_execute_issuer_recovery(ctx)
+    }
+
+    /// Permissionless: copies the live issuer authority into `Sale.authority`.
+    pub fn sync_sale_authority(ctx: Context<SyncSaleAuthority>) -> Result<()> {
+        instructions::handle_sync_sale_authority(ctx)
+    }
+
+    /// Permissionless: copies the live issuer authority into `PayoutVault.founder`.
+    pub fn sync_payout_founder(ctx: Context<SyncPayoutFounder>) -> Result<()> {
+        instructions::handle_sync_payout_founder(ctx)
+    }
+
     /// The KYC registry authority replaces both jurisdiction bitmaps.
     pub fn update_kyc_registry_jurisdictions(
         ctx: Context<UpdateKycRegistryJurisdictions>,

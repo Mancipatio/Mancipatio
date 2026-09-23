@@ -23,6 +23,8 @@ import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { recordAudit } from "@/lib/supabase";
 import { IssuerPermissionsPanel } from "./issuer-permissions-panel";
+import { IssuerRecoveryPanel } from "./issuer-recovery-panel";
+import { recoveryPathFor } from "@/lib/issuer-recovery";
 import { RequireRole } from "@/components/require-role";
 import {
   getIssuerProfile,
@@ -259,6 +261,9 @@ function IssuersOps() {
       {selected && (
         <IssuerDetail
           issuer={selected}
+          otherAuthorities={(data?.issuers ?? [])
+            .filter((i) => i !== selected)
+            .map((i) => i.authority.toString())}
           onRefresh={refresh}
           onClose={() => setSelectedLegalId(null)}
         />
@@ -281,10 +286,13 @@ function IssuersOps() {
 
 function IssuerDetail({
   issuer,
+  otherAuthorities,
   onRefresh,
   onClose,
 }: {
   issuer: Issuer;
+  /** Authorities of every other issuer (a recovery key must not be one). */
+  otherAuthorities: readonly string[];
   onRefresh: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -571,8 +579,7 @@ function IssuerDetail({
       </div>
 
       {isSuperAdmin &&
-        issuer.assetsCount === BigInt(0) &&
-        (issuer.kybStatus === 0 || issuer.kybStatus === 2) && (
+        recoveryPathFor(issuer) === "registration" && (
           <a
             href="/issuer/recovery"
             className="mt-5 block rounded-lg border border-brand-200 bg-brand-50 p-3 text-sm font-semibold text-brand-900"
@@ -584,6 +591,14 @@ function IssuerDetail({
         <IssuerPermissionsPanel
           issuer={issuerPda}
           authority={issuer.authority}
+          canEdit={isSuperAdmin}
+        />
+      )}
+      {issuerPda && (
+        <IssuerRecoveryPanel
+          issuer={issuerPda}
+          authority={issuer.authority}
+          otherAuthorities={otherAuthorities}
           canEdit={isSuperAdmin}
         />
       )}

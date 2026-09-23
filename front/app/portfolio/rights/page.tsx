@@ -70,9 +70,14 @@ import {
 } from "@/lib/pdas";
 import { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { walletSigner } from "@/lib/wallet-signer";
+import { features } from "@/lib/features";
+import { issuerSyncInstructions, resolveIssuerChain } from "@/lib/issuer-authority";
+import type { Instruction } from "@solana/kit";
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
+
+const ISSUER_ROTATION = features().issuerRotation;
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -353,6 +358,11 @@ export default function MyRightsPage() {
 
   // Original investors may have sold every token. Keep every public vault
   // discoverable; the signed original proof determines actual entitlement.
+  // 2C-2: only an issuer's authority can be a vault's (rotated) founder.
+  const walletIsIssuer = useMemo(
+    () => !!wallet && !!data?.issuers.some((i) => i.authority.toString() === wallet.toString()),
+    [data, wallet],
+  );
   const myVaults = useMemo(() => {
     if (!vaults) return [];
     const out: Array<{ vault: PayoutVault; sc?: ShareClass; asset?: Asset }> =
@@ -435,6 +445,7 @@ export default function MyRightsPage() {
                     key={vault.sale.toString()}
                     vault={vault}
                     asset={asset}
+                    walletIsIssuer={walletIsIssuer}
                     onDone={refresh}
                   />
                 ))}
@@ -560,10 +571,14 @@ export default function MyRightsPage() {
 function VaultCard({
   vault,
   asset,
+  walletIsIssuer,
   onDone,
 }: {
   vault: PayoutVault;
   asset: Asset | undefined;
+  /** The wallet is SOME issuer's authority (indexer data): only then can it
+   *  be this vault's issuer key, so only then is the issuer chain read. */
+  walletIsIssuer: boolean;
   onDone: () => Promise<void>;
 }) {
   const conn = useWalletConnection();
@@ -572,7 +587,47 @@ function VaultCard({
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
 
-  const isFounder = wallet?.toString() === vault.founder.toString();
+  // 2C-2: after an issuer key rotation the vault still names the earlier
+  // key until `sync_payout_founder` runs. When this wallet is the issuer's
+  // CURRENT key, it is the founder in all but the snapshot: the founder
+  // actions below prepend the (permissionless) sync.
+  const [founderSync, setFounderSync] = useState<Instruction[]>([]);
+  const founder = vault.founder;
+  const shareClass = vault.shareClass;
+  const saleAddress = vault.sale;
+  useEffect(() => {
+    let cancelled = false;
+    // Three RPC reads per vault: skipped for every wallet that is no issuer
+    // (almost every investor), and keyed on the vault's fields, not the
+    // object a refresh() replaces.
+    if (!ISSUER_ROTATION || !walletIsIssuer || !wallet || wallet.toString() === founder.toString()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setFounderSync([]);
+      return;
+    }
+    void (async () => {
+      try {
+        const [chain, vaultPda] = await Promise.all([
+          resolveIssuerChain(client.runtime.rpc, shareClass),
+          payoutVaultPda(saleAddress),
+        ]);
+        if (cancelled || chain.issuerAuthority !== wallet.toString()) return;
+        setFounderSync(
+          issuerSyncInstructions({
+            issuer: chain.issuer,
+            issuerAuthority: chain.issuerAuthority,
+            vaults: [{ address: vaultPda, shareClass, asset: chain.asset, founder }],
+          }),
+        );
+      } catch {
+        // Not resolvable: this wallet simply is not the founder.
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, wallet, walletIsIssuer, founder, shareClass, saleAddress]);
+  const isFounder = wallet?.toString() === vault.founder.toString() || founderSync.length > 0;
   const [yieldProof, setYieldProof] = useState<
     SnapshotProof | "loading" | "missing"
   >("loading");
@@ -728,7 +783,7 @@ function VaultCard({
         founderAccount: founderAta,
         paymentTokenProgram: payTokenProgram,
       });
-      return { instructions: [createAta, ix] };
+      return { instructions: [...founderSync, createAta, ix] };
     });
   }
 

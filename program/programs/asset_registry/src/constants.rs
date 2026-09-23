@@ -184,6 +184,13 @@ pub const ISSUER_PERMISSION_METADATA: u8 = 2;
 pub const ISSUER_PERMISSION_CONVERSION: u8 = 4;
 pub const ISSUER_PERMISSIONS_ALL: u8 = 7;
 
+/// Timelocked issuer-authority recovery (2C-2): `["issuer_recovery", issuer]`.
+pub const ISSUER_RECOVERY_SEED: &[u8] = b"issuer_recovery";
+/// 7 days. Recovery executes at or after `eta = proposed_at + delay`.
+pub const ISSUER_RECOVERY_DELAY: i64 = 604_800;
+/// 14 days after `eta`. Past it, the recovery is expired and must be re-proposed.
+pub const ISSUER_RECOVERY_EXECUTION_WINDOW: i64 = 1_209_600;
+
 pub const DISTRIBUTION_PLAN_SEED: &[u8] = b"distribution_plan";
 pub const DISTRIBUTION_BATCH_SEED: &[u8] = b"distribution_batch";
 pub const DISTRIBUTION_STATE_VERSION: u8 = 2;

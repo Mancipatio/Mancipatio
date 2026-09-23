@@ -144,6 +144,8 @@ pub mod rotate_authority;
 pub use rotate_authority::*;
 pub mod kyc_registry_authority;
 pub use kyc_registry_authority::*;
+pub mod issuer_authority;
+pub use issuer_authority::*;
 pub mod update_kyc_registry_jurisdictions;
 pub use update_kyc_registry_jurisdictions::*;
 

@@ -37,6 +37,8 @@ import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
+import { features } from "@/lib/features";
+import { syncSaleIfNeeded } from "@/lib/issuer-authority";
 import { useChainClock } from "@/lib/use-chain-clock";
 import { ManualSaleApprovals } from "@/app/admin/applications/sale-approvals";
 
@@ -366,6 +368,16 @@ function SaleDetail({
         client.runtime.rpc,
         sale.paymentMint,
       );
+      // 2C-2: a sale opened under a previous issuer key still names it; copy
+      // the live key in first (atomic with the close below).
+      const syncIxs =
+        features().issuerRotation && sale.authority !== wallet
+          ? await syncSaleIfNeeded(client.runtime.rpc, {
+              address: salePda,
+              shareClass: sale.shareClass,
+              authority: sale.authority,
+            })
+          : [];
       const [destAta] = await findAssociatedTokenPda({
         owner: wallet,
         tokenProgram: paymentTokenProgram,
@@ -390,7 +402,7 @@ function SaleDetail({
         paymentTokenProgram: paymentTokenProgram,
       });
       const sig = await tx.send({
-        instructions: [createDestAtaIx, closeIx],
+        instructions: [...syncIxs, createDestAtaIx, closeIx],
         feePayer: signer,
       });
       toast.dismiss(pendingId);

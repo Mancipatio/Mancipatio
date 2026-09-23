@@ -19,6 +19,8 @@ import type { WalletSession } from "@solana/client";
 import { useToast } from "@/lib/toast";
 
 import { Kpi } from "@/components/kpi";
+import { IssuerRecoveryBanner } from "@/components/issuer-recovery-banner";
+import type { Address } from "@solana/kit";
 const KYB_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
   1: "bg-emerald-100 text-emerald-800 border-emerald-200",
@@ -181,6 +183,14 @@ export default function IssuerOverviewPage() {
             off-chain. We&apos;ll email you when status changes.
           </p>
         </div>
+      )}
+
+      {myIssuerPda && (
+        <IssuerRecoveryBanner
+          issuer={myIssuerPda as Address}
+          issuerAuthority={me.authority}
+          onChanged={refresh}
+        />
       )}
 
       {myIssuerPda && profileLoading && <SkeletonCard className="mt-6" rows={3} />}

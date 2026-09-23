@@ -200,6 +200,97 @@ pub fn require_issuer_permission(
     Ok(())
 }
 
+/// Closes a program-owned account in place: every lamport to `recipient`, then
+/// system-owned with zero data (the same close as the platform-admin rotation).
+pub fn close_program_account(account: &AccountInfo, recipient: &AccountInfo) -> Result<()> {
+    let refunded = recipient
+        .lamports()
+        .checked_add(account.lamports())
+        .ok_or(RegistryError::Overflow)?;
+    **recipient.try_borrow_mut_lamports()? = refunded;
+    **account.try_borrow_mut_lamports()? = 0;
+    account.assign(&anchor_lang::system_program::ID);
+    account.resize(0)?;
+    Ok(())
+}
+
+/// Reads and closes the `IssuerPermissions` record at `record` (the caller
+/// pins its address by seeds) when an issuer authority changes, so a grant can
+/// never come back to life on an A -> B -> A round trip. Returns `None` when no
+/// record exists; otherwise the record's `(capabilities, updated_by)` after
+/// checking owner, discriminator, issuer and authority. The rent goes to
+/// `refund_to`.
+pub fn take_old_grant(
+    record: &AccountInfo,
+    issuer: &Pubkey,
+    authority: &Pubkey,
+    refund_to: &AccountInfo,
+) -> Result<Option<(u8, Pubkey)>> {
+    if record.data_is_empty() {
+        return Ok(None);
+    }
+    require!(record.owner == &crate::ID, RegistryError::Unauthorized);
+    let grant = {
+        let data = record.try_borrow_data()?;
+        crate::state::IssuerPermissions::try_deserialize(&mut data.as_ref())
+            .map_err(|_| error!(RegistryError::Unauthorized))?
+    };
+    require!(
+        grant.issuer == *issuer && grant.authority == *authority,
+        RegistryError::Unauthorized
+    );
+    close_program_account(record, refund_to)?;
+    Ok(Some((grant.capabilities, grant.updated_by)))
+}
+
+/// Retires a pending `AuthorityTransfer` or `IssuerRecovery` of `issuer` at
+/// `record` (the caller pins its address by seeds) when the issuer authority
+/// changes by the OTHER path: its `current_authority` (byte 40 in both
+/// layouts) becomes the default key, which no issuer authority can equal, so
+/// an A -> B -> A round trip can never make it acceptable / executable again.
+/// Cancel still works and returns the rent. Returns whether a live-looking
+/// proposal was retired; a missing account is a no-op.
+pub fn retire_pending_proposal(
+    record: &AccountInfo,
+    issuer: &Pubkey,
+    discriminator: &[u8],
+) -> Result<bool> {
+    if record.data_is_empty() || record.owner != &crate::ID {
+        return Ok(false);
+    }
+    let mut data = record.try_borrow_mut_data()?;
+    require!(
+        data.len() >= 72 && data[..8] == *discriminator && data[8..40] == issuer.to_bytes(),
+        RegistryError::Unauthorized
+    );
+    if data[40..72].iter().all(|b| *b == 0) {
+        return Ok(false);
+    }
+    data[40..72].fill(0);
+    Ok(true)
+}
+
+/// Reads the parent key stored in the first field (byte 8) of a registry
+/// account without deserializing the rest, after checking its address, owner
+/// and discriminator. `ShareClass.asset` and `Asset.issuer` sit there in every
+/// layout version, so legacy v1 share classes read the same as v2 ones.
+pub fn read_parent_key(
+    account: &AccountInfo,
+    expected_key: &Pubkey,
+    discriminator: &[u8],
+) -> Result<Pubkey> {
+    require_keys_eq!(*account.key, *expected_key, RegistryError::Unauthorized);
+    require!(account.owner == &crate::ID, RegistryError::Unauthorized);
+    let data = account.try_borrow_data()?;
+    require!(
+        data.len() >= 40 && data[..8] == *discriminator,
+        RegistryError::Unauthorized
+    );
+    let mut parent = [0u8; 32];
+    parent.copy_from_slice(&data[8..40]);
+    Ok(Pubkey::new_from_array(parent))
+}
+
 /// Checks issuance before any CPI. Legacy optional-field padding must never
 /// be mistaken for an initialized v2 lifetime counter.
 pub fn next_issuance_supply(

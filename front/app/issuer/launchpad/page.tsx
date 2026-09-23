@@ -48,6 +48,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { upsertListing } from "@/lib/launchpad";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
+import { syncSaleIfNeeded } from "@/lib/issuer-authority";
 import {
   isApprovalLive,
   listIssuerSaleApprovals,
@@ -63,6 +64,7 @@ import {
  *  =true). With it off, a startup sale is neither opened nor closed into a
  *  payout vault from this page — proceeds stay in the program escrow. */
 const STARTUP_RAISES = features().startupRaises;
+const ISSUER_ROTATION = features().issuerRotation;
 
 const CLASS_TYPE = [
   "Common",
@@ -236,6 +238,16 @@ function LaunchpadInner() {
       const signer = walletSigner(conn.wallet);
       const salePda = await findSalePda(s.shareClass, s.saleId);
       const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(client.runtime.rpc, s.paymentMint);
+      // 2C-2: a sale opened under a previous issuer key still names it; copy
+      // the live key in first (atomic with the close below).
+      const syncIxs =
+        ISSUER_ROTATION && s.authority !== wallet
+          ? await syncSaleIfNeeded(client.runtime.rpc, {
+              address: salePda,
+              shareClass: s.shareClass,
+              authority: s.authority,
+            })
+          : [];
 
       if (isStartup) {
         // STARTUP raises do NOT sweep proceeds to the founder. Instead the
@@ -252,7 +264,7 @@ function LaunchpadInner() {
           metadataHash: new Uint8Array(32),
         });
         const sig = await tx.send({
-          instructions: [openVaultIx],
+          instructions: [...syncIxs, openVaultIx],
           feePayer: signer,
         });
         toast.dismiss(pendingId);
@@ -289,7 +301,7 @@ function LaunchpadInner() {
         paymentTokenProgram,
       });
       const sig = await tx.send({
-        instructions: [createDestAtaIx, closeIx],
+        instructions: [...syncIxs, createDestAtaIx, closeIx],
         feePayer: signer,
       });
       toast.dismiss(pendingId);

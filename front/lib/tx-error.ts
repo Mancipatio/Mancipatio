@@ -2,6 +2,10 @@ import {
   ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY,
   ASSET_REGISTRY_ERROR__INVALID_AUTHORITY_TRANSFER,
   ASSET_REGISTRY_ERROR__INVALID_DEPOSIT_AMOUNT,
+  ASSET_REGISTRY_ERROR__INVALID_ISSUER_RECOVERY,
+  ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED,
+  ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE,
+  ASSET_REGISTRY_ERROR__NOT_FOUNDER,
   ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY,
   ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS,
   ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY,
@@ -23,6 +27,7 @@ import {
   ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
   ASSET_REGISTRY_ERROR__VAULT_NOT_ACCEPTING_DEPOSITS,
 } from "@/lib/generated/asset_registry";
+import { features } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { MaintenanceModeError } from "@/lib/maintenance";
 
@@ -71,7 +76,7 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       ],
       [
         ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY,
-        "The new authority must be a different, non-default wallet (InvalidProposedAuthority).",
+        "The new authority must be a different, non-default wallet; an issuer key can only move onto a Manci admin wallet if it already is one (InvalidProposedAuthority).",
       ],
       [
         ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED,
@@ -157,6 +162,23 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
         ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY,
         "The sale must start before its approval expires (SaleStartsAfterApprovalExpiry).",
       ],
+      // 2C-2: issuer authority recovery and the payout-vault founder snapshot.
+      [
+        ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE,
+        "This issuer recovery is still inside its 7-day waiting period. It can be executed once the countdown ends (IssuerRecoveryTimelockActive).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED,
+        "The 14-day window to execute this issuer recovery has passed. The Super Admin must cancel it and propose it again (IssuerRecoveryExpired).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_ISSUER_RECOVERY,
+        "This issuer recovery no longer matches: the issuer key or the Super Admin changed since it was proposed, this wallet is not the proposed key, or the proposed key is a Manci admin wallet (a recovery never lands on one). Cancel it and propose again (InvalidIssuerRecovery).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__NOT_FOUNDER,
+        "This wallet is not the payout vault's founder. If the issuer key was rotated, sync the payout vault first (NotFounder).",
+      ],
     ] as const
   ).map(([code, hint]) => [`0x${code.toString(16)}`, hint]),
 );
@@ -179,6 +201,16 @@ export const KYC_REGISTRY_NOT_AUTHORITY_HINT =
   "This wallet is not the KYC registry's current authority (it may have been rotated).";
 /** accept/cancel with no staged transfer (AccountNotInitialized on `transfer`). */
 export const NO_PENDING_AUTHORITY_TRANSFER_HINT = "No pending authority transfer.";
+/**
+ * Unauthorized on `sale`: close_sale / open_payout_vault by a key that is not
+ * the sale's authority snapshot, but also buy / close / open-vault with an
+ * account that does not belong to the sale (has_one mint / proceeds /
+ * share_class), so the wording stays neutral.
+ */
+export const SALE_AUTHORITY_HINT =
+  "The sale refused this transaction: this wallet is not the sale's recorded authority, or an account passed does not belong to this sale (Unauthorized).";
+/** Added to SALE_AUTHORITY_HINT only while issuer rotation (and its sync UI) is on. */
+export const SALE_SYNC_SUFFIX = " If the issuer key was rotated, sync the sale first.";
 /** transfer_hook: Open mode named a registry (KycRegistryNotAllowed, 6016). */
 export const KYC_REGISTRY_NOT_ALLOWED_HINT =
   "An Open mint must not name a KYC registry — choose KYC-gated, or clear the registry (KycRegistryNotAllowed).";
@@ -200,6 +232,8 @@ function customErrorHint(text: string): string | null {
   // numbers with the other program, so these match Anchor's names too.
   if (/caused by account: kyc_registry\. Error Code: Unauthorized\b/.test(text)) return KYC_REGISTRY_NOT_AUTHORITY_HINT;
   if (/caused by account: transfer\. Error Code: AccountNotInitialized\b/.test(text)) return NO_PENDING_AUTHORITY_TRANSFER_HINT;
+  if (/caused by account: sale\. Error Code: Unauthorized\b/.test(text))
+    return SALE_AUTHORITY_HINT + (features().issuerRotation ? SALE_SYNC_SUFFIX : "");
   if (/Error Code: KycRegistryNotAllowed\b/.test(text)) return KYC_REGISTRY_NOT_ALLOWED_HINT;
   if (/Error Code: InvalidKycRegistry\b/.test(text)) return INVALID_KYC_REGISTRY_HINT;
   // open_sale without a usable approval: Anchor names the account; the bare
