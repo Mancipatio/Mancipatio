@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import nextConfig from "@/next.config";
+import config from "@/next.config";
 
 type Rule = { source: string; headers: { key: string; value: string }[] };
 
@@ -17,7 +17,9 @@ function headersFor(rules: Rule[], path: string): Record<string, string> {
 }
 
 describe("security headers", async () => {
-  const rules = (await nextConfig.headers!()) as Rule[];
+  // The default export is a phase function (the build-network guard only runs
+  // for production builds), so a dev-server phase returns the plain config.
+  const rules = (await config("phase-development-server").headers!()) as Rule[];
 
   it.each(["/", "/marketplace", "/api/health", "/account", "/api/account/profile"])("hardens %s", (path) => {
     expect(headersFor(rules, path)).toMatchObject({
