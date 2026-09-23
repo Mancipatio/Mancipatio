@@ -20,6 +20,19 @@ pub use state::*;
 
 declare_id!("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
 
+// Gated like the Anchor entrypoint: host test binaries link both programs'
+// rlibs (the hook as a `no-entrypoint` dev-dependency), and two exported
+// `SECURITY_TXT` symbols would collide.
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "Manci asset_registry",
+    project_url: "https://www.manci.io",
+    contacts: "email:security@mancipatio.io",
+    policy: "https://www.manci.io/security",
+    preferred_languages: "en",
+    source_code: "https://github.com/Mancipatio/Mancipatio"
+}
+
 #[program]
 pub mod asset_registry {
     use super::*;
