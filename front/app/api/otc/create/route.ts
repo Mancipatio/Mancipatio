@@ -2,15 +2,37 @@
 // Signed (SIWS). The signing wallet must be one of the two parties
 // (buyer-initiated OR seller-initiated — a listing owner may request escrow
 // against an interested buyer wallet), and requested_by is always stamped
-// with the VERIFIED wallet, never taken from the payload. The server also
-// re-checks the KYC gate (the requesting wallet must belong to a KYC-verified
-// client) — mirrors /api/delivery/create; the OTC settle leg is exempt from
-// the on-chain receiver-KYC hook via its EscrowMarker, so the platform must
-// vet the parties off-chain before the escrow exists.
+// with the VERIFIED wallet, never taken from the payload.
+//
+// NO KYC REQUIRED (product policy 2026-09-23): OTC trading does not require
+// identity verification — only conversion into company equity and physical
+// delivery do. This is safe for KycGated classes too: the escrow's
+// EscrowMarker only exempts the ROUTING legs from the transfer hook, and
+// asset_registry::settle_otc_deal re-derives the buyer's receiver KYC
+// on-chain (util::require_receiver_kyc), so a KycGated deal cannot settle
+// to a wallet without a valid passport whatever this route accepts.
+//
+// Compliance screen kept (refuseSuspendedClient): the platform mediates this
+// deal (an admin opens the escrow), so it refuses a request when EITHER
+// party's dossier has been SUSPENDED by compliance — a sanctions / fraud /
+// investigation decision, not missing KYC. The counterparty refusal is
+// generic and does not name the status. The screen is repeated right before
+// the escrow is opened (/api/otc/admin-screen, called by the admin OTC page),
+// because a party can be suspended while the request waits in the queue.
+//
+// On-chain request checks (now that any signing wallet may file a request,
+// not only a verified client): the share class must be the real ShareClass
+// behind `mint`, and the seller must hold at least `amount` units — so the
+// admin queue only receives deals that can actually be funded. Both fail
+// closed (503) on RPC trouble, as in /api/resell/create.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireVerifiedClient } from "@/lib/server/kyc-gate";
+import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
+import {
+  getToken2022Balance,
+  verifyShareClassMint,
+} from "@/lib/server/token-holdings";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 
@@ -20,10 +42,12 @@ export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "otc.create");
 
-    // Server-side KYC gate — requesting an OTC escrow is for onboarded,
-    // KYC-verified clients only.
+    // Compliance screen, not a KYC gate: no client profile or KYC is needed
+    // to request an escrow; only suspended dossiers are refused (both
+    // parties — see header). The counterparty check runs after the party
+    // validation below.
     const sb = getSupabaseAdmin();
-    await requireVerifiedClient(sb, wallet, "requesting an OTC escrow");
+    await refuseSuspendedClient(sb, wallet, "requesting an OTC escrow");
 
     const shareClassPda =
       typeof params.share_class_pda === "string" ? params.share_class_pda : "";
@@ -75,6 +99,32 @@ export async function POST(request: Request) {
     }
     if (expiresAt !== null && Number.isNaN(new Date(expiresAt).getTime())) {
       throw new SiwsError(400, "expires_at is not a valid timestamp");
+    }
+
+    // The other party of a platform-mediated deal gets the same suspension
+    // screen. Generic copy: the requester is not told the counterparty's
+    // compliance status.
+    const counterparty = wallet === sellerWallet ? buyerWallet : sellerWallet;
+    try {
+      await refuseSuspendedClient(sb, counterparty, "trading");
+    } catch (err) {
+      if (err instanceof SiwsError && err.status === 403) {
+        throw new SiwsError(
+          403,
+          "This OTC request cannot be accepted for the counterparty wallet — contact the compliance team.",
+        );
+      }
+      throw err;
+    }
+
+    // On-chain request checks (see header) — after the cheap DB screens.
+    await verifyShareClassMint(shareClassPda, mint);
+    const sellerBalance = await getToken2022Balance(sellerWallet, mint);
+    if (BigInt(amount) > sellerBalance) {
+      throw new SiwsError(
+        400,
+        "The seller wallet does not hold enough units of this token for this deal",
+      );
     }
 
     const { data, error } = await sb

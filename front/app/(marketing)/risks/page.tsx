@@ -83,12 +83,15 @@ export default function RisksPage() {
       </Section>
 
       <Section>
-        <SectionHead title="Delivery is limited to onboarded holders" />
+        <SectionHead title="Conversion and delivery require verification" />
         <Body className="mt-4">
-          Tokens are bearer instruments and transfer freely, but redeeming a
-          physical asset requires identity verification. A token can therefore
-          reach a wallet that cannot redeem it, and a buyer should check that
-          before buying.
+          Tokens are bearer instruments and, unless the class is KYC-gated,
+          can be bought and traded without identity verification, but
+          converting them into company shares or redeeming a physical asset
+          requires it. A token can therefore reach
+          a wallet that cannot convert or redeem it until its holder passes
+          verification, and a buyer who expects to convert or redeem should
+          check that they can before buying.
         </Body>
         <Body className="mt-3.5">
           Manci does not move the goods. Delivery is arranged with the

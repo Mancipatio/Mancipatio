@@ -29,9 +29,9 @@ const QUESTIONS = [
     link: "Find token documents",
   },
   {
-    question: "Why am I being asked to verify my wallet?",
+    question: "Do I need to verify my identity to buy tokens?",
     answer:
-      "The verification required depends on the action and the selected token. Review your status in Portfolio and use the security guide for the rules that apply.",
+      "No. Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good. The platform can make a class KYC-gated, for example at the issuer's request; buying or receiving that class requires an approved investor passport for the receiving wallet.",
     href: MX_ROUTES.security,
     link: "Verification and transfer rules",
   },

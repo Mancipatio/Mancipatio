@@ -29,6 +29,7 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { hookTransferMetas } from "@/lib/hook-metas";
 import { findOfferPda, findShareClassPda } from "@/lib/pdas";
 import {
+  adminScreenOtcRequest,
   adminUpdateOtcRequest,
   detectTokenProgram,
   listOtcRequests,
@@ -575,6 +576,23 @@ function OtcEscrowAdmin() {
         throw new Error(
           `Payment mint ${req.payment_mint} does not exist on this network.`,
         );
+      }
+      // Compliance re-screen BEFORE the deal exists. /api/otc/create refused
+      // a suspended party when the request was filed, but compliance may have
+      // suspended one since. Fails closed: if the screen cannot run, the
+      // throw lands in the catch below and no escrow is opened.
+      const screen = await adminScreenOtcRequest(conn.wallet, req.id);
+      if (!screen.cleared) {
+        const parties = [
+          screen.seller === "suspended" ? "seller" : null,
+          screen.buyer === "suspended" ? "buyer" : null,
+        ].filter(Boolean).join(" and ");
+        toast.dismiss(pendingId);
+        toast.showError(
+          "A party is suspended",
+          `The ${parties}'s client profile is suspended by compliance. Decline this request instead of opening an escrow.`,
+        );
+        return;
       }
       // Buyer eligibility BEFORE the deal exists.
       //

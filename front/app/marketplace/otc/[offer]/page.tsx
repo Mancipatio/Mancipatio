@@ -584,9 +584,10 @@ export default function TakeOfferPage({
 
           <p className="mb-6 max-w-2xl text-sm leading-relaxed text-mx-ink-soft">
             Filling this offer pays the maker the full price and releases the
-            escrowed share units to your wallet. Settlement runs through the
-            Manci transfer hook, so the issuer-set eligibility whitelist is
-            still enforced at the moment of transfer.
+            escrowed share units to your wallet. No identity verification is
+            needed to buy an Open class. If the class is KYC-gated, the program
+            checks your investor passport before it releases the units, and the
+            fill fails without one.
           </p>
 
           {/* Terms table */}

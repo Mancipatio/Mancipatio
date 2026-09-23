@@ -30,9 +30,11 @@ export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "conversion.create");
 
-    // Server-side KYC gate — the shared helper is fail-closed on duplicate
-    // client rows (a terminal suspended/rejected row wins over an older
-    // verified one), which an inline "oldest match wins" lookup was not.
+    // Server-side KYC gate — converting tokens into company equity is one of
+    // the two points where KYC is REQUIRED (policy 2026-09-23 — buying and
+    // trading are not). The shared helper is fail-closed on duplicate client
+    // rows (a terminal suspended/rejected row wins over an older verified
+    // one), which an inline "oldest match wins" lookup was not.
     const sb = getSupabaseAdmin();
     const { clientId } = await requireVerifiedClient(
       sb,

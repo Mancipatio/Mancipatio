@@ -133,6 +133,10 @@ const GUIDES: Record<string, ToolGuide> = {
     ],
     details: [
       {
+        title: "When verification is required",
+        body: "Buying and trading tokens does not require identity verification. Verification (KYC) is required when you convert tokens into company shares or take delivery of a physical good. The platform can make a class KYC-gated, for example at the issuer's request; buying or receiving that class then requires an approved investor passport for the receiving wallet.",
+      },
+      {
         title: "Before receiving units",
         body: "Check the class's compliance mode and your investor passport in Portfolio. For a KYC-gated class, approval, expiry and jurisdiction affect the receiving wallet's eligibility.",
       },
@@ -168,7 +172,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "Delivery requests",
-        body: "Delivery deposits tokens into escrow. A completed return releases the holder’s recorded deposit; confirmed delivery burns the units. A holder’s refund may complete while the vault still contains someone else’s surplus. Review the actual request and transaction state.",
+        body: "Requesting delivery requires identity verification (KYC). Delivery deposits tokens into escrow. A completed return releases the holder’s recorded deposit; confirmed delivery burns the units. A holder’s refund may complete while the vault still contains someone else’s surplus. Review the actual request and transaction state.",
       },
       {
         title: "Interrupted recording",
@@ -181,8 +185,9 @@ const GUIDES: Record<string, ToolGuide> = {
             <TextLink href="/portfolio/conversion">
               Conversion requests
             </TextLink>{" "}
-            track units escrowed for an off-chain conversion. They are returned
-            if cancelled and burned once the conversion is executed.
+            track units escrowed for an off-chain conversion into company
+            shares, which requires identity verification (KYC). They are
+            returned if cancelled and burned once the conversion is executed.
           </>
         ),
       },
@@ -196,7 +201,7 @@ const GUIDES: Record<string, ToolGuide> = {
     details: [
       {
         title: "Review the sale terms",
-        body: "Check the share class, payment token, price, remaining supply and current eligibility. Read the published whitepaper version and accept it before purchase; your signed purchase records that version and its file hash.",
+        body: "Check the share class, payment token, price and remaining supply. Buying needs no identity verification unless the class is KYC-gated, in which case your investor passport must be approved. Read the published whitepaper version and accept it before purchase; your signed purchase records that version and its file hash.",
       },
       {
         title: "Payment and proceeds",
@@ -230,7 +235,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "Settlement",
-        body: "Taking a funded offer exchanges the buyer's payment and escrowed units in one transaction. A maker can post without an existing counterparty; completion requires a buyer to accept the terms.",
+        body: "Taking a funded offer exchanges the buyer's payment and escrowed units in one transaction. A maker can post without an existing counterparty; completion requires a buyer to accept the terms. Neither side needs identity verification unless the class is KYC-gated, in which case the program checks the buyer's investor passport.",
       },
       {
         title: "Cancellation and expiry",
