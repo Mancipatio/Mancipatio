@@ -1,6 +1,8 @@
 import {
   ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY,
+  ASSET_REGISTRY_ERROR__INVALID_AUTHORITY_TRANSFER,
   ASSET_REGISTRY_ERROR__INVALID_DEPOSIT_AMOUNT,
+  ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY,
   ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS,
   ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY,
   ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL,
@@ -60,6 +62,17 @@ function gatherLogs(value: unknown, out: string[], depth = 0): void {
 const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
   (
     [
+      // 6112 / 6113: every propose / accept of an authority transfer (platform
+      // admin, custody vault, KYC registry). They are above every transfer-hook
+      // code (≤ 6016), so the hex cannot collide across programs.
+      [
+        ASSET_REGISTRY_ERROR__INVALID_AUTHORITY_TRANSFER,
+        "The pending transfer does not match: cancelled, replaced, or proposed to another wallet (InvalidAuthorityTransfer).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY,
+        "The new authority must be a different, non-default wallet (InvalidProposedAuthority).",
+      ],
       [
         ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED,
         "This sale's KYC proof accounts were missing from the transaction — reload the page and try again (KycProofRequired).",
@@ -161,10 +174,28 @@ export const SALE_APPROVAL_OTHER_ID_HINT = "This approval belongs to a different
 export const APPROVER_NOT_ADMIN_HINT =
   "The admin who approved this sale is no longer a Manci admin, so the approval cannot be used. Ask Manci to revoke it and approve the sale again.";
 
+/** approve/revoke/rotation/jurisdictions signed by a non-authority (Unauthorized on kyc_registry). */
+export const KYC_REGISTRY_NOT_AUTHORITY_HINT =
+  "This wallet is not the KYC registry's current authority (it may have been rotated).";
+/** accept/cancel with no staged transfer (AccountNotInitialized on `transfer`). */
+export const NO_PENDING_AUTHORITY_TRANSFER_HINT = "No pending authority transfer.";
+/** transfer_hook: Open mode named a registry (KycRegistryNotAllowed, 6016). */
+export const KYC_REGISTRY_NOT_ALLOWED_HINT =
+  "An Open mint must not name a KYC registry — choose KYC-gated, or clear the registry (KycRegistryNotAllowed).";
+/** transfer_hook: the named registry account is not a real/matching KycRegistry (InvalidKycRegistry, 6009). */
+export const INVALID_KYC_REGISTRY_HINT =
+  "The KYC registry account is not a Manci KycRegistry, or is not the registry named (InvalidKycRegistry).";
+
 function customErrorHint(text: string): string | null {
   // PlatformPaused is 6000 (0x1770) — the same number as the transfer hook's
   // first error — so match Anchor's error name, never the bare code.
   if (/Error Code: PlatformPaused\b/.test(text)) return PLATFORM_PAUSED_HINT;
+  // KYC registry (2C-1). Unauthorized (6001) and the hook's 6009 / 6016 share
+  // numbers with the other program, so these match Anchor's names too.
+  if (/caused by account: kyc_registry\. Error Code: Unauthorized\b/.test(text)) return KYC_REGISTRY_NOT_AUTHORITY_HINT;
+  if (/caused by account: transfer\. Error Code: AccountNotInitialized\b/.test(text)) return NO_PENDING_AUTHORITY_TRANSFER_HINT;
+  if (/Error Code: KycRegistryNotAllowed\b/.test(text)) return KYC_REGISTRY_NOT_ALLOWED_HINT;
+  if (/Error Code: InvalidKycRegistry\b/.test(text)) return INVALID_KYC_REGISTRY_HINT;
   // open_sale without a usable approval: Anchor names the account; the bare
   // codes (3012 / 2006) are shared by every account of every instruction.
   if (/caused by account: sale_approval\. Error Code: AccountNotInitialized\b/.test(text)) return NO_SALE_APPROVAL_HINT;

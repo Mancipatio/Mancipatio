@@ -25,13 +25,13 @@ describe("admin client detail — on-chain passport surface (§5)", () => {
 
   it("signs approve/revoke with the registry's own authority", () => {
     expect(page).not.toMatch(/registryAuthority:\s*wallet/);
-    expect(page.match(/^\s*registryAuthority,\s*$/gm)).toHaveLength(2);
+    expect(page.match(/^\s*registry: registryAddress,\s*$/gm)).toHaveLength(2);
   });
 
   it("gates issue/revoke on isKycProvider instead of the Super Admin role", () => {
     expect(page).not.toContain("isSuperAdmin");
     expect(page).not.toContain("useRole");
-    expect(page).toContain("if (!isKycProvider || !registryAuthority)");
+    expect(page).toContain("if (!isKycProvider || !registryAuthority || !registryAddress)");
     expect(page).toContain("client.wallet && isKycProvider && (");
   });
 });
@@ -83,5 +83,25 @@ describe("asset identity in links and keys (§6)", () => {
     const page = src("app/admin/assets/page.tsx");
     expect(page).toContain("key={assetPda ?? `${asset.issuer}:${asset.assetId}`}");
     expect(page).not.toContain("key={asset.assetId}");
+  });
+});
+
+describe("KYC registry by address (2C-1)", () => {
+  const read = (rel: string) => readFileSync(join(__dirname, "..", rel), "utf8");
+  it("/admin/kyc issues against the resolved registry address", () => {
+    const page = read("app/admin/kyc/page.tsx");
+    expect(page).toMatch(/buildIssuePassport\(\{[\s\S]*?registry: registryAddress,/);
+    expect(page).not.toMatch(/registryAuthority: registryAuthority as Address/);
+    expect(page).toContain("KycRegistryPanel");
+  });
+  it("share-classes passes the registry account to the hook update", () => {
+    const page = read("app/admin/share-classes/page.tsx");
+    expect(page).toContain("kycRegistryAccount: kycRegistry");
+    expect(page).toContain("ctx.pinnedMissing");
+  });
+  it("the registry panel is gated on on-chain roles, never on app roles", () => {
+    const panel = read("components/kyc-registry-panel.tsx");
+    expect(panel).toContain("kycRegistryActions(wallet, authority, state)");
+    expect(panel).not.toMatch(/isSuperAdmin|useRole/);
   });
 });

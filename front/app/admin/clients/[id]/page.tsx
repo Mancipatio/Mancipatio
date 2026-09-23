@@ -481,7 +481,7 @@ function ClientDetail({ id }: { id: string }) {
     }
     // Only the live registry authority can sign approve_holder; the Super
     // Admin role does not imply it (registry.authority is enforced on-chain).
-    if (!isKycProvider || !registryAuthority) {
+    if (!isKycProvider || !registryAuthority || !registryAddress) {
       toast.showError(
         "Not the KYC provider",
         registryAuthority
@@ -548,7 +548,7 @@ function ClientDetail({ id }: { id: string }) {
       );
       const ix = await buildIssuePassport({
         authoritySigner: signer,
-        registryAuthority,
+        registry: registryAddress,
         holder: client.wallet as Address,
         jurisdiction: jurisdictionCode,
         accreditationLevel,
@@ -625,7 +625,7 @@ function ClientDetail({ id }: { id: string }) {
       );
       return;
     }
-    if (!isKycProvider || !registryAuthority) {
+    if (!isKycProvider || !registryAuthority || !registryAddress) {
       toast.showError(
         "Not the KYC provider",
         registryAuthority
@@ -640,7 +640,7 @@ function ClientDetail({ id }: { id: string }) {
       const signer = walletSigner(conn.wallet);
       const ix = await buildRevokePassport({
         authoritySigner: signer,
-        registryAuthority,
+        registry: registryAddress,
         holder: client.wallet as Address,
       });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });

@@ -13,17 +13,30 @@
  * table (the table is not anon-readable — see 0031).
  */
 
-import { type Address, type TransactionSigner } from "@solana/kit";
+import {
+  getAddressEncoder,
+  getProgramDerivedAddress,
+  getUtf8Encoder,
+  type Address,
+  type TransactionSigner,
+} from "@solana/kit";
 import type { WalletSession } from "@solana/client";
 import {
+  ASSET_REGISTRY_PROGRAM_ADDRESS,
   findKycRegistryPda,
   findKycEntryPda,
+  getAcceptKycRegistryAuthorityInstructionAsync,
   getApproveHolderInstructionAsync,
+  getCancelKycRegistryAuthorityTransferInstructionAsync,
+  getProposeKycRegistryAuthorityInstructionAsync,
   getRevokeHolderInstructionAsync,
   getCreateKycRegistryInstructionAsync,
+  getUpdateKycRegistryJurisdictionsInstruction,
+  fetchMaybeAuthorityTransfer,
   fetchMaybeKycEntry,
   fetchMaybeKycRegistry,
   KycStatus,
+  type AuthorityTransfer,
   type KycEntry,
 } from "@/lib/generated/asset_registry";
 import {
@@ -41,8 +54,14 @@ export { KycStatus, type KycEntry };
 // ── PDA helpers ───────────────────────────────────────────────────────────────
 
 /**
- * Derive the KycRegistry PDA for a given platform authority wallet.
- * Seeds: ["kyc_registry", authority].
+ * The KycRegistry address a wallet would CREATE: seeds
+ * ["kyc_registry", creating authority].
+ *
+ * Use this ONLY for `create_kyc_registry` and to ask "is this wallet's seed
+ * slot the pinned registry?". A registry's authority can rotate while its
+ * address stays put, so never use this to find the registry a live
+ * authority controls. Pass the pinned / resolved registry address instead
+ * (lib/kyc-authority).
  */
 export async function getRegistryPda(authority: Address): Promise<Address> {
   const [pda] = await findKycRegistryPda({ authority });
@@ -64,14 +83,13 @@ export async function getEntryPda(
 // ── Instruction builders ──────────────────────────────────────────────────────
 
 export type BuildIssuePassportParams = {
-  /** Signer that owns the KycRegistry (platform admin wallet). */
+  /** The registry's CURRENT `authority` (the only key the program accepts). */
   authoritySigner: TransactionSigner;
   /**
-   * Address of the authority wallet that owns the registry.
-   * Used to derive the registry PDA when it is not provided explicitly.
-   * Must match authoritySigner.address.
+   * The registry ADDRESS (pinned / resolved, see lib/kyc-authority). It is
+   * never derived from the signer: after a rotation the two differ.
    */
-  registryAuthority: Address;
+  registry: Address;
   holder: Address;
   /** ISO numeric country code (u16). */
   jurisdiction: number;
@@ -86,18 +104,14 @@ export type BuildIssuePassportParams = {
 };
 
 /**
- * Build an `approve_holder` instruction.
- * The generated Async builder derives kycRegistry and kycEntry PDAs
- * automatically from authority + holder.
+ * Build an `approve_holder` instruction against the given registry address.
+ * The generated Async builder derives only the kycEntry PDA
+ * (["kyc", registry, holder]).
  */
 export async function buildIssuePassport(params: BuildIssuePassportParams) {
-  const [kycRegistry] = await findKycRegistryPda({
-    authority: params.registryAuthority,
-  });
-
   return getApproveHolderInstructionAsync({
     authority: params.authoritySigner,
-    kycRegistry,
+    kycRegistry: params.registry,
     holder: params.holder,
     jurisdiction: params.jurisdiction,
     accreditationLevel: params.accreditationLevel,
@@ -110,23 +124,114 @@ export async function buildIssuePassport(params: BuildIssuePassportParams) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 export type BuildRevokePassportParams = {
+  /** The registry's CURRENT `authority`. */
   authoritySigner: TransactionSigner;
-  registryAuthority: Address;
+  /** The registry ADDRESS (never derived from the signer). */
+  registry: Address;
   holder: Address;
 };
 
 /**
- * Build a `revoke_holder` instruction.
+ * Build a `revoke_holder` instruction against the given registry address.
  */
 export async function buildRevokePassport(params: BuildRevokePassportParams) {
-  const [kycRegistry] = await findKycRegistryPda({
-    authority: params.registryAuthority,
-  });
-
   return getRevokeHolderInstructionAsync({
     authority: params.authoritySigner,
-    kycRegistry,
+    kycRegistry: params.registry,
     holder: params.holder,
+  });
+}
+
+// ── Registry authority rotation + jurisdictions (2C-1) ──────────────────────
+
+/**
+ * The registry's staged authority transfer: ["authority_transfer", registry].
+ * Hand-written on purpose. Codama names this PDA per instruction because the
+ * `transfer` seed collides across targets, so those generated names are not
+ * a stable import.
+ */
+export async function findKycRegistryTransferPda(registry: Address): Promise<Address> {
+  const [pda] = await getProgramDerivedAddress({
+    programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+    seeds: [
+      getUtf8Encoder().encode("authority_transfer"),
+      getAddressEncoder().encode(registry),
+    ],
+  });
+  return pda;
+}
+
+/** The pending registry authority transfer, or null when none is staged. */
+export async function fetchPendingKycAuthorityTransfer(
+  rpc: Parameters<typeof fetchMaybeAuthorityTransfer>[0],
+  registry: Address,
+): Promise<AuthorityTransfer | null> {
+  const pda = await findKycRegistryTransferPda(registry);
+  const maybe = await fetchMaybeAuthorityTransfer(rpc, pda, { commitment: "confirmed" });
+  return maybe.exists && maybe.data.target === registry ? maybe.data : null;
+}
+
+/** `propose_kyc_registry_authority`: the CURRENT authority stages `newAuthority`. */
+export async function buildProposeKycAuthority(params: {
+  authoritySigner: TransactionSigner;
+  registry: Address;
+  newAuthority: Address;
+}) {
+  return getProposeKycRegistryAuthorityInstructionAsync({
+    authority: params.authoritySigner,
+    kycRegistry: params.registry,
+    transfer: await findKycRegistryTransferPda(params.registry),
+    newAuthority: params.newAuthority,
+  });
+}
+
+/** `accept_kyc_registry_authority`: signed by the PROPOSED authority. */
+export async function buildAcceptKycAuthority(params: {
+  newAuthoritySigner: TransactionSigner;
+  registry: Address;
+}) {
+  return getAcceptKycRegistryAuthorityInstructionAsync({
+    newAuthority: params.newAuthoritySigner,
+    kycRegistry: params.registry,
+    transfer: await findKycRegistryTransferPda(params.registry),
+  });
+}
+
+/** `cancel_kyc_registry_authority_transfer`: the CURRENT authority withdraws it. */
+export async function buildCancelKycAuthorityTransfer(params: {
+  authoritySigner: TransactionSigner;
+  registry: Address;
+}) {
+  return getCancelKycRegistryAuthorityTransferInstructionAsync({
+    authority: params.authoritySigner,
+    kycRegistry: params.registry,
+    transfer: await findKycRegistryTransferPda(params.registry),
+  });
+}
+
+/**
+ * `update_kyc_registry_jurisdictions` replaces BOTH 128-byte bitmaps whole.
+ * The change is live at once on every KycGated mint that names this
+ * registry. Blocked wins over approved, and an all-zero approved map freezes
+ * every KycGated receiver.
+ */
+export async function buildUpdateRegistryJurisdictions(params: {
+  authoritySigner: TransactionSigner;
+  registry: Address;
+  approvedJurisdictions: Uint8Array;
+  blockedJurisdictions: Uint8Array;
+}) {
+  if (
+    params.approvedJurisdictions.length !== JURISDICTION_BITMAP_BYTES ||
+    params.blockedJurisdictions.length !== JURISDICTION_BITMAP_BYTES
+  ) {
+    throw new Error(`Jurisdiction bitmaps must be ${JURISDICTION_BITMAP_BYTES} bytes`);
+  }
+  return getUpdateKycRegistryJurisdictionsInstruction({
+    authority: params.authoritySigner,
+    kycRegistry: params.registry,
+    approvedJurisdictions: params.approvedJurisdictions,
+    blockedJurisdictions: params.blockedJurisdictions,
   });
 }
 

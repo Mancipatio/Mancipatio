@@ -68,6 +68,9 @@ vi.mock("@/lib/kyc-authority", async (importOriginal) => {
       chain.registryAuthority
         ? [{ address: "registry-pda", registry: { authority: chain.registryAuthority } }]
         : [],
+    // The gate re-reads the chosen registry at "finalized" (2C-1).
+    fetchKycRegistryAt: async (_rpc: unknown, address: string) =>
+      chain.registryAuthority ? { address, registry: { authority: chain.registryAuthority } } : null,
   };
 });
 vi.mock("@/lib/server/email", () => ({

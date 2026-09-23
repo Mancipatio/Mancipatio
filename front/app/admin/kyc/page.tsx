@@ -17,10 +17,13 @@ import { Kpi } from "@/components/kpi";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ClawbackPanel } from "./clawback-panel";
+import { KycRegistryPanel } from "@/components/kyc-registry-panel";
+import { JurisdictionSelector } from "@/components/jurisdiction-selector";
+import { toggleJurisdiction } from "@/lib/kyc-registry-rotation";
 import { useRole } from "@/lib/auth";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
-import { COUNTRIES, countryName, type Country } from "@/lib/countries";
+import { countryName } from "@/lib/countries";
 import {
   DEFAULT_APPROVED_JURISDICTIONS,
   buildCreateRegistry,
@@ -109,6 +112,7 @@ export default function KycPage() {
         <KycRegistryBootstrap />
       </RequireRole>
       <RequireRole role="admin">
+        <KycRegistryAuthorityCard />
         <PassportRequests />
         <KycOps />
         <ClawbackPanel />
@@ -127,6 +131,7 @@ type RegistryState =
       pda: Address;
       authority: Address;
       platformAdmin: Address | null;
+      registry: KycRegistry;
     }
   | { status: "missing"; pda: Address }
   | { status: "error"; message: string };
@@ -145,7 +150,6 @@ function KycRegistryBootstrap() {
   );
   const [blockedCodes, setBlockedCodes] = useState<Set<string>>(new Set());
   const [showSelector, setShowSelector] = useState(false);
-  const [countryFilter, setCountryFilter] = useState("");
 
   const refreshRegistry = useCallback(async (afterCreate = false) => {
     if (!wallet) {
@@ -168,7 +172,20 @@ function KycRegistryBootstrap() {
           pda: ctx.registry.address,
           authority: ctx.registry.registry.authority,
           platformAdmin: ctx.platformAdmin,
+          registry: ctx.registry.registry,
         });
+      } else if (ctx.pinnedMissing && ctx.pinned) {
+        // Fail closed: never offer Create for some OTHER address. Only the
+        // wallet whose seed slot IS the pinned address may create it.
+        const pda = await getRegistryPda(wallet as Address);
+        if (pda === ctx.pinned) {
+          setRegistryState({ status: "missing", pda });
+        } else {
+          setRegistryState({
+            status: "error",
+            message: `Pinned registry ${ctx.pinned} not found on ${detectNetwork()}. Check NEXT_PUBLIC_KYC_REGISTRY, or connect the wallet that creates it.`,
+          });
+        }
       } else if (ctx.ambiguous) {
         setRegistryState({
           status: "error",
@@ -226,49 +243,10 @@ function KycRegistryBootstrap() {
   }
 
   function toggleCode(code: string, target: "approved" | "blocked") {
-    if (target === "approved") {
-      setApprovedCodes((prev) => {
-        const next = new Set(prev);
-        if (next.has(code)) next.delete(code);
-        else {
-          next.add(code);
-          // Remove from blocked if added to approved
-          setBlockedCodes((b) => {
-            const nb = new Set(b);
-            nb.delete(code);
-            return nb;
-          });
-        }
-        return next;
-      });
-    } else {
-      setBlockedCodes((prev) => {
-        const next = new Set(prev);
-        if (next.has(code)) next.delete(code);
-        else {
-          next.add(code);
-          // Remove from approved if added to blocked
-          setApprovedCodes((a) => {
-            const na = new Set(a);
-            na.delete(code);
-            return na;
-          });
-        }
-        return next;
-      });
-    }
+    const next = toggleJurisdiction(approvedCodes, blockedCodes, code, target);
+    setApprovedCodes(next.approved);
+    setBlockedCodes(next.blocked);
   }
-
-  const filteredCountries: Country[] = useMemo(() => {
-    const q = countryFilter.trim().toLowerCase();
-    if (!q) return COUNTRIES;
-    return COUNTRIES.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.alpha2.toLowerCase().includes(q) ||
-        c.code.includes(q),
-    );
-  }, [countryFilter]);
 
   // jurisdictionBitmap SILENTLY drops codes outside the on-chain bitmap
   // (128 bytes = codes 0–1023). Every assigned ISO-3166-1 numeric code fits
@@ -346,13 +324,15 @@ function KycRegistryBootstrap() {
                     not by the current Super Admin. rotate_authority closed the
                     old Admin record, so the provider key can only reach this
                     queue and the client detail pages once the new Super Admin
-                    re-adds it via add_admin on /admin/roles — the program has
-                    no instruction to move the registry authority itself.
+                    re-adds it via add_admin on /admin/roles. The registry
+                    authority itself moves only through the propose/accept
+                    rotation below.
                   </p>
                 )}
             </div>
           </div>
         )}
+
         {registryState.status === "missing" && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
             <p className="text-sm font-semibold text-amber-900">
@@ -433,60 +413,11 @@ function KycRegistryBootstrap() {
           )}
 
           {showSelector && (
-            <div className="rounded-lg border border-slate-200 bg-white p-4">
-              <input
-                value={countryFilter}
-                onChange={(e) => setCountryFilter(e.target.value)}
-                placeholder="Filter countries…"
-                className="mb-3 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm focus:border-slate-400 focus:outline-none"
-              />
-              <div className="max-h-56 overflow-y-auto">
-                <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-white text-left text-[10px] uppercase tracking-wider text-slate-500">
-                    <tr>
-                      <th className="pb-1 pr-3 font-medium">Country</th>
-                      <th className="pb-1 pr-3 font-medium">Code</th>
-                      <th className="pb-1 pr-3 font-medium text-center">Approved</th>
-                      <th className="pb-1 font-medium text-center">Blocked</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {filteredCountries.map((c) => (
-                      <tr key={c.code} className="text-slate-700">
-                        <td className="py-1 pr-3">
-                          {c.alpha2} {c.name}
-                        </td>
-                        <td className="py-1 pr-3 font-mono">
-                          {c.code}
-                          {!isJurisdictionRepresentable(parseInt(c.code, 10)) && (
-                            <span
-                              className="ml-1 text-[10px] font-semibold text-amber-600"
-                              title="Code ≥ 1024 — cannot be encoded in the 128-byte on-chain bitmap; the program silently drops it"
-                            >
-                              ≥1024
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-1 pr-3 text-center">
-                          <input
-                            type="checkbox"
-                            checked={approvedCodes.has(c.code)}
-                            onChange={() => toggleCode(c.code, "approved")}
-                          />
-                        </td>
-                        <td className="py-1 text-center">
-                          <input
-                            type="checkbox"
-                            checked={blockedCodes.has(c.code)}
-                            onChange={() => toggleCode(c.code, "blocked")}
-                          />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <JurisdictionSelector
+              approved={approvedCodes}
+              blocked={blockedCodes}
+              onToggle={toggleCode}
+            />
           )}
 
           <button
@@ -502,6 +433,48 @@ function KycRegistryBootstrap() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── KYC registry authority + jurisdictions (2C-1) ─────────────────────────────
+
+/**
+ * Rendered for every Admin, not just the Super Admin: the registry authority
+ * (e.g. a separate compliance key) acts here, and the panel gates each action
+ * on on-chain state only (registry.authority / the staged new_authority).
+ */
+function KycRegistryAuthorityCard() {
+  const client = useSolanaClient();
+  const [record, setRecord] = useState<{ address: Address; registry: KycRegistry } | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const ctx = await loadKycAuthorityContext(client.runtime.rpc, { fresh: true });
+      setRecord(ctx.registry);
+    } catch (err) {
+      console.warn("[admin/kyc] registry load failed:", err);
+      setRecord(null);
+    }
+  }, [client]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
+  if (!record) return null;
+  return (
+    <div className="mt-8 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+        On-chain · KYC registry authority
+      </p>
+      <h2 className="mt-0.5 text-base font-semibold text-slate-900">
+        Registry authority and jurisdictions
+      </h2>
+      <KycRegistryPanel
+        key={`${record.address}:${record.registry.authority}`}
+        registryAddress={record.address}
+        registry={record.registry}
+        onChanged={load}
+      />
     </div>
   );
 }
@@ -598,6 +571,9 @@ function PassportRequests() {
   // Live registry authority — the only key allowed to issue passports. It is
   // resolved from the registry account itself, never from Platform.admin.
   const [registryAuthority, setRegistryAuthority] = useState<Address | null>(null);
+  // The live registry's ADDRESS (pinned / resolved). approve_holder targets
+  // it directly: after a rotation it is not derivable from the authority.
+  const [registryAddress, setRegistryAddress] = useState<Address | null>(null);
   const [platformAdmin, setPlatformAdmin] = useState<Address | null>(null);
   const { isKycProvider } = kycGates(wallet, registryAuthority, platformAdmin);
   const [blockedWallets, setBlockedWallets] = useState<Set<string> | null>(null);
@@ -668,10 +644,12 @@ function PassportRequests() {
       setPlatformAdmin(ctx.platformAdmin);
       setRegistry(ctx.registry?.registry ?? null);
       setRegistryAuthority(ctx.registry?.registry.authority ?? null);
+      setRegistryAddress(ctx.registry?.address ?? null);
     } catch (err) {
       console.warn("[admin/kyc] registry load failed:", err);
       setRegistry(null);
       setRegistryAuthority(null);
+      setRegistryAddress(null);
       setPlatformAdmin(null);
     }
     try {
@@ -759,7 +737,7 @@ function PassportRequests() {
   }
 
   async function issueFromRequest(req: PassportRequest, reason: string) {
-    if (!isKycProvider || !registryAuthority) {
+    if (!isKycProvider || !registryAuthority || !registryAddress) {
       toast.showError(
         "Not the KYC provider",
         "Only the registry authority wallet can issue passports.",
@@ -805,7 +783,7 @@ function PassportRequests() {
       );
       const ix = await buildIssuePassport({
         authoritySigner: signer,
-        registryAuthority: registryAuthority as Address,
+        registry: registryAddress,
         holder: req.wallet as Address,
         jurisdiction: req.jurisdiction ?? 0,
         accreditationLevel: 0,

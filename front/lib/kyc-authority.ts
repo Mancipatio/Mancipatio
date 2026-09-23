@@ -1,13 +1,25 @@
-// KYC provider vs. platform admin — two separate on-chain roles.
+// KYC provider vs. platform admin: two separate on-chain roles.
 //
-// The program seeds the KycRegistry PDA with the *original* provider key and
-// gates approve/revoke on `registry.authority`. `Platform.admin` (super admin)
-// is a different role: rotating the platform admin does not move the registry
-// and does not grant the new admin any passport rights. The UI must therefore
-// resolve the live registry by scanning for KycRegistry accounts, never by
-// deriving it from the current platform admin, and must gate KYC-provider
-// actions on `registry.authority` only.
-import { getBase58Decoder, type Address, type Base58EncodedBytes } from "@solana/kit";
+// A KycRegistry's ADDRESS is fixed at creation (`["kyc_registry", creating
+// authority]`). Its `authority` rotates (propose/accept) and gates
+// approve/revoke/jurisdictions. `Platform.admin` (super admin) is a different
+// role. Rotating either one never moves the registry and never grants the
+// other role anything, so the registry is never derived from a live key:
+//
+// 1. The deployment PINS it by address (`NEXT_PUBLIC_KYC_REGISTRY`, see
+//    lib/kyc-registry-pin). A pin wins and is read directly, with no scan.
+//    A pin that is missing on-chain is reported as `pinnedMissing` and is
+//    never replaced by the heuristic (fail closed).
+// 2. With no pin, the legacy heuristic scans for KycRegistry accounts and
+//    picks one (see selectKycRegistry).
+//
+// KYC-provider actions are gated on the live `registry.authority` only.
+import {
+  fetchEncodedAccount,
+  getBase58Decoder,
+  type Address,
+  type Base58EncodedBytes,
+} from "@solana/kit";
 import type { SolanaClient } from "@solana/client";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
@@ -15,8 +27,10 @@ import {
   findPlatformPda,
   getKycRegistryDecoder,
   getKycRegistryDiscriminatorBytes,
+  getKycRegistrySize,
   type KycRegistry,
 } from "@/lib/generated/asset_registry";
+import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
 
 type Rpc = SolanaClient["runtime"]["rpc"];
 
@@ -27,36 +41,59 @@ export type KycAuthorityContext = {
   platformAdmin: Address | null;
   /** The live KYC registry, or null when none exists / none can be chosen. */
   registry: KycRegistryRecord | null;
-  /** Every registry found on-chain (normally 0 or 1). */
+  /** Every registry found on-chain (normally 0 or 1; only the pin when pinned). */
   registries: KycRegistryRecord[];
   /** True when more than one registry exists and none could be selected. */
   ambiguous: boolean;
+  /** The configured `NEXT_PUBLIC_KYC_REGISTRY` pin, or null when unset. */
+  pinned: Address | null;
+  /** A pin is configured but no KycRegistry exists at it on this network. */
+  pinnedMissing: boolean;
+};
+
+export type KycRegistrySelection = {
+  registry: KycRegistryRecord | null;
+  ambiguous: boolean;
+  pinnedMissing: boolean;
 };
 
 /**
- * Pick the live registry from the on-chain set. Preference order:
+ * Picks the live registry from the on-chain set.
+ *
+ * With a PIN (`NEXT_PUBLIC_KYC_REGISTRY`), this returns the registry at that
+ * address, or `pinnedMissing` when it is absent. It never falls back to the
+ * heuristic.
+ *
+ * Without a pin (legacy heuristic), the preference order is:
  * 1. the registry whose authority is the current platform admin (bootstrap
- *    case — provider and admin are the same key);
+ *    case: provider and admin are the same key);
  * 2. the only registry that exists (post-rotation case);
  * 3. otherwise the choice is ambiguous and the UI must say so.
  *
- * Known limitation: the program also allows issuer-specific stricter
- * registries (`create_kyc_registry` doc, `Asset.extra_kyc_registry`), each
- * admin co-signed. No UI creates those today; if one ever exists before the
- * global registry is bootstrapped, rule 2 would pick it and the bootstrap
- * card would hide the Create form. Once such registries are supported, prefer
- * the registry referenced by the KycGated transfer-hook configs instead.
+ * The heuristic has known limits. The program also allows issuer-specific,
+ * stricter registries (`create_kyc_registry` doc, `Asset.extra_kyc_registry`),
+ * each co-signed by an admin, and a rotated registry no longer matches any
+ * seed. Every deployment should pin the platform registry.
  */
 export function selectKycRegistry(
   registries: readonly KycRegistryRecord[],
   platformAdmin: Address | string | null,
-): { registry: KycRegistryRecord | null; ambiguous: boolean } {
-  if (registries.length === 0) return { registry: null, ambiguous: false };
+  pinned: Address | string | null = null,
+): KycRegistrySelection {
+  if (pinned !== null) {
+    const hit = registries.find((r) => r.address.toString() === pinned.toString());
+    return hit
+      ? { registry: hit, ambiguous: false, pinnedMissing: false }
+      : { registry: null, ambiguous: false, pinnedMissing: true };
+  }
+  if (registries.length === 0) return { registry: null, ambiguous: false, pinnedMissing: false };
   const admin = platformAdmin?.toString() ?? null;
   const byAdmin = registries.find((r) => r.registry.authority.toString() === admin);
-  if (byAdmin) return { registry: byAdmin, ambiguous: false };
-  if (registries.length === 1) return { registry: registries[0], ambiguous: false };
-  return { registry: null, ambiguous: true };
+  if (byAdmin) return { registry: byAdmin, ambiguous: false, pinnedMissing: false };
+  if (registries.length === 1) {
+    return { registry: registries[0], ambiguous: false, pinnedMissing: false };
+  }
+  return { registry: null, ambiguous: true, pinnedMissing: false };
 }
 
 export type KycGates = {
@@ -116,45 +153,91 @@ export async function listKycRegistries(rpc: Rpc): Promise<KycRegistryRecord[]> 
   return out;
 }
 
-async function fetchKycAuthorityContext(rpc: Rpc): Promise<KycAuthorityContext> {
+/**
+ * Reads ONE registry by address (the pinned path, with no program scan).
+ * Returns null when nothing exists there. Throws when the account exists but
+ * is not a KycRegistry (wrong owner, discriminator or length), so a mistyped
+ * pin fails loudly instead of resolving to some other account.
+ */
+export async function fetchKycRegistryAt(
+  rpc: Rpc,
+  registryAddress: Address,
+  commitment: "confirmed" | "finalized" = "confirmed",
+): Promise<KycRegistryRecord | null> {
+  const account = await fetchEncodedAccount(
+    rpc as unknown as Parameters<typeof fetchEncodedAccount>[0],
+    registryAddress,
+    { commitment, abortSignal: AbortSignal.timeout(10_000) },
+  );
+  if (!account.exists) return null;
+  if (account.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) {
+    throw new Error(`KYC registry ${registryAddress} is not owned by asset_registry`);
+  }
+  const disc = getKycRegistryDiscriminatorBytes();
+  const bytes = account.data;
+  if (bytes.length < getKycRegistrySize() || !disc.every((b, i) => b === bytes[i])) {
+    throw new Error(`Account ${registryAddress} is not a KycRegistry`);
+  }
+  return { address: registryAddress, registry: getKycRegistryDecoder().decode(bytes) };
+}
+
+async function fetchKycAuthorityContext(
+  rpc: Rpc,
+  pinned: Address | null,
+): Promise<KycAuthorityContext> {
   const [platformPda] = await findPlatformPda();
   const platform = await fetchMaybePlatform(rpc, platformPda);
   const platformAdmin = platform.exists ? platform.data.admin : null;
-  const registries = await listKycRegistries(rpc);
-  const { registry, ambiguous } = selectKycRegistry(registries, platformAdmin);
-  return { platformAdmin, registry, registries, ambiguous };
+  let registries: KycRegistryRecord[];
+  if (pinned) {
+    const one = await fetchKycRegistryAt(rpc, pinned);
+    registries = one ? [one] : [];
+  } else {
+    registries = await listKycRegistries(rpc);
+  }
+  const { registry, ambiguous, pinnedMissing } = selectKycRegistry(
+    registries,
+    platformAdmin,
+    pinned,
+  );
+  return { platformAdmin, registry, registries, ambiguous, pinned, pinnedMissing };
 }
 
-/** How long a resolved context is reused before the chain is scanned again. */
+/** How long a resolved context is reused before the chain is read again. */
 export const KYC_AUTHORITY_CACHE_TTL_MS = 30_000;
 
-type CacheEntry = { at: number; promise: Promise<KycAuthorityContext> };
+type CacheEntry = { at: number; pinned: Address | null; promise: Promise<KycAuthorityContext> };
 // Keyed by the rpc object so every page sharing one Solana client shares one
-// scan; a failed scan is evicted so the next caller retries.
+// read; a failed read is evicted so the next caller retries.
 const contextCache = new WeakMap<object, CacheEntry>();
 
-/** Drop the cached context (e.g. right after the registry was created). */
+/** Drop the cached context (e.g. right after the registry was created or rotated). */
 export function invalidateKycAuthorityContext(rpc: Rpc): void {
   contextCache.delete(rpc as object);
 }
 
 /**
- * Load platform admin + live registry, keeping the two roles separate.
+ * Loads the platform admin and the live registry, keeping the two roles
+ * separate.
  *
- * The registry scan is a `getProgramAccounts` call, so the result is cached
- * per rpc for KYC_AUTHORITY_CACHE_TTL_MS and concurrent callers share one
- * in-flight request. Pass `fresh: true` to bypass the cache (after a write).
+ * The result is cached per rpc for KYC_AUTHORITY_CACHE_TTL_MS, and concurrent
+ * callers share one in-flight request. Pass `fresh: true` to bypass the cache
+ * (after a write). `pinned` defaults to the deployment's
+ * `NEXT_PUBLIC_KYC_REGISTRY`. An invalid pin rejects (fail closed).
  */
 export async function loadKycAuthorityContext(
   rpc: Rpc,
-  opts: { fresh?: boolean; now?: () => number } = {},
+  opts: { fresh?: boolean; now?: () => number; pinned?: Address | null } = {},
 ): Promise<KycAuthorityContext> {
+  const pinned = opts.pinned !== undefined ? opts.pinned : configuredKycRegistry();
   const now = opts.now ?? Date.now;
   const key = rpc as object;
   const hit = contextCache.get(key);
-  if (!opts.fresh && hit && now() - hit.at < KYC_AUTHORITY_CACHE_TTL_MS) return hit.promise;
-  const promise = fetchKycAuthorityContext(rpc);
-  contextCache.set(key, { at: now(), promise });
+  if (!opts.fresh && hit && hit.pinned === pinned && now() - hit.at < KYC_AUTHORITY_CACHE_TTL_MS) {
+    return hit.promise;
+  }
+  const promise = fetchKycAuthorityContext(rpc, pinned);
+  contextCache.set(key, { at: now(), pinned, promise });
   try {
     return await promise;
   } catch (err) {
@@ -164,29 +247,35 @@ export async function loadKycAuthorityContext(
 }
 
 /**
- * Poll (fresh scans) until a registry is visible or the attempts run out —
- * used right after `create_kyc_registry` so a lagging RPC node does not make
- * the bootstrap card fall back to the Create form.
+ * Polls (fresh reads) until a registry is visible or the attempts run out.
+ * Used right after `create_kyc_registry`, so that a lagging RPC node does not
+ * make the bootstrap card fall back to the Create form.
  */
 export async function waitForKycRegistry(
   rpc: Rpc,
-  opts: { attempts?: number; delayMs?: number; sleep?: (ms: number) => Promise<void> } = {},
+  opts: {
+    attempts?: number;
+    delayMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+    pinned?: Address | null;
+  } = {},
 ): Promise<KycAuthorityContext> {
   const attempts = opts.attempts ?? 6;
   const delayMs = opts.delayMs ?? 2_000;
   const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
-  let ctx = await loadKycAuthorityContext(rpc, { fresh: true });
+  const load = () => loadKycAuthorityContext(rpc, { fresh: true, pinned: opts.pinned });
+  let ctx = await load();
   for (let i = 1; i < attempts && !ctx.registry && !ctx.ambiguous; i++) {
     await sleep(delayMs);
-    ctx = await loadKycAuthorityContext(rpc, { fresh: true });
+    ctx = await load();
   }
   return ctx;
 }
 
 export type PassportAuthority = {
-  /** PDA of the live registry every passport op must target (null = none). */
+  /** Address of the live registry every passport op must target (null = none). */
   registryAddress: Address | null;
-  /** Live `KycRegistry.authority` — the only key that may issue/revoke. */
+  /** Live `KycRegistry.authority`, the only key that may issue/revoke. */
   registryAuthority: Address | null;
   platformAdmin: Address | null;
   /** Connected wallet equals `registryAuthority`. */
@@ -194,13 +283,16 @@ export type PassportAuthority = {
   /** Connected wallet equals `Platform.admin` (never implies isKycProvider). */
   isPlatformAdmin: boolean;
   ambiguous: boolean;
+  /** A pin is configured but its registry does not exist on this network. */
+  pinnedMissing: boolean;
 };
 
 /**
  * What a passport surface (issue/revoke panel) may do with the connected
- * wallet. The registry PDA and signer authority come from the live registry —
- * never from the wallet or `Platform.admin` — so after admin rotation the new
- * Super Admin is not offered a tx against a registry PDA that does not exist.
+ * wallet. The registry address and signer authority come from the live
+ * registry, never from the wallet or `Platform.admin`. So after a rotation of
+ * either role, nobody is offered a tx against a registry derived from their
+ * own key.
  */
 export function passportAuthorityFor(
   wallet: Address | string | null | undefined,
@@ -216,5 +308,6 @@ export function passportAuthorityFor(
     isKycProvider: gates.isKycProvider,
     isPlatformAdmin: gates.isPlatformAdmin,
     ambiguous: ctx?.ambiguous ?? false,
+    pinnedMissing: ctx?.pinnedMissing ?? false,
   };
 }
