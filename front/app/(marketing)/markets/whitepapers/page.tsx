@@ -18,9 +18,10 @@ export default function WhitepapersPage() {
       >
         <Small className="mt-5 max-w-[760px]">
           Whitepapers and basic information are provided by the issuers. A
-          document has been approved by the Securities Commission only where a
-          decision reference is shown; otherwise it has not been approved.
-          Nothing on this page is investment advice.
+          document has been approved by the Serbian Securities Commission (SSC)
+          only where it is marked as approved, with the decision reference
+          given; otherwise it has not been approved. Nothing on this page is
+          investment advice.
         </Small>
       </PageHeader>
 

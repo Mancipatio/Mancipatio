@@ -57,13 +57,19 @@ describe("Securities Commission approval label", () => {
   });
 
   it("labels unapproved whitepapers on the board and the asset page instead of plain 'Published'", () => {
-    expect(SSC_NOT_APPROVED_LABEL).toBe("Not approved by the Securities Commission");
+    // Named in full, like the approved badge, so no other regulator is implied.
+    expect(SSC_NOT_APPROVED_LABEL).toBe("Not approved by the Serbian Securities Commission");
     const board = src("app/(marketing)/markets/whitepapers/whitepapers-board.tsx");
     expect(board).toContain("sscDecisionRef(profile)");
     expect(board).toContain('decisionRef ? "SSC approved" : whitepaper ? SSC_NOT_APPROVED_LABEL : "Published"');
     const asset = src("app/marketplace/assets/[id]/page.tsx");
     expect(asset).toContain("const decisionRef = sscDecisionRef(profile);");
     expect(asset).toContain("{SSC_NOT_APPROVED_LABEL}");
-    expect(src("app/(marketing)/markets/whitepapers/page.tsx")).toMatch(/approved by the Securities Commission only where a\s+decision reference is shown/);
+    expect(asset).toContain("Approved by the Serbian Securities Commission");
+    // The disclaimer points at what the board shows (the approved badge, with
+    // the reference in its details), not only at the reference.
+    expect(src("app/(marketing)/markets/whitepapers/page.tsx")).toMatch(
+      /approved by the Serbian Securities Commission \(SSC\)\s+only where it is marked as approved, with the decision reference\s+given/,
+    );
   });
 });
