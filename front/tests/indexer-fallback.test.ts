@@ -10,10 +10,6 @@ const { getSupabaseMock } = vi.hoisted(() => ({
 
 vi.mock("@/lib/supabase", () => ({ getSupabase: getSupabaseMock }));
 vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
-vi.mock("@/lib/legacy-accounts", () => ({
-  decodeReadableShareClass: (bytes: Uint8Array) => ({ ...JSON.parse(new TextDecoder().decode(bytes)), version: 2 }),
-  isLegacyShareClass: () => false,
-}));
 vi.mock("@/lib/siws-client", () => ({ signedFetch: vi.fn() }));
 vi.mock("@/lib/generated/asset_registry", () => {
   const names = [

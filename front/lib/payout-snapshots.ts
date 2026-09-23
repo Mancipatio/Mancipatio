@@ -2,7 +2,7 @@
  * current holder balances are never substituted for this committed list. */
 import { address } from "@solana/kit";
 import { merkleRoot, snapshotLeaf } from "@/lib/merkle";
-export type PayoutSnapshotKind = "vault_vote" | "investor_yield" | "legacy_vault_vote";
+export type PayoutSnapshotKind = "vault_vote" | "investor_yield";
 export type SnapshotWeight = { wallet: string; weight: string };
 export type SnapshotEntry = SnapshotWeight & { proof: string[] };
 export type CanonicalPayoutSnapshot = { root_hex: string; rows_hash: string; total_weight: string; count: number; rows: SnapshotWeight[]; entries: SnapshotEntry[] };

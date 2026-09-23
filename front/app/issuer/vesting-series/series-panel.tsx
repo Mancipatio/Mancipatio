@@ -26,7 +26,6 @@ import {
   getRecoverVestingPositionInstructionAsync,
   getWithdrawUnvestedInstruction,
   getWithdrawVestingSurplusInstruction,
-  getRegisterVestingEscrowIdentityInstructionAsync,
   findCreateVestingSeriesIdentityPda,
   VestingSeriesStatus,
   VestingTimingMode,
@@ -101,7 +100,7 @@ export function SeriesPanel({
   const [recoverIdx, setRecoverIdx] = useState<number | null>(null);
   const [recoverWallet, setRecoverWallet] = useState("");
   const [confirm, setConfirm] = useState<
-    "cancel" | "disable" | "withdraw" | "surplus" | "identity" | null
+    "cancel" | "disable" | "withdraw" | "surplus" | null
   >(null);
   const [fundingSignature, setFundingSignature] = useState("");
   const [cancelSignature, setCancelSignature] = useState("");
@@ -347,7 +346,7 @@ export function SeriesPanel({
     );
     if (!latestEscrow.identity || !latestEscrow.immutableOwner)
       throw new Error(
-        "Register the escrow identity first. Mutable legacy escrows require a reviewed migration before accepting new deposits.",
+        "Escrow identity or immutable owner could not be verified; deposits are unavailable.",
       );
     const fromAta = await ataFor(signer.address);
     const mint = address(row.token_mint);
@@ -467,16 +466,6 @@ export function SeriesPanel({
           [ix],
           "Permanently disabling cancellation…",
           "Cancellation disabled",
-        );
-      } else if (confirm === "identity") {
-        const ix = await getRegisterVestingEscrowIdentityInstructionAsync({
-          payer: signer,
-          series: address(row.series_pda!),
-        });
-        await runTx(
-          [ix],
-          "Registering the legacy escrow identity…",
-          "Escrow identity submitted",
         );
       } else if (confirm === "withdraw" || confirm === "surplus") {
         const toAta = await ataFor(signer.address);
@@ -897,27 +886,22 @@ export function SeriesPanel({
             {String(escrowState.surplus)}
           </p>
           <p className="mt-1">
-            Cumulative deposits are historical. Legacy overfunding is preserved;
-            new program deposits cannot exceed the schedule total. Gifts or
-            transferred surplus require the current receiver KYC before
-            withdrawal.
+            Cumulative deposits are historical. New program deposits cannot
+            exceed the schedule total. Gifts or transferred surplus require
+            the current receiver KYC before withdrawal.
           </p>
           {!escrowState.immutableOwner && (
             <p className="mt-2 font-semibold">
-              This legacy escrow has mutable ownership. New deposits are
-              unavailable until its reviewed migration; reserved recipient
-              payouts and permitted refunds remain separate.
+              This escrow has mutable ownership, so new deposits are
+              unavailable. Reserved recipient payouts and permitted refunds
+              remain separate.
             </p>
           )}
           {!escrowState.identity && (
-            <button
-              type="button"
-              disabled={busy || tx.isSending}
-              onClick={() => setConfirm("identity")}
-              className="mt-2 font-semibold underline"
-            >
-              Register legacy escrow identity
-            </button>
+            <p className="mt-2 font-semibold">
+              The escrow identity could not be verified, so deposits and
+              surplus withdrawals are unavailable.
+            </p>
           )}
         </div>
       )}
@@ -1022,11 +1006,9 @@ export function SeriesPanel({
             ? "Cancel this vesting series?"
             : confirm === "disable"
               ? "Disable cancellation forever?"
-              : confirm === "identity"
-                ? "Register the legacy escrow identity?"
-                : confirm === "surplus"
-                  ? "Withdraw the active escrow surplus?"
-                  : "Withdraw the unvested remainder?"
+              : confirm === "surplus"
+                ? "Withdraw the active escrow surplus?"
+                : "Withdraw the unvested remainder?"
         }
         description={
           confirm === "cancel"
@@ -1035,11 +1017,9 @@ export function SeriesPanel({
               : "Recipients keep everything already vested (including tranches awaiting approval) — only the unvested remainder returns to you. This cannot be undone."
             : confirm === "disable"
               ? "You irrevocably give up the cancellation power. The series will run to completion exactly as scheduled."
-              : confirm === "identity"
-                ? "Attach the verified series identity with a zero historical refund ledger. This does not invent past deposits, migrate recipient rights, or bypass receiver KYC for legacy surplus."
-                : confirm === "surplus"
-                  ? "Withdraw only the actual balance above the unreleased allocation. Recipient reserves remain in escrow. Gifts and legacy surplus require receiver KYC."
-                  : "Only the unvested remainder leaves the escrow — the amount reserved for recipients can never be withdrawn here."
+              : confirm === "surplus"
+                ? "Withdraw only the actual balance above the unreleased allocation. Recipient reserves remain in escrow. Gifts and transferred surplus require receiver KYC."
+                : "Only the unvested remainder leaves the escrow — the amount reserved for recipients can never be withdrawn here."
         }
         kind={confirm === "cancel" ? "destructive" : "warning"}
         confirmLabel={
@@ -1047,9 +1027,7 @@ export function SeriesPanel({
             ? "Cancel series"
             : confirm === "disable"
               ? "Disable forever"
-              : confirm === "identity"
-                ? "Register identity"
-                : "Withdraw"
+              : "Withdraw"
         }
         requireReason={false}
         busy={busy || tx.isSending}

@@ -15,11 +15,10 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({
 }) }));
 vi.mock("@/lib/server/admin-gate", () => ({ requireAdmin: mocks.admin }));
 vi.mock("@/lib/server/siws", async (original) => ({ ...await original<typeof import("@/lib/server/siws")>(), verifySigned: mocks.verify }));
-import { legacyVaultVotePda } from "@/lib/payout-vote-pda";
 import { address } from "@solana/kit";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS, findVaultPda, getPayoutVaultEncoder, getVaultVoteEncoder, PayoutVaultState, VaultVoteOutcome } from "@/lib/generated/asset_registry";
 import { canonicalPayoutSnapshot, snapshotBytes } from "@/lib/payout-snapshots";
-import { prepareOriginalPayoutSnapshot, verifyPayoutSnapshotBinding, type SnapshotLocator } from "@/lib/server/payout-snapshots";
+import { payoutSnapshotLocator, prepareOriginalPayoutSnapshot, verifyPayoutSnapshotBinding, type SnapshotLocator } from "@/lib/server/payout-snapshots";
 import { SiwsError } from "@/lib/server/siws";
 import { POST as prepareRoute } from "@/app/api/payout-snapshots/prepare/route";
 import { POST as bindRoute } from "@/app/api/payout-snapshots/bind/route";
@@ -122,24 +121,24 @@ describe("signed admin preparation and review", () => {
   });
 });
 
-describe("original terminal legacy refund snapshot", () => {
-  function legacyVault(state = PayoutVaultState.Cancelled) {
-    const bytes = Buffer.from(vault({ state }).data[0], "base64"); bytes[bytes.length - 11] = 1;
-    return account(new Uint8Array(bytes.subarray(0, -9)));
-  }
-  function legacyVote(outcome = VaultVoteOutcome.ReturnCapital) {
-    return account(new Uint8Array(getVaultVoteEncoder().encode({ payoutVault: address(locator.target_pda), snapshotRoot: snapshotBytes(canonical.root_hex), startTs: 10, endTs: 20, returnWeight: 30, extendWeight: 0, outcome, version: 1, bump: 255, round: 0 })).slice(0, -8));
-  }
-  it("binds the original roundless PDA and original weights before size preparation", async () => {
-    const legacy = { ...locator, kind: "legacy_vault_vote" as const, round: "0" };
-    mocks.read.mockResolvedValue({ context: { slot: 123 }, value: [legacyVault(), legacyVote()] });
-    expect(await verifyPayoutSnapshotBinding(legacy)).toMatchObject({ total: "30", root: canonical.root_hex });
-    expect(mocks.read.mock.calls[0][0][1]).toBe(await legacyVaultVotePda(address(locator.target_pda)));
-    await expect(prepareOriginalPayoutSnapshot(A, { ...legacy, rows_hash: canonical.rows_hash }, rows)).resolves.toBeDefined();
+describe("no v1 payout path after 2E", () => {
+  it("the locator rejects the retired legacy_vault_vote kind with 400", () => {
+    let caught: unknown;
+    try { payoutSnapshotLocator({ ...locator, kind: "legacy_vault_vote", round: "0" }); } catch (err) { caught = err; }
+    expect(caught).toBeInstanceOf(SiwsError); expect(caught).toMatchObject({ status: 400 });
   });
-  it.each(["active", "frozen", "pending", "extend", "current_vote", "wrong_root"])("rejects legacy %s rather than inventing a completed decision", async (field) => {
-    const legacy = { ...locator, kind: "legacy_vault_vote" as const, round: "0", ...(field === "wrong_root" ? { root_hex: "1".repeat(64) } : {}) };
-    mocks.read.mockResolvedValue({ context: { slot: 123 }, value: [legacyVault(field === "active" ? PayoutVaultState.Active : field === "frozen" ? PayoutVaultState.Frozen : PayoutVaultState.Cancelled), field === "current_vote" ? vote() : legacyVote(field === "pending" ? VaultVoteOutcome.Pending : field === "extend" ? VaultVoteOutcome.Extend : VaultVoteOutcome.ReturnCapital)] });
-    await expect(verifyPayoutSnapshotBinding(legacy)).rejects.toMatchObject({ status: 409 }); expect(mocks.rpc).not.toHaveBeenCalled();
+  it("a stored legacy_vault_vote row is rejected with 409 before any chain read", async () => {
+    const legacy = { ...locator, kind: "legacy_vault_vote", round: "0" } as unknown as SnapshotLocator;
+    await expect(verifyPayoutSnapshotBinding(legacy)).rejects.toMatchObject({ status: 409 });
+    expect(mocks.read).not.toHaveBeenCalled(); expect(mocks.rpc).not.toHaveBeenCalled();
+  });
+  it.each([["physically shorter", true], ["padded", false]])("rejects %s v1 vault bytes with 409", async (_label, shorter) => {
+    const bytes = Buffer.from(vault({ state: PayoutVaultState.Cancelled }).data[0], "base64"); bytes[bytes.length - 11] = 1;
+    const v1 = account(new Uint8Array(shorter ? bytes.subarray(0, -9) : bytes));
+    mocks.read.mockResolvedValue({ context: { slot: 123 }, value: [v1, vote()] });
+    await expect(verifyPayoutSnapshotBinding(locator)).rejects.toMatchObject({ status: 409, message: expect.stringMatching(/Unsupported PayoutVault version 1/) });
+    mocks.read.mockResolvedValue({ context: { slot: 123 }, value: [v1] });
+    await expect(prepareOriginalPayoutSnapshot(A, { ...locator, rows_hash: canonical.rows_hash }, rows)).rejects.toMatchObject({ status: 409 });
+    expect(mocks.rpc).not.toHaveBeenCalled();
   });
 });

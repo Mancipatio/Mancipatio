@@ -29,13 +29,17 @@ describe("one generated indexer decoder", () => {
       if (f.table === "kyc_registries") expect(String(row.approved_jurisdictions)).toHaveLength(256);
     }
   });
-  it("rejects the wrong PDA, incomplete known type and explicit legacy version", async () => {
+  it("rejects the wrong PDA, incomplete known type and a v1 share class", async () => {
     const f = indexerFixtures().find((f) => f.table === "share_classes")!;
     await expect(decodeIndexerAccount("11111111111111111111111111111111", INDEXER_PROGRAM, f.bytes)).rejects.toThrow(/PDA/);
     await expect(decodeIndexerAccount("11111111111111111111111111111111", INDEXER_PROGRAM, f.bytes.slice(0, 15))).rejects.toThrow();
+    const entity = INDEXER_ENTITIES.find((e) => e.table === "share_classes")!;
+    const row = await entity.decode(f.bytes, null);
+    // The snapshot function (0047) still requires the column; v2 always emits false.
+    expect(row).toMatchObject({ account_version: 2, readonly_legacy: false });
     const old = new Uint8Array(getShareClassEncoder().encode({ ...getShareClassDecoder().decode(f.bytes), version: 1, lifetimeMinted: BigInt(0), cumulativeCap: false }));
-    const legacyRow = await INDEXER_ENTITIES.find((e) => e.table === "share_classes")!.decode(old, null);
-    expect(await decodeIndexerAccount(String(legacyRow.pda), INDEXER_PROGRAM, old)).toMatchObject({ row: { account_version: 1, lifetime_minted: null, cumulative_cap: null, readonly_legacy: true } });
+    await expect(entity.decode(old, null)).rejects.toThrow(/share_classes account version 1 requires an explicit migration/);
+    await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, old)).rejects.toThrow(/share_classes account version 1 requires an explicit migration/);
   });
   it("projects Sale v2 (the consumed approval and its application hash) and rejects a v1 Sale", async () => {
     const f = indexerFixtures().find((f) => f.table === "sales")!;

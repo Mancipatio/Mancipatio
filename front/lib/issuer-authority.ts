@@ -351,16 +351,15 @@ export function issuerVaultsFor<
  * Closed sales are skipped: nothing reads their authority any more.
  */
 export async function collectIssuerSyncTargets(
-  data: Pick<NetworkData, "assets" | "shareClasses" | "legacyShareClasses" | "sales">,
+  data: Pick<NetworkData, "assets" | "shareClasses" | "sales">,
   vaults: readonly { address: Address; vault: { shareClass: Address; founder: Address } }[],
   issuer: Address,
 ): Promise<{ sales: SyncableSale[]; vaults: SyncableVault[] }> {
   const assetOf = new Map<string, Address>();
-  const classes = [...data.shareClasses, ...(data.legacyShareClasses ?? [])];
   for (const asset of data.assets) {
     if (asset.issuer !== issuer) continue;
     const [assetPda] = await findAssetPda({ issuer, assetId: asset.assetId });
-    for (const sc of classes) {
+    for (const sc of data.shareClasses) {
       if (sc.asset !== assetPda) continue;
       assetOf.set(await findShareClassPda(assetPda, sc.classIndex), assetPda);
     }
@@ -700,7 +699,7 @@ export type IssuerChain = { shareClass: Address; asset: Address; issuer: Address
 /**
  * `share class -> asset -> issuer`, read the way the sync instructions read
  * it: the parent key in each account's first field (byte 8), after checking
- * owner and discriminator. Works for legacy v1 share classes too.
+ * owner and discriminator.
  */
 export async function resolveIssuerChain(rpc: Rpc, shareClass: Address): Promise<IssuerChain> {
   const fetch = (a: Address) =>

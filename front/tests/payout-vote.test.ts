@@ -1,12 +1,10 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { address } from "@solana/kit";
-const mocks = vi.hoisted(() => ({ current: vi.fn(), publish: vi.fn() }));
+const mocks = vi.hoisted(() => ({ current: vi.fn() }));
 vi.mock("@/lib/generated/asset_registry", async (original) => ({ ...await original<typeof import("@/lib/generated/asset_registry")>(), fetchMaybeVaultVote: mocks.current }));
-vi.mock("@/lib/legacy-accounts-store", () => ({ publishLegacyPayoutVaults: mocks.publish }));
-vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
 import { getPayoutVaultEncoder, getPayoutVaultDecoder, getShareClassEncoder, getShareClassDecoder, getVaultVoteEncoder, getVaultVoteDecoder,
   ASSET_REGISTRY_PROGRAM_ADDRESS, PayoutVaultState, VaultVoteOutcome, type PayoutVaultArgs } from "@/lib/generated/asset_registry";
-import { decodeReadableShareClass, decodeReadablePayoutVault, decodeReadableVaultVote } from "@/lib/legacy-accounts";
+import { decodePayoutVaultV2, decodeShareClassV2 } from "@/lib/account-versions";
 import { loadPayoutVaults, loadVaultVoteHistory, currentVaultVote, vaultVoteActions, vaultVotePda, payoutVaultPda } from "@/lib/payout-vault";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
 const KEY = address("11111111111111111111111111111111");
@@ -22,43 +20,36 @@ type Rpc = Parameters<typeof loadPayoutVaults>[0];
 const rpc = (rows: unknown[]) => ({ getProgramAccounts: vi.fn(() => ({ send: async () => rows })) }) as unknown as Rpc;
 const account = (pubkey: string, bytes: Uint8Array) => ({ pubkey, account: { owner: ASSET_REGISTRY_PROGRAM_ADDRESS, data: [Buffer.from(bytes).toString("base64"), "base64"] } });
 beforeEach(() => vi.clearAllMocks());
-describe("explicit legacy read-only layout", () => {
-  it("preserves exact v1 share-class prefix with unknown lifetime issuance, including old Option padding", () => {
-    const f = indexerFixtures().find((f) => f.table === "share_classes")!;
-    const full = new Uint8Array(getShareClassEncoder().encode({ ...getShareClassDecoder().decode(f.bytes), version: 1 }));
-    for (const bytes of [full.slice(0, -9), full, new Uint8Array([...full.slice(0, -9), ...new Uint8Array(40)])]) {
-      expect(decodeReadableShareClass(bytes)).toMatchObject({ version: 1, readonlyLegacy: true, lifetimeMinted: null, cumulativeCap: null, circulatingSupply: BigInt(9), lockedSupply: BigInt(4) });
-    }
+describe("current-layout decoders fail closed (no v1 path)", () => {
+  it("decodes a complete v2 payout vault", () => {
+    expect(decodePayoutVaultV2(new Uint8Array(getPayoutVaultEncoder().encode(vaultArgs())))).toMatchObject({ version: 2, voteRound: BigInt(3), votePending: true });
   });
-  it("ignores dirty allocation after a v1 Option-bearing prefix without decoding it as a v2 boolean", () => {
-    const original = getShareClassDecoder().decode(indexerFixtures().find((f) => f.table === "share_classes")!.bytes);
-    const prefix = new Uint8Array(getShareClassEncoder().encode({ ...original, version: 1, convertibleTo: null, maxSupply: null })).slice(0, -9);
-    const dirty = new Uint8Array(prefix.length + 50).fill(255); dirty.set(prefix);
-    expect(decodeReadableShareClass(dirty)).toMatchObject({ version: 1, lifetimeMinted: null, cumulativeCap: null, circulatingSupply: BigInt(9) });
-    const v = new Uint8Array(getPayoutVaultEncoder().encode({ ...vaultArgs(), version: 1 })).slice(0, -9);
-    expect(decodeReadablePayoutVault(new Uint8Array([...v, ...new Uint8Array(9).fill(255)]))).toMatchObject({ voteRound: null, votePending: null });
-  });
-  it("reads only original v1 vote fields and rejects an incomplete prefix", () => {
-    const bytes = new Uint8Array(getVaultVoteEncoder().encode({ ...vote(), version: 1 })).slice(0, -8);
-    expect(decodeReadableVaultVote(new Uint8Array([...bytes, ...new Uint8Array(8).fill(255)]))).toMatchObject({ version: 1, round: null, snapshotRoot: hash });
-    expect(() => decodeReadableVaultVote(bytes.slice(0, -1))).toThrow();
-  });
-  it("does not manufacture rounds/pending for a physically shorter v1 payout vault", () => {
-    const bytes = new Uint8Array(getPayoutVaultEncoder().encode({ ...vaultArgs(), version: 1 })).slice(0, -9);
-    expect(decodeReadablePayoutVault(bytes)).toMatchObject({ version: 1, readonlyLegacy: true, voteRound: null, votePending: null, totalAmount: BigInt(100), released: BigInt(30) });
-    expect(() => decodeReadablePayoutVault(bytes.slice(0, -1))).toThrow();
-  });
-  it("rejects incomplete v2 and unsupported versions rather than filling missing financial fields", () => {
+  it("rejects a truncated v2, version 3 and version 1 payout vault rather than filling missing fields", () => {
     const bytes = new Uint8Array(getPayoutVaultEncoder().encode(vaultArgs()));
-    expect(() => decodeReadablePayoutVault(bytes.slice(0, -9))).toThrow();
-    expect(() => decodeReadablePayoutVault(new Uint8Array(getPayoutVaultEncoder().encode({ ...vaultArgs(), version: 3 })))).toThrow(/Unsupported/);
+    expect(() => decodePayoutVaultV2(bytes.slice(0, -9))).toThrow();
+    expect(() => decodePayoutVaultV2(bytes.slice(0, -9))).not.toThrow(/Unsupported/);
+    expect(() => decodePayoutVaultV2(new Uint8Array(getPayoutVaultEncoder().encode({ ...vaultArgs(), version: 3 })))).toThrow(/Unsupported PayoutVault version 3/);
+    const v1 = new Uint8Array(getPayoutVaultEncoder().encode({ ...vaultArgs(), version: 1 }));
+    // Both an original (physically shorter) v1 account and a padded one.
+    expect(() => decodePayoutVaultV2(v1.slice(0, -9))).toThrow(/Unsupported PayoutVault version 1; the current program has no v1 path/);
+    expect(() => decodePayoutVaultV2(v1)).toThrow(/Unsupported PayoutVault version 1/);
   });
-  it("keeps legacy vaults visible separately while admitting v2 to action forms", async () => {
+  it("rejects a foreign discriminator and a v1 share class", () => {
+    const bytes = new Uint8Array(getPayoutVaultEncoder().encode(vaultArgs())); bytes[0] ^= 1;
+    expect(() => decodePayoutVaultV2(bytes)).toThrow(/discriminator/);
+    expect(() => decodePayoutVaultV2(new Uint8Array(3))).toThrow(/discriminator/);
+    const f = indexerFixtures().find((f) => f.table === "share_classes")!;
+    expect(decodeShareClassV2(f.bytes).version).toBe(2);
+    const v1 = new Uint8Array(getShareClassEncoder().encode({ ...getShareClassDecoder().decode(f.bytes), version: 1 }));
+    expect(() => decodeShareClassV2(v1)).toThrow(/Unsupported ShareClass version 1/);
+    expect(() => decodeShareClassV2(v1.slice(0, -9))).toThrow(/Unsupported ShareClass version 1/);
+  });
+  it("loadPayoutVaults rejects a v1 vault instead of hiding or showing it", async () => {
     const legacy = new Uint8Array(getPayoutVaultEncoder().encode({ ...vaultArgs(), sale: SECOND, version: 1 })).slice(0, -9);
     const oldPda = await payoutVaultPda(SECOND); const newPda = await payoutVaultPda(KEY);
-    const result = await loadPayoutVaults(rpc([account(oldPda, legacy), account(newPda, new Uint8Array(getPayoutVaultEncoder().encode(vaultArgs())))]));
+    await expect(loadPayoutVaults(rpc([account(oldPda, legacy), account(newPda, new Uint8Array(getPayoutVaultEncoder().encode(vaultArgs())))]))).rejects.toThrow(/Unsupported PayoutVault version 1/);
+    const result = await loadPayoutVaults(rpc([account(newPda, new Uint8Array(getPayoutVaultEncoder().encode(vaultArgs())))]));
     expect(result).toHaveLength(1); expect(result[0].vault.version).toBe(2);
-    expect(mocks.publish).toHaveBeenCalledWith("devnet", [expect.objectContaining({ address: oldPda, vault: expect.objectContaining({ readonlyLegacy: true, voteRound: null }) })]);
   });
 });
 describe("round-specific payout vote actions and history", () => {

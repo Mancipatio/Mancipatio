@@ -6,9 +6,3 @@ export async function vaultVotePda(vault: Address, round: bigint): Promise<Addre
   return (await getProgramDerivedAddress({ programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
     seeds: [new TextEncoder().encode("vaultvote"), getAddressEncoder().encode(vault), getU64Encoder().encode(round)] }))[0];
 }
-/** Original v1 vote identity has no round seed. It is only used for verified
- * terminal refunds; it cannot be reopened as a current voting round. */
-export async function legacyVaultVotePda(vault: Address): Promise<Address> {
-  return (await getProgramDerivedAddress({ programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-    seeds: [new TextEncoder().encode("vaultvote"), getAddressEncoder().encode(vault)] }))[0];
-}

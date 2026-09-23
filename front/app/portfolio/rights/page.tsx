@@ -1,13 +1,10 @@
 "use client";
 
-import { LegacyPayoutRefunds } from "@/components/legacy-payout-refunds";
 import { getPayoutSnapshotProof } from "@/lib/payout-snapshots-client";
 import { snapshotHex, snapshotBytes, verifyOriginalSnapshotProof } from "@/lib/payout-snapshots";
 import { VaultVoteHistory } from "@/components/vault-vote-history";
 import { currentVaultVote, loadVaultVoteHistory, vaultVotePda, payoutVaultPda, vaultVoteActions, type VaultVoteRecord } from "@/lib/payout-vault";
-import { decodeReadablePayoutVault, isLegacyPayoutVault, type LegacyPayoutVault } from "@/lib/legacy-accounts";
-import { publishLegacyPayoutVaults } from "@/lib/legacy-accounts-store";
-import { detectNetwork } from "@/lib/network";
+import { decodePayoutVaultV2 } from "@/lib/account-versions";
 import { WalletRequired } from "@/components/wallet-required";
 
 import {
@@ -295,7 +292,6 @@ export default function MyRightsPage() {
         raws.push(bytes);
       }
       const vDisc = getPayoutVaultDiscriminatorBytes();
-      const legacy: { address: string; vault: LegacyPayoutVault }[] = [];
       const dDisc = getDistributionDiscriminatorBytes();
       const dDec = getDistributionDecoder();
       const matches = (b: Uint8Array, d: ArrayLike<number>) => {
@@ -309,13 +305,11 @@ export default function MyRightsPage() {
         const b = raws[i];
         if (res[i].account.owner !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Unexpected program owner");
         if (matches(b, vDisc)) {
-          const v = decodeReadablePayoutVault(b);
+          const v = decodePayoutVaultV2(b);
           if (await payoutVaultPda(v.sale) !== res[i].pubkey) throw new Error("Payout vault PDA mismatch");
-          if (isLegacyPayoutVault(v)) legacy.push({ address: res[i].pubkey, vault: v });
-          else vs.push(v);
+          vs.push(v);
         } else if (matches(b, dDisc)) ds.push({ address: res[i].pubkey, distribution: dDec.decode(b) });
       }
-      publishLegacyPayoutVaults(detectNetwork(), legacy);
       setVaults(vs);
       setDistributions(ds);
       setFailed(false);
@@ -426,7 +420,6 @@ export default function MyRightsPage() {
         </div>
       ) : (
         <div className="mt-8 space-y-10">
-          <LegacyPayoutRefunds onDone={refresh} />
           {/* ── Payout vaults: investor yield / refund / vault vote ── */}
           <section>
             <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
