@@ -3,6 +3,8 @@ import { isAddress } from "@solana/kit";
 import type { Network } from "@/lib/network";
 import { signedFetch } from "@/lib/siws-client";
 import { MaintenanceModeError } from "@/lib/maintenance";
+import { OffchainMessageLimitError } from "@/lib/siws-offchain";
+import { HardwareWalletSigningError } from "@/lib/siws-signing";
 
 export type TransactionWalletPolicy = {
   wallet: string;
@@ -33,7 +35,10 @@ export class PrimaryWalletRequiredError extends Error {
 }
 
 /** Invoked on an explicit sign/send intent, never on render or account reads.
- * Every attempt asks the server; no persisted browser value grants authority. */
+ * Every attempt asks the server; no persisted browser value grants authority.
+ * The verification is a SIWS signature (lib/siws-signing.ts): a Ledger behind
+ * Phantom/Solflare signs it as a Solana off-chain message (a second prompt
+ * only the first time a Ledger refuses raw bytes). */
 export async function requestTransactionWalletPolicy(
   session: WalletSession,
   network: Network,
@@ -56,7 +61,8 @@ export async function requestTransactionWalletPolicy(
     response = await signedFetch(guardedSession, "/api/account/wallets/transaction", "account.wallets.transaction", {});
   } catch (error) {
     assertCurrent();
-    if (error instanceof TransactionWalletChangedError || error instanceof MaintenanceModeError) throw error;
+    if (error instanceof TransactionWalletChangedError || error instanceof MaintenanceModeError ||
+        error instanceof HardwareWalletSigningError || error instanceof OffchainMessageLimitError) throw error;
     throw new Error("We could not verify your primary transaction wallet. Approve the wallet verification and try again.");
   }
   assertCurrent();

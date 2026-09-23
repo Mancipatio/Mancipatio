@@ -1,5 +1,8 @@
 // SERVER-ONLY — SIWS signature verification for signed routes.
 // Client half (payload construction + canonicalization) is lib/siws-client.ts.
+// Hardware wallets (Ledger) sign the same canonical text inside a Solana
+// off-chain message; the envelope layouts, limits and the application-domain
+// decision are in lib/siws-offchain.ts.
 //
 // Usage inside a route handler (see app/api/_exemplar/route.ts):
 //
@@ -28,6 +31,12 @@ import {
   siwsMessage,
   type SiwsPayload,
 } from "@/lib/siws-client";
+import {
+  isSiwsSignatureFormat,
+  OffchainMessageLimitError,
+  siwsSignedBytes,
+  type SiwsSignatureFormat,
+} from "@/lib/siws-offchain";
 import { detectNetwork } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isSessionReadAction } from "@/lib/siws-session";
@@ -149,11 +158,12 @@ export async function verifySigned(
   }
   if (!isPlainObject(body)) throw new SiwsError(400, "Invalid request body");
 
-  const { payload, signature, publicKey, session } = body as {
+  const { payload, signature, publicKey, session, sigFormat } = body as {
     payload?: unknown;
     signature?: unknown;
     publicKey?: unknown;
     session?: unknown;
+    sigFormat?: unknown;
   };
   if (!isPlainObject(payload)) throw new SiwsError(400, "Missing payload");
   // Read-only requests may ride on a wallet session cookie instead of a
@@ -165,6 +175,11 @@ export async function verifySigned(
     }
     if (typeof publicKey !== "string" || publicKey.length === 0) {
       throw new SiwsError(400, "Missing publicKey");
+    }
+    // Which bytes the signature covers (lib/siws-offchain.ts). Only the NAME
+    // of the layout comes from the client; the bytes are rebuilt below.
+    if (sigFormat !== undefined && !isSiwsSignatureFormat(sigFormat)) {
+      throw new SiwsError(400, "Unsupported signature format");
     }
   }
 
@@ -218,9 +233,17 @@ export async function verifySigned(
 
   // Verify the exact signed context and params before touching the nonce store.
   // Invalid signatures must never reserve another wallet's nonce.
-  const messageBytes = new TextEncoder().encode(
-    siwsMessage(payload as SiwsPayload),
-  );
+  // "raw" = the UTF-8 SIWS text itself; "offchain-v0*" = a Solana off-chain
+  // message whose body is that same text (hardware wallets). Either way the
+  // server derives the one byte string to check from the canonical payload.
+  const format: SiwsSignatureFormat = (sigFormat as SiwsSignatureFormat | undefined) ?? "raw";
+  let messageBytes: Uint8Array;
+  try {
+    messageBytes = siwsSignedBytes(siwsMessage(payload as SiwsPayload), wallet, format);
+  } catch (error) {
+    if (error instanceof OffchainMessageLimitError) throw new SiwsError(400, error.message);
+    throw new SiwsError(401, "Invalid wallet address or signature");
+  }
   let sigBytes: Uint8Array;
   try {
     sigBytes = new Uint8Array(Buffer.from(signature as string, "base64"));
