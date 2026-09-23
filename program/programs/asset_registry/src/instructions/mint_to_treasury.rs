@@ -175,7 +175,7 @@ pub fn handle_mint_to_treasury(ctx: Context<MintToTreasury>, amount: u64) -> Res
             //     ships (today it is a strict improvement: realize would fail
             //     with `UnsupportedRealizeAction` and strand the units).
             //
-            // What remains reachable — `Vesting` / `ConversionPending` /
+            // What remains reachable — `Vesting` / (legacy) `ConversionPending` /
             // `RedemptionQueue` + `BurnAndAttest` — is exactly the documented
             // funding flow: every exit of such a vault burns.
             require!(

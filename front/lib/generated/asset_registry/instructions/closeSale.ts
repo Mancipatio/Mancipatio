@@ -25,10 +25,10 @@ import {
   type InstructionWithAccounts,
   type InstructionWithData,
   type ReadonlyAccount,
-  type ReadonlySignerAccount,
   type ReadonlyUint8Array,
   type TransactionSigner,
   type WritableAccount,
+  type WritableSignerAccount,
 } from "@solana/kit";
 import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
@@ -57,7 +57,7 @@ export type CloseSaleInstruction<
   InstructionWithAccounts<
     [
       TAccountAuthority extends string
-        ? ReadonlySignerAccount<TAccountAuthority> &
+        ? WritableSignerAccount<TAccountAuthority> &
             AccountSignerMeta<TAccountAuthority>
         : TAccountAuthority,
       TAccountSale extends string
@@ -118,6 +118,7 @@ export type CloseSaleAsyncInput<
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
 > = {
+  /** Mut (2D): receives the closed proceeds account's rent. */
   authority: TransactionSigner<TAccountAuthority>;
   sale: Address<TAccountSale>;
   proceeds: Address<TAccountProceeds>;
@@ -170,7 +171,7 @@ export async function getCloseSaleInstructionAsync<
 
   // Original accounts.
   const originalAccounts = {
-    authority: { value: input.authority ?? null, isWritable: false },
+    authority: { value: input.authority ?? null, isWritable: true },
     sale: { value: input.sale ?? null, isWritable: true },
     proceeds: { value: input.proceeds ?? null, isWritable: true },
     paymentMint: { value: input.paymentMint ?? null, isWritable: false },
@@ -225,6 +226,7 @@ export type CloseSaleInput<
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
 > = {
+  /** Mut (2D): receives the closed proceeds account's rent. */
   authority: TransactionSigner<TAccountAuthority>;
   sale: Address<TAccountSale>;
   proceeds: Address<TAccountProceeds>;
@@ -275,7 +277,7 @@ export function getCloseSaleInstruction<
 
   // Original accounts.
   const originalAccounts = {
-    authority: { value: input.authority ?? null, isWritable: false },
+    authority: { value: input.authority ?? null, isWritable: true },
     sale: { value: input.sale ?? null, isWritable: true },
     proceeds: { value: input.proceeds ?? null, isWritable: true },
     paymentMint: { value: input.paymentMint ?? null, isWritable: false },
@@ -322,6 +324,7 @@ export type ParsedCloseSaleInstruction<
 > = {
   programAddress: Address<TProgram>;
   accounts: {
+    /** Mut (2D): receives the closed proceeds account's rent. */
     authority: TAccountMetas[0];
     sale: TAccountMetas[1];
     proceeds: TAccountMetas[2];

@@ -9,6 +9,8 @@
 
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/reclaim.rs"]
+mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -826,7 +828,7 @@ fn non_admin_calls_fail() {
             &stranger.pubkey(),
             dist_id,
             &ctx.funder_payment_ata,
-            &ctx.funder.pubkey(),
+            &ctx.payer.pubkey(),
         )],
     )
     .expect_err("non-admin close_distribution must fail");
@@ -884,13 +886,14 @@ fn close_sweeps_remainder_and_blocks_further_ops() {
             &ctx.payer.pubkey(),
             dist_id,
             &outsider_ata,
-            &ctx.funder.pubkey(),
+            &ctx.payer.pubkey(),
         )],
     )
     .expect_err("refund to a non-funder account must fail");
     assert!(err.contains("RefundNotFunderOwned"), "got: {err}");
 
-    // ... and so is directing the escrow rent to a non-funder wallet
+    // ... and (2D) so is directing the rent to anyone but `distribution.admin`
+    // — the funder included (6001).
     let err = try_send(
         &mut svm,
         &[&ctx.payer],
@@ -899,25 +902,39 @@ fn close_sweeps_remainder_and_blocks_further_ops() {
             &ctx.payer.pubkey(),
             dist_id,
             &ctx.funder_payment_ata,
-            &ctx.payer.pubkey(),
+            &ctx.funder.pubkey(),
         )],
     )
-    .expect_err("escrow rent to a non-funder wallet must fail");
-    assert!(err.contains("RefundNotFunderOwned"), "got: {err}");
+    .expect_err("rent to a non-admin wallet must fail");
+    assert!(err.contains("Custom(6001)"), "got: {err}");
 
-    // close — the 700_000 remainder returns to the funder
+    // close — the 700_000 remainder returns to the funder; ALL rent (escrow +
+    // marker) to the admin that paid it. A separate fee payer keeps it exact.
+    let fee = Keypair::new();
+    svm.airdrop(&fee.pubkey(), 1_000_000_000).unwrap();
+    let rent_total = svm.get_account(&escrow_pda).unwrap().lamports
+        + svm
+            .get_account(&escrow_marker_of(&ctx, &dist_pda))
+            .unwrap()
+            .lamports;
+    let admin_lamports_before = svm.get_account(&ctx.payer.pubkey()).unwrap().lamports;
     let funder_lamports_before = svm.get_account(&ctx.funder.pubkey()).unwrap().lamports;
     send(
         &mut svm,
-        &[&ctx.payer],
+        &[&fee, &ctx.payer],
         &[close_distribution_ix(
             &ctx,
             &ctx.payer.pubkey(),
             dist_id,
             &ctx.funder_payment_ata,
-            &ctx.funder.pubkey(),
+            &ctx.payer.pubkey(),
         )],
         "close_distribution",
+    );
+    assert_eq!(
+        svm.get_account(&ctx.payer.pubkey()).unwrap().lamports,
+        admin_lamports_before + rent_total,
+        "escrow + marker rent to distribution.admin"
     );
     let d: Distribution = load(&svm, &dist_pda);
     assert_eq!(d.status, DistributionStatus::Closed);
@@ -926,16 +943,17 @@ fn close_sweeps_remainder_and_blocks_further_ops() {
         FUNDER_BALANCE - 300_000,
         "exact remainder swept to the refund account"
     );
-    // escrow token account is CLOSED — its rent went to the funder
+    // escrow token account is CLOSED — its rent went to the admin
     assert!(
         svm.get_account(&escrow_pda)
             .map(|a| a.data.is_empty() || a.lamports == 0)
             .unwrap_or(true),
         "escrow token account closed"
     );
-    assert!(
-        svm.get_account(&ctx.funder.pubkey()).unwrap().lamports > funder_lamports_before,
-        "escrow rent refunded to the funder"
+    assert_eq!(
+        svm.get_account(&ctx.funder.pubkey()).unwrap().lamports,
+        funder_lamports_before,
+        "the funder gets the tokens, not the rent"
     );
     // escrow marker closed too
     assert!(
@@ -954,7 +972,7 @@ fn close_sweeps_remainder_and_blocks_further_ops() {
             &ctx.payer.pubkey(),
             dist_id,
             &ctx.funder_payment_ata,
-            &ctx.funder.pubkey(),
+            &ctx.payer.pubkey(),
         )],
     )
     .expect_err("second close must fail");
@@ -1164,7 +1182,7 @@ fn committed_batch_retries_are_noops_and_modified_payloads_cannot_spend_again() 
             &ctx.payer.pubkey(),
             2005,
             &ctx.funder_payment_ata,
-            &ctx.funder.pubkey(),
+            &ctx.payer.pubkey(),
         )],
         "close preserves receipt",
     );
@@ -1215,7 +1233,7 @@ fn legacy_distribution_retains_funder_close_refund_without_a_new_plan() {
             &ctx.payer.pubkey(),
             2006,
             &ctx.funder_payment_ata,
-            &ctx.funder.pubkey(),
+            &ctx.payer.pubkey(),
         )],
         "legacy distribution close without plan",
     );
@@ -1301,7 +1319,7 @@ fn distribution_pause_gates_create_and_distribute_but_not_close() {
             &ctx.payer.pubkey(),
             3001,
             &ctx.funder_payment_ata,
-            &ctx.funder.pubkey(),
+            &ctx.payer.pubkey(),
         )],
         "close_distribution under 0x3F",
     );
@@ -1314,4 +1332,76 @@ fn distribution_pause_gates_create_and_distribute_but_not_close() {
         .get_account(&escrow)
         .map(|a| a.lamports == 0 || a.data.is_empty())
         .unwrap_or(true));
+}
+
+/// 2D: whichever Admin closes, ALL rent (escrow + marker) goes to
+/// `distribution.admin` — never to the closer, never to the funder. A
+/// Distribution is not a `reclaim_rent` target (6001).
+#[test]
+fn another_admin_closes_and_all_rent_goes_to_the_creating_admin() {
+    let (mut svm, ctx) = boot();
+    let (distribution, escrow) = setup_distribution(&mut svm, &ctx, 4001);
+    let admin = ctx.payer.pubkey();
+    let closer = Keypair::new();
+    svm.airdrop(&closer.pubkey(), 1_000_000_000).unwrap();
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[reclaim::add_admin_ix(&admin, &closer.pubkey())],
+        "second admin",
+    );
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&closer],
+            &[reclaim::reclaim_ix(
+                &closer.pubkey(),
+                &admin,
+                &distribution,
+                &escrow,
+                None,
+                Some(TOKEN_2022),
+                None,
+            )],
+        ),
+        6001,
+    );
+    // The closer cannot route the rent to itself.
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&closer],
+            &[close_distribution_ix(
+                &ctx,
+                &closer.pubkey(),
+                4001,
+                &ctx.funder_payment_ata,
+                &closer.pubkey(),
+            )],
+        ),
+        6001,
+    );
+    let marker = escrow_marker_of(&ctx, &distribution);
+    let rent = reclaim::lamports(&svm, &escrow) + reclaim::lamports(&svm, &marker);
+    let admin_before = reclaim::lamports(&svm, &admin);
+    let closer_before = reclaim::lamports(&svm, &closer.pubkey());
+    let fee = Keypair::new();
+    svm.airdrop(&fee.pubkey(), 1_000_000_000).unwrap();
+    send(
+        &mut svm,
+        &[&fee, &closer],
+        &[close_distribution_ix(
+            &ctx,
+            &closer.pubkey(),
+            4001,
+            &ctx.funder_payment_ata,
+            &admin,
+        )],
+        "close by another admin",
+    );
+    assert_eq!(reclaim::lamports(&svm, &admin), admin_before + rent);
+    assert_eq!(reclaim::lamports(&svm, &closer.pubkey()), closer_before);
+    reclaim::assert_gone(&svm, &escrow);
+    reclaim::assert_gone(&svm, &marker);
+    assert_eq!(token_balance(&svm, &ctx.funder_payment_ata), FUNDER_BALANCE);
 }

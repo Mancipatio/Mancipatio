@@ -139,4 +139,37 @@ describe("emergency-pause gate in the committed IDL", () => {
       .sort();
     expect(writers).toEqual([...PLATFORM_WRITERS].sort());
   });
+
+  // Package 2D: cleanup is never pause-gated and has exactly one signer.
+  it("reclaim_rent has one signer (caller), never reads the Platform and takes optional OTC accounts", () => {
+    const accounts = byName.get("reclaim_rent")!.accounts as (IdlAccount & {
+      optional?: boolean;
+    })[];
+    expect(accounts.map((a) => a.name)).toEqual([
+      "caller", "owner", "target", "linked", "linked_b", "token_program", "token_program_b",
+    ]);
+    expect(accounts.filter((a) => a.signer).map((a) => a.name)).toEqual(["caller"]);
+    expect(accounts.filter((a) => a.writable).map((a) => a.name)).toEqual([
+      "owner", "target", "linked", "linked_b",
+    ]);
+    expect(accounts.filter((a) => a.optional).map((a) => a.name)).toEqual([
+      "linked_b", "token_program", "token_program_b",
+    ]);
+  });
+
+  // Package 2D: close_sale closes the proceeds account, rent to the authority.
+  it("close_sale's authority is writable and still the only signer", () => {
+    const accounts = byName.get("close_sale")!.accounts;
+    expect(accounts[0].name).toBe("authority");
+    expect(accounts[0].writable).toBe(true);
+    expect(accounts.filter((a) => a.signer)).toHaveLength(1);
+  });
+
+  // Package 2D: all distribution rent goes to `distribution.admin`, so the
+  // closing Admin no longer needs to be writable.
+  it("close_distribution's authority is read-only; the rent recipient is writable", () => {
+    const accounts = byName.get("close_distribution")!.accounts;
+    expect(accounts.find((a) => a.name === "authority")!.writable ?? false).toBe(false);
+    expect(accounts.find((a) => a.name === "escrow_rent_recipient")!.writable).toBe(true);
+  });
 });

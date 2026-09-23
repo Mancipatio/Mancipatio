@@ -26,6 +26,14 @@ export type Features = {
    * The issuer's recovery notice (IssuerRecoveryBanner) stays on regardless.
    */
   issuerRotation: boolean;
+  /**
+   * 2D "Close revoked passport" (the KycEntry arm of reclaim_rent) on
+   * /admin/clients/[id]. Owner decision D13: the lawyer must confirm AML
+   * retention versus the on-chain KycEntry close before it is enabled on
+   * mainnet — set NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE=true only after that
+   * sign-off. The UI hides the button and `closePassport` refuses when off.
+   */
+  passportClose: boolean;
 };
 
 export type FeatureName = keyof Features;
@@ -34,6 +42,7 @@ export const FEATURE_LABELS: Record<FeatureName, string> = {
   payoutAirdrop: "Admin-wallet payout airdrops",
   startupRaises: "Startup raises",
   issuerRotation: "Issuer key rotation and recovery",
+  passportClose: "Revoked passport closes",
 };
 
 function mainnetOptIn(value: string | undefined): boolean {
@@ -51,6 +60,7 @@ export function features(network: Network = detectNetwork()): Features {
       payoutAirdrop: true,
       startupRaises: true,
       issuerRotation: !killSwitchOff(process.env.NEXT_PUBLIC_FEATURE_ISSUER_ROTATION),
+      passportClose: true,
     };
   }
   // Literal process.env.NEXT_PUBLIC_* reads so Next inlines them client-side.
@@ -58,6 +68,8 @@ export function features(network: Network = detectNetwork()): Features {
     payoutAirdrop: mainnetOptIn(process.env.NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP),
     startupRaises: mainnetOptIn(process.env.NEXT_PUBLIC_FEATURE_STARTUP_RAISES),
     issuerRotation: mainnetOptIn(process.env.NEXT_PUBLIC_FEATURE_ISSUER_ROTATION),
+    // D13: stays off on mainnet until the lawyer's sign-off.
+    passportClose: mainnetOptIn(process.env.NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE),
   };
 }
 

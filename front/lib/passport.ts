@@ -30,6 +30,7 @@ import {
   getCancelKycRegistryAuthorityTransferInstructionAsync,
   getProposeKycRegistryAuthorityInstructionAsync,
   getRevokeHolderInstructionAsync,
+  getReclaimRentInstruction,
   getCreateKycRegistryInstructionAsync,
   getUpdateKycRegistryJurisdictionsInstruction,
   fetchMaybeAuthorityTransfer,
@@ -139,6 +140,25 @@ export async function buildRevokePassport(params: BuildRevokePassportParams) {
     authority: params.authoritySigner,
     kycRegistry: params.registry,
     holder: params.holder,
+  });
+}
+
+/**
+ * Close a revoked, expired passport (2D, the KycEntry arm of `reclaim_rent`):
+ * the registry's CURRENT authority signs and gets the entry's rent back, and
+ * `entries_count` drops by one. On-chain gate: `status == Revoked && expiry <=
+ * now` (AccountNotClosable otherwise). Run `closePassportPreflight` first.
+ *
+ * After a close, `clawback_from_holder` needs the entry again: approve (with
+ * an expiry one second out) + revoke + clawback in ONE transaction, or use the
+ * blocklist path. Never split that recovery across transactions.
+ */
+export async function buildClosePassport(params: BuildRevokePassportParams) {
+  return getReclaimRentInstruction({
+    caller: params.authoritySigner,
+    owner: params.authoritySigner.address,
+    target: await getEntryPda(params.registry, params.holder),
+    linked: params.registry,
   });
 }
 

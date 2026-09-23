@@ -23,9 +23,10 @@ describe("admin client detail — on-chain passport surface (§5)", () => {
     expect(page).not.toMatch(/platform\.data\.admin/);
   });
 
-  it("signs approve/revoke with the registry's own authority", () => {
+  it("signs approve/revoke/close with the registry's own authority", () => {
     expect(page).not.toMatch(/registryAuthority:\s*wallet/);
-    expect(page.match(/^\s*registry: registryAddress,\s*$/gm)).toHaveLength(2);
+    // approve, revoke and (2D) close passport.
+    expect(page.match(/^\s*registry: registryAddress,\s*$/gm)).toHaveLength(3);
   });
 
   it("gates issue/revoke on isKycProvider instead of the Super Admin role", () => {

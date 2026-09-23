@@ -164,7 +164,7 @@ const GUIDES: Record<string, ToolGuide> = {
     details: [
       {
         title: "Vault types and states",
-        body: "Custody vault types cover vesting, conversion pending, delivery escrow and redemption queues. The lifecycle moves from Active to Triggered to Realized, with a separate revert path for an untriggered vault after its deadline.",
+        body: "Custody vault types cover vesting, delivery escrow and redemption queues. Holder conversions and deliveries both use a delivery escrow, whose completion checks the holder’s identity passport. The lifecycle moves from Active to Triggered to Realized, with a separate revert path for an untriggered vault after its deadline.",
       },
       {
         title: "Completion and return",

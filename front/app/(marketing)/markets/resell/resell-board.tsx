@@ -8,7 +8,7 @@ import { SkeletonTable } from "@/components/skeleton";
 import { Kpi } from "@/components/kpi";
 import { ASSET_TYPES, slugForEnum } from "@/lib/asset-types";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
-import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { loadNetworkPreferIndexer, withClosedOffers } from "@/lib/indexer";
 import {
   findAssetPda,
   OfferStatus,
@@ -113,9 +113,9 @@ export function ResellBoard() {
     let cancelled = false;
     async function load() {
       try {
-        const network = await loadNetworkPreferIndexer(() =>
+        const network = await withClosedOffers(await loadNetworkPreferIndexer(() =>
           loadNetwork(client.runtime.rpc),
-        );
+        ));
         if (cancelled) return;
         const am = new Map<string, Asset>();
         for (const a of network.assets) {

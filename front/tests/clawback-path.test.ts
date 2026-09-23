@@ -49,6 +49,17 @@ describe("chooseClawbackPath", () => {
           }
   });
 
+  // 2D: a closed (rent-reclaimed) passport reads as "missing". The passport
+  // path then needs the one-transaction recovery; the blocklist path works.
+  it("a closed passport: blocked → blocklist, otherwise no direct path", () => {
+    expect(
+      chooseClawbackPath({ blocked: true, hookConfigured: true, kycGated: true, entryStatus: "missing" }),
+    ).toBe("blocklist");
+    expect(
+      chooseClawbackPath({ blocked: false, hookConfigured: true, kycGated: true, entryStatus: "missing" }),
+    ).toBeNull();
+  });
+
   it("an Open mint is clawed back only through the blocklist", () => {
     for (const entryStatus of statuses) {
       expect(

@@ -25,10 +25,10 @@ import {
   type InstructionWithAccounts,
   type InstructionWithData,
   type ReadonlyAccount,
+  type ReadonlySignerAccount,
   type ReadonlyUint8Array,
   type TransactionSigner,
   type WritableAccount,
-  type WritableSignerAccount,
 } from "@solana/kit";
 import {
   findAdminRecordPda,
@@ -68,7 +68,7 @@ export type CloseDistributionInstruction<
   InstructionWithAccounts<
     [
       TAccountAuthority extends string
-        ? WritableSignerAccount<TAccountAuthority> &
+        ? ReadonlySignerAccount<TAccountAuthority> &
             AccountSignerMeta<TAccountAuthority>
         : TAccountAuthority,
       TAccountAdminRecord extends string
@@ -139,7 +139,10 @@ export type CloseDistributionAsyncInput<
   TAccountEscrowMarker extends string = string,
   TAccountPaymentTokenProgram extends string = string,
 > = {
-  /** Mut: receives the closed escrow marker's rent. */
+  /**
+   * Any platform Admin. Receives no rent (2D: all rent goes to
+   * `distribution.admin`, whichever Admin closes).
+   */
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may close distributions. */
   adminRecord?: Address<TAccountAdminRecord>;
@@ -152,14 +155,15 @@ export type CloseDistributionAsyncInput<
    */
   refundAccount: Address<TAccountRefundAccount>;
   /**
-   * closed — constrained to be the distribution funder (the wallet that
-   * owns `refund_account`), so both the remainder and the rent return to
-   * whoever funded the distribution.
+   * lamports — constrained to be `distribution.admin`, the Admin that paid
+   * for both at `create_distribution` (2D). The token remainder still goes
+   * only to the funder's `refund_account`.
    */
   escrowRentRecipient: Address<TAccountEscrowRentRecipient>;
   /**
    * Escrow marker for the distribution PDA — closed here (rent →
-   * authority); close is the distribution's only terminal path.
+   * `distribution.admin` via `escrow_rent_recipient`); close is the
+   * distribution's only terminal path.
    */
   escrowMarker?: Address<TAccountEscrowMarker>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
@@ -209,7 +213,7 @@ export async function getCloseDistributionInstructionAsync<
 
   // Original accounts.
   const originalAccounts = {
-    authority: { value: input.authority ?? null, isWritable: true },
+    authority: { value: input.authority ?? null, isWritable: false },
     adminRecord: { value: input.adminRecord ?? null, isWritable: false },
     distribution: { value: input.distribution ?? null, isWritable: true },
     paymentMint: { value: input.paymentMint ?? null, isWritable: false },
@@ -282,7 +286,10 @@ export type CloseDistributionInput<
   TAccountEscrowMarker extends string = string,
   TAccountPaymentTokenProgram extends string = string,
 > = {
-  /** Mut: receives the closed escrow marker's rent. */
+  /**
+   * Any platform Admin. Receives no rent (2D: all rent goes to
+   * `distribution.admin`, whichever Admin closes).
+   */
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may close distributions. */
   adminRecord: Address<TAccountAdminRecord>;
@@ -295,14 +302,15 @@ export type CloseDistributionInput<
    */
   refundAccount: Address<TAccountRefundAccount>;
   /**
-   * closed — constrained to be the distribution funder (the wallet that
-   * owns `refund_account`), so both the remainder and the rent return to
-   * whoever funded the distribution.
+   * lamports — constrained to be `distribution.admin`, the Admin that paid
+   * for both at `create_distribution` (2D). The token remainder still goes
+   * only to the funder's `refund_account`.
    */
   escrowRentRecipient: Address<TAccountEscrowRentRecipient>;
   /**
    * Escrow marker for the distribution PDA — closed here (rent →
-   * authority); close is the distribution's only terminal path.
+   * `distribution.admin` via `escrow_rent_recipient`); close is the
+   * distribution's only terminal path.
    */
   escrowMarker: Address<TAccountEscrowMarker>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
@@ -350,7 +358,7 @@ export function getCloseDistributionInstruction<
 
   // Original accounts.
   const originalAccounts = {
-    authority: { value: input.authority ?? null, isWritable: true },
+    authority: { value: input.authority ?? null, isWritable: false },
     adminRecord: { value: input.adminRecord ?? null, isWritable: false },
     distribution: { value: input.distribution ?? null, isWritable: true },
     paymentMint: { value: input.paymentMint ?? null, isWritable: false },
@@ -406,7 +414,10 @@ export type ParsedCloseDistributionInstruction<
 > = {
   programAddress: Address<TProgram>;
   accounts: {
-    /** Mut: receives the closed escrow marker's rent. */
+    /**
+     * Any platform Admin. Receives no rent (2D: all rent goes to
+     * `distribution.admin`, whichever Admin closes).
+     */
     authority: TAccountMetas[0];
     /** Admin gate — only an admin may close distributions. */
     adminRecord: TAccountMetas[1];
@@ -419,14 +430,15 @@ export type ParsedCloseDistributionInstruction<
      */
     refundAccount: TAccountMetas[5];
     /**
-     * closed — constrained to be the distribution funder (the wallet that
-     * owns `refund_account`), so both the remainder and the rent return to
-     * whoever funded the distribution.
+     * lamports — constrained to be `distribution.admin`, the Admin that paid
+     * for both at `create_distribution` (2D). The token remainder still goes
+     * only to the funder's `refund_account`.
      */
     escrowRentRecipient: TAccountMetas[6];
     /**
      * Escrow marker for the distribution PDA — closed here (rent →
-     * authority); close is the distribution's only terminal path.
+     * `distribution.admin` via `escrow_rent_recipient`); close is the
+     * distribution's only terminal path.
      */
     escrowMarker: TAccountMetas[7];
     paymentTokenProgram: TAccountMetas[8];

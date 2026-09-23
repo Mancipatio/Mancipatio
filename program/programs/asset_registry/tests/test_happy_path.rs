@@ -551,7 +551,7 @@ fn happy_path_registry_lifecycle() {
             program_id,
             &ixd::OpenCustodyVault {
                 vault_id,
-                vault_type: VaultType::ConversionPending,
+                vault_type: VaultType::Vesting,
                 realize_action: RealizeAction::BurnAndAttest,
                 amount: 1_000,
                 deadline: 4_102_444_800,
@@ -582,7 +582,7 @@ fn happy_path_registry_lifecycle() {
     );
     let vault: CustodyVault = load(&svm, &custody_pda, "custody_vault");
     assert_eq!(vault.state, VaultState::Active);
-    assert_eq!(vault.vault_type, VaultType::ConversionPending);
+    assert_eq!(vault.vault_type, VaultType::Vesting);
 
     // ── 10. mint_to_treasury — fund the escrow ───────────────────────────────
     // The destination is the custody escrow (owner = vault PDA), so the vault
@@ -698,7 +698,7 @@ fn happy_path_registry_lifecycle() {
             program_id,
             &ixd::OpenCustodyVault {
                 vault_id: vault_id_2,
-                vault_type: VaultType::ConversionPending,
+                vault_type: VaultType::Vesting,
                 realize_action: RealizeAction::BurnAndAttest,
                 amount: 50,
                 deadline: 0, // already past (LiteSVM clock = 0) → revertable now
@@ -939,6 +939,12 @@ fn happy_path_registry_lifecycle() {
     pause::unpause_all(&mut svm, &payer);
     let sale: Sale = load(&svm, &sale_pda, "sale");
     assert_eq!(sale.status, SaleStatus::Closed);
+    // 2D: the swept proceeds account is closed in the same instruction.
+    assert!(
+        svm.get_account(&proceeds_pda)
+            .is_none_or(|a| a.lamports == 0 && a.data.is_empty()),
+        "proceeds account closed by close_sale"
+    );
 
     // ── 17. OTC: create_offer — the buyer lists units for secondary sale ─────
     let offer_id: u64 = 1;

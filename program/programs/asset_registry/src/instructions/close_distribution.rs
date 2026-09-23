@@ -9,8 +9,8 @@ use crate::state::{Admin, Distribution, DistributionStatus, EscrowMarker};
 
 #[derive(Accounts)]
 pub struct CloseDistribution<'info> {
-    /// Mut: receives the closed escrow marker's rent.
-    #[account(mut)]
+    /// Any platform Admin. Receives no rent (2D: all rent goes to
+    /// `distribution.admin`, whichever Admin closes).
     pub authority: Signer<'info>,
 
     /// Admin gate — only an admin may close distributions.
@@ -44,21 +44,22 @@ pub struct CloseDistribution<'info> {
     )]
     pub refund_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
-    /// CHECK: receives the escrow token account's rent lamports when it is
-    /// closed — constrained to be the distribution funder (the wallet that
-    /// owns `refund_account`), so both the remainder and the rent return to
-    /// whoever funded the distribution.
+    /// CHECK: receives the escrow token account's and the escrow marker's rent
+    /// lamports — constrained to be `distribution.admin`, the Admin that paid
+    /// for both at `create_distribution` (2D). The token remainder still goes
+    /// only to the funder's `refund_account`.
     #[account(
         mut,
-        constraint = escrow_rent_recipient.key() == distribution.funder @ RegistryError::RefundNotFunderOwned,
+        constraint = escrow_rent_recipient.key() == distribution.admin @ RegistryError::Unauthorized,
     )]
     pub escrow_rent_recipient: UncheckedAccount<'info>,
 
     /// Escrow marker for the distribution PDA — closed here (rent →
-    /// authority); close is the distribution's only terminal path.
+    /// `distribution.admin` via `escrow_rent_recipient`); close is the
+    /// distribution's only terminal path.
     #[account(
         mut,
-        close = authority,
+        close = escrow_rent_recipient,
         seeds = [ESCROW_MARKER_SEED, distribution.key().as_ref()],
         bump = escrow_marker.bump,
     )]
@@ -69,9 +70,9 @@ pub struct CloseDistribution<'info> {
 
 /// Closes a distribution: the undistributed remainder (if any) is swept to
 /// `refund_account` (which must be funder-owned) via a transfer signed by the
-/// `Distribution` PDA, the escrow token account is closed (rent → the funder
-/// via `escrow_rent_recipient`), the escrow marker is closed (rent → the
-/// closing admin) and the status flips to `Closed`.
+/// `Distribution` PDA, the escrow token account and the escrow marker are
+/// closed (all rent → `distribution.admin` via `escrow_rent_recipient`) and
+/// the status flips to `Closed`.
 pub fn handle_close_distribution(ctx: Context<CloseDistribution>) -> Result<()> {
     let remainder = ctx.accounts.escrow.amount;
 
@@ -102,7 +103,7 @@ pub fn handle_close_distribution(ctx: Context<CloseDistribution>) -> Result<()> 
         )?;
     }
 
-    // Escrow is now empty — close it and send its rent to the funder.
+    // Escrow is now empty — close it and send its rent to `distribution.admin`.
     token_interface::close_account(CpiContext::new_with_signer(
         ctx.accounts.payment_token_program.key(),
         CloseAccount {

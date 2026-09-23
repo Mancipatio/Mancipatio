@@ -176,16 +176,24 @@ export async function adminUpdateDeliveryRequest(
   }
 }
 
-/** Admin reads the full queue (signed + on-chain admin gate). THROWS. */
+/**
+ * Admin reads the full queue (signed + on-chain admin gate), optionally by
+ * `status` and/or only the requests linked to `vaultPda` (unbounded by the
+ * 1000-row list cap). THROWS.
+ */
 export async function adminListDeliveryRequests(
   session: WalletSession | null | undefined,
   status?: DeliveryStatus,
+  vaultPda?: string,
 ): Promise<DeliveryRequest[]> {
   const data = await signedFetch<{ requests: DeliveryRequest[] }>(
     session,
     "/api/delivery/admin-list",
     "delivery.adminList",
-    status ? { status } : {},
+    {
+      ...(status ? { status } : {}),
+      ...(vaultPda ? { vault_pda: vaultPda } : {}),
+    },
   );
   return data.requests ?? [];
 }

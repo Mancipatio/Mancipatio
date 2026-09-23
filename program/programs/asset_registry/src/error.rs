@@ -172,7 +172,9 @@ pub enum RegistryError {
     MintDestinationVaultNotBurnOnly,
     #[msg("Revert not allowed — without a positive deadline only the vault authority may revert")]
     RevertNotAllowed,
-    #[msg("A DeliveryEscrow vault may only be funded by its own beneficiary")]
+    #[msg(
+        "Only a DeliveryEscrow custody vault accepts deposits, and only from its own beneficiary"
+    )]
     DepositorNotBeneficiary,
     #[msg("Deposit amount must be greater than zero")]
     InvalidDepositAmount,
@@ -285,4 +287,13 @@ pub enum RegistryError {
     ClawbackHolderNotBlocked,
     #[msg("Transfer-hook config is missing or does not belong to this mint and share class")]
     HookConfigInvalid,
+    // ── 2D (appended: every earlier code keeps its position) ──
+    #[msg("Escrow token account still holds tokens; only an empty escrow can be closed")]
+    EscrowNotEmpty,
+    #[msg("Account is not closable: terminal status required (a KYC entry must be Revoked and past its expiry)")]
+    AccountNotClosable,
+    #[msg("Only a DeliveryEscrow custody vault may name a beneficiary")]
+    BeneficiaryNotAllowed,
+    #[msg("ConversionPending custody vaults are retired; holder conversions use a DeliveryEscrow")]
+    VaultTypeRetired,
 }

@@ -3,6 +3,8 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { SiwsError } from "@/lib/server/siws";
 import {
+  ClosedCustodyVaultError,
+  closedRequestVault,
   requireBeneficiaryPassport,
   requireDepositEvidence,
   requireRequestVault,
@@ -20,6 +22,25 @@ import {
 } from "@/lib/chain-evidence";
 
 type RequestTable = "delivery_requests" | "conversion_requests";
+/**
+ * The live vault, or — 2D — the escrow of a vault tombstoned by
+ * `reclaim_rent` after settlement (`live: null`). A tombstone is only
+ * reachable with an empty escrow, so the transaction alone proves the outcome.
+ */
+async function requestVaultOrTombstone(
+  row: CustodyRequestEvidence,
+  minContextSlot?: bigint,
+) {
+  try {
+    const live = await requireRequestVault(row, minContextSlot);
+    return { live, escrow: live.vault.escrow as string };
+  } catch (error) {
+    if (!(error instanceof ClosedCustodyVaultError)) throw error;
+    const closed = await closedRequestVault(row);
+    if (!closed) throw error;
+    return { live: null, escrow: closed.escrow };
+  }
+}
 async function requireReturnedDeposit(
   row: CustodyRequestEvidence,
   signature: unknown,
@@ -38,16 +59,17 @@ async function requireReturnedDeposit(
         503,
         "Return is awaiting finalization. Retry recording without sending another transaction",
       );
-    const { vault, escrow } = await requireRequestVault(row, tx.slot);
+    const { live, escrow } = await requestVaultOrTombstone(row, tx.slot);
     const proof = custodyReturnEvidence(tx as ChainTransaction, outcomeTx, {
       holder: row.holder_wallet,
       vault: row.vault_pda!,
       shareClass: row.share_class_pda,
       mint: row.mint,
-      escrow: vault.escrow,
+      escrow,
       amount: BigInt(row.amount),
     });
-    if (vault.deposited !== BigInt(0))
+    // A closed vault means an empty escrow and a spent deposit ledger.
+    if (live && live.vault.deposited !== BigInt(0))
       throw new SiwsError(
         409,
         "The holder deposit has not been fully returned",
@@ -56,7 +78,7 @@ async function requireReturnedDeposit(
       signature: outcomeTx,
       ...proof,
       vault: row.vault_pda,
-      surplusRemaining: escrow.amount.toString(),
+      surplusRemaining: live ? live.escrow.amount.toString() : "0",
     };
   } catch (error) {
     if (error instanceof SiwsError) throw error;
@@ -180,6 +202,93 @@ export async function recordCustodyDeposit(
   return { id, status: "deposited" };
 }
 
+/** Verifies the realize transaction and writes it into `patch`. */
+async function recordRealization(
+  expected: CustodyRequestEvidence,
+  patch: Record<string, unknown>,
+  escrow: string,
+  outcomeTx: unknown,
+) {
+  const signature = transactionSignature(outcomeTx);
+  try {
+    const tx = await getServerRpc()
+      .getTransaction(toSignature(signature), {
+        commitment: "finalized",
+        encoding: "json",
+        maxSupportedTransactionVersion: 0,
+      })
+      .send({ abortSignal: AbortSignal.timeout(12_000) });
+    if (!tx)
+      throw new SiwsError(
+        503,
+        "Realization is awaiting finalization. Retry recording the existing transaction",
+      );
+    const proof = custodyRealizationEvidence(tx as ChainTransaction, signature, {
+      holder: expected.holder_wallet,
+      vault: expected.vault_pda!,
+      shareClass: expected.share_class_pda,
+      mint: expected.mint,
+      escrow,
+      amount: BigInt(expected.amount),
+    });
+    patch.outcome_tx = signature;
+    patch.outcome_evidence = {
+      ...proof,
+      signature,
+      vault: expected.vault_pda,
+    };
+  } catch (error) {
+    if (error instanceof SiwsError) throw error;
+    if (error instanceof ChainEvidenceError)
+      throw new SiwsError(400, error.message);
+    throw new SiwsError(
+      503,
+      "Realization verification unavailable. Retry recording the existing transaction",
+    );
+  }
+}
+
+/**
+ * 2D: the request's vault was tombstoned by `reclaim_rent` (settled, escrow
+ * empty). Outcomes are verified from the transaction alone; every step that
+ * needs live vault state is refused, and note-only patches pass.
+ */
+async function validateClosedVaultUpdate(
+  row: Record<string, unknown>,
+  patch: Record<string, unknown>,
+  expected: CustodyRequestEvidence,
+  status: string,
+) {
+  const closed = await closedRequestVault(expected);
+  if (!closed) throw new ClosedCustodyVaultError();
+  const changing = status !== row.status;
+  if (["vault_opened", "deposited", "in_delivery"].includes(status)) {
+    if (changing || patch.deposit_tx !== undefined)
+      throw new ClosedCustodyVaultError();
+    return;
+  }
+  if ((status === "delivered" || status === "converted") && !row.outcome_evidence)
+    await recordRealization(
+      expected,
+      patch,
+      closed.escrow,
+      patch.outcome_tx ?? row.outcome_tx,
+    );
+  if (status === "returned" && !row.outcome_evidence) {
+    const proof = await requireReturnedDeposit(
+      expected,
+      patch.outcome_tx ?? row.outcome_tx,
+    );
+    patch.outcome_evidence = proof;
+    patch.outcome_tx = proof.signature;
+  }
+  if (status === "cancelled" && changing && row.deposit_evidence)
+    throw new SiwsError(
+      409,
+      "Funded custody must be returned before cancellation",
+    );
+}
+
 /** Admin status changes use the same chain evidence as holder changes. */
 export async function validateCustodyUpdate(
   table: RequestTable,
@@ -225,9 +334,19 @@ export async function validateCustodyUpdate(
   }
   if (expected.vault_pda) {
     // Linking is the only step bound to the CURRENT platform registry pin.
-    const { vault, escrow } = await requireRequestVault(expected, undefined, {
-      requirePlatformPin: !row.vault_pda,
-    });
+    let live;
+    try {
+      live = await requireRequestVault(expected, undefined, {
+        requirePlatformPin: !row.vault_pda,
+      });
+    } catch (error) {
+      // Linking a tombstone (or any live-state step on one) stays a 409.
+      if (!(error instanceof ClosedCustodyVaultError) || !row.vault_pda)
+        throw error;
+      await validateClosedVaultUpdate(row, patch, expected, status);
+      return row.status as string;
+    }
+    const { vault, escrow } = live;
     if (
       !row.vault_pda &&
       status === "vault_opened" &&
@@ -267,49 +386,12 @@ export async function validateCustodyUpdate(
     ) {
       if (vault.state !== VaultState.Realized)
         throw new SiwsError(409, "On-chain realization is not finalized");
-      const signature = transactionSignature(
+      await recordRealization(
+        expected,
+        patch,
+        vault.escrow,
         patch.outcome_tx ?? row.outcome_tx,
       );
-      try {
-        const tx = await getServerRpc()
-          .getTransaction(toSignature(signature), {
-            commitment: "finalized",
-            encoding: "json",
-            maxSupportedTransactionVersion: 0,
-          })
-          .send({ abortSignal: AbortSignal.timeout(12_000) });
-        if (!tx)
-          throw new SiwsError(
-            503,
-            "Realization is awaiting finalization. Retry recording the existing transaction",
-          );
-        const proof = custodyRealizationEvidence(
-          tx as ChainTransaction,
-          signature,
-          {
-            holder: expected.holder_wallet,
-            vault: expected.vault_pda!,
-            shareClass: expected.share_class_pda,
-            mint: expected.mint,
-            escrow: vault.escrow,
-            amount: BigInt(expected.amount),
-          },
-        );
-        patch.outcome_tx = signature;
-        patch.outcome_evidence = {
-          ...proof,
-          signature,
-          vault: expected.vault_pda,
-        };
-      } catch (error) {
-        if (error instanceof SiwsError) throw error;
-        if (error instanceof ChainEvidenceError)
-          throw new SiwsError(400, error.message);
-        throw new SiwsError(
-          503,
-          "Realization verification unavailable. Retry recording the existing transaction",
-        );
-      }
     }
     if (status === "returned" && !row.outcome_evidence) {
       const proof = await requireReturnedDeposit(

@@ -13,10 +13,10 @@ import { type Address } from "@solana/kit";
 import {
   AssetType,
   fetchMaybeAsset,
-  fetchMaybeCustodyVault,
   fetchMaybeShareClass,
   VaultState,
 } from "@/lib/generated/asset_registry";
+import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { SiwsError } from "@/lib/server/siws";
 import { getServerRpc } from "@/lib/server/rpc";
 
@@ -86,7 +86,7 @@ export async function getToken2022Balance(
 export async function custodyVaultIsActive(vaultPda: string): Promise<boolean> {
   let account;
   try {
-    account = await fetchMaybeCustodyVault(getRpc(), vaultPda as Address);
+    account = await fetchMaybeLiveCustodyVault(getRpc(), vaultPda as Address);
   } catch (err) {
     console.error("[token-holdings] custody vault fetch failure:", err);
     throw new SiwsError(503, "On-chain vault check unavailable — try again");

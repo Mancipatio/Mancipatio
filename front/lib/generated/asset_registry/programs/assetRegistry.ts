@@ -86,6 +86,7 @@ import {
   parsePublishMilestoneInstruction,
   parsePushVestedInstruction,
   parseRealizeCustodyVaultInstruction,
+  parseReclaimRentInstruction,
   parseRecoverIssuerRegistrationInstruction,
   parseRecoverVestingPositionInstruction,
   parseRegisterIssuerInstruction,
@@ -181,6 +182,7 @@ import {
   type ParsedPublishMilestoneInstruction,
   type ParsedPushVestedInstruction,
   type ParsedRealizeCustodyVaultInstruction,
+  type ParsedReclaimRentInstruction,
   type ParsedRecoverIssuerRegistrationInstruction,
   type ParsedRecoverVestingPositionInstruction,
   type ParsedRegisterIssuerInstruction,
@@ -666,6 +668,7 @@ export enum AssetRegistryInstruction {
   PublishMilestone,
   PushVested,
   RealizeCustodyVault,
+  ReclaimRent,
   RecoverIssuerRegistration,
   RecoverVestingPosition,
   RegisterIssuer,
@@ -1461,6 +1464,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([218, 200, 19, 197, 227, 89, 192, 22]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ReclaimRent;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([124, 230, 110, 13, 71, 175, 146, 176]),
       ),
       0,
@@ -1958,6 +1972,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.RealizeCustodyVault;
     } & ParsedRealizeCustodyVaultInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.ReclaimRent;
+    } & ParsedReclaimRentInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.RecoverIssuerRegistration;
     } & ParsedRecoverIssuerRegistrationInstruction<TProgram>)
@@ -2524,6 +2541,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.RealizeCustodyVault,
         ...parseRealizeCustodyVaultInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.ReclaimRent: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ReclaimRent,
+        ...parseReclaimRentInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.RecoverIssuerRegistration: {

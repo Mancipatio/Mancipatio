@@ -14,6 +14,8 @@ import type { SolanaClient, WalletSession } from "@solana/client";
 import type { Address } from "@solana/kit";
 import { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { signedFetch } from "@/lib/siws-client";
+import { loadClosedRows } from "@/lib/indexer";
+import { getSupabase } from "@/lib/supabase";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   getOtcDealDecoder,
@@ -175,6 +177,42 @@ export async function adminUpdateOtcRequest(
     console.warn("[otc] admin update failed:", err);
     return false;
   }
+}
+
+/**
+ * 2D: archive a terminal deal's on-chain record (deal.admin only; the server
+ * re-reads it at finalized) BEFORE its rent is reclaimed, and close any linked
+ * request. Throws on failure: never reclaim a deal whose history did not land.
+ */
+export async function archiveOtcDealRecord(
+  session: WalletSession | null | undefined,
+  dealPda: string,
+): Promise<void> {
+  await signedFetch(session, "/api/otc/admin-update", "otc.adminUpdate", {
+    archive: true,
+    deal_pda: dealPda,
+  });
+}
+
+/**
+ * Live deals plus archived (rent-reclaimed) ones for PDAs that are no longer
+ * live, marked `closed`. History only.
+ */
+export async function withArchivedOtcDeals(
+  live: LoadedOtcDeal[],
+): Promise<(LoadedOtcDeal & { closed?: boolean })[]> {
+  const archived = await loadClosedRows(
+    getSupabase(),
+    "otc_deals",
+    getOtcDealDecoder(),
+  ).catch(() => []);
+  const livePdas = new Set(live.map((d) => d.pda.toString()));
+  return [
+    ...live,
+    ...archived
+      .filter((row) => !livePdas.has(row.pda))
+      .map((row) => ({ pda: row.pda as Address, deal: row.data, closed: true })),
+  ];
 }
 
 // ── On-chain helpers ─────────────────────────────────────────────────────────

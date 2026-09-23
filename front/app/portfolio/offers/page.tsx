@@ -10,6 +10,7 @@ import {
   useWalletConnection,
 } from "@solana/react-hooks";
 import {
+  fetchMaybeToken,
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
@@ -19,6 +20,7 @@ import {
   getCancelOfferInstructionAsync,
   getCreateOfferInstructionAsync,
   getDepositToOfferEscrowInstruction,
+  getOfferDecoder,
   findPlatformPda,
   OfferStatus,
   type Asset,
@@ -26,7 +28,17 @@ import {
   type ShareClass,
 } from "@/lib/generated/asset_registry";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
-import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import {
+  loadClosedRows,
+  loadNetworkPreferIndexer,
+  type ClosedRow,
+} from "@/lib/indexer";
+import { getSupabase } from "@/lib/supabase";
+import {
+  randomAccountId,
+  reclaimOffer,
+  reclaimState,
+} from "@/lib/reclaim-rent";
 import { remainingDeposit } from "@/lib/escrow-ledger";
 import { hookTransferMetas } from "@/lib/hook-metas";
 import { findOfferPda, findShareClassPda } from "@/lib/pdas";
@@ -74,6 +86,12 @@ export default function MyOffersPage() {
   const [offerPdaByKey, setOfferPdaByKey] = useState<Map<string, string>>(
     new Map(),
   );
+  // 2D: offers whose rent was reclaimed (archived by migration 0069).
+  const [closedOffers, setClosedOffers] = useState<ClosedRow<Offer>[]>([]);
+  // Live escrow balances of the maker's terminal offers (null = unreadable).
+  const [escrowBalance, setEscrowBalance] = useState<
+    Map<string, bigint | null>
+  >(new Map());
 
   const refresh = useCallback(async () => {
     try {
@@ -81,6 +99,36 @@ export default function MyOffersPage() {
         loadNetwork(client.runtime.rpc),
       );
       setData(network);
+      if (wallet) {
+        setClosedOffers(
+          await loadClosedRows(getSupabase(), "offers", getOfferDecoder())
+            .then((rows) =>
+              rows.filter((r) => r.data.maker.toString() === wallet.toString()),
+            )
+            .catch(() => []),
+        );
+        const balances = new Map<string, bigint | null>();
+        await Promise.all(
+          network.offers
+            .filter(
+              (o) =>
+                o.maker.toString() === wallet.toString() &&
+                o.status !== OfferStatus.Open,
+            )
+            .map(async (o) => {
+              const escrow = await fetchMaybeToken(
+                client.runtime.rpc,
+                o.escrow,
+                { commitment: "confirmed" },
+              ).catch(() => null);
+              balances.set(
+                o.escrow.toString(),
+                escrow === null ? null : escrow.exists ? escrow.data.amount : null,
+              );
+            }),
+        );
+        setEscrowBalance(balances);
+      }
 
       const am = new Map<string, Asset>();
       for (const a of network.assets) {
@@ -139,10 +187,46 @@ export default function MyOffersPage() {
 
   const myOffers = useMemo(() => {
     if (!data || !wallet) return [];
-    return data.offers
+    const live = data.offers
       .filter((o) => o.maker.toString() === wallet.toString())
-      .sort((a, b) => Number(b.offerId - a.offerId));
-  }, [data, wallet]);
+      .map((o) => ({ offer: o, closed: false }));
+    const liveKeys = new Set(
+      live.map((o) => `${o.offer.shareClass}-${o.offer.offerId}`),
+    );
+    const closed = closedOffers
+      .filter((r) => !liveKeys.has(`${r.data.shareClass}-${r.data.offerId}`))
+      .map((r) => ({ offer: r.data, closed: true }));
+    return [...live, ...closed].sort((a, b) =>
+      Number(b.offer.offerId - a.offer.offerId),
+    );
+  }, [data, wallet, closedOffers]);
+
+  /**
+   * Returns a terminal offer's rent to the maker (2D). Always its OWN
+   * transaction — never bundled with the cancel: a withheld surplus would
+   * make the reclaim fail (EscrowNotEmpty) and revert the cancel with it.
+   */
+  async function reclaimRent(offer: Offer) {
+    if (!wallet || !conn.wallet) return;
+    const pendingId = toast.showPending(
+      `Reclaiming the rent of offer #${offer.offerId}…`,
+    );
+    try {
+      const signer = walletSigner(conn.wallet);
+      const ix = reclaimOffer({
+        caller: signer,
+        offer: await findOfferPda(offer.shareClass, offer.offerId),
+        data: offer,
+      });
+      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      toast.dismiss(pendingId);
+      toast.showTx(sig ?? "", { title: "Offer closed, rent returned" });
+      void refresh();
+    } catch (err) {
+      toast.dismiss(pendingId);
+      toast.showError("Failed to reclaim rent", explainSendError(err));
+    }
+  }
 
   /**
    * Funds the offer escrow through `deposit_to_offer_escrow` — NOT a bare
@@ -336,7 +420,17 @@ export default function MyOffersPage() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {myOffers.map((o, i) => {
+              {myOffers.map(({ offer: o, closed }, i) => {
+                // 2D: an archived row can keep a stale Open status (the
+                // terminal step and the reclaim were indexed together); a
+                // tombstoned offer is never open.
+                const staleOpen = closed && o.status === OfferStatus.Open;
+                const reclaim = closed
+                  ? "live"
+                  : reclaimState(
+                      o.status !== OfferStatus.Open,
+                      escrowBalance.get(o.escrow.toString()),
+                    );
                 const sc = shareClassByMint.get(o.mint.toString());
                 const asset = sc ? assetPdaMap.get(sc.asset.toString()) : undefined;
                 const offerPda = offerPdaByKey.get(
@@ -379,13 +473,40 @@ export default function MyOffersPage() {
                     </td>
                     <td className="px-4 py-3">
                       <span
-                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[o.status] ?? STATUS_BADGE[0]}`}
+                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${staleOpen ? STATUS_BADGE[1] : (STATUS_BADGE[o.status] ?? STATUS_BADGE[0])}`}
+                        title={
+                          staleOpen
+                            ? "The archive kept the offer's last indexed state (Open); it was settled and its rent reclaimed before the indexer saw the final status."
+                            : undefined
+                        }
                       >
-                        {STATUS_LABEL[o.status] ?? "?"}
+                        {staleOpen ? "Closed" : (STATUS_LABEL[o.status] ?? "?")}
                       </span>
+                      {closed && (
+                        <span className="ml-2 text-[11px] text-slate-500">
+                          closed (rent reclaimed)
+                        </span>
+                      )}
                     </td>
                     <td className="space-x-3 px-4 py-3 text-right text-xs">
-                      {o.status === OfferStatus.Open && (
+                      {!closed && o.status !== OfferStatus.Open && (
+                        <button
+                          type="button"
+                          disabled={tx.isSending || reclaim !== "reclaimable"}
+                          onClick={() => void reclaimRent(o)}
+                          title={
+                            reclaim === "escrow-not-empty"
+                              ? "The escrow still holds tokens (a withheld surplus or dust), so its rent cannot be reclaimed."
+                              : reclaim === "unknown"
+                                ? "The escrow balance could not be read. Reload and try again."
+                                : "Closes the empty escrow and returns the rent to you."
+                          }
+                          className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                        >
+                          Reclaim rent
+                        </button>
+                      )}
+                      {!closed && o.status === OfferStatus.Open && (
                         <>
                           {offerPda && (
                             <Link
@@ -590,7 +711,7 @@ function CreateOfferModal({
   const [selectedScPda, setSelectedScPda] = useState(
     myShareClasses[0]?.pda ?? "",
   );
-  const [offerId, setOfferId] = useState("1");
+  const [offerId, setOfferId] = useState(randomAccountId);
   const [amount, setAmount] = useState("");
   const [price, setPrice] = useState("");
   const [paymentMint, setPaymentMint] = useState("");

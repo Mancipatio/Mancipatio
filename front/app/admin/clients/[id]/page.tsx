@@ -47,6 +47,7 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import {
   buildIssuePassport,
+  buildClosePassport,
   buildRevokePassport,
   fetchPassport,
   dossierHash,
@@ -56,6 +57,14 @@ import {
   type KycEntry,
 } from "@/lib/passport";
 import { type KycRegistry } from "@/lib/generated/asset_registry";
+import {
+  closePassportPreflight,
+  passportCloseDisabledReason,
+} from "@/lib/passport-close";
+import { loadCustodyVaultsFromIndexer, loadNetworkPreferIndexer } from "@/lib/indexer";
+import { loadNetwork } from "@/lib/enumerate";
+import { loadOtcDeals } from "@/lib/otc";
+import { findCustodyVaultPda, findOfferPda } from "@/lib/pdas";
 import {
   kycRegistryUnavailableReason,
   loadKycAuthorityContext,
@@ -694,6 +703,90 @@ function ClientDetail({ id }: { id: string }) {
     }
   }
 
+  /**
+   * 2D: close a revoked, expired passport (the KycEntry arm of reclaim_rent);
+   * its rent returns to the KYC provider. Runs a live-chain preflight first:
+   * the close is refused while the holder still holds KYC-gated units of this
+   * registry, is the beneficiary of an open delivery escrow, or has an open
+   * offer / OTC deal as seller. After a close, the passport clawback needs the
+   * one-transaction recovery (approve + revoke + clawback) or the blocklist.
+   */
+  async function closePassport() {
+    if (!wallet || !conn.wallet || !client?.wallet) {
+      toast.showError(WALLET_CONNECT_LABEL, WALLET_CONNECT_DESCRIPTION);
+      return;
+    }
+    const closeDisabled = passportCloseDisabledReason();
+    if (closeDisabled) {
+      // D13: off on mainnet until the lawyer's AML-retention sign-off.
+      toast.showError("Passport close is not enabled", closeDisabled);
+      return;
+    }
+    if (!isKycProvider || !registryAddress) {
+      toast.showError(
+        "Not the KYC provider",
+        "Only the registry authority can close a passport.",
+      );
+      return;
+    }
+    const holder = client.wallet as Address;
+    setPassportTxBusy(true);
+    const pendingId = toast.showPending("Checking the passport can be closed…");
+    try {
+      const rpc = solanaClient.runtime.rpc;
+      const [vaults, network, deals] = await Promise.all([
+        loadCustodyVaultsFromIndexer(),
+        loadNetworkPreferIndexer(() => loadNetwork(rpc)),
+        loadOtcDeals(rpc),
+      ]);
+      const check = await closePassportPreflight(
+        rpc,
+        { registry: registryAddress, holder },
+        {
+          vaults: await Promise.all(
+            vaults
+              .filter((v) => v.beneficiary === holder)
+              .map((v) => findCustodyVaultPda(v.shareClass, v.vaultId)),
+          ),
+          offers: await Promise.all(
+            network.offers
+              .filter((o) => o.maker === holder)
+              .map((o) => findOfferPda(o.shareClass, o.offerId)),
+          ),
+          deals,
+        },
+      );
+      if (!check.closable) {
+        toast.dismiss(pendingId);
+        toast.showError("The passport cannot be closed yet", check.blockers.join(" "));
+        return;
+      }
+      const signer = walletSigner(conn.wallet);
+      const ix = await buildClosePassport({
+        authoritySigner: signer,
+        registry: registryAddress,
+        holder,
+      });
+      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      toast.dismiss(pendingId);
+      toast.showTx(sig, { title: "Revoked passport closed, rent reclaimed" });
+      void recordAudit({
+        ix_name: "reclaim_rent",
+        category: "issuers",
+        actor_wallet: wallet.toString(),
+        reason: "Close a revoked, expired on-chain passport",
+        target_label: client.display_name,
+        tx_signature: sig,
+      });
+      await refreshPassport(client.wallet);
+    } catch (err) {
+      toast.dismiss(pendingId);
+      toast.showError("Failed to close the passport", explainSendError(err));
+    } finally {
+      setPassportTxBusy(false);
+    }
+  }
+
   if (client === undefined) {
     return (
       <div className="mt-4">
@@ -1000,6 +1093,31 @@ function ClientDetail({ id }: { id: string }) {
                 >
                   {passportTxBusy ? "Revoking…" : "Revoke passport"}
                 </button>
+              )}
+
+              {/* Close (2D) — a revoked passport, once past its expiry.
+                  Hidden while D13 keeps it off (mainnet, no sign-off). */}
+              {passport?.status === KycStatus.Revoked &&
+                passportCloseDisabledReason() === null && (
+                <>
+                  <button
+                    type="button"
+                    disabled={passportTxBusy || tx.isSending || !isKycProvider}
+                    onClick={() => void closePassport()}
+                    className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50"
+                  >
+                    Close revoked passport
+                  </button>
+                  <p className="w-full text-xs leading-snug text-slate-500">
+                    {passport.expiry > BigInt(nowSec)
+                      ? `Closable after ${new Date(Number(passport.expiry) * 1000).toLocaleString()} (its expiry). Until then it stays available for a passport clawback. `
+                      : ""}
+                    Closing returns the passport&apos;s rent to the KYC
+                    provider. Afterwards a passport clawback needs one
+                    transaction that re-approves (expiring a second later),
+                    revokes and claws back, or the blocklist path.
+                  </p>
+                </>
               )}
 
               {client.kyc_status !== "verified" && (

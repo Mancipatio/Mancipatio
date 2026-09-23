@@ -6,6 +6,9 @@ const mocks = vi.hoisted(() => ({
   transfer: vi.fn(),
   admin: vi.fn(),
 }));
+vi.mock("@/lib/closed-account", () => ({
+  fetchMaybeLiveCustodyVault: mocks.vault,
+}));
 vi.mock("@/lib/generated/asset_registry", async (original) => ({
   ...(await original<typeof import("@/lib/generated/asset_registry")>()),
   fetchMaybeCustodyVault: mocks.vault,

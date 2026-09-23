@@ -75,6 +75,7 @@ export * from "./proposePlatformAdmin";
 export * from "./publishMilestone";
 export * from "./pushVested";
 export * from "./realizeCustodyVault";
+export * from "./reclaimRent";
 export * from "./recoverIssuerRegistration";
 export * from "./recoverVestingPosition";
 export * from "./registerIssuer";

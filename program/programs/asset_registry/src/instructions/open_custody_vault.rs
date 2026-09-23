@@ -189,6 +189,21 @@ pub fn handle_open_custody_vault(
         RegistryError::UnsupportedRealizeAction
     );
 
+    // 2D: ConversionPending is retired — its realize burns and attests with no
+    // KYC and it could be funded outside the beneficiary's own deposit. Holder
+    // conversions are DeliveryEscrow vaults (KYC-gated realize, return path).
+    // The variant stays in the enum only to keep Borsh positions.
+    crate::util::ensure(
+        vault_type != VaultType::ConversionPending,
+        RegistryError::VaultTypeRetired,
+    )?;
+    // Only a DeliveryEscrow has a beneficiary (`return_custody_vault` pays
+    // them; realize checks their KYC). Every other type must leave it unset.
+    crate::util::ensure(
+        vault_type == VaultType::DeliveryEscrow || beneficiary == Pubkey::default(),
+        RegistryError::BeneficiaryNotAllowed,
+    )?;
+
     let v = &mut ctx.accounts.custody_vault;
     v.share_class = ctx.accounts.share_class.key();
     v.mint = ctx.accounts.mint.key();

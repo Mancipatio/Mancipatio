@@ -37,6 +37,7 @@ import {
 import {
   readCommittedDistribution,
   buildDistributionFunding,
+  buildDistributionClose,
   buildDistributionPayment,
   isDistributionBatchPaid,
   readPaidDistributionBatches,
@@ -228,5 +229,35 @@ describe("distribution v2 real builders and receipts", () => {
         (r) => r.wallet,
       ),
     ).toEqual(["a"]);
+  });
+});
+
+describe("close_distribution (2D rent recipient)", () => {
+  it("refunds the remainder to the funder's ATA and sends all rent to distribution.admin", async () => {
+    const closer = createNoopSigner(key(40)),
+      admin = key(41),
+      funder = key(42),
+      paymentMint = key(43),
+      escrow = key(44),
+      distribution = key(45);
+    const [create, close] = await buildDistributionClose({
+      authority: closer,
+      distribution,
+      data: { admin, funder, paymentMint, escrow },
+      tokenProgram: program,
+    });
+    const [refund] = await findAssociatedTokenPda({
+      owner: funder,
+      mint: paymentMint,
+      tokenProgram: program,
+    });
+    expect(create.accounts?.find((a) => a.address === refund)).toBeDefined();
+    // authority, admin_record, distribution, payment_mint, escrow,
+    // refund_account, escrow_rent_recipient, escrow_marker, payment_token_program
+    const accounts = close.accounts!;
+    expect(accounts[0].address).toBe(closer.address);
+    expect(accounts[5].address).toBe(refund);
+    expect(accounts[6].address).toBe(admin);
+    expect(accounts.some((a) => a.address === funder)).toBe(false);
   });
 });

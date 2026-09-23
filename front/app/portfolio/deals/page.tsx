@@ -30,6 +30,7 @@ import {
   detectTokenProgram,
   listOtcRequestsByWallet,
   loadOtcDeals,
+  withArchivedOtcDeals,
   TOKEN_2022_PROGRAM,
   TOKEN_CLASSIC_PROGRAM,
   type LoadedOtcDeal,
@@ -69,7 +70,9 @@ export default function MyDealsPage() {
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
 
-  const [deals, setDeals] = useState<LoadedOtcDeal[] | null>(null);
+  const [deals, setDeals] = useState<
+    (LoadedOtcDeal & { closed?: boolean })[] | null
+  >(null);
   const [requests, setRequests] = useState<OtcRequest[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [labelByShareClass, setLabelByShareClass] = useState<
@@ -95,7 +98,8 @@ export default function MyDealsPage() {
     }
     try {
       const rpc = client.runtime.rpc;
-      const all = await loadOtcDeals(rpc);
+      // 2D: archived (rent-reclaimed) deals stay visible as history.
+      const all = await withArchivedOtcDeals(await loadOtcDeals(rpc));
       setNowMs(Date.now());
       const mine = all.filter(
         (d) =>
@@ -578,6 +582,11 @@ export default function MyDealsPage() {
                             >
                               {DEAL_STATUS_LABEL[deal.status] ?? "?"}
                             </span>
+                            {row.closed && (
+                              <span className="ml-2 text-[11px] text-slate-500">
+                                closed (rent reclaimed)
+                              </span>
+                            )}
                           </td>
                           <td className="px-4 py-3 text-right text-xs">
                             {isOpen && !expired && !isBuyer && !deal.assetDeposited && (

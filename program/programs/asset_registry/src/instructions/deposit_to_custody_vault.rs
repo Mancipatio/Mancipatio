@@ -93,9 +93,8 @@ pub struct DepositToCustodyVault<'info> {
 /// passes. Legitimate flows are untouched: the holder deposits here, and gets
 /// their deposit back even after their passport lapses.
 ///
-/// For non-`DeliveryEscrow` vault types the ledger is informational (their
-/// every exit burns), but the same instruction serves them — e.g. a holder
-/// putting units into a `RedemptionQueue` buyback.
+/// Only a `DeliveryEscrow` accepts deposits (2D): every other vault type is
+/// funded by `mint_to_treasury` or clawback, never through here.
 pub fn handle_deposit_to_custody_vault<'info>(
     ctx: Context<'info, DepositToCustodyVault<'info>>,
     amount: u64,
@@ -129,9 +128,11 @@ pub fn handle_deposit_to_custody_vault<'info>(
     // authority holding freshly minted treasury units) could credit the
     // beneficiary's ledger and hand the fresh units to a non-KYC'd wallet
     // through `return_custody_vault`, which is exactly the hole being closed.
+    // 2D: no other vault type accepts deposits at all; they are funded only by
+    // `mint_to_treasury` and clawback.
     require!(
-        ctx.accounts.custody_vault.vault_type != VaultType::DeliveryEscrow
-            || ctx.accounts.depositor.key() == ctx.accounts.custody_vault.beneficiary,
+        ctx.accounts.custody_vault.vault_type == VaultType::DeliveryEscrow
+            && ctx.accounts.depositor.key() == ctx.accounts.custody_vault.beneficiary,
         RegistryError::DepositorNotBeneficiary
     );
 

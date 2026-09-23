@@ -1,5 +1,9 @@
 import {
+  ASSET_REGISTRY_ERROR__ACCOUNT_NOT_CLOSABLE,
+  ASSET_REGISTRY_ERROR__BENEFICIARY_NOT_ALLOWED,
   ASSET_REGISTRY_ERROR__CLAWBACK_DESTINATION_INVALID,
+  ASSET_REGISTRY_ERROR__ESCROW_NOT_EMPTY,
+  ASSET_REGISTRY_ERROR__VAULT_TYPE_RETIRED,
   ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED,
   ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE,
   ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED,
@@ -109,7 +113,7 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       ],
       [
         ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY,
-        "Only the escrow's own beneficiary can fund it — connect the wallet the request was opened for (DepositorNotBeneficiary).",
+        "Only a delivery / conversion escrow accepts deposits, and only from its own beneficiary — connect the wallet the request was opened for (DepositorNotBeneficiary).",
       ],
       [
         ASSET_REGISTRY_ERROR__INVALID_DEPOSIT_AMOUNT,
@@ -221,6 +225,23 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       [
         ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID,
         "The mint's transfer-hook config is missing or does not belong to this share class. Reload and pick the share class again (HookConfigInvalid).",
+      ],
+      // Rent reclaim and custody opening (2D appended 6139–6142).
+      [
+        ASSET_REGISTRY_ERROR__ESCROW_NOT_EMPTY,
+        "The escrow still holds tokens (for example a withheld surplus or dust sent after settlement), so its rent cannot be reclaimed. Nothing was changed (EscrowNotEmpty).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__ACCOUNT_NOT_CLOSABLE,
+        "This account is still live. Rent can be reclaimed only after it is settled, cancelled or expired; a passport only once it is revoked and past its expiry (AccountNotClosable).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__BENEFICIARY_NOT_ALLOWED,
+        "Only a delivery escrow may name a beneficiary. Leave the beneficiary empty for vesting and redemption vaults (BeneficiaryNotAllowed).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__VAULT_TYPE_RETIRED,
+        "Conversion-pending vaults are retired. Holder conversions use a delivery escrow (VaultTypeRetired).",
       ],
       [
         ASSET_REGISTRY_ERROR__NOT_FOUNDER,

@@ -1,10 +1,14 @@
 import "server-only";
-import { address, signature as toSignature } from "@solana/kit";
+import {
+  address,
+  fetchEncodedAccount,
+  signature as toSignature,
+} from "@solana/kit";
 import { fetchMaybeToken } from "@solana-program/token-2022";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   fetchMaybeSale,
-  fetchMaybeCustodyVault,
+  findOpenCustodyVaultEscrowPda,
   fetchMaybeKycEntry,
   fetchMaybeKycRegistry,
   fetchMaybeShareClass,
@@ -31,6 +35,18 @@ import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
 import { evaluatePassport } from "@/lib/custody-kyc";
 import { getEntryPda } from "@/lib/passport";
 import { SiwsError } from "@/lib/server/siws";
+import {
+  fetchMaybeLiveCustodyVault,
+  isClosedAccount,
+} from "@/lib/closed-account";
+
+/** 2D: the request's vault was tombstoned by `reclaim_rent` after settlement. */
+export const CLOSED_VAULT_MESSAGE = "Custody vault was closed after settlement";
+export class ClosedCustodyVaultError extends SiwsError {
+  constructor() {
+    super(409, CLOSED_VAULT_MESSAGE);
+  }
+}
 
 export function transactionSignature(value: unknown): string {
   try {
@@ -206,7 +222,7 @@ export async function requireRequestVault(
         !/^\d+$/.test(String(row.vault_id)))
     )
       throw new SiwsError(400, "Custody vault ID must be an exact integer");
-    const vault = await fetchMaybeCustodyVault(
+    const vault = await fetchMaybeLiveCustodyVault(
       getServerRpc(),
       address(row.vault_pda),
       {
@@ -215,6 +231,7 @@ export async function requireRequestVault(
         abortSignal: AbortSignal.timeout(12_000),
       },
     );
+    if (vault.closed) throw new ClosedCustodyVaultError();
     if (
       !vault.exists ||
       vault.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS ||
@@ -262,6 +279,44 @@ export async function requireRequestVault(
       throw new SiwsError(400, "Custody escrow does not match this request");
     }
     return { vault: vault.data, escrow: escrow.data };
+  } catch (error) {
+    proofError(error);
+  }
+}
+/**
+ * 2D fallback for a request whose vault was tombstoned by `reclaim_rent`
+ * (only possible after settlement, and only with an empty escrow). The vault's
+ * terms were verified when the request was linked and the PDA can never be
+ * re-created, so the address — re-derived from the request's share class and
+ * vault id — identifies it; its escrow is the `["escrow", vault]` PDA. Returns
+ * null when the vault is not a tombstone.
+ */
+export async function closedRequestVault(
+  row: CustodyRequestEvidence,
+): Promise<{ escrow: string } | null> {
+  try {
+    if (!row.vault_pda) return null;
+    const account = await fetchEncodedAccount(
+      getServerRpc(),
+      address(row.vault_pda),
+      { commitment: "finalized", abortSignal: AbortSignal.timeout(12_000) },
+    );
+    if (!account.exists || !isClosedAccount(account.programAddress, account.data))
+      return null;
+    if (
+      row.vault_id === undefined ||
+      row.vault_id === null ||
+      !/^\d+$/.test(String(row.vault_id)) ||
+      (await findCustodyVaultPda(
+        address(row.share_class_pda),
+        BigInt(row.vault_id),
+      )) !== row.vault_pda
+    )
+      throw new SiwsError(400, "Custody vault terms do not match this request");
+    const [escrow] = await findOpenCustodyVaultEscrowPda({
+      custodyVault: address(row.vault_pda),
+    });
+    return { escrow };
   } catch (error) {
     proofError(error);
   }

@@ -41,6 +41,8 @@
 mod kyc_registry;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/reclaim.rs"]
+mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -1690,6 +1692,28 @@ fn kyc_gated_cancel_offer_refunds_a_revoked_makers_own_deposit_despite_dust() {
     let offer: Offer = load(&svm, &offer_pda);
     assert_eq!(offer.status, OfferStatus::Cancelled);
     assert_eq!(offer.deposited, 0, "ledger consumed by the refund");
+
+    // 2D: the withheld surplus keeps the offer unclosable (EscrowNotEmpty) —
+    // its rent stays locked, exactly as before the reclaim existed.
+    let err = try_send(
+        &mut svm,
+        &[&ctx.seller],
+        &[reclaim::reclaim_ix(
+            &seller_pk,
+            &seller_pk,
+            &offer_pda,
+            &escrow_pda,
+            None,
+            Some(TOKEN_2022),
+            None,
+        )],
+    )
+    .expect_err("a withheld surplus blocks the reclaim");
+    assert!(err.contains("Custom(6139)"), "got: {err}");
+    assert_eq!(
+        load::<Offer>(&svm, &offer_pda).status,
+        OfferStatus::Cancelled
+    );
 }
 
 /// A maker may only ever ledger their OWN units — otherwise the whole scheme

@@ -8,6 +8,7 @@ import {
   useWalletConnection,
 } from "@solana/react-hooks";
 import {
+  fetchMaybeToken,
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
@@ -25,7 +26,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { Kpi } from "@/components/kpi";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
-import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { loadNetworkPreferIndexer, withClosedOffers } from "@/lib/indexer";
 import { hookTransferMetas } from "@/lib/hook-metas";
 import { findOfferPda, findShareClassPda } from "@/lib/pdas";
 import {
@@ -34,6 +35,8 @@ import {
   detectTokenProgram,
   listOtcRequests,
   loadOtcDeals,
+  archiveOtcDealRecord,
+  withArchivedOtcDeals,
   TOKEN_2022_PROGRAM,
   TOKEN_CLASSIC_PROGRAM,
   type LoadedOtcDeal,
@@ -43,6 +46,7 @@ import { checkReceiverEligibility } from "@/lib/passport";
 import { recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
+import { reclaimOtcDeal } from "@/lib/reclaim-rent";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { SkeletonTable } from "@/components/skeleton";
@@ -110,9 +114,9 @@ function OtcOversight() {
 
   const refresh = useCallback(async () => {
     try {
-      const network = await loadNetworkPreferIndexer(() =>
+      const network = await withClosedOffers(await loadNetworkPreferIndexer(() =>
         loadNetwork(client.runtime.rpc),
-      );
+      ));
       setData(network);
       const am = new Map<string, Asset>();
       for (const asset of network.assets) {
@@ -487,7 +491,9 @@ function OtcEscrowAdmin() {
 
   const [requests, setRequests] = useState<OtcRequest[] | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
-  const [deals, setDeals] = useState<LoadedOtcDeal[] | null>(null);
+  const [deals, setDeals] = useState<
+    (LoadedOtcDeal & { closed?: boolean })[] | null
+  >(null);
   const [labelByShareClass, setLabelByShareClass] = useState<
     Map<string, string>
   >(new Map());
@@ -506,7 +512,7 @@ function OtcEscrowAdmin() {
       ]);
       setRequests(reqs);
       setRequestError(null);
-      setDeals(onchain);
+      setDeals(await withArchivedOtcDeals(onchain));
 
       // Asset-name labels for the deal rows (share-class PDA → asset name).
       try {
@@ -815,6 +821,63 @@ function OtcEscrowAdmin() {
     }
   }
 
+  /**
+   * 2D: archive a terminal deal's record, THEN return all its rent (both
+   * escrows + the deal, left as an 8-byte tombstone) to deal.admin. The
+   * archive must land first: OTC deals are scanned live, so the tombstone
+   * would otherwise erase the deal's history.
+   */
+  async function closeAndReclaim(row: LoadedOtcDeal) {
+    if (!wallet || !conn.wallet) return;
+    const { pda, deal } = row;
+    const pendingId = toast.showPending(
+      `Closing deal #${String(deal.dealId)} and reclaiming its rent…`,
+    );
+    try {
+      const rpc = client.runtime.rpc;
+      const signer = walletSigner(conn.wallet);
+      const payTokenProgram =
+        (await detectTokenProgram(rpc, deal.paymentMint)) ??
+        TOKEN_CLASSIC_PROGRAM;
+      const [asset, payment] = await Promise.all([
+        fetchMaybeToken(rpc, deal.assetEscrow, { commitment: "confirmed" }),
+        fetchMaybeToken(rpc, deal.paymentEscrow, { commitment: "confirmed" }),
+      ]);
+      if (
+        !asset.exists ||
+        !payment.exists ||
+        asset.data.amount !== BigInt(0) ||
+        payment.data.amount !== BigInt(0)
+      )
+        throw new Error(
+          "An escrow still holds tokens (a withheld surplus or dust), so this deal cannot be closed.",
+        );
+      await archiveOtcDealRecord(conn.wallet, pda.toString());
+      const ix = reclaimOtcDeal({
+        admin: signer,
+        deal: pda,
+        data: deal,
+        paymentTokenProgram: payTokenProgram,
+      });
+      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      void recordAudit({
+        ix_name: "reclaim_rent",
+        category: "otc",
+        actor_wallet: wallet.toString(),
+        reason: "Close a terminal OTC deal and reclaim its rent",
+        target_label: `deal #${String(deal.dealId)}`,
+        tx_signature: sig,
+        metadata: { deal_pda: pda.toString(), deal_id: String(deal.dealId) },
+      });
+      toast.dismiss(pendingId);
+      toast.showTx(sig, { title: "Deal closed, rent reclaimed" });
+      void refresh();
+    } catch (err) {
+      toast.dismiss(pendingId);
+      toast.showError("Failed to close the deal", explainSendError(err));
+    }
+  }
+
   return (
     <div className="mt-8 space-y-6">
       {/* ── Requested escrow contracts (off-chain queue) ── */}
@@ -951,7 +1014,7 @@ function OtcEscrowAdmin() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {sortedDeals.map(({ pda, deal }) => (
+                {sortedDeals.map(({ pda, deal, closed }) => (
                   <tr key={pda.toString()} className="text-slate-700">
                     <td className="px-4 py-3">
                       <p className="font-medium text-slate-900">
@@ -1020,9 +1083,27 @@ function OtcEscrowAdmin() {
                       >
                         {DEAL_STATUS_LABEL[deal.status] ?? "?"}
                       </span>
+                      {closed && (
+                        <span className="ml-2 text-[11px] text-slate-500">
+                          closed (rent reclaimed)
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right">
-                      {deal.status === OtcDealStatus.Open && (
+                      {!closed &&
+                        deal.status !== OtcDealStatus.Open &&
+                        wallet?.toString() === deal.admin.toString() && (
+                          <button
+                            type="button"
+                            disabled={tx.isSending}
+                            onClick={() => void closeAndReclaim({ pda, deal })}
+                            title="Archives the deal record, closes both empty escrows and returns their rent to you (the deal's admin)."
+                            className="text-xs text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                          >
+                            Close &amp; reclaim
+                          </button>
+                        )}
+                      {!closed && deal.status === OtcDealStatus.Open && (
                         <button
                           type="button"
                           disabled={tx.isSending || !wallet}

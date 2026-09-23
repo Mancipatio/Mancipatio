@@ -12,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { address, getAddressDecoder, getAddressEncoder, getProgramDerivedAddress } from '@solana/kit';
+import { isRegistryTombstone } from './closed-account-tag.mjs';
 
 const FRONT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const arg = (name, fallback) => { const i = process.argv.indexOf(name); return i < 0 ? fallback : process.argv[i + 1]; };
@@ -172,6 +173,12 @@ function publicFields(value) {
   return Object.fromEntries(Object.entries(value).filter(([k, v]) => !excludedFields.has(k) && !Array.isArray(v) && (v === null || typeof v !== 'object')));
 }
 function decodeAccount(programName, pubkey, account) {
+  // 2D: a rent-reclaimed Offer / OtcDeal / CustodyVault is an 8-byte
+  // registry-owned tombstone, a known terminal row and never a blocker.
+  if (isRegistryTombstone(account.owner, IDS.asset_registry, account.data)) {
+    evidence.accounts.push({ address: pubkey, owner: account.owner, bytes: account.data.length, sha256: sha(account.data), type: 'Tombstone', executable: account.executable });
+    return;
+  }
   const idl = schemas[programName];
   const type = idl.accounts.find(a => account.data.subarray(0, 8).equals(Buffer.from(a.discriminator)));
   const row = { address: pubkey, owner: account.owner, bytes: account.data.length, sha256: sha(account.data), type: type?.name ?? 'Unknown', executable: account.executable };

@@ -8,12 +8,10 @@ import {
 } from "@solana/react-hooks";
 import {
   findAssociatedTokenPda,
-  getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
 import {
   DistributionStatus,
   findDistributionPda,
-  getCloseDistributionInstructionAsync,
 } from "@/lib/generated/asset_registry";
 import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
@@ -42,6 +40,7 @@ import {
   type PreparedDistributionPlan,
 } from "@/lib/distribution-plans";
 import {
+  buildDistributionClose,
   buildDistributionFunding,
   buildDistributionPayment,
   readCommittedDistribution,
@@ -946,29 +945,16 @@ function DistributionClose({
           client.runtime.rpc,
           d.paymentMint,
           { commitment: "finalized" },
-        ),
-        [refundAccount] = await findAssociatedTokenPda({
-          owner: d.funder,
-          mint: d.paymentMint,
-          tokenProgram,
-        });
-      const create = await getCreateAssociatedTokenIdempotentInstructionAsync({
-        payer: signer,
-        owner: d.funder,
-        mint: d.paymentMint,
-        tokenProgram,
-      });
-      const ix = await getCloseDistributionInstructionAsync({
+        );
+      // 2D: remainder to the funder, all rent (escrow + marker) to d.admin.
+      const instructions = await buildDistributionClose({
         authority: signer,
         distribution: record.address,
-        paymentMint: d.paymentMint,
-        escrow: d.escrow,
-        refundAccount,
-        escrowRentRecipient: d.funder,
-        paymentTokenProgram: tokenProgram,
+        data: d,
+        tokenProgram,
       });
       const sig = await tx.send({
-        instructions: [create, ix],
+        instructions,
         feePayer: signer,
       });
       toast.showTx(sig, { title: "Distribution close submitted" });
@@ -995,7 +981,7 @@ function DistributionClose({
       <ConfirmModal
         open={confirm}
         title="Close and refund this distribution?"
-        description={`No further unpaid batches can execute. The remaining balance is returned only to the original funder ${d.funder}, together with escrow rent. Review unfinished recipients first.`}
+        description={`No further unpaid batches can execute. The remaining balance is returned only to the original funder ${d.funder}; the escrow and marker rent go to the creating Admin ${d.admin}. Review unfinished recipients first.`}
         kind="destructive"
         requireReason={false}
         confirmLabel="Close and refund"

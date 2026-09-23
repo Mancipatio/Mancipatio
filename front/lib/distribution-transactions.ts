@@ -16,9 +16,11 @@ import {
   fetchAllMaybeDistributionBatch,
   fetchMaybeShareClass,
   findEscrowPda,
+  getCloseDistributionInstructionAsync,
   getCreateDistributionInstructionAsync,
   getDistributeBatchInstructionAsync,
   DistributionStatus,
+  type Distribution,
 } from "@/lib/generated/asset_registry";
 import {
   assertStoredDistributionPlan,
@@ -259,4 +261,38 @@ export async function buildDistributionPayment(
       "Saved batch exceeds the wallet packet limit; do not alter its recipients",
     );
   return { preparation: [prepare], payment: [payment] };
+}
+
+/**
+ * `close_distribution`: the remainder goes only to the funder's payment ATA
+ * (created idempotently), while all rent — escrow and marker — goes to
+ * `distribution.admin` (2D), whichever Admin signs.
+ */
+export async function buildDistributionClose(input: {
+  authority: TransactionSigner;
+  distribution: Parameters<typeof getCloseDistributionInstructionAsync>[0]["distribution"];
+  data: Pick<Distribution, "admin" | "funder" | "paymentMint" | "escrow">;
+  tokenProgram: Parameters<typeof findAssociatedTokenPda>[0]["tokenProgram"];
+}): Promise<Instruction[]> {
+  const [refundAccount] = await findAssociatedTokenPda({
+    owner: input.data.funder,
+    mint: input.data.paymentMint,
+    tokenProgram: input.tokenProgram,
+  });
+  const create = await getCreateAssociatedTokenIdempotentInstructionAsync({
+    payer: input.authority,
+    owner: input.data.funder,
+    mint: input.data.paymentMint,
+    tokenProgram: input.tokenProgram,
+  });
+  const close = await getCloseDistributionInstructionAsync({
+    authority: input.authority,
+    distribution: input.distribution,
+    paymentMint: input.data.paymentMint,
+    escrow: input.data.escrow,
+    refundAccount,
+    escrowRentRecipient: input.data.admin,
+    paymentTokenProgram: input.tokenProgram,
+  });
+  return [create, close];
 }

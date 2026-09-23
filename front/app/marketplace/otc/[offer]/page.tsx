@@ -7,7 +7,7 @@ import { WalletRequired } from "@/components/wallet-required";
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { type Address } from "@solana/kit";
+import { fetchEncodedAccount, isAddress, type Address } from "@solana/kit";
 import {
   useSendTransaction,
   useSolanaClient,
@@ -42,6 +42,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonCard } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
+import { isClosedAccount } from "@/lib/closed-account";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -69,7 +70,9 @@ export default function TakeOfferPage({
   const router = useRouter();
   const wallet = conn.wallet?.account.address;
 
-  const [loaded, setLoaded] = useState<LoadedOffer | null | "not_found">(null);
+  const [loaded, setLoaded] = useState<
+    LoadedOffer | null | "not_found" | "closed"
+  >(null);
   const [failed, setFailed] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
   // Taker's available payment-token balance (base units), or null while unknown.
@@ -123,7 +126,20 @@ export default function TakeOfferPage({
         }
         if (cancelled) return;
         if (!matched) {
-          setLoaded("not_found");
+          // 2D: a settled offer whose rent was reclaimed is an 8-byte
+          // tombstone, not a missing account. A URL segment that is not an
+          // address is simply not found (never the "failed to load" state).
+          const raw = isAddress(offerPubkey)
+            ? await fetchEncodedAccount(client.runtime.rpc, offerPubkey).catch(
+                () => null,
+              )
+            : null;
+          if (cancelled) return;
+          setLoaded(
+            raw?.exists && isClosedAccount(raw.programAddress, raw.data)
+              ? "closed"
+              : "not_found",
+          );
           return;
         }
 
@@ -151,7 +167,7 @@ export default function TakeOfferPage({
   useEffect(() => {
     let cancelled = false;
     async function detect() {
-      if (loaded === null || loaded === "not_found") return;
+      if (loaded === null || typeof loaded === "string") return;
       const prog = await detectTokenProgram(
         client.runtime.rpc,
         loaded.offer.paymentMint,
@@ -168,7 +184,7 @@ export default function TakeOfferPage({
   useEffect(() => {
     let cancelled = false;
     async function readBalance() {
-      if (!wallet || loaded === null || loaded === "not_found") return;
+      if (!wallet || loaded === null || typeof loaded === "string") return;
       try {
         const [takerPaymentAta] = await findAssociatedTokenPda({
           owner: wallet,
@@ -199,7 +215,7 @@ export default function TakeOfferPage({
   useEffect(() => {
     let cancelled = false;
     async function checkPassport() {
-      if (loaded === null || loaded === "not_found") return;
+      if (loaded === null || typeof loaded === "string") return;
       if (!wallet) {
         // Nothing to check yet — the "connect a wallet" reason takes priority
         // over the passport reason in `blockedReason` anyway.
@@ -232,6 +248,29 @@ export default function TakeOfferPage({
     return (
       <section>
         <SkeletonCard rows={6} />
+      </section>
+    );
+  }
+
+  if (loaded === "closed") {
+    return (
+      <section>
+        <p className="text-xs font-semibold uppercase tracking-widest text-mx-ink-faint">
+          OTC
+        </p>
+        <h1 className="mt-1 text-2xl font-semibold text-mx-ink">
+          Offer closed (rent reclaimed)
+        </h1>
+        <p className="mt-2 text-sm text-mx-ink-soft">
+          This offer was settled, cancelled or expired, and its account rent
+          was returned to the maker. It can no longer be taken.
+        </p>
+        <Link
+          href="/marketplace/otc"
+          className="mt-4 inline-block text-sm text-mx-ink-soft underline-offset-2 hover:underline"
+        >
+          ← All open offers
+        </Link>
       </section>
     );
   }
