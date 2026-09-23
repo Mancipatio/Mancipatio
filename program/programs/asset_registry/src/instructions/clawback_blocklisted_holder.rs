@@ -56,15 +56,15 @@ pub struct ClawbackBlocklistedHolder<'info> {
     /// CHECK: address-derived; only its emptiness is read (see above).
     pub holder_escrow_marker: UncheckedAccount<'info>,
 
-    /// CHECK: the hook's `BlockEntry` PDA `["blocked", holder]` — address pinned
-    /// by the seeds constraint; contents (hook-owned, discriminator, wallet)
-    /// checked by `util::require_blocklisted`. Only the hook's
-    /// `BlocklistAuthority` can create it.
+    /// The holder's transfer-hook `BlockEntry` PDA `["blocked", holder]` —
+    /// the first key. Only the hook's `BlocklistAuthority` can create it.
     #[account(
         seeds = [HOOK_BLOCK_ENTRY_SEED, holder.as_ref()],
         seeds::program = TRANSFER_HOOK_PROGRAM,
         bump,
     )]
+    /// CHECK: address pinned by the seeds constraint; contents (hook-owned,
+    /// discriminator, wallet) checked by `util::require_blocklisted`.
     pub block_entry: UncheckedAccount<'info>,
 
     /// Destination — the escrow of `custody_vault` below (burn-only quarantine
@@ -94,14 +94,15 @@ pub struct ClawbackBlocklistedHolder<'info> {
     )]
     pub custody_vault: Box<Account<'info, CustodyVault>>,
 
-    /// CHECK: the mint's `TransferHookConfig` PDA (`["hook_cfg", mint]` under
-    /// the hook) — address pinned by the seeds constraint; the handler checks
-    /// it is hook-owned and names this mint and share class, in ANY mode.
+    /// The mint's `TransferHookConfig` PDA (`["hook_cfg", mint]` under the
+    /// hook), in ANY mode — it tells the handler whether the mint is KycGated.
     #[account(
         seeds = [HOOK_CONFIG_SEED, mint.key().as_ref()],
         seeds::program = TRANSFER_HOOK_PROGRAM,
         bump,
     )]
+    /// CHECK: address pinned by the seeds constraint; `util::read_hook_config`
+    /// checks it is hook-owned and names this mint and share class.
     pub hook_config: UncheckedAccount<'info>,
 
     pub token_program: Interface<'info, TokenInterface>,
