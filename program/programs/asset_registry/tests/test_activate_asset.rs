@@ -6,6 +6,8 @@
 
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/sale_approval.rs"]
+mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -447,6 +449,19 @@ fn open_sale_on_draft_rejected() {
         &[asset_registry::PROCEEDS_SEED, sale_pda.as_ref()],
         &ctx.program_id,
     );
+    // Approving does not require an Active asset; `open_sale` still validates
+    // `asset` (and so AssetNotActive) before it reaches the approval.
+    let terms = sale_approval::Terms::covering(&svm, 1, 100, asset_registry::RaiseType::Mature);
+    let approval = sale_approval::approve_sale(
+        &mut svm,
+        &ctx.payer,
+        &ctx.issuer_pda,
+        &ctx.asset_pda,
+        &ctx.share_class_pda,
+        &payment_mint,
+        sale_id,
+        terms,
+    );
 
     let open_sale_ix = || {
         Instruction::new_with_bytes(
@@ -473,6 +488,8 @@ fn open_sale_on_draft_rejected() {
                 proceeds: proceeds_pda,
                 payment_token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                sale_approval: approval,
+                approved_by: ctx.payer.pubkey(),
                 platform: pause::platform_pda(),
             }
             .to_account_metas(None),

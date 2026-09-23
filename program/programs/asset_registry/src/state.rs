@@ -524,6 +524,83 @@ pub struct Sale {
     pub vesting_months: u8,
     pub version: u8,
     pub bump: u8,
+    // ── v2 (`SALE_STATE_VERSION`): appended, every v1 offset is unchanged ──
+    /// The `SaleApproval` that `open_sale` consumed (and closed).
+    pub sale_approval: Pubkey,
+    /// Copied from the approval: commitment to the reviewed application.
+    pub application_hash: [u8; 32],
+}
+
+/// An Admin's approval to open exactly one sale. Seeds:
+/// `["sale_approval", share_class, sale_id LE]`. Consumed and closed by
+/// `open_sale`, or closed by `revoke_sale_approval`; the rent always returns to
+/// `approved_by`.
+///
+/// ⚠ Layout: the field order is fixed so `issuer` sits at byte offset 48 (the
+/// issuer launchpad lists its approvals with a memcmp at that offset).
+#[account]
+#[derive(InitSpace)]
+pub struct SaleApproval {
+    /// Byte 8.
+    pub share_class: Pubkey,
+    /// Byte 40.
+    pub sale_id: u64,
+    /// Byte 48: the `Issuer` PDA (not its authority), so an approval
+    /// survives an issuer authority rotation.
+    pub issuer: Pubkey,
+    pub payment_mint: Pubkey,
+    /// Payment-mint base units; `price_per_unit * total_for_sale` must not exceed it.
+    pub max_gross_raise: u64,
+    pub min_price_per_unit: u64,
+    pub max_price_per_unit: u64,
+    pub raise_type: RaiseType,
+    /// Unix ts; `open_sale` is refused after it.
+    pub expires_at: i64,
+    /// sha256 of the canonical reviewed-application snapshot (kept off-chain).
+    pub application_hash: [u8; 32],
+    /// The approving Admin; receives the rent on consume / revoke.
+    pub approved_by: Pubkey,
+    pub bump: u8,
+    pub version: u8,
+}
+
+/// Emitted by `approve_sale`.
+#[event]
+pub struct SaleApproved {
+    pub sale_approval: Pubkey,
+    pub share_class: Pubkey,
+    pub sale_id: u64,
+    pub issuer: Pubkey,
+    pub payment_mint: Pubkey,
+    pub max_gross_raise: u64,
+    pub min_price_per_unit: u64,
+    pub max_price_per_unit: u64,
+    pub raise_type: RaiseType,
+    pub expires_at: i64,
+    pub application_hash: [u8; 32],
+    pub approved_by: Pubkey,
+}
+
+/// Emitted by `revoke_sale_approval`.
+#[event]
+pub struct SaleApprovalRevoked {
+    pub sale_approval: Pubkey,
+    pub share_class: Pubkey,
+    pub sale_id: u64,
+    pub revoked_by: Pubkey,
+    pub rent_to: Pubkey,
+}
+
+/// Emitted by `open_sale` when it consumes (and closes) the approval.
+#[event]
+pub struct SaleApprovalConsumed {
+    pub sale_approval: Pubkey,
+    pub sale: Pubkey,
+    pub share_class: Pubkey,
+    pub sale_id: u64,
+    pub price_per_unit: u64,
+    pub total_for_sale: u64,
+    pub approved_by: Pubkey,
 }
 
 // ── OTC secondary market (Faza 3) ────────────────────────────────────────────
@@ -1267,6 +1344,95 @@ mod tests {
         assert_eq!(data[84], 254);
         let decoded = Platform::try_deserialize(&mut data.as_slice()).unwrap();
         assert_eq!(decoded.pause_flags, PAUSE_FLAGS_ALL);
+    }
+
+    /// `SaleApproval` is listed by the issuer launchpad with a memcmp on
+    /// `issuer` at byte 48 and `dataSize` 211; both are pinned here.
+    #[test]
+    fn sale_approval_layout_is_pinned() {
+        assert_eq!(8 + SaleApproval::INIT_SPACE, 211);
+        let approval = SaleApproval {
+            share_class: Pubkey::new_from_array([1; 32]),
+            sale_id: 0x0807_0605_0403_0201,
+            issuer: Pubkey::new_from_array([3; 32]),
+            payment_mint: Pubkey::new_from_array([4; 32]),
+            max_gross_raise: 5,
+            min_price_per_unit: 6,
+            max_price_per_unit: 7,
+            raise_type: RaiseType::Startup,
+            expires_at: 8,
+            application_hash: [9; 32],
+            approved_by: Pubkey::new_from_array([10; 32]),
+            bump: 254,
+            version: 1,
+        };
+        let mut data = Vec::new();
+        approval.try_serialize(&mut data).unwrap();
+        assert_eq!(data.len(), 211);
+        assert_eq!(&data[..8], SaleApproval::DISCRIMINATOR);
+        assert_eq!(data[8..40], [1; 32]);
+        assert_eq!(data[40..48], 0x0807_0605_0403_0201u64.to_le_bytes());
+        assert_eq!(data[48..80], [3; 32]);
+        assert_eq!(data[80..112], [4; 32]);
+        assert_eq!(data[112..120], 5u64.to_le_bytes());
+        assert_eq!(data[120..128], 6u64.to_le_bytes());
+        assert_eq!(data[128..136], 7u64.to_le_bytes());
+        assert_eq!(data[136], 1); // RaiseType::Startup
+        assert_eq!(data[137..145], 8i64.to_le_bytes());
+        assert_eq!(data[145..177], [9; 32]);
+        assert_eq!(data[177..209], [10; 32]);
+        assert_eq!(data[209], 254);
+        assert_eq!(data[210], 1);
+    }
+
+    /// Sale v2 appends two fields; every v1 offset stays where it was.
+    #[test]
+    fn sale_v2_appends_after_v1_layout() {
+        assert_eq!(8 + Sale::INIT_SPACE, 286);
+        let sale = Sale {
+            share_class: Pubkey::new_from_array([1; 32]),
+            mint: Pubkey::new_from_array([2; 32]),
+            payment_mint: Pubkey::new_from_array([3; 32]),
+            proceeds: Pubkey::new_from_array([4; 32]),
+            authority: Pubkey::new_from_array([5; 32]),
+            sale_id: 6,
+            price_per_unit: 7,
+            total_for_sale: 8,
+            sold: 9,
+            start_ts: 10,
+            end_ts: 11,
+            status: SaleStatus::Closed,
+            raise_type: RaiseType::Startup,
+            cliff_months: 12,
+            vesting_months: 13,
+            version: SALE_STATE_VERSION,
+            bump: 253,
+            sale_approval: Pubkey::new_from_array([14; 32]),
+            application_hash: [15; 32],
+        };
+        let mut data = Vec::new();
+        sale.try_serialize(&mut data).unwrap();
+        assert_eq!(data.len(), 286);
+        assert_eq!(&data[..8], Sale::DISCRIMINATOR);
+        assert_eq!(data[8..40], [1; 32]);
+        assert_eq!(data[40..72], [2; 32]);
+        assert_eq!(data[72..104], [3; 32]);
+        assert_eq!(data[104..136], [4; 32]);
+        assert_eq!(data[136..168], [5; 32]);
+        assert_eq!(data[168..176], 6u64.to_le_bytes());
+        assert_eq!(data[176..184], 7u64.to_le_bytes());
+        assert_eq!(data[184..192], 8u64.to_le_bytes());
+        assert_eq!(data[192..200], 9u64.to_le_bytes());
+        assert_eq!(data[200..208], 10i64.to_le_bytes());
+        assert_eq!(data[208..216], 11i64.to_le_bytes());
+        assert_eq!(data[216], 1); // SaleStatus::Closed
+        assert_eq!(data[217], 1); // RaiseType::Startup
+        assert_eq!(data[218], 12);
+        assert_eq!(data[219], 13);
+        assert_eq!(data[220], 2);
+        assert_eq!(data[221], 253);
+        assert_eq!(data[222..254], [14; 32]);
+        assert_eq!(data[254..286], [15; 32]);
     }
 
     #[test]

@@ -2,6 +2,8 @@
 
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/sale_approval.rs"]
+mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -424,6 +426,19 @@ fn setup_sale(
         &program_id,
     );
 
+    // The payer is the super admin (with an Admin record): it approves the
+    // sale it then opens as the issuer authority.
+    let terms = sale_approval::Terms::covering(svm, price_per_unit, 1_000_000, raise_type);
+    let approval = sale_approval::approve_sale(
+        svm,
+        &payer,
+        &issuer_pda,
+        &asset_pda,
+        &share_class_pda,
+        &payment_mint,
+        sale_id,
+        terms,
+    );
     send(
         svm,
         &[&payer],
@@ -451,6 +466,8 @@ fn setup_sale(
                 proceeds: proceeds_pda,
                 payment_token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                sale_approval: approval,
+                approved_by: payer.pubkey(),
                 platform: pause::platform_pda(),
             }
             .to_account_metas(None),
@@ -2191,9 +2208,26 @@ fn open_sale_ix(ctx: &SaleCtx, sale_id: u64, price_per_unit: u64) -> Instruction
             .0,
             payment_token_program: TOKEN_2022,
             system_program: system_program::ID,
+            sale_approval: sale_approval::sale_approval_pda(&ctx.share_class, sale_id),
+            approved_by: ctx.payer.pubkey(),
             platform: pause::platform_pda(),
         }
         .to_account_metas(None),
+    )
+}
+
+/// The payer (super admin) approves `sale_id` for 1_000 units at `price`.
+fn approve_sale_for(svm: &mut LiteSVM, ctx: &SaleCtx, sale_id: u64, price: u64) -> Pubkey {
+    let terms = sale_approval::Terms::covering(svm, price, 1_000, RaiseType::Mature);
+    sale_approval::approve_sale(
+        svm,
+        &ctx.payer,
+        &ctx.issuer,
+        &ctx.asset,
+        &ctx.share_class,
+        &ctx.payment_mint,
+        sale_id,
+        terms,
     )
 }
 
@@ -2247,11 +2281,16 @@ fn release_ix(ctx: &SaleCtx, vault: &Pubkey, escrow: &Pubkey) -> Instruction {
 }
 
 /// bit1 gates `open_sale` / `buy`; `open_sale` also refuses a zero price.
+/// The approval for sale 2 is created BEFORE the pause: Anchor validates
+/// `sale_approval` before `platform`, so without one the error would be
+/// `AccountNotInitialized`, not the pause. A paused `open_sale` leaves the
+/// approval in place.
 #[test]
 fn primary_pause_gates_open_sale_and_buy() {
     let (mut svm, _) = boot();
     let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 12);
     let payer = ctx.payer.insecure_clone();
+    let approval = approve_sale_for(&mut svm, &ctx, 2, 5);
 
     pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_PRIMARY);
     pause::assert_paused(
@@ -2261,6 +2300,10 @@ fn primary_pause_gates_open_sale_and_buy() {
     pause::assert_paused(
         try_send(&mut svm, &[&ctx.payer], &[open_sale_ix(&ctx, 2, 5)]),
         "open_sale under PRIMARY",
+    );
+    assert!(
+        !sale_approval::is_closed(&svm, &approval),
+        "a paused open_sale must leave the approval in place"
     );
 
     // Every other bit paused: primary issuance proceeds.
@@ -2284,6 +2327,7 @@ fn primary_pause_gates_open_sale_and_buy() {
         &[open_sale_ix(&ctx, 2, 5)],
         "open_sale with only PRIMARY clear",
     );
+    assert!(sale_approval::is_closed(&svm, &approval), "consumed");
     assert_eq!(load::<Sale>(&svm, &ctx.sale).sold, 10);
 }
 

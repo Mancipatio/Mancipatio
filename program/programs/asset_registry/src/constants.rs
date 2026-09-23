@@ -50,6 +50,10 @@ pub const CUSTODY_SEED: &[u8] = b"custody";
 pub const ESCROW_SEED: &[u8] = b"escrow";
 /// Seed for a primary `Sale` PDA.
 pub const SALE_SEED: &[u8] = b"sale";
+/// Seed for a `SaleApproval` PDA — `["sale_approval", share_class, sale_id LE]`.
+pub const SALE_APPROVAL_SEED: &[u8] = b"sale_approval";
+/// Longest an admin's sale approval may stay open: 90 days.
+pub const SALE_APPROVAL_MAX_TTL_SECS: i64 = 7_776_000;
 /// Seed for a sale's proceeds escrow token account PDA.
 pub const PROCEEDS_SEED: &[u8] = b"proceeds";
 /// Seed for an OTC `Offer` PDA.
@@ -168,6 +172,9 @@ pub const MAX_APPROVAL_WINDOW_SECS: i64 = 7_776_000;
 pub const SHARE_CLASS_STATE_VERSION: u8 = 2;
 pub const PAYOUT_STATE_VERSION: u8 = 2;
 pub const VESTING_STATE_VERSION: u8 = 2;
+/// Sale v2 appends `sale_approval` and `application_hash` (open_sale consumes
+/// an admin `SaleApproval`).
+pub const SALE_STATE_VERSION: u8 = 2;
 
 /// Scoped issuer permissions and staged operational authority changes.
 pub const ISSUER_PERMISSIONS_SEED: &[u8] = b"issuer_permissions";
