@@ -79,7 +79,10 @@ export const INDEXER_ENTITIES: readonly Entry[] = [
     authority: a.authority, vault_type: a.vaultType, realize_action: a.realizeAction, amount: numberString(a.amount),
     state: a.state, deadline: numberString(a.deadline), metadata_hash: hex(a.metadataHash),
     deposited: numberString(a.deposited), beneficiary: a.beneficiary,
-  }), (a) => pda([text("custody"), key(a.shareClass), u64(a.vaultId)])),
+    // CustodyVault v2 (program 2C-3): the KYC registry a DeliveryEscrow pinned
+    // at open (its realize checks the beneficiary there); null when unpinned.
+    kyc_registry: a.kycRegistry === "11111111111111111111111111111111" ? null : a.kycRegistry,
+  }), (a) => pda([text("custody"), key(a.shareClass), u64(a.vaultId)]), 2),
   spec("offers", accounts.getOfferDiscriminatorBytes(), accounts.getOfferDecoder(), (a) => ({
     maker: a.maker, share_class_pda: a.shareClass, mint: a.mint, escrow: a.escrow, payment_mint: a.paymentMint,
     amount: numberString(a.amount), price: numberString(a.price), status: a.status, offer_id: numberString(a.offerId),

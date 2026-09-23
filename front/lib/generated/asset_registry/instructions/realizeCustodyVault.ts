@@ -62,6 +62,8 @@ export type RealizeCustodyVaultInstruction<
   TAccountTokenProgram extends string | AccountMeta<string> =
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   TAccountAuthorityAdminRecord extends string | AccountMeta<string> = string,
+  TAccountKycRegistry extends string | AccountMeta<string> = string,
+  TAccountKycEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -92,6 +94,12 @@ export type RealizeCustodyVaultInstruction<
       TAccountAuthorityAdminRecord extends string
         ? ReadonlyAccount<TAccountAuthorityAdminRecord>
         : TAccountAuthorityAdminRecord,
+      TAccountKycRegistry extends string
+        ? ReadonlyAccount<TAccountKycRegistry>
+        : TAccountKycRegistry,
+      TAccountKycEntry extends string
+        ? ReadonlyAccount<TAccountKycEntry>
+        : TAccountKycEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -137,6 +145,8 @@ export type RealizeCustodyVaultAsyncInput<
   TAccountEscrowMarker extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountAuthorityAdminRecord extends string = string,
+  TAccountKycRegistry extends string = string,
+  TAccountKycEntry extends string = string,
 > = {
   /** Mut: receives the closed escrow marker's rent. */
   authority: TransactionSigner<TAccountAuthority>;
@@ -151,6 +161,19 @@ export type RealizeCustodyVaultAsyncInput<
   escrowMarker?: Address<TAccountEscrowMarker>;
   tokenProgram?: Address<TAccountTokenProgram>;
   authorityAdminRecord?: Address<TAccountAuthorityAdminRecord>;
+  /**
+   * DeliveryEscrow only: the registry pinned at open
+   * (`custody_vault.kyc_registry`). Ignored for every other type. Appended
+   * LAST (2C-3).
+   */
+  kycRegistry?: Address<TAccountKycRegistry>;
+  /**
+   * DeliveryEscrow only: the beneficiary's entry,
+   * `["kyc", kyc_registry, custody_vault.beneficiary]` — checked in the
+   * handler (no Anchor seeds, so clients never auto-fill a non-existent
+   * entry and each failure keeps its own error). Ignored otherwise.
+   */
+  kycEntry?: Address<TAccountKycEntry>;
 };
 
 export async function getRealizeCustodyVaultInstructionAsync<
@@ -162,6 +185,8 @@ export async function getRealizeCustodyVaultInstructionAsync<
   TAccountEscrowMarker extends string,
   TAccountTokenProgram extends string,
   TAccountAuthorityAdminRecord extends string,
+  TAccountKycRegistry extends string,
+  TAccountKycEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: RealizeCustodyVaultAsyncInput<
@@ -172,7 +197,9 @@ export async function getRealizeCustodyVaultInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountAuthorityAdminRecord
+    TAccountAuthorityAdminRecord,
+    TAccountKycRegistry,
+    TAccountKycEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -185,7 +212,9 @@ export async function getRealizeCustodyVaultInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountAuthorityAdminRecord
+    TAccountAuthorityAdminRecord,
+    TAccountKycRegistry,
+    TAccountKycEntry
   >
 > {
   // Program address.
@@ -205,6 +234,8 @@ export async function getRealizeCustodyVaultInstructionAsync<
       value: input.authorityAdminRecord ?? null,
       isWritable: false,
     },
+    kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
+    kycEntry: { value: input.kycEntry ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -238,6 +269,8 @@ export async function getRealizeCustodyVaultInstructionAsync<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.authorityAdminRecord),
+      getAccountMeta(accounts.kycRegistry),
+      getAccountMeta(accounts.kycEntry),
     ],
     data: getRealizeCustodyVaultInstructionDataEncoder().encode({}),
     programAddress,
@@ -250,7 +283,9 @@ export async function getRealizeCustodyVaultInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountAuthorityAdminRecord
+    TAccountAuthorityAdminRecord,
+    TAccountKycRegistry,
+    TAccountKycEntry
   >);
 }
 
@@ -263,6 +298,8 @@ export type RealizeCustodyVaultInput<
   TAccountEscrowMarker extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountAuthorityAdminRecord extends string = string,
+  TAccountKycRegistry extends string = string,
+  TAccountKycEntry extends string = string,
 > = {
   /** Mut: receives the closed escrow marker's rent. */
   authority: TransactionSigner<TAccountAuthority>;
@@ -277,6 +314,19 @@ export type RealizeCustodyVaultInput<
   escrowMarker: Address<TAccountEscrowMarker>;
   tokenProgram?: Address<TAccountTokenProgram>;
   authorityAdminRecord: Address<TAccountAuthorityAdminRecord>;
+  /**
+   * DeliveryEscrow only: the registry pinned at open
+   * (`custody_vault.kyc_registry`). Ignored for every other type. Appended
+   * LAST (2C-3).
+   */
+  kycRegistry?: Address<TAccountKycRegistry>;
+  /**
+   * DeliveryEscrow only: the beneficiary's entry,
+   * `["kyc", kyc_registry, custody_vault.beneficiary]` — checked in the
+   * handler (no Anchor seeds, so clients never auto-fill a non-existent
+   * entry and each failure keeps its own error). Ignored otherwise.
+   */
+  kycEntry?: Address<TAccountKycEntry>;
 };
 
 export function getRealizeCustodyVaultInstruction<
@@ -288,6 +338,8 @@ export function getRealizeCustodyVaultInstruction<
   TAccountEscrowMarker extends string,
   TAccountTokenProgram extends string,
   TAccountAuthorityAdminRecord extends string,
+  TAccountKycRegistry extends string,
+  TAccountKycEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: RealizeCustodyVaultInput<
@@ -298,7 +350,9 @@ export function getRealizeCustodyVaultInstruction<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountAuthorityAdminRecord
+    TAccountAuthorityAdminRecord,
+    TAccountKycRegistry,
+    TAccountKycEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): RealizeCustodyVaultInstruction<
@@ -310,7 +364,9 @@ export function getRealizeCustodyVaultInstruction<
   TAccountEscrow,
   TAccountEscrowMarker,
   TAccountTokenProgram,
-  TAccountAuthorityAdminRecord
+  TAccountAuthorityAdminRecord,
+  TAccountKycRegistry,
+  TAccountKycEntry
 > {
   // Program address.
   const programAddress =
@@ -329,6 +385,8 @@ export function getRealizeCustodyVaultInstruction<
       value: input.authorityAdminRecord ?? null,
       isWritable: false,
     },
+    kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
+    kycEntry: { value: input.kycEntry ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -352,6 +410,8 @@ export function getRealizeCustodyVaultInstruction<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.authorityAdminRecord),
+      getAccountMeta(accounts.kycRegistry),
+      getAccountMeta(accounts.kycEntry),
     ],
     data: getRealizeCustodyVaultInstructionDataEncoder().encode({}),
     programAddress,
@@ -364,7 +424,9 @@ export function getRealizeCustodyVaultInstruction<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountAuthorityAdminRecord
+    TAccountAuthorityAdminRecord,
+    TAccountKycRegistry,
+    TAccountKycEntry
   >);
 }
 
@@ -387,6 +449,19 @@ export type ParsedRealizeCustodyVaultInstruction<
     escrowMarker: TAccountMetas[5];
     tokenProgram: TAccountMetas[6];
     authorityAdminRecord: TAccountMetas[7];
+    /**
+     * DeliveryEscrow only: the registry pinned at open
+     * (`custody_vault.kyc_registry`). Ignored for every other type. Appended
+     * LAST (2C-3).
+     */
+    kycRegistry?: TAccountMetas[8] | undefined;
+    /**
+     * DeliveryEscrow only: the beneficiary's entry,
+     * `["kyc", kyc_registry, custody_vault.beneficiary]` — checked in the
+     * handler (no Anchor seeds, so clients never auto-fill a non-existent
+     * entry and each failure keeps its own error). Ignored otherwise.
+     */
+    kycEntry?: TAccountMetas[9] | undefined;
   };
   data: RealizeCustodyVaultInstructionData;
 };
@@ -399,7 +474,7 @@ export function parseRealizeCustodyVaultInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedRealizeCustodyVaultInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 8) {
+  if (instruction.accounts.length < 10) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -408,6 +483,12 @@ export function parseRealizeCustodyVaultInstruction<
     const accountMeta = (instruction.accounts as TAccountMetas)[accountIndex]!;
     accountIndex += 1;
     return accountMeta;
+  };
+  const getNextOptionalAccount = () => {
+    const accountMeta = getNextAccount();
+    return accountMeta.address === ASSET_REGISTRY_PROGRAM_ADDRESS
+      ? undefined
+      : accountMeta;
   };
   return {
     programAddress: instruction.programAddress,
@@ -420,6 +501,8 @@ export function parseRealizeCustodyVaultInstruction<
       escrowMarker: getNextAccount(),
       tokenProgram: getNextAccount(),
       authorityAdminRecord: getNextAccount(),
+      kycRegistry: getNextOptionalAccount(),
+      kycEntry: getNextOptionalAccount(),
     },
     data: getRealizeCustodyVaultInstructionDataDecoder().decode(
       instruction.data,

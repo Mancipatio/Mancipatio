@@ -30,7 +30,6 @@ const GATED_2A = [
   "distribute_batch",
   "initialize_share_class_mint",
   "mint_to_treasury",
-  "open_custody_vault",
   "open_sale",
   "publish_milestone",
   "release_payout",
@@ -57,6 +56,20 @@ describe("emergency-pause gate in the committed IDL", () => {
     expect(last.writable ?? false).toBe(false);
     expect(last.signer ?? false).toBe(false);
     expect(ix!.accounts.filter((a) => a.name === "platform")).toHaveLength(1);
+  });
+
+  // Package 2C-3 appends the optional KYC registry AFTER the Platform, so no
+  // older account index moves: the Platform keeps index 9, read-only.
+  it("open_custody_vault reads the Platform read-only at index 9, followed only by the optional KYC registry", () => {
+    const accounts = byName.get("open_custody_vault")!.accounts;
+    expect(accounts).toHaveLength(11);
+    expect(accounts[9].name).toBe("platform");
+    expect(accounts[9].writable ?? false).toBe(false);
+    expect(accounts[9].signer ?? false).toBe(false);
+    expect(accounts[10].name).toBe("kyc_registry");
+    expect((accounts[10] as { optional?: boolean }).optional).toBe(true);
+    expect(accounts[10].writable ?? false).toBe(false);
+    expect(accounts.filter((a) => a.name === "platform")).toHaveLength(1);
   });
 
   it.each(GATED_EARLIER)("%s reads the Platform read-only", (name) => {

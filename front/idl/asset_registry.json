@@ -7295,7 +7295,10 @@
     {
       "name": "open_custody_vault",
       "docs": [
-        "Opens a custody vault (`Active`) with an empty escrow token account."
+        "Opens a custody vault (`Active`) with an empty escrow token account.",
+        "A `DeliveryEscrow` pins a `KycRegistry` (optional account, required for",
+        "that type and refused for every other) that its realize checks the",
+        "beneficiary in (2C-3)."
       ],
       "discriminator": [
         53,
@@ -7448,8 +7451,8 @@
           "docs": [
             "Emergency-pause gate (read-only), checked in the handler: a burn-only",
             "quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for",
-            "clawback. Keep LAST among named accounts (old account indices keep",
-            "their positions)."
+            "clawback. Appended after the original accounts (old account indices",
+            "keep their positions); only `kyc_registry` (2C-3) follows it."
           ],
           "pda": {
             "seeds": [
@@ -7468,6 +7471,17 @@
               }
             ]
           }
+        },
+        {
+          "name": "kyc_registry",
+          "docs": [
+            "DeliveryEscrow: REQUIRED — the registry `realize_custody_vault` checks",
+            "the beneficiary's `KycEntry` in (pinned on the vault). Any other type:",
+            "must be None (the program-id placeholder). `Account<KycRegistry>`",
+            "checks owner + discriminator, and only `create_kyc_registry` (admin",
+            "co-signed) can create one. Appended LAST (2C-3): no index moves."
+          ],
+          "optional": true
         }
       ],
       "args": [
@@ -8975,7 +8989,10 @@
     {
       "name": "realize_custody_vault",
       "docs": [
-        "Realizes a `Triggered` custody vault (v0.1: burn escrow + attest event)."
+        "Realizes a `Triggered` custody vault (v0.1: burn escrow + attest event).",
+        "For a `DeliveryEscrow` (conversion / delivery) the beneficiary must hold",
+        "an Approved, unexpired, jurisdiction-allowed `KycEntry` in the vault's",
+        "pinned registry; without it the exit is `return_custody_vault`."
       ],
       "discriminator": [
         54,
@@ -9106,6 +9123,25 @@
               }
             ]
           }
+        },
+        {
+          "name": "kyc_registry",
+          "docs": [
+            "DeliveryEscrow only: the registry pinned at open",
+            "(`custody_vault.kyc_registry`). Ignored for every other type. Appended",
+            "LAST (2C-3)."
+          ],
+          "optional": true
+        },
+        {
+          "name": "kyc_entry",
+          "docs": [
+            "DeliveryEscrow only: the beneficiary's entry,",
+            "`[\"kyc\", kyc_registry, custody_vault.beneficiary]` — checked in the",
+            "handler (no Anchor seeds, so clients never auto-fill a non-existent",
+            "entry and each failure keeps its own error). Ignored otherwise."
+          ],
+          "optional": true
         }
       ],
       "args": []
@@ -13182,6 +13218,21 @@
       "code": 6133,
       "name": "InvalidIssuerRecovery",
       "msg": "Issuer recovery does not match the issuer's current authority, the current super admin, or the executing signer"
+    },
+    {
+      "code": 6134,
+      "name": "CustodyKycRegistryRequired",
+      "msg": "A DeliveryEscrow custody vault must pin a KYC registry at open; realize must pass it with the beneficiary's KYC entry"
+    },
+    {
+      "code": 6135,
+      "name": "CustodyKycRegistryNotAllowed",
+      "msg": "Only a DeliveryEscrow custody vault may pin a KYC registry"
+    },
+    {
+      "code": 6136,
+      "name": "CustodyKycRegistryMismatch",
+      "msg": "KYC registry does not match the registry pinned on this custody vault"
     }
   ],
   "types": [
@@ -13541,6 +13592,21 @@
                 32
               ]
             }
+          },
+          {
+            "name": "beneficiary",
+            "docs": [
+              "The vault's beneficiary (DeliveryEscrow; default otherwise)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "kyc_registry",
+            "docs": [
+              "The registry the beneficiary's KYC was checked in (DeliveryEscrow;",
+              "default otherwise)."
+            ],
+            "type": "pubkey"
           }
         ]
       }
@@ -13735,6 +13801,16 @@
               "layout is unchanged up to `bump`."
             ],
             "type": "u64"
+          },
+          {
+            "name": "kyc_registry",
+            "docs": [
+              "KYC registry pinned by `open_custody_vault` (DeliveryEscrow only;",
+              "`Pubkey::default()` otherwise). `realize_custody_vault` requires the",
+              "beneficiary's Approved, unexpired, jurisdiction-allowed `KycEntry` in",
+              "it. Appended last (v2, `CUSTODY_STATE_VERSION`): bytes 237..269."
+            ],
+            "type": "pubkey"
           }
         ]
       }

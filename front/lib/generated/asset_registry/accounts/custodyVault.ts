@@ -107,6 +107,13 @@ export type CustodyVault = {
    * layout is unchanged up to `bump`.
    */
   deposited: bigint;
+  /**
+   * KYC registry pinned by `open_custody_vault` (DeliveryEscrow only;
+   * `Pubkey::default()` otherwise). `realize_custody_vault` requires the
+   * beneficiary's Approved, unexpired, jurisdiction-allowed `KycEntry` in
+   * it. Appended last (v2, `CUSTODY_STATE_VERSION`): bytes 237..269.
+   */
+  kycRegistry: Address;
 };
 
 export type CustodyVaultArgs = {
@@ -150,6 +157,13 @@ export type CustodyVaultArgs = {
    * layout is unchanged up to `bump`.
    */
   deposited: number | bigint;
+  /**
+   * KYC registry pinned by `open_custody_vault` (DeliveryEscrow only;
+   * `Pubkey::default()` otherwise). `realize_custody_vault` requires the
+   * beneficiary's Approved, unexpired, jurisdiction-allowed `KycEntry` in
+   * it. Appended last (v2, `CUSTODY_STATE_VERSION`): bytes 237..269.
+   */
+  kycRegistry: Address;
 };
 
 /** Gets the encoder for {@link CustodyVaultArgs} account data. */
@@ -172,6 +186,7 @@ export function getCustodyVaultEncoder(): FixedSizeEncoder<CustodyVaultArgs> {
       ["version", getU8Encoder()],
       ["bump", getU8Encoder()],
       ["deposited", getU64Encoder()],
+      ["kycRegistry", getAddressEncoder()],
     ]),
     (value) => ({ ...value, discriminator: CUSTODY_VAULT_DISCRIMINATOR }),
   );
@@ -196,6 +211,7 @@ export function getCustodyVaultDecoder(): FixedSizeDecoder<CustodyVault> {
     ["version", getU8Decoder()],
     ["bump", getU8Decoder()],
     ["deposited", getU64Decoder()],
+    ["kycRegistry", getAddressDecoder()],
   ]);
 }
 
@@ -261,5 +277,5 @@ export async function fetchAllMaybeCustodyVault(
 }
 
 export function getCustodyVaultSize(): number {
-  return 237;
+  return 269;
 }

@@ -85,6 +85,7 @@ export type OpenCustodyVaultInstruction<
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountKycRegistry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -121,6 +122,9 @@ export type OpenCustodyVaultInstruction<
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountKycRegistry extends string
+        ? ReadonlyAccount<TAccountKycRegistry>
+        : TAccountKycRegistry,
       ...TRemainingAccounts,
     ]
   >;
@@ -196,6 +200,7 @@ export type OpenCustodyVaultAsyncInput<
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountKycRegistry extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open custody vaults. */
@@ -219,10 +224,18 @@ export type OpenCustodyVaultAsyncInput<
   /**
    * Emergency-pause gate (read-only), checked in the handler: a burn-only
    * quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
-   * clawback. Keep LAST among named accounts (old account indices keep
-   * their positions).
+   * clawback. Appended after the original accounts (old account indices
+   * keep their positions); only `kyc_registry` (2C-3) follows it.
    */
   platform?: Address<TAccountPlatform>;
+  /**
+   * DeliveryEscrow: REQUIRED — the registry `realize_custody_vault` checks
+   * the beneficiary's `KycEntry` in (pinned on the vault). Any other type:
+   * must be None (the program-id placeholder). `Account<KycRegistry>`
+   * checks owner + discriminator, and only `create_kyc_registry` (admin
+   * co-signed) can create one. Appended LAST (2C-3): no index moves.
+   */
+  kycRegistry?: Address<TAccountKycRegistry>;
   vaultId: OpenCustodyVaultInstructionDataArgs["vaultId"];
   vaultType: OpenCustodyVaultInstructionDataArgs["vaultType"];
   realizeAction: OpenCustodyVaultInstructionDataArgs["realizeAction"];
@@ -243,6 +256,7 @@ export async function getOpenCustodyVaultInstructionAsync<
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
   TAccountPlatform extends string,
+  TAccountKycRegistry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenCustodyVaultAsyncInput<
@@ -255,7 +269,8 @@ export async function getOpenCustodyVaultInstructionAsync<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountKycRegistry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -270,7 +285,8 @@ export async function getOpenCustodyVaultInstructionAsync<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountKycRegistry
   >
 > {
   // Program address.
@@ -289,6 +305,7 @@ export async function getOpenCustodyVaultInstructionAsync<
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     platform: { value: input.platform ?? null, isWritable: false },
+    kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -345,6 +362,7 @@ export async function getOpenCustodyVaultInstructionAsync<
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.kycRegistry),
     ],
     data: getOpenCustodyVaultInstructionDataEncoder().encode(
       args as OpenCustodyVaultInstructionDataArgs,
@@ -361,7 +379,8 @@ export async function getOpenCustodyVaultInstructionAsync<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountKycRegistry
   >);
 }
 
@@ -376,6 +395,7 @@ export type OpenCustodyVaultInput<
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountKycRegistry extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open custody vaults. */
@@ -399,10 +419,18 @@ export type OpenCustodyVaultInput<
   /**
    * Emergency-pause gate (read-only), checked in the handler: a burn-only
    * quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
-   * clawback. Keep LAST among named accounts (old account indices keep
-   * their positions).
+   * clawback. Appended after the original accounts (old account indices
+   * keep their positions); only `kyc_registry` (2C-3) follows it.
    */
   platform: Address<TAccountPlatform>;
+  /**
+   * DeliveryEscrow: REQUIRED — the registry `realize_custody_vault` checks
+   * the beneficiary's `KycEntry` in (pinned on the vault). Any other type:
+   * must be None (the program-id placeholder). `Account<KycRegistry>`
+   * checks owner + discriminator, and only `create_kyc_registry` (admin
+   * co-signed) can create one. Appended LAST (2C-3): no index moves.
+   */
+  kycRegistry?: Address<TAccountKycRegistry>;
   vaultId: OpenCustodyVaultInstructionDataArgs["vaultId"];
   vaultType: OpenCustodyVaultInstructionDataArgs["vaultType"];
   realizeAction: OpenCustodyVaultInstructionDataArgs["realizeAction"];
@@ -423,6 +451,7 @@ export function getOpenCustodyVaultInstruction<
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
   TAccountPlatform extends string,
+  TAccountKycRegistry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenCustodyVaultInput<
@@ -435,7 +464,8 @@ export function getOpenCustodyVaultInstruction<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountKycRegistry
   >,
   config?: { programAddress?: TProgramAddress },
 ): OpenCustodyVaultInstruction<
@@ -449,7 +479,8 @@ export function getOpenCustodyVaultInstruction<
   TAccountEscrowMarker,
   TAccountTokenProgram,
   TAccountSystemProgram,
-  TAccountPlatform
+  TAccountPlatform,
+  TAccountKycRegistry
 > {
   // Program address.
   const programAddress =
@@ -467,6 +498,7 @@ export function getOpenCustodyVaultInstruction<
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     platform: { value: input.platform ?? null, isWritable: false },
+    kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -499,6 +531,7 @@ export function getOpenCustodyVaultInstruction<
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.kycRegistry),
     ],
     data: getOpenCustodyVaultInstructionDataEncoder().encode(
       args as OpenCustodyVaultInstructionDataArgs,
@@ -515,7 +548,8 @@ export function getOpenCustodyVaultInstruction<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountKycRegistry
   >);
 }
 
@@ -547,10 +581,18 @@ export type ParsedOpenCustodyVaultInstruction<
     /**
      * Emergency-pause gate (read-only), checked in the handler: a burn-only
      * quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
-     * clawback. Keep LAST among named accounts (old account indices keep
-     * their positions).
+     * clawback. Appended after the original accounts (old account indices
+     * keep their positions); only `kyc_registry` (2C-3) follows it.
      */
     platform: TAccountMetas[9];
+    /**
+     * DeliveryEscrow: REQUIRED — the registry `realize_custody_vault` checks
+     * the beneficiary's `KycEntry` in (pinned on the vault). Any other type:
+     * must be None (the program-id placeholder). `Account<KycRegistry>`
+     * checks owner + discriminator, and only `create_kyc_registry` (admin
+     * co-signed) can create one. Appended LAST (2C-3): no index moves.
+     */
+    kycRegistry?: TAccountMetas[10] | undefined;
   };
   data: OpenCustodyVaultInstructionData;
 };
@@ -563,7 +605,7 @@ export function parseOpenCustodyVaultInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedOpenCustodyVaultInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 10) {
+  if (instruction.accounts.length < 11) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -572,6 +614,12 @@ export function parseOpenCustodyVaultInstruction<
     const accountMeta = (instruction.accounts as TAccountMetas)[accountIndex]!;
     accountIndex += 1;
     return accountMeta;
+  };
+  const getNextOptionalAccount = () => {
+    const accountMeta = getNextAccount();
+    return accountMeta.address === ASSET_REGISTRY_PROGRAM_ADDRESS
+      ? undefined
+      : accountMeta;
   };
   return {
     programAddress: instruction.programAddress,
@@ -586,6 +634,7 @@ export function parseOpenCustodyVaultInstruction<
       tokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
       platform: getNextAccount(),
+      kycRegistry: getNextOptionalAccount(),
     },
     data: getOpenCustodyVaultInstructionDataDecoder().decode(instruction.data),
   };

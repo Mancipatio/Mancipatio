@@ -4,6 +4,8 @@ import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/s
 import { indexerFixtures } from "./helpers/indexer-fixtures";
 import {
   getAuthorityTransferEncoder,
+  getCustodyVaultDecoder,
+  getCustodyVaultEncoder,
   getIssuerDecoder,
   getIssuerEncoder,
   getIssuerRecoveryEncoder,
@@ -43,6 +45,20 @@ describe("one generated indexer decoder", () => {
     await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, v1)).rejects.toThrow(/version 1 requires an explicit migration/);
     // A v1-sized (222-byte) account cannot decode as a Sale at all.
     await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, f.bytes.slice(0, 222))).rejects.toThrow();
+  });
+  it("projects CustodyVault v2 (kyc_registry), rejects v1 and a 237-byte account", async () => {
+    const f = indexerFixtures().find((f) => f.table === "custody_vaults")!;
+    expect(f.bytes.length).toBe(269);
+    const entity = INDEXER_ENTITIES.find((e) => e.table === "custody_vaults")!;
+    const row = await entity.decode(f.bytes, null);
+    expect(row).toMatchObject({ account_version: 2, kyc_registry: "SysvarC1ock11111111111111111111111111111111", deposited: "33" });
+    // An unpinned (non-delivery) vault projects null, not the default key.
+    const unpinned = new Uint8Array(getCustodyVaultEncoder().encode({ ...getCustodyVaultDecoder().decode(f.bytes), kycRegistry: address("11111111111111111111111111111111") }));
+    expect(await entity.decode(unpinned, null)).toMatchObject({ kyc_registry: null });
+    const v1 = new Uint8Array(getCustodyVaultEncoder().encode({ ...getCustodyVaultDecoder().decode(f.bytes), version: 1 }));
+    await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, v1)).rejects.toThrow(/version 1 requires an explicit migration/);
+    // A v1-sized (237-byte) account cannot decode as a CustodyVault at all.
+    await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, f.bytes.slice(0, 237))).rejects.toThrow();
   });
   it("does not project foreign-owned or untracked account types", async () => {
     const f = indexerFixtures()[0];
