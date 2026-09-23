@@ -19,6 +19,7 @@ import {
   findIssuerPda,
   getPostUpdateInstruction,
   getReleasePayoutInstruction,
+  findPlatformPda,
   PayoutVaultState,
   type Sale,
   type ShareClass,
@@ -597,7 +598,10 @@ function VaultDetail({
           mint: v.paymentMint,
           tokenProgram: TOKEN_CLASSIC_ADDRESS,
         });
+      // Emergency-pause gate (read-only) — the last named account.
+      const [platform] = await findPlatformPda();
       const ix = getReleasePayoutInstruction({
+        platform,
         vault: vaultPda,
         escrow,
         paymentMint: v.paymentMint,

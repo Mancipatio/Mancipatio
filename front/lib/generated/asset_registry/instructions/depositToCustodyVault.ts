@@ -32,6 +32,7 @@ import {
   type TransactionSigner,
   type WritableAccount,
 } from "@solana/kit";
+import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
 
@@ -55,6 +56,7 @@ export type DepositToCustodyVaultInstruction<
   TAccountDepositorShareAccount extends string | AccountMeta<string> = string,
   TAccountTokenProgram extends string | AccountMeta<string> =
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -82,6 +84,9 @@ export type DepositToCustodyVaultInstruction<
       TAccountTokenProgram extends string
         ? ReadonlyAccount<TAccountTokenProgram>
         : TAccountTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -125,7 +130,7 @@ export function getDepositToCustodyVaultInstructionDataCodec(): FixedSizeCodec<
   );
 }
 
-export type DepositToCustodyVaultInput<
+export type DepositToCustodyVaultAsyncInput<
   TAccountDepositor extends string = string,
   TAccountShareClass extends string = string,
   TAccountCustodyVault extends string = string,
@@ -133,6 +138,7 @@ export type DepositToCustodyVaultInput<
   TAccountEscrow extends string = string,
   TAccountDepositorShareAccount extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   /**
    * The depositing holder — signs the escrow-funding `transfer_checked`.
@@ -149,10 +155,15 @@ export type DepositToCustodyVaultInput<
   /** The depositor's share-class token account — debited exactly `amount`. */
   depositorShareAccount: Address<TAccountDepositorShareAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   amount: DepositToCustodyVaultInstructionDataArgs["amount"];
 };
 
-export function getDepositToCustodyVaultInstruction<
+export async function getDepositToCustodyVaultInstructionAsync<
   TAccountDepositor extends string,
   TAccountShareClass extends string,
   TAccountCustodyVault extends string,
@@ -160,27 +171,32 @@ export function getDepositToCustodyVaultInstruction<
   TAccountEscrow extends string,
   TAccountDepositorShareAccount extends string,
   TAccountTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: DepositToCustodyVaultInput<
+  input: DepositToCustodyVaultAsyncInput<
     TAccountDepositor,
     TAccountShareClass,
     TAccountCustodyVault,
     TAccountMint,
     TAccountEscrow,
     TAccountDepositorShareAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
-): DepositToCustodyVaultInstruction<
-  TProgramAddress,
-  TAccountDepositor,
-  TAccountShareClass,
-  TAccountCustodyVault,
-  TAccountMint,
-  TAccountEscrow,
-  TAccountDepositorShareAccount,
-  TAccountTokenProgram
+): Promise<
+  DepositToCustodyVaultInstruction<
+    TProgramAddress,
+    TAccountDepositor,
+    TAccountShareClass,
+    TAccountCustodyVault,
+    TAccountMint,
+    TAccountEscrow,
+    TAccountDepositorShareAccount,
+    TAccountTokenProgram,
+    TAccountPlatform
+  >
 > {
   // Program address.
   const programAddress =
@@ -198,6 +214,137 @@ export function getDepositToCustodyVaultInstruction<
       isWritable: true,
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedAccount
+  >;
+
+  // Original args.
+  const args = { ...input };
+
+  // Resolve default values.
+  if (!accounts.tokenProgram.value) {
+    accounts.tokenProgram.value =
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address<"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA">;
+  }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
+  return Object.freeze({
+    accounts: [
+      getAccountMeta(accounts.depositor),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.custodyVault),
+      getAccountMeta(accounts.mint),
+      getAccountMeta(accounts.escrow),
+      getAccountMeta(accounts.depositorShareAccount),
+      getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.platform),
+    ],
+    data: getDepositToCustodyVaultInstructionDataEncoder().encode(
+      args as DepositToCustodyVaultInstructionDataArgs,
+    ),
+    programAddress,
+  } as DepositToCustodyVaultInstruction<
+    TProgramAddress,
+    TAccountDepositor,
+    TAccountShareClass,
+    TAccountCustodyVault,
+    TAccountMint,
+    TAccountEscrow,
+    TAccountDepositorShareAccount,
+    TAccountTokenProgram,
+    TAccountPlatform
+  >);
+}
+
+export type DepositToCustodyVaultInput<
+  TAccountDepositor extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountCustodyVault extends string = string,
+  TAccountMint extends string = string,
+  TAccountEscrow extends string = string,
+  TAccountDepositorShareAccount extends string = string,
+  TAccountTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
+> = {
+  /**
+   * The depositing holder — signs the escrow-funding `transfer_checked`.
+   * For a `DeliveryEscrow` vault this MUST be the vault's `beneficiary`
+   * (checked in the handler): the ledger this instruction writes is the
+   * evidence `return_custody_vault` uses to release units KYC-free, so it
+   * may only ever record the beneficiary's own units.
+   */
+  depositor: TransactionSigner<TAccountDepositor>;
+  shareClass: Address<TAccountShareClass>;
+  custodyVault: Address<TAccountCustodyVault>;
+  mint: Address<TAccountMint>;
+  escrow: Address<TAccountEscrow>;
+  /** The depositor's share-class token account — debited exactly `amount`. */
+  depositorShareAccount: Address<TAccountDepositorShareAccount>;
+  tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
+  amount: DepositToCustodyVaultInstructionDataArgs["amount"];
+};
+
+export function getDepositToCustodyVaultInstruction<
+  TAccountDepositor extends string,
+  TAccountShareClass extends string,
+  TAccountCustodyVault extends string,
+  TAccountMint extends string,
+  TAccountEscrow extends string,
+  TAccountDepositorShareAccount extends string,
+  TAccountTokenProgram extends string,
+  TAccountPlatform extends string,
+  TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
+>(
+  input: DepositToCustodyVaultInput<
+    TAccountDepositor,
+    TAccountShareClass,
+    TAccountCustodyVault,
+    TAccountMint,
+    TAccountEscrow,
+    TAccountDepositorShareAccount,
+    TAccountTokenProgram,
+    TAccountPlatform
+  >,
+  config?: { programAddress?: TProgramAddress },
+): DepositToCustodyVaultInstruction<
+  TProgramAddress,
+  TAccountDepositor,
+  TAccountShareClass,
+  TAccountCustodyVault,
+  TAccountMint,
+  TAccountEscrow,
+  TAccountDepositorShareAccount,
+  TAccountTokenProgram,
+  TAccountPlatform
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? ASSET_REGISTRY_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    depositor: { value: input.depositor ?? null, isWritable: false },
+    shareClass: { value: input.shareClass ?? null, isWritable: false },
+    custodyVault: { value: input.custodyVault ?? null, isWritable: true },
+    mint: { value: input.mint ?? null, isWritable: false },
+    escrow: { value: input.escrow ?? null, isWritable: true },
+    depositorShareAccount: {
+      value: input.depositorShareAccount ?? null,
+      isWritable: true,
+    },
+    tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -223,6 +370,7 @@ export function getDepositToCustodyVaultInstruction<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.depositorShareAccount),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getDepositToCustodyVaultInstructionDataEncoder().encode(
       args as DepositToCustodyVaultInstructionDataArgs,
@@ -236,7 +384,8 @@ export function getDepositToCustodyVaultInstruction<
     TAccountMint,
     TAccountEscrow,
     TAccountDepositorShareAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -261,6 +410,11 @@ export type ParsedDepositToCustodyVaultInstruction<
     /** The depositor's share-class token account — debited exactly `amount`. */
     depositorShareAccount: TAccountMetas[5];
     tokenProgram: TAccountMetas[6];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[7];
   };
   data: DepositToCustodyVaultInstructionData;
 };
@@ -273,7 +427,7 @@ export function parseDepositToCustodyVaultInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedDepositToCustodyVaultInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 7) {
+  if (instruction.accounts.length < 8) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -293,6 +447,7 @@ export function parseDepositToCustodyVaultInstruction<
       escrow: getNextAccount(),
       depositorShareAccount: getNextAccount(),
       tokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getDepositToCustodyVaultInstructionDataDecoder().decode(
       instruction.data,

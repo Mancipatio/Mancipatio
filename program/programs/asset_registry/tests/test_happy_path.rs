@@ -5,6 +5,8 @@
 //!
 //! One keypair plays platform admin, issuer authority and KYC-provider authority.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -242,8 +244,10 @@ fn happy_path_registry_lifecycle() {
     let platform: Platform = load(&svm, &platform_pda, "platform");
     assert_eq!(platform.admin, payer.pubkey());
     assert_eq!(platform.protocol_fee_bps, 250);
-    assert!(!platform.paused);
+    // A fresh platform starts fully paused; the bootstrap clears it.
+    assert_eq!(platform.pause_flags, asset_registry::PAUSE_FLAGS_ALL);
     assert_eq!(platform.version, 1);
+    pause::unpause_all(&mut svm, &payer);
 
     // ── 2. register_issuer ───────────────────────────────────────────────────
     send(
@@ -461,6 +465,7 @@ fn happy_path_registry_lifecycle() {
                 transfer_hook_program: hook_id,
                 token_program: token_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -562,6 +567,7 @@ fn happy_path_registry_lifecycle() {
                 escrow_marker: escrow_marker_of(&custody_pda),
                 token_program: token_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -587,6 +593,7 @@ fn happy_path_registry_lifecycle() {
         mint: mint_pda,
         destination: escrow_pda,
         token_program: token_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     fund_escrow_metas.push(AccountMeta::new_readonly(custody_pda, false));
@@ -704,6 +711,7 @@ fn happy_path_registry_lifecycle() {
                 escrow_marker: escrow_marker_of(&custody_pda_2),
                 token_program: token_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -718,6 +726,7 @@ fn happy_path_registry_lifecycle() {
         mint: mint_pda,
         destination: escrow_pda_2,
         token_program: token_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     fund_escrow_2_metas.push(AccountMeta::new_readonly(custody_pda_2, false));
@@ -832,6 +841,7 @@ fn happy_path_registry_lifecycle() {
                 proceeds: proceeds_pda,
                 payment_token_program: token_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -855,6 +865,7 @@ fn happy_path_registry_lifecycle() {
         proceeds: proceeds_pda,
         share_token_program: token_2022,
         payment_token_program: token_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     buy_metas.push(AccountMeta::new_readonly(extra_metas_pda, false));
@@ -870,24 +881,33 @@ fn happy_path_registry_lifecycle() {
     assert_eq!(share_class.circulating_supply, 10);
 
     // ── 16. close_sale — sweep proceeds to the issuer ────────────────────────
-    send(
+    let close_sale_ix = Instruction::new_with_bytes(
+        program_id,
+        &ixd::CloseSale {}.data(),
+        acc::CloseSale {
+            authority: payer.pubkey(),
+            sale: sale_pda,
+            proceeds: proceeds_pda,
+            payment_mint,
+            destination: issuer_payment_ata,
+            payment_token_program: token_2022,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None),
+    );
+    // Emergency pause: mature-sale proceeds to the issuer are bit5.
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_ISSUER_PROCEEDS);
+    pause::assert_paused(
+        try_send(&mut svm, &payer, close_sale_ix.clone()),
+        "close_sale under ISSUER_PROCEEDS",
+    );
+    pause::pause_only(
         &mut svm,
         &payer,
-        Instruction::new_with_bytes(
-            program_id,
-            &ixd::CloseSale {}.data(),
-            acc::CloseSale {
-                authority: payer.pubkey(),
-                sale: sale_pda,
-                proceeds: proceeds_pda,
-                payment_mint,
-                destination: issuer_payment_ata,
-                payment_token_program: token_2022,
-            }
-            .to_account_metas(None),
-        ),
-        "close_sale",
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_ISSUER_PROCEEDS,
     );
+    send(&mut svm, &payer, close_sale_ix, "close_sale");
+    pause::unpause_all(&mut svm, &payer);
     let sale: Sale = load(&svm, &sale_pda, "sale");
     assert_eq!(sale.status, SaleStatus::Closed);
 
@@ -929,6 +949,7 @@ fn happy_path_registry_lifecycle() {
                 escrow_marker: escrow_marker_of(&offer_pda),
                 token_program: token_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -1008,6 +1029,7 @@ fn happy_path_registry_lifecycle() {
         escrow: offer_escrow_pda,
         maker_share_account: buyer_share_ata,
         token_program: token_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     fund_metas.extend_from_slice(&hook_metas);
@@ -1062,6 +1084,7 @@ fn happy_path_registry_lifecycle() {
         escrow_marker: escrow_marker_of(&offer_pda),
         share_token_program: token_2022,
         payment_token_program: token_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     take_metas.push(AccountMeta::new_readonly(offer_block_pda, false));
@@ -1321,6 +1344,7 @@ fn happy_path_registry_lifecycle() {
                 escrow_marker: escrow_marker_of(&offer2_pda),
                 token_program: token_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -1338,6 +1362,7 @@ fn happy_path_registry_lifecycle() {
         escrow: offer2_escrow_pda,
         maker_share_account: holder_b_ata,
         token_program: token_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     fund2_metas.extend_from_slice(&[
@@ -1419,6 +1444,7 @@ fn happy_path_registry_lifecycle() {
                 escrow: rights_escrow_pda,
                 token_program: token_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -1437,6 +1463,7 @@ fn happy_path_registry_lifecycle() {
         mint: mint_pda,
         destination: rights_escrow_pda,
         token_program: token_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     fund_rights_metas.push(AccountMeta::new_readonly(rights_pda, false));
@@ -1480,6 +1507,7 @@ fn happy_path_registry_lifecycle() {
                 rights_issuance: rights_pda,
                 milestone: milestone_pda,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
@@ -1563,6 +1591,7 @@ fn happy_path_registry_lifecycle() {
             mint: mint_pda,
             destination: holder_b_ata,
             token_program: token_2022,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     );
@@ -1616,6 +1645,7 @@ fn boot_kyc() -> (LiteSVM, Pubkey, Keypair) {
         ),
         "initialize_platform (boot_kyc)",
     );
+    pause::unpause_all(&mut svm, &authority);
     (svm, program_id, authority)
 }
 

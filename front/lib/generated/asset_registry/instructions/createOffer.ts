@@ -38,6 +38,7 @@ import {
   findCreateOfferEscrowPda,
   findEscrowMarkerPda,
   findOfferPda,
+  findPlatformPda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
@@ -70,6 +71,7 @@ export type CreateOfferInstruction<
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -103,6 +105,9 @@ export type CreateOfferInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -165,6 +170,7 @@ export type CreateOfferAsyncInput<
   TAccountEscrowMarker extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   maker: TransactionSigner<TAccountMaker>;
   shareClass: Address<TAccountShareClass>;
@@ -188,6 +194,11 @@ export type CreateOfferAsyncInput<
   escrowMarker?: Address<TAccountEscrowMarker>;
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   offerId: CreateOfferInstructionDataArgs["offerId"];
   amount: CreateOfferInstructionDataArgs["amount"];
   price: CreateOfferInstructionDataArgs["price"];
@@ -204,6 +215,7 @@ export async function getCreateOfferInstructionAsync<
   TAccountEscrowMarker extends string,
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateOfferAsyncInput<
@@ -215,7 +227,8 @@ export async function getCreateOfferInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -229,7 +242,8 @@ export async function getCreateOfferInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -247,6 +261,7 @@ export async function getCreateOfferInstructionAsync<
     escrowMarker: { value: input.escrowMarker ?? null, isWritable: true },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -281,6 +296,9 @@ export async function getCreateOfferInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -294,6 +312,7 @@ export async function getCreateOfferInstructionAsync<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateOfferInstructionDataEncoder().encode(
       args as CreateOfferInstructionDataArgs,
@@ -309,7 +328,8 @@ export async function getCreateOfferInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -323,6 +343,7 @@ export type CreateOfferInput<
   TAccountEscrowMarker extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   maker: TransactionSigner<TAccountMaker>;
   shareClass: Address<TAccountShareClass>;
@@ -346,6 +367,11 @@ export type CreateOfferInput<
   escrowMarker: Address<TAccountEscrowMarker>;
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   offerId: CreateOfferInstructionDataArgs["offerId"];
   amount: CreateOfferInstructionDataArgs["amount"];
   price: CreateOfferInstructionDataArgs["price"];
@@ -362,6 +388,7 @@ export function getCreateOfferInstruction<
   TAccountEscrowMarker extends string,
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateOfferInput<
@@ -373,7 +400,8 @@ export function getCreateOfferInstruction<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): CreateOfferInstruction<
@@ -386,7 +414,8 @@ export function getCreateOfferInstruction<
   TAccountEscrow,
   TAccountEscrowMarker,
   TAccountTokenProgram,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -403,6 +432,7 @@ export function getCreateOfferInstruction<
     escrowMarker: { value: input.escrowMarker ?? null, isWritable: true },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -434,6 +464,7 @@ export function getCreateOfferInstruction<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateOfferInstructionDataEncoder().encode(
       args as CreateOfferInstructionDataArgs,
@@ -449,7 +480,8 @@ export function getCreateOfferInstruction<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -481,6 +513,11 @@ export type ParsedCreateOfferInstruction<
     escrowMarker: TAccountMetas[6];
     tokenProgram: TAccountMetas[7];
     systemProgram: TAccountMetas[8];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[9];
   };
   data: CreateOfferInstructionData;
 };
@@ -493,7 +530,7 @@ export function parseCreateOfferInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedCreateOfferInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 9) {
+  if (instruction.accounts.length < 10) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -515,6 +552,7 @@ export function parseCreateOfferInstruction<
       escrowMarker: getNextAccount(),
       tokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getCreateOfferInstructionDataDecoder().decode(instruction.data),
   };

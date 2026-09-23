@@ -36,7 +36,7 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findProceedsPda, findSalePda } from "../pdas";
+import { findPlatformPda, findProceedsPda, findSalePda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -72,6 +72,7 @@ export type OpenSaleInstruction<
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -108,6 +109,9 @@ export type OpenSaleInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -187,6 +191,7 @@ export type OpenSaleAsyncInput<
   TAccountProceeds extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   issuer: Address<TAccountIssuer>;
@@ -200,6 +205,11 @@ export type OpenSaleAsyncInput<
   proceeds?: Address<TAccountProceeds>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   saleId: OpenSaleInstructionDataArgs["saleId"];
   pricePerUnit: OpenSaleInstructionDataArgs["pricePerUnit"];
   totalForSale: OpenSaleInstructionDataArgs["totalForSale"];
@@ -221,6 +231,7 @@ export async function getOpenSaleInstructionAsync<
   TAccountProceeds extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenSaleAsyncInput<
@@ -233,7 +244,8 @@ export async function getOpenSaleInstructionAsync<
     TAccountSale,
     TAccountProceeds,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -248,7 +260,8 @@ export async function getOpenSaleInstructionAsync<
     TAccountSale,
     TAccountProceeds,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -270,6 +283,7 @@ export async function getOpenSaleInstructionAsync<
       isWritable: false,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -295,6 +309,9 @@ export async function getOpenSaleInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -309,6 +326,7 @@ export async function getOpenSaleInstructionAsync<
       getAccountMeta(accounts.proceeds),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getOpenSaleInstructionDataEncoder().encode(
       args as OpenSaleInstructionDataArgs,
@@ -325,7 +343,8 @@ export async function getOpenSaleInstructionAsync<
     TAccountSale,
     TAccountProceeds,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -340,6 +359,7 @@ export type OpenSaleInput<
   TAccountProceeds extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   issuer: Address<TAccountIssuer>;
@@ -353,6 +373,11 @@ export type OpenSaleInput<
   proceeds: Address<TAccountProceeds>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   saleId: OpenSaleInstructionDataArgs["saleId"];
   pricePerUnit: OpenSaleInstructionDataArgs["pricePerUnit"];
   totalForSale: OpenSaleInstructionDataArgs["totalForSale"];
@@ -374,6 +399,7 @@ export function getOpenSaleInstruction<
   TAccountProceeds extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenSaleInput<
@@ -386,7 +412,8 @@ export function getOpenSaleInstruction<
     TAccountSale,
     TAccountProceeds,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): OpenSaleInstruction<
@@ -400,7 +427,8 @@ export function getOpenSaleInstruction<
   TAccountSale,
   TAccountProceeds,
   TAccountPaymentTokenProgram,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -421,6 +449,7 @@ export function getOpenSaleInstruction<
       isWritable: false,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -449,6 +478,7 @@ export function getOpenSaleInstruction<
       getAccountMeta(accounts.proceeds),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getOpenSaleInstructionDataEncoder().encode(
       args as OpenSaleInstructionDataArgs,
@@ -465,7 +495,8 @@ export function getOpenSaleInstruction<
     TAccountSale,
     TAccountProceeds,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -487,6 +518,11 @@ export type ParsedOpenSaleInstruction<
     proceeds: TAccountMetas[7];
     paymentTokenProgram: TAccountMetas[8];
     systemProgram: TAccountMetas[9];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[10];
   };
   data: OpenSaleInstructionData;
 };
@@ -499,7 +535,7 @@ export function parseOpenSaleInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedOpenSaleInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 10) {
+  if (instruction.accounts.length < 11) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -522,6 +558,7 @@ export function parseOpenSaleInstruction<
       proceeds: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getOpenSaleInstructionDataDecoder().decode(instruction.data),
   };

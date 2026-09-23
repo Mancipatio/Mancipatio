@@ -59,6 +59,7 @@ import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
 import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
+import { explainSendError } from "@/lib/tx-error";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -565,7 +566,7 @@ function ShareClassDetail({
         mode === "set"
           ? "Failed to set conversion target"
           : "Failed to clear conversion target",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -613,7 +614,7 @@ function ShareClassDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Metadata update failed",
-        err instanceof Error ? err.message : undefined,
+        explainSendError(err),
       );
     }
   }
@@ -739,7 +740,7 @@ function ShareClassDetail({
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       toast.showError(`Failed to set ${label}`, message);
     }
   }
@@ -779,7 +780,7 @@ function ShareClassDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to initialize mint",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -853,7 +854,7 @@ function ShareClassDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to mint",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -882,7 +883,7 @@ function ShareClassDetail({
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       toast.showError("Failed to lock supply", message);
       void recordAudit({
         ix_name: "lock_supply",
@@ -1522,7 +1523,7 @@ function AddShareClassModal({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to add share class",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }

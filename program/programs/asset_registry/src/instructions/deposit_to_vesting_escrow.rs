@@ -50,6 +50,15 @@ pub struct DepositToVestingEscrow<'info> {
     #[account(mut, seeds = [ESCROW_MARKER_SEED, series.key().as_ref()], bump = identity.bump,
         constraint = identity.refund_owner == series.authority @ RegistryError::Unauthorized)]
     pub identity: Box<Account<'info, crate::state::EscrowIdentity>>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Funds a series escrow — the ONLY instruction that credits

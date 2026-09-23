@@ -30,6 +30,7 @@ import {
   findAssetPda,
   findIssuerPda,
   getCloseSaleInstruction,
+  findPlatformPda,
   getOpenPayoutVaultInstructionAsync,
   getOpenSaleInstructionAsync,
   RaiseType,
@@ -352,7 +353,10 @@ function LaunchpadInner() {
           mint: s.paymentMint,
           tokenProgram: TOKEN_CLASSIC_ADDRESS,
         });
+      // Emergency-pause gate (read-only) — the last named account.
+      const [platform] = await findPlatformPda();
       const closeIx = getCloseSaleInstruction({
+        platform,
         authority: signer,
         sale: salePda,
         proceeds: s.proceeds,
@@ -835,6 +839,10 @@ function OpenSaleModal({
     !(vestingMonths > cliffMonths && vestingMonths > 0);
   const startupDisabled = raiseType === RaiseType.Startup && !STARTUP_RAISES;
 
+  // open_sale rejects a zero price on-chain (InvalidSalePrice).
+  const priceIsZero =
+    /^\d+$/.test(pricePerUnit.trim()) && BigInt(pricePerUnit.trim()) === BigInt(0);
+
   async function openSale() {
     if (
       !wallet ||
@@ -845,6 +853,13 @@ function OpenSaleModal({
       !totalForSale.trim()
     )
       return;
+    if (priceIsZero) {
+      toast.showError(
+        "Invalid price",
+        "The price per unit must be greater than zero.",
+      );
+      return;
+    }
     // Defense in depth for the application gate (item 3b): the modal is only
     // rendered with a linked approved application or an audited super-admin
     // override, but never send the transaction without one of the two.
@@ -1127,8 +1142,14 @@ function OpenSaleModal({
                 onChange={(e) =>
                   setPricePerUnit(e.target.value.replace(/\D/g, ""))
                 }
+                aria-invalid={priceIsZero ? true : undefined}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
+              {priceIsZero && (
+                <span className="mt-1 block text-xs text-red-600">
+                  Must be greater than zero.
+                </span>
+              )}
             </label>
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -1166,6 +1187,7 @@ function OpenSaleModal({
               !selectedScPda ||
               !paymentMint.trim() ||
               !pricePerUnit.trim() ||
+              priceIsZero ||
               !totalForSale.trim() ||
               startupTermsInvalid ||
               startupDisabled

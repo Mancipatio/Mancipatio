@@ -8,6 +8,8 @@
 //! share class → hook-wired Token-2022 mint → transfer_hook config (Open mode)
 //! so real `transfer_checked` legs run through the hook.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -205,6 +207,7 @@ fn boot() -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],
@@ -327,6 +330,7 @@ fn boot() -> (LiteSVM, Ctx) {
                 transfer_hook_program: hook_id,
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -423,6 +427,7 @@ fn boot() -> (LiteSVM, Ctx) {
                 mint: mint_pda,
                 destination: payer_share_ata,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -550,6 +555,7 @@ fn create_deal_ix(ctx: &Ctx, authority: &Pubkey, deal_id: u64, expires_at: i64) 
             token_program: TOKEN_2022,
             payment_token_program: TOKEN_2022,
             system_program: system_program::ID,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     )
@@ -570,6 +576,7 @@ fn deposit_asset_ix(ctx: &Ctx, signer: &Pubkey, deal_id: u64) -> Instruction {
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     // deposit leg (source authority = seller) + settle leg (source authority = deal PDA)
@@ -593,6 +600,7 @@ fn deposit_payment_ix(ctx: &Ctx, signer: &Pubkey, deal_id: u64) -> Instruction {
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     // settle leg (source authority = deal PDA) — unused if the asset is not in yet
@@ -1057,5 +1065,143 @@ fn admin_cancel_refunds_and_blocks_deposits() {
     assert!(
         err.contains("DealNotOpen") || err.contains("AccountNotInitialized"),
         "got: {err}"
+    );
+}
+
+// ── Emergency pause (Platform.pause_flags) ───────────────────────────────────
+
+/// bit2 gates every deal ENTRY — create, the first deposit and the settling
+/// deposit on either side; `cancel_otc_deal` / `expire_otc_deal` refund by
+/// ledger under 0x3F.
+#[test]
+fn secondary_pause_gates_deal_entries_including_the_settling_deposit() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let payer = ctx.payer.pubkey();
+    let seller = ctx.seller.pubkey();
+    let buyer = ctx.buyer.pubkey();
+    let all_but = asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_SECONDARY;
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[create_deal_ix(&ctx, &payer, 1, 2_000)],
+        ),
+        "create_otc_deal under SECONDARY",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    for deal_id in 1..=3 {
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[create_deal_ix(&ctx, &payer, deal_id, 2_000)],
+            "create_otc_deal",
+        );
+    }
+
+    // Deal 1 — asset first, then the settling payment.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.seller],
+            &[deposit_asset_ix(&ctx, &seller, 1)],
+        ),
+        "deposit_otc_asset under SECONDARY",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    send(
+        &mut svm,
+        &[&ctx.seller],
+        &[deposit_asset_ix(&ctx, &seller, 1)],
+        "deposit_otc_asset",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.buyer],
+            &[deposit_payment_ix(&ctx, &buyer, 1)],
+        ),
+        "settling deposit_otc_payment under SECONDARY",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_payment_ix(&ctx, &buyer, 1)],
+        "settling deposit_otc_payment",
+    );
+    assert_settled(&svm, &ctx, &deal_pdas(&ctx, 1).0, 1);
+
+    // Deal 2 — payment first; the settling asset deposit is gated too.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.buyer],
+            &[deposit_payment_ix(&ctx, &buyer, 2)],
+        ),
+        "deposit_otc_payment under SECONDARY",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_payment_ix(&ctx, &buyer, 2)],
+        "deposit_otc_payment",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.seller],
+            &[deposit_asset_ix(&ctx, &seller, 2)],
+        ),
+        "settling deposit_otc_asset under SECONDARY",
+    );
+
+    // Deal 3 — the seller funds it, then the deal lapses.
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    send(
+        &mut svm,
+        &[&ctx.seller],
+        &[deposit_asset_ix(&ctx, &seller, 3)],
+        "deposit_otc_asset (deal 3)",
+    );
+
+    // Full pause: the admin cancels deal 2 (buyer refunded) and anyone
+    // expires deal 3 (seller refunded).
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    let buyer_before = token_balance(&svm, &ctx.buyer_payment_ata);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[cancel_deal_ix(&ctx, &payer, 2)],
+        "cancel_otc_deal under 0x3F",
+    );
+    assert_eq!(
+        token_balance(&svm, &ctx.buyer_payment_ata) - buyer_before,
+        DEAL_PRICE
+    );
+    warp_to(&mut svm, 3_000);
+    let stranger = Keypair::new();
+    svm.airdrop(&stranger.pubkey(), 10_000_000_000).unwrap();
+    send(
+        &mut svm,
+        &[&stranger],
+        &[expire_deal_ix(&ctx, &stranger.pubkey(), 3)],
+        "expire_otc_deal under 0x3F",
+    );
+    assert_eq!(
+        load::<OtcDeal>(&svm, &deal_pdas(&ctx, 3).0).status,
+        OtcDealStatus::Expired
+    );
+    assert_eq!(
+        token_balance(&svm, &ctx.seller_share_ata),
+        SELLER_UNITS - DEAL_AMOUNT,
+        "deal 3 refunded to the seller"
     );
 }

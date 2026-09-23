@@ -41,6 +41,7 @@ import {
   findDistributionPda,
   findEscrowPda,
   findPlanPda,
+  findPlatformPda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
@@ -76,6 +77,7 @@ export type CreateDistributionInstruction<
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
   TAccountPlan extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -122,6 +124,9 @@ export type CreateDistributionInstruction<
       TAccountPlan extends string
         ? WritableAccount<TAccountPlan>
         : TAccountPlan,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -192,6 +197,7 @@ export type CreateDistributionAsyncInput<
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
   TAccountPlan extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open distributions. */
@@ -221,6 +227,11 @@ export type CreateDistributionAsyncInput<
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
   plan?: Address<TAccountPlan>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   distributionId: CreateDistributionInstructionDataArgs["distributionId"];
   totalAmount: CreateDistributionInstructionDataArgs["totalAmount"];
   snapshotSupply: CreateDistributionInstructionDataArgs["snapshotSupply"];
@@ -242,6 +253,7 @@ export async function getCreateDistributionInstructionAsync<
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
   TAccountPlan extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateDistributionAsyncInput<
@@ -257,7 +269,8 @@ export async function getCreateDistributionInstructionAsync<
     TAccountFunderPaymentAccount,
     TAccountPaymentTokenProgram,
     TAccountSystemProgram,
-    TAccountPlan
+    TAccountPlan,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -275,7 +288,8 @@ export async function getCreateDistributionInstructionAsync<
     TAccountFunderPaymentAccount,
     TAccountPaymentTokenProgram,
     TAccountSystemProgram,
-    TAccountPlan
+    TAccountPlan,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -303,6 +317,7 @@ export async function getCreateDistributionInstructionAsync<
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     plan: { value: input.plan ?? null, isWritable: true },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -343,6 +358,9 @@ export async function getCreateDistributionInstructionAsync<
       distribution: expectAddress(accounts.distribution.value),
     });
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -360,6 +378,7 @@ export async function getCreateDistributionInstructionAsync<
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.plan),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateDistributionInstructionDataEncoder().encode(
       args as CreateDistributionInstructionDataArgs,
@@ -379,7 +398,8 @@ export async function getCreateDistributionInstructionAsync<
     TAccountFunderPaymentAccount,
     TAccountPaymentTokenProgram,
     TAccountSystemProgram,
-    TAccountPlan
+    TAccountPlan,
+    TAccountPlatform
   >);
 }
 
@@ -397,6 +417,7 @@ export type CreateDistributionInput<
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
   TAccountPlan extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open distributions. */
@@ -426,6 +447,11 @@ export type CreateDistributionInput<
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
   plan: Address<TAccountPlan>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   distributionId: CreateDistributionInstructionDataArgs["distributionId"];
   totalAmount: CreateDistributionInstructionDataArgs["totalAmount"];
   snapshotSupply: CreateDistributionInstructionDataArgs["snapshotSupply"];
@@ -447,6 +473,7 @@ export function getCreateDistributionInstruction<
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
   TAccountPlan extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateDistributionInput<
@@ -462,7 +489,8 @@ export function getCreateDistributionInstruction<
     TAccountFunderPaymentAccount,
     TAccountPaymentTokenProgram,
     TAccountSystemProgram,
-    TAccountPlan
+    TAccountPlan,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): CreateDistributionInstruction<
@@ -479,7 +507,8 @@ export function getCreateDistributionInstruction<
   TAccountFunderPaymentAccount,
   TAccountPaymentTokenProgram,
   TAccountSystemProgram,
-  TAccountPlan
+  TAccountPlan,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -506,6 +535,7 @@ export function getCreateDistributionInstruction<
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     plan: { value: input.plan ?? null, isWritable: true },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -537,6 +567,7 @@ export function getCreateDistributionInstruction<
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.plan),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateDistributionInstructionDataEncoder().encode(
       args as CreateDistributionInstructionDataArgs,
@@ -556,7 +587,8 @@ export function getCreateDistributionInstruction<
     TAccountFunderPaymentAccount,
     TAccountPaymentTokenProgram,
     TAccountSystemProgram,
-    TAccountPlan
+    TAccountPlan,
+    TAccountPlatform
   >);
 }
 
@@ -594,6 +626,11 @@ export type ParsedCreateDistributionInstruction<
     paymentTokenProgram: TAccountMetas[10];
     systemProgram: TAccountMetas[11];
     plan: TAccountMetas[12];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[13];
   };
   data: CreateDistributionInstructionData;
 };
@@ -606,7 +643,7 @@ export function parseCreateDistributionInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedCreateDistributionInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 13) {
+  if (instruction.accounts.length < 14) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -632,6 +669,7 @@ export function parseCreateDistributionInstruction<
       paymentTokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
       plan: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getCreateDistributionInstructionDataDecoder().decode(
       instruction.data,

@@ -1,35 +1,44 @@
 "use client";
 
 import Link from "next/link";
-import { createWalletTransactionSigner } from "@solana/client";
-import {
-  useSendTransaction,
-  useSolanaClient,
-  useWalletConnection,
-} from "@solana/react-hooks";
+import { useSolanaClient } from "@solana/react-hooks";
 import { useCallback, useEffect, useState } from "react";
 import {
   fetchMaybePlatform,
   findPlatformPda,
-  getSetPauseInstructionAsync,
   type Platform,
 } from "@/lib/generated/asset_registry";
-import { ConfirmModal } from "@/components/confirm-modal";
+import { PauseFlagsPanel } from "@/components/pause-flags-panel";
 import { SkeletonCard } from "@/components/skeleton";
-import { useRole } from "@/lib/auth";
-import { recordAudit } from "@/lib/supabase";
-import { useToast } from "@/lib/toast";
+import { pauseStatus, type PauseStatus } from "@/lib/pause-flags";
+
+const STATUS_THEME: Record<
+  PauseStatus["tone"],
+  { bar: string; chip: string; dot: string }
+> = {
+  active: {
+    bar: "linear-gradient(90deg, #10b981 0%, #059669 100%)",
+    chip: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200",
+    dot: "bg-emerald-500 animate-pulse",
+  },
+  paused: {
+    bar: "linear-gradient(90deg, #ef4444 0%, #b91c1c 100%)",
+    chip: "bg-red-50 text-red-700 ring-1 ring-inset ring-red-200",
+    dot: "bg-red-500",
+  },
+  // Only undefined bits set: nothing is gated, but the byte is not clean.
+  undefined: {
+    bar: "linear-gradient(90deg, #f59e0b 0%, #d97706 100%)",
+    chip: "bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200",
+    dot: "bg-amber-500",
+  },
+};
 
 export function PlatformStatusCard() {
-  const conn = useWalletConnection();
   const client = useSolanaClient();
-  const tx = useSendTransaction();
-  const { isSuperAdmin } = useRole();
-  const toast = useToast();
   const [platform, setPlatform] = useState<Platform | null | undefined>(
     undefined,
   );
-  const [confirmPause, setConfirmPause] = useState(false);
 
   const refresh = useCallback(async () => {
     const [pda] = await findPlatformPda();
@@ -42,51 +51,6 @@ export function PlatformStatusCard() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
-
-  const wallet = conn.wallet?.account.address;
-
-  async function togglePause(reason: string) {
-    if (!wallet || !platform || !conn.wallet) return;
-    const wasPaused = platform.paused;
-    const action = wasPaused ? "Unpausing" : "Pausing";
-    const pendingId = toast.showPending(`${action} platform…`, reason);
-    try {
-      const { signer } = createWalletTransactionSigner(conn.wallet);
-      const ix = await getSetPauseInstructionAsync({
-        admin: signer,
-        paused: !wasPaused,
-      });
-      const sig = await tx.send({ instructions: [ix], feePayer: signer });
-      toast.dismiss(pendingId);
-      toast.showTx(sig, {
-        title: wasPaused ? "Platform unpaused" : "Platform paused",
-      });
-      void recordAudit({
-        ix_name: "set_pause",
-        category: "platform",
-        actor_wallet: wallet.toString(),
-        reason,
-        tx_signature: sig,
-        target_label: wasPaused ? "unpause" : "pause",
-        metadata: { paused: !wasPaused },
-      });
-      setConfirmPause(false);
-      await refresh();
-    } catch (err) {
-      toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
-      toast.showError("Failed to toggle pause", message);
-      void recordAudit({
-        ix_name: "set_pause",
-        category: "platform",
-        actor_wallet: wallet.toString(),
-        reason,
-        target_label: wasPaused ? "unpause" : "pause",
-        status: "failed",
-        metadata: { error: message },
-      });
-    }
-  }
 
   if (platform === undefined) {
     return <SkeletonCard rows={4} />;
@@ -116,15 +80,14 @@ export function PlatformStatusCard() {
     );
   }
 
+  const { tone, label: status } = pauseStatus(platform.pauseFlags);
+  const theme = STATUS_THEME[tone];
+
   return (
     <div className="panel overflow-hidden">
       <div
         className="h-0.5"
-        style={{
-          background: platform.paused
-            ? "linear-gradient(90deg, #ef4444 0%, #b91c1c 100%)"
-            : "linear-gradient(90deg, #10b981 0%, #059669 100%)",
-        }}
+        style={{ background: theme.bar }}
       />
       <div className="p-5">
         <div className="flex items-start justify-between gap-4">
@@ -135,20 +98,12 @@ export function PlatformStatusCard() {
             </h2>
           </div>
           <span
-            className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${
-              platform.paused
-                ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-200"
-                : "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200"
-            }`}
+            className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${theme.chip}`}
           >
             <span
-              className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${
-                platform.paused
-                  ? "bg-red-500"
-                  : "bg-emerald-500 animate-pulse"
-              }`}
+              className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${theme.dot}`}
             />
-            {platform.paused ? "Paused" : "Active"}
+            {status}
           </span>
         </div>
 
@@ -163,25 +118,11 @@ export function PlatformStatusCard() {
           <Row label="Version" value={String(platform.version)} />
         </dl>
 
-        <div className="mt-5 flex items-center gap-3">
-          {isSuperAdmin ? (
-            <button
-              type="button"
-              disabled={tx.isSending}
-              onClick={() => setConfirmPause(true)}
-              className={`rounded-md border px-3 py-1.5 text-[12.5px] font-medium transition-colors disabled:opacity-50 ${
-                platform.paused
-                  ? "border-emerald-300 bg-emerald-50 text-emerald-900 hover:bg-emerald-100"
-                  : "border-red-300 bg-red-50 text-red-900 hover:bg-red-100"
-              }`}
-            >
-              {platform.paused ? "Unpause platform" : "Emergency pause"}
-            </button>
-          ) : (
-            <p className="text-xs text-slate-500">
-              Only the Super Admin can pause the platform.
-            </p>
-          )}
+        <div className="mt-5">
+          <PauseFlagsPanel platform={platform} onChanged={refresh} />
+        </div>
+
+        <div className="mt-4">
           <Link
             href="/admin/platform"
             className="text-xs text-brand-700 underline-offset-2 hover:underline"
@@ -190,31 +131,6 @@ export function PlatformStatusCard() {
           </Link>
         </div>
       </div>
-
-      <ConfirmModal
-        open={confirmPause}
-        onClose={() => setConfirmPause(false)}
-        onConfirm={(reason) => togglePause(reason)}
-        title={platform.paused ? "Unpause platform" : "Pause platform"}
-        kind={platform.paused ? "warning" : "destructive"}
-        confirmLabel={platform.paused ? "Unpause" : "Pause"}
-        description={
-          platform.paused ? (
-            <p>
-              Unpausing the platform resumes <strong>all</strong> mint,
-              transfer, custody, sale, OTC, governance and Rights claim
-              operations. Reason will be recorded in the audit log.
-            </p>
-          ) : (
-            <p>
-              Pausing halts <strong>all platform operations</strong> across
-              every issuer and share class. Use only in emergency. Reason will
-              be recorded in the audit log.
-            </p>
-          )
-        }
-        busy={tx.isSending}
-      />
     </div>
   );
 }

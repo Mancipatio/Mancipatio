@@ -33,6 +33,15 @@ pub struct CloseSale<'info> {
     pub destination: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub payment_token_program: Interface<'info, TokenInterface>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_ISSUER_PROCEEDS) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Closes a sale: sweeps the proceeds escrow to the issuer's payment account

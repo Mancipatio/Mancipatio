@@ -64,6 +64,15 @@ pub struct OpenSale<'info> {
 
     pub payment_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_PRIMARY) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Opens a primary sale of a share class — `total_for_sale` units at
@@ -87,6 +96,8 @@ pub fn handle_open_sale(
     )?;
 
     require!(total_for_sale > 0, RegistryError::InvalidSaleParams);
+    // A zero price would hand out units for free (and a Startup vault of 0).
+    require!(price_per_unit > 0, RegistryError::InvalidSalePrice);
     require!(
         end_ts == 0 || end_ts > start_ts,
         RegistryError::InvalidSaleParams

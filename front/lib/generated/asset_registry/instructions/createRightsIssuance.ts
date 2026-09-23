@@ -36,6 +36,7 @@ import {
   findAdminRecordPda,
   findCreateRightsIssuanceEscrowPda,
   findIdentityPda,
+  findPlatformPda,
   findRightsIssuancePda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
@@ -69,6 +70,7 @@ export type CreateRightsIssuanceInstruction<
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
   TAccountIdentity extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -102,6 +104,9 @@ export type CreateRightsIssuanceInstruction<
       TAccountIdentity extends string
         ? WritableAccount<TAccountIdentity>
         : TAccountIdentity,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -155,6 +160,7 @@ export type CreateRightsIssuanceAsyncInput<
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
   TAccountIdentity extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open a Rights-Token issuance. */
@@ -169,6 +175,11 @@ export type CreateRightsIssuanceAsyncInput<
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
   identity?: Address<TAccountIdentity>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   issuanceId: CreateRightsIssuanceInstructionDataArgs["issuanceId"];
 };
 
@@ -182,6 +193,7 @@ export async function getCreateRightsIssuanceInstructionAsync<
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
   TAccountIdentity extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateRightsIssuanceAsyncInput<
@@ -193,7 +205,8 @@ export async function getCreateRightsIssuanceInstructionAsync<
     TAccountEscrow,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -207,7 +220,8 @@ export async function getCreateRightsIssuanceInstructionAsync<
     TAccountEscrow,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -225,6 +239,7 @@ export async function getCreateRightsIssuanceInstructionAsync<
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     identity: { value: input.identity ?? null, isWritable: true },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -264,6 +279,9 @@ export async function getCreateRightsIssuanceInstructionAsync<
       rightsIssuance: expectAddress(accounts.rightsIssuance.value),
     });
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -277,6 +295,7 @@ export async function getCreateRightsIssuanceInstructionAsync<
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.identity),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateRightsIssuanceInstructionDataEncoder().encode(
       args as CreateRightsIssuanceInstructionDataArgs,
@@ -292,7 +311,8 @@ export async function getCreateRightsIssuanceInstructionAsync<
     TAccountEscrow,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >);
 }
 
@@ -306,6 +326,7 @@ export type CreateRightsIssuanceInput<
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
   TAccountIdentity extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open a Rights-Token issuance. */
@@ -320,6 +341,11 @@ export type CreateRightsIssuanceInput<
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
   identity: Address<TAccountIdentity>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   issuanceId: CreateRightsIssuanceInstructionDataArgs["issuanceId"];
 };
 
@@ -333,6 +359,7 @@ export function getCreateRightsIssuanceInstruction<
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
   TAccountIdentity extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateRightsIssuanceInput<
@@ -344,7 +371,8 @@ export function getCreateRightsIssuanceInstruction<
     TAccountEscrow,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): CreateRightsIssuanceInstruction<
@@ -357,7 +385,8 @@ export function getCreateRightsIssuanceInstruction<
   TAccountEscrow,
   TAccountTokenProgram,
   TAccountSystemProgram,
-  TAccountIdentity
+  TAccountIdentity,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -374,6 +403,7 @@ export function getCreateRightsIssuanceInstruction<
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     identity: { value: input.identity ?? null, isWritable: true },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -405,6 +435,7 @@ export function getCreateRightsIssuanceInstruction<
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.identity),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateRightsIssuanceInstructionDataEncoder().encode(
       args as CreateRightsIssuanceInstructionDataArgs,
@@ -420,7 +451,8 @@ export function getCreateRightsIssuanceInstruction<
     TAccountEscrow,
     TAccountTokenProgram,
     TAccountSystemProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >);
 }
 
@@ -443,6 +475,11 @@ export type ParsedCreateRightsIssuanceInstruction<
     tokenProgram: TAccountMetas[6];
     systemProgram: TAccountMetas[7];
     identity: TAccountMetas[8];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[9];
   };
   data: CreateRightsIssuanceInstructionData;
 };
@@ -455,7 +492,7 @@ export function parseCreateRightsIssuanceInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedCreateRightsIssuanceInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 9) {
+  if (instruction.accounts.length < 10) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -477,6 +514,7 @@ export function parseCreateRightsIssuanceInstruction<
       tokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
       identity: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getCreateRightsIssuanceInstructionDataDecoder().decode(
       instruction.data,

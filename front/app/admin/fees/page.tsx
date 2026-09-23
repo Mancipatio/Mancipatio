@@ -9,6 +9,7 @@ import {
   type Platform,
 } from "@/lib/generated/asset_registry";
 import { RequireRole } from "@/components/require-role";
+import { describePausedAreas, formatPauseFlags } from "@/lib/pause-flags";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
 import { useRole } from "@/lib/auth";
@@ -146,8 +147,14 @@ function FeesOps() {
               mono
             />
             <Field
-              label="Paused"
-              value={platform.paused ? "Yes" : "No"}
+              label="Emergency pause"
+              value={
+                platform.pauseFlags === 0
+                  ? "None"
+                  : describePausedAreas(platform.pauseFlags) ||
+                    formatPauseFlags(platform.pauseFlags)
+              }
+              hint={`pause_flags ${formatPauseFlags(platform.pauseFlags)}`}
             />
           </dl>
         )}

@@ -83,6 +83,15 @@ pub struct CreateDistribution<'info> {
     #[account(init, payer = authority, space = 8 + crate::state::DistributionPlan::INIT_SPACE,
         seeds = [DISTRIBUTION_PLAN_SEED, distribution.key().as_ref()], bump)]
     pub plan: Box<Account<'info, crate::state::DistributionPlan>>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Opens a push-based pro-rata revenue distribution (business-doc §2–§5) and

@@ -27,6 +27,8 @@
 //!     so an arbitrary `publish_milestone` root cannot be paid out through an
 //!     `EscrowMarker`-carrying third-party escrow.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -227,6 +229,7 @@ fn create_offer(svm: &mut LiteSVM, ctx: &Ctx, maker: &Keypair, offer_id: u64) ->
                 escrow_marker: escrow_marker_of(ctx, &offer_pda),
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -297,6 +300,7 @@ fn buy_ix(ctx: &Ctx, amount: u64, tail: Vec<AccountMeta>) -> Instruction {
         proceeds: ctx.proceeds_pda,
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.extend(tail);
@@ -398,6 +402,7 @@ fn open_vault_ix(
             escrow_marker: escrow_marker_of(ctx, &custody_pda),
             token_program: TOKEN_2022,
             system_program: system_program::ID,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     );
@@ -628,6 +633,7 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],
@@ -744,6 +750,7 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
                 transfer_hook_program: hook_id,
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -887,6 +894,7 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
                 proceeds: proceeds_pda,
                 payment_token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1179,6 +1187,7 @@ fn mint_to_treasury_binds_destination() {
                 mint: ctx.mint_pda,
                 destination: ctx.buyer_share_ata,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1203,6 +1212,7 @@ fn mint_to_treasury_binds_destination() {
         mint: ctx.mint_pda,
         destination: offer_escrow,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.push(AccountMeta::new_readonly(offer_pda, false));
@@ -1236,6 +1246,7 @@ fn mint_to_treasury_binds_destination() {
                 mint: ctx.mint_pda,
                 destination: payer_share_ata,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1261,6 +1272,7 @@ fn mint_to_treasury_accepts_custody_escrow() {
         mint: ctx.mint_pda,
         destination: escrow_pda,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.push(AccountMeta::new_readonly(custody_pda, false));
@@ -1289,6 +1301,7 @@ fn mint_to_escrow_ix(ctx: &Ctx, escrow: &Pubkey, parent: &Pubkey, amount: u64) -
         mint: ctx.mint_pda,
         destination: *escrow,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.push(AccountMeta::new_readonly(*parent, false));
@@ -1376,14 +1389,7 @@ fn mint_to_treasury_rejects_vaults_with_a_wallet_exit() {
 /// mint), funds its escrow with `amount` freshly minted units and publishes a
 /// single-leaf milestone entitling `claimer` to `entitlement`.
 /// Returns `(rights_pda, rights_escrow, milestone_pda)`.
-fn setup_rights_issuance(
-    svm: &mut LiteSVM,
-    ctx: &Ctx,
-    issuance_id: u64,
-    amount: u64,
-    claimer: &Pubkey,
-    entitlement: u64,
-) -> (Pubkey, Pubkey, Pubkey) {
+fn create_rights_issuance_ix(ctx: &Ctx, issuance_id: u64) -> (Instruction, Pubkey, Pubkey) {
     let (rights_pda, _) = Pubkey::find_program_address(
         &[
             asset_registry::RIGHTS_SEED,
@@ -1396,40 +1402,38 @@ fn setup_rights_issuance(
         &[asset_registry::ESCROW_SEED, rights_pda.as_ref()],
         &ctx.program_id,
     );
-    send(
-        svm,
-        &[&ctx.payer],
-        &[Instruction::new_with_bytes(
-            ctx.program_id,
-            &ixd::CreateRightsIssuance { issuance_id }.data(),
-            acc::CreateRightsIssuance {
-                identity: Pubkey::find_program_address(
-                    &[asset_registry::ESCROW_MARKER_SEED, rights_pda.as_ref()],
-                    &asset_registry::ID,
-                )
-                .0,
-                authority: ctx.payer.pubkey(),
-                admin_record: ctx.admin_pda,
-                share_class: ctx.share_class_pda,
-                underlying_mint: ctx.mint_pda,
-                rights_issuance: rights_pda,
-                escrow: rights_escrow,
-                token_program: TOKEN_2022,
-                system_program: system_program::ID,
-            }
-            .to_account_metas(None),
-        )],
-        "create_rights_issuance",
+    let ix = Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::CreateRightsIssuance { issuance_id }.data(),
+        acc::CreateRightsIssuance {
+            identity: Pubkey::find_program_address(
+                &[asset_registry::ESCROW_MARKER_SEED, rights_pda.as_ref()],
+                &asset_registry::ID,
+            )
+            .0,
+            authority: ctx.payer.pubkey(),
+            admin_record: ctx.admin_pda,
+            share_class: ctx.share_class_pda,
+            underlying_mint: ctx.mint_pda,
+            rights_issuance: rights_pda,
+            escrow: rights_escrow,
+            token_program: TOKEN_2022,
+            system_program: system_program::ID,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None),
     );
-    send(
-        svm,
-        &[&ctx.payer],
-        &[mint_to_escrow_ix(ctx, &rights_escrow, &rights_pda, amount)],
-        "fund rights escrow",
-    );
+    (ix, rights_pda, rights_escrow)
+}
 
-    // Single-leaf snapshot → root == leaf, so an empty proof verifies. The
-    // root is whatever the admin says it is — that is the point of the test.
+/// Milestone 0 with a single-leaf snapshot (root == leaf, so an empty proof
+/// verifies). The root is whatever the admin says it is.
+fn publish_milestone_ix(
+    ctx: &Ctx,
+    rights_pda: &Pubkey,
+    claimer: &Pubkey,
+    entitlement: u64,
+) -> (Instruction, Pubkey) {
     let index: u16 = 0;
     let (milestone_pda, _) = Pubkey::find_program_address(
         &[
@@ -1439,29 +1443,46 @@ fn setup_rights_issuance(
         ],
         &ctx.program_id,
     );
+    let ix = Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::PublishMilestone {
+            index,
+            merkle_root: util::snapshot_leaf(claimer, entitlement),
+            amount_pool: entitlement,
+            unlock_ts: 0,
+        }
+        .data(),
+        acc::PublishMilestone {
+            authority: ctx.payer.pubkey(),
+            admin_record: ctx.admin_pda,
+            rights_issuance: *rights_pda,
+            milestone: milestone_pda,
+            system_program: system_program::ID,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None),
+    );
+    (ix, milestone_pda)
+}
+
+fn setup_rights_issuance(
+    svm: &mut LiteSVM,
+    ctx: &Ctx,
+    issuance_id: u64,
+    amount: u64,
+    claimer: &Pubkey,
+    entitlement: u64,
+) -> (Pubkey, Pubkey, Pubkey) {
+    let (create_ix, rights_pda, rights_escrow) = create_rights_issuance_ix(ctx, issuance_id);
+    send(svm, &[&ctx.payer], &[create_ix], "create_rights_issuance");
     send(
         svm,
         &[&ctx.payer],
-        &[Instruction::new_with_bytes(
-            ctx.program_id,
-            &ixd::PublishMilestone {
-                index,
-                merkle_root: util::snapshot_leaf(claimer, entitlement),
-                amount_pool: entitlement,
-                unlock_ts: 0,
-            }
-            .data(),
-            acc::PublishMilestone {
-                authority: ctx.payer.pubkey(),
-                admin_record: ctx.admin_pda,
-                rights_issuance: rights_pda,
-                milestone: milestone_pda,
-                system_program: system_program::ID,
-            }
-            .to_account_metas(None),
-        )],
-        "publish_milestone",
+        &[mint_to_escrow_ix(ctx, &rights_escrow, &rights_pda, amount)],
+        "fund rights escrow",
     );
+    let (publish_ix, milestone_pda) = publish_milestone_ix(ctx, &rights_pda, claimer, entitlement);
+    send(svm, &[&ctx.payer], &[publish_ix], "publish_milestone");
     (rights_pda, rights_escrow, milestone_pda)
 }
 
@@ -2113,6 +2134,7 @@ fn issuance_rejects_mutable_owners_before_payment_or_supply_changes() {
                 mint: ctx.mint_pda,
                 destination: mutable_treasury,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         );
@@ -2283,6 +2305,7 @@ fn physical_good_lifetime_cap_survives_both_issuance_paths_and_custody_burns() {
                 escrow,
                 depositor_share_account: ctx.buyer_share_ata,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None);
             metas.extend(open_hook_metas(&ctx, &owner));
@@ -2368,6 +2391,7 @@ fn physical_good_lifetime_cap_survives_both_issuance_paths_and_custody_burns() {
                 mint: ctx.mint_pda,
                 destination: treasury,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         );
@@ -2428,6 +2452,7 @@ fn legacy_share_class_version_cannot_silently_start_new_lifetime_accounting() {
             mint: ctx.mint_pda,
             destination: treasury,
             token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     );
@@ -2549,6 +2574,7 @@ fn treasury_ix(ctx: &Ctx, destination: Pubkey, proof: Pubkey) -> Instruction {
             mint: ctx.mint_pda,
             destination,
             token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     )
@@ -3016,6 +3042,7 @@ fn revoked_custody_operator_can_be_rotated_without_blocking_deadline_refund() {
         escrow: delivery_escrow,
         depositor_share_account: ctx.buyer_share_ata,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     deposit_metas.extend(open_hook_metas(&ctx, &ctx.buyer.pubkey()));
@@ -3320,6 +3347,7 @@ fn empty_asset_cannot_activate_and_scoped_issuer_initializes_mint_without_global
             transfer_hook_program: ctx.hook_id,
             token_program: TOKEN_2022,
             system_program: system_program::ID,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     );
@@ -3487,6 +3515,7 @@ fn share_vesting_deposit(
         depositor_token_account: source,
         token_program: TOKEN_2022,
         identity: escrow_marker_of(ctx, &series),
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.extend(kyc_hook_metas(ctx, &depositor, &depositor, &series));
@@ -3851,6 +3880,7 @@ fn original_full_v1_share_class_prepares_size_only_and_keeps_custody_refund_whil
         escrow,
         depositor_share_account: ctx.buyer_share_ata,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     deposit_metas.extend(open_hook_metas(&ctx, &ctx.buyer.pubkey()));
@@ -4163,6 +4193,7 @@ fn deposit_rejects_vault_with_unsupported_realize_action() {
             escrow,
             depositor_share_account: ctx.buyer_share_ata,
             token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None);
         metas.extend(open_hook_metas(ctx, &owner));
@@ -4201,4 +4232,432 @@ fn deposit_rejects_vault_with_unsupported_realize_action() {
         load::<asset_registry::CustodyVault>(&svm, &vault).deposited,
         1
     );
+}
+
+// ── Emergency pause (Platform.pause_flags) ───────────────────────────────────
+
+fn admin_record_of(authority: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[asset_registry::ADMIN_SEED, authority.as_ref()],
+        &asset_registry::ID,
+    )
+    .0
+}
+
+/// bit1 gates a KycGated `buy` and `mint_to_treasury` to BOTH bound
+/// destinations (the issuer treasury and a burn-only custody escrow). KYC
+/// administration and a wallet-to-wallet hook transfer stay open under a full
+/// pause — the hook never reads the Platform.
+#[test]
+fn primary_pause_gates_buy_and_treasury_minting_but_not_kyc_or_transfers() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer_pk = ctx.buyer.pubkey();
+    let treasury_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &ctx.payer.pubkey());
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    // KYC approval is never gated.
+    approve_kyc(&mut svm, &ctx, &buyer_pk);
+    // The burn-only quarantine vault opens under a full pause (bit3 exemption).
+    let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 7);
+    let treasury_mint = |destination: Pubkey| {
+        Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::MintToTreasury { amount: 5 }.data(),
+            acc::MintToTreasury {
+                authority: ctx.payer.pubkey(),
+                admin_record: ctx.admin_pda,
+                issuer: ctx.issuer_pda,
+                asset: ctx.asset_pda,
+                share_class: ctx.share_class_pda,
+                mint: ctx.mint_pda,
+                destination,
+                token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
+            }
+            .to_account_metas(None),
+        )
+    };
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_PRIMARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.buyer],
+            &[buy_ix(
+                &ctx,
+                10,
+                kyc_hook_metas(&ctx, &buyer_pk, &buyer_pk, &buyer_pk),
+            )],
+        ),
+        "KycGated buy under PRIMARY",
+    );
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], &[treasury_mint(treasury_ata)]),
+        "mint_to_treasury (treasury) under PRIMARY",
+    );
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[mint_to_escrow_ix(&ctx, &escrow_pda, &custody_pda, 5)],
+        ),
+        "mint_to_treasury (custody escrow) under PRIMARY",
+    );
+
+    // Every other bit paused: primary issuance works on both paths.
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_PRIMARY,
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer_pk, &buyer_pk, &buyer_pk),
+        )],
+        "KycGated buy",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[treasury_mint(treasury_ata)],
+        "mint_to_treasury (treasury)",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[mint_to_escrow_ix(&ctx, &escrow_pda, &custody_pda, 5)],
+        "mint_to_treasury (custody escrow)",
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
+    assert_eq!(token_balance(&svm, &treasury_ata), 5);
+    assert_eq!(token_balance(&svm, &escrow_pda), 5);
+
+    // Full pause: a KYC'd wallet-to-wallet transfer still clears the hook.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    let peer = Keypair::new();
+    let peer_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &peer.pubkey());
+    approve_kyc(&mut svm, &ctx, &peer.pubkey());
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[transfer_ix(
+            &ctx,
+            ctx.buyer_share_ata,
+            peer_ata,
+            buyer_pk,
+            buyer_pk,
+            peer.pubkey(),
+            true,
+        )],
+        "wallet-to-wallet transfer under 0x3F",
+    );
+    assert_eq!(token_balance(&svm, &peer_ata), 1);
+    revoke_kyc(&mut svm, &ctx, &peer.pubkey()); // revocation is never gated
+}
+
+/// bit3 stops custody ENTRY, but the clawback quarantine path — open a
+/// RedemptionQueue+BurnAndAttest vault, clawback, trigger, realize (burn) —
+/// runs end to end under a full pause.
+#[test]
+fn custody_entry_pause_keeps_the_clawback_quarantine_path_open() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer_pk = ctx.buyer.pubkey();
+    approve_kyc(&mut svm, &ctx, &buyer_pk);
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer_pk, &buyer_pk, &buyer_pk),
+        )],
+        "buy",
+    );
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    revoke_kyc(&mut svm, &ctx, &buyer_pk);
+
+    // Non-quarantine opens are custody entries: paused. The exemption needs
+    // BOTH halves — a RedemptionQueue with a non-burn action is an entry too.
+    let entries = [
+        (
+            20,
+            VaultType::DeliveryEscrow,
+            RealizeAction::BurnAndAttest,
+            buyer_pk,
+        ),
+        (
+            21,
+            VaultType::ConversionPending,
+            RealizeAction::BurnAndAttest,
+            Pubkey::default(),
+        ),
+        (
+            22,
+            VaultType::Vesting,
+            RealizeAction::BurnAndAttest,
+            Pubkey::default(),
+        ),
+        (
+            23,
+            VaultType::RedemptionQueue,
+            RealizeAction::TransferToBeneficiary,
+            Pubkey::default(),
+        ),
+        (
+            24,
+            VaultType::RedemptionQueue,
+            RealizeAction::BurnAndPayout,
+            Pubkey::default(),
+        ),
+    ];
+    for (id, vault_type, action, beneficiary) in entries {
+        pause::assert_paused(
+            try_open_vault_with_action(&mut svm, &ctx, id, vault_type, action, beneficiary),
+            "non-quarantine custody open under 0x3F",
+        );
+    }
+    // …also when only bit3 is set.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_CUSTODY_ENTRY);
+    for (id, vault_type, action, beneficiary) in entries {
+        pause::assert_paused(
+            try_open_vault_with_action(&mut svm, &ctx, id, vault_type, action, beneficiary),
+            "non-quarantine custody open under CUSTODY_ENTRY",
+        );
+    }
+    // The pause check runs first. With bit3 clear the non-burn RedemptionQueue
+    // still fails, but on the (independent) realize-action gate: when that
+    // gate reopens for TransferToBeneficiary / BurnAndPayout, the pause above
+    // keeps such a vault a gated custody entry.
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_CUSTODY_ENTRY,
+    );
+    let err = try_open_vault_with_action(
+        &mut svm,
+        &ctx,
+        23,
+        VaultType::RedemptionQueue,
+        RealizeAction::TransferToBeneficiary,
+        Pubkey::default(),
+    )
+    .expect_err("non-burn RedemptionQueue");
+    assert_custom_error(&err, 6016); // UnsupportedRealizeAction, not 6000
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 1);
+    let payer_pk = ctx.payer.pubkey();
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[clawback_ix(
+            &ctx,
+            &payer_pk,
+            &buyer_pk,
+            &ctx.buyer_share_ata,
+            &custody_pda,
+            &escrow_pda,
+            0,
+        )],
+        "clawback under 0x3F",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), 10);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[
+            Instruction::new_with_bytes(
+                ctx.program_id,
+                &ixd::TriggerCustodyVault {}.data(),
+                acc::TriggerCustodyVault {
+                    authority_admin_record: admin_record_of(&payer_pk),
+                    authority: payer_pk,
+                    custody_vault: custody_pda,
+                }
+                .to_account_metas(None),
+            ),
+            Instruction::new_with_bytes(
+                ctx.program_id,
+                &ixd::RealizeCustodyVault {}.data(),
+                acc::RealizeCustodyVault {
+                    authority_admin_record: admin_record_of(&payer_pk),
+                    authority: payer_pk,
+                    share_class: ctx.share_class_pda,
+                    custody_vault: custody_pda,
+                    mint: ctx.mint_pda,
+                    escrow: escrow_pda,
+                    escrow_marker: escrow_marker_of(&ctx, &custody_pda),
+                    token_program: TOKEN_2022,
+                }
+                .to_account_metas(None),
+            ),
+        ],
+        "trigger + realize (burn) under 0x3F",
+    );
+    let state: asset_registry::ShareClass = load(&svm, &ctx.share_class_pda);
+    assert_eq!(state.circulating_supply, 0, "quarantined units burned");
+
+    // With only bit3 clear, a DeliveryEscrow opens again.
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_CUSTODY_ENTRY,
+    );
+    open_vault(&mut svm, &ctx, 20, VaultType::DeliveryEscrow, buyer_pk);
+}
+
+/// The quarantine exemption covers only OPENING the burn-only vault (clawback's
+/// destination). A holder deposit into that same RedemptionQueue +
+/// BurnAndAttest vault is a custody entry, gated by bit3 like any other.
+#[test]
+fn custody_entry_pause_gates_deposits_into_a_quarantine_vault() {
+    let (mut svm, ctx) = boot(false);
+    warp_to(&mut svm, 1_000);
+    let owner = ctx.buyer.pubkey();
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(&ctx, 2, open_hook_metas(&ctx, &owner))],
+        "buyer acquires units to deposit",
+    );
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 930);
+    let deposit_ix = |ctx: &Ctx| {
+        let mut metas = acc::DepositToCustodyVault {
+            depositor: owner,
+            share_class: ctx.share_class_pda,
+            custody_vault: vault,
+            mint: ctx.mint_pda,
+            escrow,
+            depositor_share_account: ctx.buyer_share_ata,
+            token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None);
+        metas.extend(open_hook_metas(ctx, &owner));
+        Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::DepositToCustodyVault { amount: 1 }.data(),
+            metas,
+        )
+    };
+
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.buyer], &[deposit_ix(&ctx)]),
+        "quarantine-vault deposit under 0x3F",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_CUSTODY_ENTRY);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.buyer], &[deposit_ix(&ctx)]),
+        "quarantine-vault deposit under CUSTODY_ENTRY",
+    );
+    assert_eq!(token_balance(&svm, &escrow), 0, "escrow untouched");
+
+    // Only bit3 clear: the same deposit lands.
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_CUSTODY_ENTRY,
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_ix(&ctx)],
+        "quarantine-vault deposit",
+    );
+    assert_eq!(token_balance(&svm, &escrow), 1);
+    assert_eq!(
+        load::<asset_registry::CustodyVault>(&svm, &vault).deposited,
+        1
+    );
+}
+
+/// bit4 gates the Rights-Token entries (`create_rights_issuance`,
+/// `publish_milestone`); `claim_milestone` is an exit and stays open.
+#[test]
+fn distribution_pause_gates_rights_entries_but_not_milestone_claims() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let claimer = Keypair::new();
+    svm.airdrop(&claimer.pubkey(), 10_000_000_000).unwrap();
+    let claimer_pk = claimer.pubkey();
+    let (create_ix, rights_pda, rights_escrow) = create_rights_issuance_ix(&ctx, 1);
+    let (publish_ix, milestone_pda) = publish_milestone_ix(&ctx, &rights_pda, &claimer_pk, 40);
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_DISTRIBUTIONS);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&create_ix)),
+        "create_rights_issuance under DISTRIBUTIONS",
+    );
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[create_ix],
+        "create_rights_issuance",
+    );
+
+    // Funding the rights escrow is fresh emission: bit1 (PRIMARY) gates it on
+    // this destination too, not only on the treasury and custody escrows.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_PRIMARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[mint_to_escrow_ix(&ctx, &rights_escrow, &rights_pda, 100)],
+        ),
+        "mint_to_treasury (rights escrow) under PRIMARY",
+    );
+    assert_eq!(token_balance(&svm, &rights_escrow), 0);
+    pause::unpause_all(&mut svm, &ctx.payer);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[mint_to_escrow_ix(&ctx, &rights_escrow, &rights_pda, 100)],
+        "fund rights escrow",
+    );
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_DISTRIBUTIONS);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&publish_ix)),
+        "publish_milestone under DISTRIBUTIONS",
+    );
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+    );
+    send(&mut svm, &[&ctx.payer], &[publish_ix], "publish_milestone");
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    let claimer_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &claimer_pk);
+    approve_kyc(&mut svm, &ctx, &claimer_pk);
+    send(
+        &mut svm,
+        &[&claimer],
+        &[claim_milestone_ix(
+            &ctx,
+            &claimer_pk,
+            &rights_pda,
+            &rights_escrow,
+            &milestone_pda,
+            &claimer_ata,
+            &claimer_pk,
+            40,
+        )],
+        "claim_milestone under 0x3F",
+    );
+    assert_eq!(token_balance(&svm, &claimer_ata), 40);
 }

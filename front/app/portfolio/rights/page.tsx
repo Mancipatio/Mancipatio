@@ -34,6 +34,7 @@ import {
   findAssetPda,
   getCastVaultVoteInstructionAsync,
   getClaimFounderYieldInstruction,
+  findPlatformPda,
   getClaimInvestorYieldInstruction,
   getClaimMilestoneInstruction,
   getClaimRefundInstruction,
@@ -716,7 +717,10 @@ function VaultCard({
         mint: vault.paymentMint,
         tokenProgram: payTokenProgram,
       });
+      // Emergency-pause gate (read-only) — the last named account.
+      const [platform] = await findPlatformPda();
       const ix = getClaimFounderYieldInstruction({
+        platform,
         founder: signer,
         vault: vaultPda,
         escrow: vault.escrow,

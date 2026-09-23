@@ -1,5 +1,7 @@
 //! End-to-end tests for the PayoutVault module (Faza 1–3).
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -209,6 +211,7 @@ fn setup_sale(
         )],
         "initialize_platform",
     );
+    pause::unpause_all(svm, &payer);
 
     // ── 2. register_issuer ──────────────────────────────────────────────────
     send(
@@ -334,6 +337,7 @@ fn setup_sale(
                 transfer_hook_program: transfer_hook::id(),
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -376,6 +380,7 @@ fn setup_sale(
                 mint: mint_pda,
                 destination: founder_share_ata,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -446,6 +451,7 @@ fn setup_sale(
                 proceeds: proceeds_pda,
                 payment_token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -484,6 +490,15 @@ fn open_sale_stores_raise_terms() {
 }
 
 fn buy_units(svm: &mut LiteSVM, ctx: &SaleCtx, units: u64) {
+    send(
+        svm,
+        &[&ctx.payer, &ctx.buyer],
+        &[buy_ix(ctx, units)],
+        "buy_units",
+    );
+}
+
+fn buy_ix(ctx: &SaleCtx, units: u64) -> Instruction {
     let program_id = asset_registry::id();
     // `buy` is fail-closed on receiver KYC — the ExtraAccountMetaList (in its
     // 1-meta Open shape) rides along as the on-chain Open-mode proof.
@@ -504,19 +519,11 @@ fn buy_units(svm: &mut LiteSVM, ctx: &SaleCtx, units: u64) {
         proceeds: ctx.proceeds,
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.push(AccountMeta::new_readonly(extra_metas_pda, false));
-    send(
-        svm,
-        &[&ctx.payer, &ctx.buyer],
-        &[Instruction::new_with_bytes(
-            program_id,
-            &ixd::Buy { amount: units }.data(),
-            metas,
-        )],
-        "buy_units",
-    );
+    Instruction::new_with_bytes(program_id, &ixd::Buy { amount: units }.data(), metas)
 }
 
 fn open_payout_vault(
@@ -646,6 +653,7 @@ fn send_release(
                 payment_mint: ctx.payment_mint,
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -673,6 +681,7 @@ fn try_send_release(
                 payment_mint: ctx.payment_mint,
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1678,6 +1687,7 @@ fn send_claim_founder_yield(
                 payment_mint: ctx.payment_mint,
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1706,6 +1716,7 @@ fn try_send_claim_founder_yield(
                 payment_mint: ctx.payment_mint,
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -2138,4 +2149,313 @@ pub fn prepare_legacy_ix(payer: Pubkey, legacy_account: Pubkey) -> Instruction {
         }
         .to_account_metas(None),
     )
+}
+
+// ── Emergency pause (Platform.pause_flags) ───────────────────────────────────
+
+fn open_sale_ix(ctx: &SaleCtx, sale_id: u64, price_per_unit: u64) -> Instruction {
+    let sale = Pubkey::find_program_address(
+        &[
+            asset_registry::SALE_SEED,
+            ctx.share_class.as_ref(),
+            &sale_id.to_le_bytes(),
+        ],
+        &asset_registry::ID,
+    )
+    .0;
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::OpenSale {
+            sale_id,
+            price_per_unit,
+            total_for_sale: 1_000,
+            start_ts: 0,
+            end_ts: 0,
+            raise_type: RaiseType::Mature,
+            cliff_months: 0,
+            vesting_months: 0,
+        }
+        .data(),
+        acc::OpenSale {
+            authority: ctx.payer.pubkey(),
+            issuer: ctx.issuer,
+            asset: ctx.asset,
+            share_class: ctx.share_class,
+            mint: ctx.mint,
+            payment_mint: ctx.payment_mint,
+            sale,
+            proceeds: Pubkey::find_program_address(
+                &[asset_registry::PROCEEDS_SEED, sale.as_ref()],
+                &asset_registry::ID,
+            )
+            .0,
+            payment_token_program: TOKEN_2022,
+            system_program: system_program::ID,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn route_yield_ix(
+    ctx: &SaleCtx,
+    vault: &Pubkey,
+    escrow: &Pubkey,
+    amount: u64,
+    root: [u8; 32],
+    total_weight: u64,
+    treasury_ata: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::RouteYield {
+            amount,
+            investor_root: root,
+            total_weight,
+        }
+        .data(),
+        acc::RouteYield {
+            authority: ctx.payer.pubkey(),
+            admin_record: pause::admin_pda(&ctx.payer.pubkey()),
+            vault: *vault,
+            source: ctx.founder_payment_ata,
+            escrow: *escrow,
+            platform_treasury: *treasury_ata,
+            payment_mint: ctx.payment_mint,
+            payment_token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn release_ix(ctx: &SaleCtx, vault: &Pubkey, escrow: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::ReleasePayout {}.data(),
+        acc::ReleasePayout {
+            vault: *vault,
+            escrow: *escrow,
+            payment_mint: ctx.payment_mint,
+            founder_account: ctx.founder_payment_ata,
+            payment_token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// bit1 gates `open_sale` / `buy`; `open_sale` also refuses a zero price.
+#[test]
+fn primary_pause_gates_open_sale_and_buy() {
+    let (mut svm, _) = boot();
+    let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 12);
+    let payer = ctx.payer.insecure_clone();
+
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_PRIMARY);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer, &ctx.buyer], &[buy_ix(&ctx, 10)]),
+        "buy under PRIMARY",
+    );
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], &[open_sale_ix(&ctx, 2, 5)]),
+        "open_sale under PRIMARY",
+    );
+
+    // Every other bit paused: primary issuance proceeds.
+    pause::pause_only(
+        &mut svm,
+        &payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_PRIMARY,
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer, &ctx.buyer],
+        &[buy_ix(&ctx, 10)],
+        "buy with only PRIMARY clear",
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
+    let err = try_send(&mut svm, &[&ctx.payer], &[open_sale_ix(&ctx, 2, 0)]).unwrap_err();
+    assert!(err.contains("Custom(6121)"), "zero price: {err}");
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_sale_ix(&ctx, 2, 5)],
+        "open_sale with only PRIMARY clear",
+    );
+    assert_eq!(load::<Sale>(&svm, &ctx.sale).sold, 10);
+}
+
+/// bit5 gates the founder's proceeds (`release_payout`, `claim_founder_yield`),
+/// bit4 gates `route_yield`; the investor side and the vault's own
+/// administration stay open under a full pause. `route_yield` follows a
+/// rotated protocol treasury.
+#[test]
+fn issuer_proceeds_and_yield_bits_leave_investor_exits_open() {
+    let (mut svm, _) = boot();
+    let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 3);
+    let payer = ctx.payer.insecure_clone();
+    buy_units(&mut svm, &ctx, 90);
+
+    // Full pause: turning a Startup sale into its payout vault stays open
+    // (it is the only road to Startup refunds), and so does post_update.
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_FLAGS_ALL);
+    let (vault, escrow) = open_payout_vault(&mut svm, &ctx, [7u8; 32]);
+    let v0: PayoutVault = load(&svm, &vault);
+    warp_to(&mut svm, v0.start_ts + 1);
+    send_post_update(&mut svm, &ctx, &vault);
+
+    // release_payout: 6000 under ISSUER_PROCEEDS, fine with only that bit clear.
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_ISSUER_PROCEEDS);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[release_ix(&ctx, &vault, &escrow)],
+        ),
+        "release_payout under ISSUER_PROCEEDS",
+    );
+    pause::pause_only(
+        &mut svm,
+        &payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_ISSUER_PROCEEDS,
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[release_ix(&ctx, &vault, &escrow)],
+        "release_payout",
+    );
+    assert_eq!(load::<PayoutVault>(&svm, &vault).tranches_released, 1);
+
+    // route_yield: 6000 under DISTRIBUTIONS.
+    mint_to(
+        &mut svm,
+        &ctx.payer,
+        &ctx.payment_mint,
+        &ctx.founder_payment_ata,
+        600,
+    );
+    let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 90);
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_DISTRIBUTIONS);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[route_yield_ix(
+                &ctx,
+                &vault,
+                &escrow,
+                300,
+                root,
+                90,
+                &ctx.platform_ata,
+            )],
+        ),
+        "route_yield under DISTRIBUTIONS",
+    );
+
+    // Treasury rotation (works during a pause); route_yield reads it live.
+    let new_owner = Pubkey::new_unique();
+    let new_treasury_ata = create_ata(&mut svm, &ctx.payer, &ctx.payment_mint, &new_owner);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[Instruction::new_with_bytes(
+            asset_registry::ID,
+            &ixd::SetProtocolTreasury {
+                new_treasury: new_owner,
+            }
+            .data(),
+            acc::SetProtocolTreasury {
+                super_admin: ctx.payer.pubkey(),
+                platform: pause::platform_pda(),
+            }
+            .to_account_metas(None),
+        )],
+        "set_protocol_treasury",
+    );
+    pause::pause_only(
+        &mut svm,
+        &payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+    );
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[route_yield_ix(
+            &ctx,
+            &vault,
+            &escrow,
+            300,
+            root,
+            90,
+            &ctx.platform_ata,
+        )],
+    )
+    .unwrap_err();
+    assert!(err.contains("Custom(6001)"), "old treasury rejected: {err}");
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[route_yield_ix(
+            &ctx,
+            &vault,
+            &escrow,
+            300,
+            root,
+            90,
+            &new_treasury_ata,
+        )],
+        "route_yield to the rotated treasury",
+    );
+    assert_eq!(token_balance(&svm, &new_treasury_ata), 100);
+
+    // claim_founder_yield: 6000 under ISSUER_PROCEEDS.
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_ISSUER_PROCEEDS);
+    pause::assert_paused(
+        try_send_claim_founder_yield(&mut svm, &ctx, &vault, &escrow, &ctx.founder_payment_ata),
+        "claim_founder_yield under ISSUER_PROCEEDS",
+    );
+
+    // Investors' yield claim is an exit: open under a full pause.
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_FLAGS_ALL);
+    let before = token_balance(&svm, &ctx.buyer_payment_ata);
+    send_claim_investor_yield(
+        &mut svm,
+        &ctx,
+        &vault,
+        &escrow,
+        &ctx.buyer_payment_ata,
+        90,
+        vec![],
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_payment_ata) - before, 100);
+
+    pause::pause_only(
+        &mut svm,
+        &payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_ISSUER_PROCEEDS,
+    );
+    let before = token_balance(&svm, &ctx.founder_payment_ata);
+    send_claim_founder_yield(&mut svm, &ctx, &vault, &escrow, &ctx.founder_payment_ata);
+    assert_eq!(token_balance(&svm, &ctx.founder_payment_ata) - before, 100);
+}
+
+/// Under 0x3F the protective road to refunds stays open end to end:
+/// freeze_vault → open / cast / finalize the vault vote → claim_refund.
+#[test]
+fn freeze_vote_and_refund_stay_open_under_full_pause() {
+    let (mut svm, _) = boot();
+    let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 12);
+    let payer = ctx.payer.insecure_clone();
+    buy_units(&mut svm, &ctx, 120);
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_FLAGS_ALL);
+    let (vault, escrow) = open_payout_vault(&mut svm, &ctx, [7u8; 32]);
+    let v0: PayoutVault = load(&svm, &vault);
+    warp_to(&mut svm, v0.start_ts + 2 * MONTH + 1);
+    send_freeze(&mut svm, &ctx, &vault);
+    exit_via_return_capital(&mut svm, &ctx, &vault, &escrow, 120, v0.total_amount);
+    assert_eq!(pause::pause_flags(&svm), asset_registry::PAUSE_FLAGS_ALL);
 }

@@ -36,7 +36,12 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findAdminRecordPda, findBatchPda, findPlanPda } from "../pdas";
+import {
+  findAdminRecordPda,
+  findBatchPda,
+  findPlanPda,
+  findPlatformPda,
+} from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -67,6 +72,7 @@ export type DistributeBatchInstruction<
   TAccountBatch extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -100,6 +106,9 @@ export type DistributeBatchInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -162,6 +171,7 @@ export type DistributeBatchAsyncInput<
   TAccountPlan extends string = string,
   TAccountBatch extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   adminRecord?: Address<TAccountAdminRecord>;
@@ -173,6 +183,11 @@ export type DistributeBatchAsyncInput<
   plan?: Address<TAccountPlan>;
   batch?: Address<TAccountBatch>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   distributionId: DistributeBatchInstructionDataArgs["distributionId"];
   batchId: DistributeBatchInstructionDataArgs["batchId"];
   amounts: DistributeBatchInstructionDataArgs["amounts"];
@@ -189,6 +204,7 @@ export async function getDistributeBatchInstructionAsync<
   TAccountPlan extends string,
   TAccountBatch extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DistributeBatchAsyncInput<
@@ -200,7 +216,8 @@ export async function getDistributeBatchInstructionAsync<
     TAccountPaymentTokenProgram,
     TAccountPlan,
     TAccountBatch,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -214,7 +231,8 @@ export async function getDistributeBatchInstructionAsync<
     TAccountPaymentTokenProgram,
     TAccountPlan,
     TAccountBatch,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -235,6 +253,7 @@ export async function getDistributeBatchInstructionAsync<
     plan: { value: input.plan ?? null, isWritable: false },
     batch: { value: input.batch ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -265,6 +284,9 @@ export async function getDistributeBatchInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -278,6 +300,7 @@ export async function getDistributeBatchInstructionAsync<
       getAccountMeta(accounts.plan),
       getAccountMeta(accounts.batch),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getDistributeBatchInstructionDataEncoder().encode(
       args as DistributeBatchInstructionDataArgs,
@@ -293,7 +316,8 @@ export async function getDistributeBatchInstructionAsync<
     TAccountPaymentTokenProgram,
     TAccountPlan,
     TAccountBatch,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -307,6 +331,7 @@ export type DistributeBatchInput<
   TAccountPlan extends string = string,
   TAccountBatch extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   adminRecord: Address<TAccountAdminRecord>;
@@ -318,6 +343,11 @@ export type DistributeBatchInput<
   plan: Address<TAccountPlan>;
   batch: Address<TAccountBatch>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   distributionId: DistributeBatchInstructionDataArgs["distributionId"];
   batchId: DistributeBatchInstructionDataArgs["batchId"];
   amounts: DistributeBatchInstructionDataArgs["amounts"];
@@ -334,6 +364,7 @@ export function getDistributeBatchInstruction<
   TAccountPlan extends string,
   TAccountBatch extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DistributeBatchInput<
@@ -345,7 +376,8 @@ export function getDistributeBatchInstruction<
     TAccountPaymentTokenProgram,
     TAccountPlan,
     TAccountBatch,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): DistributeBatchInstruction<
@@ -358,7 +390,8 @@ export function getDistributeBatchInstruction<
   TAccountPaymentTokenProgram,
   TAccountPlan,
   TAccountBatch,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -378,6 +411,7 @@ export function getDistributeBatchInstruction<
     plan: { value: input.plan ?? null, isWritable: false },
     batch: { value: input.batch ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -405,6 +439,7 @@ export function getDistributeBatchInstruction<
       getAccountMeta(accounts.plan),
       getAccountMeta(accounts.batch),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getDistributeBatchInstructionDataEncoder().encode(
       args as DistributeBatchInstructionDataArgs,
@@ -420,7 +455,8 @@ export function getDistributeBatchInstruction<
     TAccountPaymentTokenProgram,
     TAccountPlan,
     TAccountBatch,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -440,6 +476,11 @@ export type ParsedDistributeBatchInstruction<
     plan: TAccountMetas[6];
     batch: TAccountMetas[7];
     systemProgram: TAccountMetas[8];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[9];
   };
   data: DistributeBatchInstructionData;
 };
@@ -452,7 +493,7 @@ export function parseDistributeBatchInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedDistributeBatchInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 9) {
+  if (instruction.accounts.length < 10) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -474,6 +515,7 @@ export function parseDistributeBatchInstruction<
       plan: getNextAccount(),
       batch: getNextAccount(),
       systemProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getDistributeBatchInstructionDataDecoder().decode(instruction.data),
   };

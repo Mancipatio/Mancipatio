@@ -48,12 +48,19 @@ pub fn handle_initialize_platform(
         protocol_fee_bps <= MAX_FEE_BPS,
         RegistryError::InvalidFeeBps
     );
+    require!(
+        protocol_treasury != Pubkey::default(),
+        RegistryError::InvalidProtocolTreasury
+    );
 
     let platform = &mut ctx.accounts.platform;
     platform.admin = ctx.accounts.admin.key();
     platform.protocol_treasury = protocol_treasury;
     platform.protocol_fee_bps = protocol_fee_bps;
-    platform.paused = false;
+    // A fresh platform starts fully paused: the bootstrap finishes its setup
+    // (blocklist authority, admins, custody) and then clears the flags with
+    // `set_pause_flags(0, PAUSE_FLAGS_ALL)` before handing over authority.
+    platform.pause_flags = PAUSE_FLAGS_ALL;
     platform.issuers_count = 0;
     platform.version = STATE_VERSION;
     platform.bump = ctx.bumps.platform;

@@ -13,7 +13,7 @@ pub struct CreateAsset<'info> {
     #[account(
         seeds = [PLATFORM_SEED],
         bump = platform.bump,
-        constraint = !platform.paused @ RegistryError::PlatformPaused,
+        constraint = !platform.is_paused(PAUSE_ONBOARDING) @ RegistryError::PlatformPaused,
     )]
     pub platform: Account<'info, Platform>,
 

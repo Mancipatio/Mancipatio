@@ -54,6 +54,7 @@ import { useToast } from "@/lib/toast";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { detectNetwork } from "@/lib/network";
 import { fetchMintTokenProgram } from "@/lib/transaction-builders";
+import { explainSendError } from "@/lib/tx-error";
 export type DistributionPrefill = {
   shareClassPda: string;
   totalAmount?: string;
@@ -746,7 +747,7 @@ function PreparedDistributionCard({
     } catch (error) {
       toast.showError(
         "Funding not completed; check the saved address before retrying",
-        error instanceof Error ? error.message : undefined,
+        explainSendError(error),
       );
     } finally {
       setBusy(false);
@@ -792,7 +793,7 @@ function PreparedDistributionCard({
     } catch (error) {
       toast.showError(
         "Batch execution paused",
-        error instanceof Error ? error.message : undefined,
+        explainSendError(error),
       );
     } finally {
       setBusy(false);
@@ -976,7 +977,7 @@ function DistributionClose({
     } catch (error) {
       toast.showError(
         "Close/refund failed",
-        error instanceof Error ? error.message : undefined,
+        explainSendError(error),
       );
     }
   }

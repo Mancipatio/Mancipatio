@@ -65,6 +65,15 @@ pub struct CreateOffer<'info> {
 
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_SECONDARY) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Opens an OTC sell offer with an EMPTY escrow — permissionless, no KYC and

@@ -27,6 +27,7 @@ import {
   type ReadonlyUint8Array,
   type WritableAccount,
 } from "@solana/kit";
+import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
 
@@ -47,6 +48,7 @@ export type ReleasePayoutInstruction<
   TAccountPaymentMint extends string | AccountMeta<string> = string,
   TAccountFounderAccount extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -67,6 +69,9 @@ export type ReleasePayoutInstruction<
       TAccountPaymentTokenProgram extends string
         ? ReadonlyAccount<TAccountPaymentTokenProgram>
         : TAccountPaymentTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -100,12 +105,13 @@ export function getReleasePayoutInstructionDataCodec(): FixedSizeCodec<
   );
 }
 
-export type ReleasePayoutInput<
+export type ReleasePayoutAsyncInput<
   TAccountVault extends string = string,
   TAccountEscrow extends string = string,
   TAccountPaymentMint extends string = string,
   TAccountFounderAccount extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   vault: Address<TAccountVault>;
   escrow: Address<TAccountEscrow>;
@@ -113,31 +119,41 @@ export type ReleasePayoutInput<
   /** Founder's payment account — receives the tranche. Must belong to vault.founder. */
   founderAccount: Address<TAccountFounderAccount>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
 };
 
-export function getReleasePayoutInstruction<
+export async function getReleasePayoutInstructionAsync<
   TAccountVault extends string,
   TAccountEscrow extends string,
   TAccountPaymentMint extends string,
   TAccountFounderAccount extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: ReleasePayoutInput<
+  input: ReleasePayoutAsyncInput<
     TAccountVault,
     TAccountEscrow,
     TAccountPaymentMint,
     TAccountFounderAccount,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
-): ReleasePayoutInstruction<
-  TProgramAddress,
-  TAccountVault,
-  TAccountEscrow,
-  TAccountPaymentMint,
-  TAccountFounderAccount,
-  TAccountPaymentTokenProgram
+): Promise<
+  ReleasePayoutInstruction<
+    TProgramAddress,
+    TAccountVault,
+    TAccountEscrow,
+    TAccountPaymentMint,
+    TAccountFounderAccount,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >
 > {
   // Program address.
   const programAddress =
@@ -153,6 +169,104 @@ export function getReleasePayoutInstruction<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    platform: { value: input.platform ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedAccount
+  >;
+
+  // Resolve default values.
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
+  return Object.freeze({
+    accounts: [
+      getAccountMeta(accounts.vault),
+      getAccountMeta(accounts.escrow),
+      getAccountMeta(accounts.paymentMint),
+      getAccountMeta(accounts.founderAccount),
+      getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
+    ],
+    data: getReleasePayoutInstructionDataEncoder().encode({}),
+    programAddress,
+  } as ReleasePayoutInstruction<
+    TProgramAddress,
+    TAccountVault,
+    TAccountEscrow,
+    TAccountPaymentMint,
+    TAccountFounderAccount,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >);
+}
+
+export type ReleasePayoutInput<
+  TAccountVault extends string = string,
+  TAccountEscrow extends string = string,
+  TAccountPaymentMint extends string = string,
+  TAccountFounderAccount extends string = string,
+  TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
+> = {
+  vault: Address<TAccountVault>;
+  escrow: Address<TAccountEscrow>;
+  paymentMint: Address<TAccountPaymentMint>;
+  /** Founder's payment account — receives the tranche. Must belong to vault.founder. */
+  founderAccount: Address<TAccountFounderAccount>;
+  paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
+};
+
+export function getReleasePayoutInstruction<
+  TAccountVault extends string,
+  TAccountEscrow extends string,
+  TAccountPaymentMint extends string,
+  TAccountFounderAccount extends string,
+  TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
+  TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
+>(
+  input: ReleasePayoutInput<
+    TAccountVault,
+    TAccountEscrow,
+    TAccountPaymentMint,
+    TAccountFounderAccount,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >,
+  config?: { programAddress?: TProgramAddress },
+): ReleasePayoutInstruction<
+  TProgramAddress,
+  TAccountVault,
+  TAccountEscrow,
+  TAccountPaymentMint,
+  TAccountFounderAccount,
+  TAccountPaymentTokenProgram,
+  TAccountPlatform
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? ASSET_REGISTRY_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    vault: { value: input.vault ?? null, isWritable: true },
+    escrow: { value: input.escrow ?? null, isWritable: true },
+    paymentMint: { value: input.paymentMint ?? null, isWritable: false },
+    founderAccount: { value: input.founderAccount ?? null, isWritable: true },
+    paymentTokenProgram: {
+      value: input.paymentTokenProgram ?? null,
+      isWritable: false,
+    },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -167,6 +281,7 @@ export function getReleasePayoutInstruction<
       getAccountMeta(accounts.paymentMint),
       getAccountMeta(accounts.founderAccount),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getReleasePayoutInstructionDataEncoder().encode({}),
     programAddress,
@@ -176,7 +291,8 @@ export function getReleasePayoutInstruction<
     TAccountEscrow,
     TAccountPaymentMint,
     TAccountFounderAccount,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -192,6 +308,11 @@ export type ParsedReleasePayoutInstruction<
     /** Founder's payment account — receives the tranche. Must belong to vault.founder. */
     founderAccount: TAccountMetas[3];
     paymentTokenProgram: TAccountMetas[4];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[5];
   };
   data: ReleasePayoutInstructionData;
 };
@@ -204,7 +325,7 @@ export function parseReleasePayoutInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedReleasePayoutInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 5) {
+  if (instruction.accounts.length < 6) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -222,6 +343,7 @@ export function parseReleasePayoutInstruction<
       paymentMint: getNextAccount(),
       founderAccount: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getReleasePayoutInstructionDataDecoder().decode(instruction.data),
   };

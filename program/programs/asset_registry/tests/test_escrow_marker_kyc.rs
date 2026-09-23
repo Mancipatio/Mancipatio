@@ -33,6 +33,8 @@
 //!   * direct wallet→wallet to a non-KYC'd receiver still fails (no markers);
 //!   * the marker is closed after the terminal path (settle / cancel).
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -350,6 +352,7 @@ fn boot() -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],
@@ -462,6 +465,7 @@ fn boot() -> (LiteSVM, Ctx) {
                 transfer_hook_program: hook_id,
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -580,6 +584,7 @@ fn boot() -> (LiteSVM, Ctx) {
                 mint: mint_pda,
                 destination: payer_share_ata,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -727,6 +732,7 @@ fn create_deal_with_expiry(svm: &mut LiteSVM, ctx: &Ctx, deal_id: u64, expires_a
                 token_program: TOKEN_2022,
                 payment_token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -752,6 +758,7 @@ fn deposit_asset_ix(ctx: &Ctx, deal_id: u64, with_settle: bool) -> Instruction {
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     // deposit leg: seller ATA (owner seller) → escrow (owner deal PDA)
@@ -790,6 +797,7 @@ fn deposit_payment_ix(ctx: &Ctx, deal_id: u64, with_settle: bool) -> Instruction
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     if with_settle {
@@ -1254,6 +1262,7 @@ fn create_offer_by(
                 escrow_marker: escrow_marker_of(ctx, &offer_pda),
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1278,6 +1287,7 @@ fn deposit_to_offer_ix(
         escrow: escrow_pda,
         maker_share_account: *maker_share_ata,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     // deposit leg: maker ATA (owner maker) → escrow (owner offer PDA)
@@ -1378,6 +1388,7 @@ fn take_offer_ix(
         escrow_marker: escrow_marker_of(ctx, &offer_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     // escrow (owner offer PDA) → taker ATA (owner taker)
@@ -1812,6 +1823,7 @@ fn open_delivery_vault(
                 escrow_marker: escrow_marker_of(ctx, &custody_pda),
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1838,6 +1850,7 @@ fn deposit_to_vault_ix(
         escrow: escrow_pda,
         depositor_share_account: *depositor_share_ata,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     // deposit leg: depositor ATA (owner depositor) → escrow (owner vault PDA)

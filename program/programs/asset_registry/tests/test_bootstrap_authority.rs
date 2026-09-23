@@ -169,6 +169,13 @@ fn verify_bootstrap(registry: bool) {
             payer.pubkey(),
             "operational admin may differ from upgrader"
         );
+        assert_eq!(
+            state.pause_flags,
+            asset_registry::PAUSE_FLAGS_ALL,
+            "a fresh platform starts fully paused"
+        );
+        assert_eq!(account.data.len(), 85);
+        assert_eq!(account.data[74], 0x3F);
     } else {
         let state =
             transfer_hook::BlocklistAuthority::try_deserialize(&mut account.data.as_slice())

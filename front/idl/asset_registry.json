@@ -1019,6 +1019,30 @@
           "relations": [
             "asset"
           ]
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -1688,6 +1712,30 @@
         },
         {
           "name": "payment_token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -2692,6 +2740,30 @@
         },
         {
           "name": "payment_token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -3062,6 +3134,30 @@
               }
             ]
           }
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -3344,6 +3440,30 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -3575,6 +3695,30 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -3870,6 +4014,30 @@
               {
                 "kind": "account",
                 "path": "rights_issuance"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
               }
             ]
           }
@@ -4216,6 +4384,30 @@
         },
         {
           "name": "payment_token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -4362,6 +4554,30 @@
         },
         {
           "name": "payment_token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -4453,6 +4669,30 @@
         },
         {
           "name": "token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -4543,6 +4783,30 @@
         },
         {
           "name": "token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -4663,6 +4927,30 @@
               {
                 "kind": "account",
                 "path": "series"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
               }
             ]
           }
@@ -4915,6 +5203,30 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -5684,6 +5996,30 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -5869,6 +6205,30 @@
         },
         {
           "name": "token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -6028,6 +6388,32 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only), checked in the handler: a burn-only",
+            "quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for",
+            "clawback. Keep LAST among named accounts (old account indices keep",
+            "their positions)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -6365,6 +6751,30 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -6962,6 +7372,30 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -7794,6 +8228,30 @@
         },
         {
           "name": "payment_token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -8608,7 +9066,8 @@
     {
       "name": "set_pause",
       "docs": [
-        "Emergency pause / unpause of issuer & asset creation."
+        "Legacy onboarding switch (super admin): sets / clears only",
+        "`PAUSE_ONBOARDING`. The full emergency pause is `set_pause_flags`."
       ],
       "discriminator": [
         63,
@@ -8654,6 +9113,134 @@
         {
           "name": "paused",
           "type": "bool"
+        }
+      ]
+    },
+    {
+      "name": "set_pause_flags",
+      "docs": [
+        "Emergency pause: `flags = (flags | set_mask) & !clear_mask`. Any Admin",
+        "may set defined bits; only the super admin may clear."
+      ],
+      "discriminator": [
+        205,
+        167,
+        85,
+        237,
+        144,
+        202,
+        248,
+        175
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "`util::is_active_admin` unless `authority == platform.admin` (a super",
+            "admin without an Admin record is tolerated)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "set_mask",
+          "type": "u8"
+        },
+        {
+          "name": "clear_mask",
+          "type": "u8"
+        }
+      ]
+    },
+    {
+      "name": "set_protocol_treasury",
+      "docs": [
+        "Super admin rotates the protocol treasury (nonzero key)."
+      ],
+      "discriminator": [
+        70,
+        185,
+        238,
+        193,
+        38,
+        214,
+        189,
+        7
+      ],
+      "accounts": [
+        {
+          "name": "super_admin",
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": [
+        {
+          "name": "new_treasury",
+          "type": "pubkey"
         }
       ]
     },
@@ -8788,6 +9375,30 @@
         },
         {
           "name": "payment_token_program"
+        },
+        {
+          "name": "platform",
+          "docs": [
+            "Emergency-pause gate (read-only). Keep LAST among named accounts: old",
+            "account indices and the remaining-accounts hook tail keep their positions."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -9804,6 +10415,32 @@
       ]
     },
     {
+      "name": "PauseFlagsChanged",
+      "discriminator": [
+        56,
+        73,
+        67,
+        44,
+        237,
+        239,
+        68,
+        124
+      ]
+    },
+    {
+      "name": "ProtocolTreasuryChanged",
+      "discriminator": [
+        198,
+        130,
+        237,
+        240,
+        185,
+        150,
+        215,
+        36
+      ]
+    },
+    {
       "name": "TreasuryMinted",
       "discriminator": [
         135,
@@ -10563,6 +11200,26 @@
       "code": 6117,
       "name": "VestingFundingExceedsSchedule",
       "msg": "Cumulative vesting funding cannot exceed the immutable schedule total"
+    },
+    {
+      "code": 6118,
+      "name": "InvalidPauseFlags",
+      "msg": "Pause flags contain undefined bits, or a bit is both set and cleared"
+    },
+    {
+      "code": 6119,
+      "name": "PauseClearNotAllowed",
+      "msg": "Only the super admin may clear pause flags"
+    },
+    {
+      "code": 6120,
+      "name": "InvalidProtocolTreasury",
+      "msg": "Protocol treasury must be a nonzero key"
+    },
+    {
+      "code": 6121,
+      "name": "InvalidSalePrice",
+      "msg": "Sale price per unit must be greater than zero"
     }
   ],
   "types": [
@@ -12147,6 +12804,30 @@
       }
     },
     {
+      "name": "PauseFlagsChanged",
+      "docs": [
+        "Emitted by `set_pause_flags` and `set_pause` — the emergency-pause bitmask",
+        "changed from `old` to `new`, signed by `by`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old",
+            "type": "u8"
+          },
+          {
+            "name": "new",
+            "type": "u8"
+          },
+          {
+            "name": "by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
       "name": "PayoutVault",
       "docs": [
         "Holds the proceeds (payment mint) of one sale and disburses them to the",
@@ -12336,8 +13017,12 @@
             "type": "u16"
           },
           {
-            "name": "paused",
-            "type": "bool"
+            "name": "pause_flags",
+            "docs": [
+              "Bitmask of `PAUSE_*` (constants.rs); byte 74, formerly `paused: bool`.",
+              "0 and 1 keep their old meaning (1 = onboarding paused)."
+            ],
+            "type": "u8"
           },
           {
             "name": "issuers_count",
@@ -12484,6 +13169,30 @@
           },
           {
             "name": "Finalized"
+          }
+        ]
+      }
+    },
+    {
+      "name": "ProtocolTreasuryChanged",
+      "docs": [
+        "Emitted by `set_protocol_treasury` — the wallet whose token accounts",
+        "receive the protocol's share of routed yield changed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old",
+            "type": "pubkey"
+          },
+          {
+            "name": "new",
+            "type": "pubkey"
+          },
+          {
+            "name": "by",
+            "type": "pubkey"
           }
         ]
       }

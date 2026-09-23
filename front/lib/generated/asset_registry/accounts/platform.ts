@@ -17,8 +17,6 @@ import {
   fixEncoderSize,
   getAddressDecoder,
   getAddressEncoder,
-  getBooleanDecoder,
-  getBooleanEncoder,
   getBytesDecoder,
   getBytesEncoder,
   getStructDecoder,
@@ -57,7 +55,11 @@ export type Platform = {
   admin: Address;
   protocolTreasury: Address;
   protocolFeeBps: number;
-  paused: boolean;
+  /**
+   * Bitmask of `PAUSE_*` (constants.rs); byte 74, formerly `paused: bool`.
+   * 0 and 1 keep their old meaning (1 = onboarding paused).
+   */
+  pauseFlags: number;
   issuersCount: bigint;
   version: number;
   bump: number;
@@ -68,7 +70,11 @@ export type PlatformArgs = {
   admin: Address;
   protocolTreasury: Address;
   protocolFeeBps: number;
-  paused: boolean;
+  /**
+   * Bitmask of `PAUSE_*` (constants.rs); byte 74, formerly `paused: bool`.
+   * 0 and 1 keep their old meaning (1 = onboarding paused).
+   */
+  pauseFlags: number;
   issuersCount: number | bigint;
   version: number;
   bump: number;
@@ -82,7 +88,7 @@ export function getPlatformEncoder(): FixedSizeEncoder<PlatformArgs> {
       ["admin", getAddressEncoder()],
       ["protocolTreasury", getAddressEncoder()],
       ["protocolFeeBps", getU16Encoder()],
-      ["paused", getBooleanEncoder()],
+      ["pauseFlags", getU8Encoder()],
       ["issuersCount", getU64Encoder()],
       ["version", getU8Encoder()],
       ["bump", getU8Encoder()],
@@ -98,7 +104,7 @@ export function getPlatformDecoder(): FixedSizeDecoder<Platform> {
     ["admin", getAddressDecoder()],
     ["protocolTreasury", getAddressDecoder()],
     ["protocolFeeBps", getU16Decoder()],
-    ["paused", getBooleanDecoder()],
+    ["pauseFlags", getU8Decoder()],
     ["issuersCount", getU64Decoder()],
     ["version", getU8Decoder()],
     ["bump", getU8Decoder()],

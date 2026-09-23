@@ -13,6 +13,7 @@ import {
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   KybStatus,
+  findPlatformPda,
   getBuyInstruction,
   type Sale,
 } from "@/lib/generated/asset_registry";
@@ -132,8 +133,13 @@ describe("documented primary purchase wire plan", () => {
       const buy = instructions.at(-1)!;
       expect(buy.accounts![10].address).toBe(key(6));
       expect(buy.accounts![11].address).toBe(key(7));
+      // Emergency-pause gate: the Platform PDA is the last named account,
+      // read-only, before the receiver tail.
+      const [platform] = await findPlatformPda();
+      expect(buy.accounts![12].address).toBe(platform);
+      expect(buy.accounts![12].role).toBe(0); // AccountRole.READONLY
       expect(buy.accounts).toHaveLength(
-        mode === RestrictionMode.KycGated ? 16 : 15,
+        mode === RestrictionMode.KycGated ? 17 : 16,
       );
       const memo = instructions.at(-2)!;
       expect(memo.data).toEqual(documentTermsMemo(terms).data);
@@ -163,6 +169,7 @@ describe("documented primary purchase wire plan", () => {
       paymentTokenProgram: TOKEN_CLASSIC,
       asset: key(6),
       issuer: key(7),
+      platform: (await findPlatformPda())[0],
       amount: BigInt(1),
     });
     const ata = await getCreateAssociatedTokenIdempotentInstructionAsync({

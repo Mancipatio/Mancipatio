@@ -42,6 +42,7 @@ import {
   findCancelOtcDealEscrowMarkerPda,
   findDealPda,
   findPaymentEscrowPda,
+  findPlatformPda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
@@ -77,6 +78,7 @@ export type CreateOtcDealInstruction<
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -119,6 +121,9 @@ export type CreateOtcDealInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -196,6 +201,7 @@ export type CreateOtcDealAsyncInput<
   TAccountTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /**
@@ -221,6 +227,11 @@ export type CreateOtcDealAsyncInput<
   tokenProgram?: Address<TAccountTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   dealId: CreateOtcDealInstructionDataArgs["dealId"];
   buyer: CreateOtcDealInstructionDataArgs["buyer"];
   seller: CreateOtcDealInstructionDataArgs["seller"];
@@ -243,6 +254,7 @@ export async function getCreateOtcDealInstructionAsync<
   TAccountTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateOtcDealAsyncInput<
@@ -257,7 +269,8 @@ export async function getCreateOtcDealInstructionAsync<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -274,7 +287,8 @@ export async function getCreateOtcDealInstructionAsync<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -298,6 +312,7 @@ export async function getCreateOtcDealInstructionAsync<
       isWritable: false,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -342,6 +357,9 @@ export async function getCreateOtcDealInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -358,6 +376,7 @@ export async function getCreateOtcDealInstructionAsync<
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateOtcDealInstructionDataEncoder().encode(
       args as CreateOtcDealInstructionDataArgs,
@@ -376,7 +395,8 @@ export async function getCreateOtcDealInstructionAsync<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -393,6 +413,7 @@ export type CreateOtcDealInput<
   TAccountTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /**
@@ -418,6 +439,11 @@ export type CreateOtcDealInput<
   tokenProgram?: Address<TAccountTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   dealId: CreateOtcDealInstructionDataArgs["dealId"];
   buyer: CreateOtcDealInstructionDataArgs["buyer"];
   seller: CreateOtcDealInstructionDataArgs["seller"];
@@ -440,6 +466,7 @@ export function getCreateOtcDealInstruction<
   TAccountTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CreateOtcDealInput<
@@ -454,7 +481,8 @@ export function getCreateOtcDealInstruction<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): CreateOtcDealInstruction<
@@ -470,7 +498,8 @@ export function getCreateOtcDealInstruction<
   TAccountEscrowMarker,
   TAccountTokenProgram,
   TAccountPaymentTokenProgram,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -493,6 +522,7 @@ export function getCreateOtcDealInstruction<
       isWritable: false,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -527,6 +557,7 @@ export function getCreateOtcDealInstruction<
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getCreateOtcDealInstructionDataEncoder().encode(
       args as CreateOtcDealInstructionDataArgs,
@@ -545,7 +576,8 @@ export function getCreateOtcDealInstruction<
     TAccountEscrowMarker,
     TAccountTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -579,6 +611,11 @@ export type ParsedCreateOtcDealInstruction<
     tokenProgram: TAccountMetas[9];
     paymentTokenProgram: TAccountMetas[10];
     systemProgram: TAccountMetas[11];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[12];
   };
   data: CreateOtcDealInstructionData;
 };
@@ -591,7 +628,7 @@ export function parseCreateOtcDealInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedCreateOtcDealInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 12) {
+  if (instruction.accounts.length < 13) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -616,6 +653,7 @@ export function parseCreateOtcDealInstruction<
       tokenProgram: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getCreateOtcDealInstructionDataDecoder().decode(instruction.data),
   };

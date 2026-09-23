@@ -30,7 +30,7 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findMintPda } from "../pdas";
+import { findMintPda, findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -63,6 +63,7 @@ export type InitializeShareClassMintInstruction<
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -102,6 +103,9 @@ export type InitializeShareClassMintInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -150,6 +154,7 @@ export type InitializeShareClassMintAsyncInput<
   TAccountTransferHookProgram extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Global Admin or issuer-local MINT capability; the signer must also be the issuer. */
@@ -178,6 +183,11 @@ export type InitializeShareClassMintAsyncInput<
   transferHookProgram: Address<TAccountTransferHookProgram>;
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
 };
 
 export async function getInitializeShareClassMintInstructionAsync<
@@ -192,6 +202,7 @@ export async function getInitializeShareClassMintInstructionAsync<
   TAccountTransferHookProgram extends string,
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: InitializeShareClassMintAsyncInput<
@@ -205,7 +216,8 @@ export async function getInitializeShareClassMintInstructionAsync<
     TAccountExtraAccountMetaList,
     TAccountTransferHookProgram,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -221,7 +233,8 @@ export async function getInitializeShareClassMintInstructionAsync<
     TAccountExtraAccountMetaList,
     TAccountTransferHookProgram,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -247,6 +260,7 @@ export async function getInitializeShareClassMintInstructionAsync<
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -267,6 +281,9 @@ export async function getInitializeShareClassMintInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -282,6 +299,7 @@ export async function getInitializeShareClassMintInstructionAsync<
       getAccountMeta(accounts.transferHookProgram),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getInitializeShareClassMintInstructionDataEncoder().encode({}),
     programAddress,
@@ -297,7 +315,8 @@ export async function getInitializeShareClassMintInstructionAsync<
     TAccountExtraAccountMetaList,
     TAccountTransferHookProgram,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -313,6 +332,7 @@ export type InitializeShareClassMintInput<
   TAccountTransferHookProgram extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Global Admin or issuer-local MINT capability; the signer must also be the issuer. */
@@ -341,6 +361,11 @@ export type InitializeShareClassMintInput<
   transferHookProgram: Address<TAccountTransferHookProgram>;
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
 };
 
 export function getInitializeShareClassMintInstruction<
@@ -355,6 +380,7 @@ export function getInitializeShareClassMintInstruction<
   TAccountTransferHookProgram extends string,
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: InitializeShareClassMintInput<
@@ -368,7 +394,8 @@ export function getInitializeShareClassMintInstruction<
     TAccountExtraAccountMetaList,
     TAccountTransferHookProgram,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): InitializeShareClassMintInstruction<
@@ -383,7 +410,8 @@ export function getInitializeShareClassMintInstruction<
   TAccountExtraAccountMetaList,
   TAccountTransferHookProgram,
   TAccountTokenProgram,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -408,6 +436,7 @@ export function getInitializeShareClassMintInstruction<
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -438,6 +467,7 @@ export function getInitializeShareClassMintInstruction<
       getAccountMeta(accounts.transferHookProgram),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getInitializeShareClassMintInstructionDataEncoder().encode({}),
     programAddress,
@@ -453,7 +483,8 @@ export function getInitializeShareClassMintInstruction<
     TAccountExtraAccountMetaList,
     TAccountTransferHookProgram,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -490,6 +521,11 @@ export type ParsedInitializeShareClassMintInstruction<
     transferHookProgram: TAccountMetas[8];
     tokenProgram: TAccountMetas[9];
     systemProgram: TAccountMetas[10];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[11];
   };
   data: InitializeShareClassMintInstructionData;
 };
@@ -502,7 +538,7 @@ export function parseInitializeShareClassMintInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedInitializeShareClassMintInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 11) {
+  if (instruction.accounts.length < 12) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -526,6 +562,7 @@ export function parseInitializeShareClassMintInstruction<
       transferHookProgram: getNextAccount(),
       tokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getInitializeShareClassMintInstructionDataDecoder().decode(
       instruction.data,

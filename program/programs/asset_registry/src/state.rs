@@ -104,10 +104,20 @@ pub struct Platform {
     pub admin: Pubkey,
     pub protocol_treasury: Pubkey,
     pub protocol_fee_bps: u16,
-    pub paused: bool,
+    /// Bitmask of `PAUSE_*` (constants.rs); byte 74, formerly `paused: bool`.
+    /// 0 and 1 keep their old meaning (1 = onboarding paused).
+    pub pause_flags: u8,
     pub issuers_count: u64,
     pub version: u8,
     pub bump: u8,
+}
+
+impl Platform {
+    /// Whether any bit of `flag` is paused. Bits outside `PAUSE_FLAGS_ALL`
+    /// gate nothing — no instruction asks for them.
+    pub fn is_paused(&self, flag: u8) -> bool {
+        self.pause_flags & flag != 0
+    }
 }
 
 /// Marks a Mancipatio admin — the role that may issue mints, run custody and
@@ -226,6 +236,24 @@ pub struct TreasuryMinted {
     pub destination: Pubkey,
     pub destination_owner: Pubkey,
     pub amount: u64,
+}
+
+/// Emitted by `set_pause_flags` and `set_pause` — the emergency-pause bitmask
+/// changed from `old` to `new`, signed by `by`.
+#[event]
+pub struct PauseFlagsChanged {
+    pub old: u8,
+    pub new: u8,
+    pub by: Pubkey,
+}
+
+/// Emitted by `set_protocol_treasury` — the wallet whose token accounts
+/// receive the protocol's share of routed yield changed.
+#[event]
+pub struct ProtocolTreasuryChanged {
+    pub old: Pubkey,
+    pub new: Pubkey,
+    pub by: Pubkey,
 }
 
 /// KYC registry. docs/01 §9 Q1: the platform runs a global registry; an asset
@@ -1202,4 +1230,59 @@ pub struct DistributionBatch {
     pub paid_count: u32,
     pub version: u8,
     pub bump: u8,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::constants::*;
+
+    fn platform(pause_flags: u8) -> Platform {
+        Platform {
+            admin: Pubkey::new_from_array([1; 32]),
+            protocol_treasury: Pubkey::new_from_array([2; 32]),
+            protocol_fee_bps: 0x0403,
+            pause_flags,
+            issuers_count: 7,
+            version: 1,
+            bump: 254,
+        }
+    }
+
+    /// The devnet Platform is 85 bytes with the former `paused` byte at
+    /// offset 74; the `pause_flags` rename must keep both.
+    #[test]
+    fn platform_layout_is_unchanged() {
+        assert_eq!(8 + Platform::INIT_SPACE, 85);
+        let mut data = Vec::new();
+        platform(PAUSE_FLAGS_ALL).try_serialize(&mut data).unwrap();
+        assert_eq!(data.len(), 85);
+        assert_eq!(&data[..8], Platform::DISCRIMINATOR);
+        assert_eq!(data[8..40], [1; 32]);
+        assert_eq!(data[40..72], [2; 32]);
+        assert_eq!(data[72..74], [0x03, 0x04]);
+        assert_eq!(data[74], 0x3F);
+        assert_eq!(data[75..83], 7u64.to_le_bytes());
+        assert_eq!(data[83], 1);
+        assert_eq!(data[84], 254);
+        let decoded = Platform::try_deserialize(&mut data.as_slice()).unwrap();
+        assert_eq!(decoded.pause_flags, PAUSE_FLAGS_ALL);
+    }
+
+    #[test]
+    fn pause_bits_are_pinned() {
+        assert_eq!(PAUSE_ONBOARDING, 0x01);
+        assert_eq!(PAUSE_PRIMARY, 0x02);
+        assert_eq!(PAUSE_SECONDARY, 0x04);
+        assert_eq!(PAUSE_CUSTODY_ENTRY, 0x08);
+        assert_eq!(PAUSE_DISTRIBUTIONS, 0x10);
+        assert_eq!(PAUSE_ISSUER_PROCEEDS, 0x20);
+        assert_eq!(PAUSE_FLAGS_ALL, 0x3F);
+        // Legacy `paused = true` (byte 1) gates only onboarding.
+        assert!(platform(1).is_paused(PAUSE_ONBOARDING));
+        assert!(!platform(1).is_paused(PAUSE_PRIMARY));
+        assert!(!platform(0).is_paused(PAUSE_FLAGS_ALL));
+        // Undefined bits gate nothing.
+        assert!(!platform(0xC0).is_paused(PAUSE_FLAGS_ALL));
+    }
 }

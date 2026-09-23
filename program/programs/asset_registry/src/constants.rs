@@ -122,6 +122,35 @@ pub const MIN_LIQ_PREF_BPS: u16 = 10_000;
 /// Schema version stamped on every account, for future `migrate_*` instructions.
 pub const STATE_VERSION: u8 = 1;
 
+// ── Emergency pause (`Platform.pause_flags`, byte 74) ────────────────────────
+// Each bit stops one family of platform-mediated ENTRY flows. Exits (cancels,
+// expiries, refunds, claims, custody burns/returns) never read these bits, and
+// the transfer hook never reads the Platform — wallet-to-wallet transfers stay
+// free. Any Admin may SET bits; only the super admin (`Platform.admin`) may
+// CLEAR them. Values 0 and 1 keep the meaning of the former `paused: bool`
+// (1 = onboarding paused). Bits outside `PAUSE_FLAGS_ALL` gate nothing.
+/// Issuer registration, asset / share-class creation, share-class mint setup.
+pub const PAUSE_ONBOARDING: u8 = 1 << 0;
+/// Primary issuance: `open_sale`, `buy`, `mint_to_treasury`.
+pub const PAUSE_PRIMARY: u8 = 1 << 1;
+/// Program-mediated trading: offers and OTC deals (create / fund / take).
+pub const PAUSE_SECONDARY: u8 = 1 << 2;
+/// Entries into custody (`open_custody_vault`, `deposit_to_custody_vault`),
+/// except opening a burn-only quarantine vault for clawback.
+pub const PAUSE_CUSTODY_ENTRY: u8 = 1 << 3;
+/// Distributions, yield routing, vesting funding and Rights-Token entries.
+pub const PAUSE_DISTRIBUTIONS: u8 = 1 << 4;
+/// Proceeds paid out to issuers / founders (`close_sale`, `release_payout`,
+/// `claim_founder_yield`).
+pub const PAUSE_ISSUER_PROCEEDS: u8 = 1 << 5;
+/// Every defined pause bit. A fresh `initialize_platform` starts here.
+pub const PAUSE_FLAGS_ALL: u8 = PAUSE_ONBOARDING
+    | PAUSE_PRIMARY
+    | PAUSE_SECONDARY
+    | PAUSE_CUSTODY_ENTRY
+    | PAUSE_DISTRIBUTIONS
+    | PAUSE_ISSUER_PROCEEDS;
+
 // ── Vesting series (spec: "11. Vesting — Mancipatio") ───────────────────────
 /// Seed for a `VestingSeries` PDA — `["vesting_series", authority, series_id]`.
 pub const VESTING_SERIES_SEED: &[u8] = b"vesting_series";

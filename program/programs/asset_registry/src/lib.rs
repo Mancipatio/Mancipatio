@@ -20,6 +20,19 @@ pub use state::*;
 
 declare_id!("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
 
+// Gated like the Anchor entrypoint: host test binaries link both programs'
+// rlibs (the hook as a `no-entrypoint` dev-dependency), and two exported
+// `SECURITY_TXT` symbols would collide.
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "Manci asset_registry",
+    project_url: "https://www.manci.io",
+    contacts: "email:security@mancipatio.io",
+    policy: "https://www.manci.io/security",
+    preferred_languages: "en",
+    source_code: "https://github.com/Mancipatio/Mancipatio"
+}
+
 #[program]
 pub mod asset_registry {
     use super::*;
@@ -69,9 +82,28 @@ pub mod asset_registry {
         instructions::handle_accept_custody_authority(ctx)
     }
 
-    /// Emergency pause / unpause of issuer & asset creation.
+    /// Legacy onboarding switch (super admin): sets / clears only
+    /// `PAUSE_ONBOARDING`. The full emergency pause is `set_pause_flags`.
     pub fn set_pause(ctx: Context<SetPause>, paused: bool) -> Result<()> {
         instructions::handle_set_pause(ctx, paused)
+    }
+
+    /// Emergency pause: `flags = (flags | set_mask) & !clear_mask`. Any Admin
+    /// may set defined bits; only the super admin may clear.
+    pub fn set_pause_flags(
+        ctx: Context<SetPauseFlags>,
+        set_mask: u8,
+        clear_mask: u8,
+    ) -> Result<()> {
+        instructions::handle_set_pause_flags(ctx, set_mask, clear_mask)
+    }
+
+    /// Super admin rotates the protocol treasury (nonzero key).
+    pub fn set_protocol_treasury(
+        ctx: Context<SetProtocolTreasury>,
+        new_treasury: Pubkey,
+    ) -> Result<()> {
+        instructions::handle_set_protocol_treasury(ctx, new_treasury)
     }
 
     /// Super admin grants the admin role to `new_admin`.

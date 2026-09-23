@@ -46,6 +46,12 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0049_launchpad_network_links.sql");
       expect(applied).toContain("0061_maintenance_mode.sql");
       expect(applied).toContain("0062_verified_pledge_totals.sql");
+      expect(applied).toContain("0063_operational_retention.sql");
+      expect(applied).toContain("0064_platform_pause_flags.sql");
+      // One file per migration number: migrations are applied and tracked by
+      // number, so a duplicate would be ambiguous ("0063 applied").
+      const numbers = applied.map((file) => file.slice(0, 4));
+      expect(new Set(numbers).size).toBe(numbers.length);
       expect(
         db.query(
           "select count(*) from information_schema.tables where table_schema='public'",

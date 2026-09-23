@@ -36,7 +36,7 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findAdminRecordPda, findMilestonePda } from "../pdas";
+import { findAdminRecordPda, findMilestonePda, findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -63,6 +63,7 @@ export type PublishMilestoneInstruction<
   TAccountMilestone extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -84,6 +85,9 @@ export type PublishMilestoneInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -142,6 +146,7 @@ export type PublishMilestoneAsyncInput<
   TAccountRightsIssuance extends string = string,
   TAccountMilestone extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate. */
@@ -149,6 +154,11 @@ export type PublishMilestoneAsyncInput<
   rightsIssuance: Address<TAccountRightsIssuance>;
   milestone?: Address<TAccountMilestone>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   index: PublishMilestoneInstructionDataArgs["index"];
   merkleRoot: PublishMilestoneInstructionDataArgs["merkleRoot"];
   amountPool: PublishMilestoneInstructionDataArgs["amountPool"];
@@ -161,6 +171,7 @@ export async function getPublishMilestoneInstructionAsync<
   TAccountRightsIssuance extends string,
   TAccountMilestone extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: PublishMilestoneAsyncInput<
@@ -168,7 +179,8 @@ export async function getPublishMilestoneInstructionAsync<
     TAccountAdminRecord,
     TAccountRightsIssuance,
     TAccountMilestone,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -178,7 +190,8 @@ export async function getPublishMilestoneInstructionAsync<
     TAccountAdminRecord,
     TAccountRightsIssuance,
     TAccountMilestone,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -192,6 +205,7 @@ export async function getPublishMilestoneInstructionAsync<
     rightsIssuance: { value: input.rightsIssuance ?? null, isWritable: true },
     milestone: { value: input.milestone ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -217,6 +231,9 @@ export async function getPublishMilestoneInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -226,6 +243,7 @@ export async function getPublishMilestoneInstructionAsync<
       getAccountMeta(accounts.rightsIssuance),
       getAccountMeta(accounts.milestone),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getPublishMilestoneInstructionDataEncoder().encode(
       args as PublishMilestoneInstructionDataArgs,
@@ -237,7 +255,8 @@ export async function getPublishMilestoneInstructionAsync<
     TAccountAdminRecord,
     TAccountRightsIssuance,
     TAccountMilestone,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -247,6 +266,7 @@ export type PublishMilestoneInput<
   TAccountRightsIssuance extends string = string,
   TAccountMilestone extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate. */
@@ -254,6 +274,11 @@ export type PublishMilestoneInput<
   rightsIssuance: Address<TAccountRightsIssuance>;
   milestone: Address<TAccountMilestone>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   index: PublishMilestoneInstructionDataArgs["index"];
   merkleRoot: PublishMilestoneInstructionDataArgs["merkleRoot"];
   amountPool: PublishMilestoneInstructionDataArgs["amountPool"];
@@ -266,6 +291,7 @@ export function getPublishMilestoneInstruction<
   TAccountRightsIssuance extends string,
   TAccountMilestone extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: PublishMilestoneInput<
@@ -273,7 +299,8 @@ export function getPublishMilestoneInstruction<
     TAccountAdminRecord,
     TAccountRightsIssuance,
     TAccountMilestone,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): PublishMilestoneInstruction<
@@ -282,7 +309,8 @@ export function getPublishMilestoneInstruction<
   TAccountAdminRecord,
   TAccountRightsIssuance,
   TAccountMilestone,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -295,6 +323,7 @@ export function getPublishMilestoneInstruction<
     rightsIssuance: { value: input.rightsIssuance ?? null, isWritable: true },
     milestone: { value: input.milestone ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -318,6 +347,7 @@ export function getPublishMilestoneInstruction<
       getAccountMeta(accounts.rightsIssuance),
       getAccountMeta(accounts.milestone),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getPublishMilestoneInstructionDataEncoder().encode(
       args as PublishMilestoneInstructionDataArgs,
@@ -329,7 +359,8 @@ export function getPublishMilestoneInstruction<
     TAccountAdminRecord,
     TAccountRightsIssuance,
     TAccountMilestone,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -345,6 +376,11 @@ export type ParsedPublishMilestoneInstruction<
     rightsIssuance: TAccountMetas[2];
     milestone: TAccountMetas[3];
     systemProgram: TAccountMetas[4];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[5];
   };
   data: PublishMilestoneInstructionData;
 };
@@ -357,7 +393,7 @@ export function parsePublishMilestoneInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedPublishMilestoneInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 5) {
+  if (instruction.accounts.length < 6) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -375,6 +411,7 @@ export function parsePublishMilestoneInstruction<
       rightsIssuance: getNextAccount(),
       milestone: getNextAccount(),
       systemProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getPublishMilestoneInstructionDataDecoder().decode(instruction.data),
   };

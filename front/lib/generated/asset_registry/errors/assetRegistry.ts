@@ -250,6 +250,14 @@ export const ASSET_REGISTRY_ERROR__UNSUPPORTED_MINT_EXTENSION = 0x17e3; // 6115
 export const ASSET_REGISTRY_ERROR__INVALID_DISTRIBUTION_PLAN = 0x17e4; // 6116
 /** VestingFundingExceedsSchedule: Cumulative vesting funding cannot exceed the immutable schedule total */
 export const ASSET_REGISTRY_ERROR__VESTING_FUNDING_EXCEEDS_SCHEDULE = 0x17e5; // 6117
+/** InvalidPauseFlags: Pause flags contain undefined bits, or a bit is both set and cleared */
+export const ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS = 0x17e6; // 6118
+/** PauseClearNotAllowed: Only the super admin may clear pause flags */
+export const ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED = 0x17e7; // 6119
+/** InvalidProtocolTreasury: Protocol treasury must be a nonzero key */
+export const ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY = 0x17e8; // 6120
+/** InvalidSalePrice: Sale price per unit must be greater than zero */
+export const ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE = 0x17e9; // 6121
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -290,12 +298,15 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__INVALID_MERKLE_PROOF
   | typeof ASSET_REGISTRY_ERROR__INVALID_METADATA_FIELD
   | typeof ASSET_REGISTRY_ERROR__INVALID_OFFER_PARAMS
+  | typeof ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS
   | typeof ASSET_REGISTRY_ERROR__INVALID_PRE_CLIFF_BPS
   | typeof ASSET_REGISTRY_ERROR__INVALID_PROPOSAL_PARAMS
   | typeof ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY
+  | typeof ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY
   | typeof ASSET_REGISTRY_ERROR__INVALID_RAISE_PARAMS
   | typeof ASSET_REGISTRY_ERROR__INVALID_RIGHTS_BITFIELD
   | typeof ASSET_REGISTRY_ERROR__INVALID_SALE_PARAMS
+  | typeof ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE
   | typeof ASSET_REGISTRY_ERROR__INVALID_SHARE_CLASS_INDEX
   | typeof ASSET_REGISTRY_ERROR__INVALID_TEXT
   | typeof ASSET_REGISTRY_ERROR__INVALID_TRANCHE_INDEX
@@ -324,6 +335,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__OFFER_NOT_FUNDED
   | typeof ASSET_REGISTRY_ERROR__OFFER_NOT_OPEN
   | typeof ASSET_REGISTRY_ERROR__OVERFLOW
+  | typeof ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED
   | typeof ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_POST_LAUNCH_MINT
   | typeof ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_REQUIRES_UNIT_SUPPLY
   | typeof ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_SINGLE_CLASS
@@ -412,12 +424,15 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__INVALID_MERKLE_PROOF]: `Merkle proof does not match the snapshot root`,
     [ASSET_REGISTRY_ERROR__INVALID_METADATA_FIELD]: `Only the metadata uri field may be updated`,
     [ASSET_REGISTRY_ERROR__INVALID_OFFER_PARAMS]: `Invalid OTC offer parameters`,
+    [ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS]: `Pause flags contain undefined bits, or a bit is both set and cleared`,
     [ASSET_REGISTRY_ERROR__INVALID_PRE_CLIFF_BPS]: `Pre-cliff percentage exceeds 100%`,
     [ASSET_REGISTRY_ERROR__INVALID_PROPOSAL_PARAMS]: `Invalid governance proposal parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY]: `Proposed authority must be a different nonzero key`,
+    [ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY]: `Protocol treasury must be a nonzero key`,
     [ASSET_REGISTRY_ERROR__INVALID_RAISE_PARAMS]: `Invalid raise parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_RIGHTS_BITFIELD]: `Rights bitfield contains undefined bits`,
     [ASSET_REGISTRY_ERROR__INVALID_SALE_PARAMS]: `Invalid sale parameters`,
+    [ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE]: `Sale price per unit must be greater than zero`,
     [ASSET_REGISTRY_ERROR__INVALID_SHARE_CLASS_INDEX]: `Share class index must equal the asset's current share_classes_count`,
     [ASSET_REGISTRY_ERROR__INVALID_TEXT]: `Text field is empty or exceeds its maximum length`,
     [ASSET_REGISTRY_ERROR__INVALID_TRANCHE_INDEX]: `Tranche index out of range`,
@@ -446,6 +461,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__OFFER_NOT_FUNDED]: `OTC offer escrow is not funded with enough units`,
     [ASSET_REGISTRY_ERROR__OFFER_NOT_OPEN]: `OTC offer is not open`,
     [ASSET_REGISTRY_ERROR__OVERFLOW]: `Numeric overflow`,
+    [ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED]: `Only the super admin may clear pause flags`,
     [ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_POST_LAUNCH_MINT]: `A PhysicalGood share class must not be mintable post-launch`,
     [ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_REQUIRES_UNIT_SUPPLY]: `A PhysicalGood asset's share class must have max_supply = 1`,
     [ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_SINGLE_CLASS]: `A PhysicalGood asset can hold exactly one share class (class_index 0)`,

@@ -93,6 +93,19 @@ use spl_transfer_hook_interface::instruction::{ExecuteInstruction, TransferHookI
 
 declare_id!("GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy");
 
+// Gated like the Anchor entrypoint: the registry's host tests link this crate
+// as a `no-entrypoint` dev-dependency next to the registry, and two exported
+// `SECURITY_TXT` symbols would collide.
+#[cfg(not(feature = "no-entrypoint"))]
+solana_security_txt::security_txt! {
+    name: "Manci transfer_hook",
+    project_url: "https://www.manci.io",
+    contacts: "email:security@mancipatio.io",
+    policy: "https://www.manci.io/security",
+    preferred_languages: "en",
+    source_code: "https://github.com/Mancipatio/Mancipatio"
+}
+
 /// The `asset_registry` program — owner of the `KycRegistry` / `KycEntry`
 /// accounts the `KycGated` mode reads. Kept in sync with `asset_registry`'s
 /// `declare_id!`.

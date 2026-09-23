@@ -30,7 +30,7 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findEscrowMarkerPda } from "../pdas";
+import { findEscrowMarkerPda, findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -59,6 +59,7 @@ export type TakeOfferInstruction<
   TAccountEscrowMarker extends string | AccountMeta<string> = string,
   TAccountShareTokenProgram extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -98,6 +99,9 @@ export type TakeOfferInstruction<
       TAccountPaymentTokenProgram extends string
         ? ReadonlyAccount<TAccountPaymentTokenProgram>
         : TAccountPaymentTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -141,6 +145,7 @@ export type TakeOfferAsyncInput<
   TAccountEscrowMarker extends string = string,
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   taker: TransactionSigner<TAccountTaker>;
   offer: Address<TAccountOffer>;
@@ -165,6 +170,11 @@ export type TakeOfferAsyncInput<
   escrowMarker?: Address<TAccountEscrowMarker>;
   shareTokenProgram: Address<TAccountShareTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
 };
 
 export async function getTakeOfferInstructionAsync<
@@ -179,6 +189,7 @@ export async function getTakeOfferInstructionAsync<
   TAccountEscrowMarker extends string,
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: TakeOfferAsyncInput<
@@ -192,7 +203,8 @@ export async function getTakeOfferInstructionAsync<
     TAccountMakerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -208,7 +220,8 @@ export async function getTakeOfferInstructionAsync<
     TAccountMakerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -243,6 +256,7 @@ export async function getTakeOfferInstructionAsync<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -254,6 +268,9 @@ export async function getTakeOfferInstructionAsync<
     accounts.escrowMarker.value = await findEscrowMarkerPda({
       offer: expectAddress(accounts.offer.value),
     });
+  }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
   }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
@@ -270,6 +287,7 @@ export async function getTakeOfferInstructionAsync<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getTakeOfferInstructionDataEncoder().encode({}),
     programAddress,
@@ -285,7 +303,8 @@ export async function getTakeOfferInstructionAsync<
     TAccountMakerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -301,6 +320,7 @@ export type TakeOfferInput<
   TAccountEscrowMarker extends string = string,
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   taker: TransactionSigner<TAccountTaker>;
   offer: Address<TAccountOffer>;
@@ -325,6 +345,11 @@ export type TakeOfferInput<
   escrowMarker: Address<TAccountEscrowMarker>;
   shareTokenProgram: Address<TAccountShareTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
 };
 
 export function getTakeOfferInstruction<
@@ -339,6 +364,7 @@ export function getTakeOfferInstruction<
   TAccountEscrowMarker extends string,
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: TakeOfferInput<
@@ -352,7 +378,8 @@ export function getTakeOfferInstruction<
     TAccountMakerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): TakeOfferInstruction<
@@ -367,7 +394,8 @@ export function getTakeOfferInstruction<
   TAccountMakerPaymentAccount,
   TAccountEscrowMarker,
   TAccountShareTokenProgram,
-  TAccountPaymentTokenProgram
+  TAccountPaymentTokenProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -401,6 +429,7 @@ export function getTakeOfferInstruction<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -421,6 +450,7 @@ export function getTakeOfferInstruction<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getTakeOfferInstructionDataEncoder().encode({}),
     programAddress,
@@ -436,7 +466,8 @@ export function getTakeOfferInstruction<
     TAccountMakerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -469,6 +500,11 @@ export type ParsedTakeOfferInstruction<
     escrowMarker: TAccountMetas[8];
     shareTokenProgram: TAccountMetas[9];
     paymentTokenProgram: TAccountMetas[10];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[11];
   };
   data: TakeOfferInstructionData;
 };
@@ -481,7 +517,7 @@ export function parseTakeOfferInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedTakeOfferInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 11) {
+  if (instruction.accounts.length < 12) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -505,6 +541,7 @@ export function parseTakeOfferInstruction<
       escrowMarker: getNextAccount(),
       shareTokenProgram: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getTakeOfferInstructionDataDecoder().decode(instruction.data),
   };

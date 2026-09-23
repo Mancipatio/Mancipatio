@@ -15,6 +15,7 @@ import {
   type CustodyOpenScope,
 } from "@/lib/custody-open-recovery";
 import {
+  findPlatformPda,
   getOpenCustodyVaultInstructionAsync,
   getOpenCustodyVaultInstructionDataDecoder,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
@@ -240,7 +241,9 @@ describe("custody approval durable intent", () => {
       beneficiary: key(4),
     });
     expect(ix.programAddress).toBe(ASSET_REGISTRY_PROGRAM_ADDRESS);
-    expect(ix.accounts).toHaveLength(9);
+    expect(ix.accounts).toHaveLength(10);
+    // Emergency-pause gate: the Platform PDA is the last named account.
+    expect(ix.accounts[9].address).toBe((await findPlatformPda())[0]);
     expect(ix.accounts[4].address).toBe(
       await findCustodyVaultPda(key(2), BigInt(42)),
     );

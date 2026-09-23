@@ -8,6 +8,7 @@ import {
   findPlatformPda,
 } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM } from "@/lib/pdas";
+import { pausedFlags, PAUSE_FLAGS } from "@/lib/pause-flags";
 import { getSupabase } from "@/lib/supabase";
 import { detectNetwork, rpcUrl as networkRpcUrl } from "@/lib/network";
 import { runReconcile, runIndexerRetry, type ReconcileReport } from "@/lib/indexer";
@@ -144,8 +145,8 @@ function HealthOps() {
         ok: m.exists,
         label: "Platform PDA",
         value: m.exists
-          ? m.data.paused
-            ? "initialized · paused"
+          ? pausedFlags(m.data.pauseFlags).length > 0
+            ? `initialized · ${pausedFlags(m.data.pauseFlags).length}/${PAUSE_FLAGS.length} areas paused`
             : "initialized · active"
           : "not initialized",
         detail: pda.toString().slice(0, 6) + "…" + pda.toString().slice(-4),

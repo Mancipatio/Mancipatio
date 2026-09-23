@@ -32,7 +32,7 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findMintPda } from "../pdas";
+import { findMintPda, findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -61,6 +61,7 @@ export type MintToTreasuryInstruction<
   TAccountDestination extends string | AccountMeta<string> = string,
   TAccountTokenProgram extends string | AccountMeta<string> =
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -91,6 +92,9 @@ export type MintToTreasuryInstruction<
       TAccountTokenProgram extends string
         ? ReadonlyAccount<TAccountTokenProgram>
         : TAccountTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -138,6 +142,7 @@ export type MintToTreasuryAsyncInput<
   TAccountMint extends string = string,
   TAccountDestination extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Global Admin or issuer-local MINT capability; the signer must also be the issuer. */
@@ -155,6 +160,11 @@ export type MintToTreasuryAsyncInput<
    */
   destination: Address<TAccountDestination>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   amount: MintToTreasuryInstructionDataArgs["amount"];
 };
 
@@ -167,6 +177,7 @@ export async function getMintToTreasuryInstructionAsync<
   TAccountMint extends string,
   TAccountDestination extends string,
   TAccountTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: MintToTreasuryAsyncInput<
@@ -177,7 +188,8 @@ export async function getMintToTreasuryInstructionAsync<
     TAccountShareClass,
     TAccountMint,
     TAccountDestination,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -190,7 +202,8 @@ export async function getMintToTreasuryInstructionAsync<
     TAccountShareClass,
     TAccountMint,
     TAccountDestination,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -207,6 +220,7 @@ export async function getMintToTreasuryInstructionAsync<
     mint: { value: input.mint ?? null, isWritable: true },
     destination: { value: input.destination ?? null, isWritable: true },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -226,6 +240,9 @@ export async function getMintToTreasuryInstructionAsync<
     accounts.tokenProgram.value =
       "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address<"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -238,6 +255,7 @@ export async function getMintToTreasuryInstructionAsync<
       getAccountMeta(accounts.mint),
       getAccountMeta(accounts.destination),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getMintToTreasuryInstructionDataEncoder().encode(
       args as MintToTreasuryInstructionDataArgs,
@@ -252,7 +270,8 @@ export async function getMintToTreasuryInstructionAsync<
     TAccountShareClass,
     TAccountMint,
     TAccountDestination,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -265,6 +284,7 @@ export type MintToTreasuryInput<
   TAccountMint extends string = string,
   TAccountDestination extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Global Admin or issuer-local MINT capability; the signer must also be the issuer. */
@@ -282,6 +302,11 @@ export type MintToTreasuryInput<
    */
   destination: Address<TAccountDestination>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   amount: MintToTreasuryInstructionDataArgs["amount"];
 };
 
@@ -294,6 +319,7 @@ export function getMintToTreasuryInstruction<
   TAccountMint extends string,
   TAccountDestination extends string,
   TAccountTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: MintToTreasuryInput<
@@ -304,7 +330,8 @@ export function getMintToTreasuryInstruction<
     TAccountShareClass,
     TAccountMint,
     TAccountDestination,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): MintToTreasuryInstruction<
@@ -316,7 +343,8 @@ export function getMintToTreasuryInstruction<
   TAccountShareClass,
   TAccountMint,
   TAccountDestination,
-  TAccountTokenProgram
+  TAccountTokenProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -332,6 +360,7 @@ export function getMintToTreasuryInstruction<
     mint: { value: input.mint ?? null, isWritable: true },
     destination: { value: input.destination ?? null, isWritable: true },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -358,6 +387,7 @@ export function getMintToTreasuryInstruction<
       getAccountMeta(accounts.mint),
       getAccountMeta(accounts.destination),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getMintToTreasuryInstructionDataEncoder().encode(
       args as MintToTreasuryInstructionDataArgs,
@@ -372,7 +402,8 @@ export function getMintToTreasuryInstruction<
     TAccountShareClass,
     TAccountMint,
     TAccountDestination,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -398,6 +429,11 @@ export type ParsedMintToTreasuryInstruction<
      */
     destination: TAccountMetas[6];
     tokenProgram: TAccountMetas[7];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[8];
   };
   data: MintToTreasuryInstructionData;
 };
@@ -410,7 +446,7 @@ export function parseMintToTreasuryInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedMintToTreasuryInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 8) {
+  if (instruction.accounts.length < 9) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -431,6 +467,7 @@ export function parseMintToTreasuryInstruction<
       mint: getNextAccount(),
       destination: getNextAccount(),
       tokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getMintToTreasuryInstructionDataDecoder().decode(instruction.data),
   };

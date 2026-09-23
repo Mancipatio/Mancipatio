@@ -19,6 +19,7 @@ import {
   getCancelOfferInstructionAsync,
   getCreateOfferInstructionAsync,
   getDepositToOfferEscrowInstruction,
+  findPlatformPda,
   OfferStatus,
   type Asset,
   type Offer,
@@ -175,7 +176,10 @@ export default function MyOffersPage() {
         tokenProgram: TOKEN_2022_ADDRESS,
         mint: offer.mint,
       });
+      // Emergency-pause gate (read-only) — the last named account.
+      const [platform] = await findPlatformPda();
       const baseIx = getDepositToOfferEscrowInstruction({
+        platform,
         maker: signer,
         offer: offerPda,
         mint: offer.mint,

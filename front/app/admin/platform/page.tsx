@@ -10,12 +10,16 @@ import {
   useWalletConnection,
 } from "@solana/react-hooks";
 import { useCallback, useEffect, useState } from "react";
+import { isAddress } from "@solana/kit";
 import {
   fetchMaybePlatform,
   findPlatformPda,
-  getSetPauseInstructionAsync,
+  getSetProtocolTreasuryInstructionAsync,
   type Platform,
 } from "@/lib/generated/asset_registry";
+import { PauseFlagsPanel } from "@/components/pause-flags-panel";
+import { pauseStatus } from "@/lib/pause-flags";
+import { protocolTreasuryError } from "@/lib/protocol-treasury";
 import { buildInitializePlatformInstruction } from "@/lib/program-bootstrap";
 import { kycGates, loadKycAuthorityContext } from "@/lib/kyc-authority";
 import { AuthorityRotation } from "./authority-rotation";
@@ -27,6 +31,11 @@ import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { useToast } from "@/lib/toast";
 
 const CARD = "rounded-xl border border-slate-200 bg-white shadow-card p-6";
+const PAUSE_CHIP = {
+  active: "bg-emerald-100 text-emerald-700",
+  paused: "bg-red-100 text-red-700",
+  undefined: "bg-amber-100 text-amber-800",
+} as const;
 const BTN =
   "rounded-lg border border-slate-300/60 px-4 py-2 text-sm font-medium text-slate-900 transition-colors hover:border-slate-400 hover:text-slate-900 disabled:opacity-50";
 // protocol_fee_bps is a RESERVED on-chain field — no instruction charges or
@@ -43,7 +52,8 @@ export default function AdminPage() {
   const [platform, setPlatform] = useState<Platform | null | undefined>(
     undefined,
   );
-  const [confirmPause, setConfirmPause] = useState(false);
+  const [treasuryInput, setTreasuryInput] = useState("");
+  const [confirmTreasury, setConfirmTreasury] = useState(false);
   // KYC provider = live KycRegistry.authority — shown next to the platform
   // admin because the two roles are separate on-chain and diverge on rotation.
   const [kycProvider, setKycProvider] = useState<string | null | undefined>(
@@ -118,49 +128,53 @@ export default function AdminPage() {
     }
   }
 
-  async function togglePause(reason: string) {
+  const treasuryCandidate = treasuryInput.trim();
+  const treasuryError = protocolTreasuryError(
+    treasuryCandidate,
+    platform?.protocolTreasury,
+  );
+
+  async function rotateTreasury(reason: string) {
     if (!walletAddress || !platform || !conn.wallet) return;
-    const action = platform.paused ? "Unpausing" : "Pausing";
-    const ixName = platform.paused ? "unpause" : "set_pause";
-    const pendingId = toast.showPending(`${action} platform…`, reason);
+    if (!treasuryCandidate || treasuryError || !isAddress(treasuryCandidate))
+      return;
+    const old = platform.protocolTreasury;
+    const pendingId = toast.showPending("Rotating protocol treasury…", reason);
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
-      const ix = await getSetPauseInstructionAsync({
-        admin: signer,
-        paused: !platform.paused,
+      const ix = await getSetProtocolTreasuryInstructionAsync({
+        superAdmin: signer,
+        newTreasury: treasuryCandidate,
       });
-      const result = await tx.send({
-        instructions: [ix],
-        feePayer: signer,
-      });
+      const result = await tx.send({ instructions: [ix], feePayer: signer });
       const sig = typeof result === "string" ? result : "";
       toast.dismiss(pendingId);
-      toast.showTx(sig, {
-        title: platform.paused ? "Platform unpaused" : "Platform paused",
-      });
+      toast.showTx(sig, { title: "Protocol treasury rotated" });
       void recordAudit({
-        ix_name: ixName,
+        ix_name: "set_protocol_treasury",
         category: "platform",
         actor_wallet: walletAddress.toString(),
         reason,
-        target_label: platformPda || undefined,
+        target_label: treasuryCandidate,
         tx_signature: sig || undefined,
         status: "success",
+        metadata: { old, new: treasuryCandidate },
       });
-      setConfirmPause(false);
+      setConfirmTreasury(false);
+      setTreasuryInput("");
       await refresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
-      toast.showError("Failed to toggle pause", message);
+      const detail = explainSendError(err);
+      toast.showError("Failed to rotate the treasury", detail);
       void recordAudit({
-        ix_name: ixName,
+        ix_name: "set_protocol_treasury",
         category: "platform",
         actor_wallet: walletAddress.toString(),
         reason,
-        target_label: platformPda || undefined,
+        target_label: treasuryCandidate,
         status: "failed",
-        metadata: { error: message },
+        metadata: { old, new: treasuryCandidate, error: detail },
       });
     }
   }
@@ -173,9 +187,10 @@ export default function AdminPage() {
         </p>
         <h1 className="mt-2 text-3xl font-semibold">Platform console</h1>
         <p className="mt-3 text-slate-600">
-          The Platform singleton governs Manci on the selected network — super admin, the
-          pause switch and a reserved fee field (nothing is charged on-chain;
-          pricing is agreed per engagement).
+          The Platform singleton governs Manci on the selected network — super
+          admin, the emergency pause, the protocol treasury and a reserved fee
+          field (nothing is charged on-chain; pricing is agreed per
+          engagement).
         </p>
 
         {!conn.isReady ? (
@@ -193,6 +208,13 @@ export default function AdminPage() {
               Connect the deployed registry program’s current upgrade-authority
               wallet. This setup appoints the connected wallet as initial Super
               Admin and treasury; program upgrade authority is unchanged.
+            </p>
+            <p className="mt-2 text-sm text-amber-800">
+              The platform starts <strong>fully paused</strong>: every
+              emergency-pause area is on until the Super Admin resumes them.
+              Finish the bootstrap (blocklist authority, admins) first, then
+              resume every area in the Emergency pause panel on this page
+              before handing authority over.
             </p>
             <dl className="mt-4 space-y-2 text-sm">
               <Row label="Platform PDA" value={platformPda} />
@@ -217,12 +239,10 @@ export default function AdminPage() {
               <h2 className="text-lg font-semibold text-slate-900">Platform</h2>
               <span
                 className={`rounded-full px-2 py-0.5 text-xs ${
-                  platform.paused
-                    ? "bg-red-100 text-red-700"
-                    : "bg-emerald-100 text-emerald-700"
+                  PAUSE_CHIP[pauseStatus(platform.pauseFlags).tone]
                 }`}
               >
-                {platform.paused ? "paused" : "active"}
+                {pauseStatus(platform.pauseFlags).label}
               </span>
             </div>
             <dl className="mt-4 space-y-2 text-sm">
@@ -256,23 +276,48 @@ export default function AdminPage() {
                   detail pages to issue and revoke passports.
                 </p>
               )}
+            <div className="mt-6">
+              <PauseFlagsPanel platform={platform} onChanged={refresh} />
+            </div>
             {platform.admin === walletAddress ? (
-              <button
-                type="button"
-                disabled={tx.isSending}
-                onClick={() => setConfirmPause(true)}
-                className={`mt-6 ${BTN}`}
-              >
-                {tx.isSending
-                  ? "Sending…"
-                  : platform.paused
-                    ? "Unpause platform"
-                    : "Pause platform"}
-              </button>
+              <div className="mt-6 border-t border-slate-100 pt-5">
+                <p className="text-[13px] font-semibold text-slate-900">
+                  Protocol treasury
+                </p>
+                <p className="mt-1 text-xs text-slate-500">
+                  The wallet whose token accounts receive the platform third of
+                  routed yield. It is read live, so the next routed yield pays
+                  the new wallet. The new wallet does not have to sign (a
+                  multisig vault can be the treasury).
+                </p>
+                <div className="mt-3 flex flex-wrap items-start gap-2">
+                  <input
+                    value={treasuryInput}
+                    onChange={(e) => setTreasuryInput(e.target.value)}
+                    placeholder="New treasury wallet address"
+                    spellCheck={false}
+                    className="min-w-0 flex-1 rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs"
+                    aria-invalid={treasuryError ? true : undefined}
+                  />
+                  <button
+                    type="button"
+                    disabled={
+                      tx.isSending || !treasuryCandidate || !!treasuryError
+                    }
+                    onClick={() => setConfirmTreasury(true)}
+                    className={BTN}
+                  >
+                    Rotate treasury
+                  </button>
+                </div>
+                {treasuryError && (
+                  <p className="mt-1 text-xs text-red-600">{treasuryError}</p>
+                )}
+              </div>
             ) : (
               <p className="mt-6 text-sm text-slate-500">
-                Connected wallet is not the Super Admin — admin actions will be
-                rejected on-chain.
+                Connected wallet is not the Super Admin — only the Super Admin
+                can resume paused areas or rotate the treasury.
               </p>
             )}
             <button
@@ -313,31 +358,28 @@ export default function AdminPage() {
       <BlocklistBootstrap />
       <AuthorityRotation kind="platform" />
       <AuthorityRotation kind="blocklist" />
-      {platform && (
+      {platform && confirmTreasury && !treasuryError && treasuryCandidate && (
         <ConfirmModal
-          open={confirmPause}
-          onClose={() => setConfirmPause(false)}
-          onConfirm={(reason) => togglePause(reason)}
-          title={platform.paused ? "Unpause platform" : "Pause platform"}
-          kind={platform.paused ? "warning" : "destructive"}
-          confirmLabel={platform.paused ? "Unpause" : "Pause"}
+          open={confirmTreasury}
+          onClose={() => setConfirmTreasury(false)}
+          onConfirm={(reason) => rotateTreasury(reason)}
+          title="Rotate protocol treasury"
+          kind="warning"
+          confirmLabel="Rotate"
           description={
-            platform.paused ? (
+            <div className="space-y-2">
               <p>
-                Unpausing allows new issuer registrations, assets and share
-                classes to be created. The reason will be recorded in the audit
-                log.
+                From <span className="break-all font-mono">{platform.protocolTreasury}</span>
               </p>
-            ) : (
               <p>
-                Pausing blocks{" "}
-                <strong>
-                  new issuer registrations, assets and share classes
-                </strong>
-                . Existing sales, transfers, custody, votes and claims continue.
-                The reason will be recorded in the audit log.
+                To <span className="break-all font-mono">{treasuryCandidate}</span>
               </p>
-            )
+              <p>
+                Routed yield will require a token account owned by the new
+                wallet. Check the address carefully; the reason is recorded in
+                the audit log.
+              </p>
+            </div>
           }
           busy={tx.isSending}
         />

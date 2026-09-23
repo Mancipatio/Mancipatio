@@ -1,0 +1,5 @@
+Contact: mailto:security@mancipatio.io
+Expires: 2027-09-23T00:00:00.000Z
+Preferred-Languages: en
+Canonical: https://www.manci.io/.well-known/security.txt
+Policy: https://www.manci.io/security

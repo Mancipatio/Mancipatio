@@ -16,7 +16,6 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
-  getDepositOtcAssetInstructionAsync,
   getDepositOtcPaymentInstructionAsync,
   getExpireOtcDealInstructionAsync,
   OtcDealStatus,
@@ -25,6 +24,7 @@ import {
 import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { hookTransferMetas } from "@/lib/hook-metas";
+import { buildDepositOtcAssetInstructions } from "@/lib/otc-transactions";
 import { findShareClassPda } from "@/lib/pdas";
 import {
   detectTokenProgram,
@@ -190,14 +190,9 @@ export default function MyDealsPage() {
   }
 
   /**
-   * Seller deposits the share units. remaining_accounts, per
-   * deposit_otc_asset.rs: the deposit leg's hook tail (source authority =
-   * seller), then the settle leg's hook tail (source authority = deal PDA).
-   * Both legs move the same share mint, so the tails are equal length (3
-   * accounts each in Open mode, 9 each in KycGated — built mode-aware by
-   * hookTransferMetas) and the handler splits at len/2 when this deposit
-   * completes the pair; when it doesn't, Token-2022 hook resolution ignores
-   * the unreferenced second tail, so passing both is always safe.
+   * Seller deposits the share units (deposit leg + settle leg hook tails,
+   * settlement ATAs created idempotently) — built by
+   * buildDepositOtcAssetInstructions, which the size test measures.
    */
   async function depositAsset(row: LoadedOtcDeal) {
     if (!wallet || !conn.wallet) return;
@@ -208,78 +203,17 @@ export default function MyDealsPage() {
     try {
       const signer = walletSigner(conn.wallet);
       const payTokenProgram = await payTokenProgramFor(row);
-      const [sellerShareAta] = await findAssociatedTokenPda({
-        owner: wallet,
-        tokenProgram: TOKEN_2022_PROGRAM,
-        mint: deal.mint,
-      });
-      // The Rust account structs require the settlement destination accounts
-      // to exist even when this deposit doesn't settle — create them
-      // idempotently.
-      const [buyerShareAta] = await findAssociatedTokenPda({
-        owner: deal.buyer,
-        tokenProgram: TOKEN_2022_PROGRAM,
-        mint: deal.mint,
-      });
-      const [sellerPaymentAta] = await findAssociatedTokenPda({
-        owner: wallet,
-        tokenProgram: payTokenProgram,
-        mint: deal.paymentMint,
-      });
-      const createBuyerShareAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: deal.buyer,
-          mint: deal.mint,
-          tokenProgram: TOKEN_2022_PROGRAM,
-        });
-      const createSellerPaymentAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: wallet,
-          mint: deal.paymentMint,
-          tokenProgram: payTokenProgram,
-        });
-      // escrowMarker (["escrow_marker", deal PDA]) is auto-derived by the
-      // async builder — closed on-chain when this deposit settles the deal.
-      const baseIx = await getDepositOtcAssetInstructionAsync({
-        seller: signer,
-        deal: pda,
-        mint: deal.mint,
-        sellerShareAccount: sellerShareAta,
-        assetEscrow: deal.assetEscrow,
-        paymentMint: deal.paymentMint,
-        paymentEscrow: deal.paymentEscrow,
-        buyerShareAccount: buyerShareAta,
-        sellerPaymentAccount: sellerPaymentAta,
-        shareTokenProgram: TOKEN_2022_PROGRAM,
-        paymentTokenProgram: payTokenProgram,
-      });
-      const rpc = client.runtime.rpc;
-      const depositIx = {
-        ...baseIx,
-        accounts: [
-          ...baseIx.accounts,
-          // Deposit leg: seller wallet → asset escrow (owned by the deal PDA).
-          ...(await hookTransferMetas(rpc, deal.mint, {
-            sourceTokenAccount: sellerShareAta,
-            destTokenAccount: deal.assetEscrow,
-            transferAuthority: wallet,
-            sourceOwner: wallet,
-            destOwner: pda,
-          })),
-          // Settle leg: asset escrow (deal PDA) → buyer share account.
-          ...(await hookTransferMetas(rpc, deal.mint, {
-            sourceTokenAccount: deal.assetEscrow,
-            destTokenAccount: buyerShareAta,
-            transferAuthority: pda,
-            sourceOwner: pda,
-            destOwner: deal.buyer,
-          })),
-        ],
-      };
+      const instructions = await buildDepositOtcAssetInstructions(
+        client.runtime.rpc,
+        {
+          seller: signer,
+          dealPda: pda,
+          deal,
+          paymentTokenProgram: payTokenProgram,
+        },
+      );
       const sig = await tx.send({
-        instructions: [createBuyerShareAtaIx, createSellerPaymentAtaIx, depositIx],
+        instructions,
         feePayer: signer,
       });
       toast.dismiss(pendingId);

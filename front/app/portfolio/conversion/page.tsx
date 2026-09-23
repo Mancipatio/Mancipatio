@@ -38,6 +38,7 @@ import {
   findAssetPda,
   findOpenCustodyVaultEscrowPda,
   getDepositToCustodyVaultInstruction,
+  findPlatformPda,
   getReturnCustodyVaultInstructionAsync,
   VaultState,
   type Asset,
@@ -415,7 +416,10 @@ export default function ConversionPage() {
       // through `return_custody_vault` refunds only up to the recorded
       // ledger without a receiver-KYC check. The escrow is owned by the vault
       // PDA, whose EscrowMarker exempts the incoming leg from receiver-KYC.
+      // Emergency-pause gate (read-only) — the last named account.
+      const [platform] = await findPlatformPda();
       const baseIx = getDepositToCustodyVaultInstruction({
+        platform,
         depositor: signer,
         shareClass: vaultBefore.data.shareClass,
         custodyVault: vaultPda,

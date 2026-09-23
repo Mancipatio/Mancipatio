@@ -7,6 +7,8 @@
 //! Boot mirrors test_otc_deal.rs minus the transfer-hook setup — the payment
 //! token is hook-less, so no share-mint transfers ever run.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -194,6 +196,7 @@ fn boot() -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],
@@ -314,6 +317,7 @@ fn boot() -> (LiteSVM, Ctx) {
                 transfer_hook_program: transfer_hook::id(),
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -457,6 +461,7 @@ fn create_distribution_with_plan_ix(
             funder_payment_account: ctx.funder_payment_ata,
             payment_token_program: TOKEN_2022,
             system_program: system_program::ID,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     )
@@ -508,6 +513,7 @@ fn distribute_batch_proven_ix(
         payment_mint: ctx.payment_mint,
         escrow: escrow_pda,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     for r in recipients {
@@ -1216,4 +1222,96 @@ fn legacy_distribution_retains_funder_close_refund_without_a_new_plan() {
     assert_eq!(token_balance(&svm, &ctx.funder_payment_ata), FUNDER_BALANCE);
     assert!(svm.get_account(&escrow).is_none_or(|a| a.data.is_empty()));
     assert_eq!(load::<Distribution>(&svm, &distribution).version, 1);
+}
+
+// ── Emergency pause (Platform.pause_flags) ───────────────────────────────────
+
+/// bit4 gates `create_distribution` and `distribute_batch` — including an
+/// exact receipt replay, which is a no-op when unpaused — while
+/// `close_distribution` (remainder back to the funder) stays open under 0x3F.
+#[test]
+fn distribution_pause_gates_create_and_distribute_but_not_close() {
+    let (mut svm, ctx) = boot();
+    let payer = ctx.payer.insecure_clone();
+    let all_but = asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS;
+    let recipients = recipients(&mut svm, &ctx, 1);
+
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_DISTRIBUTIONS);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer, &ctx.funder],
+            &[create_distribution_ix(
+                &ctx,
+                &ctx.payer.pubkey(),
+                &ctx.funder.pubkey(),
+                3001,
+                TOTAL_AMOUNT,
+            )],
+        ),
+        "create_distribution under DISTRIBUTIONS",
+    );
+    assert_eq!(
+        token_balance(&svm, &ctx.funder_payment_ata),
+        FUNDER_BALANCE,
+        "nothing funded"
+    );
+
+    pause::pause_only(&mut svm, &payer, all_but);
+    let (_, escrow, proofs) =
+        setup_committed_distribution(&mut svm, &ctx, 3001, vec![vec![(recipients[0], 100_000)]]);
+    let batch = distribute_batch_proven_ix(
+        &ctx,
+        &ctx.payer.pubkey(),
+        3001,
+        0,
+        vec![100_000],
+        &recipients,
+        proofs[0].clone(),
+    );
+
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_DISTRIBUTIONS);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&batch)),
+        "distribute_batch under DISTRIBUTIONS",
+    );
+    pause::pause_only(&mut svm, &payer, all_but);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        std::slice::from_ref(&batch),
+        "distribute_batch",
+    );
+    assert_eq!(token_balance(&svm, &recipients[0]), 100_000);
+
+    // An exact receipt replay reads the Platform too: 6000 while paused.
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_DISTRIBUTIONS);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&batch)),
+        "receipt replay under DISTRIBUTIONS",
+    );
+
+    // Full pause: the remainder goes back to the funder.
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_FLAGS_ALL);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[close_distribution_ix(
+            &ctx,
+            &ctx.payer.pubkey(),
+            3001,
+            &ctx.funder_payment_ata,
+            &ctx.funder.pubkey(),
+        )],
+        "close_distribution under 0x3F",
+    );
+    assert_eq!(token_balance(&svm, &recipients[0]), 100_000);
+    assert_eq!(
+        token_balance(&svm, &ctx.funder_payment_ata),
+        FUNDER_BALANCE - 100_000
+    );
+    assert!(svm
+        .get_account(&escrow)
+        .map(|a| a.lamports == 0 || a.data.is_empty())
+        .unwrap_or(true));
 }
