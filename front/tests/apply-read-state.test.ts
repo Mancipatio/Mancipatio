@@ -36,6 +36,43 @@ describe("withSigningObserver", () => {
     expect(session.calls).toBe(1); // `this` reached the real session
   });
 
+  it("wraps a frozen session whose signMessage is non-writable and non-configurable", async () => {
+    // Regression: a Proxy over a frozen session threw on every read of
+    // `signMessage` ("'get' on proxy: property 'signMessage' is a read-only
+    // and non-configurable data property…"), so /apply showed a false
+    // "could not reach the application service" error.
+    const events: string[] = [];
+    const brand = Symbol("session-brand");
+    const session = Object.freeze({
+      [brand]: true,
+      account: Object.freeze({ address: "wallet" }),
+      get connector() {
+        return "phantom";
+      },
+      async signMessage(message: Uint8Array) {
+        events.push(`sign:${message.length}:${this === session}`);
+        return new Uint8Array([9]);
+      },
+    });
+    const observed = withSigningObserver(session, {
+      onSignStart: () => events.push("start"),
+      onSignEnd: () => events.push("end"),
+    });
+    expect(() => observed.signMessage).not.toThrow();
+    expect(observed).not.toBe(session);
+    const signature = await observed.signMessage(new Uint8Array(2));
+    expect(Array.from(signature)).toEqual([9]);
+    expect(events).toEqual(["start", "sign:2:true", "end"]);
+    expect(observed.account).toBe(session.account);
+    expect(observed.connector).toBe("phantom");
+    expect(observed[brand]).toBe(true);
+    expect(Object.isFrozen(observed)).toBe(true);
+    // The original session is untouched.
+    expect(Object.getOwnPropertyDescriptor(session, "signMessage")?.value).not.toBe(
+      observed.signMessage,
+    );
+  });
+
   it("still signals the prompt closing when the wallet rejects", async () => {
     const events: string[] = [];
     const session = {
