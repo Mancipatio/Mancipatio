@@ -25,6 +25,7 @@ import {
   type ChainTransaction,
 } from "@/lib/chain-evidence";
 import { getServerRpc } from "@/lib/server/rpc";
+import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
 import { SiwsError } from "@/lib/server/siws";
 
 export function transactionSignature(value: unknown): string {
@@ -155,6 +156,9 @@ export async function requirePurchaseEvidence(
   }
 }
 
+/** `Pubkey::default()` — the kyc_registry of a vault that pins none. */
+const UNPINNED_REGISTRY = "11111111111111111111111111111111";
+
 export type CustodyRequestEvidence = {
   holder_wallet: string;
   share_class_pda: string;
@@ -211,6 +215,21 @@ export async function requireRequestVault(
         row.vault_pda
     ) {
       throw new SiwsError(400, "Custody vault terms do not match this request");
+    }
+    // KYC at conversion / delivery (2C-3): the vault's realize checks the
+    // holder in the registry it pinned at open, so a request may only be
+    // linked to a vault pinned to the platform registry (or, with no pin
+    // configured, to some registry at all).
+    const platformRegistry = configuredKycRegistry();
+    if (
+      platformRegistry
+        ? vault.data.kycRegistry !== platformRegistry
+        : vault.data.kycRegistry === UNPINNED_REGISTRY
+    ) {
+      throw new SiwsError(
+        400,
+        "Custody vault is not pinned to the platform KYC registry",
+      );
     }
     const escrow = await fetchMaybeToken(getServerRpc(), vault.data.escrow, {
       commitment: "finalized",

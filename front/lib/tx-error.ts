@@ -1,4 +1,7 @@
 import {
+  ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH,
+  ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_NOT_ALLOWED,
+  ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED,
   ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY,
   ASSET_REGISTRY_ERROR__INVALID_AUTHORITY_TRANSFER,
   ASSET_REGISTRY_ERROR__INVALID_DEPOSIT_AMOUNT,
@@ -88,15 +91,15 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       ],
       [
         ASSET_REGISTRY_ERROR__RECEIVER_NOT_APPROVED,
-        "The receiving wallet has no approved investor passport on this mint's KYC registry (ReceiverNotApproved).",
+        "The wallet (receiver, or the custody beneficiary converting / taking delivery) has no approved investor passport on the KYC registry in play (ReceiverNotApproved).",
       ],
       [
         ASSET_REGISTRY_ERROR__RECEIVER_KYC_EXPIRED,
-        "The receiving wallet's investor passport has expired — re-verify before buying (ReceiverKycExpired).",
+        "The wallet's (receiver or custody beneficiary) investor passport has expired — renew it first (ReceiverKycExpired).",
       ],
       [
         ASSET_REGISTRY_ERROR__RECEIVER_JURISDICTION_BLOCKED,
-        "The receiving wallet's passport jurisdiction is not approved for this mint (ReceiverJurisdictionBlocked).",
+        "The wallet's (receiver or custody beneficiary) passport jurisdiction is not allowed by the KYC registry (ReceiverJurisdictionBlocked).",
       ],
       [
         ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY,
@@ -174,6 +177,19 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       [
         ASSET_REGISTRY_ERROR__INVALID_ISSUER_RECOVERY,
         "This issuer recovery no longer matches: the issuer key or the Super Admin changed since it was proposed, this wallet is not the proposed key, or the proposed key is a Manci admin wallet (a recovery never lands on one). Cancel it and propose again (InvalidIssuerRecovery).",
+      ],
+      // 2C-3: KYC at conversion / delivery (DeliveryEscrow realize).
+      [
+        ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED,
+        "A delivery / conversion escrow must pin the platform KYC registry when it is opened, and confirming it must pass that registry with the holder's passport entry. Reload and try again (CustodyKycRegistryRequired).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_NOT_ALLOWED,
+        "Only a delivery / conversion escrow pins a KYC registry. Open other vault types without one (CustodyKycRegistryNotAllowed).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH,
+        "This escrow pinned a different KYC registry when it was opened. Confirm it against that registry, or return the deposit and re-open the vault (CustodyKycRegistryMismatch).",
       ],
       [
         ASSET_REGISTRY_ERROR__NOT_FOUNDER,
