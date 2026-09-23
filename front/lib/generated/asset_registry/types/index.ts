@@ -11,6 +11,7 @@ export * from "./assetType";
 export * from "./claimKind";
 export * from "./clawbackReason";
 export * from "./distributionStatus";
+export * from "./issuerAuthorityChangeKind";
 export * from "./jurisdictionRules";
 export * from "./kybStatus";
 export * from "./kycStatus";

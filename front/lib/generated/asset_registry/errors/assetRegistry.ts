@@ -276,6 +276,12 @@ export const ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN = 0x17f0; // 612
 export const ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL = 0x17f1; // 6129
 /** SaleStartsAfterApprovalExpiry: Sale start is after the approval's expiry */
 export const ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY = 0x17f2; // 6130
+/** IssuerRecoveryTimelockActive: Issuer recovery is still inside its 7-day timelock */
+export const ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE = 0x17f3; // 6131
+/** IssuerRecoveryExpired: Issuer recovery execution window has passed; the super admin must re-propose */
+export const ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED = 0x17f4; // 6132
+/** InvalidIssuerRecovery: Issuer recovery does not match the issuer's current authority, the current super admin, or the executing signer */
+export const ASSET_REGISTRY_ERROR__INVALID_ISSUER_RECOVERY = 0x17f5; // 6133
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -311,6 +317,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__INVALID_EXPIRY
   | typeof ASSET_REGISTRY_ERROR__INVALID_FEE_BPS
   | typeof ASSET_REGISTRY_ERROR__INVALID_ISSUER_PERMISSIONS
+  | typeof ASSET_REGISTRY_ERROR__INVALID_ISSUER_RECOVERY
   | typeof ASSET_REGISTRY_ERROR__INVALID_KYC_REGISTRY
   | typeof ASSET_REGISTRY_ERROR__INVALID_LIQ_PREF
   | typeof ASSET_REGISTRY_ERROR__INVALID_MERKLE_PROOF
@@ -334,6 +341,8 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__INVALID_VESTING_ALLOCATION
   | typeof ASSET_REGISTRY_ERROR__INVALID_VESTING_SCHEDULE
   | typeof ASSET_REGISTRY_ERROR__ISSUER_NOT_VERIFIED
+  | typeof ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED
+  | typeof ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE
   | typeof ASSET_REGISTRY_ERROR__ISSUER_REGISTRATION_NOT_RECOVERABLE
   | typeof ASSET_REGISTRY_ERROR__KYC_EXPIRY_IN_PAST
   | typeof ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED
@@ -446,6 +455,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__INVALID_EXPIRY]: `Offer expiry must be 0 or in the future`,
     [ASSET_REGISTRY_ERROR__INVALID_FEE_BPS]: `Protocol fee exceeds the 10% ceiling`,
     [ASSET_REGISTRY_ERROR__INVALID_ISSUER_PERMISSIONS]: `Unknown issuer permission capability`,
+    [ASSET_REGISTRY_ERROR__INVALID_ISSUER_RECOVERY]: `Issuer recovery does not match the issuer's current authority, the current super admin, or the executing signer`,
     [ASSET_REGISTRY_ERROR__INVALID_KYC_REGISTRY]: `KYC registry account is malformed, truncated, or unexpected`,
     [ASSET_REGISTRY_ERROR__INVALID_LIQ_PREF]: `Liquidation preference multiplier must be >= 1.0x (10000 bps)`,
     [ASSET_REGISTRY_ERROR__INVALID_MERKLE_PROOF]: `Merkle proof does not match the snapshot root`,
@@ -469,6 +479,8 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__INVALID_VESTING_ALLOCATION]: `Allocation must be greater than zero`,
     [ASSET_REGISTRY_ERROR__INVALID_VESTING_SCHEDULE]: `Invalid vesting schedule: 1-64 tranches, strictly ascending unlock times, every amount > 0`,
     [ASSET_REGISTRY_ERROR__ISSUER_NOT_VERIFIED]: `Issuer KYB is not verified`,
+    [ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED]: `Issuer recovery execution window has passed; the super admin must re-propose`,
+    [ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE]: `Issuer recovery is still inside its 7-day timelock`,
     [ASSET_REGISTRY_ERROR__ISSUER_REGISTRATION_NOT_RECOVERABLE]: `Only an unverified issuer registration with no assets can be recovered`,
     [ASSET_REGISTRY_ERROR__KYC_EXPIRY_IN_PAST]: `KYC entry expiry is in the past`,
     [ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED]: `Buy requires the mint's hook accounts (config or meta list) to prove its restriction mode`,

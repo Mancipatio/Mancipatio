@@ -135,6 +135,177 @@
       "args": []
     },
     {
+      "name": "accept_issuer_authority",
+      "docs": [
+        "The proposed key accepts; the old grant's capabilities move to it."
+      ],
+      "discriminator": [
+        68,
+        51,
+        39,
+        79,
+        55,
+        177,
+        220,
+        214
+      ],
+      "accounts": [
+        {
+          "name": "new_authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "issuer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "old_permissions",
+          "docs": [
+            "The outgoing authority's grant, closed here when present (rent to the",
+            "acceptor); its capabilities move to `new_permissions`.",
+            "validated by `util::take_old_grant`. It may not exist."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              },
+              {
+                "kind": "account",
+                "path": "issuer.authority",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_permissions",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              },
+              {
+                "kind": "account",
+                "path": "new_authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "accept_kyc_registry_authority",
       "docs": [
         "The proposed authority accepts the KYC registry."
@@ -1328,6 +1499,197 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "cancel_issuer_authority_transfer",
+      "docs": [
+        "The current issuer authority cancels a pending proposal."
+      ],
+      "discriminator": [
+        116,
+        70,
+        121,
+        72,
+        14,
+        114,
+        226,
+        159
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "issuer"
+          ]
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_issuer_recovery",
+      "docs": [
+        "The current issuer authority or the super admin cancels a recovery."
+      ],
+      "discriminator": [
+        78,
+        73,
+        145,
+        14,
+        21,
+        174,
+        194,
+        147
+      ],
+      "accounts": [
+        {
+          "name": "canceller",
+          "docs": [
+            "The live issuer authority or the live super admin. Not `mut`: it may be",
+            "the same key as `proposer`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        }
+      ],
+      "args": []
     },
     {
       "name": "cancel_kyc_registry_authority_transfer",
@@ -5608,6 +5970,199 @@
       ]
     },
     {
+      "name": "execute_issuer_recovery",
+      "docs": [
+        "The recovered key executes a recovery once its timelock has passed."
+      ],
+      "discriminator": [
+        241,
+        43,
+        185,
+        210,
+        123,
+        153,
+        169,
+        48
+      ],
+      "accounts": [
+        {
+          "name": "new_authority",
+          "docs": [
+            "The recovered key signs. Not `mut`: the old grant's and the recovery's",
+            "rent both go to `proposer`, so this key needs no balance."
+          ],
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        },
+        {
+          "name": "old_permissions",
+          "docs": [
+            "The lost authority's grant, closed when present (rent to `proposer`)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              },
+              {
+                "kind": "account",
+                "path": "issuer.authority",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_permissions",
+          "docs": [
+            "A leftover grant of the RECOVERED key, closed when present (rent to",
+            "`proposer`): a recovery never carries capabilities, so none may revive."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  112,
+                  101,
+                  114,
+                  109,
+                  105,
+                  115,
+                  115,
+                  105,
+                  111,
+                  110,
+                  115
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              },
+              {
+                "kind": "account",
+                "path": "new_authority"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "expire_offer",
       "docs": [
         "Expires an open OTC offer past its `expires_at` — permissionless;",
@@ -7593,6 +8148,209 @@
               {
                 "kind": "account",
                 "path": "custody_vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "propose_issuer_authority",
+      "docs": [
+        "The current issuer authority proposes a new authority (regular rotation)."
+      ],
+      "discriminator": [
+        39,
+        132,
+        136,
+        42,
+        232,
+        76,
+        223,
+        142
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "issuer"
+          ]
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "propose_issuer_recovery",
+      "docs": [
+        "The super admin proposes recovering a lost issuer key, executable after",
+        "a 7-day timelock."
+      ],
+      "discriminator": [
+        155,
+        16,
+        221,
+        45,
+        66,
+        204,
+        18,
+        249
+      ],
+      "accounts": [
+        {
+          "name": "super_admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
               }
             ]
           }
@@ -9827,6 +10585,165 @@
       ]
     },
     {
+      "name": "sync_payout_founder",
+      "docs": [
+        "Permissionless: copies the live issuer authority into `PayoutVault.founder`."
+      ],
+      "discriminator": [
+        87,
+        233,
+        55,
+        48,
+        226,
+        82,
+        111,
+        96
+      ],
+      "accounts": [
+        {
+          "name": "vault",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  97,
+                  121,
+                  111,
+                  117,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.sale",
+                "account": "PayoutVault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_class",
+          "docs": [
+            "only `asset` (byte 8) is read."
+          ]
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "only `issuer` (byte 8) is read."
+          ]
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "sync_sale_authority",
+      "docs": [
+        "Permissionless: copies the live issuer authority into `Sale.authority`."
+      ],
+      "discriminator": [
+        135,
+        153,
+        185,
+        21,
+        112,
+        64,
+        166,
+        184
+      ],
+      "accounts": [
+        {
+          "name": "sale",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  97,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "sale.share_class",
+                "account": "Sale"
+              },
+              {
+                "kind": "account",
+                "path": "sale.sale_id",
+                "account": "Sale"
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_class",
+          "docs": [
+            "only `asset` (byte 8) is read."
+          ]
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "only `issuer` (byte 8) is read."
+          ]
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "take_offer",
       "docs": [
         "Fills an open OTC offer — taker pays, escrowed units are released."
@@ -10693,6 +11610,19 @@
       ]
     },
     {
+      "name": "IssuerRecovery",
+      "discriminator": [
+        48,
+        126,
+        235,
+        154,
+        174,
+        129,
+        80,
+        187
+      ]
+    },
+    {
       "name": "KycEntry",
       "discriminator": [
         43,
@@ -11033,6 +11963,71 @@
       ]
     },
     {
+      "name": "IssuerAuthorityChanged",
+      "discriminator": [
+        26,
+        127,
+        49,
+        9,
+        50,
+        234,
+        135,
+        197
+      ]
+    },
+    {
+      "name": "IssuerAuthorityProposalCancelled",
+      "discriminator": [
+        43,
+        135,
+        248,
+        83,
+        159,
+        243,
+        107,
+        102
+      ]
+    },
+    {
+      "name": "IssuerAuthorityProposed",
+      "discriminator": [
+        215,
+        101,
+        142,
+        231,
+        24,
+        242,
+        59,
+        44
+      ]
+    },
+    {
+      "name": "IssuerRecoveryCancelled",
+      "discriminator": [
+        156,
+        183,
+        144,
+        42,
+        148,
+        88,
+        111,
+        180
+      ]
+    },
+    {
+      "name": "IssuerRecoveryProposed",
+      "discriminator": [
+        117,
+        196,
+        141,
+        157,
+        240,
+        61,
+        3,
+        207
+      ]
+    },
+    {
       "name": "KycRegistryAuthorityChanged",
       "discriminator": [
         5,
@@ -11124,6 +12119,19 @@
       ]
     },
     {
+      "name": "PayoutFounderSynced",
+      "discriminator": [
+        227,
+        100,
+        62,
+        144,
+        224,
+        168,
+        89,
+        91
+      ]
+    },
+    {
       "name": "ProtocolTreasuryChanged",
       "discriminator": [
         198,
@@ -11173,6 +12181,19 @@
         226,
         88,
         65
+      ]
+    },
+    {
+      "name": "SaleAuthoritySynced",
+      "discriminator": [
+        243,
+        72,
+        202,
+        186,
+        44,
+        232,
+        121,
+        181
       ]
     },
     {
@@ -12000,6 +13021,21 @@
       "code": 6130,
       "name": "SaleStartsAfterApprovalExpiry",
       "msg": "Sale start is after the approval's expiry"
+    },
+    {
+      "code": 6131,
+      "name": "IssuerRecoveryTimelockActive",
+      "msg": "Issuer recovery is still inside its 7-day timelock"
+    },
+    {
+      "code": 6132,
+      "name": "IssuerRecoveryExpired",
+      "msg": "Issuer recovery execution window has passed; the super admin must re-propose"
+    },
+    {
+      "code": 6133,
+      "name": "InvalidIssuerRecovery",
+      "msg": "Issuer recovery does not match the issuer's current authority, the current super admin, or the executing signer"
     }
   ],
   "types": [
@@ -12999,6 +14035,114 @@
       }
     },
     {
+      "name": "IssuerAuthorityChangeKind",
+      "docs": [
+        "How `Issuer.authority` changed (carried by `IssuerAuthorityChanged`)."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Rotation"
+          },
+          {
+            "name": "TimelockedRecovery"
+          },
+          {
+            "name": "RegistrationRecovery"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerAuthorityChanged",
+      "docs": [
+        "Emitted whenever `Issuer.authority` changes. `old_grant_closed` says whether",
+        "an `IssuerPermissions` record of the old authority was closed;",
+        "`capabilities_carried` is what the new authority's record now holds (0 when",
+        "no record was written)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "kind",
+            "type": {
+              "defined": {
+                "name": "IssuerAuthorityChangeKind"
+              }
+            }
+          },
+          {
+            "name": "capabilities_carried",
+            "type": "u8"
+          },
+          {
+            "name": "old_grant_closed",
+            "type": "bool"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerAuthorityProposalCancelled",
+      "docs": [
+        "Emitted by `cancel_issuer_authority_transfer`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "cancelled_new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerAuthorityProposed",
+      "docs": [
+        "Emitted by `propose_issuer_authority` (a re-proposal emits again)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "current_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
       "name": "IssuerPermissions",
       "docs": [
         "An operational grant for one issuer authority; never confers global admin.",
@@ -13030,6 +14174,149 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerRecovery",
+      "docs": [
+        "A super-admin recovery of a LOST issuer authority key, effective only after",
+        "a 7-day timelock and cancellable by the current issuer authority (or the",
+        "super admin) meanwhile. Seeds: `[\"issuer_recovery\", issuer]`.",
+        "",
+        "⚠ Layout: the field order is fixed. Byte offsets: issuer 8,",
+        "current_authority 40, new_authority 72 (the same offset as",
+        "`AuthorityTransfer.new_authority`: the front lists both by a memcmp there),",
+        "proposed_by 104, proposed_at 136, eta 144, expires_at 152, version 160,",
+        "bump 161. Later fields are appended after `bump`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "docs": [
+              "Byte 8: the Issuer PDA."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "current_authority",
+            "docs": [
+              "Byte 40: `issuer.authority` when proposed; execute requires it to still",
+              "be the live authority (a rotation in between makes the recovery stale)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "docs": [
+              "Byte 72: the only key that can execute (it signs)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "docs": [
+              "Byte 104: the proposing super admin; execute requires it to still be",
+              "`platform.admin`. Receives every refund (this rent and the old grant's)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "docs": [
+              "Byte 136."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "eta",
+            "docs": [
+              "Byte 144: executable at or after this unix ts."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "docs": [
+              "Byte 152: `eta + ISSUER_RECOVERY_EXECUTION_WINDOW`; executable strictly before it."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "version",
+            "docs": [
+              "Byte 160: `STATE_VERSION`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "docs": [
+              "Byte 161."
+            ],
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerRecoveryCancelled",
+      "docs": [
+        "Emitted by `cancel_issuer_recovery`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "cancelled_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerRecoveryProposed",
+      "docs": [
+        "Emitted by `propose_issuer_recovery` (a re-proposal resets the timelock and",
+        "emits again)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "current_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "eta",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
           }
         ]
       }
@@ -13731,6 +15018,33 @@
           },
           {
             "name": "by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PayoutFounderSynced",
+      "docs": [
+        "Emitted by `sync_payout_founder` when `PayoutVault.founder` actually changed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "vault",
+            "type": "pubkey"
+          },
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_founder",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_founder",
             "type": "pubkey"
           }
         ]
@@ -14591,6 +15905,33 @@
           {
             "name": "vesting_months",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SaleAuthoritySynced",
+      "docs": [
+        "Emitted by `sync_sale_authority` when `Sale.authority` actually changed."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sale",
+            "type": "pubkey"
+          },
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
           }
         ]
       }

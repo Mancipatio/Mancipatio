@@ -18,6 +18,7 @@ export * from "./escrowIdentity";
 export * from "./escrowMarker";
 export * from "./issuer";
 export * from "./issuerPermissions";
+export * from "./issuerRecovery";
 export * from "./kycEntry";
 export * from "./kycRegistry";
 export * from "./milestoneClaim";

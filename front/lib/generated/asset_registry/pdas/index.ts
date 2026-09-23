@@ -6,6 +6,7 @@
  * @see https://github.com/codama-idl/codama
  */
 
+export * from "./acceptIssuerAuthorityTransfer";
 export * from "./acceptKycRegistryAuthorityTransfer";
 export * from "./acceptPlatformAdminNewAdminRecord";
 export * from "./acceptPlatformAdminTransfer";
@@ -35,6 +36,7 @@ export * from "./kycRegistry";
 export * from "./milestone";
 export * from "./mint";
 export * from "./newAdminRecord";
+export * from "./newPermissions";
 export * from "./offer";
 export * from "./openCustodyVaultEscrow";
 export * from "./openCustodyVaultEscrowMarker";
@@ -46,6 +48,7 @@ export * from "./position";
 export * from "./proceeds";
 export * from "./proposal";
 export * from "./record";
+export * from "./recovery";
 export * from "./rightsIssuance";
 export * from "./sale";
 export * from "./saleApproval";
