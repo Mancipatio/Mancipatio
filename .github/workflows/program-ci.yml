@@ -54,15 +54,10 @@ jobs:
         run: cargo build-sbf --workspace --tools-version v1.52 -- --locked
 
       # ProgramData capacity of the deployed asset_registry: an upgrade larger
-      # than this needs `solana program extend` first. 2C-4: 2,471,672 (2C-2)
-      # + the 65,536 B extend that must land on every cluster BEFORE the 2C-4
-      # registry upgrade is deployed.
-      # PENDING (as of the 2C-4 branch): the extend has NOT landed on any
-      # cluster yet, so this value is ahead of the deployed capacity and this
-      # gate cannot catch a missing extend. Do not merge 2C-4 until the devnet
-      # `solana program extend … 65536` has run and its `solana program show`
-      # (Data Length 2,537,208) is recorded next to pre-show-hook.txt; then
-      # cite that file here and drop this note.
+      # than this needs `solana program extend` first. Devnet capacity is
+      # CONFIRMED at 2,537,208 B: 2,471,672 (2C-2) + the 65,536 B extend that
+      # landed with the 2C-4 rollout (docs/mainnet-readiness/deploy-2C4).
+      # Any other cluster must be extended to at least this before an upgrade.
       - name: asset_registry size budget
         env:
           ASSET_REGISTRY_CAPACITY: "2537208"
