@@ -29,14 +29,25 @@ describe("security headers", async () => {
     });
   });
 
-  it("uses strict-origin-when-cross-origin site-wide and keeps no-referrer, no-store on account pages", () => {
+  it("uses strict-origin-when-cross-origin site-wide and keeps no-referrer, no-store on sensitive pages", () => {
     expect(headersFor(rules, "/marketplace")["referrer-policy"]).toBe("strict-origin-when-cross-origin");
-    for (const path of ["/account", "/account/security", "/api/account/profile"]) {
+    expect(headersFor(rules, "/marketplace")["cache-control"]).toBeUndefined();
+    for (const path of [
+      "/account", "/account/security", "/api/account/profile", "/api/account/google/callback",
+      "/login", "/login/email", "/onboarding/3f2b8c1e-9a4d-4c2b-8e1f-0a1b2c3d4e5f",
+      "/admin", "/admin/kyc", "/admin/clients/42", "/api/auth/email/verify", "/api/auth/google/start",
+    ]) {
       expect(headersFor(rules, path)).toMatchObject({
         "referrer-policy": "no-referrer", "cache-control": "no-store", "x-robots-tag": "noindex, nofollow",
       });
     }
     expect(rules[0].source).toBe("/:path*");
+  });
+
+  it("does not treat look-alike paths as sensitive", () => {
+    for (const path of ["/loginhelp", "/administration", "/issuer/onboarding"]) {
+      expect(headersFor(rules, path)["cache-control"]).toBeUndefined();
+    }
   });
 
   it("does not ship a Content-Security-Policy yet", () => {

@@ -72,11 +72,27 @@ const SECURITY_HEADERS = [
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
   { key: "X-Frame-Options", value: "DENY" },
+  // Denied for every frame. The planned Sumsub WebSDK runs in an iframe and
+  // needs camera and microphone for liveness checks: that integration must
+  // delegate them, e.g. camera=(self "https://*.sumsub.com"), and test it.
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
   // Isolates this window from pages it did not open, but keeps the opener
   // link to popups it opens (wallet adapters that use a popup window). Google
   // sign-in is a full-page redirect and needs no opener.
   { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
+];
+
+// Pages whose URL can carry a live credential (/login/email?token=…,
+// /onboarding/[id]?t=…), that show personal or KYC data (/account, /admin),
+// or that issue sessions: never stored by the browser or back-forward cache,
+// never sent as Referer (not even same-origin), never indexed.
+const SENSITIVE_SOURCES = [
+  "/account/:path*",
+  "/api/account/:path*",
+  "/login/:path*",
+  "/onboarding/:path*",
+  "/admin/:path*",
+  "/api/auth/:path*",
 ];
 
 const nextConfig: NextConfig = {
@@ -86,8 +102,8 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       { source: "/:path*", headers: SECURITY_HEADERS },
-      // Later rules win for the same key: account pages keep no-referrer.
-      ...["/account/:path*", "/api/account/:path*"].map((source) => ({
+      // Later rules win for the same key: these keep no-referrer.
+      ...SENSITIVE_SOURCES.map((source) => ({
         source,
         headers: [
           { key: "Cache-Control", value: "no-store" },
