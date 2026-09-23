@@ -5,6 +5,8 @@ import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   fetchMaybeSale,
   fetchMaybeCustodyVault,
+  fetchMaybeKycEntry,
+  fetchMaybeKycRegistry,
   fetchMaybeShareClass,
   fetchMaybeAsset,
   findAssetPda,
@@ -26,6 +28,8 @@ import {
 } from "@/lib/chain-evidence";
 import { getServerRpc } from "@/lib/server/rpc";
 import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
+import { evaluatePassport } from "@/lib/custody-kyc";
+import { getEntryPda } from "@/lib/passport";
 import { SiwsError } from "@/lib/server/siws";
 
 export function transactionSignature(value: unknown): string {
@@ -167,9 +171,21 @@ export type CustodyRequestEvidence = {
   vault_id?: string | number | null;
   amount: string | number;
 };
+export type RequestVaultOptions = {
+  /**
+   * Link step only: the vault must be pinned to the platform registry
+   * (`NEXT_PUBLIC_KYC_REGISTRY`), or to some registry when none is
+   * configured. Every later step (deposit, return, cancel, outcome) only
+   * needs a pinned DeliveryEscrow: the chain enforces the pin that was set at
+   * open, and a later re-pointing of the platform registry must never strand
+   * an in-flight request (return stays ungated).
+   */
+  requirePlatformPin?: boolean;
+};
 export async function requireRequestVault(
   row: CustodyRequestEvidence,
   minContextSlot?: bigint,
+  options: RequestVaultOptions = {},
 ) {
   try {
     if (!row.vault_pda)
@@ -218,13 +234,14 @@ export async function requireRequestVault(
     }
     // KYC at conversion / delivery (2C-3): the vault's realize checks the
     // holder in the registry it pinned at open, so a request may only be
-    // linked to a vault pinned to the platform registry (or, with no pin
-    // configured, to some registry at all).
-    const platformRegistry = configuredKycRegistry();
+    // LINKED to a vault pinned to the platform registry (or, with no pin
+    // configured, to some registry at all). Later steps only need a pin.
+    const platformRegistry = options.requirePlatformPin
+      ? configuredKycRegistry()
+      : null;
     if (
-      platformRegistry
-        ? vault.data.kycRegistry !== platformRegistry
-        : vault.data.kycRegistry === UNPINNED_REGISTRY
+      vault.data.kycRegistry === UNPINNED_REGISTRY ||
+      (platformRegistry !== null && vault.data.kycRegistry !== platformRegistry)
     ) {
       throw new SiwsError(
         400,
@@ -248,6 +265,55 @@ export async function requireRequestVault(
   } catch (error) {
     proofError(error);
   }
+}
+/**
+ * KYC at delivery (2C-3), off-chain half: the physical handover ("in
+ * delivery") must not start unless the beneficiary's passport in the vault's
+ * pinned registry would pass the realize gate (Approved, unexpired,
+ * jurisdiction allowed) — otherwise the goods could leave while the burn can
+ * only fail and the deposit's one exit is a return.
+ */
+export async function requireBeneficiaryPassport(
+  vault: { beneficiary: string; kycRegistry: string },
+  nowSec: number = Math.floor(Date.now() / 1000),
+) {
+  if (vault.kycRegistry === UNPINNED_REGISTRY)
+    throw new SiwsError(
+      409,
+      "This vault pins no KYC registry; return the deposit instead",
+    );
+  let evaluation: ReturnType<typeof evaluatePassport>;
+  try {
+    const registryAddress = address(vault.kycRegistry);
+    const entryAddress = await getEntryPda(
+      registryAddress,
+      address(vault.beneficiary),
+    );
+    // "confirmed": a revocation must block the handover as soon as it lands.
+    const config = {
+      commitment: "confirmed" as const,
+      abortSignal: AbortSignal.timeout(12_000),
+    };
+    const [entry, registry] = await Promise.all([
+      fetchMaybeKycEntry(getServerRpc(), entryAddress, config),
+      fetchMaybeKycRegistry(getServerRpc(), registryAddress, config),
+    ]);
+    evaluation = evaluatePassport(
+      entry.exists ? entry.data : null,
+      registry.exists ? registry.data : null,
+      nowSec,
+    );
+  } catch {
+    throw new SiwsError(
+      503,
+      "The holder's investor passport could not be verified; try again",
+    );
+  }
+  if (evaluation.status !== "approved")
+    throw new SiwsError(
+      409,
+      `${evaluation.reason} Delivery needs the holder's approved investor passport; without one the deposit can only be returned.`,
+    );
 }
 export async function requireDepositEvidence(
   signature: string,

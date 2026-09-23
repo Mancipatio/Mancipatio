@@ -7,8 +7,11 @@
 --
 -- Apply BEFORE the front that projects it is deployed:
 -- apply_indexer_snapshot (0047) raises on any decoded column the table lacks.
--- Devnet had no CustodyVault accounts when v2 shipped; any stale v1 mirror
--- row is not on chain and is removed by the next reconcile.
+-- PRECONDITION (verify, do not assume): zero v1 (237 B) CustodyVault
+-- accounts on chain before the program upgrade — the v2 program cannot load
+-- them (3003). scripts/ops/devnet-rollout-inventory.mjs reports each one as
+-- a blocker. Once that holds, any stale v1 mirror row is not on chain and is
+-- removed by the next reconcile.
 begin;
 set local lock_timeout = '15s';
 

@@ -1659,6 +1659,14 @@ function OpenVaultModal({
                   </option>
                 ))}
               </select>
+              {vaultType === VaultType.ConversionPending && (
+                <p className="mt-1 text-xs font-medium text-amber-700">
+                  Not for holder conversions: this type&apos;s realize is not
+                  KYC-gated. Holder conversions go through the request queue
+                  (Delivery escrow), which checks the holder&apos;s investor
+                  passport.
+                </p>
+              )}
             </label>
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -1861,15 +1869,53 @@ async function requestRealizeKycAccounts(
 }
 
 /** The holder's passport for one request row, with the issue shortcut. */
+/** Why a request row has no vault info: the vault account does not exist, or
+ *  the read failed (retryable). */
+type VaultLoadIssue = "missing" | "error";
+
+/** passportBlockReason for a request row: says why the passport is unknown
+ *  instead of "Checking…" when the vault is missing, unreadable or not a
+ *  KYC-gated DeliveryEscrow. */
+function requestPassportBlock(
+  info: VaultOnChainInfo | undefined,
+  issue: VaultLoadIssue | undefined,
+): string | null {
+  if (info === undefined && issue === "missing")
+    return "The linked custody vault was not found on-chain.";
+  if (info === undefined && issue === "error")
+    return "Could not read the custody vault or the holder's investor passport — retry.";
+  if (info !== undefined && info.passport === null)
+    return "The linked vault is not a KYC-gated DeliveryEscrow — return the deposit instead.";
+  return passportBlockReason(info?.passport);
+}
+
 function RequestPassportGate({
   info,
+  issue,
+  onRetry,
   clientId,
   holderWallet,
 }: {
   info: VaultOnChainInfo | undefined;
+  issue: VaultLoadIssue | undefined;
+  onRetry: () => void;
   clientId: string | null;
   holderWallet: string;
 }) {
+  if (info === undefined && issue !== undefined) {
+    return (
+      <p className="mt-1 text-[11px] text-slate-600">
+        {requestPassportBlock(info, issue)}{" "}
+        <button
+          type="button"
+          onClick={onRetry}
+          className="font-medium text-brand-700 underline-offset-2 hover:underline"
+        >
+          Retry
+        </button>
+      </p>
+    );
+  }
   return (
     <BeneficiaryPassport
       passport={info?.passport}
@@ -1916,6 +1962,9 @@ function ConversionRequestsSection({
   const [vaultInfo, setVaultInfo] = useState<Map<string, VaultOnChainInfo>>(
     new Map(),
   );
+  const [vaultLoadIssue, setVaultLoadIssue] = useState<
+    Map<string, VaultLoadIssue>
+  >(new Map());
 
   const loadVaultInfo = useCallback(
     async (rows: ConversionRequest[]) => {
@@ -1925,6 +1974,7 @@ function ConversionRequestsSection({
           (r.status === "vault_opened" || r.status === "deposited"),
       );
       const entries: Array<[string, VaultOnChainInfo]> = [];
+      const issues: Array<[string, VaultLoadIssue]> = [];
       await Promise.all(
         targets.map(async (r) => {
           try {
@@ -1933,12 +1983,17 @@ function ConversionRequestsSection({
               address(r.vault_pda!),
             );
             if (info) entries.push([r.vault_pda!, info]);
+            else issues.push([r.vault_pda!, "missing"]);
           } catch {
-            // leave unknown — buttons stay enabled, the program still gates
+            // Unknown: Confirm conversion fails CLOSED (passport unverifiable)
+            // while the other buttons stay enabled — the program still gates.
+            // The row offers a retry.
+            issues.push([r.vault_pda!, "error"]);
           }
         }),
       );
       setVaultInfo(new Map(entries));
+      setVaultLoadIssue(new Map(issues));
     },
     [client],
   );
@@ -2440,7 +2495,10 @@ function ConversionRequestsSection({
                   : `Vault authority is ${info.authority} — trigger/realize and the pre-deadline return only work from that wallet.`;
               // KYC at conversion (2C-3): the realize needs the holder's
               // approved passport in the vault's pinned registry.
-              const passportBlock = passportBlockReason(info?.passport);
+              const loadIssue = r.vault_pda
+                ? vaultLoadIssue.get(r.vault_pda)
+                : undefined;
+              const passportBlock = requestPassportBlock(info, loadIssue);
               return (
                 <tr key={r.id} className="text-slate-700">
                   <td className="px-4 py-3">
@@ -2487,6 +2545,8 @@ function ConversionRequestsSection({
                     {(r.status === "vault_opened" || r.status === "deposited") && (
                       <RequestPassportGate
                         info={info}
+                        issue={loadIssue}
+                        onRetry={() => void loadVaultInfo(requests)}
                         clientId={r.client_id}
                         holderWallet={r.holder_wallet}
                       />
@@ -3185,6 +3245,9 @@ function DeliveryRequestsSection({
   const [vaultInfo, setVaultInfo] = useState<Map<string, VaultOnChainInfo>>(
     new Map(),
   );
+  const [vaultLoadIssue, setVaultLoadIssue] = useState<
+    Map<string, VaultLoadIssue>
+  >(new Map());
 
   const loadVaultInfo = useCallback(
     async (rows: DeliveryRequest[]) => {
@@ -3196,6 +3259,7 @@ function DeliveryRequestsSection({
             r.status === "in_delivery"),
       );
       const entries: Array<[string, VaultOnChainInfo]> = [];
+      const issues: Array<[string, VaultLoadIssue]> = [];
       await Promise.all(
         targets.map(async (r) => {
           try {
@@ -3204,12 +3268,16 @@ function DeliveryRequestsSection({
               address(r.vault_pda!),
             );
             if (info) entries.push([r.vault_pda!, info]);
+            else issues.push([r.vault_pda!, "missing"]);
           } catch {
-            // unknown → confirm stays disabled (passport unverifiable)
+            // Unknown: Mark in delivery / Confirm delivery fail CLOSED
+            // (passport unverifiable); the row offers a retry.
+            issues.push([r.vault_pda!, "error"]);
           }
         }),
       );
       setVaultInfo(new Map(entries));
+      setVaultLoadIssue(new Map(issues));
     },
     [client],
   );
@@ -3653,7 +3721,9 @@ function DeliveryRequestsSection({
           <p className="mt-0.5 text-[11px] text-slate-500">
             Approve to open a DeliveryEscrow vault, then track deposit →
             delivery → burn. &quot;Mark in delivery&quot; is off-chain only —
-            the physical handover happens outside the chain.
+            the physical handover happens outside the chain. It and
+            &quot;Confirm delivery&quot; both need the holder&apos;s approved
+            investor passport.
           </p>
         </div>
         {pendingCount > 0 && (
@@ -3697,9 +3767,13 @@ function DeliveryRequestsSection({
           <tbody className="divide-y divide-slate-100">
             {requests.map((r) => {
               const info = r.vault_pda ? vaultInfo.get(r.vault_pda) : undefined;
-              // KYC at delivery (2C-3): the realize needs the holder's
-              // approved passport in the vault's pinned registry.
-              const passportBlock = passportBlockReason(info?.passport);
+              // KYC at delivery (2C-3): the handover ("Mark in delivery") and
+              // the realize both need the holder's approved passport in the
+              // vault's pinned registry.
+              const loadIssue = r.vault_pda
+                ? vaultLoadIssue.get(r.vault_pda)
+                : undefined;
+              const passportBlock = requestPassportBlock(info, loadIssue);
               return (
               <tr key={r.id} className="text-slate-700">
                 <td className="px-4 py-3">
@@ -3730,6 +3804,8 @@ function DeliveryRequestsSection({
                     r.status === "in_delivery") && (
                     <RequestPassportGate
                       info={info}
+                      issue={loadIssue}
+                      onRetry={() => void loadVaultInfo(requests)}
                       clientId={r.client_id}
                       holderWallet={r.holder_wallet}
                     />
@@ -3797,7 +3873,12 @@ function DeliveryRequestsSection({
                       {r.status === "deposited" && (
                         <button
                           type="button"
-                          disabled={tx.isSending || busyId === r.id}
+                          disabled={
+                            tx.isSending ||
+                            busyId === r.id ||
+                            passportBlock !== null
+                          }
+                          title={passportBlock ?? undefined}
                           onClick={() => void markInDelivery(r)}
                           className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
                         >

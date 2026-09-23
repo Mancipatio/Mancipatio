@@ -132,6 +132,7 @@ const schemas = Object.fromEntries(Object.keys(IDS).map(name => {
 }));
 for (const [name, idl] of Object.entries(schemas)) if (idl.address !== IDS[name]) throw new Error(`IDL program address mismatch: ${name}`);
 evidence.idl_inputs = Object.fromEntries(Object.entries(schemas).map(([name, idl]) => [name, { path: path.relative(ROOT, path.join(FRONT, 'idl', `${name}.json`)), sha256: idl.file_sha256 }]));
+const CUSTODY_VAULT_V2_BYTES = 269;
 const legacyAppend = { ShareClass: new Set(['lifetime_minted', 'cumulative_cap']), PayoutVault: new Set(['vote_round', 'vote_pending']), VaultVote: new Set(['round']) };
 class Reader {
   constructor(data, idl) { this.data = data; this.offset = 8; this.types = new Map(idl.types.map(t => [t.name, t.type])); }
@@ -174,6 +175,11 @@ function decodeAccount(programName, pubkey, account) {
   const idl = schemas[programName];
   const type = idl.accounts.find(a => account.data.subarray(0, 8).equals(Buffer.from(a.discriminator)));
   const row = { address: pubkey, owner: account.owner, bytes: account.data.length, sha256: sha(account.data), type: type?.name ?? 'Unknown', executable: account.executable };
+  // 2C-3 hard gate: CustodyVault v2 appends kyc_registry (269 B) with no
+  // realloc path, so the upgraded program cannot load a v1 (237 B) vault
+  // (3003) — not even to realize, return or burn a clawback quarantine.
+  // Drain every v1 vault BEFORE the upgrade.
+  if (type?.name === 'CustodyVault' && account.data.length !== CUSTODY_VAULT_V2_BYTES) evidence.blockers.push(`CustodyVault ${pubkey}: ${account.data.length} B, not v2 (${CUSTODY_VAULT_V2_BYTES} B); the 2C-3 program cannot load it. Realize, return or revert it before the upgrade`);
   if (type) {
     try {
       const reader = new Reader(account.data, idl);

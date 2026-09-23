@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-const mocks = vi.hoisted(() => ({ query: vi.fn(), vault: vi.fn(), deposit: vi.fn(), transaction: vi.fn(), verify: vi.fn(), admin: vi.fn(), filters: [] as unknown[][], updates: [] as Record<string, unknown>[] }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), vault: vi.fn(), deposit: vi.fn(), passport: vi.fn(), transaction: vi.fn(), verify: vi.fn(), admin: vi.fn(), filters: [] as unknown[][], updates: [] as Record<string, unknown>[] }));
 vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
 vi.mock("@/lib/server/rpc", () => ({ getServerRpc: () => ({ getTransaction: (...args: unknown[]) => ({ send: (options: unknown) => mocks.transaction(...args, options) }) }) }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ from: (table: string) => {
@@ -9,7 +9,7 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ from: (tabl
     eq: (...args: unknown[]) => { filters.push(args); mocks.filters.push([table, ...args]); return q; },
     maybeSingle: () => mocks.query(table, mutation, filters) }; return q;
 } }) }));
-vi.mock("@/lib/server/chain-evidence", async (original) => ({ ...await original<typeof import("@/lib/server/chain-evidence")>(), requireRequestVault: mocks.vault, requireDepositEvidence: mocks.deposit }));
+vi.mock("@/lib/server/chain-evidence", async (original) => ({ ...await original<typeof import("@/lib/server/chain-evidence")>(), requireRequestVault: mocks.vault, requireDepositEvidence: mocks.deposit, requireBeneficiaryPassport: mocks.passport }));
 vi.mock("@/lib/server/siws", async (original) => ({ ...await original<typeof import("@/lib/server/siws")>(), verifySigned: mocks.verify }));
 vi.mock("@/lib/server/admin-gate", () => ({ requireAdmin: mocks.admin }));
 import { address, createNoopSigner, getAddressDecoder, getBase58Decoder, type Instruction, type ReadonlyUint8Array } from "@solana/kit";
@@ -114,6 +114,28 @@ describe("admin custody lifecycle proofs", () => {
     await validateCustodyUpdate(table, "request-id", patch); expect(patch).toMatchObject({ outcome_evidence: { signature, vault, amountAtomic: "3" } });
     const fake = evidence("realize"); fake.meta!.innerInstructions = []; mocks.transaction.mockResolvedValue(fake);
     await expect(validateCustodyUpdate(table, "request-id", patch)).rejects.toMatchObject({ status: 400 });
+  });
+  it("binds only the link step to the current platform KYC registry pin", async () => {
+    Object.assign(row, { status: "requested", vault_pda: null });
+    mocks.vault.mockResolvedValue({ vault: { escrow, deposited: BigInt(0), state: VaultState.Active, deadline: BigInt(999), metadataHash: new Uint8Array(32).fill(1) }, escrow: { amount: BigInt(0) } });
+    await validateCustodyUpdate("delivery_requests", "request-id", { status: "vault_opened", vault_pda: vault });
+    expect(mocks.vault.mock.calls.at(-1)?.[2]).toEqual({ requirePlatformPin: true });
+    Object.assign(row, { status: "deposited", vault_pda: vault });
+    mocks.vault.mockResolvedValue({ vault: { escrow, deposited: BigInt(0), state: VaultState.Returned }, escrow: { amount: BigInt(0) } });
+    await validateCustodyUpdate("delivery_requests", "request-id", { status: "returned", outcome_tx: signature });
+    expect(mocks.vault.mock.calls.every((call, i) => i === 0 || !(call[2] as { requirePlatformPin?: boolean } | undefined)?.requirePlatformPin)).toBe(true);
+    await expect(recordCustodyReturn("delivery_requests", "request-id", holder, signature)).resolves.toMatchObject({ status: "returned" });
+    expect(mocks.vault.mock.calls.at(-1)?.[2]).toBeUndefined();
+  });
+  it("gates the physical handover (deposited → in_delivery) on the holder's passport", async () => {
+    mocks.vault.mockResolvedValue({ vault: { escrow, deposited: BigInt(3), state: VaultState.Active, beneficiary: holder, kycRegistry: other }, escrow: { amount: BigInt(3) } });
+    mocks.passport.mockRejectedValueOnce(new SiwsError(409, "The holder's investor passport is revoked."));
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "in_delivery" })).rejects.toMatchObject({ status: 409 });
+    expect(mocks.passport).toHaveBeenCalledWith({ beneficiary: holder, kycRegistry: other });
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "in_delivery" })).resolves.toBe("deposited");
+    mocks.passport.mockClear(); Object.assign(row, { status: "in_delivery" });
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { admin_note: "Courier booked" })).resolves.toBe("in_delivery");
+    expect(mocks.passport).not.toHaveBeenCalled();
   });
   it("refuses stale deposited or in-delivery status after tokens have left custody", async () => {
     mocks.vault.mockResolvedValue({ vault: { escrow, deposited: BigInt(0), state: VaultState.Returned }, escrow: { amount: BigInt(0) } });

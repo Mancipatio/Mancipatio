@@ -13596,7 +13596,9 @@
           {
             "name": "beneficiary",
             "docs": [
-              "The vault's beneficiary (DeliveryEscrow; default otherwise)."
+              "The beneficiary whose KYC this realize checked (DeliveryEscrow);",
+              "default for every other type, even one that stored a beneficiary —",
+              "the event never names an unchecked beneficiary."
             ],
             "type": "pubkey"
           },
