@@ -96,6 +96,12 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("client privacy (m
     expect(q("select coalesce(client_id::text, 'null') from public.tos_acceptances where id = 4")).toBe("null");
   });
 
+  it("bounds its lock waits to the migration's own transaction", () => {
+    const sql = readFileSync(join(dir, target!), "utf8");
+    expect(sql).toMatch(/begin;\s+(--[^\n]*\n\s*)*set local lock_timeout = '5s';/);
+    expect(q("show lock_timeout")).toBe("0");
+  });
+
   it("re-applies cleanly without changing the ledger", () => {
     const snapshot = () => q("select string_agg(id::text || ':' || coalesce(client_id::text, '-'), ',' order by id) from public.tos_acceptances")
       + "|" + q("select count(*) from public.tos_acceptance_duplicates");
@@ -176,7 +182,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("client privacy (m
         ],
         previous: { kyc_status: "verified", anonymized_at: null },
         counts: {
-          documents: 2, verification_details: 1, notes_erased: 2, requirements_cleared: 1,
+          documents: 2, verification_details: 1, notes_erased: 2, requirements_cleared: 2,
           tos_detached: 1, passport_request_notes: 1,
         },
       });
@@ -193,9 +199,10 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("client privacy (m
 
       expect(q(`select count(*) from public.client_documents where client_id = '${C}'`)).toBe("0");
       expect(q(`select count(*) from public.client_verification_details where client_id = '${C}'`)).toBe("0");
-      // Checklist statuses stay; its free text and document links go.
-      expect(q(`select string_agg(status || ':' || coalesce(note, '-') || ':' || coalesce(document_id::text, '-'), ',' order by doc_kind)
-          from public.kyc_requirements where client_id = '${C}'`)).toBe("approved:-:-,requested:-:-");
+      // Checklist statuses stay; its free text (notes, custom labels — back
+      // to the document kind) and document links go.
+      expect(q(`select string_agg(status || ':' || coalesce(note, '-') || ':' || coalesce(document_id::text, '-') || ':' || label, ',' order by doc_kind)
+          from public.kyc_requirements where client_id = '${C}'`)).toBe("approved:-:-:passport,requested:-:-:selfie");
       expect(q(`select string_agg(kind || ':' || body, ',' order by id) from public.client_notes where client_id = '${C}'`))
         .toBe("note:[erased],kyc-event:[erased],system:Personal data erased: identity documents and verification details deleted, notes cleared. Ledger records kept.");
       expect(q(`select coalesce(note, '-') || ':' || annual_raise_cap_eur from public.client_raise_limits where client_id = '${C}'`)).toBe("-:500000.00");

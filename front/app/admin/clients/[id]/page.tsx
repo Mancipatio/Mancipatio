@@ -64,6 +64,7 @@ import {
 import { listBlockEntries } from "@/lib/blocklist";
 import { listAlerts } from "@/lib/compliance";
 import { ClientPrivacyPanel } from "@/components/client-privacy-panel";
+import { erasurePassportCheck } from "@/lib/client-privacy";
 
 const TYPE_LABEL: Record<ClientType, string> = {
   issuer: "Issuer",
@@ -159,6 +160,9 @@ function ClientDetail({ id }: { id: string }) {
     undefined,
   );
   const [passportLoading, setPassportLoading] = useState(false);
+  // The last passport read failed (`passport` is then null, which otherwise
+  // means "no entry") — the erasure gate must not read that as "no passport".
+  const [passportError, setPassportError] = useState(false);
   const [passportTxBusy, setPassportTxBusy] = useState(false);
 
   // Edit mode
@@ -225,6 +229,7 @@ function ClientDetail({ id }: { id: string }) {
     async (clientWallet: string) => {
       if (!registryAddress) {
         setPassport(undefined);
+        setPassportError(false);
         return;
       }
       setPassportLoading(true);
@@ -235,8 +240,10 @@ function ClientDetail({ id }: { id: string }) {
           clientWallet as Address,
         );
         setPassport(entry);
+        setPassportError(false);
       } catch {
         setPassport(null);
+        setPassportError(true);
       } finally {
         setPassportLoading(false);
       }
@@ -852,11 +859,14 @@ function ClientDetail({ id }: { id: string }) {
         session={conn.wallet}
         clientId={client.id}
         anonymizedAt={client.anonymized_at}
-        passportActive={
-          !!passport &&
-          passport.status === KycStatus.Approved &&
-          !isPassportExpired(passport.expiry, nowSec)
-        }
+        passportCheck={erasurePassportCheck({
+          wallet: client.wallet,
+          kycCtx,
+          passport,
+          passportLoading,
+          passportError,
+          nowSec,
+        })}
         onChanged={refresh}
       />
 

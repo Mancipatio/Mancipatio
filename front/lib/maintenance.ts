@@ -1,7 +1,10 @@
 // Maintenance mode, shared by the server (lib/server/maintenance.ts) and the
 // browser. While an operator has it on (scripts/ops/maintenance.sh), signed
 // writes and wallet transactions are refused with HTTP 503 and
-// `code: "maintenance"`, and a banner explains why. Reads keep working.
+// `code: "maintenance"`, and a banner explains why. Reads keep working —
+// including a read that appends its own access-log row (audit_events), such
+// as clients.doc-url; that route skips its timeline note while the flag is on
+// (lib/siws-session.ts).
 
 import { isSessionReadAction } from "@/lib/siws-session";
 

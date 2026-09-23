@@ -20,8 +20,12 @@ import "server-only";
 export const PUBLIC_BUCKET = "documents";
 export const CONFIDENTIAL_BUCKET = "documents-confidential";
 
-/** Signed-URL lifetime for confidential documents (seconds). */
-export const CONFIDENTIAL_URL_TTL_S = 3_600;
+/**
+ * Signed-URL lifetime for ONE confidential document (seconds). Links are
+ * signed on click and logged (/api/storage/documents/url), never pre-signed
+ * in the list — same short window as a KYC document view.
+ */
+export const CONFIDENTIAL_URL_TTL_S = 120;
 
 /**
  * documents-table categories whose files are confidential. Keep in sync with

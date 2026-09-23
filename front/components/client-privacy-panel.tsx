@@ -11,7 +11,7 @@ import type { WalletSession } from "@solana/client";
 import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { adminAnonymizeClient, adminExportClient } from "@/lib/clients";
-import { anonymizeConfirmationPhrase } from "@/lib/client-privacy";
+import { anonymizeConfirmationPhrase, type ErasurePassportCheck } from "@/lib/client-privacy";
 
 function downloadJson(filename: string, value: unknown) {
   const blob = new Blob([JSON.stringify(value, null, 2)], { type: "application/json" });
@@ -30,14 +30,17 @@ export function ClientPrivacyPanel({
   session,
   clientId,
   anonymizedAt,
-  passportActive,
+  passportCheck,
   onChanged,
 }: {
   session: WalletSession | null | undefined;
   clientId: string;
   anonymizedAt: string | null | undefined;
-  /** True while an unexpired on-chain passport exists for the client's wallet. */
-  passportActive: boolean;
+  /**
+   * On-chain passport state of the client's wallet (erasurePassportCheck).
+   * Anonymize is offered only on "none"; the server checks again.
+   */
+  passportCheck: ErasurePassportCheck;
   onChanged: () => Promise<void> | void;
 }) {
   const { isSuperAdmin } = useRole();
@@ -96,19 +99,29 @@ export function ClientPrivacyPanel({
           <button
             type="button"
             onClick={() => setOpen(true)}
-            disabled={passportActive}
-            title={passportActive ? "Revoke the on-chain passport first" : undefined}
+            disabled={passportCheck !== "none"}
+            title={passportCheck === "live" ? "Revoke the on-chain passport first" : undefined}
             className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-900 hover:bg-red-100 disabled:opacity-50"
           >
             {anonymizedAt ? "Erase again" : "Anonymize"}
           </button>
         )}
       </div>
-      {isSuperAdmin && passportActive && (
+      {isSuperAdmin && passportCheck === "live" && (
         <p className="mt-2 text-xs text-amber-700">
           This client holds a live on-chain passport. Revoke it before erasing
           the dossier — the passport cannot be erased from the chain and would
           keep vouching for an identity the platform no longer holds.
+        </p>
+      )}
+      {isSuperAdmin && passportCheck === "loading" && (
+        <p className="mt-2 text-xs text-slate-500">Checking the on-chain passport…</p>
+      )}
+      {isSuperAdmin && passportCheck === "unknown" && (
+        <p className="mt-2 text-xs text-amber-700">
+          The on-chain passport could not be checked (network error, or several
+          KYC registries exist). Anonymize stays off until the check succeeds —
+          reload the page.
         </p>
       )}
       {!isSuperAdmin && (
@@ -122,11 +135,23 @@ export function ClientPrivacyPanel({
             const result = await adminAnonymizeClient(session, clientId, confirm, reason);
             setOpen(false);
             const issues: string[] = [];
-            if (result.files_missing > 0) {
-              issues.push(`${result.files_missing} document file(s) were not in the private bucket — check the legacy public bucket.`);
+            const notes: string[] = [];
+            if (result.legacy_files_deleted > 0) {
+              notes.push(`${result.legacy_files_deleted} of the files were in the old public bucket.`);
             }
-            if (result.files_left > 0) {
-              issues.push(`${result.files_left} file(s) uploaded during the erasure could not be deleted — run it again.`);
+            if (result.files_missing > 0) {
+              notes.push(`${result.files_missing} document file(s) were already gone from storage.`);
+            }
+            if (result.files_shared > 0) {
+              notes.push(`${result.files_shared} file(s) were kept because another dossier uses them.`);
+            }
+            if (result.files_for_review.length > 0) {
+              issues.push(
+                `Not deleted, check by hand (public document-repository folders): ${result.files_for_review.join(", ")}.`,
+              );
+            }
+            if (result.files_left > 0 || !result.late_sweep_complete) {
+              issues.push("Files uploaded during the erasure could not all be checked or deleted — run it again.");
             }
             if (!result.audit_complete) {
               issues.push("The completion audit row could not be written (the start row exists).");
@@ -136,6 +161,7 @@ export function ClientPrivacyPanel({
               title: "Client anonymized",
               description: [
                 `${result.counts.documents} document(s), ${result.files_deleted} file(s), ${result.counts.verification_details} verification record(s) erased.`,
+                ...notes,
                 ...issues,
               ].join(" "),
               duration: issues.length > 0 ? 0 : undefined,
@@ -194,17 +220,19 @@ function AnonymizeModal({
         </div>
         <div className="space-y-4 px-5 py-4 text-sm leading-relaxed text-slate-700">
           <p>
-            <strong>Erased:</strong> identity documents and their stored files,
-            KYC/KYB verification details, the text of all notes, requirement and
-            passport-request notes, and the name, email, company, country, tags
-            and provider reference on the dossier. The KYC verdict ends
-            (a suspension or rejection is kept).
+            <strong>Erased:</strong> identity documents and their stored files
+            (also old copies in the public bucket), KYC/KYB verification
+            details, the text of all notes, requirement notes and custom
+            requirement labels, passport-request notes, and the name, email,
+            company, country, tags and provider reference on the dossier. The
+            KYC verdict ends (a suspension or rejection is kept).
           </p>
           <p>
             <strong>Kept:</strong> the dossier row and its dates, the wallet,
             Terms acceptances (detached from the dossier), conversion and
-            delivery requests, compliance alerts, the audit log and everything
-            on-chain.
+            delivery requests, SPVs and vesting series, compliance alerts, the
+            audit log and everything on-chain. The on-chain passport must be
+            revoked before this runs.
           </p>
           <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
             Anti-money-laundering and other record-keeping rules can require

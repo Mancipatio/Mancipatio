@@ -40,11 +40,14 @@ type Document = {
   published_at: string | null;
   uploaded_by: string;
   /**
-   * Resolved by the signed list route: external URL, public-bucket URL for
-   * public categories, or a 60-minute signed URL for confidential categories
-   * (compliance / issuer-agreement / other live in a PRIVATE bucket).
+   * Resolved by the signed list route: external URL or public-bucket URL for
+   * public categories. NULL for confidential categories (compliance /
+   * issuer-agreement / other live in a PRIVATE bucket) — those carry
+   * `download_on_request` and are signed on click, logged, by
+   * /api/storage/documents/url (ConfidentialDocLink).
    */
   download_url: string | null;
+  download_on_request?: boolean;
 };
 
 const CATEGORY_LABEL: Record<Category, string> = {
@@ -283,7 +286,9 @@ function DocsOps() {
                           : "—"}
                       </td>
                       <td className="space-x-3 px-5 py-2 text-right text-xs">
-                        {d.download_url ? (
+                        {d.download_on_request ? (
+                          <ConfidentialDocLink documentId={d.id} />
+                        ) : d.download_url ? (
                           <a
                             href={d.download_url}
                             target="_blank"
@@ -332,6 +337,48 @@ function DocsOps() {
         of new ToS&quot; flow still arrives in a later iteration.
       </p>
     </div>
+  );
+}
+
+/**
+ * Confidential repository file: asks the server for ONE short-lived signed
+ * link when clicked. The server logs the access before answering (and refuses
+ * with no link when it cannot), so the log holds exactly the downloads that
+ * were started.
+ */
+function ConfidentialDocLink({ documentId }: { documentId: string }) {
+  const conn = useWalletConnection();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+
+  async function open() {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const data = await signedFetch<{ url: string }>(
+        conn.wallet,
+        "/api/storage/documents/url",
+        "storage.documents.url",
+        { id: documentId },
+      );
+      if (!data?.url) throw new Error("Could not resolve the download link");
+      window.open(data.url, "_blank", "noopener,noreferrer");
+    } catch (err) {
+      toast.showError("Could not open the document", err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <button
+      type="button"
+      onClick={() => void open()}
+      disabled={busy}
+      className="text-slate-600 underline-offset-2 hover:underline disabled:opacity-50"
+    >
+      {busy ? "Opening…" : "Download ↓"}
+    </button>
   );
 }
 

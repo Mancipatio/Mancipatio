@@ -7,10 +7,13 @@
 // metadata.actor_verified=true plus the concrete actor_source. The server
 // stamps are applied last: caller metadata can never override them.
 //
-// Categories in SERVER_ONLY_AUDIT_CATEGORIES (currently "kyc") are refused by
-// the unsigned /api/audit route, so a "kyc" row in audit_events is always a
-// server-attributed one — "who viewed which KYC document" cannot be forged by
-// anyone holding only the public site.
+// Categories in SERVER_ONLY_AUDIT_CATEGORIES (currently "kyc", shown as "KYC &
+// privacy") are refused by the unsigned /api/audit route, so a "kyc" row in
+// audit_events is always a server-attributed one — "who viewed which KYC
+// document" cannot be forged by anyone holding only the public site. Rows
+// about a dossier target its client id (kyc_document_view, kyc_data_export,
+// client_anonymize); confidential repository files target "document:<id>"
+// (confidential_document_view).
 //
 // writeServerAudit THROWS SiwsError(503) when the insert fails. Callers that
 // promise "access is logged" (doc-url, export) must let it propagate and hand

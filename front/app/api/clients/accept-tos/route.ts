@@ -76,8 +76,11 @@ export async function POST(request: Request) {
     });
     if (logErr?.code === "23505" && walletStr) {
       // The wallet already accepted this version (e.g. at the marketplace
-      // gate) — one row per (wallet, version) since 0065. Link that row to
-      // this dossier when it has no dossier yet; the earlier record stands.
+      // gate) — one row per (wallet, version) since 0065, on every network.
+      // Link that row to this dossier when it has no dossier yet; the earlier
+      // record stands. When it already belongs to another dossier of the same
+      // wallet (another network), this dossier's evidence is that wallet row
+      // plus the stamp above and the system note below (see 0065 §2).
       const { error: linkErr } = await sb
         .from("tos_acceptances")
         .update({ client_id: clientId })

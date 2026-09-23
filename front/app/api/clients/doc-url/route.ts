@@ -12,13 +12,21 @@
 // metadata {document_id, kind, ttl, actor_wallet}) BEFORE the URL is
 // returned. If that row cannot be written the route answers 503 and hands out
 // no URL — an unlogged view never happens. The client timeline also gets a
-// best-effort system note.
+// best-effort system note, except during maintenance.
+//
+// "clients.doc-url" is a session read (lib/siws-session.ts): viewing needs no
+// fresh signature and keeps working during maintenance. The access-log row is
+// the one write a session read may make (it records the read itself); the
+// timeline note touches client_notes / clients.notes_count, so it is skipped
+// while maintenance is on — the audit row still records the view.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { actorSourceOf, writeServerAudit } from "@/lib/server/audit";
+import { getMaintenance } from "@/lib/server/maintenance";
+import { detectNetwork } from "@/lib/network";
 import {
   assertPositiveInt,
   documentUrlFor,
@@ -65,13 +73,17 @@ export async function POST(request: Request) {
         actor_wallet: wallet,
       },
     });
-    await insertNote(
-      sb,
-      client.id,
-      wallet,
-      `Viewed document #${documentId} (${row.kind ?? "document"}) — link valid ${KYC_DOC_URL_TTL_S} s.`,
-      "system",
-    );
+    // Business data stays frozen during maintenance (getMaintenance never
+    // throws; an unreadable flag keeps the last known state).
+    if (!(await getMaintenance(detectNetwork())).enabled) {
+      await insertNote(
+        sb,
+        client.id,
+        wallet,
+        `Viewed document #${documentId} (${row.kind ?? "document"}) — link valid ${KYC_DOC_URL_TTL_S} s.`,
+        "system",
+      );
+    }
 
     return NextResponse.json(
       { ok: true, data: { url, expires_in: KYC_DOC_URL_TTL_S } },

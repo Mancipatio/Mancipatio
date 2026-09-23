@@ -16,6 +16,13 @@
 --    holds each removed row verbatim. Rows without a wallet (wallet-less
 --    account dossiers) are not constrained (NULLs are distinct).
 --    The routes now treat a unique violation (23505) as "already accepted".
+--    One acceptance per wallet and version, on every network: the table has
+--    no network column and the wallet-level ToS gate (/api/tos/status) was
+--    already network-agnostic. A second dossier of the same wallet (another
+--    network, or a historic duplicate) therefore gets no acceptance row of its
+--    own once the first one holds the link; its consent evidence is the
+--    wallet's acceptance row plus its own clients.tos_accepted_at /
+--    tos_version stamp and the "Accepted Terms" system note.
 --
 -- 3. clients.anonymized_at — when the dossier's personal data was last erased.
 --
@@ -24,17 +31,21 @@
 --    One transaction that erases a dossier's personal data and keeps the
 --    records the platform needs:
 --      erased   client_documents rows (identity documents — the route deletes
---               the files in the client-documents bucket), every
+--               the files, in the client-documents bucket and legacy ones in
+--               the public documents bucket), every
 --               client_verification_details row, the text of client_notes,
---               kyc_requirements notes and document links, passport_requests
---               notes, the client_raise_limits note, and the clients fields
---               email, display_name, company_name, jurisdiction, tags,
---               source, kyc_provider_ref and the onboarding token.
+--               kyc_requirements notes, document links and free-text labels
+--               (a label goes back to its doc_kind), passport_requests notes,
+--               the client_raise_limits note, and the clients fields email,
+--               display_name, company_name, jurisdiction, tags, source,
+--               kyc_provider_ref and the onboarding token.
 --      kept     the clients row itself (id, network, type, wallet, account,
 --               KYC dates and verdict history), tos_acceptances (detached:
 --               client_id -> NULL), requirement checklist statuses, note
---               timestamps/authors, delivery and conversion requests,
---               compliance alerts and audit_events.
+--               timestamps/authors, delivery and conversion requests, SPVs
+--               and vesting series linked to the dossier (business records;
+--               spvs.notes is not touched), compliance alerts and
+--               audit_events.
 --    The verdict ends: kyc_status becomes 'expired' and kyc_expires_at is
 --    capped at now, so an erased dossier can no longer pass the conversion /
 --    delivery KYC gate. A 'suspended' or 'rejected' verdict is kept as is so
@@ -48,6 +59,12 @@
 -- before touching anything) and the ToS routes only see 23505 once it is
 -- applied. Re-applying is harmless.
 begin;
+
+-- Fail fast instead of queueing behind a long transaction: while this waits
+-- for a lock, every ToS read / accept (and, for the clients locks, every
+-- dossier write) would queue behind it. A busy database makes the migration
+-- fail with "lock timeout"; nothing is applied and it can simply be re-run.
+set local lock_timeout = '5s';
 
 -- Nothing may read or write acceptances while the ledger is deduplicated and
 -- the constraint and index are rebuilt. Taken up front (not upgraded midway)
@@ -188,10 +205,12 @@ begin
     return jsonb_build_object('status', 'ready', 'anonymized_at', c.anonymized_at);
   end if;
 
-  -- Checklist history stays; its free text and document links go.
+  -- Checklist history stays; its free text (note, custom label — the label
+  -- goes back to the document kind) and document links go.
   update public.kyc_requirements
-     set document_id = null, note = null, updated_at = v_now
-   where client_id = p_client_id and (document_id is not null or note is not null);
+     set document_id = null, note = null, label = doc_kind, updated_at = v_now
+   where client_id = p_client_id
+     and (document_id is not null or note is not null or label is distinct from doc_kind);
   get diagnostics n_requirements = row_count;
 
   -- Identity documents. The route deleted the stored files before calling
