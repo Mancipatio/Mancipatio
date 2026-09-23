@@ -8,6 +8,7 @@
 import { useSyncExternalStore } from "react";
 import { detectNetwork } from "@/lib/network";
 import { MAINTENANCE_CODE, maintenanceRefusal } from "@/lib/maintenance";
+import { TURNSTILE_BODY_FIELD } from "@/lib/turnstile";
 
 export type SignedInAccount = { id: string; email: string | null; display_name: string; primary_wallet: string | null };
 type State = { status: "loading" | "signed_out" | "signed_in"; account: SignedInAccount | null };
@@ -51,8 +52,11 @@ export function useSignedInAccount(): State {
   return useSyncExternalStore(subscribe, () => state, () => SERVER_STATE);
 }
 
-export function startEmailSignIn(email: string) {
-  return post<{ sent: boolean }>("/api/auth/email/start", { email });
+/** Ask for a sign-in link. `turnstileToken` is the widget's single-use token
+ *  (only when this build renders Turnstile). */
+export function startEmailSignIn(email: string, turnstileToken?: string | null) {
+  return post<{ sent: boolean }>("/api/auth/email/start",
+    turnstileToken ? { email, [TURNSTILE_BODY_FIELD]: turnstileToken } : { email });
 }
 
 export async function completeEmailSignIn(token: string) {

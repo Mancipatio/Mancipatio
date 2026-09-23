@@ -12,7 +12,7 @@ export const metadata: Metadata = {
     "How Manci collects, uses and protects personal data of issuers, investors and visitors.",
 };
 
-const LAST_UPDATED = "2026-05-25";
+const LAST_UPDATED = "2026-09-23";
 
 export default function PrivacyPage() {
   return (
@@ -117,9 +117,20 @@ export default function PrivacyPage() {
               roles) — for KYB review and incident response.
             </li>
             <li>
-              <strong>Sub-processors</strong>: Vercel (hosting), Supabase
-              (database + storage), Helius (RPC + on-chain webhooks), and a
-              KYC provider once enabled. Each is bound by their own DPA.
+              <strong>Sub-processors</strong>: Vercel (hosting and server
+              functions), Supabase (database + storage), Helius (RPC +
+              on-chain webhooks), Cloudflare Turnstile (bot check on the
+              sign-in and contact forms, if enabled), Sentry (error reporting,
+              EU region, if enabled), and a KYC provider once enabled. Each is
+              bound by their own DPA.
+            </li>
+            <li>
+              <strong>Other services involved</strong>: the mail server that
+              sends our transactional email (such as sign-in and verification
+              links); public Solana RPC endpoints, which your browser (and our
+              servers, where no dedicated endpoint is configured) may use to
+              read on-chain data and submit transactions; and Google, only if
+              you choose to sign in with or link a Google account.
             </li>
             <li>
               <strong>Public</strong>: anything on-chain is, by design, public.
@@ -131,9 +142,11 @@ export default function PrivacyPage() {
 
         <Section title="5. Where it lives">
           <p>
-            Off-chain personal data is stored in EU-region infrastructure
-            (Vercel and Supabase Frankfurt). On-chain data lives on the
-            Solana blockchain, which is globally replicated.
+            Off-chain personal data is stored in EU-region infrastructure:
+            the database and file storage are hosted by Supabase in Ireland
+            (eu-west-1), and our server functions run on Vercel in Dublin,
+            Ireland. On-chain data lives on the Solana blockchain, which is
+            globally replicated.
           </p>
         </Section>
 

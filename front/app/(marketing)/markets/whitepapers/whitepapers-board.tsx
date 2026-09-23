@@ -9,6 +9,7 @@ import { assetTypeBySlug, CATEGORY_SLUGS } from "@/lib/asset-types";
 import { safeHttpUrl } from "@/lib/format";
 import { assetHref as marketplaceAssetHref } from "@/lib/asset-links";
 import { detectNetwork, networkLabel } from "@/lib/network";
+import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
 
 type PublishedProfile = Pick<
   AssetProfile,
@@ -139,9 +140,7 @@ function DocumentRow({ item }: { item: Item }) {
   // still consulted so a profile whose asset is not indexed yet gets no link.
   const assetHref = linkId ? marketplaceAssetHref(profile.asset_pda) : null;
   const date = displayDate(whitepaper ? profile.whitepaper_published_at : profile.updated_at);
-  const decisionRef = whitepaper && profile.whitepaper_status === "ssc_approved"
-    ? profile.ssc_decision_ref?.trim()
-    : null;
+  const decisionRef = whitepaper ? sscDecisionRef(profile) : null;
   const fingerprint = whitepaper ? profile.whitepaper_sha256?.trim() : null;
 
   return (
@@ -177,8 +176,10 @@ function DocumentRow({ item }: { item: Item }) {
       </div>
       <div className="docs-library-row-type">
         <span>{whitepaper ? "Whitepaper" : "Basic information"}</span>
-        <span className={`docs-library-status${decisionRef ? " docs-library-status-approved" : ""}`}>
-          <i />{decisionRef ? "SSC approved" : "Published"}
+        {/* A whitepaper without a recorded decision reference is not
+            approved — "Published" alone would read like an endorsement. */}
+        <span className={`docs-library-status${decisionRef ? " docs-library-status-approved" : whitepaper ? " docs-library-status-unapproved" : ""}`}>
+          <i />{decisionRef ? "SSC approved" : whitepaper ? SSC_NOT_APPROVED_LABEL : "Published"}
         </span>
       </div>
       <div className="docs-library-date">

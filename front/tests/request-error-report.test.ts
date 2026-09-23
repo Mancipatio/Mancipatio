@@ -104,18 +104,29 @@ describe("describeRequestError", () => {
 
 describe("parseSentryDsn", () => {
   it.each([
-    ["https://abc123@o42.ingest.sentry.io/4507", "https://o42.ingest.sentry.io/api/4507/envelope/", "abc123"],
-    ["https://abc123@sentry.example.com:9000/sub/path/7", "https://sentry.example.com:9000/sub/path/api/7/envelope/", "abc123"],
+    ["https://abc123@o42.ingest.de.sentry.io/4507", "https://o42.ingest.de.sentry.io/api/4507/envelope/", "abc123"],
+    ["https://abc123@O42.Ingest.DE.Sentry.io:443/sub/path/7", "https://o42.ingest.de.sentry.io/sub/path/api/7/envelope/", "abc123"],
   ])("targets the envelope endpoint of %s", (dsn, envelopeUrl, publicKey) => {
     expect(parseSentryDsn(dsn)).toEqual({ envelopeUrl, publicKey });
   });
 
-  it.each([undefined, "", "not a url", "https://o42.ingest.sentry.io/4507", "https://abc@o42.ingest.sentry.io/", "ftp://abc@host/1", "https://abc@host/project",
-    "http://abc123@o42.ingest.sentry.io/4507"])(
+  it.each([undefined, "", "not a url", "https://o42.ingest.de.sentry.io/4507", "https://abc@o42.ingest.de.sentry.io/", "ftp://abc@host.de.sentry.io/1",
+    "https://abc@o42.ingest.de.sentry.io/project", "http://abc123@o42.ingest.de.sentry.io/4507"])(
     "ignores an unusable DSN %s", (dsn) => {
       expect(parseSentryDsn(dsn)).toBeNull();
     },
   );
+
+  it.each([
+    "https://abc123@o42.ingest.sentry.io/4507", // US region
+    "https://abc123@o42.ingest.us.sentry.io/4507",
+    "https://abc123@sentry.example.com:9000/sub/path/7", // self-hosted
+    "https://abc123@o42.ingest.de.sentry.io.evil.example/4507",
+    "https://abc123@de.sentry.io.example/4507",
+  ])("refuses a DSN outside Sentry's EU region: %s", (dsn) => {
+    // The privacy policy promises EU-region error reporting.
+    expect(parseSentryDsn(dsn)).toBeNull();
+  });
 });
 
 describe("reportRequestError", () => {
@@ -133,11 +144,11 @@ describe("reportRequestError", () => {
 
   it("forwards a minimal event to the Sentry envelope endpoint when configured", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
-    const env = { SENTRY_DSN: "https://pubkey@o1.ingest.sentry.io/123", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_SHA: "abcdef1234567", NEXT_PUBLIC_NETWORK: "devnet" };
+    const env = { SENTRY_DSN: "https://pubkey@o1.ingest.de.sentry.io/123", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_SHA: "abcdef1234567", NEXT_PUBLIC_NETWORK: "devnet" };
     await reportRequestError(error, request, context, { env, log: () => {}, fetchImpl, limiter: new SentryRateLimiter() });
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0];
-    expect(url).toBe("https://o1.ingest.sentry.io/api/123/envelope/");
+    expect(url).toBe("https://o1.ingest.de.sentry.io/api/123/envelope/");
     expect(init.method).toBe("POST");
     expect(init.headers["X-Sentry-Auth"]).toContain("sentry_key=pubkey");
     expect(init.signal).toBeInstanceOf(AbortSignal);
@@ -157,7 +168,7 @@ describe("reportRequestError", () => {
   });
 
   it("never rejects when Sentry fails, and gives up at the timeout", async () => {
-    const env = { SENTRY_DSN: "https://pubkey@o1.ingest.sentry.io/123" };
+    const env = { SENTRY_DSN: "https://pubkey@o1.ingest.de.sentry.io/123" };
     const down = vi.fn().mockRejectedValue(new Error("down"));
     await expect(reportRequestError(error, request, context, { env, log: () => {}, fetchImpl: down, limiter: new SentryRateLimiter() })).resolves.toBeUndefined();
     expect(down).toHaveBeenCalledOnce();
@@ -172,13 +183,30 @@ describe("reportRequestError", () => {
     expect(Date.now() - started).toBeLessThan(1_000);
   });
 
+  it("sends nothing to a non-EU DSN and warns once per instance without the DSN", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const fetchImpl = vi.fn();
+      const env = { SENTRY_DSN: "https://pubkey123@o1.ingest.sentry.io/123" };
+      for (let i = 0; i < 3; i++) {
+        await reportRequestError(error, request, context, { env, log: () => {}, fetchImpl, limiter: new SentryRateLimiter() });
+      }
+      expect(fetchImpl).not.toHaveBeenCalled();
+      expect(warn).toHaveBeenCalledOnce();
+      expect(String(warn.mock.calls[0][0])).toMatch(/EU-region Sentry project/);
+      expect(String(warn.mock.calls[0][0])).not.toContain("pubkey123");
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
   it("uses a short default timeout", async () => {
     const { SENTRY_TIMEOUT_MS } = await import("@/lib/request-error-report");
     expect(SENTRY_TIMEOUT_MS).toBeLessThanOrEqual(1_000);
   });
 
   it("sends each distinct error once per minute and caps sends per instance, logging every one", async () => {
-    const env = { SENTRY_DSN: "https://pubkey@o1.ingest.sentry.io/123" };
+    const env = { SENTRY_DSN: "https://pubkey@o1.ingest.de.sentry.io/123" };
     const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     const log = vi.fn();
     const limiter = new SentryRateLimiter(3, 60_000);

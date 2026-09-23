@@ -37,6 +37,7 @@ import {
   getAssetProfile,
   type PublicAssetProfile,
 } from "@/lib/asset-profiles";
+import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
 
 export default function AssetDetailPage({
   params,
@@ -255,6 +256,7 @@ function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null
     whitepaperFileUrl(profile.whitepaper_path) ??
     safeHttpUrl(profile.whitepaper_url);
   const hasWhitepaper = isLive && Boolean(href);
+  const decisionRef = sscDecisionRef(profile);
   const publishedAt = profile.whitepaper_published_at
     ? new Date(profile.whitepaper_published_at).toLocaleDateString("en-US", {
         year: "numeric",
@@ -281,36 +283,39 @@ function TokenInformationBlock({ profile }: { profile: PublicAssetProfile | null
                 Whitepaper ↗
               </a>
               {/* The approval badge requires the decision evidence
-                  (ssc_decision_ref) recorded by the platform. */}
-              {profile.whitepaper_status === "ssc_approved" &&
-                profile.ssc_decision_ref && (
-                  <span
-                    title={profile.ssc_decision_ref}
-                    className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700"
-                  >
-                    Approved by the Serbian Securities Commission
-                  </span>
-                )}
-            </div>
-            {profile.whitepaper_status === "ssc_approved" &&
-              profile.ssc_decision_ref && (
-                <p className="mt-3 text-xs text-mx-ink-faint">
-                  {profile.ssc_decision_ref}
-                  {whitepaperFileUrl(profile.ssc_decision_doc_path) && (
-                    <>
-                      {" · "}
-                      <a
-                        href={whitepaperFileUrl(profile.ssc_decision_doc_path)!}
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="underline-offset-2 hover:underline"
-                      >
-                        Decision document ↗
-                      </a>
-                    </>
-                  )}
-                </p>
+                  (ssc_decision_ref) recorded by the platform; without it
+                  the whitepaper is labeled as not approved. */}
+              {decisionRef ? (
+                <span
+                  title={decisionRef}
+                  className="inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700"
+                >
+                  Approved by the Serbian Securities Commission
+                </span>
+              ) : (
+                <span className="inline-flex rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">
+                  {SSC_NOT_APPROVED_LABEL}
+                </span>
               )}
+            </div>
+            {decisionRef && (
+              <p className="mt-3 text-xs text-mx-ink-faint">
+                {decisionRef}
+                {whitepaperFileUrl(profile.ssc_decision_doc_path) && (
+                  <>
+                    {" · "}
+                    <a
+                      href={whitepaperFileUrl(profile.ssc_decision_doc_path)!}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="underline-offset-2 hover:underline"
+                    >
+                      Decision document ↗
+                    </a>
+                  </>
+                )}
+              </p>
+            )}
             {publishedAt && (
               <p className="mt-3 text-xs text-mx-ink-faint">
                 Published {publishedAt}

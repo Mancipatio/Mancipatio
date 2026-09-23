@@ -3,10 +3,12 @@
 import Link from "next/link";
 import { useState } from "react";
 import { FieldError, FieldLabel } from "@/components/field";
+import { TurnstileWidget } from "@/components/turnstile-widget";
 import { combine, maxLength, minLength, required, type Validator } from "@/lib/form-validation";
 import { ASSET_TYPES } from "@/lib/asset-types";
 import { createInquiry } from "@/lib/inquiries";
 import { useToast } from "@/lib/toast";
+import { TURNSTILE_ACTIONS, turnstileSiteKey } from "@/lib/turnstile";
 
 const email: Validator = (v) =>
   /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(v.trim())
@@ -39,6 +41,11 @@ export function ContactForm() {
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [busy, setBusy] = useState(false);
   const [sent, setSent] = useState(false);
+  // Turnstile (only when this build has a site key). Tokens are single-use:
+  // every attempt remounts the widget for a new one.
+  const challenge = turnstileSiteKey() !== null;
+  const [challengeToken, setChallengeToken] = useState<string | null>(null);
+  const [challengeRound, setChallengeRound] = useState(0);
 
   const errors: Record<string, string | null> = {
     email: VALIDATORS.email(emailValue),
@@ -50,6 +57,10 @@ export function ContactForm() {
     e.preventDefault();
     setTouched({ email: true, idea: true });
     if (hasErrors || busy) return;
+    if (challenge && !challengeToken) {
+      showError("Complete the security check", "Finish the check above the Send button, then send again.");
+      return;
+    }
     setBusy(true);
     try {
       const id = await createInquiry({
@@ -59,6 +70,7 @@ export function ContactForm() {
         asset_kind: assetKind || undefined,
         idea: idea.trim(),
         website,
+        turnstile_token: challengeToken ?? undefined,
       });
       if (id) {
         setSent(true);
@@ -70,6 +82,10 @@ export function ContactForm() {
       }
     } finally {
       setBusy(false);
+      if (challenge) {
+        setChallengeToken(null);
+        setChallengeRound((round) => round + 1);
+      }
     }
   }
 
@@ -178,11 +194,15 @@ export function ContactForm() {
         <FieldError error={touched.idea ? errors.idea : null} />
       </label>
 
+      {challenge && (
+        <TurnstileWidget key={challengeRound} action={TURNSTILE_ACTIONS.inquiry} onToken={setChallengeToken} />
+      )}
+
       <div className="flex items-center justify-between gap-3">
         <p className="text-[11px] leading-relaxed text-slate-400">
           We evaluate every inquiry and reply by email.
         </p>
-        <button type="submit" disabled={busy} className="btn-brand disabled:opacity-60">
+        <button type="submit" disabled={busy || (challenge && !challengeToken)} className="btn-brand disabled:opacity-60">
           {busy ? "Sending…" : "Send inquiry"}
         </button>
       </div>

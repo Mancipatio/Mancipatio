@@ -5,7 +5,9 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { WalletButton } from "@/app/wallet-button";
 import { IconArrowUpRight, IconCheck } from "@/components/icons";
+import { TurnstileWidget } from "@/components/turnstile-widget";
 import { completeEmailSignIn, startEmailSignIn, startGoogleSignIn, useSignedInAccount } from "@/lib/account-login";
+import { TURNSTILE_ACTIONS, turnstileSiteKey } from "@/lib/turnstile";
 
 const SAFE_NEXT = /^\/(account|verify|apply|portfolio|marketplace)(\/[A-Za-z0-9/_-]*)?(\?[A-Za-z0-9=&_/-]*)?$/;
 
@@ -22,6 +24,11 @@ export function SignIn() {
   const [sent, setSent] = useState<string | null>(null);
   const [busy, setBusy] = useState<"email" | "google" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  // Turnstile (only when this build has a site key): the current single-use
+  // token, and a counter that remounts the widget for a new one after a send.
+  const challenge = turnstileSiteKey() !== null;
+  const [challengeToken, setChallengeToken] = useState<string | null>(null);
+  const [challengeRound, setChallengeRound] = useState(0);
 
   useEffect(() => {
     if (signedIn.status === "signed_in") router.replace(next);
@@ -29,16 +36,24 @@ export function SignIn() {
 
   async function sendLink(event: FormEvent) {
     event.preventDefault();
+    if (challenge && !challengeToken) {
+      setError("Complete the security check first.");
+      return;
+    }
     setBusy("email");
     setError(null);
     try {
       try { window.sessionStorage.setItem("manci:login-next", next); } catch { /* optional */ }
-      await startEmailSignIn(email.trim());
+      await startEmailSignIn(email.trim(), challengeToken);
       setSent(email.trim());
     } catch (e) {
       setError(e instanceof Error ? e.message : "We could not send the sign-in email. Please try again.");
     } finally {
       setBusy(null);
+      if (challenge) {
+        setChallengeToken(null);
+        setChallengeRound((round) => round + 1);
+      }
     }
   }
 
@@ -72,8 +87,11 @@ export function SignIn() {
           <label htmlFor="login-email">Email</label>
           <input id="login-email" type="email" autoComplete="email" inputMode="email" required maxLength={254}
             value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" disabled={busy !== null} />
+          {challenge && <div style={{ marginTop: 14 }}>
+            <TurnstileWidget key={challengeRound} action={TURNSTILE_ACTIONS.emailLogin} onToken={setChallengeToken} />
+          </div>}
           <div className="account-form-actions" style={{ marginTop: 14 }}>
-            <button className="account-button account-button--primary" disabled={busy !== null || !email.trim()}>
+            <button className="account-button account-button--primary" disabled={busy !== null || !email.trim() || (challenge && !challengeToken)}>
               {busy === "email" ? "Sending…" : "Email me a sign-in link"}<IconArrowUpRight size={15} />
             </button>
           </div>

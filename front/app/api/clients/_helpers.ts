@@ -177,6 +177,40 @@ export function clientIpOf(request: Request): string {
   return "unknown";
 }
 
+/**
+ * The rate-limit bucket for a client address. IPv4 is kept as is. IPv6 is cut
+ * to its /64 prefix: one host or subscriber normally holds a whole /64, so a
+ * bucket per full address would give it unlimited buckets. An IPv4-mapped
+ * address (::ffff:a.b.c.d) counts as the IPv4 address. Anything that does not
+ * parse is returned unchanged.
+ */
+export function ipRateLimitKey(ip: string): string {
+  const raw = ip.trim().toLowerCase();
+  if (!raw.includes(":")) return raw;
+  // Drop brackets and a zone id ("fe80::1%eth0"): URL parsing rejects both.
+  const address = raw.replace(/^\[/, "").replace(/\]$/, "").split("%", 1)[0];
+  let canonical: string;
+  try {
+    // WHATWG URL serializes IPv6 hosts canonically: lower-case hex groups, at
+    // most one "::" and no embedded dotted IPv4.
+    canonical = new URL(`http://[${address}]/`).hostname.slice(1, -1);
+  } catch {
+    return raw;
+  }
+  const [head, tail] = canonical.split("::") as [string, string | undefined];
+  const left = head ? head.split(":") : [];
+  const right = tail ? tail.split(":") : [];
+  const groups = tail === undefined
+    ? left
+    : [...left, ...Array<string>(8 - left.length - right.length).fill("0"), ...right];
+  if (groups.length !== 8) return raw;
+  const words = groups.map((group) => Number.parseInt(group, 16));
+  if (words.slice(0, 5).every((word) => word === 0) && words[5] === 0xffff) {
+    return [words[6] >> 8, words[6] & 0xff, words[7] >> 8, words[7] & 0xff].join(".");
+  }
+  return `${groups.slice(0, 4).join(":")}::/64`;
+}
+
 /** True when `key` exceeded `max` hits inside the sliding `windowMs` window. */
 export function rateLimited(key: string, max: number, windowMs: number): boolean {
   const now = Date.now();

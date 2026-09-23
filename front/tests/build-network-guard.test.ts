@@ -4,7 +4,7 @@
 // approved for mainnet (MAINNET_LEGAL_COPY_APPROVED=true). Local builds, CI
 // (NEXT_PUBLIC_NETWORK=devnet), `next dev` and tests keep working.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import config, { assertBuildNetwork } from "@/next.config";
+import config, { assertBuildNetwork, assertBuildTurnstile } from "@/next.config";
 
 const BUILD = "phase-production-build";
 const DEV = "phase-development-server";
@@ -88,6 +88,41 @@ describe("assertBuildNetwork", () => {
   });
 });
 
+describe("assertBuildTurnstile", () => {
+  const SECRET = "0x4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const SITE_KEY = "0x4AAAAAAAAAAAAAAAAAAAAA";
+
+  it("fails a production build with the Turnstile secret but no site key", () => {
+    // The server would refuse every email sign-in and contact submission.
+    for (const env of [
+      { TURNSTILE_SECRET_KEY: SECRET },
+      { TURNSTILE_SECRET_KEY: SECRET, NEXT_PUBLIC_TURNSTILE_SITE_KEY: "  " },
+      { TURNSTILE_SECRET_KEY: ` ${SECRET} `, NEXT_PUBLIC_TURNSTILE_SITE_KEY: "", VERCEL: "1" },
+    ]) {
+      expect(() => assertBuildTurnstile(BUILD, env, () => {}), JSON.stringify(env)).toThrow(
+        /TURNSTILE_SECRET_KEY is set but NEXT_PUBLIC_TURNSTILE_SITE_KEY is not/,
+      );
+    }
+  });
+
+  it("accepts both keys or neither, and only warns about a site key without the secret", () => {
+    const warn = vi.fn();
+    expect(() => assertBuildTurnstile(BUILD, {}, warn)).not.toThrow();
+    expect(() => assertBuildTurnstile(BUILD, { TURNSTILE_SECRET_KEY: SECRET, NEXT_PUBLIC_TURNSTILE_SITE_KEY: SITE_KEY }, warn)).not.toThrow();
+    expect(warn).not.toHaveBeenCalled();
+    expect(() => assertBuildTurnstile(BUILD, { NEXT_PUBLIC_TURNSTILE_SITE_KEY: SITE_KEY }, warn)).not.toThrow();
+    expect(warn).toHaveBeenCalledOnce();
+    expect(String(warn.mock.calls[0][0])).toMatch(/does not check its tokens/);
+    expect(String(warn.mock.calls[0][0])).not.toContain(SITE_KEY);
+  });
+
+  it("checks production builds only", () => {
+    for (const phase of [DEV, SERVER]) {
+      expect(() => assertBuildTurnstile(phase, { TURNSTILE_SECRET_KEY: SECRET }, () => {})).not.toThrow();
+    }
+  });
+});
+
 describe("next.config default export", () => {
   it("runs the guard against process.env and returns the config", () => {
     vi.stubEnv("VERCEL", "1");
@@ -100,6 +135,11 @@ describe("next.config default export", () => {
     expect(() => config(BUILD)).toThrow(/Refusing a mainnet build/);
 
     vi.stubEnv("MAINNET_LEGAL_COPY_APPROVED", "true");
+    vi.stubEnv("TURNSTILE_SECRET_KEY", "0x4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA");
+    vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "");
+    expect(() => config(BUILD)).toThrow(/NEXT_PUBLIC_TURNSTILE_SITE_KEY is not/);
+
+    vi.stubEnv("TURNSTILE_SECRET_KEY", "");
     const resolved = config(BUILD);
     expect(resolved.poweredByHeader).toBe(false);
     expect(typeof resolved.headers).toBe("function");
