@@ -44,21 +44,51 @@ export function reclaimState(
 }
 
 const SETTLED_WITH_OUTCOME = new Set(["delivered", "converted", "returned"]);
-const SETTLED_WITHOUT_OUTCOME = new Set(["cancelled"]);
+
+/** The fields of a linked delivery / conversion request the gate reads. */
+export type LinkedCustodyRequest = {
+  status: string;
+  outcome_evidence?: unknown;
+  deposit_evidence?: unknown;
+};
+
+/**
+ * The requests of the delivery / conversion admin lists (already filtered by
+ * `vault_pda` on the server) that are linked to `vaultPda`, reduced to the
+ * gate's fields. Re-filtered here so an unfiltered list can never widen it.
+ */
+export function linkedCustodyRequests(
+  vaultPda: string,
+  ...queues: readonly (readonly { vault_pda: string | null; status: string }[])[]
+): LinkedCustodyRequest[] {
+  return queues
+    .flat()
+    .filter((request) => request.vault_pda === vaultPda)
+    .map((request) => {
+      const row = request as unknown as Record<string, unknown>;
+      return {
+        status: request.status,
+        outcome_evidence: row.outcome_evidence ?? null,
+        deposit_evidence: row.deposit_evidence ?? null,
+      };
+    });
+}
 
 /**
  * Why a custody vault's rent may NOT be reclaimed yet (null = it may). The
  * reclaim tombstones the vault, after which request evidence can only be
  * verified from the realize / return transaction, so every linked request
  * must already be settled: delivered / converted / returned WITH its verified
- * outcome evidence, or cancelled (never funded).
+ * outcome evidence, or cancelled with no recorded deposit (never funded).
+ * `linked: null` means the linked requests are not loaded (yet), which
+ * blocks: the gate never assumes there are none.
  */
 export function custodyReclaimBlocker(input: {
   wallet: string | null | undefined;
   authority: string;
   terminal: boolean;
   escrowBalance: bigint | null;
-  linked: readonly { status: string; outcome_evidence?: unknown }[];
+  linked: readonly LinkedCustodyRequest[] | null;
 }): string | null {
   if (!input.terminal)
     return "Only a realized, reverted or returned vault can be closed.";
@@ -68,8 +98,16 @@ export function custodyReclaimBlocker(input: {
     return "The escrow balance could not be read. Reload and try again.";
   if (input.escrowBalance !== BigInt(0))
     return "The escrow still holds tokens (a withheld surplus or dust), so the vault cannot be closed.";
+  if (input.linked === null)
+    return "The linked delivery / conversion requests are not loaded. Reload and try again.";
   for (const request of input.linked) {
-    if (SETTLED_WITHOUT_OUTCOME.has(request.status)) continue;
+    if (request.status === "cancelled") {
+      // Defensive: the 0045 status guard never lets a request with a
+      // recorded deposit be cancelled, but a funded one must end returned.
+      if (request.deposit_evidence)
+        return "A cancelled linked request recorded a deposit; record its verified return before closing the vault.";
+      continue;
+    }
     if (!SETTLED_WITH_OUTCOME.has(request.status))
       return "A linked request is still in progress. Settle it first.";
     if (!request.outcome_evidence)

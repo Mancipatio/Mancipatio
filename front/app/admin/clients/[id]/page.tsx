@@ -57,7 +57,10 @@ import {
   type KycEntry,
 } from "@/lib/passport";
 import { type KycRegistry } from "@/lib/generated/asset_registry";
-import { closePassportPreflight } from "@/lib/passport-close";
+import {
+  closePassportPreflight,
+  passportCloseDisabledReason,
+} from "@/lib/passport-close";
 import { loadCustodyVaultsFromIndexer, loadNetworkPreferIndexer } from "@/lib/indexer";
 import { loadNetwork } from "@/lib/enumerate";
 import { loadOtcDeals } from "@/lib/otc";
@@ -713,6 +716,12 @@ function ClientDetail({ id }: { id: string }) {
       toast.showError(WALLET_CONNECT_LABEL, WALLET_CONNECT_DESCRIPTION);
       return;
     }
+    const closeDisabled = passportCloseDisabledReason();
+    if (closeDisabled) {
+      // D13: off on mainnet until the lawyer's AML-retention sign-off.
+      toast.showError("Passport close is not enabled", closeDisabled);
+      return;
+    }
     if (!isKycProvider || !registryAddress) {
       toast.showError(
         "Not the KYC provider",
@@ -1086,8 +1095,10 @@ function ClientDetail({ id }: { id: string }) {
                 </button>
               )}
 
-              {/* Close (2D) — a revoked passport, once past its expiry */}
-              {passport?.status === KycStatus.Revoked && (
+              {/* Close (2D) — a revoked passport, once past its expiry.
+                  Hidden while D13 keeps it off (mainnet, no sign-off). */}
+              {passport?.status === KycStatus.Revoked &&
+                passportCloseDisabledReason() === null && (
                 <>
                   <button
                     type="button"

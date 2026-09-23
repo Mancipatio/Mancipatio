@@ -33,6 +33,7 @@ import { decodeReadableShareClass, isLegacyShareClass } from "@/lib/legacy-accou
 import { publishLegacyShareClasses } from "@/lib/legacy-accounts-store";
 import { getSupabase } from "@/lib/supabase";
 import { detectNetwork } from "@/lib/network";
+import { mergeableArchivedOffers } from "@/lib/closed-account";
 import type { NetworkData } from "@/lib/enumerate";
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
@@ -253,18 +254,20 @@ export async function loadVoteRecordsFromIndexer(): Promise<VoteRecord[]> {
 
 /**
  * `data` with the archived (rent-reclaimed) offers appended, for history and
- * statistics views. A tombstoned offer is always terminal, so it never shows
- * up as takeable. Live rows win on a duplicate key; archive errors are
- * swallowed (history is best effort, the live data is not).
+ * statistics views. An archived row whose last mirrored status is still
+ * `Open` (terminal step + reclaim seen together) is dropped, so a tombstoned
+ * offer never shows up as takeable or counts as open — see
+ * `mergeableArchivedOffers`. Live rows win on a duplicate key; archive errors
+ * are swallowed (history is best effort, the live data is not).
  */
 export async function withClosedOffers(data: NetworkData): Promise<NetworkData> {
   const closed = await loadClosedRows(getSupabase(), "offers", getOfferDecoder()).catch(
     () => [],
   );
-  const live = new Set(data.offers.map((o) => `${o.shareClass}-${o.offerId}`));
-  const extra = closed
-    .map((row) => row.data)
-    .filter((o) => !live.has(`${o.shareClass}-${o.offerId}`));
+  const extra = mergeableArchivedOffers(
+    data.offers,
+    closed.map((row) => row.data),
+  );
   return extra.length ? { ...data, offers: [...data.offers, ...extra] } : data;
 }
 

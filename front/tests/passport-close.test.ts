@@ -1,4 +1,6 @@
-import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { getAddressDecoder, some, type Address } from "@solana/kit";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
@@ -20,7 +22,10 @@ import {
   TRANSFER_HOOK_PROGRAM_ADDRESS,
 } from "@/lib/generated/transfer_hook";
 import { CLOSED_ACCOUNT_TAG } from "@/lib/closed-account";
-import { closePassportPreflight } from "@/lib/passport-close";
+import {
+  closePassportPreflight,
+  passportCloseDisabledReason,
+} from "@/lib/passport-close";
 
 const key = (n: number) => getAddressDecoder().decode(new Uint8Array(32).fill(n)) as Address;
 const registry = key(1);
@@ -152,5 +157,43 @@ describe("close revoked passport: live-chain preflight (2D)", () => {
     expect(text).toContain(vault);
     expect(text).toContain(offer);
     expect(text).toContain(key(50));
+  });
+});
+
+describe("D13: passport close is gated off on mainnet", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("refuses on mainnet without the sign-off flag, before any chain read", async () => {
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE", "");
+    const noRpc = new Proxy({}, {
+      get: () => {
+        throw new Error("the D13 gate must refuse before any RPC call");
+      },
+    }) as Parameters<typeof closePassportPreflight>[0];
+    const check = await closePassportPreflight(
+      noRpc,
+      { registry, holder, network: "mainnet" },
+      { vaults: [], offers: [], deals: [] },
+    );
+    expect(check.closable).toBe(false);
+    expect(check.blockers).toEqual([
+      "Revoked passport closes are not enabled on Solana mainnet.",
+    ]);
+    expect(passportCloseDisabledReason("mainnet")).toMatch(/not enabled/);
+  });
+
+  it("is on off mainnet, and on mainnet only after NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE=true", () => {
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE", "");
+    expect(passportCloseDisabledReason("devnet")).toBeNull();
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE", "true");
+    expect(passportCloseDisabledReason("mainnet")).toBeNull();
+  });
+
+  it("the client page hides the button and closePassport refuses while it is off", () => {
+    const page = readFileSync(join(process.cwd(), "app/admin/clients/[id]/page.tsx"), "utf8");
+    const fn = page.slice(page.indexOf("async function closePassport()"));
+    expect(fn.indexOf("passportCloseDisabledReason()")).toBeGreaterThan(0);
+    expect(fn.indexOf("passportCloseDisabledReason()")).toBeLessThan(fn.indexOf("closePassportPreflight("));
+    expect(page).toMatch(/KycStatus\.Revoked &&\s*passportCloseDisabledReason\(\) === null/);
   });
 });

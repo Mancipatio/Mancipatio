@@ -166,11 +166,24 @@ describe("2D: custody evidence once the vault was tombstoned by reclaim_rent", (
     Object.assign(row, { status: "vault_opened", deposit_tx: null, deposit_evidence: null });
     await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "cancelled" })).resolves.toBe("vault_opened");
   });
-  it.each(["vault_opened", "deposited", "in_delivery"])("refuses a move to %s: it needs live vault state", async (status) => {
-    Object.assign(row, { status: status === "vault_opened" ? "requested" : "vault_opened", deposit_evidence: null });
+  it.each(["vault_opened", "deposited", "in_delivery"])("refuses a move to %s in the tombstone branch: it needs live vault state", async (status) => {
+    // `deposited` with the deposit evidence already recorded skips the
+    // deposit-transaction check, so the refusal must come from the tombstone
+    // fallback (validateClosedVaultUpdate), not from requireDepositEvidence.
+    Object.assign(row, status === "vault_opened"
+      ? { status: "requested", deposit_evidence: null }
+      : { status: "vault_opened", deposit_evidence: status === "deposited" ? { signature: "original", vault } : null });
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { status })).rejects.toMatchObject({ status: 409, message: "Custody vault was closed after settlement" });
+    expect(mocks.deposit).not.toHaveBeenCalled();
+    expect(mocks.closed).toHaveBeenCalled();
+  });
+  it("refuses a new deposit transaction on a tombstoned vault (the deposit check needs the live vault)", async () => {
+    // Mock-only coverage: the real requireDepositEvidence reads the vault via
+    // its in-module requireRequestVault, which throws ClosedCustodyVaultError.
+    Object.assign(row, { status: "vault_opened", deposit_evidence: null });
     mocks.deposit.mockRejectedValue(new ClosedCustodyVaultError());
-    const patch = status === "deposited" ? { status, deposit_tx: signature } : { status };
-    await expect(validateCustodyUpdate("delivery_requests", "request-id", patch)).rejects.toMatchObject({ status: 409, message: "Custody vault was closed after settlement" });
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "deposited", deposit_tx: signature })).rejects.toMatchObject({ status: 409, message: "Custody vault was closed after settlement" });
+    expect(mocks.updates).toEqual([]);
   });
   it("refuses linking a tombstoned vault", async () => {
     Object.assign(row, { status: "requested", vault_pda: null });

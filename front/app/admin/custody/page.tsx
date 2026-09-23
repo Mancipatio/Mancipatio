@@ -72,7 +72,12 @@ import { RequireRole } from "@/components/require-role";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import { custodyReclaimBlocker, reclaimCustodyVault } from "@/lib/reclaim-rent";
+import {
+  custodyReclaimBlocker,
+  linkedCustodyRequests,
+  reclaimCustodyVault,
+  type LinkedCustodyRequest,
+} from "@/lib/reclaim-rent";
 import {
   loadBeneficiaryPassport,
   passportShortcutHref,
@@ -669,6 +674,9 @@ function CustodyOps() {
 
       {selectedRow && (
         <VaultDetail
+          // Remount per vault: its PDA, escrow balance and linked-request
+          // gate state must never carry over from the previous selection.
+          key={`${selectedRow.vault.shareClass}-${selectedRow.vault.vaultId}`}
           vault={selectedRow.vault}
           asset={selectedRow.asset}
           onRefresh={async () => {
@@ -692,6 +700,23 @@ function CustodyOps() {
       )}
     </div>
   );
+}
+
+/**
+ * 2D: every delivery / conversion request linked to `vaultPda`, read with the
+ * server-side `vault_pda` filter (the full queues are capped at 1000 rows).
+ * THROWS (the reclaim gate then stays closed).
+ */
+async function loadLinkedCustodyRequests(
+  session: Parameters<typeof adminListDeliveryRequests>[0],
+  vaultPda: Address,
+): Promise<LinkedCustodyRequest[]> {
+  const key = vaultPda.toString();
+  const [deliveries, conversions] = await Promise.all([
+    adminListDeliveryRequests(session, undefined, key),
+    adminListConversionRequests(session, key),
+  ]);
+  return linkedCustodyRequests(key, deliveries, conversions);
 }
 
 function VaultDetail({
@@ -752,6 +777,34 @@ function VaultDetail({
       cancelled = true;
     };
   }, [vault.shareClass, vault.vaultId]);
+
+  // 2D reclaim gate: the delivery / conversion requests linked to a SETTLED
+  // vault, read by `vault_pda` (not the capped full queue) as soon as the
+  // detail opens, so the button and tooltip show the real gate.
+  // null = not loaded (blocks the reclaim).
+  const vaultTerminal =
+    vault.state === VaultState.Realized ||
+    vault.state === VaultState.Reverted ||
+    vault.state === VaultState.Returned;
+  const [linkedRequests, setLinkedRequests] = useState<
+    LinkedCustodyRequest[] | null
+  >(null);
+  useEffect(() => {
+    if (!vaultTerminal || !vaultPda || !conn.wallet) return;
+    let cancelled = false;
+    async function loadLinked() {
+      try {
+        const linked = await loadLinkedCustodyRequests(conn.wallet, vaultPda!);
+        if (!cancelled) setLinkedRequests(linked);
+      } catch {
+        if (!cancelled) setLinkedRequests(null);
+      }
+    }
+    void loadLinked();
+    return () => {
+      cancelled = true;
+    };
+  }, [conn.wallet, vaultPda, vaultTerminal]);
 
   useEffect(() => {
     let cancelled = false;
@@ -919,17 +972,13 @@ function VaultDetail({
     }
   }
 
-  // 2D: the local half of the reclaim gate (the linked-request half needs the
-  // signed request queues and runs on click).
+  // 2D: the whole reclaim gate at render (re-checked with fresh reads on click).
   const reclaimBlocked = custodyReclaimBlocker({
     wallet: wallet?.toString(),
     authority: vault.authority.toString(),
-    terminal:
-      vault.state === VaultState.Realized ||
-      vault.state === VaultState.Reverted ||
-      vault.state === VaultState.Returned,
+    terminal: vaultTerminal,
     escrowBalance,
-    linked: [],
+    linked: linkedRequests,
   });
 
   /**
@@ -943,13 +992,8 @@ function VaultDetail({
     const target = `vault #${vault.vaultId}`;
     const pendingId = toast.showPending(`Closing ${target}…`);
     try {
-      const [deliveries, conversions] = await Promise.all([
-        adminListDeliveryRequests(conn.wallet),
-        adminListConversionRequests(conn.wallet),
-      ]);
-      const linked = [...deliveries, ...conversions].filter(
-        (request) => request.vault_pda === vaultPda.toString(),
-      ) as { status: string; outcome_evidence?: unknown }[];
+      const linked = await loadLinkedCustodyRequests(conn.wallet, vaultPda);
+      setLinkedRequests(linked);
       const blocker = custodyReclaimBlocker({
         wallet: wallet.toString(),
         authority: vault.authority.toString(),

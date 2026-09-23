@@ -148,14 +148,19 @@ export async function listMyConversionRequests(
   return { requests: data.requests ?? [], kycStatus: data.kyc_status ?? null };
 }
 
-/** Admin reads the full queue (signed + on-chain admin gate). THROWS. */
+/**
+ * Admin reads the full queue (signed + on-chain admin gate), or only the
+ * requests linked to `vaultPda` (unbounded by the 1000-row list cap). THROWS.
+ */
 export async function adminListConversionRequests(
   session: WalletSession | null | undefined,
+  vaultPda?: string,
 ): Promise<ConversionRequest[]> {
   const data = await signedFetch<{ requests: ConversionRequest[] }>(
     session,
     "/api/conversion/admin-list",
     "conversion.adminList",
+    vaultPda ? { vault_pda: vaultPda } : {},
   );
   return data.requests ?? [];
 }

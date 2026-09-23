@@ -421,6 +421,10 @@ export default function MyOffersPage() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {myOffers.map(({ offer: o, closed }, i) => {
+                // 2D: an archived row can keep a stale Open status (the
+                // terminal step and the reclaim were indexed together); a
+                // tombstoned offer is never open.
+                const staleOpen = closed && o.status === OfferStatus.Open;
                 const reclaim = closed
                   ? "live"
                   : reclaimState(
@@ -469,9 +473,14 @@ export default function MyOffersPage() {
                     </td>
                     <td className="px-4 py-3">
                       <span
-                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[o.status] ?? STATUS_BADGE[0]}`}
+                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${staleOpen ? STATUS_BADGE[1] : (STATUS_BADGE[o.status] ?? STATUS_BADGE[0])}`}
+                        title={
+                          staleOpen
+                            ? "The archive kept the offer's last indexed state (Open); it was settled and its rent reclaimed before the indexer saw the final status."
+                            : undefined
+                        }
                       >
-                        {STATUS_LABEL[o.status] ?? "?"}
+                        {staleOpen ? "Closed" : (STATUS_LABEL[o.status] ?? "?")}
                       </span>
                       {closed && (
                         <span className="ml-2 text-[11px] text-slate-500">

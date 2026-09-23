@@ -7,7 +7,7 @@ import { WalletRequired } from "@/components/wallet-required";
 import Link from "next/link";
 import { use, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { address, fetchEncodedAccount, type Address } from "@solana/kit";
+import { fetchEncodedAccount, isAddress, type Address } from "@solana/kit";
 import {
   useSendTransaction,
   useSolanaClient,
@@ -127,11 +127,13 @@ export default function TakeOfferPage({
         if (cancelled) return;
         if (!matched) {
           // 2D: a settled offer whose rent was reclaimed is an 8-byte
-          // tombstone, not a missing account.
-          const raw = await fetchEncodedAccount(
-            client.runtime.rpc,
-            address(offerPubkey),
-          ).catch(() => null);
+          // tombstone, not a missing account. A URL segment that is not an
+          // address is simply not found (never the "failed to load" state).
+          const raw = isAddress(offerPubkey)
+            ? await fetchEncodedAccount(client.runtime.rpc, offerPubkey).catch(
+                () => null,
+              )
+            : null;
           if (cancelled) return;
           setLoaded(
             raw?.exists && isClosedAccount(raw.programAddress, raw.data)

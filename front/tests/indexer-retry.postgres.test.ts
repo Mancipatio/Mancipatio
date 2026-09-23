@@ -128,12 +128,15 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
     db.query(apply(24, [], [entry]));
     expect(db.query("select count(*) from public.kyc_entries;")).toBe("0");
     expect(db.query("select count(*) from public.indexer_closed_rows;")).toBe("2");
-    // Browser roles read the archive (like the mirrors) but cannot write it:
-    // even with Supabase's default table grants, RLS has no write policy.
-    db.query("grant usage on schema public to anon, authenticated; grant select, insert, update, delete on public.indexer_closed_rows to anon, authenticated;");
-    for (const role of ["anon", "authenticated"]) {
+    // Browser roles read the archive (like the mirrors) through the
+    // migration's own SELECT grant — no test-side grant on the table.
+    db.query("grant usage on schema public to anon, authenticated;");
+    for (const role of ["anon", "authenticated"])
       expect(db.query(`set role ${role}; select count(*) from public.indexer_closed_rows;`)).toBe("2");
+    // ...but cannot write it: even with Supabase's default table grants
+    // (simulated here), RLS has no write policy.
+    db.query("grant insert, update, delete on public.indexer_closed_rows to anon, authenticated;");
+    for (const role of ["anon", "authenticated"])
       expect(() => db.query(`set role ${role}; insert into public.indexer_closed_rows(network,table_name,pda,row) values ('devnet','offers','x','{}');`)).toThrow();
-    }
   });
 });

@@ -514,9 +514,12 @@ export function ClawbackPanel() {
 
       {pre && !pre.path && pre.hookConfigured && (
         <p className="mt-3 max-w-3xl text-xs text-slate-600">
-          {pre.hookGated
-            ? "This holder is not on the blocklist and their passport is still valid (or missing), so there is nothing to claw back on. "
-            : "On an Open mint only a blocklisted wallet can be clawed back. "}
+          {!pre.hookGated
+            ? "On an Open mint only a blocklisted wallet can be clawed back. "
+            : pre.entryStatus === "missing"
+              ? // 2D: a closed (rent-reclaimed) passport reads as missing.
+                "This holder is not on the blocklist and has no passport in this registry. If it was closed (rent reclaimed), the passport path needs ONE transaction that re-approves the holder with an expiry a second away, revokes the passport and claws back (KYC provider + Admin signing together; never split, which would open a receive window). "
+              : "This holder is not on the blocklist and their passport is still valid, so there is nothing to claw back on. "}
           To use the blocklist path, the Blocklist Authority adds the wallet on{" "}
           <Link href="/admin/blocklist" className="font-medium text-brand-700 underline">
             the blocklist page

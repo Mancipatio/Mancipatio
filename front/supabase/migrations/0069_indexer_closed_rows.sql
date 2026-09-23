@@ -13,9 +13,15 @@
 -- * kyc_entries: deliberately NOT archived (data minimisation; the dossier
 --   lives in `clients`).
 --
--- Apply BEFORE the front that ships the reclaim buttons. Backward compatible
--- in both directions: nothing reads this table until that front is deployed,
--- and before 2D no offer or custody vault was ever closed.
+-- Apply BEFORE the 2D registry upgrade (design-2d §9 step 2), not merely
+-- before the front: the Offer arm of `reclaim_rent` is a permissionless crank
+-- and a vault authority can reclaim from a CLI, so tombstones can appear as
+-- soon as the program is upgraded. Without these triggers the indexer would
+-- delete those mirror rows and their history would be lost for good.
+-- Backward compatible in both directions: nothing reads this table until the
+-- 2D front is deployed, and before 2D no offer or custody vault was ever
+-- closed. Rolling the front back after any custody reclaim needs the
+-- tombstone-aware fetch wrapper (lib/closed-account.ts) in the old front too.
 begin;
 set local lock_timeout = '15s';
 
@@ -34,11 +40,15 @@ comment on table public.indexer_closed_rows is
   'Last mirrored row of an Offer / CustodyVault (trigger) or OtcDeal (admin archive route) whose rent was reclaimed (2D tombstone). History only, never live state.';
 
 -- Readable like the mirrors (0002); no write policy, so only service_role
--- (and the trigger below) can write.
+-- (and the trigger below) can write. The grants are explicit rather than
+-- left to Supabase's default table privileges: every reader swallows errors,
+-- so a missing SELECT grant would silently empty all history merges.
 alter table public.indexer_closed_rows enable row level security;
 drop policy if exists "indexer_closed_rows anon read" on public.indexer_closed_rows;
 create policy "indexer_closed_rows anon read"
   on public.indexer_closed_rows for select using (true);
+grant select on public.indexer_closed_rows to anon, authenticated;
+grant all on public.indexer_closed_rows to service_role;
 
 create or replace function public.archive_indexer_closed_row()
 returns trigger

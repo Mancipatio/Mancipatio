@@ -28,6 +28,8 @@ import {
   RestrictionMode,
 } from "@/lib/generated/transfer_hook";
 import { fetchMaybeLiveCustodyVault, isClosedAccount } from "@/lib/closed-account";
+import { featureDisabledMessage, features } from "@/lib/features";
+import type { Network } from "@/lib/network";
 import type { SolanaClient } from "@solana/client";
 
 type Rpc = SolanaClient["runtime"]["rpc"];
@@ -72,11 +74,26 @@ async function heldMints(rpc: Rpc, owner: Address): Promise<string[]> {
   return [...mints];
 }
 
+/**
+ * Owner decision D13: why the passport close is switched off on this network
+ * (null = it is on). Off on mainnet until the lawyer confirms AML retention
+ * versus the on-chain KycEntry close and NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE
+ * is set to "true" (lib/features.ts).
+ */
+export function passportCloseDisabledReason(network?: Network): string | null {
+  return features(network).passportClose
+    ? null
+    : featureDisabledMessage("passportClose", network);
+}
+
 export async function closePassportPreflight(
   rpc: Rpc,
-  input: { registry: Address; holder: Address; nowSec?: bigint },
+  input: { registry: Address; holder: Address; nowSec?: bigint; network?: Network },
   candidates: ClosePassportCandidates,
 ): Promise<ClosePassportCheck> {
+  // D13 gate first: no chain read, no signature, whatever the UI showed.
+  const disabled = passportCloseDisabledReason(input.network);
+  if (disabled) return { closable: false, closableAt: null, blockers: [disabled] };
   const now = input.nowSec ?? BigInt(Math.floor(Date.now() / 1000));
   const config = { commitment: "confirmed" as const };
   const blockers: string[] = [];

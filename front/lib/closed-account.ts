@@ -7,6 +7,7 @@ import {
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   decodeCustodyVault,
+  OfferStatus,
   type CustodyVault,
 } from "@/lib/generated/asset_registry";
 
@@ -59,4 +60,25 @@ export async function fetchMaybeLiveCustodyVault<
     return { address: vault, exists: false, closed: true };
   const decoded = decodeCustodyVault(encoded);
   return { ...decoded, exists: true, closed: false };
+}
+
+/**
+ * Archived (rent-reclaimed) offers that may be merged into a live offer list.
+ *
+ * The 0069 trigger archives the LAST row the indexer mirrored, not the
+ * offer's terminal state. The Offer arm is a permissionless crank, so
+ * `take/expire/cancel_offer` + `reclaim_rent` can land in one transaction (or
+ * the reclaim can finalize before the indexer job of the terminal
+ * transaction): the archive then still says `Open`. Its real outcome is
+ * unknown, so such a row is dropped — it must never be listed as takeable or
+ * counted as open. Live rows win on a duplicate `${shareClass}-${offerId}`.
+ */
+export function mergeableArchivedOffers<
+  T extends { shareClass: { toString(): string }; offerId: bigint; status: OfferStatus },
+>(live: readonly T[], archived: readonly T[]): T[] {
+  const liveKeys = new Set(live.map((o) => `${o.shareClass}-${o.offerId}`));
+  return archived.filter(
+    (o) =>
+      o.status !== OfferStatus.Open && !liveKeys.has(`${o.shareClass}-${o.offerId}`),
+  );
 }
