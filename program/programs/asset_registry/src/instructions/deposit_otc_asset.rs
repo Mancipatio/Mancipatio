@@ -71,6 +71,15 @@ pub struct DepositOtcAsset<'info> {
 
     pub share_token_program: Interface<'info, TokenInterface>,
     pub payment_token_program: Interface<'info, TokenInterface>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_SECONDARY) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
     // remaining_accounts: the deposit leg's hook tail (source authority =
     // seller), plus — when this deposit completes the pair — the settle leg's
     // hook tail (source authority = deal PDA). Both legs transfer the same

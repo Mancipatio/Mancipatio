@@ -3,6 +3,8 @@
 //! the asset and wires the MetadataPointer + TokenMetadata extensions;
 //! `update_mint_metadata` may only change the `uri` field.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -155,6 +157,7 @@ fn boot(asset_name: &str, symbol_prefix: &str) -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],
@@ -275,6 +278,7 @@ fn boot(asset_name: &str, symbol_prefix: &str) -> (LiteSVM, Ctx) {
                 transfer_hook_program: transfer_hook::id(),
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],

@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenInterface};
 
 use crate::constants::*;
+use crate::error::RegistryError;
 use crate::state::{Admin, RightsIssuance, ShareClass};
 
 #[derive(Accounts)]
@@ -53,6 +54,15 @@ pub struct CreateRightsIssuance<'info> {
     #[account(init, payer = authority, space = 8 + crate::state::EscrowIdentity::INIT_SPACE,
         seeds = [ESCROW_MARKER_SEED, rights_issuance.key().as_ref()], bump)]
     pub identity: Box<Account<'info, crate::state::EscrowIdentity>>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Opens a Rights-Token vesting issuance with an empty underlying escrow. The

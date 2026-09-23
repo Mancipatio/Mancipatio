@@ -6,6 +6,8 @@
 //! * `add_share_class` — a `PhysicalGood` asset's share class must be
 //!   hard-capped at exactly one unit (`max_supply == Some(1)`).
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -133,6 +135,7 @@ fn boot() -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],

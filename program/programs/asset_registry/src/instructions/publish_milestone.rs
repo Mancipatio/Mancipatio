@@ -39,6 +39,15 @@ pub struct PublishMilestone<'info> {
     pub milestone: Box<Account<'info, VestingMilestone>>,
 
     pub system_program: Program<'info, System>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Publishes a vesting milestone — a pool of underlying tokens claimable

@@ -80,6 +80,15 @@ pub struct CreateOtcDeal<'info> {
     pub token_program: Interface<'info, TokenInterface>,
     pub payment_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_SECONDARY) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Opens a bilateral OTC escrow deal between a named buyer and seller with

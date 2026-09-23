@@ -48,7 +48,11 @@ pub struct RouteYield<'info> {
 
     pub payment_mint: Box<InterfaceAccount<'info, Mint>>,
     pub payment_token_program: Interface<'info, TokenInterface>,
-    #[account(seeds = [PLATFORM_SEED], bump = platform.bump)]
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS) @ RegistryError::PlatformPaused,
+    )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 

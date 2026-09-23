@@ -240,4 +240,12 @@ pub enum RegistryError {
     InvalidDistributionPlan,
     #[msg("Cumulative vesting funding cannot exceed the immutable schedule total")]
     VestingFundingExceedsSchedule,
+    #[msg("Pause flags contain undefined bits, or a bit is both set and cleared")]
+    InvalidPauseFlags,
+    #[msg("Only the super admin may clear pause flags")]
+    PauseClearNotAllowed,
+    #[msg("Protocol treasury must be a nonzero key")]
+    InvalidProtocolTreasury,
+    #[msg("Sale price per unit must be greater than zero")]
+    InvalidSalePrice,
 }

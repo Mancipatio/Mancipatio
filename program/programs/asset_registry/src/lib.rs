@@ -82,9 +82,28 @@ pub mod asset_registry {
         instructions::handle_accept_custody_authority(ctx)
     }
 
-    /// Emergency pause / unpause of issuer & asset creation.
+    /// Legacy onboarding switch (super admin): sets / clears only
+    /// `PAUSE_ONBOARDING`. The full emergency pause is `set_pause_flags`.
     pub fn set_pause(ctx: Context<SetPause>, paused: bool) -> Result<()> {
         instructions::handle_set_pause(ctx, paused)
+    }
+
+    /// Emergency pause: `flags = (flags | set_mask) & !clear_mask`. Any Admin
+    /// may set defined bits; only the super admin may clear.
+    pub fn set_pause_flags(
+        ctx: Context<SetPauseFlags>,
+        set_mask: u8,
+        clear_mask: u8,
+    ) -> Result<()> {
+        instructions::handle_set_pause_flags(ctx, set_mask, clear_mask)
+    }
+
+    /// Super admin rotates the protocol treasury (nonzero key).
+    pub fn set_protocol_treasury(
+        ctx: Context<SetProtocolTreasury>,
+        new_treasury: Pubkey,
+    ) -> Result<()> {
+        instructions::handle_set_protocol_treasury(ctx, new_treasury)
     }
 
     /// Super admin grants the admin role to `new_admin`.

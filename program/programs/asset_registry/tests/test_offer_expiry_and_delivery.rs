@@ -5,6 +5,8 @@
 //! hook-wired Token-2022 mint → transfer_hook config (Open mode) so real
 //! `transfer_checked` legs run through the hook.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -192,6 +194,7 @@ fn boot(holder_units: u64) -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],
@@ -314,6 +317,7 @@ fn boot(holder_units: u64) -> (LiteSVM, Ctx) {
                 transfer_hook_program: hook_id,
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -407,6 +411,7 @@ fn boot(holder_units: u64) -> (LiteSVM, Ctx) {
                     mint: mint_pda,
                     destination: payer_share_ata,
                     token_program: TOKEN_2022,
+                    platform: pause::platform_pda(),
                 }
                 .to_account_metas(None),
             )],
@@ -511,6 +516,7 @@ fn create_offer_ix(
             escrow_marker: escrow_marker_of(ctx, &offer_pda),
             token_program: TOKEN_2022,
             system_program: system_program::ID,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     )
@@ -522,6 +528,15 @@ fn create_offer_ix(
 /// records nothing, and `take_offer` sells only what the ledger backs; see
 /// `raw_fund_offer_escrow` below for that contrast.
 fn deposit_to_offer_escrow(svm: &mut LiteSVM, ctx: &Ctx, offer_id: u64, amount: u64) {
+    send(
+        svm,
+        &[&ctx.holder],
+        &[deposit_to_offer_escrow_ix(ctx, offer_id, amount)],
+        "deposit_to_offer_escrow",
+    );
+}
+
+fn deposit_to_offer_escrow_ix(ctx: &Ctx, offer_id: u64, amount: u64) -> Instruction {
     let (offer_pda, escrow_pda) = offer_pdas(ctx, offer_id);
     let mut metas = acc::DepositToOfferEscrow {
         maker: ctx.holder.pubkey(),
@@ -530,19 +545,15 @@ fn deposit_to_offer_escrow(svm: &mut LiteSVM, ctx: &Ctx, offer_id: u64, amount: 
         escrow: escrow_pda,
         maker_share_account: ctx.holder_share_ata,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.extend_from_slice(&hook_metas(ctx, &ctx.holder.pubkey()));
-    send(
-        svm,
-        &[&ctx.holder],
-        &[Instruction::new_with_bytes(
-            ctx.program_id,
-            &ixd::DepositToOfferEscrow { amount }.data(),
-            metas,
-        )],
-        "deposit_to_offer_escrow",
-    );
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::DepositToOfferEscrow { amount }.data(),
+        metas,
+    )
 }
 
 /// A bare client-side `transfer_checked` into the offer escrow — lands the
@@ -603,6 +614,7 @@ fn take_offer_ix(
         escrow_marker: escrow_marker_of(ctx, &offer_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.extend_from_slice(&hook_metas(ctx, &offer_pda));
@@ -658,6 +670,7 @@ fn open_vault_ix(
             escrow_marker: escrow_marker_of(ctx, &custody_pda),
             token_program: TOKEN_2022,
             system_program: system_program::ID,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
     )
@@ -1000,6 +1013,7 @@ fn open_mode_deposit_ledgers_and_raw_funding() {
         escrow: vault_escrow,
         depositor_share_account: ctx.holder_share_ata,
         token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
     }
     .to_account_metas(None);
     metas.extend_from_slice(&hook_metas(&ctx, &ctx.holder.pubkey()));
@@ -1543,4 +1557,251 @@ fn revert_after_positive_deadline_stays_permissionless() {
     assert_eq!(token_balance(&svm, &escrow_pda), 0, "escrow burned");
     let vault: CustodyVault = load(&svm, &custody_pda);
     assert_eq!(vault.state, VaultState::Reverted);
+}
+
+// ── Emergency pause (Platform.pause_flags) ───────────────────────────────────
+
+fn cancel_offer_ix(ctx: &Ctx, offer_id: u64) -> Instruction {
+    let (offer_pda, escrow_pda) = offer_pdas(ctx, offer_id);
+    let mut metas = acc::CancelOffer {
+        maker: ctx.holder.pubkey(),
+        offer: offer_pda,
+        mint: ctx.mint_pda,
+        escrow: escrow_pda,
+        maker_share_account: ctx.holder_share_ata,
+        escrow_marker: escrow_marker_of(ctx, &offer_pda),
+        share_token_program: TOKEN_2022,
+    }
+    .to_account_metas(None);
+    metas.extend_from_slice(&hook_metas(ctx, &offer_pda));
+    Instruction::new_with_bytes(ctx.program_id, &ixd::CancelOffer {}.data(), metas)
+}
+
+fn deposit_to_custody_ix(ctx: &Ctx, vault_id: u64, amount: u64) -> Instruction {
+    let (custody_pda, escrow_pda) = custody_pdas(ctx, vault_id);
+    let mut metas = acc::DepositToCustodyVault {
+        depositor: ctx.holder.pubkey(),
+        share_class: ctx.share_class_pda,
+        custody_vault: custody_pda,
+        mint: ctx.mint_pda,
+        escrow: escrow_pda,
+        depositor_share_account: ctx.holder_share_ata,
+        token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
+    }
+    .to_account_metas(None);
+    metas.extend_from_slice(&hook_metas(ctx, &ctx.holder.pubkey()));
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::DepositToCustodyVault { amount }.data(),
+        metas,
+    )
+}
+
+/// bit2 gates the offer ENTRIES (create, fund, take); the maker's exits
+/// (`cancel_offer`, the permissionless `expire_offer`) stay open under 0x3F.
+#[test]
+fn secondary_pause_gates_offer_entries_while_cancel_and_expire_stay_open() {
+    let (mut svm, ctx) = boot(100);
+    warp_to(&mut svm, 1_000);
+    let all_but = asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_SECONDARY;
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.holder],
+            &[create_offer_ix(&ctx, 1, 10, 5_000_000, 0)],
+        ),
+        "create_offer under SECONDARY",
+    );
+
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    for (offer_id, expires_at) in [(1u64, 0i64), (2, 0), (3, 2_000)] {
+        send(
+            &mut svm,
+            &[&ctx.holder],
+            &[create_offer_ix(&ctx, offer_id, 10, 5_000_000, expires_at)],
+            "create_offer",
+        );
+    }
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.holder],
+            &[deposit_to_offer_escrow_ix(&ctx, 1, 10)],
+        ),
+        "deposit_to_offer_escrow under SECONDARY",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    for offer_id in 1..=3 {
+        deposit_to_offer_escrow(&mut svm, &ctx, offer_id, 10);
+    }
+    assert_eq!(token_balance(&svm, &ctx.holder_share_ata), 70);
+
+    let taker = Keypair::new();
+    svm.airdrop(&taker.pubkey(), 100_000_000_000).unwrap();
+    let taker_payment_ata = create_ata(&mut svm, &ctx.payer, &ctx.payment_mint, &taker.pubkey());
+    let mint_ix = token_ix::mint_to(
+        &TOKEN_2022,
+        &ctx.payment_mint,
+        &taker_payment_ata,
+        &ctx.payer.pubkey(),
+        &[],
+        10_000_000,
+    )
+    .unwrap();
+    send(&mut svm, &[&ctx.payer], &[mint_ix], "mint payment to taker");
+    let taker_share_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &taker.pubkey());
+    let maker_payment_ata = create_ata(
+        &mut svm,
+        &ctx.payer,
+        &ctx.payment_mint,
+        &ctx.holder.pubkey(),
+    );
+    let take = take_offer_ix(
+        &ctx,
+        1,
+        &taker.pubkey(),
+        &taker_share_ata,
+        &taker_payment_ata,
+        &maker_payment_ata,
+    );
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_SECONDARY);
+    pause::assert_paused(
+        try_send(&mut svm, &[&taker], std::slice::from_ref(&take)),
+        "take_offer under SECONDARY",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, all_but);
+    send(&mut svm, &[&taker], &[take], "take_offer");
+    assert_eq!(token_balance(&svm, &taker_share_ata), 10);
+
+    // Full pause: the maker cancels, and anyone expires a lapsed offer.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[cancel_offer_ix(&ctx, 2)],
+        "cancel_offer under 0x3F",
+    );
+    assert_eq!(
+        load::<Offer>(&svm, &offer_pdas(&ctx, 2).0).status,
+        OfferStatus::Cancelled
+    );
+    warp_to(&mut svm, 3_000);
+    let stranger = Keypair::new();
+    svm.airdrop(&stranger.pubkey(), 10_000_000_000).unwrap();
+    send(
+        &mut svm,
+        &[&stranger],
+        &[expire_offer_ix(&ctx, &stranger.pubkey(), 3)],
+        "expire_offer under 0x3F",
+    );
+    assert_eq!(
+        load::<Offer>(&svm, &offer_pdas(&ctx, 3).0).status,
+        OfferStatus::Expired
+    );
+    assert_eq!(token_balance(&svm, &ctx.holder_share_ata), 90);
+}
+
+/// bit3 gates `deposit_to_custody_vault` (and non-quarantine opens); the
+/// DeliveryEscrow refund (`return_custody_vault`) and the burn exit
+/// (`revert_custody_vault`) stay open under 0x3F.
+#[test]
+fn custody_entry_pause_gates_deposits_while_return_and_revert_stay_open() {
+    let (mut svm, ctx) = boot(100);
+    warp_to(&mut svm, 1_000);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            1,
+            VaultType::DeliveryEscrow,
+            30,
+            0,
+            ctx.holder.pubkey(),
+        )],
+        "open delivery vault",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            2,
+            VaultType::RedemptionQueue,
+            0,
+            0,
+            Pubkey::default(),
+        )],
+        "open redemption vault",
+    );
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_CUSTODY_ENTRY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.holder],
+            &[deposit_to_custody_ix(&ctx, 1, 30)],
+        ),
+        "deposit_to_custody_vault under CUSTODY_ENTRY",
+    );
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[open_vault_ix(
+                &ctx,
+                3,
+                VaultType::DeliveryEscrow,
+                1,
+                0,
+                ctx.holder.pubkey(),
+            )],
+        ),
+        "DeliveryEscrow open under CUSTODY_ENTRY",
+    );
+
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_CUSTODY_ENTRY,
+    );
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[deposit_to_custody_ix(&ctx, 1, 30)],
+        "deposit_to_custody_vault",
+    );
+    let (_, escrow_2) = custody_pdas(&ctx, 2);
+    fund_vault_escrow(&mut svm, &ctx, &escrow_2, 5);
+    assert_eq!(token_balance(&svm, &ctx.holder_share_ata), 65);
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[return_vault_ix(
+            &ctx,
+            &ctx.payer.pubkey(),
+            1,
+            &ctx.holder_share_ata,
+        )],
+        "return_custody_vault under 0x3F",
+    );
+    assert_eq!(token_balance(&svm, &ctx.holder_share_ata), 95);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[revert_vault_ix(&ctx, &ctx.payer.pubkey(), 2)],
+        "revert_custody_vault under 0x3F",
+    );
+    assert_eq!(token_balance(&svm, &escrow_2), 0, "escrow burned");
+    assert_eq!(
+        load::<CustodyVault>(&svm, &custody_pdas(&ctx, 2).0).state,
+        VaultState::Reverted
+    );
 }

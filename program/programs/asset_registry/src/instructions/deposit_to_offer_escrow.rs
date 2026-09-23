@@ -37,6 +37,15 @@ pub struct DepositToOfferEscrow<'info> {
     pub maker_share_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub token_program: Interface<'info, TokenInterface>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_SECONDARY) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
     // remaining_accounts — the transfer-hook accounts for the maker → escrow
     // leg, in meta-list order:
     //   Open (3):     [BlockEntry(maker), ExtraAccountMetaList,

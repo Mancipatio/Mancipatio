@@ -31,6 +31,15 @@ pub struct DistributeBatch<'info> {
         seeds = [DISTRIBUTION_BATCH_SEED, distribution.key().as_ref(), &batch_id.to_le_bytes()], bump)]
     pub batch: Box<Account<'info, DistributionBatch>>,
     pub system_program: Program<'info, System>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
     // remaining_accounts: one committed recipient token account per amount.
 }
 

@@ -3,6 +3,11 @@
 //! push/claim delivery, recovery, cancellation + pre-cliff, and the
 //! unvested withdrawal cap.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
+#[path = "../../../tests/support/mod.rs"]
+mod support;
+
 use {
     anchor_lang::{
         prelude::Pubkey,
@@ -84,6 +89,13 @@ fn token_balance(svm: &LiteSVM, ata: &Pubkey) -> u64 {
     u64::from_le_bytes(a.data[64..72].try_into().unwrap())
 }
 fn boot() -> (LiteSVM, Pubkey) {
+    let (svm, program_id, _operator) = boot_with_operator();
+    (svm, program_id)
+}
+
+/// Loads the registry and bootstraps the Platform (vesting funding reads its
+/// emergency-pause flags), returning the super admin that can pause it.
+fn boot_with_operator() -> (LiteSVM, Pubkey, Keypair) {
     let program_id = asset_registry::id();
     let mut svm = LiteSVM::new();
     svm.add_program(
@@ -91,7 +103,34 @@ fn boot() -> (LiteSVM, Pubkey) {
         include_bytes!("../../../target/deploy/asset_registry.so"),
     )
     .unwrap();
-    (svm, program_id)
+    let operator = Keypair::new();
+    svm.airdrop(&operator.pubkey(), 10_000_000_000).unwrap();
+    support::set_upgrade_authority(&mut svm, &asset_registry::ID, Some(operator.pubkey()));
+    send(
+        &mut svm,
+        &[&operator],
+        &[Instruction::new_with_bytes(
+            program_id,
+            &ixd::InitializePlatform {
+                protocol_treasury: operator.pubkey(),
+                protocol_fee_bps: 250,
+            }
+            .data(),
+            acc::InitializePlatform {
+                admin: operator.pubkey(),
+                upgrade_authority: operator.pubkey(),
+                program: asset_registry::ID,
+                program_data: support::program_data(&asset_registry::ID),
+                platform: pause::platform_pda(),
+                super_admin_record: pause::admin_pda(&operator.pubkey()),
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        )],
+        "initialize_platform",
+    );
+    pause::unpause_all(&mut svm, &operator);
+    (svm, program_id, operator)
 }
 
 struct SeriesCtx {
@@ -304,6 +343,7 @@ fn deposit_ix(ctx: &SeriesCtx, amount: u64) -> Instruction {
             escrow: ctx.escrow,
             depositor_token_account: ctx.client_ata,
             token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
         }
         .to_account_metas(None),
         data: ixd::DepositToVestingEscrow { amount }.data(),
@@ -1006,6 +1046,7 @@ fn legacy_spl_vesting_escrow_still_funds_and_delivers() {
                     escrow,
                     depositor_token_account: source,
                     token_program,
+                    platform: pause::platform_pda(),
                 }
                 .to_account_metas(None),
             ),
@@ -1617,4 +1658,135 @@ fn legacy_overfunded_active_series_can_attach_and_recover_excess_without_rewriti
     assert_eq!(token_balance(&svm, &ctx.escrow), 0);
     assert_eq!(load::<VestingSeries>(&svm, &ctx.series).deposited, 500);
     assert_eq!(load::<EscrowIdentity>(&svm, &identity).own_refunded, 0);
+}
+
+// ── Emergency pause (Platform.pause_flags) ───────────────────────────────────
+
+/// bit4 gates ONLY `deposit_to_vesting_escrow`. Creating a series stays open
+/// (it moves no value and its 48-tranche wallet transaction has no room for
+/// the Platform account); every setup step and every exit — add, finalize,
+/// approve, claim, recover, cancel, both withdrawals — runs under 0x3F.
+#[test]
+fn distribution_pause_gates_vesting_funding_while_setup_and_exits_stay_open() {
+    let (mut svm, _pid, operator) = boot_with_operator();
+    pause::pause_only(&mut svm, &operator, asset_registry::PAUSE_FLAGS_ALL);
+
+    // create_vesting_series + add_vesting_position ×2 + finalize, all paused.
+    let ctx = setup_series(
+        &mut svm,
+        VestingTimingMode::Approval,
+        VestingDeliveryMode::Claim,
+        3_600,
+        true, // recovery ON
+        true, // cancellation ON
+        0,
+        41,
+    );
+
+    pause::pause_only(&mut svm, &operator, asset_registry::PAUSE_DISTRIBUTIONS);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.client], &[deposit_ix(&ctx, 400)]),
+        "deposit_to_vesting_escrow under DISTRIBUTIONS",
+    );
+    assert_eq!(token_balance(&svm, &ctx.escrow), 0);
+    pause::pause_only(
+        &mut svm,
+        &operator,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+    );
+    deposit(&mut svm, &ctx, 400);
+
+    pause::pause_only(&mut svm, &operator, asset_registry::PAUSE_FLAGS_ALL);
+    // Surplus withdrawal (a raw donation above the schedule).
+    donate_to_series(&mut svm, &ctx, 100);
+    send(
+        &mut svm,
+        &[&ctx.client],
+        &[withdraw_surplus_ix(&ctx)],
+        "withdraw_vesting_surplus under 0x3F",
+    );
+    assert_eq!(token_balance(&svm, &ctx.client_ata), 100);
+
+    // Approve + claim.
+    warp_to(&mut svm, 1_200);
+    send(
+        &mut svm,
+        &[&ctx.client],
+        &[Instruction {
+            program_id: asset_registry::ID,
+            accounts: acc::ApproveVestingTranche {
+                authority: ctx.client.pubkey(),
+                series: ctx.series,
+            }
+            .to_account_metas(None),
+            data: ixd::ApproveVestingTranche { tranche_index: 0 }.data(),
+        }],
+        "approve_vesting_tranche under 0x3F",
+    );
+    claim(&mut svm, &ctx, &ctx.r0, 0).unwrap();
+    assert_eq!(token_balance(&svm, &ctx.r0_ata), 25);
+
+    // Recover position 1 to a fresh wallet.
+    let new_wallet = Keypair::new();
+    send(
+        &mut svm,
+        &[&ctx.client],
+        &[Instruction {
+            program_id: asset_registry::ID,
+            accounts: acc::RecoverVestingPosition {
+                authority: ctx.client.pubkey(),
+                series: ctx.series,
+                position: ctx.pos1,
+            }
+            .to_account_metas(None),
+            data: ixd::RecoverVestingPosition {
+                position_index: 1,
+                new_wallet: new_wallet.pubkey(),
+            }
+            .data(),
+        }],
+        "recover_vesting_position under 0x3F",
+    );
+
+    // Cancel, then withdraw the unvested remainder.
+    send(
+        &mut svm,
+        &[&ctx.client],
+        &[cancel_series_ix(ctx.client.pubkey(), ctx.series)],
+        "cancel_vesting_series under 0x3F",
+    );
+    let before = token_balance(&svm, &ctx.client_ata);
+    send(
+        &mut svm,
+        &[&ctx.client],
+        &[withdraw_series_ix(&ctx)],
+        "withdraw_unvested under 0x3F",
+    );
+    assert!(token_balance(&svm, &ctx.client_ata) > before);
+    assert_eq!(pause::pause_flags(&svm), asset_registry::PAUSE_FLAGS_ALL);
+}
+
+/// Push delivery is a recipient exit: a keeper pushes under 0x3F.
+#[test]
+fn vesting_push_delivery_stays_open_under_full_pause() {
+    let (mut svm, _pid, operator) = boot_with_operator();
+    let ctx = setup_series(
+        &mut svm,
+        VestingTimingMode::Auto,
+        VestingDeliveryMode::Push,
+        0,
+        false,
+        false,
+        0,
+        42,
+    );
+    deposit(&mut svm, &ctx, 400);
+    pause::pause_only(&mut svm, &operator, asset_registry::PAUSE_FLAGS_ALL);
+    warp_to(&mut svm, 1_500);
+    let crank = Keypair::new();
+    svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+    push(&mut svm, &ctx, &crank, 0).unwrap();
+    push(&mut svm, &ctx, &crank, 1).unwrap();
+    assert_eq!(token_balance(&svm, &ctx.r0_ata), 25);
+    assert_eq!(token_balance(&svm, &ctx.r1_ata), 75);
 }

@@ -66,6 +66,13 @@ pub struct OpenCustodyVault<'info> {
 
     pub token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+
+    /// Emergency-pause gate (read-only), checked in the handler: a burn-only
+    /// quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
+    /// clawback. Keep LAST among named accounts (old account indices keep
+    /// their positions).
+    #[account(seeds = [PLATFORM_SEED], bump = platform.bump)]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
 /// Opens a custody vault in `Active` state with an empty escrow token account.
@@ -104,6 +111,16 @@ pub fn handle_open_custody_vault(
     metadata_hash: [u8; 32],
     beneficiary: Pubkey,
 ) -> Result<()> {
+    // Emergency pause (custody entry). A burn-only quarantine vault stays
+    // openable: clawback (always open) needs one as its destination, and every
+    // exit of such a vault burns — see the note above.
+    let quarantine =
+        vault_type == VaultType::RedemptionQueue && realize_action == RealizeAction::BurnAndAttest;
+    require!(
+        quarantine || !ctx.accounts.platform.is_paused(PAUSE_CUSTODY_ENTRY),
+        RegistryError::PlatformPaused
+    );
+
     crate::util::initialize_token_escrow(
         &ctx.accounts.escrow.to_account_info(),
         &ctx.accounts.mint.to_account_info(),

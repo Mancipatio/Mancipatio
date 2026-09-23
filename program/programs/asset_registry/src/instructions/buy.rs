@@ -69,6 +69,15 @@ pub struct Buy<'info> {
         constraint = issuer.kyb_status == KybStatus::Verified @ RegistryError::IssuerNotVerified,
     )]
     pub issuer: Box<Account<'info, Issuer>>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_PRIMARY) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
     // remaining_accounts — accounts the fail-closed receiver-KYC check in the
     // handler resolves. No transfer runs here (delivery is a `mint_to`), so
     // this is NOT a positional hook tail: each account is looked up by its

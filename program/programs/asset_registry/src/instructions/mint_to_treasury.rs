@@ -61,6 +61,15 @@ pub struct MintToTreasury<'info> {
     pub destination: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub token_program: Interface<'info, TokenInterface>,
+
+    /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
+    /// account indices and the remaining-accounts hook tail keep their positions.
+    #[account(
+        seeds = [PLATFORM_SEED],
+        bump = platform.bump,
+        constraint = !platform.is_paused(PAUSE_PRIMARY) @ RegistryError::PlatformPaused,
+    )]
+    pub platform: Box<Account<'info, crate::state::Platform>>,
     // remaining_accounts: when the destination is a program escrow, append the
     // escrow's parent account — the `CustodyVault` or `RightsIssuance` PDA that
     // owns it. The handler DESERIALIZES it as that concrete type and requires

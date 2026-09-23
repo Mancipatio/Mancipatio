@@ -4,6 +4,8 @@
 //! `mint_to_treasury` / `open_sale` require an `Active` asset. The boot stops
 //! before activation so each test can drive the lifecycle itself.
 
+#[path = "../../../tests/support/pause.rs"]
+mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -174,6 +176,7 @@ fn boot() -> (LiteSVM, Ctx) {
         )],
         "initialize_platform",
     );
+    pause::unpause_all(&mut svm, &payer);
     send(
         &mut svm,
         &[&payer],
@@ -294,6 +297,7 @@ fn boot() -> (LiteSVM, Ctx) {
                 transfer_hook_program: transfer_hook::id(),
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -388,6 +392,7 @@ fn mint_on_draft_rejected() {
                 mint: ctx.mint_pda,
                 destination,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -417,6 +422,7 @@ fn mint_on_draft_rejected() {
                 mint: ctx.mint_pda,
                 destination,
                 token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )],
@@ -467,6 +473,7 @@ fn open_sale_on_draft_rejected() {
                 proceeds: proceeds_pda,
                 payment_token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         )
