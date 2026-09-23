@@ -1623,6 +1623,61 @@ fn claim_refund_pro_rata_after_cancel() {
     .is_err());
 }
 
+/// 2E removed the v1 terminal-refund path: a cancelled vault still stamped
+/// `version = 1` fails closed at the account constraint (6104) and moves no
+/// funds, even with an otherwise valid ReturnCapital vote and proof.
+#[test]
+fn claim_refund_rejects_a_v1_vault() {
+    use anchor_lang::AccountSerialize;
+    let (mut svm, _pid) = boot();
+    let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 12);
+    buy_units(&mut svm, &ctx, 120);
+    let (vault, escrow) = open_payout_vault(&mut svm, &ctx, [7u8; 32]);
+    let v0: PayoutVault = load(&svm, &vault);
+    warp_to(&mut svm, v0.start_ts + 2 * 2_592_000 + 1);
+    send_freeze(&mut svm, &ctx, &vault);
+    let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 120);
+    let vote_pda = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
+    send_cast(
+        &mut svm,
+        &ctx,
+        &vault,
+        &vote_pda,
+        120,
+        vec![],
+        VaultVoteChoice::ReturnCapital,
+    );
+    let vote: VaultVote = load(&svm, &vote_pda);
+    warp_to(&mut svm, vote.end_ts + 1);
+    send_finalize(&mut svm, &ctx, &vault, &vote_pda);
+
+    let mut v1: PayoutVault = load(&svm, &vault);
+    assert_eq!(v1.state, PayoutVaultState::Cancelled);
+    v1.version = 1;
+    let mut account = svm.get_account(&vault).unwrap();
+    let mut data = Vec::with_capacity(account.data.len());
+    v1.try_serialize(&mut data).unwrap();
+    assert_eq!(data.len(), account.data.len(), "same-size rewrite");
+    account.data = data;
+    svm.set_account(vault, account).unwrap();
+
+    let escrow_before = token_balance(&svm, &escrow);
+    let investor_before = token_balance(&svm, &ctx.buyer_payment_ata);
+    let err = try_claim_refund(
+        &mut svm,
+        &ctx,
+        &vault,
+        &escrow,
+        &ctx.buyer_payment_ata,
+        120,
+        vec![],
+    )
+    .unwrap_err();
+    assert!(err.contains("Custom(6104)"), "v1 vault: {err}");
+    assert_eq!(token_balance(&svm, &escrow), escrow_before);
+    assert_eq!(token_balance(&svm, &ctx.buyer_payment_ata), investor_before);
+}
+
 // ── route_yield helpers ───────────────────────────────────────────────────────
 
 fn send_route_yield(
@@ -1986,125 +2041,6 @@ fn repeated_freeze_uses_new_vote_round_and_old_outcomes_cannot_finalize_or_refun
 }
 
 #[test]
-fn original_v1_terminal_payout_and_vote_keep_refund_entitlement_after_size_only_preparation() {
-    use anchor_lang::{AnchorDeserialize, AnchorSerialize, Discriminator, Space};
-    use asset_registry::legacy::{LegacyPayoutVault, LegacyVaultVote};
-    let (mut svm, _) = boot();
-    let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 12);
-    buy_units(&mut svm, &ctx, 120);
-    let (vault, escrow) = open_payout_vault(&mut svm, &ctx, [7; 32]);
-    let initial: PayoutVault = load(&svm, &vault);
-    warp_to(&mut svm, initial.start_ts + 2 * 2_592_000 + 1);
-    send_freeze(&mut svm, &ctx, &vault);
-    let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 120);
-    let vote = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
-    send_cast(
-        &mut svm,
-        &ctx,
-        &vault,
-        &vote,
-        120,
-        vec![],
-        VaultVoteChoice::ReturnCapital,
-    );
-    let vote_state: VaultVote = load(&svm, &vote);
-    warp_to(&mut svm, vote_state.end_ts + 1);
-    send_finalize(&mut svm, &ctx, &vault, &vote);
-    let mut vault_account = svm.get_account(&vault).unwrap();
-    let mut legacy_vault = LegacyPayoutVault::deserialize(&mut &vault_account.data[8..]).unwrap();
-    legacy_vault.version = 1;
-    let mut original_vault = PayoutVault::DISCRIMINATOR.to_vec();
-    legacy_vault.serialize(&mut original_vault).unwrap();
-    assert_eq!(original_vault.len(), 8 + LegacyPayoutVault::INIT_SPACE);
-    vault_account.data = original_vault.clone();
-    vault_account.lamports = svm.minimum_balance_for_rent_exemption(original_vault.len());
-    svm.set_account(vault, vault_account).unwrap();
-    let mut vote_account = svm.get_account(&vote).unwrap();
-    let mut legacy_vote = LegacyVaultVote::deserialize(&mut &vote_account.data[8..]).unwrap();
-    let (old_vote, old_bump) = Pubkey::find_program_address(
-        &[asset_registry::VAULT_VOTE_SEED, vault.as_ref()],
-        &asset_registry::ID,
-    );
-    legacy_vote.version = 1;
-    legacy_vote.bump = old_bump;
-    let mut original_vote = VaultVote::DISCRIMINATOR.to_vec();
-    legacy_vote.serialize(&mut original_vote).unwrap();
-    assert_eq!(original_vote.len(), 8 + LegacyVaultVote::INIT_SPACE);
-    vote_account.data = original_vote.clone();
-    vote_account.lamports = svm.minimum_balance_for_rent_exemption(original_vote.len());
-    svm.set_account(old_vote, vote_account).unwrap();
-    let claim = Pubkey::find_program_address(
-        &[
-            asset_registry::PAYOUT_CLAIM_SEED,
-            vault.as_ref(),
-            &[0],
-            ctx.buyer.pubkey().as_ref(),
-        ],
-        &asset_registry::ID,
-    )
-    .0;
-    let refund = Instruction::new_with_bytes(
-        asset_registry::ID,
-        &ixd::ClaimRefund {
-            weight: 120,
-            proof: vec![],
-        }
-        .data(),
-        acc::ClaimRefund {
-            investor: ctx.buyer.pubkey(),
-            vault,
-            vote: old_vote,
-            claim,
-            escrow,
-            payment_mint: ctx.payment_mint,
-            investor_account: ctx.buyer_payment_ata,
-            payment_token_program: TOKEN_2022,
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    );
-    assert!(
-        try_send(&mut svm, &[&ctx.buyer], std::slice::from_ref(&refund))
-            .unwrap_err()
-            .contains("AccountDidNotDeserialize")
-    );
-    send(
-        &mut svm,
-        &[&ctx.buyer],
-        &[
-            prepare_legacy_ix(ctx.buyer.pubkey(), vault),
-            prepare_legacy_ix(ctx.buyer.pubkey(), old_vote),
-        ],
-        "prepare original fixed-size v1 allocations",
-    );
-    assert_eq!(
-        &svm.get_account(&vault).unwrap().data[..original_vault.len()],
-        original_vault.as_slice()
-    );
-    assert_eq!(
-        &svm.get_account(&old_vote).unwrap().data[..original_vote.len()],
-        original_vote.as_slice()
-    );
-    assert_eq!(load::<PayoutVault>(&svm, &vault).version, 1);
-    assert_eq!(load::<VaultVote>(&svm, &old_vote).version, 1);
-    let before = token_balance(&svm, &ctx.buyer_payment_ata);
-    send(
-        &mut svm,
-        &[&ctx.buyer],
-        std::slice::from_ref(&refund),
-        "legacy terminal claim preserves original PDA and entitlement",
-    );
-    assert_eq!(
-        token_balance(&svm, &ctx.buyer_payment_ata) - before,
-        initial.total_amount
-    );
-    svm.expire_blockhash();
-    assert!(try_send(&mut svm, &[&ctx.buyer], &[refund])
-        .unwrap_err()
-        .contains("AlreadyClaimed"));
-}
-
-#[test]
 fn yield_rejects_redirected_treasury_and_zero_root_before_moving_funds() {
     let (mut svm, _) = boot();
     let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 12);
@@ -2173,20 +2109,6 @@ fn yield_rejects_redirected_treasury_and_zero_root_before_moving_funds() {
         load::<PayoutVault>(&svm, &vault).investor_yield_root,
         [0; 32]
     );
-}
-
-pub fn prepare_legacy_ix(payer: Pubkey, legacy_account: Pubkey) -> Instruction {
-    use anchor_lang::{InstructionData, ToAccountMetas};
-    Instruction::new_with_bytes(
-        asset_registry::ID,
-        &asset_registry::instruction::PrepareLegacyAccount {}.data(),
-        asset_registry::accounts::PrepareLegacyAccount {
-            payer,
-            legacy_account,
-            system_program: anchor_lang::system_program::ID,
-        }
-        .to_account_metas(None),
-    )
 }
 
 // ── Emergency pause (Platform.pause_flags) ───────────────────────────────────

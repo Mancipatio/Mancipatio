@@ -338,8 +338,7 @@ pub fn retire_pending_proposal(
 
 /// Reads the parent key stored in the first field (byte 8) of a registry
 /// account without deserializing the rest, after checking its address, owner
-/// and discriminator. `ShareClass.asset` and `Asset.issuer` sit there in every
-/// layout version, so legacy v1 share classes read the same as v2 ones.
+/// and discriminator. `ShareClass.asset` and `Asset.issuer` sit there.
 pub fn read_parent_key(
     account: &AccountInfo,
     expected_key: &Pubkey,
@@ -357,8 +356,8 @@ pub fn read_parent_key(
     Ok(Pubkey::new_from_array(parent))
 }
 
-/// Checks issuance before any CPI. Legacy optional-field padding must never
-/// be mistaken for an initialized v2 lifetime counter.
+/// Checks issuance before any CPI. Only `SHARE_CLASS_STATE_VERSION` carries an
+/// initialized lifetime counter; any other version fails closed.
 pub fn next_issuance_supply(
     share_class: &crate::state::ShareClass,
     amount: u64,

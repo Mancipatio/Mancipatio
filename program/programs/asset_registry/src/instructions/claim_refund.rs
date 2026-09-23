@@ -20,7 +20,7 @@ pub struct ClaimRefund<'info> {
         has_one = escrow @ RegistryError::Unauthorized,
         has_one = payment_mint @ RegistryError::Unauthorized,
         constraint = vault.state == PayoutVaultState::Cancelled @ RegistryError::NotCancelled,
-        constraint = vault.version == 1 || vault.version == PAYOUT_STATE_VERSION @ RegistryError::AccountMigrationRequired,
+        constraint = vault.version == PAYOUT_STATE_VERSION @ RegistryError::AccountMigrationRequired,
         constraint = !vault.vote_pending @ RegistryError::InvalidVaultVoteRound,
     )]
     pub vault: Box<Account<'info, PayoutVault>>,
@@ -65,41 +65,21 @@ pub fn handle_claim_refund(
     weight: u64,
     proof: Vec<[u8; 32]>,
 ) -> Result<()> {
-    // A size-prepared legacy terminal refund retains its original vote PDA;
-    // it does not reinterpret or reactivate that old vote as a new round.
     let vault_key = ctx.accounts.vault.key();
-    let expected_vote = if ctx.accounts.vault.version == 1 {
-        require!(
-            ctx.accounts.vote.version == 1
-                && ctx.accounts.vote.round == 0
-                && ctx.accounts.vault.vote_round == 0,
-            RegistryError::InvalidVaultVoteRound
-        );
-        Pubkey::create_program_address(
-            &[
-                VAULT_VOTE_SEED,
-                vault_key.as_ref(),
-                &[ctx.accounts.vote.bump],
-            ],
-            &crate::ID,
-        )
-        .map_err(|_| RegistryError::Unauthorized)?
-    } else {
-        require!(
-            ctx.accounts.vote.version == PAYOUT_STATE_VERSION,
-            RegistryError::InvalidVaultVoteRound
-        );
-        Pubkey::create_program_address(
-            &[
-                VAULT_VOTE_SEED,
-                vault_key.as_ref(),
-                &ctx.accounts.vote.round.to_le_bytes(),
-                &[ctx.accounts.vote.bump],
-            ],
-            &crate::ID,
-        )
-        .map_err(|_| RegistryError::Unauthorized)?
-    };
+    require!(
+        ctx.accounts.vote.version == PAYOUT_STATE_VERSION,
+        RegistryError::InvalidVaultVoteRound
+    );
+    let expected_vote = Pubkey::create_program_address(
+        &[
+            VAULT_VOTE_SEED,
+            vault_key.as_ref(),
+            &ctx.accounts.vote.round.to_le_bytes(),
+            &[ctx.accounts.vote.bump],
+        ],
+        &crate::ID,
+    )
+    .map_err(|_| RegistryError::Unauthorized)?;
     require_keys_eq!(
         ctx.accounts.vote.key(),
         expected_vote,

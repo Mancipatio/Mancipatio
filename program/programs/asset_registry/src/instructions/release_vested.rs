@@ -28,8 +28,8 @@ pub fn release_vested<'info>(
         RegistryError::VestingNotActive
     );
     let schedule_total = crate::util::vesting_schedule_total(&series.tranches)?;
-    // Identical locked denominator before and after cancellation. A legacy
-    // inconsistent series requires a reviewed migration, never a guessed split.
+    // Identical locked denominator before and after cancellation. An
+    // inconsistent series is rejected, never split by guesswork.
     require!(
         schedule_total == series.total_allocated && schedule_total > 0,
         RegistryError::VestingAllocationMismatch

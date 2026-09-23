@@ -490,6 +490,39 @@ fn happy_path_registry_lifecycle() {
             "transfer_hook::SHARE_CLASS_DISCRIMINATOR drifted from asset_registry::ShareClass"
         );
     }
+    // The hook also hardcodes the escrow identity / marker discriminators and
+    // reads `EscrowIdentity.refund_owner` at bytes 8..40 of a >= 57-byte
+    // account. Pin every one of those so a registry change cannot drift.
+    {
+        use anchor_lang::{AccountSerialize, Discriminator, Space};
+        use asset_registry::{EscrowIdentity, EscrowMarker};
+        assert_eq!(
+            EscrowIdentity::DISCRIMINATOR,
+            &transfer_hook::ESCROW_IDENTITY_DISCRIMINATOR[..],
+            "transfer_hook::ESCROW_IDENTITY_DISCRIMINATOR drifted from asset_registry::EscrowIdentity"
+        );
+        assert_eq!(
+            EscrowMarker::DISCRIMINATOR,
+            &transfer_hook::ESCROW_MARKER_DISCRIMINATOR[..],
+            "transfer_hook::ESCROW_MARKER_DISCRIMINATOR drifted from asset_registry::EscrowMarker"
+        );
+        assert_eq!(8 + EscrowIdentity::INIT_SPACE, 57, "EscrowIdentity size");
+        let refund_owner = Pubkey::new_unique();
+        let identity = EscrowIdentity {
+            refund_owner,
+            own_deposited: u64::MAX,
+            own_refunded: 7,
+            bump: 254,
+        };
+        let mut bytes = Vec::new();
+        identity.try_serialize(&mut bytes).unwrap();
+        assert_eq!(bytes.len(), 57, "serialized EscrowIdentity size");
+        assert_eq!(
+            &bytes[..8],
+            &transfer_hook::ESCROW_IDENTITY_DISCRIMINATOR[..]
+        );
+        assert_eq!(&bytes[8..40], refund_owner.as_ref(), "refund_owner offset");
+    }
     // Auto-created hook config: Open mode, bound to this share class.
     let hook_cfg: transfer_hook::TransferHookConfig =
         load(&svm, &hook_config_pda, "hook config (auto-created)");

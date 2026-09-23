@@ -1576,10 +1576,11 @@ fn active_surplus_preserves_all_unpaid_allocations_and_requires_authority_and_fi
     assert_eq!((series.deposited, series.total_released), (400, 400));
 }
 
+/// 2E removed the permissionless identity attach: a series whose
+/// `EscrowIdentity` PDA is absent can neither be funded nor swept. Both
+/// instructions fail at account validation and move nothing.
 #[test]
-fn legacy_overfunded_active_series_can_attach_and_recover_excess_without_rewriting_entitlements() {
-    use anchor_lang::AccountSerialize;
-    use asset_registry::error::RegistryError;
+fn missing_escrow_identity_rejects_deposit_and_surplus_withdrawal() {
     let (mut svm, _) = boot();
     let ctx = setup_series(
         &mut svm,
@@ -1589,21 +1590,10 @@ fn legacy_overfunded_active_series_can_attach_and_recover_excess_without_rewriti
         false,
         false,
         0,
-        2103,
+        2104,
     );
     deposit(&mut svm, &ctx, 400);
     donate_to_series(&mut svm, &ctx, 100);
-    // Original VestingSeries has the same layout and Active enum tag. Restore
-    // a pre-cap 500-unit historical ledger and remove the later identity PDA.
-    let mut series: VestingSeries = load(&svm, &ctx.series);
-    series.version = 1;
-    series.deposited = 500;
-    let mut account = svm.get_account(&ctx.series).unwrap();
-    series
-        .try_serialize(&mut account.data.as_mut_slice())
-        .unwrap();
-    svm.set_account(ctx.series, account).unwrap();
-    let original = svm.get_account(&ctx.series).unwrap().data;
     let identity = Pubkey::find_program_address(
         &[asset_registry::ESCROW_MARKER_SEED, ctx.series.as_ref()],
         &asset_registry::ID,
@@ -1614,50 +1604,22 @@ fn legacy_overfunded_active_series_can_attach_and_recover_excess_without_rewriti
     absent.lamports = 0;
     absent.data.clear();
     svm.set_account(identity, absent).unwrap();
-    send(
-        &mut svm,
-        &[&ctx.r0],
-        &[Instruction::new_with_bytes(
-            asset_registry::ID,
-            &ixd::RegisterVestingEscrowIdentity {}.data(),
-            acc::RegisterVestingEscrowIdentity {
-                payer: ctx.r0.pubkey(),
-                series: ctx.series,
-                identity,
-                system_program: system_program::ID,
-            }
-            .to_account_metas(None),
-        )],
-        "permissionless legacy identity attachment",
-    );
-    let recorded: EscrowIdentity = load(&svm, &identity);
-    assert_eq!((recorded.own_deposited, recorded.own_refunded), (0, 0));
-    assert_eq!(svm.get_account(&ctx.series).unwrap().data, original);
-    assert_vesting_error(
-        &try_send(&mut svm, &[&ctx.client], &[deposit_ix(&ctx, 1)]).unwrap_err(),
-        RegistryError::VestingFundingExceedsSchedule,
-    );
-    send(
-        &mut svm,
-        &[&ctx.client],
-        &[withdraw_surplus_ix(&ctx)],
-        "recover historical surplus without cancellation",
-    );
-    assert_eq!(token_balance(&svm, &ctx.client_ata), 100);
-    assert_eq!(token_balance(&svm, &ctx.escrow), 400);
-    assert_eq!(svm.get_account(&ctx.series).unwrap().data, original);
-    assert_vesting_error(
-        &try_send(&mut svm, &[&ctx.client], &[withdraw_surplus_ix(&ctx)]).unwrap_err(),
-        RegistryError::VestingNothingToWithdraw,
-    );
-    warp_to(&mut svm, 2_000);
-    claim(&mut svm, &ctx, &ctx.r0, 0).unwrap();
-    claim(&mut svm, &ctx, &ctx.r1, 1).unwrap();
-    assert_eq!(token_balance(&svm, &ctx.r0_ata), 100);
-    assert_eq!(token_balance(&svm, &ctx.r1_ata), 300);
-    assert_eq!(token_balance(&svm, &ctx.escrow), 0);
-    assert_eq!(load::<VestingSeries>(&svm, &ctx.series).deposited, 500);
-    assert_eq!(load::<EscrowIdentity>(&svm, &identity).own_refunded, 0);
+    let series_before = svm.get_account(&ctx.series).unwrap().data;
+
+    mint_to(&mut svm, &ctx.client, &ctx.mint, &ctx.client_ata, 1);
+    let client_before = token_balance(&svm, &ctx.client_ata);
+    let escrow_before = token_balance(&svm, &ctx.escrow);
+    for (label, ix) in [
+        ("deposit", deposit_ix(&ctx, 1)),
+        ("withdraw_vesting_surplus", withdraw_surplus_ix(&ctx)),
+    ] {
+        let err = try_send(&mut svm, &[&ctx.client], &[ix]).unwrap_err();
+        // 3012 AccountNotInitialized: the identity is gone, nothing recreates it.
+        assert!(err.contains("Custom(3012)"), "{label}: {err}");
+    }
+    assert_eq!(token_balance(&svm, &ctx.client_ata), client_before);
+    assert_eq!(token_balance(&svm, &ctx.escrow), escrow_before);
+    assert_eq!(svm.get_account(&ctx.series).unwrap().data, series_before);
 }
 
 // ── Emergency pause (Platform.pause_flags) ───────────────────────────────────
