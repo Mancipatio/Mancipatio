@@ -12,7 +12,7 @@ export const metadata: Metadata = {
     "How Manci collects, uses and protects personal data of issuers, investors and visitors.",
 };
 
-const LAST_UPDATED = "2026-05-25";
+const LAST_UPDATED = "2026-09-23";
 
 export default function PrivacyPage() {
   return (
@@ -27,7 +27,7 @@ export default function PrivacyPage() {
             Manci (&quot;we&quot;, &quot;us&quot;, &quot;the platform&quot;) operates a tokenization
             and custody infrastructure for real-world assets and investments on
             Solana. This Privacy Policy describes how we collect, use and
-            protect personal data when you visit manci.io or use the
+            protect personal data when you visit www.manci.io or use the
             issuer / investor consoles.
           </p>
           <p>
@@ -117,9 +117,20 @@ export default function PrivacyPage() {
               roles) — for KYB review and incident response.
             </li>
             <li>
-              <strong>Sub-processors</strong>: Vercel (hosting), Supabase
-              (database + storage), Helius (RPC + on-chain webhooks), and a
-              KYC provider once enabled. Each is bound by their own DPA.
+              <strong>Sub-processors</strong>: Vercel (hosting and server
+              functions), Supabase (database + storage), Helius (RPC +
+              on-chain webhooks), Cloudflare Turnstile (bot check on the
+              sign-in and contact forms, if enabled), Sentry (error reporting,
+              EU region, if enabled), and a KYC provider once enabled. Each is
+              bound by their own DPA.
+            </li>
+            <li>
+              <strong>Other services involved</strong>: our own mail server,
+              which sends transactional email (such as sign-in and
+              verification links) over SMTP; public Solana RPC endpoints,
+              which your browser may use to read and submit on-chain
+              transactions; and Google, only if you choose to sign in with or
+              link a Google account.
             </li>
             <li>
               <strong>Public</strong>: anything on-chain is, by design, public.
@@ -131,9 +142,11 @@ export default function PrivacyPage() {
 
         <Section title="5. Where it lives">
           <p>
-            Off-chain personal data is stored in EU-region infrastructure
-            (Vercel and Supabase Frankfurt). On-chain data lives on the
-            Solana blockchain, which is globally replicated.
+            Off-chain personal data is stored in EU-region infrastructure:
+            the database and file storage are hosted by Supabase in Ireland
+            (eu-west-1), and our server functions run on Vercel in Dublin,
+            Ireland. On-chain data lives on the Solana blockchain, which is
+            globally replicated.
           </p>
         </Section>
 
@@ -172,7 +185,10 @@ export default function PrivacyPage() {
             To exercise any of these, write to{" "}
             <a href="mailto:privacy@mancipatio.io">privacy@mancipatio.io</a>{" "}
             with the wallet you control as the subject and a signed message
-            proving control over it.
+            proving control over it. If your account has no wallet (you sign
+            in with email or Google), send your request to{" "}
+            <a href="mailto:privacy@mancipatio.io">privacy@mancipatio.io</a>{" "}
+            from the email address on your account.
           </p>
         </Section>
 
