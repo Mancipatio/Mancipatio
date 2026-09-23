@@ -60,6 +60,11 @@ import { RequireRole } from "@/components/require-role";
 import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
+import {
+  bookTreasuryMintWhenFinalized,
+  releaseSaleApproval,
+  reserveTreasuryMint,
+} from "@/lib/sale-approvals";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -436,6 +441,8 @@ function ShareClassDetail({
   const { isSuperAdmin } = useRole();
   const wallet = conn.wallet?.account.address;
   const [mintAmount, setMintAmount] = useState("");
+  // Declared EUR value of a treasury mint (counted against the raise limit).
+  const [mintEur, setMintEur] = useState("");
   const [confirmMint, setConfirmMint] = useState(false);
   const [confirmLock, setConfirmLock] = useState(false);
   const [scPda, setScPda] = useState<Address | null>(null);
@@ -788,16 +795,35 @@ function ShareClassDetail({
   // Mints into the ISSUER TREASURY — the token account owned by the signing
   // issuer authority (the connected wallet). That is the only destination the
   // program accepts from this screen; see the destination-binding note above.
+  //
+  // Program package 2B: only an Admin issuer key reaches the treasury, and the
+  // mint counts against the issuer's (SPV's) rolling 12-month raise limit:
+  // its declared EUR value is reserved first (/api/sale-approvals/treasury-mint)
+  // and booked once the transaction finalizes. A failed send releases it.
   async function mintToTreasury(reason: string) {
     if (!wallet || !conn.wallet || !issuerPda || !scPda || !mintAmount.trim())
       return;
     if (!isIssuerAuthority) return;
     const destination = wallet;
     const amount = BigInt(mintAmount);
+    const eurValue = Number(mintEur.replace(/[^\d.]/g, ""));
+    if (!Number.isFinite(eurValue) || eurValue <= 0) {
+      toast.showError("EUR value required", "Enter the EUR value this mint counts against the raise limit.");
+      return;
+    }
     const pendingId = toast.showPending(
       `Minting ${amount} units to the issuer treasury…`,
     );
+    let reservationId: string | null = null;
+    let sent = false;
     try {
+      const reserved = await reserveTreasuryMint(conn.wallet, {
+        share_class: scPda,
+        amount_units: amount.toString(),
+        amount_eur: eurValue,
+        reason,
+      });
+      reservationId = reserved.reservation_id;
       const { signer } = createWalletTransactionSigner(conn.wallet);
       const mint = sc.mint;
       const [ata] = await findAssociatedTokenPda({
@@ -831,6 +857,7 @@ function ShareClassDetail({
         instructions: [createAtaIx, mintIx],
         feePayer: signer,
       });
+      sent = true;
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Minted to treasury" });
       void recordAudit({
@@ -845,10 +872,29 @@ function ShareClassDetail({
           destination_wallet: destination.toString(),
           destination_token_account: ata.toString(),
           amount: amount.toString(),
+          amount_eur: eurValue,
+          reservation_id: reservationId,
         },
       });
+      const bookingId = reservationId;
+      void bookTreasuryMintWhenFinalized(client.runtime.rpc, conn.wallet, bookingId, sig)
+        .then((booked) => {
+          if (!booked) {
+            toast.showError(
+              "Treasury mint not booked yet",
+              `The mint landed, but its booking against the raise limit is still pending (reservation ${bookingId}). It stays counted at the reserved value.`,
+            );
+          }
+        })
+        .catch((e) =>
+          toast.showError(
+            "Treasury mint not booked",
+            `${e instanceof Error ? e.message : "Booking failed"} (reservation ${bookingId}). It stays counted at the reserved value.`,
+          ),
+        );
       setConfirmMint(false);
       setMintAmount("");
+      setMintEur("");
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
@@ -856,6 +902,10 @@ function ShareClassDetail({
         "Failed to mint",
         explainSendError(err),
       );
+      if (reservationId && !sent) {
+        // Nothing reached the chain: free the reserved capacity again.
+        await releaseSaleApproval(conn.wallet, reservationId, "tx_failed").catch(() => undefined);
+      }
     }
   }
 
@@ -1200,6 +1250,11 @@ function ShareClassDetail({
                     : "Could not read this asset's issuer authority — reload before minting."}
                 </p>
               )}
+              <p className="mt-1 text-[11px] text-slate-500">
+                Only an Admin issuer key can mint into the treasury
+                (TreasuryMintRequiresAdmin otherwise). Each treasury mint counts
+                its declared EUR value against the issuer&apos;s raise limit.
+              </p>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <input
@@ -1211,10 +1266,21 @@ function ShareClassDetail({
                 placeholder="Units to mint to treasury"
                 className="min-w-[240px] flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
+              <input
+                value={mintEur}
+                inputMode="decimal"
+                onChange={(e) => setMintEur(e.target.value.replace(/[^\d.]/g, ""))}
+                placeholder="EUR value (raise limit)"
+                aria-label="Declared EUR value of the minted units"
+                className="w-48 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
+              />
               <button
                 type="button"
                 disabled={
-                  tx.isSending || !mintAmount.trim() || !isIssuerAuthority
+                  tx.isSending ||
+                  !mintAmount.trim() ||
+                  !(Number(mintEur) > 0) ||
+                  !isIssuerAuthority
                 }
                 onClick={() => setConfirmMint(true)}
                 className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-900 hover:border-slate-400 disabled:opacity-50"
@@ -1261,8 +1327,13 @@ function ShareClassDetail({
               Units stay in the treasury until they are sold through a sale
               (receiver-KYC gated) or transferred out under the transfer hook.
             </p>
+            <p className="mt-2 text-xs text-slate-600">
+              The mint counts <strong>€{mintEur || "0"}</strong> against the
+              issuer&apos;s rolling 12-month raise limit: reserved before it is
+              sent, booked once it finalizes.
+            </p>
             <p className="mt-2 text-xs text-slate-500">
-              Reason will be recorded in the audit log.
+              Reason will be recorded in the audit log and the raise-limit ledger.
             </p>
           </>
         }

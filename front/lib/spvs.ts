@@ -33,7 +33,8 @@ export type SpvIssuance = {
   issued_at: string;
   note: string | null;
   recorded_by: string | null;
-  /** 'manual' (admin registry) or 'sale' (auto-booked after close_sale). Absent on pre-0027 rows. */
+  /** 'manual' (admin registry), 'sale' (booked by the server when a sale closes)
+   *  or 'treasury_mint' (an Admin-issuer treasury mint). Absent on pre-0027 rows. */
   source?: string;
   /** True when the row was recorded past the annual cap via super-admin override. Absent on pre-0027 rows. */
   cap_override?: boolean;
@@ -203,32 +204,6 @@ export async function recordIssuance(
     console.warn("[spvs] record issuance failed:", msg);
     return { ok: false, error: msg };
   }
-}
-
-/**
- * Auto-book sale proceeds against an SPV's annual EUR cap (source = 'sale').
- * Called by the launchpad after a successful close_sale when the asset profile
- * has a linked spv_id. Requires migration 0027 (source column + cap trigger);
- * the DB trigger rejects the insert if it would push the SPV over its
- * calendar-year cap (returns false with the trigger's message logged).
- */
-export async function recordSaleIssuance(
-  session: WalletSession | null | undefined,
-  input: {
-    spvId: string;
-    amountEur: number;
-    assetPda: string;
-    note?: string;
-  },
-): Promise<boolean> {
-  const res = await recordIssuance(session, {
-    spv_id: input.spvId,
-    amount_eur: input.amountEur,
-    asset_pda: input.assetPda,
-    note: input.note,
-    source: "sale",
-  });
-  return res.ok;
 }
 
 /** Sum of issuances (EUR) booked against an SPV within one calendar year. */

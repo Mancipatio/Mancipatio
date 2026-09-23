@@ -19,6 +19,7 @@ import {
   type LaunchApplication,
 } from "@/lib/launchpad";
 import { fmtMoney } from "@/lib/format";
+import { SaleApprovalsSection } from "./sale-approvals";
 
 type StatusFilter = "pending" | "needs_changes" | "approved" | "rejected" | "all";
 type Decision = Exclude<ApplicationStatus, "pending">;
@@ -505,20 +506,23 @@ function ApplicationDetail({
       )}
 
       {app.status === "approved" && (
-        <div className="mt-6 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-5">
-          <Link
-            href={`/issuer/launchpad?application=${app.id}`}
-            className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
-          >
-            Open the sale from this application →
-          </Link>
-          <Link
-            href="/issuer/onboarding"
-            className="text-sm font-medium text-slate-600 hover:underline"
-          >
-            Issuer onboarding (if not yet verified)
-          </Link>
-        </div>
+        <>
+          <SaleApprovalsSection app={app} session={session} adminWallet={adminWallet} toast={toast} />
+          <div className="mt-6 flex flex-wrap items-center gap-4 border-t border-slate-100 pt-5">
+            <Link
+              href={`/issuer/launchpad?application=${app.id}`}
+              className="rounded-lg bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+            >
+              Issuer&apos;s launchpad for this application →
+            </Link>
+            <Link
+              href="/issuer/onboarding"
+              className="text-sm font-medium text-slate-600 hover:underline"
+            >
+              Issuer onboarding (if not yet verified)
+            </Link>
+          </div>
+        </>
       )}
 
       <ConfirmModal
