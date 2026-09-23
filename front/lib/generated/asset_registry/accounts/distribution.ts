@@ -63,8 +63,8 @@ export type Distribution = {
   admin: Address;
   /**
    * Wallet that funded the escrow — `close_distribution` may only sweep the
-   * remainder to a token account owned by it (and sends the escrow's rent
-   * there too).
+   * remainder to a token account owned by it. The rent (escrow and marker)
+   * goes to `admin`, which paid for both (2D).
    */
   funder: Address;
   shareClass: Address;
@@ -96,8 +96,8 @@ export type DistributionArgs = {
   admin: Address;
   /**
    * Wallet that funded the escrow — `close_distribution` may only sweep the
-   * remainder to a token account owned by it (and sends the escrow's rent
-   * there too).
+   * remainder to a token account owned by it. The rent (escrow and marker)
+   * goes to `admin`, which paid for both (2D).
    */
   funder: Address;
   shareClass: Address;

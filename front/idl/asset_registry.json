@@ -3619,9 +3619,9 @@
         {
           "name": "authority",
           "docs": [
-            "Mut: receives the closed escrow marker's rent."
+            "Any platform Admin. Receives no rent (2D: all rent goes to",
+            "`distribution.admin`, whichever Admin closes)."
           ],
-          "writable": true,
           "signer": true
         },
         {
@@ -3707,9 +3707,9 @@
         {
           "name": "escrow_rent_recipient",
           "docs": [
-            "closed — constrained to be the distribution funder (the wallet that",
-            "owns `refund_account`), so both the remainder and the rent return to",
-            "whoever funded the distribution."
+            "lamports — constrained to be `distribution.admin`, the Admin that paid",
+            "for both at `create_distribution` (2D). The token remainder still goes",
+            "only to the funder's `refund_account`."
           ],
           "writable": true
         },
@@ -3717,7 +3717,8 @@
           "name": "escrow_marker",
           "docs": [
             "Escrow marker for the distribution PDA — closed here (rent →",
-            "authority); close is the distribution's only terminal path."
+            "`distribution.admin` via `escrow_rent_recipient`); close is the",
+            "distribution's only terminal path."
           ],
           "writable": true,
           "pda": {
@@ -3771,6 +3772,10 @@
       "accounts": [
         {
           "name": "authority",
+          "docs": [
+            "Mut (2D): receives the closed proceeds account's rent."
+          ],
+          "writable": true,
           "signer": true,
           "relations": [
             "sale"
@@ -9444,6 +9449,84 @@
       "args": []
     },
     {
+      "name": "reclaim_rent",
+      "docs": [
+        "Returns the rent of a terminal Offer (any caller; rent to the maker),",
+        "OtcDeal (`deal.admin`), CustodyVault (`vault.authority`) or revoked and",
+        "expired KycEntry (`registry.authority`). Empty escrows are closed and",
+        "the Offer / OtcDeal / CustodyVault parent is tombstoned in place so its",
+        "PDA can never be reused; a KycEntry is closed outright."
+      ],
+      "discriminator": [
+        218,
+        200,
+        19,
+        197,
+        227,
+        89,
+        192,
+        22
+      ],
+      "accounts": [
+        {
+          "name": "caller",
+          "docs": [
+            "Offer arm: any signer (the rent is fixed to the maker). Every other",
+            "arm: must equal `owner`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "owner",
+          "docs": [
+            "The recorded rent owner: `offer.maker` | `deal.admin` |",
+            "`vault.authority` | `registry.authority`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "target",
+          "docs": [
+            "The terminal account, owned by this program. Its discriminator selects",
+            "the arm, which deserializes it with `try_deserialize`; an unknown tag",
+            "(a tombstone included) is refused."
+          ],
+          "writable": true
+        },
+        {
+          "name": "linked",
+          "docs": [
+            "`Offer.escrow` | `OtcDeal.asset_escrow` | `CustodyVault.escrow` |",
+            "`KycEntry.registry`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "linked_b",
+          "docs": [
+            "`OtcDeal.payment_escrow`; `None` for every other arm."
+          ],
+          "writable": true,
+          "optional": true
+        },
+        {
+          "name": "token_program",
+          "docs": [
+            "Token program owning `linked` (token arms only)."
+          ],
+          "optional": true
+        },
+        {
+          "name": "token_program_b",
+          "docs": [
+            "Token program owning `linked_b` (OtcDeal arm only)."
+          ],
+          "optional": true
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "recover_issuer_registration",
       "docs": [
         "Recovers a Pending/Rejected legal-ID reservation with no existing assets."
@@ -12638,6 +12721,19 @@
       ]
     },
     {
+      "name": "RentReclaimed",
+      "discriminator": [
+        148,
+        54,
+        67,
+        236,
+        53,
+        252,
+        14,
+        165
+      ]
+    },
+    {
       "name": "SaleApprovalConsumed",
       "discriminator": [
         0,
@@ -13283,7 +13379,7 @@
     {
       "code": 6084,
       "name": "DepositorNotBeneficiary",
-      "msg": "A DeliveryEscrow vault may only be funded by its own beneficiary"
+      "msg": "Only a DeliveryEscrow custody vault accepts deposits, and only from its own beneficiary"
     },
     {
       "code": 6085,
@@ -13554,6 +13650,26 @@
       "code": 6138,
       "name": "HookConfigInvalid",
       "msg": "Transfer-hook config is missing or does not belong to this mint and share class"
+    },
+    {
+      "code": 6139,
+      "name": "EscrowNotEmpty",
+      "msg": "Escrow token account still holds tokens; only an empty escrow can be closed"
+    },
+    {
+      "code": 6140,
+      "name": "AccountNotClosable",
+      "msg": "Account is not closable: terminal status required (a KYC entry must be Revoked and past its expiry)"
+    },
+    {
+      "code": 6141,
+      "name": "BeneficiaryNotAllowed",
+      "msg": "Only a DeliveryEscrow custody vault may name a beneficiary"
+    },
+    {
+      "code": 6142,
+      "name": "VaultTypeRetired",
+      "msg": "ConversionPending custody vaults are retired; holder conversions use a DeliveryEscrow"
     }
   ],
   "types": [
@@ -14167,7 +14283,7 @@
             "name": "beneficiary",
             "docs": [
               "Recipient of `return_custody_vault` (DeliveryEscrow only).",
-              "`Pubkey::default()` when unused."
+              "`Pubkey::default()` for every other type (enforced at open, 2D)."
             ],
             "type": "pubkey"
           },
@@ -14191,8 +14307,9 @@
               "beyond it did not come from the beneficiary — the only other way units",
               "can land in the escrow is a raw `transfer_checked` from elsewhere (e.g.",
               "freshly emitted treasury units) — and is released only to a receiver",
-              "whose `KycEntry` passes. Appended last so the account's existing byte",
-              "layout is unchanged up to `bump`."
+              "whose `KycEntry` passes. Only a DeliveryEscrow accepts deposits (2D),",
+              "so for every other type it stays 0. Appended last so the account's",
+              "existing byte layout is unchanged up to `bump`."
             ],
             "type": "u64"
           },
@@ -14231,8 +14348,8 @@
             "name": "funder",
             "docs": [
               "Wallet that funded the escrow — `close_distribution` may only sweep the",
-              "remainder to a token account owned by it (and sends the escrow's rent",
-              "there too)."
+              "remainder to a token account owned by it. The rent (escrow and marker)",
+              "goes to `admin`, which paid for both (2D)."
             ],
             "type": "pubkey"
           },
@@ -14445,7 +14562,8 @@
         "platform-mediated (into or out of a program escrow), not wallet↔wallet.",
         "Created alongside the escrow's parent account; closed on every terminal",
         "path (settle / cancel / expire / realize / revert / return / close), rent",
-        "to the closing signer. Seeds: `[\"escrow_marker\", owner_pda]`."
+        "to the closing signer, except a distribution's, whose rent goes to",
+        "`Distribution.admin` (2D). Seeds: `[\"escrow_marker\", owner_pda]`."
       ],
       "type": {
         "kind": "struct",
@@ -16063,6 +16181,37 @@
           },
           {
             "name": "BurnAndPayout"
+          }
+        ]
+      }
+    },
+    {
+      "name": "RentReclaimed",
+      "docs": [
+        "Emitted by `reclaim_rent`: a terminal account's rent went back to its",
+        "recorded owner. `kind` is one of `RECLAIM_OFFER` / `RECLAIM_OTC` /",
+        "`RECLAIM_CUSTODY` / `RECLAIM_KYC`; `lamports` is everything `owner`",
+        "received (escrow rent plus the parent's rent above the tombstone minimum,",
+        "or the whole KycEntry)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "target",
+            "type": "pubkey"
+          },
+          {
+            "name": "owner",
+            "type": "pubkey"
+          },
+          {
+            "name": "lamports",
+            "type": "u64"
           }
         ]
       }

@@ -88,7 +88,7 @@ export type CustodyVault = {
   metadataHash: ReadonlyUint8Array;
   /**
    * Recipient of `return_custody_vault` (DeliveryEscrow only).
-   * `Pubkey::default()` when unused.
+   * `Pubkey::default()` for every other type (enforced at open, 2D).
    */
   beneficiary: Address;
   version: number;
@@ -103,8 +103,9 @@ export type CustodyVault = {
    * beyond it did not come from the beneficiary — the only other way units
    * can land in the escrow is a raw `transfer_checked` from elsewhere (e.g.
    * freshly emitted treasury units) — and is released only to a receiver
-   * whose `KycEntry` passes. Appended last so the account's existing byte
-   * layout is unchanged up to `bump`.
+   * whose `KycEntry` passes. Only a DeliveryEscrow accepts deposits (2D),
+   * so for every other type it stays 0. Appended last so the account's
+   * existing byte layout is unchanged up to `bump`.
    */
   deposited: bigint;
   /**
@@ -138,7 +139,7 @@ export type CustodyVaultArgs = {
   metadataHash: ReadonlyUint8Array;
   /**
    * Recipient of `return_custody_vault` (DeliveryEscrow only).
-   * `Pubkey::default()` when unused.
+   * `Pubkey::default()` for every other type (enforced at open, 2D).
    */
   beneficiary: Address;
   version: number;
@@ -153,8 +154,9 @@ export type CustodyVaultArgs = {
    * beyond it did not come from the beneficiary — the only other way units
    * can land in the escrow is a raw `transfer_checked` from elsewhere (e.g.
    * freshly emitted treasury units) — and is released only to a receiver
-   * whose `KycEntry` passes. Appended last so the account's existing byte
-   * layout is unchanged up to `bump`.
+   * whose `KycEntry` passes. Only a DeliveryEscrow accepts deposits (2D),
+   * so for every other type it stays 0. Appended last so the account's
+   * existing byte layout is unchanged up to `bump`.
    */
   deposited: number | bigint;
   /**
