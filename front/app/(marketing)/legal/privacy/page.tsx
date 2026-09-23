@@ -27,7 +27,7 @@ export default function PrivacyPage() {
             Manci (&quot;we&quot;, &quot;us&quot;, &quot;the platform&quot;) operates a tokenization
             and custody infrastructure for real-world assets and investments on
             Solana. This Privacy Policy describes how we collect, use and
-            protect personal data when you visit www.manci.io or use the
+            protect personal data when you visit manci.io or use the
             issuer / investor consoles.
           </p>
           <p>
@@ -125,12 +125,12 @@ export default function PrivacyPage() {
               bound by their own DPA.
             </li>
             <li>
-              <strong>Other services involved</strong>: our own mail server,
-              which sends transactional email (such as sign-in and
-              verification links) over SMTP; public Solana RPC endpoints,
-              which your browser may use to read and submit on-chain
-              transactions; and Google, only if you choose to sign in with or
-              link a Google account.
+              <strong>Other services involved</strong>: the mail server that
+              sends our transactional email (such as sign-in and verification
+              links); public Solana RPC endpoints, which your browser (and our
+              servers, where no dedicated endpoint is configured) may use to
+              read on-chain data and submit transactions; and Google, only if
+              you choose to sign in with or link a Google account.
             </li>
             <li>
               <strong>Public</strong>: anything on-chain is, by design, public.
@@ -185,10 +185,7 @@ export default function PrivacyPage() {
             To exercise any of these, write to{" "}
             <a href="mailto:privacy@mancipatio.io">privacy@mancipatio.io</a>{" "}
             with the wallet you control as the subject and a signed message
-            proving control over it. If your account has no wallet (you sign
-            in with email or Google), send your request to{" "}
-            <a href="mailto:privacy@mancipatio.io">privacy@mancipatio.io</a>{" "}
-            from the email address on your account.
+            proving control over it.
           </p>
         </Section>
 

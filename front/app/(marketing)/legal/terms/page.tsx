@@ -20,10 +20,7 @@ import {
  * The prototype's version of this page is a placeholder ("To be drafted by the
  * legal team"), so it does not replace anything: every operative clause below
  * is the existing text, carried over word for word. Only the presentation
- * changed. Legal wording is not edited here: the only edits since are
- * factual (the site address and the "Last updated" date). Operative changes
- * are counsel's; a material change also bumps TOS_VERSION
- * (lib/tos-version.ts), the version users record their acceptance of.
+ * changed. Legal wording is not edited here.
  */
 export const metadata: Metadata = {
   title: "Terms of Service — Manci",
@@ -31,7 +28,7 @@ export const metadata: Metadata = {
     "Terms governing access to and use of the Manci tokenization platform.",
 };
 
-const LAST_UPDATED = "2026-09-23";
+const LAST_UPDATED = "2026-05-25";
 
 export default function TermsPage() {
   return (
@@ -63,7 +60,7 @@ export default function TermsPage() {
         <Clause title="1. Acceptance" first>
           <Body>
             By connecting a wallet or registering an issuer entity on
-            www.manci.io (&quot;Manci&quot;, &quot;Service&quot;), you
+            manci.io (&quot;Manci&quot;, &quot;Service&quot;), you
             agree to these Terms. If you don&apos;t agree, do not connect or
             register.
           </Body>
