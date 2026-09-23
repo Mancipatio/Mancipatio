@@ -33,9 +33,24 @@ export const LOGIN_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
  *  Turnstile token (≤2048) and the JSON around them. */
 export const EMAIL_START_BODY_LIMIT = 4096;
 
-/** Sign-in links sent to all addresses together, per network and window.
- *  The DB limiter takes 1–100 hits per window of at most a day; a short
- *  window lets a burst delay sign-in links for minutes, not an hour. At most
- *  ≈300 links per hour. */
-export const GLOBAL_LOGIN_EMAIL_LIMIT = 50;
-export const GLOBAL_LOGIN_EMAIL_WINDOW_SECONDS = 600;
+/** Per-IP sign-in links (the /64 prefix for IPv6), per hour. */
+export const LOGIN_IP_LIMIT = 20;
+/** Sign-in links to one address, per network and hour. */
+export const LOGIN_EMAIL_LIMIT = 5;
+
+/** Circuit breaker on sign-in links to all addresses together, per network:
+ *  it bounds the damage a large distributed flood can do to the mail server's
+ *  volume and reputation (≈6000 links an hour at most). It is set far above
+ *  real sign-in traffic so it does not act as a throttle: filling it takes
+ *  100 sends inside one minute (at LOGIN_IP_LIMIT per IP an hour: at least 5
+ *  IPs or /64s, and about 300 new ones an hour to keep it full), and it clears one
+ *  minute after the burst. The DB limiter takes 1–100 hits per window of at
+ *  most a day. */
+export const GLOBAL_LOGIN_EMAIL_LIMIT = 100;
+export const GLOBAL_LOGIN_EMAIL_WINDOW_SECONDS = 60;
+
+/** In-memory, per-instance burst cap on /api/auth/email/start per IP (or
+ *  /64), checked before the Turnstile call so junk tokens cannot make
+ *  unbounded siteverify calls. Looser than the DB caps for real users. */
+export const EMAIL_START_BURST_LIMIT = 10;
+export const EMAIL_START_BURST_WINDOW_MS = 60_000;

@@ -64,6 +64,39 @@ export function assertBuildNetwork(
   }
 }
 
+/**
+ * Cloudflare Turnstile is on for a deployment only when both keys are set:
+ * the server checks tokens when TURNSTILE_SECRET_KEY is set (read at
+ * runtime), and pages render the widget only when NEXT_PUBLIC_TURNSTILE_SITE_KEY
+ * was set at build time. The secret without the site key would refuse every
+ * email sign-in and contact submission (the server fails closed and no page
+ * can produce a token), so a production build with that combination fails.
+ * The site key without the secret only warns: the widget shows, but tokens
+ * are not checked.
+ */
+export function assertBuildTurnstile(
+  phase: string,
+  env: Record<string, string | undefined> = process.env,
+  warn: (message: string) => void = console.warn,
+): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  const secret = Boolean(env.TURNSTILE_SECRET_KEY?.trim());
+  const siteKey = Boolean(env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim());
+  if (secret && !siteKey) {
+    throw new Error(
+      "TURNSTILE_SECRET_KEY is set but NEXT_PUBLIC_TURNSTILE_SITE_KEY is not: every email sign-in and contact " +
+        "submission would be refused, because no page would show the challenge. Set both for this environment " +
+        "(the site key is read at build time), or unset the secret.",
+    );
+  }
+  if (siteKey && !secret) {
+    warn(
+      "NEXT_PUBLIC_TURNSTILE_SITE_KEY is set without TURNSTILE_SECRET_KEY: the Turnstile widget shows, but the " +
+        "server does not check its tokens.",
+    );
+  }
+}
+
 // Site-wide browser hardening. No Content-Security-Policy yet: it needs the
 // wallet, RPC and Supabase origins per network and a nonce for Next's inline
 // scripts, and ships separately (report-only first).
@@ -89,11 +122,19 @@ const SECURITY_HEADERS = [
 const SENSITIVE_SOURCES = [
   "/account/:path*",
   "/api/account/:path*",
-  "/login/:path*",
+  // Pages under /login (/login/email?token=…), not /login itself: see below.
+  "/login/:path+",
   "/onboarding/:path*",
   "/admin/:path*",
   "/api/auth/:path*",
 ];
+
+// The sign-in page carries no credential in its URL (only ?next=<path>) and
+// hosts the Cloudflare Turnstile widget, a cross-origin iframe whose domain
+// check may rely on the Referer; no-referrer could break it (error 110200),
+// and the server fails closed. So it keeps the site-wide
+// strict-origin-when-cross-origin, and is still never stored or indexed.
+const SIGN_IN_PAGE = "/login";
 
 const nextConfig: NextConfig = {
   // The local preview uses this exact loopback hostname; production is unchanged.
@@ -111,6 +152,13 @@ const nextConfig: NextConfig = {
           { key: "X-Robots-Tag", value: "noindex, nofollow" },
         ],
       })),
+      {
+        source: SIGN_IN_PAGE,
+        headers: [
+          { key: "Cache-Control", value: "no-store" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      },
     ];
   },
   async redirects() {
@@ -129,5 +177,6 @@ const nextConfig: NextConfig = {
 
 export default function config(phase: string): NextConfig {
   assertBuildNetwork(phase);
+  assertBuildTurnstile(phase);
   return nextConfig;
 }

@@ -1,15 +1,17 @@
 import { describe, expect, it } from "vitest";
+// Next's own compiler for header sources (the regex that lands in
+// routes-manifest.json), so the test matches paths exactly as a deployment does.
+import { buildCustomRoute } from "next/dist/lib/build-custom-route";
 import config from "@/next.config";
 
 type Rule = { source: string; headers: { key: string; value: string }[] };
 
-// Mirrors Next's matching for the rules used here: every matching rule
-// applies in order and a later rule overrides the same header key.
+// Every matching rule applies in order and a later rule overrides the same
+// header key.
 function headersFor(rules: Rule[], path: string): Record<string, string> {
   const out: Record<string, string> = {};
   for (const rule of rules) {
-    const prefix = rule.source.replace(/\/:path\*$/, "");
-    if (path === prefix || path.startsWith(`${prefix}/`) || prefix === "") {
+    if (new RegExp(buildCustomRoute("header", rule).regex).test(path)) {
       for (const { key, value } of rule.headers) out[key.toLowerCase()] = value;
     }
   }
@@ -36,14 +38,24 @@ describe("security headers", async () => {
     expect(headersFor(rules, "/marketplace")["cache-control"]).toBeUndefined();
     for (const path of [
       "/account", "/account/security", "/api/account/profile", "/api/account/google/callback",
-      "/login", "/login/email", "/onboarding/3f2b8c1e-9a4d-4c2b-8e1f-0a1b2c3d4e5f",
+      "/login/email", "/onboarding/3f2b8c1e-9a4d-4c2b-8e1f-0a1b2c3d4e5f",
       "/admin", "/admin/kyc", "/admin/clients/42", "/api/auth/email/verify", "/api/auth/google/start",
     ]) {
-      expect(headersFor(rules, path)).toMatchObject({
+      expect(headersFor(rules, path), path).toMatchObject({
         "referrer-policy": "no-referrer", "cache-control": "no-store", "x-robots-tag": "noindex, nofollow",
       });
     }
     expect(rules[0].source).toBe("/:path*");
+  });
+
+  it("keeps the site-wide Referer policy on /login (Turnstile widget) but never stores or indexes it", () => {
+    // /login carries no credential (only ?next=<path>); its Turnstile iframe
+    // may need the Referer for Cloudflare's domain check.
+    expect(headersFor(rules, "/login")).toMatchObject({
+      "referrer-policy": "strict-origin-when-cross-origin", "cache-control": "no-store", "x-robots-tag": "noindex, nofollow",
+    });
+    // The page whose URL carries the one-time token keeps no-referrer.
+    expect(headersFor(rules, "/login/email")["referrer-policy"]).toBe("no-referrer");
   });
 
   it("does not treat look-alike paths as sensitive", () => {

@@ -34,6 +34,7 @@ beforeEach(() => {
   vi.stubGlobal("fetch", fetchMock);
   vi.stubEnv("NEXT_PUBLIC_SITE_URL", "https://www.manci.test");
   vi.stubEnv("TURNSTILE_SECRET_KEY", SECRET);
+  vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "0x4AAAAAAAAAAAAAAAAAAAAA");
   vi.spyOn(console, "error").mockImplementation(() => {});
   vi.spyOn(console, "warn").mockImplementation(() => {});
 });
@@ -151,6 +152,19 @@ describe("verifyTurnstile", () => {
     expect(await status(verifyTurnstile(request(), "XXXX.DUMMY.TOKEN.XXXX", action))).toBe("resolved");
     answer({ success: false, "error-codes": ["invalid-input-response"] });
     expect(await status(verifyTurnstile(request(), "XXXX.DUMMY.TOKEN.XXXX", action))).toBe(403);
+  });
+
+  it("refuses (503, not 'complete the check') when the secret is set but the build has no site key", async () => {
+    // No page can show the widget, so no token can ever arrive.
+    vi.stubEnv("NEXT_PUBLIC_TURNSTILE_SITE_KEY", "");
+    expect(await status(verifyTurnstile(request(), undefined, action))).toBe(503);
+    expect(await status(verifyTurnstile(request(), "tok", action))).toBe(503);
+    expect(fetchMock).not.toHaveBeenCalled();
+    const errors = vi.mocked(console.error).mock.calls.flat().map(String);
+    // One configuration error per instance, however many requests hit it
+    // (earlier tests in this file never reach this branch).
+    expect(errors.filter((line) => line.includes("NEXT_PUBLIC_TURNSTILE_SITE_KEY"))).toHaveLength(1);
+    expect(errors.join(" ")).not.toContain(SECRET);
   });
 
   it("refuses every request when a production build is configured with a test secret", async () => {

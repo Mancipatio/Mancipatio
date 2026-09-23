@@ -6,6 +6,11 @@
 // token issued for another action or hostname, an unreachable or slow
 // siteverify endpoint and a bad secret all refuse the request.
 //
+// The secret is read at runtime, but NEXT_PUBLIC_TURNSTILE_SITE_KEY is inlined
+// at build time. A deployment with the secret and no site key would ask for a
+// token no page can produce: that refuses with 503 and logs a configuration
+// error once per instance (next.config.ts also fails such a production build).
+//
 // Cloudflare's test secrets (1x…/2x…/3x…) answer with hostname "localhost"
 // and action "test", so with one of them the action and hostname checks are
 // skipped — outside production only. A production build configured with a
@@ -15,7 +20,7 @@ import "server-only";
 import { SiwsError } from "@/lib/server/siws-error";
 import { accountSiteOrigin } from "@/lib/server/account-origin";
 import { clientIpOf } from "@/app/api/clients/_helpers";
-import { TURNSTILE_TOKEN_MAX_LENGTH, type TurnstileAction } from "@/lib/turnstile";
+import { TURNSTILE_TOKEN_MAX_LENGTH, turnstileSiteKey, type TurnstileAction } from "@/lib/turnstile";
 
 export const TURNSTILE_SITEVERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverify";
 /** Kept short: the sign-in request waits on it. */
@@ -34,6 +39,9 @@ type SiteverifyResponse = {
   action?: unknown;
   "error-codes"?: unknown;
 };
+
+/** The missing-site-key configuration error is logged once per instance. */
+let warnedMissingSiteKey = false;
 
 /** True when this deployment checks Turnstile tokens. */
 export function turnstileEnabled(): boolean {
@@ -60,6 +68,14 @@ export async function verifyTurnstile(request: Request, token: unknown, action: 
   const testSecret = TEST_SECRETS.has(secret);
   if (testSecret && process.env.NODE_ENV === "production") {
     console.error("[turnstile] TURNSTILE_SECRET_KEY is a Cloudflare test key in a production build — refusing.");
+    throw unavailable();
+  }
+  if (!turnstileSiteKey()) {
+    if (!warnedMissingSiteKey) {
+      warnedMissingSiteKey = true;
+      console.error("[turnstile] TURNSTILE_SECRET_KEY is set but this build has no NEXT_PUBLIC_TURNSTILE_SITE_KEY, " +
+        "so no page shows the challenge — refusing. Set both and rebuild, or unset the secret.");
+    }
     throw unavailable();
   }
   if (typeof token !== "string" || token.length === 0) {

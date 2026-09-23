@@ -5,7 +5,9 @@
 // Turnstile is opt-in per deployment: the widget renders only when
 // NEXT_PUBLIC_TURNSTILE_SITE_KEY is set, and the server checks tokens only
 // when TURNSTILE_SECRET_KEY is set. Set both together — a secret without a
-// site key makes every protected form fail (the server fails closed).
+// site key makes every protected form fail (the server fails closed), so a
+// production build with the secret and no site key refuses to build
+// (assertBuildTurnstile in next.config.ts).
 
 /** Actions bound into the token on render and re-checked by the server
  *  (Turnstile allows [A-Za-z0-9_-], at most 32 characters). */
