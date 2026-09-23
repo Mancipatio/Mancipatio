@@ -686,6 +686,11 @@ export default function DeliveryPage() {
             Redeem deliverable-asset tokens for the physical underlying —
             deposit into escrow, tokens are burned once delivery is confirmed.
           </p>
+          <p className="mt-1 text-xs text-slate-500">
+            Shipping and confirming a delivery also need your approved on-chain
+            investor passport. Without one, your deposit is returned to your
+            wallet.
+          </p>
         </div>
         <button
           type="button"

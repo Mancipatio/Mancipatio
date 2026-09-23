@@ -237,6 +237,9 @@ pub mod asset_registry {
     }
 
     /// Opens a custody vault (`Active`) with an empty escrow token account.
+    /// A `DeliveryEscrow` pins a `KycRegistry` (optional account, required for
+    /// that type and refused for every other) that its realize checks the
+    /// beneficiary in (2C-3).
     #[allow(clippy::too_many_arguments)]
     pub fn open_custody_vault(
         ctx: Context<OpenCustodyVault>,
@@ -277,6 +280,9 @@ pub mod asset_registry {
     }
 
     /// Realizes a `Triggered` custody vault (v0.1: burn escrow + attest event).
+    /// For a `DeliveryEscrow` (conversion / delivery) the beneficiary must hold
+    /// an Approved, unexpired, jurisdiction-allowed `KycEntry` in the vault's
+    /// pinned registry; without it the exit is `return_custody_vault`.
     pub fn realize_custody_vault(ctx: Context<RealizeCustodyVault>) -> Result<()> {
         instructions::handle_realize_custody_vault(ctx)
     }

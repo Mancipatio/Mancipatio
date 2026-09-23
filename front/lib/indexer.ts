@@ -237,7 +237,8 @@ async function loadExtra<T>(table: string, decoder: { decode: (b: Uint8Array) =>
   return decodeAll<T>(await fetchAllRaw(sb, table, network), decoder, expectedVersion);
 }
 export async function loadCustodyVaultsFromIndexer(): Promise<CustodyVault[]> {
-  return loadExtra("custody_vaults", getCustodyVaultDecoder());
+  // CustodyVault v2 (2C-3) appends kyc_registry; v1 rows need a reconcile.
+  return loadExtra("custody_vaults", getCustodyVaultDecoder(), 2);
 }
 export async function loadProposalsFromIndexer(): Promise<Proposal[]> {
   return loadExtra("proposals", getProposalDecoder());

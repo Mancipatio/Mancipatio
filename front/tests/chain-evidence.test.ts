@@ -40,7 +40,10 @@ const buyer = key(1),
   vault = key(9),
   escrow = key(10),
   // Platform PDA stand-in (read-only emergency-pause gate, last named account).
-  platform = key(11);
+  platform = key(11),
+  // DeliveryEscrow realize (2C-3): the pinned KYC registry + the holder's entry.
+  kycRegistry = key(12),
+  kycEntry = key(13);
 const signature = getBase58Decoder().decode(new Uint8Array(64).fill(42));
 const expected = {
   buyer,
@@ -76,6 +79,8 @@ function fixture() {
     address(CLASSIC_TOKEN_PROGRAM),
     address(TOKEN_2022_PROGRAM),
     platform,
+    kycRegistry,
+    kycEntry,
   ];
   const compiled = (
     program: string,
@@ -490,6 +495,8 @@ describe("custody realization transaction evidence", () => {
           escrowMarker: escrow,
           tokenProgram: address(TOKEN_2022_PROGRAM),
           authorityAdminRecord: buyer,
+          kycRegistry,
+          kycEntry,
         }),
       ),
     ];

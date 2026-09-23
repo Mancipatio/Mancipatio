@@ -25,6 +25,7 @@ import {
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
 import {
   fetchMaybeCustodyVault,
   findAssetPda,
@@ -71,6 +72,20 @@ import { RequireRole } from "@/components/require-role";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
+import {
+  loadBeneficiaryPassport,
+  passportShortcutHref,
+  pinnedRegistryWarning,
+  PASSPORT_STATUS_LABEL,
+  realizeKycAccounts,
+  type PassportEvaluation,
+} from "@/lib/custody-kyc";
+import {
+  kycRegistryUnavailableReason,
+  loadKycAuthorityContext,
+} from "@/lib/kyc-authority";
+import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
+import { detectNetwork } from "@/lib/network";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -702,6 +717,28 @@ function VaultDetail({
   // what decides whether a return needs the beneficiary's KYC — see the
   // "Escrow balance" field below.
   const [escrowBalance, setEscrowBalance] = useState<bigint | null>(null);
+  // KYC at conversion / delivery (2C-3): a DeliveryEscrow realize needs the
+  // beneficiary's passport in the registry the vault pinned at open.
+  const kycGated = vault.vaultType === VaultType.DeliveryEscrow;
+  const [passport, setPassport] = useState<PassportEvaluation | null>(null);
+
+  useEffect(() => {
+    if (!kycGated) return;
+    let cancelled = false;
+    async function loadPassport() {
+      const result = await loadBeneficiaryPassport(client.runtime.rpc, {
+        vaultType: vault.vaultType,
+        beneficiary: vault.beneficiary,
+        kycRegistry: vault.kycRegistry,
+      });
+      if (!cancelled) setPassport(result);
+    }
+    void loadPassport();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, kycGated, vault.vaultType, vault.beneficiary, vault.kycRegistry, vault.state]);
+  const realizeBlocked = kycGated ? passportBlockReason(passport) : null;
 
   useEffect(() => {
     let cancelled = false;
@@ -781,7 +818,9 @@ function VaultDetail({
     try {
       const signer = walletSigner(conn.wallet);
       // escrowMarker (["escrow_marker", vault PDA]) is auto-derived by the
-      // async builder — closed on-chain by this terminal path.
+      // async builder — closed on-chain by this terminal path. A
+      // DeliveryEscrow also passes its pinned registry and the beneficiary's
+      // KycEntry (2C-3); other types pass neither.
       const ix = await getRealizeCustodyVaultInstructionAsync({
         authority: signer,
         shareClass: vault.shareClass,
@@ -793,6 +832,7 @@ function VaultDetail({
         mint: vault.mint,
         escrow: vault.escrow,
         tokenProgram: TOKEN_2022_ADDRESS,
+        ...(await realizeKycAccounts(vault)),
       });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
@@ -807,6 +847,7 @@ function VaultDetail({
         metadata: {
           vault_pda: vaultPda.toString(),
           realize_action: vault.realizeAction,
+          kyc_registry: kycGated ? vault.kycRegistry.toString() : null,
         },
       });
       setConfirmRealize(false);
@@ -1044,7 +1085,21 @@ function VaultDetail({
         <Field label="Mint" value={vault.mint.toString()} mono />
         <Field label="Escrow" value={vault.escrow.toString()} mono />
         <Field label="Vault PDA" value={vaultPda?.toString() ?? "…"} mono />
+        {kycGated && (
+          <Field label="Beneficiary" value={vault.beneficiary.toString()} mono />
+        )}
       </dl>
+
+      {kycGated && (
+        <BeneficiaryPassport
+          passport={passport}
+          registry={vault.kycRegistry.toString()}
+          shortcutHref={passportShortcutHref({
+            clientId: null,
+            wallet: vault.beneficiary.toString(),
+          })}
+        />
+      )}
 
       {vaultPda && (
         <CustodyAuthorityTransfer vaultPda={vaultPda} onRefresh={onRefresh} />
@@ -1094,7 +1149,8 @@ function VaultDetail({
           {vault.state === VaultState.Triggered && (
             <button
               type="button"
-              disabled={tx.isSending}
+              disabled={tx.isSending || realizeBlocked !== null}
+              title={realizeBlocked ?? undefined}
               onClick={() => setConfirmRealize(true)}
               className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-900 hover:bg-red-100 disabled:opacity-50"
             >
@@ -1130,8 +1186,15 @@ function VaultDetail({
                   Delivery / conversion escrows hold a holder&apos;s own deposit
                   — revert (burn) is banned on-chain. Return sends the deposit
                   back to the vault&apos;s beneficiary; confirm &amp; burn is
-                  offered from the request queue.
+                  offered from the request queue and needs the holder&apos;s
+                  approved investor passport. Without a passport the
+                  holder&apos;s deposit can be returned.
                 </p>
+                {vault.state === VaultState.Triggered && realizeBlocked && (
+                  <p className="w-full text-xs text-amber-700">
+                    Realize is disabled: {realizeBlocked}
+                  </p>
+                )}
               </>
             )}
           {(vault.state === VaultState.Realized ||
@@ -1239,6 +1302,106 @@ function VaultDetail({
   );
 }
 
+/** The KYC registry a new DeliveryEscrow pins (2C-3): the platform registry
+ *  (`NEXT_PUBLIC_KYC_REGISTRY`, or the resolved one when unpinned). `error`
+ *  explains why none is usable; the open stays blocked until it resolves. */
+function usePlatformKycRegistry(enabled: boolean): {
+  registry: Address | null;
+  error: string | null;
+} {
+  const client = useSolanaClient();
+  const [state, setState] = useState<{ registry: Address | null; error: string | null }>({
+    registry: null,
+    error: null,
+  });
+  useEffect(() => {
+    if (!enabled) return;
+    let cancelled = false;
+    async function resolve() {
+      try {
+        const ctx = await loadKycAuthorityContext(client.runtime.rpc);
+        const reason = kycRegistryUnavailableReason(ctx, detectNetwork());
+        const next = ctx.registry
+          ? { registry: ctx.registry.address, error: null }
+          : {
+              registry: null,
+              error:
+                reason ??
+                "No KYC registry exists yet — create the platform registry on /admin/kyc first.",
+            };
+        if (!cancelled) setState(next);
+      } catch (err) {
+        if (!cancelled)
+          setState({
+            registry: null,
+            error: `Could not resolve the platform KYC registry: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          });
+      }
+    }
+    void resolve();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, enabled]);
+  return state;
+}
+
+/** The holder's passport in `registry` — shown when a request is approved
+ *  (information only: opening and depositing need no KYC). */
+function useHolderPassport(
+  registry: Address | null,
+  holderWallet: string,
+): PassportEvaluation | null {
+  const client = useSolanaClient();
+  const [passport, setPassport] = useState<PassportEvaluation | null>(null);
+  useEffect(() => {
+    if (!registry) return;
+    let cancelled = false;
+    async function loadPassport() {
+      const result = await loadBeneficiaryPassport(client.runtime.rpc, {
+        vaultType: VaultType.DeliveryEscrow,
+        beneficiary: holderWallet,
+        kycRegistry: registry!,
+      });
+      if (!cancelled) setPassport(result);
+    }
+    void loadPassport();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, registry, holderWallet]);
+  return passport;
+}
+
+/** Read-only line naming the registry a DeliveryEscrow will pin. */
+function PinnedRegistryLine({
+  registry,
+  error,
+}: {
+  registry: Address | null;
+  error: string | null;
+}) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <p className="font-medium uppercase tracking-wide text-slate-500">
+        KYC registry pinned on the vault
+      </p>
+      {registry ? (
+        <p className="mt-1 break-all font-mono text-slate-700">{registry}</p>
+      ) : (
+        <p className="mt-1 text-red-600">{error ?? "Resolving the platform KYC registry…"}</p>
+      )}
+      <p className="mt-1 text-slate-500">
+        Opening and depositing need no KYC. Confirming the conversion / delivery
+        (realize) requires the holder&apos;s approved investor passport in this
+        registry; without one the deposit can only be returned.
+      </p>
+    </div>
+  );
+}
+
 function OpenVaultModal({
   data,
   onClose,
@@ -1264,6 +1427,15 @@ function OpenVaultModal({
   const [amount, setAmount] = useState("");
   const [deadlineDate, setDeadlineDate] = useState("");
   const [beneficiary, setBeneficiary] = useState("");
+  // A DeliveryEscrow pins the platform KYC registry (2C-3); every other type
+  // passes none (the program refuses a pin on them).
+  const platformRegistry = usePlatformKycRegistry(
+    vaultType === VaultType.DeliveryEscrow,
+  );
+  const registryBlock =
+    vaultType === VaultType.DeliveryEscrow && platformRegistry.registry === null
+      ? (platformRegistry.error ?? "Resolving the platform KYC registry…")
+      : null;
   // realize_custody_vault only implements BurnAndAttest; a vault opened with
   // any other action could never be realized, reverted or returned. The
   // option is disabled in the <select>, and this guard also covers a value
@@ -1295,7 +1467,8 @@ function OpenVaultModal({
       !issuerLegalId.trim() ||
       !assetId.trim() ||
       !amount.trim() ||
-      !attHashOk
+      !attHashOk ||
+      registryBlock !== null
     )
       return;
     try {
@@ -1378,6 +1551,9 @@ function OpenVaultModal({
           vaultType === VaultType.DeliveryEscrow
             ? address(beneficiary.trim())
             : address("11111111111111111111111111111111"),
+        ...(vaultType === VaultType.DeliveryEscrow && platformRegistry.registry
+          ? { kycRegistry: platformRegistry.registry }
+          : {}),
       });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
@@ -1483,6 +1659,14 @@ function OpenVaultModal({
                   </option>
                 ))}
               </select>
+              {vaultType === VaultType.ConversionPending && (
+                <p className="mt-1 text-xs font-medium text-amber-700">
+                  Not for holder conversions: this type&apos;s realize is not
+                  KYC-gated. Holder conversions go through the request queue
+                  (Delivery escrow), which checks the holder&apos;s investor
+                  passport.
+                </p>
+              )}
             </label>
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -1554,6 +1738,12 @@ function OpenVaultModal({
               </label>
             )}
           </div>
+          {vaultType === VaultType.DeliveryEscrow && (
+            <PinnedRegistryLine
+              registry={platformRegistry.registry}
+              error={platformRegistry.error}
+            />
+          )}
           <AttestationDocSection
             kindLabel="underlying agreement or vault spec"
             file={attFile}
@@ -1586,6 +1776,7 @@ function OpenVaultModal({
               !assetId.trim() ||
               !amount.trim() ||
               !attHashOk ||
+              registryBlock !== null ||
               (vaultType === VaultType.DeliveryEscrow &&
                 (!beneficiary.trim() ||
                   deliveryDeadlineError(deadlineDate) !== null))
@@ -1635,7 +1826,105 @@ type VaultOnChainInfo = {
   state: VaultState;
   authority: string;
   deadline: bigint;
+  vaultType: VaultType;
+  beneficiary: string;
+  /** Registry pinned at open (2C-3); `1111…1111` for non-delivery vaults. */
+  kycRegistry: string;
+  /** Beneficiary passport in the pinned registry (DeliveryEscrow only). */
+  passport: PassportEvaluation | null;
 };
+
+/** Reads a request's vault and, for a DeliveryEscrow, its beneficiary's
+ *  passport. Null when the vault does not exist. */
+async function readVaultOnChainInfo(
+  rpc: Parameters<typeof fetchMaybeCustodyVault>[0],
+  vaultPda: Address,
+): Promise<VaultOnChainInfo | null> {
+  const maybe = await fetchMaybeCustodyVault(rpc, vaultPda);
+  if (!maybe.exists) return null;
+  const v = maybe.data;
+  return {
+    state: v.state,
+    authority: v.authority.toString(),
+    deadline: v.deadline,
+    vaultType: v.vaultType,
+    beneficiary: v.beneficiary.toString(),
+    kycRegistry: v.kycRegistry.toString(),
+    passport:
+      v.vaultType === VaultType.DeliveryEscrow
+        ? await loadBeneficiaryPassport(rpc, v)
+        : null,
+  };
+}
+
+/** Fetches the live vault right before realize and returns the KYC accounts
+ *  its realize needs (the pinned registry + the beneficiary's entry). */
+async function requestRealizeKycAccounts(
+  rpc: Parameters<typeof fetchMaybeCustodyVault>[0],
+  vaultPda: Address,
+) {
+  const maybe = await fetchMaybeCustodyVault(rpc, vaultPda);
+  if (!maybe.exists) throw new Error(`Custody vault ${vaultPda} not found`);
+  return realizeKycAccounts(maybe.data);
+}
+
+/** The holder's passport for one request row, with the issue shortcut. */
+/** Why a request row has no vault info: the vault account does not exist, or
+ *  the read failed (retryable). */
+type VaultLoadIssue = "missing" | "error";
+
+/** passportBlockReason for a request row: says why the passport is unknown
+ *  instead of "Checking…" when the vault is missing, unreadable or not a
+ *  KYC-gated DeliveryEscrow. */
+function requestPassportBlock(
+  info: VaultOnChainInfo | undefined,
+  issue: VaultLoadIssue | undefined,
+): string | null {
+  if (info === undefined && issue === "missing")
+    return "The linked custody vault was not found on-chain.";
+  if (info === undefined && issue === "error")
+    return "Could not read the custody vault or the holder's investor passport — retry.";
+  if (info !== undefined && info.passport === null)
+    return "The linked vault is not a KYC-gated DeliveryEscrow — return the deposit instead.";
+  return passportBlockReason(info?.passport);
+}
+
+function RequestPassportGate({
+  info,
+  issue,
+  onRetry,
+  clientId,
+  holderWallet,
+}: {
+  info: VaultOnChainInfo | undefined;
+  issue: VaultLoadIssue | undefined;
+  onRetry: () => void;
+  clientId: string | null;
+  holderWallet: string;
+}) {
+  if (info === undefined && issue !== undefined) {
+    return (
+      <p className="mt-1 text-[11px] text-slate-600">
+        {requestPassportBlock(info, issue)}{" "}
+        <button
+          type="button"
+          onClick={onRetry}
+          className="font-medium text-brand-700 underline-offset-2 hover:underline"
+        >
+          Retry
+        </button>
+      </p>
+    );
+  }
+  return (
+    <BeneficiaryPassport
+      passport={info?.passport}
+      registry={info?.kycRegistry ?? null}
+      shortcutHref={passportShortcutHref({ clientId, wallet: holderWallet })}
+      compact
+    />
+  );
+}
 
 function deadlinePassed(info: VaultOnChainInfo): boolean {
   return (
@@ -1673,6 +1962,9 @@ function ConversionRequestsSection({
   const [vaultInfo, setVaultInfo] = useState<Map<string, VaultOnChainInfo>>(
     new Map(),
   );
+  const [vaultLoadIssue, setVaultLoadIssue] = useState<
+    Map<string, VaultLoadIssue>
+  >(new Map());
 
   const loadVaultInfo = useCallback(
     async (rows: ConversionRequest[]) => {
@@ -1682,29 +1974,26 @@ function ConversionRequestsSection({
           (r.status === "vault_opened" || r.status === "deposited"),
       );
       const entries: Array<[string, VaultOnChainInfo]> = [];
+      const issues: Array<[string, VaultLoadIssue]> = [];
       await Promise.all(
         targets.map(async (r) => {
           try {
-            const maybe = await fetchMaybeCustodyVault(
+            const info = await readVaultOnChainInfo(
               client.runtime.rpc,
               address(r.vault_pda!),
             );
-            if (maybe.exists) {
-              entries.push([
-                r.vault_pda!,
-                {
-                  state: maybe.data.state,
-                  authority: maybe.data.authority.toString(),
-                  deadline: maybe.data.deadline,
-                },
-              ]);
-            }
+            if (info) entries.push([r.vault_pda!, info]);
+            else issues.push([r.vault_pda!, "missing"]);
           } catch {
-            // leave unknown — buttons stay enabled, the program still gates
+            // Unknown: Confirm conversion fails CLOSED (passport unverifiable)
+            // while the other buttons stay enabled — the program still gates.
+            // The row offers a retry.
+            issues.push([r.vault_pda!, "error"]);
           }
         }),
       );
       setVaultInfo(new Map(entries));
+      setVaultLoadIssue(new Map(issues));
     },
     [client],
   );
@@ -1799,7 +2088,13 @@ function ConversionRequestsSection({
         ),
       });
       // escrowMarker (["escrow_marker", vault PDA]) is auto-derived by the
-      // async builder — closed on-chain by this terminal path.
+      // async builder — closed on-chain by this terminal path. The KYC gate
+      // (2C-3) needs the pinned registry + the holder's KycEntry; if it
+      // fails, the whole transaction (trigger included) rolls back.
+      const kycAccounts = await requestRealizeKycAccounts(
+        client.runtime.rpc,
+        vaultPda,
+      );
       const realizeIx = await getRealizeCustodyVaultInstructionAsync({
         authority: signer,
         shareClass: address(req.share_class_pda),
@@ -1811,6 +2106,7 @@ function ConversionRequestsSection({
         mint: address(req.mint),
         escrow,
         tokenProgram: TOKEN_2022_ADDRESS,
+        ...kycAccounts,
       });
       // BurnAndAttest burns the escrowed tokens — trigger then realize in one
       // transaction; the attestation hash the vault carried at open is what
@@ -1837,6 +2133,7 @@ function ConversionRequestsSection({
           conversion_request_id: req.id,
           vault_pda: req.vault_pda,
           realize_action: RealizeAction.BurnAndAttest,
+          kyc_registry: kycAccounts.kycRegistry ?? null,
         },
       });
       setConfirmReq(null);
@@ -2196,6 +2493,12 @@ function ConversionRequestsSection({
                 info === undefined
                   ? undefined
                   : `Vault authority is ${info.authority} — trigger/realize and the pre-deadline return only work from that wallet.`;
+              // KYC at conversion (2C-3): the realize needs the holder's
+              // approved passport in the vault's pinned registry.
+              const loadIssue = r.vault_pda
+                ? vaultLoadIssue.get(r.vault_pda)
+                : undefined;
+              const passportBlock = requestPassportBlock(info, loadIssue);
               return (
                 <tr key={r.id} className="text-slate-700">
                   <td className="px-4 py-3">
@@ -2239,6 +2542,15 @@ function ConversionRequestsSection({
                     >
                       {r.contact || "—"}
                     </p>
+                    {(r.status === "vault_opened" || r.status === "deposited") && (
+                      <RequestPassportGate
+                        info={info}
+                        issue={loadIssue}
+                        onRetry={() => void loadVaultInfo(requests)}
+                        clientId={r.client_id}
+                        holderWallet={r.holder_wallet}
+                      />
+                    )}
                   </td>
                   <td className="px-4 py-3 text-right font-mono">{r.amount}</td>
                   <td className="px-4 py-3">
@@ -2314,9 +2626,15 @@ function ConversionRequestsSection({
                         <button
                           type="button"
                           disabled={
-                            tx.isSending || !r.vault_pda || !isVaultAuthority
+                            tx.isSending ||
+                            !r.vault_pda ||
+                            !isVaultAuthority ||
+                            passportBlock !== null
                           }
-                          title={!isVaultAuthority ? authorityHint : undefined}
+                          title={
+                            passportBlock ??
+                            (!isVaultAuthority ? authorityHint : undefined)
+                          }
                           onClick={() => setConfirmReq(r)}
                           className="text-emerald-700 underline-offset-2 hover:underline disabled:opacity-50"
                         >
@@ -2496,6 +2814,12 @@ function ApproveConversionModal({
   const [attPasted, setAttPasted] = useState("");
   const attHash = attFile ? attFileHash : attPasted.trim().toLowerCase();
   const attHashOk = isValidSha256Hex(attHash);
+  // KYC at conversion / delivery (2C-3): the vault pins the platform KYC
+  // registry; the holder's passport there is shown for information (the
+  // open needs none — the realize does).
+  const platformRegistry = usePlatformKycRegistry(true);
+  const pinnedRegistry = platformRegistry.registry;
+  const holderPassport = useHolderPassport(pinnedRegistry, req.holder_wallet);
 
   async function approve() {
     if (
@@ -2503,6 +2827,7 @@ function ApproveConversionModal({
       inputError ||
       deadlineError ||
       !attHashOk ||
+      !pinnedRegistry ||
       !recovery.ready ||
       recovery.pending
     )
@@ -2539,6 +2864,7 @@ function ApproveConversionModal({
             ),
             metadataHash: hexToBytes32(attHash),
             beneficiary: address(req.holder_wallet),
+            kycRegistry: pinnedRegistry,
           });
         },
         (ix) => tx.send({ instructions: [ix], feePayer: signer }),
@@ -2561,6 +2887,7 @@ function ApproveConversionModal({
           vault_id: intent.vaultId,
           vault_type: "DeliveryEscrow",
           beneficiary: req.holder_wallet,
+          kyc_registry: pinnedRegistry,
           metadata_hash: attHash,
           metadata_hash_source: attFile ? "file" : "pasted",
         },
@@ -2715,6 +3042,20 @@ function ApproveConversionModal({
               </FieldHelp>
             </label>
           </div>
+          <PinnedRegistryLine
+            registry={pinnedRegistry}
+            error={platformRegistry.error}
+          />
+          {pinnedRegistry && (
+            <BeneficiaryPassport
+              passport={holderPassport}
+              registry={pinnedRegistry}
+              shortcutHref={passportShortcutHref({
+                clientId: req.client_id,
+                wallet: req.holder_wallet,
+              })}
+            />
+          )}
           <AttestationDocSection
             kindLabel="conversion agreement"
             file={attFile}
@@ -2749,7 +3090,8 @@ function ApproveConversionModal({
               !vaultId.trim() ||
               !amount.trim() ||
               deadlineError !== null ||
-              !attHashOk
+              !attHashOk ||
+              !pinnedRegistry
             }
             className="rounded-md bg-brand-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-800 disabled:opacity-50"
           >
@@ -2757,6 +3099,95 @@ function ApproveConversionModal({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+/** The platform KYC registry pin, or null (a malformed pin must not crash a
+ *  render — loadKycAuthorityContext reports it where a registry is needed). */
+function platformKycRegistryPin(): string | null {
+  try {
+    return configuredKycRegistry();
+  } catch {
+    return null;
+  }
+}
+
+const PASSPORT_BADGE: Record<PassportEvaluation["status"], string> = {
+  approved: "bg-emerald-100 text-emerald-800 border-emerald-200",
+  missing: "bg-amber-100 text-amber-800 border-amber-200",
+  not_approved: "bg-red-100 text-red-800 border-red-200",
+  expired: "bg-amber-100 text-amber-800 border-amber-200",
+  jurisdiction: "bg-red-100 text-red-800 border-red-200",
+  registry_unreadable: "bg-slate-200 text-slate-800 border-slate-300",
+};
+
+/** Why a DeliveryEscrow realize (conversion / delivery) cannot run yet, or
+ *  null when the beneficiary's passport passes. Unknown blocks too: the
+ *  program would refuse, and the deposit's exit is return instead. */
+function passportBlockReason(passport: PassportEvaluation | null | undefined): string | null {
+  if (passport === undefined || passport === null) {
+    return "Checking the holder's investor passport…";
+  }
+  if (passport.status === "approved") return null;
+  return `${passport.reason} Converting or delivering needs an approved passport; without one the deposit can only be returned.`;
+}
+
+/** KYC at conversion / delivery (2C-3): the beneficiary's passport in the
+ *  registry the vault pinned at open, with a shortcut to issue one. */
+function BeneficiaryPassport({
+  passport,
+  registry,
+  shortcutHref,
+  compact = false,
+}: {
+  passport: PassportEvaluation | null | undefined;
+  registry: string | null;
+  shortcutHref: string;
+  compact?: boolean;
+}) {
+  const warning =
+    registry === null ? null : pinnedRegistryWarning(registry, platformKycRegistryPin());
+  const expiry =
+    passport?.expiry != null && passport.expiry > BigInt(0)
+      ? new Date(Number(passport.expiry) * 1000).toISOString().slice(0, 10)
+      : null;
+  return (
+    <div className={compact ? "mt-1 space-y-0.5" : "mt-4 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3"}>
+      {!compact && (
+        <p className="text-[11px] font-semibold uppercase tracking-wide text-slate-500">
+          Beneficiary passport
+        </p>
+      )}
+      <p className={`flex flex-wrap items-center gap-2 ${compact ? "text-[11px]" : "mt-1 text-xs"}`}>
+        <span
+          className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${
+            passport ? PASSPORT_BADGE[passport.status] : PASSPORT_BADGE.registry_unreadable
+          }`}
+        >
+          {passport ? PASSPORT_STATUS_LABEL[passport.status] : "Checking…"}
+        </span>
+        {expiry && <span className="text-slate-500">expires {expiry}</span>}
+        {registry && !compact && (
+          <span className="font-mono text-slate-500" title={registry}>
+            registry {shortAddr(registry)}
+          </span>
+        )}
+        {passport && passport.status !== "approved" && (
+          <Link
+            href={shortcutHref}
+            className="font-medium text-brand-700 underline-offset-2 hover:underline"
+          >
+            Issue passport →
+          </Link>
+        )}
+      </p>
+      {!compact && passport && passport.status !== "approved" && (
+        <p className="mt-1 text-xs text-slate-600">{passport.reason}</p>
+      )}
+      {warning && (
+        <p className={`${compact ? "text-[11px]" : "mt-1 text-xs"} text-amber-700`}>{warning}</p>
+      )}
     </div>
   );
 }
@@ -2809,21 +3240,64 @@ function DeliveryRequestsSection({
     null,
   );
   const [busyId, setBusyId] = useState<string | null>(null);
+  // vault_pda → on-chain vault + the holder's passport (2C-3: confirming a
+  // delivery realizes a KYC-gated DeliveryEscrow).
+  const [vaultInfo, setVaultInfo] = useState<Map<string, VaultOnChainInfo>>(
+    new Map(),
+  );
+  const [vaultLoadIssue, setVaultLoadIssue] = useState<
+    Map<string, VaultLoadIssue>
+  >(new Map());
+
+  const loadVaultInfo = useCallback(
+    async (rows: DeliveryRequest[]) => {
+      const targets = rows.filter(
+        (r) =>
+          r.vault_pda &&
+          (r.status === "vault_opened" ||
+            r.status === "deposited" ||
+            r.status === "in_delivery"),
+      );
+      const entries: Array<[string, VaultOnChainInfo]> = [];
+      const issues: Array<[string, VaultLoadIssue]> = [];
+      await Promise.all(
+        targets.map(async (r) => {
+          try {
+            const info = await readVaultOnChainInfo(
+              client.runtime.rpc,
+              address(r.vault_pda!),
+            );
+            if (info) entries.push([r.vault_pda!, info]);
+            else issues.push([r.vault_pda!, "missing"]);
+          } catch {
+            // Unknown: Mark in delivery / Confirm delivery fail CLOSED
+            // (passport unverifiable); the row offers a retry.
+            issues.push([r.vault_pda!, "error"]);
+          }
+        }),
+      );
+      setVaultInfo(new Map(entries));
+      setVaultLoadIssue(new Map(issues));
+    },
+    [client],
+  );
 
   // delivery_requests has no anon SELECT (rows carry the holder's physical
   // address + contact — PII); load the queue through the signed admin route.
   const load = useCallback(async () => {
     if (!conn.wallet) return;
     try {
-      setRequests(await adminListDeliveryRequests(conn.wallet));
+      const rows = await adminListDeliveryRequests(conn.wallet);
+      setRequests(rows);
       setLoaded(true);
       setLoadError(null);
+      void loadVaultInfo(rows);
     } catch (err) {
       setLoadError(
         err instanceof Error ? err.message : "Could not load delivery requests",
       );
     }
-  }, [conn.wallet]);
+  }, [conn.wallet, loadVaultInfo]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -3049,7 +3523,13 @@ function DeliveryRequestsSection({
         ),
       });
       // escrowMarker (["escrow_marker", vault PDA]) is auto-derived by the
-      // async builder — closed on-chain by this terminal path.
+      // async builder — closed on-chain by this terminal path. The KYC gate
+      // (2C-3) needs the pinned registry + the holder's KycEntry; if it
+      // fails, the whole transaction (trigger included) rolls back.
+      const kycAccounts = await requestRealizeKycAccounts(
+        client.runtime.rpc,
+        vaultPda,
+      );
       const realizeIx = await getRealizeCustodyVaultInstructionAsync({
         authority: signer,
         shareClass: address(req.share_class_pda),
@@ -3061,6 +3541,7 @@ function DeliveryRequestsSection({
         mint: address(req.mint),
         escrow,
         tokenProgram: TOKEN_2022_ADDRESS,
+        ...kycAccounts,
       });
       // BurnAndAttest burns the escrowed tokens — trigger then realize in one
       // transaction; the Triggered state from the first ix is visible to the
@@ -3087,6 +3568,7 @@ function DeliveryRequestsSection({
           delivery_request_id: req.id,
           vault_pda: req.vault_pda,
           realize_action: RealizeAction.BurnAndAttest,
+          kyc_registry: kycAccounts.kycRegistry ?? null,
         },
       });
       setConfirmReq(null);
@@ -3239,7 +3721,9 @@ function DeliveryRequestsSection({
           <p className="mt-0.5 text-[11px] text-slate-500">
             Approve to open a DeliveryEscrow vault, then track deposit →
             delivery → burn. &quot;Mark in delivery&quot; is off-chain only —
-            the physical handover happens outside the chain.
+            the physical handover happens outside the chain. It and
+            &quot;Confirm delivery&quot; both need the holder&apos;s approved
+            investor passport.
           </p>
         </div>
         {pendingCount > 0 && (
@@ -3281,7 +3765,16 @@ function DeliveryRequestsSection({
             </tr>
           </thead>
           <tbody className="divide-y divide-slate-100">
-            {requests.map((r) => (
+            {requests.map((r) => {
+              const info = r.vault_pda ? vaultInfo.get(r.vault_pda) : undefined;
+              // KYC at delivery (2C-3): the handover ("Mark in delivery") and
+              // the realize both need the holder's approved passport in the
+              // vault's pinned registry.
+              const loadIssue = r.vault_pda
+                ? vaultLoadIssue.get(r.vault_pda)
+                : undefined;
+              const passportBlock = requestPassportBlock(info, loadIssue);
+              return (
               <tr key={r.id} className="text-slate-700">
                 <td className="px-4 py-3">
                   <p className="font-medium text-slate-900">
@@ -3306,6 +3799,17 @@ function DeliveryRequestsSection({
                   >
                     {r.contact || "—"}
                   </p>
+                  {(r.status === "vault_opened" ||
+                    r.status === "deposited" ||
+                    r.status === "in_delivery") && (
+                    <RequestPassportGate
+                      info={info}
+                      issue={loadIssue}
+                      onRetry={() => void loadVaultInfo(requests)}
+                      clientId={r.client_id}
+                      holderWallet={r.holder_wallet}
+                    />
+                  )}
                 </td>
                 <td className="px-4 py-3 text-right font-mono">{r.amount}</td>
                 <td className="px-4 py-3">
@@ -3369,7 +3873,12 @@ function DeliveryRequestsSection({
                       {r.status === "deposited" && (
                         <button
                           type="button"
-                          disabled={tx.isSending || busyId === r.id}
+                          disabled={
+                            tx.isSending ||
+                            busyId === r.id ||
+                            passportBlock !== null
+                          }
+                          title={passportBlock ?? undefined}
                           onClick={() => void markInDelivery(r)}
                           className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
                         >
@@ -3379,8 +3888,12 @@ function DeliveryRequestsSection({
                       <button
                         type="button"
                         disabled={
-                          tx.isSending || busyId === r.id || !r.vault_pda
+                          tx.isSending ||
+                          busyId === r.id ||
+                          !r.vault_pda ||
+                          passportBlock !== null
                         }
+                        title={passportBlock ?? undefined}
                         onClick={() => setConfirmReq(r)}
                         className="text-emerald-700 underline-offset-2 hover:underline disabled:opacity-50"
                       >
@@ -3400,7 +3913,8 @@ function DeliveryRequestsSection({
                   )}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       )}
@@ -3562,6 +4076,12 @@ function ApproveDeliveryModal({
   const [attPasted, setAttPasted] = useState("");
   const attHash = attFile ? attFileHash : attPasted.trim().toLowerCase();
   const attHashOk = isValidSha256Hex(attHash);
+  // KYC at conversion / delivery (2C-3): the vault pins the platform KYC
+  // registry; the holder's passport there is shown for information (the
+  // open needs none — the realize does).
+  const platformRegistry = usePlatformKycRegistry(true);
+  const pinnedRegistry = platformRegistry.registry;
+  const holderPassport = useHolderPassport(pinnedRegistry, req.holder_wallet);
 
   async function approve() {
     if (
@@ -3569,6 +4089,7 @@ function ApproveDeliveryModal({
       inputError ||
       deadlineError ||
       !attHashOk ||
+      !pinnedRegistry ||
       !recovery.ready ||
       recovery.pending
     )
@@ -3603,6 +4124,7 @@ function ApproveDeliveryModal({
             ),
             metadataHash: hexToBytes32(attHash),
             beneficiary: address(req.holder_wallet),
+            kycRegistry: pinnedRegistry,
           });
         },
         (ix) => tx.send({ instructions: [ix], feePayer: signer }),
@@ -3625,6 +4147,7 @@ function ApproveDeliveryModal({
           vault_id: intent.vaultId,
           vault_type: "DeliveryEscrow",
           beneficiary: req.holder_wallet,
+          kyc_registry: pinnedRegistry,
           metadata_hash: attHash,
           metadata_hash_source: attFile ? "file" : "pasted",
         },
@@ -3741,6 +4264,20 @@ function ApproveDeliveryModal({
               </FieldHelp>
             </label>
           </div>
+          <PinnedRegistryLine
+            registry={pinnedRegistry}
+            error={platformRegistry.error}
+          />
+          {pinnedRegistry && (
+            <BeneficiaryPassport
+              passport={holderPassport}
+              registry={pinnedRegistry}
+              shortcutHref={passportShortcutHref({
+                clientId: req.client_id,
+                wallet: req.holder_wallet,
+              })}
+            />
+          )}
           <AttestationDocSection
             kindLabel="delivery confirmation / agreement"
             file={attFile}
@@ -3775,7 +4312,8 @@ function ApproveDeliveryModal({
               !vaultId.trim() ||
               !amount.trim() ||
               deadlineError !== null ||
-              !attHashOk
+              !attHashOk ||
+              !pinnedRegistry
             }
             className="rounded-md bg-brand-700 px-3 py-1.5 text-sm font-medium text-white hover:bg-brand-800 disabled:opacity-50"
           >

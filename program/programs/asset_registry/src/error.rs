@@ -273,4 +273,11 @@ pub enum RegistryError {
     IssuerRecoveryExpired,
     #[msg("Issuer recovery does not match the issuer's current authority, the current super admin, or the executing signer")]
     InvalidIssuerRecovery,
+    // ── 2C-3 (appended: every earlier code keeps its position) ──
+    #[msg("A DeliveryEscrow custody vault must pin a KYC registry at open; realize must pass it with the beneficiary's KYC entry")]
+    CustodyKycRegistryRequired,
+    #[msg("Only a DeliveryEscrow custody vault may pin a KYC registry")]
+    CustodyKycRegistryNotAllowed,
+    #[msg("KYC registry does not match the registry pinned on this custody vault")]
+    CustodyKycRegistryMismatch,
 }

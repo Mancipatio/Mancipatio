@@ -239,11 +239,14 @@ describe("custody approval durable intent", () => {
       deadline: BigInt(2000000000),
       metadataHash: new Uint8Array(32).fill(9),
       beneficiary: key(4),
+      kycRegistry: key(5),
     });
     expect(ix.programAddress).toBe(ASSET_REGISTRY_PROGRAM_ADDRESS);
-    expect(ix.accounts).toHaveLength(10);
-    // Emergency-pause gate: the Platform PDA is the last named account.
+    expect(ix.accounts).toHaveLength(11);
+    // Emergency-pause gate: the Platform PDA keeps index 9.
     expect(ix.accounts[9].address).toBe((await findPlatformPda())[0]);
+    // 2C-3: a DeliveryEscrow pins the KYC registry, appended last.
+    expect(ix.accounts[10].address).toBe(key(5));
     expect(ix.accounts[4].address).toBe(
       await findCustodyVaultPda(key(2), BigInt(42)),
     );
@@ -253,5 +256,23 @@ describe("custody approval durable intent", () => {
     expect(decoded.vaultType).toBe(VaultType.DeliveryEscrow);
     expect(decoded.realizeAction).toBe(RealizeAction.BurnAndAttest);
     expect(decoded.beneficiary).toBe(key(4));
+  });
+  it("fills the optional KYC registry slot with the program id for a quarantine vault", async () => {
+    const ix = await getOpenCustodyVaultInstructionAsync({
+      authority: createNoopSigner(address(scope.wallet)),
+      shareClass: key(2),
+      mint: key(3),
+      tokenProgram: address("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+      vaultId: BigInt(1),
+      vaultType: VaultType.RedemptionQueue,
+      realizeAction: RealizeAction.BurnAndAttest,
+      amount: BigInt(0),
+      deadline: BigInt(0),
+      metadataHash: new Uint8Array(32).fill(9),
+      beneficiary: address("11111111111111111111111111111111"),
+    });
+    expect(ix.accounts).toHaveLength(11);
+    expect(ix.accounts[9].address).toBe((await findPlatformPda())[0]);
+    expect(ix.accounts[10].address).toBe(ASSET_REGISTRY_PROGRAM_ADDRESS);
   });
 });

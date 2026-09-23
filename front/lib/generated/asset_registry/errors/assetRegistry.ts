@@ -282,6 +282,12 @@ export const ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE = 0x17f3; // 
 export const ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED = 0x17f4; // 6132
 /** InvalidIssuerRecovery: Issuer recovery does not match the issuer's current authority, the current super admin, or the executing signer */
 export const ASSET_REGISTRY_ERROR__INVALID_ISSUER_RECOVERY = 0x17f5; // 6133
+/** CustodyKycRegistryRequired: A DeliveryEscrow custody vault must pin a KYC registry at open; realize must pass it with the beneficiary's KYC entry */
+export const ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED = 0x17f6; // 6134
+/** CustodyKycRegistryNotAllowed: Only a DeliveryEscrow custody vault may pin a KYC registry */
+export const ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_NOT_ALLOWED = 0x17f7; // 6135
+/** CustodyKycRegistryMismatch: KYC registry does not match the registry pinned on this custody vault */
+export const ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH = 0x17f8; // 6136
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -296,6 +302,9 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED
   | typeof ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW
   | typeof ASSET_REGISTRY_ERROR__CONVERTIBLE_TARGET_INVALID
+  | typeof ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH
+  | typeof ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_NOT_ALLOWED
+  | typeof ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED
   | typeof ASSET_REGISTRY_ERROR__DEAL_ALREADY_DEPOSITED
   | typeof ASSET_REGISTRY_ERROR__DEAL_EXPIRED
   | typeof ASSET_REGISTRY_ERROR__DEAL_NOT_EXPIRED
@@ -434,6 +443,9 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED]: `Clawback is only available on KycGated mints`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW]: `Clawback target is a program escrow, not a holder wallet`,
     [ASSET_REGISTRY_ERROR__CONVERTIBLE_TARGET_INVALID]: `Convertible target must be an existing share class of the same asset and not the class itself`,
+    [ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH]: `KYC registry does not match the registry pinned on this custody vault`,
+    [ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_NOT_ALLOWED]: `Only a DeliveryEscrow custody vault may pin a KYC registry`,
+    [ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED]: `A DeliveryEscrow custody vault must pin a KYC registry at open; realize must pass it with the beneficiary's KYC entry`,
     [ASSET_REGISTRY_ERROR__DEAL_ALREADY_DEPOSITED]: `This side of the OTC deal is already deposited`,
     [ASSET_REGISTRY_ERROR__DEAL_EXPIRED]: `OTC deal has expired`,
     [ASSET_REGISTRY_ERROR__DEAL_NOT_EXPIRED]: `OTC deal has not expired yet`,

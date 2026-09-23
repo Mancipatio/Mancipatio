@@ -407,6 +407,9 @@ fn open_vault_ix(
             token_program: TOKEN_2022,
             system_program: system_program::ID,
             platform: pause::platform_pda(),
+            // 2C-3: a DeliveryEscrow pins the boot registry; every other type
+            // (the clawback quarantine included) passes none.
+            kyc_registry: (vault_type == VaultType::DeliveryEscrow).then_some(ctx.kyc_registry_pda),
         }
         .to_account_metas(None),
     );
@@ -2724,6 +2727,15 @@ fn physical_good_lifetime_cap_survives_both_issuance_paths_and_custody_burns() {
     for primary_first in [false, true] {
         let (mut svm, ctx) = boot_asset_type(false, AssetType::PhysicalGood);
         warp_to(&mut svm, 1_000);
+        // 2C-3: the DeliveryEscrow realize (the physical delivery) needs the
+        // holder's passport in the pinned registry; the quarantine needs none.
+        let realize_kyc = if primary_first {
+            let owner = ctx.buyer.pubkey();
+            approve_kyc(&mut svm, &ctx, &owner);
+            (Some(ctx.kyc_registry_pda), Some(kyc_entry_of(&ctx, &owner)))
+        } else {
+            (None, None)
+        };
         let (vault, escrow) = if primary_first {
             let owner = ctx.buyer.pubkey();
             send(
@@ -2800,6 +2812,8 @@ fn physical_good_lifetime_cap_survives_both_issuance_paths_and_custody_burns() {
                         escrow,
                         escrow_marker: escrow_marker_of(&ctx, &vault),
                         token_program: TOKEN_2022,
+                        kyc_registry: realize_kyc.0,
+                        kyc_entry: realize_kyc.1,
                     }
                     .to_account_metas(None),
                 ),
@@ -3339,6 +3353,7 @@ fn open_admin_burn_only_vault(
             token_program: TOKEN_2022,
             system_program: system_program::ID,
             platform: pause::platform_pda(),
+            kyc_registry: None,
         }
         .to_account_metas(None),
     );
@@ -3713,6 +3728,8 @@ fn revoked_custody_operator_can_be_rotated_without_blocking_deadline_refund() {
                 escrow_marker: escrow_marker_of(&ctx, &redemption),
                 token_program: TOKEN_2022,
                 authority_admin_record: admin_address(new_root.pubkey()),
+                kyc_registry: None,
+                kyc_entry: None,
             }
             .to_account_metas(None),
         )],
@@ -5034,6 +5051,8 @@ fn custody_entry_pause_keeps_the_clawback_quarantine_path_open() {
                     escrow: escrow_pda,
                     escrow_marker: escrow_marker_of(&ctx, &custody_pda),
                     token_program: TOKEN_2022,
+                    kyc_registry: None,
+                    kyc_entry: None,
                 }
                 .to_account_metas(None),
             ),

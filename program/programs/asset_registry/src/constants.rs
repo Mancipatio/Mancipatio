@@ -175,6 +175,8 @@ pub const VESTING_STATE_VERSION: u8 = 2;
 /// Sale v2 appends `sale_approval` and `application_hash` (open_sale consumes
 /// an admin `SaleApproval`).
 pub const SALE_STATE_VERSION: u8 = 2;
+/// CustodyVault v2 appends `kyc_registry` (2C-3).
+pub const CUSTODY_STATE_VERSION: u8 = 2;
 
 /// Scoped issuer permissions and staged operational authority changes.
 pub const ISSUER_PERMISSIONS_SEED: &[u8] = b"issuer_permissions";

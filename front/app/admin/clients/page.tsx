@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { useWalletConnection } from "@solana/react-hooks";
 import {
   IconBuilding,
@@ -59,7 +60,10 @@ export default function ClientsPage() {
         </p>
       </div>
       <RequireRole role="admin">
-        <ClientsOps />
+        {/* useSearchParams needs a Suspense boundary for the static build. */}
+        <Suspense fallback={null}>
+          <ClientsOps />
+        </Suspense>
       </RequireRole>
     </section>
   );
@@ -69,7 +73,10 @@ function ClientsOps() {
   const conn = useWalletConnection();
   const [rows, setRows] = useState<ClientRow[] | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
-  const [query, setQuery] = useState("");
+  // `?q=` seeds the search — the custody page links here by wallet to issue
+  // a holder's passport (2C-3).
+  const searchParams = useSearchParams();
+  const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
   const [typeFilter, setTypeFilter] = useState<ClientType | "all">("all");
   const [kycFilter, setKycFilter] = useState<ClientKycStatus | "all">("all");
   const [showAdd, setShowAdd] = useState(false);

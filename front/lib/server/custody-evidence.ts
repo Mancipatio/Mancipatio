@@ -3,6 +3,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { SiwsError } from "@/lib/server/siws";
 import {
+  requireBeneficiaryPassport,
   requireDepositEvidence,
   requireRequestVault,
   transactionSignature,
@@ -223,7 +224,10 @@ export async function validateCustodyUpdate(
     patch.deposit_evidence = { ...proof, signature, vault: expected.vault_pda };
   }
   if (expected.vault_pda) {
-    const { vault, escrow } = await requireRequestVault(expected);
+    // Linking is the only step bound to the CURRENT platform registry pin.
+    const { vault, escrow } = await requireRequestVault(expected, undefined, {
+      requirePlatformPin: !row.vault_pda,
+    });
     if (
       !row.vault_pda &&
       status === "vault_opened" &&
@@ -249,6 +253,13 @@ export async function validateCustodyUpdate(
           409,
           "Requested deposit is no longer held in custody",
         );
+      // KYC at delivery (2C-3): the physical handover starts here, so it is
+      // gated like the realize burn that later records it.
+      if (status === "in_delivery" && row.status !== "in_delivery")
+        await requireBeneficiaryPassport({
+          beneficiary: vault.beneficiary,
+          kycRegistry: vault.kycRegistry,
+        });
     }
     if (
       (status === "delivered" || status === "converted") &&

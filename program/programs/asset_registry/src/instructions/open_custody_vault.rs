@@ -4,7 +4,8 @@ use anchor_spl::token_interface::{Mint, TokenInterface};
 use crate::constants::*;
 use crate::error::RegistryError;
 use crate::state::{
-    Admin, CustodyVault, EscrowMarker, RealizeAction, ShareClass, VaultState, VaultType,
+    Admin, CustodyVault, EscrowMarker, KycRegistry, RealizeAction, ShareClass, VaultState,
+    VaultType,
 };
 
 #[derive(Accounts)]
@@ -69,10 +70,17 @@ pub struct OpenCustodyVault<'info> {
 
     /// Emergency-pause gate (read-only), checked in the handler: a burn-only
     /// quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
-    /// clawback. Keep LAST among named accounts (old account indices keep
-    /// their positions).
+    /// clawback. Appended after the original accounts (old account indices
+    /// keep their positions); only `kyc_registry` (2C-3) follows it.
     #[account(seeds = [PLATFORM_SEED], bump = platform.bump)]
     pub platform: Box<Account<'info, crate::state::Platform>>,
+
+    /// DeliveryEscrow: REQUIRED — the registry `realize_custody_vault` checks
+    /// the beneficiary's `KycEntry` in (pinned on the vault). Any other type:
+    /// must be None (the program-id placeholder). `Account<KycRegistry>`
+    /// checks owner + discriminator, and only `create_kyc_registry` (admin
+    /// co-signed) can create one. Appended LAST (2C-3): no index moves.
+    pub kyc_registry: Option<Box<Account<'info, KycRegistry>>>,
 }
 
 /// Opens a custody vault in `Active` state with an empty escrow token account.
@@ -99,7 +107,16 @@ pub struct OpenCustodyVault<'info> {
 /// destination for `clawback_from_holder`: `return_custody_vault` (the only
 /// escrow→wallet exit) is reserved for `DeliveryEscrow`, so every exit of such
 /// a vault burns. Open it with `deadline == 0` unless you deliberately want a
-/// permissionless burn after some T — see `revert_custody_vault`.
+/// permissionless burn after some T — see `revert_custody_vault`. The
+/// quarantine vault takes no `kyc_registry`.
+///
+/// KYC at conversion / delivery (2C-3): a `DeliveryEscrow` — the type the
+/// platform uses for both holder conversions and physical deliveries — pins
+/// a `KycRegistry` here, and `realize_custody_vault` requires the
+/// beneficiary's Approved, unexpired, jurisdiction-allowed `KycEntry` in it.
+/// Nothing is KYC-checked at open or deposit (buying / holding needs no KYC);
+/// without a passport the beneficiary's deposit leaves via
+/// `return_custody_vault`. Every other vault type must pass no registry.
 #[allow(clippy::too_many_arguments)]
 pub fn handle_open_custody_vault(
     ctx: Context<OpenCustodyVault>,
@@ -134,6 +151,19 @@ pub fn handle_open_custody_vault(
         vault_type != VaultType::DeliveryEscrow || beneficiary != Pubkey::default(),
         RegistryError::BeneficiaryRequired
     );
+
+    // KYC registry pin (2C-3): required for a DeliveryEscrow (its realize is
+    // the holder's conversion / delivery and is KYC-gated against it), refused
+    // for every other type — the clawback quarantine included, so its path is
+    // unchanged.
+    let pinned_registry = match (vault_type, ctx.accounts.kyc_registry.as_ref()) {
+        (VaultType::DeliveryEscrow, Some(registry)) => registry.key(),
+        (VaultType::DeliveryEscrow, None) => {
+            return err!(RegistryError::CustodyKycRegistryRequired)
+        }
+        (_, None) => Pubkey::default(),
+        (_, Some(_)) => return err!(RegistryError::CustodyKycRegistryNotAllowed),
+    };
 
     // `deadline == 0` means "no deadline": it disables BOTH permissionless
     // paths — `return_custody_vault` and `revert_custody_vault` — leaving the
@@ -172,12 +202,13 @@ pub fn handle_open_custody_vault(
     v.deadline = deadline;
     v.metadata_hash = metadata_hash;
     v.beneficiary = beneficiary;
-    v.version = STATE_VERSION;
+    v.version = CUSTODY_STATE_VERSION;
     v.bump = ctx.bumps.custody_vault;
     // Deposit ledger starts empty: nothing has been contributed by the
     // beneficiary yet, so `return_custody_vault` would require receiver KYC
     // for every unit that shows up in the escrow by any other route.
     v.deposited = 0;
+    v.kyc_registry = pinned_registry;
 
     ctx.accounts.escrow_marker.bump = ctx.bumps.escrow_marker;
 

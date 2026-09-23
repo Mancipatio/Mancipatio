@@ -692,6 +692,10 @@ export default function ConversionPage() {
             right — deposit into escrow, tokens are burned once the conversion
             is executed and attested.
           </p>
+          <p className="mt-1 text-xs text-slate-500">
+            Confirming a conversion also needs your approved on-chain investor
+            passport. Without one, your deposit is returned to your wallet.
+          </p>
         </div>
         <button
           type="button"

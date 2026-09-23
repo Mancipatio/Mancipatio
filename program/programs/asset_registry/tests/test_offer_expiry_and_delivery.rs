@@ -4,7 +4,14 @@
 //! Boot mirrors test_happy_path.rs: platform → issuer → asset → share class →
 //! hook-wired Token-2022 mint → transfer_hook config (Open mode) so real
 //! `transfer_checked` legs run through the hook.
+//!
+//! 2C-3: boot also creates a KYC registry (payer = provider). Every
+//! `DeliveryEscrow` opened here pins it (`open_vault_ix`), and its realize is
+//! gated on the beneficiary's passport even though the mint is Open — the gate
+//! does not depend on the hook mode.
 
+#[path = "../../../tests/support/kyc_registry.rs"]
+mod kyc_registry;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
 #[path = "../../../tests/support/mod.rs"]
@@ -98,6 +105,9 @@ struct Ctx {
     /// Holder with share units in `holder_share_ata` (funded via mint_to_treasury).
     holder: Keypair,
     holder_share_ata: Pubkey,
+    /// KYC registry created at boot (payer = provider); DeliveryEscrow vaults
+    /// pin it.
+    kyc_registry: Pubkey,
 }
 
 /// [source BlockEntry, ExtraAccountMetaList, hook program] for a hook transfer
@@ -368,6 +378,20 @@ fn boot(holder_units: u64) -> (LiteSVM, Ctx) {
         "initialize_blocklist_authority",
     );
 
+    // ── KYC registry (2C-3: DeliveryEscrow vaults pin it) ───────────────────
+    let kyc_registry = kyc_registry::registry_pda(&payer.pubkey());
+    send(
+        &mut svm,
+        &[&payer],
+        &[kyc_registry::create_registry_ix(
+            &payer.pubkey(),
+            &payer.pubkey(),
+            kyc_registry::bitmap(&[222]),
+            [0u8; asset_registry::JURISDICTION_BITMAP_BYTES],
+        )],
+        "create_kyc_registry",
+    );
+
     // ── payment mint + holder share units ────────────────────────────────────
     let payment_mint = {
         use anchor_lang::solana_program::system_instruction;
@@ -458,6 +482,7 @@ fn boot(holder_units: u64) -> (LiteSVM, Ctx) {
         extra_metas_pda,
         holder,
         holder_share_ata,
+        kyc_registry,
     };
     (svm, ctx)
 }
@@ -639,6 +664,8 @@ fn custody_pdas(ctx: &Ctx, vault_id: u64) -> (Pubkey, Pubkey) {
     (custody_pda, escrow_pda)
 }
 
+/// Opens a vault the way the front does: a `DeliveryEscrow` pins the boot
+/// registry, every other type passes none.
 fn open_vault_ix(
     ctx: &Ctx,
     vault_id: u64,
@@ -646,6 +673,27 @@ fn open_vault_ix(
     amount: u64,
     deadline: i64,
     beneficiary: Pubkey,
+) -> Instruction {
+    let kyc_registry = (vault_type == VaultType::DeliveryEscrow).then_some(ctx.kyc_registry);
+    open_vault_ix_with_registry(
+        ctx,
+        vault_id,
+        vault_type,
+        amount,
+        deadline,
+        beneficiary,
+        kyc_registry,
+    )
+}
+
+fn open_vault_ix_with_registry(
+    ctx: &Ctx,
+    vault_id: u64,
+    vault_type: VaultType,
+    amount: u64,
+    deadline: i64,
+    beneficiary: Pubkey,
+    kyc_registry: Option<Pubkey>,
 ) -> Instruction {
     let (custody_pda, escrow_pda) = custody_pdas(ctx, vault_id);
     Instruction::new_with_bytes(
@@ -671,6 +719,7 @@ fn open_vault_ix(
             token_program: TOKEN_2022,
             system_program: system_program::ID,
             platform: pause::platform_pda(),
+            kyc_registry,
         }
         .to_account_metas(None),
     )
@@ -1764,6 +1813,24 @@ fn custody_entry_pause_gates_deposits_while_return_and_revert_stay_open() {
         ),
         "DeliveryEscrow open under CUSTODY_ENTRY",
     );
+    // The pause check runs before the registry pin check: a DeliveryEscrow
+    // without its registry is still refused as a paused entry, not 6134.
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[open_vault_ix_with_registry(
+                &ctx,
+                3,
+                VaultType::DeliveryEscrow,
+                1,
+                0,
+                ctx.holder.pubkey(),
+                None,
+            )],
+        ),
+        "DeliveryEscrow open without registry under CUSTODY_ENTRY",
+    );
 
     pause::pause_only(
         &mut svm,
@@ -1804,4 +1871,290 @@ fn custody_entry_pause_gates_deposits_while_return_and_revert_stay_open() {
         load::<CustodyVault>(&svm, &custody_pdas(&ctx, 2).0).state,
         VaultState::Reverted
     );
+}
+
+// ── 2C-3: DeliveryEscrow KYC registry pin (Open mint) ────────────────────────
+
+fn trigger_vault_ix(ctx: &Ctx, vault_id: u64) -> Instruction {
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::TriggerCustodyVault {}.data(),
+        acc::TriggerCustodyVault {
+            authority_admin_record: ctx.admin_pda,
+            authority: ctx.payer.pubkey(),
+            custody_vault: custody_pdas(ctx, vault_id).0,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn realize_vault_ix(
+    ctx: &Ctx,
+    vault_id: u64,
+    kyc_registry: Option<Pubkey>,
+    kyc_entry: Option<Pubkey>,
+) -> Instruction {
+    let (custody_pda, escrow_pda) = custody_pdas(ctx, vault_id);
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::RealizeCustodyVault {}.data(),
+        acc::RealizeCustodyVault {
+            authority: ctx.payer.pubkey(),
+            share_class: ctx.share_class_pda,
+            custody_vault: custody_pda,
+            mint: ctx.mint_pda,
+            escrow: escrow_pda,
+            escrow_marker: escrow_marker_of(ctx, &custody_pda),
+            token_program: TOKEN_2022,
+            authority_admin_record: ctx.admin_pda,
+            kyc_registry,
+            kyc_entry,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// A DeliveryEscrow must pin a registry (6134) — and it must be a real
+/// `KycRegistry` account, not any account the caller likes.
+#[test]
+fn delivery_vault_open_requires_kyc_registry() {
+    let (mut svm, ctx) = boot(0);
+    warp_to(&mut svm, 1_000);
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix_with_registry(
+            &ctx,
+            1,
+            VaultType::DeliveryEscrow,
+            10,
+            0,
+            ctx.holder.pubkey(),
+            None,
+        )],
+    )
+    .expect_err("DeliveryEscrow without a registry must fail");
+    assert!(err.contains("Custom(6134)"), "got: {err}");
+
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix_with_registry(
+            &ctx,
+            1,
+            VaultType::DeliveryEscrow,
+            10,
+            0,
+            ctx.holder.pubkey(),
+            Some(pause::platform_pda()),
+        )],
+    )
+    .expect_err("a non-registry account must not pass as the pin");
+    assert!(
+        err.contains("AccountDiscriminatorMismatch") || err.contains("Custom(3002)"),
+        "got: {err}"
+    );
+}
+
+/// Only a DeliveryEscrow may pin a registry: every other type passes none —
+/// the clawback quarantine (RedemptionQueue) keeps its exact old shape.
+#[test]
+fn non_delivery_vault_open_rejects_kyc_registry() {
+    let (mut svm, ctx) = boot(0);
+    warp_to(&mut svm, 1_000);
+    for (id, vault_type) in [
+        (1u64, VaultType::RedemptionQueue),
+        (2, VaultType::ConversionPending),
+        (3, VaultType::Vesting),
+    ] {
+        let err = try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[open_vault_ix_with_registry(
+                &ctx,
+                id,
+                vault_type,
+                10,
+                0,
+                Pubkey::default(),
+                Some(ctx.kyc_registry),
+            )],
+        )
+        .expect_err("a non-delivery vault must not pin a registry");
+        assert!(err.contains("Custom(6135)"), "{vault_type:?}: got {err}");
+        // …and the same open without a registry succeeds.
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[open_vault_ix(
+                &ctx,
+                id,
+                vault_type,
+                10,
+                0,
+                Pubkey::default(),
+            )],
+            "non-delivery open without a registry",
+        );
+    }
+}
+
+/// The gate is independent of the hook mode: on an Open mint (no receiver KYC
+/// anywhere) the DeliveryEscrow realize still needs the beneficiary's passport.
+#[test]
+fn open_mode_delivery_realize_requires_beneficiary_kyc() {
+    let (mut svm, ctx) = boot(50);
+    warp_to(&mut svm, 1_000);
+    let holder_pk = ctx.holder.pubkey();
+    let (vault_pda, escrow_pda) = custody_pdas(&ctx, 1);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            1,
+            VaultType::DeliveryEscrow,
+            20,
+            0,
+            holder_pk,
+        )],
+        "open delivery vault",
+    );
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[deposit_to_custody_ix(&ctx, 1, 20)],
+        "deposit_to_custody_vault (no KYC asked)",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[trigger_vault_ix(&ctx, 1)],
+        "trigger",
+    );
+
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[realize_vault_ix(&ctx, 1, Some(ctx.kyc_registry), None)],
+    )
+    .expect_err("realize without a passport must fail on an Open mint too");
+    assert!(err.contains("Custom(6069)"), "got: {err}");
+    assert_eq!(token_balance(&svm, &escrow_pda), 20);
+
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc_registry::approve_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry,
+            &holder_pk,
+            222,
+        )],
+        "approve_holder",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[realize_vault_ix(
+            &ctx,
+            1,
+            Some(ctx.kyc_registry),
+            Some(kyc_registry::entry_pda(&ctx.kyc_registry, &holder_pk)),
+        )],
+        "realize with the beneficiary's passport",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), 0);
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Realized);
+}
+
+/// v2 layout: `kyc_registry` appended after `deposited` (bytes 237..269),
+/// `version == CUSTODY_STATE_VERSION (2)`; default for non-delivery types.
+#[test]
+fn delivery_vault_pins_registry_v2_layout() {
+    let (mut svm, ctx) = boot(0);
+    warp_to(&mut svm, 1_000);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[
+            open_vault_ix(
+                &ctx,
+                1,
+                VaultType::DeliveryEscrow,
+                10,
+                0,
+                ctx.holder.pubkey(),
+            ),
+            open_vault_ix(&ctx, 2, VaultType::RedemptionQueue, 0, 0, Pubkey::default()),
+        ],
+        "open delivery + redemption vaults",
+    );
+    assert_eq!(asset_registry::CUSTODY_STATE_VERSION, 2);
+    for (id, pinned) in [(1u64, ctx.kyc_registry), (2, Pubkey::default())] {
+        let pda = custody_pdas(&ctx, id).0;
+        let vault: CustodyVault = load(&svm, &pda);
+        assert_eq!(vault.kyc_registry, pinned);
+        assert_eq!(vault.version, 2);
+        let raw = svm.get_account(&pda).unwrap().data;
+        assert_eq!(raw.len(), 269);
+        assert_eq!(&raw[237..269], pinned.as_ref());
+    }
+}
+
+/// Non-delivery realize ignores the KYC accounts entirely: a ConversionPending
+/// vault realizes with None / None. Its attestation names no beneficiary and
+/// no registry — even though this vault stored one, it was never KYC-checked.
+#[test]
+fn non_delivery_realize_needs_no_kyc_accounts() {
+    let (mut svm, ctx) = boot(20);
+    warp_to(&mut svm, 1_000);
+    let (custody_pda, escrow_pda) = custody_pdas(&ctx, 1);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            1,
+            VaultType::ConversionPending,
+            5,
+            0,
+            ctx.holder.pubkey(),
+        )],
+        "open conversion-pending vault (beneficiary stored)",
+    );
+    let stored: CustodyVault = load(&svm, &custody_pda);
+    assert_eq!(stored.beneficiary, ctx.holder.pubkey());
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[deposit_to_custody_ix(&ctx, 1, 5)],
+        "deposit",
+    );
+    svm.expire_blockhash();
+    let bh = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(
+        &[
+            trigger_vault_ix(&ctx, 1),
+            realize_vault_ix(&ctx, 1, None, None),
+        ],
+        Some(&ctx.payer.pubkey()),
+        &bh,
+    );
+    let tx =
+        VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&ctx.payer]).expect("sign");
+    let meta = svm
+        .send_transaction(tx)
+        .unwrap_or_else(|e| panic!("trigger + realize (no KYC accounts): {e:?}"));
+    assert_eq!(token_balance(&svm, &escrow_pda), 0);
+    let events = kyc_registry::events::<asset_registry::CustodyRealized>(&meta.logs);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].custody_vault, custody_pda);
+    assert_eq!(
+        events[0].beneficiary,
+        Pubkey::default(),
+        "an unchecked beneficiary is never attested"
+    );
+    assert_eq!(events[0].kyc_registry, Pubkey::default());
 }
