@@ -51,11 +51,12 @@ describe("features()", () => {
   });
 
   it("names the feature and the network in the refusal copy", () => {
+    // Lower-case network, like the stage badge ("Solana mainnet · v0.1").
     expect(featureDisabledMessage("payoutAirdrop", "mainnet")).toBe(
-      "Admin-wallet payout airdrops are not enabled on Solana Mainnet.",
+      "Admin-wallet payout airdrops are not enabled on Solana mainnet.",
     );
     expect(featureDisabledMessage("startupRaises", "mainnet")).toBe(
-      "Startup raises are not enabled on Solana Mainnet.",
+      "Startup raises are not enabled on Solana mainnet.",
     );
   });
 });

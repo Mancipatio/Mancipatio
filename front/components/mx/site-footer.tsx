@@ -2,7 +2,7 @@ import Link from "next/link";
 import { BrandLogo } from "@/components/brand-logo";
 import { Badge } from "./badge";
 import { Disclaimer, FootNote } from "./footnote";
-import { MX_FOOTER_COLUMNS, MX_ROUTES, MX_STAGE_LABEL } from "./nav";
+import { MX_FOOTER_COLUMNS, MX_NETWORK_STAGE_LABEL, MX_ROUTES } from "./nav";
 import { Wrap } from "./section";
 
 /**
@@ -24,7 +24,7 @@ export function SiteFooter() {
               terms.
             </p>
             <p className="mt-4">
-              <Badge>{MX_STAGE_LABEL}</Badge>
+              <Badge>{MX_NETWORK_STAGE_LABEL}</Badge>
             </p>
           </div>
 

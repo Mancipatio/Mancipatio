@@ -8,6 +8,19 @@ const PHASE_PRODUCTION_BUILD = "phase-production-build";
 const NETWORKS = ["mainnet", "devnet", "testnet", "localnet"];
 
 /**
+ * The Terms of Service and the Privacy Policy (app/(marketing)/legal/terms,
+ * app/(marketing)/legal/privacy) still carry the devnet-pilot wording: "The
+ * current release runs on Solana devnet. No real assets are tokenized…", "No
+ * real assets or fiat are ever transferred", "before mainnet launch". That is
+ * binding text, it is counsel's to rewrite (not this codebase's), and it would
+ * be false on a mainnet deployment. So a mainnet build refuses to ship it until
+ * someone sets MAINNET_LEGAL_COPY_APPROVED=true, which asserts that counsel's
+ * mainnet terms and privacy copy has landed. Build-time only (not
+ * NEXT_PUBLIC_): nothing at runtime reads it.
+ */
+const MAINNET_LEGAL_ACK = "MAINNET_LEGAL_COPY_APPROVED";
+
+/**
  * NEXT_PUBLIC_NETWORK must be explicit in a deployed build. lib/network.ts
  * falls back to sniffing NEXT_PUBLIC_SOLANA_RPC_URL (and then to devnet) when
  * it is unset — convenient locally, but on Vercel it would silently ship a
@@ -17,8 +30,10 @@ const NETWORKS = ["mainnet", "devnet", "testnet", "localnet"];
  *     throw at runtime anyway);
  *   - a production build ON VERCEL (VERCEL=1 or VERCEL_ENV set — Production
  *     and Preview alike) also fails when the variable is unset.
- * Local `next build`, CI (which sets NEXT_PUBLIC_NETWORK=devnet), `next dev`
- * and tests are unaffected.
+ *   - a MAINNET production build (anywhere) also fails unless
+ *     MAINNET_LEGAL_COPY_APPROVED=true — see MAINNET_LEGAL_ACK below.
+ * Local devnet/testnet/localnet builds, CI (which sets
+ * NEXT_PUBLIC_NETWORK=devnet), `next dev` and tests are unaffected.
  */
 export function assertBuildNetwork(
   phase: string,
@@ -38,6 +53,13 @@ export function assertBuildNetwork(
       `NEXT_PUBLIC_NETWORK is not set for this Vercel build (VERCEL_ENV=${env.VERCEL_ENV ?? "unset"}). ` +
         `Set it explicitly (${NETWORKS.join(" | ")}) in the Vercel project's Environment Variables ` +
         "for this environment — the build refuses to guess the network from the RPC URL.",
+    );
+  }
+  if (value === "mainnet" && env[MAINNET_LEGAL_ACK]?.trim() !== "true") {
+    throw new Error(
+      `Refusing a mainnet build: the Terms of Service and Privacy Policy (app/(marketing)/legal/) ` +
+        "still say the platform runs on Solana devnet with no real assets. Land counsel's mainnet " +
+        `legal copy, then set ${MAINNET_LEGAL_ACK}=true for this build.`,
     );
   }
 }

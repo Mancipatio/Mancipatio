@@ -6,8 +6,8 @@ import {
   Eyebrow,
   Facts,
   H2,
+  MX_NETWORK_STAGE_LABEL,
   MX_ROUTES,
-  MX_STAGE_LABEL,
   PageHeader,
   Section,
   TextLink,
@@ -40,8 +40,8 @@ const NETWORK = detectNetwork();
  *  lines follow the build's network (NEXT_PUBLIC_NETWORK). */
 const WHERE_THINGS_STAND = [
   isTestNetwork(NETWORK)
-    ? `${MX_STAGE_LABEL} — nothing is issued live yet`
-    : MX_STAGE_LABEL,
+    ? `${MX_NETWORK_STAGE_LABEL} — nothing is issued live yet`
+    : MX_NETWORK_STAGE_LABEL,
   `Two on-chain programs, deployed on Solana ${NETWORK}`,
   "Both went through a systematic security review before deploy",
   "Asset registry, Token-2022 mints and program-owned custody",

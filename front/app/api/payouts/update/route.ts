@@ -7,7 +7,9 @@
 //
 // The two airdrop stamps belong to the admin-wallet push airdrop, which is
 // feature-flagged (lib/features.ts `payoutAirdrop`, off on mainnet unless
-// NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP=true): with it off they are refused.
+// NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP=true): with it off they are refused, and
+// so is status "live" — that transition means "airdrop execution opened"
+// (the detail page's Go live button) and nothing else sets it.
 //
 // Client wrapper: updatePayout() in lib/payouts.ts (action "payouts.update").
 
@@ -55,7 +57,11 @@ export async function POST(request: Request) {
       }
       patch.funded_tx = params.fundedTx;
     }
-    if (params.airdropStarted === true || params.airdropCompleted === true) {
+    if (
+      params.status === "live" ||
+      params.airdropStarted === true ||
+      params.airdropCompleted === true
+    ) {
       requireFeature("payoutAirdrop");
     }
     if (params.airdropStarted === true) {

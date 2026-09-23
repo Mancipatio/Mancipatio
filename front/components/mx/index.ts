@@ -32,6 +32,7 @@ export {
   MX_INSTRUMENTS,
   MX_PRIMARY_NAV,
   MX_ROUTES,
+  MX_NETWORK_STAGE_LABEL,
   MX_STAGE_LABEL,
   instrumentHref,
   mxStageLabel,

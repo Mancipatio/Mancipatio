@@ -5,6 +5,11 @@
 // PDA gate). Writes the decision, logs an application_events row, then sends
 // a decision email to founder_email (item 6) — email is best-effort and never
 // fails the request (sendEmail does not throw).
+//
+// Approving a STARTUP application needs the startupRaises feature
+// (lib/features.ts; off on mainnet unless NEXT_PUBLIC_FEATURE_STARTUP_RAISES
+// =true). Rejecting it or asking for changes stays possible, so a queue left
+// over from when the flag was on can still be wound down.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -12,6 +17,7 @@ import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { sendEmail } from "@/lib/server/email";
+import { requireFeature } from "@/lib/server/feature-gate";
 import { insertApplicationEvent } from "../_lib";
 
 const UUID_RE =
@@ -96,7 +102,7 @@ export async function POST(request: Request) {
     const sb = getSupabaseAdmin();
     const { data: row, error: readError } = await sb
       .from("launch_applications")
-      .select("id, status, company_name, founder_name, founder_email")
+      .select("id, status, raise_type, company_name, founder_name, founder_email")
       .eq("id", id)
       .eq("network", detectNetwork())
       .maybeSingle();
@@ -107,6 +113,9 @@ export async function POST(request: Request) {
     if (!row) throw new SiwsError(404, "Application not found");
     if (row.status !== "pending" && row.status !== "needs_changes") {
       throw new SiwsError(409, `Application is already ${row.status}`);
+    }
+    if (decision === "approved" && row.raise_type === "startup") {
+      requireFeature("startupRaises");
     }
 
     const { data: updated, error } = await sb

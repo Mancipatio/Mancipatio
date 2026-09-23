@@ -24,7 +24,7 @@ import {
   type OtcRequest,
 } from "@/lib/otc";
 import { useToast } from "@/lib/toast";
-import { detectNetwork, networkLabel } from "@/lib/network";
+import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
 
 type Row = {
   offer: Offer;
@@ -714,6 +714,13 @@ function assetForPost(
   return sc ? pdaMap.get(sc.asset.toString()) : undefined;
 }
 
+/** "Devnet is quiet." on a test network; on mainnet the network name would
+ *  read as a claim about Solana itself, so the line is about the board. */
+function quietLead(): string {
+  const network = detectNetwork();
+  return isTestNetwork(network) ? `${networkLabel(network)} is quiet.` : "It's quiet here.";
+}
+
 function EmptyState({ typeFilter }: { typeFilter: string }) {
   const typed = typeFilter
     ? ASSET_TYPES.find((t) => t.slug === typeFilter)?.title
@@ -726,7 +733,7 @@ function EmptyState({ typeFilter }: { typeFilter: string }) {
       <p className="mt-2 text-[12.5px] text-slate-500">
         {typed
           ? "Try the full list or open the platform to post one."
-          : `${networkLabel(detectNetwork())} is quiet. The platform is live but no issuer has posted a secondary offer yet.`}
+          : `${quietLead()} The platform is live but no issuer has posted a secondary offer yet.`}
       </p>
       <div className="mt-4 flex flex-wrap justify-center gap-2">
         <Link href="/marketplace" className="btn-brand">

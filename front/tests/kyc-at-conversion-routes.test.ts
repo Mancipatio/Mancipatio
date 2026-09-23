@@ -119,7 +119,9 @@ vi.mock("@/app/api/launchpad/_lib", () => ({
     if (typeof value !== "number" || !(value > 0)) throw new Error("bad amount");
     return value;
   },
-  requireLiveSale: vi.fn(async () => "issuer-authority"),
+  // raiseType 0 = RaiseType.Mature (startup-raise gating is covered in
+  // feature-flag-routes.test.ts).
+  requireLiveSale: vi.fn(async () => ({ authority: "issuer-authority", raiseType: 0 })),
   enforceSaleAmountCap: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/server/sale-document", () => ({

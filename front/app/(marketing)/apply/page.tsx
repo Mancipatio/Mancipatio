@@ -681,6 +681,11 @@ export default function ApplyPage() {
   if (walletAddress && latestApp && !startNew && !editingApp) {
     const status = latestApp.status;
     const company = <span className="mx-strong">{latestApp.company_name}</span>;
+    // An approved STARTUP application while startup raises are off on this
+    // network (approved before the flag went off): the issuer launchpad
+    // refuses to open its sale, so don't send the founder there.
+    const startupUnavailable =
+      status === "approved" && latestApp.raise_type === "startup" && !STARTUP_RAISES;
 
     const lede =
       status === "pending" ? (
@@ -700,6 +705,14 @@ export default function ApplyPage() {
           We reviewed {company} and decided not to move forward with this
           application. You&apos;re welcome to submit a fresh application at any
           time.
+        </>
+      ) : startupUnavailable ? (
+        <>
+          Congratulations — {company} was approved.{" "}
+          {featureDisabledMessage("startupRaises")} Its sale can&apos;t be
+          opened yet —{" "}
+          <TextLink href={MX_ROUTES.contact}>contact the team</TextLink> about
+          next steps.
         </>
       ) : (
         <>
@@ -721,9 +734,13 @@ export default function ApplyPage() {
         </Button>
       ) : status === "approved" ? (
         <>
-          <Button href={`/issuer/launchpad?application=${latestApp.id}`}>
-            Open your sale →
-          </Button>
+          {startupUnavailable ? (
+            <Button href={MX_ROUTES.contact}>Contact the team</Button>
+          ) : (
+            <Button href={`/issuer/launchpad?application=${latestApp.id}`}>
+              Open your sale →
+            </Button>
+          )}
           <Button href="/issuer/onboarding" variant="ghost">
             Issuer onboarding
           </Button>

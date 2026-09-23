@@ -5,12 +5,13 @@ import { cx } from "./cx";
  * Mono, uppercase, hairline chip.
  *
  * - `default` — neutral metadata.
- * - `stage`   — amber. Reserved for deployment stage (`MX_STAGE_LABEL`,
- *   e.g. "Solana devnet · v0.1" — derived from the build's network).
+ * - `stage`   — amber. Reserved for deployment stage
+ *   (`MX_NETWORK_STAGE_LABEL`, e.g. "Solana devnet · v0.1" — derived from
+ *   the build's network).
  *   Amber means *status*, never decoration, and never an unresolved fact.
  *
  * ```tsx
- * <Badge variant="stage">{MX_STAGE_LABEL}</Badge>
+ * <Badge variant="stage">{MX_NETWORK_STAGE_LABEL}</Badge>
  * ```
  */
 export function Badge({

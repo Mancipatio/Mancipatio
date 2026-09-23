@@ -2,7 +2,8 @@
 // equity % of one application ("case by case"). Signed
 // ("applications.adjustTerms") + requireAdmin. The database trigger still
 // enforces the applicant's yearly cap and max equity; raise the client's
-// limit first when a case needs more.
+// limit first when a case needs more. A STARTUP application's terms need the
+// startupRaises feature (lib/features.ts) — off on mainnet by default.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -11,6 +12,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { insertApplicationEvent } from "../_lib";
 import { raiseLimitError } from "@/lib/server/raise-limits";
+import { requireFeature } from "@/lib/server/feature-gate";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -28,9 +30,10 @@ export async function POST(request: Request) {
 
     const sb = getSupabaseAdmin();
     const { data: before, error: readErr } = await sb.from("launch_applications")
-      .select("raise_amount,equity_offered").eq("id", id).eq("network", detectNetwork()).maybeSingle();
+      .select("raise_amount,equity_offered,raise_type").eq("id", id).eq("network", detectNetwork()).maybeSingle();
     if (readErr) throw new SiwsError(500, "Could not load the application");
     if (!before) throw new SiwsError(404, "Application not found");
+    if (before.raise_type === "startup") requireFeature("startupRaises");
     const { error } = await sb.from("launch_applications")
       .update({ raise_amount: raise, equity_offered: equity }).eq("id", id).eq("network", detectNetwork());
     const limit = raiseLimitError(error);

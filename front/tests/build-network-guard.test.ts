@@ -1,7 +1,8 @@
 // next.config.ts refuses a Vercel build without an explicit, valid
 // NEXT_PUBLIC_NETWORK (lib/network.ts would otherwise guess from the RPC URL
-// and fall back to devnet). Local builds, CI (NEXT_PUBLIC_NETWORK=devnet),
-// `next dev` and tests keep working.
+// and fall back to devnet), and any mainnet build until the legal copy is
+// approved for mainnet (MAINNET_LEGAL_COPY_APPROVED=true). Local builds, CI
+// (NEXT_PUBLIC_NETWORK=devnet), `next dev` and tests keep working.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import config, { assertBuildNetwork } from "@/next.config";
 
@@ -41,9 +42,42 @@ describe("assertBuildNetwork", () => {
   it("accepts an explicit network on Vercel", () => {
     for (const network of ["mainnet", "devnet", "testnet", "localnet", " Mainnet "]) {
       expect(() =>
-        assertBuildNetwork(BUILD, { VERCEL: "1", VERCEL_ENV: "production", NEXT_PUBLIC_NETWORK: network }),
+        assertBuildNetwork(BUILD, {
+          VERCEL: "1",
+          VERCEL_ENV: "production",
+          NEXT_PUBLIC_NETWORK: network,
+          MAINNET_LEGAL_COPY_APPROVED: "true",
+        }),
       ).not.toThrow();
     }
+  });
+
+  it("refuses a mainnet build until the legal copy is approved for mainnet", () => {
+    // The Terms / Privacy pages still say "runs on Solana devnet, no real
+    // assets" — binding text that would be false on mainnet.
+    for (const env of [
+      { NEXT_PUBLIC_NETWORK: "mainnet" },
+      { NEXT_PUBLIC_NETWORK: " Mainnet ", MAINNET_LEGAL_COPY_APPROVED: "" },
+      { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "1" },
+      { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "TRUE" },
+      { VERCEL: "1", VERCEL_ENV: "production", NEXT_PUBLIC_NETWORK: "mainnet" },
+    ]) {
+      expect(() => assertBuildNetwork(BUILD, env), JSON.stringify(env)).toThrow(
+        /Refusing a mainnet build: .*MAINNET_LEGAL_COPY_APPROVED=true/,
+      );
+    }
+    expect(() =>
+      assertBuildNetwork(BUILD, {
+        NEXT_PUBLIC_NETWORK: "mainnet",
+        MAINNET_LEGAL_COPY_APPROVED: " true ",
+      }),
+    ).not.toThrow();
+    // Test networks never need it; dev and the production server never check.
+    for (const network of ["devnet", "testnet", "localnet"]) {
+      expect(() => assertBuildNetwork(BUILD, { NEXT_PUBLIC_NETWORK: network })).not.toThrow();
+    }
+    expect(() => assertBuildNetwork(DEV, { NEXT_PUBLIC_NETWORK: "mainnet" })).not.toThrow();
+    expect(() => assertBuildNetwork(SERVER, { NEXT_PUBLIC_NETWORK: "mainnet" })).not.toThrow();
   });
 
   it("leaves local builds, dev and the production server alone", () => {
@@ -62,6 +96,10 @@ describe("next.config default export", () => {
     expect(() => config(BUILD)).toThrow(/not set/);
 
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    vi.stubEnv("MAINNET_LEGAL_COPY_APPROVED", "");
+    expect(() => config(BUILD)).toThrow(/Refusing a mainnet build/);
+
+    vi.stubEnv("MAINNET_LEGAL_COPY_APPROVED", "true");
     const resolved = config(BUILD);
     expect(resolved.poweredByHeader).toBe(false);
     expect(typeof resolved.headers).toBe("function");

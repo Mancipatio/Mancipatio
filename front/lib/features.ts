@@ -9,7 +9,7 @@
 // NEXT_PUBLIC_ so the client bundle sees the same answer the server enforces;
 // they are inlined at build time, so flipping one needs a rebuild.
 
-import { detectNetwork, networkLabel, type Network } from "@/lib/network";
+import { detectNetwork, type Network } from "@/lib/network";
 
 export type Features = {
   /** Admin-wallet push airdrop of a payout (/admin/payouts/[id]). */
@@ -40,10 +40,12 @@ export function features(network: Network = detectNetwork()): Features {
   };
 }
 
-/** User-facing sentence for a feature that is off on this network. */
+/** User-facing sentence for a feature that is off on this network. The
+ *  network is lower case ("Solana mainnet"), like the stage badge
+ *  (mxStageLabel) and the rest of the marketing copy. */
 export function featureDisabledMessage(
   name: FeatureName,
   network: Network = detectNetwork(),
 ): string {
-  return `${FEATURE_LABELS[name]} are not enabled on Solana ${networkLabel(network)}.`;
+  return `${FEATURE_LABELS[name]} are not enabled on Solana ${network}.`;
 }

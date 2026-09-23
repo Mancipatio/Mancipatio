@@ -215,6 +215,16 @@ function LaunchpadInner() {
       .sort((a, b) => Number(b.saleId - a.saleId));
   }, [data, scPdaMap]);
 
+  // Open Startup sales that can't be closed into a vested vault from here
+  // while startup raises are off (opened while the flag was on, or outside
+  // this UI). Explained in a visible note above the table — the disabled
+  // Close & vest button alone would give no reason on touch or keyboard.
+  const stuckStartupSales = STARTUP_RAISES
+    ? 0
+    : rows.filter(
+        (s) => s.status === SaleStatus.Open && s.raiseType === RaiseType.Startup,
+      ).length;
+
   const verified = me?.kybStatus === 1;
   const mintableScs = myShareClasses.filter((sc) => sc.mintInitialized);
   const canOpen = verified && mintableScs.length > 0;
@@ -444,6 +454,23 @@ function LaunchpadInner() {
       ) : rows.length === 0 ? (
         <Empty />
       ) : (
+        <>
+        {stuckStartupSales > 0 && (
+          <div
+            id="startup-close-unavailable"
+            className="mt-8 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900"
+          >
+            <p className="font-semibold">Startup raises unavailable</p>
+            <p className="mt-1 text-amber-700">
+              {featureDisabledMessage("startupRaises")}{" "}
+              {stuckStartupSales === 1
+                ? "Your open startup sale can't"
+                : `Your ${stuckStartupSales} open startup sales can't`}{" "}
+              be closed and vested from this page, so the proceeds stay in the
+              program escrow. Contact the Manci team.
+            </p>
+          </div>
+        )}
         <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
@@ -511,6 +538,11 @@ function LaunchpadInner() {
                               ? featureDisabledMessage("startupRaises")
                               : undefined
                           }
+                          aria-describedby={
+                            s.raiseType === RaiseType.Startup && !STARTUP_RAISES
+                              ? "startup-close-unavailable"
+                              : undefined
+                          }
                           onClick={() => setConfirmClose(s)}
                           className="text-xs text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
                         >
@@ -526,6 +558,7 @@ function LaunchpadInner() {
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {showOpen &&

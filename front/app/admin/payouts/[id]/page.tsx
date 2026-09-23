@@ -498,7 +498,9 @@ function PayoutDetail({ id }: { id: string }) {
               Mark as funded
             </button>
           )}
-          {payout.status === "funded" && (
+          {/* "live" means the admin-wallet airdrop is running; with that
+              feature off the API refuses it (payouts/update), so no button. */}
+          {payout.status === "funded" && AIRDROP_ENABLED && (
             <button
               type="button"
               onClick={() =>
@@ -554,8 +556,15 @@ function PayoutDetail({ id }: { id: string }) {
               Airdrop execution
             </h2>
             <p className="mt-1.5 max-w-2xl text-[13px] leading-relaxed text-slate-600">
-              {featureDisabledMessage("payoutAirdrop")} Use the on-chain
-              distribution flow on the Payouts page instead.
+              {featureDisabledMessage("payoutAirdrop")} Distribute on-chain
+              from{" "}
+              <Link
+                href="/admin/payouts#push-distributions"
+                className="font-medium text-slate-900 underline underline-offset-2"
+              >
+                Push distributions
+              </Link>{" "}
+              on the Payouts page instead.
             </p>
           </section>
         )}
