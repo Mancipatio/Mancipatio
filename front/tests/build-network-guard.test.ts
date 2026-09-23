@@ -108,9 +108,11 @@ describe("next.config default export", () => {
   it("keeps the X-Robots-Tag noindex header on /account paths", async () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
     const headers = await config(BUILD).headers!();
-    const sources = headers.map((h) => h.source);
-    expect(sources).toEqual(["/account/:path*", "/api/account/:path*"]);
-    for (const entry of headers) {
+    // Other rules (site-wide security headers, no-store pages) sit alongside;
+    // the account rules must still be there and still carry noindex.
+    const account = headers.filter((h) => h.source === "/account/:path*" || h.source === "/api/account/:path*");
+    expect(account.map((h) => h.source)).toEqual(["/account/:path*", "/api/account/:path*"]);
+    for (const entry of account) {
       expect(entry.headers).toContainEqual({ key: "X-Robots-Tag", value: "noindex, nofollow" });
     }
   });
