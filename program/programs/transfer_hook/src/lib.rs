@@ -809,7 +809,12 @@ fn process_execute(program_id: &Pubkey, accounts: &[AccountInfo], _amount: u64) 
     // Open mode has no config tail. Ordinary delegates never replace the
     // source owner for sanctions checks, including when the owner delegated
     // their tokens before being blocked; a blocked source leaves only via the
-    // registry's permanent-delegate quarantine clawback.
+    // registry's permanent-delegate quarantine clawback. Here the hook can
+    // only prove "ShareClass-signed, into SOME registry escrow PDA": that it
+    // is the burn-only quarantine vault relies on asset_registry signing as
+    // the ShareClass solely in `util::seize_into_quarantine` (whose callers
+    // pin the vault) and never calling SetAuthority — guarded there by
+    // `share_class_signs_only_the_quarantine_transfer`.
     let Some(config_ai) = accounts.get(6).filter(|ai| ai.owner == program_id) else {
         if blocked {
             require_quarantine_clawback(

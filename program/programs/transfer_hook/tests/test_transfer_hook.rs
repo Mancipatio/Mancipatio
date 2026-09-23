@@ -3313,3 +3313,48 @@ fn kyc_gated_quarantine_still_requires_destination_marker() {
         "no destination marker",
     );
 }
+
+/// Defensive middle branch: a config IS in the tail (idx 6) but says Open —
+/// only reachable with a legacy / hand-built meta list, since
+/// `update_transfer_hook_config` always rebuilds the list for the new mode.
+/// There the quarantine leg is pinned to `config.share_class` (not merely the
+/// mint's PermanentDelegate): the genuine ShareClass → escrow PDA passes; a
+/// different ShareClass the mint's delegate was re-pointed to is refused.
+#[test]
+fn open_config_in_a_kyc_gated_tail_pins_config_share_class() {
+    // Open config + meta list, but Execute built in the 12-account shape.
+    let mut f = quarantine_fixture(false);
+    f.gated = true;
+    let (escrow, share_class) = (f.escrow, f.share_class);
+    f.run(escrow, share_class)
+        .expect("config.share_class → escrow PDA passes");
+
+    // Not the escrow PDA / a wallet destination: still refused.
+    let wallet_token = Pubkey::new_unique();
+    f.svm
+        .set_account(wallet_token, dest_token_account(&Pubkey::new_unique()))
+        .unwrap();
+    assert_hook_err(
+        f.run(wallet_token, share_class),
+        ERR_SENDER_BLOCKED,
+        "open config in tail: wallet destination",
+    );
+
+    // The mint's delegate re-pointed to another genuine-looking ShareClass:
+    // in the config-less Open branch that delegate IS the pin (see the
+    // matrix), but with a config in the tail `config.share_class` wins.
+    let other = Pubkey::new_unique();
+    install_fake_share_class(&mut f.svm, &other);
+    let mint = f.mint;
+    f.svm.set_account(mint, mint_account(Some(other))).unwrap();
+    assert_hook_err(
+        f.run(escrow, other),
+        ERR_SENDER_BLOCKED,
+        "open config in tail: delegate ShareClass != config.share_class",
+    );
+    assert_hook_err(
+        f.run(escrow, share_class),
+        ERR_SENDER_BLOCKED,
+        "open config in tail: config.share_class is no longer the delegate",
+    );
+}
