@@ -12,7 +12,7 @@ import {
 export const metadata: Metadata = {
   title: "Security & compliance — Manci",
   description:
-    "Understand transfer checks, custody rules and operational authorities in the Manci app.",
+    "Understand transfer checks, custody rules, the emergency pause and operational authorities in the Manci app, and how to report a vulnerability.",
 };
 
 // Describe supported controls without claiming local changes are already deployed.
@@ -36,6 +36,10 @@ const PILLARS: Array<{ title: string; body: string }> = [
   {
     title: "Program-mediated custody",
     body: "Primary sales, OTC deals, conversions, deliveries and redemptions move through escrow accounts owned by program-derived addresses. Movements require the program’s authorized instructions and their checks.",
+  },
+  {
+    title: "Emergency pause",
+    body: "Any Manci admin can pause one or more areas of platform-mediated activity: onboarding, primary sales, trading through Manci, custody entry, distributions and payouts to issuers. Only the Super Admin can resume them. A pause never blocks exits — cancels, expiries, refunds, claims and custody returns keep working — and the transfer hook does not read it, so holders can still move tokens between wallets under the usual transfer checks.",
   },
   {
     title: "Role-gated authority",
@@ -119,6 +123,28 @@ export default function SecurityPage() {
             Pilot operator guide →
           </a>
         </p>
+      </Section>
+
+      <Section>
+        <H2>Reporting a vulnerability</H2>
+        <Body className="mt-4">
+          If you find a security issue in the Manci programs or app, email{" "}
+          <a className="mx-link" href="mailto:security@mancipatio.io">
+            security@mancipatio.io
+          </a>
+          . Describe the issue, the affected program, page or instruction, and
+          the steps to reproduce it. Test only on devnet or with your own
+          accounts and assets, never with other people&apos;s funds or data,
+          and give us reasonable time to fix the issue before disclosing it.
+        </Body>
+        <Body className="mt-4">
+          Both on-chain programs embed a security.txt with this contact, and
+          the app publishes one at{" "}
+          <a className="mx-link" href="/.well-known/security.txt">
+            /.well-known/security.txt
+          </a>
+          .
+        </Body>
       </Section>
 
       <Section>
