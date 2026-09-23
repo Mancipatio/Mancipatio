@@ -1,8 +1,8 @@
 // SERVER-ONLY — SIWS signature verification for signed routes.
 // Client half (payload construction + canonicalization) is lib/siws-client.ts.
 // Hardware wallets (Ledger) sign the same canonical text inside a Solana
-// off-chain message; the envelope layouts, limits and the application-domain
-// decision are in lib/siws-offchain.ts.
+// off-chain message; the envelope layouts, limits and the application-domain,
+// format-byte and body-text decisions are in lib/siws-offchain.ts.
 //
 // Usage inside a route handler (see app/api/_exemplar/route.ts):
 //
@@ -34,6 +34,7 @@ import {
 import {
   isSiwsSignatureFormat,
   OffchainMessageLimitError,
+  SIWS_SIGNATURE_FORMATS,
   siwsSignedBytes,
   type SiwsSignatureFormat,
 } from "@/lib/siws-offchain";
@@ -176,8 +177,8 @@ export async function verifySigned(
     if (typeof publicKey !== "string" || publicKey.length === 0) {
       throw new SiwsError(400, "Missing publicKey");
     }
-    // Which bytes the signature covers (lib/siws-offchain.ts). Only the NAME
-    // of the layout comes from the client; the bytes are rebuilt below.
+    // Which bytes the signature covers (lib/siws-offchain.ts) — a hint for
+    // the order of the checks below. No bytes ever come from the client.
     if (sigFormat !== undefined && !isSiwsSignatureFormat(sigFormat)) {
       throw new SiwsError(400, "Unsupported signature format");
     }
@@ -234,15 +235,27 @@ export async function verifySigned(
   // Verify the exact signed context and params before touching the nonce store.
   // Invalid signatures must never reserve another wallet's nonce.
   // "raw" = the UTF-8 SIWS text itself; "offchain-v0*" = a Solana off-chain
-  // message whose body is that same text (hardware wallets). Either way the
-  // server derives the one byte string to check from the canonical payload.
-  const format: SiwsSignatureFormat = (sigFormat as SiwsSignatureFormat | undefined) ?? "raw";
-  let messageBytes: Uint8Array;
-  try {
-    messageBytes = siwsSignedBytes(siwsMessage(payload as SiwsPayload), wallet, format);
-  } catch (error) {
-    if (error instanceof OffchainMessageLimitError) throw new SiwsError(400, error.message);
-    throw new SiwsError(401, "Invalid wallet address or signature");
+  // message around that same text (hardware wallets, lib/siws-offchain.ts).
+  // The server derives every accepted byte string from the canonical payload
+  // and tries the one the client names first, then the others: all of them
+  // bind the same payload and wallet and are domain-separated (raw starts
+  // "mancipatio:v2:", envelopes start 0xff), and a client may name any of
+  // them anyway — so accepting any one weakens nothing, and a wallet that
+  // wrapped the text itself still verifies when the client could not tell
+  // (no WebCrypto Ed25519 in that browser).
+  const named: SiwsSignatureFormat = (sigFormat as SiwsSignatureFormat | undefined) ?? "raw";
+  const text = siwsMessage(payload as SiwsPayload);
+  const candidates: Uint8Array[] = [];
+  for (const format of [named, ...SIWS_SIGNATURE_FORMATS.filter((f) => f !== named)]) {
+    try {
+      candidates.push(siwsSignedBytes(text, wallet, format));
+    } catch (error) {
+      if (!(error instanceof OffchainMessageLimitError)) {
+        throw new SiwsError(401, "Invalid wallet address or signature");
+      }
+      // Too long for a hardware wallet: an error only when that was the claim.
+      if (format === named) throw new SiwsError(400, error.message);
+    }
   }
   let sigBytes: Uint8Array;
   try {
@@ -255,11 +268,10 @@ export async function verifySigned(
   let verified = false;
   try {
     const cryptoKey = await getPublicKeyFromAddress(toAddress(wallet));
-    verified = await verifySignature(
-      cryptoKey,
-      signatureBytes(sigBytes),
-      messageBytes,
-    );
+    for (const messageBytes of candidates) {
+      verified = await verifySignature(cryptoKey, signatureBytes(sigBytes), messageBytes);
+      if (verified) break;
+    }
   } catch {
     throw new SiwsError(401, "Invalid wallet address or signature");
   }

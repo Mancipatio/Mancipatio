@@ -656,7 +656,9 @@ export default function ApplyPage() {
                 ? "Wallet request declined"
                 : readError.kind === "signing_unsupported"
                   ? "Wallet cannot sign messages"
-                  : "Could not read your applications"}
+                  : readError.kind === "hardware_wallet"
+                    ? "Hardware wallet could not sign"
+                    : "Could not read your applications"}
             </Eyebrow>
             <div role="alert">
               <Body className="mt-2">{readError.message}</Body>

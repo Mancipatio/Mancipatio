@@ -5,9 +5,11 @@
 //   message = "mancipatio:v2:" + canonicalJson(payload)   (sorted keys, no whitespace)
 //   signature = ed25519 sign of the UTF-8 message bytes by the connected wallet
 //               — or, for a Ledger, of a Solana off-chain message whose body is
-//               exactly that message (lib/siws-offchain.ts, lib/siws-signing.ts)
+//               that message with non-ASCII characters \u-escaped, so the device
+//               shows it in full (lib/siws-offchain.ts, lib/siws-signing.ts)
 //   POST { payload, signature: base64, publicKey: wallet, sigFormat } to the route
-//   (sigFormat: "raw" | "offchain-v0" | "offchain-v0-legacy"; absent = "raw")
+//   (sigFormat: "raw" | "offchain-v0" | "offchain-v0-legacy"; absent = "raw";
+//   a hint only — the server rebuilds and tries every accepted byte string)
 //
 // The server half lives in lib/server/siws.ts (`verifySigned`). Both sides share
 // `canonicalJson` and `SIWS_MESSAGE_PREFIX` from THIS file — do not fork the
@@ -57,7 +59,8 @@ export type SiwsRequestBody = {
   /** Redundant copy of payload.wallet (server requires equality). */
   publicKey: string;
   /** Which bytes were signed: the message itself ("raw", the default) or a
-   * Solana off-chain message around it. The server rebuilds those bytes. */
+   * Solana off-chain message around it. A hint: the server rebuilds and
+   * tries every accepted byte string, the named one first. */
   sigFormat?: SiwsSignatureFormat;
 };
 
@@ -131,6 +134,7 @@ export async function createSignedRequest(
     params,
   };
   // One prompt; a Ledger that refuses raw bytes gets one off-chain retry.
+  // Throws instead of returning a signature it has proved the server rejects.
   const { signature, sigFormat } = await signSiwsMessage(
     session, signMessage, siwsMessage(payload), payload.wallet,
   );
