@@ -243,6 +243,33 @@ pub fn take_old_grant(
     Ok(Some((grant.capabilities, grant.updated_by)))
 }
 
+/// Retires a pending `AuthorityTransfer` or `IssuerRecovery` of `issuer` at
+/// `record` (the caller pins its address by seeds) when the issuer authority
+/// changes by the OTHER path: its `current_authority` (byte 40 in both
+/// layouts) becomes the default key, which no issuer authority can equal, so
+/// an A -> B -> A round trip can never make it acceptable / executable again.
+/// Cancel still works and returns the rent. Returns whether a live-looking
+/// proposal was retired; a missing account is a no-op.
+pub fn retire_pending_proposal(
+    record: &AccountInfo,
+    issuer: &Pubkey,
+    discriminator: &[u8],
+) -> Result<bool> {
+    if record.data_is_empty() || record.owner != &crate::ID {
+        return Ok(false);
+    }
+    let mut data = record.try_borrow_mut_data()?;
+    require!(
+        data.len() >= 72 && data[..8] == *discriminator && data[8..40] == issuer.to_bytes(),
+        RegistryError::Unauthorized
+    );
+    if data[40..72].iter().all(|b| *b == 0) {
+        return Ok(false);
+    }
+    data[40..72].fill(0);
+    Ok(true)
+}
+
 /// Reads the parent key stored in the first field (byte 8) of a registry
 /// account without deserializing the rest, after checking its address, owner
 /// and discriminator. `ShareClass.asset` and `Asset.issuer` sit there in every

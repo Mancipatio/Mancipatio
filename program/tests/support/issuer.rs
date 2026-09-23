@@ -664,6 +664,9 @@ pub fn accept_issuer_authority_ix_with(
             transfer,
             old_permissions: permissions_pda(issuer, current),
             new_permissions: permissions_pda(issuer, new_authority),
+            old_admin_record: admin_pda(current),
+            new_admin_record: admin_pda(new_authority),
+            recovery: recovery_pda(issuer),
             system_program: system_program::ID,
         }
         .to_account_metas(None),
@@ -739,6 +742,8 @@ pub fn execute_issuer_recovery_ix(
             proposer: *proposer,
             old_permissions: permissions_pda(issuer, current),
             new_permissions: permissions_pda(issuer, new_authority),
+            new_admin_record: admin_pda(new_authority),
+            transfer: transfer_pda(issuer),
         }
         .to_account_metas(None),
     )

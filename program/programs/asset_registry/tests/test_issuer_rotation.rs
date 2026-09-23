@@ -1792,3 +1792,546 @@ fn layouts_and_error_codes_are_positional() {
         "AuthorityTransfer.new_authority at 72 too"
     );
 }
+
+// ── 22. Review round: Admin keys, retired proposals, foreign accounts ────────
+
+fn add_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::AddAdmin {
+            new_admin: *new_admin,
+        }
+        .data(),
+        acc::AddAdmin {
+            super_admin: *super_admin,
+            platform: platform_pda(),
+            admin_record: admin_pda(new_admin),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// `ix` with every account meta keyed `from` re-pointed at `to`.
+fn swap_account(mut ix: Instruction, from: &Pubkey, to: &Pubkey) -> Instruction {
+    let mut hit = false;
+    for meta in &mut ix.accounts {
+        if meta.pubkey == *from {
+            meta.pubkey = *to;
+            hit = true;
+        }
+    }
+    assert!(hit, "account {from} is not in the instruction");
+    ix
+}
+
+#[test]
+fn a_plain_issuer_key_never_rotates_or_recovers_onto_a_global_admin_key() {
+    let Scene { mut w, a, b, c, fx } = scene();
+    let admin = w.admin.insecure_clone();
+    w.send(
+        &[&admin],
+        &[add_admin_ix(&admin.pubkey(), &b.pubkey())],
+        "add_admin B",
+    );
+
+    // A (plain key, MINT|METADATA grant) -> B (Admin): refused at accept,
+    // since an Admin skips the per-issuer grant.
+    w.send(
+        &[&a],
+        &[propose_issuer_authority_ix(
+            &a.pubkey(),
+            &fx.issuer,
+            &b.pubkey(),
+        )],
+        "propose -> Admin B",
+    );
+    w.expect_code(
+        &[&b],
+        &[accept_issuer_authority_ix(
+            &b.pubkey(),
+            &fx.issuer,
+            &a.pubkey(),
+        )],
+        ERR_INVALID_PROPOSED_AUTHORITY,
+        "accept by an Admin key",
+    );
+    let hidden = swap_account(
+        accept_issuer_authority_ix(&b.pubkey(), &fx.issuer, &a.pubkey()),
+        &admin_pda(&b.pubkey()),
+        &admin_pda(&c.pubkey()),
+    );
+    w.expect_code(
+        &[&b],
+        &[hidden],
+        ERR_CONSTRAINT_SEEDS,
+        "accept with another key's Admin PDA",
+    );
+    w.send(
+        &[&a],
+        &[cancel_issuer_authority_transfer_ix(&a.pubkey(), &fx.issuer)],
+        "cancel",
+    );
+
+    // A recovery never lands on an Admin key.
+    let t0 = w.now();
+    w.propose_recovery(&fx.issuer, &b.pubkey());
+    w.warp_to(t0 + DELAY);
+    w.expect_code(
+        &[&b],
+        &[execute_issuer_recovery_ix(
+            &b.pubkey(),
+            &fx.issuer,
+            &a.pubkey(),
+            &admin.pubkey(),
+        )],
+        ERR_INVALID_RECOVERY,
+        "execute by an Admin key",
+    );
+    let hidden = swap_account(
+        execute_issuer_recovery_ix(&b.pubkey(), &fx.issuer, &a.pubkey(), &admin.pubkey()),
+        &admin_pda(&b.pubkey()),
+        &admin_pda(&c.pubkey()),
+    );
+    w.expect_code(
+        &[&b],
+        &[hidden],
+        ERR_CONSTRAINT_SEEDS,
+        "execute with another key's Admin PDA",
+    );
+    assert_eq!(w.load::<Issuer>(&fx.issuer).authority, a.pubkey());
+    w.send(
+        &[&admin],
+        &[cancel_issuer_recovery_ix(
+            &admin.pubkey(),
+            &fx.issuer,
+            &admin.pubkey(),
+        )],
+        "cancel recovery",
+    );
+
+    // Admin -> Admin gains nothing and stays possible.
+    w.send(
+        &[&admin],
+        &[add_admin_ix(&admin.pubkey(), &a.pubkey())],
+        "add_admin A",
+    );
+    w.rotate(&fx.issuer, &a, &b);
+    assert_eq!(w.load::<Issuer>(&fx.issuer).authority, b.pubkey());
+}
+
+#[test]
+fn a_rotation_retires_a_pending_recovery_so_a_round_trip_cannot_revive_it() {
+    let Scene { mut w, a, b, c, fx } = scene();
+    let admin = w.admin.insecure_clone();
+    let recovery = recovery_pda(&fx.issuer);
+    let t0 = w.now();
+    w.propose_recovery(&fx.issuer, &c.pubkey());
+    let logs = w.rotate(&fx.issuer, &a, &b);
+    assert!(logs.iter().any(|l| l.contains("pending recovery retired")));
+    let retired = w.load::<IssuerRecovery>(&recovery);
+    assert_eq!(retired.current_authority, Pubkey::default());
+    assert_eq!(retired.new_authority, c.pubkey());
+
+    // B hands the key back to A inside the execution window.
+    w.rotate(&fx.issuer, &b, &a);
+    w.warp_to(t0 + DELAY);
+    w.expect_code(
+        &[&c],
+        &[execute_issuer_recovery_ix(
+            &c.pubkey(),
+            &fx.issuer,
+            &a.pubkey(),
+            &admin.pubkey(),
+        )],
+        ERR_INVALID_RECOVERY,
+        "a recovery revived by A -> B -> A",
+    );
+    let rent = w.lamports(&recovery);
+    let before = w.lamports(&admin.pubkey());
+    w.send(
+        &[&a],
+        &[cancel_issuer_recovery_ix(
+            &a.pubkey(),
+            &fx.issuer,
+            &admin.pubkey(),
+        )],
+        "A cancels the retired recovery",
+    );
+    assert!(w.is_closed(&recovery));
+    assert_eq!(w.lamports(&admin.pubkey()), before + rent);
+    assert_eq!(w.load::<Issuer>(&fx.issuer).authority, a.pubkey());
+}
+
+/// A (about to lose its key) stages a rotation to C; the super admin recovers
+/// the issuer to B.
+fn recovered_with_a_pending_rotation(s: &mut Scene) {
+    let admin = s.w.admin.insecure_clone();
+    s.w.send(
+        &[&s.a],
+        &[propose_issuer_authority_ix(
+            &s.a.pubkey(),
+            &s.fx.issuer,
+            &s.c.pubkey(),
+        )],
+        "A proposes C",
+    );
+    let t0 = s.w.now();
+    s.w.propose_recovery(&s.fx.issuer, &s.b.pubkey());
+    s.w.warp_to(t0 + DELAY);
+    let logs = s.w.send(
+        &[&s.b],
+        &[execute_issuer_recovery_ix(
+            &s.b.pubkey(),
+            &s.fx.issuer,
+            &s.a.pubkey(),
+            &admin.pubkey(),
+        )],
+        "recover -> B",
+    );
+    assert!(logs
+        .iter()
+        .any(|l| l.contains("pending authority transfer retired")));
+    let transfer = s.w.load::<AuthorityTransfer>(&transfer_pda(&s.fx.issuer));
+    assert_eq!(transfer.current_authority, Pubkey::default());
+    assert_eq!(transfer.new_authority, s.c.pubkey());
+}
+
+#[test]
+fn a_recovery_retires_a_pending_rotation_and_the_recovered_key_cancels_it() {
+    let mut s = scene();
+    recovered_with_a_pending_rotation(&mut s);
+    let Scene {
+        mut w, b, c, fx, ..
+    } = s;
+    let transfer = transfer_pda(&fx.issuer);
+    w.expect_code(
+        &[&c],
+        &[accept_issuer_authority_ix(
+            &c.pubkey(),
+            &fx.issuer,
+            &b.pubkey(),
+        )],
+        ERR_INVALID_AUTHORITY_TRANSFER,
+        "C accepts the lost key's proposal",
+    );
+    let rent = w.lamports(&transfer);
+    let before = w.lamports(&b.pubkey());
+    w.send(
+        &[&b],
+        &[cancel_issuer_authority_transfer_ix(&b.pubkey(), &fx.issuer)],
+        "B cancels the stale proposal",
+    );
+    assert!(w.is_closed(&transfer));
+    assert_eq!(w.lamports(&b.pubkey()), before + rent);
+}
+
+#[test]
+fn a_round_trip_back_to_the_proposing_key_cannot_revive_a_retired_rotation() {
+    let mut s = scene();
+    recovered_with_a_pending_rotation(&mut s);
+    let Scene { mut w, a, b, c, fx } = s;
+    let admin = w.admin.insecure_clone();
+    let t1 = w.now();
+    w.propose_recovery(&fx.issuer, &a.pubkey());
+    w.warp_to(t1 + DELAY);
+    w.send(
+        &[&a],
+        &[execute_issuer_recovery_ix(
+            &a.pubkey(),
+            &fx.issuer,
+            &b.pubkey(),
+            &admin.pubkey(),
+        )],
+        "recover back -> A",
+    );
+    assert_eq!(w.load::<Issuer>(&fx.issuer).authority, a.pubkey());
+    w.expect_code(
+        &[&c],
+        &[accept_issuer_authority_ix(
+            &c.pubkey(),
+            &fx.issuer,
+            &a.pubkey(),
+        )],
+        ERR_INVALID_AUTHORITY_TRANSFER,
+        "C accepts once A is back",
+    );
+    w.send(
+        &[&a],
+        &[cancel_issuer_authority_transfer_ix(&a.pubkey(), &fx.issuer)],
+        "A cancels",
+    );
+}
+
+#[test]
+fn another_issuers_proposals_and_wrong_grant_pdas_are_refused() {
+    let Scene { mut w, a, b, c, fx } = scene();
+    let admin = w.admin.insecure_clone();
+    let y = w.register(&c, legal_id(9));
+    w.set_kyb(&y, true);
+    w.send(
+        &[&c],
+        &[propose_issuer_authority_ix(&c.pubkey(), &y, &b.pubkey())],
+        "Y proposes B",
+    );
+    let t0 = w.now();
+    w.propose_recovery(&y, &b.pubkey());
+    w.warp_to(t0 + DELAY);
+
+    // Y's proposals replayed against issuer X.
+    w.expect_code(
+        &[&b],
+        &[accept_issuer_authority_ix_with(
+            &b.pubkey(),
+            &fx.issuer,
+            &a.pubkey(),
+            transfer_pda(&y),
+        )],
+        ERR_CONSTRAINT_SEEDS,
+        "accept X with Y's transfer",
+    );
+    let replay = swap_account(
+        execute_issuer_recovery_ix(&b.pubkey(), &fx.issuer, &a.pubkey(), &admin.pubkey()),
+        &recovery_pda(&fx.issuer),
+        &recovery_pda(&y),
+    );
+    w.expect_code(
+        &[&b],
+        &[replay],
+        ERR_CONSTRAINT_SEEDS,
+        "execute X with Y's recovery",
+    );
+    let replay = swap_account(
+        cancel_issuer_recovery_ix(&a.pubkey(), &fx.issuer, &admin.pubkey()),
+        &recovery_pda(&fx.issuer),
+        &recovery_pda(&y),
+    );
+    w.expect_code(
+        &[&a],
+        &[replay],
+        ERR_CONSTRAINT_SEEDS,
+        "X's authority cancels Y's recovery",
+    );
+    let replay = swap_account(
+        cancel_issuer_authority_transfer_ix(&a.pubkey(), &fx.issuer),
+        &transfer_pda(&fx.issuer),
+        &transfer_pda(&y),
+    );
+    w.expect_code(
+        &[&a],
+        &[replay],
+        ERR_CONSTRAINT_SEEDS,
+        "X's authority cancels Y's transfer",
+    );
+
+    // Wrong grant / Admin / proposal PDAs on X's own live proposals.
+    w.send(
+        &[&a],
+        &[propose_issuer_authority_ix(
+            &a.pubkey(),
+            &fx.issuer,
+            &b.pubkey(),
+        )],
+        "X proposes B",
+    );
+    let x_old = permissions_pda(&fx.issuer, &a.pubkey());
+    let x_new = permissions_pda(&fx.issuer, &b.pubkey());
+    let x_other = permissions_pda(&fx.issuer, &c.pubkey());
+    for (what, from, to) in [
+        ("old grant of another key", x_old, x_other),
+        ("new grant of another key", x_new, x_other),
+        (
+            "Y's grant as the old grant",
+            x_old,
+            permissions_pda(&y, &c.pubkey()),
+        ),
+        (
+            "old Admin PDA of another key",
+            admin_pda(&a.pubkey()),
+            admin_pda(&c.pubkey()),
+        ),
+        ("Y's recovery", recovery_pda(&fx.issuer), recovery_pda(&y)),
+    ] {
+        let ix = swap_account(
+            accept_issuer_authority_ix(&b.pubkey(), &fx.issuer, &a.pubkey()),
+            &from,
+            &to,
+        );
+        w.expect_code(&[&b], &[ix], ERR_CONSTRAINT_SEEDS, what);
+    }
+    w.send(
+        &[&a],
+        &[cancel_issuer_authority_transfer_ix(&a.pubkey(), &fx.issuer)],
+        "cancel",
+    );
+    let t1 = w.now();
+    w.propose_recovery(&fx.issuer, &b.pubkey());
+    w.warp_to(t1 + DELAY);
+    for (what, from, to) in [
+        ("old grant of another key", x_old, x_other),
+        ("new grant of another key", x_new, x_other),
+        (
+            "Y's grant as the new grant",
+            x_new,
+            permissions_pda(&y, &b.pubkey()),
+        ),
+        ("Y's transfer", transfer_pda(&fx.issuer), transfer_pda(&y)),
+    ] {
+        let ix = swap_account(
+            execute_issuer_recovery_ix(&b.pubkey(), &fx.issuer, &a.pubkey(), &admin.pubkey()),
+            &from,
+            &to,
+        );
+        w.expect_code(&[&b], &[ix], ERR_CONSTRAINT_SEEDS, what);
+    }
+    w.send(
+        &[&b],
+        &[execute_issuer_recovery_ix(
+            &b.pubkey(),
+            &fx.issuer,
+            &a.pubkey(),
+            &admin.pubkey(),
+        )],
+        "the real execute",
+    );
+    assert_eq!(w.load::<Issuer>(&fx.issuer).authority, b.pubkey());
+    // Y's own proposals are untouched.
+    assert_eq!(
+        w.load::<AuthorityTransfer>(&transfer_pda(&y))
+            .current_authority,
+        c.pubkey()
+    );
+    assert_eq!(
+        w.load::<IssuerRecovery>(&recovery_pda(&y))
+            .current_authority,
+        c.pubkey()
+    );
+}
+
+#[test]
+fn sync_payout_founder_refuses_a_foreign_or_forged_chain_and_is_idempotent() {
+    let Scene { mut w, a, b, c, fx } = scene();
+    let other = {
+        let issuer = w.register(&c, legal_id(9));
+        w.set_kyb(&issuer, true);
+        w.asset_under(&c, &issuer, "other-001")
+    };
+    let m = market(&mut w, &fx);
+    let s = sale(&mut w, &a, &fx, &m, 2, RaiseType::Startup, 120);
+    w.send(
+        &[&a],
+        &[open_payout_vault_ix(&a.pubkey(), &s, &m)],
+        "open vault",
+    );
+    let vault = payout_pda(&s);
+    let logs = w.send(&[], &[sync_payout_founder_ix(&vault, &fx)], "in sync");
+    assert!(events::<PayoutFounderSynced>(&logs).is_empty());
+
+    w.rotate(&fx.issuer, &a, &b);
+    for (what, share_class, asset, issuer) in [
+        (
+            "foreign share class",
+            other.share_class,
+            fx.asset,
+            fx.issuer,
+        ),
+        ("foreign asset", fx.share_class, other.asset, fx.issuer),
+        ("foreign issuer", fx.share_class, fx.asset, other.issuer),
+        ("issuer as asset", fx.share_class, fx.issuer, fx.issuer),
+        (
+            "the other issuer's whole chain",
+            other.share_class,
+            other.asset,
+            other.issuer,
+        ),
+    ] {
+        let ix = sync_payout_founder_ix_with(&vault, &share_class, &asset, &issuer);
+        w.expect_code(&[], &[ix], ERR_UNAUTHORIZED, what);
+    }
+
+    let real = w.svm.get_account(&fx.share_class).unwrap();
+    let mut forged = real.clone();
+    forged.owner = system_program::ID;
+    w.svm.set_account(fx.share_class, forged).unwrap();
+    w.expect_code(
+        &[],
+        &[sync_payout_founder_ix(&vault, &fx)],
+        ERR_UNAUTHORIZED,
+        "forged owner",
+    );
+    w.svm.set_account(fx.share_class, real).unwrap();
+    let real_asset = w.svm.get_account(&fx.asset).unwrap();
+    let mut forged = real_asset.clone();
+    forged.data[..8].copy_from_slice(Issuer::DISCRIMINATOR);
+    w.svm.set_account(fx.asset, forged).unwrap();
+    w.expect_code(
+        &[],
+        &[sync_payout_founder_ix(&vault, &fx)],
+        ERR_UNAUTHORIZED,
+        "forged discriminator",
+    );
+    w.svm.set_account(fx.asset, real_asset).unwrap();
+    assert_eq!(w.load::<PayoutVault>(&vault).founder, a.pubkey());
+
+    let logs = w.send(&[], &[sync_payout_founder_ix(&vault, &fx)], "sync");
+    assert_eq!(events::<PayoutFounderSynced>(&logs).len(), 1);
+    assert_eq!(w.load::<PayoutVault>(&vault).founder, b.pubkey());
+    let logs = w.send(&[], &[sync_payout_founder_ix(&vault, &fx)], "again");
+    assert!(events::<PayoutFounderSynced>(&logs).is_empty());
+}
+
+#[test]
+fn registration_recovery_is_the_documented_timelock_gap_for_issuers_without_assets() {
+    // A Verified issuer with NO asset: the super admin alone flips KYB and
+    // re-assigns the registration at once (no 7-day notice), and a dormant
+    // grant revives when the registration returns to its key. Both are the
+    // super-admin trust assumption documented on `recover_issuer_registration`.
+    let mut w = World::boot();
+    let a = w.funded();
+    let c = w.funded();
+    let admin = w.admin.insecure_clone();
+    let issuer = w.register(&a, legal_id(4));
+    w.set_kyb(&issuer, true);
+    w.grant(&issuer, asset_registry::ISSUER_PERMISSION_MINT);
+    w.set_kyb(&issuer, false);
+    w.send(
+        &[&admin, &c],
+        &[recover_registration_ix(
+            &admin.pubkey(),
+            &issuer,
+            &c.pubkey(),
+        )],
+        "-> C without a timelock",
+    );
+    assert_eq!(w.load::<Issuer>(&issuer).authority, c.pubkey());
+    w.send(
+        &[&admin, &a],
+        &[recover_registration_ix(
+            &admin.pubkey(),
+            &issuer,
+            &a.pubkey(),
+        )],
+        "-> A without a timelock",
+    );
+    assert_eq!(
+        w.load::<IssuerPermissions>(&permissions_pda(&issuer, &a.pubkey()))
+            .capabilities,
+        asset_registry::ISSUER_PERMISSION_MINT,
+        "A's dormant grant is live again: the super admin must re-check it"
+    );
+
+    // With an asset the same flip cannot move the key: only the timelock can.
+    let Scene { mut w, b, fx, .. } = scene();
+    let admin = w.admin.insecure_clone();
+    w.set_kyb(&fx.issuer, false);
+    w.expect_code(
+        &[&admin, &b],
+        &[recover_registration_ix(
+            &admin.pubkey(),
+            &fx.issuer,
+            &b.pubkey(),
+        )],
+        ERR_NOT_RECOVERABLE,
+        "registration recovery of an issuer with an asset",
+    );
+}

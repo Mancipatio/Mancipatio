@@ -60,17 +60,25 @@ pub struct RecoverIssuerRegistration<'info> {
     pub new_authority: Signer<'info>,
 }
 
-/// Recovers an unverified, unused legal-ID reservation. Existing verified
-/// issuers or issuers with any asset cannot be reassigned through this path
-/// (they use the timelocked `propose_issuer_recovery`).
+/// Recovers an unverified, unused legal-ID reservation. Issuers with any asset
+/// cannot be reassigned through this path (they use the timelocked
+/// `propose_issuer_recovery`). A Verified issuer with no asset CAN: the super
+/// admin alone may flip KYB to Rejected (`verify_issuer_kyb(false)`) and then
+/// co-sign this with any key, skipping the 7-day timelock. That residual is a
+/// super-admin trust assumption (no asset, sale or vault is at stake); the
+/// runbook forbids the flip for an issuer that was ever Verified.
 ///
 /// The account list is frozen (the K9 co-sign envelope depends on it), so the
-/// old authority's `IssuerPermissions` record is left in place. It is dormant
-/// (`require_issuer_permission` derives the record from the live authority)
-/// and an unverified issuer can only have been granted 0, except when KYB went
-/// Verified -> Rejected after a grant. Should the old key become the authority
-/// again, `accept_issuer_authority` overwrites that record and
-/// `execute_issuer_recovery` closes it.
+/// old authority's `IssuerPermissions` record is left in place, and so is any
+/// leftover record of `new_authority` and any pending `AuthorityTransfer` /
+/// `IssuerRecovery`. A dormant record (`require_issuer_permission` derives it
+/// from the live authority) can only be non-zero when KYB went Verified ->
+/// Rejected after a grant. It is overwritten when its key later takes over
+/// through `accept_issuer_authority` and closed through
+/// `execute_issuer_recovery`, but it REVIVES when this instruction assigns
+/// the registration back to that key (A -> C -> A, each leg needing the super
+/// admin): the super admin must re-check or revoke the grant with
+/// `set_issuer_permissions` after every registration recovery.
 pub fn handle_recover_issuer_registration(
     ctx: Context<RecoverIssuerRegistration>,
     jurisdiction: u16,

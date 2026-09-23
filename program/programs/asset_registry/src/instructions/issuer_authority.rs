@@ -23,17 +23,38 @@
 //!   life on an A -> B -> A round trip. A regular accept carries the
 //!   capabilities over to the new key (the old key already had them); a
 //!   recovery carries nothing, the super admin re-grants after review.
+//! * Every authority change also RETIRES the other pending proposal (accept
+//!   retires a pending recovery, execute a pending regular rotation): its
+//!   `current_authority` becomes the default key, so a round trip back to the
+//!   proposing key cannot revive it without a fresh proposal (and, for a
+//!   recovery, a fresh 7-day notice). Cancel still returns its rent.
+//! * The new authority may not be a global Admin key unless the outgoing one
+//!   is too: `require_issuer_permission` lets an active Admin skip the
+//!   per-issuer grant, so rotating an issuer onto an Admin key would hand it
+//!   MINT / METADATA / CONVERSION without `set_issuer_permissions`. A recovery
+//!   never lands on an Admin key (it carries nothing; the super admin can add
+//!   the role afterwards with `add_admin`). Checked where the authority
+//!   changes (accept / execute), since the role can change after a proposal.
 //!
 //! Threat model: the recovery protects a LOST key. A COMPROMISED issuer key can
 //! cancel any recovery; that incident path is `PAUSE_ISSUER_PROCEEDS` plus
-//! off-chain action.
+//! off-chain action. The timelock covers every change made through these
+//! instructions. It does NOT cover `recover_issuer_registration` (2C-1, frozen
+//! accounts): for an issuer with `assets_count == 0` the super admin can flip
+//! KYB to Rejected and re-assign the registration at once, and that path
+//! neither closes grants nor retires pending proposals. That is a super-admin
+//! trust assumption; the runbook forbids it for any issuer that was ever
+//! Verified.
 //!
 //! Until `sync_sale_authority` / `sync_payout_founder` run, the OLD key keeps
 //! `close_sale`, `open_payout_vault`, `post_update` and `claim_founder_yield`,
 //! and the permissionless `release_payout` still pays the old key's account.
-//! The front bundles accept / execute with the syncs in one transaction; the
-//! runbook pauses issuer proceeds before executing a recovery for an issuer
-//! with Startup vaults.
+//! The front bundles accept / execute with the syncs (split over several
+//! transactions when they do not fit in one). For a recovery the key is LOST
+//! for the whole 7-day window, so every `release_payout` crank in that window
+//! already pays it: the runbook weighs `PAUSE_ISSUER_PROCEEDS` (global, so it
+//! halts every issuer) from the proposal until the syncs land. This is an
+//! accepted, documented trade-off, not enforced on-chain.
 //!
 //! None of these reads the pause flags: rotation and recovery are security
 //! exits, and a sync moves no funds (the payout exits stay gated).
@@ -49,7 +70,7 @@ use crate::state::{
     IssuerRecoveryCancelled, IssuerRecoveryProposed, PayoutFounderSynced, PayoutVault, Platform,
     Sale, SaleAuthoritySynced, ShareClass,
 };
-use crate::util::{read_parent_key, take_old_grant};
+use crate::util::{is_active_admin, read_parent_key, retire_pending_proposal, take_old_grant};
 
 // ── (a) Regular rotation ─────────────────────────────────────────────────────
 
@@ -67,7 +88,8 @@ pub struct ProposeIssuerAuthority<'info> {
 }
 
 /// The current issuer authority stages a new authority. A re-proposal
-/// overwrites the pending one. Allowed in every KYB status.
+/// overwrites the pending one. Allowed in every KYB status. The Admin-key
+/// rule is enforced at accept (the role can change in between).
 pub fn handle_propose_issuer_authority(
     ctx: Context<ProposeIssuerAuthority>,
     new_authority: Pubkey,
@@ -114,16 +136,42 @@ pub struct AcceptIssuerAuthority<'info> {
     #[account(init_if_needed, payer = new_authority, space = 8 + IssuerPermissions::INIT_SPACE,
         seeds = [ISSUER_PERMISSIONS_SEED, issuer.key().as_ref(), new_authority.key().as_ref()], bump)]
     pub new_permissions: Account<'info, IssuerPermissions>,
+    /// The outgoing authority's global Admin PDA (usually missing).
+    /// CHECK: address pinned by seeds; read by `util::is_active_admin`.
+    #[account(seeds = [ADMIN_SEED, issuer.authority.as_ref()], bump)]
+    pub old_admin_record: UncheckedAccount<'info>,
+    /// The incoming key's global Admin PDA (usually missing).
+    /// CHECK: address pinned by seeds; read by `util::is_active_admin`.
+    #[account(seeds = [ADMIN_SEED, new_authority.key().as_ref()], bump)]
+    pub new_admin_record: UncheckedAccount<'info>,
+    /// The issuer's pending recovery, retired here when present (it may not exist).
+    /// CHECK: address pinned by seeds; `util::retire_pending_proposal` checks the rest.
+    #[account(mut, seeds = [ISSUER_RECOVERY_SEED, issuer.key().as_ref()], bump)]
+    pub recovery: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
 }
 
 /// The proposed authority accepts. Only `Issuer.authority` changes (legal ID,
 /// KYB, asset count and every PDA seeded by the Issuer are untouched). The old
 /// grant is closed and its capabilities carried over (none: a zero record).
+/// A pending recovery is retired. The new key may be a global Admin only when
+/// the outgoing key is one too (otherwise `InvalidProposedAuthority`).
 pub fn handle_accept_issuer_authority(ctx: Context<AcceptIssuerAuthority>) -> Result<()> {
     let issuer = ctx.accounts.issuer.key();
     let old_authority = ctx.accounts.issuer.authority;
     let new_authority = ctx.accounts.new_authority.key();
+    require!(
+        !is_active_admin(&ctx.accounts.new_admin_record, &new_authority)
+            || is_active_admin(&ctx.accounts.old_admin_record, &old_authority),
+        RegistryError::InvalidProposedAuthority
+    );
+    if retire_pending_proposal(
+        &ctx.accounts.recovery.to_account_info(),
+        &issuer,
+        IssuerRecovery::DISCRIMINATOR,
+    )? {
+        msg!("Issuer {} pending recovery retired", issuer);
+    }
     let old_grant = take_old_grant(
         &ctx.accounts.old_permissions.to_account_info(),
         &issuer,
@@ -170,7 +218,7 @@ pub struct CancelIssuerAuthorityTransfer<'info> {
 }
 
 /// The current issuer authority withdraws a pending proposal (including one a
-/// recovery made stale); the rent returns to it.
+/// recovery retired or made stale); the rent returns to it.
 pub fn handle_cancel_issuer_authority_transfer(
     ctx: Context<CancelIssuerAuthorityTransfer>,
 ) -> Result<()> {
@@ -308,11 +356,21 @@ pub struct ExecuteIssuerRecovery<'info> {
     /// CHECK: address pinned by seeds; validated by `util::take_old_grant`.
     #[account(mut, seeds = [ISSUER_PERMISSIONS_SEED, issuer.key().as_ref(), new_authority.key().as_ref()], bump)]
     pub new_permissions: UncheckedAccount<'info>,
+    /// The recovered key's global Admin PDA: a recovery never lands on one.
+    /// CHECK: address pinned by seeds; read by `util::is_active_admin`.
+    #[account(seeds = [ADMIN_SEED, new_authority.key().as_ref()], bump)]
+    pub new_admin_record: UncheckedAccount<'info>,
+    /// The issuer's pending regular rotation, retired here when present (it may not exist).
+    /// CHECK: address pinned by seeds; `util::retire_pending_proposal` checks the rest.
+    #[account(mut, seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump)]
+    pub transfer: UncheckedAccount<'info>,
 }
 
 /// The recovered key executes the recovery inside `[eta, expires_at)`. Both
 /// grants are closed and none is written: the super admin re-grants with
-/// `set_issuer_permissions` after review.
+/// `set_issuer_permissions` after review. The recovered key may not be a
+/// global Admin (`InvalidIssuerRecovery`), and a pending regular rotation is
+/// retired.
 pub fn handle_execute_issuer_recovery(ctx: Context<ExecuteIssuerRecovery>) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(
@@ -326,6 +384,17 @@ pub fn handle_execute_issuer_recovery(ctx: Context<ExecuteIssuerRecovery>) -> Re
     let issuer = ctx.accounts.issuer.key();
     let old_authority = ctx.accounts.issuer.authority;
     let new_authority = ctx.accounts.new_authority.key();
+    require!(
+        !is_active_admin(&ctx.accounts.new_admin_record, &new_authority),
+        RegistryError::InvalidIssuerRecovery
+    );
+    if retire_pending_proposal(
+        &ctx.accounts.transfer.to_account_info(),
+        &issuer,
+        AuthorityTransfer::DISCRIMINATOR,
+    )? {
+        msg!("Issuer {} pending authority transfer retired", issuer);
+    }
     let proposer = ctx.accounts.proposer.to_account_info();
     let old_grant = take_old_grant(
         &ctx.accounts.old_permissions.to_account_info(),
