@@ -18,7 +18,6 @@ import { createHash } from "node:crypto";
 import {
   address,
   getBase58Encoder,
-  signature as toSignature,
   type Address,
   type ReadonlyUint8Array,
 } from "@solana/kit";
@@ -28,6 +27,7 @@ import {
   MINT_TO_TREASURY_DISCRIMINATOR,
   RaiseType,
   SaleStatus,
+  fetchMaybeAsset,
   fetchMaybeSale,
   fetchMaybeSaleApproval,
   fetchMaybeShareClass,
@@ -40,7 +40,13 @@ import { findSalePda } from "@/lib/pdas";
 import { getServerRpc } from "@/lib/server/rpc";
 import { SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { listLiveApprovals, readApprovalAndSale, type LiveApproval } from "@/lib/server/sale-capacity-chain";
+import {
+  finalizedTransaction,
+  listFinalizedSignatures,
+  listLiveApprovals,
+  readApprovalAndSale,
+  type LiveApproval,
+} from "@/lib/server/sale-capacity-chain";
 
 export const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -51,6 +57,18 @@ export const SALE_APPROVAL_MAX_TTL_SECS = 7_776_000;
 const CONFIRM_GRACE_MS = 5 * 60_000;
 /** Chain clock drift allowance before an expired approval's reservation is released. */
 const EXPIRY_GRACE_SECS = 3_600;
+/**
+ * A treasury mint is sent right after its reservation, with a recent
+ * blockhash (it can land for ~90 s): one with no matching finalized mint
+ * after this long is expired by the worker.
+ */
+const TREASURY_TTL_MS = 30 * 60_000;
+/** Released treasury rows are rechecked for a late-found mint for this long, */
+const TREASURY_RECHECK_MS = 24 * 3_600_000;
+/** at most this often each. */
+const TREASURY_RECHECK_EVERY_MS = 10 * 60_000;
+/** Block-time slack around a treasury reservation's window. */
+const TREASURY_WINDOW_SLACK_SECS = 120;
 
 export type RaiseTypeName = "mature" | "startup";
 export const raiseTypeName = (t: RaiseType): RaiseTypeName => (t === RaiseType.Startup ? "startup" : "mature");
@@ -215,6 +233,7 @@ export type Reservation = {
   approve_signature: string | null;
   mint_signature: string | null;
   booked_amount_eur: string | number | null;
+  released_at?: string | null;
   release_reason: string | null;
   reason: string | null;
   last_error: string | null;
@@ -240,7 +259,11 @@ export function capacityError(error: { code?: string; message?: string } | null 
   if (error?.code === "P0001") {
     const cap = /SALE_CAP_EXCEEDED remaining=([\d.]+) cap=([\d.]+) window_start=(\S+)/.exec(message);
     if (cap) {
-      return new SiwsError(409, `This approval would exceed the ${eur(cap[2])} limit over the last 12 months: only ${eur(cap[1])} remains.`);
+      return new SiwsError(409, `This would exceed the ${eur(cap[2])} limit over the last 12 months (booked issuances plus live sale approvals and treasury mints): only ${eur(cap[1])} remains.`);
+    }
+    const floor = /TREASURY_VALUE_BELOW_FLOOR floor=([\d.]+)/.exec(message);
+    if (floor) {
+      return new SiwsError(409, `The declared value is below the floor for these units (${eur(floor[1])}: at least €1, and the units at the share class's latest sale or approved price).`);
     }
     const amount = /APPLICATION_AMOUNT_EXCEEDED amount=([\d.]+) raise_amount=([\d.]+)/.exec(message);
     if (amount) {
@@ -264,6 +287,12 @@ export function capacityError(error: { code?: string; message?: string } | null 
       INVALID_TERMS: [400, "Invalid approval terms."],
       INVALID_GROSS: [400, "Invalid sale total."],
       SCHEDULE_MISMATCH: [409, "The cliff and vesting months must match the application."],
+      SPV_SUBJECT_CONFLICT: [409, "The asset's SPV does not match the issuer's SPV (spvs.issuer_pda / asset_profiles.spv_id). Fix the SPV registry first: one legal entity has one raise limit."],
+      SPV_AMBIGUOUS: [409, "Two SPVs on this network are registered for this issuer. Keep one before approving."],
+      MINT_ALREADY_BOOKED: [409, "This mint transaction is already booked by another reservation."],
+      INVALID_SIGNATURE: [400, "A transaction signature is required."],
+      ISSUED_AT_IN_FUTURE: [400, "issued_at cannot be in the future."],
+      ISSUED_AT_BACKDATED: [403, "issued_at more than 30 days back needs the super admin."],
       APPLICATION_ALREADY_APPROVED: [409, "This application already backs a sale approval or a sale. One application backs one sale: revoke the live approval first, or ask for a new application."],
     };
     for (const [code, [status, text]] of Object.entries(known)) {
@@ -315,6 +344,21 @@ export const releaseReservation = (sb: SupabaseClient, id: string, reason: strin
 
 export async function saleCapacity(sb: SupabaseClient, subject: string) {
   return rpcCall<Record<string, unknown>>(sb, "sale_capacity", { p_network: detectNetwork(), p_subject: subject });
+}
+
+/**
+ * The SPV that (asset, issuer) counts against, or null for an issuer subject
+ * (0066 sale_capacity_spv): the SPV registered with this issuer_pda, else
+ * asset_profiles.spv_id. `strict` (new reservations) refuses a disagreement;
+ * adoption (the chain already acted) lets the issuer's own SPV win.
+ */
+export async function resolveSubjectSpv(
+  sb: SupabaseClient, asset: string | null, issuer: string, strict: boolean, signal?: AbortSignal,
+): Promise<string | null> {
+  const spv = await rpcCall<string | null>(sb, "sale_capacity_spv", {
+    p_network: detectNetwork(), p_asset_pda: asset, p_issuer_pda: issuer, p_strict: strict,
+  }, signal);
+  return typeof spv === "string" && UUID_RE.test(spv) ? spv : null;
 }
 
 // ── Chain ──────────────────────────────────────────────────────────────────
@@ -428,15 +472,59 @@ export function treasuryMintEvidence(tx: TreasuryTx, sig: string, expected: { sh
 export async function finalizedTreasuryTx(sig: string, signal?: AbortSignal): Promise<TreasuryTx> {
   let tx;
   try {
-    tx = await getServerRpc().getTransaction(toSignature(sig), {
-      commitment: "finalized", encoding: "json", maxSupportedTransactionVersion: 0,
-    }).send({ abortSignal: chainSignal(signal) });
+    tx = await finalizedTransaction(sig, signal);
   } catch {
     throw new SiwsError(503, "Transaction verification unavailable; try again");
   }
   if (!tx) throw new SiwsError(409, "The transaction is not finalized yet; try again shortly");
-  return tx as unknown as TreasuryTx;
+  return tx as TreasuryTx;
 }
+
+/**
+ * Finds the finalized `mint_to_treasury` a treasury reservation stands for
+ * when nobody reported its signature (the browser failed or left): a
+ * successful transaction on the share class, between the reservation and
+ * `untilMs`, that is exactly one mint of these units by the reserving admin
+ * into its own account, and that no other reservation booked. `complete` is
+ * false when the share class's history in the window could not all be read.
+ */
+export async function findTreasuryMint(
+  sb: SupabaseClient, r: Pick<Reservation, "network" | "share_class_pda" | "reserved_by" | "amount_units" | "created_at">,
+  untilMs: number, signal?: AbortSignal,
+): Promise<{ signature: string | null; complete: boolean }> {
+  const from = Math.floor(Date.parse(r.created_at) / 1000) - TREASURY_WINDOW_SLACK_SECS;
+  const to = Math.ceil(untilMs / 1000) + TREASURY_WINDOW_SLACK_SECS;
+  const { signatures, complete } = await listFinalizedSignatures(r.share_class_pda, from, to, signal);
+  if (!signatures.length) return { signature: null, complete };
+  let query = sb.from("sale_capacity_reservations").select("mint_signature")
+    .eq("network", r.network).in("mint_signature", signatures.map((s) => s.signature));
+  if (signal) query = query.abortSignal(signal);
+  const { data, error } = await query;
+  if (error) throw capacityError(error);
+  const booked = new Set((data ?? []).map((row) => row.mint_signature as string));
+  const expected = { shareClass: r.share_class_pda, authority: r.reserved_by, amount: dbU64(r.amount_units) };
+  let checked = 0;
+  for (const { signature } of signatures) {
+    if (booked.has(signature)) continue;
+    // Bounded: a share class sees few transactions around one treasury mint.
+    if (++checked > 10) return { signature: null, complete: false };
+    const tx = (await finalizedTransaction(signature, signal)) as TreasuryTx | null;
+    if (!tx) continue;
+    try {
+      treasuryMintEvidence(tx, signature, expected);
+      return { signature, complete: true };
+    } catch (err) {
+      if (!(err instanceof SiwsError)) throw err;
+    }
+  }
+  return { signature: null, complete };
+}
+
+/** Books a treasury reservation with a verified signature (0066 book_treasury_mint; reactivates a released row). */
+export const bookTreasuryMintRow = (sb: SupabaseClient, id: string, signature: string, signal?: AbortSignal) =>
+  rpcCall<Reservation & { book_error?: string; adopted?: boolean }>(sb, "book_treasury_mint", {
+    p_id: id, p_signature: signature, p_issued_at: null,
+  }, signal);
 
 // ── Retry-worker stage ─────────────────────────────────────────────────────
 
@@ -470,11 +558,7 @@ export async function adoptApproval(
     const sc = await fetchMaybeShareClass(getServerRpc(), a.shareClass, { commitment: "confirmed", abortSignal: chainSignal(signal) });
     if (!sc.exists || sc.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Approval share class not found");
     asset = sc.data.asset;
-    let query = sb.from("asset_profiles").select("spv_id").eq("network", detectNetwork()).eq("asset_pda", asset);
-    if (signal) query = query.abortSignal(signal);
-    const { data, error } = await query.maybeSingle();
-    if (error) throw capacityError(error);
-    spvId = (data?.spv_id as string | null | undefined) ?? null;
+    spvId = await resolveSubjectSpv(sb, asset, a.issuer, false, signal);
     salePda = await findSalePda(a.shareClass, a.saleId);
   }
   return rpcCall<Adopted>(sb, "adopt_sale_approval", {
@@ -510,6 +594,133 @@ async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, cou
     const adopted = await adoptApproval(sb, a, a.address, null, "orphan-scan", signal);
     await alert(sb, adopted, adoptionMessage("An on-chain sale approval had no live reservation", adopted));
     counts.pending++;
+  }
+}
+
+/**
+ * Orphan sales: an indexed Sale v2 whose consumed approval no reservation
+ * covers — opened from an approval made straight on the program and consumed
+ * before the approval scan saw it, or from one whose reservation was released
+ * while it was still usable. Counted at the sale's own terms (price x total,
+ * at the current rate even past the cap), consumed, booked once closed, and
+ * alerted. A few per run; the rest are found again next run.
+ */
+async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts: { complete: number; pending: number; invalid: number }) {
+  const { data, error } = await sb.from("sales").select("pda,sale_approval")
+    .eq("network", detectNetwork()).not("sale_approval", "is", null)
+    .order("updated_at", { ascending: false }).limit(200).abortSignal(signal);
+  if (error) throw new SiwsError(503, "Sale mirror unavailable");
+  const sales = ((data ?? []) as Array<{ pda: unknown; sale_approval: unknown }>)
+    .filter((row): row is { pda: string; sale_approval: string } => typeof row.pda === "string" && typeof row.sale_approval === "string");
+  if (!sales.length) return;
+  const { data: rows, error: rowsError } = await sb.from("sale_capacity_reservations").select("sale_pda,status,release_reason")
+    .eq("network", detectNetwork()).eq("kind", "sale").in("sale_pda", sales.map((row) => row.pda)).abortSignal(signal);
+  if (rowsError) throw new SiwsError(503, "Sale capacity ledger unavailable");
+  const covered = new Set(((rows ?? []) as Array<{ sale_pda: string; status: string; release_reason: string | null }>)
+    .filter((row) => row.status !== "released" || row.release_reason === "closed_unsold").map((row) => row.sale_pda));
+  let tried = 0;
+  for (const row of sales) {
+    if (covered.has(row.pda)) continue;
+    if (signal.aborted || ++tried > 3) return;
+    const sale = await fetchSale(row.pda, "finalized", signal);
+    // Not finalized yet, or a stale mirror row: the chain decides.
+    if (!sale || (await findSalePda(sale.shareClass, sale.saleId)) !== row.pda) continue;
+    const adopted = await adoptSale(sb, row.pda, sale, signal);
+    await alert(sb, adopted, adoptionMessage(`Sale ${row.pda} was opened from an approval with no live reservation`, adopted));
+    await applySale(sb, adopted, sale, signal);
+    counts.pending++;
+  }
+}
+
+/** A sale's own terms as an adopted reservation (0066 adopt_sale_approval; the approval is closed). */
+async function adoptSale(sb: SupabaseClient, salePda: string, sale: Sale, signal?: AbortSignal): Promise<Adopted> {
+  const config = { commitment: "finalized" as const, abortSignal: chainSignal(signal) };
+  const sc = await fetchMaybeShareClass(getServerRpc(), sale.shareClass, config);
+  if (!sc.exists || sc.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Sale share class not found");
+  const asset = await fetchMaybeAsset(getServerRpc(), sc.data.asset, config);
+  if (!asset.exists || asset.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Sale asset not found");
+  const spvId = await resolveSubjectSpv(sb, sc.data.asset, asset.data.issuer, false, signal);
+  return rpcCall<Adopted>(sb, "adopt_sale_approval", {
+    p_network: detectNetwork(), p_share_class_pda: sale.shareClass, p_sale_id: sale.saleId.toString(),
+    p_approval_pda: sale.saleApproval, p_sale_pda: salePda, p_asset_pda: sc.data.asset, p_issuer_pda: asset.data.issuer,
+    p_spv_id: spvId, p_payment_mint: sale.paymentMint, p_max_gross_raise: (sale.pricePerUnit * sale.totalForSale).toString(),
+    p_min_price_per_unit: sale.pricePerUnit.toString(), p_max_price_per_unit: sale.pricePerUnit.toString(),
+    p_raise_type: raiseTypeName(sale.raiseType), p_cliff_months: sale.cliffMonths, p_vesting_months: sale.vestingMonths,
+    // The closed approval's expiry and approver are gone with it.
+    p_expires_at: new Date().toISOString(), p_application_hash: hexOf(sale.applicationHash),
+    p_approved_by: "unknown (orphan sale)", p_source: "orphan-sale-scan",
+  }, signal);
+}
+
+/**
+ * Treasury-mint rows. A reserved row is booked from the chain when its
+ * finalized mint is found (the browser failed or left before booking), and
+ * expired once TREASURY_TTL_MS passed with the share class's history fully
+ * read and no matching mint. A released row is rechecked for a day, since a
+ * mint that landed before its release would otherwise go uncounted.
+ */
+async function reconcileTreasuryMints(sb: SupabaseClient, signal: AbortSignal, counts: { complete: number; pending: number; invalid: number }) {
+  const now = Date.now();
+  const touch = (id: string, fields: Record<string, unknown> = {}) =>
+    sb.from("sale_capacity_reservations").update({ ...fields, updated_at: new Date().toISOString() }).eq("id", id)
+      .then(() => undefined, () => undefined);
+  const { data, error } = await sb.from("sale_capacity_reservations").select("*")
+    .eq("network", detectNetwork()).eq("kind", "treasury_mint").eq("status", "reserved")
+    .order("updated_at").limit(5).abortSignal(signal);
+  if (error) throw new SiwsError(503, "Sale capacity ledger unavailable");
+  for (const r of ((data ?? []) as Reservation[]).filter((x) => x.kind === "treasury_mint" && x.status === "reserved")) {
+    if (signal.aborted) return;
+    const age = now - Date.parse(r.created_at);
+    // The admin's browser books it after finality.
+    if (age < CONFIRM_GRACE_MS) continue;
+    try {
+      const found = await findTreasuryMint(sb, r, now, signal);
+      if (found.signature) {
+        const booked = await bookTreasuryMintRow(sb, r.id, found.signature, signal);
+        if (booked.book_error) {
+          await alert(sb, booked, `Treasury mint ${found.signature} booking refused: ${booked.book_error}`);
+          counts.pending++;
+        } else counts.complete++;
+      } else if (age > TREASURY_TTL_MS && found.complete) {
+        // A released row is still rechecked for a day (below).
+        await releaseReservation(sb, r.id, "expired", "retry-worker", signal);
+        counts.complete++;
+      } else {
+        if (age > TREASURY_TTL_MS) {
+          await alert(sb, r, "Treasury mint reservation: the share class's history is too long to scan; book it with its signature or release it by hand");
+        }
+        counts.pending++;
+        await touch(r.id);
+      }
+    } catch (err) {
+      if (signal.aborted) return;
+      counts.pending++;
+      await touch(r.id, { last_error: `Worker: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000) });
+    }
+  }
+  const { data: released, error: releasedError } = await sb.from("sale_capacity_reservations").select("*")
+    .eq("network", detectNetwork()).eq("kind", "treasury_mint").eq("status", "released")
+    .gte("released_at", new Date(now - TREASURY_RECHECK_MS).toISOString())
+    .lte("updated_at", new Date(now - TREASURY_RECHECK_EVERY_MS).toISOString())
+    .order("updated_at").limit(3).abortSignal(signal);
+  if (releasedError) throw new SiwsError(503, "Sale capacity ledger unavailable");
+  for (const r of ((released ?? []) as Reservation[]).filter((x) => x.kind === "treasury_mint" && x.status === "released" && x.released_at)) {
+    if (signal.aborted) return;
+    try {
+      const found = await findTreasuryMint(sb, r, Date.parse(r.released_at!), signal);
+      if (!found.signature) {
+        await touch(r.id);
+        continue;
+      }
+      const booked = await bookTreasuryMintRow(sb, r.id, found.signature, signal);
+      await alert(sb, booked, `Treasury mint ${found.signature} landed although its reservation was released (${r.release_reason}): counted again${booked.book_error ? `; booking refused: ${booked.book_error}` : ""}`);
+      counts.pending++;
+    } catch (err) {
+      if (signal.aborted) return;
+      counts.pending++;
+      await touch(r.id);
+      console.error("[sale-capacity] treasury recheck failed:", err instanceof Error ? err.message : err);
+    }
   }
 }
 
@@ -558,7 +769,11 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
   return "complete";
 }
 
-/** Retry-worker stage: the orphan scan, then a bounded batch of live sale reservations, least recently touched first. */
+/**
+ * Retry-worker stage: the orphan approval and sale scans, the treasury-mint
+ * rows, then a bounded batch of live sale reservations, least recently
+ * touched first.
+ */
 export async function reconcileSaleCapacity(limit = 10, deadlineMs = Date.now() + 20_000, parentSignal?: AbortSignal) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new SiwsError(400, "Retry limit must be between 1 and 20");
   const counts = { complete: 0, pending: 0, invalid: 0 };
@@ -567,19 +782,26 @@ export async function reconcileSaleCapacity(limit = 10, deadlineMs = Date.now() 
   const timeout = AbortSignal.timeout(budgetMs);
   const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
   const sb = getSupabaseAdmin();
-  try {
-    await adoptOrphanApprovals(sb, signal, counts);
-  } catch (err) {
-    if (signal.aborted) return counts;
-    console.error("[sale-capacity] orphan scan failed:", err instanceof Error ? err.message : err);
-    counts.pending++;
+  // Safety nets first: what the chain did that the ledger does not know.
+  for (const [name, scan] of [
+    ["orphan approval scan", adoptOrphanApprovals],
+    ["orphan sale scan", adoptOrphanSales],
+    ["treasury mint stage", reconcileTreasuryMints],
+  ] as const) {
+    try {
+      await scan(sb, signal, counts);
+    } catch (err) {
+      if (signal.aborted) return counts;
+      console.error(`[sale-capacity] ${name} failed:`, err instanceof Error ? err.message : err);
+      counts.pending++;
+    }
   }
   const { data, error } = await sb.from("sale_capacity_reservations").select("*")
     .eq("network", detectNetwork()).eq("kind", "sale").in("status", ["reserved", "consumed"])
     .order("updated_at").limit(limit).abortSignal(signal);
   if (signal.aborted) return counts;
   if (error) throw new SiwsError(503, "Sale capacity ledger unavailable");
-  for (const row of (data ?? []) as Reservation[]) {
+  for (const row of ((data ?? []) as Reservation[]).filter((r) => r.kind === "sale")) {
     if (signal.aborted || Date.now() >= deadlineMs) break;
     try {
       if ((await reconcileOne(sb, row, signal)) === "complete") counts.complete++;

@@ -94,7 +94,7 @@ export function fromBaseUnits(value: bigint, decimals: number): string {
 
 export type Capacity = {
   cap: number; issued: number; reserved: number; used: number; remaining: number;
-  window_start: string; cap_source: "spv" | "platform"; subject: string;
+  window_start: string; cap_source: "spv" | "platform" | "client"; subject: string;
 };
 
 export type ReserveResult = {
@@ -201,7 +201,9 @@ export async function settleWhenFinalized(rpc: Rpc, session: Session, sale: stri
   return null;
 }
 
-export const listSaleReservations = (session: Session, filter: { application_id: string } | { share_class: string }, live = false) =>
+export const listSaleReservations = (
+  session: Session, filter: { application_id: string } | { share_class: string } | { manual: true }, live = false,
+) =>
   signedFetch<ReservationRow[]>(session, "/api/sale-approvals/list", "saleApprovals.list", { ...filter, ...(live ? { live } : {}) });
 
 export const saleCapacityFor = (session: Session, shareClass: string) =>

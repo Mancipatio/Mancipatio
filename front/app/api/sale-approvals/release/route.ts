@@ -9,7 +9,10 @@
 //     no longer land: its signature failed, or the finalized chain is past its
 //     blockhash's last valid block height and the approval is absent there.
 //   * treasury_mint: the same proof for the mint transaction (a signature that
-//     succeeded is booked with saleApprovals.treasuryMintBook instead).
+//     succeeded is booked with saleApprovals.treasuryMintBook instead), and no
+//     matching finalized mint_to_treasury on the share class since the
+//     reservation: the browser may have lost the signature of a mint that
+//     landed. A mint found there is BOOKED instead, and the answer is 409.
 // Otherwise 409; the retry worker releases dead reservations, and adopts an
 // approval that lands after a release (orphan scan).
 // Params: reservation_id, reason ("tx_failed" | "revoked" | "admin"),
@@ -19,7 +22,7 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { loadReservation, releaseReservation } from "@/lib/server/sale-capacity";
+import { bookTreasuryMintRow, findTreasuryMint, loadReservation, releaseReservation } from "@/lib/server/sale-capacity";
 import { blockhashExpired, readApprovalAndSale, signatureOutcome } from "@/lib/server/sale-capacity-chain";
 
 const REASONS = new Set(["tx_failed", "revoked", "admin"]);
@@ -77,6 +80,17 @@ export async function POST(request: Request) {
         throw new SiwsError(409, "The treasury mint landed; book it instead of releasing it");
       }
       if (!(await cannotLand(async () => true))) throw new SiwsError(409, IN_FLIGHT);
+      // Every block the mint could have landed in is final: look for it.
+      const found = await chain(() => findTreasuryMint(sb, reservation, Date.now()));
+      if (found.signature) {
+        const booked = await bookTreasuryMintRow(sb, reservation.id, found.signature);
+        throw new SiwsError(409, booked.book_error
+          ? `The treasury mint landed (${found.signature}); it stays counted, but booking was refused: ${booked.book_error}`
+          : `The treasury mint landed (${found.signature}); it was booked instead of released`);
+      }
+      if (!found.complete) {
+        throw new SiwsError(409, "The share class's history is too long to prove the mint did not land; book it with its signature, or leave it to the retry worker");
+      }
     }
     const released = await releaseReservation(sb, reservation.id, reason, wallet);
     return NextResponse.json({ ok: true, data: { reservation_id: released.id, status: released.status, release_reason: released.release_reason } });

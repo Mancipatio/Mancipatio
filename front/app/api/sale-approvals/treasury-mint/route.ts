@@ -9,7 +9,10 @@
 // ("saleApprovals.treasuryMintBook": reservation_id, signature): the server
 // requires exactly one top-level mint_to_treasury of that share class and
 // amount, signed by the reserving admin, into an account the admin owns.
-// A failed mint is released through /api/sale-approvals/release.
+// A failed mint is released through /api/sale-approvals/release. The declared
+// EUR value has a floor (0066: at least EUR 1 and the units at the share
+// class's latest price). The retry worker books a mint the browser never
+// booked, expires one that never landed, and rechecks released ones.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -18,6 +21,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import {
   addressParam,
+  bookTreasuryMintRow,
   capacityError,
   dbU64,
   finalizedTreasuryTx,
@@ -26,7 +30,7 @@ import {
   treasuryMintEvidence,
   u64Param,
 } from "@/lib/server/sale-capacity";
-import { assetSpvId, shareClassChain } from "../_lib";
+import { subjectSpvId, shareClassChain } from "../_lib";
 
 const SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,96}$/;
 
@@ -49,9 +53,9 @@ export async function POST(request: Request) {
       treasuryMintEvidence(tx, signature, {
         shareClass: reservation.share_class_pda, authority: reservation.reserved_by, amount: dbU64(reservation.amount_units),
       });
-      const { data, error } = await sb.rpc("book_treasury_mint", { p_id: reservation.id, p_signature: signature, p_issued_at: null });
-      if (error) throw capacityError(error);
-      const booked = data as { id: string; status: string; booked_amount_eur: number };
+      const booked = await bookTreasuryMintRow(sb, reservation.id, signature);
+      // The 0027 calendar-year trigger refused the SPV row: still counted (reserved).
+      if (booked.book_error) throw new SiwsError(409, `Booking refused: ${booked.book_error}`);
       return NextResponse.json({ ok: true, data: { reservation_id: booked.id, status: booked.status, booked_amount_eur: booked.booked_amount_eur } });
     }
 
@@ -65,7 +69,7 @@ export async function POST(request: Request) {
     if (chain.authority !== wallet) {
       throw new SiwsError(409, "Only the issuer's own (Admin) key can mint into its treasury");
     }
-    const spvId = await assetSpvId(sb, chain.asset);
+    const spvId = await subjectSpvId(sb, chain.asset, chain.issuer);
     const snapshot = {
       v: 1, kind: "treasury_mint", network, share_class: shareClass, asset: chain.asset, issuer: chain.issuer,
       amount_units: amountUnits.toString(), amount_eur: amountEur.toFixed(2), reason, reserved_by: wallet,

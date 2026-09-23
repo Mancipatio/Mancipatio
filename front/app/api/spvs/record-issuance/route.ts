@@ -14,10 +14,15 @@
 //                                      gets a clear answer.
 //   * source === "manual"           -> requireAdmin (admin ledger entry).
 //
-// The 0027 BEFORE INSERT trigger remains the authoritative cap guard: without
-// cap_override it rejects any insert that would push the SPV over its
-// calendar-year cap, and its error message is surfaced verbatim so the client
-// toast stays meaningful.
+// The row is written by 0066 record_spv_issuance under the raise-cap ledger's
+// subject lock: without cap_override it must also fit the SPV's rolling
+// 12-month capacity INCLUDING live sale approvals and treasury-mint
+// reservations (so a manual entry cannot take capacity an approved sale
+// already holds). The 0027 BEFORE INSERT trigger still rejects any insert
+// that would push the calendar year over the cap; its message is surfaced
+// verbatim so the client toast stays meaningful. issued_at may not be in the
+// future, and more than 30 days back needs the super admin (a backdated row
+// would fall out of the rolling window).
 //
 // `recorded_by` is stamped with the VERIFIED signer wallet (client value is
 // ignored). Client wrapper: recordIssuance() in
@@ -27,6 +32,7 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin, requireSuperAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { capacityError } from "@/lib/server/sale-capacity";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -84,9 +90,11 @@ export async function POST(request: Request) {
       typeof params.issued_at === "string" && params.issued_at.trim()
         ? params.issued_at.trim()
         : new Date().toISOString().slice(0, 10);
-    if (!DATE_RE.test(issuedAt)) {
+    if (!DATE_RE.test(issuedAt) || Number.isNaN(Date.parse(`${issuedAt}T00:00:00Z`))) {
       throw new SiwsError(400, "issued_at must be YYYY-MM-DD");
     }
+    const backdated =
+      Date.parse(`${issuedAt}T00:00:00Z`) < Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`) - 30 * 86_400_000;
 
     const note = typeof params.note === "string" ? params.note.trim() : "";
     if (note.length > 2000) {
@@ -94,9 +102,9 @@ export async function POST(request: Request) {
     }
 
     // ---- Authorization (see header) ----
-    if (capOverride) {
-      // Escalated path: only THE super admin may bypass the annual cap,
-      // whatever the source.
+    if (capOverride || backdated) {
+      // Escalated path: only THE super admin may bypass the annual cap or
+      // backdate an entry out of the rolling window.
       await requireSuperAdmin(wallet);
     } else {
       // Manual admin ledger entry.
@@ -104,24 +112,25 @@ export async function POST(request: Request) {
     }
 
     const sb = getSupabaseAdmin();
-    const { error } = await sb.from("spv_issuances").insert({
-      spv_id: spvId,
-      amount_eur: amountEur,
-      asset_pda: assetPda || null,
-      sale_pubkey: salePubkey || null,
-      issued_at: issuedAt,
-      note: note || null,
-      recorded_by: wallet,
-      source,
-      ...(capOverride ? { cap_override: true } : {}),
+    const { error } = await sb.rpc("record_spv_issuance", {
+      p_spv_id: spvId,
+      p_amount_eur: amountEur,
+      p_asset_pda: assetPda || null,
+      p_sale_pubkey: salePubkey || null,
+      p_issued_at: issuedAt,
+      p_note: note || null,
+      p_recorded_by: wallet,
+      p_cap_override: capOverride,
+      p_allow_backdate: backdated,
     });
     if (error) {
       // Surface the 0027 trigger's cap message verbatim — the client relies
-      // on it ("SPV annual issuance cap exceeded: …"). Other DB errors get a
-      // generic message.
-      if (/annual issuance cap/i.test(error.message)) {
+      // on it ("SPV annual issuance cap exceeded: …"). The ledger's own
+      // refusals (rolling cap with live reservations, dates) are mapped.
+      if (/annual issuance cap/i.test(error.message ?? "")) {
         throw new SiwsError(409, error.message);
       }
+      if (error.code === "P0001") throw capacityError(error);
       console.error("[api/spvs/record-issuance] insert failed:", error.message);
       throw new SiwsError(500, "Issuance insert failed");
     }

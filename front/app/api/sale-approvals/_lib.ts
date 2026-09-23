@@ -17,7 +17,7 @@ import {
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
 import { getServerRpc } from "@/lib/server/rpc";
 import { SiwsError } from "@/lib/server/siws";
-import { TOKEN_2022_PROGRAM, TOKEN_PROGRAM } from "@/lib/server/sale-capacity";
+import { TOKEN_2022_PROGRAM, TOKEN_PROGRAM, resolveSubjectSpv } from "@/lib/server/sale-capacity";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork } from "@/lib/network";
 
@@ -104,12 +104,13 @@ export async function applicantWallets(sb: SupabaseClient, wallet: string): Prom
   return data as string[];
 }
 
-/** The asset's SPV (asset_profiles.spv_id), or null for an issuer subject. */
-export async function assetSpvId(sb: SupabaseClient, asset: string): Promise<string | null> {
-  const { data, error } = await sb.from("asset_profiles").select("spv_id")
-    .eq("network", detectNetwork()).eq("asset_pda", asset).maybeSingle();
-  if (error) throw new SiwsError(503, "Could not read the asset profile");
-  return (data?.spv_id as string | null | undefined) ?? null;
+/**
+ * The SPV a new reservation for (asset, issuer) counts against, or null for an
+ * issuer subject: the SPV registered with this issuer_pda, else the asset
+ * profile's; a disagreement refuses (0066 sale_capacity_spv, strict).
+ */
+export async function subjectSpvId(sb: SupabaseClient, asset: string, issuer: string): Promise<string | null> {
+  return resolveSubjectSpv(sb, asset, issuer, true);
 }
 
 export function subjectOf(spvId: string | null, issuer: string): string {

@@ -1,6 +1,7 @@
 // POST /api/sale-approvals/list — admin read of capacity reservations
 // ("saleApprovals.list"; a wallet session may authorize it).
-// Params: application_id (uuid) or share_class (address); optional `live`
+// Params: application_id (uuid), share_class (address) or manual: true (sale
+// approvals without an application, the super admin's); optional `live`
 // (only reserved / consumed rows).
 
 import { NextResponse } from "next/server";
@@ -20,6 +21,8 @@ export async function POST(request: Request) {
     if (typeof params.application_id === "string") {
       if (!UUID_RE.test(params.application_id)) throw new SiwsError(400, "application_id must be a UUID");
       query = query.eq("application_id", params.application_id);
+    } else if (params.manual === true) {
+      query = query.eq("kind", "sale").is("application_id", null);
     } else if (params.share_class !== undefined) {
       query = query.eq("share_class_pda", addressParam(params.share_class, "share_class"));
     } else {

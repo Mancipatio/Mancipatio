@@ -90,3 +90,40 @@ export async function listLiveApprovals(signal?: AbortSignal): Promise<LiveAppro
     address: row.pubkey,
   }));
 }
+
+export type FinalizedSignature = { signature: string; blockTime: number };
+
+/**
+ * Successful FINALIZED transactions that touched `account` with a block time
+ * in [fromSecs, toSecs], oldest first. Pages back (newest first, 100 per
+ * page, at most `maxPages`) until it passes `fromSecs`; `complete` is false
+ * when the pages ran out first, so a caller can tell "none" from "not all seen".
+ */
+export async function listFinalizedSignatures(
+  account: string, fromSecs: number, toSecs: number, signal?: AbortSignal, maxPages = 3,
+): Promise<{ signatures: FinalizedSignature[]; complete: boolean }> {
+  const out: FinalizedSignature[] = [];
+  let before: string | undefined;
+  for (let page = 0; page < maxPages; page++) {
+    const rows = await getServerRpc().getSignaturesForAddress(address(account), {
+      commitment: "finalized", limit: 100, ...(before ? { before: toSignature(before) } : {}),
+    }).send({ abortSignal: chainSignal(signal) });
+    for (const row of rows) {
+      const time = row.blockTime === null ? null : Number(row.blockTime);
+      if (row.err === null && time !== null && time >= fromSecs && time <= toSecs) out.push({ signature: row.signature, blockTime: time });
+    }
+    const last = rows[rows.length - 1];
+    if (rows.length < 100 || !last || (last.blockTime !== null && Number(last.blockTime) < fromSecs)) {
+      return { signatures: out.reverse(), complete: true };
+    }
+    before = last.signature;
+  }
+  return { signatures: out.reverse(), complete: false };
+}
+
+/** A finalized transaction (json encoding), or null when it is not finalized (yet). */
+export async function finalizedTransaction(sig: string, signal?: AbortSignal): Promise<unknown | null> {
+  return getServerRpc().getTransaction(toSignature(sig), {
+    commitment: "finalized", encoding: "json", maxSupportedTransactionVersion: 0,
+  }).send({ abortSignal: chainSignal(signal) });
+}

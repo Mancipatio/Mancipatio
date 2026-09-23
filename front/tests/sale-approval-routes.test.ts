@@ -19,6 +19,9 @@ const state = vi.hoisted(() => ({
   chainState: { confirmed: { approval: false, sale: false }, finalized: { approval: false, sale: false } },
   expired: false,
   sigOutcome: "unknown" as "failed" | "succeeded" | "unknown",
+  // Treasury-mint history on the share class (release route scan).
+  signatures: { signatures: [] as Array<{ signature: string; blockTime: number }>, complete: true },
+  txs: {} as Record<string, unknown>,
   rows: {} as Record<string, unknown>,
   lists: {} as Record<string, unknown[]>,
   rpc: {} as Record<string, unknown>,
@@ -39,6 +42,8 @@ vi.mock("@/lib/server/sale-capacity-chain", () => ({
   blockhashExpired: vi.fn(async () => state.expired),
   signatureOutcome: vi.fn(async () => state.sigOutcome),
   listLiveApprovals: vi.fn(async () => []),
+  listFinalizedSignatures: vi.fn(async () => state.signatures),
+  finalizedTransaction: vi.fn(async (sig: string) => state.txs[sig] ?? null),
 }));
 vi.mock("@solana/kit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@solana/kit")>()),
@@ -100,7 +105,16 @@ vi.mock("@/lib/supabase-server", () => ({
   }),
 }));
 
-import { findAssetPda, findIssuerPda, findSaleApprovalPda, RaiseType, SaleStatus } from "@/lib/generated/asset_registry";
+import {
+  ASSET_REGISTRY_PROGRAM_ADDRESS,
+  findAssetPda,
+  findIssuerPda,
+  findSaleApprovalPda,
+  getMintToTreasuryInstructionDataEncoder,
+  RaiseType,
+  SaleStatus,
+} from "@/lib/generated/asset_registry";
+import { getBase58Decoder } from "@solana/kit";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
 import { applicationSnapshot, snapshotHash, TOKEN_PROGRAM } from "@/lib/server/sale-capacity";
 import { POST as reserveRoute } from "@/app/api/sale-approvals/reserve/route";
@@ -185,6 +199,8 @@ beforeEach(() => {
   state.chainState = { confirmed: { approval: false, sale: false }, finalized: { approval: false, sale: false } };
   state.expired = false;
   state.sigOutcome = "unknown";
+  state.signatures = { signatures: [], complete: true };
+  state.txs = {};
   state.rows = { launch_applications: APP_ROW, asset_profiles: { spv_id: null } };
   state.lists = {};
   state.rpc = {
@@ -371,6 +387,25 @@ describe("release", () => {
     state.expired = true;
     expect((await release({ last_valid_block_height: "1000" })).status).toBe(200);
   });
+
+  it("books instead of releasing a treasury mint found on the share class's finalized history", async () => {
+    state.rows.sale_capacity_reservations = reservation({ kind: "treasury_mint", approval_pda: null, sale_pda: null, amount_units: "500" });
+    state.expired = true;
+    const sig = "5".repeat(88);
+    state.signatures = { signatures: [{ signature: sig, blockTime: NOW }], complete: true };
+    state.txs = { [sig]: treasuryTx(BigInt(500), sig) };
+    state.rpc.book_treasury_mint = reservation({ kind: "treasury_mint", status: "booked", mint_signature: sig });
+    const { status, body } = await release({ last_valid_block_height: "1000" });
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/booked instead of released/);
+    expect(rpcCall("book_treasury_mint")).toMatchObject({ p_id: RESERVATION_ID, p_signature: sig });
+    expect(rpcCall("release_sale_reservation")).toBeUndefined();
+    // A history too long to read proves nothing: refused, left to the worker.
+    state.calls = [];
+    state.signatures = { signatures: [], complete: false };
+    expect((await release({ last_valid_block_height: "1000" })).body.error).toMatch(/too long/);
+    expect(rpcCall("release_sale_reservation")).toBeUndefined();
+  });
 });
 
 describe("settle", () => {
@@ -412,7 +447,44 @@ describe("settle", () => {
   });
 });
 
+/** One mint_to_treasury of `amount` units of the fixture share class by ADMIN into ADMIN's account. */
+function treasuryTx(amount: bigint, signature: string) {
+  const data = getBase58Decoder().decode(getMintToTreasuryInstructionDataEncoder().encode({ amount }));
+  const keys = [ADMIN, STRANGER, state.fixtures.issuer, state.fixtures.asset, state.fixtures.shareClass, MINT, ISSUER_KEY,
+    TOKEN_PROGRAM, "SysvarRent111111111111111111111111111111111", ASSET_REGISTRY_PROGRAM_ADDRESS];
+  return {
+    transaction: { signatures: [signature], message: { accountKeys: keys, header: { numRequiredSignatures: 1 },
+      instructions: [{ programIdIndex: 9, accounts: [0, 1, 2, 3, 4, 5, 6, 7, 8], data }] } },
+    meta: { err: null, postTokenBalances: [{ accountIndex: 6, mint: MINT, owner: ADMIN }] },
+  };
+}
+
 describe("record-issuance", () => {
+  const SPV_ID = "30000000-0000-4000-8000-000000000001";
+  const today = () => new Date().toISOString().slice(0, 10);
+  const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+
+  it("records a manual issuance through the ledger (live reservations count), never a direct insert", async () => {
+    state.rpc.record_spv_issuance = { id: 1 };
+    const { status } = await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, issued_at: today() });
+    expect(status).toBe(200);
+    expect(rpcCall("record_spv_issuance")).toMatchObject({
+      p_spv_id: SPV_ID, p_amount_eur: 100, p_recorded_by: ADMIN, p_cap_override: false, p_allow_backdate: false,
+    });
+    expect(state.calls.filter((c) => c.kind === "insert")).toHaveLength(0);
+  });
+
+  it("needs the super admin to backdate more than 30 days or to override the cap", async () => {
+    state.rpc.record_spv_issuance = { id: 1 };
+    expect((await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, issued_at: daysAgo(40) })).status).toBe(403);
+    expect((await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, cap_override: true })).status).toBe(403);
+    expect(rpcCall("record_spv_issuance")).toBeUndefined();
+    state.superAdmin = true;
+    expect((await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, issued_at: daysAgo(40) })).status).toBe(200);
+    expect(rpcCall("record_spv_issuance")).toMatchObject({ p_allow_backdate: true, p_cap_override: false });
+    state.superAdmin = false;
+  });
+
   it("no longer books sale proceeds from the browser (410)", async () => {
     const { status, body } = await call(recordIssuanceRoute, {
       spv_id: "30000000-0000-4000-8000-000000000001", amount_eur: 100, source: "sale", asset_pda: state.fixtures.asset,

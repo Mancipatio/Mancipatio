@@ -35,7 +35,7 @@ import {
 import {
   accountExists,
   applicantWallets,
-  assetSpvId,
+  subjectSpvId,
   paymentMintDecimals,
   saleAndApprovalPdas,
   shareClassChain,
@@ -115,7 +115,7 @@ export async function POST(request: Request) {
     if (await accountExists(sale)) throw new SiwsError(409, "A sale with this id already exists for the share class");
     if (await accountExists(approval)) throw new SiwsError(409, "This sale id already has an on-chain approval");
     const decimals = await paymentMintDecimals(paymentMint);
-    const spvId = await assetSpvId(sb, chain.asset);
+    const spvId = await subjectSpvId(sb, chain.asset, chain.issuer);
 
     const terms: SaleApprovalTerms = {
       shareClass, saleId, issuer: chain.issuer, paymentMint, maxGrossRaise: maxGross,

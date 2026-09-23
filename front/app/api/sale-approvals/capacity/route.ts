@@ -11,7 +11,7 @@ import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { addressParam, saleCapacity } from "@/lib/server/sale-capacity";
-import { assetSpvId, shareClassChain, subjectOf } from "../_lib";
+import { subjectSpvId, shareClassChain, subjectOf } from "../_lib";
 
 export async function POST(request: Request) {
   try {
@@ -20,7 +20,7 @@ export async function POST(request: Request) {
     const shareClass = addressParam(params.share_class, "share_class");
     const sb = getSupabaseAdmin();
     const chain = await shareClassChain(shareClass);
-    const spvId = await assetSpvId(sb, chain.asset);
+    const spvId = await subjectSpvId(sb, chain.asset, chain.issuer);
     const subject = subjectOf(spvId, chain.issuer);
     const capacity = await saleCapacity(sb, subject);
     const { data, error } = await sb.from("sale_capacity_reservations").select("sale_id")

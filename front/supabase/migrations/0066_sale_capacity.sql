@@ -8,9 +8,14 @@
 -- transaction failed) or booked (the sale closed: the locked-rate EUR value
 -- of what was actually sold).
 --
---   subject       'spv:<spvs.id>'   when the asset is issued through an SPV
---                 'issuer:<pda>'    otherwise (no asset_profiles.spv_id)
---   cap           spvs.annual_cap_eur, or platform_raise_limits for issuers
+--   subject       'spv:<spvs.id>'   when the asset is issued through an SPV:
+--                                   the SPV whose issuer_pda is the on-chain
+--                                   issuer, else asset_profiles.spv_id (they
+--                                   must agree: one legal entity, one cap)
+--                 'issuer:<pda>'    otherwise
+--   cap           spvs.annual_cap_eur; for issuers platform_raise_limits, or
+--                 the client_raise_limits override of the issuer's dossier
+--                 (the most permissive one wins, as in 0056)
 --   window        rolling 12 months ending now (stricter than the calendar
 --                 year of 0027 / 0056: every calendar year then also stays
 --                 under the cap). The 0027 trigger itself is unchanged.
@@ -25,7 +30,8 @@
 --
 -- Lock order: every writer here takes the advisory lock
 -- 'sale-cap:<network>:<subject>' FIRST, then (SPV subjects) the spvs row
--- FOR UPDATE — the row lock the 0027 trigger takes. The 0027 manual path
+-- FOR UPDATE — the row lock the 0027 trigger takes. Manual issuances go
+-- through record_spv_issuance (same order); a direct spv_issuances insert
 -- takes only the row lock, so no cycle is possible.
 --
 -- Service role only: RLS on, every browser role revoked, functions
@@ -170,6 +176,7 @@ returns jsonb language plpgsql stable security definer set search_path = '' as $
 declare
   cap numeric; cap_source text; issued numeric := 0; reserved numeric := 0; spv uuid;
   window_start timestamptz := now() - interval '12 months';
+  issuer text; authority text; wallets text[] := array[]::text[]; o_cap numeric;
 begin
   if p_network is null or p_network not in ('devnet','mainnet','testnet','localnet') then
     raise exception 'INVALID_NETWORK' using errcode = 'P0001';
@@ -187,6 +194,17 @@ begin
     select annual_raise_cap_eur into cap from public.platform_raise_limits where network = p_network;
     cap := coalesce(cap, 3000000);
     cap_source := 'platform';
+    -- The per-dossier override 0056 applies to the person's applications
+    -- applies to the issuer's raises too: the dossier of the issuer PDA, or of
+    -- any wallet linked to its authority's account (the indexed Issuer); the
+    -- most permissive override wins, as in raise_capacity().
+    issuer := substr(p_subject, 8);
+    select i.authority into authority from public.issuers i where i.pda = issuer and i.network = p_network;
+    if authority is not null then wallets := public.applicant_wallets(authority, p_network); end if;
+    select max(l.annual_raise_cap_eur) into o_cap
+      from public.client_raise_limits l join public.clients c on c.id = l.client_id
+     where c.network = p_network and (c.issuer_pda = issuer or c.wallet = any(wallets));
+    if o_cap is not null then cap := o_cap; cap_source := 'client'; end if;
     select coalesce(sum(booked_amount_eur), 0) into issued from public.sale_capacity_reservations
      where network = p_network and subject = p_subject and status = 'booked' and booked_at > window_start;
   else
@@ -197,6 +215,50 @@ begin
   return jsonb_build_object('cap', cap, 'issued', issued, 'reserved', reserved, 'used', issued + reserved,
     'remaining', greatest(cap - issued - reserved, 0), 'window_start', window_start, 'cap_source', cap_source,
     'subject', p_subject);
+end $$;
+
+-- The SPV a sale or treasury mint of (asset, issuer) counts against, or null
+-- for an issuer subject. One legal entity has one cap: an SPV registered with
+-- this issuer_pda IS the issuer, whatever asset_profiles says. Strict (a new
+-- reservation) refuses a profile that points at another SPV, an SPV of
+-- another issuer, or two SPVs with this issuer; non-strict (adopting what the
+-- chain already did) lets the issuer's own SPV win.
+create or replace function public.sale_capacity_spv(p_network text, p_asset_pda text, p_issuer_pda text, p_strict boolean default true)
+returns uuid language plpgsql stable security definer set search_path = '' as $$
+declare by_issuer uuid; by_profile uuid; n integer; profile_issuer text; profile_found boolean;
+begin
+  select count(*) into n from public.spvs where network = p_network and issuer_pda = p_issuer_pda;
+  if n > 1 and p_strict then raise exception 'SPV_AMBIGUOUS' using errcode = 'P0001'; end if;
+  select id into by_issuer from public.spvs where network = p_network and issuer_pda = p_issuer_pda
+   order by created_at, id limit 1;
+  if p_asset_pda is not null then
+    select spv_id into by_profile from public.asset_profiles where network = p_network and asset_pda = p_asset_pda limit 1;
+  end if;
+  if by_profile is not null then
+    select s.issuer_pda into profile_issuer from public.spvs s where s.id = by_profile and s.network = p_network;
+    profile_found := found;
+    if not profile_found or (by_issuer is not null and by_issuer <> by_profile)
+       or (profile_issuer is not null and profile_issuer <> p_issuer_pda) then
+      if p_strict then
+        raise exception '%', case when profile_found then 'SPV_SUBJECT_CONFLICT' else 'SPV_NOT_FOUND' end using errcode = 'P0001';
+      end if;
+      by_profile := null;
+    end if;
+  end if;
+  return coalesce(by_issuer, by_profile);
+end $$;
+
+-- A new reservation's subject must be the one sale_capacity_spv resolves: an
+-- issuer with an SPV cannot open a second, separate 'issuer:' bucket, and an
+-- SPV registered for another issuer cannot be charged.
+create or replace function public.sale_capacity_check_subject(p_network text, p_asset_pda text, p_issuer_pda text, p_spv_id uuid)
+returns void language plpgsql stable security definer set search_path = '' as $$
+declare resolved uuid := public.sale_capacity_spv(p_network, p_asset_pda, p_issuer_pda, true);
+begin
+  if (resolved is not null and p_spv_id is distinct from resolved) or exists (
+    select 1 from public.spvs s where s.id = p_spv_id and s.issuer_pda is not null and s.issuer_pda <> p_issuer_pda) then
+    raise exception 'SPV_SUBJECT_CONFLICT' using errcode = 'P0001';
+  end if;
 end $$;
 
 -- Serializes every capacity writer of one subject (advisory lock first, then
@@ -235,6 +297,7 @@ begin
      or (p_raise_type = 'startup' and p_vesting_months <= p_cliff_months) then
     raise exception 'INVALID_TERMS' using errcode = 'P0001';
   end if;
+  perform public.sale_capacity_check_subject(p_network, p_asset_pda, p_issuer_pda, p_spv_id);
   subject := public.sale_capacity_lock(p_network, p_spv_id, p_issuer_pda);
 
   -- Idempotent retry of the same request; anything else for a live id refuses.
@@ -524,20 +587,47 @@ begin
     'over_cap', (cap->>'used')::numeric > (cap->>'cap')::numeric, 'capacity', cap);
 end $$;
 
--- Admin-issuer treasury mint: reserve its declared EUR value first.
+-- Admin-issuer treasury mint: reserve its declared EUR value first. The
+-- declared value has a floor, or any number of units could be minted for a
+-- cent: at least EUR 1, and at least the units' value at the share class's
+-- latest price — the newest indexed sale's price, else the minimum price of
+-- the newest sale approval (a rate of any age; none known, no price floor).
+-- A reservation the browser never books is booked from the chain or expired
+-- by the retry worker (lib/server/sale-capacity.ts).
 create or replace function public.reserve_treasury_mint_capacity(
   p_network text, p_share_class_pda text, p_asset_pda text, p_issuer_pda text, p_spv_id uuid,
   p_amount_units numeric, p_amount_eur numeric, p_reason text, p_snapshot jsonb, p_hash text, p_reserved_by text
 ) returns jsonb language plpgsql security definer set search_path = '' as $$
-declare subject text; cap jsonb; new_id uuid; amount numeric := ceil(p_amount_eur * 100) / 100;
+declare
+  subject text; cap jsonb; new_id uuid; amount numeric := ceil(p_amount_eur * 100) / 100;
+  ref_price numeric; ref_mint text; fx public.fx_rates%rowtype; floor_eur numeric;
 begin
   if p_network is null or p_network not in ('devnet','mainnet','testnet','localnet') then
     raise exception 'INVALID_NETWORK' using errcode = 'P0001';
   end if;
-  if p_amount_units is null or p_amount_units <= 0 or amount is null or amount <= 0
+  if p_amount_units is null or p_amount_units <= 0 or p_amount_units > 18446744073709551615 or amount is null or amount <= 0
      or p_reason is null or length(trim(p_reason)) = 0 or p_reserved_by is null then
     raise exception 'INVALID_TERMS' using errcode = 'P0001';
   end if;
+  if amount < 1 then raise exception 'TREASURY_VALUE_BELOW_FLOOR floor=1.00' using errcode = 'P0001'; end if;
+  select s.price_per_unit, s.payment_mint into ref_price, ref_mint from public.sales s
+   where s.network = p_network and s.share_class_pda = p_share_class_pda and s.price_per_unit > 0
+   order by s.sale_id desc limit 1;
+  if ref_price is null then
+    select r.min_price_per_unit, r.payment_mint into ref_price, ref_mint from public.sale_capacity_reservations r
+     where r.network = p_network and r.kind = 'sale' and r.share_class_pda = p_share_class_pda
+     order by r.created_at desc limit 1;
+  end if;
+  if ref_price is not null then
+    select * into fx from public.fx_rates where network = p_network and payment_mint = ref_mint;
+    if found then
+      floor_eur := public.sale_capacity_eur(p_amount_units * ref_price, fx.eur_per_token, fx.decimals);
+      if amount < floor_eur then
+        raise exception 'TREASURY_VALUE_BELOW_FLOOR floor=%', floor_eur using errcode = 'P0001';
+      end if;
+    end if;
+  end if;
+  perform public.sale_capacity_check_subject(p_network, p_asset_pda, p_issuer_pda, p_spv_id);
   subject := public.sale_capacity_lock(p_network, p_spv_id, p_issuer_pda);
   cap := public.sale_capacity(p_network, subject);
   if (cap->>'used')::numeric + amount > (cap->>'cap')::numeric then
@@ -549,40 +639,144 @@ begin
   values (p_network, 'treasury_mint', p_share_class_pda, p_asset_pda, p_issuer_pda, p_spv_id, subject,
     p_snapshot, p_hash, p_amount_units, amount, 'declared', trim(p_reason), p_reserved_by)
   returning id into new_id;
-  return jsonb_build_object('id', new_id, 'amount_eur', amount, 'subject', subject,
+  return jsonb_build_object('id', new_id, 'amount_eur', amount, 'subject', subject, 'floor_eur', floor_eur,
     'capacity', public.sale_capacity(p_network, subject));
 end $$;
 
--- The treasury mint confirmed on-chain (the route verified its TreasuryMinted
--- evidence): book it. SPV subjects get an spv_issuances row (source
--- 'treasury_mint').
+-- The treasury mint is on-chain (the caller verified the finalized
+-- mint_to_treasury of exactly these units, share class and admin): book it.
+-- SPV subjects get an spv_issuances row (source 'treasury_mint'). A released
+-- reservation whose mint is found anyway (it landed before the release, the
+-- browser lost it) is reactivated and flagged adopted: the chain is the
+-- truth. If the 0027 calendar-year trigger refuses the row, the reservation
+-- stays reserved (still counted) with last_error set, and book_error returned.
 create or replace function public.book_treasury_mint(p_id uuid, p_signature text, p_issued_at date default null)
 returns jsonb language plpgsql security definer set search_path = '' as $$
-declare r public.sale_capacity_reservations%rowtype; issuance bigint;
+declare r public.sale_capacity_reservations%rowtype; issuance bigint; failure text;
 begin
   select * into r from public.sale_capacity_reservations where id = p_id and kind = 'treasury_mint';
   if not found then raise exception 'RESERVATION_NOT_FOUND' using errcode = 'P0001'; end if;
+  if p_signature is null or length(p_signature) = 0 then raise exception 'INVALID_SIGNATURE' using errcode = 'P0001'; end if;
   perform public.sale_capacity_lock(r.network, r.spv_id, r.issuer_pda);
   select * into r from public.sale_capacity_reservations where id = p_id for update;
   if r.status = 'booked' then
     if r.mint_signature is distinct from p_signature then raise exception 'RESERVATION_ALREADY_BOOKED' using errcode = 'P0001'; end if;
     return to_jsonb(r);
   end if;
+  if exists (select 1 from public.sale_capacity_reservations x
+              where x.network = r.network and x.mint_signature = p_signature and x.id <> p_id) then
+    raise exception 'MINT_ALREADY_BOOKED' using errcode = 'P0001';
+  end if;
+  if r.status = 'released' then
+    update public.sale_capacity_reservations
+       set status = 'reserved', released_at = null, release_reason = null, adopted = true,
+           adopted_from = coalesce(adopted_from, jsonb_build_object('status', 'released',
+             'release_reason', r.release_reason, 'released_at', r.released_at)),
+           last_error = left(format('Treasury mint %s landed although its reservation was released (%s): reactivated',
+             p_signature, r.release_reason), 2000)
+     where id = p_id
+    returning * into r;
+  end if;
   if r.status <> 'reserved' then raise exception 'RESERVATION_NOT_LIVE' using errcode = 'P0001'; end if;
   if r.spv_id is not null then
-    insert into public.spv_issuances(spv_id, asset_pda, amount_eur, issued_at, note, recorded_by, source)
-    values (r.spv_id, r.asset_pda, r.amount_eur, coalesce(p_issued_at, current_date),
-      format('Treasury mint of %s units (tx %s): %s; reservation %s', r.amount_units, p_signature, r.reason, r.id),
-      'server', 'treasury_mint')
-    returning id into issuance;
+    begin
+      insert into public.spv_issuances(spv_id, asset_pda, amount_eur, issued_at, note, recorded_by, source)
+      values (r.spv_id, r.asset_pda, r.amount_eur, coalesce(p_issued_at, current_date),
+        format('Treasury mint of %s units (tx %s): %s; reservation %s', r.amount_units, p_signature, r.reason, r.id),
+        'server', 'treasury_mint')
+      returning id into issuance;
+    exception when others then
+      failure := sqlerrm;
+    end;
+    if failure is not null then
+      update public.sale_capacity_reservations set last_error = left(failure, 2000) where id = p_id returning * into r;
+      return to_jsonb(r) || jsonb_build_object('book_error', failure);
+    end if;
   end if;
   update public.sale_capacity_reservations
      set status = 'booked', mint_signature = p_signature, booked_amount_eur = amount_eur,
-         booked_issuance_id = issuance, booked_at = now(), chain_confirmed_at = now(), last_error = null
+         booked_issuance_id = issuance, booked_at = now(), chain_confirmed_at = now(),
+         last_error = case when adopted then last_error end
    where id = p_id and status = 'reserved'
   returning * into r;
   return to_jsonb(r);
 end $$;
+
+-- A manual (admin) SPV issuance, under the same subject lock as the ledger
+-- above, so it cannot slip past reserved / consumed sale approvals: without a
+-- super-admin cap override it must fit the rolling 12-month capacity
+-- (booked issuances + live reservations), and the 0027 calendar-year trigger
+-- still runs. issued_at may not be in the future, nor more than 30 days back
+-- unless a super admin allows it (a backdated row would leave the window).
+create or replace function public.record_spv_issuance(
+  p_spv_id uuid, p_amount_eur numeric, p_asset_pda text, p_sale_pubkey text, p_issued_at date, p_note text,
+  p_recorded_by text, p_cap_override boolean, p_allow_backdate boolean
+) returns jsonb language plpgsql security definer set search_path = '' as $$
+declare net text; cap jsonb; amount numeric := round(p_amount_eur, 2); issued date := coalesce(p_issued_at, current_date);
+  rec public.spv_issuances%rowtype;
+begin
+  select network into net from public.spvs where id = p_spv_id;
+  if not found then raise exception 'SPV_NOT_FOUND' using errcode = 'P0001'; end if;
+  if amount is null or amount <= 0 or p_recorded_by is null then raise exception 'INVALID_TERMS' using errcode = 'P0001'; end if;
+  if issued > current_date then raise exception 'ISSUED_AT_IN_FUTURE' using errcode = 'P0001'; end if;
+  if issued < current_date - 30 and not coalesce(p_allow_backdate, false) then
+    raise exception 'ISSUED_AT_BACKDATED' using errcode = 'P0001';
+  end if;
+  perform public.sale_capacity_lock(net, p_spv_id, null);
+  if not coalesce(p_cap_override, false) and issued > current_date - interval '12 months' then
+    cap := public.sale_capacity(net, 'spv:' || p_spv_id::text);
+    if (cap->>'used')::numeric + amount > (cap->>'cap')::numeric then
+      raise exception 'SALE_CAP_EXCEEDED remaining=% cap=% window_start=%', cap->>'remaining', cap->>'cap', cap->>'window_start'
+        using errcode = 'P0001';
+    end if;
+  end if;
+  insert into public.spv_issuances(spv_id, amount_eur, asset_pda, sale_pubkey, issued_at, note, recorded_by, source, cap_override)
+  values (p_spv_id, amount, nullif(p_asset_pda, ''), nullif(p_sale_pubkey, ''), issued, nullif(p_note, ''), p_recorded_by,
+    'manual', coalesce(p_cap_override, false))
+  returning * into rec;
+  return to_jsonb(rec) || jsonb_build_object('capacity', public.sale_capacity(net, 'spv:' || p_spv_id::text));
+end $$;
+
+-- 0049's listing publication checked the applicant by ONE wallet. A sale
+-- approval accepts any wallet linked to the applicant's account (0056
+-- applicant_wallets), so the listing must too, or an approved sale opened
+-- from a linked wallet could never publish its application.
+create or replace function public.save_launch_listing(p_network text,p_sale text,p_issuer text,p_admin boolean,p_listing jsonb)
+returns text language plpgsql set search_path='' as $$
+declare existing public.launch_listings%rowtype; application public.launch_applications%rowtype;app_id uuid;
+begin
+  if p_network not in ('devnet','mainnet','testnet','localnet') or p_issuer is null then raise exception 'valid network and verified sale issuer required';end if;
+  perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('listing:' || p_network || ':' || p_sale,0));
+  select * into existing from public.launch_listings where network=p_network and sale_pubkey=p_sale for update;
+  app_id=case when p_listing ? 'application_id' then (p_listing->>'application_id')::uuid else existing.application_id end;
+  if existing.application_id is not null and app_id is distinct from existing.application_id then raise exception 'a linked application cannot be replaced';end if;
+  if app_id is not null then
+    select * into application from public.launch_applications where id=app_id and network=p_network for update;
+    if not found or application.status <> 'approved' then raise exception 'application must be approved on this network';end if;
+    if not p_admin and application.linked_issuer is distinct from p_issuer
+       and not (p_issuer = any(public.applicant_wallets(application.applicant_wallet, p_network))) then
+      raise exception 'application does not belong to this issuer';
+    end if;
+    if application.linked_sale_pubkey is not null and application.linked_sale_pubkey <> p_sale then raise exception 'application is already linked to another sale';end if;
+  end if;
+  insert into public.launch_listings(network,sale_pubkey,application_id,logo_letter,logo_gradient,problem,why_now,traction,existing_investors,is_published)
+  values(p_network,p_sale,app_id,
+    case when p_listing ? 'logo_letter' then p_listing->>'logo_letter' else existing.logo_letter end,
+    case when p_listing ? 'logo_gradient' then p_listing->>'logo_gradient' else existing.logo_gradient end,
+    case when p_listing ? 'problem' then p_listing->>'problem' else existing.problem end,
+    case when p_listing ? 'why_now' then p_listing->>'why_now' else existing.why_now end,
+    coalesce(p_listing->'traction',existing.traction,'{}'::jsonb),
+    case when p_listing ? 'existing_investors' then p_listing->>'existing_investors' else existing.existing_investors end,
+    coalesce((p_listing->>'is_published')::boolean,existing.is_published,false))
+  on conflict(network,sale_pubkey) do update set application_id=excluded.application_id,logo_letter=excluded.logo_letter,
+    logo_gradient=excluded.logo_gradient,problem=excluded.problem,why_now=excluded.why_now,traction=excluded.traction,
+    existing_investors=excluded.existing_investors,is_published=excluded.is_published;
+  if app_id is not null then
+    update public.launch_applications set linked_sale_pubkey=p_sale,linked_issuer=p_issuer where id=app_id and network=p_network;
+  end if;
+  return p_sale;
+end;
+$$;
 
 revoke all on function
   public.sale_capacity_eur(numeric,numeric,integer),
@@ -595,7 +789,11 @@ revoke all on function
   public.book_sale_reservation(uuid,numeric,date),
   public.release_sale_reservation(uuid,text,text),
   public.reserve_treasury_mint_capacity(text,text,text,text,uuid,numeric,numeric,text,jsonb,text,text),
-  public.book_treasury_mint(uuid,text,date)
+  public.book_treasury_mint(uuid,text,date),
+  public.sale_capacity_spv(text,text,text,boolean),
+  public.sale_capacity_check_subject(text,text,text,uuid),
+  public.record_spv_issuance(uuid,numeric,text,text,date,text,text,boolean,boolean),
+  public.save_launch_listing(text,text,text,boolean,jsonb)
   from public, anon, authenticated;
 grant execute on function
   public.sale_capacity_eur(numeric,numeric,integer),
@@ -607,7 +805,10 @@ grant execute on function
   public.book_sale_reservation(uuid,numeric,date),
   public.release_sale_reservation(uuid,text,text),
   public.reserve_treasury_mint_capacity(text,text,text,text,uuid,numeric,numeric,text,jsonb,text,text),
-  public.book_treasury_mint(uuid,text,date)
+  public.book_treasury_mint(uuid,text,date),
+  public.sale_capacity_spv(text,text,text,boolean),
+  public.record_spv_issuance(uuid,numeric,text,text,date,text,text,boolean,boolean),
+  public.save_launch_listing(text,text,text,boolean,jsonb)
   to service_role;
 
 commit;

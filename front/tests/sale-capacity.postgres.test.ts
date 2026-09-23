@@ -310,6 +310,105 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     ).toThrow(/SALE_CAP_EXCEEDED/);
   });
 
+  it("resolves the SPV by its issuer_pda: one legal entity, one cap", () => {
+    sql(`update public.spvs set issuer_pda='${ISSUER}' where id='${SPV}'`);
+    expect(sql(`select public.sale_capacity_spv('devnet','${ASSET}','${ISSUER}')`)).toBe(SPV);
+    // No separate issuer bucket, and no other SPV, for an issuer with an SPV.
+    expect(() => reserve({ spv: null })).toThrow(/SPV_SUBJECT_CONFLICT/);
+    expect(() => reserve({ spv: SPV_SMALL })).toThrow(/SPV_SUBJECT_CONFLICT/);
+    expect(reserve({ spv: SPV })).toMatchObject({ subject: `spv:${SPV}` });
+    // A profile that points at another SPV is refused (strict) or overruled (adoption).
+    sql(`insert into public.asset_profiles(asset_pda,network,category,spv_id) values('${ASSET}','devnet','equity','${SPV_SMALL}')`);
+    expect(() => sql(`select public.sale_capacity_spv('devnet','${ASSET}','${ISSUER}')`)).toThrow(/SPV_SUBJECT_CONFLICT/);
+    expect(sql(`select public.sale_capacity_spv('devnet','${ASSET}','${ISSUER}',false)`)).toBe(SPV);
+    // An SPV registered for another issuer cannot be charged for this one.
+    sql(`delete from public.asset_profiles; update public.spvs set issuer_pda='${STALE}' where id='${SPV}'`);
+    expect(() => reserve({ saleId: 2, spv: SPV })).toThrow(/SPV_SUBJECT_CONFLICT/);
+    sql(`insert into public.asset_profiles(asset_pda,network,category,spv_id) values('${ASSET}','devnet','equity','${SPV_SMALL}')`);
+    expect(sql(`select public.sale_capacity_spv('devnet','${ASSET}','${ISSUER}')`)).toBe(SPV_SMALL);
+    sql(`delete from public.asset_profiles`);
+  });
+
+  it("an issuer subject takes its dossier's client_raise_limits override, as 0056 does", () => {
+    const wallet = b58("J");
+    sql(`insert into public.issuers(pda,network,authority,legal_entity_id,jurisdiction,kyb_status,kyb_doc_hash,layout_version,last_slot)
+      values('${ISSUER}','devnet','${wallet}','le',688,1,'h',2,1) on conflict do nothing`);
+    expect(capacity(`issuer:${ISSUER}`)).toMatchObject({ cap: 3000000, cap_source: "platform" });
+    const client = sql(`insert into public.clients(network,type,wallet) values('devnet','issuer','${wallet}') returning id`);
+    sql(`insert into public.client_raise_limits(client_id,annual_raise_cap_eur) values('${client}',1000)`);
+    expect(capacity(`issuer:${ISSUER}`)).toMatchObject({ cap: 1000, cap_source: "client" });
+    expect(() => reserve({ spv: null, maxGross: BigInt(1_001) * WHOLE })).toThrow(/SALE_CAP_EXCEEDED remaining=1000/);
+    expect(reserve({ spv: null, maxGross: BigInt(1_000) * WHOLE })).toMatchObject({ subject: `issuer:${ISSUER}` });
+    sql(`delete from public.client_raise_limits; delete from public.clients; delete from public.issuers`);
+  });
+
+  it("a manual SPV issuance counts live reservations, and is neither future-dated nor backdated", () => {
+    const record = (amount: number, opts: { issued?: string; override?: boolean; backdate?: boolean } = {}) =>
+      json(`select public.record_spv_issuance('${SPV}',${amount},null,null,${opts.issued ?? "null"},'note','admin-wallet',
+        ${opts.override ?? false},${opts.backdate ?? false})`);
+    reserve({ maxGross: BigInt(2_500_000) * WHOLE });
+    expect(() => record(500_001)).toThrow(/SALE_CAP_EXCEEDED remaining=500000/);
+    expect(record(500_000)).toMatchObject({ amount_eur: 500000, source: "manual", capacity: { remaining: 0 } });
+    expect(() => record(1, { issued: "current_date + 1" })).toThrow(/ISSUED_AT_IN_FUTURE/);
+    expect(() => record(1, { issued: "current_date - 40" })).toThrow(/ISSUED_AT_BACKDATED/);
+    // A super admin's override is recorded on the row (0027 lets it through too).
+    expect(record(10, { override: true })).toMatchObject({ cap_override: true });
+    expect(record(10, { issued: "current_date - 400", backdate: true, override: true })).toMatchObject({ amount_eur: 10 });
+    expect(() => sql(`select public.record_spv_issuance('30000000-0000-4000-8000-00000000000f',1,null,null,null,null,'a',false,false)`))
+      .toThrow(/SPV_NOT_FOUND/);
+  });
+
+  it("floors a treasury mint's declared value at EUR 1 and the share class's latest price", () => {
+    const treasury = (units: number, eur: number, spv = SPV) =>
+      json(`select public.reserve_treasury_mint_capacity('devnet','${SC}','${ASSET}','${ISSUER}','${spv}',${units},
+        ${eur},'Founder allocation','{"v":1}'::jsonb,'${HASH}','admin-wallet')`);
+    expect(() => treasury(500, 0.5)).toThrow(/TREASURY_VALUE_BELOW_FLOOR floor=1.00/);
+    expect(treasury(500, 1)).toMatchObject({ amount_eur: 1 });
+    // Latest approval's minimum price (2 EURC) until a sale is indexed.
+    reserve({ saleId: 1, maxGross: BigInt(100) * WHOLE, min: BigInt(2) * WHOLE, max: BigInt(2) * WHOLE });
+    expect(() => treasury(500, 999.99)).toThrow(/TREASURY_VALUE_BELOW_FLOOR floor=1000/);
+    // The indexed sale's price (0.9 EUR/USDC x 4 USDC) wins over the approval.
+    sql(`insert into public.sales(pda,network,share_class_pda,mint,payment_mint,proceeds,authority,sale_id,price_per_unit,total_for_sale,
+      layout_version,last_slot) values('${b58("K")}','devnet','${SC}','m','${USDC}','p','a',1,${BigInt(4) * WHOLE},10,2,1)`);
+    expect(() => treasury(500, 1799.99)).toThrow(/TREASURY_VALUE_BELOW_FLOOR floor=1800/);
+    expect(treasury(500, 1800)).toMatchObject({ amount_eur: 1800, floor_eur: 1800 });
+    sql(`delete from public.sales`);
+  });
+
+  it("books a treasury mint found after its reservation was released (adopted), each signature once", () => {
+    const treasury = () =>
+      json(`select public.reserve_treasury_mint_capacity('devnet','${SC}','${ASSET}','${ISSUER}','${SPV}',5,
+        100,'Founder allocation','{"v":1}'::jsonb,'${HASH}','admin-wallet')`);
+    const a = treasury(), b = treasury();
+    sql(`select public.release_sale_reservation('${a.id}','expired','retry-worker')`);
+    expect(capacity()).toMatchObject({ reserved: 100 });
+    const booked = json(`select public.book_treasury_mint('${a.id}','sig-late',null)`);
+    expect(booked).toMatchObject({ status: "booked", adopted: true, mint_signature: "sig-late", booked_amount_eur: 100 });
+    expect(booked.adopted_from).toMatchObject({ status: "released", release_reason: "expired" });
+    expect(capacity()).toMatchObject({ reserved: 100, issued: 100 });
+    expect(() => sql(`select public.book_treasury_mint('${b.id}','sig-late',null)`)).toThrow(/MINT_ALREADY_BOOKED/);
+    // The 0027 calendar-year trigger refusing the row keeps it reserved (counted), with book_error.
+    sql(`update public.spvs set annual_cap_eur=150 where id='${SPV}'`);
+    const refused = json(`select public.book_treasury_mint('${b.id}','sig-b',null)`);
+    expect(refused).toMatchObject({ status: "reserved" });
+    expect(String(refused.book_error)).toMatch(/annual issuance cap/);
+  });
+
+  it("publishes an application's listing from any wallet linked to the applicant's account", () => {
+    const [owner, linked, stranger] = [b58("J"), b58("K"), b58("L")];
+    const account = sql(`insert into public.account_profiles(network,wallet) values('devnet','${owner}') returning id`);
+    sql(`insert into public.account_wallets(network,wallet,account_id) values('devnet','${owner}','${account}'),
+      ('devnet','${linked}','${account}') on conflict do nothing`);
+    const app = sql(`insert into public.launch_applications(applicant_wallet,raise_type,company_name,one_liner,category,raise_amount,
+      equity_offered,status,network) values ('${owner}','mature','Acme','One line','equity',1000,5,'approved','devnet') returning id`);
+    const save = (issuer: string, sale: string) =>
+      sql(`select public.save_launch_listing('devnet','${sale}','${issuer}',false,'{"application_id":"${app}","is_published":true}')`);
+    expect(() => save(stranger, "sale-x")).toThrow(/does not belong/);
+    expect(save(linked, "sale-y")).toBe("sale-y");
+    expect(sql(`select linked_issuer from public.launch_applications where id='${app}'`)).toBe(linked);
+    sql(`delete from public.launch_listings; delete from public.account_wallets; delete from public.account_profiles`);
+  });
+
   it("is invisible to browser roles and executable only by the service role", () => {
     for (const role of ["anon", "authenticated"]) {
       for (const table of ["sale_capacity_reservations", "fx_rates"]) {
