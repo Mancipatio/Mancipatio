@@ -1,9 +1,10 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-const mocks = vi.hoisted(() => ({ rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), abortSignals: [] as AbortSignal[] }));
+const mocks = vi.hoisted(() => ({ rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), capacity: vi.fn(), abortSignals: [] as AbortSignal[] }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ rpc: mocks.rpc }) }));
 vi.mock("@/lib/server/indexer-sync", () => ({ reconcileIndexerJobs: mocks.indexer }));
 vi.mock("@/lib/server/purchase-records", () => ({ reconcilePurchases: mocks.purchases }));
+vi.mock("@/lib/server/sale-capacity", () => ({ reconcileSaleCapacity: mocks.capacity }));
 vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
 import { POST, maxDuration } from "@/app/api/internal/retry/route";
 import { runRetryWorker, retryWorkerLimit } from "@/lib/server/retry-worker";
@@ -20,7 +21,7 @@ beforeEach(() => {
   vi.clearAllMocks(); mocks.abortSignals.length = 0;
   vi.stubEnv("RETRY_WORKER_SECRET", SECRET);
   mocks.rpc.mockImplementation(() => rpcResult());
-  mocks.indexer.mockResolvedValue(COUNTS); mocks.purchases.mockResolvedValue(COUNTS);
+  mocks.indexer.mockResolvedValue(COUNTS); mocks.purchases.mockResolvedValue(COUNTS); mocks.capacity.mockResolvedValue(COUNTS);
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
@@ -39,6 +40,7 @@ describe("scheduler authorization", () => {
     expect(response.status).toBe(200); expect(body.data.network).toBe("devnet");
     expect(mocks.rpc).toHaveBeenNthCalledWith(1, "acquire_retry_worker_lease", expect.objectContaining({ p_network: "devnet", p_ttl_seconds: 120 }));
     expect(mocks.indexer.mock.calls[0][0]).toBe(10); expect(mocks.purchases.mock.calls[0][0]).toBe(10);
+    expect(mocks.capacity.mock.calls[0][0]).toBe(10); expect(body.data.capacity).toEqual({ status: "processed", counts: COUNTS });
     expect(response.headers.get("Cache-Control")).toBe("private, no-store"); expect(maxDuration).toBe(60);
   });
   it.each(["0", "21", "1.5", "-1", "NaN", "01"])("rejects an invalid query limit %s without leasing", async (limit) => {
@@ -53,6 +55,15 @@ describe("scheduler authorization", () => {
 });
 
 describe("persistent worker lease and deadlines", () => {
+  it("runs the raise-cap reservation stage third and reports its failure as partial", async () => {
+    mocks.capacity.mockRejectedValue(new Error("ledger-internal-detail"));
+    const response = await POST(request()); const body = await response.json();
+    expect(response.status).toBe(503); expect(body.data.capacity.status).toBe("failed");
+    expect(body.data.indexer.status).toBe("processed"); expect(body.data.purchases.status).toBe("processed");
+    expect(JSON.stringify(body)).not.toContain("ledger-internal-detail");
+    const order = [mocks.indexer, mocks.purchases, mocks.capacity].map((m) => m.mock.invocationCallOrder[0]);
+    expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
   it("skips overlapping runs without executing work or releasing the other owner's lease", async () => {
     mocks.rpc.mockImplementation(() => rpcResult(false));
     const response = await POST(request());
@@ -84,15 +95,21 @@ describe("persistent worker lease and deadlines", () => {
       expect(deadline).toBe(140_000); expect(signal).toBeInstanceOf(AbortSignal);
       now = 140_000; return COUNTS;
     });
+    // The raise-cap stage gets what is left of the 47 s work budget.
+    mocks.capacity.mockImplementation(async (_limit, deadline, signal) => {
+      expect(deadline).toBe(147_000); expect(signal).toBeInstanceOf(AbortSignal);
+      now = 146_000; return COUNTS;
+    });
     expect((await runRetryWorker()).status).toBe("processed");
+    expect(mocks.capacity).toHaveBeenCalledOnce();
     expect(now - 100_000).toBeLessThan(50_000);
   });
   it("leaves later jobs deferred when the total budget is exhausted, then releases with a fresh signal", async () => {
     let now = 100_000; vi.spyOn(Date, "now").mockImplementation(() => now);
     mocks.indexer.mockImplementation(async () => { now = 147_000; throw new Error("deadline"); });
     const result = await runRetryWorker();
-    expect(result).toMatchObject({ status: "processed", indexer: { status: "deferred" }, purchases: { status: "deferred" } });
-    expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.rpc).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ status: "processed", indexer: { status: "deferred" }, purchases: { status: "deferred" }, capacity: { status: "deferred" } });
+    expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.capacity).not.toHaveBeenCalled(); expect(mocks.rpc).toHaveBeenCalledTimes(2);
     expect(mocks.abortSignals[1].aborted).toBe(false);
   });
   it("surfaces failed release instead of reporting a fully successful run", async () => {
