@@ -27,7 +27,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
         db.query(readFileSync(join(process.cwd(), "supabase/migrations", file), "utf8"));
       }
       for (const fixture of indexerFixtures()) {
-        const row = await INDEXER_ENTITIES.find((e) => e.table === fixture.table)!.decode(fixture.bytes);
+        const row = await INDEXER_ENTITIES.find((e) => e.table === fixture.table)!.decode(fixture.bytes, fixture.address);
         rows.push({ table: fixture.table, row: { ...row, raw: { base64: Buffer.from(fixture.bytes).toString("base64") } } });
       }
     } catch (error) { db.close(); throw error; }

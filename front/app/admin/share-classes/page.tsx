@@ -691,14 +691,20 @@ function ShareClassDetail({
       const signer = walletSigner(conn.wallet);
       let kycRegistry: Address | null = null;
       if (target === "kyc-gated") {
-        // The program stores kyc_registry as plain instruction data — it
-        // cannot verify the account exists, and a config pointing at a
-        // nonexistent registry blocks every transfer of the mint. Pin the
-        // hook to the LIVE registry found on-chain (e2e §5): the registry is
-        // bound to its original provider key, so deriving it from the
-        // connected Super Admin would, after admin rotation, point at a PDA
-        // that does not exist (or steer the admin into creating a second one).
+        // Pin the hook to the LIVE registry, by ADDRESS (the deployment pin,
+        // or the heuristic when unpinned), never derived from the connected
+        // wallet: a registry keeps its address when its authority rotates.
+        // The hook now verifies the passed kyc_registry_account (owner,
+        // KycRegistry discriminator, length) and refuses a mismatch.
         const ctx = await loadKycAuthorityContext(client.runtime.rpc);
+        if (ctx.pinnedMissing) {
+          toast.dismiss(pendingId);
+          toast.showError(
+            "Pinned KYC registry not found",
+            `NEXT_PUBLIC_KYC_REGISTRY names ${ctx.pinned}, which does not exist on this network. Fix the pin before gating this mint.`,
+          );
+          return;
+        }
         if (ctx.ambiguous) {
           toast.dismiss(pendingId);
           toast.showError(
@@ -728,6 +734,9 @@ function ShareClassDetail({
             ? RestrictionMode.KycGated
             : RestrictionMode.Open,
         kycRegistry,
+        // Required iff KycGated (the hook validates it); omitted for Open,
+        // which the hook reads as None.
+        ...(kycRegistry ? { kycRegistryAccount: kycRegistry } : {}),
       });
 
       // tx.signature is stale render-time state inside this callback — use

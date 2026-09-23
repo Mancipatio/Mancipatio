@@ -17,10 +17,13 @@ import { Kpi } from "@/components/kpi";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ClawbackPanel } from "./clawback-panel";
+import { KycRegistryPanel } from "@/components/kyc-registry-panel";
+import { JurisdictionSelector } from "@/components/jurisdiction-selector";
+import { toggleJurisdiction } from "@/lib/kyc-registry-rotation";
 import { useRole } from "@/lib/auth";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
-import { COUNTRIES, countryName, type Country } from "@/lib/countries";
+import { countryName } from "@/lib/countries";
 import {
   DEFAULT_APPROVED_JURISDICTIONS,
   buildCreateRegistry,
@@ -39,6 +42,7 @@ import { type KycRegistry } from "@/lib/generated/asset_registry";
 import {
   invalidateKycAuthorityContext,
   kycGates,
+  kycRegistryUnavailableReason,
   loadKycAuthorityContext,
   waitForKycRegistry,
 } from "@/lib/kyc-authority";
@@ -88,6 +92,11 @@ const KYC_BADGE: Record<ClientKycStatus, string> = {
 type Tab = "pending" | "expiring" | "expired" | "rejected" | "all";
 
 export default function KycPage() {
+  // Bumped after any on-chain registry change made on this page (create,
+  // rotation propose/accept/cancel, jurisdictions): every card that caches
+  // the registry context re-reads it, so no card keeps a stale authority.
+  const [registryVersion, setRegistryVersion] = useState(0);
+  const registryChanged = useCallback(() => setRegistryVersion((v) => v + 1), []);
   return (
     <section className="min-w-0 flex-1">
       <div>
@@ -106,10 +115,11 @@ export default function KycPage() {
         </p>
       </div>
       <RequireRole role="superAdmin" fallback={<></>}>
-        <KycRegistryBootstrap />
+        <KycRegistryBootstrap registryVersion={registryVersion} onChanged={registryChanged} />
       </RequireRole>
       <RequireRole role="admin">
-        <PassportRequests />
+        <KycRegistryAuthorityCard registryVersion={registryVersion} onChanged={registryChanged} />
+        <PassportRequests registryVersion={registryVersion} />
         <KycOps />
         <ClawbackPanel />
       </RequireRole>
@@ -131,7 +141,14 @@ type RegistryState =
   | { status: "missing"; pda: Address }
   | { status: "error"; message: string };
 
-function KycRegistryBootstrap() {
+type RegistryChangeProps = {
+  /** Page-level version; a change re-reads the registry context. */
+  registryVersion: number;
+  /** Signals the page that the registry changed on-chain. */
+  onChanged: () => void;
+};
+
+function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProps) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
@@ -145,7 +162,6 @@ function KycRegistryBootstrap() {
   );
   const [blockedCodes, setBlockedCodes] = useState<Set<string>>(new Set());
   const [showSelector, setShowSelector] = useState(false);
-  const [countryFilter, setCountryFilter] = useState("");
 
   const refreshRegistry = useCallback(async (afterCreate = false) => {
     if (!wallet) {
@@ -153,11 +169,12 @@ function KycRegistryBootstrap() {
       return;
     }
     try {
-      // The live registry is found by scanning KycRegistry accounts, not by
-      // deriving it from the connected wallet or the current platform admin:
-      // the registry stays bound to its original provider key after rotation.
-      // Right after create_kyc_registry the tx is only "confirmed", so poll a
-      // few fresh scans instead of flipping back to the Create form.
+      // The registry is resolved BY ADDRESS — the NEXT_PUBLIC_KYC_REGISTRY
+      // pin, or (unpinned) a scan of KycRegistry accounts — never derived
+      // from the connected wallet, the platform admin or the registry's
+      // current (rotatable) authority. Right after create_kyc_registry the tx
+      // is only "confirmed", so poll a few fresh reads instead of flipping
+      // back to the Create form.
       const ctx = afterCreate
         ? await waitForKycRegistry(client.runtime.rpc)
         : await loadKycAuthorityContext(client.runtime.rpc);
@@ -169,6 +186,18 @@ function KycRegistryBootstrap() {
           authority: ctx.registry.registry.authority,
           platformAdmin: ctx.platformAdmin,
         });
+      } else if (ctx.pinnedMissing && ctx.pinned) {
+        // Fail closed: never offer Create for some OTHER address. Only the
+        // wallet whose seed slot IS the pinned address may create it.
+        const pda = await getRegistryPda(wallet as Address);
+        if (pda === ctx.pinned) {
+          setRegistryState({ status: "missing", pda });
+        } else {
+          setRegistryState({
+            status: "error",
+            message: `Pinned registry ${ctx.pinned} not found on ${detectNetwork()}. Check NEXT_PUBLIC_KYC_REGISTRY, or connect the wallet that creates it.`,
+          });
+        }
       } else if (ctx.ambiguous) {
         setRegistryState({
           status: "error",
@@ -189,7 +218,7 @@ function KycRegistryBootstrap() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshRegistry();
-  }, [refreshRegistry]);
+  }, [refreshRegistry, registryVersion]);
 
   async function createRegistry() {
     if (!wallet || !conn.wallet || !isSuperAdmin) return;
@@ -216,6 +245,7 @@ function KycRegistryBootstrap() {
       toast.showTx(sig, { title: "KYC registry created" });
       invalidateKycAuthorityContext(client.runtime.rpc);
       await refreshRegistry(true);
+      onChanged();
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError(
@@ -226,49 +256,10 @@ function KycRegistryBootstrap() {
   }
 
   function toggleCode(code: string, target: "approved" | "blocked") {
-    if (target === "approved") {
-      setApprovedCodes((prev) => {
-        const next = new Set(prev);
-        if (next.has(code)) next.delete(code);
-        else {
-          next.add(code);
-          // Remove from blocked if added to approved
-          setBlockedCodes((b) => {
-            const nb = new Set(b);
-            nb.delete(code);
-            return nb;
-          });
-        }
-        return next;
-      });
-    } else {
-      setBlockedCodes((prev) => {
-        const next = new Set(prev);
-        if (next.has(code)) next.delete(code);
-        else {
-          next.add(code);
-          // Remove from approved if added to blocked
-          setApprovedCodes((a) => {
-            const na = new Set(a);
-            na.delete(code);
-            return na;
-          });
-        }
-        return next;
-      });
-    }
+    const next = toggleJurisdiction(approvedCodes, blockedCodes, code, target);
+    setApprovedCodes(next.approved);
+    setBlockedCodes(next.blocked);
   }
-
-  const filteredCountries: Country[] = useMemo(() => {
-    const q = countryFilter.trim().toLowerCase();
-    if (!q) return COUNTRIES;
-    return COUNTRIES.filter(
-      (c) =>
-        c.name.toLowerCase().includes(q) ||
-        c.alpha2.toLowerCase().includes(q) ||
-        c.code.includes(q),
-    );
-  }, [countryFilter]);
 
   // jurisdictionBitmap SILENTLY drops codes outside the on-chain bitmap
   // (128 bytes = codes 0–1023). Every assigned ISO-3166-1 numeric code fits
@@ -341,18 +332,20 @@ function KycRegistryBootstrap() {
                 registryState.platformAdmin.toString() !==
                   registryState.authority.toString() && (
                   <p className="mt-1 text-[11px] text-amber-800">
-                    The platform admin has been rotated: passports are still
-                    issued and revoked only by the registry authority above,
-                    not by the current Super Admin. rotate_authority closed the
-                    old Admin record, so the provider key can only reach this
-                    queue and the client detail pages once the new Super Admin
-                    re-adds it via add_admin on /admin/roles — the program has
-                    no instruction to move the registry authority itself.
+                    The registry authority differs from the Super Admin (the
+                    registry was handed to a separate key, or the platform
+                    admin was rotated). Passports are issued and revoked only
+                    by the registry authority above. That key reaches this
+                    queue and the client detail pages only with an Admin
+                    record — add it via add_admin on /admin/roles if it has
+                    none. The registry authority itself moves only through the
+                    propose/accept rotation below.
                   </p>
                 )}
             </div>
           </div>
         )}
+
         {registryState.status === "missing" && (
           <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
             <p className="text-sm font-semibold text-amber-900">
@@ -433,60 +426,11 @@ function KycRegistryBootstrap() {
           )}
 
           {showSelector && (
-            <div className="rounded-lg border border-slate-200 bg-white p-4">
-              <input
-                value={countryFilter}
-                onChange={(e) => setCountryFilter(e.target.value)}
-                placeholder="Filter countries…"
-                className="mb-3 w-full rounded-md border border-slate-300 px-3 py-1.5 text-sm focus:border-slate-400 focus:outline-none"
-              />
-              <div className="max-h-56 overflow-y-auto">
-                <table className="w-full text-xs">
-                  <thead className="sticky top-0 bg-white text-left text-[10px] uppercase tracking-wider text-slate-500">
-                    <tr>
-                      <th className="pb-1 pr-3 font-medium">Country</th>
-                      <th className="pb-1 pr-3 font-medium">Code</th>
-                      <th className="pb-1 pr-3 font-medium text-center">Approved</th>
-                      <th className="pb-1 font-medium text-center">Blocked</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-50">
-                    {filteredCountries.map((c) => (
-                      <tr key={c.code} className="text-slate-700">
-                        <td className="py-1 pr-3">
-                          {c.alpha2} {c.name}
-                        </td>
-                        <td className="py-1 pr-3 font-mono">
-                          {c.code}
-                          {!isJurisdictionRepresentable(parseInt(c.code, 10)) && (
-                            <span
-                              className="ml-1 text-[10px] font-semibold text-amber-600"
-                              title="Code ≥ 1024 — cannot be encoded in the 128-byte on-chain bitmap; the program silently drops it"
-                            >
-                              ≥1024
-                            </span>
-                          )}
-                        </td>
-                        <td className="py-1 pr-3 text-center">
-                          <input
-                            type="checkbox"
-                            checked={approvedCodes.has(c.code)}
-                            onChange={() => toggleCode(c.code, "approved")}
-                          />
-                        </td>
-                        <td className="py-1 text-center">
-                          <input
-                            type="checkbox"
-                            checked={blockedCodes.has(c.code)}
-                            onChange={() => toggleCode(c.code, "blocked")}
-                          />
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+            <JurisdictionSelector
+              approved={approvedCodes}
+              blocked={blockedCodes}
+              onToggle={toggleCode}
+            />
           )}
 
           <button
@@ -502,6 +446,64 @@ function KycRegistryBootstrap() {
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ── KYC registry authority + jurisdictions (2C-1) ─────────────────────────────
+
+/**
+ * Rendered for every Admin, not just the Super Admin: the registry authority
+ * (e.g. a separate compliance key) acts here, and the panel gates each action
+ * on on-chain state only (registry.authority / the staged new_authority).
+ */
+function KycRegistryAuthorityCard({ registryVersion, onChanged }: RegistryChangeProps) {
+  const client = useSolanaClient();
+  const [record, setRecord] = useState<{ address: Address; registry: KycRegistry } | null>(null);
+  // Why the card cannot show the registry (load error, missing pin, ambiguous
+  // scan). Shown in the card: a non-Super-Admin does not see the bootstrap
+  // card, so this is its only feedback.
+  const [problem, setProblem] = useState<string | null>(null);
+  const load = useCallback(async () => {
+    try {
+      const ctx = await loadKycAuthorityContext(client.runtime.rpc, { fresh: true });
+      setRecord(ctx.registry);
+      setProblem(kycRegistryUnavailableReason(ctx, detectNetwork()));
+    } catch (err) {
+      console.warn("[admin/kyc] registry load failed:", err);
+      setRecord(null);
+      setProblem(`Could not load the KYC registry: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }, [client]);
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load, registryVersion]);
+  if (!record && !problem) return null; // no registry yet: the bootstrap card handles creation
+  if (!record) {
+    return (
+      <div className="mt-8 rounded-xl border border-red-200 bg-red-50 p-6 shadow-sm">
+        <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-red-700">
+          On-chain · KYC registry authority
+        </p>
+        <p className="mt-1 text-sm text-red-700">{problem}</p>
+      </div>
+    );
+  }
+  return (
+    <div className="mt-8 rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+      <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+        On-chain · KYC registry authority
+      </p>
+      <h2 className="mt-0.5 text-base font-semibold text-slate-900">
+        Registry authority and jurisdictions
+      </h2>
+      <KycRegistryPanel
+        key={`${record.address}:${record.registry.authority}`}
+        registryAddress={record.address}
+        registry={record.registry}
+        onChanged={onChanged}
+      />
     </div>
   );
 }
@@ -581,7 +583,7 @@ function shortWallet(w: string): string {
   return `${w.slice(0, 6)}…${w.slice(-4)}`;
 }
 
-function PassportRequests() {
+function PassportRequests({ registryVersion }: { registryVersion: number }) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
@@ -598,6 +600,9 @@ function PassportRequests() {
   // Live registry authority — the only key allowed to issue passports. It is
   // resolved from the registry account itself, never from Platform.admin.
   const [registryAuthority, setRegistryAuthority] = useState<Address | null>(null);
+  // The live registry's ADDRESS (pinned / resolved). approve_holder targets
+  // it directly: after a rotation it is not derivable from the authority.
+  const [registryAddress, setRegistryAddress] = useState<Address | null>(null);
   const [platformAdmin, setPlatformAdmin] = useState<Address | null>(null);
   const { isKycProvider } = kycGates(wallet, registryAuthority, platformAdmin);
   const [blockedWallets, setBlockedWallets] = useState<Set<string> | null>(null);
@@ -634,6 +639,25 @@ function PassportRequests() {
   );
   const [retrying, setRetrying] = useState<string | null>(null);
 
+  // Registry authority / address / bitmaps only — no signed admin read, so a
+  // registry change elsewhere on the page re-runs just this (no wallet
+  // prompt), and the Issue gate follows the live authority immediately.
+  const loadRegistryContext = useCallback(async () => {
+    try {
+      const ctx = await loadKycAuthorityContext(client.runtime.rpc);
+      setPlatformAdmin(ctx.platformAdmin);
+      setRegistry(ctx.registry?.registry ?? null);
+      setRegistryAuthority(ctx.registry?.registry.authority ?? null);
+      setRegistryAddress(ctx.registry?.address ?? null);
+    } catch (err) {
+      console.warn("[admin/kyc] registry load failed:", err);
+      setRegistry(null);
+      setRegistryAuthority(null);
+      setRegistryAddress(null);
+      setPlatformAdmin(null);
+    }
+  }, [client]);
+
   const refresh = useCallback(async () => {
     // The queue is no longer anon-readable — the signed admin read needs the
     // connected wallet (one signature per refresh, same as /admin/fees).
@@ -663,17 +687,7 @@ function PassportRequests() {
     // failed load leaves `null` (= "unknown", surfaced in the blocker text)
     // rather than blocking triage outright — the chain still enforces the
     // registry bitmap and blocklist on every transfer.
-    try {
-      const ctx = await loadKycAuthorityContext(client.runtime.rpc);
-      setPlatformAdmin(ctx.platformAdmin);
-      setRegistry(ctx.registry?.registry ?? null);
-      setRegistryAuthority(ctx.registry?.registry.authority ?? null);
-    } catch (err) {
-      console.warn("[admin/kyc] registry load failed:", err);
-      setRegistry(null);
-      setRegistryAuthority(null);
-      setPlatformAdmin(null);
-    }
+    await loadRegistryContext();
     try {
       const entries = await listBlockEntries(client.runtime.rpc);
       setBlockedWallets(new Set(entries.map((e) => e.entry.wallet.toString())));
@@ -694,12 +708,19 @@ function PassportRequests() {
       console.warn("[admin/kyc] compliance alerts load failed:", err);
       setAlertWallets(null);
     }
-  }, [conn.wallet, client]);
+  }, [conn.wallet, client, loadRegistryContext]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
+
+  // A registry change on this page (rotation, jurisdictions, create): re-read
+  // the registry context only. Version 0 is the initial load, done by refresh.
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (registryVersion > 0) void loadRegistryContext();
+  }, [registryVersion, loadRegistryContext]);
 
   /**
    * The issue gate: every reason why approve_holder must NOT be sent for this
@@ -759,7 +780,7 @@ function PassportRequests() {
   }
 
   async function issueFromRequest(req: PassportRequest, reason: string) {
-    if (!isKycProvider || !registryAuthority) {
+    if (!isKycProvider || !registryAuthority || !registryAddress) {
       toast.showError(
         "Not the KYC provider",
         "Only the registry authority wallet can issue passports.",
@@ -805,7 +826,7 @@ function PassportRequests() {
       );
       const ix = await buildIssuePassport({
         authoritySigner: signer,
-        registryAuthority: registryAuthority as Address,
+        registry: registryAddress,
         holder: req.wallet as Address,
         jurisdiction: req.jurisdiction ?? 0,
         accreditationLevel: 0,

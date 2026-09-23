@@ -9,7 +9,7 @@ describe("one generated indexer decoder", () => {
     const fixtures = indexerFixtures(); expect(fixtures.map((f) => f.table)).toEqual(INDEXER_ENTITIES.map((e) => e.table));
     for (const f of fixtures) {
       const entity = INDEXER_ENTITIES.find((e) => e.table === f.table)!;
-      const row = await entity.decode(f.bytes);
+      const row = await entity.decode(f.bytes, f.address);
       const result = await decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, f.bytes);
       expect(result).toEqual({ table: f.table, row });
       if (f.table === "share_classes") expect(row).toMatchObject({ lifetime_minted: "44", cumulative_cap: true, liq_pref_multi_bps: 15000, account_version: 2 });
@@ -22,12 +22,12 @@ describe("one generated indexer decoder", () => {
     await expect(decodeIndexerAccount("11111111111111111111111111111111", INDEXER_PROGRAM, f.bytes)).rejects.toThrow(/PDA/);
     await expect(decodeIndexerAccount("11111111111111111111111111111111", INDEXER_PROGRAM, f.bytes.slice(0, 15))).rejects.toThrow();
     const old = new Uint8Array(getShareClassEncoder().encode({ ...getShareClassDecoder().decode(f.bytes), version: 1, lifetimeMinted: BigInt(0), cumulativeCap: false }));
-    const legacyRow = await INDEXER_ENTITIES.find((e) => e.table === "share_classes")!.decode(old);
+    const legacyRow = await INDEXER_ENTITIES.find((e) => e.table === "share_classes")!.decode(old, null);
     expect(await decodeIndexerAccount(String(legacyRow.pda), INDEXER_PROGRAM, old)).toMatchObject({ row: { account_version: 1, lifetime_minted: null, cumulative_cap: null, readonly_legacy: true } });
   });
   it("projects Sale v2 (the consumed approval and its application hash) and rejects a v1 Sale", async () => {
     const f = indexerFixtures().find((f) => f.table === "sales")!;
-    const row = await INDEXER_ENTITIES.find((e) => e.table === "sales")!.decode(f.bytes);
+    const row = await INDEXER_ENTITIES.find((e) => e.table === "sales")!.decode(f.bytes, null);
     expect(row).toMatchObject({ account_version: 2, sale_approval: "SysvarC1ock11111111111111111111111111111111", application_hash: "07".repeat(32) });
     const v1 = new Uint8Array(getSaleEncoder().encode({ ...getSaleDecoder().decode(f.bytes), version: 1 }));
     await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, v1)).rejects.toThrow(/version 1 requires an explicit migration/);

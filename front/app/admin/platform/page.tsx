@@ -21,7 +21,11 @@ import { PauseFlagsPanel } from "@/components/pause-flags-panel";
 import { pauseStatus } from "@/lib/pause-flags";
 import { protocolTreasuryError } from "@/lib/protocol-treasury";
 import { buildInitializePlatformInstruction } from "@/lib/program-bootstrap";
-import { kycGates, loadKycAuthorityContext } from "@/lib/kyc-authority";
+import {
+  kycGates,
+  kycRegistryUnavailableReason,
+  loadKycAuthorityContext,
+} from "@/lib/kyc-authority";
 import { AuthorityRotation } from "./authority-rotation";
 import { BlocklistBootstrap } from "./blocklist-bootstrap";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -59,6 +63,9 @@ export default function AdminPage() {
   const [kycProvider, setKycProvider] = useState<string | null | undefined>(
     undefined,
   );
+  // Why there is no provider when a registry is expected (pin missing on this
+  // network, or several registries and no pin); null = simply none yet.
+  const [kycProviderNote, setKycProviderNote] = useState<string | null>(null);
   const toast = useToast();
 
   const refresh = useCallback(async () => {
@@ -69,8 +76,10 @@ export default function AdminPage() {
     try {
       const ctx = await loadKycAuthorityContext(client.runtime.rpc);
       setKycProvider(ctx.registry?.registry.authority.toString() ?? null);
+      setKycProviderNote(kycRegistryUnavailableReason(ctx, detectNetwork()));
     } catch {
       setKycProvider(undefined);
+      setKycProviderNote(null);
     }
   }, [client]);
 
@@ -251,9 +260,9 @@ export default function AdminPage() {
                 label="KYC provider"
                 value={
                   kycProvider === undefined
-                    ? "unknown (registry scan failed)"
+                    ? "unknown (registry read failed)"
                     : kycProvider === null
-                      ? "no KYC registry yet"
+                      ? (kycProviderNote ?? "no KYC registry yet")
                       : kycProvider
                 }
               />
@@ -268,12 +277,14 @@ export default function AdminPage() {
               !kycGates(walletAddress, kycProvider, platform.admin)
                 .providerIsPlatformAdmin && (
                 <p className="mt-3 text-xs text-amber-700">
-                  The KYC provider differs from the Super Admin: passports stay
-                  under the registry authority after admin rotation, and no
-                  instruction rotates the KYC authority itself. Rotation closed
-                  the provider&apos;s Admin record — re-add the provider key via
-                  add_admin so it can still reach /admin/kyc and the client
-                  detail pages to issue and revoke passports.
+                  The KYC provider (registry authority) differs from the Super
+                  Admin. Passports are issued and revoked only by the registry
+                  authority; it moves only through the propose/accept rotation
+                  on /admin/kyc, never with an admin rotation. That key needs an
+                  Admin record (add_admin on /admin/roles) to reach /admin/kyc
+                  and the client detail pages — e.g. after an admin rotation
+                  closed the old record, or when the registry was handed to a
+                  separate compliance key.
                 </p>
               )}
             <div className="mt-6">

@@ -46,6 +46,8 @@ export const TRANSFER_HOOK_ERROR__INVALID_BLOCK_ENTRY = 0x177d; // 6013
 export const TRANSFER_HOOK_ERROR__INVALID_PROPOSED_AUTHORITY = 0x177e; // 6014
 /** InvalidAuthorityTransfer: Authority proposal does not match current authority and accepting signer */
 export const TRANSFER_HOOK_ERROR__INVALID_AUTHORITY_TRANSFER = 0x177f; // 6015
+/** KycRegistryNotAllowed: Open restriction mode must not name a KYC registry */
+export const TRANSFER_HOOK_ERROR__KYC_REGISTRY_NOT_ALLOWED = 0x1780; // 6016
 
 export type TransferHookError =
   | typeof TRANSFER_HOOK_ERROR__HOLDER_KYC_EXPIRED
@@ -58,6 +60,7 @@ export type TransferHookError =
   | typeof TRANSFER_HOOK_ERROR__INVALID_PROPOSED_AUTHORITY
   | typeof TRANSFER_HOOK_ERROR__INVALID_TOKEN_ACCOUNT
   | typeof TRANSFER_HOOK_ERROR__JURISDICTION_BLOCKED
+  | typeof TRANSFER_HOOK_ERROR__KYC_REGISTRY_NOT_ALLOWED
   | typeof TRANSFER_HOOK_ERROR__KYC_REGISTRY_REQUIRED
   | typeof TRANSFER_HOOK_ERROR__META_LIST_NOT_INITIALIZED
   | typeof TRANSFER_HOOK_ERROR__MISSING_EXTRA_ACCOUNT
@@ -78,6 +81,7 @@ if (process.env.NODE_ENV !== "production") {
     [TRANSFER_HOOK_ERROR__INVALID_PROPOSED_AUTHORITY]: `Proposed authority must be a different nonzero key`,
     [TRANSFER_HOOK_ERROR__INVALID_TOKEN_ACCOUNT]: `Expected a Token-2022 token account`,
     [TRANSFER_HOOK_ERROR__JURISDICTION_BLOCKED]: `Receiver's jurisdiction is not allowed by the registry`,
+    [TRANSFER_HOOK_ERROR__KYC_REGISTRY_NOT_ALLOWED]: `Open restriction mode must not name a KYC registry`,
     [TRANSFER_HOOK_ERROR__KYC_REGISTRY_REQUIRED]: `KycGated restriction mode requires a kyc_registry`,
     [TRANSFER_HOOK_ERROR__META_LIST_NOT_INITIALIZED]: `ExtraAccountMetaList must be initialized before it can be updated`,
     [TRANSFER_HOOK_ERROR__MISSING_EXTRA_ACCOUNT]: `Expected extra account was not provided`,

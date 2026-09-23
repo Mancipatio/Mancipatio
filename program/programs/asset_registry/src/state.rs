@@ -258,11 +258,16 @@ pub struct ProtocolTreasuryChanged {
 
 /// KYC registry. docs/01 §9 Q1: the platform runs a global registry; an asset
 /// may additionally point at a stricter per-issuer one via `extra_kyc_registry`.
-/// Seeds: `["kyc_registry", authority]`.
+/// Seeds: `["kyc_registry", creating authority]`. The address is permanent;
+/// `authority` rotates via `propose_kyc_registry_authority` /
+/// `accept_kyc_registry_authority`. Never re-derive the registry from
+/// `authority` — take it by address (hook config, pinned front config).
+/// `bump` keeps the bump of the ORIGINAL seeds and is no longer verified.
 #[account]
 #[derive(InitSpace)]
 pub struct KycRegistry {
-    /// KYC-provider multisig authorised to approve / revoke holders.
+    /// KYC-provider multisig authorised to approve / revoke holders, rotate
+    /// this authority and replace the jurisdiction bitmaps.
     pub authority: Pubkey,
     pub approved_jurisdictions: [u8; JURISDICTION_BITMAP_BYTES],
     pub blocked_jurisdictions: [u8; JURISDICTION_BITMAP_BYTES],
@@ -323,6 +328,9 @@ pub struct HolderApproved {
     pub expiry: i64,
     pub provider_id: u16,
     pub reapproval: bool,
+    /// The registry authority that signed. The registry address no longer
+    /// implies the approver once the authority has rotated (2C-1).
+    pub authority: Pubkey,
 }
 
 /// Emitted by `revoke_holder`.
@@ -330,6 +338,44 @@ pub struct HolderApproved {
 pub struct HolderRevoked {
     pub registry: Pubkey,
     pub holder: Pubkey,
+    /// The registry authority that signed (see `HolderApproved::authority`).
+    pub authority: Pubkey,
+}
+
+/// Emitted by `propose_kyc_registry_authority` (a re-proposal overwrites the
+/// pending one and emits again).
+#[event]
+pub struct KycRegistryAuthorityProposed {
+    pub registry: Pubkey,
+    pub current_authority: Pubkey,
+    pub new_authority: Pubkey,
+}
+
+/// Emitted by `cancel_kyc_registry_authority_transfer`.
+#[event]
+pub struct KycRegistryAuthorityProposalCancelled {
+    pub registry: Pubkey,
+    pub authority: Pubkey,
+    pub cancelled_new_authority: Pubkey,
+}
+
+/// Emitted by `accept_kyc_registry_authority` — the registry address is
+/// unchanged; only its `authority` moved.
+#[event]
+pub struct KycRegistryAuthorityChanged {
+    pub registry: Pubkey,
+    pub old_authority: Pubkey,
+    pub new_authority: Pubkey,
+}
+
+/// Emitted by `update_kyc_registry_jurisdictions` — both bitmaps were replaced
+/// whole (the new values are carried for audit).
+#[event]
+pub struct KycRegistryJurisdictionsUpdated {
+    pub registry: Pubkey,
+    pub authority: Pubkey,
+    pub approved_jurisdictions: [u8; JURISDICTION_BITMAP_BYTES],
+    pub blocked_jurisdictions: [u8; JURISDICTION_BITMAP_BYTES],
 }
 
 /// Why a clawback was allowed — the holder's entry was revoked outright, or it

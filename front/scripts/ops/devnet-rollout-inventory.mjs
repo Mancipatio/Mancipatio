@@ -39,7 +39,7 @@ const pda = async (program, ...seeds) => (await getProgramDerivedAddress({ progr
 const trimZeros = b => { let n = b.length; while (n && b[n - 1] === 0) n--; return b.subarray(0, n); };
 
 // Explicit allowlist: do not retain unrelated .env values or source shell code.
-const envKeys = new Set(['NEXT_PUBLIC_NETWORK', 'NEXT_PUBLIC_SOLANA_RPC_URL', 'HELIUS_DEVNET_RPC', 'NEXT_PUBLIC_SOLANA_GENESIS_HASH']);
+const envKeys = new Set(['NEXT_PUBLIC_NETWORK', 'NEXT_PUBLIC_SOLANA_RPC_URL', 'HELIUS_DEVNET_RPC', 'NEXT_PUBLIC_SOLANA_GENESIS_HASH', 'NEXT_PUBLIC_KYC_REGISTRY']);
 const config = {};
 for (const line of fs.readFileSync(envFile, 'utf8').split(/\r?\n/)) {
   const match = line.match(/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
@@ -68,6 +68,11 @@ const evidence = {
     browser_rpc_hostname: config.NEXT_PUBLIC_SOLANA_RPC_URL ? safeEndpoint(config.NEXT_PUBLIC_SOLANA_RPC_URL).hostname : null,
     browser_rpc_equals_server_rpc: !config.NEXT_PUBLIC_SOLANA_RPC_URL || config.NEXT_PUBLIC_SOLANA_RPC_URL === endpoint,
     genesis_pin_configured: Boolean(config.NEXT_PUBLIC_SOLANA_GENESIS_HASH),
+    // 2C-1: the platform KYC registry is pinned by address (a public account
+    // address, not a secret). Unset = the front falls back to the scan
+    // heuristic, which a rotation can make ambiguous.
+    kyc_registry_pin_configured: Boolean(config.NEXT_PUBLIC_KYC_REGISTRY),
+    kyc_registry_pin: config.NEXT_PUBLIC_KYC_REGISTRY || null,
   },
   git_head_start: execFileSync('git', ['rev-parse', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim(),
   calls: [], failures: [], programs: [], scans: [], accounts: [], singletons: {}, mints: [], escrow_accounts: [], holder_scans: [], meta_lists: [], blockers: [], observations: [],
@@ -288,7 +293,7 @@ async function main() {
     if (data && data.data.length >= 45 && data.owner === LOADER && data.data.readUInt32LE(0) === 3) {
       const payload = data.data.subarray(45), candidate = fs.existsSync(path.join(ROOT, row.candidate.path)) ? fs.readFileSync(path.join(ROOT, row.candidate.path)) : null;
       const authorityTag = data.data[12];
-      row.program_data_info = { owner: data.owner, bytes: data.data.length, account_sha256: sha(data.data), payload_capacity_bytes: payload.length, last_deploy_slot: data.data.readBigUInt64LE(4).toString(), upgrade_authority: authorityTag === 1 ? key(data.data.subarray(13, 45)) : null, authority_option_valid: authorityTag <= 1, full_payload_sha256: sha(payload), nonzero_prefix_bytes: trimZeros(payload).length, trailing_zero_normalized_sha256: sha(trimZeros(payload)), candidate_fits_capacity: Boolean(candidate && candidate.length <= payload.length), candidate_exact_prefix_and_zero_padding: Boolean(candidate && candidate.length <= payload.length && payload.subarray(0, candidate.length).equals(candidate) && payload.subarray(candidate.length).every(b => b === 0)), candidate_normalized_match: Boolean(candidate && trimZeros(payload).equals(trimZeros(candidate))) };
+      row.program_data_info = { owner: data.owner, bytes: data.data.length, account_sha256: sha(data.data), payload_capacity_bytes: payload.length, last_deploy_slot: data.data.readBigUInt64LE(4).toString(), upgrade_authority: authorityTag === 1 ? key(data.data.subarray(13, 45)) : null, authority_option_valid: authorityTag <= 1, full_payload_sha256: sha(payload), nonzero_prefix_bytes: trimZeros(payload).length, trailing_zero_normalized_sha256: sha(trimZeros(payload)), candidate_fits_capacity: Boolean(candidate && candidate.length <= payload.length), candidate_bytes: candidate ? candidate.length : null, candidate_headroom_bytes: candidate ? payload.length - candidate.length : null, candidate_exact_prefix_and_zero_padding: Boolean(candidate && candidate.length <= payload.length && payload.subarray(0, candidate.length).equals(candidate) && payload.subarray(candidate.length).every(b => b === 0)), candidate_normalized_match: Boolean(candidate && trimZeros(payload).equals(trimZeros(candidate))) };
       if (!row.program_data_info.authority_option_valid) evidence.blockers.push(`${row.name}: invalid ProgramData upgrade-authority option`);
       if (!row.program_data_info.candidate_exact_prefix_and_zero_padding) evidence.blockers.push(`${row.name}: deployed bytes differ from local candidate`);
       if (!row.program_data_info.candidate_fits_capacity) evidence.blockers.push(`${row.name}: ProgramData capacity smaller than local candidate`);
@@ -306,6 +311,15 @@ async function main() {
     evidence.singletons[label] = { address: addr, exists: Boolean(a), expected_owner: program, owner: a?.owner ?? null, type: dec?.type ?? null, fields: dec ? publicFields(dec.value) : null, valid: Boolean(a?.owner === program && dec?.type === expectedType) };
     if (!evidence.singletons[label].valid) evidence.blockers.push(`${expectedType}: not initialized at canonical PDA or invalid`);
   }
+  // 2C-1: the pinned platform KYC registry must be a live KycRegistry. It is
+  // found by ADDRESS (a rotated registry is not derivable from its authority).
+  if (config.NEXT_PUBLIC_KYC_REGISTRY) {
+    const pin = config.NEXT_PUBLIC_KYC_REGISTRY;
+    await fetchAccounts([pin], 'singleton:kyc_registry_pin');
+    const a = rawAccounts.get(pin), dec = decoded.get(pin);
+    evidence.singletons.kyc_registry_pin = { address: pin, exists: Boolean(a), expected_owner: IDS.asset_registry, owner: a?.owner ?? null, type: dec?.type ?? null, fields: dec ? publicFields(dec.value) : null, valid: Boolean(a?.owner === IDS.asset_registry && dec?.type === 'KycRegistry') };
+    if (!evidence.singletons.kyc_registry_pin.valid) evidence.blockers.push(`NEXT_PUBLIC_KYC_REGISTRY ${pin}: not a live KycRegistry on this network`);
+  } else evidence.blockers.push('NEXT_PUBLIC_KYC_REGISTRY: not configured (2C-1 pins the platform KYC registry by address)');
   const mintShares = new Map(), mintRefs = new Set(), escrowRefs = [];
   for (const [addr, { type, value: v }] of decoded) {
     let expected;

@@ -68,6 +68,9 @@ vi.mock("@/lib/kyc-authority", async (importOriginal) => {
       chain.registryAuthority
         ? [{ address: "registry-pda", registry: { authority: chain.registryAuthority } }]
         : [],
+    // The gate re-reads the chosen registry at "finalized" (2C-1).
+    fetchKycRegistryAt: async (_rpc: unknown, address: string) =>
+      chain.registryAuthority ? { address, registry: { authority: chain.registryAuthority } } : null,
   };
 });
 vi.mock("@/lib/server/email", () => ({
@@ -147,6 +150,9 @@ async function post(params: Record<string, unknown>) {
 
 beforeEach(() => {
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
+  // No ambient pin: the route's gate must not switch to the pinned path
+  // because NEXT_PUBLIC_KYC_REGISTRY happens to be exported in the shell.
+  vi.stubEnv("NEXT_PUBLIC_KYC_REGISTRY", "");
   chain.adminGate.mockClear();
   chain.platformAdmin = NEW_SUPER_ADMIN;
   chain.registryAuthority = PROVIDER;

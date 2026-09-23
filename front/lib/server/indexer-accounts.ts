@@ -7,7 +7,13 @@ import * as accounts from "@/lib/generated/asset_registry";
 export const INDEXER_LAYOUT_VERSION = 2;
 export const INDEXER_PROGRAM = accounts.ASSET_REGISTRY_PROGRAM_ADDRESS;
 type Row = Record<string, unknown>;
-type Entry = { table: string; discriminator: ReadonlyUint8Array; decode: (data: Uint8Array) => Promise<Row> };
+/**
+ * `address` is the snapshot address of the account being decoded, or null when
+ * the caller has none. Seed-derived entities ignore it (their row `pda` is
+ * re-derived and compared by decodeIndexerAccount); `kyc_registries` REQUIRES
+ * it, because a rotated registry's address is not derivable from its fields.
+ */
+type Entry = { table: string; discriminator: ReadonlyUint8Array; decode: (data: Uint8Array, address: string | null) => Promise<Row> };
 const text = (s: string) => new TextEncoder().encode(s);
 const key = (s: string) => getAddressEncoder().encode(address(s));
 const u64 = (n: number | bigint) => getU64Encoder().encode(n);
@@ -20,15 +26,15 @@ async function pda(seeds: readonly ReadonlyUint8Array[]) {
 }
 function spec<T>(
   table: string, discriminator: ReadonlyUint8Array, decoder: Decoder<T>,
-  project: (value: T) => Row, derive: (value: T) => Promise<string>, expectedVersion: number | readonly number[] = 1,
+  project: (value: T) => Row, derive: (value: T, address: string | null) => Promise<string>, expectedVersion: number | readonly number[] = 1,
 ): Entry {
-  return { table, discriminator, decode: async (bytes) => {
+  return { table, discriminator, decode: async (bytes, address) => {
     const value = decoder.decode(bytes);
     const version = (value as { version?: number }).version;
     if (version !== undefined && !(Array.isArray(expectedVersion) ? expectedVersion.includes(version) : version === expectedVersion)) {
       throw new Error(`${table} account version ${version} requires an explicit migration; expected ${expectedVersion}`);
     }
-    return { ...project(value), pda: await derive(value), account_version: version ?? 0 };
+    return { ...project(value), pda: await derive(value, address), account_version: version ?? 0 };
   } };
 }
 
@@ -103,7 +109,17 @@ export const INDEXER_ENTITIES: readonly Entry[] = [
   spec("kyc_registries", accounts.getKycRegistryDiscriminatorBytes(), accounts.getKycRegistryDecoder(), (a) => ({
     authority: a.authority, approved_jurisdictions: hex(a.approvedJurisdictions), blocked_jurisdictions: hex(a.blockedJurisdictions),
     entries_count: numberString(a.entriesCount), version: a.version,
-  }), (a) => pda([text("kyc_registry"), key(a.authority)])),
+    // A registry's address is ["kyc_registry", CREATING authority], and its
+    // `authority` rotates (2C-1). After a rotation the address cannot be
+    // derived from any field. Its identity is proven instead by the owner
+    // check, the discriminator, the full-length generated decode and the
+    // version check, and the snapshot address is the key.
+    // There is deliberately NO seed fallback: re-deriving from the current
+    // authority would silently key a rotated registry at the wrong address.
+  }), async (_a, address) => {
+    if (address === null) throw new Error("kyc_registries rows are keyed by the snapshot address; decode needs it");
+    return address;
+  }),
   spec("kyc_entries", accounts.getKycEntryDiscriminatorBytes(), accounts.getKycEntryDecoder(), (a) => ({
     registry_pda: a.registry, holder: a.holder, status: a.status, jurisdiction: a.jurisdiction,
     accreditation_level: a.accreditationLevel, expiry: numberString(a.expiry), provider_id: a.providerId,
@@ -117,7 +133,7 @@ export async function decodeIndexerAccount(pdaAddress: string, owner: string, by
   if (bytes.length < 8) throw new Error("Incomplete registry discriminator");
   const entry = INDEXER_ENTITIES.find((e) => bytes.length >= 8 && e.discriminator.every((b, i) => bytes[i] === b));
   if (!entry) return null; // valid registry account type outside the 14 existing mirror tables
-  const row = await entry.decode(bytes); // generated decoder enforces complete field lengths
+  const row = await entry.decode(bytes, pdaAddress); // generated decoder enforces complete field lengths
   if (row.pda !== pdaAddress) throw new Error(`${entry.table} derived PDA does not match the snapshot address`);
   return { table: entry.table, row };
 }

@@ -51,7 +51,10 @@ export function getKycRegistryDiscriminatorBytes() {
 
 export type KycRegistry = {
   discriminator: ReadonlyUint8Array;
-  /** KYC-provider multisig authorised to approve / revoke holders. */
+  /**
+   * KYC-provider multisig authorised to approve / revoke holders, rotate
+   * this authority and replace the jurisdiction bitmaps.
+   */
   authority: Address;
   approvedJurisdictions: ReadonlyUint8Array;
   blockedJurisdictions: ReadonlyUint8Array;
@@ -61,7 +64,10 @@ export type KycRegistry = {
 };
 
 export type KycRegistryArgs = {
-  /** KYC-provider multisig authorised to approve / revoke holders. */
+  /**
+   * KYC-provider multisig authorised to approve / revoke holders, rotate
+   * this authority and replace the jurisdiction bitmaps.
+   */
   authority: Address;
   approvedJurisdictions: ReadonlyUint8Array;
   blockedJurisdictions: ReadonlyUint8Array;

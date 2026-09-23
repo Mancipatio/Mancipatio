@@ -9,6 +9,8 @@ vi.mock("server-only", () => ({}));
 const chain = vi.hoisted(() => ({
   platform: vi.fn(),
   registries: vi.fn(),
+  registryAt: vi.fn(),
+  pin: vi.fn<() => string | null>(() => null),
   network: vi.fn(async () => {}),
   requireAdmin: vi.fn<(wallet: string) => Promise<void>>(),
 }));
@@ -23,8 +25,9 @@ vi.mock("@/lib/generated/asset_registry", () => ({
 }));
 vi.mock("@/lib/kyc-authority", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/kyc-authority")>();
-  return { ...real, listKycRegistries: chain.registries };
+  return { ...real, listKycRegistries: chain.registries, fetchKycRegistryAt: chain.registryAt };
 });
+vi.mock("@/lib/kyc-registry-pin", () => ({ configuredKycRegistry: chain.pin }));
 vi.mock("@/lib/server/admin-gate", () => ({ requireAdmin: chain.requireAdmin }));
 
 import { SiwsError } from "@/lib/server/siws";
@@ -34,10 +37,13 @@ const PROVIDER = "11111111111111111111111111111111";
 const NEW_ADMIN = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
 const STRANGER = "So11111111111111111111111111111111111111112";
 
-const registryOf = (authority: string) => ({
-  address: "registry-pda",
+const registryOf = (authority: string, address = `registry-of-${authority}`) => ({
+  address,
   registry: { authority },
 });
+// The FINALIZED view the gate re-reads the chosen registry from; by default
+// it matches the confirmed scan.
+const finalized = new Map<string, ReturnType<typeof registryOf> | null>();
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -49,6 +55,14 @@ beforeEach(() => {
     data: { admin: NEW_ADMIN },
   });
   chain.registries.mockResolvedValue([registryOf(PROVIDER)]);
+  chain.pin.mockReturnValue(null);
+  finalized.clear();
+  chain.registryAt.mockImplementation(async (_rpc: unknown, address: string) => {
+    if (finalized.has(address)) return finalized.get(address);
+    const last = chain.registries.mock.results.at(-1)?.value;
+    const scanned = ((last ? await last : []) ?? []) as ReturnType<typeof registryOf>[];
+    return scanned.find((r) => r.address === address) ?? null;
+  });
   chain.requireAdmin.mockImplementation(async (w: string) => {
     if (w !== NEW_ADMIN) throw new SiwsError(403, "Admin privileges required");
   });
@@ -110,6 +124,43 @@ describe("requireKycProvider", () => {
     chain.registries.mockRejectedValueOnce(new Error("rpc down"));
     await expect(requireKycProvider(PROVIDER)).rejects.toMatchObject({ status: 503 });
     chain.platform.mockResolvedValueOnce({ exists: true, programAddress: "foreign", data: { admin: PROVIDER } });
+    await expect(requireKycProvider(PROVIDER)).rejects.toMatchObject({ status: 503 });
+  });
+});
+
+describe("requireKycProvider after a registry authority rotation (2C-1)", () => {
+  const REGISTRY = "registry-seeded-by-provider";
+  it("recognises the rotated authority (not the seed key) and refuses the old one", async () => {
+    chain.registries.mockResolvedValue([registryOf(STRANGER, REGISTRY)]);
+    await expect(requireKycProvider(STRANGER)).resolves.toBeUndefined();
+    await expect(requireKycProvider(PROVIDER)).rejects.toMatchObject({ status: 403 });
+  });
+
+  it("takes the authority from a FINALIZED read, not the confirmed scan", async () => {
+    // The confirmed scan already shows the new authority; finalized does not yet.
+    chain.registries.mockResolvedValue([registryOf(STRANGER, REGISTRY)]);
+    finalized.set(REGISTRY, registryOf(PROVIDER, REGISTRY));
+    await expect(requireKycProvider(STRANGER)).rejects.toMatchObject({ status: 403 });
+    await expect(requireKycProvider(PROVIDER)).resolves.toBeUndefined();
+    expect(chain.registryAt).toHaveBeenCalledWith(expect.anything(), REGISTRY, "finalized");
+  });
+
+  it("uses the pin without scanning, and fails closed when it is missing", async () => {
+    chain.pin.mockReturnValue(REGISTRY);
+    finalized.set(REGISTRY, registryOf(STRANGER, REGISTRY));
+    await expect(requireKycProvider(STRANGER)).resolves.toBeUndefined();
+    expect(chain.registries).not.toHaveBeenCalled();
+    finalized.set(REGISTRY, null);
+    await expect(requireKycProvider(STRANGER)).rejects.toMatchObject({
+      status: 403,
+      message: expect.stringContaining("pinned KYC registry"),
+    });
+  });
+
+  it("returns 503 on an invalid pin (never grants)", async () => {
+    chain.pin.mockImplementation(() => {
+      throw new Error("NEXT_PUBLIC_KYC_REGISTRY is not a valid address");
+    });
     await expect(requireKycProvider(PROVIDER)).rejects.toMatchObject({ status: 503 });
   });
 });

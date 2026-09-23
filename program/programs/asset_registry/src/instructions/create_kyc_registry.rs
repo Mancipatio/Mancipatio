@@ -6,14 +6,21 @@ use crate::state::{Admin, KycRegistry, KycRegistryCreated, JURISDICTION_BITMAP_B
 #[derive(Accounts)]
 pub struct CreateKycRegistry<'info> {
     /// The KYC provider the registry belongs to — pays for and owns it, and is
-    /// the only signer `approve_holder` / `revoke_holder` accept afterwards.
+    /// the only signer `approve_holder` / `revoke_holder` accept afterwards,
+    /// until rotated (`propose_kyc_registry_authority` /
+    /// `accept_kyc_registry_authority`). The registry address stays derived
+    /// from THIS creating key forever, so this key can never create a second
+    /// registry, even after rotating the first one away.
     #[account(mut)]
     pub authority: Signer<'info>,
 
     /// Platform admin co-signer. Registries are the root of trust for every
-    /// `KycGated` mint, so one cannot be conjured permissionlessly; the
-    /// provider key stays distinct from the admin key (it gets no admin
-    /// powers, and the admin never owns the registry).
+    /// `KycGated` mint, so one cannot be conjured permissionlessly. The
+    /// co-signature gates only the CREATION of the address: afterwards the
+    /// current registry authority alone rotates the registry (to any key,
+    /// including an admin key) and replaces its jurisdiction bitmaps, with no
+    /// admin co-signature, admin override or pause flag. The registry
+    /// authority gets no admin powers from this record.
     pub admin_authority: Signer<'info>,
 
     /// Admin gate — `admin_authority` must hold an `Admin` record.
@@ -44,6 +51,14 @@ pub struct CreateKycRegistry<'info> {
 /// pins the registry to the mint's hook config, so a stray registry cannot be
 /// used against a holder — but without a gate anyone could litter the program
 /// with registries that look authoritative to an off-chain indexer.
+///
+/// Trust after creation: the admin has no further say. The registry authority
+/// alone approves / revokes holders, rotates the authority
+/// (`propose_kyc_registry_authority` / `accept_kyc_registry_authority`) and
+/// replaces both bitmaps (`update_kyc_registry_jurisdictions`, applied live to
+/// every KycGated mint that names this registry). There is no admin or pause
+/// override; recovering from a lost or compromised authority means a new
+/// registry and re-pointing the hooks (see `kyc_registry_authority`).
 pub fn handle_create_kyc_registry(
     ctx: Context<CreateKycRegistry>,
     approved_jurisdictions: [u8; JURISDICTION_BITMAP_BYTES],

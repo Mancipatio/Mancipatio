@@ -73,6 +73,7 @@ export type UpdateTransferHookConfigInstruction<
   TAccountExtraAccountMetaList extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountKycRegistryAccount extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -97,6 +98,9 @@ export type UpdateTransferHookConfigInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountKycRegistryAccount extends string
+        ? ReadonlyAccount<TAccountKycRegistryAccount>
+        : TAccountKycRegistryAccount,
       ...TRemainingAccounts,
     ]
   >;
@@ -151,6 +155,7 @@ export type UpdateTransferHookConfigAsyncInput<
   TAccountConfig extends string = string,
   TAccountExtraAccountMetaList extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountKycRegistryAccount extends string = string,
 > = {
   /**
    * Must be the `BlocklistAuthority.authority` (Mancipatio admin multisig);
@@ -163,6 +168,12 @@ export type UpdateTransferHookConfigAsyncInput<
   /** program, i.e. initialized); resized and rewritten in the handler. */
   extraAccountMetaList?: Address<TAccountExtraAccountMetaList>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * The `KycRegistry` the `kyc_registry` argument names: required iff the
+   * argument is `Some`, and its key must equal it. Appended LAST so the
+   * existing account order is kept.
+   */
+  kycRegistryAccount?: Address<TAccountKycRegistryAccount>;
   restrictionMode: UpdateTransferHookConfigInstructionDataArgs["restrictionMode"];
   kycRegistry: UpdateTransferHookConfigInstructionDataArgs["kycRegistry"];
 };
@@ -174,6 +185,7 @@ export async function getUpdateTransferHookConfigInstructionAsync<
   TAccountConfig extends string,
   TAccountExtraAccountMetaList extends string,
   TAccountSystemProgram extends string,
+  TAccountKycRegistryAccount extends string,
   TProgramAddress extends Address = typeof TRANSFER_HOOK_PROGRAM_ADDRESS,
 >(
   input: UpdateTransferHookConfigAsyncInput<
@@ -182,7 +194,8 @@ export async function getUpdateTransferHookConfigInstructionAsync<
     TAccountMint,
     TAccountConfig,
     TAccountExtraAccountMetaList,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountKycRegistryAccount
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -193,7 +206,8 @@ export async function getUpdateTransferHookConfigInstructionAsync<
     TAccountMint,
     TAccountConfig,
     TAccountExtraAccountMetaList,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountKycRegistryAccount
   >
 > {
   // Program address.
@@ -214,6 +228,10 @@ export async function getUpdateTransferHookConfigInstructionAsync<
       isWritable: true,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    kycRegistryAccount: {
+      value: input.kycRegistryAccount ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -251,6 +269,7 @@ export async function getUpdateTransferHookConfigInstructionAsync<
       getAccountMeta(accounts.config),
       getAccountMeta(accounts.extraAccountMetaList),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.kycRegistryAccount),
     ],
     data: getUpdateTransferHookConfigInstructionDataEncoder().encode(
       args as UpdateTransferHookConfigInstructionDataArgs,
@@ -263,7 +282,8 @@ export async function getUpdateTransferHookConfigInstructionAsync<
     TAccountMint,
     TAccountConfig,
     TAccountExtraAccountMetaList,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountKycRegistryAccount
   >);
 }
 
@@ -274,6 +294,7 @@ export type UpdateTransferHookConfigInput<
   TAccountConfig extends string = string,
   TAccountExtraAccountMetaList extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountKycRegistryAccount extends string = string,
 > = {
   /**
    * Must be the `BlocklistAuthority.authority` (Mancipatio admin multisig);
@@ -286,6 +307,12 @@ export type UpdateTransferHookConfigInput<
   /** program, i.e. initialized); resized and rewritten in the handler. */
   extraAccountMetaList: Address<TAccountExtraAccountMetaList>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * The `KycRegistry` the `kyc_registry` argument names: required iff the
+   * argument is `Some`, and its key must equal it. Appended LAST so the
+   * existing account order is kept.
+   */
+  kycRegistryAccount?: Address<TAccountKycRegistryAccount>;
   restrictionMode: UpdateTransferHookConfigInstructionDataArgs["restrictionMode"];
   kycRegistry: UpdateTransferHookConfigInstructionDataArgs["kycRegistry"];
 };
@@ -297,6 +324,7 @@ export function getUpdateTransferHookConfigInstruction<
   TAccountConfig extends string,
   TAccountExtraAccountMetaList extends string,
   TAccountSystemProgram extends string,
+  TAccountKycRegistryAccount extends string,
   TProgramAddress extends Address = typeof TRANSFER_HOOK_PROGRAM_ADDRESS,
 >(
   input: UpdateTransferHookConfigInput<
@@ -305,7 +333,8 @@ export function getUpdateTransferHookConfigInstruction<
     TAccountMint,
     TAccountConfig,
     TAccountExtraAccountMetaList,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountKycRegistryAccount
   >,
   config?: { programAddress?: TProgramAddress },
 ): UpdateTransferHookConfigInstruction<
@@ -315,7 +344,8 @@ export function getUpdateTransferHookConfigInstruction<
   TAccountMint,
   TAccountConfig,
   TAccountExtraAccountMetaList,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountKycRegistryAccount
 > {
   // Program address.
   const programAddress =
@@ -335,6 +365,10 @@ export function getUpdateTransferHookConfigInstruction<
       isWritable: true,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    kycRegistryAccount: {
+      value: input.kycRegistryAccount ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -359,6 +393,7 @@ export function getUpdateTransferHookConfigInstruction<
       getAccountMeta(accounts.config),
       getAccountMeta(accounts.extraAccountMetaList),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.kycRegistryAccount),
     ],
     data: getUpdateTransferHookConfigInstructionDataEncoder().encode(
       args as UpdateTransferHookConfigInstructionDataArgs,
@@ -371,7 +406,8 @@ export function getUpdateTransferHookConfigInstruction<
     TAccountMint,
     TAccountConfig,
     TAccountExtraAccountMetaList,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountKycRegistryAccount
   >);
 }
 
@@ -392,6 +428,12 @@ export type ParsedUpdateTransferHookConfigInstruction<
     /** program, i.e. initialized); resized and rewritten in the handler. */
     extraAccountMetaList: TAccountMetas[4];
     systemProgram: TAccountMetas[5];
+    /**
+     * The `KycRegistry` the `kyc_registry` argument names: required iff the
+     * argument is `Some`, and its key must equal it. Appended LAST so the
+     * existing account order is kept.
+     */
+    kycRegistryAccount?: TAccountMetas[6] | undefined;
   };
   data: UpdateTransferHookConfigInstructionData;
 };
@@ -404,7 +446,7 @@ export function parseUpdateTransferHookConfigInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedUpdateTransferHookConfigInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 6) {
+  if (instruction.accounts.length < 7) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -413,6 +455,12 @@ export function parseUpdateTransferHookConfigInstruction<
     const accountMeta = (instruction.accounts as TAccountMetas)[accountIndex]!;
     accountIndex += 1;
     return accountMeta;
+  };
+  const getNextOptionalAccount = () => {
+    const accountMeta = getNextAccount();
+    return accountMeta.address === TRANSFER_HOOK_PROGRAM_ADDRESS
+      ? undefined
+      : accountMeta;
   };
   return {
     programAddress: instruction.programAddress,
@@ -423,6 +471,7 @@ export function parseUpdateTransferHookConfigInstruction<
       config: getNextAccount(),
       extraAccountMetaList: getNextAccount(),
       systemProgram: getNextAccount(),
+      kycRegistryAccount: getNextOptionalAccount(),
     },
     data: getUpdateTransferHookConfigInstructionDataDecoder().decode(
       instruction.data,

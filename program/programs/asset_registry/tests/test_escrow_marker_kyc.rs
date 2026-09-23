@@ -647,6 +647,7 @@ fn boot() -> (LiteSVM, Ctx) {
                 config: hook_config_pda,
                 extra_account_meta_list: extra_metas_pda,
                 system_program: system_program::ID,
+                kyc_registry_account: Some(kyc_registry_pda),
             }
             .to_account_metas(None),
         )],

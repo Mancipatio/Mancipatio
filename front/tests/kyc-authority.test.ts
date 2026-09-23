@@ -2,7 +2,7 @@
 // platform admin (Platform.admin) are separate on-chain roles. The UI must
 // resolve the live registry from chain — not derive it from Platform.admin —
 // and must gate passport actions on the registry authority only.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { address, getBase64Decoder, type Address } from "@solana/kit";
 
 const calls = vi.hoisted(() => ({ platform: vi.fn() }));
@@ -78,6 +78,13 @@ function encoded(authority: Address, entries = 3): Uint8Array {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  // The default `pinned` is the ambient NEXT_PUBLIC_KYC_REGISTRY: pin it
+  // unset so a value exported in the shell cannot switch these tests onto
+  // the pinned path.
+  vi.stubEnv("NEXT_PUBLIC_KYC_REGISTRY", "");
+});
+afterEach(() => {
+  vi.unstubAllEnvs();
 });
 
 describe("kycGates", () => {
@@ -112,19 +119,19 @@ describe("selectKycRegistry", () => {
   it("prefers the registry owned by the current platform admin", () => {
     const a = registryOf(PROVIDER);
     const b = { ...registryOf(NEW_ADMIN), address: STRANGER };
-    expect(selectKycRegistry([a, b], NEW_ADMIN)).toEqual({ registry: b, ambiguous: false });
+    expect(selectKycRegistry([a, b], NEW_ADMIN)).toEqual({ registry: b, ambiguous: false, pinnedMissing: false });
   });
 
   it("keeps the only registry after the platform admin rotated away", () => {
     const a = registryOf(PROVIDER);
-    expect(selectKycRegistry([a], NEW_ADMIN)).toEqual({ registry: a, ambiguous: false });
+    expect(selectKycRegistry([a], NEW_ADMIN)).toEqual({ registry: a, ambiguous: false, pinnedMissing: false });
   });
 
   it("reports ambiguity instead of guessing between foreign registries", () => {
     const a = registryOf(PROVIDER);
     const b = { ...registryOf(STRANGER), address: STRANGER };
-    expect(selectKycRegistry([a, b], NEW_ADMIN)).toEqual({ registry: null, ambiguous: true });
-    expect(selectKycRegistry([], NEW_ADMIN)).toEqual({ registry: null, ambiguous: false });
+    expect(selectKycRegistry([a, b], NEW_ADMIN)).toEqual({ registry: null, ambiguous: true, pinnedMissing: false });
+    expect(selectKycRegistry([], NEW_ADMIN)).toEqual({ registry: null, ambiguous: false, pinnedMissing: false });
   });
 });
 
@@ -166,7 +173,7 @@ describe("live registry resolution", () => {
     calls.platform.mockResolvedValue({ exists: false });
     const { rpc } = rpcWith([]);
     const ctx = await loadKycAuthorityContext(rpc);
-    expect(ctx).toEqual({ platformAdmin: null, registry: null, registries: [], ambiguous: false });
+    expect(ctx).toEqual({ platformAdmin: null, registry: null, registries: [], ambiguous: false, pinned: null, pinnedMissing: false });
   });
 });
 
@@ -176,6 +183,8 @@ describe("passportAuthorityFor (issue/revoke surfaces)", () => {
     registry: registryOf(PROVIDER),
     registries: [registryOf(PROVIDER)],
     ambiguous: false,
+    pinned: null,
+    pinnedMissing: false,
   };
 
   it("targets the LIVE registry PDA, never one derived from the connected wallet", () => {
@@ -207,7 +216,7 @@ describe("passportAuthorityFor (issue/revoke surfaces)", () => {
   });
 
   it("surfaces ambiguity instead of picking a registry", () => {
-    const a = passportAuthorityFor(PROVIDER, { ...rotated, registry: null, ambiguous: true });
+    const a = passportAuthorityFor(PROVIDER, { ...rotated, registry: null, ambiguous: true, pinnedMissing: false });
     expect(a.ambiguous).toBe(true);
     expect(a.registryAddress).toBeNull();
     expect(a.isKycProvider).toBe(false);

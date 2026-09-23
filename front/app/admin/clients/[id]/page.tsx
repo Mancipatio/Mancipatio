@@ -57,10 +57,12 @@ import {
 } from "@/lib/passport";
 import { type KycRegistry } from "@/lib/generated/asset_registry";
 import {
+  kycRegistryUnavailableReason,
   loadKycAuthorityContext,
   passportAuthorityFor,
   type KycAuthorityContext,
 } from "@/lib/kyc-authority";
+import { detectNetwork } from "@/lib/network";
 import { listBlockEntries } from "@/lib/blocklist";
 import { listAlerts } from "@/lib/compliance";
 import { ClientPrivacyPanel } from "@/components/client-privacy-panel";
@@ -210,12 +212,12 @@ function ClientDetail({ id }: { id: string }) {
     void refresh();
   }, [refresh]);
 
-  // KYC authority context (e2e §5): the passport registry is the LIVE
-  // KycRegistry found on-chain — never derived from the connected wallet or
-  // from Platform.admin. After admin rotation the registry stays with its
-  // original provider key, so the new Super Admin must not be offered
-  // Issue/Revoke against a registry PDA that does not exist, and the original
-  // provider must keep the panel. `undefined` = not loaded yet.
+  // KYC authority context (e2e §5): the passport registry is resolved BY
+  // ADDRESS — the NEXT_PUBLIC_KYC_REGISTRY pin, or (unpinned) a scan of the
+  // KycRegistry accounts — never derived from the connected wallet or from
+  // Platform.admin. Issue/Revoke are offered only to the registry's LIVE
+  // authority, which moves only through the registry's own propose/accept
+  // rotation (not with an admin rotation). `undefined` = not loaded yet.
   const [kycCtx, setKycCtx] = useState<KycAuthorityContext | null | undefined>(
     undefined,
   );
@@ -481,7 +483,7 @@ function ClientDetail({ id }: { id: string }) {
     }
     // Only the live registry authority can sign approve_holder; the Super
     // Admin role does not imply it (registry.authority is enforced on-chain).
-    if (!isKycProvider || !registryAuthority) {
+    if (!isKycProvider || !registryAuthority || !registryAddress) {
       toast.showError(
         "Not the KYC provider",
         registryAuthority
@@ -548,7 +550,7 @@ function ClientDetail({ id }: { id: string }) {
       );
       const ix = await buildIssuePassport({
         authoritySigner: signer,
-        registryAuthority,
+        registry: registryAddress,
         holder: client.wallet as Address,
         jurisdiction: jurisdictionCode,
         accreditationLevel,
@@ -625,7 +627,7 @@ function ClientDetail({ id }: { id: string }) {
       );
       return;
     }
-    if (!isKycProvider || !registryAuthority) {
+    if (!isKycProvider || !registryAuthority || !registryAddress) {
       toast.showError(
         "Not the KYC provider",
         registryAuthority
@@ -640,7 +642,7 @@ function ClientDetail({ id }: { id: string }) {
       const signer = walletSigner(conn.wallet);
       const ix = await buildRevokePassport({
         authoritySigner: signer,
-        registryAuthority,
+        registry: registryAddress,
         holder: client.wallet as Address,
       });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
@@ -882,14 +884,15 @@ function ClientDetail({ id }: { id: string }) {
               Could not load the KYC registry — passport status unknown.
             </p>
           )}
-          {kycCtx?.ambiguous && (
+          {kycCtx && kycRegistryUnavailableReason(kycCtx, detectNetwork()) && (
+            // A missing pin or an ambiguous scan: fix the configuration —
+            // never "create a registry" (that would not be the pinned one).
             <p className="mt-2 text-xs text-red-600">
-              {kycCtx.registries.length} KYC registries exist and none belongs
-              to the platform admin — resolve the KYC authority on /admin/kyc
-              before issuing passports.
+              {kycRegistryUnavailableReason(kycCtx, detectNetwork())} No
+              passport can be issued or revoked until it is resolved.
             </p>
           )}
-          {kycCtx && !kycCtx.registry && !kycCtx.ambiguous && (
+          {kycCtx && !kycCtx.registry && !kycCtx.ambiguous && !kycCtx.pinnedMissing && (
             <p className="mt-2 text-xs text-amber-700">
               No KYC registry on-chain yet — create it on /admin/kyc first.
             </p>

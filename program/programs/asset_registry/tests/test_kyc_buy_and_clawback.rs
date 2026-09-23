@@ -27,6 +27,8 @@
 //!     so an arbitrary `publish_milestone` root cannot be paid out through an
 //!     `EscrowMarker`-carrying third-party escrow.
 
+#[path = "../../../tests/support/kyc_registry.rs"]
+mod kyc;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
 #[path = "../../../tests/support/sale_approval.rs"]
@@ -937,6 +939,7 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
                     config: hook_config_pda,
                     extra_account_meta_list: extra_metas_pda,
                     system_program: system_program::ID,
+                    kyc_registry_account: Some(kyc_registry_pda),
                 }
                 .to_account_metas(None),
             )],
@@ -2016,6 +2019,422 @@ fn kyc_registry_layout_matches_hook_offsets() {
         "entries_count @ 296 — hook KYC_REGISTRY_MIN_LEN"
     );
     assert_eq!(data.len(), 306, "total serialized KycRegistry length");
+
+    // Cross-crate pin: `update_transfer_hook_config` validates a named
+    // registry by these two hardcoded hook constants.
+    assert_eq!(
+        KycRegistry::DISCRIMINATOR,
+        &transfer_hook::KYC_REGISTRY_DISCRIMINATOR[..],
+        "transfer_hook::KYC_REGISTRY_DISCRIMINATOR drifted from asset_registry::KycRegistry"
+    );
+    assert_eq!(
+        8 + <KycRegistry as anchor_lang::Space>::INIT_SPACE,
+        transfer_hook::KYC_REGISTRY_ACCOUNT_LEN,
+        "transfer_hook::KYC_REGISTRY_ACCOUNT_LEN drifted from asset_registry::KycRegistry"
+    );
+}
+
+// ── KYC registry rotation / jurisdictions on a live KycGated mint (2C-1) ────
+
+/// The payer (creating KYC authority) hands the boot registry to `next`.
+fn rotate_registry(svm: &mut LiteSVM, ctx: &Ctx, next: &Keypair) {
+    send(
+        svm,
+        &[&ctx.payer],
+        &[kyc::propose_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            &next.pubkey(),
+        )],
+        "propose_kyc_registry_authority",
+    );
+    send(
+        svm,
+        &[next],
+        &[kyc::accept_ix(&next.pubkey(), &ctx.kyc_registry_pda)],
+        "accept_kyc_registry_authority",
+    );
+}
+
+/// A jurisdiction block applies immediately to every path that reads the
+/// registry live: the hook (wallet transfer) and `buy`'s receiver check. The
+/// hook config pins the registry by address, so nothing needs re-pointing.
+#[test]
+fn jurisdiction_update_applies_live_to_a_kyc_gated_mint() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer = ctx.buyer.pubkey();
+    let receiver = Keypair::new();
+    approve_kyc(&mut svm, &ctx, &buyer);
+    approve_kyc(&mut svm, &ctx, &receiver.pubkey());
+    let receiver_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &receiver.pubkey());
+    let tail = || kyc_hook_metas(&ctx, &buyer, &buyer, &buyer);
+    let to_receiver = || {
+        transfer_ix(
+            &ctx,
+            ctx.buyer_share_ata,
+            receiver_ata,
+            buyer,
+            buyer,
+            receiver.pubkey(),
+            true,
+        )
+    };
+
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(&ctx, 10, tail())],
+        "buy in J",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[to_receiver()],
+        "transfer to J holder",
+    );
+    assert_eq!(token_balance(&svm, &receiver_ata), 1);
+
+    // Block J (approved map untouched: blocked wins).
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc::update_jurisdictions_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            [0xFF; 128],
+            kyc::bitmap(&[JURISDICTION]),
+        )],
+        "block J",
+    );
+    let err = try_send(&mut svm, &[&ctx.buyer], &[to_receiver()])
+        .expect_err("hook transfer into a blocked jurisdiction");
+    assert_custom_error(
+        &err,
+        u32::from(transfer_hook::HookError::JurisdictionBlocked),
+    );
+    let err = try_send(&mut svm, &[&ctx.buyer], &[buy_ix(&ctx, 1, tail())])
+        .expect_err("buy into a blocked jurisdiction");
+    assert_custom_error(&err, 6071); // ReceiverJurisdictionBlocked
+    assert_eq!(token_balance(&svm, &receiver_ata), 1);
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 9);
+
+    // Unblock — both paths work again.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc::update_jurisdictions_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            [0xFF; 128],
+            [0u8; 128],
+        )],
+        "unblock J",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[to_receiver()],
+        "transfer after unblock",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(&ctx, 1, tail())],
+        "buy after unblock",
+    );
+    assert_eq!(token_balance(&svm, &receiver_ata), 2);
+}
+
+/// Rotation does not re-point anything: the hook config and every KycEntry
+/// stay keyed on the registry ADDRESS. The new authority revokes on the same
+/// registry, the admin claws back, the old authority is locked out.
+#[test]
+fn clawback_still_works_after_registry_rotation() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer = ctx.buyer.pubkey();
+    approve_kyc(&mut svm, &ctx, &buyer);
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer, &buyer, &buyer),
+        )],
+        "buy",
+    );
+
+    let compliance = Keypair::new();
+    svm.airdrop(&compliance.pubkey(), 10_000_000_000).unwrap();
+    rotate_registry(&mut svm, &ctx, &compliance);
+
+    // The old authority (still the platform admin) is out of the registry.
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc::revoke_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            &buyer,
+        )],
+    )
+    .expect_err("old registry authority cannot revoke");
+    assert_custom_error(&err, 6001);
+
+    send(
+        &mut svm,
+        &[&compliance],
+        &[kyc::revoke_ix(
+            &compliance.pubkey(),
+            &ctx.kyc_registry_pda,
+            &buyer,
+        )],
+        "revoke by the rotated authority",
+    );
+    let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 77);
+    let payer_pk = ctx.payer.pubkey();
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[clawback_ix(
+            &ctx,
+            &payer_pk,
+            &buyer,
+            &ctx.buyer_share_ata,
+            &custody_pda,
+            &escrow_pda,
+            0,
+        )],
+        "clawback after rotation",
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 0);
+    assert_eq!(token_balance(&svm, &escrow_pda), 10);
+}
+
+/// The issuing half after a rotation: a holder approved ONLY by the new
+/// authority, on the same registry address, buys (`receiver_kyc_outcome`)
+/// and receives through the hook — no hook config re-point needed.
+#[test]
+fn holder_approved_by_the_rotated_authority_buys_and_receives() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer = ctx.buyer.pubkey();
+    let receiver = Keypair::new();
+    let receiver_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &receiver.pubkey());
+    let config_before: transfer_hook::TransferHookConfig = load(&svm, &ctx.hook_config_pda);
+
+    let compliance = Keypair::new();
+    svm.airdrop(&compliance.pubkey(), 10_000_000_000).unwrap();
+    rotate_registry(&mut svm, &ctx, &compliance);
+
+    // The old authority can no longer onboard anyone.
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc::approve_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            &buyer,
+            JURISDICTION,
+        )],
+    )
+    .expect_err("old registry authority cannot approve");
+    assert_custom_error(&err, 6001);
+
+    for holder in [buyer, receiver.pubkey()] {
+        send(
+            &mut svm,
+            &[&compliance],
+            &[kyc::approve_ix(
+                &compliance.pubkey(),
+                &ctx.kyc_registry_pda,
+                &holder,
+                JURISDICTION,
+            )],
+            "approve by the rotated authority",
+        );
+    }
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer, &buyer, &buyer),
+        )],
+        "buy by a holder the rotated authority approved",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[transfer_ix(
+            &ctx,
+            ctx.buyer_share_ata,
+            receiver_ata,
+            buyer,
+            buyer,
+            receiver.pubkey(),
+            true,
+        )],
+        "hook transfer to a holder the rotated authority approved",
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 9);
+    assert_eq!(token_balance(&svm, &receiver_ata), 1);
+
+    let config_after: transfer_hook::TransferHookConfig = load(&svm, &ctx.hook_config_pda);
+    assert_eq!(config_after.kyc_registry, Some(ctx.kyc_registry_pda));
+    assert_eq!(
+        config_after.version, config_before.version,
+        "hook config never touched by the rotation"
+    );
+}
+
+/// `update_transfer_hook_config` for a KycGated mint pointing at `registry`.
+fn repoint_hook_ix(ctx: &Ctx, registry: Pubkey) -> Instruction {
+    let (blocklist_authority, _) =
+        Pubkey::find_program_address(&[transfer_hook::BLOCKLIST_AUTHORITY_SEED], &ctx.hook_id);
+    Instruction::new_with_bytes(
+        ctx.hook_id,
+        &transfer_hook::instruction::UpdateTransferHookConfig {
+            restriction_mode: transfer_hook::RestrictionMode::KycGated,
+            kyc_registry: Some(registry),
+        }
+        .data(),
+        transfer_hook::accounts::UpdateTransferHookConfig {
+            authority: ctx.payer.pubkey(),
+            blocklist_authority,
+            mint: ctx.mint_pda,
+            config: ctx.hook_config_pda,
+            extra_account_meta_list: ctx.extra_metas_pda,
+            system_program: system_program::ID,
+            kyc_registry_account: Some(registry),
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// The lost-KYC-key recovery path with REAL registries: a replacement
+/// registry R2 (fresh key, admin co-signed) is created, the KycGated mint is
+/// re-pointed R1 -> R2, and from then on only R2 passports count — for the
+/// hook and for `buy` alike.
+#[test]
+fn re_pointing_a_kyc_gated_mint_to_a_replacement_registry() {
+    let (mut svm, mut ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let r1 = ctx.kyc_registry_pda;
+    let buyer = ctx.buyer.pubkey();
+    let receiver = Keypair::new();
+    let receiver_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &receiver.pubkey());
+    approve_kyc(&mut svm, &ctx, &buyer); // R1 only
+    approve_kyc(&mut svm, &ctx, &receiver.pubkey()); // R1 only
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer, &buyer, &buyer),
+        )],
+        "buy on R1",
+    );
+
+    // Replacement registry from a key that never created one.
+    let r2_key = Keypair::new();
+    svm.airdrop(&r2_key.pubkey(), 10_000_000_000).unwrap();
+    send(
+        &mut svm,
+        &[&r2_key, &ctx.payer],
+        &[kyc::create_registry_ix(
+            &r2_key.pubkey(),
+            &ctx.payer.pubkey(),
+            [0xFF; 128],
+            [0u8; 128],
+        )],
+        "create R2",
+    );
+    let r2 = kyc::registry_pda(&r2_key.pubkey());
+    assert_ne!(r1, r2);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[repoint_hook_ix(&ctx, r2)],
+        "re-point R1 -> R2",
+    );
+    let config: transfer_hook::TransferHookConfig = load(&svm, &ctx.hook_config_pda);
+    assert_eq!(config.kyc_registry, Some(r2));
+
+    // A stale client still naming R1 is refused by both paths.
+    let stale_buy = buy_ix(&ctx, 1, kyc_hook_metas(&ctx, &buyer, &buyer, &buyer));
+    let to_receiver = |ctx: &Ctx| {
+        transfer_ix(
+            ctx,
+            ctx.buyer_share_ata,
+            receiver_ata,
+            buyer,
+            buyer,
+            receiver.pubkey(),
+            true,
+        )
+    };
+    let stale_transfer = to_receiver(&ctx);
+    try_send(&mut svm, &[&ctx.buyer], &[stale_buy]).expect_err("buy with an R1 tail");
+    try_send(&mut svm, &[&ctx.buyer], &[stale_transfer]).expect_err("transfer with an R1 tail");
+
+    // From here on the tails name R2; R1 passports no longer count.
+    ctx.kyc_registry_pda = r2;
+    let err = try_send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            1,
+            kyc_hook_metas(&ctx, &buyer, &buyer, &buyer),
+        )],
+    )
+    .expect_err("buyer approved only in R1");
+    assert_custom_error(&err, 6069); // ReceiverNotApproved
+    let err = try_send(&mut svm, &[&ctx.buyer], &[to_receiver(&ctx)])
+        .expect_err("receiver approved only in R1");
+    assert_custom_error(
+        &err,
+        u32::from(transfer_hook::HookError::ReceiverNotApproved),
+    );
+    assert_eq!(token_balance(&svm, &receiver_ata), 0);
+
+    // Re-issued in R2 — both paths pass again.
+    for holder in [buyer, receiver.pubkey()] {
+        send(
+            &mut svm,
+            &[&r2_key],
+            &[kyc::approve_ix(
+                &r2_key.pubkey(),
+                &r2,
+                &holder,
+                JURISDICTION,
+            )],
+            "re-issue in R2",
+        );
+    }
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            1,
+            kyc_hook_metas(&ctx, &buyer, &buyer, &buyer),
+        )],
+        "buy on R2",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[to_receiver(&ctx)],
+        "transfer on R2",
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
+    assert_eq!(token_balance(&svm, &receiver_ata), 1);
 }
 
 // ── Fixed owner and source-owner sanctions invariants ───────────────────────

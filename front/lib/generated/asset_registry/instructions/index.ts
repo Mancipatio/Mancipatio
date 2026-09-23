@@ -7,6 +7,7 @@
  */
 
 export * from "./acceptCustodyAuthority";
+export * from "./acceptKycRegistryAuthority";
 export * from "./acceptPlatformAdmin";
 export * from "./activateAsset";
 export * from "./addAdmin";
@@ -16,6 +17,7 @@ export * from "./approveHolder";
 export * from "./approveSale";
 export * from "./approveVestingTranche";
 export * from "./buy";
+export * from "./cancelKycRegistryAuthorityTransfer";
 export * from "./cancelOffer";
 export * from "./cancelOtcDeal";
 export * from "./cancelVestingSeries";
@@ -61,6 +63,7 @@ export * from "./openVaultVote";
 export * from "./postUpdate";
 export * from "./prepareLegacyAccount";
 export * from "./proposeCustodyAuthority";
+export * from "./proposeKycRegistryAuthority";
 export * from "./proposePlatformAdmin";
 export * from "./publishMilestone";
 export * from "./pushVested";
@@ -84,6 +87,7 @@ export * from "./setPauseFlags";
 export * from "./setProtocolTreasury";
 export * from "./takeOffer";
 export * from "./triggerCustodyVault";
+export * from "./updateKycRegistryJurisdictions";
 export * from "./updateMintMetadata";
 export * from "./verifyIssuerKyb";
 export * from "./withdrawUnvested";

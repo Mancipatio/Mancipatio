@@ -1803,10 +1803,8 @@ fn revoke_holder_rejects_non_authority() {
     let kyc_entry_pda =
         approve_holder_for(&mut svm, program_id, &authority, kyc_registry_pda, holder);
 
-    // The intruder has a different authority key, so `has_one = authority` must fail.
-    // (The intruder's seeds would resolve to a *different* kyc_registry PDA, so
-    // we pass the real registry — the seeds constraint will reject the tx because
-    // `kyc_registry.authority != intruder.pubkey()`.)
+    // The intruder passes the real registry (taken by address, no seeds), so
+    // it is `has_one = authority` that must reject: Unauthorized (6001).
     let result = try_send(
         &mut svm,
         &intruder,
@@ -1821,7 +1819,11 @@ fn revoke_holder_rejects_non_authority() {
             .to_account_metas(None),
         ),
     );
-    assert!(result.is_err(), "non-authority must not revoke");
+    let err = result.expect_err("non-authority must not revoke");
+    assert!(
+        err.contains("Custom(6001)"),
+        "expected Unauthorized, got {err}"
+    );
 }
 
 // ── approve_holder re-approval (init_if_needed) ──────────────────────────────

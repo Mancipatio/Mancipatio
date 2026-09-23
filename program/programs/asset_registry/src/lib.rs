@@ -662,7 +662,8 @@ pub mod asset_registry {
     }
 
     /// Creates a KYC registry owned by a KYC-provider authority, co-signed by
-    /// a platform admin.
+    /// a platform admin. The address `["kyc_registry", authority]` is fixed
+    /// forever; the authority itself can later rotate.
     pub fn create_kyc_registry(
         ctx: Context<CreateKycRegistry>,
         approved_jurisdictions: [u8; state::JURISDICTION_BITMAP_BYTES],
@@ -671,7 +672,8 @@ pub mod asset_registry {
         instructions::handle_create_kyc_registry(ctx, approved_jurisdictions, blocked_jurisdictions)
     }
 
-    /// Records an approved (time-bounded) holder in a KYC registry.
+    /// Records an approved (time-bounded) holder in a KYC registry. The
+    /// registry is taken by address and gated by `has_one = authority`.
     #[allow(clippy::too_many_arguments)]
     pub fn approve_holder(
         ctx: Context<ApproveHolder>,
@@ -699,6 +701,40 @@ pub mod asset_registry {
     /// balance. Use `clawback_from_holder` to seize it.
     pub fn revoke_holder(ctx: Context<RevokeHolder>, holder: Pubkey) -> Result<()> {
         instructions::handle_revoke_holder(ctx, holder)
+    }
+
+    /// The current KYC registry authority proposes a new authority. The
+    /// registry ADDRESS never changes; only `authority` rotates on accept.
+    pub fn propose_kyc_registry_authority(
+        ctx: Context<ProposeKycRegistryAuthority>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
+        instructions::handle_propose_kyc_registry_authority(ctx, new_authority)
+    }
+
+    /// The proposed authority accepts the KYC registry.
+    pub fn accept_kyc_registry_authority(ctx: Context<AcceptKycRegistryAuthority>) -> Result<()> {
+        instructions::handle_accept_kyc_registry_authority(ctx)
+    }
+
+    /// The current KYC registry authority cancels a pending proposal.
+    pub fn cancel_kyc_registry_authority_transfer(
+        ctx: Context<CancelKycRegistryAuthorityTransfer>,
+    ) -> Result<()> {
+        instructions::handle_cancel_kyc_registry_authority_transfer(ctx)
+    }
+
+    /// The KYC registry authority replaces both jurisdiction bitmaps.
+    pub fn update_kyc_registry_jurisdictions(
+        ctx: Context<UpdateKycRegistryJurisdictions>,
+        approved_jurisdictions: [u8; state::JURISDICTION_BITMAP_BYTES],
+        blocked_jurisdictions: [u8; state::JURISDICTION_BITMAP_BYTES],
+    ) -> Result<()> {
+        instructions::handle_update_kyc_registry_jurisdictions(
+            ctx,
+            approved_jurisdictions,
+            blocked_jurisdictions,
+        )
     }
 
     /// Admin claws back a revoked (or KYC-expired) holder's share units into a

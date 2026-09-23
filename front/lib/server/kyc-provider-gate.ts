@@ -1,10 +1,10 @@
 // SERVER-ONLY — on-chain KYC-provider authorization for signed routes.
 //
 // The KYC provider is `KycRegistry.authority`, NOT `Platform.admin`: the
-// program seeds the registry with the original provider key and gates
-// approve_holder / revoke_holder on that key alone, so rotating the platform
-// admin neither moves the registry nor grants the new admin any passport
-// rights (e2e §5). Routes that mirror a passport transaction into the
+// program gates approve_holder / revoke_holder on that key alone. Rotating
+// the platform admin neither moves the registry nor grants the new admin any
+// passport rights (e2e §5), and rotating the registry authority
+// (propose/accept) moves those rights without moving the registry address. Routes that mirror a passport transaction into the
 // off-chain dossier must therefore authorize against the registry authority
 // — a rotated provider that is no longer the super admin still has to be
 // able to write back (and retry) the sync for the transactions only it can
@@ -24,7 +24,14 @@ import {
   fetchMaybePlatform,
   findPlatformPda,
 } from "@/lib/generated/asset_registry";
-import { kycGates, listKycRegistries, selectKycRegistry } from "@/lib/kyc-authority";
+import type { Address } from "@solana/kit";
+import {
+  fetchKycRegistryAt,
+  kycGates,
+  listKycRegistries,
+  selectKycRegistry,
+} from "@/lib/kyc-authority";
+import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getServerRpc } from "@/lib/server/rpc";
 import { SiwsError } from "@/lib/server/siws";
@@ -38,6 +45,8 @@ export type KycProviderStatus = {
   registryAuthority: string | null;
   /** More than one registry exists and none belongs to the platform admin. */
   ambiguous: boolean;
+  /** NEXT_PUBLIC_KYC_REGISTRY is set but no registry exists at it. */
+  pinnedMissing: boolean;
 };
 
 async function fetchKycProviderStatus(wallet: string): Promise<KycProviderStatus> {
@@ -55,18 +64,33 @@ async function fetchKycProviderStatus(wallet: string): Promise<KycProviderStatus
   }
   const platformAdmin = platform.exists ? platform.data.admin : null;
 
-  // listKycRegistries (shared with the client) scans at "confirmed" and
-  // verifies owner + discriminator. That is acceptable for authorization
-  // here: a registry's authority is immutable once the account exists (no
-  // rotation instruction), so the only thing commitment changes is how soon
-  // a freshly created registry is honoured — never WHO its authority is.
-  // selectKycRegistry keeps the two roles separate (the registry whose
-  // authority is the platform admin wins only as a tie-break).
-  const registries = await listKycRegistries(rpc);
-  const { registry, ambiguous } = selectKycRegistry(registries, platformAdmin);
+  // WHICH registry: the deployment pin (NEXT_PUBLIC_KYC_REGISTRY) wins, with
+  // no scan and no fallback. A pin missing on-chain is a 403, never the
+  // heuristic, and an invalid pin throws (503). With no pin,
+  // listKycRegistries (shared with the client: "confirmed", owner and
+  // discriminator verified) and selectKycRegistry keep the two roles
+  // separate: the registry whose authority is the platform admin wins only
+  // as a tie-break.
+  const pinned = configuredKycRegistry();
+  let chosen: Address | null;
+  let ambiguous = false;
+  if (pinned) {
+    chosen = pinned;
+  } else {
+    const selection = selectKycRegistry(await listKycRegistries(rpc), platformAdmin);
+    chosen = selection.registry?.address ?? null;
+    ambiguous = selection.ambiguous;
+  }
+
+  // WHO the authority is comes from a FINALIZED re-read of the chosen
+  // registry. `authority` rotates (propose/accept, 2C-1), so a rotation that
+  // is confirmed but not yet finalized must not move write-back rights yet.
+  // Owner, discriminator and length are re-verified.
+  const registry = chosen ? await fetchKycRegistryAt(rpc, chosen, "finalized") : null;
+  const pinnedMissing = pinned !== null && registry === null;
   const registryAuthority = registry ? registry.registry.authority.toString() : null;
   const { isKycProvider } = kycGates(wallet, registryAuthority, platformAdmin);
-  return { isKycProvider, registryAuthority, ambiguous };
+  return { isKycProvider, registryAuthority, ambiguous, pinnedMissing };
 }
 
 /**
@@ -88,6 +112,9 @@ export async function requireKycProvider(wallet: string): Promise<void> {
       403,
       "KYC registry authority could not be resolved — several registries exist",
     );
+  }
+  if (status.pinnedMissing) {
+    throw new SiwsError(403, "The pinned KYC registry does not exist on this network");
   }
   if (!status.isKycProvider) {
     throw new SiwsError(403, "KYC provider privileges required");

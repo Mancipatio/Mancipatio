@@ -18,6 +18,7 @@ import {
 } from "@solana/kit";
 import {
   parseAcceptCustodyAuthorityInstruction,
+  parseAcceptKycRegistryAuthorityInstruction,
   parseAcceptPlatformAdminInstruction,
   parseActivateAssetInstruction,
   parseAddAdminInstruction,
@@ -27,6 +28,7 @@ import {
   parseApproveSaleInstruction,
   parseApproveVestingTrancheInstruction,
   parseBuyInstruction,
+  parseCancelKycRegistryAuthorityTransferInstruction,
   parseCancelOfferInstruction,
   parseCancelOtcDealInstruction,
   parseCancelVestingSeriesInstruction,
@@ -72,6 +74,7 @@ import {
   parsePostUpdateInstruction,
   parsePrepareLegacyAccountInstruction,
   parseProposeCustodyAuthorityInstruction,
+  parseProposeKycRegistryAuthorityInstruction,
   parseProposePlatformAdminInstruction,
   parsePublishMilestoneInstruction,
   parsePushVestedInstruction,
@@ -95,11 +98,13 @@ import {
   parseSetProtocolTreasuryInstruction,
   parseTakeOfferInstruction,
   parseTriggerCustodyVaultInstruction,
+  parseUpdateKycRegistryJurisdictionsInstruction,
   parseUpdateMintMetadataInstruction,
   parseVerifyIssuerKybInstruction,
   parseWithdrawUnvestedInstruction,
   parseWithdrawVestingSurplusInstruction,
   type ParsedAcceptCustodyAuthorityInstruction,
+  type ParsedAcceptKycRegistryAuthorityInstruction,
   type ParsedAcceptPlatformAdminInstruction,
   type ParsedActivateAssetInstruction,
   type ParsedAddAdminInstruction,
@@ -109,6 +114,7 @@ import {
   type ParsedApproveSaleInstruction,
   type ParsedApproveVestingTrancheInstruction,
   type ParsedBuyInstruction,
+  type ParsedCancelKycRegistryAuthorityTransferInstruction,
   type ParsedCancelOfferInstruction,
   type ParsedCancelOtcDealInstruction,
   type ParsedCancelVestingSeriesInstruction,
@@ -154,6 +160,7 @@ import {
   type ParsedPostUpdateInstruction,
   type ParsedPrepareLegacyAccountInstruction,
   type ParsedProposeCustodyAuthorityInstruction,
+  type ParsedProposeKycRegistryAuthorityInstruction,
   type ParsedProposePlatformAdminInstruction,
   type ParsedPublishMilestoneInstruction,
   type ParsedPushVestedInstruction,
@@ -177,6 +184,7 @@ import {
   type ParsedSetProtocolTreasuryInstruction,
   type ParsedTakeOfferInstruction,
   type ParsedTriggerCustodyVaultInstruction,
+  type ParsedUpdateKycRegistryJurisdictionsInstruction,
   type ParsedUpdateMintMetadataInstruction,
   type ParsedVerifyIssuerKybInstruction,
   type ParsedWithdrawUnvestedInstruction,
@@ -560,6 +568,7 @@ export function identifyAssetRegistryAccount(
 
 export enum AssetRegistryInstruction {
   AcceptCustodyAuthority,
+  AcceptKycRegistryAuthority,
   AcceptPlatformAdmin,
   ActivateAsset,
   AddAdmin,
@@ -569,6 +578,7 @@ export enum AssetRegistryInstruction {
   ApproveSale,
   ApproveVestingTranche,
   Buy,
+  CancelKycRegistryAuthorityTransfer,
   CancelOffer,
   CancelOtcDeal,
   CancelVestingSeries,
@@ -614,6 +624,7 @@ export enum AssetRegistryInstruction {
   PostUpdate,
   PrepareLegacyAccount,
   ProposeCustodyAuthority,
+  ProposeKycRegistryAuthority,
   ProposePlatformAdmin,
   PublishMilestone,
   PushVested,
@@ -637,6 +648,7 @@ export enum AssetRegistryInstruction {
   SetProtocolTreasury,
   TakeOffer,
   TriggerCustodyVault,
+  UpdateKycRegistryJurisdictions,
   UpdateMintMetadata,
   VerifyIssuerKyb,
   WithdrawUnvested,
@@ -657,6 +669,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.AcceptCustodyAuthority;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([105, 176, 82, 250, 31, 201, 26, 70]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.AcceptKycRegistryAuthority;
   }
   if (
     containsBytes(
@@ -756,6 +779,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.Buy;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([248, 0, 42, 144, 254, 38, 243, 192]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CancelKycRegistryAuthorityTransfer;
   }
   if (
     containsBytes(
@@ -1256,6 +1290,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([227, 141, 158, 240, 184, 154, 63, 3]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ProposeKycRegistryAuthority;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([26, 187, 5, 155, 78, 207, 193, 4]),
       ),
       0,
@@ -1509,6 +1554,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([62, 194, 115, 242, 149, 115, 88, 84]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.UpdateKycRegistryJurisdictions;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([46, 244, 2, 123, 67, 219, 22, 121]),
       ),
       0,
@@ -1561,6 +1617,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.AcceptCustodyAuthority;
     } & ParsedAcceptCustodyAuthorityInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.AcceptKycRegistryAuthority;
+    } & ParsedAcceptKycRegistryAuthorityInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.AcceptPlatformAdmin;
     } & ParsedAcceptPlatformAdminInstruction<TProgram>)
   | ({
@@ -1587,6 +1646,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.Buy;
     } & ParsedBuyInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.CancelKycRegistryAuthorityTransfer;
+    } & ParsedCancelKycRegistryAuthorityTransferInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.CancelOffer;
     } & ParsedCancelOfferInstruction<TProgram>)
@@ -1723,6 +1785,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.ProposeCustodyAuthority;
     } & ParsedProposeCustodyAuthorityInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.ProposeKycRegistryAuthority;
+    } & ParsedProposeKycRegistryAuthorityInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.ProposePlatformAdmin;
     } & ParsedProposePlatformAdminInstruction<TProgram>)
   | ({
@@ -1792,6 +1857,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.TriggerCustodyVault;
     } & ParsedTriggerCustodyVaultInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.UpdateKycRegistryJurisdictions;
+    } & ParsedUpdateKycRegistryJurisdictionsInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.UpdateMintMetadata;
     } & ParsedUpdateMintMetadataInstruction<TProgram>)
   | ({
@@ -1814,6 +1882,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.AcceptCustodyAuthority,
         ...parseAcceptCustodyAuthorityInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.AcceptKycRegistryAuthority: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.AcceptKycRegistryAuthority,
+        ...parseAcceptKycRegistryAuthorityInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.AcceptPlatformAdmin: {
@@ -1877,6 +1952,14 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.Buy,
         ...parseBuyInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.CancelKycRegistryAuthorityTransfer: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType:
+          AssetRegistryInstruction.CancelKycRegistryAuthorityTransfer,
+        ...parseCancelKycRegistryAuthorityTransferInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.CancelOffer: {
@@ -2194,6 +2277,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseProposeCustodyAuthorityInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.ProposeKycRegistryAuthority: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ProposeKycRegistryAuthority,
+        ...parseProposeKycRegistryAuthorityInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.ProposePlatformAdmin: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2353,6 +2443,14 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.TriggerCustodyVault,
         ...parseTriggerCustodyVaultInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.UpdateKycRegistryJurisdictions: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType:
+          AssetRegistryInstruction.UpdateKycRegistryJurisdictions,
+        ...parseUpdateKycRegistryJurisdictionsInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.UpdateMintMetadata: {

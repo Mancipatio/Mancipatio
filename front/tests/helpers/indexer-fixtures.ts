@@ -4,7 +4,15 @@ const key = address("11111111111111111111111111111111");
 const hash = new Uint8Array(32).fill(7);
 const bits = new Uint8Array(128).fill(1);
 const base = { version: 1, bump: 255 };
-function fixture<T>(table: string, codec: Encoder<T>, data: T) { return { table, bytes: new Uint8Array(codec.encode(data)) }; }
+/**
+ * The snapshot address a fixture is decoded at. Seed-derived entities re-derive
+ * their own (null here); a KYC registry is keyed by address only (2C-1: its
+ * authority rotates, so the address is not derivable from its fields).
+ */
+export const KYC_REGISTRY_FIXTURE_ADDRESS = "5MofiJNCoCRkNg1f2Yd7368WkjiNxkZZmUTaQo7xLhku";
+function fixture<T>(table: string, codec: Encoder<T>, data: T, address: string | null = null) {
+  return { table, bytes: new Uint8Array(codec.encode(data)), address };
+}
 /** Actual generated encoders, non-zero ledgers and every currently mirrored type. */
 export function indexerFixtures() {
   return [
@@ -20,7 +28,7 @@ export function indexerFixtures() {
     fixture("rights_issuances", a.getRightsIssuanceEncoder(), { ...base, shareClass: key, underlyingMint: key, escrow: key, authority: key, issuanceId: BigInt(11), totalClaimed: BigInt(2), milestonesCount: 4 }),
     fixture("milestones", a.getVestingMilestoneEncoder(), { ...base, issuance: key, index: 3, merkleRoot: hash, amountPool: BigInt(100), claimed: BigInt(2), unlockTs: BigInt(77) }),
     fixture("milestone_claims", a.getMilestoneClaimEncoder(), { bump: 255, milestone: key, claimer: key, amount: BigInt(12) }),
-    fixture("kyc_registries", a.getKycRegistryEncoder(), { ...base, authority: key, approvedJurisdictions: bits, blockedJurisdictions: new Uint8Array(128), entriesCount: BigInt(4) }),
+    fixture("kyc_registries", a.getKycRegistryEncoder(), { ...base, authority: key, approvedJurisdictions: bits, blockedJurisdictions: new Uint8Array(128), entriesCount: BigInt(4) }, KYC_REGISTRY_FIXTURE_ADDRESS),
     fixture("kyc_entries", a.getKycEntryEncoder(), { ...base, registry: key, holder: key, status: 1, jurisdiction: 688, accreditationLevel: 2, expiry: BigInt(100), providerId: 1, externalRefHash: hash }),
   ];
 }

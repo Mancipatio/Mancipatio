@@ -10,11 +10,9 @@ pub struct RevokeHolder<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
 
-    #[account(
-        seeds = [KYC_REGISTRY_SEED, authority.key().as_ref()],
-        bump = kyc_registry.bump,
-        has_one = authority @ RegistryError::Unauthorized,
-    )]
+    /// Taken by address (see `ApproveHolder::kyc_registry`): the registry
+    /// address is permanent, its `authority` rotates.
+    #[account(has_one = authority @ RegistryError::Unauthorized)]
     pub kyc_registry: Box<Account<'info, KycRegistry>>,
 
     #[account(
@@ -40,6 +38,7 @@ pub fn handle_revoke_holder(ctx: Context<RevokeHolder>, holder: Pubkey) -> Resul
     emit!(HolderRevoked {
         registry: ctx.accounts.kyc_registry.key(),
         holder,
+        authority: ctx.accounts.authority.key(),
     });
     msg!("Holder {} revoked (KYC)", holder);
     Ok(())

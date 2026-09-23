@@ -25,7 +25,7 @@ import { indexerFixtures } from "./helpers/indexer-fixtures";
 import { getAddressDecoder } from "@solana/kit";
 async function snapshots() {
   return Promise.all(indexerFixtures().map(async (f) => {
-    const row = await INDEXER_ENTITIES.find((e) => e.table === f.table)!.decode(f.bytes);
+    const row = await INDEXER_ENTITIES.find((e) => e.table === f.table)!.decode(f.bytes, f.address);
     return { pubkey: String(row.pda), account: { owner: String(INDEXER_PROGRAM), data: [Buffer.from(f.bytes).toString("base64"), "base64"] } };
   }));
 }

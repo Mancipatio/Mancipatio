@@ -135,14 +135,21 @@ export type CreateKycRegistryAsyncInput<
 > = {
   /**
    * The KYC provider the registry belongs to — pays for and owns it, and is
-   * the only signer `approve_holder` / `revoke_holder` accept afterwards.
+   * the only signer `approve_holder` / `revoke_holder` accept afterwards,
+   * until rotated (`propose_kyc_registry_authority` /
+   * `accept_kyc_registry_authority`). The registry address stays derived
+   * from THIS creating key forever, so this key can never create a second
+   * registry, even after rotating the first one away.
    */
   authority: TransactionSigner<TAccountAuthority>;
   /**
    * Platform admin co-signer. Registries are the root of trust for every
-   * `KycGated` mint, so one cannot be conjured permissionlessly; the
-   * provider key stays distinct from the admin key (it gets no admin
-   * powers, and the admin never owns the registry).
+   * `KycGated` mint, so one cannot be conjured permissionlessly. The
+   * co-signature gates only the CREATION of the address: afterwards the
+   * current registry authority alone rotates the registry (to any key,
+   * including an admin key) and replaces its jurisdiction bitmaps, with no
+   * admin co-signature, admin override or pause flag. The registry
+   * authority gets no admin powers from this record.
    */
   adminAuthority: TransactionSigner<TAccountAdminAuthority>;
   /** Admin gate — `admin_authority` must hold an `Admin` record. */
@@ -247,14 +254,21 @@ export type CreateKycRegistryInput<
 > = {
   /**
    * The KYC provider the registry belongs to — pays for and owns it, and is
-   * the only signer `approve_holder` / `revoke_holder` accept afterwards.
+   * the only signer `approve_holder` / `revoke_holder` accept afterwards,
+   * until rotated (`propose_kyc_registry_authority` /
+   * `accept_kyc_registry_authority`). The registry address stays derived
+   * from THIS creating key forever, so this key can never create a second
+   * registry, even after rotating the first one away.
    */
   authority: TransactionSigner<TAccountAuthority>;
   /**
    * Platform admin co-signer. Registries are the root of trust for every
-   * `KycGated` mint, so one cannot be conjured permissionlessly; the
-   * provider key stays distinct from the admin key (it gets no admin
-   * powers, and the admin never owns the registry).
+   * `KycGated` mint, so one cannot be conjured permissionlessly. The
+   * co-signature gates only the CREATION of the address: afterwards the
+   * current registry authority alone rotates the registry (to any key,
+   * including an admin key) and replaces its jurisdiction bitmaps, with no
+   * admin co-signature, admin override or pause flag. The registry
+   * authority gets no admin powers from this record.
    */
   adminAuthority: TransactionSigner<TAccountAdminAuthority>;
   /** Admin gate — `admin_authority` must hold an `Admin` record. */
@@ -346,14 +360,21 @@ export type ParsedCreateKycRegistryInstruction<
   accounts: {
     /**
      * The KYC provider the registry belongs to — pays for and owns it, and is
-     * the only signer `approve_holder` / `revoke_holder` accept afterwards.
+     * the only signer `approve_holder` / `revoke_holder` accept afterwards,
+     * until rotated (`propose_kyc_registry_authority` /
+     * `accept_kyc_registry_authority`). The registry address stays derived
+     * from THIS creating key forever, so this key can never create a second
+     * registry, even after rotating the first one away.
      */
     authority: TAccountMetas[0];
     /**
      * Platform admin co-signer. Registries are the root of trust for every
-     * `KycGated` mint, so one cannot be conjured permissionlessly; the
-     * provider key stays distinct from the admin key (it gets no admin
-     * powers, and the admin never owns the registry).
+     * `KycGated` mint, so one cannot be conjured permissionlessly. The
+     * co-signature gates only the CREATION of the address: afterwards the
+     * current registry authority alone rotates the registry (to any key,
+     * including an admin key) and replaces its jurisdiction bitmaps, with no
+     * admin co-signature, admin override or pause flag. The registry
+     * authority gets no admin powers from this record.
      */
     adminAuthority: TAccountMetas[1];
     /** Admin gate — `admin_authority` must hold an `Admin` record. */

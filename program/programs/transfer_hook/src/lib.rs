@@ -149,6 +149,43 @@ fn is_share_class_account(info: &AccountInfo) -> bool {
     }
 }
 
+/// The Anchor account discriminator of `asset_registry::KycRegistry` —
+/// `sha256("account:KycRegistry")[0..8]`. Hardcoded like
+/// `SHARE_CLASS_DISCRIMINATOR`; pinned by a cross-crate assertion in the
+/// asset_registry test suite.
+pub const KYC_REGISTRY_DISCRIMINATOR: [u8; 8] = [204, 241, 19, 79, 46, 77, 56, 20];
+/// Full `asset_registry::KycRegistry` account length (`8 + INIT_SPACE`) — the
+/// minimum `update_transfer_hook_config` accepts for a named registry. Pinned
+/// by the same cross-crate test.
+pub const KYC_REGISTRY_ACCOUNT_LEN: usize = 306;
+
+/// `true` iff `info` is a real `asset_registry::KycRegistry`: owned by the
+/// registry program, full length, and carrying the `KycRegistry`
+/// discriminator (only the registry program can write it, and only
+/// `create_kyc_registry` — admin co-signed — creates one).
+fn is_kyc_registry_account(info: &AccountInfo) -> bool {
+    if info.owner != &ASSET_REGISTRY_PROGRAM {
+        return false;
+    }
+    match info.try_borrow_data() {
+        Ok(data) => {
+            data.len() >= KYC_REGISTRY_ACCOUNT_LEN && data[..8] == KYC_REGISTRY_DISCRIMINATOR
+        }
+        Err(_) => false,
+    }
+}
+
+/// A mode / registry pairing is coherent: `KycGated` must name a registry and
+/// `Open` must not (an Open config naming a registry would be silently
+/// ignored by `build_metas`, and mislead any reader of the config).
+fn validate_mode_registry(mode: RestrictionMode, kyc_registry: Option<Pubkey>) -> Result<()> {
+    match (mode, kyc_registry) {
+        (RestrictionMode::KycGated, None) => err!(HookError::KycRegistryRequired),
+        (RestrictionMode::Open, Some(_)) => err!(HookError::KycRegistryNotAllowed),
+        _ => Ok(()),
+    }
+}
+
 // ── asset_registry account byte layout (read by offset; no crate dependency) ──
 //
 // These offsets mirror `asset_registry::state::{KycEntry, KycRegistry}`. They
@@ -302,10 +339,12 @@ pub mod transfer_hook {
         restriction_mode: RestrictionMode,
         kyc_registry: Option<Pubkey>,
     ) -> Result<()> {
-        require!(
-            restriction_mode != RestrictionMode::KycGated || kyc_registry.is_some(),
-            HookError::KycRegistryRequired
-        );
+        // No registry ACCOUNT is visible here, so a KycGated init cannot
+        // validate the named registry. That path is reachable only through
+        // asset_registry's ShareClass-co-signed CPI, which always passes
+        // `(Open, None)` (`initialize_share_class_mint`); KycGated is reached
+        // via `update_transfer_hook_config`, which does validate it.
+        validate_mode_registry(restriction_mode, kyc_registry)?;
 
         let cfg = &mut ctx.accounts.config;
         cfg.mint = ctx.accounts.mint.key();
@@ -431,15 +470,25 @@ pub mod transfer_hook {
     /// rent-exemption by `authority`) for Open → KycGated, shrunk for
     /// KycGated → Open (no lamport refund — the account simply stays above
     /// its rent-exempt minimum).
+    ///
+    /// A named registry must be passed as `kyc_registry_account` and must be a
+    /// real `asset_registry::KycRegistry` (owner, discriminator, length);
+    /// Open mode must name none and pass none.
     pub fn update_transfer_hook_config(
         ctx: Context<UpdateTransferHookConfig>,
         restriction_mode: RestrictionMode,
         kyc_registry: Option<Pubkey>,
     ) -> Result<()> {
-        require!(
-            restriction_mode != RestrictionMode::KycGated || kyc_registry.is_some(),
-            HookError::KycRegistryRequired
-        );
+        validate_mode_registry(restriction_mode, kyc_registry)?;
+        match (kyc_registry, ctx.accounts.kyc_registry_account.as_ref()) {
+            (Some(key), Some(ai)) => require!(
+                ai.key() == key && is_kyc_registry_account(&ai.to_account_info()),
+                HookError::InvalidKycRegistry
+            ),
+            (Some(_), None) => return err!(HookError::InvalidKycRegistry),
+            (None, Some(_)) => return err!(HookError::KycRegistryNotAllowed),
+            (None, None) => {}
+        }
 
         let cfg = &mut ctx.accounts.config;
         let old_mode = cfg.restriction_mode;
@@ -975,6 +1024,12 @@ pub struct UpdateTransferHookConfig<'info> {
     pub extra_account_meta_list: UncheckedAccount<'info>,
 
     pub system_program: Program<'info, System>,
+
+    /// The `KycRegistry` the `kyc_registry` argument names: required iff the
+    /// argument is `Some`, and its key must equal it. Appended LAST so the
+    /// existing account order is kept.
+    /// CHECK: owner / discriminator / length are validated in the handler.
+    pub kyc_registry_account: Option<UncheckedAccount<'info>>,
 }
 
 #[derive(Accounts)]
@@ -1071,7 +1126,10 @@ pub struct TransferHookConfig {
     /// Blocklist registry consulted on every transfer (sanctions / court order).
     pub blocklist: Pubkey,
     pub restriction_mode: RestrictionMode,
-    /// Required when `restriction_mode == KycGated`; otherwise `None`.
+    /// Required when `restriction_mode == KycGated`, and must be `None` for
+    /// `Open` (both enforced). `update_transfer_hook_config` also verifies the
+    /// named account is a real `asset_registry::KycRegistry`. Pinned by
+    /// ADDRESS: a registry's authority can rotate without moving it.
     pub kyc_registry: Option<Pubkey>,
     pub version: u8,
     pub bump: u8,
@@ -1129,4 +1187,6 @@ pub enum HookError {
     InvalidProposedAuthority,
     #[msg("Authority proposal does not match current authority and accepting signer")]
     InvalidAuthorityTransfer,
+    #[msg("Open restriction mode must not name a KYC registry")]
+    KycRegistryNotAllowed,
 }

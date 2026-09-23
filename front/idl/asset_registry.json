@@ -135,6 +135,69 @@
       "args": []
     },
     {
+      "name": "accept_kyc_registry_authority",
+      "docs": [
+        "The proposed authority accepts the KYC registry."
+      ],
+      "discriminator": [
+        105,
+        176,
+        82,
+        250,
+        31,
+        201,
+        26,
+        70
+      ],
+      "accounts": [
+        {
+          "name": "new_authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "kyc_registry",
+          "writable": true
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "kyc_registry"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "accept_platform_admin",
       "discriminator": [
         138,
@@ -708,7 +771,8 @@
     {
       "name": "approve_holder",
       "docs": [
-        "Records an approved (time-bounded) holder in a KYC registry."
+        "Records an approved (time-bounded) holder in a KYC registry. The",
+        "registry is taken by address and gated by `has_one = authority`."
       ],
       "discriminator": [
         242,
@@ -731,32 +795,14 @@
         },
         {
           "name": "kyc_registry",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  107,
-                  121,
-                  99,
-                  95,
-                  114,
-                  101,
-                  103,
-                  105,
-                  115,
-                  116,
-                  114,
-                  121
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "authority"
-              }
-            ]
-          }
+          "docs": [
+            "Taken BY ADDRESS, not re-derived from the signer: a registry's address",
+            "is fixed at creation (`[\"kyc_registry\", creating authority]`) while its",
+            "`authority` can rotate. `Account<KycRegistry>` still checks the owner",
+            "and discriminator, and only `create_kyc_registry` (admin co-signed) can",
+            "create one, so it cannot be forged."
+          ],
+          "writable": true
         },
         {
           "name": "kyc_entry",
@@ -1282,6 +1328,71 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "cancel_kyc_registry_authority_transfer",
+      "docs": [
+        "The current KYC registry authority cancels a pending proposal."
+      ],
+      "discriminator": [
+        248,
+        0,
+        42,
+        144,
+        254,
+        38,
+        243,
+        192
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "kyc_registry"
+          ]
+        },
+        {
+          "name": "kyc_registry"
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "kyc_registry"
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
     },
     {
       "name": "cancel_offer",
@@ -3423,7 +3534,8 @@
       "name": "create_kyc_registry",
       "docs": [
         "Creates a KYC registry owned by a KYC-provider authority, co-signed by",
-        "a platform admin."
+        "a platform admin. The address `[\"kyc_registry\", authority]` is fixed",
+        "forever; the authority itself can later rotate."
       ],
       "discriminator": [
         126,
@@ -3440,7 +3552,11 @@
           "name": "authority",
           "docs": [
             "The KYC provider the registry belongs to — pays for and owns it, and is",
-            "the only signer `approve_holder` / `revoke_holder` accept afterwards."
+            "the only signer `approve_holder` / `revoke_holder` accept afterwards,",
+            "until rotated (`propose_kyc_registry_authority` /",
+            "`accept_kyc_registry_authority`). The registry address stays derived",
+            "from THIS creating key forever, so this key can never create a second",
+            "registry, even after rotating the first one away."
           ],
           "writable": true,
           "signer": true
@@ -3449,9 +3565,12 @@
           "name": "admin_authority",
           "docs": [
             "Platform admin co-signer. Registries are the root of trust for every",
-            "`KycGated` mint, so one cannot be conjured permissionlessly; the",
-            "provider key stays distinct from the admin key (it gets no admin",
-            "powers, and the admin never owns the registry)."
+            "`KycGated` mint, so one cannot be conjured permissionlessly. The",
+            "co-signature gates only the CREATION of the address: afterwards the",
+            "current registry authority alone rotates the registry (to any key,",
+            "including an admin key) and replaces its jurisdiction bitmaps, with no",
+            "admin co-signature, admin override or pause flag. The registry",
+            "authority gets no admin powers from this record."
           ],
           "signer": true
         },
@@ -7491,6 +7610,81 @@
       ]
     },
     {
+      "name": "propose_kyc_registry_authority",
+      "docs": [
+        "The current KYC registry authority proposes a new authority. The",
+        "registry ADDRESS never changes; only `authority` rotates on accept."
+      ],
+      "discriminator": [
+        227,
+        141,
+        158,
+        240,
+        184,
+        154,
+        63,
+        3
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true,
+          "relations": [
+            "kyc_registry"
+          ]
+        },
+        {
+          "name": "kyc_registry"
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "kyc_registry"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "propose_platform_admin",
       "discriminator": [
         26,
@@ -8959,31 +9153,10 @@
         },
         {
           "name": "kyc_registry",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  107,
-                  121,
-                  99,
-                  95,
-                  114,
-                  101,
-                  103,
-                  105,
-                  115,
-                  116,
-                  114,
-                  121
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "authority"
-              }
-            ]
-          }
+          "docs": [
+            "Taken by address (see `ApproveHolder::kyc_registry`): the registry",
+            "address is permanent, its `authority` rotates."
+          ]
         },
         {
           "name": "kyc_entry",
@@ -9862,6 +10035,55 @@
         }
       ],
       "args": []
+    },
+    {
+      "name": "update_kyc_registry_jurisdictions",
+      "docs": [
+        "The KYC registry authority replaces both jurisdiction bitmaps."
+      ],
+      "discriminator": [
+        62,
+        194,
+        115,
+        242,
+        149,
+        115,
+        88,
+        84
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true,
+          "relations": [
+            "kyc_registry"
+          ]
+        },
+        {
+          "name": "kyc_registry",
+          "writable": true
+        }
+      ],
+      "args": [
+        {
+          "name": "approved_jurisdictions",
+          "type": {
+            "array": [
+              "u8",
+              128
+            ]
+          }
+        },
+        {
+          "name": "blocked_jurisdictions",
+          "type": {
+            "array": [
+              "u8",
+              128
+            ]
+          }
+        }
+      ]
     },
     {
       "name": "update_mint_metadata",
@@ -10811,6 +11033,45 @@
       ]
     },
     {
+      "name": "KycRegistryAuthorityChanged",
+      "discriminator": [
+        5,
+        85,
+        28,
+        227,
+        222,
+        212,
+        79,
+        152
+      ]
+    },
+    {
+      "name": "KycRegistryAuthorityProposalCancelled",
+      "discriminator": [
+        34,
+        245,
+        0,
+        88,
+        180,
+        169,
+        40,
+        22
+      ]
+    },
+    {
+      "name": "KycRegistryAuthorityProposed",
+      "discriminator": [
+        1,
+        251,
+        13,
+        136,
+        237,
+        219,
+        150,
+        172
+      ]
+    },
+    {
       "name": "KycRegistryCreated",
       "discriminator": [
         134,
@@ -10821,6 +11082,19 @@
         129,
         152,
         142
+      ]
+    },
+    {
+      "name": "KycRegistryJurisdictionsUpdated",
+      "discriminator": [
+        201,
+        253,
+        149,
+        20,
+        244,
+        170,
+        112,
+        47
       ]
     },
     {
@@ -12567,6 +12841,14 @@
           {
             "name": "reapproval",
             "type": "bool"
+          },
+          {
+            "name": "authority",
+            "docs": [
+              "The registry authority that signed. The registry address no longer",
+              "implies the approver once the authority has rotated (2C-1)."
+            ],
+            "type": "pubkey"
           }
         ]
       }
@@ -12638,6 +12920,13 @@
           },
           {
             "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "docs": [
+              "The registry authority that signed (see `HolderApproved::authority`)."
+            ],
             "type": "pubkey"
           }
         ]
@@ -12889,7 +13178,11 @@
       "docs": [
         "KYC registry. docs/01 §9 Q1: the platform runs a global registry; an asset",
         "may additionally point at a stricter per-issuer one via `extra_kyc_registry`.",
-        "Seeds: `[\"kyc_registry\", authority]`."
+        "Seeds: `[\"kyc_registry\", creating authority]`. The address is permanent;",
+        "`authority` rotates via `propose_kyc_registry_authority` /",
+        "`accept_kyc_registry_authority`. Never re-derive the registry from",
+        "`authority` — take it by address (hook config, pinned front config).",
+        "`bump` keeps the bump of the ORIGINAL seeds and is no longer verified."
       ],
       "type": {
         "kind": "struct",
@@ -12897,7 +13190,8 @@
           {
             "name": "authority",
             "docs": [
-              "KYC-provider multisig authorised to approve / revoke holders."
+              "KYC-provider multisig authorised to approve / revoke holders, rotate",
+              "this authority and replace the jurisdiction bitmaps."
             ],
             "type": "pubkey"
           },
@@ -12935,6 +13229,77 @@
       }
     },
     {
+      "name": "KycRegistryAuthorityChanged",
+      "docs": [
+        "Emitted by `accept_kyc_registry_authority` — the registry address is",
+        "unchanged; only its `authority` moved."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "registry",
+            "type": "pubkey"
+          },
+          {
+            "name": "old_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "KycRegistryAuthorityProposalCancelled",
+      "docs": [
+        "Emitted by `cancel_kyc_registry_authority_transfer`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "registry",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "cancelled_new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "KycRegistryAuthorityProposed",
+      "docs": [
+        "Emitted by `propose_kyc_registry_authority` (a re-proposal overwrites the",
+        "pending one and emits again)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "registry",
+            "type": "pubkey"
+          },
+          {
+            "name": "current_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
       "name": "KycRegistryCreated",
       "docs": [
         "Emitted by `create_kyc_registry`."
@@ -12949,6 +13314,44 @@
           {
             "name": "authority",
             "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "KycRegistryJurisdictionsUpdated",
+      "docs": [
+        "Emitted by `update_kyc_registry_jurisdictions` — both bitmaps were replaced",
+        "whole (the new values are carried for audit)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "registry",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "approved_jurisdictions",
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
+          },
+          {
+            "name": "blocked_jurisdictions",
+            "type": {
+              "array": [
+                "u8",
+                128
+              ]
+            }
           }
         ]
       }
