@@ -56,6 +56,9 @@ export type CustomInquiryInput = {
   /** Honeypot — rendered invisibly on the contact form; humans leave it empty.
    *  A non-empty value makes the server silently drop the submission. */
   website?: string;
+  /** Single-use Cloudflare Turnstile token (only when the build renders the
+   *  widget; the server requires it when TURNSTILE_SECRET_KEY is set). */
+  turnstile_token?: string;
 };
 
 /** Public contact-form submit. Returns the new inquiry id, or null on failure

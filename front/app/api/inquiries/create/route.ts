@@ -5,7 +5,10 @@
 //   - honeypot field ("website"): bots that fill it get a plausible success
 //     response but nothing is inserted;
 //   - strict length caps + email format check;
-//   - best-effort in-memory rate limit: 5 requests/min/IP (per instance).
+//   - best-effort in-memory rate limit: 5 requests/min/IP (per instance);
+//   - a Cloudflare Turnstile check when TURNSTILE_SECRET_KEY is set (fails
+//     closed; runs after field validation, so malformed submissions are
+//     refused without a call to Cloudflare).
 // The insert goes through the service role, so the anon INSERT policy on
 // custom_inquiries can be dropped entirely (W3-RLS: NO anon anything).
 //
@@ -17,6 +20,8 @@ import { SiwsError, siwsErrorResponse } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail } from "@/lib/server/email";
 import { detectNetwork } from "@/lib/network";
+import { verifyTurnstile } from "@/lib/server/turnstile";
+import { TURNSTILE_ACTIONS, TURNSTILE_BODY_FIELD } from "@/lib/turnstile";
 
 // ---------------------------------------------------------------------------
 // Best-effort rate limit — in-memory, per serverless instance.
@@ -118,6 +123,8 @@ export async function POST(request: Request) {
       typeof b.asset_kind === "string"
         ? b.asset_kind.trim().slice(0, 120)
         : "";
+
+    await verifyTurnstile(request, b[TURNSTILE_BODY_FIELD], TURNSTILE_ACTIONS.inquiry);
 
     const sb = getSupabaseAdmin();
     const { data, error } = await sb

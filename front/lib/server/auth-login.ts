@@ -28,3 +28,14 @@ export function clearAccountSession(response: NextResponse, origin: string): Nex
 }
 
 export const LOGIN_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+/** /api/auth/email/start body cap: an address (≤254 characters) plus a
+ *  Turnstile token (≤2048) and the JSON around them. */
+export const EMAIL_START_BODY_LIMIT = 4096;
+
+/** Sign-in links sent to all addresses together, per network and window.
+ *  The DB limiter takes 1–100 hits per window of at most a day; a short
+ *  window lets a burst delay sign-in links for minutes, not an hour. At most
+ *  ≈300 links per hour. */
+export const GLOBAL_LOGIN_EMAIL_LIMIT = 50;
+export const GLOBAL_LOGIN_EMAIL_WINDOW_SECONDS = 600;
