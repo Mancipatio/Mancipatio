@@ -621,14 +621,23 @@ async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts:
   let tried = 0;
   for (const row of sales) {
     if (covered.has(row.pda)) continue;
-    if (signal.aborted || ++tried > 3) return;
-    const sale = await fetchSale(row.pda, "finalized", signal);
-    // Not finalized yet, or a stale mirror row: the chain decides.
-    if (!sale || (await findSalePda(sale.shareClass, sale.saleId)) !== row.pda) continue;
-    const adopted = await adoptSale(sb, row.pda, sale, signal);
-    await alert(sb, adopted, adoptionMessage(`Sale ${row.pda} was opened from an approval with no live reservation`, adopted));
-    await applySale(sb, adopted, sale, signal);
-    counts.pending++;
+    if (signal.aborted || tried >= 3) return;
+    // One orphan that keeps failing (no FX rate, missing SPV…) must not block
+    // the ones behind it, and a not-yet-finalized or stale mirror row must not
+    // use up this run's adoption attempts.
+    try {
+      const sale = await fetchSale(row.pda, "finalized", signal);
+      // Not finalized yet, or a stale mirror row: the chain decides.
+      if (!sale || (await findSalePda(sale.shareClass, sale.saleId)) !== row.pda) continue;
+      tried++;
+      const adopted = await adoptSale(sb, row.pda, sale, signal);
+      await alert(sb, adopted, adoptionMessage(`Sale ${row.pda} was opened from an approval with no live reservation`, adopted));
+      await applySale(sb, adopted, sale, signal);
+      counts.pending++;
+    } catch (error) {
+      if (signal.aborted) return;
+      console.error("[sale-capacity] orphan sale adoption failed", row.pda, error instanceof Error ? error.message : error);
+    }
   }
 }
 
