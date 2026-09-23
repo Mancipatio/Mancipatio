@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
-import { getShareClassDecoder, getShareClassEncoder } from "@/lib/generated/asset_registry";
+import { getSaleDecoder, getSaleEncoder, getShareClassDecoder, getShareClassEncoder } from "@/lib/generated/asset_registry";
 
 describe("one generated indexer decoder", () => {
   it("covers all 14 existing mirror entities with complete typed non-zero projections", async () => {
@@ -24,6 +24,15 @@ describe("one generated indexer decoder", () => {
     const old = new Uint8Array(getShareClassEncoder().encode({ ...getShareClassDecoder().decode(f.bytes), version: 1, lifetimeMinted: BigInt(0), cumulativeCap: false }));
     const legacyRow = await INDEXER_ENTITIES.find((e) => e.table === "share_classes")!.decode(old);
     expect(await decodeIndexerAccount(String(legacyRow.pda), INDEXER_PROGRAM, old)).toMatchObject({ row: { account_version: 1, lifetime_minted: null, cumulative_cap: null, readonly_legacy: true } });
+  });
+  it("projects Sale v2 (the consumed approval and its application hash) and rejects a v1 Sale", async () => {
+    const f = indexerFixtures().find((f) => f.table === "sales")!;
+    const row = await INDEXER_ENTITIES.find((e) => e.table === "sales")!.decode(f.bytes);
+    expect(row).toMatchObject({ account_version: 2, sale_approval: "SysvarC1ock11111111111111111111111111111111", application_hash: "07".repeat(32) });
+    const v1 = new Uint8Array(getSaleEncoder().encode({ ...getSaleDecoder().decode(f.bytes), version: 1 }));
+    await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, v1)).rejects.toThrow(/version 1 requires an explicit migration/);
+    // A v1-sized (222-byte) account cannot decode as a Sale at all.
+    await expect(decodeIndexerAccount(String(row.pda), INDEXER_PROGRAM, f.bytes.slice(0, 222))).rejects.toThrow();
   });
   it("does not project foreign-owned or untracked account types", async () => {
     const f = indexerFixtures()[0];

@@ -65,7 +65,9 @@ export const INDEXER_ENTITIES: readonly Entry[] = [
     authority: a.authority, sale_id: numberString(a.saleId), price_per_unit: numberString(a.pricePerUnit),
     total_for_sale: numberString(a.totalForSale), sold: numberString(a.sold), start_ts: numberString(a.startTs),
     end_ts: numberString(a.endTs), status: a.status, raise_type: a.raiseType, cliff_months: a.cliffMonths, vesting_months: a.vestingMonths,
-  }), (a) => pda([text("sale"), key(a.shareClass), u64(a.saleId)])),
+    // Sale v2 (program 2B): the SaleApproval open_sale consumed and its application commitment.
+    sale_approval: a.saleApproval, application_hash: hex(a.applicationHash),
+  }), (a) => pda([text("sale"), key(a.shareClass), u64(a.saleId)]), 2),
   spec("custody_vaults", accounts.getCustodyVaultDiscriminatorBytes(), accounts.getCustodyVaultDecoder(), (a) => ({
     share_class_pda: a.shareClass, mint: a.mint, escrow: a.escrow, vault_id: numberString(a.vaultId),
     authority: a.authority, vault_type: a.vaultType, realize_action: a.realizeAction, amount: numberString(a.amount),

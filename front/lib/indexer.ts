@@ -174,7 +174,8 @@ export async function loadNetworkFromIndexer(): Promise<NetworkData> {
   const legacyShareClasses = readable.filter(isLegacyShareClass);
   const shareClasses = readable.filter((a): a is ShareClass => !isLegacyShareClass(a));
   publishLegacyShareClasses(network, legacyShareClasses);
-  const sales = decodeAll<Sale>(salesR, getSaleDecoder());
+  // Sale v2 (program 2B, SALE_STATE_VERSION): v1 rows are not on chain.
+  const sales = decodeAll<Sale>(salesR, getSaleDecoder(), 2);
   const offers = decodeAll<Offer>(offersR, getOfferDecoder());
   const rightsIssuances = decodeAll<RightsIssuance>(
     rightsR,
