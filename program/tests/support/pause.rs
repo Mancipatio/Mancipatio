@@ -79,11 +79,20 @@ pub fn pause_only(svm: &mut LiteSVM, super_admin: &Keypair, flags: u8) {
     assert_eq!(pause_flags(svm), flags);
 }
 
-/// Asserts a failed transaction reverted with `PlatformPaused` (6000).
+/// Asserts a failed transaction reverted with the registry's `PlatformPaused`
+/// (6000). The code alone is ambiguous: transfer_hook's first error,
+/// `KycRegistryRequired`, is also 6000 and surfaces as the outer instruction's
+/// error on every hook-CPI instruction (take_offer, OTC and custody deposits).
+/// The Anchor error NAME in the logs (the failure's Debug output carries them)
+/// pins the registry's pause check.
 pub fn assert_paused(result: Result<(), String>, what: &str) {
     let err = result.expect_err(what);
     assert!(
-        err.contains("Custom(6000)"),
+        err.contains("Custom(6000)") && err.contains("Error Code: PlatformPaused"),
         "{what}: expected PlatformPaused (6000), got {err}"
+    );
+    assert!(
+        !err.contains("Error Code: KycRegistryRequired"),
+        "{what}: the hook failed, not the pause: {err}"
     );
 }

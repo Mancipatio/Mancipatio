@@ -4256,8 +4256,9 @@ fn primary_pause_gates_buy_and_treasury_minting_but_not_kyc_or_transfers() {
     let treasury_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &ctx.payer.pubkey());
 
     pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
-    approve_kyc(&mut svm, &ctx, &buyer_pk); // KYC approval is never gated
-                                            // The burn-only quarantine vault opens under a full pause (bit3 exemption).
+    // KYC approval is never gated.
+    approve_kyc(&mut svm, &ctx, &buyer_pk);
+    // The burn-only quarantine vault opens under a full pause (bit3 exemption).
     let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 7);
     let treasury_mint = |destination: Pubkey| {
         Instruction::new_with_bytes(
@@ -4382,37 +4383,73 @@ fn custody_entry_pause_keeps_the_clawback_quarantine_path_open() {
     pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
     revoke_kyc(&mut svm, &ctx, &buyer_pk);
 
-    // Non-quarantine opens are custody entries: paused.
-    for (id, vault_type, beneficiary) in [
-        (20, VaultType::DeliveryEscrow, buyer_pk),
-        (21, VaultType::ConversionPending, Pubkey::default()),
-        (22, VaultType::Vesting, Pubkey::default()),
-    ] {
-        pause::assert_paused(
-            try_open_vault_with_action(
-                &mut svm,
-                &ctx,
-                id,
-                vault_type,
-                RealizeAction::BurnAndAttest,
-                beneficiary,
-            ),
-            "non-quarantine custody open under 0x3F",
-        );
-    }
-    // …also when only bit3 is set.
-    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_CUSTODY_ENTRY);
-    pause::assert_paused(
-        try_open_vault_with_action(
-            &mut svm,
-            &ctx,
+    // Non-quarantine opens are custody entries: paused. The exemption needs
+    // BOTH halves — a RedemptionQueue with a non-burn action is an entry too.
+    let entries = [
+        (
             20,
             VaultType::DeliveryEscrow,
             RealizeAction::BurnAndAttest,
             buyer_pk,
         ),
-        "DeliveryEscrow open under CUSTODY_ENTRY",
+        (
+            21,
+            VaultType::ConversionPending,
+            RealizeAction::BurnAndAttest,
+            Pubkey::default(),
+        ),
+        (
+            22,
+            VaultType::Vesting,
+            RealizeAction::BurnAndAttest,
+            Pubkey::default(),
+        ),
+        (
+            23,
+            VaultType::RedemptionQueue,
+            RealizeAction::TransferToBeneficiary,
+            Pubkey::default(),
+        ),
+        (
+            24,
+            VaultType::RedemptionQueue,
+            RealizeAction::BurnAndPayout,
+            Pubkey::default(),
+        ),
+    ];
+    for (id, vault_type, action, beneficiary) in entries {
+        pause::assert_paused(
+            try_open_vault_with_action(&mut svm, &ctx, id, vault_type, action, beneficiary),
+            "non-quarantine custody open under 0x3F",
+        );
+    }
+    // …also when only bit3 is set.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_CUSTODY_ENTRY);
+    for (id, vault_type, action, beneficiary) in entries {
+        pause::assert_paused(
+            try_open_vault_with_action(&mut svm, &ctx, id, vault_type, action, beneficiary),
+            "non-quarantine custody open under CUSTODY_ENTRY",
+        );
+    }
+    // The pause check runs first. With bit3 clear the non-burn RedemptionQueue
+    // still fails, but on the (independent) realize-action gate: when that
+    // gate reopens for TransferToBeneficiary / BurnAndPayout, the pause above
+    // keeps such a vault a gated custody entry.
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_CUSTODY_ENTRY,
     );
+    let err = try_open_vault_with_action(
+        &mut svm,
+        &ctx,
+        23,
+        VaultType::RedemptionQueue,
+        RealizeAction::TransferToBeneficiary,
+        Pubkey::default(),
+    )
+    .expect_err("non-burn RedemptionQueue");
+    assert_custom_error(&err, 6016); // UnsupportedRealizeAction, not 6000
 
     pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
     let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 1);
@@ -4476,6 +4513,73 @@ fn custody_entry_pause_keeps_the_clawback_quarantine_path_open() {
     open_vault(&mut svm, &ctx, 20, VaultType::DeliveryEscrow, buyer_pk);
 }
 
+/// The quarantine exemption covers only OPENING the burn-only vault (clawback's
+/// destination). A holder deposit into that same RedemptionQueue +
+/// BurnAndAttest vault is a custody entry, gated by bit3 like any other.
+#[test]
+fn custody_entry_pause_gates_deposits_into_a_quarantine_vault() {
+    let (mut svm, ctx) = boot(false);
+    warp_to(&mut svm, 1_000);
+    let owner = ctx.buyer.pubkey();
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(&ctx, 2, open_hook_metas(&ctx, &owner))],
+        "buyer acquires units to deposit",
+    );
+
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+    let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 930);
+    let deposit_ix = |ctx: &Ctx| {
+        let mut metas = acc::DepositToCustodyVault {
+            depositor: owner,
+            share_class: ctx.share_class_pda,
+            custody_vault: vault,
+            mint: ctx.mint_pda,
+            escrow,
+            depositor_share_account: ctx.buyer_share_ata,
+            token_program: TOKEN_2022,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None);
+        metas.extend(open_hook_metas(ctx, &owner));
+        Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::DepositToCustodyVault { amount: 1 }.data(),
+            metas,
+        )
+    };
+
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.buyer], &[deposit_ix(&ctx)]),
+        "quarantine-vault deposit under 0x3F",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_CUSTODY_ENTRY);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.buyer], &[deposit_ix(&ctx)]),
+        "quarantine-vault deposit under CUSTODY_ENTRY",
+    );
+    assert_eq!(token_balance(&svm, &escrow), 0, "escrow untouched");
+
+    // Only bit3 clear: the same deposit lands.
+    pause::pause_only(
+        &mut svm,
+        &ctx.payer,
+        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_CUSTODY_ENTRY,
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_ix(&ctx)],
+        "quarantine-vault deposit",
+    );
+    assert_eq!(token_balance(&svm, &escrow), 1);
+    assert_eq!(
+        load::<asset_registry::CustodyVault>(&svm, &vault).deposited,
+        1
+    );
+}
+
 /// bit4 gates the Rights-Token entries (`create_rights_issuance`,
 /// `publish_milestone`); `claim_milestone` is an exit and stays open.
 #[test]
@@ -4505,6 +4609,18 @@ fn distribution_pause_gates_rights_entries_but_not_milestone_claims() {
         "create_rights_issuance",
     );
 
+    // Funding the rights escrow is fresh emission: bit1 (PRIMARY) gates it on
+    // this destination too, not only on the treasury and custody escrows.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_PRIMARY);
+    pause::assert_paused(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[mint_to_escrow_ix(&ctx, &rights_escrow, &rights_pda, 100)],
+        ),
+        "mint_to_treasury (rights escrow) under PRIMARY",
+    );
+    assert_eq!(token_balance(&svm, &rights_escrow), 0);
     pause::unpause_all(&mut svm, &ctx.payer);
     send(
         &mut svm,

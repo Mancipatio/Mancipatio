@@ -494,6 +494,35 @@ fn admins_set_bits_that_combine_and_only_the_super_admin_clears() {
     );
     assert_eq!(pause::pause_flags(&ctx.svm), 0x0C);
 
+    // Someone else's record never stands in for the signer's own: the seeds
+    // constraint (`["admin", authority]`) rejects it before the handler, for
+    // an Admin borrowing the super admin's record and an outsider borrowing
+    // an active Admin's record alike.
+    let foreign_record = |signer: &Keypair, record_of: &Pubkey| {
+        let mut ix = pause::set_pause_flags_ix(&signer.pubkey(), PAUSE_PRIMARY, 0);
+        ix.accounts[1].pubkey = pause::admin_pda(record_of);
+        ix
+    };
+    expect_code(
+        try_send(
+            &mut ctx.svm,
+            &[&ctx.admin],
+            &[foreign_record(&ctx.admin, &ctx.payer.pubkey())],
+        ),
+        2006,
+        "admin with the super admin's record",
+    );
+    expect_code(
+        try_send(
+            &mut ctx.svm,
+            &[&ctx.outsider],
+            &[foreign_record(&ctx.outsider, &ctx.admin.pubkey())],
+        ),
+        2006,
+        "outsider with an Admin's record",
+    );
+    assert_eq!(pause::pause_flags(&ctx.svm), 0x0C);
+
     // No Admin record at all → Unauthorized, for set and for clear.
     expect_code(
         pause::set_pause_flags(&mut ctx.svm, &ctx.outsider, PAUSE_PRIMARY, 0),
