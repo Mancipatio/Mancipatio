@@ -2,7 +2,17 @@ import { describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
-import { getSaleDecoder, getSaleEncoder, getShareClassDecoder, getShareClassEncoder } from "@/lib/generated/asset_registry";
+import {
+  getAuthorityTransferEncoder,
+  getIssuerDecoder,
+  getIssuerEncoder,
+  getIssuerRecoveryEncoder,
+  getSaleDecoder,
+  getSaleEncoder,
+  getShareClassDecoder,
+  getShareClassEncoder,
+} from "@/lib/generated/asset_registry";
+import { address } from "@solana/kit";
 
 describe("one generated indexer decoder", () => {
   it("covers all 14 existing mirror entities with complete typed non-zero projections", async () => {
@@ -38,5 +48,30 @@ describe("one generated indexer decoder", () => {
     const f = indexerFixtures()[0];
     expect(await decodeIndexerAccount("11111111111111111111111111111111", "11111111111111111111111111111111", f.bytes)).toBeNull();
     expect(await decodeIndexerAccount("11111111111111111111111111111111", INDEXER_PROGRAM, new Uint8Array(8))).toBeNull();
+  });
+});
+
+describe("issuer authority rotation (2C-2)", () => {
+  const key = address("11111111111111111111111111111111");
+  const other = address("SysvarC1ock11111111111111111111111111111111");
+  it("ignores the staged transfer and recovery accounts (no mirror table)", async () => {
+    const recovery = new Uint8Array(getIssuerRecoveryEncoder().encode({
+      issuer: key, currentAuthority: key, newAuthority: other, proposedBy: key,
+      proposedAt: BigInt(1), eta: BigInt(2), expiresAt: BigInt(3), version: 1, bump: 255,
+    }));
+    const transfer = new Uint8Array(getAuthorityTransferEncoder().encode({
+      target: key, currentAuthority: key, newAuthority: other, proposedBy: key, bump: 255,
+    }));
+    expect(await decodeIndexerAccount(String(key), INDEXER_PROGRAM, recovery)).toBeNull();
+    expect(await decodeIndexerAccount(String(key), INDEXER_PROGRAM, transfer)).toBeNull();
+  });
+  it("re-projects a rotated Issuer with the new authority and nothing else changed", async () => {
+    const f = indexerFixtures().find((f) => f.table === "issuers")!;
+    const entity = INDEXER_ENTITIES.find((e) => e.table === "issuers")!;
+    const before = await entity.decode(f.bytes, null);
+    const rotated = new Uint8Array(getIssuerEncoder().encode({ ...getIssuerDecoder().decode(f.bytes), authority: other }));
+    expect(rotated.length).toBe(117);
+    const result = await decodeIndexerAccount(String(before.pda), INDEXER_PROGRAM, rotated);
+    expect(result).toEqual({ table: "issuers", row: { ...before, authority: other } });
   });
 });

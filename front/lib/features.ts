@@ -16,6 +16,13 @@ export type Features = {
   payoutAirdrop: boolean;
   /** Startup (vested payout-vault) raises: /apply option + issuer launchpad. */
   startupRaises: boolean;
+  /**
+   * Issuer authority rotation and timelocked recovery (program 2C-2):
+   * /issuer/rotation, the admin recovery panel, and the sale / payout-vault
+   * sync bundled into close / payout flows. Off hides the UI and stops the
+   * sync bundling (the rollback switch).
+   */
+  issuerRotation: boolean;
 };
 
 export type FeatureName = keyof Features;
@@ -23,6 +30,7 @@ export type FeatureName = keyof Features;
 export const FEATURE_LABELS: Record<FeatureName, string> = {
   payoutAirdrop: "Admin-wallet payout airdrops",
   startupRaises: "Startup raises",
+  issuerRotation: "Issuer key rotation and recovery",
 };
 
 function mainnetOptIn(value: string | undefined): boolean {
@@ -31,12 +39,13 @@ function mainnetOptIn(value: string | undefined): boolean {
 
 export function features(network: Network = detectNetwork()): Features {
   if (network !== "mainnet") {
-    return { payoutAirdrop: true, startupRaises: true };
+    return { payoutAirdrop: true, startupRaises: true, issuerRotation: true };
   }
   // Literal process.env.NEXT_PUBLIC_* reads so Next inlines them client-side.
   return {
     payoutAirdrop: mainnetOptIn(process.env.NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP),
     startupRaises: mainnetOptIn(process.env.NEXT_PUBLIC_FEATURE_STARTUP_RAISES),
+    issuerRotation: mainnetOptIn(process.env.NEXT_PUBLIC_FEATURE_ISSUER_ROTATION),
   };
 }
 

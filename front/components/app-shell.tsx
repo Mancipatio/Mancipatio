@@ -9,6 +9,7 @@ import { LegacyAccountsNotice } from "@/components/legacy-accounts-notice";
 import { TosGate } from "@/components/tos-gate";
 import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
 import { detectNetwork, networkLabel } from "@/lib/network";
+import { features } from "@/lib/features";
 
 const primary = [
   { href: "/", label: "Overview", icon: IconHome },
@@ -32,6 +33,8 @@ const portfolioTabs = [
 const issuerTabs = [
   ["/issuer", "Overview"], ["/issuer/assets", "Assets"], ["/issuer/share-classes", "Share classes"],
   ["/issuer/launchpad", "Sales"], ["/issuer/payouts", "Payout vaults"], ["/issuer/vesting", "Vesting"], ["/issuer/vesting-series", "Vesting series"],
+  // 2C-2: the issuer key's rotation / recovery page (feature-flagged rollback switch).
+  ...(features().issuerRotation ? [["/issuer/rotation", "Authority key"]] : []),
 ];
 const marketTabs = [
   ["/marketplace", "Assets"], ["/marketplace/launchpad", "Primary sales"],

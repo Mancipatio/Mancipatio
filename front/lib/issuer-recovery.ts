@@ -266,3 +266,22 @@ export async function submitIssuerRecovery(
     })
     .send({ abortSignal: AbortSignal.timeout(20_000) });
 }
+
+/**
+ * Which recovery path fits an issuer whose key is lost:
+ * - "registration": an unused (0 assets) Pending or Rejected registration can
+ *   use the instant two-signer `recover_issuer_registration` (/issuer/recovery);
+ * - "timelocked": every other issuer (Verified, or with assets) goes through
+ *   the super admin's 7-day `propose_issuer_recovery`.
+ * Mirrors the program's `IssuerRegistrationNotRecoverable` constraint.
+ */
+export function recoveryPathFor(issuer: {
+  kybStatus: number;
+  assetsCount: bigint | number;
+}): "registration" | "timelocked" {
+  const unused = BigInt(issuer.assetsCount) === BigInt(0);
+  const unverified =
+    issuer.kybStatus === KybStatus.Pending ||
+    issuer.kybStatus === KybStatus.Rejected;
+  return unused && unverified ? "registration" : "timelocked";
+}

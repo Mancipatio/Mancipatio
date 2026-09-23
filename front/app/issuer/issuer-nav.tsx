@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { features } from "@/lib/features";
 
 type Item = { href: string; label: string };
 
@@ -13,6 +14,7 @@ const NAV: Item[] = [
   { href: "/issuer/payouts", label: "Payout vaults" },
   { href: "/issuer/vesting", label: "Vesting" },
   { href: "/issuer/vesting-series", label: "Vesting series" },
+  ...(features().issuerRotation ? [{ href: "/issuer/rotation", label: "Authority key" }] : []),
 ];
 
 export function IssuerNav() {
