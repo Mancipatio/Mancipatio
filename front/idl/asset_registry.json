@@ -828,8 +828,9 @@
       "name": "approve_sale",
       "docs": [
         "Admin approval to open exactly one sale (`share_class`, `sale_id`),",
-        "bounded by payment mint, price range, maximum gross raise, raise type",
-        "and expiry (at most 90 days). Consumed by `open_sale`."
+        "bounded by payment mint, price range, maximum gross raise, raise type,",
+        "Startup payout schedule (cliff / vesting months) and expiry (at most 90",
+        "days). Consumed by `open_sale`."
       ],
       "discriminator": [
         161,
@@ -1043,6 +1044,14 @@
               32
             ]
           }
+        },
+        {
+          "name": "cliff_months",
+          "type": "u8"
+        },
+        {
+          "name": "vesting_months",
+          "type": "u8"
         }
       ]
     },
@@ -6827,7 +6836,9 @@
       "name": "open_sale",
       "docs": [
         "Opens a primary sale of a share class (launchpad), consuming the",
-        "Admin's `SaleApproval` for this `(share_class, sale_id)`."
+        "Admin's `SaleApproval` for this `(share_class, sale_id)`. The approver",
+        "must still be an Admin; the sale must start by the approval's expiry",
+        "and use its exact payout schedule."
       ],
       "discriminator": [
         246,
@@ -7030,6 +7041,32 @@
           "relations": [
             "sale_approval"
           ]
+        },
+        {
+          "name": "approver_admin_record",
+          "docs": [
+            "The approver's Admin record: an approval dies with its approver's Admin",
+            "role (`remove_admin`, or a super-admin rotation, closes the record), so",
+            "a removed or compromised key's approvals cannot be used."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "approved_by"
+              }
+            ]
+          }
         },
         {
           "name": "platform",
@@ -11668,7 +11705,7 @@
     {
       "code": 6126,
       "name": "InvalidSaleApproval",
-      "msg": "Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero"
+      "msg": "Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero, and cliff/vesting 0/0 for Mature or vesting > cliff for Startup"
     },
     {
       "code": 6127,
@@ -11679,6 +11716,16 @@
       "code": 6128,
       "name": "TreasuryMintRequiresAdmin",
       "msg": "Minting into the issuer treasury requires a platform Admin issuer key; the MINT permission only funds custody or rights escrows"
+    },
+    {
+      "code": 6129,
+      "name": "SaleVestingOutsideApproval",
+      "msg": "Sale cliff / vesting months differ from the approved schedule"
+    },
+    {
+      "code": 6130,
+      "name": "SaleStartsAfterApprovalExpiry",
+      "msg": "Sale start is after the approval's expiry"
     }
   ],
   "types": [
@@ -13890,7 +13937,9 @@
         "`approved_by`.",
         "",
         "⚠ Layout: the field order is fixed so `issuer` sits at byte offset 48 (the",
-        "issuer launchpad lists its approvals with a memcmp at that offset)."
+        "issuer launchpad lists its approvals with a memcmp at that offset) and",
+        "`approved_by` at 177 (an Admin's approvals, listed when the Admin is",
+        "removed). Later fields are appended after `version`."
       ],
       "type": {
         "kind": "struct",
@@ -13966,7 +14015,8 @@
           {
             "name": "approved_by",
             "docs": [
-              "The approving Admin; receives the rent on consume / revoke."
+              "The approving Admin; receives the rent on consume / revoke. `open_sale`",
+              "also requires this key to still hold its Admin record."
             ],
             "type": "pubkey"
           },
@@ -13976,6 +14026,21 @@
           },
           {
             "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "cliff_months",
+            "docs": [
+              "Byte 211. The Startup payout schedule the sale must use exactly (the",
+              "reviewed application's terms); both 0 for a Mature raise."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "vesting_months",
+            "docs": [
+              "Byte 212. Startup: greater than `cliff_months`."
+            ],
             "type": "u8"
           }
         ]
@@ -14115,6 +14180,14 @@
           {
             "name": "approved_by",
             "type": "pubkey"
+          },
+          {
+            "name": "cliff_months",
+            "type": "u8"
+          },
+          {
+            "name": "vesting_months",
+            "type": "u8"
           }
         ]
       }

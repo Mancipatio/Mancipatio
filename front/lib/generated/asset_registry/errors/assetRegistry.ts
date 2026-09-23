@@ -266,12 +266,16 @@ export const ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH = 0x17eb; // 6123
 export const ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL = 0x17ec; // 6124
 /** SaleExceedsApprovedRaise: price_per_unit x total_for_sale exceeds the approved maximum gross raise */
 export const ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE = 0x17ed; // 6125
-/** InvalidSaleApproval: Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero */
+/** InvalidSaleApproval: Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero, and cliff/vesting 0/0 for Mature or vesting > cliff for Startup */
 export const ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL = 0x17ee; // 6126
 /** SaleIdAlreadyUsed: A sale with this id already exists for the share class */
 export const ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED = 0x17ef; // 6127
 /** TreasuryMintRequiresAdmin: Minting into the issuer treasury requires a platform Admin issuer key; the MINT permission only funds custody or rights escrows */
 export const ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN = 0x17f0; // 6128
+/** SaleVestingOutsideApproval: Sale cliff / vesting months differ from the approved schedule */
+export const ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL = 0x17f1; // 6129
+/** SaleStartsAfterApprovalExpiry: Sale start is after the approval's expiry */
+export const ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY = 0x17f2; // 6130
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -371,6 +375,8 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__SALE_NOT_STARTED
   | typeof ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL
   | typeof ASSET_REGISTRY_ERROR__SALE_SOLD_OUT
+  | typeof ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY
+  | typeof ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL
   | typeof ASSET_REGISTRY_ERROR__SALE_WINDOW_CLOSED
   | typeof ASSET_REGISTRY_ERROR__SUPPLY_LOCKED
   | typeof ASSET_REGISTRY_ERROR__TOO_MANY_SHARE_CLASSES
@@ -452,7 +458,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY]: `Protocol treasury must be a nonzero key`,
     [ASSET_REGISTRY_ERROR__INVALID_RAISE_PARAMS]: `Invalid raise parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_RIGHTS_BITFIELD]: `Rights bitfield contains undefined bits`,
-    [ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL]: `Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero`,
+    [ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL]: `Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero, and cliff/vesting 0/0 for Mature or vesting > cliff for Startup`,
     [ASSET_REGISTRY_ERROR__INVALID_SALE_PARAMS]: `Invalid sale parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE]: `Sale price per unit must be greater than zero`,
     [ASSET_REGISTRY_ERROR__INVALID_SHARE_CLASS_INDEX]: `Share class index must equal the asset's current share_classes_count`,
@@ -504,6 +510,8 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__SALE_NOT_STARTED]: `Sale has not started yet`,
     [ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL]: `Sale price per unit is outside the approved range`,
     [ASSET_REGISTRY_ERROR__SALE_SOLD_OUT]: `Sale does not have enough units left`,
+    [ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY]: `Sale start is after the approval's expiry`,
+    [ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL]: `Sale cliff / vesting months differ from the approved schedule`,
     [ASSET_REGISTRY_ERROR__SALE_WINDOW_CLOSED]: `Sale window has closed`,
     [ASSET_REGISTRY_ERROR__SUPPLY_LOCKED]: `Share class supply is locked — minting is closed`,
     [ASSET_REGISTRY_ERROR__TOO_MANY_SHARE_CLASSES]: `Share class limit reached for this asset`,

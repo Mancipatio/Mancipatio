@@ -477,6 +477,7 @@ fn open_sale_ix(env: &Env, a: &OpenArgs) -> Instruction {
             system_program: system_program::ID,
             sale_approval: a.approval,
             approved_by: a.approved_by,
+            approver_admin_record: pause::admin_pda(&a.approved_by),
             platform: platform(),
         }
         .to_account_metas(None),
@@ -535,9 +536,9 @@ fn approve_requires_a_live_admin_record() {
     assert_eq!(stored.application_hash, [7u8; 32]);
     assert_eq!(stored.approved_by, env.admin2.pubkey());
     assert_eq!(stored.version, asset_registry::STATE_VERSION);
-    // The launchpad lists approvals by memcmp(issuer @ 48) and dataSize 211.
+    // The launchpad lists approvals by memcmp(issuer @ 48) and dataSize 213.
     let raw = svm.get_account(&approval).unwrap();
-    assert_eq!(raw.data.len(), 211);
+    assert_eq!(raw.data.len(), 213);
     assert_eq!(&raw.data[48..80], env.issuer.as_ref());
 }
 
@@ -667,7 +668,7 @@ fn open_sale_consumes_the_approval_and_refunds_the_approver() {
     let t = terms(&svm);
     let approval = approve(&mut svm, &env, &env.admin2, 1, t).unwrap();
     let rent = lamports(&svm, &approval);
-    assert_eq!(rent, svm.minimum_balance_for_rent_exemption(211));
+    assert_eq!(rent, svm.minimum_balance_for_rent_exemption(213));
     let admin2_before = lamports(&svm, &env.admin2.pubkey());
 
     send(
@@ -1049,4 +1050,136 @@ fn admin_issuer_treasury_mint_still_succeeds_but_mint_permission_alone_does_not(
         "TreasuryMintRequiresAdmin",
     );
     assert_eq!(token_balance(&svm, &treasury), 5);
+}
+
+// ── review follow-ups ───────────────────────────────────────────────────────
+
+#[test]
+fn open_sale_refuses_an_approval_whose_approver_lost_the_admin_role() {
+    let (mut svm, env) = boot();
+    let t = terms(&svm);
+    approve(&mut svm, &env, &env.admin2, 1, t).unwrap();
+    send(
+        &mut svm,
+        &[&env.payer],
+        &[remove_admin_ix(&env.payer.pubkey(), &env.admin2.pubkey())],
+        "remove admin2",
+    );
+    let err = try_open(
+        &mut svm,
+        &env,
+        &OpenArgs::new(&env, 1, 10, 100, &env.admin2),
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("Custom(3012)") && err.contains("approver_admin_record"),
+        "removed approver: {err}"
+    );
+    // Any remaining Admin can still revoke it; a removed Admin cannot.
+    let approval = sale_approval_pda(&env.share_class, 1);
+    let err = sale_approval::try_revoke_sale_approval(
+        &mut svm,
+        &env.admin2,
+        &approval,
+        &env.admin2.pubkey(),
+    )
+    .unwrap_err();
+    assert!(err.contains("Custom(3012)"), "removed admin revoke: {err}");
+    sale_approval::try_revoke_sale_approval(&mut svm, &env.payer, &approval, &env.admin2.pubkey())
+        .expect("super admin revokes");
+}
+
+#[test]
+fn approval_fixes_the_payout_schedule_and_the_start() {
+    let (mut svm, env) = boot();
+    // Mature needs 0/0; Startup needs vesting > cliff.
+    for (what, t) in [
+        ("mature with vesting", terms(&svm).with_schedule(0, 12)),
+        (
+            "startup without vesting",
+            Terms::covering(&svm, 10, 100, RaiseType::Startup).with_schedule(3, 3),
+        ),
+    ] {
+        let err = approve(&mut svm, &env, &env.payer, 1, t).unwrap_err();
+        assert!(err.contains("InvalidSaleApproval"), "{what}: {err}");
+    }
+    let t = Terms::covering(&svm, 10, 100, RaiseType::Startup).with_schedule(6, 24);
+    approve(&mut svm, &env, &env.payer, 1, t).unwrap();
+    let stored: SaleApproval = load(&svm, &sale_approval_pda(&env.share_class, 1));
+    assert_eq!((stored.cliff_months, stored.vesting_months), (6, 24));
+    let open = |cliff: u8, vesting: u8, start_ts: i64| {
+        let sale = sale_pda(&env.share_class, 1);
+        let mut ix = open_sale_ix(
+            &env,
+            &OpenArgs {
+                raise_type: RaiseType::Startup,
+                ..OpenArgs::new(&env, 1, 10, 100, &env.payer)
+            },
+        );
+        ix.data = ixd::OpenSale {
+            sale_id: 1,
+            price_per_unit: 10,
+            total_for_sale: 100,
+            start_ts,
+            end_ts: 0,
+            raise_type: RaiseType::Startup,
+            cliff_months: cliff,
+            vesting_months: vesting,
+        }
+        .data();
+        let _ = sale;
+        ix
+    };
+    assert_error(
+        try_send(&mut svm, &[&env.payer], &[open(0, 1, 0)]),
+        6129,
+        "SaleVestingOutsideApproval",
+    );
+    assert_error(
+        try_send(&mut svm, &[&env.payer], &[open(6, 24, t.expires_at + 1)]),
+        6130,
+        "SaleStartsAfterApprovalExpiry",
+    );
+    try_send(&mut svm, &[&env.payer], &[open(6, 24, t.expires_at)])
+        .expect("exact schedule, start at expiry");
+}
+
+#[test]
+fn an_approval_binds_its_share_class_and_its_sale_pda() {
+    let (mut svm, env) = boot();
+    let t = terms(&svm);
+    // A second class of the same asset, with a mint.
+    let class_b = Pubkey::find_program_address(
+        &[asset_registry::SHARE_CLASS_SEED, env.asset.as_ref(), &[1u8]],
+        &asset_registry::ID,
+    )
+    .0;
+    // (a) An approval for class A (id 1) cannot open class B's sale id 1: the
+    // approval PDA is derived from the share class the sale uses.
+    approve(&mut svm, &env, &env.payer, 1, t).unwrap();
+    let mut ix = open_sale_ix(&env, &OpenArgs::new(&env, 1, 10, 100, &env.payer));
+    ix.accounts[3].pubkey = class_b; // share_class
+    ix.accounts[6].pubkey = sale_pda(&class_b, 1); // sale
+    let err = try_send(&mut svm, &[&env.payer], &[ix]).unwrap_err();
+    assert!(
+        err.contains("Custom(3012)") || err.contains("ConstraintSeeds"),
+        "class B: {err}"
+    );
+    assert!(!sale_approval::is_closed(
+        &svm,
+        &sale_approval_pda(&env.share_class, 1)
+    ));
+    // (d) approve_sale with a `sale` that is not the Sale PDA of the id.
+    let mut ix = sale_approval::approve_sale_ix(
+        &env.payer.pubkey(),
+        &env.issuer,
+        &env.asset,
+        &env.share_class,
+        &env.payment_mint,
+        2,
+        t,
+    );
+    ix.accounts[6].pubkey = Pubkey::new_unique();
+    let err = try_send(&mut svm, &[&env.payer], &[ix]).unwrap_err();
+    assert!(err.contains("ConstraintSeeds"), "random sale: {err}");
 }

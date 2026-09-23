@@ -490,6 +490,7 @@ fn open_sale_on_draft_rejected() {
                 system_program: system_program::ID,
                 sale_approval: approval,
                 approved_by: ctx.payer.pubkey(),
+                approver_admin_record: sale_approval::admin_pda(&ctx.payer.pubkey()),
                 platform: pause::platform_pda(),
             }
             .to_account_metas(None),

@@ -296,8 +296,9 @@ pub mod asset_registry {
     }
 
     /// Admin approval to open exactly one sale (`share_class`, `sale_id`),
-    /// bounded by payment mint, price range, maximum gross raise, raise type
-    /// and expiry (at most 90 days). Consumed by `open_sale`.
+    /// bounded by payment mint, price range, maximum gross raise, raise type,
+    /// Startup payout schedule (cliff / vesting months) and expiry (at most 90
+    /// days). Consumed by `open_sale`.
     #[allow(clippy::too_many_arguments)]
     pub fn approve_sale(
         ctx: Context<ApproveSale>,
@@ -308,6 +309,8 @@ pub mod asset_registry {
         raise_type: RaiseType,
         expires_at: i64,
         application_hash: [u8; 32],
+        cliff_months: u8,
+        vesting_months: u8,
     ) -> Result<()> {
         instructions::handle_approve_sale(
             ctx,
@@ -318,6 +321,8 @@ pub mod asset_registry {
             raise_type,
             expires_at,
             application_hash,
+            cliff_months,
+            vesting_months,
         )
     }
 
@@ -327,7 +332,9 @@ pub mod asset_registry {
     }
 
     /// Opens a primary sale of a share class (launchpad), consuming the
-    /// Admin's `SaleApproval` for this `(share_class, sale_id)`.
+    /// Admin's `SaleApproval` for this `(share_class, sale_id)`. The approver
+    /// must still be an Admin; the sale must start by the approval's expiry
+    /// and use its exact payout schedule.
     pub fn open_sale(
         ctx: Context<OpenSale>,
         sale_id: u64,

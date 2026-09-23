@@ -70,9 +70,11 @@ pub struct ApproveSale<'info> {
 
 /// Records an Admin's approval to open exactly one sale of `share_class` under
 /// `sale_id`, bounded by payment mint, price range, maximum gross raise, raise
-/// type and expiry. `open_sale` consumes (and closes) it. No `Platform`
-/// account: approving is not an entry flow, so the emergency pause does not
-/// apply (the consuming `open_sale` is still `PAUSE_PRIMARY`-gated).
+/// type, payout schedule (Startup cliff / vesting months) and expiry.
+/// `open_sale` consumes (and closes) it. No `Platform` account: approving is
+/// not an entry flow, so the emergency pause does not apply (the consuming
+/// `open_sale` is still `PAUSE_PRIMARY`-gated).
+#[allow(clippy::too_many_arguments)]
 pub fn handle_approve_sale(
     ctx: Context<ApproveSale>,
     sale_id: u64,
@@ -82,6 +84,8 @@ pub fn handle_approve_sale(
     raise_type: RaiseType,
     expires_at: i64,
     application_hash: [u8; 32],
+    cliff_months: u8,
+    vesting_months: u8,
 ) -> Result<()> {
     // The payment-leg rule `open_sale` applies (via `payment_escrow_space`):
     // an approval for a mint the sale could never use is refused up front.
@@ -101,6 +105,14 @@ pub fn handle_approve_sale(
             && expires_at <= latest_expiry,
         RegistryError::InvalidSaleApproval
     );
+    // The payout schedule the sale must use. A Startup raise closes into a
+    // PayoutVault (vesting > cliff, see open_payout_vault); a Mature raise has
+    // none, so both must be 0 and the sale cannot carry one either.
+    let schedule_ok = match raise_type {
+        RaiseType::Mature => cliff_months == 0 && vesting_months == 0,
+        RaiseType::Startup => vesting_months > cliff_months,
+    };
+    require!(schedule_ok, RegistryError::InvalidSaleApproval);
 
     let approval_key = ctx.accounts.sale_approval.key();
     let share_class = ctx.accounts.share_class.key();
@@ -122,6 +134,8 @@ pub fn handle_approve_sale(
     approval.approved_by = approved_by;
     approval.bump = ctx.bumps.sale_approval;
     approval.version = STATE_VERSION;
+    approval.cliff_months = cliff_months;
+    approval.vesting_months = vesting_months;
 
     emit!(SaleApproved {
         sale_approval: approval_key,
@@ -136,6 +150,8 @@ pub fn handle_approve_sale(
         expires_at,
         application_hash,
         approved_by,
+        cliff_months,
+        vesting_months,
     });
     msg!(
         "Sale {} approved: max gross {} at {}..={} per unit, expires {}",

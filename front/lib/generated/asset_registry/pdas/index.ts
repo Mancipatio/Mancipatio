@@ -9,6 +9,7 @@
 export * from "./acceptPlatformAdminNewAdminRecord";
 export * from "./acceptPlatformAdminTransfer";
 export * from "./adminRecord";
+export * from "./approverAdminRecord";
 export * from "./asset";
 export * from "./assetEscrow";
 export * from "./batch";

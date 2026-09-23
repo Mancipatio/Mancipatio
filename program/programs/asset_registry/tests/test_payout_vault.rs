@@ -428,7 +428,8 @@ fn setup_sale(
 
     // The payer is the super admin (with an Admin record): it approves the
     // sale it then opens as the issuer authority.
-    let terms = sale_approval::Terms::covering(svm, price_per_unit, 1_000_000, raise_type);
+    let terms = sale_approval::Terms::covering(svm, price_per_unit, 1_000_000, raise_type)
+        .with_schedule(cliff_months, vesting_months);
     let approval = sale_approval::approve_sale(
         svm,
         &payer,
@@ -468,6 +469,7 @@ fn setup_sale(
                 system_program: system_program::ID,
                 sale_approval: approval,
                 approved_by: payer.pubkey(),
+                approver_admin_record: sale_approval::admin_pda(&payer.pubkey()),
                 platform: pause::platform_pda(),
             }
             .to_account_metas(None),
@@ -2210,6 +2212,7 @@ fn open_sale_ix(ctx: &SaleCtx, sale_id: u64, price_per_unit: u64) -> Instruction
             system_program: system_program::ID,
             sale_approval: sale_approval::sale_approval_pda(&ctx.share_class, sale_id),
             approved_by: ctx.payer.pubkey(),
+            approver_admin_record: sale_approval::admin_pda(&ctx.payer.pubkey()),
             platform: pause::platform_pda(),
         }
         .to_account_metas(None),

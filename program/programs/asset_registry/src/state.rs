@@ -537,7 +537,9 @@ pub struct Sale {
 /// `approved_by`.
 ///
 /// ⚠ Layout: the field order is fixed so `issuer` sits at byte offset 48 (the
-/// issuer launchpad lists its approvals with a memcmp at that offset).
+/// issuer launchpad lists its approvals with a memcmp at that offset) and
+/// `approved_by` at 177 (an Admin's approvals, listed when the Admin is
+/// removed). Later fields are appended after `version`.
 #[account]
 #[derive(InitSpace)]
 pub struct SaleApproval {
@@ -558,10 +560,16 @@ pub struct SaleApproval {
     pub expires_at: i64,
     /// sha256 of the canonical reviewed-application snapshot (kept off-chain).
     pub application_hash: [u8; 32],
-    /// The approving Admin; receives the rent on consume / revoke.
+    /// The approving Admin; receives the rent on consume / revoke. `open_sale`
+    /// also requires this key to still hold its Admin record.
     pub approved_by: Pubkey,
     pub bump: u8,
     pub version: u8,
+    /// Byte 211. The Startup payout schedule the sale must use exactly (the
+    /// reviewed application's terms); both 0 for a Mature raise.
+    pub cliff_months: u8,
+    /// Byte 212. Startup: greater than `cliff_months`.
+    pub vesting_months: u8,
 }
 
 /// Emitted by `approve_sale`.
@@ -579,6 +587,8 @@ pub struct SaleApproved {
     pub expires_at: i64,
     pub application_hash: [u8; 32],
     pub approved_by: Pubkey,
+    pub cliff_months: u8,
+    pub vesting_months: u8,
 }
 
 /// Emitted by `revoke_sale_approval`.
@@ -1347,10 +1357,11 @@ mod tests {
     }
 
     /// `SaleApproval` is listed by the issuer launchpad with a memcmp on
-    /// `issuer` at byte 48 and `dataSize` 211; both are pinned here.
+    /// `issuer` at byte 48 and `dataSize` 213, and by approver at byte 177;
+    /// all are pinned here.
     #[test]
     fn sale_approval_layout_is_pinned() {
-        assert_eq!(8 + SaleApproval::INIT_SPACE, 211);
+        assert_eq!(8 + SaleApproval::INIT_SPACE, 213);
         let approval = SaleApproval {
             share_class: Pubkey::new_from_array([1; 32]),
             sale_id: 0x0807_0605_0403_0201,
@@ -1365,10 +1376,12 @@ mod tests {
             approved_by: Pubkey::new_from_array([10; 32]),
             bump: 254,
             version: 1,
+            cliff_months: 6,
+            vesting_months: 24,
         };
         let mut data = Vec::new();
         approval.try_serialize(&mut data).unwrap();
-        assert_eq!(data.len(), 211);
+        assert_eq!(data.len(), 213);
         assert_eq!(&data[..8], SaleApproval::DISCRIMINATOR);
         assert_eq!(data[8..40], [1; 32]);
         assert_eq!(data[40..48], 0x0807_0605_0403_0201u64.to_le_bytes());
@@ -1383,6 +1396,8 @@ mod tests {
         assert_eq!(data[177..209], [10; 32]);
         assert_eq!(data[209], 254);
         assert_eq!(data[210], 1);
+        assert_eq!(data[211], 6);
+        assert_eq!(data[212], 24);
     }
 
     /// Sale v2 appends two fields; every v1 offset stays where it was.

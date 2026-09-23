@@ -256,10 +256,14 @@ pub enum RegistryError {
     SalePriceOutsideApproval,
     #[msg("price_per_unit x total_for_sale exceeds the approved maximum gross raise")]
     SaleExceedsApprovedRaise,
-    #[msg("Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero")]
+    #[msg("Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero, and cliff/vesting 0/0 for Mature or vesting > cliff for Startup")]
     InvalidSaleApproval,
     #[msg("A sale with this id already exists for the share class")]
     SaleIdAlreadyUsed,
     #[msg("Minting into the issuer treasury requires a platform Admin issuer key; the MINT permission only funds custody or rights escrows")]
     TreasuryMintRequiresAdmin,
+    #[msg("Sale cliff / vesting months differ from the approved schedule")]
+    SaleVestingOutsideApproval,
+    #[msg("Sale start is after the approval's expiry")]
+    SaleStartsAfterApprovalExpiry,
 }

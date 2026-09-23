@@ -58,13 +58,21 @@ pub struct Terms {
     pub raise_type: RaiseType,
     pub expires_at: i64,
     pub application_hash: [u8; 32],
+    /// The payout schedule the sale must use: 0/0 for Mature.
+    pub cliff_months: u8,
+    pub vesting_months: u8,
 }
 
 impl Terms {
     /// Exactly one price and exactly `price * total` gross, expiring one day
-    /// after `now` (read from the SVM clock).
+    /// after `now` (read from the SVM clock). Startup terms default to a
+    /// 0-month cliff and 12 months of vesting (`with_schedule` changes it).
     pub fn covering(svm: &LiteSVM, price: u64, total: u64, raise_type: RaiseType) -> Self {
         let now = svm.get_sysvar::<Clock>().unix_timestamp;
+        let (cliff_months, vesting_months) = match raise_type {
+            RaiseType::Mature => (0, 0),
+            RaiseType::Startup => (0, 12),
+        };
         Self {
             max_gross_raise: price.checked_mul(total).expect("test terms overflow"),
             min_price_per_unit: price,
@@ -72,6 +80,17 @@ impl Terms {
             raise_type,
             expires_at: now + 86_400,
             application_hash: [7u8; 32],
+            cliff_months,
+            vesting_months,
+        }
+    }
+
+    /// The same terms with another payout schedule.
+    pub fn with_schedule(self, cliff_months: u8, vesting_months: u8) -> Self {
+        Self {
+            cliff_months,
+            vesting_months,
+            ..self
         }
     }
 }
@@ -97,6 +116,8 @@ pub fn approve_sale_ix(
             raise_type: terms.raise_type,
             expires_at: terms.expires_at,
             application_hash: terms.application_hash,
+            cliff_months: terms.cliff_months,
+            vesting_months: terms.vesting_months,
         }
         .data(),
         asset_registry::accounts::ApproveSale {

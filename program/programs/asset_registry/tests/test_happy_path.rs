@@ -857,6 +857,7 @@ fn happy_path_registry_lifecycle() {
                 system_program: system_program::ID,
                 sale_approval: approval,
                 approved_by: payer.pubkey(),
+                approver_admin_record: sale_approval::admin_pda(&payer.pubkey()),
                 platform: pause::platform_pda(),
             }
             .to_account_metas(None),

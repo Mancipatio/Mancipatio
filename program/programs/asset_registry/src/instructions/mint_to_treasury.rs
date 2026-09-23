@@ -207,7 +207,11 @@ pub fn handle_mint_to_treasury(ctx: Context<MintToTreasury>, amount: u64) -> Res
     // alone covers only the admin-created escrow parents bound above
     // (burn-only custody vaults, rights issuances), whose exits burn or are
     // KYC-checked claims. External issuers issue to the public through an
-    // approved sale (`approve_sale` → `open_sale` → `buy`).
+    // approved sale (`approve_sale` → `open_sale` → `buy`). Granting an
+    // external issuer key the global Admin role to pass this check is NOT a
+    // supported path: Admin is platform-wide (it could approve its own sales,
+    // revoke others' approvals, open custody vaults, ...). A one-shot,
+    // admin-created treasury-mint approval is the way to add that if needed.
     if bound_to_authority {
         require!(
             crate::util::is_active_admin(

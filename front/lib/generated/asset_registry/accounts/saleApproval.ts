@@ -78,10 +78,20 @@ export type SaleApproval = {
   expiresAt: bigint;
   /** sha256 of the canonical reviewed-application snapshot (kept off-chain). */
   applicationHash: ReadonlyUint8Array;
-  /** The approving Admin; receives the rent on consume / revoke. */
+  /**
+   * The approving Admin; receives the rent on consume / revoke. `open_sale`
+   * also requires this key to still hold its Admin record.
+   */
   approvedBy: Address;
   bump: number;
   version: number;
+  /**
+   * Byte 211. The Startup payout schedule the sale must use exactly (the
+   * reviewed application's terms); both 0 for a Mature raise.
+   */
+  cliffMonths: number;
+  /** Byte 212. Startup: greater than `cliff_months`. */
+  vestingMonths: number;
 };
 
 export type SaleApprovalArgs = {
@@ -104,10 +114,20 @@ export type SaleApprovalArgs = {
   expiresAt: number | bigint;
   /** sha256 of the canonical reviewed-application snapshot (kept off-chain). */
   applicationHash: ReadonlyUint8Array;
-  /** The approving Admin; receives the rent on consume / revoke. */
+  /**
+   * The approving Admin; receives the rent on consume / revoke. `open_sale`
+   * also requires this key to still hold its Admin record.
+   */
   approvedBy: Address;
   bump: number;
   version: number;
+  /**
+   * Byte 211. The Startup payout schedule the sale must use exactly (the
+   * reviewed application's terms); both 0 for a Mature raise.
+   */
+  cliffMonths: number;
+  /** Byte 212. Startup: greater than `cliff_months`. */
+  vestingMonths: number;
 };
 
 /** Gets the encoder for {@link SaleApprovalArgs} account data. */
@@ -128,6 +148,8 @@ export function getSaleApprovalEncoder(): FixedSizeEncoder<SaleApprovalArgs> {
       ["approvedBy", getAddressEncoder()],
       ["bump", getU8Encoder()],
       ["version", getU8Encoder()],
+      ["cliffMonths", getU8Encoder()],
+      ["vestingMonths", getU8Encoder()],
     ]),
     (value) => ({ ...value, discriminator: SALE_APPROVAL_DISCRIMINATOR }),
   );
@@ -150,6 +172,8 @@ export function getSaleApprovalDecoder(): FixedSizeDecoder<SaleApproval> {
     ["approvedBy", getAddressDecoder()],
     ["bump", getU8Decoder()],
     ["version", getU8Decoder()],
+    ["cliffMonths", getU8Decoder()],
+    ["vestingMonths", getU8Decoder()],
   ]);
 }
 
@@ -215,5 +239,5 @@ export async function fetchAllMaybeSaleApproval(
 }
 
 export function getSaleApprovalSize(): number {
-  return 211;
+  return 213;
 }

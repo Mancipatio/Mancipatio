@@ -18,6 +18,8 @@ import {
   getStructEncoder,
   getU64Decoder,
   getU64Encoder,
+  getU8Decoder,
+  getU8Encoder,
   transformEncoder,
   type AccountMeta,
   type AccountSignerMeta,
@@ -117,6 +119,8 @@ export type ApproveSaleInstructionData = {
   raiseType: RaiseType;
   expiresAt: bigint;
   applicationHash: ReadonlyUint8Array;
+  cliffMonths: number;
+  vestingMonths: number;
 };
 
 export type ApproveSaleInstructionDataArgs = {
@@ -127,6 +131,8 @@ export type ApproveSaleInstructionDataArgs = {
   raiseType: RaiseTypeArgs;
   expiresAt: number | bigint;
   applicationHash: ReadonlyUint8Array;
+  cliffMonths: number;
+  vestingMonths: number;
 };
 
 export function getApproveSaleInstructionDataEncoder(): FixedSizeEncoder<ApproveSaleInstructionDataArgs> {
@@ -140,6 +146,8 @@ export function getApproveSaleInstructionDataEncoder(): FixedSizeEncoder<Approve
       ["raiseType", getRaiseTypeEncoder()],
       ["expiresAt", getI64Encoder()],
       ["applicationHash", fixEncoderSize(getBytesEncoder(), 32)],
+      ["cliffMonths", getU8Encoder()],
+      ["vestingMonths", getU8Encoder()],
     ]),
     (value) => ({ ...value, discriminator: APPROVE_SALE_DISCRIMINATOR }),
   );
@@ -155,6 +163,8 @@ export function getApproveSaleInstructionDataDecoder(): FixedSizeDecoder<Approve
     ["raiseType", getRaiseTypeDecoder()],
     ["expiresAt", getI64Decoder()],
     ["applicationHash", fixDecoderSize(getBytesDecoder(), 32)],
+    ["cliffMonths", getU8Decoder()],
+    ["vestingMonths", getU8Decoder()],
   ]);
 }
 
@@ -205,6 +215,8 @@ export type ApproveSaleAsyncInput<
   raiseType: ApproveSaleInstructionDataArgs["raiseType"];
   expiresAt: ApproveSaleInstructionDataArgs["expiresAt"];
   applicationHash: ApproveSaleInstructionDataArgs["applicationHash"];
+  cliffMonths: ApproveSaleInstructionDataArgs["cliffMonths"];
+  vestingMonths: ApproveSaleInstructionDataArgs["vestingMonths"];
 };
 
 export async function getApproveSaleInstructionAsync<
@@ -360,6 +372,8 @@ export type ApproveSaleInput<
   raiseType: ApproveSaleInstructionDataArgs["raiseType"];
   expiresAt: ApproveSaleInstructionDataArgs["expiresAt"];
   applicationHash: ApproveSaleInstructionDataArgs["applicationHash"];
+  cliffMonths: ApproveSaleInstructionDataArgs["cliffMonths"];
+  vestingMonths: ApproveSaleInstructionDataArgs["vestingMonths"];
 };
 
 export function getApproveSaleInstruction<

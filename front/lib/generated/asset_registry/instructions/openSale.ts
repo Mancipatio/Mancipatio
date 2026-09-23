@@ -37,6 +37,7 @@ import {
   type WritableSignerAccount,
 } from "@solana/kit";
 import {
+  findApproverAdminRecordPda,
   findPlatformPda,
   findProceedsPda,
   findSaleApprovalPda,
@@ -79,6 +80,7 @@ export type OpenSaleInstruction<
     "11111111111111111111111111111111",
   TAccountSaleApproval extends string | AccountMeta<string> = string,
   TAccountApprovedBy extends string | AccountMeta<string> = string,
+  TAccountApproverAdminRecord extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
@@ -122,6 +124,9 @@ export type OpenSaleInstruction<
       TAccountApprovedBy extends string
         ? WritableAccount<TAccountApprovedBy>
         : TAccountApprovedBy,
+      TAccountApproverAdminRecord extends string
+        ? ReadonlyAccount<TAccountApproverAdminRecord>
+        : TAccountApproverAdminRecord,
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
@@ -206,6 +211,7 @@ export type OpenSaleAsyncInput<
   TAccountSystemProgram extends string = string,
   TAccountSaleApproval extends string = string,
   TAccountApprovedBy extends string = string,
+  TAccountApproverAdminRecord extends string = string,
   TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
@@ -230,6 +236,12 @@ export type OpenSaleAsyncInput<
    * approval's rent. May be the same key as `authority`.
    */
   approvedBy: Address<TAccountApprovedBy>;
+  /**
+   * The approver's Admin record: an approval dies with its approver's Admin
+   * role (`remove_admin`, or a super-admin rotation, closes the record), so
+   * a removed or compromised key's approvals cannot be used.
+   */
+  approverAdminRecord?: Address<TAccountApproverAdminRecord>;
   /**
    * Emergency-pause gate (read-only). Keep LAST among named accounts: old
    * account indices and the remaining-accounts hook tail keep their positions.
@@ -258,6 +270,7 @@ export async function getOpenSaleInstructionAsync<
   TAccountSystemProgram extends string,
   TAccountSaleApproval extends string,
   TAccountApprovedBy extends string,
+  TAccountApproverAdminRecord extends string,
   TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
@@ -274,6 +287,7 @@ export async function getOpenSaleInstructionAsync<
     TAccountSystemProgram,
     TAccountSaleApproval,
     TAccountApprovedBy,
+    TAccountApproverAdminRecord,
     TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
@@ -292,6 +306,7 @@ export async function getOpenSaleInstructionAsync<
     TAccountSystemProgram,
     TAccountSaleApproval,
     TAccountApprovedBy,
+    TAccountApproverAdminRecord,
     TAccountPlatform
   >
 > {
@@ -316,6 +331,10 @@ export async function getOpenSaleInstructionAsync<
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     saleApproval: { value: input.saleApproval ?? null, isWritable: true },
     approvedBy: { value: input.approvedBy ?? null, isWritable: true },
+    approverAdminRecord: {
+      value: input.approverAdminRecord ?? null,
+      isWritable: false,
+    },
     platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -348,6 +367,11 @@ export async function getOpenSaleInstructionAsync<
       saleId: expectSome(args.saleId),
     });
   }
+  if (!accounts.approverAdminRecord.value) {
+    accounts.approverAdminRecord.value = await findApproverAdminRecordPda({
+      approvedBy: expectAddress(accounts.approvedBy.value),
+    });
+  }
   if (!accounts.platform.value) {
     accounts.platform.value = await findPlatformPda();
   }
@@ -367,6 +391,7 @@ export async function getOpenSaleInstructionAsync<
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.saleApproval),
       getAccountMeta(accounts.approvedBy),
+      getAccountMeta(accounts.approverAdminRecord),
       getAccountMeta(accounts.platform),
     ],
     data: getOpenSaleInstructionDataEncoder().encode(
@@ -387,6 +412,7 @@ export async function getOpenSaleInstructionAsync<
     TAccountSystemProgram,
     TAccountSaleApproval,
     TAccountApprovedBy,
+    TAccountApproverAdminRecord,
     TAccountPlatform
   >);
 }
@@ -404,6 +430,7 @@ export type OpenSaleInput<
   TAccountSystemProgram extends string = string,
   TAccountSaleApproval extends string = string,
   TAccountApprovedBy extends string = string,
+  TAccountApproverAdminRecord extends string = string,
   TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
@@ -428,6 +455,12 @@ export type OpenSaleInput<
    * approval's rent. May be the same key as `authority`.
    */
   approvedBy: Address<TAccountApprovedBy>;
+  /**
+   * The approver's Admin record: an approval dies with its approver's Admin
+   * role (`remove_admin`, or a super-admin rotation, closes the record), so
+   * a removed or compromised key's approvals cannot be used.
+   */
+  approverAdminRecord: Address<TAccountApproverAdminRecord>;
   /**
    * Emergency-pause gate (read-only). Keep LAST among named accounts: old
    * account indices and the remaining-accounts hook tail keep their positions.
@@ -456,6 +489,7 @@ export function getOpenSaleInstruction<
   TAccountSystemProgram extends string,
   TAccountSaleApproval extends string,
   TAccountApprovedBy extends string,
+  TAccountApproverAdminRecord extends string,
   TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
@@ -472,6 +506,7 @@ export function getOpenSaleInstruction<
     TAccountSystemProgram,
     TAccountSaleApproval,
     TAccountApprovedBy,
+    TAccountApproverAdminRecord,
     TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
@@ -489,6 +524,7 @@ export function getOpenSaleInstruction<
   TAccountSystemProgram,
   TAccountSaleApproval,
   TAccountApprovedBy,
+  TAccountApproverAdminRecord,
   TAccountPlatform
 > {
   // Program address.
@@ -512,6 +548,10 @@ export function getOpenSaleInstruction<
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
     saleApproval: { value: input.saleApproval ?? null, isWritable: true },
     approvedBy: { value: input.approvedBy ?? null, isWritable: true },
+    approverAdminRecord: {
+      value: input.approverAdminRecord ?? null,
+      isWritable: false,
+    },
     platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -543,6 +583,7 @@ export function getOpenSaleInstruction<
       getAccountMeta(accounts.systemProgram),
       getAccountMeta(accounts.saleApproval),
       getAccountMeta(accounts.approvedBy),
+      getAccountMeta(accounts.approverAdminRecord),
       getAccountMeta(accounts.platform),
     ],
     data: getOpenSaleInstructionDataEncoder().encode(
@@ -563,6 +604,7 @@ export function getOpenSaleInstruction<
     TAccountSystemProgram,
     TAccountSaleApproval,
     TAccountApprovedBy,
+    TAccountApproverAdminRecord,
     TAccountPlatform
   >);
 }
@@ -596,10 +638,16 @@ export type ParsedOpenSaleInstruction<
      */
     approvedBy: TAccountMetas[11];
     /**
+     * The approver's Admin record: an approval dies with its approver's Admin
+     * role (`remove_admin`, or a super-admin rotation, closes the record), so
+     * a removed or compromised key's approvals cannot be used.
+     */
+    approverAdminRecord: TAccountMetas[12];
+    /**
      * Emergency-pause gate (read-only). Keep LAST among named accounts: old
      * account indices and the remaining-accounts hook tail keep their positions.
      */
-    platform: TAccountMetas[12];
+    platform: TAccountMetas[13];
   };
   data: OpenSaleInstructionData;
 };
@@ -612,7 +660,7 @@ export function parseOpenSaleInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedOpenSaleInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 13) {
+  if (instruction.accounts.length < 14) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -637,6 +685,7 @@ export function parseOpenSaleInstruction<
       systemProgram: getNextAccount(),
       saleApproval: getNextAccount(),
       approvedBy: getNextAccount(),
+      approverAdminRecord: getNextAccount(),
       platform: getNextAccount(),
     },
     data: getOpenSaleInstructionDataDecoder().decode(instruction.data),

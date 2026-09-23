@@ -4,8 +4,8 @@ use anchor_spl::token_interface::{Mint, TokenInterface};
 use crate::constants::*;
 use crate::error::RegistryError;
 use crate::state::{
-    Asset, AssetStatus, Issuer, RaiseType, Sale, SaleApproval, SaleApprovalConsumed, SaleStatus,
-    ShareClass,
+    Admin, Asset, AssetStatus, Issuer, RaiseType, Sale, SaleApproval, SaleApprovalConsumed,
+    SaleStatus, ShareClass,
 };
 
 #[derive(Accounts)]
@@ -87,6 +87,16 @@ pub struct OpenSale<'info> {
     #[account(mut)]
     pub approved_by: UncheckedAccount<'info>,
 
+    /// The approver's Admin record: an approval dies with its approver's Admin
+    /// role (`remove_admin`, or a super-admin rotation, closes the record), so
+    /// a removed or compromised key's approvals cannot be used.
+    #[account(
+        seeds = [ADMIN_SEED, approved_by.key().as_ref()],
+        bump = approver_admin_record.bump,
+        constraint = approver_admin_record.admin == approved_by.key() @ RegistryError::SaleApprovalMismatch,
+    )]
+    pub approver_admin_record: Box<Account<'info, Admin>>,
+
     /// Emergency-pause gate (read-only). Keep LAST among named accounts: old
     /// account indices and the remaining-accounts hook tail keep their positions.
     #[account(
@@ -142,6 +152,18 @@ pub fn handle_open_sale(
     require!(
         raise_type == approval.raise_type,
         RegistryError::SaleApprovalMismatch
+    );
+    // The reviewed payout schedule (how fast a Startup's proceeds reach the
+    // founder) is part of the approval, not the issuer's choice.
+    require!(
+        cliff_months == approval.cliff_months && vesting_months == approval.vesting_months,
+        RegistryError::SaleVestingOutsideApproval
+    );
+    // The sale must start (buys become possible) within the approval window;
+    // an approval cannot be parked in a sale that starts years later.
+    require!(
+        start_ts <= approval.expires_at,
+        RegistryError::SaleStartsAfterApprovalExpiry
     );
     require!(
         price_per_unit >= approval.min_price_per_unit
