@@ -23,7 +23,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
   beforeAll(async () => {
     try {
       db.initialize(); db.query("create role anon; create role authenticated; create role service_role bypassrls;");
-      for (const file of ["0002_indexer.sql", "0014_asset_profiles.sql", "0015_issuer_profiles.sql", "0037_indexer_integrity.sql", "0038_indexer_composite_key.sql", "0039_indexer_events_wallets.sql", "0040_indexer_kyc.sql", "0042_indexer_deposit_ledgers.sql", "0047_indexer_retry.sql", "0064_platform_pause_flags.sql", "0067_sales_sale_approval.sql", "0068_custody_vault_kyc_registry.sql"]) {
+      for (const file of ["0002_indexer.sql", "0014_asset_profiles.sql", "0015_issuer_profiles.sql", "0037_indexer_integrity.sql", "0038_indexer_composite_key.sql", "0039_indexer_events_wallets.sql", "0040_indexer_kyc.sql", "0042_indexer_deposit_ledgers.sql", "0047_indexer_retry.sql", "0064_platform_pause_flags.sql", "0067_sales_sale_approval.sql", "0068_custody_vault_kyc_registry.sql", "0069_indexer_closed_rows.sql"]) {
         db.query(readFileSync(join(process.cwd(), "supabase/migrations", file), "utf8"));
       }
       for (const fixture of indexerFixtures()) {
@@ -34,7 +34,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
   }, 30_000);
   afterAll(() => { db.close(); rows = []; });
   beforeEach(() => {
-    db.query(`truncate ${INDEXER_ENTITIES.map((e) => `public.${e.table}`).join(",")},public.indexer_account_versions,public.indexer_jobs,public.indexer_events,public.indexer_sync_state,public.asset_profiles,public.issuer_profiles;`);
+    db.query(`truncate ${INDEXER_ENTITIES.map((e) => `public.${e.table}`).join(",")},public.indexer_account_versions,public.indexer_jobs,public.indexer_events,public.indexer_sync_state,public.asset_profiles,public.issuer_profiles,public.indexer_closed_rows;`);
   });
   it("inserts and refreshes full generated typed rows in every existing mirror", () => {
     expect(JSON.parse(db.query(apply(20))).written).toBe(14);
@@ -105,5 +105,35 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
     expect(() => db.query(`set role ${role}; ${apply(20)}`)).toThrow();
     expect(() => db.query(`set role ${role}; select * from public.indexer_jobs;`)).toThrow();
     expect(() => db.query(`set role ${role}; select * from public.indexer_account_versions;`)).toThrow();
+  });
+  it("0069 archives a closed offer or custody vault row once, but never a KYC entry", () => {
+    db.query(apply(20));
+    const pdaOf = (table: string) => String(rows.find((r) => r.table === table)!.row.pda);
+    const closed = (table: string) => db.query(`select count(*) from public.indexer_closed_rows where table_name='${table}';`);
+    for (const table of ["offers", "custody_vaults"]) {
+      const pda = pdaOf(table);
+      const raw = rows.find((r) => r.table === table)!.row.raw as { base64: string };
+      db.query(apply(21, [], [pda]));
+      expect(db.query(`select count(*) from public.${table};`)).toBe("0");
+      expect(closed(table)).toBe("1");
+      expect(db.query(`select network||':'||pda||':'||closed_slot from public.indexer_closed_rows where table_name='${table}';`)).toBe(`devnet:${pda}:20`);
+      expect(db.query(`select row->'raw'->>'base64' from public.indexer_closed_rows where table_name='${table}';`)).toBe(raw.base64);
+      // Re-mirrored and closed again (e.g. a replayed snapshot): still one row.
+      db.query(apply(22, [rows.find((r) => r.table === table)!]));
+      db.query(apply(23, [], [pda]));
+      expect(closed(table)).toBe("1");
+      expect(db.query(`select closed_slot from public.indexer_closed_rows where table_name='${table}';`)).toBe("22");
+    }
+    const entry = pdaOf("kyc_entries");
+    db.query(apply(24, [], [entry]));
+    expect(db.query("select count(*) from public.kyc_entries;")).toBe("0");
+    expect(db.query("select count(*) from public.indexer_closed_rows;")).toBe("2");
+    // Browser roles read the archive (like the mirrors) but cannot write it:
+    // even with Supabase's default table grants, RLS has no write policy.
+    db.query("grant usage on schema public to anon, authenticated; grant select, insert, update, delete on public.indexer_closed_rows to anon, authenticated;");
+    for (const role of ["anon", "authenticated"]) {
+      expect(db.query(`set role ${role}; select count(*) from public.indexer_closed_rows;`)).toBe("2");
+      expect(() => db.query(`set role ${role}; insert into public.indexer_closed_rows(network,table_name,pda,row) values ('devnet','offers','x','{}');`)).toThrow();
+    }
   });
 });

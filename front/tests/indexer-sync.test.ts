@@ -22,6 +22,7 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({
 import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
 import { reconcileAllIndexerAccounts, reconcileIndexerJobs, refreshIndexedAddresses } from "@/lib/server/indexer-sync";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
+import { CLOSED_ACCOUNT_TAG } from "@/lib/closed-account";
 import { getAddressDecoder } from "@solana/kit";
 async function snapshots() {
   return Promise.all(indexerFixtures().map(async (f) => {
@@ -96,5 +97,13 @@ describe("finalized indexer snapshots and retries", () => {
   });
   it("rejects a truncated discriminator for a program-owned snapshot", async () => {
     await expect(decodeIndexerAccount("11111111111111111111111111111111", INDEXER_PROGRAM, new Uint8Array(3))).rejects.toThrow(/discriminator/);
+  });
+  it("sends a 2D tombstone (8-byte CLOSED_ACCOUNT_TAG) and a missing account to p_closed", async () => {
+    const [a, b] = await snapshots();
+    const tombstone = { owner: String(INDEXER_PROGRAM), data: [Buffer.from(CLOSED_ACCOUNT_TAG).toString("base64"), "base64"] };
+    expect(await decodeIndexerAccount(a.pubkey, INDEXER_PROGRAM, CLOSED_ACCOUNT_TAG)).toBeNull();
+    mocks.multiple.mockResolvedValue({ context: { slot: BigInt(70) }, value: [tombstone, null] });
+    await refreshIndexedAddresses([a.pubkey, b.pubkey], 3, "signature", deadline());
+    expect(applied()[0][1]).toMatchObject({ p_rows: [], p_closed: [a.pubkey, b.pubkey], p_slot: 70 });
   });
 });

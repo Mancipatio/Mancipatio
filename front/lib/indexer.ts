@@ -246,3 +246,80 @@ export async function loadProposalsFromIndexer(): Promise<Proposal[]> {
 export async function loadVoteRecordsFromIndexer(): Promise<VoteRecord[]> {
   return loadExtra("vote_records", getVoteRecordDecoder(), 0);
 }
+
+// ──────────────────────────────────────────────────────────────────────────
+// 2D: history of accounts whose rent was reclaimed (0069 indexer_closed_rows).
+// ──────────────────────────────────────────────────────────────────────────
+
+/**
+ * `data` with the archived (rent-reclaimed) offers appended, for history and
+ * statistics views. A tombstoned offer is always terminal, so it never shows
+ * up as takeable. Live rows win on a duplicate key; archive errors are
+ * swallowed (history is best effort, the live data is not).
+ */
+export async function withClosedOffers(data: NetworkData): Promise<NetworkData> {
+  const closed = await loadClosedRows(getSupabase(), "offers", getOfferDecoder()).catch(
+    () => [],
+  );
+  const live = new Set(data.offers.map((o) => `${o.shareClass}-${o.offerId}`));
+  const extra = closed
+    .map((row) => row.data)
+    .filter((o) => !live.has(`${o.shareClass}-${o.offerId}`));
+  return extra.length ? { ...data, offers: [...data.offers, ...extra] } : data;
+}
+
+export type ClosedRowTable = "offers" | "custody_vaults" | "otc_deals";
+export type ClosedRow<T> = {
+  pda: string;
+  data: T;
+  closed: true;
+  closedAt: string | null;
+};
+
+/**
+ * Rows archived when their account was tombstoned by `reclaim_rent`: offers
+ * and custody vaults are copied by the 0069 delete trigger when the indexer
+ * drops the mirror row, OTC deals by the admin archive route before the
+ * reclaim. Each row keeps the account's last `raw.base64`, decoded here with
+ * the Codama decoder. History only — never a live-state source. A row that no
+ * longer decodes is skipped.
+ */
+export async function loadClosedRows<T>(
+  sb: ReturnType<typeof getSupabase>,
+  table: ClosedRowTable,
+  decoder: { decode: (bytes: Uint8Array) => T },
+): Promise<ClosedRow<T>[]> {
+  if (!sb) return [];
+  const out: ClosedRow<T>[] = [];
+  for (let from = 0; ; from += INDEXER_PAGE) {
+    const { data, error } = await sb
+      .from("indexer_closed_rows")
+      .select("pda,row,closed_at")
+      .eq("network", detectNetwork())
+      .eq("table_name", table)
+      .order("pda", { ascending: true })
+      .range(from, from + INDEXER_PAGE - 1);
+    if (error) throw new Error(`Could not load closed ${table}: ${error.message}`);
+    const rows = (data ?? []) as {
+      pda: string;
+      row: { raw?: { base64?: string } | null } | null;
+      closed_at: string | null;
+    }[];
+    for (const row of rows) {
+      const b64 = row.row?.raw?.base64;
+      if (!b64) continue;
+      try {
+        out.push({
+          pda: row.pda,
+          data: decoder.decode(base64ToBytes(b64)),
+          closed: true,
+          closedAt: row.closed_at,
+        });
+      } catch {
+        // An undecodable archive row is history we cannot show; skip it.
+      }
+    }
+    if (rows.length < INDEXER_PAGE) break;
+  }
+  return out;
+}
