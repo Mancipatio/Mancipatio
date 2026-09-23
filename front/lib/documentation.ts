@@ -141,8 +141,9 @@ export const DOCUMENTATION_GROUPS: DocumentationGroup[] = [
         href: "/security",
         title: "Security & controls",
         description:
-          "Program authorities, transfer controls and custody mechanisms.",
-        keywords: "blocklist clawback transfer hook",
+          "Program authorities, transfer controls, custody mechanisms and when tokens can be clawed back.",
+        keywords:
+          "blocklist clawback transfer hook permanent delegate quarantine sanctions seize",
       },
       {
         href: "/risks",

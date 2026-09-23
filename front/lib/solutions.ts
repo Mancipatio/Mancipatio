@@ -91,7 +91,7 @@ export const SOLUTIONS: Solution[] = [
       },
       {
         step: "Screen on transfer",
-        note: "Each transfer checks source and destination against the blocklist.",
+        note: "Each transfer checks the sending wallet against the blocklist.",
       },
       {
         step: "Settle or reject",
@@ -99,7 +99,7 @@ export const SOLUTIONS: Solution[] = [
       },
       {
         step: "Clawback path",
-        note: "The permanent delegate stands ready for court-ordered action.",
+        note: "Blocklisted or revoked holders' units can be moved into a burn-only quarantine.",
       },
     ],
   },
