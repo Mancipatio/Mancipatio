@@ -62,7 +62,7 @@ import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import {
   bookTreasuryMintWhenFinalized,
-  releaseSaleApproval,
+  releaseWhenExpired,
   reserveTreasuryMint,
 } from "@/lib/sale-approvals";
 
@@ -815,6 +815,7 @@ function ShareClassDetail({
       `Minting ${amount} units to the issuer treasury…`,
     );
     let reservationId: string | null = null;
+    let lastValidBlockHeight: bigint | null = null;
     let sent = false;
     try {
       const reserved = await reserveTreasuryMint(conn.wallet, {
@@ -853,7 +854,13 @@ function ShareClassDetail({
         tokenProgram: TOKEN_2022_ADDRESS,
         amount,
       });
+      // A known lifetime: after a failed send the reservation is released
+      // only once this blockhash can no longer land (server-proven).
+      const lifetime = (await client.runtime.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
+      lastValidBlockHeight = lifetime.lastValidBlockHeight;
       const sig = await tx.send({
+        lifetime,
+        prepareTransaction: { blockhashReset: false },
         instructions: [createAtaIx, mintIx],
         feePayer: signer,
       });
@@ -902,9 +909,10 @@ function ShareClassDetail({
         "Failed to mint",
         explainSendError(err),
       );
-      if (reservationId && !sent) {
-        // Nothing reached the chain: free the reserved capacity again.
-        await releaseSaleApproval(conn.wallet, reservationId, "tx_failed").catch(() => undefined);
+      if (reservationId && !sent && lastValidBlockHeight !== null) {
+        // The mint may still land until its blockhash expires; the server
+        // releases the reservation only after that (the worker otherwise).
+        void releaseWhenExpired(conn.wallet, reservationId, lastValidBlockHeight);
       }
     }
   }
@@ -1310,6 +1318,8 @@ function ShareClassDetail({
         open={confirmMint}
         onClose={() => setConfirmMint(false)}
         onConfirm={(reason) => mintToTreasury(reason)}
+        // The raise-limit ledger needs 5-1000 characters (treasury-mint route).
+        reasonMinLength={5}
         title="Mint to treasury"
         kind="info"
         confirmLabel="Mint"

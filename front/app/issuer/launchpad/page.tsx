@@ -47,6 +47,7 @@ import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { upsertListing } from "@/lib/launchpad";
+import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import {
   isApprovalLive,
   listIssuerSaleApprovals,
@@ -63,9 +64,6 @@ import {
  *  payout vault from this page — proceeds stay in the program escrow. */
 const STARTUP_RAISES = features().startupRaises;
 
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
-
 const CLASS_TYPE = [
   "Common",
   "Preferred A",
@@ -76,7 +74,7 @@ const CLASS_TYPE = [
   "Royalty tier",
 ];
 
-type ScMeta = { assetName: string; assetId: string; classIndex: number };
+type ScMeta = { assetName: string; assetId: string; classIndex: number; sc: ShareClass };
 
 export default function MyLaunchpadPage() {
   return (
@@ -142,6 +140,7 @@ function LaunchpadInner() {
                 assetName: a.name,
                 assetId: a.assetId,
                 classIndex: sc.classIndex,
+                sc,
               });
               mySc.push(sc);
             }
@@ -236,6 +235,7 @@ function LaunchpadInner() {
     try {
       const signer = walletSigner(conn.wallet);
       const salePda = await findSalePda(s.shareClass, s.saleId);
+      const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(client.runtime.rpc, s.paymentMint);
 
       if (isStartup) {
         // STARTUP raises do NOT sweep proceeds to the founder. Instead the
@@ -248,7 +248,7 @@ function LaunchpadInner() {
           sale: salePda,
           proceeds: s.proceeds,
           paymentMint: s.paymentMint,
-          paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+          paymentTokenProgram,
           metadataHash: new Uint8Array(32),
         });
         const sig = await tx.send({
@@ -267,7 +267,7 @@ function LaunchpadInner() {
       // straight to the founder's payment ATA and close the sale.
       const [destAta] = await findAssociatedTokenPda({
         owner: wallet,
-        tokenProgram: TOKEN_CLASSIC_ADDRESS,
+        tokenProgram: paymentTokenProgram,
         mint: s.paymentMint,
       });
       const createDestAtaIx =
@@ -275,7 +275,7 @@ function LaunchpadInner() {
           payer: signer,
           owner: wallet,
           mint: s.paymentMint,
-          tokenProgram: TOKEN_CLASSIC_ADDRESS,
+          tokenProgram: paymentTokenProgram,
         });
       // Emergency-pause gate (read-only) — the last named account.
       const [platform] = await findPlatformPda();
@@ -286,7 +286,7 @@ function LaunchpadInner() {
         proceeds: s.proceeds,
         paymentMint: s.paymentMint,
         destination: destAta,
-        paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+        paymentTokenProgram,
       });
       const sig = await tx.send({
         instructions: [createDestAtaIx, closeIx],
@@ -495,7 +495,6 @@ function LaunchpadInner() {
         (approvals && approvals.length > 0 ? (
           <OpenSaleModal
             issuerPda={issuerPda}
-            mintableScs={mintableScs}
             scPdaMap={scPdaMap}
             approvals={approvals}
             preselectApplicationId={applicationId}
@@ -638,7 +637,6 @@ const digits = (s: string) => /^\d+$/.test(s.trim());
 
 function OpenSaleModal({
   issuerPda,
-  mintableScs,
   scPdaMap,
   approvals,
   preselectApplicationId,
@@ -646,7 +644,6 @@ function OpenSaleModal({
   onSuccess,
 }: {
   issuerPda: Address;
-  mintableScs: ShareClass[];
   scPdaMap: Map<string, ScMeta>;
   approvals: SaleApprovalAccount[];
   preselectApplicationId: string | null;
@@ -695,17 +692,20 @@ function OpenSaleModal({
   const approval = approvals.find((a) => a.address === selected) ?? null;
   const info = approval ? (mine?.get(approval.address) ?? null) : null;
   const meta = approval ? (scPdaMap.get(approval.shareClass.toString()) ?? null) : null;
-  const selectedSc = meta ? (mintableScs.find((x) => x.classIndex === meta.classIndex) ?? null) : null;
+  // The approved share class itself (resolved by its PDA, never by class
+  // index alone: two assets can both have a class #0).
+  const selectedSc = meta && meta.sc.mintInitialized ? meta.sc : null;
 
   const [pricePerUnit, setPricePerUnit] = useState("");
   const [totalForSale, setTotalForSale] = useState("");
   const [endTs, setEndTs] = useState("");
 
-  // Locked by the approval.
+  // Locked by the approval, including the payout schedule (on-chain since the
+  // approval carries it; open_sale requires it exactly).
   const raiseType = approval?.raiseType ?? RaiseType.Mature;
   const isStartup = raiseType === RaiseType.Startup;
-  const cliffMonths = isStartup ? (info?.cliff_months ?? null) : 0;
-  const vestingMonths = isStartup ? (info?.vesting_months ?? null) : 0;
+  const cliffMonths: number | null = approval ? approval.cliffMonths : null;
+  const vestingMonths: number | null = approval ? approval.vestingMonths : null;
   // A Startup raise closes into a PayoutVault (open_payout_vault), which the
   // program rejects unless vesting > cliff and vesting > 0.
   const startupTermsMissing = isStartup && (cliffMonths === null || vestingMonths === null);
@@ -743,6 +743,8 @@ function OpenSaleModal({
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
       const signer = walletSigner(conn.wallet);
+      // The payment mint comes from the approval (classic SPL or Token-2022).
+      const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(client.runtime.rpc, approval.paymentMint);
       // The approval's PDA is derived from (share class, sale id); its rent
       // returns to the approving admin (approved_by).
       const ix = await getOpenSaleInstructionAsync({
@@ -752,7 +754,7 @@ function OpenSaleModal({
         shareClass: approval.shareClass,
         mint: selectedSc.mint,
         paymentMint: approval.paymentMint,
-        paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+        paymentTokenProgram,
         saleId,
         pricePerUnit: price,
         totalForSale: total,
@@ -837,7 +839,7 @@ function OpenSaleModal({
 
   const label = (a: SaleApprovalAccount) => {
     const m = scPdaMap.get(a.shareClass.toString());
-    const sc = m ? mintableScs.find((x) => x.classIndex === m.classIndex) : undefined;
+    const sc = m?.sc;
     const company = mine?.get(a.address)?.company_name;
     return `${company ? `${company} · ` : ""}${m?.assetName ?? "Share class"} · #${m?.classIndex ?? "?"} ${CLASS_TYPE[sc?.classType ?? 0]} · sale #${a.saleId}`;
   };
@@ -907,7 +909,7 @@ function OpenSaleModal({
           {mineError && (
             <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
               The approval&apos;s application details could not be loaded ({mineError}). The sale can still be opened,
-              but it will not be linked to your application listing{isStartup ? ", and a startup sale needs its vesting terms" : ""}.
+              but it will not be linked to your application listing.
             </p>
           )}
           {isStartup && (
@@ -1008,8 +1010,8 @@ function OpenSaleModal({
             </label>
           </div>
           <p className="text-[11px] text-slate-400">
-            Payment token program is classic SPL Token (USDC is classic SPL on
-            Solana). Opening the sale uses up the approval.
+            The payment token (and its token program) is fixed by the approval.
+            Opening the sale uses up the approval.
           </p>
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">

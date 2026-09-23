@@ -21,7 +21,7 @@ const WHOLE = BigInt(1_000_000); // 6-decimal payment mints
 type Reserve = {
   saleId?: number; spv?: string | null; issuer?: string; app?: string | null; mint?: string; decimals?: number;
   maxGross?: bigint; min?: bigint; max?: bigint; raiseType?: string; expires?: string; by?: string; hash?: string;
-  approval?: string; sale?: string;
+  approval?: string; sale?: string; cliff?: number; vesting?: number;
 };
 function reserveSql(o: Reserve = {}) {
   const id = o.saleId ?? 1;
@@ -32,7 +32,7 @@ function reserveSql(o: Reserve = {}) {
     '${o.issuer ?? ISSUER}',${lit(o.spv === undefined ? SPV : o.spv)},${lit(o.app ?? null)},'{"v":1}'::jsonb,
     '${o.hash ?? HASH}','${o.mint ?? EURC}',${o.decimals ?? 6},${o.maxGross ?? BigInt(1_000) * WHOLE},
     ${o.min ?? BigInt(1)},${o.max ?? BigInt(10)},'${o.raiseType ?? "mature"}',
-    ${o.expires ?? "'2099-01-01T00:00:00Z'"},'${o.by ?? "admin-wallet"}')`;
+    ${o.expires ?? "'2099-01-01T00:00:00Z'"},'${o.by ?? "admin-wallet"}',${o.cliff ?? 0},${o.vesting ?? 0})`;
 }
 const reserve = (o: Reserve = {}) => json(reserveSql(o));
 const capacity = (subject = `spv:${SPV}`) => json(`select public.sale_capacity('devnet','${subject}')`);
@@ -200,10 +200,10 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     expect(() =>
       sql(`insert into public.sale_capacity_reservations(network,kind,share_class_pda,sale_id,approval_pda,sale_pda,issuer_pda,
         spv_id,subject,application_snapshot,application_hash,payment_mint,payment_decimals,max_gross_raise,min_price_per_unit,
-        max_price_per_unit,raise_type,expires_at,amount_eur,fx_rate,fx_kind,reserved_by)
+        max_price_per_unit,raise_type,cliff_months,vesting_months,expires_at,amount_eur,fx_rate,fx_kind,reserved_by)
         select network,kind,share_class_pda,sale_id,approval_pda,sale_pda,issuer_pda,spv_id,subject,application_snapshot,
         application_hash,payment_mint,payment_decimals,max_gross_raise,min_price_per_unit,max_price_per_unit,raise_type,
-        expires_at,amount_eur,fx_rate,fx_kind,reserved_by from public.sale_capacity_reservations where id='${again.id}'`),
+        cliff_months,vesting_months,expires_at,amount_eur,fx_rate,fx_kind,reserved_by from public.sale_capacity_reservations where id='${again.id}'`),
     ).toThrow(/duplicate key/);
   });
 
@@ -219,6 +219,65 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     expect(() => sql(`select public.release_sale_reservation('${c.id}','revoked',null)`)).toThrow(/RESERVATION_NOT_RELEASABLE/);
     expect(() => sql(`select public.book_sale_reservation('${r.id}',1)`)).toThrow(/RESERVATION_NOT_CONSUMED/);
     expect(() => sql(`select public.release_sale_reservation('${c.id}','closed_unsold',null)`)).toThrow(/INVALID_RELEASE_REASON/);
+  });
+
+  it("grows (never refuses) a consumption larger than the reservation, flagged as adopted", () => {
+    const r = reserve({ saleId: 1, maxGross: BigInt(100) * WHOLE, max: BigInt(100) * WHOLE });
+    const grown = json(`select public.consume_sale_reservation('${r.id}','${row(r.id).sale_pda}',${BigInt(150) * WHOLE})`);
+    expect(grown).toMatchObject({ status: "consumed", amount_eur: 150, adopted: true, grew: true });
+    expect(String(grown.last_error)).toMatch(/larger than its reservation/);
+    expect(row(r.id).max_gross_raise).toBe(150_000_000);
+    expect(json(`select public.book_sale_reservation('${r.id}',${BigInt(150) * WHOLE})`)).toMatchObject({ status: "booked" });
+  });
+
+  it("adopts the chain: other terms, a released reservation that landed, or an approval nobody reserved", () => {
+    const adopt = (o: { approval?: string; sale?: string; saleId?: number; gross?: bigint; by?: string; hash?: string }) =>
+      json(`select public.adopt_sale_approval('devnet','${SC}',${o.saleId ?? 1},'${o.approval ?? `${"G".repeat(40)}002`}',
+        '${o.sale ?? `${"H".repeat(40)}002`}','${ASSET}','${ISSUER}','${SPV}','${EURC}',${o.gross ?? BigInt(100) * WHOLE},1,10,
+        'mature',0,0,'2099-01-01T00:00:00Z','${o.hash ?? HASH}','${o.by ?? "admin-wallet"}','test')`);
+    // Same terms: nothing to do.
+    const r = reserve({ saleId: 1, maxGross: BigInt(100) * WHOLE });
+    expect(adopt({ approval: String(row(r.id).approval_pda), sale: String(row(r.id).sale_pda) })).toMatchObject({ action: "none" });
+    // Larger on-chain terms: counted at them, flagged.
+    const bigger = adopt({ approval: String(row(r.id).approval_pda), sale: String(row(r.id).sale_pda), gross: BigInt(400) * WHOLE, by: "other-admin" });
+    expect(bigger).toMatchObject({ action: "adopted_terms", amount_eur: 400, adopted: true, reserved_by: "other-admin" });
+    expect(bigger.adopted_from).toMatchObject({ max_gross_raise: String(BigInt(100) * WHOLE) });
+    // A released reservation whose approval landed anyway is reactivated.
+    const late = reserve({ saleId: 2, maxGross: BigInt(50) * WHOLE });
+    sql(`select public.release_sale_reservation('${late.id}','tx_failed',null)`);
+    expect(capacity()).toMatchObject({ reserved: 400 });
+    expect(adopt({ saleId: 2, approval: String(row(late.id).approval_pda), sale: String(row(late.id).sale_pda), gross: BigInt(50) * WHOLE }))
+      .toMatchObject({ id: late.id, action: "reactivated", status: "reserved" });
+    expect(capacity()).toMatchObject({ reserved: 450 });
+    // An approval nobody reserved gets a row, even past the cap.
+    const orphan = adopt({ saleId: 9, approval: b58("P"), sale: b58("Q"), gross: BigInt(3_000_000) * WHOLE, hash: "cd".repeat(32) });
+    expect(orphan).toMatchObject({ action: "inserted", adopted: true, over_cap: true, application_id: null, amount_eur: 3000000 });
+    expect(capacity()).toMatchObject({ reserved: 3000450 });
+  });
+
+  it("one application backs one sale; a startup approval carries the application's schedule", () => {
+    const app = (type = "mature", extra = "") =>
+      sql(`insert into public.launch_applications(applicant_wallet,raise_type,company_name,one_liner,category,raise_amount,
+        equity_offered,status,network${extra ? ",cliff_months,vesting_months" : ""}) values ('wallet-${type}-${Math.random()}',
+        '${type}','Acme','One line','equity',1000000,5,'approved','devnet'${extra}) returning id`);
+    const mature = app();
+    const first = reserve({ saleId: 1, app: mature, maxGross: BigInt(100) * WHOLE });
+    expect(() => reserve({ saleId: 2, app: mature, maxGross: BigInt(100) * WHOLE })).toThrow(/APPLICATION_ALREADY_APPROVED/);
+    sql(`select public.release_sale_reservation('${first.id}','revoked',null)`);
+    expect(reserve({ saleId: 2, app: mature, maxGross: BigInt(100) * WHOLE })).toMatchObject({ existing: false });
+    const linked = app();
+    sql(`update public.launch_applications set linked_sale_pubkey='${b58("R")}' where id='${linked}'`);
+    expect(() => reserve({ saleId: 3, app: linked })).toThrow(/APPLICATION_ALREADY_APPROVED/);
+    const startup = app("startup", ",6,24");
+    expect(() => reserve({ saleId: 4, app: startup, raiseType: "startup", cliff: 0, vesting: 12 })).toThrow(/SCHEDULE_MISMATCH/);
+    expect(() => reserve({ saleId: 4, raiseType: "mature", cliff: 1, vesting: 2 })).toThrow(/INVALID_TERMS/);
+    expect(reserve({ saleId: 4, app: startup, raiseType: "startup", cliff: 6, vesting: 24 })).toMatchObject({ existing: false });
+  });
+
+  it("an SPV subject must belong to the network", () => {
+    sql(`update public.spvs set network='mainnet' where id='${SPV}'`);
+    expect(() => reserve({ saleId: 1 })).toThrow(/SPV_NOT_FOUND/);
+    expect(() => capacity()).toThrow(/SPV_NOT_FOUND/);
   });
 
   it("checks the linked application: approved, same network and raise type, amount within the raise", () => {

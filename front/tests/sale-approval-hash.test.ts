@@ -22,6 +22,8 @@ const TERMS: SaleApprovalTerms = {
   minPricePerUnit: BigInt(1_000_000),
   maxPricePerUnit: BigInt(1_200_000),
   raiseType: "mature",
+  cliffMonths: 0,
+  vestingMonths: 0,
   expiresAt: BigInt(1_790_000_000),
 };
 const APP = {
@@ -43,10 +45,10 @@ const EXPECTED_JSON =
   '"expires_at":"1790000000","issuer":"Issuer111111111111111111111111111111111111","kind":"application",' +
   '"max_gross_raise":"250000000000","max_price_per_unit":"1200000","min_price_per_unit":"1000000","network":"devnet",' +
   '"payment_mint":"EURCmint11111111111111111111111111111111111","raise_amount":"250000","raise_type":"mature",' +
-  '"reviewed_at":"2026-09-20T10:00:00.000Z","revision_count":"2","sale_id":"3",' +
+  '"reviewed_at":"2026-09-20T10:00:00.000Z","revision_count":"2","sale_cliff_months":"0","sale_id":"3","sale_vesting_months":"0",' +
   '"share_class":"ShareC1ass111111111111111111111111111111111","v":1,"vesting_months":"0"}';
 /** `printf '%s' "$EXPECTED_JSON" | shasum -a 256` */
-const EXPECTED_HASH = "8948b72bb5f61d80ec1d1e624e0a081e3b693cb67fb05cf43d8fcb23341e9e14";
+const EXPECTED_HASH = "27ac2d306f902cf52c7153503163c82fdd1fd1e23581ff77405cd013c1d1d606";
 
 describe("sale approval application hash", () => {
   it("canonicalizes the reviewed application and the approved terms", () => {

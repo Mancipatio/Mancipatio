@@ -4,8 +4,9 @@
 //
 // "Approve sale": reserve the EUR value against the raise cap (server, under a
 // per-subject lock) → approve_sale (this admin's wallet) → confirm (server
-// compares the on-chain approval with the reservation). A failed send releases
-// the reservation. "Revoke": revoke_sale_approval (any admin; rent returns to
+// compares the on-chain approval with the reservation). After a failed send
+// the reservation is released once the transaction's blockhash has expired
+// (it may still land until then). "Revoke": revoke_sale_approval (any admin; rent returns to
 // the approver) → release. The retry worker finishes any step left undone.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
@@ -35,6 +36,7 @@ import {
   listShareClassSaleApprovals,
   readFxRates,
   releaseSaleApproval,
+  releaseWhenExpired,
   reserveSaleApproval,
   saleCapacityFor,
   toBaseUnits,
@@ -222,6 +224,10 @@ function ApproveSaleModal({
   const [capacityError, setCapacityError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const raiseType = app.raise_type === "startup" ? "startup" : "mature";
+  // The payout schedule the approval fixes on-chain: the application's for a
+  // startup raise, none (0/0) for a mature one.
+  const cliffMonths = raiseType === "startup" ? app.cliff_months : 0;
+  const vestingMonths = raiseType === "startup" ? app.vesting_months : 0;
 
   // The applicant's issuer(s): share classes whose issuer authority is the
   // applicant wallet (or the wallet already linked to the application). The
@@ -313,6 +319,7 @@ function ApproveSaleModal({
     setBusy(true);
     const pendingId = toast.showPending(`Approving sale #${saleId}…`);
     let reservationId: string | null = null;
+    let lastValidBlockHeight: bigint | null = null;
     let sent = false;
     try {
       const expiresAt = Math.floor(Date.now() / 1000) + Math.min(daysNum * 86_400, SALE_APPROVAL_MAX_TTL_SECS - 3_600);
@@ -326,6 +333,8 @@ function ApproveSaleModal({
         max_price_per_unit: max.toString(),
         raise_type: raiseType,
         expires_at: String(expiresAt),
+        cliff_months: cliffMonths,
+        vesting_months: vestingMonths,
       });
       reservationId = reserved.reservation_id;
       const signer = walletSigner(session);
@@ -343,8 +352,19 @@ function ApproveSaleModal({
         raiseType: raiseType === "startup" ? RaiseType.Startup : RaiseType.Mature,
         expiresAt: BigInt(expiresAt),
         applicationHash: hash,
+        cliffMonths,
+        vestingMonths,
       });
-      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      // A known lifetime: if the send fails, the reservation is released only
+      // once this blockhash can no longer land (server-proven).
+      const lifetime = (await rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
+      lastValidBlockHeight = lifetime.lastValidBlockHeight;
+      const sig = await tx.send({
+        instructions: [ix],
+        feePayer: signer,
+        lifetime,
+        prepareTransaction: { blockhashReset: false },
+      });
       sent = true;
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Sale approved" });
@@ -371,8 +391,13 @@ function ApproveSaleModal({
       toast.dismiss(pendingId);
       toast.showError("Sale approval failed", explainSendError(err));
       if (reservationId && !sent) {
-        // Nothing reached the chain: free the reserved capacity again.
-        await releaseSaleApproval(session, reservationId, "tx_failed").catch(() => undefined);
+        if (lastValidBlockHeight === null) {
+          // Failed before any transaction existed.
+          await releaseSaleApproval(session, reservationId, "tx_failed").catch(() => undefined);
+        } else {
+          // The transaction may still land until its blockhash expires.
+          void releaseWhenExpired(session, reservationId, lastValidBlockHeight);
+        }
       }
     } finally {
       setBusy(false);

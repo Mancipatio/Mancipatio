@@ -30,14 +30,17 @@ import {
   SaleStatus,
   fetchMaybeSale,
   fetchMaybeSaleApproval,
+  fetchMaybeShareClass,
   getMintToTreasuryInstructionDataDecoder,
   type Sale,
   type SaleApproval,
 } from "@/lib/generated/asset_registry";
 import { detectNetwork } from "@/lib/network";
+import { findSalePda } from "@/lib/pdas";
 import { getServerRpc } from "@/lib/server/rpc";
 import { SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { listLiveApprovals, readApprovalAndSale, type LiveApproval } from "@/lib/server/sale-capacity-chain";
 
 export const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -62,6 +65,9 @@ export type SaleApprovalTerms = {
   minPricePerUnit: bigint;
   maxPricePerUnit: bigint;
   raiseType: RaiseTypeName;
+  /** The payout schedule the sale must use (0/0 for mature). */
+  cliffMonths: number;
+  vestingMonths: number;
   /** Unix seconds. */
   expiresAt: bigint;
 };
@@ -117,6 +123,8 @@ function termsSnapshot(network: string, terms: SaleApprovalTerms) {
     min_price_per_unit: terms.minPricePerUnit.toString(),
     max_price_per_unit: terms.maxPricePerUnit.toString(),
     raise_type: terms.raiseType,
+    sale_cliff_months: String(terms.cliffMonths),
+    sale_vesting_months: String(terms.vestingMonths),
     expires_at: terms.expiresAt.toString(),
   };
 }
@@ -196,7 +204,10 @@ export type Reservation = {
   min_price_per_unit: string | number | null;
   max_price_per_unit: string | number | null;
   raise_type: RaiseTypeName | null;
+  cliff_months: number | null;
+  vesting_months: number | null;
   expires_at: string | null;
+  adopted?: boolean;
   amount_units: string | number | null;
   amount_eur: string | number;
   status: "reserved" | "consumed" | "booked" | "released";
@@ -252,6 +263,8 @@ export function capacityError(error: { code?: string; message?: string } | null 
       SALE_EXCEEDS_RESERVATION: [409, "The sale is larger than its reservation."],
       INVALID_TERMS: [400, "Invalid approval terms."],
       INVALID_GROSS: [400, "Invalid sale total."],
+      SCHEDULE_MISMATCH: [409, "The cliff and vesting months must match the application."],
+      APPLICATION_ALREADY_APPROVED: [409, "This application already backs a sale approval or a sale. One application backs one sale: revoke the live approval first, or ask for a new application."],
     };
     for (const [code, [status, text]] of Object.entries(known)) {
       if (message.startsWith(code)) return new SiwsError(status, text);
@@ -294,7 +307,7 @@ export async function findReservationByApproval(
 export const confirmReservation = (sb: SupabaseClient, id: string, signature: string | null, signal?: AbortSignal) =>
   rpcCall<Reservation>(sb, "confirm_sale_reservation", { p_id: id, p_signature: signature }, signal);
 export const consumeReservation = (sb: SupabaseClient, id: string, salePda: string, grossMax: bigint, signal?: AbortSignal) =>
-  rpcCall<Reservation>(sb, "consume_sale_reservation", { p_id: id, p_sale_pda: salePda, p_sale_gross_max: grossMax.toString() }, signal);
+  rpcCall<Reservation & { grew?: boolean }>(sb, "consume_sale_reservation", { p_id: id, p_sale_pda: salePda, p_sale_gross_max: grossMax.toString() }, signal);
 export const bookReservation = (sb: SupabaseClient, id: string, gross: bigint, signal?: AbortSignal) =>
   rpcCall<Reservation & { book_error?: string }>(sb, "book_sale_reservation", { p_id: id, p_gross_base_units: gross.toString(), p_issued_at: null }, signal);
 export const releaseReservation = (sb: SupabaseClient, id: string, reason: string, by: string | null, signal?: AbortSignal) =>
@@ -337,28 +350,21 @@ export function approvalMismatches(r: Reservation, a: SaleApproval): string[] {
   check("min_price_per_unit", r.min_price_per_unit !== null && a.minPricePerUnit === dbU64(r.min_price_per_unit));
   check("max_price_per_unit", r.max_price_per_unit !== null && a.maxPricePerUnit === dbU64(r.max_price_per_unit));
   check("raise_type", raiseTypeName(a.raiseType) === r.raise_type);
+  check("cliff_months", a.cliffMonths === r.cliff_months);
+  check("vesting_months", a.vestingMonths === r.vesting_months);
   check("expires_at", r.expires_at !== null && a.expiresAt === BigInt(Math.floor(Date.parse(r.expires_at) / 1000)));
   check("application_hash", hexOf(a.applicationHash) === r.application_hash);
   check("approved_by", a.approvedBy === r.reserved_by);
   return out;
 }
 
-export type ApprovalCheck = { state: "match" } | { state: "missing" } | { state: "mismatch"; fields: string[] };
-
-/** Reads the approval at `confirmed` and compares every field with the reservation. */
-export async function verifyOnChainApproval(r: Reservation, signal?: AbortSignal): Promise<ApprovalCheck> {
-  if (r.kind !== "sale" || !r.approval_pda) return { state: "mismatch", fields: ["kind"] };
-  const approval = await fetchApproval(r.approval_pda, signal);
-  if (!approval) return { state: "missing" };
-  const fields = approvalMismatches(r, approval);
-  return fields.length ? { state: "mismatch", fields } : { state: "match" };
-}
-
 /** Consume (if needed) and book a reservation from the sale's on-chain state. */
 async function applySale(sb: SupabaseClient, r: Reservation, sale: Sale, signal?: AbortSignal): Promise<Reservation & { book_error?: string }> {
-  let current: Reservation & { book_error?: string } = r;
+  let current: Reservation & { book_error?: string; grew?: boolean } = r;
   if (current.status === "reserved") {
     current = await consumeReservation(sb, r.id, r.sale_pda!, sale.pricePerUnit * sale.totalForSale, signal);
+    // The chain allowed more than was reserved: counted at the sale's size.
+    if (current.grew) await alert(sb, r, current.last_error ?? "The sale is larger than its reservation");
   }
   if (current.status === "consumed" && sale.status === SaleStatus.Closed) {
     current = await bookReservation(sb, r.id, sale.sold * sale.pricePerUnit, signal);
@@ -434,14 +440,77 @@ export async function finalizedTreasuryTx(sig: string, signal?: AbortSignal): Pr
 
 // ── Retry-worker stage ─────────────────────────────────────────────────────
 
-async function alert(sb: SupabaseClient, r: Reservation, message: string) {
+/** Compliance alert, raised once per distinct message (not on every worker run). */
+async function alert(sb: SupabaseClient, r: Pick<Reservation, "id" | "network" | "approval_pda" | "subject" | "last_error">, message: string) {
   console.error(`[sale-capacity] reservation ${r.id}: ${message}`);
+  if (r.last_error === message.slice(0, 2000)) return;
   await sb.from("sale_capacity_reservations").update({ last_error: message.slice(0, 2000) }).eq("id", r.id);
   await sb.from("audit_events").insert({
     network: r.network, ix_name: "sale_capacity_alert", category: "launchpad", actor_wallet: "server",
     target_label: r.approval_pda ?? r.id, reason: message.slice(0, 1000), status: "failed",
     metadata: { reservation_id: r.id, subject: r.subject, actor_verified: false, actor_source: "retry-worker" },
   });
+}
+
+type Adopted = Reservation & { action: "none" | "adopted_terms" | "reactivated" | "inserted"; over_cap: boolean };
+
+/**
+ * Counts an on-chain approval at its ON-CHAIN terms (0066
+ * adopt_sale_approval): a live reservation with other terms takes them, a
+ * released one is reactivated, and an approval nobody reserved gets a row.
+ * The chain is the truth; the cap is only reported (over_cap), never refused.
+ */
+export async function adoptApproval(
+  sb: SupabaseClient, a: SaleApproval, approvalPda: string, row: Reservation | null, source: string, signal?: AbortSignal,
+): Promise<Adopted> {
+  let asset = row?.asset_pda ?? null;
+  let spvId = row?.spv_id ?? null;
+  let salePda = row?.sale_pda ?? null;
+  if (!row) {
+    const sc = await fetchMaybeShareClass(getServerRpc(), a.shareClass, { commitment: "confirmed", abortSignal: chainSignal(signal) });
+    if (!sc.exists || sc.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Approval share class not found");
+    asset = sc.data.asset;
+    let query = sb.from("asset_profiles").select("spv_id").eq("network", detectNetwork()).eq("asset_pda", asset);
+    if (signal) query = query.abortSignal(signal);
+    const { data, error } = await query.maybeSingle();
+    if (error) throw capacityError(error);
+    spvId = (data?.spv_id as string | null | undefined) ?? null;
+    salePda = await findSalePda(a.shareClass, a.saleId);
+  }
+  return rpcCall<Adopted>(sb, "adopt_sale_approval", {
+    p_network: detectNetwork(), p_share_class_pda: a.shareClass, p_sale_id: a.saleId.toString(), p_approval_pda: approvalPda,
+    p_sale_pda: salePda, p_asset_pda: asset, p_issuer_pda: a.issuer, p_spv_id: spvId, p_payment_mint: a.paymentMint,
+    p_max_gross_raise: a.maxGrossRaise.toString(), p_min_price_per_unit: a.minPricePerUnit.toString(),
+    p_max_price_per_unit: a.maxPricePerUnit.toString(), p_raise_type: raiseTypeName(a.raiseType),
+    p_cliff_months: a.cliffMonths, p_vesting_months: a.vestingMonths,
+    p_expires_at: new Date(Number(a.expiresAt) * 1000).toISOString(), p_application_hash: hexOf(a.applicationHash),
+    p_approved_by: a.approvedBy, p_source: source,
+  }, signal);
+}
+
+const adoptionMessage = (what: string, adopted: Adopted) =>
+  `${what}: counted at the on-chain terms (${adopted.action})${adopted.over_cap ? " — the subject is now OVER its raise cap" : ""}. Revoke the approval if it is not intended.`;
+
+/**
+ * Orphan scan: every on-chain SaleApproval must have a live reservation. An
+ * Admin can call approve_sale on the program directly, and a reservation can
+ * be released while its transaction is still in flight; the program does not
+ * know the off-chain cap, so this is its safety net.
+ */
+async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, counts: { complete: number; pending: number; invalid: number }) {
+  const approvals: LiveApproval[] = await listLiveApprovals(signal);
+  if (!approvals.length) return;
+  const { data, error } = await sb.from("sale_capacity_reservations").select("approval_pda")
+    .eq("network", detectNetwork()).eq("kind", "sale").in("status", ["reserved", "consumed"])
+    .in("approval_pda", approvals.map((a) => a.address)).abortSignal(signal);
+  if (error) throw new SiwsError(503, "Sale capacity ledger unavailable");
+  const live = new Set((data ?? []).map((row) => row.approval_pda as string));
+  for (const a of approvals) {
+    if (live.has(a.address) || signal.aborted) continue;
+    const adopted = await adoptApproval(sb, a, a.address, null, "orphan-scan", signal);
+    await alert(sb, adopted, adoptionMessage("An on-chain sale approval had no live reservation", adopted));
+    counts.pending++;
+  }
 }
 
 /** One reservation's next step from chain state; returns "complete" once nothing is left to do. */
@@ -456,26 +525,24 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
   }
   // reserved
   if (!r.chain_confirmed_at && now - Date.parse(r.created_at) < CONFIRM_GRACE_MS) return "pending";
-  const approval = await fetchApproval(r.approval_pda!, signal);
+  // One slot for both accounts: never "approval closed, sale not yet seen".
+  const { approval, sale } = await readApprovalAndSale(r.approval_pda!, r.sale_pda!, "confirmed", signal);
   if (approval) {
     const fields = approvalMismatches(r, approval);
     if (fields.length) {
-      await alert(sb, r, `On-chain approval differs from its reservation: ${fields.join(", ")}`);
+      const adopted = await adoptApproval(sb, approval, r.approval_pda!, r, "worker", signal);
+      await alert(sb, adopted, adoptionMessage(`On-chain approval differs from its reservation (${fields.join(", ")})`, adopted));
       return "pending";
     }
     if (!r.chain_confirmed_at) await confirmReservation(sb, r.id, null, signal);
     // Still unused. An expired approval can no longer be consumed.
-    if (Number(approval.expiresAt) + EXPIRY_GRACE_SECS < now / 1000) {
-      const sale = await fetchSale(r.sale_pda!, "confirmed", signal);
-      if (!sale) {
-        await releaseReservation(sb, r.id, "expired", "retry-worker", signal);
-        return "complete";
-      }
+    if (Number(approval.expiresAt) + EXPIRY_GRACE_SECS < now / 1000 && !sale) {
+      await releaseReservation(sb, r.id, "expired", "retry-worker", signal);
+      return "complete";
     }
     return "pending";
   }
   // The approval account is gone: consumed by open_sale, revoked, or never created.
-  const sale = await fetchSale(r.sale_pda!, "confirmed", signal);
   if (sale) {
     if (sale.saleApproval !== r.approval_pda) {
       await alert(sb, r, "A sale exists for this id but consumed a different approval");
@@ -486,11 +553,12 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
     const done = await applySale(sb, r, finalized, signal);
     return done.status === "booked" ? "complete" : "pending";
   }
+  // A late landing after this release is caught by the orphan scan (adopted back).
   await releaseReservation(sb, r.id, r.chain_confirmed_at ? "revoked" : "tx_failed", "retry-worker", signal);
   return "complete";
 }
 
-/** Retry-worker stage: bounded batch of live sale reservations, oldest first. */
+/** Retry-worker stage: the orphan scan, then a bounded batch of live sale reservations, least recently touched first. */
 export async function reconcileSaleCapacity(limit = 10, deadlineMs = Date.now() + 20_000, parentSignal?: AbortSignal) {
   if (!Number.isSafeInteger(limit) || limit < 1 || limit > 20) throw new SiwsError(400, "Retry limit must be between 1 and 20");
   const counts = { complete: 0, pending: 0, invalid: 0 };
@@ -499,6 +567,13 @@ export async function reconcileSaleCapacity(limit = 10, deadlineMs = Date.now() 
   const timeout = AbortSignal.timeout(budgetMs);
   const signal = parentSignal ? AbortSignal.any([parentSignal, timeout]) : timeout;
   const sb = getSupabaseAdmin();
+  try {
+    await adoptOrphanApprovals(sb, signal, counts);
+  } catch (err) {
+    if (signal.aborted) return counts;
+    console.error("[sale-capacity] orphan scan failed:", err instanceof Error ? err.message : err);
+    counts.pending++;
+  }
   const { data, error } = await sb.from("sale_capacity_reservations").select("*")
     .eq("network", detectNetwork()).eq("kind", "sale").in("status", ["reserved", "consumed"])
     .order("updated_at").limit(limit).abortSignal(signal);
@@ -517,6 +592,11 @@ export async function reconcileSaleCapacity(limit = 10, deadlineMs = Date.now() 
       if (signal.aborted) break;
       if (err instanceof SiwsError && err.status < 500) counts.invalid++;
       else counts.pending++;
+      // Rotate a failing row too (the touch trigger bumps updated_at), or
+      // ten rows that always fail would starve every other reservation.
+      const message = `Worker: ${err instanceof Error ? err.message : String(err)}`.slice(0, 2000);
+      await sb.from("sale_capacity_reservations").update({ last_error: message, updated_at: new Date().toISOString() })
+        .eq("id", row.id).then(() => undefined, () => undefined);
     }
   }
   return counts;

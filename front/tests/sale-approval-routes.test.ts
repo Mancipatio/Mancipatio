@@ -15,6 +15,10 @@ const state = vi.hoisted(() => ({
   accounts: new Map<string, { exists: boolean; programAddress?: string; data?: Uint8Array }>(),
   approval: null as Record<string, unknown> | null,
   sale: null as Record<string, unknown> | null,
+  // The single-slot reads of the release route, per commitment.
+  chainState: { confirmed: { approval: false, sale: false }, finalized: { approval: false, sale: false } },
+  expired: false,
+  sigOutcome: "unknown" as "failed" | "succeeded" | "unknown",
   rows: {} as Record<string, unknown>,
   lists: {} as Record<string, unknown[]>,
   rpc: {} as Record<string, unknown>,
@@ -27,6 +31,15 @@ vi.mock("@/lib/network", async (importOriginal) => ({
   detectNetwork: () => state.network,
 }));
 vi.mock("@/lib/server/rpc", () => ({ getServerRpc: () => ({}) }));
+vi.mock("@/lib/server/sale-capacity-chain", () => ({
+  readApprovalAndSale: vi.fn(async (_a: string, _s: string, commitment: "confirmed" | "finalized") => ({
+    approval: state.chainState[commitment].approval ? {} : null,
+    sale: state.chainState[commitment].sale ? {} : null,
+  })),
+  blockhashExpired: vi.fn(async () => state.expired),
+  signatureOutcome: vi.fn(async () => state.sigOutcome),
+  listLiveApprovals: vi.fn(async () => []),
+}));
 vi.mock("@solana/kit", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@solana/kit")>()),
   fetchEncodedAccount: vi.fn(async (_rpc: unknown, key: string) => state.accounts.get(key) ?? { exists: false, address: key }),
@@ -139,7 +152,7 @@ const reservation = (over: Record<string, unknown> = {}) => ({
   approval_pda: APPROVAL, sale_pda: SALE, asset_pda: state.fixtures.asset, issuer_pda: state.fixtures.issuer, spv_id: null,
   subject: `issuer:${state.fixtures.issuer}`, application_id: APPLICATION_ID, application_snapshot: {},
   application_hash: "ab".repeat(32), payment_mint: MINT, payment_decimals: 6, max_gross_raise: "250000000000",
-  min_price_per_unit: "1000000", max_price_per_unit: "1200000", raise_type: "mature",
+  min_price_per_unit: "1000000", max_price_per_unit: "1200000", raise_type: "mature", cliff_months: 0, vesting_months: 0,
   expires_at: new Date(EXPIRES * 1000).toISOString(), amount_units: null, amount_eur: 250000, status: "reserved",
   chain_confirmed_at: null, approve_signature: null, mint_signature: null, booked_amount_eur: null,
   release_reason: null, reason: null, last_error: null, reserved_by: ADMIN, created_at: new Date().toISOString(),
@@ -149,7 +162,7 @@ const onChainApproval = (over: Record<string, unknown> = {}) => ({
   shareClass: state.fixtures.shareClass, saleId: BigInt(4), issuer: state.fixtures.issuer, paymentMint: MINT,
   maxGrossRaise: BigInt(250_000_000_000), minPricePerUnit: BigInt(1_000_000), maxPricePerUnit: BigInt(1_200_000),
   raiseType: RaiseType.Mature, expiresAt: BigInt(EXPIRES), applicationHash: new Uint8Array(32).fill(0xab),
-  approvedBy: ADMIN, bump: 255, version: 1, ...over,
+  approvedBy: ADMIN, bump: 255, version: 1, cliffMonths: 0, vestingMonths: 0, ...over,
 });
 
 beforeAll(async () => {
@@ -169,6 +182,9 @@ beforeEach(() => {
   state.accounts = new Map([[MINT, mintAccount(6)]]);
   state.approval = null;
   state.sale = null;
+  state.chainState = { confirmed: { approval: false, sale: false }, finalized: { approval: false, sale: false } };
+  state.expired = false;
+  state.sigOutcome = "unknown";
   state.rows = { launch_applications: APP_ROW, asset_profiles: { spv_id: null } };
   state.lists = {};
   state.rpc = {
@@ -236,6 +252,17 @@ describe("reserve", () => {
     expect((await call(reserveRoute, reserveParams())).status).toBe(403);
   });
 
+  it("fixes the payout schedule: 0/0 for mature, the application's for startup", async () => {
+    expect((await call(reserveRoute, { ...reserveParams(), cliff_months: 1, vesting_months: 12 })).status).toBe(400);
+    state.rows.launch_applications = { ...APP_ROW, raise_type: "startup", cliff_months: 6, vesting_months: 24 };
+    const startup = { ...reserveParams(), raise_type: "startup" };
+    expect((await call(reserveRoute, { ...startup, cliff_months: 0, vesting_months: 12 })).status).toBe(409);
+    expect((await call(reserveRoute, { ...startup, cliff_months: 6, vesting_months: 6 })).status).toBe(400);
+    expect(rpcCall("reserve_sale_capacity")).toBeUndefined();
+    expect((await call(reserveRoute, { ...startup, cliff_months: 6, vesting_months: 24 })).status).toBe(200);
+    expect(rpcCall("reserve_sale_capacity")).toMatchObject({ p_raise_type: "startup", p_cliff_months: 6, p_vesting_months: 24 });
+  });
+
   it("reserves with the chain-derived PDAs, the on-chain decimals and the pinned application hash", async () => {
     const { status, body } = await call(reserveRoute, reserveParams());
     expect(status).toBe(200);
@@ -243,7 +270,7 @@ describe("reserve", () => {
       applicationSnapshot(APP_ROW, {
         shareClass: state.fixtures.shareClass, saleId: BigInt(4), issuer: state.fixtures.issuer, paymentMint: MINT,
         maxGrossRaise: BigInt(250_000_000_000), minPricePerUnit: BigInt(1_000_000), maxPricePerUnit: BigInt(1_200_000),
-        raiseType: "mature", expiresAt: BigInt(EXPIRES),
+        raiseType: "mature", expiresAt: BigInt(EXPIRES), cliffMonths: 0, vestingMonths: 0,
       }),
     ).hex;
     expect(body.data).toMatchObject({ reservation_id: RESERVATION_ID, approval_pda: APPROVAL, sale_pda: SALE, application_hash: expected });
@@ -262,11 +289,14 @@ describe("confirm", () => {
     state.rpc.confirm_sale_reservation = reservation({ chain_confirmed_at: new Date().toISOString() });
   });
 
-  it("answers 409 and records the mismatch when the on-chain terms differ", async () => {
+  it("answers 409, counts the ON-CHAIN terms (adopt) and alerts when they differ", async () => {
     state.approval = onChainApproval({ maxGrossRaise: BigInt(250_000_000_001) });
+    state.rpc.adopt_sale_approval = reservation({ action: "adopted_terms", over_cap: true });
     const { status, body } = await call(confirmRoute, { reservation_id: RESERVATION_ID });
     expect(status).toBe(409);
-    expect(body.error).toMatch(/max_gross_raise/);
+    expect(body.error).toMatch(/max_gross_raise.*over its raise cap.*revoke/);
+    expect(rpcCall("adopt_sale_approval")).toMatchObject({ p_max_gross_raise: "250000000001", p_source: "confirm" });
+    expect(state.calls.find((c) => c.kind === "insert" && c.target === "audit_events")?.args).toMatchObject({ ix_name: "sale_capacity_alert" });
     expect(state.calls.find((c) => c.kind === "update")?.args).toMatchObject({ last_error: expect.stringMatching(/max_gross_raise/) });
     expect(rpcCall("confirm_sale_reservation")).toBeUndefined();
   });
@@ -276,6 +306,7 @@ describe("confirm", () => {
   });
 
   it("confirms an exact match, including approved_by = the reserving admin", async () => {
+    state.rpc.adopt_sale_approval = reservation({ action: "adopted_terms", over_cap: false });
     state.approval = onChainApproval({ approvedBy: STRANGER });
     expect((await call(confirmRoute, { reservation_id: RESERVATION_ID })).status).toBe(409);
     state.approval = onChainApproval();
@@ -286,24 +317,59 @@ describe("confirm", () => {
 
 describe("release", () => {
   beforeEach(() => {
-    state.rows.sale_capacity_reservations = reservation();
+    state.rows.sale_capacity_reservations = reservation({ chain_confirmed_at: new Date().toISOString() });
     state.rpc.release_sale_reservation = reservation({ status: "released", release_reason: "tx_failed" });
   });
+  const release = (extra: Record<string, unknown> = {}) =>
+    call(releaseRoute, { reservation_id: RESERVATION_ID, reason: "tx_failed", ...extra });
 
-  it("is refused while the approval still exists on-chain, or once a sale used it", async () => {
-    state.accounts.set(APPROVAL, { exists: true });
-    expect((await call(releaseRoute, { reservation_id: RESERVATION_ID, reason: "tx_failed" })).status).toBe(409);
-    state.accounts.delete(APPROVAL);
-    state.accounts.set(SALE, { exists: true });
-    expect((await call(releaseRoute, { reservation_id: RESERVATION_ID, reason: "revoked" })).status).toBe(409);
+  it("is refused while the approval still exists on-chain, or once a sale used it (one-slot read)", async () => {
+    state.chainState.confirmed.approval = true;
+    expect((await release()).status).toBe(409);
+    state.chainState.confirmed = { approval: false, sale: true };
+    expect((await release({ reason: "revoked" })).status).toBe(409);
     expect(rpcCall("release_sale_reservation")).toBeUndefined();
   });
 
-  it("releases when the chain proves the approval can no longer be used", async () => {
-    expect((await call(releaseRoute, { reservation_id: RESERVATION_ID, reason: "closed_unsold" })).status).toBe(400);
-    const { status } = await call(releaseRoute, { reservation_id: RESERVATION_ID, reason: "tx_failed" });
+  it("releases a confirmed approval that is gone with no sale (revoked)", async () => {
+    expect((await release({ reason: "closed_unsold" })).status).toBe(400);
+    const { status } = await release({ reason: "revoked" });
     expect(status).toBe(200);
-    expect(rpcCall("release_sale_reservation")).toMatchObject({ p_id: RESERVATION_ID, p_reason: "tx_failed", p_by: ADMIN });
+    expect(rpcCall("release_sale_reservation")).toMatchObject({ p_id: RESERVATION_ID, p_reason: "revoked", p_by: ADMIN });
+  });
+
+  it("never releases an unconfirmed approval whose transaction may still land", async () => {
+    state.rows.sale_capacity_reservations = reservation();
+    // No proof at all, a signature not (yet) visible, or a blockhash still valid.
+    expect((await release()).body.error).toMatch(/may still land/);
+    expect((await release({ signature: "5".repeat(88) })).status).toBe(409);
+    expect((await release({ last_valid_block_height: "1000" })).status).toBe(409);
+    // Expired, but the approval exists at finalized (landed, then not yet visible at confirmed? no — still absent proof fails).
+    state.expired = true;
+    state.chainState.finalized.approval = true;
+    expect((await release({ last_valid_block_height: "1000" })).status).toBe(409);
+    expect(rpcCall("release_sale_reservation")).toBeUndefined();
+  });
+
+  it("releases an unconfirmed approval once its transaction provably cannot land", async () => {
+    state.rows.sale_capacity_reservations = reservation();
+    state.sigOutcome = "failed";
+    expect((await release({ signature: "5".repeat(88) })).status).toBe(200);
+    state.calls = [];
+    state.sigOutcome = "unknown";
+    state.expired = true;
+    expect((await release({ last_valid_block_height: "1000" })).status).toBe(200);
+    expect(rpcCall("release_sale_reservation")).toMatchObject({ p_reason: "tx_failed" });
+  });
+
+  it("a treasury mint needs the same proof, and a landed mint is booked, not released", async () => {
+    state.rows.sale_capacity_reservations = reservation({ kind: "treasury_mint", approval_pda: null, sale_pda: null });
+    expect((await release()).status).toBe(409);
+    state.sigOutcome = "succeeded";
+    expect((await release({ signature: "5".repeat(88), last_valid_block_height: "1" })).body.error).toMatch(/book it/);
+    state.sigOutcome = "unknown";
+    state.expired = true;
+    expect((await release({ last_valid_block_height: "1000" })).status).toBe(200);
   });
 });
 

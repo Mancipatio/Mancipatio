@@ -1,6 +1,5 @@
 "use client";
 
-import { type Address } from "@solana/kit";
 import { useRouter } from "next/navigation";
 import { walletSigner } from "@/lib/wallet-signer";
 import {
@@ -39,9 +38,6 @@ import { detectNetwork } from "@/lib/network";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
 import { useChainClock } from "@/lib/use-chain-clock";
-
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
 
 type SaleLifecycle = "open" | "closing-soon" | "expired-open" | "closed";
 type StatusFilter = "all" | SaleLifecycle;
@@ -658,6 +654,11 @@ function OpenSaleModal({
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
       const signer = walletSigner(conn.wallet);
+      // The payment mint comes from the approval (classic SPL or Token-2022).
+      const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(
+        client.runtime.rpc,
+        approval.paymentMint,
+      );
       const ix = await getOpenSaleInstructionAsync({
         authority: signer,
         issuer: ip,
@@ -665,7 +666,7 @@ function OpenSaleModal({
         shareClass: scPda,
         mint: sc.mint,
         paymentMint: approval.paymentMint,
-        paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+        paymentTokenProgram,
         saleId: BigInt(saleId || "0"),
         pricePerUnit: price,
         totalForSale: total,
@@ -887,8 +888,7 @@ function OpenSaleModal({
             />
           </label>
           <p className="text-[11px] text-slate-400">
-            Payment token program is classic SPL Token (v0.1 assumption — USDC
-            is classic SPL on Solana).
+            The payment token (and its token program) is fixed by the approval.
           </p>
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">

@@ -16,6 +16,8 @@ import {
   ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE,
   ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED,
   ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL,
+  ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY,
+  ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL,
   ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
   ASSET_REGISTRY_ERROR__VAULT_NOT_ACCEPTING_DEPOSITS,
 } from "@/lib/generated/asset_registry";
@@ -134,6 +136,14 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
         ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
         "Only a Manci admin issuer key can mint into the issuer treasury. Issue units to investors through an approved sale instead (TreasuryMintRequiresAdmin).",
       ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL,
+        "The cliff and vesting months must be exactly the ones Manci approved for this sale (SaleVestingOutsideApproval).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY,
+        "The sale must start before its approval expires (SaleStartsAfterApprovalExpiry).",
+      ],
     ] as const
   ).map(([code, hint]) => [`0x${code.toString(16)}`, hint]),
 );
@@ -147,6 +157,9 @@ export const NO_SALE_APPROVAL_HINT =
   "No live sale approval for this share class and sale id: it was never approved, was revoked, or was already used.";
 /** open_sale was given another sale id's approval (ConstraintSeeds, 2006). */
 export const SALE_APPROVAL_OTHER_ID_HINT = "This approval belongs to a different sale id.";
+/** open_sale's approver no longer holds an Admin record (AccountNotInitialized, 3012). */
+export const APPROVER_NOT_ADMIN_HINT =
+  "The admin who approved this sale is no longer a Manci admin, so the approval cannot be used. Ask Manci to revoke it and approve the sale again.";
 
 function customErrorHint(text: string): string | null {
   // PlatformPaused is 6000 (0x1770) — the same number as the transfer hook's
@@ -156,6 +169,7 @@ function customErrorHint(text: string): string | null {
   // codes (3012 / 2006) are shared by every account of every instruction.
   if (/caused by account: sale_approval\. Error Code: AccountNotInitialized\b/.test(text)) return NO_SALE_APPROVAL_HINT;
   if (/caused by account: sale_approval\. Error Code: ConstraintSeeds\b/.test(text)) return SALE_APPROVAL_OTHER_ID_HINT;
+  if (/caused by account: approver_admin_record\. Error Code: AccountNotInitialized\b/.test(text)) return APPROVER_NOT_ADMIN_HINT;
   const match = /custom program error:\s*(0x[0-9a-f]+)/i.exec(text);
   if (!match) return null;
   return CUSTOM_ERROR_HINTS[match[1].toLowerCase()] ?? null;

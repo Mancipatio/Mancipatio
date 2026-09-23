@@ -2,7 +2,7 @@
 //
 // The chain is the source of truth for which approvals exist: the issuer
 // launchpad lists them with getProgramAccounts (SaleApproval discriminator +
-// `issuer` at byte 48, dataSize 211). The /api/sale-approvals/* routes keep
+// `issuer` at byte 48, dataSize 213). The /api/sale-approvals/* routes keep
 // the EUR raise-cap ledger around them (0066).
 
 import type { SolanaClient, WalletSession } from "@solana/client";
@@ -18,7 +18,7 @@ import { signedFetch } from "@/lib/siws-client";
 type Rpc = SolanaClient["runtime"]["rpc"];
 
 /** `8 + SaleApproval::INIT_SPACE` (pinned by the program's layout test). */
-export const SALE_APPROVAL_SIZE = 211;
+export const SALE_APPROVAL_SIZE = 213;
 /** Byte offsets of the memcmp filters (pinned by the program's layout test). */
 const SHARE_CLASS_OFFSET = 8;
 const ISSUER_OFFSET = 48;
@@ -114,6 +114,8 @@ export type ReserveInput = {
   max_price_per_unit: string;
   raise_type: "mature" | "startup";
   expires_at: string;
+  cliff_months: number;
+  vesting_months: number;
 };
 
 export type ReservationRow = {
@@ -147,10 +149,32 @@ export const confirmSaleApproval = (session: Session, reservationId: string, sig
     reservation_id: reservationId, ...(signature ? { signature } : {}),
   });
 
-export const releaseSaleApproval = (session: Session, reservationId: string, reason: "tx_failed" | "revoked" | "admin") =>
+export const releaseSaleApproval = (
+  session: Session, reservationId: string, reason: "tx_failed" | "revoked" | "admin",
+  proof: { last_valid_block_height?: string; signature?: string } = {},
+) =>
   signedFetch<{ reservation_id: string; status: string }>(session, "/api/sale-approvals/release", "saleApprovals.release", {
-    reservation_id: reservationId, reason,
+    reservation_id: reservationId, reason, ...proof,
   });
+
+/**
+ * After a failed send: the transaction may still land until its blockhash
+ * expires, so the server releases the reservation only once the finalized
+ * chain is past `lastValidBlockHeight` (retried here for up to ~3 minutes).
+ * Best effort; the retry worker releases it otherwise.
+ */
+export async function releaseWhenExpired(session: Session, reservationId: string, lastValidBlockHeight: bigint) {
+  const until = Date.now() + 180_000;
+  while (Date.now() < until) {
+    try {
+      return await releaseSaleApproval(session, reservationId, "tx_failed", { last_valid_block_height: lastValidBlockHeight.toString() });
+    } catch (err) {
+      if (!(err instanceof Error) || !/may still land/.test(err.message)) return null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 15_000));
+  }
+  return null;
+}
 
 export type SettleResult = { reservation_id: string; status: string; booked_amount_eur: number | null; book_error: string | null };
 
