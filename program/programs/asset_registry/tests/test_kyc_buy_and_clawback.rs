@@ -5482,7 +5482,9 @@ fn blocklist_clawback_open_mint_sweeps_into_quarantine() {
 
 /// Boots `gated`, sells the boot buyer 10 units (KYC'd first when gated) and
 /// has the BlocklistAuthority (payer) block them. Returns the holder.
-fn blocked_holder_setup(gated: bool) -> (LiteSVM, Ctx, Pubkey) {
+/// A holder with 10 units on a fresh mint of the given mode (KycGated: KYC
+/// approved first), NOT yet blocked.
+fn funded_holder_setup(gated: bool) -> (LiteSVM, Ctx, Pubkey) {
     let (mut svm, ctx) = boot(gated);
     warp_to(&mut svm, 1_000);
     let holder = if gated {
@@ -5502,6 +5504,11 @@ fn blocked_holder_setup(gated: bool) -> (LiteSVM, Ctx, Pubkey) {
     } else {
         open_buy(&mut svm, &ctx, 10)
     };
+    (svm, ctx, holder)
+}
+
+fn blocked_holder_setup(gated: bool) -> (LiteSVM, Ctx, Pubkey) {
+    let (mut svm, ctx, holder) = funded_holder_setup(gated);
     block_holder(&mut svm, &ctx, holder);
     (svm, ctx, holder)
 }
@@ -5726,90 +5733,90 @@ fn blocklist_clawback_works_under_full_pause_in_both_modes() {
 
 /// Two keys: the BlocklistAuthority alone cannot seize (no Admin record), the
 /// Admin alone cannot block (hook Unauthorized), and with distinct keys the
-/// event names both.
+/// event names both. Both modes.
 #[test]
 fn two_keys_required_and_distinct_keys_work() {
-    let (mut svm, ctx) = boot(false);
-    warp_to(&mut svm, 1_000);
-    let holder = open_buy(&mut svm, &ctx, 10);
-    let ba = Keypair::new();
-    rotate_blocklist_authority(&mut svm, &ctx, &ba);
-    let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
-    let payer_pk = ctx.payer.pubkey();
+    for gated in [false, true] {
+        let (mut svm, ctx, holder) = funded_holder_setup(gated);
+        let ba = Keypair::new();
+        rotate_blocklist_authority(&mut svm, &ctx, &ba);
+        let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
+        let payer_pk = ctx.payer.pubkey();
 
-    // The Admin (payer) is no longer the BlocklistAuthority: cannot block.
-    let err = try_send(
-        &mut svm,
-        &[&ctx.payer],
-        &[add_to_blocklist_ix(&ctx, &payer_pk, &holder)],
-    )
-    .expect_err("admin cannot add to the blocklist");
-    assert_custom_error(&err, 6004);
+        // The Admin (payer) is no longer the BlocklistAuthority: cannot block.
+        let err = try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[add_to_blocklist_ix(&ctx, &payer_pk, &holder)],
+        )
+        .expect_err("admin cannot add to the blocklist");
+        assert_custom_error(&err, 6004);
 
-    // Before any BlockEntry exists the Admin cannot seize.
-    let err = try_send(
-        &mut svm,
-        &[&ctx.payer],
-        &[blocklist_clawback_ix(
-            &ctx,
-            &payer_pk,
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
-        )],
-    )
-    .expect_err("not blocked");
-    assert_custom_error(&err, 6137);
+        // Before any BlockEntry exists the Admin cannot seize.
+        let err = try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[blocklist_clawback_ix(
+                &ctx,
+                &payer_pk,
+                &holder,
+                &ctx.buyer_share_ata,
+                &vault,
+                &escrow,
+                0,
+                gated,
+            )],
+        )
+        .expect_err("not blocked");
+        assert_custom_error(&err, 6137);
 
-    // `ba` blocks the holder, then tries to seize alone: no Admin record.
-    send(
-        &mut svm,
-        &[&ba],
-        &[add_to_blocklist_ix(&ctx, &ba.pubkey(), &holder)],
-        "ba blocks holder",
-    );
-    let err = try_send(
-        &mut svm,
-        &[&ba],
-        &[blocklist_clawback_ix(
-            &ctx,
-            &ba.pubkey(),
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
-        )],
-    )
-    .expect_err("BlocklistAuthority alone cannot seize");
-    assert_custom_error(&err, 3012);
-    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
+        // `ba` blocks the holder, then tries to seize alone: no Admin record.
+        send(
+            &mut svm,
+            &[&ba],
+            &[add_to_blocklist_ix(&ctx, &ba.pubkey(), &holder)],
+            "ba blocks holder",
+        );
+        let err = try_send(
+            &mut svm,
+            &[&ba],
+            &[blocklist_clawback_ix(
+                &ctx,
+                &ba.pubkey(),
+                &holder,
+                &ctx.buyer_share_ata,
+                &vault,
+                &escrow,
+                0,
+                gated,
+            )],
+        )
+        .expect_err("BlocklistAuthority alone cannot seize");
+        assert_custom_error(&err, 3012);
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
 
-    let logs = send_with_logs(
-        &mut svm,
-        &[&ctx.payer],
-        &[blocklist_clawback_ix(
-            &ctx,
-            &payer_pk,
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
-        )],
-    )
-    .expect("admin seizes the ba-blocked holder");
-    let events = blocklist_clawback_events(&logs);
-    assert_eq!(events.len(), 1);
-    assert_eq!(events[0].admin, payer_pk);
-    assert_eq!(events[0].blocked_by, ba.pubkey());
-    assert_ne!(events[0].admin, events[0].blocked_by);
-    assert_eq!(token_balance(&svm, &escrow), 10);
+        let logs = send_with_logs(
+            &mut svm,
+            &[&ctx.payer],
+            &[blocklist_clawback_ix(
+                &ctx,
+                &payer_pk,
+                &holder,
+                &ctx.buyer_share_ata,
+                &vault,
+                &escrow,
+                0,
+                gated,
+            )],
+        )
+        .expect("admin seizes the ba-blocked holder");
+        let events = blocklist_clawback_events(&logs);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].admin, payer_pk);
+        assert_eq!(events[0].blocked_by, ba.pubkey());
+        assert_ne!(events[0].admin, events[0].blocked_by);
+        assert_eq!(token_balance(&svm, &escrow), 10);
+    }
 }
 
 /// The instruction reads the mode live from the hook config: it works after
@@ -5936,162 +5943,168 @@ fn blocklist_clawback_requires_a_block_entry() {
 /// A BlockEntry cannot be spoofed: another wallet's entry fails the seeds
 /// (2006); anything at the right address that is not a live hook-owned entry
 /// for this holder is 6137 — wrong owner, wrong discriminator, wrong wallet,
-/// truncated, or added-then-removed.
+/// truncated, or added-then-removed. Both modes.
 #[test]
 fn blocklist_clawback_rejects_spoofed_block_entries() {
-    let (mut svm, ctx, holder) = blocked_holder_setup(false);
-    let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
-    let payer_pk = ctx.payer.pubkey();
-    let attempt = |svm: &mut LiteSVM, block_entry: Pubkey| {
-        let mut ix = BlocklistClawbackIx::new(
-            &ctx,
-            &payer_pk,
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
+    for gated in [false, true] {
+        let (mut svm, ctx, holder) = blocked_holder_setup(gated);
+        let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
+        let payer_pk = ctx.payer.pubkey();
+        let attempt = |svm: &mut LiteSVM, block_entry: Pubkey| {
+            let mut ix = BlocklistClawbackIx::new(
+                &ctx,
+                &payer_pk,
+                &holder,
+                &ctx.buyer_share_ata,
+                &vault,
+                &escrow,
+                0,
+                gated,
+            );
+            ix.block_entry = block_entry;
+            try_send(svm, &[&ctx.payer], &[ix.build(&ctx)])
+        };
+
+        // Another (really) blocked wallet's entry.
+        let other = Pubkey::new_unique();
+        block_holder(&mut svm, &ctx, other);
+        let err = attempt(&mut svm, block_entry_of(&ctx, &other)).expect_err("foreign entry");
+        assert_custom_error(&err, 2006);
+
+        let pda = block_entry_of(&ctx, &holder);
+        let genuine = svm.get_account(&pda).expect("entry");
+        let cases = [
+            (
+                "registry-owned",
+                edited(&genuine, |a| a.owner = asset_registry::ID),
+            ),
+            (
+                "system-owned",
+                edited(&genuine, |a| a.owner = system_program::ID),
+            ),
+            (
+                "random owner",
+                edited(&genuine, |a| a.owner = Pubkey::new_unique()),
+            ),
+            (
+                "wrong discriminator",
+                edited(&genuine, |a| a.data[0] ^= 0xff),
+            ),
+            ("wallet != holder", edited(&genuine, |a| a.data[8] ^= 0xff)),
+            ("truncated", edited(&genuine, |a| a.data.truncate(72))),
+        ];
+        for (what, account) in cases {
+            svm.set_account(pda, account).unwrap();
+            let err = attempt(&mut svm, pda).expect_err(what);
+            assert!(err.contains("Custom(6137)"), "{what}: {err}");
+        }
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
+
+        // Added then removed (closed) → 6137.
+        svm.set_account(pda, genuine.clone()).unwrap();
+        let singleton =
+            Pubkey::find_program_address(&[transfer_hook::BLOCKLIST_AUTHORITY_SEED], &ctx.hook_id)
+                .0;
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[Instruction::new_with_bytes(
+                ctx.hook_id,
+                &transfer_hook::instruction::RemoveFromBlocklist { wallet: holder }.data(),
+                transfer_hook::accounts::RemoveFromBlocklist {
+                    authority: payer_pk,
+                    blocklist_authority: singleton,
+                    block_entry: pda,
+                }
+                .to_account_metas(None),
+            )],
+            "unblock",
         );
-        ix.block_entry = block_entry;
-        try_send(svm, &[&ctx.payer], &[ix.build(&ctx)])
-    };
-
-    // Another (really) blocked wallet's entry.
-    let other = Pubkey::new_unique();
-    block_holder(&mut svm, &ctx, other);
-    let err = attempt(&mut svm, block_entry_of(&ctx, &other)).expect_err("foreign entry");
-    assert_custom_error(&err, 2006);
-
-    let pda = block_entry_of(&ctx, &holder);
-    let genuine = svm.get_account(&pda).expect("entry");
-    let cases = [
-        (
-            "registry-owned",
-            edited(&genuine, |a| a.owner = asset_registry::ID),
-        ),
-        (
-            "system-owned",
-            edited(&genuine, |a| a.owner = system_program::ID),
-        ),
-        (
-            "random owner",
-            edited(&genuine, |a| a.owner = Pubkey::new_unique()),
-        ),
-        (
-            "wrong discriminator",
-            edited(&genuine, |a| a.data[0] ^= 0xff),
-        ),
-        ("wallet != holder", edited(&genuine, |a| a.data[8] ^= 0xff)),
-        ("truncated", edited(&genuine, |a| a.data.truncate(72))),
-    ];
-    for (what, account) in cases {
-        svm.set_account(pda, account).unwrap();
-        let err = attempt(&mut svm, pda).expect_err(what);
-        assert!(err.contains("Custom(6137)"), "{what}: {err}");
+        let err = attempt(&mut svm, pda).expect_err("removed entry");
+        assert_custom_error(&err, 6137);
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
     }
-    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
-
-    // Added then removed (closed) → 6137.
-    svm.set_account(pda, genuine.clone()).unwrap();
-    let singleton =
-        Pubkey::find_program_address(&[transfer_hook::BLOCKLIST_AUTHORITY_SEED], &ctx.hook_id).0;
-    send(
-        &mut svm,
-        &[&ctx.payer],
-        &[Instruction::new_with_bytes(
-            ctx.hook_id,
-            &transfer_hook::instruction::RemoveFromBlocklist { wallet: holder }.data(),
-            transfer_hook::accounts::RemoveFromBlocklist {
-                authority: payer_pk,
-                blocklist_authority: singleton,
-                block_entry: pda,
-            }
-            .to_account_metas(None),
-        )],
-        "unblock",
-    );
-    let err = attempt(&mut svm, pda).expect_err("removed entry");
-    assert_custom_error(&err, 6137);
-    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
 }
 
 /// Only an Admin record holder may sign: a random key, and an issuer with
 /// every scoped capability but no Admin record, both fail with 3012. The
 /// (rotated) Admin then seizes the holder the BlocklistAuthority blocked.
+/// Both modes.
 #[test]
 fn blocklist_clawback_admin_gate() {
-    let (mut svm, ctx, holder) = blocked_holder_setup(false);
-    let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
-    let mallory = Keypair::new();
-    svm.airdrop(&mallory.pubkey(), 10_000_000_000).unwrap();
-    let err = try_send(
-        &mut svm,
-        &[&mallory],
-        &[blocklist_clawback_ix(
-            &ctx,
-            &mallory.pubkey(),
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
-        )],
-    )
-    .expect_err("non-admin");
-    assert_custom_error(&err, 3012);
+    for gated in [false, true] {
+        let (mut svm, ctx, holder) = blocked_holder_setup(gated);
+        let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
+        let mallory = Keypair::new();
+        svm.airdrop(&mallory.pubkey(), 10_000_000_000).unwrap();
+        let err = try_send(
+            &mut svm,
+            &[&mallory],
+            &[blocklist_clawback_ix(
+                &ctx,
+                &mallory.pubkey(),
+                &holder,
+                &ctx.buyer_share_ata,
+                &vault,
+                &escrow,
+                0,
+                gated,
+            )],
+        )
+        .expect_err("non-admin");
+        assert_custom_error(&err, 3012);
 
-    // payer hands the Admin role to `root` (payer's Admin record is retired)
-    // and gets every scoped issuer capability instead.
-    let root = Keypair::new();
-    rotate_platform(&mut svm, &ctx, &root);
-    send(
-        &mut svm,
-        &[&root],
-        &[set_permissions_ix(
-            root.pubkey(),
-            &ctx,
-            asset_registry::ISSUER_PERMISSIONS_ALL,
-        )],
-        "grant every scoped capability",
-    );
-    let err = try_send(
-        &mut svm,
-        &[&ctx.payer],
-        &[blocklist_clawback_ix(
-            &ctx,
-            &payer_pk_of(&ctx),
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
-        )],
-    )
-    .expect_err("scoped issuer without an Admin record");
-    assert_custom_error(&err, 3012);
-    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
+        // payer hands the Admin role to `root` (payer's Admin record is retired)
+        // and gets every scoped issuer capability instead.
+        let root = Keypair::new();
+        rotate_platform(&mut svm, &ctx, &root);
+        send(
+            &mut svm,
+            &[&root],
+            &[set_permissions_ix(
+                root.pubkey(),
+                &ctx,
+                asset_registry::ISSUER_PERMISSIONS_ALL,
+            )],
+            "grant every scoped capability",
+        );
+        let err = try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[blocklist_clawback_ix(
+                &ctx,
+                &payer_pk_of(&ctx),
+                &holder,
+                &ctx.buyer_share_ata,
+                &vault,
+                &escrow,
+                0,
+                gated,
+            )],
+        )
+        .expect_err("scoped issuer without an Admin record");
+        assert_custom_error(&err, 3012);
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
 
-    let logs = send_with_logs(
-        &mut svm,
-        &[&root],
-        &[blocklist_clawback_ix(
-            &ctx,
-            &root.pubkey(),
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
-        )],
-    )
-    .expect("the Admin seizes");
-    let ev = &blocklist_clawback_events(&logs)[0];
-    assert_eq!(ev.admin, root.pubkey());
-    assert_eq!(ev.blocked_by, payer_pk_of(&ctx));
+        let logs = send_with_logs(
+            &mut svm,
+            &[&root],
+            &[blocklist_clawback_ix(
+                &ctx,
+                &root.pubkey(),
+                &holder,
+                &ctx.buyer_share_ata,
+                &vault,
+                &escrow,
+                0,
+                gated,
+            )],
+        )
+        .expect("the Admin seizes");
+        let ev = &blocklist_clawback_events(&logs)[0];
+        assert_eq!(ev.admin, root.pubkey());
+        assert_eq!(ev.blocked_by, payer_pk_of(&ctx));
+    }
 }
 
 /// Even with both keys, a program escrow cannot be the target: the
@@ -6133,16 +6146,110 @@ fn blocklist_clawback_refuses_a_program_escrow_as_holder() {
 
 /// The destination must be this class's Active RedemptionQueue +
 /// BurnAndAttest vault escrow — mirror of
-/// `clawback_destination_must_be_burn_only_vault`, on an Open mint.
+/// `clawback_destination_must_be_burn_only_vault`, in both modes.
 #[test]
 fn blocklist_clawback_destination_must_be_burn_only_vault() {
-    let (mut svm, ctx, holder) = blocked_holder_setup(false);
-    let payer_pk = ctx.payer.pubkey();
-    let attempt = |svm: &mut LiteSVM, vault: Pubkey, escrow: Pubkey| {
-        try_send(
-            svm,
+    for gated in [false, true] {
+        let (mut svm, ctx, holder) = blocked_holder_setup(gated);
+        let payer_pk = ctx.payer.pubkey();
+        let attempt = |svm: &mut LiteSVM, vault: Pubkey, escrow: Pubkey| {
+            try_send(
+                svm,
+                &[&ctx.payer],
+                &[blocklist_clawback_ix(
+                    &ctx,
+                    &payer_pk,
+                    &holder,
+                    &ctx.buyer_share_ata,
+                    &vault,
+                    &escrow,
+                    0,
+                    gated,
+                )],
+            )
+        };
+        let (good_vault, good_escrow) = open_redemption_vault(&mut svm, &ctx, 1);
+
+        // (a) Offer escrow as destination (not this vault's escrow).
+        let maker = Keypair::new();
+        svm.airdrop(&maker.pubkey(), 10_000_000_000).unwrap();
+        let (_offer, offer_escrow) = create_offer(&mut svm, &ctx, &maker, 5);
+        assert_custom_error(
+            &attempt(&mut svm, good_vault, offer_escrow).unwrap_err(),
+            6081,
+        );
+        // (b) DeliveryEscrow vault.
+        let (delivery, delivery_escrow) =
+            open_vault(&mut svm, &ctx, 2, VaultType::DeliveryEscrow, payer_pk);
+        assert_custom_error(
+            &attempt(&mut svm, delivery, delivery_escrow).unwrap_err(),
+            6081,
+        );
+        // (c) RedemptionQueue with a non-burn realize action.
+        let (non_burn, non_burn_escrow) = open_redemption_vault(&mut svm, &ctx, 3);
+        set_realize_action(&mut svm, &non_burn, RealizeAction::TransferToBeneficiary);
+        assert_custom_error(
+            &attempt(&mut svm, non_burn, non_burn_escrow).unwrap_err(),
+            6081,
+        );
+        // (d) A Triggered (no longer Active) quarantine vault.
+        let (triggered, triggered_escrow) = open_redemption_vault(&mut svm, &ctx, 4);
+        send(
+            &mut svm,
             &[&ctx.payer],
-            &[blocklist_clawback_ix(
+            &[Instruction::new_with_bytes(
+                ctx.program_id,
+                &ixd::TriggerCustodyVault {}.data(),
+                acc::TriggerCustodyVault {
+                    authority_admin_record: admin_record_of(&payer_pk),
+                    authority: payer_pk,
+                    custody_vault: triggered,
+                }
+                .to_account_metas(None),
+            )],
+            "trigger",
+        );
+        assert_custom_error(
+            &attempt(&mut svm, triggered, triggered_escrow).unwrap_err(),
+            6081,
+        );
+        // (e) destination != vault.escrow (another quarantine's escrow).
+        let (_other, other_escrow) = open_redemption_vault(&mut svm, &ctx, 5);
+        assert_custom_error(
+            &attempt(&mut svm, good_vault, other_escrow).unwrap_err(),
+            6081,
+        );
+        // (f) A vault record naming another share class.
+        let (foreign, foreign_escrow) = open_redemption_vault(&mut svm, &ctx, 6);
+        {
+            use anchor_lang::AccountSerialize;
+            let mut state: asset_registry::CustodyVault = load(&svm, &foreign);
+            state.share_class = Pubkey::new_unique();
+            let mut account = svm.get_account(&foreign).unwrap();
+            state
+                .try_serialize(&mut account.data.as_mut_slice())
+                .unwrap();
+            svm.set_account(foreign, account).unwrap();
+        }
+        assert_custom_error(
+            &attempt(&mut svm, foreign, foreign_escrow).unwrap_err(),
+            6081,
+        );
+
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10, "untouched");
+        assert_eq!(token_balance(&svm, &good_escrow), 0);
+    }
+}
+
+/// Wrong mint / class / holder account / hook config, in both modes.
+#[test]
+fn blocklist_clawback_binds_mint_class_holder_and_config() {
+    for gated in [false, true] {
+        let (mut svm, ctx, holder) = blocked_holder_setup(gated);
+        let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
+        let payer_pk = ctx.payer.pubkey();
+        let base = || {
+            BlocklistClawbackIx::new(
                 &ctx,
                 &payer_pk,
                 &holder,
@@ -6150,148 +6257,58 @@ fn blocklist_clawback_destination_must_be_burn_only_vault() {
                 &vault,
                 &escrow,
                 0,
-                false,
-            )],
+                gated,
+            )
+        };
+        let run = |svm: &mut LiteSVM, ix: BlocklistClawbackIx| {
+            try_send(svm, &[&ctx.payer], &[ix.build(&ctx)]).unwrap_err()
+        };
+
+        // Class A with mint B.
+        let mut ix = base();
+        ix.mint = ctx.payment_mint;
+        assert_custom_error(&run(&mut svm, ix), 6001);
+        // Holder account of another mint (the buyer's payment account).
+        let mut ix = base();
+        ix.holder_share_account = ctx.buyer_payment_ata;
+        assert_custom_error(&run(&mut svm, ix), 6001);
+        // Holder account of another owner (same mint).
+        let other_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &payer_pk);
+        let mut ix = base();
+        ix.holder_share_account = other_ata;
+        assert_custom_error(&run(&mut svm, ix), 6001);
+        // Hook config of another mint.
+        let mut ix = base();
+        ix.hook_config = Pubkey::find_program_address(
+            &[transfer_hook::HOOK_CONFIG_SEED, ctx.payment_mint.as_ref()],
+            &ctx.hook_id,
         )
-    };
-    let (good_vault, good_escrow) = open_redemption_vault(&mut svm, &ctx, 1);
+        .0;
+        assert_custom_error(&run(&mut svm, ix), 2006);
 
-    // (a) Offer escrow as destination (not this vault's escrow).
-    let maker = Keypair::new();
-    svm.airdrop(&maker.pubkey(), 10_000_000_000).unwrap();
-    let (_offer, offer_escrow) = create_offer(&mut svm, &ctx, &maker, 5);
-    assert_custom_error(
-        &attempt(&mut svm, good_vault, offer_escrow).unwrap_err(),
-        6081,
-    );
-    // (b) DeliveryEscrow vault.
-    let (delivery, delivery_escrow) =
-        open_vault(&mut svm, &ctx, 2, VaultType::DeliveryEscrow, payer_pk);
-    assert_custom_error(
-        &attempt(&mut svm, delivery, delivery_escrow).unwrap_err(),
-        6081,
-    );
-    // (c) RedemptionQueue with a non-burn realize action.
-    let (non_burn, non_burn_escrow) = open_redemption_vault(&mut svm, &ctx, 3);
-    set_realize_action(&mut svm, &non_burn, RealizeAction::TransferToBeneficiary);
-    assert_custom_error(
-        &attempt(&mut svm, non_burn, non_burn_escrow).unwrap_err(),
-        6081,
-    );
-    // (d) A Triggered (no longer Active) quarantine vault.
-    let (triggered, triggered_escrow) = open_redemption_vault(&mut svm, &ctx, 4);
-    send(
-        &mut svm,
-        &[&ctx.payer],
-        &[Instruction::new_with_bytes(
-            ctx.program_id,
-            &ixd::TriggerCustodyVault {}.data(),
-            acc::TriggerCustodyVault {
-                authority_admin_record: admin_record_of(&payer_pk),
-                authority: payer_pk,
-                custody_vault: triggered,
-            }
-            .to_account_metas(None),
-        )],
-        "trigger",
-    );
-    assert_custom_error(
-        &attempt(&mut svm, triggered, triggered_escrow).unwrap_err(),
-        6081,
-    );
-    // (e) destination != vault.escrow (another quarantine's escrow).
-    let (_other, other_escrow) = open_redemption_vault(&mut svm, &ctx, 5);
-    assert_custom_error(
-        &attempt(&mut svm, good_vault, other_escrow).unwrap_err(),
-        6081,
-    );
-    // (f) A vault record naming another share class.
-    let (foreign, foreign_escrow) = open_redemption_vault(&mut svm, &ctx, 6);
-    {
-        use anchor_lang::AccountSerialize;
-        let mut state: asset_registry::CustodyVault = load(&svm, &foreign);
-        state.share_class = Pubkey::new_unique();
-        let mut account = svm.get_account(&foreign).unwrap();
-        state
-            .try_serialize(&mut account.data.as_mut_slice())
-            .unwrap();
-        svm.set_account(foreign, account).unwrap();
+        // Fabricated config at the right address: wrong owner, wrong share_class
+        // field, wrong mint field, truncated → 6138.
+        let genuine = svm.get_account(&ctx.hook_config_pda).unwrap();
+        let cases = [
+            (
+                "registry-owned",
+                edited(&genuine, |a| a.owner = asset_registry::ID),
+            ),
+            (
+                "share_class field",
+                edited(&genuine, |a| a.data[40] ^= 0xff),
+            ),
+            ("mint field", edited(&genuine, |a| a.data[8] ^= 0xff)),
+            ("truncated", edited(&genuine, |a| a.data.truncate(137))),
+        ];
+        for (what, account) in cases {
+            svm.set_account(ctx.hook_config_pda, account).unwrap();
+            let err = run(&mut svm, base());
+            assert!(err.contains("Custom(6138)"), "{what}: {err}");
+        }
+        svm.set_account(ctx.hook_config_pda, genuine).unwrap();
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
     }
-    assert_custom_error(
-        &attempt(&mut svm, foreign, foreign_escrow).unwrap_err(),
-        6081,
-    );
-
-    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10, "untouched");
-    assert_eq!(token_balance(&svm, &good_escrow), 0);
-}
-
-/// Wrong mint / class / holder account / hook config.
-#[test]
-fn blocklist_clawback_binds_mint_class_holder_and_config() {
-    let (mut svm, ctx, holder) = blocked_holder_setup(false);
-    let (vault, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
-    let payer_pk = ctx.payer.pubkey();
-    let base = || {
-        BlocklistClawbackIx::new(
-            &ctx,
-            &payer_pk,
-            &holder,
-            &ctx.buyer_share_ata,
-            &vault,
-            &escrow,
-            0,
-            false,
-        )
-    };
-    let run = |svm: &mut LiteSVM, ix: BlocklistClawbackIx| {
-        try_send(svm, &[&ctx.payer], &[ix.build(&ctx)]).unwrap_err()
-    };
-
-    // Class A with mint B.
-    let mut ix = base();
-    ix.mint = ctx.payment_mint;
-    assert_custom_error(&run(&mut svm, ix), 6001);
-    // Holder account of another mint (the buyer's payment account).
-    let mut ix = base();
-    ix.holder_share_account = ctx.buyer_payment_ata;
-    assert_custom_error(&run(&mut svm, ix), 6001);
-    // Holder account of another owner (same mint).
-    let other_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &payer_pk);
-    let mut ix = base();
-    ix.holder_share_account = other_ata;
-    assert_custom_error(&run(&mut svm, ix), 6001);
-    // Hook config of another mint.
-    let mut ix = base();
-    ix.hook_config = Pubkey::find_program_address(
-        &[transfer_hook::HOOK_CONFIG_SEED, ctx.payment_mint.as_ref()],
-        &ctx.hook_id,
-    )
-    .0;
-    assert_custom_error(&run(&mut svm, ix), 2006);
-
-    // Fabricated config at the right address: wrong owner, wrong share_class
-    // field, wrong mint field, truncated → 6138.
-    let genuine = svm.get_account(&ctx.hook_config_pda).unwrap();
-    let cases = [
-        (
-            "registry-owned",
-            edited(&genuine, |a| a.owner = asset_registry::ID),
-        ),
-        (
-            "share_class field",
-            edited(&genuine, |a| a.data[40] ^= 0xff),
-        ),
-        ("mint field", edited(&genuine, |a| a.data[8] ^= 0xff)),
-        ("truncated", edited(&genuine, |a| a.data.truncate(137))),
-    ];
-    for (what, account) in cases {
-        svm.set_account(ctx.hook_config_pda, account).unwrap();
-        let err = run(&mut svm, base());
-        assert!(err.contains("Custom(6138)"), "{what}: {err}");
-    }
-    svm.set_account(ctx.hook_config_pda, genuine).unwrap();
-    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
 }
 
 /// A blocked wallet with an empty share account → NothingToClaim.
@@ -6325,7 +6342,8 @@ fn blocklist_clawback_zero_balance_is_nothing_to_claim() {
 /// trusted: a tail whose BlockEntry is keyed on the ShareClass (the transfer
 /// authority) instead of the holder fails in Token-2022's account resolution
 /// (spl-tlv-account-resolution `IncorrectAccount`, 2724315840) before the hook
-/// runs, and an Open 3-account tail on a KycGated mint lacks the config. A
+/// runs, and an Open 3-account tail on a KycGated mint fails the same way
+/// (the KycGated list's config / registry / marker metas do not resolve). A
 /// KycGated-shaped SUPERSET on an Open mint is harmless: Token-2022 forwards
 /// only the metas the Open list resolves, so the hook still sees the Open
 /// shape and applies the same quarantine exception.
@@ -6355,6 +6373,10 @@ fn blocklist_clawback_tail_tampering_fails() {
         let err = try_send(&mut svm, &[&ctx.payer], &[with_tail(tail)])
             .expect_err("BlockEntry keyed on the ShareClass");
         assert_custom_error(&err, 2_724_315_840);
+        assert!(
+            !err.contains(&format!("Program {} invoke", ctx.hook_id)),
+            "resolution must fail before the hook runs: {err}"
+        );
         // The other mode's tail.
         let result = try_send(
             &mut svm,
@@ -6362,8 +6384,14 @@ fn blocklist_clawback_tail_tampering_fails() {
             &[with_tail(quarantine_tail(&ctx, &holder, &vault, !gated))],
         );
         if gated {
+            // Token-2022 cannot resolve the KycGated meta list from the
+            // Open-shaped tail: IncorrectAccount, and the hook never runs.
             let err = result.expect_err("Open tail on a KycGated mint");
-            assert!(err.contains("InstructionError(0,"), "{err}");
+            assert_custom_error(&err, 2_724_315_840);
+            assert!(
+                !err.contains(&format!("Program {} invoke", ctx.hook_id)),
+                "resolution must fail before the hook runs: {err}"
+            );
             assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
         } else {
             result.expect("KycGated superset on an Open mint is ignored by Token-2022");
@@ -6400,6 +6428,131 @@ fn clawback_from_holder_still_refuses_open_mint_for_blocked_holder() {
     .expect_err("passport path on an Open mint");
     assert_custom_error(&err, 6080);
     assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 10);
+}
+
+/// Source guard for the hook's blocked-source exception. In Open mode the hook
+/// accepts ANY ShareClass-signed (PermanentDelegate) transfer from a blocked
+/// wallet into ANY registry escrow PDA; it lands in a burn-only quarantine
+/// only because the registry signs as the ShareClass for a token transfer in
+/// exactly one place — `util::seize_into_quarantine`, whose two callers pin
+/// the vault — and never re-points the PermanentDelegate. A new ShareClass
+/// signer site, or any SetAuthority, fails here until it is reviewed against
+/// that exception (docs: `hook_transfer` / `seize_into_quarantine`).
+#[test]
+fn share_class_signs_only_the_quarantine_transfer() {
+    use std::{collections::BTreeMap, fs, path::Path};
+
+    fn walk(dir: &Path, out: &mut Vec<(String, String)>) {
+        for entry in fs::read_dir(dir).expect("read src dir") {
+            let path = entry.expect("dir entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                let src = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+                let rel = path
+                    .strip_prefix(&src)
+                    .expect("under src")
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.push((rel, fs::read_to_string(&path).expect("read source")));
+            }
+        }
+    }
+    let mut files = Vec::new();
+    walk(
+        &Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut files,
+    );
+    assert!(files.iter().any(|(f, _)| f == "util.rs"), "source walk");
+
+    // Every ShareClass-seed use outside an Anchor `seeds = [..]` constraint:
+    // signer seeds (and one address re-derivation). Each is reviewed.
+    let allowed: BTreeMap<&str, usize> = [
+        // seize_into_quarantine — the ONLY ShareClass-signed transfer.
+        ("util.rs", 1),
+        // Token-2022 metadata init + hook config init (co-sign), no transfer.
+        ("instructions/initialize_share_class_mint.rs", 1),
+        // mint_to (mint authority), no transfer.
+        ("instructions/mint_to_treasury.rs", 1),
+        ("instructions/buy.rs", 1),
+        // metadata field update, no transfer.
+        ("instructions/update_mint_metadata.rs", 1),
+        // create_program_address check of a legacy ShareClass, no signing.
+        ("instructions/prepare_legacy_account.rs", 1),
+    ]
+    .into_iter()
+    .collect();
+    let mut found: BTreeMap<String, usize> = BTreeMap::new();
+    for (file, src) in &files {
+        for line in src.lines() {
+            let line = line.trim_start();
+            if line.starts_with("//") || line.starts_with("seeds = [SHARE_CLASS_SEED") {
+                continue;
+            }
+            if line.contains("SHARE_CLASS_SEED") && !line.starts_with("pub const SHARE_CLASS_SEED")
+            {
+                *found.entry(file.clone()).or_default() += 1;
+            }
+            assert!(
+                !line.contains("b\"share_class\"")
+                    || line.starts_with("pub const SHARE_CLASS_SEED"),
+                "{file}: raw ShareClass seed literal — use SHARE_CLASS_SEED: {line}"
+            );
+            for banned in ["set_authority", "SetAuthority", "AuthorityType"] {
+                assert!(
+                    !line.contains(banned),
+                    "{file}: {banned} — the registry must never re-point mint \
+                     authorities (the hook trusts the PermanentDelegate): {line}"
+                );
+            }
+        }
+    }
+    let found: BTreeMap<&str, usize> = found.iter().map(|(f, n)| (f.as_str(), *n)).collect();
+    assert_eq!(
+        found, allowed,
+        "ShareClass signer sites changed — a ShareClass-signed transfer widens \
+         the hook's blocked-source quarantine exception; review, then update"
+    );
+
+    // In util.rs the one site is inside `seize_into_quarantine`.
+    let util = &files.iter().find(|(f, _)| f == "util.rs").unwrap().1;
+    let start = util
+        .find("pub fn seize_into_quarantine")
+        .expect("seize_into_quarantine");
+    let end = util[start + 1..]
+        .find("\npub fn ")
+        .map_or(util.len(), |i| start + 1 + i);
+    assert!(util[start..end].contains("SHARE_CLASS_SEED"));
+
+    // The other signer files never move tokens.
+    for file in [
+        "instructions/initialize_share_class_mint.rs",
+        "instructions/mint_to_treasury.rs",
+        "instructions/update_mint_metadata.rs",
+    ] {
+        let src = &files.iter().find(|(f, _)| f == file).unwrap().1;
+        for transfer in ["hook_transfer", "transfer_checked", "TransferChecked"] {
+            assert!(!src.contains(transfer), "{file}: {transfer}");
+        }
+    }
+    // buy.rs moves ONLY the buyer-signed payment leg.
+    let buy = &files
+        .iter()
+        .find(|(f, _)| f == "instructions/buy.rs")
+        .unwrap()
+        .1;
+    assert!(!buy.contains("hook_transfer"));
+    assert_eq!(buy.matches("transfer_checked(").count(), 1);
+    let payment = buy.find("transfer_checked(").unwrap();
+    let signer = payment
+        + buy[payment..]
+            .find("let signer_seeds")
+            .expect("ShareClass signer after the payment leg");
+    let leg = &buy[payment..signer];
+    assert!(
+        leg.contains("CpiContext::new(") && !leg.contains("new_with_signer"),
+        "buy.rs: the payment transfer must stay unsigned by the ShareClass"
+    );
 }
 
 /// Layout pins for the hook accounts the registry reads by offset (no crate

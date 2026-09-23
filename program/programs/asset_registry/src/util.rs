@@ -374,6 +374,14 @@ const TRANSFER_CHECKED_IX: u8 = 12;
 /// `[source BlockEntry, ExtraAccountMetaList, transfer_hook program]` — the
 /// layout proven by the happy-path real-transfer test (docs/05 §5). The caller
 /// passes them through `ctx.remaining_accounts`.
+///
+/// INVARIANT: the `ShareClass` PDA must never be the `authority` here except
+/// via [`seize_into_quarantine`]. The transfer hook lets a BLOCKED source move
+/// only when the authority is the mint's PermanentDelegate ShareClass and the
+/// destination is a registry escrow PDA — on an Open mint it cannot tell WHICH
+/// escrow, so the "burn-only quarantine" guarantee rests on this program
+/// signing as the ShareClass only for the pinned quarantine leg. Guarded by
+/// `share_class_signs_only_the_quarantine_transfer` (asset_registry tests).
 #[allow(clippy::too_many_arguments)]
 pub fn hook_transfer<'info>(
     token_program: &AccountInfo<'info>,
@@ -433,6 +441,16 @@ pub fn hook_transfer<'info>(
 ///
 /// `amount == 0` sweeps `source`'s full balance; nothing to move ⇒
 /// `NothingToClaim`. Returns the amount moved.
+///
+/// INVARIANT: this is the ONLY place the ShareClass signs a token transfer,
+/// and the registry never calls `SetAuthority` (so the PermanentDelegate stays
+/// the ShareClass). The transfer hook's blocked-source exception — above all
+/// in Open mode, where no config names the class and no marker names the
+/// escrow — accepts any ShareClass-signed transfer into any registry escrow
+/// PDA; it is burn-only quarantine only because both callers pin
+/// `destination` to an Active RedemptionQueue + BurnAndAttest vault. A new
+/// ShareClass-signed transfer widens that exception. Guarded by
+/// `share_class_signs_only_the_quarantine_transfer` (asset_registry tests).
 pub fn seize_into_quarantine<'info>(
     token_program: &AccountInfo<'info>,
     share_class: &Account<'info, ShareClass>,
