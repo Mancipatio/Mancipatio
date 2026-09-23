@@ -3565,9 +3565,12 @@
           "name": "admin_authority",
           "docs": [
             "Platform admin co-signer. Registries are the root of trust for every",
-            "`KycGated` mint, so one cannot be conjured permissionlessly; the",
-            "provider key stays distinct from the admin key (it gets no admin",
-            "powers, and the admin never owns the registry)."
+            "`KycGated` mint, so one cannot be conjured permissionlessly. The",
+            "co-signature gates only the CREATION of the address: afterwards the",
+            "current registry authority alone rotates the registry (to any key,",
+            "including an admin key) and replaces its jurisdiction bitmaps, with no",
+            "admin co-signature, admin override or pause flag. The registry",
+            "authority gets no admin powers from this record."
           ],
           "signer": true
         },
@@ -12838,6 +12841,14 @@
           {
             "name": "reapproval",
             "type": "bool"
+          },
+          {
+            "name": "authority",
+            "docs": [
+              "The registry authority that signed. The registry address no longer",
+              "implies the approver once the authority has rotated (2C-1)."
+            ],
+            "type": "pubkey"
           }
         ]
       }
@@ -12909,6 +12920,13 @@
           },
           {
             "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "authority",
+            "docs": [
+              "The registry authority that signed (see `HolderApproved::authority`)."
+            ],
             "type": "pubkey"
           }
         ]
