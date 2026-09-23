@@ -295,7 +295,46 @@ pub mod asset_registry {
         instructions::handle_return_custody_vault(ctx)
     }
 
-    /// Opens a primary sale of a share class (launchpad).
+    /// Admin approval to open exactly one sale (`share_class`, `sale_id`),
+    /// bounded by payment mint, price range, maximum gross raise, raise type,
+    /// Startup payout schedule (cliff / vesting months) and expiry (at most 90
+    /// days). Consumed by `open_sale`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn approve_sale(
+        ctx: Context<ApproveSale>,
+        sale_id: u64,
+        max_gross_raise: u64,
+        min_price_per_unit: u64,
+        max_price_per_unit: u64,
+        raise_type: RaiseType,
+        expires_at: i64,
+        application_hash: [u8; 32],
+        cliff_months: u8,
+        vesting_months: u8,
+    ) -> Result<()> {
+        instructions::handle_approve_sale(
+            ctx,
+            sale_id,
+            max_gross_raise,
+            min_price_per_unit,
+            max_price_per_unit,
+            raise_type,
+            expires_at,
+            application_hash,
+            cliff_months,
+            vesting_months,
+        )
+    }
+
+    /// Closes an unused sale approval (any Admin; rent to the approver).
+    pub fn revoke_sale_approval(ctx: Context<RevokeSaleApproval>) -> Result<()> {
+        instructions::handle_revoke_sale_approval(ctx)
+    }
+
+    /// Opens a primary sale of a share class (launchpad), consuming the
+    /// Admin's `SaleApproval` for this `(share_class, sale_id)`. The approver
+    /// must still be an Admin; the sale must start by the approval's expiry
+    /// and use its exact payout schedule.
     pub fn open_sale(
         ctx: Context<OpenSale>,
         sale_id: u64,

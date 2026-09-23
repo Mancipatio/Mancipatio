@@ -24,7 +24,6 @@ import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
-import { fetchMaybeMint as fetchMaybeClassicMint } from "@solana-program/token";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
@@ -47,24 +46,23 @@ import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
-import { useRole } from "@/lib/auth";
-import { recordAudit } from "@/lib/supabase";
-import { getPrivateAssetProfile as getAssetProfile } from "@/lib/asset-profiles";
-import { recordSaleIssuance } from "@/lib/spvs";
+import { upsertListing } from "@/lib/launchpad";
+import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import {
-  upsertListing,
-  getMyApplicationWithEvents,
-  type LaunchApplication,
-} from "@/lib/launchpad";
+  isApprovalLive,
+  listIssuerSaleApprovals,
+  maxUnitsAt,
+  mySaleApprovals,
+  settleWhenFinalized,
+  type MyApproval,
+  type SaleApprovalAccount,
+} from "@/lib/sale-approvals";
 
 /** Startup (vested payout-vault) raises are feature-flagged per network
  *  (lib/features.ts; off on mainnet unless NEXT_PUBLIC_FEATURE_STARTUP_RAISES
  *  =true). With it off, a startup sale is neither opened nor closed into a
  *  payout vault from this page — proceeds stay in the program escrow. */
 const STARTUP_RAISES = features().startupRaises;
-
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
 
 const CLASS_TYPE = [
   "Common",
@@ -75,6 +73,8 @@ const CLASS_TYPE = [
   "Rev-share tier",
   "Royalty tier",
 ];
+
+type ScMeta = { assetName: string; assetId: string; classIndex: number; sc: ShareClass };
 
 export default function MyLaunchpadPage() {
   return (
@@ -89,72 +89,23 @@ function LaunchpadInner() {
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
-  const role = useRole();
   const searchParams = useSearchParams();
+  // /issuer/launchpad?application=ID (from /apply or the admin queue) opens
+  // the form and preselects the approval Manci granted for that application.
   const applicationId = searchParams.get("application");
   const wallet = conn.wallet?.account.address;
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [me, setMe] = useState<Issuer | null>(null);
+  const [issuerPda, setIssuerPda] = useState<Address | null>(null);
   const [myShareClasses, setMyShareClasses] = useState<ShareClass[]>([]);
-  const [scPdaMap, setScPdaMap] = useState<
-    Map<string, { assetName: string; assetId: string; classIndex: number }>
-  >(new Map());
+  const [scPdaMap, setScPdaMap] = useState<Map<string, ScMeta>>(new Map());
+  // Live (unexpired, unused) Admin sale approvals of this issuer, read from
+  // chain. open_sale consumes one; without one no sale can be opened.
+  const [approvals, setApprovals] = useState<SaleApprovalAccount[] | null>(null);
   const [showOpen, setShowOpen] = useState(false);
+  const [autoOpened, setAutoOpened] = useState(false);
   const [confirmClose, setConfirmClose] = useState<Sale | null>(null);
-  // openSale gate (P1 item 3b): opening a sale requires a linked APPROVED
-  // application owned by the connected wallet. Super admins may override with
-  // a mandatory audited reason; the reason is kept so the modal knows the gate
-  // was consciously bypassed.
-  const [gateOverrideReason, setGateOverrideReason] = useState<string | null>(
-    null,
-  );
-  const [showGateOverride, setShowGateOverride] = useState(false);
-  // When arriving from an approved application (/issuer/launchpad?application=ID),
-  // fetch it so the open-sale modal can prefill and thread the id onto the listing.
-  // Only honoured when the application is approved AND owned by the connected wallet.
-  const [linkedApp, setLinkedApp] = useState<LaunchApplication | null>(null);
-  const [applicationLoadError, setApplicationLoadError] = useState<
-    string | null
-  >(null);
-  useEffect(() => {
-    if (!applicationId || !wallet) return;
-    let cancelled = false;
-    void (async () => {
-      // Signed self-read — the route only ever returns the signer's own
-      // applications (launch_applications has no anon SELECT).
-      try {
-        setLinkedApp(null);
-        setApplicationLoadError(null);
-        const { application: a } = await getMyApplicationWithEvents(
-          conn.wallet,
-          applicationId,
-        );
-        if (cancelled || !a) return;
-        if (
-          a.status !== "approved" ||
-          a.applicant_wallet !== wallet.toString()
-        ) {
-          console.warn(
-            "[launchpad] Ignoring ?application=: application is not approved or does not belong to the connected wallet.",
-          );
-          return;
-        }
-        setLinkedApp(a);
-        setShowOpen(true);
-      } catch {
-        if (!cancelled) {
-          setLinkedApp(null);
-          setApplicationLoadError(
-            "Application eligibility could not be verified. Retry after the service recovers; opening a new sale remains unavailable.",
-          );
-        }
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [applicationId, wallet, conn.wallet]);
 
   const refresh = useCallback(async () => {
     try {
@@ -168,16 +119,14 @@ function LaunchpadInner() {
         );
         setMe(found ?? null);
         if (found) {
-          const [issuerPda] = await findIssuerPda({
+          const [pda] = await findIssuerPda({
             legalEntityId: found.legalEntityId,
           });
+          setIssuerPda(pda);
           const myAssets = network.assets.filter(
-            (a) => a.issuer.toString() === issuerPda.toString(),
+            (a) => a.issuer.toString() === pda.toString(),
           );
-          const m = new Map<
-            string,
-            { assetName: string; assetId: string; classIndex: number }
-          >();
+          const m = new Map<string, ScMeta>();
           const mySc: ShareClass[] = [];
           for (const a of myAssets) {
             const [apda] = await findAssetPda({
@@ -191,12 +140,22 @@ function LaunchpadInner() {
                 assetName: a.name,
                 assetId: a.assetId,
                 classIndex: sc.classIndex,
+                sc,
               });
               mySc.push(sc);
             }
           }
           setScPdaMap(m);
           setMyShareClasses(mySc);
+          try {
+            setApprovals(
+              (await listIssuerSaleApprovals(client.runtime.rpc, pda)).filter(
+                (a) => isApprovalLive(a) && m.has(a.shareClass.toString()),
+              ),
+            );
+          } catch {
+            setApprovals([]);
+          }
         }
       }
     } catch {
@@ -208,6 +167,14 @@ function LaunchpadInner() {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
+
+  // Arriving from an approved application: open the form once approvals load.
+  useEffect(() => {
+    if (!applicationId || autoOpened || approvals === null) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setAutoOpened(true);
+    setShowOpen(true);
+  }, [applicationId, autoOpened, approvals]);
 
   const rows = useMemo(() => {
     if (!data) return [];
@@ -230,67 +197,23 @@ function LaunchpadInner() {
   const mintableScs = myShareClasses.filter((sc) => sc.mintInitialized);
   const canOpen = verified && mintableScs.length > 0;
 
-  // AUTO-BOOK (P1 item 4): after a sale closes (instant close_sale for
-  // Established/Mature, or the open_payout_vault close flow for Startup), if
-  // the sale's asset profile is linked to an SPV (asset_profiles.spv_id) the
-  // gross proceeds are booked against that SPV's EUR 3M annual cap via
-  // recordSaleIssuance (W1-F3, source='sale'; the 0027 DB trigger rejects
-  // over-cap inserts).
-  //
-  // FX note (documented per spec): devnet payment mints are USDC-like, not
-  // EUR-denominated. We book the UI amount (base units / 10^decimals) as-is
-  // and stamp the note with "FX unconverted" + the payment mint so the ledger
-  // is auditable. Fire-and-forget: a booking failure never blocks the
-  // on-chain close (which has already succeeded), it only surfaces a toast
-  // asking for a manual entry on /admin/spvs.
-  async function autoBookSpvIssuance(s: Sale) {
-    try {
-      if (!me) return;
-      const meta = scPdaMap.get(s.shareClass.toString());
-      if (!meta) return;
-      const [issuerPda] = await findIssuerPda({
-        legalEntityId: me.legalEntityId,
-      });
-      const [assetPda] = await findAssetPda({
-        issuer: issuerPda,
-        assetId: meta.assetId,
-      });
-      const profile = await getAssetProfile(conn.wallet, assetPda.toString());
-      if (!profile?.spv_id) return; // no SPV linked — nothing to book
-      const grossBaseUnits = s.sold * s.pricePerUnit;
-      let decimals = 6; // USDC/USDT default — the common devnet payment mints
-      try {
-        const maybe = await fetchMaybeClassicMint(
-          client.runtime.rpc,
-          s.paymentMint,
-        );
-        if (maybe.exists) decimals = maybe.data.decimals;
-      } catch {
-        // keep the 6-decimal fallback
-      }
-      const amount = Number(grossBaseUnits) / 10 ** decimals;
-      if (!(amount > 0)) return; // nothing sold — nothing to book
-      const ok = await recordSaleIssuance(conn.wallet, {
-        spvId: profile.spv_id,
-        amountEur: amount,
-        assetPda: assetPda.toString(),
-        note: `Auto-booked on close of sale #${s.saleId} (${meta.assetId}) — FX unconverted; amount is payment-mint units (mint ${s.paymentMint})`,
-      });
-      if (ok) {
-        toast.show({
-          kind: "success",
-          title: "SPV issuance booked",
-          description: `${amount.toLocaleString("en-US")} recorded against the SPV annual cap (sale #${s.saleId}).`,
-        });
-      } else {
-        toast.showError(
-          "SPV issuance NOT booked",
-          `The sale closed on-chain, but booking ${amount.toLocaleString("en-US")} against the SPV annual cap was rejected (cap reached or database unreachable). Please contact the Manci team so it can be recorded.`,
-        );
-      }
-    } catch (err) {
-      console.warn("[launchpad] SPV auto-book failed:", err);
-    }
+  // After a sale closes (instant close_sale for Mature, or the
+  // open_payout_vault close flow for Startup) the server books what was sold
+  // against the raise cap, at the FX rate locked when Manci approved the
+  // sale. It reads the sale at `finalized`, so this waits for finality first.
+  // Best effort: the retry worker books it anyway if this page is left.
+  function settleAfterClose(s: Sale, salePda: Address, signature: string) {
+    void settleWhenFinalized(client.runtime.rpc, conn.wallet, salePda, signature)
+      .then((result) => {
+        if (result?.status === "booked" && result.booked_amount_eur !== null) {
+          toast.show({
+            kind: "success",
+            title: "Raise recorded",
+            description: `€${Number(result.booked_amount_eur).toLocaleString("en-US")} of sale #${s.saleId} counted against the annual raise limit.`,
+          });
+        }
+      })
+      .catch((err) => console.warn("[launchpad] raise-limit settlement deferred to the worker:", err));
   }
 
   async function closeSale(s: Sale) {
@@ -312,6 +235,7 @@ function LaunchpadInner() {
     try {
       const signer = walletSigner(conn.wallet);
       const salePda = await findSalePda(s.shareClass, s.saleId);
+      const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(client.runtime.rpc, s.paymentMint);
 
       if (isStartup) {
         // STARTUP raises do NOT sweep proceeds to the founder. Instead the
@@ -324,7 +248,7 @@ function LaunchpadInner() {
           sale: salePda,
           proceeds: s.proceeds,
           paymentMint: s.paymentMint,
-          paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+          paymentTokenProgram,
           metadataHash: new Uint8Array(32),
         });
         const sig = await tx.send({
@@ -334,7 +258,7 @@ function LaunchpadInner() {
         toast.dismiss(pendingId);
         toast.showTx(sig, { title: "Vault opened" });
         setConfirmClose(null);
-        void autoBookSpvIssuance(s);
+        settleAfterClose(s, salePda, sig);
         await refresh();
         return;
       }
@@ -343,7 +267,7 @@ function LaunchpadInner() {
       // straight to the founder's payment ATA and close the sale.
       const [destAta] = await findAssociatedTokenPda({
         owner: wallet,
-        tokenProgram: TOKEN_CLASSIC_ADDRESS,
+        tokenProgram: paymentTokenProgram,
         mint: s.paymentMint,
       });
       const createDestAtaIx =
@@ -351,7 +275,7 @@ function LaunchpadInner() {
           payer: signer,
           owner: wallet,
           mint: s.paymentMint,
-          tokenProgram: TOKEN_CLASSIC_ADDRESS,
+          tokenProgram: paymentTokenProgram,
         });
       // Emergency-pause gate (read-only) — the last named account.
       const [platform] = await findPlatformPda();
@@ -362,7 +286,7 @@ function LaunchpadInner() {
         proceeds: s.proceeds,
         paymentMint: s.paymentMint,
         destination: destAta,
-        paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+        paymentTokenProgram,
       });
       const sig = await tx.send({
         instructions: [createDestAtaIx, closeIx],
@@ -371,7 +295,7 @@ function LaunchpadInner() {
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Sale closed" });
       setConfirmClose(null);
-      void autoBookSpvIssuance(s);
+      settleAfterClose(s, salePda, sig);
       await refresh();
     } catch (err) {
       toast.dismiss(pendingId);
@@ -406,9 +330,7 @@ function LaunchpadInner() {
         <button
           type="button"
           disabled={!canOpen}
-          onClick={() => {
-            if (!applicationLoadError) setShowOpen(true);
-          }}
+          onClick={() => setShowOpen(true)}
           title={
             !verified
               ? "Verify KYB first."
@@ -439,12 +361,14 @@ function LaunchpadInner() {
           </Link>
         </div>
       )}
-
-      {applicationLoadError && (
-        <p className="mt-5 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-800">
-          {applicationLoadError}
-        </p>
+      {verified && approvals !== null && approvals.length > 0 && (
+        <div className="mt-6 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3 text-xs text-emerald-900">
+          Manci approved {approvals.length === 1 ? "a sale" : `${approvals.length} sales`} for
+          your share classes. Use &quot;+ Open sale&quot; to open{" "}
+          {approvals.length === 1 ? "it" : "them"} before the approval expires.
+        </div>
       )}
+
       <SalePublicationRecovery />
 
       {failed ? (
@@ -566,136 +490,26 @@ function LaunchpadInner() {
       )}
 
       {showOpen &&
-        !applicationLoadError &&
         me &&
-        (linkedApp || gateOverrideReason ? (
+        issuerPda &&
+        (approvals && approvals.length > 0 ? (
           <OpenSaleModal
-            issuer={me}
-            mintableScs={mintableScs}
+            issuerPda={issuerPda}
             scPdaMap={scPdaMap}
-            existingSales={data?.sales ?? []}
-            applicationId={linkedApp ? applicationId : null}
-            linkedApp={linkedApp}
-            gateOverrideReason={gateOverrideReason}
-            onClose={() => {
-              setShowOpen(false);
-              // An override is single-use: closing the form re-arms the gate.
-              setGateOverrideReason(null);
-            }}
+            approvals={approvals}
+            preselectApplicationId={applicationId}
+            onClose={() => setShowOpen(false)}
             onSuccess={() => {
               void refresh();
               setShowOpen(false);
-              setGateOverrideReason(null);
             }}
           />
         ) : (
-          // openSale gate (P1 item 3b): no approved application linked — block.
-          <div
-            className="fixed inset-0 z-40 flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4 backdrop-blur-sm"
-            role="dialog"
-            aria-modal="true"
-            onMouseDown={(e) => {
-              if (e.target === e.currentTarget) setShowOpen(false);
-            }}
-          >
-            <div className="mx-auto w-full max-w-lg overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
-              <div className="border-b border-amber-200 bg-amber-50 px-5 py-4">
-                <p className="text-sm font-semibold uppercase tracking-wide text-amber-900">
-                  Approved application required
-                </p>
-              </div>
-              <div className="space-y-3 px-5 py-4 text-sm leading-relaxed text-slate-700">
-                <p>
-                  Opening a primary sale requires an{" "}
-                  <strong>approved launch application</strong> linked to this
-                  wallet. Sale terms (raise type, vesting, cliff) are taken from
-                  the approved application — sales cannot be opened ad hoc.
-                </p>
-                <p className="text-xs text-slate-500">
-                  If your application has been approved, open it from{" "}
-                  <Link
-                    href="/apply"
-                    className="font-semibold text-slate-700 underline underline-offset-2"
-                  >
-                    /apply
-                  </Link>{" "}
-                  — the &quot;Open sale&quot; link there returns here with the
-                  application attached. If you have not applied yet, start
-                  there.
-                </p>
-              </div>
-              <div className="flex items-center justify-between gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
-                {role.isSuperAdmin ? (
-                  <button
-                    type="button"
-                    onClick={() => setShowGateOverride(true)}
-                    className="rounded-md px-3 py-1.5 text-xs font-medium text-red-700 underline-offset-2 hover:underline"
-                  >
-                    Override (super admin)…
-                  </button>
-                ) : (
-                  <span />
-                )}
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setShowOpen(false)}
-                    className="rounded-md px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200"
-                  >
-                    Close
-                  </button>
-                  <Link
-                    href="/apply"
-                    className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
-                  >
-                    Go to application →
-                  </Link>
-                </div>
-              </div>
-            </div>
-          </div>
+          <NoApprovalDialog
+            loading={approvals === null}
+            onClose={() => setShowOpen(false)}
+          />
         ))}
-
-      {showGateOverride && (
-        <ConfirmModal
-          open
-          onClose={() => setShowGateOverride(false)}
-          onConfirm={(reason) => {
-            if (wallet) {
-              // legalEntityId is a fixed-width byte array on-chain — decode
-              // and strip NUL padding for a human-readable audit label.
-              const entityId = me
-                ? new TextDecoder()
-                    .decode(new Uint8Array(me.legalEntityId))
-                    .replace(/\0+$/, "")
-                : null;
-              void recordAudit({
-                ix_name: "open_sale_gate_override",
-                category: "launchpad",
-                actor_wallet: wallet.toString(),
-                reason,
-                target_label: entityId ?? undefined,
-                metadata: { issuer_legal_entity_id: entityId },
-              });
-            }
-            setGateOverrideReason(reason);
-            setShowGateOverride(false);
-          }}
-          title="Override the application gate"
-          kind="destructive"
-          confirmLabel="Override & open sale form"
-          requireReason
-          reasonPlaceholder="Why is a sale being opened without an approved application? (audit log)"
-          description={
-            <p>
-              You are opening a primary sale{" "}
-              <strong>without a linked approved application</strong>. This
-              bypasses the platform&apos;s review gate and is recorded in the
-              audit log with your wallet and reason.
-            </p>
-          }
-        />
-      )}
 
       {confirmClose && (
         <ConfirmModal
@@ -749,28 +563,90 @@ function LaunchpadInner() {
   );
 }
 
+/** No live approval: a sale needs Manci's on-chain approval first. */
+function NoApprovalDialog({
+  loading,
+  onClose,
+}: {
+  loading: boolean;
+  onClose: () => void;
+}) {
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4 backdrop-blur-sm"
+      role="dialog"
+      aria-modal="true"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="mx-auto w-full max-w-lg overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
+        <div className="border-b border-amber-200 bg-amber-50 px-5 py-4">
+          <p className="text-sm font-semibold uppercase tracking-wide text-amber-900">
+            Ask Manci to approve your sale
+          </p>
+        </div>
+        <div className="space-y-3 px-5 py-4 text-sm leading-relaxed text-slate-700">
+          {loading ? (
+            <p>Checking your sale approvals…</p>
+          ) : (
+            <>
+              <p>
+                A primary sale can only be opened with a{" "}
+                <strong>sale approval from Manci</strong>. Manci approves a sale
+                after reviewing your launch application: the approval fixes the
+                share class, the payment token, the price range and the most
+                the sale may raise.
+              </p>
+              <p className="text-xs text-slate-500">
+                There is no live approval for your share classes. If your
+                application was approved, ask the Manci team to approve the
+                sale. If you have not applied yet, start at{" "}
+                <Link
+                  href="/apply"
+                  className="font-semibold text-slate-700 underline underline-offset-2"
+                >
+                  /apply
+                </Link>
+                .
+              </p>
+            </>
+          )}
+        </div>
+        <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200"
+          >
+            Close
+          </button>
+          <Link
+            href="/apply"
+            className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Go to application →
+          </Link>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const digits = (s: string) => /^\d+$/.test(s.trim());
+
 function OpenSaleModal({
-  issuer,
-  mintableScs,
+  issuerPda,
   scPdaMap,
-  existingSales,
-  applicationId,
-  linkedApp,
-  gateOverrideReason,
+  approvals,
+  preselectApplicationId,
   onClose,
   onSuccess,
 }: {
-  issuer: Issuer;
-  mintableScs: ShareClass[];
-  scPdaMap: Map<
-    string,
-    { assetName: string; assetId: string; classIndex: number }
-  >;
-  existingSales: Sale[];
-  applicationId: string | null;
-  linkedApp: LaunchApplication | null;
-  /** Non-null when a super admin overrode the approved-application gate. */
-  gateOverrideReason: string | null;
+  issuerPda: Address;
+  scPdaMap: Map<string, ScMeta>;
+  approvals: SaleApprovalAccount[];
+  preselectApplicationId: string | null;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -780,110 +656,75 @@ function OpenSaleModal({
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
 
-  // Default to first share class — but we need its PDA as the key.
-  const firstScPda = useMemo(() => {
-    return Array.from(scPdaMap.keys())[0] ?? "";
-  }, [scPdaMap]);
-  const [selectedScPda, setSelectedScPda] = useState<string>(firstScPda);
+  // What only the ledger knows about each approval: its application (for the
+  // listing) and the committed cliff / vesting terms. The chain decides which
+  // approvals exist; this is read once per form (a wallet-session read).
+  const [mine, setMine] = useState<Map<string, MyApproval> | null>(null);
+  const [mineError, setMineError] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    mySaleApprovals(conn.wallet, issuerPda)
+      .then((rows) => {
+        if (!cancelled) setMine(new Map(rows.map((r) => [r.approval_pda, r])));
+      })
+      .catch((e) => {
+        if (!cancelled) {
+          setMine(new Map());
+          setMineError(e instanceof Error ? e.message : "Could not load the approval details");
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [conn.wallet, issuerPda]);
 
-  const [saleId, setSaleId] = useState("");
-  const [saleIdTouched, setSaleIdTouched] = useState(false);
+  const [selected, setSelected] = useState<string>(approvals[0]?.address ?? "");
+  const [picked, setPicked] = useState(false);
+  // Preselect the approval Manci granted for ?application=ID, once known.
+  useEffect(() => {
+    if (picked || !mine || !preselectApplicationId) return;
+    const match = approvals.find((a) => mine.get(a.address)?.application_id === preselectApplicationId);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (match) setSelected(match.address);
+    setPicked(true);
+  }, [mine, preselectApplicationId, approvals, picked]);
+
+  const approval = approvals.find((a) => a.address === selected) ?? null;
+  const info = approval ? (mine?.get(approval.address) ?? null) : null;
+  const meta = approval ? (scPdaMap.get(approval.shareClass.toString()) ?? null) : null;
+  // The approved share class itself (resolved by its PDA, never by class
+  // index alone: two assets can both have a class #0).
+  const selectedSc = meta && meta.sc.mintInitialized ? meta.sc : null;
+
   const [pricePerUnit, setPricePerUnit] = useState("");
   const [totalForSale, setTotalForSale] = useState("");
-  const [paymentMint, setPaymentMint] = useState("");
   const [endTs, setEndTs] = useState("");
 
-  // For the chosen scPda, lookup metadata.
-  const meta = scPdaMap.get(selectedScPda);
-
-  // The ShareClass struct for the selected PDA (matched by classIndex).
-  const selectedSc = useMemo(
-    () =>
-      meta
-        ? (mintableScs.find((x) => x.classIndex === meta.classIndex) ?? null)
-        : null,
-    [meta, mintableScs],
-  );
-
-  // Auto-suggest the next free sale id for the chosen share class so a second
-  // sale never collides with an existing (shareClass, saleId) PDA.
-  const nextSaleId = useMemo(() => {
-    if (!selectedScPda) return BigInt(1);
-    let max = BigInt(0);
-    for (const s of existingSales) {
-      if (s.shareClass.toString() === selectedScPda && s.saleId > max) {
-        max = s.saleId;
-      }
-    }
-    return max + BigInt(1);
-  }, [existingSales, selectedScPda]);
-
-  // Keep the sale-id field defaulted to the next free id until the user edits it.
-  useEffect(() => {
-    if (!saleIdTouched) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSaleId(nextSaleId.toString());
-    }
-  }, [nextSaleId, saleIdTouched]);
-
-  // Raise terms from the linked (approved) application, if any.
-  const raiseType =
-    linkedApp?.raise_type === "startup" ? RaiseType.Startup : RaiseType.Mature;
-  const cliffMonths = linkedApp?.cliff_months ?? 0;
-  const vestingMonths = linkedApp?.vesting_months ?? 0;
+  // Locked by the approval, including the payout schedule (on-chain since the
+  // approval carries it; open_sale requires it exactly).
+  const raiseType = approval?.raiseType ?? RaiseType.Mature;
+  const isStartup = raiseType === RaiseType.Startup;
+  const cliffMonths: number | null = approval ? approval.cliffMonths : null;
+  const vestingMonths: number | null = approval ? approval.vestingMonths : null;
   // A Startup raise closes into a PayoutVault (open_payout_vault), which the
-  // program rejects unless vesting > cliff and vesting > 0. Catch it here with a
-  // clear message instead of letting the founder hit a raw on-chain error at close.
+  // program rejects unless vesting > cliff and vesting > 0.
+  const startupTermsMissing = isStartup && (cliffMonths === null || vestingMonths === null);
   const startupTermsInvalid =
-    raiseType === RaiseType.Startup &&
-    !(vestingMonths > cliffMonths && vestingMonths > 0);
-  const startupDisabled = raiseType === RaiseType.Startup && !STARTUP_RAISES;
+    isStartup && !startupTermsMissing && !((vestingMonths ?? 0) > (cliffMonths ?? 0) && (vestingMonths ?? 0) > 0);
+  const startupDisabled = isStartup && !STARTUP_RAISES;
 
-  // open_sale rejects a zero price on-chain (InvalidSalePrice).
-  const priceIsZero =
-    /^\d+$/.test(pricePerUnit.trim()) && BigInt(pricePerUnit.trim()) === BigInt(0);
+  const price = digits(pricePerUnit) ? BigInt(pricePerUnit.trim()) : null;
+  const total = digits(totalForSale) ? BigInt(totalForSale.trim()) : null;
+  const priceOutOfRange =
+    approval !== null && price !== null && (price < approval.minPricePerUnit || price > approval.maxPricePerUnit);
+  const maxUnits = approval && price !== null && price > BigInt(0) ? maxUnitsAt(approval, price) : null;
+  const totalTooLarge = maxUnits !== null && total !== null && total > maxUnits;
+  const totalIsZero = total !== null && total === BigInt(0);
 
   async function openSale() {
-    if (
-      !wallet ||
-      !conn.wallet ||
-      !selectedScPda ||
-      !paymentMint.trim() ||
-      !pricePerUnit.trim() ||
-      !totalForSale.trim()
-    )
-      return;
-    if (priceIsZero) {
-      toast.showError(
-        "Invalid price",
-        "The price per unit must be greater than zero.",
-      );
-      return;
-    }
-    // Defense in depth for the application gate (item 3b): the modal is only
-    // rendered with a linked approved application or an audited super-admin
-    // override, but never send the transaction without one of the two.
-    if (!linkedApp && !gateOverrideReason) {
-      toast.showError(
-        "Approved application required",
-        "Open the sale from an approved application on /apply, or use the super-admin override.",
-      );
-      return;
-    }
-    if (startupDisabled) {
-      toast.showError(
-        "Startup raises unavailable",
-        featureDisabledMessage("startupRaises"),
-      );
-      return;
-    }
-    if (startupTermsInvalid) {
-      toast.showError(
-        "Invalid vesting terms",
-        "Startup raises need vesting months greater than the cliff (at least 1). Update the approved application before opening this sale.",
-      );
-      return;
-    }
+    if (!wallet || !conn.wallet || !approval || price === null || total === null) return;
+    if (priceOutOfRange || totalTooLarge || totalIsZero || startupDisabled || startupTermsMissing || startupTermsInvalid) return;
+    const saleId = approval.saleId;
     const pendingId = toast.showPending(`Opening sale #${saleId}…`);
     let publication: PendingSalePublication | null = null;
     let submittedSignature: string | null = null;
@@ -893,41 +734,38 @@ function OpenSaleModal({
         throw new Error(
           "A sale opening is already pending publication. Close this dialog and use Publish existing sale, or verify that its unsent intent expired.",
         );
-      const [issuerPda] = await findIssuerPda({
-        legalEntityId: issuer.legalEntityId,
-      });
-      if (!meta) throw new Error("Share class not found in PDA map");
+      if (!meta || !selectedSc) throw new Error("The approved share class has no initialized mint");
       const [assetPda] = await findAssetPda({
         issuer: issuerPda,
         assetId: meta.assetId,
       });
-      // The ShareClass struct for the selected PDA (matched by classIndex).
-      const matched = selectedSc;
-      if (!matched) throw new Error("Share class lookup failed");
-
       const endTsBig = endTs.trim()
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
       const signer = walletSigner(conn.wallet);
-      const saleIdBig = BigInt(saleId || "0");
+      // The payment mint comes from the approval (classic SPL or Token-2022).
+      const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(client.runtime.rpc, approval.paymentMint);
+      // The approval's PDA is derived from (share class, sale id); its rent
+      // returns to the approving admin (approved_by).
       const ix = await getOpenSaleInstructionAsync({
         authority: signer,
         issuer: issuerPda,
         asset: assetPda,
-        shareClass: selectedScPda as Address,
-        mint: matched.mint,
-        paymentMint: paymentMint.trim() as Address,
-        paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
-        saleId: saleIdBig,
-        pricePerUnit: BigInt(pricePerUnit),
-        totalForSale: BigInt(totalForSale),
+        shareClass: approval.shareClass,
+        mint: selectedSc.mint,
+        paymentMint: approval.paymentMint,
+        paymentTokenProgram,
+        saleId,
+        pricePerUnit: price,
+        totalForSale: total,
         startTs: BigInt(0),
         endTs: endTsBig,
         raiseType,
-        cliffMonths,
-        vestingMonths,
+        cliffMonths: cliffMonths ?? 0,
+        vestingMonths: vestingMonths ?? 0,
+        approvedBy: approval.approvedBy,
       });
-      const salePda = await findSalePda(selectedScPda as Address, saleIdBig);
+      const salePda = await findSalePda(approval.shareClass, saleId);
       const lifetime = (
         await client.runtime.rpc
           .getLatestBlockhash({ commitment: "confirmed" })
@@ -942,9 +780,9 @@ function OpenSaleModal({
         lastValidBlockHeight: lifetime.lastValidBlockHeight.toString(),
         listing: {
           sale_pubkey: salePda,
-          application_id: applicationId,
+          application_id: info?.application_id ?? null,
           logo_letter: (
-            linkedApp?.company_name?.[0] ??
+            info?.company_name?.[0] ??
             meta.assetName?.[0] ??
             "•"
           ).toUpperCase(),
@@ -999,6 +837,13 @@ function OpenSaleModal({
 
   if (!wallet) return null;
 
+  const label = (a: SaleApprovalAccount) => {
+    const m = scPdaMap.get(a.shareClass.toString());
+    const sc = m?.sc;
+    const company = mine?.get(a.address)?.company_name;
+    return `${company ? `${company} · ` : ""}${m?.assetName ?? "Share class"} · #${m?.classIndex ?? "?"} ${CLASS_TYPE[sc?.classType ?? 0]} · sale #${a.saleId}`;
+  };
+
   return (
     <div
       className="fixed inset-0 z-40 flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4 backdrop-blur-sm"
@@ -1015,31 +860,59 @@ function OpenSaleModal({
           </p>
         </div>
         <div className="space-y-4 px-5 py-4">
-          {linkedApp && (
+          <label className="block">
+            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+              Sale approval from Manci
+            </span>
+            <select
+              value={selected}
+              onChange={(e) => {
+                setSelected(e.target.value);
+                setPicked(true);
+              }}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
+            >
+              {approvals.map((a) => (
+                <option key={a.address} value={a.address}>
+                  {label(a)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {approval && (
             <div className="rounded-md border border-brand-200 bg-brand-50 px-4 py-3 text-xs text-brand-900">
-              <p className="font-semibold">
-                Fulfilling application: {linkedApp.company_name}
-              </p>
-              <p className="mt-1 text-brand-700">
-                {raiseType === RaiseType.Startup
-                  ? `Startup raise — vested payout over ${vestingMonths} month${
-                      vestingMonths === 1 ? "" : "s"
-                    }${cliffMonths > 0 ? `, ${cliffMonths}mo cliff` : ""}.`
-                  : "Established raise — instant payout on close."}{" "}
-                Terms are taken from the approved application.
-              </p>
+              <p className="font-semibold">Approved terms</p>
+              <dl className="mt-2 grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                <dt className="text-brand-700">Share class · sale id</dt>
+                <dd className="font-mono">#{meta?.classIndex ?? "?"} · {String(approval.saleId)}</dd>
+                <dt className="text-brand-700">Payment mint</dt>
+                <dd className="break-all font-mono">{approval.paymentMint}</dd>
+                <dt className="text-brand-700">Price per unit (base units)</dt>
+                <dd className="font-mono">
+                  {String(approval.minPricePerUnit)}
+                  {approval.maxPricePerUnit !== approval.minPricePerUnit ? ` – ${approval.maxPricePerUnit}` : ""}
+                </dd>
+                <dt className="text-brand-700">Maximum raise (base units)</dt>
+                <dd className="font-mono">{String(approval.maxGrossRaise)}</dd>
+                <dt className="text-brand-700">Raise type</dt>
+                <dd>
+                  {isStartup
+                    ? `Startup — vested payout${vestingMonths !== null ? ` over ${vestingMonths} months` : ""}${cliffMonths ? `, ${cliffMonths}mo cliff` : ""}`
+                    : "Established — instant payout on close"}
+                </dd>
+                <dt className="text-brand-700">Open by</dt>
+                <dd>{new Date(Number(approval.expiresAt) * 1000).toLocaleString("en-GB")}</dd>
+              </dl>
             </div>
           )}
-          {!linkedApp && gateOverrideReason && (
-            <div className="rounded-md border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-900">
-              <p className="font-semibold">Super-admin override active</p>
-              <p className="mt-1 text-red-700">
-                No approved application is linked — this sale is being opened
-                under an audited override (&quot;{gateOverrideReason}&quot;).
-              </p>
-            </div>
+          {mineError && (
+            <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              The approval&apos;s application details could not be loaded ({mineError}). The sale can still be opened,
+              but it will not be linked to your application listing.
+            </p>
           )}
-          {raiseType === RaiseType.Startup && (
+          {isStartup && (
             <div className="rounded-md border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-800">
               <p className="font-semibold">Startup raise disclosure</p>
               <p className="mt-1 text-slate-600">
@@ -1055,9 +928,17 @@ function OpenSaleModal({
             <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
               <p className="font-semibold">Startup raises unavailable</p>
               <p className="mt-1 text-amber-700">
-                {featureDisabledMessage("startupRaises")} This application is a
+                {featureDisabledMessage("startupRaises")} This approval is for a
                 startup raise, so its sale cannot be opened here — contact the
                 Manci team.
+              </p>
+            </div>
+          )}
+          {startupTermsMissing && !startupDisabled && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+              <p className="font-semibold">Vesting terms unavailable</p>
+              <p className="mt-1 text-amber-700">
+                The cliff and vesting months of this startup approval could not be loaded. Reload the page and try again.
               </p>
             </div>
           )}
@@ -1067,71 +948,13 @@ function OpenSaleModal({
               <p className="mt-1 text-amber-700">
                 A startup raise closes into a vested payout vault, which
                 requires vesting months greater than the cliff (at least 1).
-                This application has {vestingMonths}mo vesting / {cliffMonths}mo
-                cliff. Update the application before opening the sale.
+                This approval has {vestingMonths}mo vesting / {cliffMonths}mo
+                cliff. Ask Manci to approve the sale again with corrected terms.
               </p>
             </div>
           )}
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Share class (Token-2022 mint must be initialized)
-            </span>
-            <select
-              value={selectedScPda}
-              onChange={(e) => setSelectedScPda(e.target.value)}
-              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-            >
-              {Array.from(scPdaMap.entries()).map(([pda, info]) => (
-                <option key={pda} value={pda}>
-                  {info.assetName} · #{info.classIndex} ·{" "}
-                  {
-                    CLASS_TYPE[
-                      mintableScs.find((x) => x.classIndex === info.classIndex)
-                        ?.classType ?? 0
-                    ]
-                  }
-                </option>
-              ))}
-            </select>
-          </label>
 
           <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block">
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Sale ID
-              </span>
-              <input
-                value={saleId}
-                inputMode="numeric"
-                onChange={(e) => {
-                  setSaleIdTouched(true);
-                  setSaleId(e.target.value.replace(/\D/g, ""));
-                }}
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-              />
-            </label>
-            <label className="block">
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                End date (optional)
-              </span>
-              <input
-                type="datetime-local"
-                value={endTs}
-                onChange={(e) => setEndTs(e.target.value)}
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-              />
-            </label>
-            <label className="block sm:col-span-2">
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Payment mint (e.g. USDC {detectNetwork()})
-              </span>
-              <input
-                value={paymentMint}
-                onChange={(e) => setPaymentMint(e.target.value)}
-                placeholder="Mint address"
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono text-xs focus:border-slate-400 focus:outline-none"
-              />
-            </label>
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
                 Price per unit (payment base units)
@@ -1142,12 +965,13 @@ function OpenSaleModal({
                 onChange={(e) =>
                   setPricePerUnit(e.target.value.replace(/\D/g, ""))
                 }
-                aria-invalid={priceIsZero ? true : undefined}
+                placeholder={approval ? String(approval.minPricePerUnit) : undefined}
+                aria-invalid={priceOutOfRange ? true : undefined}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
-              {priceIsZero && (
+              {priceOutOfRange && approval && (
                 <span className="mt-1 block text-xs text-red-600">
-                  Must be greater than zero.
+                  Must be between {String(approval.minPricePerUnit)} and {String(approval.maxPricePerUnit)}.
                 </span>
               )}
             </label>
@@ -1161,13 +985,33 @@ function OpenSaleModal({
                 onChange={(e) =>
                   setTotalForSale(e.target.value.replace(/\D/g, ""))
                 }
+                aria-invalid={totalTooLarge || totalIsZero ? true : undefined}
+                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
+              />
+              {maxUnits !== null && !priceOutOfRange && (
+                <span className={`mt-1 block text-xs ${totalTooLarge ? "text-red-600" : "text-slate-500"}`}>
+                  At this price the approval allows at most {maxUnits.toString()} units.
+                </span>
+              )}
+              {totalIsZero && (
+                <span className="mt-1 block text-xs text-red-600">Must be at least 1.</span>
+              )}
+            </label>
+            <label className="block sm:col-span-2">
+              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                End date (optional)
+              </span>
+              <input
+                type="datetime-local"
+                value={endTs}
+                onChange={(e) => setEndTs(e.target.value)}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
             </label>
           </div>
           <p className="text-[11px] text-slate-400">
-            Payment token program is classic SPL Token (USDC is classic SPL on
-            Solana).
+            The payment token (and its token program) is fixed by the approval.
+            Opening the sale uses up the approval.
           </p>
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
@@ -1184,11 +1028,15 @@ function OpenSaleModal({
             onClick={() => void openSale()}
             disabled={
               tx.isSending ||
-              !selectedScPda ||
-              !paymentMint.trim() ||
-              !pricePerUnit.trim() ||
-              priceIsZero ||
-              !totalForSale.trim() ||
+              !approval ||
+              !selectedSc ||
+              mine === null ||
+              price === null ||
+              total === null ||
+              priceOutOfRange ||
+              totalTooLarge ||
+              totalIsZero ||
+              startupTermsMissing ||
               startupTermsInvalid ||
               startupDisabled
             }

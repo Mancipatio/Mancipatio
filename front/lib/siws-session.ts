@@ -16,6 +16,7 @@ export const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
 export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "account.me",
   "account.wallets.transaction",
+  "adminConfig.fxRatesRead",
   "adminConfig.raiseLimitsRead",
   "adminConfig.read",
   "applications.adminEvents",
@@ -44,6 +45,9 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "payout-snapshots.adminRead",
   "payout-snapshots.proof",
   "profiles.read",
+  "saleApprovals.capacity",
+  "saleApprovals.list",
+  "saleApprovals.mine",
   "storage.documents.list",
   // Signs ONE confidential document on click; its only write is the access-log row.
   "storage.documents.url",

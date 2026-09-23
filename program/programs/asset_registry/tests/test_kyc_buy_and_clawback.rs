@@ -29,6 +29,8 @@
 
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/sale_approval.rs"]
+mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -867,6 +869,18 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
         &[asset_registry::PROCEEDS_SEED, sale_pda.as_ref()],
         &program_id,
     );
+    let approval_terms =
+        sale_approval::Terms::covering(&svm, PRICE_PER_UNIT, TOTAL_FOR_SALE, RaiseType::Mature);
+    let approval = sale_approval::approve_sale(
+        &mut svm,
+        &payer,
+        &issuer_pda,
+        &asset_pda,
+        &share_class_pda,
+        &payment_mint,
+        sale_id,
+        approval_terms,
+    );
     send(
         &mut svm,
         &[&payer],
@@ -894,6 +908,9 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
                 proceeds: proceeds_pda,
                 payment_token_program: TOKEN_2022,
                 system_program: system_program::ID,
+                sale_approval: approval,
+                approved_by: payer.pubkey(),
+                approver_admin_record: sale_approval::admin_pda(&payer.pubkey()),
                 platform: pause::platform_pda(),
             }
             .to_account_metas(None),
@@ -2733,13 +2750,27 @@ fn issuer_scoped_permissions_are_capability_bound_revocable_and_not_global_admin
         )],
         "grant issuer mint only",
     );
-    send(
+    // MINT alone no longer reaches the issuer treasury: freshly minted,
+    // freely transferable units need an Admin issuer key (or an approved sale).
+    let err = try_send(
         &mut svm,
         &[&ctx.payer],
         &[treasury_ix(&ctx, destination, proof)],
-        "scoped issuer mints without global role",
+    )
+    .unwrap_err();
+    assert_custom_error(&err, 6128);
+    assert!(err.contains("TreasuryMintRequiresAdmin"), "{err}");
+    assert_eq!(token_balance(&svm, &destination), 0);
+    // MINT still funds an admin-created burn-only escrow: here a
+    // RedemptionQueue vault opened by the (rotated) platform admin.
+    let (escrow, custody) = open_admin_burn_only_vault(&mut svm, &ctx, &new_root, 77);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[scoped_mint_to_escrow_ix(&ctx, proof, &escrow, &custody, 1)],
+        "scoped issuer funds a burn-only custody escrow",
     );
-    assert_eq!(token_balance(&svm, &destination), 1);
+    assert_eq!(token_balance(&svm, &escrow), 1);
     assert!(svm
         .get_account(&ctx.admin_pda)
         .is_none_or(|a| a.data.is_empty()));
@@ -2833,7 +2864,96 @@ fn issuer_scoped_permissions_are_capability_bound_revocable_and_not_global_admin
     )
     .unwrap_err()
     .contains("Unauthorized"));
-    assert_eq!(token_balance(&svm, &destination), 1);
+    assert!(try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[scoped_mint_to_escrow_ix(&ctx, proof, &escrow, &custody, 1)]
+    )
+    .unwrap_err()
+    .contains("Unauthorized"));
+    assert_eq!(token_balance(&svm, &destination), 0);
+    assert_eq!(token_balance(&svm, &escrow), 1);
+}
+
+/// Opens a burn-only `RedemptionQueue` custody vault signed by `admin` (an
+/// Admin record holder other than the issuer). Returns `(escrow, custody)`.
+fn open_admin_burn_only_vault(
+    svm: &mut LiteSVM,
+    ctx: &Ctx,
+    admin: &Keypair,
+    vault_id: u64,
+) -> (Pubkey, Pubkey) {
+    let custody = Pubkey::find_program_address(
+        &[
+            asset_registry::CUSTODY_SEED,
+            ctx.share_class_pda.as_ref(),
+            &vault_id.to_le_bytes(),
+        ],
+        &ctx.program_id,
+    )
+    .0;
+    let escrow = Pubkey::find_program_address(
+        &[asset_registry::ESCROW_SEED, custody.as_ref()],
+        &ctx.program_id,
+    )
+    .0;
+    let ix = Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::OpenCustodyVault {
+            vault_id,
+            vault_type: VaultType::RedemptionQueue,
+            realize_action: RealizeAction::BurnAndAttest,
+            amount: 0,
+            deadline: 0,
+            metadata_hash: [7u8; 32],
+            beneficiary: Pubkey::default(),
+        }
+        .data(),
+        acc::OpenCustodyVault {
+            authority: admin.pubkey(),
+            admin_record: admin_address(admin.pubkey()),
+            share_class: ctx.share_class_pda,
+            mint: ctx.mint_pda,
+            custody_vault: custody,
+            escrow,
+            escrow_marker: escrow_marker_of(ctx, &custody),
+            token_program: TOKEN_2022,
+            system_program: system_program::ID,
+            platform: pause::platform_pda(),
+        }
+        .to_account_metas(None),
+    );
+    send(svm, &[admin], &[ix], "open burn-only vault (admin)");
+    (escrow, custody)
+}
+
+/// `mint_to_treasury` into a custody escrow, proving the signer's authority
+/// with `proof` (an Admin record or IssuerPermissions PDA).
+fn scoped_mint_to_escrow_ix(
+    ctx: &Ctx,
+    proof: Pubkey,
+    escrow: &Pubkey,
+    parent: &Pubkey,
+    amount: u64,
+) -> Instruction {
+    let mut metas = acc::MintToTreasury {
+        authority: ctx.payer.pubkey(),
+        admin_record: proof,
+        issuer: ctx.issuer_pda,
+        asset: ctx.asset_pda,
+        share_class: ctx.share_class_pda,
+        mint: ctx.mint_pda,
+        destination: *escrow,
+        token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
+    }
+    .to_account_metas(None);
+    metas.push(AccountMeta::new_readonly(*parent, false));
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::MintToTreasury { amount }.data(),
+        metas,
+    )
 }
 
 #[test]

@@ -145,7 +145,12 @@ export type MintToTreasuryAsyncInput<
   TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
-  /** Global Admin or issuer-local MINT capability; the signer must also be the issuer. */
+  /**
+   * Global Admin or issuer-local MINT capability; the signer must also be the issuer.
+   * The treasury destination (the signer's own token account) additionally
+   * requires the global Admin record: MINT alone only funds the admin-created
+   * custody / rights escrows.
+   */
   adminRecord: Address<TAccountAdminRecord>;
   issuer: Address<TAccountIssuer>;
   asset: Address<TAccountAsset>;
@@ -287,7 +292,12 @@ export type MintToTreasuryInput<
   TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
-  /** Global Admin or issuer-local MINT capability; the signer must also be the issuer. */
+  /**
+   * Global Admin or issuer-local MINT capability; the signer must also be the issuer.
+   * The treasury destination (the signer's own token account) additionally
+   * requires the global Admin record: MINT alone only funds the admin-created
+   * custody / rights escrows.
+   */
   adminRecord: Address<TAccountAdminRecord>;
   issuer: Address<TAccountIssuer>;
   asset: Address<TAccountAsset>;
@@ -414,7 +424,12 @@ export type ParsedMintToTreasuryInstruction<
   programAddress: Address<TProgram>;
   accounts: {
     authority: TAccountMetas[0];
-    /** Global Admin or issuer-local MINT capability; the signer must also be the issuer. */
+    /**
+     * Global Admin or issuer-local MINT capability; the signer must also be the issuer.
+     * The treasury destination (the signer's own token account) additionally
+     * requires the global Admin record: MINT alone only funds the admin-created
+     * custody / rights escrows.
+     */
     adminRecord: TAccountMetas[1];
     issuer: TAccountMetas[2];
     asset: TAccountMetas[3];

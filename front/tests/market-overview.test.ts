@@ -95,8 +95,10 @@ async function fixture() {
     raiseType: 0,
     cliffMonths: 0,
     vestingMonths: 0,
-    version: 1,
+    version: 2,
     bump: 255,
+    saleApproval: address(5),
+    applicationHash: new Uint8Array(32),
   };
   const offer: Offer = {
     discriminator: new Uint8Array(8),

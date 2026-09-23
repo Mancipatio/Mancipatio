@@ -65,6 +65,36 @@ describe("emergency-pause gate in the committed IDL", () => {
     expect(platform!.writable ?? false).toBe(false);
   });
 
+  // Package 2B: open_sale's approval accounts sit just before the Platform,
+  // so every older account index and the Platform-last rule are unchanged.
+  it("open_sale takes sale_approval, approved_by and the approver's Admin record right before the Platform", () => {
+    const names = byName.get("open_sale")!.accounts.map((a) => a.name);
+    expect(names.slice(0, 10)).toEqual([
+      "authority", "issuer", "asset", "share_class", "mint", "payment_mint",
+      "sale", "proceeds", "payment_token_program", "system_program",
+    ]);
+    expect(names.at(-4)).toBe("sale_approval");
+    expect(names.at(-3)).toBe("approved_by");
+    expect(names.at(-2)).toBe("approver_admin_record");
+    const accounts = byName.get("open_sale")!.accounts;
+    expect(accounts.at(-4)!.writable).toBe(true);
+    expect(accounts.at(-3)!.writable).toBe(true);
+    expect(accounts.at(-2)!.writable ?? false).toBe(false);
+  });
+
+  it.each(["approve_sale", "revoke_sale_approval"])(
+    "%s is Admin-gated and never reads the Platform (not an entry flow)",
+    (name) => {
+      const ix = byName.get(name);
+      expect(ix, name).toBeDefined();
+      const names = ix!.accounts.map((a) => a.name);
+      expect(names).toContain("admin_record");
+      expect(names).toContain("sale_approval");
+      expect(names).not.toContain("platform");
+      expect(ix!.accounts.filter((a) => a.signer)).toHaveLength(1);
+    },
+  );
+
   it("lets only the admin instructions write the Platform", () => {
     const writers = idl.instructions
       .filter((ix) => ix.accounts.some((a) => a.name === "platform" && a.writable))

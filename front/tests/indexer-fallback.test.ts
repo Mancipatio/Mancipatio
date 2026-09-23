@@ -45,7 +45,8 @@ type PageResult = { data: RawRow[] | null; error: { message: string } | null };
 function row(table: Table, id = 0): RawRow {
   return {
     raw: { base64: btoa(JSON.stringify({ source: "indexer", table, id })) },
-    layout_version: 2, account_version: table === "share_classes" ? 2 : 1,
+    // ShareClass v2 and Sale v2 (program 2B) are the only readable versions.
+    layout_version: 2, account_version: table === "share_classes" || table === "sales" ? 2 : 1,
   };
 }
 

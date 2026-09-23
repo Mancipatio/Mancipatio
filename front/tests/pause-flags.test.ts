@@ -22,7 +22,12 @@ import {
   pauseStatus,
   unknownPauseBits,
 } from "@/lib/pause-flags";
-import { explainSendError, PLATFORM_PAUSED_HINT } from "@/lib/tx-error";
+import {
+  explainSendError,
+  NO_SALE_APPROVAL_HINT,
+  PLATFORM_PAUSED_HINT,
+  SALE_APPROVAL_OTHER_ID_HINT,
+} from "@/lib/tx-error";
 import { getPlatformDecoder, getPlatformEncoder } from "@/lib/generated/asset_registry";
 import { address } from "@solana/kit";
 
@@ -219,5 +224,43 @@ describe("pause-related transaction errors", () => {
     expect(
       explainSendError(withLogs(["Program x failed: custom program error: 0x17e9"])),
     ).toMatch(/greater than zero/);
+  });
+
+  it("explains the sale-approval and treasury-mint errors (6122-6128)", () => {
+    const hint = (code: number) =>
+      explainSendError(withLogs([`Program x failed: custom program error: 0x${code.toString(16)}`]));
+    expect(hint(6122)).toMatch(/SaleApprovalExpired/);
+    expect(hint(6123)).toMatch(/SaleApprovalMismatch/);
+    expect(hint(6124)).toMatch(/SalePriceOutsideApproval/);
+    expect(hint(6125)).toMatch(/SaleExceedsApprovedRaise/);
+    expect(hint(6126)).toMatch(/InvalidSaleApproval/);
+    expect(hint(6127)).toMatch(/SaleIdAlreadyUsed/);
+    expect(hint(6128)).toMatch(/TreasuryMintRequiresAdmin/);
+  });
+
+  it("names a missing or foreign sale approval, not a generic 3012 / 2006", () => {
+    expect(
+      explainSendError(
+        withLogs([
+          "Program log: AnchorError caused by account: sale_approval. Error Code: AccountNotInitialized. Error Number: 3012. Error Message: The program expected this account to be already initialized.",
+          "Program FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS failed: custom program error: 0xbc4",
+        ]),
+      ),
+    ).toBe(NO_SALE_APPROVAL_HINT);
+    expect(
+      explainSendError(
+        withLogs([
+          "Program log: AnchorError caused by account: sale_approval. Error Code: ConstraintSeeds. Error Number: 2006. Error Message: A seeds constraint was violated.",
+        ]),
+      ),
+    ).toBe(SALE_APPROVAL_OTHER_ID_HINT);
+    // Another account's 3012 keeps its own explanation.
+    expect(
+      explainSendError(
+        withLogs([
+          "Program log: AnchorError caused by account: admin_record. Error Code: AccountNotInitialized. Error Number: 3012. Error Message: The program expected this account to be already initialized.",
+        ]),
+      ),
+    ).not.toBe(NO_SALE_APPROVAL_HINT);
   });
 });

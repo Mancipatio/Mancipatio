@@ -1,6 +1,5 @@
 "use client";
 
-import { type Address } from "@solana/kit";
 import { useRouter } from "next/navigation";
 import { walletSigner } from "@/lib/wallet-signer";
 import {
@@ -15,10 +14,13 @@ import {
   getCloseSaleInstruction,
   findPlatformPda,
   getOpenSaleInstructionAsync,
+  fetchMaybeSaleApproval,
+  findSaleApprovalPda,
   RaiseType,
   SaleStatus,
   type Asset,
   type Sale,
+  type SaleApproval,
 } from "@/lib/generated/asset_registry";
 import {
   findAssociatedTokenPda,
@@ -35,9 +37,8 @@ import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
-
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
+import { useChainClock } from "@/lib/use-chain-clock";
+import { ManualSaleApprovals } from "@/app/admin/applications/sale-approvals";
 
 type SaleLifecycle = "open" | "closing-soon" | "expired-open" | "closed";
 type StatusFilter = "all" | SaleLifecycle;
@@ -177,6 +178,7 @@ function SalesOps() {
 
   return (
     <div className="mt-8 space-y-6">
+      <ManualSaleApprovals />
       <div className="flex flex-wrap items-center gap-3">
         <input
           value={query}
@@ -511,9 +513,11 @@ function OpenSaleModal({
   onSuccess: () => void;
 }) {
   const conn = useWalletConnection();
+  const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
+  const chainNow = useChainClock();
 
   const [issuerLegalId, setIssuerLegalId] = useState("");
   const [assetId, setAssetId] = useState("");
@@ -521,8 +525,13 @@ function OpenSaleModal({
   const [saleId, setSaleId] = useState("1");
   const [pricePerUnit, setPricePerUnit] = useState("");
   const [totalForSale, setTotalForSale] = useState("");
-  const [paymentMint, setPaymentMint] = useState("");
   const [endTs, setEndTs] = useState("");
+  // The Admin SaleApproval for (share class, sale id): open_sale consumes it,
+  // and it fixes the payment mint, price range, maximum raise and raise type.
+  const [approval, setApproval] = useState<SaleApproval | null>(null);
+  const [approvalState, setApprovalState] = useState<
+    "idle" | "loading" | "missing" | "found" | "error"
+  >("idle");
 
   const matchedIssuer = useMemo(() => {
     if (!issuerLegalId.trim()) return null;
@@ -533,24 +542,90 @@ function OpenSaleModal({
     );
   }, [data, issuerLegalId]);
 
+  useEffect(() => {
+    if (!issuerLegalId.trim() || !assetId.trim() || !/^\d+$/.test(saleId)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setApproval(null);
+      setApprovalState("idle");
+      return;
+    }
+    let cancelled = false;
+    setApprovalState("loading");
+    void (async () => {
+      try {
+        const [ip] = await findIssuerPda({
+          legalEntityId: toBytes32(issuerLegalId.trim()),
+        });
+        const [ap] = await findAssetPda({ issuer: ip, assetId: assetId.trim() });
+        const scPda = await findShareClassPda(ap, Number(classIndex) || 0);
+        const [approvalPda] = await findSaleApprovalPda({
+          shareClass: scPda,
+          saleId: BigInt(saleId),
+        });
+        const found = await fetchMaybeSaleApproval(
+          client.runtime.rpc,
+          approvalPda,
+          { commitment: "confirmed" },
+        );
+        if (cancelled) return;
+        setApproval(found.exists ? found.data : null);
+        setApprovalState(found.exists ? "found" : "missing");
+      } catch {
+        if (!cancelled) {
+          setApproval(null);
+          setApprovalState("error");
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [client, issuerLegalId, assetId, classIndex, saleId]);
+
+  const price = /^\d+$/.test(pricePerUnit.trim())
+    ? BigInt(pricePerUnit.trim())
+    : null;
+  const total = /^\d+$/.test(totalForSale.trim())
+    ? BigInt(totalForSale.trim())
+    : null;
   // open_sale rejects a zero price on-chain (InvalidSalePrice).
-  const priceIsZero =
-    /^\d+$/.test(pricePerUnit.trim()) && BigInt(pricePerUnit.trim()) === BigInt(0);
+  const priceIsZero = price === BigInt(0);
+  const priceOutOfRange =
+    approval !== null &&
+    price !== null &&
+    price > BigInt(0) &&
+    (price < approval.minPricePerUnit || price > approval.maxPricePerUnit);
+  const maxUnits =
+    approval && price !== null && price > BigInt(0)
+      ? approval.maxGrossRaise / price
+      : null;
+  const totalTooLarge = maxUnits !== null && total !== null && total > maxUnits;
+  const approvalExpired = approval !== null && approval.expiresAt < chainNow;
+  const isStartup = approval?.raiseType === RaiseType.Startup;
 
   async function open() {
     if (
       !wallet ||
       !issuerLegalId.trim() ||
       !assetId.trim() ||
-      !paymentMint.trim() ||
-      !pricePerUnit.trim() ||
-      !totalForSale.trim()
+      !approval ||
+      price === null ||
+      total === null
     )
       return;
     if (priceIsZero) {
       toast.showError(
         "Invalid price",
         "The price per unit must be greater than zero.",
+      );
+      return;
+    }
+    if (priceOutOfRange || totalTooLarge || approvalExpired || isStartup) {
+      toast.showError(
+        "Outside the approval",
+        isStartup
+          ? "This approval is for a startup raise; open it from the issuer launchpad, which carries its vesting terms."
+          : "The price, the total or the expiry is outside the sale approval.",
       );
       return;
     }
@@ -581,22 +656,29 @@ function OpenSaleModal({
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
       const signer = walletSigner(conn.wallet);
+      // The payment mint comes from the approval (classic SPL or Token-2022).
+      const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(
+        client.runtime.rpc,
+        approval.paymentMint,
+      );
       const ix = await getOpenSaleInstructionAsync({
         authority: signer,
         issuer: ip,
         asset: ap,
         shareClass: scPda,
         mint: sc.mint,
-        paymentMint: paymentMint.trim() as Address,
-        paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+        paymentMint: approval.paymentMint,
+        paymentTokenProgram,
         saleId: BigInt(saleId || "0"),
-        pricePerUnit: BigInt(pricePerUnit),
-        totalForSale: BigInt(totalForSale),
+        pricePerUnit: price,
+        totalForSale: total,
         startTs: BigInt(0),
         endTs: endTsBig,
         raiseType: RaiseType.Mature,
         cliffMonths: 0,
         vestingMonths: 0,
+        // The consumed approval's rent returns to the approving admin.
+        approvedBy: approval.approvedBy,
       });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
@@ -684,17 +766,70 @@ function OpenSaleModal({
               />
             </label>
           </div>
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Payment mint (e.g. USDC {detectNetwork()})
-            </span>
-            <input
-              value={paymentMint}
-              onChange={(e) => setPaymentMint(e.target.value)}
-              placeholder="Mint address"
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono text-xs focus:border-slate-400 focus:outline-none"
-            />
-          </label>
+          <div
+            className={`rounded-md border px-4 py-3 text-xs ${
+              approvalState === "found" && !approvalExpired
+                ? "border-brand-200 bg-brand-50 text-brand-900"
+                : "border-amber-200 bg-amber-50 text-amber-900"
+            }`}
+          >
+            <p className="font-semibold">Sale approval</p>
+            {approvalState === "idle" && (
+              <p className="mt-1">
+                Enter the issuer, asset, class and sale id to load the approval.
+              </p>
+            )}
+            {approvalState === "loading" && (
+              <p className="mt-1">Loading the approval…</p>
+            )}
+            {approvalState === "error" && (
+              <p className="mt-1">
+                The approval could not be read. Check the inputs and the
+                connection.
+              </p>
+            )}
+            {approvalState === "missing" && (
+              <p className="mt-1">
+                No live approval for this share class and sale id: approve the
+                sale from the application on{" "}
+                <code className="rounded bg-amber-100 px-1">
+                  /admin/applications
+                </code>{" "}
+                first, or (super admin, no application) with &ldquo;Approve
+                sale (no application)&rdquo; above.
+              </p>
+            )}
+            {approval && (
+              <dl className="mt-2 grid gap-x-4 gap-y-1 sm:grid-cols-2">
+                <dt className="opacity-70">Payment mint ({detectNetwork()})</dt>
+                <dd className="break-all font-mono">{approval.paymentMint}</dd>
+                <dt className="opacity-70">Price per unit (base units)</dt>
+                <dd className="font-mono">
+                  {String(approval.minPricePerUnit)}
+                  {approval.maxPricePerUnit !== approval.minPricePerUnit
+                    ? ` – ${approval.maxPricePerUnit}`
+                    : ""}
+                </dd>
+                <dt className="opacity-70">Maximum raise (base units)</dt>
+                <dd className="font-mono">{String(approval.maxGrossRaise)}</dd>
+                <dt className="opacity-70">Raise type</dt>
+                <dd>
+                  {isStartup
+                    ? "Startup (open from the issuer launchpad)"
+                    : "Established"}
+                </dd>
+                <dt className="opacity-70">Open by</dt>
+                <dd>
+                  {new Date(Number(approval.expiresAt) * 1000).toLocaleString(
+                    "en-GB",
+                  )}
+                  {approvalExpired ? " — expired" : ""}
+                </dd>
+                <dt className="opacity-70">Approved by</dt>
+                <dd className="break-all font-mono">{approval.approvedBy}</dd>
+              </dl>
+            )}
+          </div>
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -706,12 +841,18 @@ function OpenSaleModal({
                 onChange={(e) =>
                   setPricePerUnit(e.target.value.replace(/\D/g, ""))
                 }
-                aria-invalid={priceIsZero ? true : undefined}
+                aria-invalid={priceIsZero || priceOutOfRange ? true : undefined}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
               {priceIsZero && (
                 <span className="mt-1 block text-xs text-red-600">
                   Must be greater than zero.
+                </span>
+              )}
+              {priceOutOfRange && approval && (
+                <span className="mt-1 block text-xs text-red-600">
+                  Must be between {String(approval.minPricePerUnit)} and{" "}
+                  {String(approval.maxPricePerUnit)}.
                 </span>
               )}
             </label>
@@ -725,8 +866,17 @@ function OpenSaleModal({
                 onChange={(e) =>
                   setTotalForSale(e.target.value.replace(/\D/g, ""))
                 }
+                aria-invalid={totalTooLarge ? true : undefined}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
+              {maxUnits !== null && !priceOutOfRange && (
+                <span
+                  className={`mt-1 block text-xs ${totalTooLarge ? "text-red-600" : "text-slate-500"}`}
+                >
+                  At this price the approval allows at most{" "}
+                  {maxUnits.toString()} units.
+                </span>
+              )}
             </label>
           </div>
           <label className="block">
@@ -741,8 +891,7 @@ function OpenSaleModal({
             />
           </label>
           <p className="text-[11px] text-slate-400">
-            Payment token program is classic SPL Token (v0.1 assumption — USDC
-            is classic SPL on Solana).
+            The payment token (and its token program) is fixed by the approval.
           </p>
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
@@ -761,10 +910,14 @@ function OpenSaleModal({
               tx.isSending ||
               !issuerLegalId.trim() ||
               !assetId.trim() ||
-              !paymentMint.trim() ||
-              !pricePerUnit.trim() ||
+              !approval ||
+              approvalExpired ||
+              isStartup ||
+              price === null ||
+              total === null ||
               priceIsZero ||
-              !totalForSale.trim()
+              priceOutOfRange ||
+              totalTooLarge
             }
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >

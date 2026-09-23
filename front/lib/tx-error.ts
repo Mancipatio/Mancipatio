@@ -3,6 +3,7 @@ import {
   ASSET_REGISTRY_ERROR__INVALID_DEPOSIT_AMOUNT,
   ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS,
   ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY,
+  ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL,
   ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE,
   ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED,
   ASSET_REGISTRY_ERROR__MINT_DESTINATION_NOT_BOUND,
@@ -10,6 +11,14 @@ import {
   ASSET_REGISTRY_ERROR__RECEIVER_JURISDICTION_BLOCKED,
   ASSET_REGISTRY_ERROR__RECEIVER_KYC_EXPIRED,
   ASSET_REGISTRY_ERROR__RECEIVER_NOT_APPROVED,
+  ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED,
+  ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH,
+  ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE,
+  ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED,
+  ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL,
+  ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY,
+  ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL,
+  ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
   ASSET_REGISTRY_ERROR__VAULT_NOT_ACCEPTING_DEPOSITS,
 } from "@/lib/generated/asset_registry";
 import { detectNetwork } from "@/lib/network";
@@ -99,6 +108,42 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
         ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE,
         "The sale price per unit must be greater than zero (InvalidSalePrice).",
       ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED,
+        "This sale approval has expired. Ask Manci to approve the sale again (SaleApprovalExpired).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH,
+        "The sale does not match its approval: check the payment mint and raise type, and that the approving admin receives the approval's rent (SaleApprovalMismatch).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL,
+        "The price per unit is outside the range Manci approved for this sale (SalePriceOutsideApproval).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE,
+        "Price x units for sale is above the approved maximum raise. Lower the number of units or the price (SaleExceedsApprovedRaise).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL,
+        "Approval terms are invalid: the expiry must be in the future and at most 90 days away, the minimum price at least 1 and not above the maximum, and the maximum raise above zero (InvalidSaleApproval).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED,
+        "A sale with this id already exists for the share class. Pick the next free sale id (SaleIdAlreadyUsed).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
+        "Only a Manci admin issuer key can mint into the issuer treasury. Issue units to investors through an approved sale instead (TreasuryMintRequiresAdmin).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL,
+        "The cliff and vesting months must be exactly the ones Manci approved for this sale (SaleVestingOutsideApproval).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__SALE_STARTS_AFTER_APPROVAL_EXPIRY,
+        "The sale must start before its approval expires (SaleStartsAfterApprovalExpiry).",
+      ],
     ] as const
   ).map(([code, hint]) => [`0x${code.toString(16)}`, hint]),
 );
@@ -107,10 +152,24 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
 export const PLATFORM_PAUSED_HINT =
   "Manci has temporarily paused this action (emergency pause). Cancels, refunds and claims still work.";
 
+/** open_sale's `sale_approval` account does not exist (AccountNotInitialized, 3012). */
+export const NO_SALE_APPROVAL_HINT =
+  "No live sale approval for this share class and sale id: it was never approved, was revoked, or was already used.";
+/** open_sale was given another sale id's approval (ConstraintSeeds, 2006). */
+export const SALE_APPROVAL_OTHER_ID_HINT = "This approval belongs to a different sale id.";
+/** open_sale's approver no longer holds an Admin record (AccountNotInitialized, 3012). */
+export const APPROVER_NOT_ADMIN_HINT =
+  "The admin who approved this sale is no longer a Manci admin, so the approval cannot be used. Ask Manci to revoke it and approve the sale again.";
+
 function customErrorHint(text: string): string | null {
   // PlatformPaused is 6000 (0x1770) — the same number as the transfer hook's
   // first error — so match Anchor's error name, never the bare code.
   if (/Error Code: PlatformPaused\b/.test(text)) return PLATFORM_PAUSED_HINT;
+  // open_sale without a usable approval: Anchor names the account; the bare
+  // codes (3012 / 2006) are shared by every account of every instruction.
+  if (/caused by account: sale_approval\. Error Code: AccountNotInitialized\b/.test(text)) return NO_SALE_APPROVAL_HINT;
+  if (/caused by account: sale_approval\. Error Code: ConstraintSeeds\b/.test(text)) return SALE_APPROVAL_OTHER_ID_HINT;
+  if (/caused by account: approver_admin_record\. Error Code: AccountNotInitialized\b/.test(text)) return APPROVER_NOT_ADMIN_HINT;
   const match = /custom program error:\s*(0x[0-9a-f]+)/i.exec(text);
   if (!match) return null;
   return CUSTOM_ERROR_HINTS[match[1].toLowerCase()] ?? null;

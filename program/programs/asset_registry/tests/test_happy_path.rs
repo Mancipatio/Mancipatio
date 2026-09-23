@@ -7,6 +7,8 @@
 
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/sale_approval.rs"]
+mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -814,6 +816,18 @@ fn happy_path_registry_lifecycle() {
         &[asset_registry::PROCEEDS_SEED, sale_pda.as_ref()],
         &program_id,
     );
+    // An Admin (here the super admin) approves the sale; open_sale consumes it.
+    let approval_terms = sale_approval::Terms::covering(&svm, 1_000_000, 500, RaiseType::Mature);
+    let approval = sale_approval::approve_sale(
+        &mut svm,
+        &payer,
+        &issuer_pda,
+        &asset_pda,
+        &share_class_pda,
+        &payment_mint,
+        sale_id,
+        approval_terms,
+    );
     send(
         &mut svm,
         &payer,
@@ -841,12 +855,23 @@ fn happy_path_registry_lifecycle() {
                 proceeds: proceeds_pda,
                 payment_token_program: token_2022,
                 system_program: system_program::ID,
+                sale_approval: approval,
+                approved_by: payer.pubkey(),
+                approver_admin_record: sale_approval::admin_pda(&payer.pubkey()),
                 platform: pause::platform_pda(),
             }
             .to_account_metas(None),
         ),
         "open_sale",
     );
+    assert!(
+        sale_approval::is_closed(&svm, &approval),
+        "approval consumed"
+    );
+    let opened: Sale = load(&svm, &sale_pda, "sale");
+    assert_eq!(opened.sale_approval, approval);
+    assert_eq!(opened.application_hash, approval_terms.application_hash);
+    assert_eq!(opened.version, asset_registry::SALE_STATE_VERSION);
 
     // ── 15. buy — buyer pays, receives minted units ──────────────────────────
     // `buy` is fail-closed on receiver KYC: the mint's hook tail must ride

@@ -48,6 +48,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0062_verified_pledge_totals.sql");
       expect(applied).toContain("0063_operational_retention.sql");
       expect(applied).toContain("0064_platform_pause_flags.sql");
+      expect(applied).toContain("0066_sale_capacity.sql");
+      expect(applied).toContain("0067_sales_sale_approval.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));
@@ -70,6 +72,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "purchase_evidence_jobs",
         "payout_snapshots",
         "distribution_plans",
+        "sale_capacity_reservations",
+        "fx_rates",
       ]) {
         for (const role of ["anon", "authenticated"]) {
           const privileges = db.query(

@@ -14,6 +14,9 @@ pub struct MintToTreasury<'info> {
     pub authority: Signer<'info>,
 
     /// Global Admin or issuer-local MINT capability; the signer must also be the issuer.
+    /// The treasury destination (the signer's own token account) additionally
+    /// requires the global Admin record: MINT alone only funds the admin-created
+    /// custody / rights escrows.
     /// CHECK: validated by require_issuer_permission before any state change/CPI.
     pub admin_record: UncheckedAccount<'info>,
 
@@ -81,8 +84,9 @@ pub struct MintToTreasury<'info> {
 /// Mints `amount` share-class units into a destination token account. The
 /// `ShareClass` PDA is the mint authority and signs the Token-2022 CPI.
 /// Enforces `max_supply`, bumps `circulating_supply`, binds the destination
-/// (issuer treasury, or the escrow of an `Active` burn-only `CustodyVault` /
-/// a `RightsIssuance` of this mint) and emits `TreasuryMinted`.
+/// (issuer treasury, Admin issuer keys only; or the escrow of an `Active`
+/// burn-only `CustodyVault` / a `RightsIssuance` of this mint) and emits
+/// `TreasuryMinted`.
 pub fn handle_mint_to_treasury(ctx: Context<MintToTreasury>, amount: u64) -> Result<()> {
     crate::util::require_issuer_permission(
         &ctx.accounts.admin_record.to_account_info(),
@@ -197,6 +201,26 @@ pub fn handle_mint_to_treasury(ctx: Context<MintToTreasury>, amount: u64) -> Res
         bound_to_authority || bound_to_escrow_parent,
         RegistryError::MintDestinationNotBound
     );
+    // A treasury mint hands out freely transferable new units with no sale
+    // approval (and so outside the off-chain raise cap): mint, then sell OTC.
+    // Only a platform Admin issuer key may do it. `ISSUER_PERMISSION_MINT`
+    // alone covers only the admin-created escrow parents bound above
+    // (burn-only custody vaults, rights issuances), whose exits burn or are
+    // KYC-checked claims. External issuers issue to the public through an
+    // approved sale (`approve_sale` → `open_sale` → `buy`). Granting an
+    // external issuer key the global Admin role to pass this check is NOT a
+    // supported path: Admin is platform-wide (it could approve its own sales,
+    // revoke others' approvals, open custody vaults, ...). A one-shot,
+    // admin-created treasury-mint approval is the way to add that if needed.
+    if bound_to_authority {
+        require!(
+            crate::util::is_active_admin(
+                &ctx.accounts.admin_record.to_account_info(),
+                &ctx.accounts.authority.key(),
+            ),
+            RegistryError::TreasuryMintRequiresAdmin
+        );
+    }
 
     // The ShareClass PDA is the mint authority — sign the CPI with its seeds.
     let asset_key = ctx.accounts.asset.key();

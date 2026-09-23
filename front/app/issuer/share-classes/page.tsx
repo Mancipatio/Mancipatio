@@ -15,10 +15,6 @@ import {
   useSolanaClient,
   useWalletConnection,
 } from "@solana/react-hooks";
-import {
-  findAssociatedTokenPda,
-  getCreateAssociatedTokenIdempotentInstructionAsync,
-} from "@solana-program/token-2022";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
@@ -28,7 +24,6 @@ import {
   getAddShareClassInstructionAsync,
   getInitializeShareClassMintInstructionAsync,
   getLockSupplyInstructionAsync,
-  getMintToTreasuryInstructionAsync,
   ShareClassType,
   type Asset,
   type Issuer,
@@ -83,6 +78,15 @@ const RIGHTS = [
 // hook, so units minted straight into an investor wallet would bypass every
 // receiver-KYC check. Investors get their units through a sale (`buy`, gated)
 // or a hook-checked transfer out of the treasury.
+
+// Program package 2B: the TREASURY destination additionally needs an Admin
+// issuer key (TreasuryMintRequiresAdmin, 6128) — otherwise "mint, then sell
+// OTC" would issue to the public with no sale approval and outside the raise
+// limit. The issuer-local MINT permission now only funds the admin-created
+// custody / rights escrows. Admin treasury mints are counted against the
+// raise limit on /admin/share-classes, so this screen no longer sends them.
+const TREASURY_MINT_DISABLED =
+  "Treasury minting needs a Manci admin issuer key; investors are issued units through an approved sale.";
 
 export default function MyShareClassesPage() {
   const conn = useWalletConnection();
@@ -360,8 +364,6 @@ function ShareClassActions({
   const [issuerCapabilities, setIssuerCapabilities] = useState(0);
   const [globalAdmin, setGlobalAdmin] = useState(false);
   const wallet = conn.wallet?.account.address;
-  const [mintAmount, setMintAmount] = useState("");
-  const [confirmMint, setConfirmMint] = useState(false);
   const [confirmLock, setConfirmLock] = useState(false);
 
   const issuerPda = asset.issuer;
@@ -421,75 +423,6 @@ function ShareClassActions({
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError("Failed to initialize mint", explainSendError(err));
-    }
-  }
-
-  // Mints into the ISSUER TREASURY — the token account owned by the signing
-  // issuer authority (the connected wallet). The only destination the program
-  // accepts from this screen; see the destination-binding note at the top.
-  async function mintToTreasury(reason: string) {
-    if (!wallet || !conn.wallet || !mintAmount.trim()) return;
-    const destination = wallet;
-    const amount = BigInt(mintAmount);
-    const pendingId = toast.showPending(
-      `Minting ${amount} units to the issuer treasury…`,
-    );
-    try {
-      const signer = walletSigner(conn.wallet);
-      const mint = sc.mint;
-      const [ata] = await findAssociatedTokenPda({
-        owner: destination,
-        tokenProgram: TOKEN_2022_ADDRESS,
-        mint,
-      });
-      const createAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: destination,
-          mint,
-          tokenProgram: TOKEN_2022_ADDRESS,
-        });
-      const mintIx = await getMintToTreasuryInstructionAsync({
-        authority: signer,
-        adminRecord: await resolveIssuerPermission(
-          client.runtime.rpc,
-          issuerPda,
-          signer.address,
-          ISSUER_CAPABILITIES.Mint,
-        ),
-        issuer: issuerPda,
-        asset: sc.asset,
-        shareClass: scPda,
-        destination: ata,
-        tokenProgram: TOKEN_2022_ADDRESS,
-        amount,
-      });
-      const sig = await tx.send({
-        instructions: [createAtaIx, mintIx],
-        feePayer: signer,
-      });
-      toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Minted to treasury" });
-      void recordAudit({
-        ix_name: "mint_to_treasury",
-        category: "share-class",
-        actor_wallet: wallet.toString(),
-        reason,
-        target_label: scPda.toString(),
-        tx_signature: sig,
-        metadata: {
-          destination: "issuer_treasury",
-          destination_wallet: destination.toString(),
-          destination_token_account: ata.toString(),
-          amount: amount.toString(),
-        },
-      });
-      setConfirmMint(false);
-      setMintAmount("");
-      await onRefresh();
-    } catch (err) {
-      toast.dismiss(pendingId);
-      toast.showError("Failed to mint", explainSendError(err));
     }
   }
 
@@ -585,36 +518,43 @@ function ShareClassActions({
 
         {canMint && sc.mintInitialized && !sc.supplyLocked && (
           <div className="w-full space-y-2">
-            <div className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2">
+            <div
+              id="treasury-mint-disabled"
+              className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2"
+            >
               <p className="text-xs font-medium text-slate-700">
-                Destination: the issuer treasury —{" "}
-                <code className="break-all rounded bg-white px-1 font-mono text-[11px]">
-                  {wallet ? wallet.toString() : "Not connected"}
-                </code>
+                Treasury minting
               </p>
-              <p className="mt-1 text-[11px] text-slate-500">
-                The program binds the destination on-chain: minted units may
-                only land in the signing issuer authority&apos;s own token
-                account (or a custody / rights escrow of this mint). Minting
-                directly to an investor wallet is rejected
-                (MintDestinationNotBound) — sell through a sale or transfer out
-                of the treasury under the hook instead.
-              </p>
+              {globalAdmin ? (
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Your key is a Manci admin key. Admin treasury mints count
+                  against the issuer&apos;s raise limit, so they are made from{" "}
+                  <Link href="/admin/share-classes" className="font-medium underline">
+                    Admin → Share classes
+                  </Link>
+                  , which records them.
+                </p>
+              ) : (
+                <p className="mt-1 text-[11px] text-slate-500">
+                  Only a Manci admin issuer key can mint into the issuer
+                  treasury (TreasuryMintRequiresAdmin): freely transferable new
+                  units would otherwise bypass the sale approval and the raise
+                  limit. Your mint permission funds the custody and rights
+                  escrows Manci opens for this share class. To issue units to
+                  investors, ask Manci to approve a sale and open it from{" "}
+                  <Link href="/issuer/launchpad" className="font-medium underline">
+                    My sales
+                  </Link>
+                  .
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <input
-                value={mintAmount}
-                inputMode="numeric"
-                onChange={(e) =>
-                  setMintAmount(e.target.value.replace(/\D/g, ""))
-                }
-                placeholder="Units to mint"
-                className="min-w-[200px] flex-1 rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-              />
               <button
                 type="button"
-                disabled={tx.isSending || !mintAmount.trim()}
-                onClick={() => setConfirmMint(true)}
+                disabled
+                title={TREASURY_MINT_DISABLED}
+                aria-describedby="treasury-mint-disabled"
                 className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-900 hover:border-slate-400 disabled:opacity-50"
               >
                 Mint to treasury
@@ -646,35 +586,6 @@ function ShareClassActions({
         sc={sc}
         capabilities={issuerCapabilities}
         onRefresh={onRefresh}
-      />
-
-      <ConfirmModal
-        open={confirmMint}
-        onClose={() => setConfirmMint(false)}
-        onConfirm={(reason) => mintToTreasury(reason)}
-        title="Mint to treasury"
-        kind="info"
-        confirmLabel="Mint"
-        description={
-          <>
-            <p>
-              Mint <strong>{mintAmount || "0"}</strong> units into the issuer
-              treasury —{" "}
-              <code className="break-all rounded bg-slate-100 px-1 font-mono text-xs">
-                {wallet ? wallet.toString() : ""}
-              </code>
-              .
-            </p>
-            <p className="mt-2 text-xs text-slate-600">
-              Units stay in the treasury until they are sold through a sale
-              (receiver-KYC gated) or transferred out under the transfer hook.
-            </p>
-            <p className="mt-2 text-xs text-slate-500">
-              Reason will be recorded in the audit log.
-            </p>
-          </>
-        }
-        busy={tx.isSending}
       />
 
       <ConfirmModal

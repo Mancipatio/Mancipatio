@@ -4,6 +4,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { reconcileIndexerJobs } from "@/lib/server/indexer-sync";
 import { reconcilePurchases } from "@/lib/server/purchase-records";
+import { reconcileSaleCapacity } from "@/lib/server/sale-capacity";
 
 export class RetryWorkerError extends Error {
   constructor(public readonly status: number, message: string) { super(message); }
@@ -12,7 +13,7 @@ export type RetryCounts = { complete: number; pending: number; invalid: number }
 type StageResult = { status: "processed"; counts: RetryCounts } | { status: "deferred" | "failed"; counts: null };
 export type RetryWorkerResult =
   | { status: "busy"; network: Network }
-  | { status: "processed" | "partial"; network: Network; indexer: StageResult; purchases: StageResult };
+  | { status: "processed" | "partial"; network: Network; indexer: StageResult; purchases: StageResult; capacity: StageResult };
 
 const LEASE_TTL_SECONDS = 120;
 const LEASE_RPC_TIMEOUT_MS = 3_000;
@@ -72,7 +73,12 @@ export async function runRetryWorker(limit = 10): Promise<RetryWorkerResult> {
   try {
     const indexer = await stage(reconcileIndexerJobs, limit, workDeadline);
     const purchases = await stage(reconcilePurchases, limit, workDeadline);
-    return { status: indexer.status === "failed" || purchases.status === "failed" ? "partial" : "processed", network, indexer, purchases };
+    // Raise-cap reservations behind sale approvals (0066): confirm, consume,
+    // book closed sales, release dead approvals. The browser does each step
+    // best effort; this is the backstop.
+    const capacity = await stage(reconcileSaleCapacity, limit, workDeadline);
+    const failed = [indexer, purchases, capacity].some((s) => s.status === "failed");
+    return { status: failed ? "partial" : "processed", network, indexer, purchases, capacity };
   } finally {
     // A separate signal permits cleanup even after either queue's signal aborted.
     const releaseBudget = Math.max(1, Math.min(LEASE_RPC_TIMEOUT_MS, finalDeadline - Date.now()));
