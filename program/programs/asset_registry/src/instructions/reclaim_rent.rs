@@ -31,24 +31,27 @@ pub struct ReclaimRent<'info> {
     /// arm: must equal `owner`.
     pub caller: Signer<'info>,
 
-    /// CHECK: the recorded rent owner (`offer.maker` | `deal.admin` |
-    /// `vault.authority` | `registry.authority`), bound by key per arm.
+    /// The recorded rent owner: `offer.maker` | `deal.admin` |
+    /// `vault.authority` | `registry.authority`.
+    /// CHECK: bound by key per arm in the handler.
     #[account(mut)]
     pub owner: UncheckedAccount<'info>,
 
-    /// CHECK: must be owned by this program (checked first in the handler);
-    /// its discriminator selects the arm and it is deserialized (with
-    /// `try_deserialize`) inside that arm. Unknown tags — a tombstone
-    /// included — are refused.
+    /// The terminal account, owned by this program. Its discriminator selects
+    /// the arm, which deserializes it with `try_deserialize`; an unknown tag
+    /// (a tombstone included) is refused.
+    /// CHECK: owner and discriminator are checked first in the handler.
     #[account(mut)]
     pub target: UncheckedAccount<'info>,
 
-    /// CHECK: `Offer.escrow` | `OtcDeal.asset_escrow` | `CustodyVault.escrow` |
-    /// `KycEntry.registry`, bound by key per arm.
+    /// `Offer.escrow` | `OtcDeal.asset_escrow` | `CustodyVault.escrow` |
+    /// `KycEntry.registry`.
+    /// CHECK: bound by key per arm in the handler.
     #[account(mut)]
     pub linked: UncheckedAccount<'info>,
 
-    /// CHECK: `OtcDeal.payment_escrow` (bound by key); `None` for every other arm.
+    /// `OtcDeal.payment_escrow`; `None` for every other arm.
+    /// CHECK: bound by key in the OtcDeal arm.
     #[account(mut)]
     pub linked_b: Option<UncheckedAccount<'info>>,
 
