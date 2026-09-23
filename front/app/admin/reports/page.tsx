@@ -5,7 +5,7 @@ import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { RequireRole } from "@/components/require-role";
 import { SkeletonCard } from "@/components/skeleton";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
-import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { loadNetworkPreferIndexer, withClosedOffers } from "@/lib/indexer";
 import { listClients, type ClientRow } from "@/lib/clients";
 import { SaleStatus, type Asset } from "@/lib/generated/asset_registry";
 import { findAssetPda } from "@/lib/generated/asset_registry";
@@ -72,7 +72,9 @@ function ReportsOps() {
   const refresh = useCallback(async () => {
     if (!conn.wallet) return;
     const [network, cs] = await Promise.all([
-      loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
+      loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)).then(
+        withClosedOffers,
+      ),
       listClients(conn.wallet),
     ]);
     setData(network);

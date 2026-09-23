@@ -7,12 +7,16 @@
 // email IF a clients row with an email is known for their wallet (silently
 // skipped otherwise), and ALWAYS a notifications row per wallet as the
 // in-app trace. Notification failures never fail the route.
+//
+// Archive (2D): `{ archive: true, deal_pda }` stores a terminal deal's bytes
+// in indexer_closed_rows before the admin reclaims its rent.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { archiveOtcDeal } from "@/lib/server/otc-archive";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -33,6 +37,15 @@ export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "otc.adminUpdate");
     await requireAdmin(wallet);
+
+    // 2D: archive a terminal deal (deal.admin only) before its rent is
+    // reclaimed; also closes the linked request. Keyed by deal_pda.
+    if (params.archive === true) {
+      return NextResponse.json({
+        ok: true,
+        data: await archiveOtcDeal(wallet, params.deal_pda),
+      });
+    }
 
     const id = typeof params.id === "string" ? params.id : "";
     if (id.length === 0 || id.length > 64) {

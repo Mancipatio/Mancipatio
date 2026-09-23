@@ -27,7 +27,6 @@ import {
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import {
-  fetchMaybeCustodyVault,
   findAssetPda,
   findIssuerPda,
   findOpenCustodyVaultEscrowPda,
@@ -43,6 +42,7 @@ import {
   type CustodyVault,
   type ShareClass,
 } from "@/lib/generated/asset_registry";
+import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import {
   loadCustodyVaultsFromIndexer,
@@ -72,6 +72,7 @@ import { RequireRole } from "@/components/require-role";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
+import { custodyReclaimBlocker, reclaimCustodyVault } from "@/lib/reclaim-rent";
 import {
   loadBeneficiaryPassport,
   passportShortcutHref,
@@ -218,11 +219,11 @@ type ReturnOutcome = {
 };
 
 async function readReturnOutcome(
-  rpc: Parameters<typeof fetchMaybeCustodyVault>[0],
+  rpc: Parameters<typeof fetchMaybeLiveCustodyVault>[0],
   vaultPda: Address,
 ): Promise<ReturnOutcome> {
   try {
-    const after = await fetchMaybeCustodyVault(rpc, vaultPda);
+    const after = await fetchMaybeLiveCustodyVault(rpc, vaultPda);
     if (!after.exists) return { terminal: false, depositedAfter: null };
     return {
       terminal: after.data.state === VaultState.Returned,
@@ -918,6 +919,71 @@ function VaultDetail({
     }
   }
 
+  // 2D: the local half of the reclaim gate (the linked-request half needs the
+  // signed request queues and runs on click).
+  const reclaimBlocked = custodyReclaimBlocker({
+    wallet: wallet?.toString(),
+    authority: vault.authority.toString(),
+    terminal:
+      vault.state === VaultState.Realized ||
+      vault.state === VaultState.Reverted ||
+      vault.state === VaultState.Returned,
+    escrowBalance,
+    linked: [],
+  });
+
+  /**
+   * 2D: close the settled vault's empty escrow and tombstone the vault; all
+   * rent goes to the vault authority. Always its OWN transaction, never
+   * bundled with realize / return: the request evidence parsers need the
+   * escrow's post balance from those transactions.
+   */
+  async function closeVault() {
+    if (!wallet || !conn.wallet || !vaultPda) return;
+    const target = `vault #${vault.vaultId}`;
+    const pendingId = toast.showPending(`Closing ${target}…`);
+    try {
+      const [deliveries, conversions] = await Promise.all([
+        adminListDeliveryRequests(conn.wallet),
+        adminListConversionRequests(conn.wallet),
+      ]);
+      const linked = [...deliveries, ...conversions].filter(
+        (request) => request.vault_pda === vaultPda.toString(),
+      ) as { status: string; outcome_evidence?: unknown }[];
+      const blocker = custodyReclaimBlocker({
+        wallet: wallet.toString(),
+        authority: vault.authority.toString(),
+        terminal: true,
+        escrowBalance,
+        linked,
+      });
+      if (blocker) throw new Error(blocker);
+      const signer = walletSigner(conn.wallet);
+      const ix = reclaimCustodyVault({
+        authority: signer,
+        vault: vaultPda,
+        data: vault,
+      });
+      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      toast.dismiss(pendingId);
+      toast.showTx(sig, { title: "Vault closed, rent reclaimed" });
+      void recordAudit({
+        ix_name: "reclaim_rent",
+        category: "custody",
+        actor_wallet: wallet.toString(),
+        reason: "Close a settled custody vault and reclaim its rent",
+        target_label: target,
+        tx_signature: sig,
+        metadata: { vault_pda: vaultPda.toString() },
+      });
+      onClose();
+      await onRefresh();
+    } catch (err) {
+      toast.dismiss(pendingId);
+      toast.showError("Failed to close the vault", explainSendError(err));
+    }
+  }
+
   /**
    * Return a DeliveryEscrow vault's deposit to its on-chain beneficiary. For
    * manually-opened delivery vaults (not tied to a request-queue row) this is
@@ -1157,10 +1223,9 @@ function VaultDetail({
               Realize
             </button>
           )}
+          {/* revert_custody_vault requires Active on-chain. */}
           {vault.vaultType !== VaultType.DeliveryEscrow &&
-            (vault.state === VaultState.Active ||
-              vault.state === VaultState.Triggered ||
-              vault.state === VaultState.Expired) && (
+            vault.state === VaultState.Active && (
               <button
                 type="button"
                 disabled={tx.isSending}
@@ -1200,9 +1265,25 @@ function VaultDetail({
           {(vault.state === VaultState.Realized ||
             vault.state === VaultState.Reverted ||
             vault.state === VaultState.Returned) && (
-            <p className="text-sm text-slate-500">
-              Vault is in a terminal state — no further actions.
-            </p>
+            <>
+              <button
+                type="button"
+                disabled={tx.isSending || reclaimBlocked !== null}
+                title={
+                  reclaimBlocked ??
+                  "Closes the empty escrow and returns all rent to you (the vault authority)."
+                }
+                onClick={() => void closeVault()}
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50"
+              >
+                Close vault &amp; reclaim rent
+              </button>
+              <p className="w-full text-xs text-slate-500">
+                Vault is in a terminal state.{" "}
+                {reclaimBlocked ??
+                  "Closing it keeps its ID reserved forever; any linked request must already record its verified outcome."}
+              </p>
+            </>
           )}
         </div>
       </div>
@@ -1653,20 +1734,18 @@ function OpenVaultModal({
                 }
                 className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               >
-                {VAULT_TYPE_LABEL.map((label, i) => (
-                  <option key={i} value={i}>
-                    {label}
-                  </option>
-                ))}
+                {VAULT_TYPE_LABEL.map((label, i) =>
+                  // 2D: ConversionPending is retired on-chain
+                  // (VaultTypeRetired); holder conversions are Delivery
+                  // escrows from the request queue. The label stays for
+                  // display of any legacy vault.
+                  i === VaultType.ConversionPending ? null : (
+                    <option key={i} value={i}>
+                      {label}
+                    </option>
+                  ),
+                )}
               </select>
-              {vaultType === VaultType.ConversionPending && (
-                <p className="mt-1 text-xs font-medium text-amber-700">
-                  Not for holder conversions: this type&apos;s realize is not
-                  KYC-gated. Holder conversions go through the request queue
-                  (Delivery escrow), which checks the holder&apos;s investor
-                  passport.
-                </p>
-              )}
             </label>
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -1837,10 +1916,10 @@ type VaultOnChainInfo = {
 /** Reads a request's vault and, for a DeliveryEscrow, its beneficiary's
  *  passport. Null when the vault does not exist. */
 async function readVaultOnChainInfo(
-  rpc: Parameters<typeof fetchMaybeCustodyVault>[0],
+  rpc: Parameters<typeof fetchMaybeLiveCustodyVault>[0],
   vaultPda: Address,
 ): Promise<VaultOnChainInfo | null> {
-  const maybe = await fetchMaybeCustodyVault(rpc, vaultPda);
+  const maybe = await fetchMaybeLiveCustodyVault(rpc, vaultPda);
   if (!maybe.exists) return null;
   const v = maybe.data;
   return {
@@ -1860,10 +1939,10 @@ async function readVaultOnChainInfo(
 /** Fetches the live vault right before realize and returns the KYC accounts
  *  its realize needs (the pinned registry + the beneficiary's entry). */
 async function requestRealizeKycAccounts(
-  rpc: Parameters<typeof fetchMaybeCustodyVault>[0],
+  rpc: Parameters<typeof fetchMaybeLiveCustodyVault>[0],
   vaultPda: Address,
 ) {
-  const maybe = await fetchMaybeCustodyVault(rpc, vaultPda);
+  const maybe = await fetchMaybeLiveCustodyVault(rpc, vaultPda);
   if (!maybe.exists) throw new Error(`Custody vault ${vaultPda} not found`);
   return realizeKycAccounts(maybe.data);
 }
@@ -3388,7 +3467,7 @@ function DeliveryRequestsSection({
       let returnTerminal = true;
       if (req.vault_pda) {
         // Only return if the vault is still live on-chain (idempotent otherwise).
-        const maybe = await fetchMaybeCustodyVault(
+        const maybe = await fetchMaybeLiveCustodyVault(
           client.runtime.rpc,
           address(req.vault_pda),
         );
