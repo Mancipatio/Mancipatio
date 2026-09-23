@@ -1,7 +1,10 @@
 use crate::{
     constants::*,
     error::RegistryError,
-    state::{Issuer, IssuerPermissions, KybStatus, Platform},
+    state::{
+        Issuer, IssuerAuthorityChangeKind, IssuerAuthorityChanged, IssuerPermissions, KybStatus,
+        Platform,
+    },
 };
 use anchor_lang::prelude::*;
 
@@ -58,17 +61,36 @@ pub struct RecoverIssuerRegistration<'info> {
 }
 
 /// Recovers an unverified, unused legal-ID reservation. Existing verified
-/// issuers or issuers with any asset cannot be reassigned through this path.
+/// issuers or issuers with any asset cannot be reassigned through this path
+/// (they use the timelocked `propose_issuer_recovery`).
+///
+/// The account list is frozen (the K9 co-sign envelope depends on it), so the
+/// old authority's `IssuerPermissions` record is left in place. It is dormant
+/// (`require_issuer_permission` derives the record from the live authority)
+/// and an unverified issuer can only have been granted 0, except when KYB went
+/// Verified -> Rejected after a grant. Should the old key become the authority
+/// again, `accept_issuer_authority` overwrites that record and
+/// `execute_issuer_recovery` closes it.
 pub fn handle_recover_issuer_registration(
     ctx: Context<RecoverIssuerRegistration>,
     jurisdiction: u16,
     kyb_doc_hash: [u8; 32],
 ) -> Result<()> {
+    let issuer_key = ctx.accounts.issuer.key();
     let issuer = &mut ctx.accounts.issuer;
+    let old_authority = issuer.authority;
     issuer.authority = ctx.accounts.new_authority.key();
     issuer.jurisdiction = jurisdiction;
     issuer.kyb_doc_hash = kyb_doc_hash;
     issuer.kyb_status = KybStatus::Pending;
+    emit!(IssuerAuthorityChanged {
+        issuer: issuer_key,
+        old_authority,
+        new_authority: issuer.authority,
+        kind: IssuerAuthorityChangeKind::RegistrationRecovery,
+        capabilities_carried: 0,
+        old_grant_closed: false,
+    });
     msg!(
         "Issuer registration recovered — legal ID preserved, new pending authority {}",
         issuer.authority

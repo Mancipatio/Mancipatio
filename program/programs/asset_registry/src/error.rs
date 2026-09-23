@@ -266,4 +266,11 @@ pub enum RegistryError {
     SaleVestingOutsideApproval,
     #[msg("Sale start is after the approval's expiry")]
     SaleStartsAfterApprovalExpiry,
+    // ── 2C-2 (appended: every earlier code keeps its position) ──
+    #[msg("Issuer recovery is still inside its 7-day timelock")]
+    IssuerRecoveryTimelockActive,
+    #[msg("Issuer recovery execution window has passed; the super admin must re-propose")]
+    IssuerRecoveryExpired,
+    #[msg("Issuer recovery does not match the issuer's current authority, the current super admin, or the executing signer")]
+    InvalidIssuerRecovery,
 }

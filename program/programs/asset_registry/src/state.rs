@@ -1330,6 +1330,120 @@ pub struct AuthorityTransfer {
     pub bump: u8,
 }
 
+/// A super-admin recovery of a LOST issuer authority key, effective only after
+/// a 7-day timelock and cancellable by the current issuer authority (or the
+/// super admin) meanwhile. Seeds: `["issuer_recovery", issuer]`.
+///
+/// ⚠ Layout: the field order is fixed. Byte offsets: issuer 8,
+/// current_authority 40, new_authority 72 (the same offset as
+/// `AuthorityTransfer.new_authority`: the front lists both by a memcmp there),
+/// proposed_by 104, proposed_at 136, eta 144, expires_at 152, version 160,
+/// bump 161. Later fields are appended after `bump`.
+#[account]
+#[derive(InitSpace)]
+pub struct IssuerRecovery {
+    /// Byte 8: the Issuer PDA.
+    pub issuer: Pubkey,
+    /// Byte 40: `issuer.authority` when proposed; execute requires it to still
+    /// be the live authority (a rotation in between makes the recovery stale).
+    pub current_authority: Pubkey,
+    /// Byte 72: the only key that can execute (it signs).
+    pub new_authority: Pubkey,
+    /// Byte 104: the proposing super admin; execute requires it to still be
+    /// `platform.admin`. Receives every refund (this rent and the old grant's).
+    pub proposed_by: Pubkey,
+    /// Byte 136.
+    pub proposed_at: i64,
+    /// Byte 144: executable at or after this unix ts.
+    pub eta: i64,
+    /// Byte 152: `eta + ISSUER_RECOVERY_EXECUTION_WINDOW`; executable strictly before it.
+    pub expires_at: i64,
+    /// Byte 160: `STATE_VERSION`.
+    pub version: u8,
+    /// Byte 161.
+    pub bump: u8,
+}
+
+/// How `Issuer.authority` changed (carried by `IssuerAuthorityChanged`).
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IssuerAuthorityChangeKind {
+    /// `accept_issuer_authority`: proposed by the current authority.
+    Rotation,
+    /// `execute_issuer_recovery`: proposed by the super admin, after the timelock.
+    TimelockedRecovery,
+    /// `recover_issuer_registration`: the instant two-signer path for an
+    /// unverified, unused registration.
+    RegistrationRecovery,
+}
+
+/// Emitted by `propose_issuer_authority` (a re-proposal emits again).
+#[event]
+pub struct IssuerAuthorityProposed {
+    pub issuer: Pubkey,
+    pub current_authority: Pubkey,
+    pub new_authority: Pubkey,
+}
+
+/// Emitted by `cancel_issuer_authority_transfer`.
+#[event]
+pub struct IssuerAuthorityProposalCancelled {
+    pub issuer: Pubkey,
+    pub authority: Pubkey,
+    pub cancelled_new_authority: Pubkey,
+}
+
+/// Emitted whenever `Issuer.authority` changes. `old_grant_closed` says whether
+/// an `IssuerPermissions` record of the old authority was closed;
+/// `capabilities_carried` is what the new authority's record now holds (0 when
+/// no record was written).
+#[event]
+pub struct IssuerAuthorityChanged {
+    pub issuer: Pubkey,
+    pub old_authority: Pubkey,
+    pub new_authority: Pubkey,
+    pub kind: IssuerAuthorityChangeKind,
+    pub capabilities_carried: u8,
+    pub old_grant_closed: bool,
+}
+
+/// Emitted by `propose_issuer_recovery` (a re-proposal resets the timelock and
+/// emits again).
+#[event]
+pub struct IssuerRecoveryProposed {
+    pub issuer: Pubkey,
+    pub current_authority: Pubkey,
+    pub new_authority: Pubkey,
+    pub proposed_by: Pubkey,
+    pub eta: i64,
+    pub expires_at: i64,
+}
+
+/// Emitted by `cancel_issuer_recovery`.
+#[event]
+pub struct IssuerRecoveryCancelled {
+    pub issuer: Pubkey,
+    pub cancelled_by: Pubkey,
+    pub new_authority: Pubkey,
+}
+
+/// Emitted by `sync_sale_authority` when `Sale.authority` actually changed.
+#[event]
+pub struct SaleAuthoritySynced {
+    pub sale: Pubkey,
+    pub issuer: Pubkey,
+    pub old_authority: Pubkey,
+    pub new_authority: Pubkey,
+}
+
+/// Emitted by `sync_payout_founder` when `PayoutVault.founder` actually changed.
+#[event]
+pub struct PayoutFounderSynced {
+    pub vault: Pubkey,
+    pub issuer: Pubkey,
+    pub old_founder: Pubkey,
+    pub new_founder: Pubkey,
+}
+
 /// Escrow identity is distinct from the general escrow-routing exemption.
 /// Same PDA seed as EscrowMarker, separate discriminator: inbound routing is
 /// exempt, ordinary outbound delivery is screened. Only a recorded refund owner
