@@ -4,6 +4,7 @@
 // Protections instead of a signature:
 //   - honeypot field ("website"): bots that fill it get a plausible success
 //     response but nothing is inserted;
+//   - a body cap (INQUIRY_BODY_LIMIT) enforced while reading, before parsing;
 //   - strict length caps + email format check;
 //   - best-effort in-memory rate limit: 5 requests/min/IP (per instance);
 //   - a Cloudflare Turnstile check when TURNSTILE_SECRET_KEY is set (fails
@@ -12,11 +13,12 @@
 // The insert goes through the service role, so the anon INSERT policy on
 // custom_inquiries can be dropped entirely (W3-RLS: NO anon anything).
 //
-// On a real insert, notifies CONTACT_NOTIFY_EMAIL (env) via Resend — graceful
-// no-op when either env is missing.
+// On a real insert, notifies CONTACT_NOTIFY_EMAIL (env) through sendEmail
+// (SMTP, or the Resend fallback) — graceful no-op when either is missing.
 
 import { NextResponse } from "next/server";
 import { SiwsError, siwsErrorResponse } from "@/lib/server/siws";
+import { boundedRequest } from "@/lib/server/bounded-request";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail } from "@/lib/server/email";
 import { detectNetwork } from "@/lib/network";
@@ -72,6 +74,11 @@ function clientIp(request: Request): string {
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
+/** Request body cap: the idea (≤5000 characters, up to 3 UTF-8 bytes each),
+ *  name, company, asset kind, a Turnstile token (≤2048) and the JSON around
+ *  them fit with room to spare. */
+const INQUIRY_BODY_LIMIT = 32 * 1024;
+
 function escapeHtml(s: string): string {
   return s
     .replace(/&/g, "&amp;")
@@ -87,9 +94,11 @@ export async function POST(request: Request) {
       throw new SiwsError(429, "Too many inquiries — please try again in a minute");
     }
 
+    // 413 for an oversized body, before anything is parsed.
+    const bounded = await boundedRequest(request, INQUIRY_BODY_LIMIT);
     let body: unknown;
     try {
-      body = await request.json();
+      body = await bounded.json();
     } catch {
       throw new SiwsError(400, "Invalid JSON body");
     }
