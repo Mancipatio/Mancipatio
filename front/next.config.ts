@@ -64,19 +64,38 @@ export function assertBuildNetwork(
   }
 }
 
+// Site-wide browser hardening. No Content-Security-Policy yet: it needs the
+// wallet, RPC and Supabase origins per network and a nonce for Next's inline
+// scripts, and ships separately (report-only first).
+const SECURITY_HEADERS = [
+  { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
+  { key: "X-Content-Type-Options", value: "nosniff" },
+  { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
+  { key: "X-Frame-Options", value: "DENY" },
+  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
+  // Isolates this window from pages it did not open, but keeps the opener
+  // link to popups it opens (wallet adapters that use a popup window). Google
+  // sign-in is a full-page redirect and needs no opener.
+  { key: "Cross-Origin-Opener-Policy", value: "same-origin-allow-popups" },
+];
+
 const nextConfig: NextConfig = {
   // The local preview uses this exact loopback hostname; production is unchanged.
   allowedDevOrigins: ["127.0.0.1"],
   poweredByHeader: false,
   async headers() {
-    return ["/account/:path*", "/api/account/:path*"].map((source) => ({
-      source,
-      headers: [
-        { key: "Cache-Control", value: "no-store" },
-        { key: "Referrer-Policy", value: "no-referrer" },
-        { key: "X-Robots-Tag", value: "noindex, nofollow" },
-      ],
-    }));
+    return [
+      { source: "/:path*", headers: SECURITY_HEADERS },
+      // Later rules win for the same key: account pages keep no-referrer.
+      ...["/account/:path*", "/api/account/:path*"].map((source) => ({
+        source,
+        headers: [
+          { key: "Cache-Control", value: "no-store" },
+          { key: "Referrer-Policy", value: "no-referrer" },
+          { key: "X-Robots-Tag", value: "noindex, nofollow" },
+        ],
+      })),
+    ];
   },
   async redirects() {
     return [
