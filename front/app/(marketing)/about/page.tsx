@@ -6,12 +6,13 @@ import {
   Eyebrow,
   Facts,
   H2,
+  MX_NETWORK_STAGE_LABEL,
   MX_ROUTES,
-  MX_STAGE_LABEL,
   PageHeader,
   Section,
   TextLink,
 } from "@/components/mx";
+import { detectNetwork, isTestNetwork } from "@/lib/network";
 
 /**
  * "About" — prototype `#page-about`.
@@ -33,10 +34,15 @@ export const metadata: Metadata = {
     "Why Manci starts with the legal structure rather than the token, and where the platform actually is today.",
 };
 
-/** Short, checkable statements only — the dark band's whole value. */
+const NETWORK = detectNetwork();
+
+/** Short, checkable statements only — the dark band's whole value. The stage
+ *  lines follow the build's network (NEXT_PUBLIC_NETWORK). */
 const WHERE_THINGS_STAND = [
-  `${MX_STAGE_LABEL} — nothing is issued live yet`,
-  "Two on-chain programs, deployed on Solana devnet",
+  isTestNetwork(NETWORK)
+    ? `${MX_NETWORK_STAGE_LABEL} — nothing is issued live yet`
+    : MX_NETWORK_STAGE_LABEL,
+  `Two on-chain programs, deployed on Solana ${NETWORK}`,
   "Both went through a systematic security review before deploy",
   "Asset registry, Token-2022 mints and program-owned custody",
   "Launchpad, OTC settlement, governance and vesting shipped",

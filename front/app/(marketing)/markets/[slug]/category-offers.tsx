@@ -12,6 +12,7 @@ import {
 } from "@/lib/asset-profiles";
 import { fieldsForCategory, type CategorySlug } from "@/lib/asset-types";
 import { assetHref } from "@/lib/asset-links";
+import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
 
 type Item = {
   profile: PublicAssetProfile;
@@ -46,6 +47,13 @@ async function resolveLinkIds(
   } catch {
     return out;
   }
+}
+
+/** "Devnet is early." on a test network; on mainnet the network name would
+ *  read as a claim about Solana itself, so the line is about the category. */
+function earlyLead(): string {
+  const network = detectNetwork();
+  return isTestNetwork(network) ? `${networkLabel(network)} is early.` : "It's early days.";
 }
 
 export function CategoryOffers({
@@ -107,7 +115,8 @@ export function CategoryOffers({
           No {title.toLowerCase()} listed yet.
         </p>
         <p className="mt-2 text-[12.5px] text-slate-500">
-          Devnet is early. No issuer has published a {title.toLowerCase()}{" "}
+          {earlyLead()} No issuer has published a{" "}
+          {title.toLowerCase()}{" "}
           listing in this category yet — check the live OTC board for secondary
           offers, or open the platform to be the first.
         </p>

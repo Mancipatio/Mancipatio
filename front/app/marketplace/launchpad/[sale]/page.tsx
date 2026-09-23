@@ -68,6 +68,7 @@ import {
 import { purchaseQuote, paymentTokenLabel } from "@/lib/purchase-quote";
 import { tokenDecimal } from "@/lib/chain-evidence";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
+import { featureDisabledMessage, features } from "@/lib/features";
 import {
   assertChainRecordStorageAvailable,
   type PendingChainRecord,
@@ -506,7 +507,7 @@ export default function DealPage({
         </h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
           No on-chain sale with this address is registered on Manci
-          (devnet).
+          ({detectNetwork()}).
         </p>
         <Link
           href="/marketplace/launchpad"
@@ -572,10 +573,19 @@ export default function DealPage({
   const notStarted =
     saleData.startTs > BigInt(0) && Number(saleData.startTs) > now;
   const expired = saleData.endTs > BigInt(0) && Number(saleData.endTs) <= now;
+  // Startup raises are feature-flagged per network (lib/features.ts; off on
+  // mainnet unless NEXT_PUBLIC_FEATURE_STARTUP_RAISES=true), and
+  // /api/launchpad/commit refuses a Startup sale with it off — so an on-chain
+  // Startup sale (opened while the flag was on, or outside the issuer UI)
+  // takes no commitments here either.
+  const startupUnavailable = isStartup && !features().startupRaises;
   const saleOpen =
+    !startupUnavailable &&
     saleData.status === SaleStatus.Open && !soldOut && !notStarted && !expired;
   const closedReason = !saleOpen
-    ? saleData.status !== SaleStatus.Open
+    ? startupUnavailable
+      ? `${featureDisabledMessage("startupRaises")} This raise is not taking commitments.`
+      : saleData.status !== SaleStatus.Open
       ? "This sale has been closed by the issuer."
       : soldOut
         ? "This raise is fully subscribed."
@@ -1590,7 +1600,9 @@ export default function DealPage({
                 }`}
               >
                 {!saleOpen
-                  ? "Sale closed"
+                  ? startupUnavailable
+                    ? "Not available"
+                    : "Sale closed"
                   : eligibility.gated && !eligibility.eligible
                     ? eligibility.unverified
                       ? "Eligibility check failed"

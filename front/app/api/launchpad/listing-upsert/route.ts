@@ -4,6 +4,8 @@
 //   1. platform admin (on-chain Admin PDA / super admin), OR
 //   2. the issuer authority behind the sale
 //      (Sale -> ShareClass -> Asset -> Issuer.authority, on-chain, 60s cache).
+// A Startup sale's listing can only be unpublished while startup raises are
+// off on this network (requireRaiseTypeEnabled, lib/server/feature-gate.ts).
 //
 // Strict field allowlist mirroring public.launch_listings (0012); unknown
 // keys are rejected, `created_at` is server-controlled.
@@ -15,12 +17,13 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { requireRaiseTypeEnabled } from "@/lib/server/feature-gate";
 import {
   BASE58_RE,
   UUID_RE,
   isAdminWallet,
   isPlainObject,
-  saleIssuerAuthority,
+  saleChainInfo,
 } from "../_lib";
 
 /** column -> max length (for the free-text columns). */
@@ -86,9 +89,14 @@ export async function POST(request: Request) {
     }
 
     const admin = await isAdminWallet(wallet);
-    const issuer = await saleIssuerAuthority(salePubkey);
-    if(!issuer) throw new SiwsError(404,"A verified on-chain sale is required");
+    const sale = await saleChainInfo(salePubkey);
+    if(!sale) throw new SiwsError(404,"A verified on-chain sale is required");
+    const issuer = sale.authority;
     if(!admin && issuer !== wallet) throw new SiwsError(403,"Only the platform admin or sale issuer may edit this listing");
+    // Startup raises off on this network (lib/features.ts): a Startup sale's
+    // listing may still be taken DOWN (is_published=false — winding down a
+    // sale opened while the flag was on), but not published or edited live.
+    if(cleaned.is_published !== false) requireRaiseTypeEnabled(sale.raiseType);
     const result = await getSupabaseAdmin().rpc("save_launch_listing",{
       p_network:detectNetwork(),p_sale:salePubkey,p_issuer:issuer,p_admin:admin,p_listing:cleaned,
     });

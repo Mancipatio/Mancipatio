@@ -16,6 +16,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { RequireRole } from "@/components/require-role";
 import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
 import { useRole } from "@/lib/auth";
+import { featureDisabledMessage, features } from "@/lib/features";
 import {
   markPayoutRecipientsClaimed,
   setPayoutRecipientsSendError,
@@ -37,6 +38,12 @@ const TOKEN_CLASSIC_ADDRESS =
 
 /** Recipients per transaction: 2 instructions each (create ATA + transfer). */
 const AIRDROP_BATCH = 8;
+
+/** Admin-wallet push airdrop — feature-flagged per network (lib/features.ts;
+ *  off on mainnet unless NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP=true). The API
+ *  refuses airdropStarted / mark_claimed with it off, so the UI must never
+ *  send a transfer it could not record. */
+const AIRDROP_ENABLED = features().payoutAirdrop;
 
 const STATUS_LABEL: Record<PayoutStatus, string> = {
   draft: "Draft",
@@ -167,6 +174,10 @@ function PayoutDetail({ id }: { id: string }) {
   }
 
   async function runAirdrop(reason: string) {
+    if (!AIRDROP_ENABLED) {
+      toast.showError("Airdrop disabled", featureDisabledMessage("payoutAirdrop"));
+      return;
+    }
     if (!payout || payout === "missing" || !recipients) return;
     if (!wallet || !conn.wallet) return;
     const session = conn.wallet;
@@ -487,7 +498,9 @@ function PayoutDetail({ id }: { id: string }) {
               Mark as funded
             </button>
           )}
-          {payout.status === "funded" && (
+          {/* "live" means the admin-wallet airdrop is running; with that
+              feature off the API refuses it (payouts/update), so no button. */}
+          {payout.status === "funded" && AIRDROP_ENABLED && (
             <button
               type="button"
               onClick={() =>
@@ -536,7 +549,28 @@ function PayoutDetail({ id }: { id: string }) {
         </div>
       </header>
 
-      {(payout.status === "funded" || payout.status === "live") && (
+      {(payout.status === "funded" || payout.status === "live") &&
+        !AIRDROP_ENABLED && (
+          <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-card">
+            <h2 className="text-sm font-semibold uppercase tracking-widest text-slate-500">
+              Airdrop execution
+            </h2>
+            <p className="mt-1.5 max-w-2xl text-[13px] leading-relaxed text-slate-600">
+              {featureDisabledMessage("payoutAirdrop")} Distribute on-chain
+              from{" "}
+              <Link
+                href="/admin/payouts#push-distributions"
+                className="font-medium text-slate-900 underline underline-offset-2"
+              >
+                Push distributions
+              </Link>{" "}
+              on the Payouts page instead.
+            </p>
+          </section>
+        )}
+
+      {(payout.status === "funded" || payout.status === "live") &&
+        AIRDROP_ENABLED && (
         <section className="rounded-xl border border-slate-200 bg-white p-6 shadow-card">
           <div className="flex flex-wrap items-baseline justify-between gap-3">
             <div>

@@ -32,6 +32,7 @@ import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { publishedSaleDocument } from "@/lib/server/sale-document";
+import { requireRaiseTypeEnabled } from "@/lib/server/feature-gate";
 import {
   BASE58_RE,
   enforceSaleAmountCap,
@@ -68,8 +69,11 @@ export async function POST(request: Request) {
 
     // The sale must be a real on-chain Sale (base58 shape is not enough —
     // otherwise anyone can seed commitments under arbitrary sale keys), and a
-    // single commitment may not exceed the sale's raise target.
-    await requireLiveSale(salePubkey);
+    // single commitment may not exceed the sale's raise target. A Startup
+    // sale is refused while startup raises are off on this network
+    // (lib/features.ts), even one opened outside the issuer UI.
+    const { raiseType } = await requireLiveSale(salePubkey);
+    requireRaiseTypeEnabled(raiseType);
     await enforceSaleAmountCap(salePubkey, amount);
     const terms=await publishedSaleDocument(salePubkey);
     const accepted=params.document_terms as {versionId?:unknown;sha256?:unknown}|null;

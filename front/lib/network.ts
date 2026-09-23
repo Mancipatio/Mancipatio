@@ -1,5 +1,11 @@
 export type Network = "mainnet" | "devnet" | "testnet" | "localnet";
 
+/**
+ * The network this build targets. `NEXT_PUBLIC_NETWORK` is authoritative; an
+ * invalid value throws. When it is unset (local dev and tests only — Vercel
+ * builds refuse to start without it, see next.config.ts) the network is
+ * sniffed from `NEXT_PUBLIC_SOLANA_RPC_URL`, defaulting to devnet.
+ */
 export function detectNetwork(): Network {
   const explicit = process.env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase();
   if (
@@ -46,6 +52,36 @@ export function rpcUrl(): string {
   }
 }
 
+/** A local validator's default RPC port on a loopback host, right before the
+ *  path/query/fragment/end; the capture is the scheme + host prefix. */
+const LOCAL_VALIDATOR_RPC_PORT =
+  /^(wss?:\/\/(?:127\.0\.0\.1|localhost|\[::1\]):)8899(?=[/?#]|$)/i;
+
+/**
+ * Client-side WebSocket (subscriptions) URL for the CURRENT network.
+ * `NEXT_PUBLIC_SOLANA_WS_URL` wins — set it when the RPC provider serves
+ * subscriptions on a different host or path than HTTP RPC. Otherwise it is
+ * derived from rpcUrl() by swapping the scheme (https → wss, http → ws). A
+ * local validator (solana-test-validator, surfpool) serves WebSockets on RPC
+ * port + 1, so a loopback URL on the default RPC port 8899 maps to 8900 —
+ * whether the RPC URL is explicit or the localnet default. Any other host or
+ * port is kept as is; set NEXT_PUBLIC_SOLANA_WS_URL when it differs.
+ */
+export function wsUrl(): string {
+  const explicit = process.env.NEXT_PUBLIC_SOLANA_WS_URL?.trim();
+  if (explicit) return explicit;
+  return rpcUrl()
+    .replace(/^https:\/\//, "wss://")
+    .replace(/^http:\/\//, "ws://")
+    .replace(LOCAL_VALIDATOR_RPC_PORT, (_match, prefix: string) => `${prefix}8900`);
+}
+
+/** True for every network whose tokens carry no economic value. */
+export function isTestNetwork(network: Network): boolean {
+  return network !== "mainnet";
+}
+
+/** Proper-noun label for UI copy: "Devnet", "Mainnet", … */
 export function networkLabel(network: Network): string {
   return network.charAt(0).toUpperCase() + network.slice(1);
 }

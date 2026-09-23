@@ -17,6 +17,7 @@ import {
   fetchMaybeIssuer,
   fetchMaybeSale,
   fetchMaybeShareClass,
+  type RaiseType,
 } from "@/lib/generated/asset_registry";
 import { SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
@@ -57,13 +58,30 @@ export async function isAdminWallet(wallet: string): Promise<boolean> {
 // Resolve the live issuer authority from finalized program accounts.
 // ---------------------------------------------------------------------------
 
+/** What the platform routes need from a live on-chain sale. */
+export type SaleChainInfo = {
+  /** Issuer authority wallet (Sale -> ShareClass -> Asset -> Issuer). */
+  authority: string;
+  /** The sale's on-chain raise type (Startup sales are feature-flagged —
+   *  requireRaiseTypeEnabled in lib/server/feature-gate.ts). */
+  raiseType: RaiseType;
+};
+
 /** Returns the issuer authority wallet behind a sale PDA, or null when any
  *  hop of the chain (sale / share class / asset / issuer) does not exist.
  *  Throws SiwsError(503) on RPC failure (fail closed — never grant on error). */
 export async function saleIssuerAuthority(
   salePubkey: string,
 ): Promise<string | null> {
-  let authority: string | null = null;
+  return (await saleChainInfo(salePubkey))?.authority ?? null;
+}
+
+/** saleIssuerAuthority plus the sale's raise type, from the same finalized
+ *  reads. Null when any hop is missing; SiwsError(503) on RPC failure. */
+export async function saleChainInfo(
+  salePubkey: string,
+): Promise<SaleChainInfo | null> {
+  let info: SaleChainInfo | null = null;
   try {
     const rpc = getServerRpc();
     const config={commitment:"finalized" as const,abortSignal:AbortSignal.timeout(12_000)};
@@ -74,7 +92,9 @@ export async function saleIssuerAuthority(
         const asset = await fetchMaybeAsset(rpc, shareClass.data.asset,config);
         if (asset.exists && asset.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS) {
           const issuer = await fetchMaybeIssuer(rpc, asset.data.issuer,config);
-          if (issuer.exists && issuer.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS) authority = issuer.data.authority.toString();
+          if (issuer.exists && issuer.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS) {
+            info = { authority: issuer.data.authority.toString(), raiseType: sale.data.raiseType };
+          }
         }
       }
     }
@@ -86,7 +106,7 @@ export async function saleIssuerAuthority(
     throw new SiwsError(503, "Authorization check unavailable — try again");
   }
 
-  return authority;
+  return info;
 }
 
 /** Validates a commitment dollar amount: finite, > 0, sane upper bound. */
@@ -103,18 +123,19 @@ export function validateAmount(value: unknown): number {
  * Sale -> ShareClass -> Asset -> Issuer chain exists. Commit/record-purchase
  * previously accepted any base58 string here, letting anyone fabricate
  * commitments (and inflate the public raised/backers aggregate) against
- * arbitrary sale_pubkey values. Returns the issuer authority wallet.
+ * arbitrary sale_pubkey values. Returns the issuer authority wallet and the
+ * sale's raise type.
  * Throws SiwsError(404) for unknown sales, 503 on RPC failure (fail closed).
  */
-export async function requireLiveSale(salePubkey: string): Promise<string> {
-  const authority = await saleIssuerAuthority(salePubkey);
-  if (authority === null) {
+export async function requireLiveSale(salePubkey: string): Promise<SaleChainInfo> {
+  const info = await saleChainInfo(salePubkey);
+  if (info === null) {
     throw new SiwsError(
       404,
       "sale_pubkey does not resolve to a live on-chain sale",
     );
   }
-  return authority;
+  return info;
 }
 
 /**

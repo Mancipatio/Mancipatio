@@ -1,4 +1,5 @@
 import { ASSET_TYPES } from "@/lib/asset-types";
+import { detectNetwork, type Network } from "@/lib/network";
 
 /**
  * The marketing site's route map — one place, so the header, the footer and
@@ -102,6 +103,19 @@ export const MX_FOOTER_COLUMNS: { title: string; links: MxNavItem[] }[] = [
   },
 ];
 
-/** Deployment stage, shown as a badge in the header footprint and footer.
- *  Kept here so one edit retires it at mainnet. */
+/** Deployment stage for `network`: "Solana devnet · v0.1". */
+export function mxStageLabel(network: Network): string {
+  return `Solana ${network} · v0.1`;
+}
+
+/** Deployment stage of THIS build, shown as a badge in the footer and on the
+ *  about page. Derived from NEXT_PUBLIC_NETWORK (lib/network.ts), so a
+ *  mainnet build never advertises devnet. Use this one in UI. */
+export const MX_NETWORK_STAGE_LABEL = mxStageLabel(detectNetwork());
+
+/** FROZEN legal copy — do not use in new UI (use MX_NETWORK_STAGE_LABEL).
+ *  The Terms of Service renders this badge inside its "Devnet pilot" card,
+ *  whose operative text says the release runs on Solana devnet. Legal wording
+ *  is counsel's to change, so this literal stays put until the mainnet terms
+ *  land; a mainnet build is refused until then (next.config.ts). */
 export const MX_STAGE_LABEL = "Solana devnet · v0.1";

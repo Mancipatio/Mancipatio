@@ -9,6 +9,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { findAssetPda } from "@/lib/generated/asset_registry";
 import { loadKycAuthorityContext } from "@/lib/kyc-authority";
 import { Kpi } from "@/components/kpi";
+import { detectNetwork, networkLabel } from "@/lib/network";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { loadHoldings, type Holding } from "@/lib/holdings";
@@ -294,7 +295,7 @@ export default function PortfolioOverviewPage() {
         />
         <Kpi
           label="Network"
-          value="Devnet"
+          value={networkLabel(detectNetwork())}
         />
       </section>
 

@@ -5,11 +5,18 @@
 //   airdropStarted: true      sets airdrop_started_at = now
 //   airdropCompleted: true    sets airdrop_completed_at = now
 //
+// The two airdrop stamps belong to the admin-wallet push airdrop, which is
+// feature-flagged (lib/features.ts `payoutAirdrop`, off on mainnet unless
+// NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP=true): with it off they are refused, and
+// so is status "live" — that transition means "airdrop execution opened"
+// (the detail page's Go live button) and nothing else sets it.
+//
 // Client wrapper: updatePayout() in lib/payouts.ts (action "payouts.update").
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireFeature } from "@/lib/server/feature-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 const STATUSES = new Set([
@@ -49,6 +56,13 @@ export async function POST(request: Request) {
         throw new SiwsError(400, "Invalid fundedTx");
       }
       patch.funded_tx = params.fundedTx;
+    }
+    if (
+      params.status === "live" ||
+      params.airdropStarted === true ||
+      params.airdropCompleted === true
+    ) {
+      requireFeature("payoutAirdrop");
     }
     if (params.airdropStarted === true) {
       patch.airdrop_started_at = now;

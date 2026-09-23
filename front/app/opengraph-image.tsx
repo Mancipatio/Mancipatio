@@ -1,6 +1,7 @@
 import { ImageResponse } from "next/og";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
+import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
 
 export const runtime = "nodejs";
 export const alt = "Manci — on-chain tokenization on Solana";
@@ -9,6 +10,9 @@ export const contentType = "image/png";
 
 export default async function OG() {
   const logo = await readFile(join(process.cwd(), "public/brand/manci-logo.png"));
+  // The stage pill marks a test deployment; mainnet cards carry no pill.
+  const network = detectNetwork();
+  const stagePill = isTestNetwork(network) ? networkLabel(network).toUpperCase() : null;
 
   return new ImageResponse(
     (
@@ -65,20 +69,22 @@ export default async function OG() {
             color: "#afc9bb",
           }}
         >
-          <div
-            style={{
-              padding: "6px 14px",
-              borderRadius: 999,
-              background: "#234e3d",
-              color: "#c8e4d2",
-              border: "1px solid #51856b",
-              fontWeight: 600,
-              fontSize: 14,
-              letterSpacing: 2,
-            }}
-          >
-            DEVNET
-          </div>
+          {stagePill && (
+            <div
+              style={{
+                padding: "6px 14px",
+                borderRadius: 999,
+                background: "#234e3d",
+                color: "#c8e4d2",
+                border: "1px solid #51856b",
+                fontWeight: 600,
+                fontSize: 14,
+                letterSpacing: 2,
+              }}
+            >
+              {stagePill}
+            </div>
+          )}
           <div>manci.io</div>
         </div>
       </div>

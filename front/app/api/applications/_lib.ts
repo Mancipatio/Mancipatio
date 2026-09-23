@@ -6,6 +6,7 @@ import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SiwsError } from "@/lib/server/siws";
+import { requireFeature } from "@/lib/server/feature-gate";
 
 // ── KYC / onboarding gate (item 3a, server-enforced half) ──────────────────
 // Extracted to lib/server/kyc-gate.ts so non-application signed routes
@@ -112,6 +113,9 @@ export function narrowApplication(value: unknown): ApplicationContent {
   if (p.raise_type !== "startup" && p.raise_type !== "mature") {
     throw new SiwsError(400, "raise_type must be 'startup' or 'mature'");
   }
+  // Startup (vested payout-vault) raises are feature-flagged — off on mainnet
+  // unless NEXT_PUBLIC_FEATURE_STARTUP_RAISES=true (lib/features.ts).
+  if (p.raise_type === "startup") requireFeature("startupRaises");
 
   const founderEmail = reqStr(p.founder_email, "founder_email", 300);
   if (!EMAIL_RE.test(founderEmail)) {

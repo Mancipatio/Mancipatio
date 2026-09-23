@@ -56,6 +56,7 @@ import {
   type ApplicationReadPhase,
 } from "@/lib/apply-read-state";
 import { useToast } from "@/lib/toast";
+import { featureDisabledMessage, features } from "@/lib/features";
 
 /**
  * "Apply to issue" — prototype `#page-apply`, on the live application wizard.
@@ -75,6 +76,11 @@ import { useToast } from "@/lib/toast";
  */
 
 // ── constants ──────────────────────────────────────────────────────────────
+
+/** Startup (vested payout-vault) raises are feature-flagged per network
+ *  (lib/features.ts; off on mainnet unless NEXT_PUBLIC_FEATURE_STARTUP_RAISES
+ *  =true). The submit/resubmit routes refuse raise_type "startup" with it off. */
+const STARTUP_RAISES = features().startupRaises;
 
 const CATEGORIES = ["DeFi","Infrastructure","Consumer","AI / ML","Gaming","Social","DAO Tooling","Payments","RWA","Other"];
 const STAGES_STARTUP = ["Pre-seed","Seed","Series A","Post-revenue","Bootstrapped"];
@@ -488,7 +494,7 @@ export default function ApplyPage() {
   const yldEst = yieldEstimate(form.raiseAmount, form.vestingMonths);
   const isStartup = form.raiseType === "startup";
   const canContinue =
-    step === 0 ? !!form.raiseType
+    step === 0 ? !!form.raiseType && (STARTUP_RAISES || form.raiseType !== "startup")
     : step === 1 ? !!form.companyName.trim() && !!form.oneLiner.trim() && !!form.category && isOptionalUrl(form.website)
     : step === 2 ? !!form.stage && !!form.valuation.trim() && !!form.problemOrWhy.trim()
     : step === 3 ? !!form.raiseStructure && !capacityBlocked
@@ -510,6 +516,10 @@ export default function ApplyPage() {
     }
     if (!form.raiseType) {
       toast.showError("Select a raise type", "Please go back to Step 1.");
+      return;
+    }
+    if (form.raiseType === "startup" && !STARTUP_RAISES) {
+      toast.showError("Startup raises unavailable", featureDisabledMessage("startupRaises"));
       return;
     }
     // Re-assert all required fields — the wizard nav is not the source of truth.
@@ -671,6 +681,11 @@ export default function ApplyPage() {
   if (walletAddress && latestApp && !startNew && !editingApp) {
     const status = latestApp.status;
     const company = <span className="mx-strong">{latestApp.company_name}</span>;
+    // An approved STARTUP application while startup raises are off on this
+    // network (approved before the flag went off): the issuer launchpad
+    // refuses to open its sale, so don't send the founder there.
+    const startupUnavailable =
+      status === "approved" && latestApp.raise_type === "startup" && !STARTUP_RAISES;
 
     const lede =
       status === "pending" ? (
@@ -690,6 +705,14 @@ export default function ApplyPage() {
           We reviewed {company} and decided not to move forward with this
           application. You&apos;re welcome to submit a fresh application at any
           time.
+        </>
+      ) : startupUnavailable ? (
+        <>
+          Congratulations — {company} was approved.{" "}
+          {featureDisabledMessage("startupRaises")} Its sale can&apos;t be
+          opened yet —{" "}
+          <TextLink href={MX_ROUTES.contact}>contact the team</TextLink> about
+          next steps.
         </>
       ) : (
         <>
@@ -711,9 +734,13 @@ export default function ApplyPage() {
         </Button>
       ) : status === "approved" ? (
         <>
-          <Button href={`/issuer/launchpad?application=${latestApp.id}`}>
-            Open your sale →
-          </Button>
+          {startupUnavailable ? (
+            <Button href={MX_ROUTES.contact}>Contact the team</Button>
+          ) : (
+            <Button href={`/issuer/launchpad?application=${latestApp.id}`}>
+              Open your sale →
+            </Button>
+          )}
           <Button href="/issuer/onboarding" variant="ghost">
             Issuer onboarding
           </Button>
@@ -925,7 +952,9 @@ export default function ApplyPage() {
                     body: string;
                     note: string;
                   }[]
-                ).map((opt) => {
+                )
+                  .filter((opt) => STARTUP_RAISES || opt.value !== "startup")
+                  .map((opt) => {
                   const active = form.raiseType === opt.value;
                   return (
                     <button
@@ -952,6 +981,15 @@ export default function ApplyPage() {
                   );
                 })}
               </div>
+              {!STARTUP_RAISES && form.raiseType === "startup" && (
+                <Card className="mt-6" title="Startup raises are unavailable">
+                  <p>
+                    {featureDisabledMessage("startupRaises")} Choose
+                    &ldquo;Established company&rdquo; to continue, or{" "}
+                    <TextLink href={MX_ROUTES.contact}>contact the team</TextLink>.
+                  </p>
+                </Card>
+              )}
             </div>
           )}
 

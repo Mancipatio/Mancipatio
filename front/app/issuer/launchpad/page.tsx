@@ -9,6 +9,7 @@ import {
 } from "@/lib/sale-publication-recovery";
 import { SalePublicationRecovery } from "./publication-recovery";
 import { detectNetwork } from "@/lib/network";
+import { featureDisabledMessage, features } from "@/lib/features";
 import { WalletRequired } from "@/components/wallet-required";
 
 import Link from "next/link";
@@ -54,6 +55,12 @@ import {
   getMyApplicationWithEvents,
   type LaunchApplication,
 } from "@/lib/launchpad";
+
+/** Startup (vested payout-vault) raises are feature-flagged per network
+ *  (lib/features.ts; off on mainnet unless NEXT_PUBLIC_FEATURE_STARTUP_RAISES
+ *  =true). With it off, a startup sale is neither opened nor closed into a
+ *  payout vault from this page — proceeds stay in the program escrow. */
+const STARTUP_RAISES = features().startupRaises;
 
 const TOKEN_CLASSIC_ADDRESS =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
@@ -208,6 +215,16 @@ function LaunchpadInner() {
       .sort((a, b) => Number(b.saleId - a.saleId));
   }, [data, scPdaMap]);
 
+  // Open Startup sales that can't be closed into a vested vault from here
+  // while startup raises are off (opened while the flag was on, or outside
+  // this UI). Explained in a visible note above the table — the disabled
+  // Close & vest button alone would give no reason on touch or keyboard.
+  const stuckStartupSales = STARTUP_RAISES
+    ? 0
+    : rows.filter(
+        (s) => s.status === SaleStatus.Open && s.raiseType === RaiseType.Startup,
+      ).length;
+
   const verified = me?.kybStatus === 1;
   const mintableScs = myShareClasses.filter((sc) => sc.mintInitialized);
   const canOpen = verified && mintableScs.length > 0;
@@ -278,6 +295,14 @@ function LaunchpadInner() {
   async function closeSale(s: Sale) {
     if (!wallet || !conn.wallet) return;
     const isStartup = s.raiseType === RaiseType.Startup;
+    if (isStartup && !STARTUP_RAISES) {
+      toast.showError(
+        "Startup raises unavailable",
+        `${featureDisabledMessage("startupRaises")} The sale stays open and its proceeds stay in escrow — contact the Manci team.`,
+      );
+      setConfirmClose(null);
+      return;
+    }
     const pendingId = toast.showPending(
       isStartup
         ? `Closing sale #${s.saleId} & opening vested vault…`
@@ -429,6 +454,23 @@ function LaunchpadInner() {
       ) : rows.length === 0 ? (
         <Empty />
       ) : (
+        <>
+        {stuckStartupSales > 0 && (
+          <div
+            id="startup-close-unavailable"
+            className="mt-8 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900"
+          >
+            <p className="font-semibold">Startup raises unavailable</p>
+            <p className="mt-1 text-amber-700">
+              {featureDisabledMessage("startupRaises")}{" "}
+              {stuckStartupSales === 1
+                ? "Your open startup sale can't"
+                : `Your ${stuckStartupSales} open startup sales can't`}{" "}
+              be closed and vested from this page, so the proceeds stay in the
+              program escrow. Contact the Manci team.
+            </p>
+          </div>
+        )}
         <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
@@ -487,7 +529,20 @@ function LaunchpadInner() {
                       {isOpen && (
                         <button
                           type="button"
-                          disabled={tx.isSending}
+                          disabled={
+                            tx.isSending ||
+                            (s.raiseType === RaiseType.Startup && !STARTUP_RAISES)
+                          }
+                          title={
+                            s.raiseType === RaiseType.Startup && !STARTUP_RAISES
+                              ? featureDisabledMessage("startupRaises")
+                              : undefined
+                          }
+                          aria-describedby={
+                            s.raiseType === RaiseType.Startup && !STARTUP_RAISES
+                              ? "startup-close-unavailable"
+                              : undefined
+                          }
                           onClick={() => setConfirmClose(s)}
                           className="text-xs text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
                         >
@@ -503,6 +558,7 @@ function LaunchpadInner() {
             </tbody>
           </table>
         </div>
+        </>
       )}
 
       {showOpen &&
@@ -777,6 +833,7 @@ function OpenSaleModal({
   const startupTermsInvalid =
     raiseType === RaiseType.Startup &&
     !(vestingMonths > cliffMonths && vestingMonths > 0);
+  const startupDisabled = raiseType === RaiseType.Startup && !STARTUP_RAISES;
 
   async function openSale() {
     if (
@@ -795,6 +852,13 @@ function OpenSaleModal({
       toast.showError(
         "Approved application required",
         "Open the sale from an approved application on /apply, or use the super-admin override.",
+      );
+      return;
+    }
+    if (startupDisabled) {
+      toast.showError(
+        "Startup raises unavailable",
+        featureDisabledMessage("startupRaises"),
       );
       return;
     }
@@ -972,6 +1036,16 @@ function OpenSaleModal({
               </p>
             </div>
           )}
+          {startupDisabled && (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+              <p className="font-semibold">Startup raises unavailable</p>
+              <p className="mt-1 text-amber-700">
+                {featureDisabledMessage("startupRaises")} This application is a
+                startup raise, so its sale cannot be opened here — contact the
+                Manci team.
+              </p>
+            </div>
+          )}
           {startupTermsInvalid && (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
               <p className="font-semibold">Vesting terms need fixing</p>
@@ -1034,7 +1108,7 @@ function OpenSaleModal({
             </label>
             <label className="block sm:col-span-2">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Payment mint (e.g. USDC devnet)
+                Payment mint (e.g. USDC {detectNetwork()})
               </span>
               <input
                 value={paymentMint}
@@ -1071,8 +1145,8 @@ function OpenSaleModal({
             </label>
           </div>
           <p className="text-[11px] text-slate-400">
-            Payment token program is classic SPL Token (USDC is classic-SPL on
-            mainnet/devnet).
+            Payment token program is classic SPL Token (USDC is classic SPL on
+            Solana).
           </p>
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
@@ -1093,7 +1167,8 @@ function OpenSaleModal({
               !paymentMint.trim() ||
               !pricePerUnit.trim() ||
               !totalForSale.trim() ||
-              startupTermsInvalid
+              startupTermsInvalid ||
+              startupDisabled
             }
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
