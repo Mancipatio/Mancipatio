@@ -48,9 +48,10 @@ import {
 } from "@/lib/transaction-builders";
 import { fetchBlockEntry, type LiveBlockEntry } from "@/lib/blocklist";
 import {
+  checkSameKey,
   chooseClawbackPath,
   CLAWBACK_IX_NAME,
-  sameKeyHoldsBothRoles,
+  sameKeyWarning,
   type ClawbackPath,
   type PassportStatus,
 } from "@/lib/clawback-path";
@@ -66,6 +67,10 @@ const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
 const SYSTEM_PROGRAM = "11111111111111111111111111111111" as Address;
 
 type Preflight = {
+  /** The share-class mint and holder this preflight checked — clawback() uses
+   *  these, never the (possibly edited) inputs. */
+  mint: Address;
+  holder: Address;
   hookConfigured: boolean;
   hookGated: boolean;
   kycRegistry: Address | null;
@@ -217,6 +222,8 @@ export function ClawbackPanel() {
         ) ?? null;
 
       setPre({
+        mint: sc.mint,
+        holder: h,
         hookConfigured: config.exists,
         hookGated: gated,
         kycRegistry: registry,
@@ -270,9 +277,22 @@ export function ClawbackPanel() {
 
   async function clawback(reason: string) {
     if (!conn.wallet || !sc || !pre?.vault || !pre.path) return;
+    // The preflight's evidence (path, BlockEntry, vault) belongs to the
+    // holder and mint it checked; refuse if the inputs moved on since.
+    if (sc.mint !== pre.mint || holder.trim() !== pre.holder.toString()) {
+      setPre(null);
+      setConfirm(false);
+      toast.showError("Holder or share class changed", "Check the holder again.");
+      return;
+    }
     const path = pre.path;
-    const h = address(holder.trim());
+    const h = pre.holder;
     const signer = walletSigner(conn.wallet);
+    const keys = checkSameKey(
+      signer.address,
+      pre.blockEntry?.addedBy ?? null,
+      pre.blocklistAuthority,
+    );
     setBusy(true);
     const pendingId = toast.showPending("Clawing back the holder's units…");
     try {
@@ -320,6 +340,16 @@ export function ClawbackPanel() {
           mode: pre.hookGated ? "kyc_gated" : "open",
           block_entry: pre.blockEntry?.pda.toString() ?? null,
           blocked_by: pre.blockEntry?.addedBy.toString() ?? null,
+          blocklist_authority: pre.blocklistAuthority?.toString() ?? null,
+          ...(path === "blocklist"
+            ? {
+                same_key:
+                  keys.asBlockedBy || keys.asBlocklistAuthority === true,
+                same_key_as_blocked_by: keys.asBlockedBy,
+                // null = the Blocklist Authority could not be read.
+                same_key_as_blocklist_authority: keys.asBlocklistAuthority,
+              }
+            : {}),
         },
       });
       setConfirm(false);
@@ -336,13 +366,16 @@ export function ClawbackPanel() {
 
   const eligible = pre?.path != null;
   const connected = conn.wallet?.account.address ?? null;
-  const sameKey =
-    pre?.path === "blocklist" &&
-    sameKeyHoldsBothRoles(
-      connected,
-      pre.blockEntry?.addedBy ?? null,
-      pre.blocklistAuthority,
-    );
+  const sameKeyNote =
+    pre?.path === "blocklist"
+      ? sameKeyWarning(
+          checkSameKey(
+            connected,
+            pre.blockEntry?.addedBy ?? null,
+            pre.blocklistAuthority,
+          ),
+        )
+      : null;
 
   return (
     <section className="mt-8 rounded-xl border border-slate-200 bg-white p-5 shadow-card">
@@ -366,7 +399,10 @@ export function ClawbackPanel() {
           <FieldLabel>Share class (mint)</FieldLabel>
           <select
             value={selected}
-            onChange={(e) => setSelected(e.target.value)}
+            onChange={(e) => {
+              setSelected(e.target.value);
+              setPre(null);
+            }}
             className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
           >
             <option value="">
@@ -383,7 +419,10 @@ export function ClawbackPanel() {
           <FieldLabel>Holder wallet</FieldLabel>
           <input
             value={holder}
-            onChange={(e) => setHolder(e.target.value)}
+            onChange={(e) => {
+              setHolder(e.target.value);
+              setPre(null);
+            }}
             placeholder="Blocked, revoked or expired holder's wallet"
             className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs focus:border-slate-400 focus:outline-none"
           />
@@ -486,12 +525,9 @@ export function ClawbackPanel() {
         </p>
       )}
 
-      {sameKey && (
+      {sameKeyNote && (
         <p className="mt-3 max-w-3xl rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-          The connected Admin wallet is also the key that blocked this holder or
-          the current Blocklist Authority. The blocklist path is meant to need
-          two different keys; the program does not enforce it, but the event and
-          audit log will show one key on both sides.
+          {sameKeyNote}
         </p>
       )}
 
@@ -544,15 +580,17 @@ export function ClawbackPanel() {
               </strong>{" "}
               of the mint from wallet{" "}
               <code className="break-all rounded bg-slate-100 px-1 font-mono text-xs">
-                {holder.trim()}
+                {pre?.holder.toString() ?? holder.trim()}
               </code>{" "}
               into the burn-only quarantine vault.{" "}
               {pre?.path === "blocklist"
                 ? "The wallet is on the sanctions blocklist (Blocklist Authority)."
                 : `The holder's passport is ${pre?.entryStatus}.`}{" "}
               This uses the mint&apos;s permanent delegate — no holder signature
-              — and cannot be reversed through the platform, even if the wallet
-              is later removed from the blocklist.
+              — and cannot be reversed through the platform
+              {pre?.path === "blocklist"
+                ? ", even if the wallet is later removed from the blocklist."
+                : "."}
             </p>
             <p className="mt-2 text-xs text-slate-500">
               Reason (regulatory reference) will be recorded in the audit log.

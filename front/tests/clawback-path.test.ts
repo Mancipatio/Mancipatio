@@ -7,7 +7,9 @@ import {
 import {
   chooseClawbackPath,
   CLAWBACK_IX_NAME,
+  checkSameKey,
   sameKeyHoldsBothRoles,
+  sameKeyWarning,
   type PassportStatus,
 } from "@/lib/clawback-path";
 import { fetchBlockEntry } from "@/lib/blocklist";
@@ -69,6 +71,48 @@ describe("chooseClawbackPath", () => {
     expect(sameKeyHoldsBothRoles(ADMIN, BA, ADMIN)).toBe(true);
     expect(sameKeyHoldsBothRoles(null, null, null)).toBe(false);
     expect(sameKeyHoldsBothRoles(ADMIN, null, null)).toBe(false);
+  });
+
+  it("reports which key matched, and an unreadable Blocklist Authority", () => {
+    expect(checkSameKey(ADMIN, BA, BA)).toEqual({
+      asBlockedBy: false,
+      asBlocklistAuthority: false,
+    });
+    expect(checkSameKey(ADMIN, ADMIN, BA)).toEqual({
+      asBlockedBy: true,
+      asBlocklistAuthority: false,
+    });
+    // Rotated authority: someone else added the entry, the Admin now holds BA.
+    expect(checkSameKey(ADMIN, BA, ADMIN)).toEqual({
+      asBlockedBy: false,
+      asBlocklistAuthority: true,
+    });
+    expect(checkSameKey(ADMIN, BA, null)).toEqual({
+      asBlockedBy: false,
+      asBlocklistAuthority: null,
+    });
+    expect(checkSameKey(null, BA, BA)).toEqual({
+      asBlockedBy: false,
+      asBlocklistAuthority: false,
+    });
+  });
+
+  it("words the same-key warning by which key matched", () => {
+    expect(sameKeyWarning(checkSameKey(ADMIN, BA, BA))).toBeNull();
+    expect(sameKeyWarning(checkSameKey(ADMIN, ADMIN, ADMIN))).toMatch(
+      /same key as admin and blocked_by/,
+    );
+    const rotated = sameKeyWarning(checkSameKey(ADMIN, BA, ADMIN));
+    expect(rotated).toMatch(/current Blocklist Authority/);
+    expect(rotated).toMatch(/two different keys/);
+    expect(rotated).not.toMatch(/same key as admin and blocked_by/);
+    expect(sameKeyWarning(checkSameKey(ADMIN, BA, null))).toMatch(
+      /could not be read/,
+    );
+    // The blocked_by match is known even when BA is unreadable.
+    expect(sameKeyWarning(checkSameKey(ADMIN, ADMIN, null))).toMatch(
+      /same key as admin and blocked_by/,
+    );
   });
 });
 
@@ -155,5 +199,10 @@ describe("clawback tx-error hints", () => {
     [6138, /HookConfigInvalid/],
   ])("explains %i", (code, pattern) => {
     expect(hint(code)).toMatch(pattern);
+  });
+
+  it("6087 covers a blocked escrow, whose own exits are refused too", () => {
+    expect(hint(6087)).toMatch(/remove it from the blocklist first/);
+    expect(hint(6087)).toMatch(/block the recipient wallet instead/);
   });
 });

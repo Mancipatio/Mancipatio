@@ -212,7 +212,7 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       ],
       [
         ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW,
-        "That address is one of the platform's own escrows, not a holder wallet, and can never be clawed back. Let the escrow pay the wallet out first (cancel, expire or return), then claw back from the wallet (ClawbackTargetIsEscrow).",
+        "That address is one of the platform's own escrows, not a holder wallet, and can never be clawed back. Let the escrow pay the wallet out first (cancel, expire or return), then claw back from the wallet. If the escrow address itself is on the blocklist, its exits are refused too: remove it from the blocklist first so they can run, and block the recipient wallet instead (ClawbackTargetIsEscrow).",
       ],
       [
         ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED,

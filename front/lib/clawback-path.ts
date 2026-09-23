@@ -57,6 +57,46 @@ export function sameKeyHoldsBothRoles(
   blockedBy: Address | null,
   blocklistAuthority: Address | null,
 ): boolean {
-  if (!admin) return false;
-  return admin === blockedBy || admin === blocklistAuthority;
+  const check = checkSameKey(admin, blockedBy, blocklistAuthority);
+  return check.asBlockedBy || check.asBlocklistAuthority === true;
+}
+
+export type SameKeyCheck = {
+  /** The connected Admin added this BlockEntry — the event will show
+   *  `admin == blocked_by`. */
+  asBlockedBy: boolean;
+  /** The connected Admin is the CURRENT Blocklist Authority; `null` when the
+   *  Blocklist Authority could not be read (only `asBlockedBy` was checked). */
+  asBlocklistAuthority: boolean | null;
+};
+
+/** Which of the two blocklist-path keys the connected Admin also holds. */
+export function checkSameKey(
+  admin: Address | null,
+  blockedBy: Address | null,
+  blocklistAuthority: Address | null,
+): SameKeyCheck {
+  return {
+    asBlockedBy: admin !== null && admin === blockedBy,
+    asBlocklistAuthority:
+      blocklistAuthority === null ? null : admin !== null && admin === blocklistAuthority,
+  };
+}
+
+/**
+ * Panel copy for a {@link SameKeyCheck}: worded by WHICH key matched, since
+ * only `asBlockedBy` shows up in the on-chain event (admin == blocked_by); a
+ * rotated Blocklist Authority that is now the Admin shows admin != blocked_by
+ * and is visible only in the audit metadata. `null` = nothing to say.
+ */
+export function sameKeyWarning(check: SameKeyCheck): string | null {
+  const base =
+    "The blocklist path is meant to need two different keys; the program does not enforce it.";
+  if (check.asBlockedBy)
+    return `The connected Admin wallet is the key that added this holder to the blocklist. ${base} The event and audit log will show the same key as admin and blocked_by.`;
+  if (check.asBlocklistAuthority === true)
+    return `The connected Admin wallet is also the current Blocklist Authority (a different key added this entry). ${base} The event will show two different keys; the audit log records that one key now holds both roles.`;
+  if (check.asBlocklistAuthority === null)
+    return "The current Blocklist Authority could not be read, so only the key that added this entry was compared with the connected wallet.";
+  return null;
 }
