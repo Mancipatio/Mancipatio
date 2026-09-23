@@ -53,12 +53,19 @@ jobs:
       - name: Build both SBF programs from this checkout
         run: cargo build-sbf --workspace --tools-version v1.52 -- --locked
 
-      # ProgramData capacity of the deployed asset_registry (2C-2): an upgrade
-      # larger than this needs `solana program extend` first. Raise the
-      # constant only after that extend has landed on every cluster.
+      # ProgramData capacity of the deployed asset_registry: an upgrade larger
+      # than this needs `solana program extend` first. 2C-4: 2,471,672 (2C-2)
+      # + the 65,536 B extend that must land on every cluster BEFORE the 2C-4
+      # registry upgrade is deployed.
+      # PENDING (as of the 2C-4 branch): the extend has NOT landed on any
+      # cluster yet, so this value is ahead of the deployed capacity and this
+      # gate cannot catch a missing extend. Do not merge 2C-4 until the devnet
+      # `solana program extend … 65536` has run and its `solana program show`
+      # (Data Length 2,537,208) is recorded next to pre-show-hook.txt; then
+      # cite that file here and drop this note.
       - name: asset_registry size budget
         env:
-          ASSET_REGISTRY_CAPACITY: "2471672"
+          ASSET_REGISTRY_CAPACITY: "2537208"
         run: |
           size=$(wc -c < target/deploy/asset_registry.so | tr -d ' ')
           headroom=$((ASSET_REGISTRY_CAPACITY - size))
@@ -69,6 +76,24 @@ jobs:
           fi
           if [ "$headroom" -lt 8192 ]; then
             echo "::warning::asset_registry.so is within 8 KiB of the ProgramData capacity (${headroom} B left): plan solana program extend"
+          fi
+
+      # ProgramData capacity of the deployed transfer_hook (devnet `solana
+      # program show` before 2A: 392,712 B; no hook extend since). 2C-4 is the
+      # first hook upgrade since 2C-1 — keep it inside, or extend first.
+      - name: transfer_hook size budget
+        env:
+          TRANSFER_HOOK_CAPACITY: "392712"
+        run: |
+          size=$(wc -c < target/deploy/transfer_hook.so | tr -d ' ')
+          headroom=$((TRANSFER_HOOK_CAPACITY - size))
+          echo "transfer_hook.so: ${size} B, capacity ${TRANSFER_HOOK_CAPACITY} B, headroom ${headroom} B"
+          if [ "$size" -gt "$TRANSFER_HOOK_CAPACITY" ]; then
+            echo "::error::transfer_hook.so (${size} B) exceeds the deployed ProgramData capacity (${TRANSFER_HOOK_CAPACITY} B): extend the program first"
+            exit 1
+          fi
+          if [ "$headroom" -lt 2048 ]; then
+            echo "::warning::transfer_hook.so is within 2 KiB of the ProgramData capacity (${headroom} B left): plan solana program extend"
           fi
 
       - name: Test the freshly built artifacts

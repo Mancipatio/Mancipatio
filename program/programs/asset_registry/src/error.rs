@@ -280,4 +280,9 @@ pub enum RegistryError {
     CustodyKycRegistryNotAllowed,
     #[msg("KYC registry does not match the registry pinned on this custody vault")]
     CustodyKycRegistryMismatch,
+    // ── 2C-4 (appended: every earlier code keeps its position) ──
+    #[msg("Holder is not on the transfer-hook blocklist (no live BlockEntry for this wallet)")]
+    ClawbackHolderNotBlocked,
+    #[msg("Transfer-hook config is missing or does not belong to this mint and share class")]
+    HookConfigInvalid,
 }

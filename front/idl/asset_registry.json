@@ -3024,6 +3024,303 @@
       ]
     },
     {
+      "name": "clawback_blocklisted_holder",
+      "docs": [
+        "Admin claws back the units of a holder on the transfer-hook blocklist",
+        "into a burn-only quarantine escrow (a `RedemptionQueue` +",
+        "`BurnAndAttest` custody vault of the same share class) via the mint's",
+        "`PermanentDelegate`. `Open` or `KycGated` mints; two keys — the holder",
+        "must carry a live hook `BlockEntry` (created only by the hook's",
+        "BlocklistAuthority) and an Admin signs. `amount == 0` sweeps the",
+        "holder's full balance."
+      ],
+      "discriminator": [
+        79,
+        167,
+        196,
+        210,
+        61,
+        140,
+        75,
+        221
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Admin gate — the signer must hold an `Admin` record. This is the second",
+            "key; the first is the BlocklistAuthority that created `block_entry`."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "share_class",
+          "relations": [
+            "custody_vault"
+          ]
+        },
+        {
+          "name": "mint",
+          "relations": [
+            "share_class",
+            "custody_vault"
+          ]
+        },
+        {
+          "name": "holder_share_account",
+          "docs": [
+            "Any token account of this mint owned by `holder` — the clawback source.",
+            "The hook independently re-derives its `BlockEntry` from this account's",
+            "owner, so the evidence chain is `source.owner == holder ==",
+            "BlockEntry.wallet`."
+          ],
+          "writable": true
+        },
+        {
+          "name": "holder_escrow_marker",
+          "docs": [
+            "Proof that `holder` is an ordinary wallet and not one of this program's",
+            "own escrows (`EscrowMarker` / `EscrowIdentity` at this address). The",
+            "BlocklistAuthority can block ANY pubkey, escrow PDAs included, so even",
+            "with both keys a program escrow cannot be targeted — see",
+            "`clawback_from_holder` for the full reasoning."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  101,
+                  115,
+                  99,
+                  114,
+                  111,
+                  119,
+                  95,
+                  109,
+                  97,
+                  114,
+                  107,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "holder"
+              }
+            ]
+          }
+        },
+        {
+          "name": "block_entry",
+          "docs": [
+            "The holder's transfer-hook `BlockEntry` PDA `[\"blocked\", holder]` —",
+            "the first key. Only the hook's `BlocklistAuthority` can create it.",
+            "discriminator, wallet) checked by `util::require_blocklisted`."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "holder"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "destination",
+          "docs": [
+            "Destination — the escrow of `custody_vault` below (burn-only quarantine",
+            "of THIS share class)."
+          ],
+          "writable": true
+        },
+        {
+          "name": "custody_vault",
+          "docs": [
+            "The quarantine vault — identical constraints to `clawback_from_holder`:",
+            "a typed, Active `RedemptionQueue` + `BurnAndAttest` `CustodyVault` of",
+            "this class whose every exit burns."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  100,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "share_class"
+              },
+              {
+                "kind": "account",
+                "path": "custody_vault.vault_id",
+                "account": "CustodyVault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "hook_config",
+          "docs": [
+            "The mint's `TransferHookConfig` PDA (`[\"hook_cfg\", mint]` under the",
+            "hook), in ANY mode — it tells the handler whether the mint is KycGated.",
+            "checks it is hook-owned and names this mint and share class."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  104,
+                  111,
+                  111,
+                  107,
+                  95,
+                  99,
+                  102,
+                  103
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "mint"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "token_program"
+        }
+      ],
+      "args": [
+        {
+          "name": "holder",
+          "type": "pubkey"
+        },
+        {
+          "name": "amount",
+          "type": "u64"
+        }
+      ]
+    },
+    {
       "name": "clawback_from_holder",
       "docs": [
         "Admin claws back a revoked (or KYC-expired) holder's share units into a",
@@ -10070,7 +10367,8 @@
         "Revokes a holder's KYC entry — flips status to `Revoked`.",
         "The `transfer_hook` program checks only the RECEIVER, so a revoked",
         "holder can no longer receive — but keeps (and can still send) their",
-        "balance. Use `clawback_from_holder` to seize it."
+        "balance. Use `clawback_from_holder` to seize it (or, for a wallet the",
+        "hook's BlocklistAuthority has blocked, `clawback_blocklisted_holder`)."
       ],
       "discriminator": [
         250,
@@ -12041,6 +12339,19 @@
   ],
   "events": [
     {
+      "name": "BlocklistClawback",
+      "discriminator": [
+        97,
+        42,
+        115,
+        107,
+        117,
+        180,
+        2,
+        87
+      ]
+    },
+    {
       "name": "ConvertibleTargetSet",
       "discriminator": [
         64,
@@ -13233,6 +13544,16 @@
       "code": 6136,
       "name": "CustodyKycRegistryMismatch",
       "msg": "KYC registry does not match the registry pinned on this custody vault"
+    },
+    {
+      "code": 6137,
+      "name": "ClawbackHolderNotBlocked",
+      "msg": "Holder is not on the transfer-hook blocklist (no live BlockEntry for this wallet)"
+    },
+    {
+      "code": 6138,
+      "name": "HookConfigInvalid",
+      "msg": "Transfer-hook config is missing or does not belong to this mint and share class"
     }
   ],
   "types": [
@@ -13432,6 +13753,77 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlocklistClawback",
+      "docs": [
+        "Emitted by `clawback_blocklisted_holder` — a holder on the transfer-hook",
+        "blocklist had units seized into a burn-only quarantine vault via the mint's",
+        "permanent delegate, on an Open or a KycGated mint. The two keys behind the",
+        "seizure are both on the record: `blocked_by` (the `BlockEntry.added_by`",
+        "BlocklistAuthority key) and `admin` (the signer). Monitoring should alert",
+        "when they are equal — the two-key property then rests on one key."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "share_class",
+            "type": "pubkey"
+          },
+          {
+            "name": "mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "holder",
+            "type": "pubkey"
+          },
+          {
+            "name": "block_entry",
+            "docs": [
+              "The hook `BlockEntry` PDA `[\"blocked\", holder]` that justified it."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "blocked_by",
+            "docs": [
+              "`BlockEntry.added_by` — the BlocklistAuthority key that blocked `holder`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "admin",
+            "docs": [
+              "The signing `Admin` of this program."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "destination",
+            "type": "pubkey"
+          },
+          {
+            "name": "custody_vault",
+            "docs": [
+              "The `CustodyVault` (RedemptionQueue + BurnAndAttest) owning `destination`."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "kyc_gated",
+            "docs": [
+              "The mint's restriction mode at seizure time (hook config)."
+            ],
+            "type": "bool"
+          },
+          {
+            "name": "amount",
+            "type": "u64"
           }
         ]
       }

@@ -108,6 +108,30 @@ describe("emergency-pause gate in the committed IDL", () => {
     },
   );
 
+  it.each(["clawback_from_holder", "clawback_blocklisted_holder"])(
+    "%s is Admin-gated, never reads the Platform and has one signer (enforcement stays open under a pause)",
+    (name) => {
+      const ix = byName.get(name);
+      expect(ix, name).toBeDefined();
+      const names = ix!.accounts.map((a) => a.name);
+      expect(names).toContain("admin_record");
+      expect(names).toContain("hook_config");
+      expect(names).toContain("custody_vault");
+      expect(names).not.toContain("platform");
+      expect(ix!.accounts.filter((a) => a.signer)).toHaveLength(1);
+    },
+  );
+
+  it("clawback_blocklisted_holder proves the block with the hook BlockEntry and takes no KYC accounts", () => {
+    const names = byName
+      .get("clawback_blocklisted_holder")!
+      .accounts.map((a) => a.name);
+    expect(names).toContain("block_entry");
+    expect(names).not.toContain("kyc_registry");
+    expect(names).not.toContain("kyc_entry");
+    expect(byName.get("clawback_from_holder")!.accounts.map((a) => a.name)).not.toContain("block_entry");
+  });
+
   it("lets only the admin instructions write the Platform", () => {
     const writers = idl.instructions
       .filter((ix) => ix.accounts.some((a) => a.name === "platform" && a.writable))

@@ -42,6 +42,7 @@ import {
   parseClaimMilestoneInstruction,
   parseClaimRefundInstruction,
   parseClaimVestedInstruction,
+  parseClawbackBlocklistedHolderInstruction,
   parseClawbackFromHolderInstruction,
   parseCloseDistributionInstruction,
   parseCloseSaleInstruction,
@@ -136,6 +137,7 @@ import {
   type ParsedClaimMilestoneInstruction,
   type ParsedClaimRefundInstruction,
   type ParsedClaimVestedInstruction,
+  type ParsedClawbackBlocklistedHolderInstruction,
   type ParsedClawbackFromHolderInstruction,
   type ParsedCloseDistributionInstruction,
   type ParsedCloseSaleInstruction,
@@ -620,6 +622,7 @@ export enum AssetRegistryInstruction {
   ClaimMilestone,
   ClaimRefund,
   ClaimVested,
+  ClawbackBlocklistedHolder,
   ClawbackFromHolder,
   CloseDistribution,
   CloseSale,
@@ -969,6 +972,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.ClaimVested;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([79, 167, 196, 210, 61, 140, 75, 221]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ClawbackBlocklistedHolder;
   }
   if (
     containsBytes(
@@ -1813,6 +1827,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.ClaimVested;
     } & ParsedClaimVestedInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.ClawbackBlocklistedHolder;
+    } & ParsedClawbackBlocklistedHolderInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.ClawbackFromHolder;
     } & ParsedClawbackFromHolderInstruction<TProgram>)
   | ({
@@ -2199,6 +2216,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.ClaimVested,
         ...parseClaimVestedInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.ClawbackBlocklistedHolder: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ClawbackBlocklistedHolder,
+        ...parseClawbackBlocklistedHolderInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.ClawbackFromHolder: {

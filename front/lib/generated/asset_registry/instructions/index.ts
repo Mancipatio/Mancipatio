@@ -31,6 +31,7 @@ export * from "./claimInvestorYield";
 export * from "./claimMilestone";
 export * from "./claimRefund";
 export * from "./claimVested";
+export * from "./clawbackBlocklistedHolder";
 export * from "./clawbackFromHolder";
 export * from "./closeDistribution";
 export * from "./closeSale";

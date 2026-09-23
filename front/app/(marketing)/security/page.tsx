@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import {
   Body,
+  Bullets,
   Card,
   FootNote,
   Grid,
@@ -19,7 +20,7 @@ export const metadata: Metadata = {
 const PILLARS: Array<{ title: string; body: string }> = [
   {
     title: "Compliance transfer hook",
-    body: "The transfer hook checks the source token-account owner against the blocklist, including delegated transfers. KYC-gated classes also check the receiver’s passport. Destinations use immutable token-account ownership; narrow program-controlled recovery paths have their own checks.",
+    body: "The transfer hook checks the source token-account owner against the blocklist, including delegated transfers. A blocklisted wallet cannot send tokens; the only exception is an admin clawback into a burn-only quarantine vault. KYC-gated classes also check the receiver’s passport. Destinations use immutable token-account ownership; narrow program-controlled recovery paths have their own checks.",
   },
   {
     title: "Primary sales follow the class's mode",
@@ -31,7 +32,7 @@ const PILLARS: Array<{ title: string; body: string }> = [
   },
   {
     title: "Permanent delegate",
-    body: "Each share-class mint carries a Token-2022 permanent delegate — the share class's own program address, not a person. One instruction uses it: an admin clawback of a revoked or expired holder on a KYC-gated class. The seized units can only land in a quarantine vault whose every exit burns them, and the instruction refuses to target the platform's own escrows.",
+    body: "Each share-class mint carries a Token-2022 permanent delegate: the share class's own program address, not a person. Two admin instructions use it, and only to move a holder's units into a quarantine vault of the same class whose every exit burns them: on a KYC-gated class, a holder whose passport was revoked or has expired; on any class, Open or KYC-gated, a wallet on the sanctions blocklist. The blocklist has its own on-chain authority (the Blocklist Authority), separate from the Manci admin role: it adds the wallet, then a Manci admin signs the clawback. Neither instruction can target the platform's own escrows or send units to a wallet.",
   },
   {
     title: "Program-mediated custody",
@@ -99,6 +100,29 @@ export default function SecurityPage() {
           recipient checks still apply, with narrow returns of recorded deposits
           handled by the program. Attaching a legacy escrow identity does not
           invent past funding or make gifted surplus exempt.
+        </Body>
+      </Section>
+
+      <Section>
+        <H2>When tokens can be clawed back</H2>
+        <Body className="mt-4">
+          A Manci admin can move a holder&apos;s tokens without the
+          holder&apos;s signature in exactly two cases, and only into a
+          quarantine vault of the same share class from which the tokens can
+          only be burned:
+        </Body>
+        <Bullets
+          className="mt-4"
+          items={[
+            "On a KYC-gated class, when the holder’s investor passport was revoked or has expired.",
+            "On any class, Open or KYC-gated, when the holder’s wallet is on the sanctions blocklist. The Blocklist Authority, a separate on-chain role, adds the wallet; a Manci admin then signs the clawback. The program does not require the two roles to be held by different keys.",
+          ]}
+        />
+        <Body className="mt-4">
+          Seized tokens are not returned on-chain, including if the wallet is
+          later removed from the blocklist. The emergency pause does not stop a
+          clawback. Neither path can take tokens held in the platform&apos;s own
+          escrows or send them to a wallet.
         </Body>
       </Section>
 

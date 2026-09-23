@@ -23,7 +23,7 @@ use spl_tlv_account_resolution::state::ExtraAccountMetaList;
 
 use crate::constants::*;
 use crate::error::RegistryError;
-use crate::state::{KycEntry, KycRegistry, KycStatus, OtcDeal};
+use crate::state::{KycEntry, KycRegistry, KycStatus, OtcDeal, ShareClass};
 
 /// Supported first-release mint policy. Ledgers and quotes use base units;
 /// extension-dependent fees, display scaling and external transfer control are
@@ -374,6 +374,14 @@ const TRANSFER_CHECKED_IX: u8 = 12;
 /// `[source BlockEntry, ExtraAccountMetaList, transfer_hook program]` — the
 /// layout proven by the happy-path real-transfer test (docs/05 §5). The caller
 /// passes them through `ctx.remaining_accounts`.
+///
+/// INVARIANT: the `ShareClass` PDA must never be the `authority` here except
+/// via [`seize_into_quarantine`]. The transfer hook lets a BLOCKED source move
+/// only when the authority is the mint's PermanentDelegate ShareClass and the
+/// destination is a registry escrow PDA — on an Open mint it cannot tell WHICH
+/// escrow, so the "burn-only quarantine" guarantee rests on this program
+/// signing as the ShareClass only for the pinned quarantine leg. Guarded by
+/// `share_class_signs_only_the_quarantine_transfer` (asset_registry tests).
 #[allow(clippy::too_many_arguments)]
 pub fn hook_transfer<'info>(
     token_program: &AccountInfo<'info>,
@@ -422,6 +430,109 @@ pub fn hook_transfer<'info>(
         signer_seeds,
     )?;
     Ok(())
+}
+
+/// The seizure leg shared by both permanent-delegate clawbacks
+/// (`clawback_from_holder`, `clawback_blocklisted_holder`): `source` → the
+/// quarantine `destination`, hook-aware, the `ShareClass` PDA signing as the
+/// mint's Token-2022 `PermanentDelegate`. The callers pin `destination` to an
+/// Active `RedemptionQueue` + `BurnAndAttest` vault escrow of this class and
+/// authorise the holder; this only moves the units.
+///
+/// `amount == 0` sweeps `source`'s full balance; nothing to move ⇒
+/// `NothingToClaim`. Returns the amount moved.
+///
+/// INVARIANT: this is the ONLY place the ShareClass signs a token transfer,
+/// and the registry never calls `SetAuthority` (so the PermanentDelegate stays
+/// the ShareClass). The transfer hook's blocked-source exception — above all
+/// in Open mode, where no config names the class and no marker names the
+/// escrow — accepts any ShareClass-signed transfer into any registry escrow
+/// PDA; it is burn-only quarantine only because both callers pin
+/// `destination` to an Active RedemptionQueue + BurnAndAttest vault. A new
+/// ShareClass-signed transfer widens that exception. Guarded by
+/// `share_class_signs_only_the_quarantine_transfer` (asset_registry tests).
+pub fn seize_into_quarantine<'info>(
+    token_program: &AccountInfo<'info>,
+    share_class: &Account<'info, ShareClass>,
+    source: &InterfaceAccount<'info, TokenAccount>,
+    mint: &InterfaceAccount<'info, Mint>,
+    destination: &AccountInfo<'info>,
+    hook_accounts: &[AccountInfo<'info>],
+    amount: u64,
+) -> Result<u64> {
+    let clawback_amount = if amount == 0 { source.amount } else { amount };
+    require!(clawback_amount > 0, RegistryError::NothingToClaim);
+
+    let asset_key = share_class.asset;
+    let class_index_seed = [share_class.class_index];
+    let bump_seed = [share_class.bump];
+    let signer_seeds: &[&[&[u8]]] = &[&[
+        SHARE_CLASS_SEED,
+        asset_key.as_ref(),
+        &class_index_seed,
+        &bump_seed,
+    ]];
+    hook_transfer(
+        token_program,
+        &source.to_account_info(),
+        &mint.to_account_info(),
+        destination,
+        &share_class.to_account_info(),
+        hook_accounts,
+        clawback_amount,
+        mint.decimals,
+        signer_seeds,
+    )?;
+    Ok(clawback_amount)
+}
+
+/// Proof that `holder` is on the transfer-hook blocklist: `entry` (address
+/// already pinned by the caller's `seeds::program` constraint to the hook's
+/// `["blocked", holder]` PDA) must be a live, hook-owned `BlockEntry` naming
+/// `holder`. Only the hook's `BlocklistAuthority` can create one
+/// (`add_to_blocklist`); `remove_from_blocklist` closes it (empty,
+/// system-owned ⇒ refused). Owner + address already suffice — the
+/// discriminator / length / wallet checks are defense in depth.
+///
+/// Returns `BlockEntry.added_by` — the BlocklistAuthority key on record.
+pub fn require_blocklisted(entry: &AccountInfo, holder: &Pubkey) -> Result<Pubkey> {
+    require!(
+        entry.owner == &TRANSFER_HOOK_PROGRAM,
+        RegistryError::ClawbackHolderNotBlocked
+    );
+    let data = entry.try_borrow_data()?;
+    require!(
+        data.len() >= HOOK_BLOCK_ENTRY_LEN
+            && data[..8] == HOOK_BLOCK_ENTRY_DISCRIMINATOR
+            && data[HOOK_BLOCK_ENTRY_WALLET_OFFSET..HOOK_BLOCK_ENTRY_WALLET_OFFSET + 32]
+                == holder.to_bytes(),
+        RegistryError::ClawbackHolderNotBlocked
+    );
+    let added_by: [u8; 32] = data
+        [HOOK_BLOCK_ENTRY_ADDED_BY_OFFSET..HOOK_BLOCK_ENTRY_ADDED_BY_OFFSET + 32]
+        .try_into()
+        .map_err(|_| error!(RegistryError::ClawbackHolderNotBlocked))?;
+    Ok(Pubkey::new_from_array(added_by))
+}
+
+/// Reads the mint's `TransferHookConfig` (address pinned by the caller's
+/// `seeds::program` constraint) in ANY mode: it must be hook-owned, full
+/// length, and name this `mint` and `share_class`. Returns `true` iff the
+/// mint is `KycGated`.
+pub fn read_hook_config(cfg: &AccountInfo, mint: &Pubkey, share_class: &Pubkey) -> Result<bool> {
+    require!(
+        cfg.owner == &TRANSFER_HOOK_PROGRAM,
+        RegistryError::HookConfigInvalid
+    );
+    let data = cfg.try_borrow_data()?;
+    require!(
+        data.len() >= HOOK_CONFIG_MIN_LEN
+            && data[HOOK_CONFIG_MINT_OFFSET..HOOK_CONFIG_MINT_OFFSET + 32] == mint.to_bytes()
+            && data[HOOK_CONFIG_SHARE_CLASS_OFFSET..HOOK_CONFIG_SHARE_CLASS_OFFSET + 32]
+                == share_class.to_bytes(),
+        RegistryError::HookConfigInvalid
+    );
+    Ok(data[HOOK_CONFIG_RESTRICTION_MODE_OFFSET] == RESTRICTION_MODE_KYC_GATED)
 }
 
 /// How much of an escrow balance a refund leg may release, split by evidence.

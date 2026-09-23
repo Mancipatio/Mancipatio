@@ -320,9 +320,11 @@ function BlocklistOps() {
               <span className="font-mono text-xs">
                 {target.slice(0, 8)}…{target.slice(-6)}
               </span>{" "}
-              will be unable to send any Manci token — every transfer
-              where it is the source authority will fail on-chain. Provide the
-              sanctions / legal basis; it lands in the audit log.
+              will be unable to send any Manci token — every transfer out of
+              its token accounts will fail on-chain. A Manci admin can then
+              claw this wallet&apos;s units into a burn-only quarantine on any
+              class, Open or KYC-gated. Provide the sanctions / legal basis; it
+              lands in the audit log.
             </p>
           }
         />
@@ -345,8 +347,9 @@ function BlocklistOps() {
                 {confirmRemove.entry.wallet.slice(0, 8)}…
                 {confirmRemove.entry.wallet.slice(-6)}
               </span>{" "}
-              regains the ability to transfer Manci tokens. Provide the
-              reason for lifting the restriction; it lands in the audit log.
+              regains the ability to transfer Manci tokens. Units already
+              clawed back into quarantine are not returned. Provide the reason
+              for lifting the restriction; it lands in the audit log.
             </p>
           }
         />

@@ -7,7 +7,7 @@ use crate::state::{
     Admin, ClawbackReason, CustodyVault, HolderClawback, KycEntry, KycRegistry, KycStatus,
     RealizeAction, ShareClass, VaultState, VaultType,
 };
-use crate::util::hook_transfer;
+use crate::util::seize_into_quarantine;
 
 #[derive(Accounts)]
 #[instruction(holder: Pubkey)]
@@ -130,7 +130,10 @@ pub struct ClawbackFromHolder<'info> {
 }
 
 /// Claws back a revoked (or KYC-expired) holder's share units into a burn-only
-/// quarantine escrow, using the mint's Token-2022 `PermanentDelegate` (the
+/// quarantine escrow — one of the two `PermanentDelegate` transfer
+/// instructions (the other, `clawback_blocklisted_holder`, needs a live
+/// transfer-hook `BlockEntry` instead of a KYC record and works on any mode) —
+/// using the mint's Token-2022 `PermanentDelegate` (the
 /// `ShareClass` PDA — set at mint creation, docs/01 §6) as the authority. This is
 /// the enforcement arm of `revoke_holder`: revocation only blocks the holder
 /// from *receiving* (the hook checks the receiver alone), so the units they
@@ -212,18 +215,12 @@ pub fn handle_clawback_from_holder<'info>(
         RegistryError::ClawbackHolderStillEligible
     );
 
-    let clawback_amount = if amount == 0 {
-        ctx.accounts.holder_share_account.amount
-    } else {
-        amount
-    };
-    require!(clawback_amount > 0, RegistryError::NothingToClaim);
-
-    // holder ATA → quarantine escrow (hook-aware; the ShareClass PDA signs as
-    // permanent delegate). The hook still runs: the sender blocklist checks
-    // the ShareClass PDA (the source authority), and the destination-owner
-    // EscrowMarker (the custody vault's, alive while the vault is Active)
-    // exempts the receiver-KYC checks.
+    // holder account → quarantine escrow (hook-aware; the ShareClass PDA signs
+    // as permanent delegate; `amount == 0` sweeps, nothing ⇒ NothingToClaim).
+    // The hook still runs: the source-owner blocklist applies, and a blocked
+    // holder passes only via its authenticated permanent-delegate quarantine
+    // exception; the destination-owner EscrowMarker (the custody vault's,
+    // alive while the vault is Active) exempts the receiver-KYC checks.
     //
     // Receiver KYC: EXPLICITLY NOT required, and the direction is why — this
     // moves units INTO a program escrow, never out to a wallet. The receiver
@@ -231,25 +228,14 @@ pub fn handle_clawback_from_holder<'info>(
     // account constraints), which has no escrow→wallet exit at all:
     // `return_custody_vault` is `DeliveryEscrow`-only. Demanding a `KycEntry`
     // for the escrow would make the enforcement action impossible.
-    let asset_key = ctx.accounts.share_class.asset;
-    let class_index_seed = [ctx.accounts.share_class.class_index];
-    let bump_seed = [ctx.accounts.share_class.bump];
-    let signer_seeds: &[&[&[u8]]] = &[&[
-        SHARE_CLASS_SEED,
-        asset_key.as_ref(),
-        &class_index_seed,
-        &bump_seed,
-    ]];
-    hook_transfer(
+    let clawback_amount = seize_into_quarantine(
         &ctx.accounts.token_program.to_account_info(),
-        &ctx.accounts.holder_share_account.to_account_info(),
-        &ctx.accounts.mint.to_account_info(),
+        &ctx.accounts.share_class,
+        &ctx.accounts.holder_share_account,
+        &ctx.accounts.mint,
         &ctx.accounts.destination.to_account_info(),
-        &ctx.accounts.share_class.to_account_info(),
         ctx.remaining_accounts,
-        clawback_amount,
-        ctx.accounts.mint.decimals,
-        signer_seeds,
+        amount,
     )?;
 
     emit!(HolderClawback {

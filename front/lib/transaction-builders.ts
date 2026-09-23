@@ -10,6 +10,7 @@ import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   findMintPda,
   fetchMaybeShareClass,
+  getClawbackBlocklistedHolderInstructionAsync,
   getClawbackFromHolderInstructionAsync,
   getCreateVestingSeriesInstructionAsync,
   getUpdateMintMetadataInstruction,
@@ -19,7 +20,7 @@ import {
   fetchMaybeTransferHookConfig,
   findConfigPda,
 } from "@/lib/generated/transfer_hook";
-import { hookTransferMetas } from "@/lib/hook-metas";
+import { hookTransferMetas, mintHasManciHook } from "@/lib/hook-metas";
 
 export const TOKEN_CLASSIC =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
@@ -168,7 +169,32 @@ export function buildUpdateMintMetadataInstruction(
   });
 }
 
-/** Keep the fixed accounts and permanent-delegate hook tail in one builder. */
+type ClawbackLeg = {
+  mint: Address;
+  shareClass: Address;
+  holder: Address;
+  holderShareAccount: Address;
+  destination: Address;
+  custodyVault: Address;
+};
+
+/**
+ * The holder -> quarantine leg's hook tail, in the mint's CURRENT mode (Open:
+ * 3 accounts, KycGated: 9). The transfer authority is the ShareClass (the
+ * mint's permanent delegate); the BlockEntry and source marker stay keyed on
+ * the holder, the destination marker on the custody vault.
+ */
+function clawbackHookTail(rpc: Rpc, leg: ClawbackLeg) {
+  return hookTransferMetas(rpc, leg.mint, {
+    sourceTokenAccount: leg.holderShareAccount,
+    destTokenAccount: leg.destination,
+    sourceOwner: leg.holder,
+    transferAuthority: leg.shareClass,
+    destOwner: leg.custodyVault,
+  });
+}
+
+/** clawback_from_holder: KycGated mint, revoked / expired passport. */
 export async function buildClawbackInstruction(
   rpc: Rpc,
   input: Omit<
@@ -180,13 +206,32 @@ export async function buildClawbackInstruction(
     ...input,
     tokenProgram: TOKEN_2022,
   });
-  const metas = await hookTransferMetas(rpc, input.mint, {
-    sourceTokenAccount: input.holderShareAccount,
-    destTokenAccount: input.destination,
-    sourceOwner: input.holder,
-    transferAuthority: input.shareClass,
-    destOwner: input.custodyVault,
+  const metas = await clawbackHookTail(rpc, input);
+  return { ...ix, accounts: [...ix.accounts, ...metas] };
+}
+
+/**
+ * clawback_blocklisted_holder: Open or KycGated mint, holder on the
+ * transfer-hook blocklist (BlocklistAuthority) + an Admin signature.
+ */
+export async function buildBlocklistClawbackInstruction(
+  rpc: Rpc,
+  input: Omit<
+    Parameters<typeof getClawbackBlocklistedHolderInstructionAsync>[0],
+    "tokenProgram"
+  >,
+) {
+  // The instruction reads the mint's hook config in any mode; without one it
+  // can only fail on-chain, so refuse before asking the wallet to sign.
+  if (!(await mintHasManciHook(rpc, input.mint)))
+    throw new Error(
+      "This mint has no transfer-hook config, so it cannot be clawed back.",
+    );
+  const ix = await getClawbackBlocklistedHolderInstructionAsync({
+    ...input,
+    tokenProgram: TOKEN_2022,
   });
+  const metas = await clawbackHookTail(rpc, input);
   return { ...ix, accounts: [...ix.accounts, ...metas] };
 }
 

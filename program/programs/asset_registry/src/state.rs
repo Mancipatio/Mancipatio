@@ -404,6 +404,31 @@ pub struct HolderClawback {
     pub amount: u64,
 }
 
+/// Emitted by `clawback_blocklisted_holder` — a holder on the transfer-hook
+/// blocklist had units seized into a burn-only quarantine vault via the mint's
+/// permanent delegate, on an Open or a KycGated mint. The two keys behind the
+/// seizure are both on the record: `blocked_by` (the `BlockEntry.added_by`
+/// BlocklistAuthority key) and `admin` (the signer). Monitoring should alert
+/// when they are equal — the two-key property then rests on one key.
+#[event]
+pub struct BlocklistClawback {
+    pub share_class: Pubkey,
+    pub mint: Pubkey,
+    pub holder: Pubkey,
+    /// The hook `BlockEntry` PDA `["blocked", holder]` that justified it.
+    pub block_entry: Pubkey,
+    /// `BlockEntry.added_by` — the BlocklistAuthority key that blocked `holder`.
+    pub blocked_by: Pubkey,
+    /// The signing `Admin` of this program.
+    pub admin: Pubkey,
+    pub destination: Pubkey,
+    /// The `CustodyVault` (RedemptionQueue + BurnAndAttest) owning `destination`.
+    pub custody_vault: Pubkey,
+    /// The mint's restriction mode at seizure time (hook config).
+    pub kyc_gated: bool,
+    pub amount: u64,
+}
+
 // ── CustodyVault — the mint → custody → burn primitive (docs/01 §3) ───────────
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]

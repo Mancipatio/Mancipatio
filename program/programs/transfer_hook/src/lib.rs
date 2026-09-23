@@ -26,7 +26,10 @@
 //! stay screened. Only its named refund owner gets a refund route, backed by
 //! the registry's separate own-deposit ledger and explicit surplus KYC gate. Unresolved markers are system-owned ⇒ no exemption, so
 //! direct wallet↔wallet transfers stay fully gated. The source-owner blocklist is enforced in every mode. A blocked holder can
-//! only leave via the authenticated registry permanent-delegate quarantine path.
+//! only leave via the authenticated registry permanent-delegate quarantine path
+//! (`require_quarantine_clawback`) — in `Open` mode too, where the mint's
+//! `PermanentDelegate` pins the ShareClass and the destination must be a
+//! registry escrow PDA.
 //!
 //! **The exemption is a routing decision, not an eligibility verdict.** It
 //! exists because a program escrow can never hold a `KycEntry` of its own, so
@@ -147,6 +150,60 @@ fn is_share_class_account(info: &AccountInfo) -> bool {
         Ok(data) => data.len() >= 8 && data[..8] == SHARE_CLASS_DISCRIMINATOR,
         Err(_) => false,
     }
+}
+
+/// asset_registry `ESCROW_SEED`: custody / offer / rights escrow token
+/// accounts are PDAs `["escrow", parent]` under the registry, owned by
+/// `parent`. Pinned by a cross-crate assertion in the asset_registry tests.
+pub const REGISTRY_ESCROW_SEED: &[u8] = b"escrow";
+
+/// The ONLY owner-block exception: the registry's permanent-delegate
+/// quarantine clawback (`clawback_from_holder` / `clawback_blocklisted_holder`
+/// — the only registry transfers the `ShareClass` PDA signs). The authority
+/// must be a registry `ShareClass` account that is this mint's Token-2022
+/// `PermanentDelegate`, and the destination a registry escrow token PDA
+/// `["escrow", destination owner]`. `KycGated` also pins the authority to
+/// `config.share_class`; the `Open` tail carries no config, so there the
+/// mint's `PermanentDelegate` (fixed to its ShareClass at mint creation) is
+/// the pin. Generic token delegates and the blocked owner never pass.
+fn require_quarantine_clawback(
+    mint_ai: &AccountInfo,
+    destination_ai: &AccountInfo,
+    destination_owner: &Pubkey,
+    authority_ai: &AccountInfo,
+    expected_share_class: Option<&Pubkey>,
+) -> Result<()> {
+    require!(
+        authority_ai.owner == &ASSET_REGISTRY_PROGRAM && is_share_class_account(authority_ai),
+        HookError::SenderBlocked
+    );
+    if let Some(share_class) = expected_share_class {
+        require_keys_eq!(*authority_ai.key, *share_class, HookError::SenderBlocked);
+    }
+    require_keys_eq!(
+        *mint_ai.owner,
+        spl_token_2022_interface::ID,
+        HookError::SenderBlocked
+    );
+    {
+        let data = mint_ai.try_borrow_data()?;
+        let mint = StateWithExtensions::<SplMint>::unpack(&data)?;
+        let delegate = mint
+            .get_extension::<PermanentDelegate>()
+            .map_err(|_| error!(HookError::SenderBlocked))?;
+        require!(
+            Option::<Pubkey>::from(delegate.delegate) == Some(*authority_ai.key),
+            HookError::SenderBlocked
+        );
+    }
+    // Defense in depth (Open has no idx-10 marker): the destination must be a
+    // registry escrow token account, never a wallet.
+    let (escrow, _) = Pubkey::find_program_address(
+        &[REGISTRY_ESCROW_SEED, destination_owner.as_ref()],
+        &ASSET_REGISTRY_PROGRAM,
+    );
+    require_keys_eq!(*destination_ai.key, escrow, HookError::SenderBlocked);
+    Ok(())
 }
 
 /// The Anchor account discriminator of `asset_registry::KycRegistry` —
@@ -751,9 +808,23 @@ fn process_execute(program_id: &Pubkey, accounts: &[AccountInfo], _amount: u64) 
 
     // Open mode has no config tail. Ordinary delegates never replace the
     // source owner for sanctions checks, including when the owner delegated
-    // their tokens before being blocked.
+    // their tokens before being blocked; a blocked source leaves only via the
+    // registry's permanent-delegate quarantine clawback. Here the hook can
+    // only prove "ShareClass-signed, into SOME registry escrow PDA": that it
+    // is the burn-only quarantine vault relies on asset_registry signing as
+    // the ShareClass solely in `util::seize_into_quarantine` (whose callers
+    // pin the vault) and never calling SetAuthority — guarded there by
+    // `share_class_signs_only_the_quarantine_transfer`.
     let Some(config_ai) = accounts.get(6).filter(|ai| ai.owner == program_id) else {
-        require!(!blocked, HookError::SenderBlocked);
+        if blocked {
+            require_quarantine_clawback(
+                mint_ai,
+                destination_ai,
+                &destination_owner,
+                authority_ai,
+                None,
+            )?;
+        }
         return Ok(());
     };
     let config = {
@@ -765,7 +836,15 @@ fn process_execute(program_id: &Pubkey, accounts: &[AccountInfo], _amount: u64) 
     require_keys_eq!(*config_ai.key, expected_config, HookError::Unauthorized);
     require_keys_eq!(config.mint, *mint_ai.key, HookError::Unauthorized);
     if config.restriction_mode != RestrictionMode::KycGated {
-        require!(!blocked, HookError::SenderBlocked);
+        if blocked {
+            require_quarantine_clawback(
+                mint_ai,
+                destination_ai,
+                &destination_owner,
+                authority_ai,
+                Some(&config.share_class),
+            )?;
+        }
         return Ok(());
     }
     // None = no proven identity; Some(None) = general platform routing;
@@ -798,31 +877,19 @@ fn process_execute(program_id: &Pubkey, accounts: &[AccountInfo], _amount: u64) 
         None => false,
     };
     if blocked {
-        // The only owner-block exception is registry enforcement into escrow.
-        // The registry's sole PermanentDelegate transfer instruction pins this
-        // destination to an active burn-only quarantine vault and the holder to
-        // revoked/expired KYC. Generic token delegates cannot use this route.
-        require!(
-            destination_is_escrow
-                && *authority_ai.key == config.share_class
-                && authority_ai.owner == &ASSET_REGISTRY_PROGRAM
-                && is_share_class_account(authority_ai),
-            HookError::SenderBlocked
-        );
-        require_keys_eq!(
-            *mint_ai.owner,
-            spl_token_2022_interface::ID,
-            HookError::SenderBlocked
-        );
-        let data = mint_ai.try_borrow_data()?;
-        let mint = StateWithExtensions::<SplMint>::unpack(&data)?;
-        let delegate = mint
-            .get_extension::<PermanentDelegate>()
-            .map_err(|_| error!(HookError::SenderBlocked))?;
-        require!(
-            Option::<Pubkey>::from(delegate.delegate) == Some(config.share_class),
-            HookError::SenderBlocked
-        );
+        // The only owner-block exception is registry enforcement into escrow:
+        // the registry's two PermanentDelegate transfer instructions pin this
+        // destination to an active burn-only quarantine vault and the holder
+        // to revoked/expired KYC or a live BlockEntry. Generic token delegates
+        // cannot use this route.
+        require!(destination_is_escrow, HookError::SenderBlocked);
+        require_quarantine_clawback(
+            mint_ai,
+            destination_ai,
+            &destination_owner,
+            authority_ai,
+            Some(&config.share_class),
+        )?;
     }
 
     // ── Escrow-marker exemption (platform-mediated escrow legs) ──────────────

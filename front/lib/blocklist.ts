@@ -6,8 +6,9 @@
 // discriminator match — same pattern as lib/enumerate.ts.
 
 import type { SolanaClient } from "@solana/client";
-import type { Address } from "@solana/kit";
+import { fetchEncodedAccount, type Address } from "@solana/kit";
 import {
+  findBlockEntryPda,
   getBlockEntryDecoder,
   getBlockEntryDiscriminatorBytes,
   TRANSFER_HOOK_PROGRAM_ADDRESS,
@@ -45,4 +46,44 @@ export async function listBlockEntries(rpc: Rpc): Promise<BlockEntryRow[]> {
     if (match) out.push({ pda: r.pubkey, entry: decode.decode(data) });
   }
   return out;
+}
+
+export type LiveBlockEntry = {
+  pda: Address;
+  /** `BlockEntry.added_by` — the BlocklistAuthority key that blocked. */
+  addedBy: Address;
+};
+
+function hasPrefix(data: ArrayLike<number>, prefix: ArrayLike<number>): boolean {
+  if (data.length < prefix.length) return false;
+  for (let i = 0; i < prefix.length; i += 1)
+    if (data[i] !== prefix[i]) return false;
+  return true;
+}
+
+/**
+ * The holder's live BlockEntry, or null. Mirrors the registry's
+ * `util::require_blocklisted`: the account at `["blocked", holder]` must be
+ * owned by the hook, carry the BlockEntry discriminator and name `holder` —
+ * anything else (closed, foreign-owned, malformed) means "not blocked".
+ * RPC failures propagate.
+ */
+export async function fetchBlockEntry(
+  rpc: Parameters<typeof fetchEncodedAccount>[0],
+  holder: Address,
+): Promise<LiveBlockEntry | null> {
+  const [pda] = await findBlockEntryPda({ wallet: holder });
+  const account = await fetchEncodedAccount(rpc, pda);
+  if (!account.exists) return null;
+  if (account.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS) return null;
+  const data = account.data;
+  if (!hasPrefix(data, getBlockEntryDiscriminatorBytes())) return null;
+  let entry: BlockEntry;
+  try {
+    entry = getBlockEntryDecoder().decode(data);
+  } catch {
+    return null;
+  }
+  if (entry.wallet !== holder) return null;
+  return { pda, addedBy: entry.addedBy };
 }

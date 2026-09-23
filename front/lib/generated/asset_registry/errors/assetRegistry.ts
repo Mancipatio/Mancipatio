@@ -288,6 +288,10 @@ export const ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED = 0x17f6; // 61
 export const ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_NOT_ALLOWED = 0x17f7; // 6135
 /** CustodyKycRegistryMismatch: KYC registry does not match the registry pinned on this custody vault */
 export const ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH = 0x17f8; // 6136
+/** ClawbackHolderNotBlocked: Holder is not on the transfer-hook blocklist (no live BlockEntry for this wallet) */
+export const ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED = 0x17f9; // 6137
+/** HookConfigInvalid: Transfer-hook config is missing or does not belong to this mint and share class */
+export const ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID = 0x17fa; // 6138
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -298,6 +302,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__BENEFICIARY_REQUIRED
   | typeof ASSET_REGISTRY_ERROR__CANNOT_REVOKE_PLATFORM_ADMIN
   | typeof ASSET_REGISTRY_ERROR__CLAWBACK_DESTINATION_INVALID
+  | typeof ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED
   | typeof ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE
   | typeof ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED
   | typeof ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW
@@ -313,6 +318,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY
   | typeof ASSET_REGISTRY_ERROR__DISTRIBUTION_NOT_ACTIVE
   | typeof ASSET_REGISTRY_ERROR__DISTRIBUTION_OVERDRAW
+  | typeof ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID
   | typeof ASSET_REGISTRY_ERROR__IMMUTABLE_OWNER_REQUIRED
   | typeof ASSET_REGISTRY_ERROR__INVALID_APPROVAL_WINDOW
   | typeof ASSET_REGISTRY_ERROR__INVALID_ASSET_ID
@@ -439,6 +445,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__BENEFICIARY_REQUIRED]: `A DeliveryEscrow vault requires a beneficiary`,
     [ASSET_REGISTRY_ERROR__CANNOT_REVOKE_PLATFORM_ADMIN]: `Rotate the platform admin before revoking its global admin role`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_DESTINATION_INVALID]: `Clawback destination must be the escrow of an Active RedemptionQueue + BurnAndAttest custody vault of this share class`,
+    [ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED]: `Holder is not on the transfer-hook blocklist (no live BlockEntry for this wallet)`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE]: `Clawback requires the holder's KYC entry to be Revoked or expired`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED]: `Clawback is only available on KycGated mints`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW]: `Clawback target is a program escrow, not a holder wallet`,
@@ -454,6 +461,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY]: `A DeliveryEscrow vault may only be funded by its own beneficiary`,
     [ASSET_REGISTRY_ERROR__DISTRIBUTION_NOT_ACTIVE]: `Distribution is not active for this action`,
     [ASSET_REGISTRY_ERROR__DISTRIBUTION_OVERDRAW]: `Batch would exceed the distribution's total amount`,
+    [ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID]: `Transfer-hook config is missing or does not belong to this mint and share class`,
     [ASSET_REGISTRY_ERROR__IMMUTABLE_OWNER_REQUIRED]: `Share-token recipients must have the Token-2022 ImmutableOwner extension`,
     [ASSET_REGISTRY_ERROR__INVALID_APPROVAL_WINDOW]: `Approval window out of range (1 hour to 90 days), or set for a non-Approval series`,
     [ASSET_REGISTRY_ERROR__INVALID_ASSET_ID]: `Asset id must be 1..=32 bytes`,

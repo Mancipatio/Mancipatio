@@ -20,7 +20,11 @@ import {
  * The prototype's version of this page is a placeholder ("To be drafted by the
  * legal team"), so it does not replace anything: every operative clause below
  * is the existing text, carried over word for word. Only the presentation
- * changed. Legal wording is not edited here.
+ * changed. Legal wording is not edited here — with one exception: the second
+ * paragraph of clause 8 (2C-4, permanent-delegate clawback) is a factual
+ * disclosure of on-chain behaviour added by engineering. Its wording, and
+ * whether it needs re-acceptance (a TOS_VERSION bump, lib/tos-version.ts), are
+ * for the lawyer; TOS_VERSION is deliberately unchanged.
  */
 export const metadata: Metadata = {
   title: "Terms of Service — Manci",
@@ -28,7 +32,7 @@ export const metadata: Metadata = {
     "Terms governing access to and use of the Manci tokenization platform.",
 };
 
-const LAST_UPDATED = "2026-05-25";
+const LAST_UPDATED = "2026-09-23";
 
 export default function TermsPage() {
   return (
@@ -136,6 +140,18 @@ export default function TermsPage() {
             platform&apos;s custody program holds tokens in PDA-owned escrows
             during conversion, delivery and redemption. We do not take legal
             title to off-chain assets backing tokens.
+          </Body>
+          <Body className="mt-4">
+            Every share-class token has a program-controlled permanent
+            delegate. It allows tokens to be moved without the holder&apos;s
+            signature only (a) on a KYC-gated class, when the holder&apos;s
+            verification was revoked or has expired, or (b) on any class, when
+            the holder&apos;s wallet is on the platform&apos;s sanctions
+            blocklist, which is kept by the Blocklist Authority, an on-chain
+            role separate from the Manci admin role. In both
+            cases a Manci admin must sign, and the tokens can only be moved into
+            a quarantine vault from which they can only be burned. The platform
+            has no on-chain way to return them.
           </Body>
         </Clause>
 
