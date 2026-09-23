@@ -10,8 +10,6 @@ import {
   combineCodec,
   fixDecoderSize,
   fixEncoderSize,
-  getAddressDecoder,
-  getAddressEncoder,
   getBytesDecoder,
   getBytesEncoder,
   getStructDecoder,
@@ -32,30 +30,28 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findKycEntryPda } from "../pdas";
+import { findAcceptKycRegistryAuthorityTransferPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
-  expectSome,
   getAccountMetaFactory,
   type ResolvedAccount,
 } from "../shared";
 
-export const REVOKE_HOLDER_DISCRIMINATOR = new Uint8Array([
-  250, 238, 38, 18, 138, 55, 227, 111,
-]);
+export const CANCEL_KYC_REGISTRY_AUTHORITY_TRANSFER_DISCRIMINATOR =
+  new Uint8Array([248, 0, 42, 144, 254, 38, 243, 192]);
 
-export function getRevokeHolderDiscriminatorBytes() {
+export function getCancelKycRegistryAuthorityTransferDiscriminatorBytes() {
   return fixEncoderSize(getBytesEncoder(), 8).encode(
-    REVOKE_HOLDER_DISCRIMINATOR,
+    CANCEL_KYC_REGISTRY_AUTHORITY_TRANSFER_DISCRIMINATOR,
   );
 }
 
-export type RevokeHolderInstruction<
+export type CancelKycRegistryAuthorityTransferInstruction<
   TProgram extends string = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
   TAccountAuthority extends string | AccountMeta<string> = string,
   TAccountKycRegistry extends string | AccountMeta<string> = string,
-  TAccountKycEntry extends string | AccountMeta<string> = string,
+  TAccountTransfer extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -68,80 +64,73 @@ export type RevokeHolderInstruction<
       TAccountKycRegistry extends string
         ? ReadonlyAccount<TAccountKycRegistry>
         : TAccountKycRegistry,
-      TAccountKycEntry extends string
-        ? WritableAccount<TAccountKycEntry>
-        : TAccountKycEntry,
+      TAccountTransfer extends string
+        ? WritableAccount<TAccountTransfer>
+        : TAccountTransfer,
       ...TRemainingAccounts,
     ]
   >;
 
-export type RevokeHolderInstructionData = {
+export type CancelKycRegistryAuthorityTransferInstructionData = {
   discriminator: ReadonlyUint8Array;
-  holder: Address;
 };
 
-export type RevokeHolderInstructionDataArgs = { holder: Address };
+export type CancelKycRegistryAuthorityTransferInstructionDataArgs = {};
 
-export function getRevokeHolderInstructionDataEncoder(): FixedSizeEncoder<RevokeHolderInstructionDataArgs> {
+export function getCancelKycRegistryAuthorityTransferInstructionDataEncoder(): FixedSizeEncoder<CancelKycRegistryAuthorityTransferInstructionDataArgs> {
   return transformEncoder(
-    getStructEncoder([
-      ["discriminator", fixEncoderSize(getBytesEncoder(), 8)],
-      ["holder", getAddressEncoder()],
-    ]),
-    (value) => ({ ...value, discriminator: REVOKE_HOLDER_DISCRIMINATOR }),
+    getStructEncoder([["discriminator", fixEncoderSize(getBytesEncoder(), 8)]]),
+    (value) => ({
+      ...value,
+      discriminator: CANCEL_KYC_REGISTRY_AUTHORITY_TRANSFER_DISCRIMINATOR,
+    }),
   );
 }
 
-export function getRevokeHolderInstructionDataDecoder(): FixedSizeDecoder<RevokeHolderInstructionData> {
+export function getCancelKycRegistryAuthorityTransferInstructionDataDecoder(): FixedSizeDecoder<CancelKycRegistryAuthorityTransferInstructionData> {
   return getStructDecoder([
     ["discriminator", fixDecoderSize(getBytesDecoder(), 8)],
-    ["holder", getAddressDecoder()],
   ]);
 }
 
-export function getRevokeHolderInstructionDataCodec(): FixedSizeCodec<
-  RevokeHolderInstructionDataArgs,
-  RevokeHolderInstructionData
+export function getCancelKycRegistryAuthorityTransferInstructionDataCodec(): FixedSizeCodec<
+  CancelKycRegistryAuthorityTransferInstructionDataArgs,
+  CancelKycRegistryAuthorityTransferInstructionData
 > {
   return combineCodec(
-    getRevokeHolderInstructionDataEncoder(),
-    getRevokeHolderInstructionDataDecoder(),
+    getCancelKycRegistryAuthorityTransferInstructionDataEncoder(),
+    getCancelKycRegistryAuthorityTransferInstructionDataDecoder(),
   );
 }
 
-export type RevokeHolderAsyncInput<
+export type CancelKycRegistryAuthorityTransferAsyncInput<
   TAccountAuthority extends string = string,
   TAccountKycRegistry extends string = string,
-  TAccountKycEntry extends string = string,
+  TAccountTransfer extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
-  /**
-   * Taken by address (see `ApproveHolder::kyc_registry`): the registry
-   * address is permanent, its `authority` rotates.
-   */
   kycRegistry: Address<TAccountKycRegistry>;
-  kycEntry?: Address<TAccountKycEntry>;
-  holder: RevokeHolderInstructionDataArgs["holder"];
+  transfer?: Address<TAccountTransfer>;
 };
 
-export async function getRevokeHolderInstructionAsync<
+export async function getCancelKycRegistryAuthorityTransferInstructionAsync<
   TAccountAuthority extends string,
   TAccountKycRegistry extends string,
-  TAccountKycEntry extends string,
+  TAccountTransfer extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: RevokeHolderAsyncInput<
+  input: CancelKycRegistryAuthorityTransferAsyncInput<
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry
+    TAccountTransfer
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
-  RevokeHolderInstruction<
+  CancelKycRegistryAuthorityTransferInstruction<
     TProgramAddress,
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry
+    TAccountTransfer
   >
 > {
   // Program address.
@@ -152,21 +141,17 @@ export async function getRevokeHolderInstructionAsync<
   const originalAccounts = {
     authority: { value: input.authority ?? null, isWritable: true },
     kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
-    kycEntry: { value: input.kycEntry ?? null, isWritable: true },
+    transfer: { value: input.transfer ?? null, isWritable: true },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
     ResolvedAccount
   >;
 
-  // Original args.
-  const args = { ...input };
-
   // Resolve default values.
-  if (!accounts.kycEntry.value) {
-    accounts.kycEntry.value = await findKycEntryPda({
+  if (!accounts.transfer.value) {
+    accounts.transfer.value = await findAcceptKycRegistryAuthorityTransferPda({
       kycRegistry: expectAddress(accounts.kycRegistry.value),
-      holder: expectSome(args.holder),
     });
   }
 
@@ -175,52 +160,47 @@ export async function getRevokeHolderInstructionAsync<
     accounts: [
       getAccountMeta(accounts.authority),
       getAccountMeta(accounts.kycRegistry),
-      getAccountMeta(accounts.kycEntry),
+      getAccountMeta(accounts.transfer),
     ],
-    data: getRevokeHolderInstructionDataEncoder().encode(
-      args as RevokeHolderInstructionDataArgs,
+    data: getCancelKycRegistryAuthorityTransferInstructionDataEncoder().encode(
+      {},
     ),
     programAddress,
-  } as RevokeHolderInstruction<
+  } as CancelKycRegistryAuthorityTransferInstruction<
     TProgramAddress,
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry
+    TAccountTransfer
   >);
 }
 
-export type RevokeHolderInput<
+export type CancelKycRegistryAuthorityTransferInput<
   TAccountAuthority extends string = string,
   TAccountKycRegistry extends string = string,
-  TAccountKycEntry extends string = string,
+  TAccountTransfer extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
-  /**
-   * Taken by address (see `ApproveHolder::kyc_registry`): the registry
-   * address is permanent, its `authority` rotates.
-   */
   kycRegistry: Address<TAccountKycRegistry>;
-  kycEntry: Address<TAccountKycEntry>;
-  holder: RevokeHolderInstructionDataArgs["holder"];
+  transfer: Address<TAccountTransfer>;
 };
 
-export function getRevokeHolderInstruction<
+export function getCancelKycRegistryAuthorityTransferInstruction<
   TAccountAuthority extends string,
   TAccountKycRegistry extends string,
-  TAccountKycEntry extends string,
+  TAccountTransfer extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: RevokeHolderInput<
+  input: CancelKycRegistryAuthorityTransferInput<
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry
+    TAccountTransfer
   >,
   config?: { programAddress?: TProgramAddress },
-): RevokeHolderInstruction<
+): CancelKycRegistryAuthorityTransferInstruction<
   TProgramAddress,
   TAccountAuthority,
   TAccountKycRegistry,
-  TAccountKycEntry
+  TAccountTransfer
 > {
   // Program address.
   const programAddress =
@@ -230,60 +210,56 @@ export function getRevokeHolderInstruction<
   const originalAccounts = {
     authority: { value: input.authority ?? null, isWritable: true },
     kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
-    kycEntry: { value: input.kycEntry ?? null, isWritable: true },
+    transfer: { value: input.transfer ?? null, isWritable: true },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
     ResolvedAccount
   >;
 
-  // Original args.
-  const args = { ...input };
-
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
     accounts: [
       getAccountMeta(accounts.authority),
       getAccountMeta(accounts.kycRegistry),
-      getAccountMeta(accounts.kycEntry),
+      getAccountMeta(accounts.transfer),
     ],
-    data: getRevokeHolderInstructionDataEncoder().encode(
-      args as RevokeHolderInstructionDataArgs,
+    data: getCancelKycRegistryAuthorityTransferInstructionDataEncoder().encode(
+      {},
     ),
     programAddress,
-  } as RevokeHolderInstruction<
+  } as CancelKycRegistryAuthorityTransferInstruction<
     TProgramAddress,
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry
+    TAccountTransfer
   >);
 }
 
-export type ParsedRevokeHolderInstruction<
+export type ParsedCancelKycRegistryAuthorityTransferInstruction<
   TProgram extends string = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;
   accounts: {
     authority: TAccountMetas[0];
-    /**
-     * Taken by address (see `ApproveHolder::kyc_registry`): the registry
-     * address is permanent, its `authority` rotates.
-     */
     kycRegistry: TAccountMetas[1];
-    kycEntry: TAccountMetas[2];
+    transfer: TAccountMetas[2];
   };
-  data: RevokeHolderInstructionData;
+  data: CancelKycRegistryAuthorityTransferInstructionData;
 };
 
-export function parseRevokeHolderInstruction<
+export function parseCancelKycRegistryAuthorityTransferInstruction<
   TProgram extends string,
   TAccountMetas extends readonly AccountMeta[],
 >(
   instruction: Instruction<TProgram> &
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
-): ParsedRevokeHolderInstruction<TProgram, TAccountMetas> {
+): ParsedCancelKycRegistryAuthorityTransferInstruction<
+  TProgram,
+  TAccountMetas
+> {
   if (instruction.accounts.length < 3) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
@@ -299,8 +275,10 @@ export function parseRevokeHolderInstruction<
     accounts: {
       authority: getNextAccount(),
       kycRegistry: getNextAccount(),
-      kycEntry: getNextAccount(),
+      transfer: getNextAccount(),
     },
-    data: getRevokeHolderInstructionDataDecoder().decode(instruction.data),
+    data: getCancelKycRegistryAuthorityTransferInstructionDataDecoder().decode(
+      instruction.data,
+    ),
   };
 }

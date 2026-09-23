@@ -6,6 +6,7 @@
  * @see https://github.com/codama-idl/codama
  */
 
+export * from "./acceptKycRegistryAuthorityTransfer";
 export * from "./acceptPlatformAdminNewAdminRecord";
 export * from "./acceptPlatformAdminTransfer";
 export * from "./adminRecord";

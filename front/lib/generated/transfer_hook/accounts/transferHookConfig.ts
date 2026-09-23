@@ -64,7 +64,12 @@ export type TransferHookConfig = {
   /** Blocklist registry consulted on every transfer (sanctions / court order). */
   blocklist: Address;
   restrictionMode: RestrictionMode;
-  /** Required when `restriction_mode == KycGated`; otherwise `None`. */
+  /**
+   * Required when `restriction_mode == KycGated`, and must be `None` for
+   * `Open` (both enforced). `update_transfer_hook_config` also verifies the
+   * named account is a real `asset_registry::KycRegistry`. Pinned by
+   * ADDRESS: a registry's authority can rotate without moving it.
+   */
   kycRegistry: Option<Address>;
   version: number;
   bump: number;
@@ -76,7 +81,12 @@ export type TransferHookConfigArgs = {
   /** Blocklist registry consulted on every transfer (sanctions / court order). */
   blocklist: Address;
   restrictionMode: RestrictionModeArgs;
-  /** Required when `restriction_mode == KycGated`; otherwise `None`. */
+  /**
+   * Required when `restriction_mode == KycGated`, and must be `None` for
+   * `Open` (both enforced). `update_transfer_hook_config` also verifies the
+   * named account is a real `asset_registry::KycRegistry`. Pinned by
+   * ADDRESS: a registry's authority can rotate without moving it.
+   */
   kycRegistry: OptionOrNullable<Address>;
   version: number;
   bump: number;

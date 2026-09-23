@@ -680,7 +680,11 @@
         "The meta-list account is resized in place: grown (topped up to",
         "rent-exemption by `authority`) for Open → KycGated, shrunk for",
         "KycGated → Open (no lamport refund — the account simply stays above",
-        "its rent-exempt minimum)."
+        "its rent-exempt minimum).",
+        "",
+        "A named registry must be passed as `kyc_registry_account` and must be a",
+        "real `asset_registry::KycRegistry` (owner, discriminator, length);",
+        "Open mode must name none and pass none."
       ],
       "discriminator": [
         143,
@@ -803,6 +807,15 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "kyc_registry_account",
+          "docs": [
+            "The `KycRegistry` the `kyc_registry` argument names: required iff the",
+            "argument is `Some`, and its key must equal it. Appended LAST so the",
+            "existing account order is kept."
+          ],
+          "optional": true
         }
       ],
       "args": [
@@ -957,6 +970,11 @@
       "code": 6015,
       "name": "InvalidAuthorityTransfer",
       "msg": "Authority proposal does not match current authority and accepting signer"
+    },
+    {
+      "code": 6016,
+      "name": "KycRegistryNotAllowed",
+      "msg": "Open restriction mode must not name a KYC registry"
     }
   ],
   "types": [
@@ -1072,7 +1090,10 @@
           {
             "name": "kyc_registry",
             "docs": [
-              "Required when `restriction_mode == KycGated`; otherwise `None`."
+              "Required when `restriction_mode == KycGated`, and must be `None` for",
+              "`Open` (both enforced). `update_transfer_hook_config` also verifies the",
+              "named account is a real `asset_registry::KycRegistry`. Pinned by",
+              "ADDRESS: a registry's authority can rotate without moving it."
             ],
             "type": {
               "option": "pubkey"

@@ -14,14 +14,8 @@ import {
   getAddressEncoder,
   getBytesDecoder,
   getBytesEncoder,
-  getI64Decoder,
-  getI64Encoder,
   getStructDecoder,
   getStructEncoder,
-  getU16Decoder,
-  getU16Encoder,
-  getU8Decoder,
-  getU8Encoder,
   transformEncoder,
   type AccountMeta,
   type AccountSignerMeta,
@@ -38,30 +32,29 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findKycEntryPda } from "../pdas";
+import { findAcceptKycRegistryAuthorityTransferPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
-  expectSome,
   getAccountMetaFactory,
   type ResolvedAccount,
 } from "../shared";
 
-export const APPROVE_HOLDER_DISCRIMINATOR = new Uint8Array([
-  242, 175, 168, 245, 181, 103, 74, 208,
+export const PROPOSE_KYC_REGISTRY_AUTHORITY_DISCRIMINATOR = new Uint8Array([
+  227, 141, 158, 240, 184, 154, 63, 3,
 ]);
 
-export function getApproveHolderDiscriminatorBytes() {
+export function getProposeKycRegistryAuthorityDiscriminatorBytes() {
   return fixEncoderSize(getBytesEncoder(), 8).encode(
-    APPROVE_HOLDER_DISCRIMINATOR,
+    PROPOSE_KYC_REGISTRY_AUTHORITY_DISCRIMINATOR,
   );
 }
 
-export type ApproveHolderInstruction<
+export type ProposeKycRegistryAuthorityInstruction<
   TProgram extends string = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
   TAccountAuthority extends string | AccountMeta<string> = string,
   TAccountKycRegistry extends string | AccountMeta<string> = string,
-  TAccountKycEntry extends string | AccountMeta<string> = string,
+  TAccountTransfer extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -74,11 +67,11 @@ export type ApproveHolderInstruction<
             AccountSignerMeta<TAccountAuthority>
         : TAccountAuthority,
       TAccountKycRegistry extends string
-        ? WritableAccount<TAccountKycRegistry>
+        ? ReadonlyAccount<TAccountKycRegistry>
         : TAccountKycRegistry,
-      TAccountKycEntry extends string
-        ? WritableAccount<TAccountKycEntry>
-        : TAccountKycEntry,
+      TAccountTransfer extends string
+        ? WritableAccount<TAccountTransfer>
+        : TAccountTransfer,
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
@@ -86,112 +79,78 @@ export type ApproveHolderInstruction<
     ]
   >;
 
-export type ApproveHolderInstructionData = {
+export type ProposeKycRegistryAuthorityInstructionData = {
   discriminator: ReadonlyUint8Array;
-  holder: Address;
-  jurisdiction: number;
-  accreditationLevel: number;
-  expiry: bigint;
-  providerId: number;
-  externalRefHash: ReadonlyUint8Array;
+  newAuthority: Address;
 };
 
-export type ApproveHolderInstructionDataArgs = {
-  holder: Address;
-  jurisdiction: number;
-  accreditationLevel: number;
-  expiry: number | bigint;
-  providerId: number;
-  externalRefHash: ReadonlyUint8Array;
+export type ProposeKycRegistryAuthorityInstructionDataArgs = {
+  newAuthority: Address;
 };
 
-export function getApproveHolderInstructionDataEncoder(): FixedSizeEncoder<ApproveHolderInstructionDataArgs> {
+export function getProposeKycRegistryAuthorityInstructionDataEncoder(): FixedSizeEncoder<ProposeKycRegistryAuthorityInstructionDataArgs> {
   return transformEncoder(
     getStructEncoder([
       ["discriminator", fixEncoderSize(getBytesEncoder(), 8)],
-      ["holder", getAddressEncoder()],
-      ["jurisdiction", getU16Encoder()],
-      ["accreditationLevel", getU8Encoder()],
-      ["expiry", getI64Encoder()],
-      ["providerId", getU16Encoder()],
-      ["externalRefHash", fixEncoderSize(getBytesEncoder(), 32)],
+      ["newAuthority", getAddressEncoder()],
     ]),
-    (value) => ({ ...value, discriminator: APPROVE_HOLDER_DISCRIMINATOR }),
+    (value) => ({
+      ...value,
+      discriminator: PROPOSE_KYC_REGISTRY_AUTHORITY_DISCRIMINATOR,
+    }),
   );
 }
 
-export function getApproveHolderInstructionDataDecoder(): FixedSizeDecoder<ApproveHolderInstructionData> {
+export function getProposeKycRegistryAuthorityInstructionDataDecoder(): FixedSizeDecoder<ProposeKycRegistryAuthorityInstructionData> {
   return getStructDecoder([
     ["discriminator", fixDecoderSize(getBytesDecoder(), 8)],
-    ["holder", getAddressDecoder()],
-    ["jurisdiction", getU16Decoder()],
-    ["accreditationLevel", getU8Decoder()],
-    ["expiry", getI64Decoder()],
-    ["providerId", getU16Decoder()],
-    ["externalRefHash", fixDecoderSize(getBytesDecoder(), 32)],
+    ["newAuthority", getAddressDecoder()],
   ]);
 }
 
-export function getApproveHolderInstructionDataCodec(): FixedSizeCodec<
-  ApproveHolderInstructionDataArgs,
-  ApproveHolderInstructionData
+export function getProposeKycRegistryAuthorityInstructionDataCodec(): FixedSizeCodec<
+  ProposeKycRegistryAuthorityInstructionDataArgs,
+  ProposeKycRegistryAuthorityInstructionData
 > {
   return combineCodec(
-    getApproveHolderInstructionDataEncoder(),
-    getApproveHolderInstructionDataDecoder(),
+    getProposeKycRegistryAuthorityInstructionDataEncoder(),
+    getProposeKycRegistryAuthorityInstructionDataDecoder(),
   );
 }
 
-export type ApproveHolderAsyncInput<
+export type ProposeKycRegistryAuthorityAsyncInput<
   TAccountAuthority extends string = string,
   TAccountKycRegistry extends string = string,
-  TAccountKycEntry extends string = string,
+  TAccountTransfer extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
-  /**
-   * Taken BY ADDRESS, not re-derived from the signer: a registry's address
-   * is fixed at creation (`["kyc_registry", creating authority]`) while its
-   * `authority` can rotate. `Account<KycRegistry>` still checks the owner
-   * and discriminator, and only `create_kyc_registry` (admin co-signed) can
-   * create one, so it cannot be forged.
-   */
   kycRegistry: Address<TAccountKycRegistry>;
-  /**
-   * `init_if_needed` — first approval creates the entry; a later call for
-   * the same holder RE-approves it in place (after a revoke or an expiry),
-   * overwriting every field with the fresh KYC decision.
-   */
-  kycEntry?: Address<TAccountKycEntry>;
+  transfer?: Address<TAccountTransfer>;
   systemProgram?: Address<TAccountSystemProgram>;
-  holder: ApproveHolderInstructionDataArgs["holder"];
-  jurisdiction: ApproveHolderInstructionDataArgs["jurisdiction"];
-  accreditationLevel: ApproveHolderInstructionDataArgs["accreditationLevel"];
-  expiry: ApproveHolderInstructionDataArgs["expiry"];
-  providerId: ApproveHolderInstructionDataArgs["providerId"];
-  externalRefHash: ApproveHolderInstructionDataArgs["externalRefHash"];
+  newAuthority: ProposeKycRegistryAuthorityInstructionDataArgs["newAuthority"];
 };
 
-export async function getApproveHolderInstructionAsync<
+export async function getProposeKycRegistryAuthorityInstructionAsync<
   TAccountAuthority extends string,
   TAccountKycRegistry extends string,
-  TAccountKycEntry extends string,
+  TAccountTransfer extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: ApproveHolderAsyncInput<
+  input: ProposeKycRegistryAuthorityAsyncInput<
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry,
+    TAccountTransfer,
     TAccountSystemProgram
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
-  ApproveHolderInstruction<
+  ProposeKycRegistryAuthorityInstruction<
     TProgramAddress,
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry,
+    TAccountTransfer,
     TAccountSystemProgram
   >
 > {
@@ -202,8 +161,8 @@ export async function getApproveHolderInstructionAsync<
   // Original accounts.
   const originalAccounts = {
     authority: { value: input.authority ?? null, isWritable: true },
-    kycRegistry: { value: input.kycRegistry ?? null, isWritable: true },
-    kycEntry: { value: input.kycEntry ?? null, isWritable: true },
+    kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
+    transfer: { value: input.transfer ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -215,10 +174,9 @@ export async function getApproveHolderInstructionAsync<
   const args = { ...input };
 
   // Resolve default values.
-  if (!accounts.kycEntry.value) {
-    accounts.kycEntry.value = await findKycEntryPda({
+  if (!accounts.transfer.value) {
+    accounts.transfer.value = await findAcceptKycRegistryAuthorityTransferPda({
       kycRegistry: expectAddress(accounts.kycRegistry.value),
-      holder: expectSome(args.holder),
     });
   }
   if (!accounts.systemProgram.value) {
@@ -231,71 +189,54 @@ export async function getApproveHolderInstructionAsync<
     accounts: [
       getAccountMeta(accounts.authority),
       getAccountMeta(accounts.kycRegistry),
-      getAccountMeta(accounts.kycEntry),
+      getAccountMeta(accounts.transfer),
       getAccountMeta(accounts.systemProgram),
     ],
-    data: getApproveHolderInstructionDataEncoder().encode(
-      args as ApproveHolderInstructionDataArgs,
+    data: getProposeKycRegistryAuthorityInstructionDataEncoder().encode(
+      args as ProposeKycRegistryAuthorityInstructionDataArgs,
     ),
     programAddress,
-  } as ApproveHolderInstruction<
+  } as ProposeKycRegistryAuthorityInstruction<
     TProgramAddress,
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry,
+    TAccountTransfer,
     TAccountSystemProgram
   >);
 }
 
-export type ApproveHolderInput<
+export type ProposeKycRegistryAuthorityInput<
   TAccountAuthority extends string = string,
   TAccountKycRegistry extends string = string,
-  TAccountKycEntry extends string = string,
+  TAccountTransfer extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
-  /**
-   * Taken BY ADDRESS, not re-derived from the signer: a registry's address
-   * is fixed at creation (`["kyc_registry", creating authority]`) while its
-   * `authority` can rotate. `Account<KycRegistry>` still checks the owner
-   * and discriminator, and only `create_kyc_registry` (admin co-signed) can
-   * create one, so it cannot be forged.
-   */
   kycRegistry: Address<TAccountKycRegistry>;
-  /**
-   * `init_if_needed` — first approval creates the entry; a later call for
-   * the same holder RE-approves it in place (after a revoke or an expiry),
-   * overwriting every field with the fresh KYC decision.
-   */
-  kycEntry: Address<TAccountKycEntry>;
+  transfer: Address<TAccountTransfer>;
   systemProgram?: Address<TAccountSystemProgram>;
-  holder: ApproveHolderInstructionDataArgs["holder"];
-  jurisdiction: ApproveHolderInstructionDataArgs["jurisdiction"];
-  accreditationLevel: ApproveHolderInstructionDataArgs["accreditationLevel"];
-  expiry: ApproveHolderInstructionDataArgs["expiry"];
-  providerId: ApproveHolderInstructionDataArgs["providerId"];
-  externalRefHash: ApproveHolderInstructionDataArgs["externalRefHash"];
+  newAuthority: ProposeKycRegistryAuthorityInstructionDataArgs["newAuthority"];
 };
 
-export function getApproveHolderInstruction<
+export function getProposeKycRegistryAuthorityInstruction<
   TAccountAuthority extends string,
   TAccountKycRegistry extends string,
-  TAccountKycEntry extends string,
+  TAccountTransfer extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: ApproveHolderInput<
+  input: ProposeKycRegistryAuthorityInput<
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry,
+    TAccountTransfer,
     TAccountSystemProgram
   >,
   config?: { programAddress?: TProgramAddress },
-): ApproveHolderInstruction<
+): ProposeKycRegistryAuthorityInstruction<
   TProgramAddress,
   TAccountAuthority,
   TAccountKycRegistry,
-  TAccountKycEntry,
+  TAccountTransfer,
   TAccountSystemProgram
 > {
   // Program address.
@@ -305,8 +246,8 @@ export function getApproveHolderInstruction<
   // Original accounts.
   const originalAccounts = {
     authority: { value: input.authority ?? null, isWritable: true },
-    kycRegistry: { value: input.kycRegistry ?? null, isWritable: true },
-    kycEntry: { value: input.kycEntry ?? null, isWritable: true },
+    kycRegistry: { value: input.kycRegistry ?? null, isWritable: false },
+    transfer: { value: input.transfer ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -328,56 +269,44 @@ export function getApproveHolderInstruction<
     accounts: [
       getAccountMeta(accounts.authority),
       getAccountMeta(accounts.kycRegistry),
-      getAccountMeta(accounts.kycEntry),
+      getAccountMeta(accounts.transfer),
       getAccountMeta(accounts.systemProgram),
     ],
-    data: getApproveHolderInstructionDataEncoder().encode(
-      args as ApproveHolderInstructionDataArgs,
+    data: getProposeKycRegistryAuthorityInstructionDataEncoder().encode(
+      args as ProposeKycRegistryAuthorityInstructionDataArgs,
     ),
     programAddress,
-  } as ApproveHolderInstruction<
+  } as ProposeKycRegistryAuthorityInstruction<
     TProgramAddress,
     TAccountAuthority,
     TAccountKycRegistry,
-    TAccountKycEntry,
+    TAccountTransfer,
     TAccountSystemProgram
   >);
 }
 
-export type ParsedApproveHolderInstruction<
+export type ParsedProposeKycRegistryAuthorityInstruction<
   TProgram extends string = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;
   accounts: {
     authority: TAccountMetas[0];
-    /**
-     * Taken BY ADDRESS, not re-derived from the signer: a registry's address
-     * is fixed at creation (`["kyc_registry", creating authority]`) while its
-     * `authority` can rotate. `Account<KycRegistry>` still checks the owner
-     * and discriminator, and only `create_kyc_registry` (admin co-signed) can
-     * create one, so it cannot be forged.
-     */
     kycRegistry: TAccountMetas[1];
-    /**
-     * `init_if_needed` — first approval creates the entry; a later call for
-     * the same holder RE-approves it in place (after a revoke or an expiry),
-     * overwriting every field with the fresh KYC decision.
-     */
-    kycEntry: TAccountMetas[2];
+    transfer: TAccountMetas[2];
     systemProgram: TAccountMetas[3];
   };
-  data: ApproveHolderInstructionData;
+  data: ProposeKycRegistryAuthorityInstructionData;
 };
 
-export function parseApproveHolderInstruction<
+export function parseProposeKycRegistryAuthorityInstruction<
   TProgram extends string,
   TAccountMetas extends readonly AccountMeta[],
 >(
   instruction: Instruction<TProgram> &
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
-): ParsedApproveHolderInstruction<TProgram, TAccountMetas> {
+): ParsedProposeKycRegistryAuthorityInstruction<TProgram, TAccountMetas> {
   if (instruction.accounts.length < 4) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
@@ -393,9 +322,11 @@ export function parseApproveHolderInstruction<
     accounts: {
       authority: getNextAccount(),
       kycRegistry: getNextAccount(),
-      kycEntry: getNextAccount(),
+      transfer: getNextAccount(),
       systemProgram: getNextAccount(),
     },
-    data: getApproveHolderInstructionDataDecoder().decode(instruction.data),
+    data: getProposeKycRegistryAuthorityInstructionDataDecoder().decode(
+      instruction.data,
+    ),
   };
 }
