@@ -2696,3 +2696,171 @@ fn init_config_open_mode_rejects_a_named_registry() {
         "no config created"
     );
 }
+
+/// Gates the `open_mint_fixture` mint on a genuine registry `r1` and returns
+/// the meta-list PDA.
+fn gate_on(
+    svm: &mut LiteSVM,
+    payer: &Keypair,
+    program_id: Pubkey,
+    mint: &Pubkey,
+    r1: Pubkey,
+) -> Pubkey {
+    install_kyc_registry(svm, &r1, ASSET_REGISTRY_PROGRAM);
+    send(
+        svm,
+        payer,
+        update_config_ix(
+            program_id,
+            &payer.pubkey(),
+            mint,
+            RestrictionMode::KycGated,
+            Some(r1),
+            Some(r1),
+        ),
+        "gate on R1",
+    );
+    Pubkey::find_program_address(
+        &[transfer_hook::EXTRA_METAS_SEED, mint.as_ref()],
+        &program_id,
+    )
+    .0
+}
+
+/// The lost-KYC-key recovery path: a KycGated mint moves from registry R1 to
+/// a fresh R2 in one update (KycGated -> KycGated); the config and the meta
+/// list both name R2 afterwards, and nothing names R1.
+#[test]
+fn update_config_re_points_a_kyc_gated_mint_to_another_registry() {
+    let (mut svm, payer, program_id, mint, config_pda) = open_mint_fixture();
+    let (r1, r2) = (Pubkey::new_unique(), Pubkey::new_unique());
+    let extra_metas_pda = gate_on(&mut svm, &payer, program_id, &mint, r1);
+    install_kyc_registry(&mut svm, &r2, ASSET_REGISTRY_PROGRAM);
+    let gated_len = svm.get_account(&extra_metas_pda).unwrap().data.len();
+
+    svm.expire_blockhash();
+    send(
+        &mut svm,
+        &payer,
+        update_config_ix(
+            program_id,
+            &payer.pubkey(),
+            &mint,
+            RestrictionMode::KycGated,
+            Some(r2),
+            Some(r2),
+        ),
+        "re-point R1 -> R2",
+    );
+    let cfg: TransferHookConfig = load(&svm, &config_pda, "config after re-point");
+    assert_eq!(cfg.restriction_mode, RestrictionMode::KycGated);
+    assert_eq!(cfg.kyc_registry, Some(r2));
+    assert_eq!(cfg.version, 3, "Open -> R1 -> R2");
+    let metas = svm.get_account(&extra_metas_pda).unwrap();
+    assert_eq!(metas.data.len(), gated_len, "same 7-meta shape, no resize");
+    assert_eq!(
+        unpack_metas(&metas.data),
+        expected_kyc_gated_metas(&r2),
+        "meta list rebuilt around R2"
+    );
+    assert!(
+        !metas.data.windows(32).any(|w| w == r1.as_ref()),
+        "no meta still names R1"
+    );
+}
+
+/// A re-point to anything that is not a genuine registry is refused and the
+/// mint stays gated on R1 (config and meta list untouched). KycGated with no
+/// registry argument is refused even when an account is passed.
+#[test]
+fn update_config_rejects_a_bad_re_point_and_keeps_r1() {
+    let (mut svm, payer, program_id, mint, config_pda) = open_mint_fixture();
+    let r1 = Pubkey::new_unique();
+    let extra_metas_pda = gate_on(&mut svm, &payer, program_id, &mint, r1);
+    let metas_before = svm.get_account(&extra_metas_pda).unwrap().data;
+
+    let fake = Pubkey::new_unique();
+    install_kyc_registry(&mut svm, &fake, Pubkey::new_unique());
+    let cases = [
+        (
+            Some(fake),
+            Some(fake),
+            ERR_INVALID_KYC_REGISTRY,
+            "foreign-owned registry bytes",
+        ),
+        (
+            None,
+            Some(r1),
+            ERR_KYC_REGISTRY_REQUIRED,
+            "KycGated, no argument, account passed",
+        ),
+    ];
+    for (arg, account, code, label) in cases {
+        svm.expire_blockhash();
+        assert_hook_err(
+            try_send(
+                &mut svm,
+                &payer,
+                update_config_ix(
+                    program_id,
+                    &payer.pubkey(),
+                    &mint,
+                    RestrictionMode::KycGated,
+                    arg,
+                    account,
+                ),
+            ),
+            code,
+            label,
+        );
+        let cfg: TransferHookConfig = load(&svm, &config_pda, label);
+        assert_eq!(cfg.restriction_mode, RestrictionMode::KycGated, "{label}");
+        assert_eq!(cfg.kyc_registry, Some(r1), "{label}: still R1");
+        assert_eq!(cfg.version, 2, "{label}");
+        assert_eq!(
+            svm.get_account(&extra_metas_pda).unwrap().data,
+            metas_before,
+            "{label}: meta list untouched"
+        );
+    }
+}
+
+/// An old client (pre-2C-1 IDL) builds `update_transfer_hook_config` without
+/// the trailing optional `kyc_registry_account`. Pins what the new hook does
+/// with it, which the rollout plan (hook upgraded before the front) relies on.
+#[test]
+fn update_config_from_an_old_client_without_the_trailing_account() {
+    let (mut svm, payer, program_id, mint, config_pda) = open_mint_fixture();
+    let registry = Pubkey::new_unique();
+    install_kyc_registry(&mut svm, &registry, ASSET_REGISTRY_PROGRAM);
+    let old_client = |mode: RestrictionMode, arg: Option<Pubkey>| {
+        let mut ix = update_config_ix(program_id, &payer.pubkey(), &mint, mode, arg, None);
+        // The new client encodes `None` as the program id placeholder; an old
+        // client sends no account there at all.
+        let last = ix.accounts.pop().expect("trailing optional account");
+        assert_eq!(
+            last.pubkey, program_id,
+            "None placeholder is the program id"
+        );
+        ix
+    };
+
+    for (mode, arg, label) in [
+        (
+            RestrictionMode::KycGated,
+            Some(registry),
+            "old client: Open -> KycGated",
+        ),
+        (RestrictionMode::Open, None, "old client: Open -> Open"),
+    ] {
+        svm.expire_blockhash();
+        assert_hook_err(
+            try_send(&mut svm, &payer, old_client(mode, arg)),
+            3005,
+            label,
+        );
+        let cfg: TransferHookConfig = load(&svm, &config_pda, label);
+        assert_eq!(cfg.restriction_mode, RestrictionMode::Open, "{label}");
+        assert_eq!(cfg.version, 1, "{label}");
+    }
+}

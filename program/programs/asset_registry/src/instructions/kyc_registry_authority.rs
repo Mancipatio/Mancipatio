@@ -9,9 +9,20 @@
 //! deliberately no super-admin cancel or recovery (signer-matrix §5: one human
 //! signer per instruction, roles never linked by co-signing; a compromised KYC
 //! key could propose + accept back to back anyway). A LOST KYC key is
-//! recovered without a program change: create a new registry (admin
-//! co-signed), re-point each KycGated mint with `update_transfer_hook_config`,
-//! re-issue passports.
+//! recovered without a program change:
+//!   1. create a replacement registry (admin co-signed) from a key that has
+//!      NEVER created one — each creator's `["kyc_registry", key]` seed slot
+//!      is single-use, and the lost key's slot stays occupied;
+//!   2. re-point each KycGated mint with `update_transfer_hook_config`
+//!      (KycGated -> KycGated, the new registry passed as
+//!      `kyc_registry_account`);
+//!   3. set the front's `NEXT_PUBLIC_KYC_REGISTRY` pin to the new address and
+//!      redeploy — until then every KYC surface keeps resolving the dead
+//!      registry (the pin fails closed, it never falls back to a scan);
+//!   4. re-issue passports in the new registry (entries do not carry over).
+//!
+//! Until step 2 a holder approved only in the old registry still passes the
+//! hook; after it, only the new registry's passports count.
 //!
 //! None of these reads `Platform`, so none is subject to the pause flags (the
 //! same as `approve_holder`).

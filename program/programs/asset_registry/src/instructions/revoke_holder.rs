@@ -38,6 +38,7 @@ pub fn handle_revoke_holder(ctx: Context<RevokeHolder>, holder: Pubkey) -> Resul
     emit!(HolderRevoked {
         registry: ctx.accounts.kyc_registry.key(),
         holder,
+        authority: ctx.accounts.authority.key(),
     });
     msg!("Holder {} revoked (KYC)", holder);
     Ok(())

@@ -25,8 +25,8 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     asset_registry::{
-        accounts as acc, instruction as ixd, AuthorityTransfer, KycEntry, KycRegistry,
-        KycRegistryAuthorityChanged, KycRegistryAuthorityProposalCancelled,
+        accounts as acc, instruction as ixd, AuthorityTransfer, HolderApproved, HolderRevoked,
+        KycEntry, KycRegistry, KycRegistryAuthorityChanged, KycRegistryAuthorityProposalCancelled,
         KycRegistryAuthorityProposed, KycRegistryJurisdictionsUpdated, KycStatus,
     },
     kyc::{bitmap, Bitmap},
@@ -292,14 +292,29 @@ fn old_authority_is_locked_out_and_new_authority_works_on_the_same_address() {
         "old authority revoke",
     );
 
-    w.approve(&b, &h2)
+    let logs = w
+        .approve(&b, &h2)
         .expect("B approves H2 on the same registry");
+    let approved = kyc::events::<HolderApproved>(&logs);
+    assert_eq!(approved.len(), 1);
+    assert_eq!(approved[0].registry, registry);
+    assert_eq!(approved[0].holder, h2);
+    assert_eq!(
+        approved[0].authority,
+        b.pubkey(),
+        "the event names the signer, not the creator"
+    );
     assert_eq!(w.registry().entries_count, 2);
     let entry: KycEntry = load(&w.svm, &kyc::entry_pda(&registry, &h2));
     assert_eq!(entry.registry, registry);
     assert_eq!(entry.status, KycStatus::Approved);
 
-    w.revoke(&b, &h1).expect("B revokes H1");
+    let logs = w.revoke(&b, &h1).expect("B revokes H1");
+    let revoked = kyc::events::<HolderRevoked>(&logs);
+    assert_eq!(revoked.len(), 1);
+    assert_eq!(revoked[0].registry, registry);
+    assert_eq!(revoked[0].holder, h1);
+    assert_eq!(revoked[0].authority, b.pubkey());
     let entry: KycEntry = load(&w.svm, &kyc::entry_pda(&registry, &h1));
     assert_eq!(entry.status, KycStatus::Revoked);
 }
@@ -604,4 +619,158 @@ fn rotated_away_creator_cannot_create_again_but_the_new_authority_can() {
     .expect_err("A cannot re-create at its occupied seed address");
     assert!(err.contains("already in use"), "got {err}");
     assert_eq!(w.registry().authority, b.pubkey(), "R1 untouched");
+}
+
+// ── 12. The registry slot is identified by its TYPE alone ───────────────────
+//
+// With no seeds on `kyc_registry`, `Account<KycRegistry>` (owner +
+// discriminator) is the only thing that identifies it. These pin that check:
+// a refactor to `UncheckedAccount` / `AccountInfo` must fail here.
+
+const ERR_DISCRIMINATOR_MISMATCH: u32 = 3002;
+const ERR_OWNED_BY_WRONG_PROGRAM: u32 = 3007;
+
+/// Every registry-taking instruction, with `slot` in the `kyc_registry`
+/// position, signed by `who`.
+fn registry_slot_ixs(who: &Pubkey, slot: &Pubkey) -> Vec<(&'static str, Instruction)> {
+    let holder = Pubkey::new_unique();
+    vec![
+        ("approve", kyc::approve_ix(who, slot, &holder, J)),
+        ("revoke", kyc::revoke_ix(who, slot, &holder)),
+        (
+            "update_jurisdictions",
+            kyc::update_jurisdictions_ix(who, slot, [0u8; 128], [0xFF; 128]),
+        ),
+        ("propose", kyc::propose_ix(who, slot, &Pubkey::new_unique())),
+        ("cancel", kyc::cancel_ix(who, slot)),
+    ]
+}
+
+#[test]
+fn another_program_owned_account_type_cannot_stand_in_for_the_registry() {
+    let mut w = boot();
+    let (a, b) = (World::key(&w.a), World::key(&w.b));
+    let registry = w.registry;
+    let h = Pubkey::new_unique();
+    w.approve(&a, &h).expect("A approves H");
+    // A live AuthorityTransfer at the registry's own transfer PDA.
+    w.send(
+        &a,
+        kyc::propose_ix(&a.pubkey(), &registry, &b.pubkey()),
+        "propose A -> B",
+    );
+    let before = w.registry();
+
+    let impostors = [
+        (
+            "the registry's AuthorityTransfer",
+            kyc::transfer_pda(&registry),
+        ),
+        ("the Platform", kyc::platform_pda()),
+        ("a KycEntry", kyc::entry_pda(&registry, &h)),
+        ("an Admin record", kyc::admin_pda(&w.admin.pubkey())),
+    ];
+    for (what, slot) in impostors {
+        assert!(
+            w.svm.get_account(&slot).unwrap().owner == asset_registry::ID,
+            "{what} is program-owned"
+        );
+        for (ix_name, ix) in registry_slot_ixs(&a.pubkey(), &slot) {
+            w.expect_code(
+                &a,
+                ix,
+                ERR_DISCRIMINATOR_MISMATCH,
+                &format!("{ix_name} with {what} as the registry"),
+            );
+        }
+        w.expect_code(
+            &b,
+            kyc::accept_ix(&b.pubkey(), &slot),
+            ERR_DISCRIMINATOR_MISMATCH,
+            &format!("accept with {what} as the registry"),
+        );
+    }
+
+    let after = w.registry();
+    assert_eq!(after.authority, before.authority);
+    assert_eq!(after.entries_count, before.entries_count);
+    assert_eq!(after.blocked_jurisdictions, before.blocked_jurisdictions);
+}
+
+#[test]
+fn forged_registry_bytes_owned_by_another_program_are_refused() {
+    let mut w = boot();
+    let attacker = World::key(&w.c);
+
+    // Byte-for-byte the real registry, but naming the attacker as authority
+    // and owned by a program that is not asset_registry.
+    let mut forged_state = w.registry();
+    forged_state.authority = attacker.pubkey();
+    let mut forged = w.svm.get_account(&w.registry).unwrap();
+    forged.data.clear();
+    anchor_lang::AccountSerialize::try_serialize(&forged_state, &mut forged.data).unwrap();
+    assert_eq!(forged.data.len(), 306, "same length as a genuine registry");
+    forged.owner = Pubkey::new_unique();
+    let forged_key = Pubkey::new_unique();
+    w.svm.set_account(forged_key, forged.clone()).unwrap();
+
+    for (ix_name, ix) in registry_slot_ixs(&attacker.pubkey(), &forged_key) {
+        w.expect_code(
+            &attacker,
+            ix,
+            ERR_OWNED_BY_WRONG_PROGRAM,
+            &format!("{ix_name} against a foreign-owned forged registry"),
+        );
+    }
+    w.expect_code(
+        &attacker,
+        kyc::accept_ix(&attacker.pubkey(), &forged_key),
+        ERR_OWNED_BY_WRONG_PROGRAM,
+        "accept against a foreign-owned forged registry",
+    );
+    assert!(
+        w.svm
+            .get_account(&kyc::entry_pda(&forged_key, &Pubkey::default()))
+            .is_none(),
+        "no entry created under the forgery"
+    );
+
+    // Control: the SAME bytes owned by asset_registry would pass the typed
+    // check — the owner is the only thing refusing the forgery above.
+    forged.owner = asset_registry::ID;
+    w.svm.set_account(forged_key, forged).unwrap();
+    w.try_send(
+        &attacker,
+        kyc::update_jurisdictions_ix(&attacker.pubkey(), &forged_key, [0u8; 128], [0u8; 128]),
+    )
+    .expect("control: program-owned bytes deserialize as a registry");
+}
+
+#[test]
+fn accept_and_cancel_cannot_be_replayed_after_an_accept() {
+    let mut w = boot();
+    let (a, b) = (World::key(&w.a), World::key(&w.b));
+    let registry = w.registry;
+    w.rotate(&a, &b);
+
+    w.expect_code(
+        &b,
+        kyc::accept_ix(&b.pubkey(), &registry),
+        ERR_ACCOUNT_NOT_INITIALIZED,
+        "second accept after a successful accept",
+    );
+    w.expect_code(
+        &b,
+        kyc::cancel_ix(&b.pubkey(), &registry),
+        ERR_ACCOUNT_NOT_INITIALIZED,
+        "cancel after accept (nothing pending)",
+    );
+    w.expect_code(
+        &a,
+        kyc::cancel_ix(&a.pubkey(), &registry),
+        ERR_ACCOUNT_NOT_INITIALIZED,
+        "the old authority's cancel after accept",
+    );
+    assert_eq!(w.registry().authority, b.pubkey());
+    assert!(w.is_closed(&kyc::transfer_pda(&registry)));
 }

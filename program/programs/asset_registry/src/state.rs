@@ -328,6 +328,9 @@ pub struct HolderApproved {
     pub expiry: i64,
     pub provider_id: u16,
     pub reapproval: bool,
+    /// The registry authority that signed. The registry address no longer
+    /// implies the approver once the authority has rotated (2C-1).
+    pub authority: Pubkey,
 }
 
 /// Emitted by `revoke_holder`.
@@ -335,6 +338,8 @@ pub struct HolderApproved {
 pub struct HolderRevoked {
     pub registry: Pubkey,
     pub holder: Pubkey,
+    /// The registry authority that signed (see `HolderApproved::authority`).
+    pub authority: Pubkey,
 }
 
 /// Emitted by `propose_kyc_registry_authority` (a re-proposal overwrites the

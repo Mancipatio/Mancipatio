@@ -89,6 +89,7 @@ pub fn handle_approve_holder(
         expiry,
         provider_id,
         reapproval: !is_new,
+        authority: ctx.accounts.authority.key(),
     });
     Ok(())
 }
