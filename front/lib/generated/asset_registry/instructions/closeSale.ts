@@ -30,6 +30,7 @@ import {
   type TransactionSigner,
   type WritableAccount,
 } from "@solana/kit";
+import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
 
@@ -49,6 +50,7 @@ export type CloseSaleInstruction<
   TAccountPaymentMint extends string | AccountMeta<string> = string,
   TAccountDestination extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -73,6 +75,9 @@ export type CloseSaleInstruction<
       TAccountPaymentTokenProgram extends string
         ? ReadonlyAccount<TAccountPaymentTokenProgram>
         : TAccountPaymentTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -104,13 +109,14 @@ export function getCloseSaleInstructionDataCodec(): FixedSizeCodec<
   );
 }
 
-export type CloseSaleInput<
+export type CloseSaleAsyncInput<
   TAccountAuthority extends string = string,
   TAccountSale extends string = string,
   TAccountProceeds extends string = string,
   TAccountPaymentMint extends string = string,
   TAccountDestination extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   sale: Address<TAccountSale>;
@@ -119,34 +125,44 @@ export type CloseSaleInput<
   /** Issuer's payment account — receives the collected proceeds. */
   destination: Address<TAccountDestination>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
 };
 
-export function getCloseSaleInstruction<
+export async function getCloseSaleInstructionAsync<
   TAccountAuthority extends string,
   TAccountSale extends string,
   TAccountProceeds extends string,
   TAccountPaymentMint extends string,
   TAccountDestination extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: CloseSaleInput<
+  input: CloseSaleAsyncInput<
     TAccountAuthority,
     TAccountSale,
     TAccountProceeds,
     TAccountPaymentMint,
     TAccountDestination,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
-): CloseSaleInstruction<
-  TProgramAddress,
-  TAccountAuthority,
-  TAccountSale,
-  TAccountProceeds,
-  TAccountPaymentMint,
-  TAccountDestination,
-  TAccountPaymentTokenProgram
+): Promise<
+  CloseSaleInstruction<
+    TProgramAddress,
+    TAccountAuthority,
+    TAccountSale,
+    TAccountProceeds,
+    TAccountPaymentMint,
+    TAccountDestination,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >
 > {
   // Program address.
   const programAddress =
@@ -163,6 +179,112 @@ export function getCloseSaleInstruction<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    platform: { value: input.platform ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedAccount
+  >;
+
+  // Resolve default values.
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
+  return Object.freeze({
+    accounts: [
+      getAccountMeta(accounts.authority),
+      getAccountMeta(accounts.sale),
+      getAccountMeta(accounts.proceeds),
+      getAccountMeta(accounts.paymentMint),
+      getAccountMeta(accounts.destination),
+      getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
+    ],
+    data: getCloseSaleInstructionDataEncoder().encode({}),
+    programAddress,
+  } as CloseSaleInstruction<
+    TProgramAddress,
+    TAccountAuthority,
+    TAccountSale,
+    TAccountProceeds,
+    TAccountPaymentMint,
+    TAccountDestination,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >);
+}
+
+export type CloseSaleInput<
+  TAccountAuthority extends string = string,
+  TAccountSale extends string = string,
+  TAccountProceeds extends string = string,
+  TAccountPaymentMint extends string = string,
+  TAccountDestination extends string = string,
+  TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
+> = {
+  authority: TransactionSigner<TAccountAuthority>;
+  sale: Address<TAccountSale>;
+  proceeds: Address<TAccountProceeds>;
+  paymentMint: Address<TAccountPaymentMint>;
+  /** Issuer's payment account — receives the collected proceeds. */
+  destination: Address<TAccountDestination>;
+  paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
+};
+
+export function getCloseSaleInstruction<
+  TAccountAuthority extends string,
+  TAccountSale extends string,
+  TAccountProceeds extends string,
+  TAccountPaymentMint extends string,
+  TAccountDestination extends string,
+  TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
+  TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
+>(
+  input: CloseSaleInput<
+    TAccountAuthority,
+    TAccountSale,
+    TAccountProceeds,
+    TAccountPaymentMint,
+    TAccountDestination,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >,
+  config?: { programAddress?: TProgramAddress },
+): CloseSaleInstruction<
+  TProgramAddress,
+  TAccountAuthority,
+  TAccountSale,
+  TAccountProceeds,
+  TAccountPaymentMint,
+  TAccountDestination,
+  TAccountPaymentTokenProgram,
+  TAccountPlatform
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? ASSET_REGISTRY_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    authority: { value: input.authority ?? null, isWritable: false },
+    sale: { value: input.sale ?? null, isWritable: true },
+    proceeds: { value: input.proceeds ?? null, isWritable: true },
+    paymentMint: { value: input.paymentMint ?? null, isWritable: false },
+    destination: { value: input.destination ?? null, isWritable: true },
+    paymentTokenProgram: {
+      value: input.paymentTokenProgram ?? null,
+      isWritable: false,
+    },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -178,6 +300,7 @@ export function getCloseSaleInstruction<
       getAccountMeta(accounts.paymentMint),
       getAccountMeta(accounts.destination),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getCloseSaleInstructionDataEncoder().encode({}),
     programAddress,
@@ -188,7 +311,8 @@ export function getCloseSaleInstruction<
     TAccountProceeds,
     TAccountPaymentMint,
     TAccountDestination,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -205,6 +329,11 @@ export type ParsedCloseSaleInstruction<
     /** Issuer's payment account — receives the collected proceeds. */
     destination: TAccountMetas[4];
     paymentTokenProgram: TAccountMetas[5];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[6];
   };
   data: CloseSaleInstructionData;
 };
@@ -217,7 +346,7 @@ export function parseCloseSaleInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedCloseSaleInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 6) {
+  if (instruction.accounts.length < 7) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -236,6 +365,7 @@ export function parseCloseSaleInstruction<
       paymentMint: getNextAccount(),
       destination: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getCloseSaleInstructionDataDecoder().decode(instruction.data),
   };

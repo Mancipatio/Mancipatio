@@ -32,6 +32,7 @@ import {
   type TransactionSigner,
   type WritableAccount,
 } from "@solana/kit";
+import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
 
@@ -54,6 +55,7 @@ export type DepositToOfferEscrowInstruction<
   TAccountMakerShareAccount extends string | AccountMeta<string> = string,
   TAccountTokenProgram extends string | AccountMeta<string> =
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -78,6 +80,9 @@ export type DepositToOfferEscrowInstruction<
       TAccountTokenProgram extends string
         ? ReadonlyAccount<TAccountTokenProgram>
         : TAccountTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -121,13 +126,14 @@ export function getDepositToOfferEscrowInstructionDataCodec(): FixedSizeCodec<
   );
 }
 
-export type DepositToOfferEscrowInput<
+export type DepositToOfferEscrowAsyncInput<
   TAccountMaker extends string = string,
   TAccountOffer extends string = string,
   TAccountMint extends string = string,
   TAccountEscrow extends string = string,
   TAccountMakerShareAccount extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   /**
    * The offer's maker — the only party whose units this ledger may record,
@@ -140,35 +146,45 @@ export type DepositToOfferEscrowInput<
   /** The maker's share-class token account — debited exactly `amount`. */
   makerShareAccount: Address<TAccountMakerShareAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   amount: DepositToOfferEscrowInstructionDataArgs["amount"];
 };
 
-export function getDepositToOfferEscrowInstruction<
+export async function getDepositToOfferEscrowInstructionAsync<
   TAccountMaker extends string,
   TAccountOffer extends string,
   TAccountMint extends string,
   TAccountEscrow extends string,
   TAccountMakerShareAccount extends string,
   TAccountTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: DepositToOfferEscrowInput<
+  input: DepositToOfferEscrowAsyncInput<
     TAccountMaker,
     TAccountOffer,
     TAccountMint,
     TAccountEscrow,
     TAccountMakerShareAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
-): DepositToOfferEscrowInstruction<
-  TProgramAddress,
-  TAccountMaker,
-  TAccountOffer,
-  TAccountMint,
-  TAccountEscrow,
-  TAccountMakerShareAccount,
-  TAccountTokenProgram
+): Promise<
+  DepositToOfferEscrowInstruction<
+    TProgramAddress,
+    TAccountMaker,
+    TAccountOffer,
+    TAccountMint,
+    TAccountEscrow,
+    TAccountMakerShareAccount,
+    TAccountTokenProgram,
+    TAccountPlatform
+  >
 > {
   // Program address.
   const programAddress =
@@ -185,6 +201,126 @@ export function getDepositToOfferEscrowInstruction<
       isWritable: true,
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedAccount
+  >;
+
+  // Original args.
+  const args = { ...input };
+
+  // Resolve default values.
+  if (!accounts.tokenProgram.value) {
+    accounts.tokenProgram.value =
+      "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address<"TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA">;
+  }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
+  return Object.freeze({
+    accounts: [
+      getAccountMeta(accounts.maker),
+      getAccountMeta(accounts.offer),
+      getAccountMeta(accounts.mint),
+      getAccountMeta(accounts.escrow),
+      getAccountMeta(accounts.makerShareAccount),
+      getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.platform),
+    ],
+    data: getDepositToOfferEscrowInstructionDataEncoder().encode(
+      args as DepositToOfferEscrowInstructionDataArgs,
+    ),
+    programAddress,
+  } as DepositToOfferEscrowInstruction<
+    TProgramAddress,
+    TAccountMaker,
+    TAccountOffer,
+    TAccountMint,
+    TAccountEscrow,
+    TAccountMakerShareAccount,
+    TAccountTokenProgram,
+    TAccountPlatform
+  >);
+}
+
+export type DepositToOfferEscrowInput<
+  TAccountMaker extends string = string,
+  TAccountOffer extends string = string,
+  TAccountMint extends string = string,
+  TAccountEscrow extends string = string,
+  TAccountMakerShareAccount extends string = string,
+  TAccountTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
+> = {
+  /**
+   * The offer's maker — the only party whose units this ledger may record,
+   * and the only party the refund paths pay out to.
+   */
+  maker: TransactionSigner<TAccountMaker>;
+  offer: Address<TAccountOffer>;
+  mint: Address<TAccountMint>;
+  escrow: Address<TAccountEscrow>;
+  /** The maker's share-class token account — debited exactly `amount`. */
+  makerShareAccount: Address<TAccountMakerShareAccount>;
+  tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
+  amount: DepositToOfferEscrowInstructionDataArgs["amount"];
+};
+
+export function getDepositToOfferEscrowInstruction<
+  TAccountMaker extends string,
+  TAccountOffer extends string,
+  TAccountMint extends string,
+  TAccountEscrow extends string,
+  TAccountMakerShareAccount extends string,
+  TAccountTokenProgram extends string,
+  TAccountPlatform extends string,
+  TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
+>(
+  input: DepositToOfferEscrowInput<
+    TAccountMaker,
+    TAccountOffer,
+    TAccountMint,
+    TAccountEscrow,
+    TAccountMakerShareAccount,
+    TAccountTokenProgram,
+    TAccountPlatform
+  >,
+  config?: { programAddress?: TProgramAddress },
+): DepositToOfferEscrowInstruction<
+  TProgramAddress,
+  TAccountMaker,
+  TAccountOffer,
+  TAccountMint,
+  TAccountEscrow,
+  TAccountMakerShareAccount,
+  TAccountTokenProgram,
+  TAccountPlatform
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? ASSET_REGISTRY_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    maker: { value: input.maker ?? null, isWritable: false },
+    offer: { value: input.offer ?? null, isWritable: true },
+    mint: { value: input.mint ?? null, isWritable: false },
+    escrow: { value: input.escrow ?? null, isWritable: true },
+    makerShareAccount: {
+      value: input.makerShareAccount ?? null,
+      isWritable: true,
+    },
+    tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -209,6 +345,7 @@ export function getDepositToOfferEscrowInstruction<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.makerShareAccount),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getDepositToOfferEscrowInstructionDataEncoder().encode(
       args as DepositToOfferEscrowInstructionDataArgs,
@@ -221,7 +358,8 @@ export function getDepositToOfferEscrowInstruction<
     TAccountMint,
     TAccountEscrow,
     TAccountMakerShareAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -242,6 +380,11 @@ export type ParsedDepositToOfferEscrowInstruction<
     /** The maker's share-class token account — debited exactly `amount`. */
     makerShareAccount: TAccountMetas[4];
     tokenProgram: TAccountMetas[5];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[6];
   };
   data: DepositToOfferEscrowInstructionData;
 };
@@ -254,7 +397,7 @@ export function parseDepositToOfferEscrowInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedDepositToOfferEscrowInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 6) {
+  if (instruction.accounts.length < 7) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -273,6 +416,7 @@ export function parseDepositToOfferEscrowInstruction<
       escrow: getNextAccount(),
       makerShareAccount: getNextAccount(),
       tokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getDepositToOfferEscrowInstructionDataDecoder().decode(
       instruction.data,

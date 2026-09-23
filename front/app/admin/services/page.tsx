@@ -67,7 +67,7 @@ const CATALOG = [
       {
         name: "Platform & sanctions control",
         href: "/admin/platform",
-        desc: "Reserved fee field (nothing is charged on-chain), the pause switch and the transfer-hook sanctions blocklist.",
+        desc: "Emergency pause by area (Admins pause, the Super Admin resumes), protocol treasury rotation, the reserved fee field (nothing is charged on-chain) and the transfer-hook sanctions blocklist.",
       },
     ],
   },

@@ -21,6 +21,7 @@ import {
   getApproveVestingTrancheInstruction,
   getCancelVestingSeriesInstruction,
   getDepositToVestingEscrowInstruction,
+  findPlatformPda,
   getDisableVestingCancellationInstruction,
   getRecoverVestingPositionInstructionAsync,
   getWithdrawUnvestedInstruction,
@@ -351,7 +352,10 @@ export function SeriesPanel({
     const fromAta = await ataFor(signer.address);
     const mint = address(row.token_mint);
     const escrow = series.escrow;
+    // Emergency-pause gate (read-only) — the last named account.
+    const [platform] = await findPlatformPda();
     const baseIx = getDepositToVestingEscrowInstruction({
+      platform,
       depositor: signer,
       series: address(row.series_pda!),
       tokenMint: mint,

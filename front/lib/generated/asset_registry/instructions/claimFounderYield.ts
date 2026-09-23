@@ -30,6 +30,7 @@ import {
   type TransactionSigner,
   type WritableAccount,
 } from "@solana/kit";
+import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
 
@@ -51,6 +52,7 @@ export type ClaimFounderYieldInstruction<
   TAccountPaymentMint extends string | AccountMeta<string> = string,
   TAccountFounderAccount extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -75,6 +77,9 @@ export type ClaimFounderYieldInstruction<
       TAccountPaymentTokenProgram extends string
         ? ReadonlyAccount<TAccountPaymentTokenProgram>
         : TAccountPaymentTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -108,13 +113,14 @@ export function getClaimFounderYieldInstructionDataCodec(): FixedSizeCodec<
   );
 }
 
-export type ClaimFounderYieldInput<
+export type ClaimFounderYieldAsyncInput<
   TAccountFounder extends string = string,
   TAccountVault extends string = string,
   TAccountEscrow extends string = string,
   TAccountPaymentMint extends string = string,
   TAccountFounderAccount extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   founder: TransactionSigner<TAccountFounder>;
   vault: Address<TAccountVault>;
@@ -122,34 +128,44 @@ export type ClaimFounderYieldInput<
   paymentMint: Address<TAccountPaymentMint>;
   founderAccount: Address<TAccountFounderAccount>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
 };
 
-export function getClaimFounderYieldInstruction<
+export async function getClaimFounderYieldInstructionAsync<
   TAccountFounder extends string,
   TAccountVault extends string,
   TAccountEscrow extends string,
   TAccountPaymentMint extends string,
   TAccountFounderAccount extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: ClaimFounderYieldInput<
+  input: ClaimFounderYieldAsyncInput<
     TAccountFounder,
     TAccountVault,
     TAccountEscrow,
     TAccountPaymentMint,
     TAccountFounderAccount,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
-): ClaimFounderYieldInstruction<
-  TProgramAddress,
-  TAccountFounder,
-  TAccountVault,
-  TAccountEscrow,
-  TAccountPaymentMint,
-  TAccountFounderAccount,
-  TAccountPaymentTokenProgram
+): Promise<
+  ClaimFounderYieldInstruction<
+    TProgramAddress,
+    TAccountFounder,
+    TAccountVault,
+    TAccountEscrow,
+    TAccountPaymentMint,
+    TAccountFounderAccount,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >
 > {
   // Program address.
   const programAddress =
@@ -166,6 +182,111 @@ export function getClaimFounderYieldInstruction<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    platform: { value: input.platform ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedAccount
+  >;
+
+  // Resolve default values.
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
+  return Object.freeze({
+    accounts: [
+      getAccountMeta(accounts.founder),
+      getAccountMeta(accounts.vault),
+      getAccountMeta(accounts.escrow),
+      getAccountMeta(accounts.paymentMint),
+      getAccountMeta(accounts.founderAccount),
+      getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
+    ],
+    data: getClaimFounderYieldInstructionDataEncoder().encode({}),
+    programAddress,
+  } as ClaimFounderYieldInstruction<
+    TProgramAddress,
+    TAccountFounder,
+    TAccountVault,
+    TAccountEscrow,
+    TAccountPaymentMint,
+    TAccountFounderAccount,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >);
+}
+
+export type ClaimFounderYieldInput<
+  TAccountFounder extends string = string,
+  TAccountVault extends string = string,
+  TAccountEscrow extends string = string,
+  TAccountPaymentMint extends string = string,
+  TAccountFounderAccount extends string = string,
+  TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
+> = {
+  founder: TransactionSigner<TAccountFounder>;
+  vault: Address<TAccountVault>;
+  escrow: Address<TAccountEscrow>;
+  paymentMint: Address<TAccountPaymentMint>;
+  founderAccount: Address<TAccountFounderAccount>;
+  paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
+};
+
+export function getClaimFounderYieldInstruction<
+  TAccountFounder extends string,
+  TAccountVault extends string,
+  TAccountEscrow extends string,
+  TAccountPaymentMint extends string,
+  TAccountFounderAccount extends string,
+  TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
+  TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
+>(
+  input: ClaimFounderYieldInput<
+    TAccountFounder,
+    TAccountVault,
+    TAccountEscrow,
+    TAccountPaymentMint,
+    TAccountFounderAccount,
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
+  >,
+  config?: { programAddress?: TProgramAddress },
+): ClaimFounderYieldInstruction<
+  TProgramAddress,
+  TAccountFounder,
+  TAccountVault,
+  TAccountEscrow,
+  TAccountPaymentMint,
+  TAccountFounderAccount,
+  TAccountPaymentTokenProgram,
+  TAccountPlatform
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? ASSET_REGISTRY_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    founder: { value: input.founder ?? null, isWritable: false },
+    vault: { value: input.vault ?? null, isWritable: true },
+    escrow: { value: input.escrow ?? null, isWritable: true },
+    paymentMint: { value: input.paymentMint ?? null, isWritable: false },
+    founderAccount: { value: input.founderAccount ?? null, isWritable: true },
+    paymentTokenProgram: {
+      value: input.paymentTokenProgram ?? null,
+      isWritable: false,
+    },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -181,6 +302,7 @@ export function getClaimFounderYieldInstruction<
       getAccountMeta(accounts.paymentMint),
       getAccountMeta(accounts.founderAccount),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getClaimFounderYieldInstructionDataEncoder().encode({}),
     programAddress,
@@ -191,7 +313,8 @@ export function getClaimFounderYieldInstruction<
     TAccountEscrow,
     TAccountPaymentMint,
     TAccountFounderAccount,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -207,6 +330,11 @@ export type ParsedClaimFounderYieldInstruction<
     paymentMint: TAccountMetas[3];
     founderAccount: TAccountMetas[4];
     paymentTokenProgram: TAccountMetas[5];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[6];
   };
   data: ClaimFounderYieldInstructionData;
 };
@@ -219,7 +347,7 @@ export function parseClaimFounderYieldInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedClaimFounderYieldInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 6) {
+  if (instruction.accounts.length < 7) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -238,6 +366,7 @@ export function parseClaimFounderYieldInstruction<
       paymentMint: getNextAccount(),
       founderAccount: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getClaimFounderYieldInstructionDataDecoder().decode(instruction.data),
   };

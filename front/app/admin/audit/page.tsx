@@ -65,7 +65,13 @@ const PAGE_SIZE = 50;
 function categorizeIxName(name: string | null): AuditCategory {
   if (!name) return "other";
   const n = name.toLowerCase();
-  if (n.includes("platform") || n.includes("pause")) return "platform";
+  if (
+    n.includes("platform") ||
+    n.includes("pause") ||
+    // not "treasury" alone: that would also catch mint_to_treasury
+    n.includes("protocol_treasury")
+  )
+    return "platform";
   if (n.includes("admin")) return "admins";
   if (n.includes("issuer") || n.includes("kyb")) return "issuers";
   if (n.includes("asset")) return "assets";

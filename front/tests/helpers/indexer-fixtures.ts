@@ -8,7 +8,7 @@ function fixture<T>(table: string, codec: Encoder<T>, data: T) { return { table,
 /** Actual generated encoders, non-zero ledgers and every currently mirrored type. */
 export function indexerFixtures() {
   return [
-    fixture("platforms", a.getPlatformEncoder(), { ...base, admin: key, protocolTreasury: key, protocolFeeBps: 25, paused: false, issuersCount: BigInt(2) }),
+    fixture("platforms", a.getPlatformEncoder(), { ...base, admin: key, protocolTreasury: key, protocolFeeBps: 25, pauseFlags: 0x0c, issuersCount: BigInt(2) }),
     fixture("issuers", a.getIssuerEncoder(), { ...base, authority: key, legalEntityId: hash, jurisdiction: 688, kybStatus: 1, kybDocHash: hash, assetsCount: BigInt(3) }),
     fixture("assets", a.getAssetEncoder(), { ...base, issuer: key, assetId: "asset-42", assetType: 0, name: "Real asset", symbolPrefix: "RWA", legalDocHash: hash, jurisdictionRules: { allowedCountries: bits, maxHolders: 100, restrictedPeriodEnd: BigInt(1), allowP2p: false }, status: 1, shareClassesCount: 2, extraKycRegistry: null }),
     fixture("share_classes", a.getShareClassEncoder(), { ...base, version: 2, asset: key, mint: key, classIndex: 2, classType: 0, rightsBitfield: 3, liqPrefMultiplierBps: 15000, liqSeniority: 1, votingWeight: 2, convertibleTo: key, maxSupply: BigInt(99), circulatingSupply: BigInt(9), lockedSupply: BigInt(4), mintablePostLaunch: false, mintInitialized: true, supplyLocked: true, lifetimeMinted: BigInt(44), cumulativeCap: true }),

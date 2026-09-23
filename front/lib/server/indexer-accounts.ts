@@ -35,7 +35,10 @@ function spec<T>(
 export const INDEXER_ENTITIES: readonly Entry[] = [
   spec("platforms", accounts.getPlatformDiscriminatorBytes(), accounts.getPlatformDecoder(), (a) => ({
     admin: a.admin, protocol_treasury: a.protocolTreasury, protocol_fee_bps: a.protocolFeeBps,
-    paused: a.paused, issuers_count: numberString(a.issuersCount), version: a.version,
+    // Byte 74 is the emergency-pause bitmask (formerly `paused: bool`).
+    // `paused` stays as "any bit set" until the contract migration drops it.
+    pause_flags: a.pauseFlags, paused: a.pauseFlags !== 0,
+    issuers_count: numberString(a.issuersCount), version: a.version,
   }), () => pda([text("platform")])),
   spec("issuers", accounts.getIssuerDiscriminatorBytes(), accounts.getIssuerDecoder(), (a) => ({
     authority: a.authority, legal_entity_id: utf8(a.legalEntityId), jurisdiction: a.jurisdiction,

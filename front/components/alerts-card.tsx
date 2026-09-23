@@ -8,6 +8,7 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { fetchMaybePlatform, findPlatformPda } from "@/lib/generated/asset_registry";
 import { SaleStatus } from "@/lib/generated/asset_registry";
 import { Skeleton } from "@/components/skeleton";
+import { describePausedAreas, PAUSE_EXITS_OPEN } from "@/lib/pause-flags";
 
 type AlertLevel = "critical" | "warning" | "info";
 
@@ -36,7 +37,8 @@ const SALE_EXPIRY_WARN_HOURS = 24;
 export function AlertsCard() {
   const client = useSolanaClient();
   const [data, setData] = useState<NetworkData | null>(null);
-  const [platformPaused, setPlatformPaused] = useState<boolean | null>(null);
+  /** `Platform.pause_flags`, or null when the Platform is not initialized. */
+  const [platformPaused, setPlatformPaused] = useState<number | null>(null);
   const [platformInitialized, setPlatformInitialized] = useState<
     boolean | null
   >(null);
@@ -53,7 +55,7 @@ export function AlertsCard() {
         ]);
         if (cancelled) return;
         setPlatformInitialized(platform.exists);
-        setPlatformPaused(platform.exists ? platform.data.paused : null);
+        setPlatformPaused(platform.exists ? platform.data.pauseFlags : null);
         setData(network);
       } catch {
         if (!cancelled) setFailed(true);
@@ -162,7 +164,7 @@ export function AlertsCard() {
 function computeAlerts(args: {
   data: NetworkData;
   platformInitialized: boolean;
-  platformPaused: boolean | null;
+  platformPaused: number | null;
 }): Alert[] {
   const { data, platformInitialized, platformPaused } = args;
   const alerts: Alert[] = [];
@@ -179,11 +181,12 @@ function computeAlerts(args: {
     return alerts;
   }
 
-  if (platformPaused) {
+  const pausedAreas = platformPaused ? describePausedAreas(platformPaused) : "";
+  if (pausedAreas) {
     alerts.push({
       level: "critical",
-      title: "Platform is paused",
-      description: "All mint, transfer, custody, sale, OTC and governance operations are halted.",
+      title: "Emergency pause is on",
+      description: `Paused: ${pausedAreas}. ${PAUSE_EXITS_OPEN}`,
       href: "/admin/platform",
     });
   }

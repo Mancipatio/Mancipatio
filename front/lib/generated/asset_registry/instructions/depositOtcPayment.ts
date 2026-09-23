@@ -30,7 +30,7 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findCancelOtcDealEscrowMarkerPda } from "../pdas";
+import { findCancelOtcDealEscrowMarkerPda, findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -62,6 +62,7 @@ export type DepositOtcPaymentInstruction<
   TAccountEscrowMarker extends string | AccountMeta<string> = string,
   TAccountShareTokenProgram extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -104,6 +105,9 @@ export type DepositOtcPaymentInstruction<
       TAccountPaymentTokenProgram extends string
         ? ReadonlyAccount<TAccountPaymentTokenProgram>
         : TAccountPaymentTokenProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -150,6 +154,7 @@ export type DepositOtcPaymentAsyncInput<
   TAccountEscrowMarker extends string = string,
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   buyer: TransactionSigner<TAccountBuyer>;
   deal: Address<TAccountDeal>;
@@ -170,6 +175,11 @@ export type DepositOtcPaymentAsyncInput<
   escrowMarker?: Address<TAccountEscrowMarker>;
   shareTokenProgram: Address<TAccountShareTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
 };
 
 export async function getDepositOtcPaymentInstructionAsync<
@@ -185,6 +195,7 @@ export async function getDepositOtcPaymentInstructionAsync<
   TAccountEscrowMarker extends string,
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DepositOtcPaymentAsyncInput<
@@ -199,7 +210,8 @@ export async function getDepositOtcPaymentInstructionAsync<
     TAccountSellerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -216,7 +228,8 @@ export async function getDepositOtcPaymentInstructionAsync<
     TAccountSellerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -252,6 +265,7 @@ export async function getDepositOtcPaymentInstructionAsync<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -263,6 +277,9 @@ export async function getDepositOtcPaymentInstructionAsync<
     accounts.escrowMarker.value = await findCancelOtcDealEscrowMarkerPda({
       deal: expectAddress(accounts.deal.value),
     });
+  }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
   }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
@@ -280,6 +297,7 @@ export async function getDepositOtcPaymentInstructionAsync<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getDepositOtcPaymentInstructionDataEncoder().encode({}),
     programAddress,
@@ -296,7 +314,8 @@ export async function getDepositOtcPaymentInstructionAsync<
     TAccountSellerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -313,6 +332,7 @@ export type DepositOtcPaymentInput<
   TAccountEscrowMarker extends string = string,
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   buyer: TransactionSigner<TAccountBuyer>;
   deal: Address<TAccountDeal>;
@@ -333,6 +353,11 @@ export type DepositOtcPaymentInput<
   escrowMarker: Address<TAccountEscrowMarker>;
   shareTokenProgram: Address<TAccountShareTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
 };
 
 export function getDepositOtcPaymentInstruction<
@@ -348,6 +373,7 @@ export function getDepositOtcPaymentInstruction<
   TAccountEscrowMarker extends string,
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DepositOtcPaymentInput<
@@ -362,7 +388,8 @@ export function getDepositOtcPaymentInstruction<
     TAccountSellerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): DepositOtcPaymentInstruction<
@@ -378,7 +405,8 @@ export function getDepositOtcPaymentInstruction<
   TAccountSellerPaymentAccount,
   TAccountEscrowMarker,
   TAccountShareTokenProgram,
-  TAccountPaymentTokenProgram
+  TAccountPaymentTokenProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -413,6 +441,7 @@ export function getDepositOtcPaymentInstruction<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -434,6 +463,7 @@ export function getDepositOtcPaymentInstruction<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getDepositOtcPaymentInstructionDataEncoder().encode({}),
     programAddress,
@@ -450,7 +480,8 @@ export function getDepositOtcPaymentInstruction<
     TAccountSellerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountPlatform
   >);
 }
 
@@ -479,6 +510,11 @@ export type ParsedDepositOtcPaymentInstruction<
     escrowMarker: TAccountMetas[9];
     shareTokenProgram: TAccountMetas[10];
     paymentTokenProgram: TAccountMetas[11];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[12];
   };
   data: DepositOtcPaymentInstructionData;
 };
@@ -491,7 +527,7 @@ export function parseDepositOtcPaymentInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedDepositOtcPaymentInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 12) {
+  if (instruction.accounts.length < 13) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -516,6 +552,7 @@ export function parseDepositOtcPaymentInstruction<
       escrowMarker: getNextAccount(),
       shareTokenProgram: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getDepositOtcPaymentInstructionDataDecoder().decode(instruction.data),
   };

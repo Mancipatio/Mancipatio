@@ -13,6 +13,7 @@ import {
   findAssetPda,
   findIssuerPda,
   getCloseSaleInstruction,
+  findPlatformPda,
   getOpenSaleInstructionAsync,
   RaiseType,
   SaleStatus,
@@ -374,7 +375,10 @@ function SaleDetail({
           mint: sale.paymentMint,
           tokenProgram: paymentTokenProgram,
         });
+      // Emergency-pause gate (read-only) — the last named account.
+      const [platform] = await findPlatformPda();
       const closeIx = getCloseSaleInstruction({
+        platform,
         authority: signer,
         sale: salePda,
         proceeds: sale.proceeds,
@@ -528,6 +532,10 @@ function OpenSaleModal({
     );
   }, [data, issuerLegalId]);
 
+  // open_sale rejects a zero price on-chain (InvalidSalePrice).
+  const priceIsZero =
+    /^\d+$/.test(pricePerUnit.trim()) && BigInt(pricePerUnit.trim()) === BigInt(0);
+
   async function open() {
     if (
       !wallet ||
@@ -538,6 +546,13 @@ function OpenSaleModal({
       !totalForSale.trim()
     )
       return;
+    if (priceIsZero) {
+      toast.showError(
+        "Invalid price",
+        "The price per unit must be greater than zero.",
+      );
+      return;
+    }
     const pendingId = toast.showPending(`Opening sale #${saleId}…`);
     try {
       const [ip] = await findIssuerPda({
@@ -690,8 +705,14 @@ function OpenSaleModal({
                 onChange={(e) =>
                   setPricePerUnit(e.target.value.replace(/\D/g, ""))
                 }
+                aria-invalid={priceIsZero ? true : undefined}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
+              {priceIsZero && (
+                <span className="mt-1 block text-xs text-red-600">
+                  Must be greater than zero.
+                </span>
+              )}
             </label>
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -741,6 +762,7 @@ function OpenSaleModal({
               !assetId.trim() ||
               !paymentMint.trim() ||
               !pricePerUnit.trim() ||
+              priceIsZero ||
               !totalForSale.trim()
             }
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"

@@ -21,6 +21,7 @@ import {
   findAssetPda,
   findOpenCustodyVaultEscrowPda,
   getDepositToCustodyVaultInstruction,
+  findPlatformPda,
   getReturnCustodyVaultInstructionAsync,
   VaultState,
   type Asset,
@@ -411,7 +412,10 @@ export default function DeliveryPage() {
       // passes, so a lapsed passport would strand the holder's own deposit.
       // The escrow is owned by the vault PDA, whose EscrowMarker exempts the
       // incoming leg from receiver-KYC when the mint is gated.
+      // Emergency-pause gate (read-only) — the last named account.
+      const [platform] = await findPlatformPda();
       const baseIx = getDepositToCustodyVaultInstruction({
+        platform,
         depositor: signer,
         shareClass: vaultBefore.data.shareClass,
         custodyVault: vaultPda,

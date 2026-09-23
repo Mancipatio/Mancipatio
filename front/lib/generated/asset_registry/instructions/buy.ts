@@ -32,6 +32,7 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
+import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
 
@@ -57,6 +58,7 @@ export type BuyInstruction<
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountAsset extends string | AccountMeta<string> = string,
   TAccountIssuer extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -99,6 +101,9 @@ export type BuyInstruction<
       TAccountIssuer extends string
         ? ReadonlyAccount<TAccountIssuer>
         : TAccountIssuer,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -137,7 +142,7 @@ export function getBuyInstructionDataCodec(): FixedSizeCodec<
   );
 }
 
-export type BuyInput<
+export type BuyAsyncInput<
   TAccountBuyer extends string = string,
   TAccountSale extends string = string,
   TAccountShareClass extends string = string,
@@ -150,6 +155,7 @@ export type BuyInput<
   TAccountPaymentTokenProgram extends string = string,
   TAccountAsset extends string = string,
   TAccountIssuer extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   buyer: TransactionSigner<TAccountBuyer>;
   sale: Address<TAccountSale>;
@@ -170,10 +176,15 @@ export type BuyInput<
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   asset: Address<TAccountAsset>;
   issuer: Address<TAccountIssuer>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   amount: BuyInstructionDataArgs["amount"];
 };
 
-export function getBuyInstruction<
+export async function getBuyInstructionAsync<
   TAccountBuyer extends string,
   TAccountSale extends string,
   TAccountShareClass extends string,
@@ -186,9 +197,10 @@ export function getBuyInstruction<
   TAccountPaymentTokenProgram extends string,
   TAccountAsset extends string,
   TAccountIssuer extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
-  input: BuyInput<
+  input: BuyAsyncInput<
     TAccountBuyer,
     TAccountSale,
     TAccountShareClass,
@@ -200,23 +212,27 @@ export function getBuyInstruction<
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
     TAccountAsset,
-    TAccountIssuer
+    TAccountIssuer,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
-): BuyInstruction<
-  TProgramAddress,
-  TAccountBuyer,
-  TAccountSale,
-  TAccountShareClass,
-  TAccountMint,
-  TAccountBuyerShareAccount,
-  TAccountBuyerPaymentAccount,
-  TAccountPaymentMint,
-  TAccountProceeds,
-  TAccountShareTokenProgram,
-  TAccountPaymentTokenProgram,
-  TAccountAsset,
-  TAccountIssuer
+): Promise<
+  BuyInstruction<
+    TProgramAddress,
+    TAccountBuyer,
+    TAccountSale,
+    TAccountShareClass,
+    TAccountMint,
+    TAccountBuyerShareAccount,
+    TAccountBuyerPaymentAccount,
+    TAccountPaymentMint,
+    TAccountProceeds,
+    TAccountShareTokenProgram,
+    TAccountPaymentTokenProgram,
+    TAccountAsset,
+    TAccountIssuer,
+    TAccountPlatform
+  >
 > {
   // Program address.
   const programAddress =
@@ -248,6 +264,179 @@ export function getBuyInstruction<
     },
     asset: { value: input.asset ?? null, isWritable: false },
     issuer: { value: input.issuer ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
+  };
+  const accounts = originalAccounts as Record<
+    keyof typeof originalAccounts,
+    ResolvedAccount
+  >;
+
+  // Original args.
+  const args = { ...input };
+
+  // Resolve default values.
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
+
+  const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
+  return Object.freeze({
+    accounts: [
+      getAccountMeta(accounts.buyer),
+      getAccountMeta(accounts.sale),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.mint),
+      getAccountMeta(accounts.buyerShareAccount),
+      getAccountMeta(accounts.buyerPaymentAccount),
+      getAccountMeta(accounts.paymentMint),
+      getAccountMeta(accounts.proceeds),
+      getAccountMeta(accounts.shareTokenProgram),
+      getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.asset),
+      getAccountMeta(accounts.issuer),
+      getAccountMeta(accounts.platform),
+    ],
+    data: getBuyInstructionDataEncoder().encode(args as BuyInstructionDataArgs),
+    programAddress,
+  } as BuyInstruction<
+    TProgramAddress,
+    TAccountBuyer,
+    TAccountSale,
+    TAccountShareClass,
+    TAccountMint,
+    TAccountBuyerShareAccount,
+    TAccountBuyerPaymentAccount,
+    TAccountPaymentMint,
+    TAccountProceeds,
+    TAccountShareTokenProgram,
+    TAccountPaymentTokenProgram,
+    TAccountAsset,
+    TAccountIssuer,
+    TAccountPlatform
+  >);
+}
+
+export type BuyInput<
+  TAccountBuyer extends string = string,
+  TAccountSale extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountMint extends string = string,
+  TAccountBuyerShareAccount extends string = string,
+  TAccountBuyerPaymentAccount extends string = string,
+  TAccountPaymentMint extends string = string,
+  TAccountProceeds extends string = string,
+  TAccountShareTokenProgram extends string = string,
+  TAccountPaymentTokenProgram extends string = string,
+  TAccountAsset extends string = string,
+  TAccountIssuer extends string = string,
+  TAccountPlatform extends string = string,
+> = {
+  buyer: TransactionSigner<TAccountBuyer>;
+  sale: Address<TAccountSale>;
+  shareClass: Address<TAccountShareClass>;
+  mint: Address<TAccountMint>;
+  /**
+   * Buyer's share-class token account — receives the purchased units.
+   * Bound to the buyer signer so the receiver of the minted security is the
+   * party whose KYC is checked in the handler — units can never be
+   * redirected to an arbitrary third-party account (mirrors `take_offer`).
+   */
+  buyerShareAccount: Address<TAccountBuyerShareAccount>;
+  /** Buyer's payment token account — debited the price. */
+  buyerPaymentAccount: Address<TAccountBuyerPaymentAccount>;
+  paymentMint: Address<TAccountPaymentMint>;
+  proceeds: Address<TAccountProceeds>;
+  shareTokenProgram: Address<TAccountShareTokenProgram>;
+  paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  asset: Address<TAccountAsset>;
+  issuer: Address<TAccountIssuer>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
+  amount: BuyInstructionDataArgs["amount"];
+};
+
+export function getBuyInstruction<
+  TAccountBuyer extends string,
+  TAccountSale extends string,
+  TAccountShareClass extends string,
+  TAccountMint extends string,
+  TAccountBuyerShareAccount extends string,
+  TAccountBuyerPaymentAccount extends string,
+  TAccountPaymentMint extends string,
+  TAccountProceeds extends string,
+  TAccountShareTokenProgram extends string,
+  TAccountPaymentTokenProgram extends string,
+  TAccountAsset extends string,
+  TAccountIssuer extends string,
+  TAccountPlatform extends string,
+  TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
+>(
+  input: BuyInput<
+    TAccountBuyer,
+    TAccountSale,
+    TAccountShareClass,
+    TAccountMint,
+    TAccountBuyerShareAccount,
+    TAccountBuyerPaymentAccount,
+    TAccountPaymentMint,
+    TAccountProceeds,
+    TAccountShareTokenProgram,
+    TAccountPaymentTokenProgram,
+    TAccountAsset,
+    TAccountIssuer,
+    TAccountPlatform
+  >,
+  config?: { programAddress?: TProgramAddress },
+): BuyInstruction<
+  TProgramAddress,
+  TAccountBuyer,
+  TAccountSale,
+  TAccountShareClass,
+  TAccountMint,
+  TAccountBuyerShareAccount,
+  TAccountBuyerPaymentAccount,
+  TAccountPaymentMint,
+  TAccountProceeds,
+  TAccountShareTokenProgram,
+  TAccountPaymentTokenProgram,
+  TAccountAsset,
+  TAccountIssuer,
+  TAccountPlatform
+> {
+  // Program address.
+  const programAddress =
+    config?.programAddress ?? ASSET_REGISTRY_PROGRAM_ADDRESS;
+
+  // Original accounts.
+  const originalAccounts = {
+    buyer: { value: input.buyer ?? null, isWritable: true },
+    sale: { value: input.sale ?? null, isWritable: true },
+    shareClass: { value: input.shareClass ?? null, isWritable: true },
+    mint: { value: input.mint ?? null, isWritable: true },
+    buyerShareAccount: {
+      value: input.buyerShareAccount ?? null,
+      isWritable: true,
+    },
+    buyerPaymentAccount: {
+      value: input.buyerPaymentAccount ?? null,
+      isWritable: true,
+    },
+    paymentMint: { value: input.paymentMint ?? null, isWritable: false },
+    proceeds: { value: input.proceeds ?? null, isWritable: true },
+    shareTokenProgram: {
+      value: input.shareTokenProgram ?? null,
+      isWritable: false,
+    },
+    paymentTokenProgram: {
+      value: input.paymentTokenProgram ?? null,
+      isWritable: false,
+    },
+    asset: { value: input.asset ?? null, isWritable: false },
+    issuer: { value: input.issuer ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -272,6 +461,7 @@ export function getBuyInstruction<
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.asset),
       getAccountMeta(accounts.issuer),
+      getAccountMeta(accounts.platform),
     ],
     data: getBuyInstructionDataEncoder().encode(args as BuyInstructionDataArgs),
     programAddress,
@@ -288,7 +478,8 @@ export function getBuyInstruction<
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
     TAccountAsset,
-    TAccountIssuer
+    TAccountIssuer,
+    TAccountPlatform
   >);
 }
 
@@ -317,6 +508,11 @@ export type ParsedBuyInstruction<
     paymentTokenProgram: TAccountMetas[9];
     asset: TAccountMetas[10];
     issuer: TAccountMetas[11];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[12];
   };
   data: BuyInstructionData;
 };
@@ -329,7 +525,7 @@ export function parseBuyInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedBuyInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 12) {
+  if (instruction.accounts.length < 13) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -354,6 +550,7 @@ export function parseBuyInstruction<
       paymentTokenProgram: getNextAccount(),
       asset: getNextAccount(),
       issuer: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getBuyInstructionDataDecoder().decode(instruction.data),
   };

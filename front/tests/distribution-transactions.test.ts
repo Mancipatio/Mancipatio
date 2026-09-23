@@ -25,6 +25,7 @@ import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   findDistributionPda,
   findEscrowPda,
+  findPlatformPda,
   getDistributeBatchInstructionDataDecoder,
   DistributionStatus,
 } from "@/lib/generated/asset_registry";
@@ -146,7 +147,9 @@ describe("distribution v2 real builders and receipts", () => {
     expect(decoded.amounts.map(String)).toEqual(
       batch.entries.map((e) => e.amount),
     );
-    expect(ix.accounts?.slice(9).map((a) => a.address)).toEqual(
+    // 9 named accounts + the Platform pause gate, then the recipients.
+    expect(ix.accounts?.[9].address).toBe((await findPlatformPda())[0]);
+    expect(ix.accounts?.slice(10).map((a) => a.address)).toEqual(
       batch.entries.map((e) => e.token_account),
     );
     const funding = await buildDistributionFunding(rpc, f.plan, f.signer);

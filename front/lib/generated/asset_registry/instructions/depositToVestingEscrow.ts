@@ -32,7 +32,7 @@ import {
   type TransactionSigner,
   type WritableAccount,
 } from "@solana/kit";
-import { findCreateVestingSeriesIdentityPda } from "../pdas";
+import { findCreateVestingSeriesIdentityPda, findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
   expectAddress,
@@ -60,6 +60,7 @@ export type DepositToVestingEscrowInstruction<
   TAccountTokenProgram extends string | AccountMeta<string> =
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   TAccountIdentity extends string | AccountMeta<string> = string,
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -87,6 +88,9 @@ export type DepositToVestingEscrowInstruction<
       TAccountIdentity extends string
         ? WritableAccount<TAccountIdentity>
         : TAccountIdentity,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -138,6 +142,7 @@ export type DepositToVestingEscrowAsyncInput<
   TAccountDepositorTokenAccount extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountIdentity extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   /**
    * The depositing wallet — signs the escrow-funding transfer. Usually the
@@ -151,6 +156,11 @@ export type DepositToVestingEscrowAsyncInput<
   depositorTokenAccount: Address<TAccountDepositorTokenAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
   identity?: Address<TAccountIdentity>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform?: Address<TAccountPlatform>;
   amount: DepositToVestingEscrowInstructionDataArgs["amount"];
 };
 
@@ -162,6 +172,7 @@ export async function getDepositToVestingEscrowInstructionAsync<
   TAccountDepositorTokenAccount extends string,
   TAccountTokenProgram extends string,
   TAccountIdentity extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DepositToVestingEscrowAsyncInput<
@@ -171,7 +182,8 @@ export async function getDepositToVestingEscrowInstructionAsync<
     TAccountEscrow,
     TAccountDepositorTokenAccount,
     TAccountTokenProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -183,7 +195,8 @@ export async function getDepositToVestingEscrowInstructionAsync<
     TAccountEscrow,
     TAccountDepositorTokenAccount,
     TAccountTokenProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -202,6 +215,7 @@ export async function getDepositToVestingEscrowInstructionAsync<
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     identity: { value: input.identity ?? null, isWritable: true },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -221,6 +235,9 @@ export async function getDepositToVestingEscrowInstructionAsync<
       series: expectAddress(accounts.series.value),
     });
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -232,6 +249,7 @@ export async function getDepositToVestingEscrowInstructionAsync<
       getAccountMeta(accounts.depositorTokenAccount),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.identity),
+      getAccountMeta(accounts.platform),
     ],
     data: getDepositToVestingEscrowInstructionDataEncoder().encode(
       args as DepositToVestingEscrowInstructionDataArgs,
@@ -245,7 +263,8 @@ export async function getDepositToVestingEscrowInstructionAsync<
     TAccountEscrow,
     TAccountDepositorTokenAccount,
     TAccountTokenProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >);
 }
 
@@ -257,6 +276,7 @@ export type DepositToVestingEscrowInput<
   TAccountDepositorTokenAccount extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountIdentity extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   /**
    * The depositing wallet — signs the escrow-funding transfer. Usually the
@@ -270,6 +290,11 @@ export type DepositToVestingEscrowInput<
   depositorTokenAccount: Address<TAccountDepositorTokenAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
   identity: Address<TAccountIdentity>;
+  /**
+   * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+   * account indices and the remaining-accounts hook tail keep their positions.
+   */
+  platform: Address<TAccountPlatform>;
   amount: DepositToVestingEscrowInstructionDataArgs["amount"];
 };
 
@@ -281,6 +306,7 @@ export function getDepositToVestingEscrowInstruction<
   TAccountDepositorTokenAccount extends string,
   TAccountTokenProgram extends string,
   TAccountIdentity extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DepositToVestingEscrowInput<
@@ -290,7 +316,8 @@ export function getDepositToVestingEscrowInstruction<
     TAccountEscrow,
     TAccountDepositorTokenAccount,
     TAccountTokenProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): DepositToVestingEscrowInstruction<
@@ -301,7 +328,8 @@ export function getDepositToVestingEscrowInstruction<
   TAccountEscrow,
   TAccountDepositorTokenAccount,
   TAccountTokenProgram,
-  TAccountIdentity
+  TAccountIdentity,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -319,6 +347,7 @@ export function getDepositToVestingEscrowInstruction<
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     identity: { value: input.identity ?? null, isWritable: true },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -344,6 +373,7 @@ export function getDepositToVestingEscrowInstruction<
       getAccountMeta(accounts.depositorTokenAccount),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.identity),
+      getAccountMeta(accounts.platform),
     ],
     data: getDepositToVestingEscrowInstructionDataEncoder().encode(
       args as DepositToVestingEscrowInstructionDataArgs,
@@ -357,7 +387,8 @@ export function getDepositToVestingEscrowInstruction<
     TAccountEscrow,
     TAccountDepositorTokenAccount,
     TAccountTokenProgram,
-    TAccountIdentity
+    TAccountIdentity,
+    TAccountPlatform
   >);
 }
 
@@ -379,6 +410,11 @@ export type ParsedDepositToVestingEscrowInstruction<
     depositorTokenAccount: TAccountMetas[4];
     tokenProgram: TAccountMetas[5];
     identity: TAccountMetas[6];
+    /**
+     * Emergency-pause gate (read-only). Keep LAST among named accounts: old
+     * account indices and the remaining-accounts hook tail keep their positions.
+     */
+    platform: TAccountMetas[7];
   };
   data: DepositToVestingEscrowInstructionData;
 };
@@ -391,7 +427,7 @@ export function parseDepositToVestingEscrowInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedDepositToVestingEscrowInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 7) {
+  if (instruction.accounts.length < 8) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -411,6 +447,7 @@ export function parseDepositToVestingEscrowInstruction<
       depositorTokenAccount: getNextAccount(),
       tokenProgram: getNextAccount(),
       identity: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getDepositToVestingEscrowInstructionDataDecoder().decode(
       instruction.data,

@@ -78,6 +78,8 @@ export * from "./routeYield";
 export * from "./setConvertibleTo";
 export * from "./setIssuerPermissions";
 export * from "./setPause";
+export * from "./setPauseFlags";
+export * from "./setProtocolTreasury";
 export * from "./takeOffer";
 export * from "./triggerCustodyVault";
 export * from "./updateMintMetadata";

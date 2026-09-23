@@ -41,6 +41,7 @@ import {
   findCustodyVaultPda,
   findOpenCustodyVaultEscrowMarkerPda,
   findOpenCustodyVaultEscrowPda,
+  findPlatformPda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
@@ -83,6 +84,7 @@ export type OpenCustodyVaultInstruction<
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountPlatform extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -116,6 +118,9 @@ export type OpenCustodyVaultInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountPlatform extends string
+        ? ReadonlyAccount<TAccountPlatform>
+        : TAccountPlatform,
       ...TRemainingAccounts,
     ]
   >;
@@ -190,6 +195,7 @@ export type OpenCustodyVaultAsyncInput<
   TAccountEscrowMarker extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open custody vaults. */
@@ -210,6 +216,13 @@ export type OpenCustodyVaultAsyncInput<
   escrowMarker?: Address<TAccountEscrowMarker>;
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only), checked in the handler: a burn-only
+   * quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
+   * clawback. Keep LAST among named accounts (old account indices keep
+   * their positions).
+   */
+  platform?: Address<TAccountPlatform>;
   vaultId: OpenCustodyVaultInstructionDataArgs["vaultId"];
   vaultType: OpenCustodyVaultInstructionDataArgs["vaultType"];
   realizeAction: OpenCustodyVaultInstructionDataArgs["realizeAction"];
@@ -229,6 +242,7 @@ export async function getOpenCustodyVaultInstructionAsync<
   TAccountEscrowMarker extends string,
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenCustodyVaultAsyncInput<
@@ -240,7 +254,8 @@ export async function getOpenCustodyVaultInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -254,7 +269,8 @@ export async function getOpenCustodyVaultInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >
 > {
   // Program address.
@@ -272,6 +288,7 @@ export async function getOpenCustodyVaultInstructionAsync<
     escrowMarker: { value: input.escrowMarker ?? null, isWritable: true },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -311,6 +328,9 @@ export async function getOpenCustodyVaultInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.platform.value) {
+    accounts.platform.value = await findPlatformPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -324,6 +344,7 @@ export async function getOpenCustodyVaultInstructionAsync<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getOpenCustodyVaultInstructionDataEncoder().encode(
       args as OpenCustodyVaultInstructionDataArgs,
@@ -339,7 +360,8 @@ export async function getOpenCustodyVaultInstructionAsync<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -353,6 +375,7 @@ export type OpenCustodyVaultInput<
   TAccountEscrowMarker extends string = string,
   TAccountTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountPlatform extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   /** Admin gate — only an admin may open custody vaults. */
@@ -373,6 +396,13 @@ export type OpenCustodyVaultInput<
   escrowMarker: Address<TAccountEscrowMarker>;
   tokenProgram?: Address<TAccountTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * Emergency-pause gate (read-only), checked in the handler: a burn-only
+   * quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
+   * clawback. Keep LAST among named accounts (old account indices keep
+   * their positions).
+   */
+  platform: Address<TAccountPlatform>;
   vaultId: OpenCustodyVaultInstructionDataArgs["vaultId"];
   vaultType: OpenCustodyVaultInstructionDataArgs["vaultType"];
   realizeAction: OpenCustodyVaultInstructionDataArgs["realizeAction"];
@@ -392,6 +422,7 @@ export function getOpenCustodyVaultInstruction<
   TAccountEscrowMarker extends string,
   TAccountTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountPlatform extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenCustodyVaultInput<
@@ -403,7 +434,8 @@ export function getOpenCustodyVaultInstruction<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >,
   config?: { programAddress?: TProgramAddress },
 ): OpenCustodyVaultInstruction<
@@ -416,7 +448,8 @@ export function getOpenCustodyVaultInstruction<
   TAccountEscrow,
   TAccountEscrowMarker,
   TAccountTokenProgram,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountPlatform
 > {
   // Program address.
   const programAddress =
@@ -433,6 +466,7 @@ export function getOpenCustodyVaultInstruction<
     escrowMarker: { value: input.escrowMarker ?? null, isWritable: true },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    platform: { value: input.platform ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -464,6 +498,7 @@ export function getOpenCustodyVaultInstruction<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.tokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.platform),
     ],
     data: getOpenCustodyVaultInstructionDataEncoder().encode(
       args as OpenCustodyVaultInstructionDataArgs,
@@ -479,7 +514,8 @@ export function getOpenCustodyVaultInstruction<
     TAccountEscrow,
     TAccountEscrowMarker,
     TAccountTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountPlatform
   >);
 }
 
@@ -508,6 +544,13 @@ export type ParsedOpenCustodyVaultInstruction<
     escrowMarker: TAccountMetas[6];
     tokenProgram: TAccountMetas[7];
     systemProgram: TAccountMetas[8];
+    /**
+     * Emergency-pause gate (read-only), checked in the handler: a burn-only
+     * quarantine vault (RedemptionQueue + BurnAndAttest) stays openable for
+     * clawback. Keep LAST among named accounts (old account indices keep
+     * their positions).
+     */
+    platform: TAccountMetas[9];
   };
   data: OpenCustodyVaultInstructionData;
 };
@@ -520,7 +563,7 @@ export function parseOpenCustodyVaultInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedOpenCustodyVaultInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 9) {
+  if (instruction.accounts.length < 10) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -542,6 +585,7 @@ export function parseOpenCustodyVaultInstruction<
       escrowMarker: getNextAccount(),
       tokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
+      platform: getNextAccount(),
     },
     data: getOpenCustodyVaultInstructionDataDecoder().decode(instruction.data),
   };

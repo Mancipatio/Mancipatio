@@ -88,7 +88,9 @@ import {
   parseRouteYieldInstruction,
   parseSetConvertibleToInstruction,
   parseSetIssuerPermissionsInstruction,
+  parseSetPauseFlagsInstruction,
   parseSetPauseInstruction,
+  parseSetProtocolTreasuryInstruction,
   parseTakeOfferInstruction,
   parseTriggerCustodyVaultInstruction,
   parseUpdateMintMetadataInstruction,
@@ -166,7 +168,9 @@ import {
   type ParsedRouteYieldInstruction,
   type ParsedSetConvertibleToInstruction,
   type ParsedSetIssuerPermissionsInstruction,
+  type ParsedSetPauseFlagsInstruction,
   type ParsedSetPauseInstruction,
+  type ParsedSetProtocolTreasuryInstruction,
   type ParsedTakeOfferInstruction,
   type ParsedTriggerCustodyVaultInstruction,
   type ParsedUpdateMintMetadataInstruction,
@@ -611,6 +615,8 @@ export enum AssetRegistryInstruction {
   SetConvertibleTo,
   SetIssuerPermissions,
   SetPause,
+  SetPauseFlags,
+  SetProtocolTreasury,
   TakeOffer,
   TriggerCustodyVault,
   UpdateMintMetadata,
@@ -1419,6 +1425,28 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([205, 167, 85, 237, 144, 202, 248, 175]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.SetPauseFlags;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([70, 185, 238, 193, 38, 214, 189, 7]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.SetProtocolTreasury;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([128, 156, 242, 207, 237, 192, 103, 240]),
       ),
       0,
@@ -1705,6 +1733,12 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.SetPause;
     } & ParsedSetPauseInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.SetPauseFlags;
+    } & ParsedSetPauseFlagsInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.SetProtocolTreasury;
+    } & ParsedSetProtocolTreasuryInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.TakeOffer;
     } & ParsedTakeOfferInstruction<TProgram>)
@@ -2231,6 +2265,20 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.SetPause,
         ...parseSetPauseInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.SetPauseFlags: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.SetPauseFlags,
+        ...parseSetPauseFlagsInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.SetProtocolTreasury: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.SetProtocolTreasury,
+        ...parseSetProtocolTreasuryInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.TakeOffer: {

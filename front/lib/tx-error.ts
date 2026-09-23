@@ -1,8 +1,12 @@
 import {
   ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY,
   ASSET_REGISTRY_ERROR__INVALID_DEPOSIT_AMOUNT,
+  ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS,
+  ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY,
+  ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE,
   ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED,
   ASSET_REGISTRY_ERROR__MINT_DESTINATION_NOT_BOUND,
+  ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED,
   ASSET_REGISTRY_ERROR__RECEIVER_JURISDICTION_BLOCKED,
   ASSET_REGISTRY_ERROR__RECEIVER_KYC_EXPIRED,
   ASSET_REGISTRY_ERROR__RECEIVER_NOT_APPROVED,
@@ -79,11 +83,34 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
         ASSET_REGISTRY_ERROR__VAULT_NOT_ACCEPTING_DEPOSITS,
         "This escrow is no longer accepting deposits — it has already been triggered, returned or closed (VaultNotAcceptingDeposits).",
       ],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS,
+        "Those pause flags are not valid: only the six defined areas can be paused, and one area cannot be paused and resumed in the same step (InvalidPauseFlags).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED,
+        "Only the Super Admin can resume a paused area. Admins can pause, not resume (PauseClearNotAllowed).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY,
+        "The protocol treasury must be a real wallet address, not the default 1111…1111 address (InvalidProtocolTreasury).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE,
+        "The sale price per unit must be greater than zero (InvalidSalePrice).",
+      ],
     ] as const
   ).map(([code, hint]) => [`0x${code.toString(16)}`, hint]),
 );
 
+/** User-facing text for the registry's emergency pause (PlatformPaused, 6000). */
+export const PLATFORM_PAUSED_HINT =
+  "Manci has temporarily paused this action (emergency pause). Cancels, refunds and claims still work.";
+
 function customErrorHint(text: string): string | null {
+  // PlatformPaused is 6000 (0x1770) — the same number as the transfer hook's
+  // first error — so match Anchor's error name, never the bare code.
+  if (/Error Code: PlatformPaused\b/.test(text)) return PLATFORM_PAUSED_HINT;
   const match = /custom program error:\s*(0x[0-9a-f]+)/i.exec(text);
   if (!match) return null;
   return CUSTOM_ERROR_HINTS[match[1].toLowerCase()] ?? null;

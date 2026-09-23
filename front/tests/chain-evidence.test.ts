@@ -38,7 +38,9 @@ const buyer = key(1),
   shares = key(7),
   payment = key(8),
   vault = key(9),
-  escrow = key(10);
+  escrow = key(10),
+  // Platform PDA stand-in (read-only emergency-pause gate, last named account).
+  platform = key(11);
 const signature = getBase58Decoder().decode(new Uint8Array(64).fill(42));
 const expected = {
   buyer,
@@ -73,6 +75,7 @@ function fixture() {
     address(ASSET_REGISTRY_PROGRAM_ADDRESS),
     address(CLASSIC_TOKEN_PROGRAM),
     address(TOKEN_2022_PROGRAM),
+    platform,
   ];
   const compiled = (
     program: string,
@@ -103,6 +106,7 @@ function fixture() {
       paymentTokenProgram: address(CLASSIC_TOKEN_PROGRAM),
       asset: shareClass,
       issuer: buyer,
+      platform,
       amount: 3,
     }),
   );
@@ -367,6 +371,27 @@ describe("chain-derived purchase evidence", () => {
       0,
     );
   });
+  it("still parses a pre-2A buy: 12 named accounts, then the receiver tail", () => {
+    // Before the emergency-pause upgrade `buy` had no Platform account, so in
+    // historical transactions position 12 holds the first tail account.
+    // Evidence must never read accounts.platform.
+    const { tx } = fixture();
+    const keys = tx.transaction.message.accountKeys;
+    const tail = [key(20), key(21), key(22)];
+    tx.transaction.message.accountKeys = [...keys, ...tail];
+    const [buy] = tx.transaction.message.instructions;
+    expect(buy.accounts).toHaveLength(13);
+    tx.transaction.message.instructions = [
+      {
+        ...buy,
+        accounts: [
+          ...buy.accounts.slice(0, 12),
+          ...tail.map((_, i) => keys.length + i),
+        ],
+      },
+    ];
+    expect(purchaseEvidence(tx, signature, expected).instructionIndex).toBe(0);
+  });
   it("keeps large and fractional atomic values exact", () => {
     expect(tokenDecimal(BigInt("18446744073709551615"), 18)).toBe(
       "18.446744073709551615",
@@ -387,6 +412,7 @@ describe("custody deposit proof", () => {
           escrow,
           depositorShareAccount: shares,
           tokenProgram: address(TOKEN_2022_PROGRAM),
+          platform,
           amount: 5,
         }),
       ),
@@ -407,6 +433,24 @@ describe("custody deposit proof", () => {
       slot: "123",
       amountAtomic: "5",
     });
+  });
+  it("still parses a pre-2A deposit: 7 named accounts, then the hook tail", () => {
+    const tx = deposit();
+    const keys = tx.transaction.message.accountKeys;
+    const tail = [key(20), key(21), key(22)];
+    tx.transaction.message.accountKeys = [...keys, ...tail];
+    const [ix] = tx.transaction.message.instructions;
+    expect(ix.accounts).toHaveLength(8);
+    tx.transaction.message.instructions = [
+      {
+        ...ix,
+        accounts: [
+          ...ix.accounts.slice(0, 7),
+          ...tail.map((_, i) => keys.length + i),
+        ],
+      },
+    ];
+    expect(custodyDepositEvidence(tx, signature, terms).amountAtomic).toBe("5");
   });
   it.each(["holder", "vault", "mint", "escrow", "shareClass"] as const)(
     "rejects another %s",

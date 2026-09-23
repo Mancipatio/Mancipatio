@@ -12,6 +12,7 @@ import {
   fetchMaybeShareClass,
   fetchMaybeAsset,
   fetchMaybeIssuer,
+  findPlatformPda,
   getBuyInstruction,
   KybStatus,
   type Sale,
@@ -97,6 +98,8 @@ export async function buildDocumentedPurchase(
       tokenProgram: paymentProgram,
     }),
   ]);
+  // Emergency-pause gate (read-only): the last named account, before the tail.
+  const [platform] = await findPlatformPda();
   const base = getBuyInstruction({
     buyer,
     sale: salePda,
@@ -110,6 +113,7 @@ export async function buildDocumentedPurchase(
     paymentTokenProgram: paymentProgram,
     asset: share.data.asset,
     issuer: asset.data.issuer,
+    platform,
     amount,
   });
   const tail = await kycReceiverMetas(rpc, sale.mint, buyer.address);

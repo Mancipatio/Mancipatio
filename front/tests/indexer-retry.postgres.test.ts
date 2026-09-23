@@ -23,7 +23,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
   beforeAll(async () => {
     try {
       db.initialize(); db.query("create role anon; create role authenticated; create role service_role bypassrls;");
-      for (const file of ["0002_indexer.sql", "0014_asset_profiles.sql", "0015_issuer_profiles.sql", "0037_indexer_integrity.sql", "0038_indexer_composite_key.sql", "0039_indexer_events_wallets.sql", "0040_indexer_kyc.sql", "0042_indexer_deposit_ledgers.sql", "0047_indexer_retry.sql"]) {
+      for (const file of ["0002_indexer.sql", "0014_asset_profiles.sql", "0015_issuer_profiles.sql", "0037_indexer_integrity.sql", "0038_indexer_composite_key.sql", "0039_indexer_events_wallets.sql", "0040_indexer_kyc.sql", "0042_indexer_deposit_ledgers.sql", "0047_indexer_retry.sql", "0063_platform_pause_flags.sql"]) {
         db.query(readFileSync(join(process.cwd(), "supabase/migrations", file), "utf8"));
       }
       for (const fixture of indexerFixtures()) {
@@ -41,6 +41,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
     expect(JSON.parse(db.query(apply(21))).written).toBe(14);
     expect(db.query("select lifetime_minted||':'||cumulative_cap||':'||last_slot from public.share_classes;")).toBe("44:true:21");
     expect(db.query("select deposited from public.offers;")).toBe("8");
+    expect(db.query("select pause_flags||':'||paused from public.platforms;")).toBe("12:true");
     for (const { table } of rows) expect(db.query(`select count(*) from public.${table} where layout_version=2;`)).toBe("1");
   });
   it("keeps newest slots and closure tombstones even when old snapshots finish later", async () => {
