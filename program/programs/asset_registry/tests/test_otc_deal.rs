@@ -8,8 +8,12 @@
 //! share class → hook-wired Token-2022 mint → transfer_hook config (Open mode)
 //! so real `transfer_checked` legs run through the hook.
 
+#[path = "../../../tests/support/kyc_registry.rs"]
+mod kyc_registry;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/reclaim.rs"]
+mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -525,6 +529,25 @@ fn deal_pdas(ctx: &Ctx, deal_id: u64) -> (Pubkey, Pubkey, Pubkey) {
 }
 
 fn create_deal_ix(ctx: &Ctx, authority: &Pubkey, deal_id: u64, expires_at: i64) -> Instruction {
+    create_deal_ix_with(
+        ctx,
+        authority,
+        deal_id,
+        expires_at,
+        &ctx.payment_mint,
+        &TOKEN_2022,
+    )
+}
+
+/// `create_otc_deal` with an explicit payment mint and its token program.
+fn create_deal_ix_with(
+    ctx: &Ctx,
+    authority: &Pubkey,
+    deal_id: u64,
+    expires_at: i64,
+    payment_mint: &Pubkey,
+    payment_program: &Pubkey,
+) -> Instruction {
     let (deal_pda, asset_escrow_pda, payment_escrow_pda) = deal_pdas(ctx, deal_id);
     let (admin_record, _) = Pubkey::find_program_address(
         &[asset_registry::ADMIN_SEED, authority.as_ref()],
@@ -538,7 +561,7 @@ fn create_deal_ix(ctx: &Ctx, authority: &Pubkey, deal_id: u64, expires_at: i64) 
             seller: ctx.seller.pubkey(),
             amount: DEAL_AMOUNT,
             price: DEAL_PRICE,
-            payment_mint: ctx.payment_mint,
+            payment_mint: *payment_mint,
             expires_at,
         }
         .data(),
@@ -547,13 +570,13 @@ fn create_deal_ix(ctx: &Ctx, authority: &Pubkey, deal_id: u64, expires_at: i64) 
             admin_record,
             share_class: ctx.share_class_pda,
             mint: ctx.mint_pda,
-            payment_mint: ctx.payment_mint,
+            payment_mint: *payment_mint,
             deal: deal_pda,
             asset_escrow: asset_escrow_pda,
             payment_escrow: payment_escrow_pda,
             escrow_marker: escrow_marker_of(ctx, &deal_pda),
             token_program: TOKEN_2022,
-            payment_token_program: TOKEN_2022,
+            payment_token_program: *payment_program,
             system_program: system_program::ID,
             platform: pause::platform_pda(),
         }
@@ -629,6 +652,22 @@ fn expire_deal_ix(ctx: &Ctx, payer: &Pubkey, deal_id: u64) -> Instruction {
 }
 
 fn cancel_deal_ix(ctx: &Ctx, authority: &Pubkey, deal_id: u64) -> Instruction {
+    cancel_deal_ix_with(
+        ctx,
+        authority,
+        deal_id,
+        (&ctx.payment_mint, &TOKEN_2022, &ctx.buyer_payment_ata),
+    )
+}
+
+/// `cancel_otc_deal` with an explicit (payment mint, its token program, the
+/// buyer's payment account).
+fn cancel_deal_ix_with(
+    ctx: &Ctx,
+    authority: &Pubkey,
+    deal_id: u64,
+    (payment_mint, payment_program, buyer_payment): (&Pubkey, &Pubkey, &Pubkey),
+) -> Instruction {
     let (deal_pda, asset_escrow_pda, payment_escrow_pda) = deal_pdas(ctx, deal_id);
     let (admin_record, _) = Pubkey::find_program_address(
         &[asset_registry::ADMIN_SEED, authority.as_ref()],
@@ -641,12 +680,12 @@ fn cancel_deal_ix(ctx: &Ctx, authority: &Pubkey, deal_id: u64) -> Instruction {
         mint: ctx.mint_pda,
         asset_escrow: asset_escrow_pda,
         seller_share_account: ctx.seller_share_ata,
-        payment_mint: ctx.payment_mint,
+        payment_mint: *payment_mint,
         payment_escrow: payment_escrow_pda,
-        buyer_payment_account: ctx.buyer_payment_ata,
+        buyer_payment_account: *buyer_payment,
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
-        payment_token_program: TOKEN_2022,
+        payment_token_program: *payment_program,
     }
     .to_account_metas(None);
     metas.extend_from_slice(&hook_metas(ctx, &deal_pda));
@@ -1204,4 +1243,318 @@ fn secondary_pause_gates_deal_entries_including_the_settling_deposit() {
         SELLER_UNITS - DEAL_AMOUNT,
         "deal 3 refunded to the seller"
     );
+}
+
+// ── 2D: reclaim_rent — OtcDeal arm ───────────────────────────────────────────
+
+fn funded_wallet(svm: &mut LiteSVM) -> Keypair {
+    let wallet = Keypair::new();
+    svm.airdrop(&wallet.pubkey(), 10_000_000_000).unwrap();
+    wallet
+}
+
+fn reclaim_deal_ix(
+    ctx: &Ctx,
+    caller: &Pubkey,
+    owner: &Pubkey,
+    deal_id: u64,
+    payment_program: Option<Pubkey>,
+) -> Instruction {
+    let (deal_pda, asset_escrow, payment_escrow) = deal_pdas(ctx, deal_id);
+    reclaim::reclaim_ix(
+        caller,
+        owner,
+        &deal_pda,
+        &asset_escrow,
+        Some(payment_escrow),
+        Some(TOKEN_2022),
+        payment_program,
+    )
+}
+
+/// Asserts a reclaim by `deal.admin` (the boot payer) pays it exactly both
+/// escrows' rent plus the deal's rent above the tombstone minimum.
+fn reclaim_deal_and_check(
+    svm: &mut LiteSVM,
+    ctx: &Ctx,
+    fee: &Keypair,
+    deal_id: u64,
+    payment_program: Pubkey,
+) {
+    let admin = ctx.payer.pubkey();
+    let (deal_pda, asset_escrow, payment_escrow) = deal_pdas(ctx, deal_id);
+    let expected =
+        reclaim::expected_tombstone_refund(svm, &deal_pda, &[asset_escrow, payment_escrow]);
+    let before = reclaim::lamports(svm, &admin);
+    svm.expire_blockhash();
+    let bh = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(
+        &[reclaim_deal_ix(
+            ctx,
+            &admin,
+            &admin,
+            deal_id,
+            Some(payment_program),
+        )],
+        Some(&fee.pubkey()),
+        &bh,
+    );
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[fee, &ctx.payer])
+        .expect("sign");
+    let meta = svm
+        .send_transaction(tx)
+        .unwrap_or_else(|e| panic!("reclaim deal {deal_id}: {e:?}"));
+    assert_eq!(
+        reclaim::lamports(svm, &admin),
+        before + expected,
+        "deal {deal_id}: all rent to deal.admin"
+    );
+    reclaim::assert_tombstone(svm, &deal_pda);
+    reclaim::assert_gone(svm, &asset_escrow);
+    reclaim::assert_gone(svm, &payment_escrow);
+    let events = kyc_registry::events::<asset_registry::RentReclaimed>(&meta.logs);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, asset_registry::RECLAIM_OTC);
+    assert_eq!(events[0].owner, admin);
+    assert_eq!(events[0].lamports, expected);
+}
+
+/// Completed, Cancelled and Expired deals (Token-2022 payment leg) and a
+/// Cancelled deal with a legacy SPL payment leg: both escrows close, the deal
+/// is tombstoned and every lamport goes to `deal.admin`.
+#[test]
+fn otc_reclaim_after_completed_cancelled_and_expired() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let admin = ctx.payer.pubkey();
+    let fee = funded_wallet(&mut svm);
+    for id in 1..=3u64 {
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[create_deal_ix(&ctx, &admin, id, 2_000)],
+            "create_otc_deal",
+        );
+    }
+    // 1: both sides deposit → Completed.
+    send(
+        &mut svm,
+        &[&ctx.seller],
+        &[deposit_asset_ix(&ctx, &ctx.seller.pubkey(), 1)],
+        "deposit asset",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_payment_ix(&ctx, &ctx.buyer.pubkey(), 1)],
+        "deposit payment",
+    );
+    // 2: the seller deposits, the admin cancels (refund) → Cancelled.
+    send(
+        &mut svm,
+        &[&ctx.seller],
+        &[deposit_asset_ix(&ctx, &ctx.seller.pubkey(), 2)],
+        "deposit asset 2",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[cancel_deal_ix(&ctx, &admin, 2)],
+        "cancel 2",
+    );
+    // 3: nobody deposits, it expires → Expired.
+    warp_to(&mut svm, 3_000);
+    send(
+        &mut svm,
+        &[&fee],
+        &[expire_deal_ix(&ctx, &fee.pubkey(), 3)],
+        "expire 3",
+    );
+    for (id, status) in [
+        (1u64, OtcDealStatus::Completed),
+        (2, OtcDealStatus::Cancelled),
+        (3, OtcDealStatus::Expired),
+    ] {
+        assert_eq!(load::<OtcDeal>(&svm, &deal_pdas(&ctx, id).0).status, status);
+        reclaim_deal_and_check(&mut svm, &ctx, &fee, id, TOKEN_2022);
+    }
+
+    // 4: a legacy SPL payment mint.
+    let spl = anchor_spl::token::ID;
+    let spl_mint = {
+        use anchor_lang::solana_program::system_instruction;
+        let mint = Keypair::new();
+        let lamports = svm.minimum_balance_for_rent_exemption(82);
+        let create = system_instruction::create_account(&admin, &mint.pubkey(), lamports, 82, &spl);
+        let init = token_ix::initialize_mint2(&spl, &mint.pubkey(), &admin, None, 6).unwrap();
+        send(&mut svm, &[&ctx.payer, &mint], &[create, init], "spl mint");
+        mint.pubkey()
+    };
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[ata_ix::create_associated_token_account(
+            &admin,
+            &ctx.buyer.pubkey(),
+            &spl_mint,
+            &spl,
+        )],
+        "buyer spl ata",
+    );
+    let buyer_spl =
+        get_associated_token_address_with_program_id(&ctx.buyer.pubkey(), &spl_mint, &spl);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[create_deal_ix_with(&ctx, &admin, 4, 0, &spl_mint, &spl)],
+        "create spl deal",
+    );
+    let (_, _, spl_payment_escrow) = deal_pdas(&ctx, 4);
+    assert_eq!(svm.get_account(&spl_payment_escrow).unwrap().owner, spl);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[cancel_deal_ix_with(
+            &ctx,
+            &admin,
+            4,
+            (&spl_mint, &spl, &buyer_spl),
+        )],
+        "cancel spl deal",
+    );
+    // The payment program must be the SPL one (the escrow's owner).
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[reclaim_deal_ix(&ctx, &admin, &admin, 4, Some(TOKEN_2022))],
+        ),
+        6001,
+    );
+    reclaim_deal_and_check(&mut svm, &ctx, &fee, 4, spl);
+}
+
+/// Open → 6140; another Admin, a non-signing owner, a missing payment escrow
+/// or program → 6001; payment dust → 6139. A tombstoned deal id can never be
+/// re-created and the deposits fail with 3002.
+#[test]
+fn otc_reclaim_refusals_and_the_tombstone_is_permanent() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let admin = ctx.payer.pubkey();
+    let other = funded_wallet(&mut svm);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[reclaim::add_admin_ix(&admin, &other.pubkey())],
+        "second admin",
+    );
+    for id in 1..=2u64 {
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[create_deal_ix(&ctx, &admin, id, 0)],
+            "create_otc_deal",
+        );
+    }
+    let t22 = Some(TOKEN_2022);
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[reclaim_deal_ix(&ctx, &admin, &admin, 1, t22)],
+        ),
+        6140,
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[cancel_deal_ix(&ctx, &admin, 1)],
+        "cancel 1",
+    );
+    let (deal_1, asset_escrow_1, _) = deal_pdas(&ctx, 1);
+    for (signer, ix) in [
+        // Another Admin, for itself or naming deal.admin as the owner.
+        (
+            &other,
+            reclaim_deal_ix(&ctx, &other.pubkey(), &other.pubkey(), 1, t22),
+        ),
+        (
+            &other,
+            reclaim_deal_ix(&ctx, &other.pubkey(), &admin, 1, t22),
+        ),
+        // deal.admin, but the rent sent elsewhere.
+        (
+            &ctx.payer,
+            reclaim_deal_ix(&ctx, &admin, &other.pubkey(), 1, t22),
+        ),
+        // Missing payment program / payment escrow.
+        (&ctx.payer, reclaim_deal_ix(&ctx, &admin, &admin, 1, None)),
+        (
+            &ctx.payer,
+            reclaim::reclaim_ix(&admin, &admin, &deal_1, &asset_escrow_1, None, t22, t22),
+        ),
+    ] {
+        reclaim::assert_code(try_send(&mut svm, &[signer], &[ix]), 6001);
+    }
+    // Payment dust (the payment mint has no hook) keeps the deal unclosable.
+    let (_, _, payment_escrow_1) = deal_pdas(&ctx, 1);
+    let dust = token_ix::transfer_checked(
+        &TOKEN_2022,
+        &ctx.buyer_payment_ata,
+        &ctx.payment_mint,
+        &payment_escrow_1,
+        &ctx.buyer.pubkey(),
+        &[],
+        1,
+        6,
+    )
+    .unwrap();
+    send(&mut svm, &[&ctx.buyer], &[dust], "payment dust");
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[reclaim_deal_ix(&ctx, &admin, &admin, 1, t22)],
+        ),
+        6139,
+    );
+
+    // Deal 2: reclaimed, then every reuse fails.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[cancel_deal_ix(&ctx, &admin, 2)],
+        "cancel 2",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[reclaim_deal_ix(&ctx, &admin, &admin, 2, t22)],
+        "reclaim 2",
+    );
+    let (deal_2, _, _) = deal_pdas(&ctx, 2);
+    reclaim::assert_tombstone(&svm, &deal_2);
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[reclaim_deal_ix(&ctx, &admin, &admin, 2, t22)],
+        ),
+        6001,
+    );
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[create_deal_ix(&ctx, &admin, 2, 0)],
+    )
+    .expect_err("a tombstoned deal id cannot be re-created");
+    assert!(err.contains("already in use"), "got: {err}");
+    for (signer, ix) in [
+        (&ctx.seller, deposit_asset_ix(&ctx, &ctx.seller.pubkey(), 2)),
+        (&ctx.buyer, deposit_payment_ix(&ctx, &ctx.buyer.pubkey(), 2)),
+    ] {
+        reclaim::assert_code(try_send(&mut svm, &[signer], &[ix]), 3002);
+    }
+    reclaim::assert_tombstone(&svm, &deal_2);
 }

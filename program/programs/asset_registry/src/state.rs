@@ -284,7 +284,8 @@ pub struct KycRegistry {
 /// platform-mediated (into or out of a program escrow), not wallet↔wallet.
 /// Created alongside the escrow's parent account; closed on every terminal
 /// path (settle / cancel / expire / realize / revert / return / close), rent
-/// to the closing signer. Seeds: `["escrow_marker", owner_pda]`.
+/// to the closing signer, except a distribution's, whose rent goes to
+/// `Distribution.admin` (2D). Seeds: `["escrow_marker", owner_pda]`.
 #[account]
 #[derive(InitSpace)]
 pub struct EscrowMarker {
@@ -429,13 +430,28 @@ pub struct BlocklistClawback {
     pub amount: u64,
 }
 
+/// Emitted by `reclaim_rent`: a terminal account's rent went back to its
+/// recorded owner. `kind` is one of `RECLAIM_OFFER` / `RECLAIM_OTC` /
+/// `RECLAIM_CUSTODY` / `RECLAIM_KYC`; `lamports` is everything `owner`
+/// received (escrow rent plus the parent's rent above the tombstone minimum,
+/// or the whole KycEntry).
+#[event]
+pub struct RentReclaimed {
+    pub kind: u8,
+    pub target: Pubkey,
+    pub owner: Pubkey,
+    pub lamports: u64,
+}
+
 // ── CustodyVault — the mint → custody → burn primitive (docs/01 §3) ───────────
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug, InitSpace)]
 pub enum VaultType {
     /// Startup vested tokens released on a schedule.
     Vesting,
-    /// Equity token held pending an off-chain share conversion.
+    /// RETIRED (2D): `open_custody_vault` refuses it (`VaultTypeRetired`).
+    /// Its realize burned and attested with no KYC; holder conversions use a
+    /// `DeliveryEscrow`. Kept only so later variants keep their Borsh position.
     ConversionPending,
     /// RWA token locked pending physical delivery — also the type the platform
     /// uses for a holder's equity conversion. Its realize (the conversion or
@@ -494,7 +510,7 @@ pub struct CustodyVault {
     /// SHA-256 of the off-chain agreement / conversion document.
     pub metadata_hash: [u8; 32],
     /// Recipient of `return_custody_vault` (DeliveryEscrow only).
-    /// `Pubkey::default()` when unused.
+    /// `Pubkey::default()` for every other type (enforced at open, 2D).
     pub beneficiary: Pubkey,
     pub version: u8,
     pub bump: u8,
@@ -507,8 +523,9 @@ pub struct CustodyVault {
     /// beyond it did not come from the beneficiary — the only other way units
     /// can land in the escrow is a raw `transfer_checked` from elsewhere (e.g.
     /// freshly emitted treasury units) — and is released only to a receiver
-    /// whose `KycEntry` passes. Appended last so the account's existing byte
-    /// layout is unchanged up to `bump`.
+    /// whose `KycEntry` passes. Only a DeliveryEscrow accepts deposits (2D),
+    /// so for every other type it stays 0. Appended last so the account's
+    /// existing byte layout is unchanged up to `bump`.
     pub deposited: u64,
     /// KYC registry pinned by `open_custody_vault` (DeliveryEscrow only;
     /// `Pubkey::default()` otherwise). `realize_custody_vault` requires the
@@ -841,8 +858,8 @@ pub struct Distribution {
     /// Admin that created the distribution.
     pub admin: Pubkey,
     /// Wallet that funded the escrow — `close_distribution` may only sweep the
-    /// remainder to a token account owned by it (and sends the escrow's rent
-    /// there too).
+    /// remainder to a token account owned by it. The rent (escrow and marker)
+    /// goes to `admin`, which paid for both (2D).
     pub funder: Pubkey,
     pub share_class: Pubkey,
     /// Share-class Token-2022 mint the distribution relates to (indexing).

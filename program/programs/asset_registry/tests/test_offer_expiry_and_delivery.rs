@@ -14,6 +14,8 @@
 mod kyc_registry;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/reclaim.rs"]
+mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
 
@@ -1577,7 +1579,7 @@ fn revert_after_positive_deadline_stays_permissionless() {
         &[open_vault_ix(
             &ctx,
             vault_id,
-            VaultType::ConversionPending,
+            VaultType::Vesting,
             10,
             2_000,
             Pubkey::default(),
@@ -1982,20 +1984,19 @@ fn non_delivery_vault_open_rejects_kyc_registry() {
         )
         .expect_err("a non-delivery vault must not pin a registry");
         assert!(err.contains("Custom(6135)"), "{vault_type:?}: got {err}");
-        // …and the same open without a registry succeeds.
-        send(
-            &mut svm,
-            &[&ctx.payer],
-            &[open_vault_ix(
-                &ctx,
-                id,
-                vault_type,
-                10,
-                0,
-                Pubkey::default(),
-            )],
-            "non-delivery open without a registry",
-        );
+        // …and the same open without a registry succeeds, except for the
+        // retired ConversionPending (2D: VaultTypeRetired, 6142).
+        let open = open_vault_ix(&ctx, id, vault_type, 10, 0, Pubkey::default());
+        if vault_type == VaultType::ConversionPending {
+            reclaim::assert_code(try_send(&mut svm, &[&ctx.payer], &[open]), 6142);
+        } else {
+            send(
+                &mut svm,
+                &[&ctx.payer],
+                &[open],
+                "non-delivery open without a registry",
+            );
+        }
     }
 }
 
@@ -2103,35 +2104,59 @@ fn delivery_vault_pins_registry_v2_layout() {
     }
 }
 
-/// Non-delivery realize ignores the KYC accounts entirely: a ConversionPending
-/// vault realizes with None / None. Its attestation names no beneficiary and
-/// no registry — even though this vault stored one, it was never KYC-checked.
+/// Non-delivery realize ignores the KYC accounts entirely: a Vesting vault
+/// (funded by `mint_to_treasury`, 2D) realizes with None / None and its
+/// attestation names no beneficiary and no registry.
 #[test]
 fn non_delivery_realize_needs_no_kyc_accounts() {
     let (mut svm, ctx) = boot(20);
     warp_to(&mut svm, 1_000);
     let (custody_pda, escrow_pda) = custody_pdas(&ctx, 1);
+    // 2D: a non-delivery vault can no longer store a beneficiary (6141).
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[open_vault_ix(
+                &ctx,
+                1,
+                VaultType::Vesting,
+                5,
+                0,
+                ctx.holder.pubkey(),
+            )],
+        ),
+        6141,
+    );
     send(
         &mut svm,
         &[&ctx.payer],
         &[open_vault_ix(
             &ctx,
             1,
-            VaultType::ConversionPending,
+            VaultType::Vesting,
             5,
             0,
-            ctx.holder.pubkey(),
+            Pubkey::default(),
         )],
-        "open conversion-pending vault (beneficiary stored)",
+        "open vesting vault",
     );
-    let stored: CustodyVault = load(&svm, &custody_pda);
-    assert_eq!(stored.beneficiary, ctx.holder.pubkey());
+    // …nor accept a deposit (6084): it is funded by fresh emission.
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.holder],
+            &[deposit_to_custody_ix(&ctx, 1, 5)],
+        ),
+        6084,
+    );
     send(
         &mut svm,
-        &[&ctx.holder],
-        &[deposit_to_custody_ix(&ctx, 1, 5)],
-        "deposit",
+        &[&ctx.payer],
+        &[mint_to_vault_ix(&ctx, 1, 5)],
+        "mint_to_treasury into the vault escrow",
     );
+    assert_eq!(token_balance(&svm, &escrow_pda), 5);
     svm.expire_blockhash();
     let bh = svm.latest_blockhash();
     let msg = Message::new_with_blockhash(
@@ -2157,4 +2182,674 @@ fn non_delivery_realize_needs_no_kyc_accounts() {
         "an unchecked beneficiary is never attested"
     );
     assert_eq!(events[0].kyc_registry, Pubkey::default());
+}
+
+/// `mint_to_treasury` into a custody vault's escrow (the vault PDA rides along
+/// as the destination-binding proof).
+fn mint_to_vault_ix(ctx: &Ctx, vault_id: u64, amount: u64) -> Instruction {
+    let (custody_pda, escrow_pda) = custody_pdas(ctx, vault_id);
+    let mut metas = acc::MintToTreasury {
+        authority: ctx.payer.pubkey(),
+        admin_record: ctx.admin_pda,
+        issuer: ctx.issuer_pda,
+        asset: ctx.asset_pda,
+        share_class: ctx.share_class_pda,
+        mint: ctx.mint_pda,
+        destination: escrow_pda,
+        token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
+    }
+    .to_account_metas(None);
+    metas.push(AccountMeta::new_readonly(custody_pda, false));
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::MintToTreasury { amount }.data(),
+        metas,
+    )
+}
+
+// ── 2D: reclaim_rent — Offer and CustodyVault arms ───────────────────────────
+
+fn send_logs(
+    svm: &mut LiteSVM,
+    signers: &[&Keypair],
+    ixs: &[Instruction],
+    label: &str,
+) -> Vec<String> {
+    svm.expire_blockhash();
+    let bh = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(ixs, Some(&signers[0].pubkey()), &bh);
+    let tx = VersionedTransaction::try_new(VersionedMessage::Legacy(msg), signers).expect("sign");
+    svm.send_transaction(tx)
+        .unwrap_or_else(|e| panic!("[{label}] tx failed: {e:?}"))
+        .logs
+}
+
+fn funded_wallet(svm: &mut LiteSVM) -> Keypair {
+    let wallet = Keypair::new();
+    svm.airdrop(&wallet.pubkey(), 10_000_000_000).unwrap();
+    wallet
+}
+
+fn reclaim_offer_ix(ctx: &Ctx, caller: &Pubkey, owner: &Pubkey, offer_id: u64) -> Instruction {
+    let (offer_pda, escrow_pda) = offer_pdas(ctx, offer_id);
+    reclaim::reclaim_ix(
+        caller,
+        owner,
+        &offer_pda,
+        &escrow_pda,
+        None,
+        Some(TOKEN_2022),
+        None,
+    )
+}
+
+fn reclaim_vault_ix(ctx: &Ctx, caller: &Pubkey, owner: &Pubkey, vault_id: u64) -> Instruction {
+    let (custody_pda, escrow_pda) = custody_pdas(ctx, vault_id);
+    reclaim::reclaim_ix(
+        caller,
+        owner,
+        &custody_pda,
+        &escrow_pda,
+        None,
+        Some(TOKEN_2022),
+        None,
+    )
+}
+
+/// A taker with payment units and both ATAs, plus the maker's payment ATA.
+struct Taker {
+    wallet: Keypair,
+    share: Pubkey,
+    payment: Pubkey,
+    maker_payment: Pubkey,
+}
+
+fn new_taker(svm: &mut LiteSVM, ctx: &Ctx) -> Taker {
+    let wallet = funded_wallet(svm);
+    let payment = create_ata(svm, &ctx.payer, &ctx.payment_mint, &wallet.pubkey());
+    let mint_ix = token_ix::mint_to(
+        &TOKEN_2022,
+        &ctx.payment_mint,
+        &payment,
+        &ctx.payer.pubkey(),
+        &[],
+        100_000_000,
+    )
+    .unwrap();
+    send(svm, &[&ctx.payer], &[mint_ix], "mint payment to taker");
+    let share = create_ata(svm, &ctx.payer, &ctx.mint_pda, &wallet.pubkey());
+    let maker_payment = create_ata(svm, &ctx.payer, &ctx.payment_mint, &ctx.holder.pubkey());
+    Taker {
+        wallet,
+        share,
+        payment,
+        maker_payment,
+    }
+}
+
+fn take_ix(ctx: &Ctx, offer_id: u64, taker: &Taker) -> Instruction {
+    take_offer_ix(
+        ctx,
+        offer_id,
+        &taker.wallet.pubkey(),
+        &taker.share,
+        &taker.payment,
+        &taker.maker_payment,
+    )
+}
+
+/// Cancelled (maker signs), Filled (a stranger cranks; the maker does not
+/// sign) and Expired (crank) offers: the escrow closes, the Offer shrinks to
+/// the 8-byte tombstone and EVERY reclaimed lamport lands on the maker.
+#[test]
+fn offer_reclaim_returns_rent_to_the_maker_after_cancel_take_and_expire() {
+    let (mut svm, ctx) = boot(100);
+    warp_to(&mut svm, 1_000);
+    let maker = ctx.holder.pubkey();
+    let fee = funded_wallet(&mut svm);
+    let stranger = funded_wallet(&mut svm);
+    let taker = new_taker(&mut svm, &ctx);
+    for id in 1..=3u64 {
+        send(
+            &mut svm,
+            &[&ctx.holder],
+            &[create_offer_ix(&ctx, id, 10, 5_000_000, 2_000)],
+            "create_offer",
+        );
+        deposit_to_offer_escrow(&mut svm, &ctx, id, 10);
+    }
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[cancel_offer_ix(&ctx, 1)],
+        "cancel",
+    );
+    send(
+        &mut svm,
+        &[&taker.wallet],
+        &[take_ix(&ctx, 2, &taker)],
+        "take",
+    );
+    warp_to(&mut svm, 3_000);
+    send(
+        &mut svm,
+        &[&stranger],
+        &[expire_offer_ix(&ctx, &stranger.pubkey(), 3)],
+        "expire",
+    );
+
+    for (id, caller, status) in [
+        (1u64, &ctx.holder, OfferStatus::Cancelled),
+        (2, &stranger, OfferStatus::Filled),
+        (3, &stranger, OfferStatus::Expired),
+    ] {
+        let (offer_pda, escrow_pda) = offer_pdas(&ctx, id);
+        assert_eq!(load::<Offer>(&svm, &offer_pda).status, status);
+        let expected = reclaim::expected_tombstone_refund(&svm, &offer_pda, &[escrow_pda]);
+        let maker_before = reclaim::lamports(&svm, &maker);
+        let caller_before = reclaim::lamports(&svm, &caller.pubkey());
+        let logs = send_logs(
+            &mut svm,
+            &[&fee, caller],
+            &[reclaim_offer_ix(&ctx, &caller.pubkey(), &maker, id)],
+            "reclaim offer",
+        );
+        if caller.pubkey() != maker {
+            assert_eq!(reclaim::lamports(&svm, &caller.pubkey()), caller_before);
+        }
+        assert_eq!(
+            reclaim::lamports(&svm, &maker),
+            maker_before + expected,
+            "offer {id}: escrow rent + parent rent above the minimum, to the maker"
+        );
+        reclaim::assert_tombstone(&svm, &offer_pda);
+        reclaim::assert_gone(&svm, &escrow_pda);
+        let events = kyc_registry::events::<asset_registry::RentReclaimed>(&logs);
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, asset_registry::RECLAIM_OFFER);
+        assert_eq!(events[0].target, offer_pda);
+        assert_eq!(events[0].owner, maker);
+        assert_eq!(events[0].lamports, expected);
+    }
+}
+
+/// Open → 6140; wrong owner, escrow or token program → 6001; dust in the
+/// escrow → 6139; a second reclaim (tombstone) → 6001. A tombstoned id can
+/// never be re-created, and every old offer instruction fails with 3002.
+#[test]
+fn offer_reclaim_refusals_and_the_tombstone_is_permanent() {
+    let (mut svm, ctx) = boot(100);
+    warp_to(&mut svm, 1_000);
+    let maker = ctx.holder.pubkey();
+    let stranger = funded_wallet(&mut svm);
+    let taker = new_taker(&mut svm, &ctx);
+    let legacy_token = anchor_spl::token::ID;
+
+    // ── offer 1: Open, then dust after cancel ────────────────────────────────
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[create_offer_ix(&ctx, 1, 10, 5_000_000, 0)],
+        "create_offer 1",
+    );
+    deposit_to_offer_escrow(&mut svm, &ctx, 1, 5);
+    let (offer_1, escrow_1) = offer_pdas(&ctx, 1);
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.holder],
+            &[reclaim_offer_ix(&ctx, &maker, &maker, 1)],
+        ),
+        6140,
+    );
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[cancel_offer_ix(&ctx, 1)],
+        "cancel 1",
+    );
+    // Wrong owner / escrow / token program.
+    for ix in [
+        reclaim_offer_ix(&ctx, &stranger.pubkey(), &stranger.pubkey(), 1),
+        reclaim::reclaim_ix(
+            &stranger.pubkey(),
+            &maker,
+            &offer_1,
+            &ctx.holder_share_ata,
+            None,
+            Some(TOKEN_2022),
+            None,
+        ),
+        reclaim::reclaim_ix(
+            &stranger.pubkey(),
+            &maker,
+            &offer_1,
+            &escrow_1,
+            None,
+            Some(legacy_token),
+            None,
+        ),
+        reclaim::reclaim_ix(
+            &stranger.pubkey(),
+            &maker,
+            &offer_1,
+            &escrow_1,
+            None,
+            None,
+            None,
+        ),
+    ] {
+        reclaim::assert_code(try_send(&mut svm, &[&stranger], &[ix]), 6001);
+    }
+    // Open-mode dust: after the marker closed, anyone can still transfer into
+    // the escrow. The offer then stays unclosable (the status quo).
+    raw_fund_offer_escrow(&mut svm, &ctx, &escrow_1, 1);
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&stranger],
+            &[reclaim_offer_ix(&ctx, &stranger.pubkey(), &maker, 1)],
+        ),
+        6139,
+    );
+    assert_eq!(load::<Offer>(&svm, &offer_1).status, OfferStatus::Cancelled);
+
+    // ── offer 2: reclaimed, then every reuse fails ───────────────────────────
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[create_offer_ix(&ctx, 2, 10, 5_000_000, 2_000)],
+        "create_offer 2",
+    );
+    deposit_to_offer_escrow(&mut svm, &ctx, 2, 5);
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[cancel_offer_ix(&ctx, 2)],
+        "cancel 2",
+    );
+    send(
+        &mut svm,
+        &[&stranger],
+        &[reclaim_offer_ix(&ctx, &stranger.pubkey(), &maker, 2)],
+        "reclaim 2",
+    );
+    let (offer_2, _) = offer_pdas(&ctx, 2);
+    reclaim::assert_tombstone(&svm, &offer_2);
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&stranger],
+            &[reclaim_offer_ix(&ctx, &stranger.pubkey(), &maker, 2)],
+        ),
+        6001,
+    );
+    // The PDA can never be initialised again (allocate refuses a program owner).
+    let err = try_send(
+        &mut svm,
+        &[&ctx.holder],
+        &[create_offer_ix(&ctx, 2, 1, 1, 0)],
+    )
+    .expect_err("a tombstoned offer id cannot be re-created");
+    assert!(err.contains("already in use"), "got: {err}");
+    reclaim::assert_tombstone(&svm, &offer_2);
+    // Old signed instructions fail to deserialize the tombstone.
+    warp_to(&mut svm, 3_000);
+    for (signer, ix) in [
+        (&ctx.holder, cancel_offer_ix(&ctx, 2)),
+        (&stranger, expire_offer_ix(&ctx, &stranger.pubkey(), 2)),
+        (&taker.wallet, take_ix(&ctx, 2, &taker)),
+        (&ctx.holder, deposit_to_offer_escrow_ix(&ctx, 2, 1)),
+    ] {
+        reclaim::assert_code(try_send(&mut svm, &[signer], &[ix]), 3002);
+    }
+    reclaim::assert_tombstone(&svm, &offer_2);
+}
+
+/// Realized, Reverted and Returned vaults: escrow closed, vault tombstoned,
+/// every reclaimed lamport to the vault authority. The id can never be
+/// opened again.
+#[test]
+fn custody_reclaim_after_realize_revert_and_return() {
+    let (mut svm, ctx) = boot(60);
+    warp_to(&mut svm, 1_000);
+    let authority = ctx.payer.pubkey();
+    let fee = funded_wallet(&mut svm);
+
+    // 1: Vesting → trigger + realize (burn) → Realized.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            1,
+            VaultType::Vesting,
+            10,
+            0,
+            Pubkey::default(),
+        )],
+        "open 1",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[mint_to_vault_ix(&ctx, 1, 10)],
+        "fund 1",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[
+            trigger_vault_ix(&ctx, 1),
+            realize_vault_ix(&ctx, 1, None, None),
+        ],
+        "realize 1",
+    );
+    // 2: Vesting with a deadline → permissionless revert → Reverted.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            2,
+            VaultType::Vesting,
+            10,
+            2_000,
+            Pubkey::default(),
+        )],
+        "open 2",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[mint_to_vault_ix(&ctx, 2, 10)],
+        "fund 2",
+    );
+    // 3: DeliveryEscrow → the beneficiary deposits → authority returns.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            3,
+            VaultType::DeliveryEscrow,
+            10,
+            0,
+            ctx.holder.pubkey(),
+        )],
+        "open 3",
+    );
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[deposit_to_custody_ix(&ctx, 3, 10)],
+        "deposit 3",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[return_vault_ix(&ctx, &authority, 3, &ctx.holder_share_ata)],
+        "return 3",
+    );
+    warp_to(&mut svm, 3_000);
+    send(
+        &mut svm,
+        &[&fee],
+        &[revert_vault_ix(&ctx, &fee.pubkey(), 2)],
+        "revert 2",
+    );
+
+    for (id, state) in [
+        (1u64, VaultState::Realized),
+        (2, VaultState::Reverted),
+        (3, VaultState::Returned),
+    ] {
+        let (vault_pda, escrow_pda) = custody_pdas(&ctx, id);
+        assert_eq!(load::<CustodyVault>(&svm, &vault_pda).state, state);
+        let expected = reclaim::expected_tombstone_refund(&svm, &vault_pda, &[escrow_pda]);
+        let before = reclaim::lamports(&svm, &authority);
+        let logs = send_logs(
+            &mut svm,
+            &[&fee, &ctx.payer],
+            &[reclaim_vault_ix(&ctx, &authority, &authority, id)],
+            "reclaim vault",
+        );
+        assert_eq!(reclaim::lamports(&svm, &authority), before + expected);
+        reclaim::assert_tombstone(&svm, &vault_pda);
+        reclaim::assert_gone(&svm, &escrow_pda);
+        let events = kyc_registry::events::<asset_registry::RentReclaimed>(&logs);
+        assert_eq!(events[0].kind, asset_registry::RECLAIM_CUSTODY);
+        assert_eq!(events[0].lamports, expected);
+    }
+    // The tombstoned id can never be opened again.
+    assert!(try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            1,
+            VaultType::Vesting,
+            10,
+            0,
+            Pubkey::default()
+        )],
+    )
+    .is_err());
+    reclaim::assert_tombstone(&svm, &custody_pdas(&ctx, 1).0);
+}
+
+/// Active / Triggered → 6140; a caller or an owner other than the vault
+/// authority → 6001; dust that lands after the marker closed → 6139.
+#[test]
+fn custody_reclaim_refusals() {
+    let (mut svm, ctx) = boot(30);
+    warp_to(&mut svm, 1_000);
+    let authority = ctx.payer.pubkey();
+    let stranger = funded_wallet(&mut svm);
+    let (_, escrow_pda) = custody_pdas(&ctx, 1);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            1,
+            VaultType::Vesting,
+            10,
+            0,
+            Pubkey::default(),
+        )],
+        "open",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[mint_to_vault_ix(&ctx, 1, 5)],
+        "fund",
+    );
+    let own = || reclaim_vault_ix(&ctx, &authority, &authority, 1);
+    reclaim::assert_code(try_send(&mut svm, &[&ctx.payer], &[own()]), 6140);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[trigger_vault_ix(&ctx, 1)],
+        "trigger",
+    );
+    reclaim::assert_code(try_send(&mut svm, &[&ctx.payer], &[own()]), 6140);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[realize_vault_ix(&ctx, 1, None, None)],
+        "realize",
+    );
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&stranger],
+            &[reclaim_vault_ix(&ctx, &stranger.pubkey(), &authority, 1)],
+        ),
+        6001,
+    );
+    reclaim::assert_code(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[reclaim_vault_ix(&ctx, &authority, &stranger.pubkey(), 1)],
+        ),
+        6001,
+    );
+    fund_vault_escrow(&mut svm, &ctx, &escrow_pda, 1);
+    reclaim::assert_code(try_send(&mut svm, &[&ctx.payer], &[own()]), 6139);
+}
+
+/// D15: a custody `AuthorityTransfer` left pending is not retired by the
+/// reclaim, but it can never be accepted: accept needs a decodable vault.
+#[test]
+fn stale_custody_authority_transfer_cannot_be_accepted_after_reclaim() {
+    let (mut svm, ctx) = boot(10);
+    warp_to(&mut svm, 1_000);
+    let authority = ctx.payer.pubkey();
+    let next = funded_wallet(&mut svm);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[reclaim::add_admin_ix(&authority, &next.pubkey())],
+        "add admin",
+    );
+    let (vault_pda, _) = custody_pdas(&ctx, 1);
+    let transfer = Pubkey::find_program_address(
+        &[asset_registry::AUTHORITY_TRANSFER_SEED, vault_pda.as_ref()],
+        &asset_registry::ID,
+    )
+    .0;
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            1,
+            VaultType::Vesting,
+            10,
+            0,
+            Pubkey::default(),
+        )],
+        "open",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::ProposeCustodyAuthority {
+                new_authority: next.pubkey(),
+            }
+            .data(),
+            acc::ProposeCustodyAuthority {
+                super_admin: authority,
+                platform: pause::platform_pda(),
+                custody_vault: vault_pda,
+                new_admin_record: pause::admin_pda(&next.pubkey()),
+                transfer,
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        )],
+        "propose custody authority",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[
+            trigger_vault_ix(&ctx, 1),
+            realize_vault_ix(&ctx, 1, None, None),
+        ],
+        "realize (empty vault)",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[reclaim_vault_ix(&ctx, &authority, &authority, 1)],
+        "reclaim",
+    );
+    let accept = Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::AcceptCustodyAuthority {}.data(),
+        acc::AcceptCustodyAuthority {
+            new_authority: next.pubkey(),
+            platform: pause::platform_pda(),
+            custody_vault: vault_pda,
+            new_admin_record: pause::admin_pda(&next.pubkey()),
+            transfer,
+        }
+        .to_account_metas(None),
+    );
+    reclaim::assert_code(try_send(&mut svm, &[&next], &[accept]), 3002);
+    reclaim::assert_tombstone(&svm, &vault_pda);
+    assert!(svm.get_account(&transfer).is_some(), "D15: left as is");
+}
+
+/// Unknown discriminators (ShareClass, Asset, Platform), accounts this program
+/// does not own, and too-short data are all refused with 6001.
+#[test]
+fn reclaim_refuses_unknown_and_foreign_targets() {
+    let (mut svm, ctx) = boot(10);
+    let payer = ctx.payer.pubkey();
+    for target in [
+        ctx.share_class_pda,
+        ctx.asset_pda,
+        pause::platform_pda(),
+        ctx.holder.pubkey(),
+        ctx.holder_share_ata,
+        ctx.mint_pda,
+    ] {
+        reclaim::assert_code(
+            try_send(
+                &mut svm,
+                &[&ctx.payer],
+                &[reclaim::reclaim_ix(
+                    &payer,
+                    &payer,
+                    &target,
+                    &ctx.holder_share_ata,
+                    None,
+                    Some(TOKEN_2022),
+                    None,
+                )],
+            ),
+            6001,
+        );
+    }
+}
+
+/// The tombstone tag differs from every `#[account]` discriminator of the
+/// registry (all of them, parsed from `state.rs`), so a tombstone never
+/// decodes as a live account.
+#[test]
+fn closed_account_tag_differs_from_every_account_discriminator() {
+    use anchor_lang::Discriminator;
+    let source = include_str!("../src/state.rs");
+    let names: Vec<&str> = source
+        .split("#[account]")
+        .skip(1)
+        .filter_map(|rest| rest.split("pub struct ").nth(1))
+        .filter_map(|rest| rest.split([' ', '{', '<']).next())
+        .collect();
+    assert!(names.len() >= 31, "parsed {names:?}");
+    let discriminator = |name: &str| {
+        solana_sha256_hasher::hashv(&[b"account:", name.as_bytes()]).to_bytes()[..8].to_vec()
+    };
+    // The derivation matches Anchor's.
+    assert_eq!(discriminator("Offer"), Offer::DISCRIMINATOR.to_vec());
+    assert_eq!(
+        discriminator("KycEntry"),
+        asset_registry::KycEntry::DISCRIMINATOR.to_vec()
+    );
+    for name in names {
+        assert_ne!(
+            discriminator(name),
+            asset_registry::CLOSED_ACCOUNT_TAG.to_vec(),
+            "{name}"
+        );
+    }
+    assert_eq!(&asset_registry::CLOSED_ACCOUNT_TAG, b"CLOSED__");
 }

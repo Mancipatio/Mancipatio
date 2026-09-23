@@ -79,7 +79,7 @@ pub fn handle_open_payout_vault(
     let sc_key = ctx.accounts.sale.share_class;
     let sale_id_seed = ctx.accounts.sale.sale_id.to_le_bytes();
     let sale_bump = ctx.accounts.sale.bump;
-    let signer: &[&[&[u8]]] = &[&[SALE_SEED, sc_key.as_ref(), &sale_id_seed, &[sale_bump]]];
+    let seeds: &[&[u8]] = &[SALE_SEED, sc_key.as_ref(), &sale_id_seed, &[sale_bump]];
     token_interface::transfer_checked(
         CpiContext::new_with_signer(
             ctx.accounts.payment_token_program.key(),
@@ -89,10 +89,19 @@ pub fn handle_open_payout_vault(
                 to: ctx.accounts.escrow.to_account_info(),
                 authority: ctx.accounts.sale.to_account_info(),
             },
-            signer,
+            &[seeds],
         ),
         swept,
         ctx.accounts.payment_mint.decimals,
+    )?;
+    // 2D: the proceeds account is empty after the sweep; its rent goes back to
+    // the sale authority (the founder), which paid for it.
+    crate::util::close_empty_escrow(
+        &ctx.accounts.proceeds.to_account_info(),
+        Some(&ctx.accounts.payment_token_program),
+        &ctx.accounts.sale.to_account_info(),
+        &ctx.accounts.authority.to_account_info(),
+        seeds,
     )?;
 
     let now = Clock::get()?.unix_timestamp;

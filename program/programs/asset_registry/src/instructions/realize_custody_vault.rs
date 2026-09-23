@@ -79,7 +79,8 @@ pub struct RealizeCustodyVault<'info> {
 /// a missing or other holder's entry `ReceiverNotApproved`. Without KYC the
 /// beneficiary is not stuck: `return_custody_vault` refunds their recorded
 /// deposit (Active or Triggered). Every other vault type (the clawback
-/// quarantine, ConversionPending) passes None / None and is not gated.
+/// quarantine, Vesting; ConversionPending is retired at open, 2D) passes
+/// None / None and is not gated.
 ///
 /// Receiver KYC: NOT APPLICABLE — there is no receiver. The escrow balance is
 /// burned, so no share units leave the program. When `TransferToBeneficiary`

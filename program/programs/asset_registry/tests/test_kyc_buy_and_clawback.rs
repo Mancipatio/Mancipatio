@@ -31,6 +31,8 @@
 mod kyc;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/reclaim.rs"]
+mod reclaim;
 #[path = "../../../tests/support/sale_approval.rs"]
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
@@ -1378,7 +1380,7 @@ fn mint_to_treasury_rejects_vaults_with_a_wallet_exit() {
     //     `open_custody_vault` no longer stores such an action, so model a
     //     vault written before that gate by rewriting the state directly.
     let (vesting_pda, vesting_escrow) =
-        open_vault(&mut svm, &ctx, 2, VaultType::Vesting, mallory.pubkey());
+        open_vault(&mut svm, &ctx, 2, VaultType::Vesting, Pubkey::default());
     set_realize_action(&mut svm, &vesting_pda, RealizeAction::TransferToBeneficiary);
     let err = try_send(
         &mut svm,
@@ -4690,6 +4692,11 @@ fn open_custody_vault_rejects_unsupported_realize_action() {
             RealizeAction::TransferToBeneficiary,
         ),
         (VaultType::RedemptionQueue, RealizeAction::BurnAndPayout),
+        // 2D: the realize-action gate still fires before the retirement one.
+        (
+            VaultType::ConversionPending,
+            RealizeAction::TransferToBeneficiary,
+        ),
     ];
     for (i, (vault_type, action)) in cases.into_iter().enumerate() {
         let err = try_open_vault_with_action(
@@ -4713,13 +4720,104 @@ fn open_custody_vault_rejects_unsupported_realize_action() {
         VaultType::RedemptionQueue,
         Pubkey::default(),
     );
-    open_vault(
+    // …except the retired ConversionPending (2D: VaultTypeRetired).
+    let err = try_open_vault_with_action(
         &mut svm,
         &ctx,
         913,
         VaultType::ConversionPending,
+        RealizeAction::BurnAndAttest,
         Pubkey::default(),
-    );
+    )
+    .expect_err("ConversionPending is retired");
+    assert_custom_error(&err, 6142);
+}
+
+/// 2D: only a DeliveryEscrow may name a beneficiary (BeneficiaryNotAllowed,
+/// 6141); a DeliveryEscrow still requires one (BeneficiaryRequired).
+#[test]
+fn non_delivery_vault_refuses_a_beneficiary() {
+    let (mut svm, ctx) = boot(false);
+    warp_to(&mut svm, 1_000);
+    let beneficiary = Pubkey::new_unique();
+    for (i, vault_type) in [VaultType::Vesting, VaultType::RedemptionQueue]
+        .into_iter()
+        .enumerate()
+    {
+        let err = try_open_vault_with_action(
+            &mut svm,
+            &ctx,
+            940 + i as u64,
+            vault_type,
+            RealizeAction::BurnAndAttest,
+            beneficiary,
+        )
+        .expect_err("a non-delivery vault must not store a beneficiary");
+        assert_custom_error(&err, 6141);
+    }
+    open_vault(&mut svm, &ctx, 942, VaultType::DeliveryEscrow, beneficiary);
+}
+
+/// 2D (D9): deposits land only in a DeliveryEscrow, from its beneficiary. A
+/// Vesting or RedemptionQueue vault refuses every depositor with 6084, on an
+/// Open and on a KycGated mint.
+#[test]
+fn deposits_into_non_delivery_vaults_are_refused_in_both_modes() {
+    for gated in [false, true] {
+        let (mut svm, ctx) = boot(gated);
+        warp_to(&mut svm, 1_000);
+        let owner = ctx.buyer.pubkey();
+        let tail = |ctx: &Ctx| {
+            if gated {
+                kyc_hook_metas(ctx, &owner, &owner, &owner)
+            } else {
+                open_hook_metas(ctx, &owner)
+            }
+        };
+        if gated {
+            approve_kyc(&mut svm, &ctx, &owner);
+        }
+        send(
+            &mut svm,
+            &[&ctx.buyer],
+            &[buy_ix(&ctx, 2, tail(&ctx))],
+            "buyer acquires units",
+        );
+        for (id, vault_type) in [
+            (950u64, VaultType::Vesting),
+            (951, VaultType::RedemptionQueue),
+        ] {
+            let (vault, escrow) = open_vault(&mut svm, &ctx, id, vault_type, Pubkey::default());
+            let mut metas = acc::DepositToCustodyVault {
+                depositor: owner,
+                share_class: ctx.share_class_pda,
+                custody_vault: vault,
+                mint: ctx.mint_pda,
+                escrow,
+                depositor_share_account: ctx.buyer_share_ata,
+                token_program: TOKEN_2022,
+                platform: pause::platform_pda(),
+            }
+            .to_account_metas(None);
+            metas.extend(if gated {
+                kyc_hook_metas(&ctx, &owner, &owner, &vault)
+            } else {
+                open_hook_metas(&ctx, &owner)
+            });
+            let err = try_send(
+                &mut svm,
+                &[&ctx.buyer],
+                &[Instruction::new_with_bytes(
+                    ctx.program_id,
+                    &ixd::DepositToCustodyVault { amount: 1 }.data(),
+                    metas,
+                )],
+            )
+            .expect_err("non-delivery deposit");
+            assert_custom_error(&err, 6084);
+            assert_eq!(token_balance(&svm, &escrow), 0, "{vault_type:?} untouched");
+        }
+    }
 }
 
 /// Mirror of the `mint_to_treasury` funding gate on the holder-deposit side:
@@ -4738,7 +4836,8 @@ fn deposit_rejects_vault_with_unsupported_realize_action() {
         &[buy_ix(&ctx, 2, open_hook_metas(&ctx, &owner))],
         "buyer acquires units to deposit",
     );
-    let (vault, escrow) = open_vault(&mut svm, &ctx, 920, VaultType::Vesting, Pubkey::default());
+    // 2D: only a DeliveryEscrow accepts deposits at all, from its beneficiary.
+    let (vault, escrow) = open_vault(&mut svm, &ctx, 920, VaultType::DeliveryEscrow, owner);
 
     let deposit_ix = |ctx: &Ctx, amount: u64| {
         let mut metas = acc::DepositToCustodyVault {
@@ -4950,6 +5049,7 @@ fn custody_entry_pause_keeps_the_clawback_quarantine_path_open() {
         ),
         (
             21,
+            // Retired (2D, 6142), but the pause check still runs first.
             VaultType::ConversionPending,
             RealizeAction::BurnAndAttest,
             Pubkey::default(),
@@ -5073,7 +5173,8 @@ fn custody_entry_pause_keeps_the_clawback_quarantine_path_open() {
 
 /// The quarantine exemption covers only OPENING the burn-only vault (clawback's
 /// destination). A holder deposit into that same RedemptionQueue +
-/// BurnAndAttest vault is a custody entry, gated by bit3 like any other.
+/// BurnAndAttest vault is a custody entry, gated by bit3 like any other, and
+/// since 2D refused outright once unpaused (only a DeliveryEscrow accepts one).
 #[test]
 fn custody_entry_pause_gates_deposits_into_a_quarantine_vault() {
     let (mut svm, ctx) = boot(false);
@@ -5119,22 +5220,20 @@ fn custody_entry_pause_gates_deposits_into_a_quarantine_vault() {
     );
     assert_eq!(token_balance(&svm, &escrow), 0, "escrow untouched");
 
-    // Only bit3 clear: the same deposit lands.
+    // Only bit3 clear: the pause no longer stops it, but 2D does — only a
+    // DeliveryEscrow accepts deposits (DepositorNotBeneficiary, 6084).
     pause::pause_only(
         &mut svm,
         &ctx.payer,
         asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_CUSTODY_ENTRY,
     );
-    send(
-        &mut svm,
-        &[&ctx.buyer],
-        &[deposit_ix(&ctx)],
-        "quarantine-vault deposit",
-    );
-    assert_eq!(token_balance(&svm, &escrow), 1);
+    let err = try_send(&mut svm, &[&ctx.buyer], &[deposit_ix(&ctx)])
+        .expect_err("quarantine-vault deposit");
+    assert_custom_error(&err, 6084);
+    assert_eq!(token_balance(&svm, &escrow), 0);
     assert_eq!(
         load::<asset_registry::CustodyVault>(&svm, &vault).deposited,
-        1
+        0
     );
 }
 
@@ -6625,4 +6724,384 @@ fn block_entry_layout_matches_hook() {
         8 + transfer_hook::TransferHookConfig::INIT_SPACE
     );
     assert!(data.len() >= asset_registry::HOOK_CONFIG_MIN_LEN);
+}
+
+// ── 2D: reclaim_rent — KycEntry arm (close_kyc_entry) ────────────────────────
+
+fn approve_kyc_ix(ctx: &Ctx, holder: &Pubkey, expiry: i64) -> Instruction {
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::ApproveHolder {
+            holder: *holder,
+            jurisdiction: JURISDICTION,
+            accreditation_level: 1,
+            expiry,
+            provider_id: 1,
+            external_ref_hash: [5u8; 32],
+        }
+        .data(),
+        acc::ApproveHolder {
+            authority: ctx.payer.pubkey(),
+            kyc_registry: ctx.kyc_registry_pda,
+            kyc_entry: kyc_entry_of(ctx, holder),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn close_entry_ix(ctx: &Ctx, caller: &Pubkey, owner: &Pubkey, holder: &Pubkey) -> Instruction {
+    reclaim::reclaim_ix(
+        caller,
+        owner,
+        &kyc_entry_of(ctx, holder),
+        &ctx.kyc_registry_pda,
+        None,
+        None,
+        None,
+    )
+}
+
+fn entries_count(svm: &LiteSVM, ctx: &Ctx) -> u64 {
+    load::<asset_registry::KycRegistry>(svm, &ctx.kyc_registry_pda).entries_count
+}
+
+fn funded(svm: &mut LiteSVM) -> Keypair {
+    let wallet = Keypair::new();
+    svm.airdrop(&wallet.pubkey(), 10_000_000_000).unwrap();
+    wallet
+}
+
+/// The boot buyer is approved until t=5_000, buys 10 units (KycGated) and is
+/// revoked; the clock is then moved to 5_000 and the provider closes the entry.
+fn buy_revoke_and_close(svm: &mut LiteSVM, ctx: &Ctx) -> Pubkey {
+    let holder = ctx.buyer.pubkey();
+    send(
+        svm,
+        &[&ctx.payer],
+        &[approve_kyc_ix(ctx, &holder, 5_000)],
+        "approve until 5_000",
+    );
+    send(
+        svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            ctx,
+            10,
+            kyc_hook_metas(ctx, &holder, &holder, &holder),
+        )],
+        "buy",
+    );
+    revoke_kyc(svm, ctx, &holder);
+    warp_to(svm, 5_000);
+    let provider = ctx.payer.pubkey();
+    send(
+        svm,
+        &[&ctx.payer],
+        &[close_entry_ix(ctx, &provider, &provider, &holder)],
+        "close entry",
+    );
+    reclaim::assert_gone(svm, &kyc_entry_of(ctx, &holder));
+    holder
+}
+
+/// Approved → 6140; Revoked before its expiry → 6140; any signer, owner or
+/// registry other than the provider's own → 6001. Past the expiry the provider
+/// gets the whole entry's rent, the entry is gone and `entries_count` drops.
+#[test]
+fn kyc_close_needs_the_provider_a_revoked_entry_and_a_lapsed_expiry() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let provider = ctx.payer.pubkey();
+    let holder = ctx.buyer.pubkey();
+    let entry = kyc_entry_of(&ctx, &holder);
+    let stranger = funded(&mut svm);
+    let fee = funded(&mut svm);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[approve_kyc_ix(&ctx, &holder, 5_000)],
+        "approve",
+    );
+    let own = |ctx: &Ctx| close_entry_ix(ctx, &provider, &provider, &holder);
+    let err = try_send(&mut svm, &[&ctx.payer], &[own(&ctx)]).expect_err("approved");
+    assert_custom_error(&err, 6140);
+    revoke_kyc(&mut svm, &ctx, &holder);
+    let err = try_send(&mut svm, &[&ctx.payer], &[own(&ctx)]).expect_err("before expiry");
+    assert_custom_error(&err, 6140);
+
+    warp_to(&mut svm, 5_000);
+    // A second registry, created by `stranger` (admin co-signed).
+    send(
+        &mut svm,
+        &[&stranger, &ctx.payer],
+        &[kyc::create_registry_ix(
+            &stranger.pubkey(),
+            &provider,
+            kyc::bitmap(&[JURISDICTION]),
+            kyc::bitmap(&[]),
+        )],
+        "foreign registry",
+    );
+    let foreign = kyc::registry_pda(&stranger.pubkey());
+    for (signer, ix) in [
+        (
+            &stranger,
+            close_entry_ix(&ctx, &stranger.pubkey(), &stranger.pubkey(), &holder),
+        ),
+        (
+            &ctx.payer,
+            close_entry_ix(&ctx, &provider, &stranger.pubkey(), &holder),
+        ),
+        (
+            &stranger,
+            reclaim::reclaim_ix(
+                &stranger.pubkey(),
+                &stranger.pubkey(),
+                &entry,
+                &foreign,
+                None,
+                None,
+                None,
+            ),
+        ),
+    ] {
+        let err = try_send(&mut svm, &[signer], &[ix]).expect_err("not the provider");
+        assert_custom_error(&err, 6001);
+    }
+
+    let count = entries_count(&svm, &ctx);
+    let rent = reclaim::lamports(&svm, &entry);
+    let before = reclaim::lamports(&svm, &provider);
+    let logs = send_with_logs(&mut svm, &[&fee, &ctx.payer], &[own(&ctx)]).expect("close");
+    assert_eq!(reclaim::lamports(&svm, &provider), before + rent);
+    reclaim::assert_gone(&svm, &entry);
+    assert_eq!(entries_count(&svm, &ctx), count - 1, "counts live entries");
+    let events = kyc::events::<asset_registry::RentReclaimed>(&logs);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].kind, asset_registry::RECLAIM_KYC);
+    assert_eq!(events[0].target, entry);
+    assert_eq!(events[0].owner, provider);
+    assert_eq!(events[0].lamports, rent);
+}
+
+/// After a close, `clawback_from_holder` fails (3012: no entry); the recovery
+/// is ONE transaction — approve (expiring next second) + revoke + clawback —
+/// which re-creates the entry as new (`reapproval = false`) and keeps
+/// `entries_count` consistent. The blocklist clawback needs no entry at all.
+#[test]
+fn after_kyc_close_clawback_needs_the_one_transaction_recovery() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let count = entries_count(&svm, &ctx);
+    let holder = buy_revoke_and_close(&mut svm, &ctx);
+    assert_eq!(entries_count(&svm, &ctx), count);
+    let payer = ctx.payer.pubkey();
+    let (custody, escrow) = open_redemption_vault(&mut svm, &ctx, 1);
+    let clawback = |ctx: &Ctx| {
+        clawback_ix(
+            ctx,
+            &payer,
+            &holder,
+            &ctx.buyer_share_ata,
+            &custody,
+            &escrow,
+            4,
+        )
+    };
+    let err = try_send(&mut svm, &[&ctx.payer], &[clawback(&ctx)]).expect_err("no entry");
+    assert_custom_error(&err, 3012);
+
+    let logs = send_with_logs(
+        &mut svm,
+        &[&ctx.payer],
+        &[
+            approve_kyc_ix(&ctx, &holder, 5_001),
+            kyc::revoke_ix(&payer, &ctx.kyc_registry_pda, &holder),
+            clawback(&ctx),
+        ],
+    )
+    .expect("one-transaction recovery");
+    assert_eq!(token_balance(&svm, &escrow), 4);
+    let approved = kyc::events::<asset_registry::HolderApproved>(&logs);
+    assert_eq!(approved.len(), 1);
+    assert!(!approved[0].reapproval, "the entry was re-created");
+    assert_eq!(kyc::events::<asset_registry::HolderRevoked>(&logs).len(), 1);
+    assert_eq!(entries_count(&svm, &ctx), count + 1);
+
+    // The blocklist path never needed the entry.
+    block_holder(&mut svm, &ctx, holder);
+    let (custody_2, escrow_2) = open_redemption_vault(&mut svm, &ctx, 2);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[blocklist_clawback_ix(
+            &ctx,
+            &payer,
+            &holder,
+            &ctx.buyer_share_ata,
+            &custody_2,
+            &escrow_2,
+            0,
+            true,
+        )],
+        "blocklist clawback",
+    );
+    assert_eq!(token_balance(&svm, &escrow_2), 6);
+}
+
+/// With the beneficiary's entry closed a DeliveryEscrow realize fails (3012),
+/// but `return_custody_vault` still refunds the recorded deposit, and a hook
+/// transfer TO that holder fails with `ReceiverNotApproved`.
+#[test]
+fn after_kyc_close_realize_fails_return_works_and_receives_are_refused() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let holder = ctx.buyer.pubkey();
+    let payer = ctx.payer.pubkey();
+    // A second holder, approved for good, who will try to send units.
+    let peer = funded(&mut svm);
+    approve_kyc(&mut svm, &ctx, &peer.pubkey());
+    let peer_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &peer.pubkey());
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[approve_kyc_ix(&ctx, &holder, 5_000)],
+        "approve until 5_000",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &holder, &holder, &holder),
+        )],
+        "buy",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[transfer_ix(
+            &ctx,
+            ctx.buyer_share_ata,
+            peer_ata,
+            holder,
+            holder,
+            peer.pubkey(),
+            true,
+        )],
+        "holder → peer",
+    );
+    let (vault, escrow) = open_vault(&mut svm, &ctx, 7, VaultType::DeliveryEscrow, holder);
+    let mut deposit = acc::DepositToCustodyVault {
+        depositor: holder,
+        share_class: ctx.share_class_pda,
+        custody_vault: vault,
+        mint: ctx.mint_pda,
+        escrow,
+        depositor_share_account: ctx.buyer_share_ata,
+        token_program: TOKEN_2022,
+        platform: pause::platform_pda(),
+    }
+    .to_account_metas(None);
+    deposit.extend(kyc_hook_metas(&ctx, &holder, &holder, &vault));
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::DepositToCustodyVault { amount: 4 }.data(),
+            deposit,
+        )],
+        "deposit",
+    );
+    revoke_kyc(&mut svm, &ctx, &holder);
+    warp_to(&mut svm, 5_000);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[close_entry_ix(&ctx, &payer, &payer, &holder)],
+        "close entry",
+    );
+
+    let admin_record = admin_record_of(&payer);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::TriggerCustodyVault {}.data(),
+            acc::TriggerCustodyVault {
+                authority_admin_record: admin_record,
+                authority: payer,
+                custody_vault: vault,
+            }
+            .to_account_metas(None),
+        )],
+        "trigger",
+    );
+    let realize = Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::RealizeCustodyVault {}.data(),
+        acc::RealizeCustodyVault {
+            authority_admin_record: admin_record,
+            authority: payer,
+            share_class: ctx.share_class_pda,
+            custody_vault: vault,
+            mint: ctx.mint_pda,
+            escrow,
+            escrow_marker: escrow_marker_of(&ctx, &vault),
+            token_program: TOKEN_2022,
+            kyc_registry: Some(ctx.kyc_registry_pda),
+            kyc_entry: Some(kyc_entry_of(&ctx, &holder)),
+        }
+        .to_account_metas(None),
+    );
+    let err = try_send(&mut svm, &[&ctx.payer], &[realize]).expect_err("no entry");
+    assert_custom_error(&err, 3012);
+    let mut ret = acc::ReturnCustodyVault {
+        authority_admin_record: admin_record,
+        signer: payer,
+        share_class: ctx.share_class_pda,
+        custody_vault: vault,
+        mint: ctx.mint_pda,
+        escrow,
+        beneficiary_token_account: ctx.buyer_share_ata,
+        escrow_marker: escrow_marker_of(&ctx, &vault),
+        token_program: TOKEN_2022,
+    }
+    .to_account_metas(None);
+    ret.extend(kyc_hook_metas(&ctx, &vault, &vault, &holder));
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::ReturnCustodyVault {}.data(),
+            ret,
+        )],
+        "return the deposit without KYC",
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 9);
+    assert_eq!(token_balance(&svm, &escrow), 0);
+
+    let err = try_send(
+        &mut svm,
+        &[&peer],
+        &[transfer_ix(
+            &ctx,
+            peer_ata,
+            ctx.buyer_share_ata,
+            peer.pubkey(),
+            peer.pubkey(),
+            holder,
+            true,
+        )],
+    )
+    .expect_err("receiver without an entry");
+    assert_custom_error(
+        &err,
+        u32::from(transfer_hook::HookError::ReceiverNotApproved),
+    );
 }

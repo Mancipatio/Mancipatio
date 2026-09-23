@@ -214,6 +214,72 @@ pub fn close_program_account(account: &AccountInfo, recipient: &AccountInfo) -> 
     Ok(())
 }
 
+/// One shared error site for the 2D paths: every `require!` expands to its
+/// own error construction (~0.6 KB of SBF each), and the program is close to
+/// its ProgramData capacity.
+#[inline(never)]
+pub fn ensure(ok: bool, code: RegistryError) -> Result<()> {
+    if ok {
+        Ok(())
+    } else {
+        Err(error!(code))
+    }
+}
+
+/// Closes an EMPTY escrow token account owned by `program` and whose token
+/// authority is the PDA signing with `seeds`; its rent goes to `recipient`.
+/// A non-zero balance is refused (`EscrowNotEmpty`): dust is never burned or
+/// swept here, the account simply stays open.
+#[inline(never)]
+pub fn close_empty_escrow<'info>(
+    escrow: &AccountInfo<'info>,
+    program: Option<&Interface<'info, token_interface::TokenInterface>>,
+    authority: &AccountInfo<'info>,
+    recipient: &AccountInfo<'info>,
+    seeds: &[&[u8]],
+) -> Result<()> {
+    let program = match program {
+        Some(program) if *escrow.owner == program.key() => program,
+        _ => return ensure(false, RegistryError::Unauthorized),
+    };
+    let amount = {
+        let data = escrow.try_borrow_data()?;
+        TokenAccount::try_deserialize(&mut &data[..])?.amount
+    };
+    ensure(amount == 0, RegistryError::EscrowNotEmpty)?;
+    token_interface::close_account(CpiContext::new_with_signer(
+        program.key(),
+        token_interface::CloseAccount {
+            account: escrow.clone(),
+            destination: recipient.clone(),
+            authority: authority.clone(),
+        },
+        &[seeds],
+    ))
+}
+
+/// Retires a registry parent in place (2D tombstone): shrinks it to the
+/// 8-byte `CLOSED_ACCOUNT_TAG`, keeps exactly the rent minimum for 8 bytes and
+/// moves every other lamport to `recipient`. The account stays owned by this
+/// program, so its PDA can never be re-initialised (`init`'s `allocate`
+/// refuses a program owner) and every old instruction fails to deserialize it.
+#[inline(never)]
+pub fn tombstone_program_account(account: &AccountInfo, recipient: &AccountInfo) -> Result<()> {
+    let keep = Rent::get()?.minimum_balance(CLOSED_ACCOUNT_TAG.len());
+    // The parent was rent-exempt at its full size, so it holds at least
+    // `keep`; the sum cannot exceed the lamport supply. The runtime rejects
+    // any imbalance anyway.
+    let refund = account.lamports().saturating_sub(keep);
+    account.resize(CLOSED_ACCOUNT_TAG.len())?;
+    account
+        .try_borrow_mut_data()?
+        .copy_from_slice(&CLOSED_ACCOUNT_TAG);
+    **account.try_borrow_mut_lamports()? = keep;
+    let credited = recipient.lamports().saturating_add(refund);
+    **recipient.try_borrow_mut_lamports()? = credited;
+    Ok(())
+}
+
 /// Reads and closes the `IssuerPermissions` record at `record` (the caller
 /// pins its address by seeds) when an issuer authority changes, so a grant can
 /// never come back to life on an A -> B -> A round trip. Returns `None` when no

@@ -550,6 +550,12 @@ fn open_payout_vault(
     ctx: &SaleCtx,
     metadata_hash: [u8; 32],
 ) -> (Pubkey, Pubkey) {
+    let (ix, vault_pda, escrow_pda) = open_payout_vault_ix(ctx, metadata_hash);
+    send(svm, &[&ctx.payer], &[ix], "open_payout_vault");
+    (vault_pda, escrow_pda)
+}
+
+fn open_payout_vault_ix(ctx: &SaleCtx, metadata_hash: [u8; 32]) -> (Instruction, Pubkey, Pubkey) {
     let program_id = asset_registry::id();
     let vault_pda = Pubkey::find_program_address(
         &[asset_registry::PAYOUT_SEED, ctx.sale.as_ref()],
@@ -561,27 +567,22 @@ fn open_payout_vault(
         &program_id,
     )
     .0;
-    send(
-        svm,
-        &[&ctx.payer],
-        &[Instruction::new_with_bytes(
-            program_id,
-            &ixd::OpenPayoutVault { metadata_hash }.data(),
-            acc::OpenPayoutVault {
-                authority: ctx.payer.pubkey(),
-                sale: ctx.sale,
-                proceeds: ctx.proceeds,
-                payment_mint: ctx.payment_mint,
-                vault: vault_pda,
-                escrow: escrow_pda,
-                payment_token_program: TOKEN_2022,
-                system_program: system_program::ID,
-            }
-            .to_account_metas(None),
-        )],
-        "open_payout_vault",
+    let ix = Instruction::new_with_bytes(
+        program_id,
+        &ixd::OpenPayoutVault { metadata_hash }.data(),
+        acc::OpenPayoutVault {
+            authority: ctx.payer.pubkey(),
+            sale: ctx.sale,
+            proceeds: ctx.proceeds,
+            payment_mint: ctx.payment_mint,
+            vault: vault_pda,
+            escrow: escrow_pda,
+            payment_token_program: TOKEN_2022,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
     );
-    (vault_pda, escrow_pda)
+    (ix, vault_pda, escrow_pda)
 }
 
 #[test]
@@ -591,8 +592,14 @@ fn open_payout_vault_funds_and_schedules() {
     buy_units(&mut svm, &ctx, 100);
     let proceeds_before = token_balance(&svm, &ctx.proceeds);
     assert!(proceeds_before > 0);
+    let proceeds_rent = svm.get_account(&ctx.proceeds).unwrap().lamports;
+    let authority_before = svm.get_account(&ctx.payer.pubkey()).unwrap().lamports;
 
-    let (vault, escrow) = open_payout_vault(&mut svm, &ctx, [7u8; 32]);
+    // A separate fee payer keeps the authority's lamport delta exact.
+    let fee = Keypair::new();
+    svm.airdrop(&fee.pubkey(), 1_000_000_000).unwrap();
+    let (ix, vault, escrow) = open_payout_vault_ix(&ctx, [7u8; 32]);
+    send(&mut svm, &[&fee, &ctx.payer], &[ix], "open_payout_vault");
 
     let v: PayoutVault = load(&svm, &vault);
     assert_eq!(v.state, PayoutVaultState::Active);
@@ -600,9 +607,21 @@ fn open_payout_vault_funds_and_schedules() {
     assert_eq!(v.num_tranches, 10);
     assert_eq!(v.tranche_amount, proceeds_before / 10);
     assert_eq!(token_balance(&svm, &escrow), proceeds_before);
-    assert_eq!(token_balance(&svm, &ctx.proceeds), 0);
     let sale: Sale = load(&svm, &ctx.sale);
     assert_eq!(sale.status, SaleStatus::Closed);
+    // 2D: the swept proceeds account is closed; its rent returns to the sale
+    // authority, which also paid for the new vault and its escrow.
+    assert!(
+        svm.get_account(&ctx.proceeds)
+            .is_none_or(|a| a.lamports == 0 && a.data.is_empty()),
+        "proceeds account closed"
+    );
+    let paid =
+        svm.get_account(&vault).unwrap().lamports + svm.get_account(&escrow).unwrap().lamports;
+    assert_eq!(
+        svm.get_account(&ctx.payer.pubkey()).unwrap().lamports,
+        authority_before + proceeds_rent - paid
+    );
 }
 
 fn send_post_update_with_hash(

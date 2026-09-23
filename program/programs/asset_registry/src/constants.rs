@@ -217,3 +217,21 @@ pub const DISTRIBUTION_PLAN_SEED: &[u8] = b"distribution_plan";
 pub const DISTRIBUTION_BATCH_SEED: &[u8] = b"distribution_batch";
 pub const DISTRIBUTION_STATE_VERSION: u8 = 2;
 pub const MAX_DISTRIBUTION_BATCH_SIZE: usize = 16;
+
+// ── Rent reclaim (2D) ────────────────────────────────────────────────────────
+/// Tombstone written by `reclaim_rent` over a retired Offer / OtcDeal /
+/// CustodyVault: the parent shrinks to these 8 bytes, keeps exactly the rent
+/// minimum for them and stays owned by this program, so its PDA can never be
+/// re-initialised (Anchor `init` on a funded account takes the transfer +
+/// `allocate` path, and `allocate` refuses a non-system owner). Deliberately
+/// NOT an `#[account]` type: it must never decode as one. Pinned against every
+/// account discriminator by a test; mirrored by `front/lib/closed-account.ts`.
+pub const CLOSED_ACCOUNT_TAG: [u8; 8] = *b"CLOSED__";
+/// `RentReclaimed.kind`: an Offer (escrow closed, Offer tombstoned).
+pub const RECLAIM_OFFER: u8 = 0;
+/// `RentReclaimed.kind`: an OtcDeal (both escrows closed, deal tombstoned).
+pub const RECLAIM_OTC: u8 = 1;
+/// `RentReclaimed.kind`: a CustodyVault (escrow closed, vault tombstoned).
+pub const RECLAIM_CUSTODY: u8 = 2;
+/// `RentReclaimed.kind`: a KycEntry (fully closed; the PDA is reusable).
+pub const RECLAIM_KYC: u8 = 3;

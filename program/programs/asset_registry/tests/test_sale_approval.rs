@@ -7,6 +7,8 @@
 
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
+#[path = "../../../tests/support/reclaim.rs"]
+mod reclaim;
 #[path = "../../../tests/support/sale_approval.rs"]
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
@@ -1182,4 +1184,85 @@ fn an_approval_binds_its_share_class_and_its_sale_pda() {
     ix.accounts[6].pubkey = Pubkey::new_unique();
     let err = try_send(&mut svm, &[&env.payer], &[ix]).unwrap_err();
     assert!(err.contains("ConstraintSeeds"), "random sale: {err}");
+}
+
+// ── 2D: close_sale closes the swept proceeds account ─────────────────────────
+
+/// `close_sale` with nothing raised still closes the proceeds account and
+/// returns its rent to `sale.authority`. The Sale itself stays (Closed): it is
+/// the sale-id reuse guard, and `reclaim_rent` refuses it (6001).
+#[test]
+fn close_sale_closes_the_proceeds_and_the_sale_stays_the_reuse_guard() {
+    let (mut svm, env) = boot();
+    let t = terms(&svm);
+    approve(&mut svm, &env, &env.admin2, 7, t).unwrap();
+    send(
+        &mut svm,
+        &[&env.payer],
+        &[open_sale_ix(
+            &env,
+            &OpenArgs::new(&env, 7, 10, 100, &env.admin2),
+        )],
+        "open_sale",
+    );
+    let sale = sale_pda(&env.share_class, 7);
+    let proceeds = Pubkey::find_program_address(
+        &[asset_registry::PROCEEDS_SEED, sale.as_ref()],
+        &asset_registry::ID,
+    )
+    .0;
+    let destination = create_ata(&mut svm, &env.payer, &env.payment_mint, &env.payer.pubkey());
+    let rent = lamports(&svm, &proceeds);
+    assert!(rent > 0);
+    let authority_before = lamports(&svm, &env.payer.pubkey());
+    let fee = Keypair::new();
+    svm.airdrop(&fee.pubkey(), 1_000_000_000).unwrap();
+    send(
+        &mut svm,
+        &[&fee, &env.payer],
+        &[Instruction::new_with_bytes(
+            asset_registry::ID,
+            &ixd::CloseSale {}.data(),
+            acc::CloseSale {
+                authority: env.payer.pubkey(),
+                sale,
+                proceeds,
+                payment_mint: env.payment_mint,
+                destination,
+                payment_token_program: TOKEN_2022,
+                platform: platform(),
+            }
+            .to_account_metas(None),
+        )],
+        "close_sale (nothing raised)",
+    );
+    assert_eq!(lamports(&svm, &proceeds), 0, "proceeds account closed");
+    assert_eq!(
+        lamports(&svm, &env.payer.pubkey()),
+        authority_before + rent,
+        "its rent to sale.authority"
+    );
+    assert_eq!(load::<Sale>(&svm, &sale).status, SaleStatus::Closed);
+    assert_error(
+        approve(&mut svm, &env, &env.payer, 7, t).map(|_| ()),
+        6127,
+        "SaleIdAlreadyUsed",
+    );
+    assert_error(
+        try_send(
+            &mut svm,
+            &[&env.payer],
+            &[reclaim::reclaim_ix(
+                &env.payer.pubkey(),
+                &env.payer.pubkey(),
+                &sale,
+                &proceeds,
+                None,
+                Some(TOKEN_2022),
+                None,
+            )],
+        ),
+        6001,
+        "Unauthorized",
+    );
 }

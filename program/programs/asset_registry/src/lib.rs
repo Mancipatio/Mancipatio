@@ -937,4 +937,13 @@ pub mod asset_registry {
     ) -> Result<()> {
         instructions::handle_withdraw_vesting_surplus(ctx)
     }
+
+    /// Returns the rent of a terminal Offer (any caller; rent to the maker),
+    /// OtcDeal (`deal.admin`), CustodyVault (`vault.authority`) or revoked and
+    /// expired KycEntry (`registry.authority`). Empty escrows are closed and
+    /// the Offer / OtcDeal / CustodyVault parent is tombstoned in place so its
+    /// PDA can never be reused; a KycEntry is closed outright.
+    pub fn reclaim_rent<'info>(ctx: Context<'info, ReclaimRent<'info>>) -> Result<()> {
+        instructions::handle_reclaim_rent(ctx)
+    }
 }

@@ -7,6 +7,8 @@ use crate::state::{RaiseType, Sale, SaleStatus};
 
 #[derive(Accounts)]
 pub struct CloseSale<'info> {
+    /// Mut (2D): receives the closed proceeds account's rent.
+    #[account(mut)]
     pub authority: Signer<'info>,
 
     #[account(
@@ -44,8 +46,10 @@ pub struct CloseSale<'info> {
     pub platform: Box<Account<'info, crate::state::Platform>>,
 }
 
-/// Closes a sale: sweeps the proceeds escrow to the issuer's payment account
-/// and marks the sale `Closed`.
+/// Closes a sale: sweeps the proceeds escrow to the issuer's payment account,
+/// closes the (now empty) proceeds account with its rent to `sale.authority`
+/// (2D; also when nothing was raised) and marks the sale `Closed`. The Sale
+/// itself stays: it is the sale-id reuse guard.
 pub fn handle_close_sale(ctx: Context<CloseSale>) -> Result<()> {
     require!(
         ctx.accounts.sale.raise_type == RaiseType::Mature,
@@ -54,18 +58,18 @@ pub fn handle_close_sale(ctx: Context<CloseSale>) -> Result<()> {
 
     let proceeds_amount = ctx.accounts.proceeds.amount;
 
-    if proceeds_amount > 0 {
-        // The Sale PDA is the proceeds-escrow authority — sign with its seeds.
-        let share_class_key = ctx.accounts.sale.share_class;
-        let sale_id_seed = ctx.accounts.sale.sale_id.to_le_bytes();
-        let sale_bump = ctx.accounts.sale.bump;
-        let signer_seeds: &[&[&[u8]]] = &[&[
-            SALE_SEED,
-            share_class_key.as_ref(),
-            &sale_id_seed,
-            &[sale_bump],
-        ]];
+    // The Sale PDA is the proceeds-escrow authority — sign with its seeds.
+    let share_class_key = ctx.accounts.sale.share_class;
+    let sale_id_seed = ctx.accounts.sale.sale_id.to_le_bytes();
+    let sale_bump = ctx.accounts.sale.bump;
+    let seeds: &[&[u8]] = &[
+        SALE_SEED,
+        share_class_key.as_ref(),
+        &sale_id_seed,
+        &[sale_bump],
+    ];
 
+    if proceeds_amount > 0 {
         token_interface::transfer_checked(
             CpiContext::new_with_signer(
                 ctx.accounts.payment_token_program.key(),
@@ -75,12 +79,21 @@ pub fn handle_close_sale(ctx: Context<CloseSale>) -> Result<()> {
                     to: ctx.accounts.destination.to_account_info(),
                     authority: ctx.accounts.sale.to_account_info(),
                 },
-                signer_seeds,
+                &[seeds],
             ),
             proceeds_amount,
             ctx.accounts.payment_mint.decimals,
         )?;
     }
+
+    // Empty after the sweep, and `buy` requires Open: nothing reads it again.
+    crate::util::close_empty_escrow(
+        &ctx.accounts.proceeds.to_account_info(),
+        Some(&ctx.accounts.payment_token_program),
+        &ctx.accounts.sale.to_account_info(),
+        &ctx.accounts.authority.to_account_info(),
+        seeds,
+    )?;
 
     ctx.accounts.sale.status = SaleStatus::Closed;
     msg!(
