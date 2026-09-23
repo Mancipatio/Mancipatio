@@ -63,6 +63,7 @@ import {
 } from "@/lib/kyc-authority";
 import { listBlockEntries } from "@/lib/blocklist";
 import { listAlerts } from "@/lib/compliance";
+import { ClientPrivacyPanel } from "@/components/client-privacy-panel";
 
 const TYPE_LABEL: Record<ClientType, string> = {
   issuer: "Issuer",
@@ -846,6 +847,18 @@ function ClientDetail({ id }: { id: string }) {
           )}
         </div>
       </section>
+
+      <ClientPrivacyPanel
+        session={conn.wallet}
+        clientId={client.id}
+        anonymizedAt={client.anonymized_at}
+        passportActive={
+          !!passport &&
+          passport.status === KycStatus.Approved &&
+          !isPassportExpired(passport.expiry, nowSec)
+        }
+        onChanged={refresh}
+      />
 
       {/* On-chain passport — status is visible to every admin; Issue/Revoke
           only for the KYC provider (live registry authority), which is a
@@ -1770,9 +1783,9 @@ function RequestMoreInfoModal({
 
 /**
  * KYC documents live in the PRIVATE `client-documents` bucket — resolving a
- * URL requires an admin-signed request (60-minute signed URL; legacy public
- * fallback handled server-side). Fetch-on-click keeps the page free of
- * pre-generated links.
+ * URL requires an admin request that the server audit-logs before answering
+ * (2-minute signed URL, no public fallback). Fetch-on-click keeps the page
+ * free of pre-generated links and logs exactly the views that happened.
  */
 function DocLink({
   session,
@@ -1793,7 +1806,6 @@ function DocLink({
     setBusy(true);
     try {
       const url = await getClientDocumentUrl(session, documentId);
-      if (!url) throw new Error("Could not resolve the document URL");
       window.open(url, "_blank", "noopener,noreferrer");
     } catch (err) {
       toast.showError(

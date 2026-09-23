@@ -43,6 +43,7 @@ const CATEGORY_LABELS: Record<AuditCategory | "all", string> = {
   otc: "OTC",
   governance: "Governance",
   rights: "Rights",
+  kyc: "KYC & privacy",
   other: "Other",
 };
 

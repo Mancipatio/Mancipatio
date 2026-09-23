@@ -27,6 +27,8 @@ export type AuditCategory =
   | "otc"
   | "governance"
   | "rights"
+  /** Server-only: KYC data access and GDPR actions (lib/server/audit.ts). */
+  | "kyc"
   | "other";
 
 export type AuditStatus = "success" | "failed" | "pending";

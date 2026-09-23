@@ -50,7 +50,7 @@ afterEach(() => vi.unstubAllEnvs());
 describe("SIWS v2 authorization", () => {
   it("verifies a real ed25519 signature and atomically consumes the exact context", async () => {
     const body = envelope();
-    await expect(verifySigned(request(body), "test.private")).resolves.toEqual({ wallet, params: body.payload.params });
+    await expect(verifySigned(request(body), "test.private")).resolves.toEqual({ wallet, params: body.payload.params, via: "signature" });
     expect(rpc).toHaveBeenCalledWith("consume_siws_nonce", {
       p_origin: origin, p_network: "devnet", p_wallet: wallet,
       p_nonce: body.payload.nonce,
@@ -144,7 +144,7 @@ describe("wallet session for read-only actions", () => {
   it("accepts a valid cookie for an allowlisted read and still consumes the nonce", async () => {
     vi.stubEnv("SESSION_SECRET", secret);
     const req = await sessionRequest("clients.me", await token());
-    await expect(verifySigned(req, "clients.me")).resolves.toEqual({ wallet, params: {} });
+    await expect(verifySigned(req, "clients.me")).resolves.toEqual({ wallet, params: {}, via: "session" });
     expect(rpc).toHaveBeenCalledTimes(1);
   });
 

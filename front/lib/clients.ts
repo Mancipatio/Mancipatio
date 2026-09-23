@@ -16,9 +16,10 @@
 //   * onboarding-view / onboarding-requirements — magic-link token, own row
 //
 // KYC document uploads land in the PRIVATE "client-documents" bucket via the
-// service-role client server-side; admins read them through 60-minute signed
-// URLs (getClientDocumentUrl). Legacy pre-P1 files in the public "documents"
-// bucket keep working via a server-side fallback.
+// service-role client server-side; admins read them through 2-minute signed
+// URLs (getClientDocumentUrl), and every such view is audit-logged server-side
+// before the URL is returned. Legacy pre-P1 files still in the public
+// "documents" bucket are NOT served (no public fallback) until moved.
 
 import type { WalletSession } from "@solana/client";
 import {
@@ -28,6 +29,7 @@ import {
 import { TOS_VERSION } from "@/lib/tos-version";
 import { MAINTENANCE_CODE, maintenanceRefusal } from "@/lib/maintenance";
 import { detectNetwork } from "@/lib/network";
+import type { AnonymizeResult } from "@/lib/client-privacy";
 
 /** Current Terms-of-Service version (single source: lib/tos-version.ts). */
 export { TOS_VERSION };
@@ -76,6 +78,8 @@ export type ClientRow = {
   last_activity_at: string | null;
   tos_accepted_at: string | null;
   tos_version: string | null;
+  /** When the dossier's personal data was last erased (0065); null = never. */
+  anonymized_at?: string | null;
 };
 
 export type ClientNote = {
@@ -266,6 +270,41 @@ export async function adminGetClientDetail(
     "/api/clients/admin-detail",
     "clients.adminDetail",
     { id },
+  );
+}
+
+/**
+ * Admin (GDPR access / portability): the JSON bundle of everything stored
+ * about one dossier, with short-lived document links. Needs a fresh wallet
+ * signature; the server logs the export before answering. THROWS.
+ */
+export async function adminExportClient(
+  session: WalletSession | null | undefined,
+  clientId: string,
+): Promise<Record<string, unknown>> {
+  return await signedFetch<Record<string, unknown>>(
+    session,
+    "/api/clients/export",
+    "clients.export",
+    { client_id: clientId },
+  );
+}
+
+/**
+ * Super Admin (GDPR erasure): erase the dossier's personal data. `confirm`
+ * must be anonymizeConfirmationPhrase(clientId). Not reversible. THROWS.
+ */
+export async function adminAnonymizeClient(
+  session: WalletSession | null | undefined,
+  clientId: string,
+  confirm: string,
+  reason: string,
+): Promise<AnonymizeResult> {
+  return await signedFetch<AnonymizeResult>(
+    session,
+    "/api/clients/anonymize",
+    "clients.anonymize",
+    { client_id: clientId, confirm, reason },
   );
 }
 
@@ -664,8 +703,9 @@ export type ClientDocument = {
 /**
  * @deprecated The legacy public-bucket URL fallback is gone — KYC documents
  * must never resolve to an unauthenticated URL. Always returns null; resolve
- * documents with getClientDocumentUrl() (60-minute signed URL via the admin
- * route). Kept only so stale imports fail soft instead of leaking a URL.
+ * documents with getClientDocumentUrl() (short-lived, logged signed URL via
+ * the admin route). Kept only so stale imports fail soft instead of leaking a
+ * URL.
  */
 export function clientDocUrl(storage_path: string): string | null {
   console.warn(
@@ -675,25 +715,23 @@ export function clientDocUrl(storage_path: string): string | null {
 }
 
 /**
- * Admin-only: resolve a client document to a time-limited (60 min) signed URL,
- * with a public-bucket fallback for legacy rows. Returns null on failure.
+ * Admin-only: resolve a client document to a short-lived (2 min) signed URL.
+ * The server logs the view (audit_events, category "kyc") before answering;
+ * when the log is unavailable it refuses with 503 and no URL. THROWS on
+ * failure so the caller can show the server's reason.
  */
 export async function getClientDocumentUrl(
   session: WalletSession | null | undefined,
   documentId: number,
-): Promise<string | null> {
-  try {
-    const data = await signedFetch<{ url: string }>(
-      session,
-      "/api/clients/doc-url",
-      "clients.doc-url",
-      { document_id: documentId },
-    );
-    return data?.url ?? null;
-  } catch (err) {
-    console.warn("[client_docs] doc-url failed:", err);
-    return null;
-  }
+): Promise<string> {
+  const data = await signedFetch<{ url: string }>(
+    session,
+    "/api/clients/doc-url",
+    "clients.doc-url",
+    { document_id: documentId },
+  );
+  if (!data?.url) throw new Error("Could not resolve the document URL");
+  return data.url;
 }
 
 async function sha256Hex(file: File): Promise<string> {

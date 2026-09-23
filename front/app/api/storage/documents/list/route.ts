@@ -8,12 +8,21 @@
 //
 // Each row gains a `download_url`:
 //   - external rows            -> the stored external_url
-//   - public categories        -> raw public-bucket URL (unchanged behavior)
+//   - public categories        -> raw public-bucket URL (whitepapers, legal,
+//     marketing, KYB templates — public by design)
 //   - confidential categories  -> 60-minute service-role signed URL on the
-//     PRIVATE documents-confidential bucket; legacy objects uploaded before
-//     the bucket split still live in the public bucket, so a failed signing
-//     falls back to the public URL (works while the object remains there —
-//     see the ops note in 0031 about moving them).
+//     PRIVATE documents-confidential bucket, or NULL when it cannot be signed.
+//     There is deliberately NO public-URL fallback: compliance memos can name
+//     clients, and a permanent public link to a confidential file (a legacy
+//     object that never moved out of the public bucket — ops note in 0031)
+//     must not be handed out and copied around. Such rows carry
+//     `download_unavailable: "not_in_private_bucket"` so the ops move is
+//     visible instead of silently papered over.
+//
+// This route lists the global document repository only (public.documents).
+// Client KYC files (client_documents, bucket client-documents) never pass
+// through here — they are resolved one at a time, logged, by
+// /api/clients/doc-url.
 //
 // Client: app/admin/documents/page.tsx (action "storage.documents.list").
 
@@ -67,8 +76,8 @@ export async function POST(request: Request) {
         .from(CONFIDENTIAL_BUCKET)
         .createSignedUrls(confidentialPaths, CONFIDENTIAL_URL_TTL_S);
       if (signError) {
-        // Bucket missing (0031 not applied yet) or storage hiccup — fall back
-        // to legacy public URLs below rather than failing the whole list.
+        // Bucket missing (0031 not applied yet) or storage hiccup — the
+        // confidential rows list without a link rather than failing the page.
         console.warn(
           "[api/storage/documents/list] signed-url batch failed:",
           signError.message,
@@ -84,16 +93,23 @@ export async function POST(request: Request) {
 
     const documents = rows.map((r) => {
       let downloadUrl: string | null = null;
+      let unavailable: string | null = null;
       if (r.storage_path) {
-        downloadUrl = CONFIDENTIAL_CATEGORIES.has(r.category)
-          ? (signedByPath.get(r.storage_path) ??
-            // Legacy fallback: object still in the public bucket.
-            publicUrlFor(r.storage_path))
-          : publicUrlFor(r.storage_path);
+        if (CONFIDENTIAL_CATEGORIES.has(r.category)) {
+          // Signed private URL or nothing — never a public-bucket URL.
+          downloadUrl = signedByPath.get(r.storage_path) ?? null;
+          if (!downloadUrl) unavailable = "not_in_private_bucket";
+        } else {
+          downloadUrl = publicUrlFor(r.storage_path);
+        }
       } else if (r.external_url) {
         downloadUrl = r.external_url;
       }
-      return { ...r, download_url: downloadUrl };
+      return {
+        ...r,
+        download_url: downloadUrl,
+        ...(unavailable ? { download_unavailable: unavailable } : {}),
+      };
     });
 
     return NextResponse.json({ ok: true, data: { documents } });
