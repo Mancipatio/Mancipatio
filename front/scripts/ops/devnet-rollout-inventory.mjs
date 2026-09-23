@@ -1,7 +1,15 @@
 #!/usr/bin/env node
 /**
  * Read-only devnet rollout inventory. Requires Node >=22 and this repo's npm deps.
- * Usage: node scripts/ops/devnet-rollout-inventory.mjs [--program-dir PATH] [--env-file PATH] [--output PATH]
+ * Usage: node scripts/ops/devnet-rollout-inventory.mjs --program-dir PATH --output NEW_FILE [--env-file PATH]
+ *        node scripts/ops/devnet-rollout-inventory.mjs --dry-metadata [--program-dir PATH] [--env-file PATH]
+ * --program-dir must be a directory INSIDE this git repo (the script runs `git rev-parse HEAD`
+ * there) whose target/deploy/{asset_registry,transfer_hook}.so are the EXACT verifiable binaries
+ * being compared: every byte difference from the deployed ProgramData is a blocker, and a local
+ * `cargo build-sbf` never matches the verifiable build. Point it at an archived verifiable
+ * artifact directory (it has the target/deploy/ layout), not at program/ after a local build.
+ * --output is required (except with --dry-metadata) and must not exist yet: evidence files are
+ * never overwritten.
  * --dry-metadata verifies local paths/configuration without RPC or output-file writes.
  * Never loads a wallet/keypair. Only the RPC methods in READ_METHODS are callable.
  * Environment values, RPC paths/query strings and raw account data are not output.
@@ -19,7 +27,10 @@ const arg = (name, fallback) => { const i = process.argv.indexOf(name); return i
 const ROOT = path.resolve(arg('--program-dir', path.resolve(FRONT, '../program')));
 const dryMetadata = process.argv.includes('--dry-metadata');
 const envFile = path.resolve(arg('--env-file', path.join(FRONT, '.env.local')));
-const outputFile = path.resolve(arg('--output', path.join(FRONT, 'docs/release-evidence/2026-09-07/devnet-inventory.json')));
+const outputArg = arg('--output', null);
+if (!dryMetadata && !outputArg) throw new Error('--output NEW_FILE is required (evidence is never written to a default path)');
+const outputFile = outputArg ? path.resolve(outputArg) : null;
+if (!dryMetadata && fs.existsSync(outputFile)) throw new Error(`Refusing to overwrite existing evidence: ${outputFile}`);
 const IDS = {
   asset_registry: 'FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS',
   transfer_hook: 'GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy',
@@ -348,10 +359,11 @@ async function main() {
       const expectedMint = await pda(IDS.asset_registry, utf8('share_mint'), bytes.encode(addr));
       if (addr !== expectedClass || v.mint_initialized && v.mint !== expectedMint) evidence.blockers.push(`ShareClass ${addr}: canonical PDA/mint mismatch`);
       if (v.mint_initialized) mintShares.set(v.mint, addr);
-      if (v.version !== 2) evidence.blockers.push(`ShareClass ${addr}: legacy version; no new issuance and size preparation required before affected exits`);
+      if (v.version !== 2) evidence.blockers.push(`ShareClass ${addr}: version ${v.version} (v1 layout); the 2E program has no v1 path`);
     }
+    if (type === 'PayoutVault' && v.version !== 2) evidence.blockers.push(`PayoutVault ${addr}: version ${v.version} (v1 layout); the 2E program has no v1 path`);
     if (type === 'PayoutVault' && (v.state === 'Frozen' || v.vote_pending)) evidence.blockers.push(`PayoutVault ${addr}: frozen/pending vote requires explicit round and entitlement review`);
-    if (type === 'VaultVote' && v.version !== 2 && v.outcome === 'Pending') evidence.blockers.push(`VaultVote ${addr}: pending legacy vote migration gate`);
+    if (type === 'VaultVote' && v.version !== 2) evidence.blockers.push(`VaultVote ${addr}: version ${v.version} (v1 layout); the 2E program has no v1 path`);
     const fields = ['escrow', 'proceeds', 'asset_escrow', 'payment_escrow'];
     for (const field of fields) if (v[field]) {
       const mint = field === 'payment_escrow' || field === 'proceeds' || ['Distribution','PayoutVault'].includes(type) ? v.payment_mint : v.token_mint || v.underlying_mint || v.mint;
@@ -374,13 +386,13 @@ async function main() {
       if (a) {
         Object.assign(row, decodeToken(a)); row.identity_matches_parent = row.authority === ref.parent && row.mint === ref.expected_mint;
         if (!row.identity_matches_parent) evidence.blockers.push(`Escrow ${ref.address}: authority/mint mismatch`);
-        if (row.token_program === TOKEN2022 && !row.immutable_owner) evidence.observations.push(`Escrow ${ref.address}: mutable legacy owner; preserve exits, block new inbound funding`);
+        if (row.token_program === TOKEN2022 && !row.immutable_owner) evidence.observations.push(`Escrow ${ref.address}: mutable owner; preserve exits, block new inbound funding`);
       } else row.note = 'Absent or unread; may be closed for terminal parent, inspect status';
     } catch (error) { row.decode_error = error.message; evidence.blockers.push(`Escrow ${ref.address}: cannot decode`); }
     if (['RightsIssuance','VestingSeries'].includes(ref.parent_type)) {
       const identity = await pda(IDS.asset_registry, utf8('escrow_marker'), bytes.encode(ref.parent));
       row.identity_pda = identity; row.identity_type = decoded.get(identity)?.type || null;
-      if (row.identity_type !== 'EscrowIdentity') evidence.observations.push(`${ref.parent_type} ${ref.parent}: needs legacy identity attach; own deposit history must remain zero`);
+      if (row.identity_type !== 'EscrowIdentity') evidence.blockers.push(`${ref.parent_type} ${ref.parent}: EscrowIdentity missing; no attach instruction after 2E`);
     }
     evidence.escrow_accounts.push(row);
   }
@@ -442,7 +454,8 @@ if (dryMetadata) {
   evidence.finished_at_utc = new Date().toISOString();
   evidence.script_sha256 = sha(fs.readFileSync(fileURLToPath(import.meta.url)));
   fs.mkdirSync(path.dirname(outputFile), { recursive: true });
-  fs.writeFileSync(outputFile, `${JSON.stringify(evidence, null, 2)}\n`);
+  // 'wx': fail rather than overwrite evidence that appeared during the run.
+  fs.writeFileSync(outputFile, `${JSON.stringify(evidence, null, 2)}\n`, { flag: 'wx' });
   console.log(JSON.stringify({ output: path.relative(FRONT, outputFile), started_at_utc: evidence.started_at_utc, finished_at_utc: evidence.finished_at_utc, network, genesis_verified: evidence.genesis_hash === DEVNET_GENESIS, start_slot: evidence.start_slot, end_slot: evidence.end_slot, account_counts: evidence.account_counts_by_type, failures: evidence.failures.length, blockers: evidence.blockers, coverage_complete: evidence.coverage_complete, inventory_gate_clear: evidence.inventory_gate_clear, fatal_error: evidence.fatal_error }, null, 2));
   if (evidence.fatal_error || !evidence.coverage_complete) process.exitCode = 2;
 }
