@@ -1,10 +1,12 @@
 import Link from "next/link";
+import { detectNetwork, isTestNetwork } from "@/lib/network";
 
 export const metadata = {
   title: "Not found — Manci",
 };
 
 export default function NotFound() {
+  const network = detectNetwork();
   return (
     <main className="flex flex-1 items-center justify-center px-6 py-24">
       <div className="max-w-md text-center">
@@ -15,8 +17,9 @@ export default function NotFound() {
           Nothing here
         </h1>
         <p className="mt-3 text-sm text-slate-600">
-          The page you were looking for doesn&apos;t exist on this devnet
-          deployment. Try one of the links below.
+          The page you were looking for doesn&apos;t exist
+          {isTestNetwork(network) ? ` on this ${network} deployment` : ""}. Try
+          one of the links below.
         </p>
         <div className="mt-8 flex flex-wrap items-center justify-center gap-3 text-sm">
           <Link

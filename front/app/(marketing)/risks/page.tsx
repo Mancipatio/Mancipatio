@@ -8,6 +8,7 @@ import {
   SectionHead,
   TextLink,
 } from "@/components/mx";
+import { detectNetwork, isTestNetwork } from "@/lib/network";
 
 /**
  * "What can go wrong" — prototype `#page-risks`.
@@ -26,6 +27,7 @@ export const metadata: Metadata = {
 };
 
 export default function RisksPage() {
+  const network = detectNetwork();
   return (
     <>
       <PageHeader
@@ -118,9 +120,9 @@ export default function RisksPage() {
       <Section>
         <SectionHead title="The platform is at an early stage" />
         <Body className="mt-4">
-          The platform runs on Solana devnet at v0.1. Nothing is issued live,
-          tokens minted today carry no economic value, and the product can
-          change.
+          {isTestNetwork(network)
+            ? `The platform runs on Solana ${network} at v0.1. Nothing is issued live, tokens minted today carry no economic value, and the product can change.`
+            : `The platform runs on Solana ${network} at v0.1, and the product can change.`}
         </Body>
         <Body className="mt-3.5">
           Software can contain defects. Both on-chain programs went through a

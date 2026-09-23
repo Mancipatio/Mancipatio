@@ -506,7 +506,7 @@ export default function DealPage({
         </h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
           No on-chain sale with this address is registered on Manci
-          (devnet).
+          ({detectNetwork()}).
         </p>
         <Link
           href="/marketplace/launchpad"

@@ -41,6 +41,7 @@ import { explainSendError } from "@/lib/tx-error";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonCard } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
+import { detectNetwork } from "@/lib/network";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -246,7 +247,7 @@ export default function TakeOfferPage({
         </h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
           No on-chain OTC offer with this address is registered on Manci
-          (devnet).
+          ({detectNetwork()}).
         </p>
         <Link
           href="/marketplace/otc"

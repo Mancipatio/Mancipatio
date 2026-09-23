@@ -1,5 +1,11 @@
 export type Network = "mainnet" | "devnet" | "testnet" | "localnet";
 
+/**
+ * The network this build targets. `NEXT_PUBLIC_NETWORK` is authoritative; an
+ * invalid value throws. When it is unset (local dev and tests only — Vercel
+ * builds refuse to start without it, see next.config.ts) the network is
+ * sniffed from `NEXT_PUBLIC_SOLANA_RPC_URL`, defaulting to devnet.
+ */
 export function detectNetwork(): Network {
   const explicit = process.env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase();
   if (
@@ -46,6 +52,30 @@ export function rpcUrl(): string {
   }
 }
 
+/**
+ * Client-side WebSocket (subscriptions) URL for the CURRENT network.
+ * `NEXT_PUBLIC_SOLANA_WS_URL` wins — set it when the RPC provider serves
+ * subscriptions on a different host or path than HTTP RPC. Otherwise it is
+ * derived from rpcUrl() by swapping the scheme (https → wss, http → ws); the
+ * default local validator serves WebSockets on RPC port + 1 (8900).
+ */
+export function wsUrl(): string {
+  const explicit = process.env.NEXT_PUBLIC_SOLANA_WS_URL?.trim();
+  if (explicit) return explicit;
+  if (!process.env.NEXT_PUBLIC_SOLANA_RPC_URL && detectNetwork() === "localnet") {
+    return "ws://127.0.0.1:8900";
+  }
+  return rpcUrl()
+    .replace(/^https:\/\//, "wss://")
+    .replace(/^http:\/\//, "ws://");
+}
+
+/** True for every network whose tokens carry no economic value. */
+export function isTestNetwork(network: Network): boolean {
+  return network !== "mainnet";
+}
+
+/** Proper-noun label for UI copy: "Devnet", "Mainnet", … */
 export function networkLabel(network: Network): string {
   return network.charAt(0).toUpperCase() + network.slice(1);
 }

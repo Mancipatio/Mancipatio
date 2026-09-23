@@ -24,6 +24,7 @@ import {
   type OtcRequest,
 } from "@/lib/otc";
 import { useToast } from "@/lib/toast";
+import { detectNetwork, networkLabel } from "@/lib/network";
 
 type Row = {
   offer: Offer;
@@ -725,7 +726,7 @@ function EmptyState({ typeFilter }: { typeFilter: string }) {
       <p className="mt-2 text-[12.5px] text-slate-500">
         {typed
           ? "Try the full list or open the platform to post one."
-          : "Devnet is quiet. The platform is live but no issuer has posted a secondary offer yet."}
+          : `${networkLabel(detectNetwork())} is quiet. The platform is live but no issuer has posted a secondary offer yet.`}
       </p>
       <div className="mt-4 flex flex-wrap justify-center gap-2">
         <Link href="/marketplace" className="btn-brand">

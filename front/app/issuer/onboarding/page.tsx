@@ -20,6 +20,7 @@ import { fromBytes32, KYB_LABEL, toBytes32 } from "@/lib/format";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
+import { detectNetwork } from "@/lib/network";
 import { upsertIssuerProfile } from "@/lib/issuer-profiles";
 
 void createNoopSigner; // tree-shake guard while we keep noop available for future flows
@@ -378,7 +379,7 @@ export default function IssuerOnboardingPage() {
                   Registration submitted
                 </h2>
                 <p className="mt-1 text-sm text-slate-600">
-                  Your transaction is on devnet. The platform&apos;s Super Admin will
+                  Your transaction is on {detectNetwork()}. The platform&apos;s Super Admin will
                   review KYB documents and approve the entity. KYB status:{" "}
                   <strong>{KYB_LABEL[0]}</strong>.
                 </p>

@@ -11,6 +11,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { detectNetwork } from "@/lib/network";
 import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL, toBytes32 } from "@/lib/format";
 import { SkeletonCard } from "@/components/skeleton";
 
@@ -104,7 +105,7 @@ export default function IssuerProfilePage({
         <h1 className="mt-1 text-2xl font-semibold text-mx-ink">Not found</h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
           No issuer with this legal entity ID is registered on Manci
-          (devnet).
+          ({detectNetwork()}).
         </p>
         <Link
           href="/marketplace"

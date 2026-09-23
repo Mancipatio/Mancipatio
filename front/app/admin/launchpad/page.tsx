@@ -31,6 +31,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
 import { useToast } from "@/lib/toast";
+import { detectNetwork } from "@/lib/network";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 
 const TOKEN_CLASSIC_ADDRESS =
@@ -669,7 +670,7 @@ function OpenSaleModal({
           </div>
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Payment mint (e.g. USDC devnet)
+              Payment mint (e.g. USDC {detectNetwork()})
             </span>
             <input
               value={paymentMint}
@@ -719,7 +720,7 @@ function OpenSaleModal({
           </label>
           <p className="text-[11px] text-slate-400">
             Payment token program is classic SPL Token (v0.1 assumption — USDC
-            is classic-SPL on mainnet/devnet).
+            is classic SPL on Solana).
           </p>
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">

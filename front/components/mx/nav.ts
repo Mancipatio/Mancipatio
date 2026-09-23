@@ -1,4 +1,5 @@
 import { ASSET_TYPES } from "@/lib/asset-types";
+import { detectNetwork, type Network } from "@/lib/network";
 
 /**
  * The marketing site's route map — one place, so the header, the footer and
@@ -102,6 +103,12 @@ export const MX_FOOTER_COLUMNS: { title: string; links: MxNavItem[] }[] = [
   },
 ];
 
-/** Deployment stage, shown as a badge in the header footprint and footer.
- *  Kept here so one edit retires it at mainnet. */
-export const MX_STAGE_LABEL = "Solana devnet · v0.1";
+/** Deployment stage for `network`: "Solana devnet · v0.1". */
+export function mxStageLabel(network: Network): string {
+  return `Solana ${network} · v0.1`;
+}
+
+/** Deployment stage of THIS build, shown as a badge in the header footprint
+ *  and footer. Derived from NEXT_PUBLIC_NETWORK (lib/network.ts), so a
+ *  mainnet build never advertises devnet. */
+export const MX_STAGE_LABEL = mxStageLabel(detectNetwork());

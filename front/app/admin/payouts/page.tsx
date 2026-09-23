@@ -52,6 +52,7 @@ import { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
+import { features } from "@/lib/features";
 import {
   isFreezable,
   loadPayoutVaults,
@@ -335,9 +336,16 @@ function PayoutsOps() {
 
       <p className="text-xs text-slate-400">
         Merkle trees are built off operator-asserted snapshots (CSV upload).
-        After the issuer funds the drop, run the airdrop from the per-payout
-        page: batched token transfers push each recipient&apos;s share straight
-        to their wallet and record the signature next to each row.
+        {features().payoutAirdrop ? (
+          <>
+            {" "}After the issuer funds the drop, run the airdrop from the
+            per-payout page: batched token transfers push each recipient&apos;s
+            share straight to their wallet and record the signature next to
+            each row.
+          </>
+        ) : (
+          " The admin-wallet push airdrop is not enabled on this network."
+        )}
       </p>
     </div>
   );
@@ -611,8 +619,9 @@ function CreateModal({
               error={touched.paymentMint ? errors.paymentMint : null}
             />
             <span className="mt-1 block text-[11px] text-slate-400">
-              Needed to run the push airdrop. Can be left blank for off-chain
-              payouts.
+              {features().payoutAirdrop
+                ? "Needed to run the push airdrop. Can be left blank for off-chain payouts."
+                : "Recorded with the payout. Can be left blank for off-chain payouts."}
             </span>
           </label>
           <label className="block">

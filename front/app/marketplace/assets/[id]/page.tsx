@@ -27,6 +27,7 @@ import {
   safeHttpUrl,
 } from "@/lib/format";
 import { SkeletonCard } from "@/components/skeleton";
+import { detectNetwork } from "@/lib/network";
 import {
   assetTypeBySlug,
   fieldsForCategory,
@@ -151,7 +152,7 @@ export default function AssetDetailPage({
           Not found
         </h1>
         <p className="mt-2 text-sm text-mx-ink-soft">
-          No asset with this ID is registered on Manci (devnet).
+          No asset with this ID is registered on Manci ({detectNetwork()}).
         </p>
         <Link
           href="/marketplace"

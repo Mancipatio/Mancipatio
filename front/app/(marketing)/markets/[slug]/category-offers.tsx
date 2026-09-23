@@ -12,6 +12,7 @@ import {
 } from "@/lib/asset-profiles";
 import { fieldsForCategory, type CategorySlug } from "@/lib/asset-types";
 import { assetHref } from "@/lib/asset-links";
+import { detectNetwork, networkLabel } from "@/lib/network";
 
 type Item = {
   profile: PublicAssetProfile;
@@ -107,7 +108,8 @@ export function CategoryOffers({
           No {title.toLowerCase()} listed yet.
         </p>
         <p className="mt-2 text-[12.5px] text-slate-500">
-          Devnet is early. No issuer has published a {title.toLowerCase()}{" "}
+          {networkLabel(detectNetwork())} is early. No issuer has published a{" "}
+          {title.toLowerCase()}{" "}
           listing in this category yet — check the live OTC board for secondary
           offers, or open the platform to be the first.
         </p>

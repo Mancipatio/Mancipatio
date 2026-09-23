@@ -34,6 +34,7 @@ export {
   MX_ROUTES,
   MX_STAGE_LABEL,
   instrumentHref,
+  mxStageLabel,
   type MxNavItem,
 } from "./nav";
 export {

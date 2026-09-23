@@ -11,6 +11,7 @@ import {
   Small,
   TextLink,
 } from "@/components/mx";
+import { detectNetwork, isTestNetwork } from "@/lib/network";
 
 export const metadata: Metadata = {
   title: "Investor guide — Manci",
@@ -51,6 +52,7 @@ const STEPS = [
 ];
 
 export default function InvestorsPage() {
+  const network = detectNetwork();
   return (
     <>
       <PageHeader
@@ -65,8 +67,8 @@ export default function InvestorsPage() {
           </Button>
         </ButtonRow>
         <Small className="mt-5">
-          The app currently runs on Solana devnet. Test tokens have no economic
-          value.
+          The app currently runs on Solana {network}.
+          {isTestNetwork(network) && " Test tokens have no economic value."}
         </Small>
       </PageHeader>
 

@@ -7,6 +7,7 @@ import "./document-library.css";
 import "./account.css";
 import { Providers } from "./providers";
 import { MaintenanceBanner } from "@/components/maintenance-banner";
+import { indexingAllowed } from "@/lib/indexing";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -25,17 +26,20 @@ export const metadata: Metadata = {
   title: "Manci — on-chain tokenization",
   description:
     "Manci issues, custodies, trades and vests tokenized real-world assets and investments on Solana.",
-  // Devnet only — no indexing until mainnet launch.
-  robots: {
-    index: false,
-    follow: false,
-    nocache: true,
-    googleBot: {
-      index: false,
-      follow: false,
-      noimageindex: true,
-    },
-  },
+  // No indexing unless this is a mainnet build that opted in with
+  // NEXT_PUBLIC_ALLOW_INDEXING=true (lib/indexing.ts; app/robots.ts agrees).
+  robots: indexingAllowed()
+    ? { index: true, follow: true }
+    : {
+        index: false,
+        follow: false,
+        nocache: true,
+        googleBot: {
+          index: false,
+          follow: false,
+          noimageindex: true,
+        },
+      },
 };
 
 export default function RootLayout({
