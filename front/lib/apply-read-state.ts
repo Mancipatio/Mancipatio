@@ -41,9 +41,14 @@ export type SigningObserver = {
 
 /**
  * Wrap a wallet session so every `signMessage` call reports when the wallet
- * prompt opens and closes. A Proxy keeps every other property (including
- * prototype methods) intact; the original `signMessage` is invoked with the
- * session as `this` in case the adapter relies on it.
+ * prompt opens and closes. Returns a copy that keeps the session's prototype
+ * and every own property (symbols and accessors included) and replaces only
+ * `signMessage`; the original is invoked with the session as `this` in case
+ * the adapter relies on it.
+ *
+ * Not a Proxy: wallet sessions can be frozen, and a Proxy `get` trap may not
+ * report a different value for a non-writable, non-configurable property —
+ * the engine throws a TypeError on every read of `signMessage`.
  */
 export function withSigningObserver<S extends SigningSession | null | undefined>(
   session: S,
@@ -59,12 +64,13 @@ export function withSigningObserver<S extends SigningSession | null | undefined>
       observer.onSignEnd();
     }
   };
-  return new Proxy(session as object, {
-    get(target, property, receiver) {
-      if (property === "signMessage") return wrapped;
-      return Reflect.get(target, property, receiver);
-    },
+  const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(session);
+  delete descriptors.signMessage;
+  const observed = Object.create(Object.getPrototypeOf(session), {
+    ...descriptors,
+    signMessage: { value: wrapped, enumerable: true, writable: false, configurable: false },
   }) as S;
+  return Object.isFrozen(session) ? Object.freeze(observed) : observed;
 }
 
 function errorText(error: unknown): string {
