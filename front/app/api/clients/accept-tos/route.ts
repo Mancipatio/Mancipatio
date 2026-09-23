@@ -74,7 +74,23 @@ export async function POST(request: Request) {
       version: TOS_VERSION,
       source: "onboarding",
     });
-    if (logErr) {
+    if (logErr?.code === "23505" && walletStr) {
+      // The wallet already accepted this version (e.g. at the marketplace
+      // gate) — one row per (wallet, version) since 0065, on every network.
+      // Link that row to this dossier when it has no dossier yet; the earlier
+      // record stands. When it already belongs to another dossier of the same
+      // wallet (another network), this dossier's evidence is that wallet row
+      // plus the stamp above and the system note below (see 0065 §2).
+      const { error: linkErr } = await sb
+        .from("tos_acceptances")
+        .update({ client_id: clientId })
+        .eq("wallet", walletStr)
+        .eq("version", TOS_VERSION)
+        .is("client_id", null);
+      if (linkErr) {
+        console.warn("[api/clients/accept-tos] acceptance link failed:", linkErr.message);
+      }
+    } else if (logErr) {
       // Log-append failure is non-fatal (matches pre-P1 behavior).
       console.warn("[api/clients/accept-tos] log insert failed:", logErr.message);
     }

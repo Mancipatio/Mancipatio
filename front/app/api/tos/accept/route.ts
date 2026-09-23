@@ -8,7 +8,9 @@
 // the clients row is stamped too.
 //
 // Idempotent per (wallet, version): a repeat acceptance returns ok without
-// inserting a duplicate log row.
+// inserting a duplicate log row. Migration 0065 makes (wallet, version)
+// unique, so two concurrent first acceptances cannot both insert: the loser's
+// unique violation (23505) is answered as "already accepted".
 //
 // Client call: signedFetch(session, "/api/tos/accept", "tos.accept", { version })
 
@@ -67,8 +69,14 @@ export async function POST(request: Request) {
       source: "wallet-gate",
     });
     if (error) {
+      if (error.code === "23505") {
+        return NextResponse.json({
+          ok: true,
+          data: { accepted: true, version, already: true },
+        });
+      }
       console.warn("[api/tos/accept] insert failed:", error.message);
-      throw new SiwsError(500, error.message);
+      throw new SiwsError(500, "Could not record the acceptance — try again");
     }
 
     if (clientId) {

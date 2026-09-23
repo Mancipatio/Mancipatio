@@ -1,5 +1,5 @@
 // POST /api/storage/documents/list — admin read of the global document
-// repository (public.documents) WITH resolved download URLs.
+// repository (public.documents) WITH download links where they are public.
 //
 // Signed + requireAdmin. The metadata table exposes storage_path values for
 // every category — including unpublished drafts and confidential
@@ -8,12 +8,19 @@
 //
 // Each row gains a `download_url`:
 //   - external rows            -> the stored external_url
-//   - public categories        -> raw public-bucket URL (unchanged behavior)
-//   - confidential categories  -> 60-minute service-role signed URL on the
-//     PRIVATE documents-confidential bucket; legacy objects uploaded before
-//     the bucket split still live in the public bucket, so a failed signing
-//     falls back to the public URL (works while the object remains there —
-//     see the ops note in 0031 about moving them).
+//   - public categories        -> raw public-bucket URL (whitepapers, legal,
+//     marketing, KYB templates — public by design)
+//   - confidential categories  -> NULL plus `download_on_request: true`.
+//     Compliance memos can name clients, so their links are never pre-signed
+//     here (a list load would otherwise mint a link for every confidential
+//     file, unlogged): the page asks /api/storage/documents/url for ONE
+//     short-lived, audit-logged link when the admin clicks. There is no
+//     public-URL fallback either — a legacy object that never moved out of the
+//     public bucket (ops note in 0031) gets a 404 from that route.
+//
+// Client KYC files (client_documents, bucket client-documents) never pass
+// through here — they are resolved one at a time, logged, by
+// /api/clients/doc-url.
 //
 // Client: app/admin/documents/page.tsx (action "storage.documents.list").
 
@@ -21,12 +28,7 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import {
-  CONFIDENTIAL_BUCKET,
-  CONFIDENTIAL_CATEGORIES,
-  CONFIDENTIAL_URL_TTL_S,
-  publicUrlFor,
-} from "../../_lib";
+import { CONFIDENTIAL_CATEGORIES, publicUrlFor } from "../../_lib";
 
 type DocumentRow = {
   id: string;
@@ -54,45 +56,14 @@ export async function POST(request: Request) {
     }
     const rows = (data ?? []) as DocumentRow[];
 
-    // Batch-sign confidential paths (one storage call for the whole page).
-    const confidentialPaths = rows
-      .filter(
-        (r) =>
-          r.storage_path !== null && CONFIDENTIAL_CATEGORIES.has(r.category),
-      )
-      .map((r) => r.storage_path as string);
-    const signedByPath = new Map<string, string>();
-    if (confidentialPaths.length > 0) {
-      const { data: signed, error: signError } = await sb.storage
-        .from(CONFIDENTIAL_BUCKET)
-        .createSignedUrls(confidentialPaths, CONFIDENTIAL_URL_TTL_S);
-      if (signError) {
-        // Bucket missing (0031 not applied yet) or storage hiccup — fall back
-        // to legacy public URLs below rather than failing the whole list.
-        console.warn(
-          "[api/storage/documents/list] signed-url batch failed:",
-          signError.message,
-        );
-      } else {
-        for (const item of signed ?? []) {
-          if (!item.error && item.path && item.signedUrl) {
-            signedByPath.set(item.path, item.signedUrl);
-          }
-        }
-      }
-    }
-
     const documents = rows.map((r) => {
-      let downloadUrl: string | null = null;
-      if (r.storage_path) {
-        downloadUrl = CONFIDENTIAL_CATEGORIES.has(r.category)
-          ? (signedByPath.get(r.storage_path) ??
-            // Legacy fallback: object still in the public bucket.
-            publicUrlFor(r.storage_path))
-          : publicUrlFor(r.storage_path);
-      } else if (r.external_url) {
-        downloadUrl = r.external_url;
+      if (r.storage_path && CONFIDENTIAL_CATEGORIES.has(r.category)) {
+        // Signed on click, logged — never here, never a public URL.
+        return { ...r, download_url: null, download_on_request: true };
       }
+      const downloadUrl = r.storage_path
+        ? publicUrlFor(r.storage_path)
+        : r.external_url ?? null;
       return { ...r, download_url: downloadUrl };
     });
 

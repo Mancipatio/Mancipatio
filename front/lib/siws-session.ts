@@ -2,6 +2,11 @@
 // Shared by the client (lib/siws-client.ts) and the server (lib/server/siws.ts).
 // Anything that writes, moves value, changes identity or grants access keeps
 // requiring a per-request wallet signature — never add such an action here.
+//
+// One kind of write is part of a read and allowed: an access-log row that
+// records the read itself (lib/server/audit.ts writeServerAudit, e.g. the
+// "kyc_document_view" row of clients.doc-url). Such a route must not change
+// business data while maintenance is on (lib/maintenance.ts).
 
 export const SESSION_COOKIE = "manci_session";
 
@@ -40,6 +45,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "payout-snapshots.proof",
   "profiles.read",
   "storage.documents.list",
+  // Signs ONE confidential document on click; its only write is the access-log row.
+  "storage.documents.url",
   "vesting-series.admin-list",
   "vesting-series.creation-state",
   "vesting-series.list-mine",

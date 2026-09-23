@@ -20,6 +20,15 @@
 // requirement flips to `submitted` with the document linked, and the parent
 // client's kyc_status is recomputed (more_info → pending when nothing open).
 //
+// Erasure race: an upload that overlaps /api/clients/anonymize (the file is
+// stored after the erasure listed the dossier's files, and the row insert —
+// which waits on anonymize_client's lock on the clients row — commits after
+// it) would leave a document on an erased dossier. clients.anonymized_at is
+// read when the upload starts and again after the row is written; if it
+// moved, the upload is rolled back (row and file deleted) and answered 409.
+// A dossier erased BEFORE the upload started takes new documents normally
+// (re-verification).
+//
 // Reads are NOT served from here — see /api/clients/doc-url (signed URLs).
 
 import { NextResponse } from "next/server";
@@ -44,6 +53,52 @@ import {
 function formString(form: FormData, key: string): string | null {
   const v = form.get(key);
   return typeof v === "string" && v.length > 0 ? v : null;
+}
+
+/**
+ * Re-read clients.anonymized_at after the document row is written (the
+ * insert waited for any erasure holding the dossier's row lock, so this read
+ * sees it). When it differs from the value at the start — or cannot be read —
+ * delete the row and the file and refuse: fail closed, the client retries.
+ */
+async function rollBackIfErasedMeanwhile(
+  sb: ReturnType<typeof getSupabaseAdmin>,
+  clientId: string,
+  erasedAtStart: unknown,
+  documentId: number,
+  storagePath: string,
+): Promise<void> {
+  const { data, error } = await sb.from("clients").select("*").eq("id", clientId).maybeSingle();
+  const erasedNow = (data as { anonymized_at?: unknown } | null)?.anonymized_at ?? null;
+  if (!error && data && erasedNow === erasedAtStart) return;
+
+  const { error: rowErr } = await sb.from("client_documents").delete().eq("id", documentId);
+  // The path is content-addressed, so an identical earlier upload may share
+  // it: the file goes only when no other document row points at it (after an
+  // erasure there is none). When that cannot be checked, the file stays — the
+  // next Anonymize run deletes unreferenced files under the dossier's prefix.
+  const { data: others, error: othersErr } = await sb
+    .from("client_documents")
+    .select("id")
+    .eq("storage_path", storagePath)
+    .neq("id", documentId)
+    .limit(1);
+  let fileErr: unknown = othersErr;
+  if (!othersErr && (others ?? []).length === 0) {
+    ({ error: fileErr } = await sb.storage.from(PRIVATE_BUCKET).remove([storagePath]));
+  }
+  if (rowErr || fileErr) {
+    console.error(
+      `[api/clients/upload] rollback after erasure incomplete for ${clientId} (row: ${rowErr ? "failed" : "ok"}, file: ${fileErr ? "kept" : "ok"}) — run Anonymize again`,
+    );
+  }
+  if (error || !data) {
+    throw new SiwsError(503, "Could not confirm the upload — nothing was kept; try again");
+  }
+  throw new SiwsError(
+    409,
+    "This dossier's personal data was erased while the file was uploading — nothing was kept. Upload it again if it is still needed.",
+  );
 }
 
 export async function POST(request: Request) {
@@ -71,6 +126,9 @@ export async function POST(request: Request) {
     let kind: string;
     let uploadedBy: string;
     let requirementId: number | null = null;
+    // clients.anonymized_at when the upload started (null = never erased, or
+    // a database without migration 0065).
+    let erasedAtStart: unknown;
 
     const authRaw = formString(form, "auth");
     if (authRaw) {
@@ -112,7 +170,7 @@ export async function POST(request: Request) {
       uploadedBy = wallet;
 
       // The admin's authority and the dossier must belong to this network.
-      await fetchClientOr404(sb, clientId);
+      erasedAtStart = (await fetchClientOr404(sb, clientId)).anonymized_at ?? null;
     } else {
       // ── Magic-link mode: onboarding token is the credential ──────────────
       if (rateLimited(`upload:${clientIpOf(request)}`, 20, 60_000)) {
@@ -123,6 +181,7 @@ export async function POST(request: Request) {
       await assertWritable(detectNetwork());
       clientId = assertUuid(formString(form, "client_id"), "client_id");
       const clientRow = await requireClientToken(sb, clientId, formString(form, "token"));
+      erasedAtStart = clientRow.anonymized_at ?? null;
       const kindRaw = formString(form, "kind");
       if (!kindRaw || kindRaw.length > 40) {
         throw new SiwsError(400, "kind must be a 1–40 character string");
@@ -209,6 +268,9 @@ export async function POST(request: Request) {
       throw new SiwsError(500, "Document record insert failed");
     }
     const documentId = (doc as { id: number }).id;
+
+    // Erased while this upload ran? Then nothing of it may stay.
+    await rollBackIfErasedMeanwhile(sb, clientId, erasedAtStart, documentId, storagePath);
 
     let recomputed: string | null = null;
     if (requirementId != null) {

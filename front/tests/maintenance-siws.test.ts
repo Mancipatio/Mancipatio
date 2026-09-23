@@ -82,7 +82,7 @@ describe("verifySigned in maintenance", () => {
   });
 
   it("allows session reads but refuses the pre-send policy check, signed or by session", async () => {
-    await expect(siws.verifySigned(await viaSession("clients.me"), "clients.me")).resolves.toEqual({ wallet, params: {} });
+    await expect(siws.verifySigned(await viaSession("clients.me"), "clients.me")).resolves.toEqual({ wallet, params: {}, via: "session" });
     expect(nonceCalls()).toBe(1);
     await expect(siws.verifySigned(await viaSession("account.wallets.transaction"), "account.wallets.transaction"))
       .rejects.toMatchObject({ status: 503 });

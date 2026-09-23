@@ -43,6 +43,24 @@ export type ServerKycStatus = (typeof KYC_STATUSES)[number];
 export const PRIVATE_BUCKET = "client-documents";
 /** Hard cap for uploaded KYC documents. */
 export const MAX_UPLOAD_BYTES = 15 * 1024 * 1024;
+/**
+ * Lifetime of the signed URL /api/clients/doc-url hands an admin for ONE
+ * logged document view (seconds). Short on purpose: the URL is opened right
+ * away, and a copied link must not outlive the view it was logged for.
+ */
+export const KYC_DOC_URL_TTL_S = 120;
+/**
+ * Lifetime of the per-document signed URLs inside a GDPR data export
+ * (/api/clients/export). Longer than a single view because the admin has to
+ * download every file of the bundle, still short enough that the export file
+ * itself stops working as a key to the documents within minutes.
+ */
+export const KYC_EXPORT_URL_TTL_S = 600;
+
+/** Storage prefix holding every KYC object of one dossier (upload route layout). */
+export function clientStoragePrefix(clientId: string): string {
+  return `clients/${safePathSegment(clientId)}`;
+}
 
 // ── KYC lifecycle policy ────────────────────────────────────────────────────
 /** Off-chain KYC validity window stamped at verification (kyc_expires_at). */
@@ -492,7 +510,8 @@ export function randomOnboardingToken(): string {
 }
 
 /**
- * Resolve a client document to a 60-minute signed URL on the PRIVATE bucket.
+ * Resolve a client document to a short-lived signed URL on the PRIVATE bucket
+ * (KYC_DOC_URL_TTL_S unless the caller passes another lifetime).
  *
  * No public-bucket fallback: KYC documents must never be reachable through an
  * unauthenticated URL. Legacy pre-P1 rows whose objects still live in the
@@ -502,10 +521,11 @@ export function randomOnboardingToken(): string {
 export async function documentUrlFor(
   sb: SupabaseClient,
   storagePath: string,
+  ttlSeconds: number = KYC_DOC_URL_TTL_S,
 ): Promise<string | null> {
   const { data, error } = await sb.storage
     .from(PRIVATE_BUCKET)
-    .createSignedUrl(storagePath, 3600);
+    .createSignedUrl(storagePath, ttlSeconds);
   if (!error && data?.signedUrl) return data.signedUrl;
   console.warn(
     `[api/clients] no signed URL for "${storagePath}" — legacy public-bucket fallback removed; move the object into ${PRIVATE_BUCKET}`,

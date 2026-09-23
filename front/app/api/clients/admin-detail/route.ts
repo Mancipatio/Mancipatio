@@ -16,6 +16,8 @@ const CLIENT_COLUMNS =
   "display_name,company_name,jurisdiction,kyc_status,kyc_provider," +
   "kyc_provider_ref,kyc_verified_at,kyc_expires_at,onboarding_status,wallet," +
   "issuer_pda,suspended_at,notes_count,last_activity_at,tos_accepted_at,tos_version";
+/** Added by migration 0065; read only when the column exists. */
+const ANONYMIZED_COLUMN = "anonymized_at";
 
 export async function POST(request: Request) {
   try {
@@ -26,12 +28,13 @@ export async function POST(request: Request) {
     if (!id) throw new SiwsError(400, "id is required");
 
     const sb = getSupabaseAdmin();
-    const { data: client, error: clientErr } = await sb
-      .from("clients")
-      .select(CLIENT_COLUMNS)
-      .eq("id", id)
-      .eq("network", detectNetwork())
-      .maybeSingle();
+    const readClient = (columns: string) =>
+      sb.from("clients").select(columns).eq("id", id).eq("network", detectNetwork()).maybeSingle();
+    let { data: client, error: clientErr } = await readClient(`${CLIENT_COLUMNS},${ANONYMIZED_COLUMN}`);
+    if (clientErr?.message?.includes(ANONYMIZED_COLUMN)) {
+      // Database without migration 0065: the page works, minus the marker.
+      ({ data: client, error: clientErr } = await readClient(CLIENT_COLUMNS));
+    }
     if (clientErr) throw new SiwsError(500, "Client lookup failed");
     if (!client) throw new SiwsError(404, "Client not found");
 

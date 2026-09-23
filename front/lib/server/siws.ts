@@ -42,6 +42,11 @@ export type VerifiedRequest = {
   wallet: string;
   /** The signed, route-specific params — still validate field-by-field. */
   params: Record<string, unknown>;
+  /**
+   * How the wallet was proven: a fresh signature over this request, or the
+   * wallet session cookie (read actions only). Recorded by server audit rows.
+   */
+  via?: "signature" | "session";
 };
 
 const NONCE_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -208,7 +213,7 @@ export async function verifySigned(
     // Maintenance refuses before the nonce is spent (lib/server/maintenance.ts).
     await assertActionWritable(action, detectNetwork());
     await consumeNonce(payload as SiwsPayload, tsMs + SIWS_MAX_AGE_MS);
-    return { wallet, params };
+    return { wallet, params, via: "session" };
   }
 
   // Verify the exact signed context and params before touching the nonce store.
@@ -246,7 +251,7 @@ export async function verifySigned(
   // Retain a future-dated request until its actual signed validity ends.
   await consumeNonce(payload as SiwsPayload, tsMs + SIWS_MAX_AGE_MS);
 
-  return { wallet, params };
+  return { wallet, params, via: "signature" };
 }
 
 /**

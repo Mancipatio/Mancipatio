@@ -26,6 +26,7 @@ import { NextResponse } from "next/server";
 import { SiwsError, siwsErrorResponse } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { SERVER_ONLY_AUDIT_CATEGORIES } from "@/lib/server/audit";
 
 const CATEGORIES = new Set([
   "platform",
@@ -76,6 +77,12 @@ export async function POST(request: Request) {
     if (!ixName) throw new SiwsError(400, "ix_name required (≤120 chars)");
 
     const category = typeof b.category === "string" ? b.category : "";
+    // "kyc" rows (KYC document views, data exports, erasures) are written only
+    // by the routes that perform them, with a verified actor. Refusing the
+    // category here keeps every "kyc" row in the ledger server-attributed.
+    if (SERVER_ONLY_AUDIT_CATEGORIES.has(category)) {
+      throw new SiwsError(400, "This audit category is recorded by the server only");
+    }
     if (!CATEGORIES.has(category)) {
       throw new SiwsError(400, "Unknown audit category");
     }
