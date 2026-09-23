@@ -17,7 +17,6 @@ import {
 } from "@solana-program/token-2022";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
-  fetchMaybeCustodyVault,
   findAssetPda,
   findOpenCustodyVaultEscrowPda,
   getDepositToCustodyVaultInstruction,
@@ -26,6 +25,7 @@ import {
   VaultState,
   type Asset,
 } from "@/lib/generated/asset_registry";
+import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { loadHoldings } from "@/lib/holdings";
@@ -240,7 +240,7 @@ export default function DeliveryPage() {
       await Promise.all(
         targets.map(async (r) => {
           try {
-            const maybe = await fetchMaybeCustodyVault(
+            const maybe = await fetchMaybeLiveCustodyVault(
               client.runtime.rpc,
               address(r.vault_pda!),
             );
@@ -361,7 +361,7 @@ export default function DeliveryPage() {
       // move funds out of a terminal vault. (Delivery vaults have deadlines and
       // a permissionless post-deadline return, so a stale vault_opened row can
       // point at an already-closed vault.)
-      const vaultBefore = await fetchMaybeCustodyVault(
+      const vaultBefore = await fetchMaybeLiveCustodyVault(
         client.runtime.rpc,
         address(req.vault_pda),
       );
@@ -545,7 +545,7 @@ export default function DeliveryPage() {
     const pendingId = toast.showPending("Reclaiming your tokens from escrow…");
     try {
       assertChainRecordStorageAvailable();
-      const before = await fetchMaybeCustodyVault(
+      const before = await fetchMaybeLiveCustodyVault(
         client.runtime.rpc,
         address(req.vault_pda),
         { commitment: "finalized" },

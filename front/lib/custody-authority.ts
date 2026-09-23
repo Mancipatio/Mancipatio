@@ -1,7 +1,6 @@
 import { address, type Address, type TransactionSigner } from "@solana/kit";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
-  fetchMaybeCustodyVault,
   findAdminRecordPda,
   findPlatformPda,
   fetchMaybePlatform,
@@ -11,14 +10,15 @@ import {
   getProposeCustodyAuthorityInstructionAsync,
   getAcceptCustodyAuthorityInstructionAsync,
 } from "@/lib/generated/asset_registry";
+import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { findCustodyVaultPda } from "@/lib/pdas";
 /** Bind the proof to the vault's current operator. The PDA may be absent after
  * revocation: permissionless deadline returns must still be constructible. */
 export async function custodyAuthorityRecord(
-  rpc: Parameters<typeof fetchMaybeCustodyVault>[0],
+  rpc: Parameters<typeof fetchMaybeLiveCustodyVault>[0],
   vaultPda: Address,
 ) {
-  const vault = await fetchMaybeCustodyVault(rpc, vaultPda, {
+  const vault = await fetchMaybeLiveCustodyVault(rpc, vaultPda, {
     commitment: "finalized",
     abortSignal: AbortSignal.timeout(8_000),
   });
@@ -35,7 +35,7 @@ export async function custodyAuthorityRecord(
   return record;
 }
 
-type Rpc = Parameters<typeof fetchMaybeCustodyVault>[0];
+type Rpc = Parameters<typeof fetchMaybeLiveCustodyVault>[0];
 export async function loadCustodyAuthority(rpc: Rpc, vaultPda: Address) {
   const options = {
     commitment: "finalized" as const,
@@ -44,7 +44,7 @@ export async function loadCustodyAuthority(rpc: Rpc, vaultPda: Address) {
   const [platformPda] = await findPlatformPda(),
     [transferPda] = await findTransferPda({ custodyVault: vaultPda });
   const [vault, platform, transfer] = await Promise.all([
-    fetchMaybeCustodyVault(rpc, vaultPda, options),
+    fetchMaybeLiveCustodyVault(rpc, vaultPda, options),
     fetchMaybePlatform(rpc, platformPda, options),
     fetchMaybeAuthorityTransfer(rpc, transferPda, options),
   ]);

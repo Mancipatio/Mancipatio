@@ -2,8 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useSolanaClient } from "@solana/react-hooks";
-import { address } from "@solana/kit";
-import { fetchMaybeCustodyVault } from "@/lib/generated/asset_registry";
+import { address, fetchEncodedAccount } from "@solana/kit";
 import type { WalletSession } from "@solana/client";
 import {
   detectNetwork,
@@ -123,7 +122,9 @@ export function useCustodyOpenRecovery(
         shareClass: request.share_class_pda,
         vaultId,
         assertUnoccupied: async (vaultPda) => {
-          const existing = await fetchMaybeCustodyVault(
+          // Raw existence: a 2D tombstone (rent reclaimed) still occupies
+          // the PDA forever, so its vault ID counts as in use.
+          const existing = await fetchEncodedAccount(
             client.runtime.rpc,
             address(vaultPda),
             {

@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-const mocks = vi.hoisted(() => ({ query: vi.fn(), vault: vi.fn(), deposit: vi.fn(), passport: vi.fn(), transaction: vi.fn(), verify: vi.fn(), admin: vi.fn(), filters: [] as unknown[][], updates: [] as Record<string, unknown>[] }));
+const mocks = vi.hoisted(() => ({ query: vi.fn(), vault: vi.fn(), closed: vi.fn(), deposit: vi.fn(), passport: vi.fn(), transaction: vi.fn(), verify: vi.fn(), admin: vi.fn(), filters: [] as unknown[][], updates: [] as Record<string, unknown>[] }));
 vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
 vi.mock("@/lib/server/rpc", () => ({ getServerRpc: () => ({ getTransaction: (...args: unknown[]) => ({ send: (options: unknown) => mocks.transaction(...args, options) }) }) }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ from: (table: string) => {
@@ -9,7 +9,7 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ from: (tabl
     eq: (...args: unknown[]) => { filters.push(args); mocks.filters.push([table, ...args]); return q; },
     maybeSingle: () => mocks.query(table, mutation, filters) }; return q;
 } }) }));
-vi.mock("@/lib/server/chain-evidence", async (original) => ({ ...await original<typeof import("@/lib/server/chain-evidence")>(), requireRequestVault: mocks.vault, requireDepositEvidence: mocks.deposit, requireBeneficiaryPassport: mocks.passport }));
+vi.mock("@/lib/server/chain-evidence", async (original) => ({ ...await original<typeof import("@/lib/server/chain-evidence")>(), requireRequestVault: mocks.vault, closedRequestVault: mocks.closed, requireDepositEvidence: mocks.deposit, requireBeneficiaryPassport: mocks.passport }));
 vi.mock("@/lib/server/siws", async (original) => ({ ...await original<typeof import("@/lib/server/siws")>(), verifySigned: mocks.verify }));
 vi.mock("@/lib/server/admin-gate", () => ({ requireAdmin: mocks.admin }));
 import { address, createNoopSigner, getAddressDecoder, getBase58Decoder, type Instruction, type ReadonlyUint8Array } from "@solana/kit";
@@ -17,6 +17,7 @@ import { getReturnCustodyVaultInstruction, getRealizeCustodyVaultInstruction, Va
 import { TOKEN_2022_PROGRAM, type ChainTransaction } from "@/lib/chain-evidence";
 import { recordCustodyReturn, recordCustodyDeposit, validateCustodyUpdate } from "@/lib/server/custody-evidence";
 import { SiwsError } from "@/lib/server/siws";
+import { ClosedCustodyVaultError } from "@/lib/server/chain-evidence";
 import { POST as deliveryReclaim } from "@/app/api/delivery/reclaim/route";
 import { POST as conversionReclaim } from "@/app/api/conversion/reclaim/route";
 import { POST as deliveryAdmin } from "@/app/api/delivery/admin-update/route";
@@ -141,5 +142,44 @@ describe("admin custody lifecycle proofs", () => {
     mocks.vault.mockResolvedValue({ vault: { escrow, deposited: BigInt(0), state: VaultState.Returned }, escrow: { amount: BigInt(0) } });
     await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "deposited" })).rejects.toMatchObject({ status: 409 });
     await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "in_delivery" })).rejects.toMatchObject({ status: 409 });
+  });
+});
+describe("2D: custody evidence once the vault was tombstoned by reclaim_rent", () => {
+  beforeEach(() => {
+    mocks.vault.mockRejectedValue(new ClosedCustodyVaultError());
+    mocks.closed.mockResolvedValue({ escrow });
+  });
+  it.each(["delivery_requests", "conversion_requests"] as const)("records a realization for %s from the transaction alone", async (table) => {
+    Object.assign(row, { status: "in_delivery" });
+    mocks.transaction.mockResolvedValue(evidence("realize"));
+    const patch = { status: table === "delivery_requests" ? "delivered" : "converted", outcome_tx: signature };
+    await expect(validateCustodyUpdate(table, "request-id", patch)).resolves.toBe("in_delivery");
+    expect(patch).toMatchObject({ outcome_evidence: { signature, vault, amountAtomic: "3" } });
+    expect(mocks.closed).toHaveBeenCalled();
+  });
+  it("records a return with no surplus left and without the live deposit ledger", async () => {
+    await expect(recordCustodyReturn("delivery_requests", "request-id", holder, signature)).resolves.toEqual({ id: "request-id", status: "returned" });
+    expect(mocks.updates[0]).toMatchObject({ status: "returned", outcome_evidence: { signature, vault, amountAtomic: "3", surplusRemaining: "0" } });
+  });
+  it("allows cancelling only a request that was never funded", async () => {
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "cancelled" })).rejects.toMatchObject({ status: 409 });
+    Object.assign(row, { status: "vault_opened", deposit_tx: null, deposit_evidence: null });
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "cancelled" })).resolves.toBe("vault_opened");
+  });
+  it.each(["vault_opened", "deposited", "in_delivery"])("refuses a move to %s: it needs live vault state", async (status) => {
+    Object.assign(row, { status: status === "vault_opened" ? "requested" : "vault_opened", deposit_evidence: null });
+    mocks.deposit.mockRejectedValue(new ClosedCustodyVaultError());
+    const patch = status === "deposited" ? { status, deposit_tx: signature } : { status };
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", patch)).rejects.toMatchObject({ status: 409, message: "Custody vault was closed after settlement" });
+  });
+  it("refuses linking a tombstoned vault", async () => {
+    Object.assign(row, { status: "requested", vault_pda: null });
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { status: "vault_opened", vault_pda: vault })).rejects.toMatchObject({ status: 409 });
+    expect(mocks.closed).not.toHaveBeenCalled();
+  });
+  it("lets a note-only patch pass", async () => {
+    Object.assign(row, { status: "delivered", outcome_tx: signature, outcome_evidence: { signature, vault } });
+    await expect(validateCustodyUpdate("delivery_requests", "request-id", { admin_note: "Archived" })).resolves.toBe("delivered");
+    expect(mocks.transaction).not.toHaveBeenCalled();
   });
 });
