@@ -147,7 +147,8 @@ export default function TermsPage() {
             signature only (a) on a KYC-gated class, when the holder&apos;s
             verification was revoked or has expired, or (b) on any class, when
             the holder&apos;s wallet is on the platform&apos;s sanctions
-            blocklist, which is kept by a separate Blocklist Authority. In both
+            blocklist, which is kept by the Blocklist Authority, an on-chain
+            role separate from the Manci admin role. In both
             cases a Manci admin must sign, and the tokens can only be moved into
             a quarantine vault from which they can only be burned. The platform
             has no on-chain way to return them.

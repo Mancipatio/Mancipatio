@@ -115,7 +115,7 @@ export default function SecurityPage() {
           className="mt-4"
           items={[
             "On a KYC-gated class, when the holder’s investor passport was revoked or has expired.",
-            "On any class, Open or KYC-gated, when the holder’s wallet is on the sanctions blocklist. The Blocklist Authority, a separate on-chain key, adds the wallet; a Manci admin then signs the clawback.",
+            "On any class, Open or KYC-gated, when the holder’s wallet is on the sanctions blocklist. The Blocklist Authority, a separate on-chain role, adds the wallet; a Manci admin then signs the clawback. The program does not require the two roles to be held by different keys.",
           ]}
         />
         <Body className="mt-4">
