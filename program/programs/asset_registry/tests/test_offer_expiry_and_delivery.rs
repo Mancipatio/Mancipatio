@@ -2622,8 +2622,9 @@ fn custody_reclaim_after_realize_revert_and_return() {
         assert_eq!(events[0].kind, asset_registry::RECLAIM_CUSTODY);
         assert_eq!(events[0].lamports, expected);
     }
-    // The tombstoned id can never be opened again.
-    assert!(try_send(
+    // The tombstoned id can never be opened again (allocate refuses a
+    // program-owned PDA), not merely "some" error.
+    let err = try_send(
         &mut svm,
         &[&ctx.payer],
         &[open_vault_ix(
@@ -2632,10 +2633,11 @@ fn custody_reclaim_after_realize_revert_and_return() {
             VaultType::Vesting,
             10,
             0,
-            Pubkey::default()
+            Pubkey::default(),
         )],
     )
-    .is_err());
+    .expect_err("a tombstoned custody vault id cannot be re-opened");
+    assert!(err.contains("already in use"), "got: {err}");
     reclaim::assert_tombstone(&svm, &custody_pdas(&ctx, 1).0);
 }
 
@@ -2794,6 +2796,17 @@ fn stale_custody_authority_transfer_cannot_be_accepted_after_reclaim() {
 fn reclaim_refuses_unknown_and_foreign_targets() {
     let (mut svm, ctx) = boot(10);
     let payer = ctx.payer.pubkey();
+    // Registry-owned accounts with too-short data (0 and 7 bytes): the owner
+    // check passes, so the refusal comes from the `len >= 8` guard.
+    let mut short_targets = Vec::new();
+    for len in [0usize, 7] {
+        let mut account = svm.get_account(&ctx.share_class_pda).unwrap();
+        assert_eq!(account.owner, asset_registry::ID);
+        account.data = vec![7; len];
+        let target = Pubkey::new_unique();
+        svm.set_account(target, account).unwrap();
+        short_targets.push(target);
+    }
     for target in [
         ctx.share_class_pda,
         ctx.asset_pda,
@@ -2801,6 +2814,8 @@ fn reclaim_refuses_unknown_and_foreign_targets() {
         ctx.holder.pubkey(),
         ctx.holder_share_ata,
         ctx.mint_pda,
+        short_targets[0],
+        short_targets[1],
     ] {
         reclaim::assert_code(
             try_send(

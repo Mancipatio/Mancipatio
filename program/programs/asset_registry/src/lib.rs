@@ -239,7 +239,10 @@ pub mod asset_registry {
     /// Opens a custody vault (`Active`) with an empty escrow token account.
     /// A `DeliveryEscrow` pins a `KycRegistry` (optional account, required for
     /// that type and refused for every other) that its realize checks the
-    /// beneficiary in (2C-3).
+    /// beneficiary in (2C-3). 2D: `ConversionPending` is retired (holder
+    /// conversions use a `DeliveryEscrow`; `VaultTypeRetired`, 6142), and only
+    /// a `DeliveryEscrow` may name a `beneficiary` (`BeneficiaryNotAllowed`,
+    /// 6141).
     #[allow(clippy::too_many_arguments)]
     pub fn open_custody_vault(
         ctx: Context<OpenCustodyVault>,
@@ -263,10 +266,12 @@ pub mod asset_registry {
         )
     }
 
-    /// Funds an `Active` custody vault's escrow from the depositor's own
-    /// wallet and CREDITS the vault's deposit ledger. For a `DeliveryEscrow`
-    /// the depositor must be the vault's `beneficiary` — the ledger is what
+    /// Funds an `Active` `DeliveryEscrow`'s escrow from its `beneficiary`'s
+    /// own wallet and CREDITS the vault's deposit ledger — the ledger is what
     /// lets `return_custody_vault` refund them without a receiver-KYC check.
+    /// 2D: only a `DeliveryEscrow` accepts deposits, and only from its
+    /// beneficiary (`DepositorNotBeneficiary`, 6084); every other vault type
+    /// is funded by `mint_to_treasury` or a clawback.
     pub fn deposit_to_custody_vault<'info>(
         ctx: Context<'info, DepositToCustodyVault<'info>>,
         amount: u64,
