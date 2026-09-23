@@ -511,7 +511,9 @@ pub struct CustodyRealized {
     pub mint: Pubkey,
     pub burned: u64,
     pub metadata_hash: [u8; 32],
-    /// The vault's beneficiary (DeliveryEscrow; default otherwise).
+    /// The beneficiary whose KYC this realize checked (DeliveryEscrow);
+    /// default for every other type, even one that stored a beneficiary —
+    /// the event never names an unchecked beneficiary.
     pub beneficiary: Pubkey,
     /// The registry the beneficiary's KYC was checked in (DeliveryEscrow;
     /// default otherwise).

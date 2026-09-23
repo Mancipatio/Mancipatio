@@ -2703,6 +2703,128 @@ fn custody_realize_other_holders_entry_rejected() {
     assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
 }
 
+/// Creates a second (admin co-signed, valid) registry and approves `holder`
+/// in it — a spoof source for the entry-binding tests.
+fn second_registry_with_approved(svm: &mut LiteSVM, ctx: &Ctx, holder: &Pubkey) -> Pubkey {
+    let other_provider = Keypair::new();
+    svm.airdrop(&other_provider.pubkey(), 10_000_000_000)
+        .unwrap();
+    let other_registry = kyc_registry::registry_pda(&other_provider.pubkey());
+    send(
+        svm,
+        &[&other_provider, &ctx.payer],
+        &[kyc_registry::create_registry_ix(
+            &other_provider.pubkey(),
+            &ctx.payer.pubkey(),
+            [0xFFu8; 128],
+            [0u8; 128],
+        )],
+        "create a second registry",
+    );
+    send(
+        svm,
+        &[&other_provider],
+        &[kyc_registry::approve_ix(
+            &other_provider.pubkey(),
+            &other_registry,
+            holder,
+            JURISDICTION,
+        )],
+        "approve the holder in the second registry",
+    );
+    other_registry
+}
+
+/// The pinned registry plus the beneficiary's OWN Approved entry from a
+/// different registry: only the handler's `["kyc", pinned, beneficiary]`
+/// derivation stops it (a `holder == beneficiary` check alone would not).
+#[test]
+fn custody_realize_pinned_registry_with_foreign_entry_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    let (vault_pda, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 39);
+    let other_registry = second_registry_with_approved(&mut svm, &ctx, &seller_pk);
+
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(
+                &ctx,
+                39,
+                Some(ctx.kyc_registry_pda),
+                Some(kyc_registry::entry_pda(&other_registry, &seller_pk)),
+            )],
+        ),
+        6069,
+        "realize with the beneficiary's entry from an unpinned registry",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Triggered);
+}
+
+/// Wrong account kinds in the KYC slots fail Anchor validation: a
+/// system-owned wallet (3007) or a `KycEntry` (3002) as `kyc_registry`, and
+/// the registry itself as `kyc_entry` (3002). Nothing is burned.
+#[test]
+fn custody_realize_wrong_account_kinds_in_kyc_slots_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    approve_kyc(&mut svm, &ctx, &seller_pk);
+    let (vault_pda, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 40);
+    let (registry, entry) = boot_kyc(&ctx, &seller_pk);
+
+    for (kyc_registry, kyc_entry, code, what) in [
+        (
+            Some(seller_pk),
+            entry,
+            3007,
+            "a system-owned wallet as kyc_registry",
+        ),
+        (entry, entry, 3002, "a KycEntry as kyc_registry"),
+        (registry, registry, 3002, "the KycRegistry as kyc_entry"),
+    ] {
+        assert_realize_err(
+            try_send(
+                &mut svm,
+                &[&ctx.payer],
+                &[realize_vault_ix(&ctx, 40, kyc_registry, kyc_entry)],
+            ),
+            code,
+            what,
+        );
+    }
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Triggered);
+}
+
+/// Realize is an exit: an approved beneficiary's KYC-gated DeliveryEscrow
+/// still realizes with every pause flag set.
+#[test]
+fn custody_realize_approved_beneficiary_under_full_pause() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    approve_kyc(&mut svm, &ctx, &seller_pk);
+    let (vault_pda, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 41);
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_FLAGS_ALL);
+
+    let (registry, entry) = boot_kyc(&ctx, &seller_pk);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[realize_vault_ix(&ctx, 41, registry, entry)],
+        "realize under PAUSE_FLAGS_ALL",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), 0);
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Realized);
+}
+
 /// A holder who never had a passport opens, deposits (no KYC asked), gets
 /// triggered — the realize is refused — and still gets every unit back
 /// through `return_custody_vault`. Nothing is confiscated.

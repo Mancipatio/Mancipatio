@@ -2104,12 +2104,13 @@ fn delivery_vault_pins_registry_v2_layout() {
 }
 
 /// Non-delivery realize ignores the KYC accounts entirely: a ConversionPending
-/// vault (no beneficiary) realizes with None / None.
+/// vault realizes with None / None. Its attestation names no beneficiary and
+/// no registry — even though this vault stored one, it was never KYC-checked.
 #[test]
 fn non_delivery_realize_needs_no_kyc_accounts() {
     let (mut svm, ctx) = boot(20);
     warp_to(&mut svm, 1_000);
-    let (_, escrow_pda) = custody_pdas(&ctx, 1);
+    let (custody_pda, escrow_pda) = custody_pdas(&ctx, 1);
     send(
         &mut svm,
         &[&ctx.payer],
@@ -2119,24 +2120,41 @@ fn non_delivery_realize_needs_no_kyc_accounts() {
             VaultType::ConversionPending,
             5,
             0,
-            Pubkey::default(),
+            ctx.holder.pubkey(),
         )],
-        "open conversion-pending vault",
+        "open conversion-pending vault (beneficiary stored)",
     );
+    let stored: CustodyVault = load(&svm, &custody_pda);
+    assert_eq!(stored.beneficiary, ctx.holder.pubkey());
     send(
         &mut svm,
         &[&ctx.holder],
         &[deposit_to_custody_ix(&ctx, 1, 5)],
         "deposit",
     );
-    send(
-        &mut svm,
-        &[&ctx.payer],
+    svm.expire_blockhash();
+    let bh = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(
         &[
             trigger_vault_ix(&ctx, 1),
             realize_vault_ix(&ctx, 1, None, None),
         ],
-        "trigger + realize (no KYC accounts)",
+        Some(&ctx.payer.pubkey()),
+        &bh,
     );
+    let tx =
+        VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&ctx.payer]).expect("sign");
+    let meta = svm
+        .send_transaction(tx)
+        .unwrap_or_else(|e| panic!("trigger + realize (no KYC accounts): {e:?}"));
     assert_eq!(token_balance(&svm, &escrow_pda), 0);
+    let events = kyc_registry::events::<asset_registry::CustodyRealized>(&meta.logs);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].custody_vault, custody_pda);
+    assert_eq!(
+        events[0].beneficiary,
+        Pubkey::default(),
+        "an unchecked beneficiary is never attested"
+    );
+    assert_eq!(events[0].kyc_registry, Pubkey::default());
 }

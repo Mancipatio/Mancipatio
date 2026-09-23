@@ -95,9 +95,11 @@ pub fn handle_realize_custody_vault(ctx: Context<RealizeCustodyVault>) -> Result
         RegistryError::UnsupportedRealizeAction
     );
 
-    // Beneficiary KYC gate — before anything is burned.
+    // Beneficiary KYC gate — before anything is burned. The attestation names
+    // a beneficiary only when its KYC was checked here: an ungated type emits
+    // default / default even if it stored a beneficiary.
     let vault = &ctx.accounts.custody_vault;
-    let checked_registry = if vault.vault_type == VaultType::DeliveryEscrow {
+    let (checked_registry, checked_beneficiary) = if vault.vault_type == VaultType::DeliveryEscrow {
         require_keys_neq!(
             vault.kyc_registry,
             Pubkey::default(),
@@ -133,9 +135,9 @@ pub fn handle_realize_custody_vault(ctx: Context<RealizeCustodyVault>) -> Result
         );
         crate::util::require_kyc_entry_current(entry, Clock::get()?.unix_timestamp)?;
         crate::util::require_jurisdiction_allowed(registry, entry.jurisdiction)?;
-        registry.key()
+        (registry.key(), vault.beneficiary)
     } else {
-        Pubkey::default()
+        (Pubkey::default(), Pubkey::default())
     };
 
     let burn_amount = ctx.accounts.escrow.amount;
@@ -180,7 +182,7 @@ pub fn handle_realize_custody_vault(ctx: Context<RealizeCustodyVault>) -> Result
         mint: cv.mint,
         burned: burn_amount,
         metadata_hash: cv.metadata_hash,
-        beneficiary: cv.beneficiary,
+        beneficiary: checked_beneficiary,
         kyc_registry: checked_registry,
     });
 
