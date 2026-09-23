@@ -1,5 +1,10 @@
 // SERVER-ONLY — deployment health for uptime monitors (GET /api/health).
 //
+// Anonymous callers get only {ok, network, checkedAt} and the status code.
+// The per-check report (queue sizes and ages, indexer and RPC state, the
+// deployed commit) needs `Authorization: Bearer <HEALTH_TOKEN>`; without a
+// HEALTH_TOKEN of at least 32 characters, details are never shown.
+//
 // Every check is bounded by a short timeout and NEVER throws: an unreachable
 // database, RPC or missing configuration is reported as that check failing.
 // The report carries only operational facts (states, slots, ages, counts,
@@ -12,8 +17,15 @@
 //   indexer       ready → ok; warming / not initialized / degraded → warn
 //                 (the browser falls back to chain reads, see lib/indexer.ts)
 //   rpc           server RPC answers getSlot → ok; else fail
-//   indexerQueue  oldest pending webhook job ≥ 5 min → warn, ≥ 30 min → fail
-//   purchaseQueue oldest pending purchase record ≥ 5 min → warn, ≥ 30 min → fail
+//   indexerQueue  oldest pending webhook job ≥ 5 min → warn (backlog),
+//                 ≥ 30 min → warn (stalled). Never fail: indexer jobs have
+//                 no terminal failed state, so one poison transaction stays
+//                 pending forever, and a lagging index only makes browsers
+//                 fall back to chain reads (same rule as a degraded indexer).
+//   purchaseQueue oldest pending purchase record ≥ 5 min → warn, ≥ 30 min →
+//                 fail: a user's purchase record is stuck (evidence that can
+//                 never verify ends as "invalid", so a stall means the worker
+//                 or what it depends on keeps failing)
 //   maintenance   off → ok; on → warn (planned; reads keep working);
 //                 flag unreadable → fail
 // Reports are shared for a few seconds per instance and concurrent requests
@@ -21,6 +33,7 @@
 
 import "server-only";
 
+import { createHash, timingSafeEqual } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork, type Network } from "@/lib/network";
 import { NetworkIdentityError } from "@/lib/network-identity";
@@ -124,7 +137,10 @@ async function checkIndexer(sb: SupabaseClient | null, network: Network, now: nu
   }
 }
 
-async function checkQueue(sb: SupabaseClient | null, table: "indexer_jobs" | "purchase_evidence_jobs", network: Network, now: number): Promise<QueueCheck> {
+async function checkQueue(
+  sb: SupabaseClient | null, table: "indexer_jobs" | "purchase_evidence_jobs", network: Network, now: number,
+  stalledStatus: "warn" | "fail",
+): Promise<QueueCheck> {
   const empty = { pending: null, oldestPendingAgeSeconds: null } as const;
   if (!sb) return { status: "fail", reason: "not_configured", ...empty };
   try {
@@ -141,7 +157,7 @@ async function checkQueue(sb: SupabaseClient | null, table: "indexer_jobs" | "pu
     if (result.error || pending === null) return { status: "fail", reason: "unavailable", ...empty };
     const oldest = pending > 0 ? ageSeconds((result.data as { created_at?: unknown }[] | null)?.[0]?.created_at, now) : null;
     const check = { pending, oldestPendingAgeSeconds: oldest };
-    if (oldest !== null && oldest >= QUEUE_FAIL_SECONDS) return { status: "fail", reason: "stalled", ...check };
+    if (oldest !== null && oldest >= QUEUE_FAIL_SECONDS) return { status: stalledStatus, reason: "stalled", ...check };
     if (oldest !== null && oldest >= QUEUE_WARN_SECONDS) return { status: "warn", reason: "backlog", ...check };
     return { status: "ok", ...check };
   } catch {
@@ -203,8 +219,8 @@ export async function runHealthChecks(): Promise<HealthReport> {
   const [indexer, rpc, indexerQueue, purchaseQueue, maintenance] = await Promise.all([
     checkIndexer(sb, network, now),
     checkRpc(),
-    checkQueue(sb, "indexer_jobs", network, now),
-    checkQueue(sb, "purchase_evidence_jobs", network, now),
+    checkQueue(sb, "indexer_jobs", network, now, "warn"),
+    checkQueue(sb, "purchase_evidence_jobs", network, now, "fail"),
     checkMaintenance(network),
   ]);
   const checks = { indexer, rpc, indexerQueue, purchaseQueue, maintenance };
@@ -215,6 +231,25 @@ export async function runHealthChecks(): Promise<HealthReport> {
     commit: commitId(),
     checks,
   };
+}
+
+export type HealthSummary = Pick<HealthReport, "ok" | "network" | "checkedAt">;
+
+/** What anonymous callers see: enough for an uptime monitor, nothing more. */
+export function summarizeHealth(report: HealthReport): HealthSummary {
+  return { ok: report.ok, network: report.network, checkedAt: report.checkedAt };
+}
+
+/** Whether the caller may see the per-check report. Constant-time compare of
+ * a bearer token against HEALTH_TOKEN; no token configured → never. */
+export function healthDetailsAuthorized(authorization: string | null, configured = process.env.HEALTH_TOKEN): boolean {
+  const secret = configured?.trim();
+  if (!secret || secret.length < 32 || /\s/.test(secret)) return false;
+  const supplied = authorization?.match(/^Bearer ([^\s]+)$/i)?.[1];
+  if (!supplied || supplied.length > 4096) return false;
+  // Hash both values first so timingSafeEqual always compares equal-size buffers.
+  const digest = (value: string) => createHash("sha256").update(value).digest();
+  return timingSafeEqual(digest(supplied), digest(secret));
 }
 
 let cached: { at: number; report: HealthReport } | null = null;

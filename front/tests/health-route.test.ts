@@ -65,6 +65,7 @@ vi.mock("@/lib/server/rpc", () => ({
 vi.mock("@/lib/server/maintenance", () => ({ readMaintenance: m.maintenance }));
 
 const NOW = new Date("2026-09-23T10:00:00Z").getTime();
+const TOKEN = "health-token-0123456789abcdef-0123456789";
 const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString();
 
 type Route = typeof import("@/app/api/health/route");
@@ -76,6 +77,7 @@ beforeEach(async () => {
   vi.setSystemTime(NOW);
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
   vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "0123456789abcdef0123456789abcdef01234567");
+  vi.stubEnv("HEALTH_TOKEN", TOKEN);
   m.calls = [];
   m.adminError = null;
   m.rpcError = null;
@@ -95,16 +97,19 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
-async function get() {
-  const response = await route.GET();
+/** The detailed report by default; `authorization: null` asks anonymously. */
+async function get(authorization: string | null = `Bearer ${TOKEN}`) {
+  const headers = authorization === null ? undefined : { authorization };
+  const response = await route.GET(new Request("https://www.manci.io/api/health", { headers }));
   return { status: response.status, headers: response.headers, body: await response.json() };
 }
 
 describe("GET /api/health", () => {
-  it("answers 200 with every check when the deployment is healthy, never cached", async () => {
+  it("answers 200 with every check to the token holder when healthy, never cached", async () => {
     const { status, headers, body } = await get();
     expect(status).toBe(200);
-    expect(headers.get("cache-control")).toBe("no-store, max-age=0");
+    expect(headers.get("cache-control")).toBe("private, no-store");
+    expect(headers.get("vary")).toBe("Authorization");
     expect(body).toEqual({
       ok: true,
       network: "devnet",
@@ -189,7 +194,7 @@ describe("GET /api/health", () => {
     const health = await import("@/lib/server/health");
     m.rpcSend = () => new Promise(() => {}); // ignores its signal, like the genesis check
     m.replies.indexer_jobs = "hang";
-    const pending = route.GET();
+    const pending = route.GET(new Request("https://www.manci.io/api/health", { headers: { authorization: `Bearer ${TOKEN}` } }));
     await vi.advanceTimersByTimeAsync(Math.max(health.HEALTH_RPC_TIMEOUT_MS, health.HEALTH_DB_TIMEOUT_MS));
     const response = await pending;
     const body = await response.json();
@@ -201,7 +206,7 @@ describe("GET /api/health", () => {
     expect(m.calls.find((call) => call.table === "indexer_jobs")?.signal?.aborted).toBe(true);
   });
 
-  it("warns on a queue backlog and fails on a stalled queue", async () => {
+  it("warns on a queue backlog and fails on a stalled purchase queue", async () => {
     m.replies.indexer_jobs = { data: [{ created_at: ago(10 * 60) }], error: null, count: 3 };
     let result = await get();
     expect(result.status).toBe(200);
@@ -213,6 +218,15 @@ describe("GET /api/health", () => {
     result = await get();
     expect(result.status).toBe(503);
     expect(result.body.checks.purchaseQueue).toEqual({ status: "fail", reason: "stalled", pending: 1, oldestPendingAgeSeconds: 46 * 60 });
+  });
+
+  it("only warns about a stalled indexer queue: a poison job stays pending forever and reads fall back to chain", async () => {
+    m.replies.indexer_jobs = { data: [{ created_at: ago(3 * 24 * 3600) }], error: null, count: 1 };
+    m.replies.indexer_sync_state = { data: { status: "degraded", last_slot: 9, checked_at: ago(5), completed_at: ago(99) }, error: null };
+    const { status, body } = await get();
+    expect(status).toBe(200);
+    expect(body.ok).toBe(true);
+    expect(body.checks.indexerQueue).toEqual({ status: "warn", reason: "stalled", pending: 1, oldestPendingAgeSeconds: 3 * 24 * 3600 });
   });
 
   it("keeps a young pending job healthy", async () => {
@@ -264,5 +278,33 @@ describe("GET /api/health", () => {
     const { body } = await get();
     expect(Object.keys(body).sort()).toEqual(["checkedAt", "checks", "commit", "network", "ok"]);
     expect(JSON.stringify(body)).not.toMatch(/wallet|email|signature|buyer|http/i);
+  });
+
+  it("shows anonymous callers only the verdict, cacheable briefly at the edge", async () => {
+    m.replies.purchase_evidence_jobs = { data: [{ created_at: ago(20) }], error: null, count: 4 };
+    const { status, headers, body } = await get(null);
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true, network: "devnet", checkedAt: new Date(NOW).toISOString() });
+    expect(headers.get("cache-control")).toBe("public, max-age=0, s-maxage=5");
+    expect(headers.get("vary")).toBe("Authorization");
+  });
+
+  it("keeps the status code for anonymous callers when a check fails", async () => {
+    m.rpcSend = () => Promise.reject(new Error("down"));
+    const { status, body } = await get(null);
+    expect(status).toBe(503);
+    expect(body).toEqual({ ok: false, network: "devnet", checkedAt: new Date(NOW).toISOString() });
+  });
+
+  it.each([
+    ["a wrong token", `Bearer ${TOKEN}x`, TOKEN],
+    ["a non-bearer scheme", `Basic ${TOKEN}`, TOKEN],
+    ["no configured token", `Bearer ${TOKEN}`, ""],
+    ["a configured token that is too short", "Bearer short-token", "short-token"],
+  ])("shows only the verdict for %s", async (_label, authorization, configured) => {
+    vi.stubEnv("HEALTH_TOKEN", configured);
+    const { body, headers } = await get(authorization);
+    expect(Object.keys(body).sort()).toEqual(["checkedAt", "network", "ok"]);
+    expect(headers.get("cache-control")).toBe("public, max-age=0, s-maxage=5");
   });
 });
