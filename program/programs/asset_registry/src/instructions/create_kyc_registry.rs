@@ -6,7 +6,11 @@ use crate::state::{Admin, KycRegistry, KycRegistryCreated, JURISDICTION_BITMAP_B
 #[derive(Accounts)]
 pub struct CreateKycRegistry<'info> {
     /// The KYC provider the registry belongs to — pays for and owns it, and is
-    /// the only signer `approve_holder` / `revoke_holder` accept afterwards.
+    /// the only signer `approve_holder` / `revoke_holder` accept afterwards,
+    /// until rotated (`propose_kyc_registry_authority` /
+    /// `accept_kyc_registry_authority`). The registry address stays derived
+    /// from THIS creating key forever, so this key can never create a second
+    /// registry, even after rotating the first one away.
     #[account(mut)]
     pub authority: Signer<'info>,
 

@@ -27,6 +27,8 @@
 //!     so an arbitrary `publish_milestone` root cannot be paid out through an
 //!     `EscrowMarker`-carrying third-party escrow.
 
+#[path = "../../../tests/support/kyc_registry.rs"]
+mod kyc;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
 #[path = "../../../tests/support/sale_approval.rs"]
@@ -2030,6 +2032,185 @@ fn kyc_registry_layout_matches_hook_offsets() {
         transfer_hook::KYC_REGISTRY_ACCOUNT_LEN,
         "transfer_hook::KYC_REGISTRY_ACCOUNT_LEN drifted from asset_registry::KycRegistry"
     );
+}
+
+// ── KYC registry rotation / jurisdictions on a live KycGated mint (2C-1) ────
+
+/// The payer (creating KYC authority) hands the boot registry to `next`.
+fn rotate_registry(svm: &mut LiteSVM, ctx: &Ctx, next: &Keypair) {
+    send(
+        svm,
+        &[&ctx.payer],
+        &[kyc::propose_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            &next.pubkey(),
+        )],
+        "propose_kyc_registry_authority",
+    );
+    send(
+        svm,
+        &[next],
+        &[kyc::accept_ix(&next.pubkey(), &ctx.kyc_registry_pda)],
+        "accept_kyc_registry_authority",
+    );
+}
+
+/// A jurisdiction block applies immediately to every path that reads the
+/// registry live: the hook (wallet transfer) and `buy`'s receiver check. The
+/// hook config pins the registry by address, so nothing needs re-pointing.
+#[test]
+fn jurisdiction_update_applies_live_to_a_kyc_gated_mint() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer = ctx.buyer.pubkey();
+    let receiver = Keypair::new();
+    approve_kyc(&mut svm, &ctx, &buyer);
+    approve_kyc(&mut svm, &ctx, &receiver.pubkey());
+    let receiver_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &receiver.pubkey());
+    let tail = || kyc_hook_metas(&ctx, &buyer, &buyer, &buyer);
+    let to_receiver = || {
+        transfer_ix(
+            &ctx,
+            ctx.buyer_share_ata,
+            receiver_ata,
+            buyer,
+            buyer,
+            receiver.pubkey(),
+            true,
+        )
+    };
+
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(&ctx, 10, tail())],
+        "buy in J",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[to_receiver()],
+        "transfer to J holder",
+    );
+    assert_eq!(token_balance(&svm, &receiver_ata), 1);
+
+    // Block J (approved map untouched: blocked wins).
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc::update_jurisdictions_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            [0xFF; 128],
+            kyc::bitmap(&[JURISDICTION]),
+        )],
+        "block J",
+    );
+    let err = try_send(&mut svm, &[&ctx.buyer], &[to_receiver()])
+        .expect_err("hook transfer into a blocked jurisdiction");
+    assert_custom_error(
+        &err,
+        u32::from(transfer_hook::HookError::JurisdictionBlocked),
+    );
+    let err = try_send(&mut svm, &[&ctx.buyer], &[buy_ix(&ctx, 1, tail())])
+        .expect_err("buy into a blocked jurisdiction");
+    assert_custom_error(&err, 6071); // ReceiverJurisdictionBlocked
+    assert_eq!(token_balance(&svm, &receiver_ata), 1);
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 9);
+
+    // Unblock — both paths work again.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc::update_jurisdictions_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            [0xFF; 128],
+            [0u8; 128],
+        )],
+        "unblock J",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[to_receiver()],
+        "transfer after unblock",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(&ctx, 1, tail())],
+        "buy after unblock",
+    );
+    assert_eq!(token_balance(&svm, &receiver_ata), 2);
+}
+
+/// Rotation does not re-point anything: the hook config and every KycEntry
+/// stay keyed on the registry ADDRESS. The new authority revokes on the same
+/// registry, the admin claws back, the old authority is locked out.
+#[test]
+fn clawback_still_works_after_registry_rotation() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer = ctx.buyer.pubkey();
+    approve_kyc(&mut svm, &ctx, &buyer);
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer, &buyer, &buyer),
+        )],
+        "buy",
+    );
+
+    let compliance = Keypair::new();
+    svm.airdrop(&compliance.pubkey(), 10_000_000_000).unwrap();
+    rotate_registry(&mut svm, &ctx, &compliance);
+
+    // The old authority (still the platform admin) is out of the registry.
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc::revoke_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            &buyer,
+        )],
+    )
+    .expect_err("old registry authority cannot revoke");
+    assert_custom_error(&err, 6001);
+
+    send(
+        &mut svm,
+        &[&compliance],
+        &[kyc::revoke_ix(
+            &compliance.pubkey(),
+            &ctx.kyc_registry_pda,
+            &buyer,
+        )],
+        "revoke by the rotated authority",
+    );
+    let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 77);
+    let payer_pk = ctx.payer.pubkey();
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[clawback_ix(
+            &ctx,
+            &payer_pk,
+            &buyer,
+            &ctx.buyer_share_ata,
+            &custody_pda,
+            &escrow_pda,
+            0,
+        )],
+        "clawback after rotation",
+    );
+    assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 0);
+    assert_eq!(token_balance(&svm, &escrow_pda), 10);
 }
 
 // ── Fixed owner and source-owner sanctions invariants ───────────────────────

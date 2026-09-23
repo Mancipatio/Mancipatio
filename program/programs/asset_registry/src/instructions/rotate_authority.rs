@@ -5,14 +5,14 @@ use crate::{
 };
 use anchor_lang::prelude::*;
 
-fn validate_new_authority(current: Pubkey, proposed: Pubkey) -> Result<()> {
+pub(crate) fn validate_new_authority(current: Pubkey, proposed: Pubkey) -> Result<()> {
     require!(
         proposed != Pubkey::default() && proposed != current,
         RegistryError::InvalidProposedAuthority
     );
     Ok(())
 }
-fn write_proposal(
+pub(crate) fn write_proposal(
     record: &mut AuthorityTransfer,
     target: Pubkey,
     current: Pubkey,

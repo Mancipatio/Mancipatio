@@ -142,6 +142,10 @@ pub mod issuer_permissions;
 pub use issuer_permissions::*;
 pub mod rotate_authority;
 pub use rotate_authority::*;
+pub mod kyc_registry_authority;
+pub use kyc_registry_authority::*;
+pub mod update_kyc_registry_jurisdictions;
+pub use update_kyc_registry_jurisdictions::*;
 
 pub mod register_escrow_identity;
 pub use register_escrow_identity::*;

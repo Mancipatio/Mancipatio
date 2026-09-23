@@ -10,12 +10,12 @@ pub struct ApproveHolder<'info> {
     #[account(mut)]
     pub authority: Signer<'info>,
 
-    #[account(
-        mut,
-        seeds = [KYC_REGISTRY_SEED, authority.key().as_ref()],
-        bump = kyc_registry.bump,
-        has_one = authority @ RegistryError::Unauthorized,
-    )]
+    /// Taken BY ADDRESS, not re-derived from the signer: a registry's address
+    /// is fixed at creation (`["kyc_registry", creating authority]`) while its
+    /// `authority` can rotate. `Account<KycRegistry>` still checks the owner
+    /// and discriminator, and only `create_kyc_registry` (admin co-signed) can
+    /// create one, so it cannot be forged.
+    #[account(mut, has_one = authority @ RegistryError::Unauthorized)]
     pub kyc_registry: Box<Account<'info, KycRegistry>>,
 
     /// `init_if_needed` — first approval creates the entry; a later call for
