@@ -2864,3 +2864,452 @@ fn update_config_from_an_old_client_without_the_trailing_account() {
         assert_eq!(cfg.version, 1, "{label}");
     }
 }
+
+// ── Permanent-delegate quarantine exception (2C-4) ──────────────────────────
+//
+// A blocked source owner may leave ONLY via the registry's permanent-delegate
+// clawback into a registry escrow, in BOTH modes. The Open tail carries no
+// config, so there the mint's Token-2022 PermanentDelegate pins the ShareClass;
+// KycGated additionally pins `config.share_class` and needs the idx-10 marker.
+
+const ERR_IMMUTABLE_OWNER_REQUIRED: u32 = 6011;
+const ERR_INVALID_BLOCK_ENTRY: u32 = 6013;
+
+/// A Token-2022 mint account, optionally carrying a PermanentDelegate.
+fn mint_account(permanent_delegate: Option<Pubkey>) -> Account {
+    use spl_token_2022_interface::{
+        extension::{
+            permanent_delegate::PermanentDelegate, BaseStateWithExtensionsMut, ExtensionType,
+            StateWithExtensionsMut,
+        },
+        state::Mint,
+    };
+    let extensions: &[ExtensionType] = if permanent_delegate.is_some() {
+        &[ExtensionType::PermanentDelegate]
+    } else {
+        &[]
+    };
+    let len = ExtensionType::try_calculate_account_len::<Mint>(extensions).unwrap();
+    let mut data = vec![0u8; len];
+    {
+        let mut state = StateWithExtensionsMut::<Mint>::unpack_uninitialized(&mut data).unwrap();
+        state.base = Mint {
+            is_initialized: true,
+            ..Mint::default()
+        };
+        state.pack_base();
+        if let Some(delegate) = permanent_delegate {
+            state.init_account_type().unwrap();
+            let ext = state.init_extension::<PermanentDelegate>(true).unwrap();
+            ext.delegate = Some(delegate).try_into().unwrap();
+        }
+    }
+    Account {
+        lamports: 10_000_000,
+        data,
+        owner: spl_token_2022_interface::ID,
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+/// A Token-2022 account WITHOUT ImmutableOwner (base layout only).
+fn mutable_token_account(owner: &Pubkey) -> Account {
+    let mut data = vec![0u8; 165];
+    data[32..64].copy_from_slice(owner.as_ref());
+    data[108] = 1; // AccountState::Initialized
+    Account {
+        lamports: 2_000_000,
+        data,
+        owner: spl_token_2022_interface::ID,
+        executable: false,
+        rent_epoch: 0,
+    }
+}
+
+struct QuarantineFixture {
+    svm: LiteSVM,
+    payer: Keypair,
+    program_id: Pubkey,
+    mint: Pubkey,
+    share_class: Pubkey,
+    config_pda: Pubkey,
+    extra_metas_pda: Pubkey,
+    registry: Pubkey,
+    holder: Pubkey,
+    src_token: Pubkey,
+    /// The quarantine vault stand-in (owner of the escrow token account).
+    vault: Pubkey,
+    /// `["escrow", vault]` under the registry — the only valid destination.
+    escrow: Pubkey,
+    gated: bool,
+}
+
+/// Deploys the hook, a real (fake-ShareClass-co-signed) config in the given
+/// mode + meta list, a Token-2022 mint whose PermanentDelegate is that
+/// ShareClass, a holder token account, the registry-escrow destination (with
+/// the vault's EscrowMarker in KycGated mode), and blocks the holder.
+fn quarantine_fixture(gated: bool) -> QuarantineFixture {
+    let program_id = transfer_hook::id();
+    let mut svm = LiteSVM::new();
+    svm.add_program(
+        program_id,
+        include_bytes!("../../../target/deploy/transfer_hook.so"),
+    )
+    .unwrap();
+    let payer = Keypair::new();
+    svm.airdrop(&payer.pubkey(), 100_000_000_000).unwrap();
+    let blocklist_authority =
+        Pubkey::find_program_address(&[transfer_hook::BLOCKLIST_AUTHORITY_SEED], &program_id).0;
+    support::set_upgrade_authority(&mut svm, &transfer_hook::ID, Some(payer.pubkey()));
+    send(
+        &mut svm,
+        &payer,
+        Instruction::new_with_bytes(
+            program_id,
+            &ixd::InitializeBlocklistAuthority {
+                authority: payer.pubkey(),
+            }
+            .data(),
+            acc::InitializeBlocklistAuthority {
+                payer: payer.pubkey(),
+                upgrade_authority: payer.pubkey(),
+                program: transfer_hook::ID,
+                program_data: support::program_data(&transfer_hook::ID),
+                blocklist_authority,
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        ),
+        "initialize_blocklist_authority",
+    );
+
+    let mint = Pubkey::new_unique();
+    let share_class_kp = Keypair::new();
+    let share_class = share_class_kp.pubkey();
+    install_fake_share_class(&mut svm, &share_class);
+    svm.set_account(mint, mint_account(Some(share_class)))
+        .unwrap();
+    let config_pda = Pubkey::find_program_address(
+        &[transfer_hook::HOOK_CONFIG_SEED, mint.as_ref()],
+        &program_id,
+    )
+    .0;
+    let extra_metas_pda = Pubkey::find_program_address(
+        &[transfer_hook::EXTRA_METAS_SEED, mint.as_ref()],
+        &program_id,
+    )
+    .0;
+    let registry = Pubkey::new_unique();
+    send_signed(
+        &mut svm,
+        &[&payer, &share_class_kp],
+        init_config_ix(
+            program_id,
+            &payer.pubkey(),
+            &mint,
+            &share_class,
+            &config_pda,
+            if gated {
+                RestrictionMode::KycGated
+            } else {
+                RestrictionMode::Open
+            },
+            gated.then_some(registry),
+        ),
+        "initialize_transfer_hook_config",
+    );
+    send(
+        &mut svm,
+        &payer,
+        Instruction::new_with_bytes(
+            program_id,
+            &ixd::InitializeExtraAccountMetaList {}.data(),
+            acc::InitializeExtraAccountMetaList {
+                payer: payer.pubkey(),
+                mint,
+                config: config_pda,
+                extra_account_meta_list: extra_metas_pda,
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        ),
+        "initialize_extra_account_meta_list",
+    );
+
+    let holder = Pubkey::new_unique();
+    let src_token = Pubkey::new_unique();
+    svm.set_account(src_token, dest_token_account(&holder))
+        .unwrap();
+    let vault = Pubkey::new_unique();
+    let escrow = Pubkey::find_program_address(
+        &[transfer_hook::REGISTRY_ESCROW_SEED, vault.as_ref()],
+        &ASSET_REGISTRY_PROGRAM,
+    )
+    .0;
+    svm.set_account(escrow, dest_token_account(&vault)).unwrap();
+    if gated {
+        let marker = token_owner_marker(&svm, &escrow);
+        install_escrow_marker(&mut svm, &marker, ASSET_REGISTRY_PROGRAM);
+    }
+    send(
+        &mut svm,
+        &payer,
+        Instruction::new_with_bytes(
+            program_id,
+            &ixd::AddToBlocklist { wallet: holder }.data(),
+            acc::AddToBlocklist {
+                authority: payer.pubkey(),
+                blocklist_authority,
+                block_entry: block_entry_pda(&program_id, &holder),
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        ),
+        "block holder",
+    );
+    QuarantineFixture {
+        svm,
+        payer,
+        program_id,
+        mint,
+        share_class,
+        config_pda,
+        extra_metas_pda,
+        registry,
+        holder,
+        src_token,
+        vault,
+        escrow,
+        gated,
+    }
+}
+
+impl QuarantineFixture {
+    /// Execute as Token-2022 would pass it for this mode: Open = 6 accounts,
+    /// KycGated = 12 (dest marker resolved from `destination`'s owner).
+    fn execute(&self, destination: Pubkey, authority: Pubkey, block_entry: Pubkey) -> Instruction {
+        if !self.gated {
+            return Instruction {
+                program_id: self.program_id,
+                accounts: vec![
+                    AccountMeta::new_readonly(self.src_token, false),
+                    AccountMeta::new_readonly(self.mint, false),
+                    AccountMeta::new_readonly(destination, false),
+                    AccountMeta::new_readonly(authority, false),
+                    AccountMeta::new_readonly(self.extra_metas_pda, false),
+                    AccountMeta::new_readonly(block_entry, false),
+                ],
+                data: TransferHookInstruction::Execute { amount: 1 }.pack(),
+            };
+        }
+        let dest_marker = token_owner_marker(&self.svm, &destination);
+        let src_marker = token_owner_marker(&self.svm, &self.src_token);
+        let mut ix = build_kyc_execute_with_markers(
+            self.program_id,
+            self.mint,
+            self.src_token,
+            destination,
+            authority,
+            self.extra_metas_pda,
+            block_entry,
+            self.config_pda,
+            self.registry,
+            kyc_entry_pda(&self.registry, &self.vault),
+            dest_marker,
+            src_marker,
+        );
+        ix.data = TransferHookInstruction::Execute { amount: 1 }.pack();
+        ix
+    }
+
+    fn run(&mut self, destination: Pubkey, authority: Pubkey) -> Result<(), String> {
+        let block = block_entry_pda(&self.program_id, &self.holder);
+        let ix = self.execute(destination, authority, block);
+        self.svm.expire_blockhash();
+        try_send(&mut self.svm, &self.payer, ix)
+    }
+}
+
+/// Blocked source, authority = the mint's PermanentDelegate ShareClass,
+/// destination = registry escrow PDA → passes, in both modes.
+#[test]
+fn blocked_source_passes_only_as_share_class_quarantine_leg() {
+    for gated in [false, true] {
+        let mut f = quarantine_fixture(gated);
+        let (escrow, share_class) = (f.escrow, f.share_class);
+        f.run(escrow, share_class)
+            .unwrap_or_else(|e| panic!("gated={gated}: quarantine leg must pass: {e}"));
+    }
+}
+
+/// Every other shape of a blocked-source leg is SenderBlocked (6003).
+#[test]
+fn blocked_source_quarantine_exception_matrix() {
+    for gated in [false, true] {
+        let label = |what: &str| format!("gated={gated}: {what}");
+
+        // Authority = the blocked owner themself.
+        let mut f = quarantine_fixture(gated);
+        let (escrow, holder) = (f.escrow, f.holder);
+        assert_hook_err(f.run(escrow, holder), ERR_SENDER_BLOCKED, &label("owner"));
+
+        // Authority registry-owned but without the ShareClass discriminator.
+        let mut f = quarantine_fixture(gated);
+        let bare = Pubkey::new_unique();
+        f.svm
+            .set_account(
+                bare,
+                Account {
+                    lamports: 2_000_000,
+                    data: vec![0u8; 32],
+                    owner: ASSET_REGISTRY_PROGRAM,
+                    executable: false,
+                    rent_epoch: 0,
+                },
+            )
+            .unwrap();
+        let escrow = f.escrow;
+        assert_hook_err(f.run(escrow, bare), ERR_SENDER_BLOCKED, &label("bare"));
+
+        // A genuine-looking ShareClass that is NOT the mint's delegate.
+        let mut f = quarantine_fixture(gated);
+        let other = Pubkey::new_unique();
+        install_fake_share_class(&mut f.svm, &other);
+        let escrow = f.escrow;
+        assert_hook_err(
+            f.run(escrow, other),
+            ERR_SENDER_BLOCKED,
+            &label("other ShareClass"),
+        );
+
+        // The mint's delegate re-pointed to another ShareClass: authority =
+        // that ShareClass (delegate matches). Open: the delegate IS the pin →
+        // passes the delegate check, still needs the escrow; KycGated: the
+        // config pins `share_class` → refused.
+        let mut f = quarantine_fixture(gated);
+        let other = Pubkey::new_unique();
+        install_fake_share_class(&mut f.svm, &other);
+        let mint = f.mint;
+        f.svm.set_account(mint, mint_account(Some(other))).unwrap();
+        let (escrow, share_class) = (f.escrow, f.share_class);
+        assert_hook_err(
+            f.run(escrow, share_class),
+            ERR_SENDER_BLOCKED,
+            &label("delegate is a different key"),
+        );
+        if gated {
+            assert_hook_err(
+                f.run(escrow, other),
+                ERR_SENDER_BLOCKED,
+                &label("delegate ShareClass != config.share_class"),
+            );
+        } else {
+            f.run(escrow, other)
+                .expect("Open: the mint's own PermanentDelegate is the pin");
+        }
+
+        // Mint without a PermanentDelegate.
+        let mut f = quarantine_fixture(gated);
+        let mint = f.mint;
+        f.svm.set_account(mint, mint_account(None)).unwrap();
+        let (escrow, share_class) = (f.escrow, f.share_class);
+        assert_hook_err(
+            f.run(escrow, share_class),
+            ERR_SENDER_BLOCKED,
+            &label("no PermanentDelegate"),
+        );
+
+        // Mint not owned by Token-2022.
+        let mut f = quarantine_fixture(gated);
+        let mint = f.mint;
+        let mut account = mint_account(Some(f.share_class));
+        account.owner = Pubkey::new_unique();
+        f.svm.set_account(mint, account).unwrap();
+        let (escrow, share_class) = (f.escrow, f.share_class);
+        assert_hook_err(
+            f.run(escrow, share_class),
+            ERR_SENDER_BLOCKED,
+            &label("mint not Token-2022"),
+        );
+
+        // Destination owned by the vault (marker present when gated) but not
+        // the registry escrow PDA.
+        let mut f = quarantine_fixture(gated);
+        let stray = Pubkey::new_unique();
+        let vault = f.vault;
+        f.svm
+            .set_account(stray, dest_token_account(&vault))
+            .unwrap();
+        let share_class = f.share_class;
+        assert_hook_err(
+            f.run(stray, share_class),
+            ERR_SENDER_BLOCKED,
+            &label("destination is not the escrow PDA"),
+        );
+
+        // Destination = an ordinary wallet's token account.
+        let mut f = quarantine_fixture(gated);
+        let wallet_token = Pubkey::new_unique();
+        f.svm
+            .set_account(wallet_token, dest_token_account(&Pubkey::new_unique()))
+            .unwrap();
+        let share_class = f.share_class;
+        assert_hook_err(
+            f.run(wallet_token, share_class),
+            ERR_SENDER_BLOCKED,
+            &label("wallet destination"),
+        );
+
+        // A mutable destination is refused first (ImmutableOwnerRequired).
+        let mut f = quarantine_fixture(gated);
+        let escrow = f.escrow;
+        let vault = f.vault;
+        f.svm
+            .set_account(escrow, mutable_token_account(&vault))
+            .unwrap();
+        let share_class = f.share_class;
+        assert_hook_err(
+            f.run(escrow, share_class),
+            ERR_IMMUTABLE_OWNER_REQUIRED,
+            &label("mutable destination"),
+        );
+
+        // A BlockEntry keyed on the ShareClass instead of the source owner.
+        let mut f = quarantine_fixture(gated);
+        let (escrow, share_class) = (f.escrow, f.share_class);
+        let sc_block = block_entry_pda(&f.program_id, &share_class);
+        let ix = f.execute(escrow, share_class, sc_block);
+        assert_hook_err(
+            try_send(&mut f.svm, &f.payer, ix),
+            ERR_INVALID_BLOCK_ENTRY,
+            &label("BlockEntry keyed on the ShareClass"),
+        );
+    }
+}
+
+/// KycGated keeps its idx-10 requirement: without the destination-owner
+/// EscrowMarker the quarantine leg is refused even into the escrow PDA.
+#[test]
+fn kyc_gated_quarantine_still_requires_destination_marker() {
+    let mut f = quarantine_fixture(true);
+    let marker = token_owner_marker(&f.svm, &f.escrow);
+    f.svm
+        .set_account(
+            marker,
+            Account {
+                lamports: 0,
+                data: vec![],
+                owner: system_program::ID,
+                executable: false,
+                rent_epoch: 0,
+            },
+        )
+        .unwrap();
+    let (escrow, share_class) = (f.escrow, f.share_class);
+    assert_hook_err(
+        f.run(escrow, share_class),
+        ERR_SENDER_BLOCKED,
+        "no destination marker",
+    );
+}
