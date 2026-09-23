@@ -87,6 +87,10 @@ export type Sale = {
   vestingMonths: number;
   version: number;
   bump: number;
+  /** The `SaleApproval` that `open_sale` consumed (and closed). */
+  saleApproval: Address;
+  /** Copied from the approval: commitment to the reviewed application. */
+  applicationHash: ReadonlyUint8Array;
 };
 
 export type SaleArgs = {
@@ -116,6 +120,10 @@ export type SaleArgs = {
   vestingMonths: number;
   version: number;
   bump: number;
+  /** The `SaleApproval` that `open_sale` consumed (and closed). */
+  saleApproval: Address;
+  /** Copied from the approval: commitment to the reviewed application. */
+  applicationHash: ReadonlyUint8Array;
 };
 
 /** Gets the encoder for {@link SaleArgs} account data. */
@@ -140,6 +148,8 @@ export function getSaleEncoder(): FixedSizeEncoder<SaleArgs> {
       ["vestingMonths", getU8Encoder()],
       ["version", getU8Encoder()],
       ["bump", getU8Encoder()],
+      ["saleApproval", getAddressEncoder()],
+      ["applicationHash", fixEncoderSize(getBytesEncoder(), 32)],
     ]),
     (value) => ({ ...value, discriminator: SALE_DISCRIMINATOR }),
   );
@@ -166,6 +176,8 @@ export function getSaleDecoder(): FixedSizeDecoder<Sale> {
     ["vestingMonths", getU8Decoder()],
     ["version", getU8Decoder()],
     ["bump", getU8Decoder()],
+    ["saleApproval", getAddressDecoder()],
+    ["applicationHash", fixDecoderSize(getBytesDecoder(), 32)],
   ]);
 }
 
@@ -228,5 +240,5 @@ export async function fetchAllMaybeSale(
 }
 
 export function getSaleSize(): number {
-  return 222;
+  return 286;
 }

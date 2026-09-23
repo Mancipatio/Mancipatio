@@ -46,6 +46,7 @@ export * from "./proposal";
 export * from "./record";
 export * from "./rightsIssuance";
 export * from "./sale";
+export * from "./saleApproval";
 export * from "./series";
 export * from "./superAdminRecord";
 export * from "./transfer";

@@ -24,6 +24,7 @@ import {
   parseAddShareClassInstruction,
   parseAddVestingPositionInstruction,
   parseApproveHolderInstruction,
+  parseApproveSaleInstruction,
   parseApproveVestingTrancheInstruction,
   parseBuyInstruction,
   parseCancelOfferInstruction,
@@ -85,6 +86,7 @@ import {
   parseReturnCustodyVaultInstruction,
   parseRevertCustodyVaultInstruction,
   parseRevokeHolderInstruction,
+  parseRevokeSaleApprovalInstruction,
   parseRouteYieldInstruction,
   parseSetConvertibleToInstruction,
   parseSetIssuerPermissionsInstruction,
@@ -104,6 +106,7 @@ import {
   type ParsedAddShareClassInstruction,
   type ParsedAddVestingPositionInstruction,
   type ParsedApproveHolderInstruction,
+  type ParsedApproveSaleInstruction,
   type ParsedApproveVestingTrancheInstruction,
   type ParsedBuyInstruction,
   type ParsedCancelOfferInstruction,
@@ -165,6 +168,7 @@ import {
   type ParsedReturnCustodyVaultInstruction,
   type ParsedRevertCustodyVaultInstruction,
   type ParsedRevokeHolderInstruction,
+  type ParsedRevokeSaleApprovalInstruction,
   type ParsedRouteYieldInstruction,
   type ParsedSetConvertibleToInstruction,
   type ParsedSetIssuerPermissionsInstruction,
@@ -205,6 +209,7 @@ export enum AssetRegistryAccount {
   Proposal,
   RightsIssuance,
   Sale,
+  SaleApproval,
   ShareClass,
   VaultVote,
   VaultVoteRecord,
@@ -464,6 +469,17 @@ export function identifyAssetRegistryAccount(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([164, 165, 31, 198, 182, 206, 95, 3]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryAccount.SaleApproval;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([169, 98, 255, 104, 159, 47, 105, 6]),
       ),
       0,
@@ -550,6 +566,7 @@ export enum AssetRegistryInstruction {
   AddShareClass,
   AddVestingPosition,
   ApproveHolder,
+  ApproveSale,
   ApproveVestingTranche,
   Buy,
   CancelOffer,
@@ -611,6 +628,7 @@ export enum AssetRegistryInstruction {
   ReturnCustodyVault,
   RevertCustodyVault,
   RevokeHolder,
+  RevokeSaleApproval,
   RouteYield,
   SetConvertibleTo,
   SetIssuerPermissions,
@@ -705,6 +723,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.ApproveHolder;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([161, 214, 32, 147, 179, 73, 138, 227]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ApproveSale;
   }
   if (
     containsBytes(
@@ -1381,6 +1410,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([123, 227, 105, 220, 92, 2, 48, 39]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.RevokeSaleApproval;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([30, 120, 157, 134, 19, 72, 147, 2]),
       ),
       0,
@@ -1538,6 +1578,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.ApproveHolder;
     } & ParsedApproveHolderInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.ApproveSale;
+    } & ParsedApproveSaleInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.ApproveVestingTranche;
     } & ParsedApproveVestingTrancheInstruction<TProgram>)
@@ -1722,6 +1765,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.RevokeHolder;
     } & ParsedRevokeHolderInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.RevokeSaleApproval;
+    } & ParsedRevokeSaleApprovalInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.RouteYield;
     } & ParsedRouteYieldInstruction<TProgram>)
   | ({
@@ -1810,6 +1856,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.ApproveHolder,
         ...parseApproveHolderInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.ApproveSale: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ApproveSale,
+        ...parseApproveSaleInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.ApproveVestingTranche: {
@@ -2237,6 +2290,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.RevokeHolder,
         ...parseRevokeHolderInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.RevokeSaleApproval: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.RevokeSaleApproval,
+        ...parseRevokeSaleApprovalInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.RouteYield: {

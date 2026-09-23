@@ -258,6 +258,20 @@ export const ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED = 0x17e7; // 6119
 export const ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY = 0x17e8; // 6120
 /** InvalidSalePrice: Sale price per unit must be greater than zero */
 export const ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE = 0x17e9; // 6121
+/** SaleApprovalExpired: Sale approval has expired */
+export const ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED = 0x17ea; // 6122
+/** SaleApprovalMismatch: Sale does not match its approval (issuer, share class, payment mint, raise type or rent recipient) */
+export const ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH = 0x17eb; // 6123
+/** SalePriceOutsideApproval: Sale price per unit is outside the approved range */
+export const ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL = 0x17ec; // 6124
+/** SaleExceedsApprovedRaise: price_per_unit x total_for_sale exceeds the approved maximum gross raise */
+export const ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE = 0x17ed; // 6125
+/** InvalidSaleApproval: Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero */
+export const ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL = 0x17ee; // 6126
+/** SaleIdAlreadyUsed: A sale with this id already exists for the share class */
+export const ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED = 0x17ef; // 6127
+/** TreasuryMintRequiresAdmin: Minting into the issuer treasury requires a platform Admin issuer key; the MINT permission only funds custody or rights escrows */
+export const ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN = 0x17f0; // 6128
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -305,6 +319,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY
   | typeof ASSET_REGISTRY_ERROR__INVALID_RAISE_PARAMS
   | typeof ASSET_REGISTRY_ERROR__INVALID_RIGHTS_BITFIELD
+  | typeof ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL
   | typeof ASSET_REGISTRY_ERROR__INVALID_SALE_PARAMS
   | typeof ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE
   | typeof ASSET_REGISTRY_ERROR__INVALID_SHARE_CLASS_INDEX
@@ -348,13 +363,19 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__REFUND_NOT_FUNDER_OWNED
   | typeof ASSET_REGISTRY_ERROR__RETURN_NOT_ALLOWED
   | typeof ASSET_REGISTRY_ERROR__REVERT_NOT_ALLOWED
+  | typeof ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED
+  | typeof ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH
+  | typeof ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE
+  | typeof ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED
   | typeof ASSET_REGISTRY_ERROR__SALE_NOT_OPEN
   | typeof ASSET_REGISTRY_ERROR__SALE_NOT_STARTED
+  | typeof ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL
   | typeof ASSET_REGISTRY_ERROR__SALE_SOLD_OUT
   | typeof ASSET_REGISTRY_ERROR__SALE_WINDOW_CLOSED
   | typeof ASSET_REGISTRY_ERROR__SUPPLY_LOCKED
   | typeof ASSET_REGISTRY_ERROR__TOO_MANY_SHARE_CLASSES
   | typeof ASSET_REGISTRY_ERROR__TRANCHE_NOT_DUE
+  | typeof ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN
   | typeof ASSET_REGISTRY_ERROR__UNAUTHORIZED
   | typeof ASSET_REGISTRY_ERROR__UNSUPPORTED_MINT_EXTENSION
   | typeof ASSET_REGISTRY_ERROR__UNSUPPORTED_REALIZE_ACTION
@@ -431,6 +452,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__INVALID_PROTOCOL_TREASURY]: `Protocol treasury must be a nonzero key`,
     [ASSET_REGISTRY_ERROR__INVALID_RAISE_PARAMS]: `Invalid raise parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_RIGHTS_BITFIELD]: `Rights bitfield contains undefined bits`,
+    [ASSET_REGISTRY_ERROR__INVALID_SALE_APPROVAL]: `Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero`,
     [ASSET_REGISTRY_ERROR__INVALID_SALE_PARAMS]: `Invalid sale parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_SALE_PRICE]: `Sale price per unit must be greater than zero`,
     [ASSET_REGISTRY_ERROR__INVALID_SHARE_CLASS_INDEX]: `Share class index must equal the asset's current share_classes_count`,
@@ -474,13 +496,19 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__REFUND_NOT_FUNDER_OWNED]: `Refund account must be owned by the distribution funder`,
     [ASSET_REGISTRY_ERROR__RETURN_NOT_ALLOWED]: `Return not allowed — only the vault authority may return before the deadline`,
     [ASSET_REGISTRY_ERROR__REVERT_NOT_ALLOWED]: `Revert not allowed — without a positive deadline only the vault authority may revert`,
+    [ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED]: `Sale approval has expired`,
+    [ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH]: `Sale does not match its approval (issuer, share class, payment mint, raise type or rent recipient)`,
+    [ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE]: `price_per_unit x total_for_sale exceeds the approved maximum gross raise`,
+    [ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED]: `A sale with this id already exists for the share class`,
     [ASSET_REGISTRY_ERROR__SALE_NOT_OPEN]: `Sale is not open`,
     [ASSET_REGISTRY_ERROR__SALE_NOT_STARTED]: `Sale has not started yet`,
+    [ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL]: `Sale price per unit is outside the approved range`,
     [ASSET_REGISTRY_ERROR__SALE_SOLD_OUT]: `Sale does not have enough units left`,
     [ASSET_REGISTRY_ERROR__SALE_WINDOW_CLOSED]: `Sale window has closed`,
     [ASSET_REGISTRY_ERROR__SUPPLY_LOCKED]: `Share class supply is locked — minting is closed`,
     [ASSET_REGISTRY_ERROR__TOO_MANY_SHARE_CLASSES]: `Share class limit reached for this asset`,
     [ASSET_REGISTRY_ERROR__TRANCHE_NOT_DUE]: `Next tranche is not due yet`,
+    [ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN]: `Minting into the issuer treasury requires a platform Admin issuer key; the MINT permission only funds custody or rights escrows`,
     [ASSET_REGISTRY_ERROR__UNAUTHORIZED]: `Signer is not authorized for this action`,
     [ASSET_REGISTRY_ERROR__UNSUPPORTED_MINT_EXTENSION]: `This mint extension is not supported for new funding in this release`,
     [ASSET_REGISTRY_ERROR__UNSUPPORTED_REALIZE_ACTION]: `This realize action is not supported yet`,

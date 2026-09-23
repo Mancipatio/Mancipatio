@@ -825,6 +825,228 @@
       ]
     },
     {
+      "name": "approve_sale",
+      "docs": [
+        "Admin approval to open exactly one sale (`share_class`, `sale_id`),",
+        "bounded by payment mint, price range, maximum gross raise, raise type",
+        "and expiry (at most 90 days). Consumed by `open_sale`."
+      ],
+      "discriminator": [
+        161,
+        214,
+        32,
+        147,
+        179,
+        73,
+        138,
+        227
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "The approving Admin; pays the approval's rent and becomes `approved_by`."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Admin gate: only a platform Admin may approve a sale."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          },
+          "relations": [
+            "asset"
+          ]
+        },
+        {
+          "name": "asset",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  115,
+                  115,
+                  101,
+                  116
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              },
+              {
+                "kind": "account",
+                "path": "asset.asset_id",
+                "account": "Asset"
+              }
+            ]
+          },
+          "relations": [
+            "share_class"
+          ]
+        },
+        {
+          "name": "share_class"
+        },
+        {
+          "name": "payment_mint",
+          "docs": [
+            "The payment mint the approved sale must use (validated in the handler",
+            "with the same payment-leg rule `open_sale` applies to its escrow)."
+          ]
+        },
+        {
+          "name": "sale",
+          "docs": [
+            "The future `Sale` PDA for this id. It must still be empty, so the",
+            "approval can actually be consumed."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  97,
+                  108,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "share_class"
+              },
+              {
+                "kind": "arg",
+                "path": "sale_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sale_approval",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  97,
+                  108,
+                  101,
+                  95,
+                  97,
+                  112,
+                  112,
+                  114,
+                  111,
+                  118,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "share_class"
+              },
+              {
+                "kind": "arg",
+                "path": "sale_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "sale_id",
+          "type": "u64"
+        },
+        {
+          "name": "max_gross_raise",
+          "type": "u64"
+        },
+        {
+          "name": "min_price_per_unit",
+          "type": "u64"
+        },
+        {
+          "name": "max_price_per_unit",
+          "type": "u64"
+        },
+        {
+          "name": "raise_type",
+          "type": {
+            "defined": {
+              "name": "RaiseType"
+            }
+          }
+        },
+        {
+          "name": "expires_at",
+          "type": "i64"
+        },
+        {
+          "name": "application_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "approve_vesting_tranche",
       "docs": [
         "Approves one tranche (Approval-mode series). Approval delays but can",
@@ -6103,7 +6325,10 @@
         {
           "name": "admin_record",
           "docs": [
-            "Global Admin or issuer-local MINT capability; the signer must also be the issuer."
+            "Global Admin or issuer-local MINT capability; the signer must also be the issuer.",
+            "The treasury destination (the signer's own token account) additionally",
+            "requires the global Admin record: MINT alone only funds the admin-created",
+            "custody / rights escrows."
           ]
         },
         {
@@ -6601,7 +6826,8 @@
     {
       "name": "open_sale",
       "docs": [
-        "Opens a primary sale of a share class (launchpad)."
+        "Opens a primary sale of a share class (launchpad), consuming the",
+        "Admin's `SaleApproval` for this `(share_class, sale_id)`."
       ],
       "discriminator": [
         246,
@@ -6645,7 +6871,8 @@
             ]
           },
           "relations": [
-            "asset"
+            "asset",
+            "sale_approval"
           ]
         },
         {
@@ -6690,6 +6917,9 @@
           "name": "payment_mint",
           "docs": [
             "Payment mint buyers pay in (e.g. USDC)."
+          ],
+          "relations": [
+            "sale_approval"
           ]
         },
         {
@@ -6751,6 +6981,55 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "sale_approval",
+          "docs": [
+            "The Admin's approval for exactly this `(share_class, sale_id)` (the",
+            "seeds bind both). Consumed here: closed, rent to `approved_by`."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  97,
+                  108,
+                  101,
+                  95,
+                  97,
+                  112,
+                  112,
+                  114,
+                  111,
+                  118,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "share_class"
+              },
+              {
+                "kind": "arg",
+                "path": "sale_id"
+              }
+            ]
+          }
+        },
+        {
+          "name": "approved_by",
+          "docs": [
+            "The approving Admin (`sale_approval.approved_by`); receives the consumed",
+            "approval's rent. May be the same key as `authority`."
+          ],
+          "writable": true,
+          "relations": [
+            "sale_approval"
+          ]
         },
         {
           "name": "platform",
@@ -8702,6 +8981,99 @@
       ]
     },
     {
+      "name": "revoke_sale_approval",
+      "docs": [
+        "Closes an unused sale approval (any Admin; rent to the approver)."
+      ],
+      "discriminator": [
+        123,
+        227,
+        105,
+        220,
+        92,
+        2,
+        48,
+        39
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "Admin gate: any active Admin may revoke, not only the approver."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "sale_approval",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  115,
+                  97,
+                  108,
+                  101,
+                  95,
+                  97,
+                  112,
+                  112,
+                  114,
+                  111,
+                  118,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "sale_approval.share_class",
+                "account": "SaleApproval"
+              },
+              {
+                "kind": "account",
+                "path": "sale_approval.sale_id",
+                "account": "SaleApproval"
+              }
+            ]
+          }
+        },
+        {
+          "name": "approved_by",
+          "docs": [
+            "The approving Admin; receives the approval's rent, whoever revokes."
+          ],
+          "writable": true,
+          "relations": [
+            "sale_approval"
+          ]
+        }
+      ],
+      "args": []
+    },
+    {
       "name": "route_yield",
       "docs": [
         "Admin deposits `amount` of payment-token yield and splits it 3-ways:",
@@ -10192,6 +10564,19 @@
       ]
     },
     {
+      "name": "SaleApproval",
+      "discriminator": [
+        164,
+        165,
+        31,
+        198,
+        182,
+        206,
+        95,
+        3
+      ]
+    },
+    {
       "name": "ShareClass",
       "discriminator": [
         169,
@@ -10438,6 +10823,45 @@
         150,
         215,
         36
+      ]
+    },
+    {
+      "name": "SaleApprovalConsumed",
+      "discriminator": [
+        0,
+        11,
+        112,
+        209,
+        10,
+        28,
+        133,
+        21
+      ]
+    },
+    {
+      "name": "SaleApprovalRevoked",
+      "discriminator": [
+        33,
+        27,
+        223,
+        99,
+        4,
+        142,
+        237,
+        218
+      ]
+    },
+    {
+      "name": "SaleApproved",
+      "discriminator": [
+        8,
+        168,
+        207,
+        215,
+        209,
+        226,
+        88,
+        65
       ]
     },
     {
@@ -11220,6 +11644,41 @@
       "code": 6121,
       "name": "InvalidSalePrice",
       "msg": "Sale price per unit must be greater than zero"
+    },
+    {
+      "code": 6122,
+      "name": "SaleApprovalExpired",
+      "msg": "Sale approval has expired"
+    },
+    {
+      "code": 6123,
+      "name": "SaleApprovalMismatch",
+      "msg": "Sale does not match its approval (issuer, share class, payment mint, raise type or rent recipient)"
+    },
+    {
+      "code": 6124,
+      "name": "SalePriceOutsideApproval",
+      "msg": "Sale price per unit is outside the approved range"
+    },
+    {
+      "code": 6125,
+      "name": "SaleExceedsApprovedRaise",
+      "msg": "price_per_unit x total_for_sale exceeds the approved maximum gross raise"
+    },
+    {
+      "code": 6126,
+      "name": "InvalidSaleApproval",
+      "msg": "Approval terms invalid: expiry must be in the future and at most 90 days away, 0 < min price <= max price, max gross raise > 0, application hash non-zero"
+    },
+    {
+      "code": 6127,
+      "name": "SaleIdAlreadyUsed",
+      "msg": "A sale with this id already exists for the share class"
+    },
+    {
+      "code": 6128,
+      "name": "TreasuryMintRequiresAdmin",
+      "msg": "Minting into the issuer treasury requires a platform Admin issuer key; the MINT permission only funds custody or rights escrows"
     }
   ],
   "types": [
@@ -13399,6 +13858,263 @@
           {
             "name": "bump",
             "type": "u8"
+          },
+          {
+            "name": "sale_approval",
+            "docs": [
+              "The `SaleApproval` that `open_sale` consumed (and closed)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "application_hash",
+            "docs": [
+              "Copied from the approval: commitment to the reviewed application."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "SaleApproval",
+      "docs": [
+        "An Admin's approval to open exactly one sale. Seeds:",
+        "`[\"sale_approval\", share_class, sale_id LE]`. Consumed and closed by",
+        "`open_sale`, or closed by `revoke_sale_approval`; the rent always returns to",
+        "`approved_by`.",
+        "",
+        "⚠ Layout: the field order is fixed so `issuer` sits at byte offset 48 (the",
+        "issuer launchpad lists its approvals with a memcmp at that offset)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "share_class",
+            "docs": [
+              "Byte 8."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "sale_id",
+            "docs": [
+              "Byte 40."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "issuer",
+            "docs": [
+              "Byte 48: the `Issuer` PDA (not its authority), so an approval",
+              "survives an issuer authority rotation."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "payment_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "max_gross_raise",
+            "docs": [
+              "Payment-mint base units; `price_per_unit * total_for_sale` must not exceed it."
+            ],
+            "type": "u64"
+          },
+          {
+            "name": "min_price_per_unit",
+            "type": "u64"
+          },
+          {
+            "name": "max_price_per_unit",
+            "type": "u64"
+          },
+          {
+            "name": "raise_type",
+            "type": {
+              "defined": {
+                "name": "RaiseType"
+              }
+            }
+          },
+          {
+            "name": "expires_at",
+            "docs": [
+              "Unix ts; `open_sale` is refused after it."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "application_hash",
+            "docs": [
+              "sha256 of the canonical reviewed-application snapshot (kept off-chain)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "approved_by",
+            "docs": [
+              "The approving Admin; receives the rent on consume / revoke."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SaleApprovalConsumed",
+      "docs": [
+        "Emitted by `open_sale` when it consumes (and closes) the approval."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sale_approval",
+            "type": "pubkey"
+          },
+          {
+            "name": "sale",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_class",
+            "type": "pubkey"
+          },
+          {
+            "name": "sale_id",
+            "type": "u64"
+          },
+          {
+            "name": "price_per_unit",
+            "type": "u64"
+          },
+          {
+            "name": "total_for_sale",
+            "type": "u64"
+          },
+          {
+            "name": "approved_by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SaleApprovalRevoked",
+      "docs": [
+        "Emitted by `revoke_sale_approval`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sale_approval",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_class",
+            "type": "pubkey"
+          },
+          {
+            "name": "sale_id",
+            "type": "u64"
+          },
+          {
+            "name": "revoked_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "rent_to",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "SaleApproved",
+      "docs": [
+        "Emitted by `approve_sale`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "sale_approval",
+            "type": "pubkey"
+          },
+          {
+            "name": "share_class",
+            "type": "pubkey"
+          },
+          {
+            "name": "sale_id",
+            "type": "u64"
+          },
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "payment_mint",
+            "type": "pubkey"
+          },
+          {
+            "name": "max_gross_raise",
+            "type": "u64"
+          },
+          {
+            "name": "min_price_per_unit",
+            "type": "u64"
+          },
+          {
+            "name": "max_price_per_unit",
+            "type": "u64"
+          },
+          {
+            "name": "raise_type",
+            "type": {
+              "defined": {
+                "name": "RaiseType"
+              }
+            }
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "application_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "approved_by",
+            "type": "pubkey"
           }
         ]
       }

@@ -28,6 +28,7 @@ export * from "./platform";
 export * from "./proposal";
 export * from "./rightsIssuance";
 export * from "./sale";
+export * from "./saleApproval";
 export * from "./shareClass";
 export * from "./vaultVote";
 export * from "./vaultVoteRecord";
