@@ -18,11 +18,13 @@
 // strings (hashes, wallets, signatures), base64 tokens and long digit runs
 // are replaced by placeholders.
 //
-// Sentry: https DSNs only. Sends are limited per server instance (one per
-// distinct error per minute, SENTRY_MAX_PER_MINUTE in total); the rest is
-// logged only. Before setting SENTRY_DSN, use an EU-region project (DSN host
-// *.de.sentry.io) and list Sentry as a sub-processor in the privacy policy
-// (app/(marketing)/legal/privacy), which promises EU-region processing.
+// Sentry: https DSNs of an EU-region Sentry project only (host
+// *.de.sentry.io): the privacy policy (app/(marketing)/legal/privacy) lists
+// Sentry as a sub-processor in the EU region, so any other DSN (a US-region
+// project, a self-hosted Sentry) is refused and a warning is logged once per
+// instance; errors are then only logged. Sends are limited per server
+// instance (one per distinct error per minute, SENTRY_MAX_PER_MINUTE in
+// total); the rest is logged only.
 //
 // Timing: Next awaits this hook for route-handler errors, so a slow Sentry
 // adds up to SENTRY_TIMEOUT_MS to that error response. For render errors Next
@@ -165,7 +167,11 @@ export function describeRequestError(error: unknown, request: ErrorRequestInfo, 
 
 export type SentryTarget = { envelopeUrl: string; publicKey: string };
 
-/** https://<key>@<host>[/<path>]/<project> → envelope endpoint, or null. */
+/** Sentry's EU data region: DSN hosts such as o123.ingest.de.sentry.io. */
+const EU_SENTRY_HOST = /\.de\.sentry\.io$/i;
+
+/** https://<key>@<host>[/<path>]/<project> → envelope endpoint, or null. Only
+ *  EU-region Sentry hosts are accepted (see the header). */
 export function parseSentryDsn(dsn: string | undefined): SentryTarget | null {
   if (!dsn?.trim()) return null;
   try {
@@ -175,6 +181,7 @@ export function parseSentryDsn(dsn: string | undefined): SentryTarget | null {
     // https only: the event must never cross the network in plaintext.
     if (url.protocol !== "https:" || !url.username
       || !/^[A-Za-z0-9]{1,64}$/.test(url.username) || !project || !/^\d{1,20}$/.test(project)) return null;
+    if (!EU_SENTRY_HOST.test(url.hostname)) return null;
     const prefix = segments.length ? `/${segments.join("/")}` : "";
     return { envelopeUrl: `${url.protocol}//${url.host}${prefix}/api/${project}/envelope/`, publicKey: url.username };
   } catch {
@@ -239,6 +246,9 @@ export class SentryRateLimiter {
 
 const defaultLimiter = new SentryRateLimiter();
 
+/** The unusable-DSN warning is logged once per instance. */
+let warnedUnusableDsn = false;
+
 type ReportOptions = {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
@@ -256,7 +266,15 @@ export function reportRequestError(error: unknown, request: ErrorRequestInfo, co
     const line = describeRequestError(error, request, context);
     (options.log ?? ((text: string) => console.error(text)))(JSON.stringify(line));
     const target = parseSentryDsn(env.SENTRY_DSN);
-    if (!target) return Promise.resolve();
+    if (!target) {
+      if (env.SENTRY_DSN?.trim() && !warnedUnusableDsn) {
+        warnedUnusableDsn = true;
+        // Never the DSN itself (it carries the project key).
+        console.warn("[error-report] SENTRY_DSN is not an https DSN of an EU-region Sentry project " +
+          "(host *.de.sentry.io), which the privacy policy promises — errors are only logged, not sent.");
+      }
+      return Promise.resolve();
+    }
     const fingerprint = `${line.route}|${line.method}|${line.name}|${line.message}`;
     if (!(options.limiter ?? defaultLimiter).allow(fingerprint)) return Promise.resolve();
     const send = options.fetchImpl ?? fetch;
