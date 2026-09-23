@@ -31,10 +31,12 @@
 // satisfy the meta list.
 //
 // `BlockEntry` and source EscrowMarker use the token account's owner. The
-// transfer authority is separate: for clawback it is the ShareClass permanent
-// delegate PDA, while the source owner remains the holder. The updated hook
-// resolves owner from source-account data and validates any delegate exemption
-// itself. These tails target that owner-based hook; upgrade existing meta lists
+// transfer authority is separate: for both clawbacks (clawback_from_holder,
+// and clawback_blocklisted_holder on Open or KycGated mints) it is the
+// ShareClass permanent delegate PDA, while the source owner remains the
+// holder. The hook resolves the owner from source-account data and admits a
+// blocked owner only for that permanent-delegate leg into a registry escrow,
+// in either mode — so the clawback tail is simply this mode's normal tail. These tails target that owner-based hook; upgrade existing meta lists
 // together with the program before enabling the updated client on that cluster.
 
 import {

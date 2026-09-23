@@ -1,12 +1,19 @@
 "use client";
 
-// Admin clawback panel — clawback_from_holder: seize a revoked/expired
-// holder's units on a KycGated mint into a burn-only quarantine vault (a
-// RedemptionQueue + BurnAndAttest custody vault of the same share class) via
-// the mint's permanent delegate. Regulatory path: sanctions, court order,
-// compliance breach — every action is reason + audit-logged.
+// Admin clawback panel — seize a holder's units into a burn-only quarantine
+// vault (a RedemptionQueue + BurnAndAttest custody vault of the same share
+// class) via the mint's permanent delegate. Two on-chain paths (see
+// lib/clawback-path.ts):
+//   * blocklist — clawback_blocklisted_holder: the wallet is on the
+//     transfer-hook blocklist (added by the Blocklist Authority) and an Admin
+//     signs. Open or KYC-gated mints.
+//   * passport  — clawback_from_holder: KYC-gated mint, passport revoked or
+//     expired (KYC provider + Admin).
+// Regulatory path: sanctions, court order, compliance breach — every action
+// is reason + audit-logged.
 
 import { useCallback, useEffect, useState } from "react";
+import Link from "next/link";
 import {
   useSendTransaction,
   useSolanaClient,
@@ -35,7 +42,19 @@ import {
 } from "@/lib/generated/transfer_hook";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { loadNetwork } from "@/lib/enumerate";
-import { buildClawbackInstruction } from "@/lib/transaction-builders";
+import {
+  buildBlocklistClawbackInstruction,
+  buildClawbackInstruction,
+} from "@/lib/transaction-builders";
+import { fetchBlockEntry, type LiveBlockEntry } from "@/lib/blocklist";
+import {
+  chooseClawbackPath,
+  CLAWBACK_IX_NAME,
+  sameKeyHoldsBothRoles,
+  type ClawbackPath,
+  type PassportStatus,
+} from "@/lib/clawback-path";
+import { loadOperationalAuthority } from "@/lib/operational-authority";
 import { recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
@@ -47,13 +66,21 @@ const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
 const SYSTEM_PROGRAM = "11111111111111111111111111111111" as Address;
 
 type Preflight = {
+  hookConfigured: boolean;
   hookGated: boolean;
   kycRegistry: Address | null;
-  entryStatus: "revoked" | "expired" | "eligible" | "missing";
+  entryStatus: PassportStatus;
+  /** Live transfer-hook BlockEntry for the holder, or null. */
+  blockEntry: LiveBlockEntry | null;
+  /** Current Blocklist Authority key (null if it could not be read). */
+  blocklistAuthority: Address | null;
+  path: ClawbackPath | null;
   balance: bigint | null;
   vault: { pda: Address; data: CustodyVault } | null;
   scPda: string;
 };
+
+const short = (a: Address) => `${a.toString().slice(0, 4)}…${a.toString().slice(-4)}`;
 
 export function ClawbackPanel() {
   const conn = useWalletConnection();
@@ -121,7 +148,8 @@ export function ClawbackPanel() {
     setPre(null);
     try {
       const h = address(holder.trim());
-      // 1. Hook mode + KYC registry (clawback is KycGated-only).
+      // 1. Hook mode + KYC registry (the passport path is KycGated-only; the
+      //    blocklist path works in either mode but needs the config).
       const [configPda] = await findConfigPda({ mint: sc.mint });
       const config = await fetchMaybeTransferHookConfig(client.runtime.rpc, configPda);
       const gated =
@@ -131,8 +159,8 @@ export function ClawbackPanel() {
           ? config.data.kycRegistry.value
           : null;
 
-      // 2. Holder's KYC entry — must be Revoked or expired.
-      let entryStatus: Preflight["entryStatus"] = "missing";
+      // 2. Holder's KYC entry (passport path) — must be Revoked or expired.
+      let entryStatus: PassportStatus = "missing";
       if (gated && registry) {
         const [entryPda] = await findKycEntryPda({ kycRegistry: registry, holder: h });
         const entry = await fetchMaybeKycEntry(client.runtime.rpc, entryPda);
@@ -148,7 +176,18 @@ export function ClawbackPanel() {
         }
       }
 
-      // 3. Holder's balance.
+      // 3. Blocklist: the holder's live BlockEntry, and the current
+      //    Blocklist Authority (for the same-key warning; best effort).
+      const blockEntry = await fetchBlockEntry(client.runtime.rpc, h);
+      let blocklistAuthority: Address | null = null;
+      try {
+        const ba = await loadOperationalAuthority(client.runtime.rpc, "blocklist");
+        blocklistAuthority = ba?.current ?? null;
+      } catch {
+        blocklistAuthority = null;
+      }
+
+      // 4. Holder's balance.
       let balance: bigint | null = null;
       const [holderAta] = await findAssociatedTokenPda({
         mint: sc.mint,
@@ -164,7 +203,7 @@ export function ClawbackPanel() {
         balance = null; // ATA may not exist
       }
 
-      // 4. Quarantine vault of this share class (RedemptionQueue +
+      // 5. Quarantine vault of this share class (RedemptionQueue +
       //    BurnAndAttest + Active).
       const { findShareClassPda } = await import("@/lib/pdas");
       const scPda = await findShareClassPda(sc.asset, sc.classIndex);
@@ -178,9 +217,18 @@ export function ClawbackPanel() {
         ) ?? null;
 
       setPre({
+        hookConfigured: config.exists,
         hookGated: gated,
         kycRegistry: registry,
         entryStatus,
+        blockEntry,
+        blocklistAuthority,
+        path: chooseClawbackPath({
+          blocked: blockEntry !== null,
+          hookConfigured: config.exists,
+          kycGated: gated,
+          entryStatus,
+        }),
         balance,
         vault,
         scPda: scPda.toString(),
@@ -221,7 +269,8 @@ export function ClawbackPanel() {
   }
 
   async function clawback(reason: string) {
-    if (!conn.wallet || !sc || !pre?.vault) return;
+    if (!conn.wallet || !sc || !pre?.vault || !pre.path) return;
+    const path = pre.path;
     const h = address(holder.trim());
     const signer = walletSigner(conn.wallet);
     setBusy(true);
@@ -232,17 +281,23 @@ export function ClawbackPanel() {
         owner: h,
         tokenProgram: TOKEN_2022,
       });
-      const ix = await buildClawbackInstruction(client.runtime.rpc, {
+      const common = {
         authority: signer,
         shareClass: address(pre.scPda),
         mint: sc.mint,
         holderShareAccount: holderAta,
         destination: pre.vault.data.escrow,
         custodyVault: pre.vault.pda,
-        kycRegistry: pre.kycRegistry!,
         holder: h,
         amount: amount.trim() === "" ? BigInt(0) : BigInt(amount.trim()),
-      });
+      };
+      const ix =
+        path === "blocklist"
+          ? await buildBlocklistClawbackInstruction(client.runtime.rpc, common)
+          : await buildClawbackInstruction(client.runtime.rpc, {
+              ...common,
+              kycRegistry: pre.kycRegistry!,
+            });
       const sig = await tx.send({
         instructions: [ix],
         feePayer: signer,
@@ -250,7 +305,7 @@ export function ClawbackPanel() {
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Units seized into quarantine" });
       void recordAudit({
-        ix_name: "clawback_from_holder",
+        ix_name: CLAWBACK_IX_NAME[path],
         category: "other",
         actor_wallet: signer.address.toString(),
         reason,
@@ -261,6 +316,10 @@ export function ClawbackPanel() {
           holder: h.toString(),
           amount: amount.trim() === "" ? "full sweep" : amount.trim(),
           quarantine_vault: pre.vault.pda.toString(),
+          path,
+          mode: pre.hookGated ? "kyc_gated" : "open",
+          block_entry: pre.blockEntry?.pda.toString() ?? null,
+          blocked_by: pre.blockEntry?.addedBy.toString() ?? null,
         },
       });
       setConfirm(false);
@@ -275,8 +334,15 @@ export function ClawbackPanel() {
     }
   }
 
-  const eligible =
-    pre && pre.hookGated && (pre.entryStatus === "revoked" || pre.entryStatus === "expired");
+  const eligible = pre?.path != null;
+  const connected = conn.wallet?.account.address ?? null;
+  const sameKey =
+    pre?.path === "blocklist" &&
+    sameKeyHoldsBothRoles(
+      connected,
+      pre.blockEntry?.addedBy ?? null,
+      pre.blocklistAuthority,
+    );
 
   return (
     <section className="mt-8 rounded-xl border border-slate-200 bg-white p-5 shadow-card">
@@ -284,13 +350,15 @@ export function ClawbackPanel() {
         Clawback
       </p>
       <h2 className="mt-1 text-lg font-semibold text-slate-900">
-        Seize a revoked holder&apos;s units
+        Seize a blocked or revoked holder&apos;s units
       </h2>
       <p className="mt-2 max-w-3xl text-[13px] leading-relaxed text-slate-600">
-        Regulatory path (sanctions / court order / compliance breach). Works on
-        KYC-gated mints only, after the holder&apos;s passport is revoked or has
-        expired. Units move into a burn-only quarantine vault — they cannot
-        come back out through any wallet exit.
+        Regulatory path (sanctions / court order / compliance breach). Two
+        routes: on any mint, Open or KYC-gated, once the Blocklist Authority
+        has put the wallet on the blocklist (blocklist path — two keys); or on a
+        KYC-gated mint, after the holder&apos;s passport is revoked or has
+        expired (passport path). Either way the units move into a burn-only
+        quarantine vault — they cannot come back out through any wallet exit.
       </p>
 
       <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -316,7 +384,7 @@ export function ClawbackPanel() {
           <input
             value={holder}
             onChange={(e) => setHolder(e.target.value)}
-            placeholder="Revoked / expired holder's wallet"
+            placeholder="Blocked, revoked or expired holder's wallet"
             className="w-full rounded-md border border-slate-300 bg-white px-3 py-2 font-mono text-xs focus:border-slate-400 focus:outline-none"
           />
         </label>
@@ -335,27 +403,59 @@ export function ClawbackPanel() {
           <div className="flex flex-wrap items-center gap-2 text-xs">
             <span
               className={`rounded-full border px-2 py-0.5 font-semibold ${
-                pre.hookGated
-                  ? "border-brand-200 bg-brand-50 text-brand-800"
-                  : "border-red-200 bg-red-50 text-red-800"
+                !pre.hookConfigured
+                  ? "border-red-200 bg-red-50 text-red-800"
+                  : pre.hookGated
+                    ? "border-brand-200 bg-brand-50 text-brand-800"
+                    : "border-slate-200 bg-slate-50 text-slate-700"
               }`}
             >
-              {pre.hookGated ? "KYC-gated" : "Not KYC-gated — clawback unavailable"}
+              {!pre.hookConfigured
+                ? "No transfer-hook config"
+                : pre.hookGated
+                  ? "KYC-gated"
+                  : "Open"}
             </span>
             <span
               className={`rounded-full border px-2 py-0.5 font-semibold ${
-                pre.entryStatus === "revoked" || pre.entryStatus === "expired"
+                pre.blockEntry
                   ? "border-red-200 bg-red-50 text-red-800"
-                  : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                  : "border-slate-200 bg-slate-50 text-slate-700"
               }`}
             >
-              {pre.entryStatus === "revoked"
-                ? "Passport revoked"
-                : pre.entryStatus === "expired"
-                  ? "Passport expired"
-                  : pre.entryStatus === "eligible"
-                    ? "Holder still eligible — cannot claw back"
-                    : "No KYC entry for this holder"}
+              {pre.blockEntry
+                ? `On blocklist — added by ${short(pre.blockEntry.addedBy)}`
+                : "Not on blocklist"}
+            </span>
+            {pre.hookGated && (
+              <span
+                className={`rounded-full border px-2 py-0.5 font-semibold ${
+                  pre.entryStatus === "revoked" || pre.entryStatus === "expired"
+                    ? "border-red-200 bg-red-50 text-red-800"
+                    : "border-emerald-200 bg-emerald-50 text-emerald-800"
+                }`}
+              >
+                {pre.entryStatus === "revoked"
+                  ? "Passport revoked"
+                  : pre.entryStatus === "expired"
+                    ? "Passport expired"
+                    : pre.entryStatus === "eligible"
+                      ? "Passport valid"
+                      : "No KYC entry for this holder"}
+              </span>
+            )}
+            <span
+              className={`rounded-full border px-2 py-0.5 font-semibold ${
+                pre.path
+                  ? "border-brand-200 bg-brand-50 text-brand-800"
+                  : "border-amber-200 bg-amber-50 text-amber-800"
+              }`}
+            >
+              {pre.path === "blocklist"
+                ? "Blocklist path (Blocklist Authority + Admin)"
+                : pre.path === "kyc"
+                  ? "Passport path (KYC provider + Admin)"
+                  : "No clawback path"}
             </span>
             <span className="rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 font-mono text-slate-700">
               balance {pre.balance === null ? "—" : pre.balance.toString()}
@@ -372,6 +472,28 @@ export function ClawbackPanel() {
           </div>
         )}
       </div>
+
+      {pre && !pre.path && pre.hookConfigured && (
+        <p className="mt-3 max-w-3xl text-xs text-slate-600">
+          {pre.hookGated
+            ? "This holder is not on the blocklist and their passport is still valid (or missing), so there is nothing to claw back on. "
+            : "On an Open mint only a blocklisted wallet can be clawed back. "}
+          To use the blocklist path, the Blocklist Authority adds the wallet on{" "}
+          <Link href="/admin/blocklist" className="font-medium text-brand-700 underline">
+            the blocklist page
+          </Link>
+          ; then check the holder again.
+        </p>
+      )}
+
+      {sameKey && (
+        <p className="mt-3 max-w-3xl rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          The connected Admin wallet is also the key that blocked this holder or
+          the current Blocklist Authority. The blocklist path is meant to need
+          two different keys; the program does not enforce it, but the event and
+          audit log will show one key on both sides.
+        </p>
+      )}
 
       {pre && eligible && !pre.vault && (
         <button
@@ -424,9 +546,13 @@ export function ClawbackPanel() {
               <code className="break-all rounded bg-slate-100 px-1 font-mono text-xs">
                 {holder.trim()}
               </code>{" "}
-              into the burn-only quarantine vault. The holder&apos;s passport is{" "}
-              {pre?.entryStatus}. This uses the mint&apos;s permanent delegate —
-              no holder signature — and cannot be reversed through the platform.
+              into the burn-only quarantine vault.{" "}
+              {pre?.path === "blocklist"
+                ? "The wallet is on the sanctions blocklist (Blocklist Authority)."
+                : `The holder's passport is ${pre?.entryStatus}.`}{" "}
+              This uses the mint&apos;s permanent delegate — no holder signature
+              — and cannot be reversed through the platform, even if the wallet
+              is later removed from the blocklist.
             </p>
             <p className="mt-2 text-xs text-slate-500">
               Reason (regulatory reference) will be recorded in the audit log.

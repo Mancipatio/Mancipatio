@@ -1,5 +1,11 @@
 import {
+  ASSET_REGISTRY_ERROR__CLAWBACK_DESTINATION_INVALID,
+  ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED,
+  ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE,
+  ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED,
+  ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW,
   ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH,
+  ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID,
   ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_NOT_ALLOWED,
   ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED,
   ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY,
@@ -190,6 +196,31 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       [
         ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_MISMATCH,
         "This escrow pinned a different KYC registry when it was opened. Confirm it against that registry, or return the deposit and re-open the vault (CustodyKycRegistryMismatch).",
+      ],
+      // Clawback (both permanent-delegate paths; 2C-4 appended 6137 / 6138).
+      [
+        ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE,
+        "This holder's passport is still valid, so the passport path cannot claw back. If the wallet is sanctioned, have the Blocklist Authority block it and use the blocklist path (ClawbackHolderStillEligible).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED,
+        "The passport path only works on KYC-gated mints. On an Open mint, a wallet on the blocklist can be clawed back through the blocklist path (ClawbackNotKycGated).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__CLAWBACK_DESTINATION_INVALID,
+        "Clawed-back units can only go into an active burn-only quarantine vault (Redemption queue + burn and attest) of this share class. Open one, or reload if it was just triggered (ClawbackDestinationInvalid).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW,
+        "That address is one of the platform's own escrows, not a holder wallet, and can never be clawed back. Let the escrow pay the wallet out first (cancel, expire or return), then claw back from the wallet (ClawbackTargetIsEscrow).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED,
+        "This wallet is not on the blocklist (or was removed from it). The Blocklist Authority must add it before the blocklist path can be used (ClawbackHolderNotBlocked).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID,
+        "The mint's transfer-hook config is missing or does not belong to this share class. Reload and pick the share class again (HookConfigInvalid).",
       ],
       [
         ASSET_REGISTRY_ERROR__NOT_FOUNDER,

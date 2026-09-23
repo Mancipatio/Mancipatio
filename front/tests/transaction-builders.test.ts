@@ -7,6 +7,7 @@ import {
 } from "@solana/kit";
 import { getMintEncoder } from "@solana-program/token-2022";
 import {
+  buildBlocklistClawbackInstruction,
   buildClawbackInstruction,
   buildCreateVestingSeriesInstruction,
   buildUpdateMintMetadataInstruction,
@@ -15,6 +16,7 @@ import {
   TOKEN_CLASSIC,
 } from "@/lib/transaction-builders";
 import {
+  parseClawbackBlocklistedHolderInstruction,
   parseClawbackFromHolderInstruction,
   parseCreateVestingSeriesInstruction,
   parseUpdateMintMetadataInstruction,
@@ -75,13 +77,13 @@ function mintData(initialized = true): Uint8Array {
     }),
   );
 }
-async function pda(program: Address, label: string, owner: Address) {
+async function pda(program: Address, label: string, ...owners: Address[]) {
   return (
     await getProgramDerivedAddress({
       programAddress: program,
       seeds: [
         new TextEncoder().encode(label),
-        getAddressEncoder().encode(owner),
+        ...owners.map((owner) => getAddressEncoder().encode(owner)),
       ],
     })
   )[0];
@@ -192,5 +194,92 @@ describe("builders used by the issuer/admin pages", () => {
       await pda(REGISTRY_PROGRAM, "escrow_marker", HOLDER),
     );
     expect(tail[8].address).toBe(HOOK_PROGRAM);
+  });
+
+  const hookConfig = (restrictionMode: RestrictionMode) =>
+    new Uint8Array(
+      getTransferHookConfigEncoder().encode({
+        mint: MINT,
+        shareClass: SHARE_CLASS,
+        blocklist: REGISTRY,
+        restrictionMode,
+        kycRegistry: restrictionMode === RestrictionMode.KycGated ? REGISTRY : null,
+        version: 1,
+        bump: 254,
+      }),
+    );
+  const blocklistInput = {
+    authority: signer,
+    shareClass: SHARE_CLASS,
+    mint: MINT,
+    holderShareAccount: HOLDER,
+    destination: VAULT,
+    custodyVault: VAULT,
+    holder: HOLDER,
+    amount: BigInt(0),
+  };
+
+  it("builds a blocklist clawback on an Open mint with the 3-account Open tail", async () => {
+    const [config] = await findConfigPda({ mint: MINT });
+    const rpc = rpcFor({
+      [config]: { owner: HOOK_PROGRAM, data: hookConfig(RestrictionMode.Open) },
+    });
+    const ix = await buildBlocklistClawbackInstruction(rpc, blocklistInput);
+    const parsed = parseClawbackBlocklistedHolderInstruction({
+      ...ix,
+      accounts: ix.accounts.slice(0, 11),
+    });
+    expect(parsed.accounts.tokenProgram.address).toBe(TOKEN_2022);
+    expect(parsed.accounts.blockEntry.address).toBe(
+      await pda(HOOK_PROGRAM, "blocked", HOLDER),
+    );
+    expect(parsed.accounts.hookConfig.address).toBe(config);
+    expect(parsed.accounts.holderEscrowMarker.address).toBe(
+      await pda(REGISTRY_PROGRAM, "escrow_marker", HOLDER),
+    );
+    expect(parsed.data.holder).toBe(HOLDER);
+    expect(ix.accounts).toHaveLength(11 + 3);
+    const tail = ix.accounts.slice(-3);
+    expect(tail.map((a) => a.address)).toEqual([
+      await pda(HOOK_PROGRAM, "blocked", HOLDER),
+      await pda(HOOK_PROGRAM, "extra-account-metas", MINT),
+      HOOK_PROGRAM,
+    ]);
+    // Keyed on the holder (source owner), never on the ShareClass authority.
+    expect(tail[0].address).not.toBe(
+      await pda(HOOK_PROGRAM, "blocked", SHARE_CLASS),
+    );
+  });
+
+  it("builds a blocklist clawback on a KycGated mint with the 9-account tail", async () => {
+    const [config] = await findConfigPda({ mint: MINT });
+    const rpc = rpcFor({
+      [config]: {
+        owner: HOOK_PROGRAM,
+        data: hookConfig(RestrictionMode.KycGated),
+      },
+    });
+    const ix = await buildBlocklistClawbackInstruction(rpc, blocklistInput);
+    expect(ix.accounts).toHaveLength(11 + 9);
+    const tail = ix.accounts.slice(-9);
+    expect(tail[0].address).toBe(await pda(HOOK_PROGRAM, "blocked", HOLDER));
+    expect(tail[1].address).toBe(config);
+    expect(tail[2].address).toBe(REGISTRY);
+    expect(tail[4].address).toBe(
+      await pda(REGISTRY_PROGRAM, "kyc", REGISTRY, VAULT),
+    );
+    expect(tail[5].address).toBe(
+      await pda(REGISTRY_PROGRAM, "escrow_marker", VAULT),
+    );
+    expect(tail[6].address).toBe(
+      await pda(REGISTRY_PROGRAM, "escrow_marker", HOLDER),
+    );
+    expect(tail[8].address).toBe(HOOK_PROGRAM);
+  });
+
+  it("refuses a blocklist clawback when the mint has no hook config", async () => {
+    await expect(
+      buildBlocklistClawbackInstruction(rpcFor({}), blocklistInput),
+    ).rejects.toThrow(/no transfer-hook config/);
   });
 });
