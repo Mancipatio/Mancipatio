@@ -1,10 +1,17 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  buildSentryEnvelope, describeRequestError, parseSentryDsn, reportRequestError, scrubText,
+  buildSentryEnvelope, describeRequestError, parseSentryDsn, reportRequestError, scrubText, SentryRateLimiter,
 } from "@/lib/request-error-report";
 
 const WALLET = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
 const SIGNATURE = "5VERv8NMvzbJMEkV8xnrLkEaWRtSz9CosKDYjCJjBRnbJLgp8uirBgmQpjKhoR4tjF3ZpRzrFmBV6UjKdiSZkQUW";
+// A production SolanaError: the context (addresses, signatures) is base64 in the decode hint.
+const SOLANA_CONTEXT = Buffer.from(`address=${WALLET}&addresses=${WALLET}%2C${WALLET}`, "utf8").toString("base64");
+const SOLANA_ERROR = `Solana error #3230000; Decode this error by running \`npx @solana/errors decode -- 3230000 '${SOLANA_CONTEXT}'\``;
+// Base64 ed25519 signatures (SIWS), one with little character variety.
+const BASE64_SIGNATURE = Buffer.from(Array.from({ length: 64 }, (_, i) => (i * 37 + 11) % 256)).toString("base64");
+const PLAIN_BASE64 = Buffer.alloc(64, 7).toString("base64");
+const LOGIN_TOKEN = Buffer.alloc(32, 0xa7).toString("base64url");
 const context = { routerKind: "App Router", routePath: "/api/assets/[id]", routeType: "route", renderSource: undefined, revalidateReason: undefined };
 const request = {
   path: `/api/assets/${WALLET}?token=MAGIC_LINK_TOKEN`,
@@ -28,6 +35,20 @@ describe("scrubText", () => {
     ["a token hash", `hash ${"ab12".repeat(16)} unknown`, "hash [hex] unknown", /ab12ab12/],
     ["an IBAN", "iban DE89370400440532013000 rejected", "iban [iban] rejected", /DE89/],
     ["a card-like number", "card 4111 1111 1111 1111 declined", "card [number] declined", /4111/],
+    ["a production SolanaError context", SOLANA_ERROR,
+      "Solana error #3230000; Decode this error by running `npx @solana/errors decode -- 3230000 '[context]'`", /YWRk|9xQe/],
+    ["a base64 signature", `bad signature ${BASE64_SIGNATURE} for message`, "bad signature [blob] for message", /[A-Za-z0-9+/]{12}/],
+    ["a padded base64 value", `sig ${PLAIN_BASE64} bad`, "sig [blob] bad", /BwcH/],
+    ["a wallet after an underscore", `user_${WALLET} missing`, "[blob] missing", /9xQe|VFin/],
+    ["a wallet next to a non-base58 letter", `l${WALLET}0`, "[blob]", /9xQe|VFin/],
+    ["a relative sign-in link", `/login/email?token=${LOGIN_TOKEN} expired`, "/login/email?token=[redacted] expired", /p6en|[A-Za-z0-9_-]{20}/],
+    ["an onboarding link", "GET /onboarding/3f2b8c1e-9a4d-4c2b-8e1f-0a1b2c3d4e5f?t=tok123456 failed", "GET /onboarding/[uuid]?t=[redacted] failed", /3f2b|tok123/],
+    ["an OAuth callback query", "callback ?code=4/0AbcDEF&state=xyz789 rejected", "callback ?code=[redacted]&state=[redacted] rejected", /0AbcDEF|xyz789/],
+    ["a URL-encoded email in a query", "/invite?to=foo%40example.com", "/invite?to=[redacted]", /example/],
+    ["a URL-encoded email in prose", "invite foo%40example.com failed", "invite [email] failed", /example/],
+    ["a Google access token", "google said ya29.a0AfH6SMBx-abc_def invalid", "google said [google-token] invalid", /ya29|a0Af/],
+    ["a Google refresh token", "refresh 1//0gAbCdEf-ghij revoked", "refresh [google-token] revoked", /0gAb/],
+    ["a Supabase secret key", "key sb_secret_abcDEF123-xyz rejected", "key [supabase-key] rejected", /abcDEF/],
   ])("removes %s", (_label, input, expected, leak) => {
     const output = scrubText(input);
     expect(output).toBe(expected);
@@ -37,6 +58,15 @@ describe("scrubText", () => {
   it("keeps operational detail such as slots, codes and route names", () => {
     expect(scrubText("Snapshot at slot 412345678 older than 412345700 (code 57014) in /api/health"))
       .toBe("Snapshot at slot 412345678 older than 412345700 (code 57014) in /api/health");
+  });
+
+  it.each([
+    'duplicate key value violates unique constraint "indexer_events_network_signature_uidx"',
+    "SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR in getMultipleAccountsInfo at /api/payout-snapshots/prepare",
+    "Base64EncodedWireTransaction TransactionExpiredBlockheightExceededError createAssociatedTokenAccountIdempotent",
+    "Solana error #8100002; Decode this error by running `npx @solana/errors decode -- 8100002`",
+  ])("keeps identifiers and constraint names: %s", (input) => {
+    expect(scrubText(input)).toBe(input);
   });
 
   it("collapses whitespace and truncates", () => {
@@ -80,7 +110,8 @@ describe("parseSentryDsn", () => {
     expect(parseSentryDsn(dsn)).toEqual({ envelopeUrl, publicKey });
   });
 
-  it.each([undefined, "", "not a url", "https://o42.ingest.sentry.io/4507", "https://abc@o42.ingest.sentry.io/", "ftp://abc@host/1", "https://abc@host/project"])(
+  it.each([undefined, "", "not a url", "https://o42.ingest.sentry.io/4507", "https://abc@o42.ingest.sentry.io/", "ftp://abc@host/1", "https://abc@host/project",
+    "http://abc123@o42.ingest.sentry.io/4507"])(
     "ignores an unusable DSN %s", (dsn) => {
       expect(parseSentryDsn(dsn)).toBeNull();
     },
@@ -103,7 +134,7 @@ describe("reportRequestError", () => {
   it("forwards a minimal event to the Sentry envelope endpoint when configured", async () => {
     const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
     const env = { SENTRY_DSN: "https://pubkey@o1.ingest.sentry.io/123", VERCEL_ENV: "production", VERCEL_GIT_COMMIT_SHA: "abcdef1234567", NEXT_PUBLIC_NETWORK: "devnet" };
-    await reportRequestError(error, request, context, { env, log: () => {}, fetchImpl });
+    await reportRequestError(error, request, context, { env, log: () => {}, fetchImpl, limiter: new SentryRateLimiter() });
     expect(fetchImpl).toHaveBeenCalledOnce();
     const [url, init] = fetchImpl.mock.calls[0];
     expect(url).toBe("https://o1.ingest.sentry.io/api/123/envelope/");
@@ -127,13 +158,44 @@ describe("reportRequestError", () => {
 
   it("never rejects when Sentry fails, and gives up at the timeout", async () => {
     const env = { SENTRY_DSN: "https://pubkey@o1.ingest.sentry.io/123" };
-    await expect(reportRequestError(error, request, context, { env, log: () => {}, fetchImpl: vi.fn().mockRejectedValue(new Error("down")) })).resolves.toBeUndefined();
+    const down = vi.fn().mockRejectedValue(new Error("down"));
+    await expect(reportRequestError(error, request, context, { env, log: () => {}, fetchImpl: down, limiter: new SentryRateLimiter() })).resolves.toBeUndefined();
+    expect(down).toHaveBeenCalledOnce();
     const hanging = vi.fn((_url: string, init: RequestInit) => new Promise<Response>((_resolve, reject) => {
       init.signal?.addEventListener("abort", () => reject(init.signal?.reason));
     }));
     const started = Date.now();
-    await expect(reportRequestError(error, request, context, { env, log: () => {}, fetchImpl: hanging as unknown as typeof fetch, timeoutMs: 30 })).resolves.toBeUndefined();
+    await expect(reportRequestError(error, request, context, {
+      env, log: () => {}, fetchImpl: hanging as unknown as typeof fetch, timeoutMs: 30, limiter: new SentryRateLimiter(),
+    })).resolves.toBeUndefined();
+    expect(hanging).toHaveBeenCalledOnce();
     expect(Date.now() - started).toBeLessThan(1_000);
+  });
+
+  it("uses a short default timeout", async () => {
+    const { SENTRY_TIMEOUT_MS } = await import("@/lib/request-error-report");
+    expect(SENTRY_TIMEOUT_MS).toBeLessThanOrEqual(1_000);
+  });
+
+  it("sends each distinct error once per minute and caps sends per instance, logging every one", async () => {
+    const env = { SENTRY_DSN: "https://pubkey@o1.ingest.sentry.io/123" };
+    const fetchImpl = vi.fn().mockResolvedValue(new Response(null, { status: 200 }));
+    const log = vi.fn();
+    const limiter = new SentryRateLimiter(3, 60_000);
+    const boom = (n: number) => new Error(`boom ${n}`);
+    for (let i = 0; i < 5; i++) await reportRequestError(boom(1), request, context, { env, log, fetchImpl, limiter });
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    for (let n = 2; n <= 6; n++) await reportRequestError(boom(n), request, context, { env, log, fetchImpl, limiter });
+    expect(fetchImpl).toHaveBeenCalledTimes(3);
+    expect(log).toHaveBeenCalledTimes(10);
+  });
+
+  it("opens a new send budget after the window", () => {
+    const limiter = new SentryRateLimiter(1, 60_000);
+    expect(limiter.allow("a", 0)).toBe(true);
+    expect(limiter.allow("a", 59_999)).toBe(false);
+    expect(limiter.allow("b", 59_999)).toBe(false);
+    expect(limiter.allow("a", 60_000)).toBe(true);
   });
 
   it("never throws even if logging fails", async () => {

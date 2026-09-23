@@ -4,12 +4,30 @@
 // message. When SENTRY_DSN is set, the same fields are also sent as a minimal
 // event to Sentry's envelope endpoint with plain fetch.
 //
-// Never included: the request path or query (tokens, wallet addresses),
+// Scope of the scrubbing: it covers THIS log line and the Sentry event only.
+// Next itself still prints the original error (message and stack) with
+// console.error before it calls this hook, so the platform's runtime logs
+// keep receiving unscrubbed text; treat those logs as sensitive.
+//
+// Never included here: the request path or query (tokens, wallet addresses),
 // headers (cookies, authorization), bodies, stack traces or thrown objects.
 // Messages are scrubbed best-effort: URLs keep only scheme and host (API keys
-// live in RPC query strings), and emails, bearer tokens, JWTs, IP addresses,
-// IBANs, long hex/base58 strings (hashes, wallets, signatures) and long
-// digit runs are replaced by placeholders.
+// live in RPC query strings), query values are redacted even without a
+// scheme, and emails (also %40-encoded), bearer/Google/Supabase tokens, JWTs,
+// IP addresses, IBANs, UUIDs, SolanaError context blobs, long hex/base58
+// strings (hashes, wallets, signatures), base64 tokens and long digit runs
+// are replaced by placeholders.
+//
+// Sentry: https DSNs only. Sends are limited per server instance (one per
+// distinct error per minute, SENTRY_MAX_PER_MINUTE in total); the rest is
+// logged only. Before setting SENTRY_DSN, use an EU-region project (DSN host
+// *.de.sentry.io) and list Sentry as a sub-processor in the privacy policy
+// (app/(marketing)/legal/privacy), which promises EU-region processing.
+//
+// Timing: Next awaits this hook for route-handler errors, so a slow Sentry
+// adds up to SENTRY_TIMEOUT_MS to that error response. For render errors Next
+// calls it from React's onError without awaiting it, so those sends are
+// best-effort and can be dropped when a serverless instance freezes.
 //
 // Runs in both server runtimes (Node.js and Edge): only fetch, crypto and
 // AbortSignal are used. Reporting never throws and never retries.
@@ -35,7 +53,9 @@ export type ErrorReportLine = {
 
 const MAX_MESSAGE = 300;
 const MAX_SCAN = 4_000;
-export const SENTRY_TIMEOUT_MS = 2_000;
+/** Kept short: Next awaits this for route-handler errors, so a slow Sentry
+ * delays that error response by up to this long. */
+export const SENTRY_TIMEOUT_MS = 1_000;
 
 function urlHost(raw: string): string {
   try {
@@ -46,17 +66,57 @@ function urlHost(raw: string): string {
   }
 }
 
+const BASE58 = /^[1-9A-HJ-NP-Za-km-z]+$/;
+const HEX = /^[0-9a-f]+$/i;
+
+function charClass(char: string): number {
+  if (char >= "A" && char <= "Z") return 0;
+  if (char >= "a" && char <= "z") return 1;
+  if (char >= "0" && char <= "9") return 2;
+  return 3;
+}
+
+/** A long run of base64/base64url/base58/hex characters. Pure hex and base58
+ * runs are named; anything else that switches between upper case, lower case,
+ * digits and symbols as often as random data does is a token or encoded blob
+ * (base64 signatures, SolanaError contexts, `user_<wallet>`). Identifiers
+ * (camelCase, snake_case, SCREAMING_CASE, route paths) switch far less often
+ * and are kept. */
+function scrubTokenRun(run: string): string {
+  if (run.length >= 32 && HEX.test(run)) return "[hex]";
+  if (run.length >= 32 && BASE58.test(run)) return "[base58]";
+  if (run.endsWith("=")) return "[blob]";
+  let switches = 0;
+  for (let i = 1; i < run.length; i++) if (charClass(run[i]) !== charClass(run[i - 1])) switches++;
+  return switches / (run.length - 1) >= 0.36 ? "[blob]" : run;
+}
+
 const SCRUBBERS: ReadonlyArray<readonly [RegExp, string | ((match: string) => string)]> = [
-  // URLs first: drops credentials, paths and query strings (RPC API keys).
+  // URLs with a scheme first: drops credentials, paths and query strings (RPC API keys).
   [/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'<>()`]+/gi, urlHost],
+  // Production SolanaError messages carry their context (addresses,
+  // signatures, values) base64-encoded in the decode hint.
+  [/(decode -- \d+) '[^']*'/g, "$1 '[context]'"],
+  // Query values without a scheme: /login/email?token=…, ?code=…&state=….
+  [/([?&][\w.[\]-]{1,40}=)[^&#\s"'`<>]+/g, "$1[redacted]"],
   [/\bBearer\s+[^\s"',;]+/gi, "Bearer [redacted]"],
   [/\beyJ[\w-]*\.[\w-]*\.[\w-]*/g, "[jwt]"],
-  [/[^\s@"'<>(),;:=[\]]+@[^\s@"'<>(),;:=[\]]+\.[a-z]{2,}\b/gi, "[email]"],
+  // Google OAuth access/refresh tokens and Supabase API keys.
+  [/\bya29\.[\w.-]+/g, "[google-token]"],
+  [/(?<![\w/])1\/\/[\w-]{8,}/g, "[google-token]"],
+  [/\bsb_(?:secret|publishable)_[\w-]+/g, "[supabase-key]"],
+  // Emails, also URL-encoded (%40).
+  [/[^\s@"'<>(),;:=[\]]+(?:@|%40)[^\s@"'<>(),;:=[\]%]+\.[a-z]{2,}\b/gi, "[email]"],
   [/\b[A-Z]{2}\d{2}[A-Z0-9]{11,30}\b/g, "[iban]"],
   [/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, "[ip]"],
   [/\b(?:[0-9a-f]{1,4}:){4,7}[0-9a-f]{1,4}\b/gi, "[ip]"],
-  [/\b[0-9a-f]{32,}\b/gi, "[hex]"],
-  [/\b[1-9A-HJ-NP-Za-km-z]{32,}\b/g, "[base58]"],
+  [/\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/gi, "[uuid]"],
+  // Bounded by characters outside the token alphabet, not by \b, so a run
+  // after "_" or next to 0/O/I/l is still found as a whole.
+  [/(?<![A-Za-z0-9+/_-])[A-Za-z0-9+/_-]{20,}={0,2}(?![A-Za-z0-9+/_-])/g, scrubTokenRun],
+  // Hex/base58 runs inside a run that was kept as an identifier.
+  [/(?<![0-9a-f])[0-9a-f]{32,}(?![0-9a-f])/gi, "[hex]"],
+  [/(?<![1-9A-HJ-NP-Za-km-z])[1-9A-HJ-NP-Za-km-z]{32,}(?![1-9A-HJ-NP-Za-km-z])/g, "[base58]"],
   [/\b\d(?:[ -]?\d){12,}\b/g, "[number]"],
 ];
 
@@ -112,7 +172,8 @@ export function parseSentryDsn(dsn: string | undefined): SentryTarget | null {
     const url = new URL(dsn.trim());
     const segments = url.pathname.split("/").filter(Boolean);
     const project = segments.pop();
-    if ((url.protocol !== "https:" && url.protocol !== "http:") || !url.username
+    // https only: the event must never cross the network in plaintext.
+    if (url.protocol !== "https:" || !url.username
       || !/^[A-Za-z0-9]{1,64}$/.test(url.username) || !project || !/^\d{1,20}$/.test(project)) return null;
     const prefix = segments.length ? `/${segments.join("/")}` : "";
     return { envelopeUrl: `${url.protocol}//${url.host}${prefix}/api/${project}/envelope/`, publicKey: url.username };
@@ -148,16 +209,47 @@ export function buildSentryEnvelope(line: ErrorReportLine, env: Record<string, s
   return `${JSON.stringify({ event_id: id, sent_at: new Date(now).toISOString() })}\n${JSON.stringify({ type: "event" })}\n${JSON.stringify(event)}\n`;
 }
 
+export const SENTRY_WINDOW_MS = 60_000;
+export const SENTRY_MAX_PER_MINUTE = 20;
+
+/** Per-instance send budget: at most `max` events per window and one per
+ * distinct error, so a caller who can trigger an error at will cannot use up
+ * the Sentry quota (hiding real errors) or hold many responses open. */
+export class SentryRateLimiter {
+  private windowStart = -Infinity;
+  private readonly seen = new Set<string>();
+  private readonly max: number;
+  private readonly windowMs: number;
+
+  constructor(max = SENTRY_MAX_PER_MINUTE, windowMs = SENTRY_WINDOW_MS) {
+    this.max = max;
+    this.windowMs = windowMs;
+  }
+
+  allow(fingerprint: string, now = Date.now()): boolean {
+    if (now - this.windowStart >= this.windowMs) {
+      this.windowStart = now;
+      this.seen.clear();
+    }
+    if (this.seen.has(fingerprint) || this.seen.size >= this.max) return false;
+    this.seen.add(fingerprint);
+    return true;
+  }
+}
+
+const defaultLimiter = new SentryRateLimiter();
+
 type ReportOptions = {
   env?: Record<string, string | undefined>;
   fetchImpl?: typeof fetch;
   log?: (line: string) => void;
   timeoutMs?: number;
+  limiter?: SentryRateLimiter;
 };
 
-/** Log the error line and, when configured, forward it to Sentry. Resolves
- * once the send finished or timed out (Next awaits onRequestError, and a
- * serverless instance may freeze un-awaited work); never rejects. */
+/** Log the error line and, when configured and within the send budget,
+ * forward it to Sentry. Resolves once the send finished or timed out; never
+ * rejects. See the header for when Next awaits this. */
 export function reportRequestError(error: unknown, request: ErrorRequestInfo, context: ErrorContextInfo, options: ReportOptions = {}): Promise<void> {
   try {
     const env = options.env ?? process.env;
@@ -165,6 +257,8 @@ export function reportRequestError(error: unknown, request: ErrorRequestInfo, co
     (options.log ?? ((text: string) => console.error(text)))(JSON.stringify(line));
     const target = parseSentryDsn(env.SENTRY_DSN);
     if (!target) return Promise.resolve();
+    const fingerprint = `${line.route}|${line.method}|${line.name}|${line.message}`;
+    if (!(options.limiter ?? defaultLimiter).allow(fingerprint)) return Promise.resolve();
     const send = options.fetchImpl ?? fetch;
     return send(target.envelopeUrl, {
       method: "POST",
