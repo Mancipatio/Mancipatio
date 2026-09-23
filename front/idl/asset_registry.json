@@ -299,6 +299,90 @@
           }
         },
         {
+          "name": "old_admin_record",
+          "docs": [
+            "The outgoing authority's global Admin PDA (usually missing)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.authority",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_admin_record",
+          "docs": [
+            "The incoming key's global Admin PDA (usually missing)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "new_authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "docs": [
+            "The issuer's pending recovery, retired here when present (it may not exist)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
+        },
+        {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
         }
@@ -6155,6 +6239,68 @@
               {
                 "kind": "account",
                 "path": "new_authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_admin_record",
+          "docs": [
+            "The recovered key's global Admin PDA: a recovery never lands on one."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "new_authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "docs": [
+            "The issuer's pending regular rotation, retired here when present (it may not exist)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  116,
+                  114,
+                  97,
+                  110,
+                  115,
+                  102,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
               }
             ]
           }

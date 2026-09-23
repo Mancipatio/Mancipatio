@@ -5,7 +5,9 @@
 //
 // Every flag is ON for devnet / testnet / localnet. On mainnet a flag is ON
 // only when its NEXT_PUBLIC_FEATURE_* variable is exactly "true" — an unset,
-// empty or misspelled value keeps the feature off. The variables are
+// empty or misspelled value keeps the feature off. `issuerRotation` also has
+// a kill switch for every network: NEXT_PUBLIC_FEATURE_ISSUER_ROTATION=false
+// turns it off on devnet / testnet / localnet too (the 2C-2 rollback step). The variables are
 // NEXT_PUBLIC_ so the client bundle sees the same answer the server enforces;
 // they are inlined at build time, so flipping one needs a rebuild.
 
@@ -20,7 +22,8 @@ export type Features = {
    * Issuer authority rotation and timelocked recovery (program 2C-2):
    * /issuer/rotation, the admin recovery panel, and the sale / payout-vault
    * sync bundled into close / payout flows. Off hides the UI and stops the
-   * sync bundling (the rollback switch).
+   * sync bundling (the rollback switch; `=false` works on every network).
+   * The issuer's recovery notice (IssuerRecoveryBanner) stays on regardless.
    */
   issuerRotation: boolean;
 };
@@ -37,9 +40,18 @@ function mainnetOptIn(value: string | undefined): boolean {
   return value?.trim() === "true";
 }
 
+/** Off only when the variable is exactly "false" (the non-mainnet kill switch). */
+function killSwitchOff(value: string | undefined): boolean {
+  return value?.trim() === "false";
+}
+
 export function features(network: Network = detectNetwork()): Features {
   if (network !== "mainnet") {
-    return { payoutAirdrop: true, startupRaises: true, issuerRotation: true };
+    return {
+      payoutAirdrop: true,
+      startupRaises: true,
+      issuerRotation: !killSwitchOff(process.env.NEXT_PUBLIC_FEATURE_ISSUER_ROTATION),
+    };
   }
   // Literal process.env.NEXT_PUBLIC_* reads so Next inlines them client-side.
   return {

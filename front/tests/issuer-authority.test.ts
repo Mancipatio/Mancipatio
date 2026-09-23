@@ -23,6 +23,7 @@ import {
   ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE,
   ASSET_REGISTRY_ERROR__NOT_FOUNDER,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
+  getAdminEncoder,
   getAuthorityTransferDiscriminatorBytes,
   getAuthorityTransferEncoder,
   getIssuerDiscriminatorBytes,
@@ -33,6 +34,7 @@ import {
   SaleStatus,
 } from "@/lib/generated/asset_registry";
 import {
+  adminKeyRuleError,
   buildAcceptIssuerAuthority,
   buildCancelIssuerAuthorityTransfer,
   buildCancelIssuerRecovery,
@@ -52,19 +54,22 @@ import {
   issuerSyncInstructions,
   issuerTransferState,
   issuerVaultsFor,
+  isActiveAdminKey,
   ISSUER_RECOVERY_DELAY_SECONDS,
   ISSUER_RECOVERY_WINDOW_SECONDS,
   NEW_AUTHORITY_OFFSET,
   pendingForWalletFilters,
   proposedIssuerAuthorityError,
+  SEND_OVERHEAD_INSTRUCTIONS,
+  sendBatches,
   transactionSize,
   waitForIndexedAuthority,
   type IssuerRecoveryRecord,
   type PendingIssuerTransfer,
 } from "@/lib/issuer-authority";
 import { findIssuerPermissionsAddress } from "@/lib/issuer-permissions";
-import { explainSendError, SALE_AUTHORITY_HINT } from "@/lib/tx-error";
-import { findAssetPda, findPlatformPda } from "@/lib/generated/asset_registry";
+import { explainSendError, SALE_AUTHORITY_HINT, SALE_SYNC_SUFFIX } from "@/lib/tx-error";
+import { findAdminRecordPda, findAssetPda, findPlatformPda } from "@/lib/generated/asset_registry";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
 
 const ISSUER = address("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb");
@@ -214,7 +219,7 @@ describe("formatting", () => {
 });
 
 describe("builders", () => {
-  it("accept derives the old grant from the live authority and the new one from the signer", async () => {
+  it("accept derives the old grant / Admin PDA from the live authority, the new ones from the signer", async () => {
     const signer = await generateKeyPairSigner();
     const ix = await buildAcceptIssuerAuthority({ newAuthoritySigner: signer, issuer: ISSUER, currentAuthority: A });
     expect(ix.accounts.map((a) => a.address)).toEqual([
@@ -223,6 +228,9 @@ describe("builders", () => {
       await findIssuerTransferPda(ISSUER),
       await findIssuerPermissionsAddress(ISSUER, A),
       await findIssuerPermissionsAddress(ISSUER, signer.address),
+      (await findAdminRecordPda({ authority: A }))[0],
+      (await findAdminRecordPda({ authority: signer.address }))[0],
+      await findIssuerRecoveryPda(ISSUER),
       "11111111111111111111111111111111",
     ]);
   });
@@ -266,6 +274,8 @@ describe("builders", () => {
       ADMIN,
       await findIssuerPermissionsAddress(ISSUER, A),
       await findIssuerPermissionsAddress(ISSUER, signer.address),
+      (await findAdminRecordPda({ authority: signer.address }))[0],
+      await findIssuerTransferPda(ISSUER),
     ]);
   });
 });
@@ -312,12 +322,34 @@ describe("sync selection and bundling", () => {
     expect(txs.length).toBeGreaterThan(1);
     expect(txs[0][0]).toBe(primary);
     expect(txs.flat()).toEqual([primary, ...syncs]);
-    for (const t of txs) expect(transactionSize(signer.address, t)).toBeLessThanOrEqual(1232);
+    for (const t of txs) expect(transactionSize(signer.address, [...SEND_OVERHEAD_INSTRUCTIONS, ...t])).toBeLessThanOrEqual(1232);
     // A handful fits atomically with the accept.
     const few = syncs.slice(0, 3);
     expect(bundleWithSync([primary], few, { feePayer: signer.address, order: "primary-first" })).toEqual([
       [primary, ...few],
     ]);
+  });
+
+  it("leaves room for the compute-budget instructions the send path appends", async () => {
+    // The realistic worst case: one issuer's syncs share the share class and
+    // asset (47 B each), so a raw-size packer leaves almost no slack.
+    const signer = await generateKeyPairSigner();
+    const primary = await buildAcceptIssuerAuthority({ newAuthoritySigner: signer, issuer: ISSUER, currentAuthority: A });
+    const [sc, asset] = await Promise.all([randomAddress(), randomAddress()]);
+    const vaults = [];
+    for (let i = 0; i < 16; i++) vaults.push({ address: await randomAddress(), shareClass: sc, asset, founder: A });
+    const syncs = issuerSyncInstructions({ issuer: ISSUER, issuerAuthority: B, vaults });
+    const txs = bundleWithSync([primary], syncs, { feePayer: signer.address, order: "primary-first" });
+    expect(txs.flat()).toEqual([primary, ...syncs]);
+    const computeBudget = "ComputeBudget111111111111111111111111111111" as Address;
+    // What prepareTransaction appends (SetComputeUnitLimit) plus a wallet's
+    // SetComputeUnitPrice, on top of each bundled transaction.
+    const prepared = (t: readonly Parameters<typeof transactionSize>[1][number][]) => [
+      ...t,
+      { programAddress: computeBudget, data: new Uint8Array([2, 64, 13, 3, 0]) },
+      { programAddress: computeBudget, data: new Uint8Array([3, 1, 0, 0, 0, 0, 0, 0, 0]) },
+    ];
+    for (const t of txs) expect(transactionSize(signer.address, prepared(t))).toBeLessThanOrEqual(1232);
   });
 
   it("puts the primary last after the syncs it must follow", async () => {
@@ -329,7 +361,7 @@ describe("sync selection and bundling", () => {
     const last = txs[txs.length - 1];
     expect(last[last.length - 1]).toBe(primary);
     expect(txs.flat()).toEqual([...syncs, primary]);
-    for (const t of txs) expect(transactionSize(signer.address, t)).toBeLessThanOrEqual(1232);
+    for (const t of txs) expect(transactionSize(signer.address, [...SEND_OVERHEAD_INSTRUCTIONS, ...t])).toBeLessThanOrEqual(1232);
     expect(bundleWithSync([primary], [], { feePayer: signer.address, order: "sync-first" })).toEqual([[primary]]);
   });
 
@@ -376,6 +408,47 @@ describe("sync selection and bundling", () => {
     ]);
     const off = issuerVaultsFor(records, { wallet: B, issuer: "issuer-mine", issuerOfShareClass: issuerOf, rotation: false });
     expect(off.map((v) => v.record)).toEqual([records[0]]);
+  });
+
+  it("hides a vault from the key that rotated away from its issuer", () => {
+    const records = [
+      { vault: { founder: A, shareClass: "sc-mine" } },
+      { vault: { founder: A, shareClass: "sc-unknown" } },
+    ];
+    const issuerOf = (sc: string) => (sc === "sc-mine" ? "issuer-mine" : undefined);
+    // A is no issuer's authority any more (issuer null) or controls another one.
+    for (const issuer of [null, "issuer-other"]) {
+      const view = issuerVaultsFor(records, { wallet: A, issuer, issuerOfShareClass: issuerOf, rotation: true });
+      expect(view.map((v) => v.record)).toEqual([records[1]]);
+    }
+    // Still A's issuer, or rotation off: unchanged.
+    expect(
+      issuerVaultsFor(records, { wallet: A, issuer: "issuer-mine", issuerOfShareClass: issuerOf, rotation: true }),
+    ).toHaveLength(2);
+    expect(
+      issuerVaultsFor(records, { wallet: A, issuer: null, issuerOfShareClass: issuerOf, rotation: false }),
+    ).toHaveLength(2);
+  });
+
+  it("sendBatches throws when the first batch fails and reports a later partial failure", async () => {
+    const ix = (n: number) => ({ programAddress: A, data: new Uint8Array([n]) });
+    const batches = [[ix(1), ix(2)], [ix(3), ix(4)], [ix(5)]];
+    await expect(
+      sendBatches(batches, async (_, i) => {
+        if (i === 0) throw new Error("first");
+        return "sig";
+      }),
+    ).rejects.toThrow("first");
+    const sent: number[] = [];
+    const partial = await sendBatches(batches, async (_, i) => {
+      if (i === 1) throw new Error("second");
+      sent.push(i);
+      return `sig-${i}`;
+    });
+    expect(sent).toEqual([0]);
+    expect(partial).toMatchObject({ signature: "sig-0", pending: 3 });
+    expect((partial.error as Error).message).toBe("second");
+    expect(await sendBatches(batches, async (_, i) => `sig-${i}`)).toEqual({ signature: "sig-0", pending: 0, error: null });
   });
 });
 
@@ -484,6 +557,32 @@ describe("chain readers", () => {
     ]);
   });
 
+  it("pre-checks the Admin-key rule the program enforces at accept / execute", async () => {
+    const owner = ASSET_REGISTRY_PROGRAM_ADDRESS;
+    const admins = new Set<string>([B]);
+    const adminPdas = new Map<string, string>();
+    for (const key of [A, B, STRANGER]) adminPdas.set((await findAdminRecordPda({ authority: key }))[0], key);
+    mocks.fetchEncodedAccount.mockImplementation(async (_rpc: unknown, target: string) => {
+      const key = adminPdas.get(target);
+      if (!key || !admins.has(key)) return { exists: false, address: target };
+      return {
+        exists: true,
+        address: target,
+        programAddress: owner,
+        data: new Uint8Array(getAdminEncoder().encode({ admin: key as Address, addedBy: ADMIN, bump: 255 })),
+      };
+    });
+    const rpc = {} as never;
+    expect(await isActiveAdminKey(rpc, B)).toBe(true);
+    expect(await isActiveAdminKey(rpc, A)).toBe(false);
+    expect(await adminKeyRuleError(rpc, "rotation", A, STRANGER)).toBeNull();
+    expect(await adminKeyRuleError(rpc, "rotation", A, B)).toMatch(/admin key/);
+    expect(await adminKeyRuleError(rpc, "recovery", A, B)).toMatch(/never lands on one/);
+    admins.add(A);
+    expect(await adminKeyRuleError(rpc, "rotation", A, B)).toBeNull();
+    expect(await adminKeyRuleError(rpc, "recovery", A, B)).toMatch(/never lands on one/);
+  });
+
   it("waits for the indexer to name the new key", async () => {
     const reads = ["old", null, "new"];
     const sleep = vi.fn(async () => undefined);
@@ -512,13 +611,18 @@ describe("transaction-error hints (2C-2)", () => {
     expect(explainSendError(withLogs([code(ASSET_REGISTRY_ERROR__NOT_FOUNDER)]))).toMatch(/sync the payout vault first/);
   });
 
-  it("points a sale authority mismatch at the sync", () => {
-    expect(
-      explainSendError(
-        withLogs([
-          "Program log: AnchorError caused by account: sale. Error Code: Unauthorized. Error Number: 6001. Error Message: Unauthorized.",
-        ]),
-      ),
-    ).toBe(SALE_AUTHORITY_HINT);
+  it("explains a sale Unauthorized neutrally and points at the sync only with rotation on", () => {
+    const logs = withLogs([
+      "Program log: AnchorError caused by account: sale. Error Code: Unauthorized. Error Number: 6001. Error Message: Unauthorized.",
+    ]);
+    // Tests run on devnet (rotation on).
+    expect(explainSendError(logs)).toBe(SALE_AUTHORITY_HINT + SALE_SYNC_SUFFIX);
+    expect(SALE_AUTHORITY_HINT).toMatch(/does not belong to this sale/);
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", "false");
+    try {
+      expect(explainSendError(logs)).toBe(SALE_AUTHORITY_HINT);
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });

@@ -31,6 +31,8 @@ import {
   type WritableAccount,
 } from "@solana/kit";
 import {
+  findAcceptIssuerAuthorityTransferPda,
+  findNewAdminRecordPda,
   findNewPermissionsPda,
   findPlatformPda,
   findRecoveryPda,
@@ -61,6 +63,8 @@ export type ExecuteIssuerRecoveryInstruction<
   TAccountProposer extends string | AccountMeta<string> = string,
   TAccountOldPermissions extends string | AccountMeta<string> = string,
   TAccountNewPermissions extends string | AccountMeta<string> = string,
+  TAccountNewAdminRecord extends string | AccountMeta<string> = string,
+  TAccountTransfer extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -88,6 +92,12 @@ export type ExecuteIssuerRecoveryInstruction<
       TAccountNewPermissions extends string
         ? WritableAccount<TAccountNewPermissions>
         : TAccountNewPermissions,
+      TAccountNewAdminRecord extends string
+        ? ReadonlyAccount<TAccountNewAdminRecord>
+        : TAccountNewAdminRecord,
+      TAccountTransfer extends string
+        ? WritableAccount<TAccountTransfer>
+        : TAccountTransfer,
       ...TRemainingAccounts,
     ]
   >;
@@ -132,6 +142,8 @@ export type ExecuteIssuerRecoveryAsyncInput<
   TAccountProposer extends string = string,
   TAccountOldPermissions extends string = string,
   TAccountNewPermissions extends string = string,
+  TAccountNewAdminRecord extends string = string,
+  TAccountTransfer extends string = string,
 > = {
   /**
    * The recovered key signs. Not `mut`: the old grant's and the recovery's
@@ -149,6 +161,10 @@ export type ExecuteIssuerRecoveryAsyncInput<
    * `proposer`): a recovery never carries capabilities, so none may revive.
    */
   newPermissions?: Address<TAccountNewPermissions>;
+  /** The recovered key's global Admin PDA: a recovery never lands on one. */
+  newAdminRecord?: Address<TAccountNewAdminRecord>;
+  /** The issuer's pending regular rotation, retired here when present (it may not exist). */
+  transfer?: Address<TAccountTransfer>;
 };
 
 export async function getExecuteIssuerRecoveryInstructionAsync<
@@ -159,6 +175,8 @@ export async function getExecuteIssuerRecoveryInstructionAsync<
   TAccountProposer extends string,
   TAccountOldPermissions extends string,
   TAccountNewPermissions extends string,
+  TAccountNewAdminRecord extends string,
+  TAccountTransfer extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ExecuteIssuerRecoveryAsyncInput<
@@ -168,7 +186,9 @@ export async function getExecuteIssuerRecoveryInstructionAsync<
     TAccountRecovery,
     TAccountProposer,
     TAccountOldPermissions,
-    TAccountNewPermissions
+    TAccountNewPermissions,
+    TAccountNewAdminRecord,
+    TAccountTransfer
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -180,7 +200,9 @@ export async function getExecuteIssuerRecoveryInstructionAsync<
     TAccountRecovery,
     TAccountProposer,
     TAccountOldPermissions,
-    TAccountNewPermissions
+    TAccountNewPermissions,
+    TAccountNewAdminRecord,
+    TAccountTransfer
   >
 > {
   // Program address.
@@ -196,6 +218,8 @@ export async function getExecuteIssuerRecoveryInstructionAsync<
     proposer: { value: input.proposer ?? null, isWritable: true },
     oldPermissions: { value: input.oldPermissions ?? null, isWritable: true },
     newPermissions: { value: input.newPermissions ?? null, isWritable: true },
+    newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: false },
+    transfer: { value: input.transfer ?? null, isWritable: true },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -217,6 +241,16 @@ export async function getExecuteIssuerRecoveryInstructionAsync<
       newAuthority: expectAddress(accounts.newAuthority.value),
     });
   }
+  if (!accounts.newAdminRecord.value) {
+    accounts.newAdminRecord.value = await findNewAdminRecordPda({
+      newAuthority: expectAddress(accounts.newAuthority.value),
+    });
+  }
+  if (!accounts.transfer.value) {
+    accounts.transfer.value = await findAcceptIssuerAuthorityTransferPda({
+      issuer: expectAddress(accounts.issuer.value),
+    });
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -228,6 +262,8 @@ export async function getExecuteIssuerRecoveryInstructionAsync<
       getAccountMeta(accounts.proposer),
       getAccountMeta(accounts.oldPermissions),
       getAccountMeta(accounts.newPermissions),
+      getAccountMeta(accounts.newAdminRecord),
+      getAccountMeta(accounts.transfer),
     ],
     data: getExecuteIssuerRecoveryInstructionDataEncoder().encode({}),
     programAddress,
@@ -239,7 +275,9 @@ export async function getExecuteIssuerRecoveryInstructionAsync<
     TAccountRecovery,
     TAccountProposer,
     TAccountOldPermissions,
-    TAccountNewPermissions
+    TAccountNewPermissions,
+    TAccountNewAdminRecord,
+    TAccountTransfer
   >);
 }
 
@@ -251,6 +289,8 @@ export type ExecuteIssuerRecoveryInput<
   TAccountProposer extends string = string,
   TAccountOldPermissions extends string = string,
   TAccountNewPermissions extends string = string,
+  TAccountNewAdminRecord extends string = string,
+  TAccountTransfer extends string = string,
 > = {
   /**
    * The recovered key signs. Not `mut`: the old grant's and the recovery's
@@ -268,6 +308,10 @@ export type ExecuteIssuerRecoveryInput<
    * `proposer`): a recovery never carries capabilities, so none may revive.
    */
   newPermissions: Address<TAccountNewPermissions>;
+  /** The recovered key's global Admin PDA: a recovery never lands on one. */
+  newAdminRecord: Address<TAccountNewAdminRecord>;
+  /** The issuer's pending regular rotation, retired here when present (it may not exist). */
+  transfer: Address<TAccountTransfer>;
 };
 
 export function getExecuteIssuerRecoveryInstruction<
@@ -278,6 +322,8 @@ export function getExecuteIssuerRecoveryInstruction<
   TAccountProposer extends string,
   TAccountOldPermissions extends string,
   TAccountNewPermissions extends string,
+  TAccountNewAdminRecord extends string,
+  TAccountTransfer extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ExecuteIssuerRecoveryInput<
@@ -287,7 +333,9 @@ export function getExecuteIssuerRecoveryInstruction<
     TAccountRecovery,
     TAccountProposer,
     TAccountOldPermissions,
-    TAccountNewPermissions
+    TAccountNewPermissions,
+    TAccountNewAdminRecord,
+    TAccountTransfer
   >,
   config?: { programAddress?: TProgramAddress },
 ): ExecuteIssuerRecoveryInstruction<
@@ -298,7 +346,9 @@ export function getExecuteIssuerRecoveryInstruction<
   TAccountRecovery,
   TAccountProposer,
   TAccountOldPermissions,
-  TAccountNewPermissions
+  TAccountNewPermissions,
+  TAccountNewAdminRecord,
+  TAccountTransfer
 > {
   // Program address.
   const programAddress =
@@ -313,6 +363,8 @@ export function getExecuteIssuerRecoveryInstruction<
     proposer: { value: input.proposer ?? null, isWritable: true },
     oldPermissions: { value: input.oldPermissions ?? null, isWritable: true },
     newPermissions: { value: input.newPermissions ?? null, isWritable: true },
+    newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: false },
+    transfer: { value: input.transfer ?? null, isWritable: true },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -329,6 +381,8 @@ export function getExecuteIssuerRecoveryInstruction<
       getAccountMeta(accounts.proposer),
       getAccountMeta(accounts.oldPermissions),
       getAccountMeta(accounts.newPermissions),
+      getAccountMeta(accounts.newAdminRecord),
+      getAccountMeta(accounts.transfer),
     ],
     data: getExecuteIssuerRecoveryInstructionDataEncoder().encode({}),
     programAddress,
@@ -340,7 +394,9 @@ export function getExecuteIssuerRecoveryInstruction<
     TAccountRecovery,
     TAccountProposer,
     TAccountOldPermissions,
-    TAccountNewPermissions
+    TAccountNewPermissions,
+    TAccountNewAdminRecord,
+    TAccountTransfer
   >);
 }
 
@@ -366,6 +422,10 @@ export type ParsedExecuteIssuerRecoveryInstruction<
      * `proposer`): a recovery never carries capabilities, so none may revive.
      */
     newPermissions: TAccountMetas[6];
+    /** The recovered key's global Admin PDA: a recovery never lands on one. */
+    newAdminRecord: TAccountMetas[7];
+    /** The issuer's pending regular rotation, retired here when present (it may not exist). */
+    transfer: TAccountMetas[8];
   };
   data: ExecuteIssuerRecoveryInstructionData;
 };
@@ -378,7 +438,7 @@ export function parseExecuteIssuerRecoveryInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedExecuteIssuerRecoveryInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 7) {
+  if (instruction.accounts.length < 9) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -398,6 +458,8 @@ export function parseExecuteIssuerRecoveryInstruction<
       proposer: getNextAccount(),
       oldPermissions: getNextAccount(),
       newPermissions: getNextAccount(),
+      newAdminRecord: getNextAccount(),
+      transfer: getNextAccount(),
     },
     data: getExecuteIssuerRecoveryInstructionDataDecoder().decode(
       instruction.data,

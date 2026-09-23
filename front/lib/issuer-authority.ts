@@ -35,9 +35,11 @@ import {
 import type { SolanaClient } from "@solana/client";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
+  fetchMaybeAdmin,
   fetchMaybeAuthorityTransfer,
   fetchMaybeIssuer,
   fetchMaybeIssuerRecovery,
+  findAdminRecordPda,
   findAssetPda,
   findPlatformPda,
   findRecoveryPda,
@@ -79,6 +81,21 @@ export const ISSUER_RECOVERY_WINDOW_SECONDS = 1_209_600;
 export const NEW_AUTHORITY_OFFSET = 72;
 /** Solana's packet limit for one transaction. */
 export const TRANSACTION_SIZE_LIMIT = 1232;
+
+const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111" as Address;
+/**
+ * What gets added to a transaction AFTER it is bundled: `useSendTransaction`
+ * prepares it (`@solana/client` simulates and appends a SetComputeUnitLimit,
+ * about 40 B with the Compute Budget program key) and a wallet may add a
+ * SetComputeUnitPrice. `bundleWithSync` measures every candidate with these
+ * placeholders included so the prepared transaction still fits.
+ */
+export const SEND_OVERHEAD_INSTRUCTIONS: readonly Instruction[] = [
+  { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array([2, 0, 0, 0, 0]) },
+  { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array([3, 0, 0, 0, 0, 0, 0, 0, 0]) },
+];
+/** Bytes kept free beyond the compute-budget placeholders (other wallet additions). */
+export const SEND_RESERVE_BYTES = 32;
 
 // ── Validation ───────────────────────────────────────────────────────────────
 
@@ -294,6 +311,11 @@ export function issuerSyncInstructions(params: {
  * classes whose founder snapshot still names an older key. Those are flagged
  * `founderOutOfSync`: `post_update`, `release_payout` and
  * `claim_founder_yield` need a `sync_payout_founder` first.
+ *
+ * With rotation on, a vault whose founder is the wallet but whose share class
+ * belongs to an issuer the wallet no longer controls (it rotated away) is
+ * left out: releasing or claiming there would pay the old key during the
+ * residual window. The current issuer key syncs it instead.
  */
 export function issuerVaultsFor<
   T extends { vault: { founder: Address | string; shareClass: Address | string } },
@@ -309,12 +331,14 @@ export function issuerVaultsFor<
   const out: { record: T; founderOutOfSync: boolean }[] = [];
   for (const record of records) {
     const founder = record.vault.founder.toString();
+    const vaultIssuer = opts.issuerOfShareClass(record.vault.shareClass.toString());
     if (founder === opts.wallet) {
-      out.push({ record, founderOutOfSync: false });
+      const rotatedAway = opts.rotation && vaultIssuer !== undefined && vaultIssuer !== opts.issuer;
+      if (!rotatedAway) out.push({ record, founderOutOfSync: false });
       continue;
     }
     if (!opts.rotation || !opts.issuer) continue;
-    if (opts.issuerOfShareClass(record.vault.shareClass.toString()) === opts.issuer) {
+    if (vaultIssuer === opts.issuer) {
       out.push({ record, founderOutOfSync: true });
     }
   }
@@ -396,7 +420,9 @@ export function transactionSize(feePayer: Address, instructions: readonly Instru
 
 /**
  * Splits `primary` + `syncs` into as few transactions as fit the packet
- * limit, keeping the order the program needs:
+ * limit AFTER the send path adds its compute-budget instructions
+ * (`SEND_OVERHEAD_INSTRUCTIONS`, measured in, plus `SEND_RESERVE_BYTES`),
+ * keeping the order the program needs:
  * - "primary-first" (accept / execute, then syncs: a sync copies the NEW live
  *   authority): transaction 1 is primary + as many syncs as fit;
  * - "sync-first" (close / payout flows: the sync must land before the
@@ -410,8 +436,9 @@ export function bundleWithSync(
   syncs: readonly Instruction[],
   opts: { feePayer: Address; order: "primary-first" | "sync-first"; limit?: number },
 ): Instruction[][] {
-  const limit = opts.limit ?? TRANSACTION_SIZE_LIMIT;
-  const fits = (ixs: readonly Instruction[]) => transactionSize(opts.feePayer, ixs) <= limit;
+  const limit = opts.limit ?? TRANSACTION_SIZE_LIMIT - SEND_RESERVE_BYTES;
+  const fits = (ixs: readonly Instruction[]) =>
+    transactionSize(opts.feePayer, [...SEND_OVERHEAD_INSTRUCTIONS, ...ixs]) <= limit;
   if (!fits(primary)) throw new Error("The instruction does not fit in one transaction");
   const chunk = (ixs: readonly Instruction[], seed: Instruction[] = []): Instruction[][] => {
     const txs: Instruction[][] = [];
@@ -436,6 +463,39 @@ export function bundleWithSync(
     rest = rest.slice(0, -1);
   }
   return [...chunk(rest), [...tail, ...primary]];
+}
+
+export type BatchResult = {
+  /** Signature of the first transaction (the one carrying the primary). */
+  signature: string;
+  /** Instructions in the batches that did not land (0 when all did). */
+  pending: number;
+  /** Why a LATER batch failed, or null. */
+  error: unknown;
+};
+
+/**
+ * Sends `bundleWithSync` batches in order. A failure of the FIRST batch (the
+ * one carrying accept / execute, or the first syncs) is the action's failure
+ * and is thrown. A failure of a later, sync-only batch is reported, not
+ * thrown: the primary already landed, and the remaining syncs can be sent
+ * later ("Sync all", the payouts page).
+ */
+export async function sendBatches(
+  batches: readonly (readonly Instruction[])[],
+  send: (instructions: readonly Instruction[], index: number) => Promise<unknown>,
+): Promise<BatchResult> {
+  let signature = "";
+  for (const [i, instructions] of batches.entries()) {
+    try {
+      const sig = await send(instructions, i);
+      if (i === 0) signature = typeof sig === "string" ? sig : "";
+    } catch (error) {
+      if (i === 0) throw error;
+      return { signature, pending: batches.slice(i).reduce((n, b) => n + b.length, 0), error };
+    }
+  }
+  return { signature, pending: 0, error: null };
 }
 
 /**
@@ -503,6 +563,32 @@ export function toIssuerRecoveryRecord(r: IssuerRecovery): IssuerRecoveryRecord 
   };
 }
 
+/** Whether `wallet` holds a live global Admin record (`util::is_active_admin`). */
+export async function isActiveAdminKey(rpc: Rpc, wallet: Address): Promise<boolean> {
+  const [record] = await findAdminRecordPda({ authority: wallet });
+  const admin = await fetchMaybeAdmin(rpc, record, read);
+  return admin.exists && admin.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS && admin.data.admin === wallet;
+}
+
+/**
+ * The on-chain Admin-key rule, checked before a propose so the wallet does
+ * not stage a change that must fail at accept / execute: an issuer key may
+ * move onto a global Admin key only from an Admin key (rotation), and a
+ * recovery never lands on one. Null when allowed.
+ */
+export async function adminKeyRuleError(
+  rpc: Rpc,
+  kind: "rotation" | "recovery",
+  currentAuthority: Address,
+  candidate: Address,
+): Promise<string | null> {
+  if (!(await isActiveAdminKey(rpc, candidate))) return null;
+  if (kind === "rotation" && (await isActiveAdminKey(rpc, currentAuthority))) return null;
+  return kind === "rotation"
+    ? "This wallet is a Manci admin key. An issuer key can move onto an admin key only from another admin key: use a wallet without the admin role."
+    : "This wallet is a Manci admin key, and a recovery never lands on one. Recover to a wallet without the admin role (the Super Admin can add the role afterwards).";
+}
+
 /** The issuer's staged regular rotation, or null. */
 export async function fetchPendingIssuerTransfer(
   rpc: Rpc,
@@ -521,16 +607,20 @@ export async function fetchIssuerRecovery(
   return maybe.exists && maybe.data.issuer === issuer ? toIssuerRecoveryRecord(maybe.data) : null;
 }
 
-/** Chain time (block time of the latest slot); falls back to the local clock. */
-export async function fetchChainNow(rpc: Rpc): Promise<number> {
+/**
+ * Chain time (block time of the latest slot). Falls back to the local clock
+ * when the RPC cannot say, and reports it (`fromChain: false`) so a countdown
+ * can be labelled; the program is the source of truth either way.
+ */
+export async function fetchChainNow(rpc: Rpc): Promise<{ now: number; fromChain: boolean }> {
   try {
     const slot = await rpc.getSlot({ commitment: "confirmed" }).send();
     const time = await rpc.getBlockTime(slot).send();
-    if (time !== null) return Number(time);
+    if (time !== null) return { now: Number(time), fromChain: true };
   } catch {
-    // Fall through to the local clock; the program is the source of truth.
+    // Fall through to the local clock.
   }
-  return Math.floor(Date.now() / 1000);
+  return { now: Math.floor(Date.now() / 1000), fromChain: false };
 }
 
 /** The GPA filters for accounts of one type whose `new_authority` is `wallet`. */
@@ -673,25 +763,33 @@ export async function buildProposeIssuerAuthority(p: {
 
 /**
  * `accept_issuer_authority`, signed by the PROPOSED key. `currentAuthority`
- * is the live `issuer.authority`: it seeds the grant that is closed; the new
- * grant is seeded by the signer.
+ * is the live `issuer.authority`: it seeds the grant that is closed and the
+ * outgoing Admin PDA; the new grant and Admin PDA are seeded by the signer.
+ * A pending recovery (its PDA is always passed) is retired on-chain.
  */
 export async function buildAcceptIssuerAuthority(p: {
   newAuthoritySigner: TransactionSigner;
   issuer: Address;
   currentAuthority: Address;
 }) {
-  const [transfer, oldPermissions, newPermissions] = await Promise.all([
-    findIssuerTransferPda(p.issuer),
-    findIssuerPermissionsAddress(p.issuer, p.currentAuthority),
-    findIssuerPermissionsAddress(p.issuer, p.newAuthoritySigner.address),
-  ]);
+  const [transfer, oldPermissions, newPermissions, [oldAdminRecord], [newAdminRecord], recovery] =
+    await Promise.all([
+      findIssuerTransferPda(p.issuer),
+      findIssuerPermissionsAddress(p.issuer, p.currentAuthority),
+      findIssuerPermissionsAddress(p.issuer, p.newAuthoritySigner.address),
+      findAdminRecordPda({ authority: p.currentAuthority }),
+      findAdminRecordPda({ authority: p.newAuthoritySigner.address }),
+      findIssuerRecoveryPda(p.issuer),
+    ]);
   return getAcceptIssuerAuthorityInstruction({
     newAuthority: p.newAuthoritySigner,
     issuer: p.issuer,
     transfer,
     oldPermissions,
     newPermissions,
+    oldAdminRecord,
+    newAdminRecord,
+    recovery,
   });
 }
 
@@ -741,7 +839,9 @@ export async function buildCancelIssuerRecovery(p: {
 
 /**
  * `execute_issuer_recovery`, signed by the recovered key. Both grant PDAs are
- * derived here: the lost key's (closed) and any leftover of the new key's.
+ * derived here: the lost key's (closed) and any leftover of the new key's,
+ * plus the new key's Admin PDA (a recovery never lands on an Admin key) and
+ * the issuer's regular-rotation PDA (a pending one is retired on-chain).
  */
 export async function buildExecuteIssuerRecovery(p: {
   newAuthoritySigner: TransactionSigner;
@@ -749,12 +849,15 @@ export async function buildExecuteIssuerRecovery(p: {
   currentAuthority: Address;
   proposer: Address;
 }) {
-  const [[platform], recovery, oldPermissions, newPermissions] = await Promise.all([
-    findPlatformPda(),
-    findIssuerRecoveryPda(p.issuer),
-    findIssuerPermissionsAddress(p.issuer, p.currentAuthority),
-    findIssuerPermissionsAddress(p.issuer, p.newAuthoritySigner.address),
-  ]);
+  const [[platform], recovery, oldPermissions, newPermissions, [newAdminRecord], transfer] =
+    await Promise.all([
+      findPlatformPda(),
+      findIssuerRecoveryPda(p.issuer),
+      findIssuerPermissionsAddress(p.issuer, p.currentAuthority),
+      findIssuerPermissionsAddress(p.issuer, p.newAuthoritySigner.address),
+      findAdminRecordPda({ authority: p.newAuthoritySigner.address }),
+      findIssuerTransferPda(p.issuer),
+    ]);
   return getExecuteIssuerRecoveryInstruction({
     newAuthority: p.newAuthoritySigner,
     platform,
@@ -763,5 +866,7 @@ export async function buildExecuteIssuerRecovery(p: {
     proposer: p.proposer,
     oldPermissions,
     newPermissions,
+    newAdminRecord,
+    transfer,
   });
 }

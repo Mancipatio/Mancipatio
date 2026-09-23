@@ -32,7 +32,9 @@ import {
 } from "@solana/kit";
 import {
   findAcceptIssuerAuthorityTransferPda,
+  findNewAdminRecordPda,
   findNewPermissionsPda,
+  findRecoveryPda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
@@ -58,6 +60,9 @@ export type AcceptIssuerAuthorityInstruction<
   TAccountTransfer extends string | AccountMeta<string> = string,
   TAccountOldPermissions extends string | AccountMeta<string> = string,
   TAccountNewPermissions extends string | AccountMeta<string> = string,
+  TAccountOldAdminRecord extends string | AccountMeta<string> = string,
+  TAccountNewAdminRecord extends string | AccountMeta<string> = string,
+  TAccountRecovery extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -81,6 +86,15 @@ export type AcceptIssuerAuthorityInstruction<
       TAccountNewPermissions extends string
         ? WritableAccount<TAccountNewPermissions>
         : TAccountNewPermissions,
+      TAccountOldAdminRecord extends string
+        ? ReadonlyAccount<TAccountOldAdminRecord>
+        : TAccountOldAdminRecord,
+      TAccountNewAdminRecord extends string
+        ? ReadonlyAccount<TAccountNewAdminRecord>
+        : TAccountNewAdminRecord,
+      TAccountRecovery extends string
+        ? WritableAccount<TAccountRecovery>
+        : TAccountRecovery,
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
@@ -126,6 +140,9 @@ export type AcceptIssuerAuthorityAsyncInput<
   TAccountTransfer extends string = string,
   TAccountOldPermissions extends string = string,
   TAccountNewPermissions extends string = string,
+  TAccountOldAdminRecord extends string = string,
+  TAccountNewAdminRecord extends string = string,
+  TAccountRecovery extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
   newAuthority: TransactionSigner<TAccountNewAuthority>;
@@ -138,6 +155,12 @@ export type AcceptIssuerAuthorityAsyncInput<
    */
   oldPermissions: Address<TAccountOldPermissions>;
   newPermissions?: Address<TAccountNewPermissions>;
+  /** The outgoing authority's global Admin PDA (usually missing). */
+  oldAdminRecord: Address<TAccountOldAdminRecord>;
+  /** The incoming key's global Admin PDA (usually missing). */
+  newAdminRecord?: Address<TAccountNewAdminRecord>;
+  /** The issuer's pending recovery, retired here when present (it may not exist). */
+  recovery?: Address<TAccountRecovery>;
   systemProgram?: Address<TAccountSystemProgram>;
 };
 
@@ -147,6 +170,9 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
   TAccountTransfer extends string,
   TAccountOldPermissions extends string,
   TAccountNewPermissions extends string,
+  TAccountOldAdminRecord extends string,
+  TAccountNewAdminRecord extends string,
+  TAccountRecovery extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
@@ -156,6 +182,9 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     TAccountTransfer,
     TAccountOldPermissions,
     TAccountNewPermissions,
+    TAccountOldAdminRecord,
+    TAccountNewAdminRecord,
+    TAccountRecovery,
     TAccountSystemProgram
   >,
   config?: { programAddress?: TProgramAddress },
@@ -167,6 +196,9 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     TAccountTransfer,
     TAccountOldPermissions,
     TAccountNewPermissions,
+    TAccountOldAdminRecord,
+    TAccountNewAdminRecord,
+    TAccountRecovery,
     TAccountSystemProgram
   >
 > {
@@ -181,6 +213,9 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     transfer: { value: input.transfer ?? null, isWritable: true },
     oldPermissions: { value: input.oldPermissions ?? null, isWritable: true },
     newPermissions: { value: input.newPermissions ?? null, isWritable: true },
+    oldAdminRecord: { value: input.oldAdminRecord ?? null, isWritable: false },
+    newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: false },
+    recovery: { value: input.recovery ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -200,6 +235,16 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
       newAuthority: expectAddress(accounts.newAuthority.value),
     });
   }
+  if (!accounts.newAdminRecord.value) {
+    accounts.newAdminRecord.value = await findNewAdminRecordPda({
+      newAuthority: expectAddress(accounts.newAuthority.value),
+    });
+  }
+  if (!accounts.recovery.value) {
+    accounts.recovery.value = await findRecoveryPda({
+      issuer: expectAddress(accounts.issuer.value),
+    });
+  }
   if (!accounts.systemProgram.value) {
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
@@ -213,6 +258,9 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
       getAccountMeta(accounts.transfer),
       getAccountMeta(accounts.oldPermissions),
       getAccountMeta(accounts.newPermissions),
+      getAccountMeta(accounts.oldAdminRecord),
+      getAccountMeta(accounts.newAdminRecord),
+      getAccountMeta(accounts.recovery),
       getAccountMeta(accounts.systemProgram),
     ],
     data: getAcceptIssuerAuthorityInstructionDataEncoder().encode({}),
@@ -224,6 +272,9 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     TAccountTransfer,
     TAccountOldPermissions,
     TAccountNewPermissions,
+    TAccountOldAdminRecord,
+    TAccountNewAdminRecord,
+    TAccountRecovery,
     TAccountSystemProgram
   >);
 }
@@ -234,6 +285,9 @@ export type AcceptIssuerAuthorityInput<
   TAccountTransfer extends string = string,
   TAccountOldPermissions extends string = string,
   TAccountNewPermissions extends string = string,
+  TAccountOldAdminRecord extends string = string,
+  TAccountNewAdminRecord extends string = string,
+  TAccountRecovery extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
   newAuthority: TransactionSigner<TAccountNewAuthority>;
@@ -246,6 +300,12 @@ export type AcceptIssuerAuthorityInput<
    */
   oldPermissions: Address<TAccountOldPermissions>;
   newPermissions: Address<TAccountNewPermissions>;
+  /** The outgoing authority's global Admin PDA (usually missing). */
+  oldAdminRecord: Address<TAccountOldAdminRecord>;
+  /** The incoming key's global Admin PDA (usually missing). */
+  newAdminRecord: Address<TAccountNewAdminRecord>;
+  /** The issuer's pending recovery, retired here when present (it may not exist). */
+  recovery: Address<TAccountRecovery>;
   systemProgram?: Address<TAccountSystemProgram>;
 };
 
@@ -255,6 +315,9 @@ export function getAcceptIssuerAuthorityInstruction<
   TAccountTransfer extends string,
   TAccountOldPermissions extends string,
   TAccountNewPermissions extends string,
+  TAccountOldAdminRecord extends string,
+  TAccountNewAdminRecord extends string,
+  TAccountRecovery extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
@@ -264,6 +327,9 @@ export function getAcceptIssuerAuthorityInstruction<
     TAccountTransfer,
     TAccountOldPermissions,
     TAccountNewPermissions,
+    TAccountOldAdminRecord,
+    TAccountNewAdminRecord,
+    TAccountRecovery,
     TAccountSystemProgram
   >,
   config?: { programAddress?: TProgramAddress },
@@ -274,6 +340,9 @@ export function getAcceptIssuerAuthorityInstruction<
   TAccountTransfer,
   TAccountOldPermissions,
   TAccountNewPermissions,
+  TAccountOldAdminRecord,
+  TAccountNewAdminRecord,
+  TAccountRecovery,
   TAccountSystemProgram
 > {
   // Program address.
@@ -287,6 +356,9 @@ export function getAcceptIssuerAuthorityInstruction<
     transfer: { value: input.transfer ?? null, isWritable: true },
     oldPermissions: { value: input.oldPermissions ?? null, isWritable: true },
     newPermissions: { value: input.newPermissions ?? null, isWritable: true },
+    oldAdminRecord: { value: input.oldAdminRecord ?? null, isWritable: false },
+    newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: false },
+    recovery: { value: input.recovery ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
@@ -308,6 +380,9 @@ export function getAcceptIssuerAuthorityInstruction<
       getAccountMeta(accounts.transfer),
       getAccountMeta(accounts.oldPermissions),
       getAccountMeta(accounts.newPermissions),
+      getAccountMeta(accounts.oldAdminRecord),
+      getAccountMeta(accounts.newAdminRecord),
+      getAccountMeta(accounts.recovery),
       getAccountMeta(accounts.systemProgram),
     ],
     data: getAcceptIssuerAuthorityInstructionDataEncoder().encode({}),
@@ -319,6 +394,9 @@ export function getAcceptIssuerAuthorityInstruction<
     TAccountTransfer,
     TAccountOldPermissions,
     TAccountNewPermissions,
+    TAccountOldAdminRecord,
+    TAccountNewAdminRecord,
+    TAccountRecovery,
     TAccountSystemProgram
   >);
 }
@@ -339,7 +417,13 @@ export type ParsedAcceptIssuerAuthorityInstruction<
      */
     oldPermissions: TAccountMetas[3];
     newPermissions: TAccountMetas[4];
-    systemProgram: TAccountMetas[5];
+    /** The outgoing authority's global Admin PDA (usually missing). */
+    oldAdminRecord: TAccountMetas[5];
+    /** The incoming key's global Admin PDA (usually missing). */
+    newAdminRecord: TAccountMetas[6];
+    /** The issuer's pending recovery, retired here when present (it may not exist). */
+    recovery: TAccountMetas[7];
+    systemProgram: TAccountMetas[8];
   };
   data: AcceptIssuerAuthorityInstructionData;
 };
@@ -352,7 +436,7 @@ export function parseAcceptIssuerAuthorityInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedAcceptIssuerAuthorityInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 6) {
+  if (instruction.accounts.length < 9) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -370,6 +454,9 @@ export function parseAcceptIssuerAuthorityInstruction<
       transfer: getNextAccount(),
       oldPermissions: getNextAccount(),
       newPermissions: getNextAccount(),
+      oldAdminRecord: getNextAccount(),
+      newAdminRecord: getNextAccount(),
+      recovery: getNextAccount(),
       systemProgram: getNextAccount(),
     },
     data: getAcceptIssuerAuthorityInstructionDataDecoder().decode(

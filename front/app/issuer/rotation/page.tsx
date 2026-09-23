@@ -47,7 +47,9 @@ import {
   issuerRecoveryState,
   issuerSyncInstructions,
   issuerTransferState,
+  adminKeyRuleError,
   proposedIssuerAuthorityError,
+  sendBatches,
   waitForIndexedAuthority,
   type PendingForWallet,
   type PendingIssuerTransfer,
@@ -57,7 +59,7 @@ import { loadPayoutVaults } from "@/lib/payout-vault";
 import { getSupabase, recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import { useChainAlignedClock } from "@/lib/use-chain-aligned-clock";
+import { LOCAL_CLOCK_NOTE, useChainAlignedClock } from "@/lib/use-chain-aligned-clock";
 import { walletSigner } from "@/lib/wallet-signer";
 
 const ENABLED = features().issuerRotation;
@@ -94,7 +96,7 @@ function Rotation() {
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
-  const { now } = useChainAlignedClock(client.runtime.rpc);
+  const { now, fromChain } = useChainAlignedClock(client.runtime.rpc);
   const wallet = conn.wallet?.account.address?.toString() ?? null;
 
   const [data, setData] = useState<NetworkData | null>(null);
@@ -181,7 +183,9 @@ function Rotation() {
     return () => {
       cancelled = true;
     };
-  }, [client, mineAddress]);
+    // `live` is a new Map after every load(), so a propose / cancel re-reads
+    // the pending transfer even though the issuer address is unchanged.
+  }, [client, mineAddress, live]);
 
   const otherAuthorities = issuers
     .filter((r) => r.address.toString() !== mineAddress)
@@ -226,8 +230,18 @@ function Rotation() {
     try {
       let batches: Instruction[][];
       switch (current.kind) {
-        case "propose":
+        case "propose": {
           metadata.new_authority = current.newAuthority;
+          const liveIssuer = live.get(current.issuer.toString());
+          const adminError = liveIssuer
+            ? await adminKeyRuleError(
+                client.runtime.rpc,
+                "rotation",
+                liveIssuer.authority,
+                current.newAuthority as Address,
+              )
+            : null;
+          if (adminError) throw new Error(adminError);
           batches = [[
             await buildProposeIssuerAuthority({
               authoritySigner: signer,
@@ -236,6 +250,7 @@ function Rotation() {
             }),
           ]];
           break;
+        }
         case "cancel":
           metadata.cancelled_new_authority = current.newAuthority;
           batches = [[await buildCancelIssuerAuthorityTransfer({ authoritySigner: signer, issuer: current.issuer })]];
@@ -267,14 +282,24 @@ function Rotation() {
           break;
         }
       }
-      let signature = "";
-      for (const [i, instructions] of batches.entries()) {
+      const result = await sendBatches(batches, (instructions, i) => {
         if (batches.length > 1) setStatus(`Sending transaction ${i + 1} of ${batches.length}…`);
-        const sig = await tx.send({ instructions, feePayer: signer });
-        if (i === 0) signature = typeof sig === "string" ? sig : "";
-      }
+        return tx.send({ instructions, feePayer: signer });
+      });
+      const signature = result.signature;
       toast.dismiss(pendingId);
       toast.showTx(signature, { title: ixName.replaceAll("_", " ") });
+      if (result.error) {
+        // The key change landed with the first transaction; only later syncs
+        // failed. Old snapshots keep the previous key's close / payout window
+        // open until they are synced.
+        metadata.syncs_pending = result.pending;
+        metadata.sync_error = explainSendError(result.error);
+        toast.showError(
+          `${result.pending} sale / payout-vault sync${result.pending === 1 ? "" : "s"} did not land`,
+          "The key change itself succeeded. Sync the rest from the payouts page or ask the Super Admin to run “Sync all”.",
+        );
+      }
       void recordAudit({
         ix_name: ixName,
         category: "issuers",
@@ -424,6 +449,7 @@ function Rotation() {
               <div key={`r-${r.issuer}`} className="rounded-lg border border-brand-200 bg-brand-50 p-4 text-sm text-brand-950">
                 <p className="font-semibold">Recovery of issuer {name} to this wallet</p>
                 <p className="mt-1 text-xs">{describeRecoveryState(r.state)}</p>
+                {!fromChain && <p className="mt-1 text-[11px] text-slate-500">{LOCAL_CLOCK_NOTE}</p>}
                 {r.state.kind === "executable" && r.issuerRecord && (
                   <button
                     type="button"

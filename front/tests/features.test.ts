@@ -1,6 +1,7 @@
 // Network-scoped feature flags (lib/features.ts): every flag is on off
-// mainnet; on mainnet a flag is on only with its NEXT_PUBLIC_FEATURE_* set to
-// exactly "true".
+// mainnet (issuerRotation unless its kill switch is exactly "false"); on
+// mainnet a flag is on only with its NEXT_PUBLIC_FEATURE_* set to exactly
+// "true".
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { featureDisabledMessage, features } from "@/lib/features";
 
@@ -8,12 +9,24 @@ afterEach(() => vi.unstubAllEnvs());
 
 describe("features()", () => {
   it.each(["devnet", "testnet", "localnet"] as const)(
-    "enables every flag on %s, even when the mainnet opt-ins say false",
+    "enables every flag on %s, even when the mainnet opt-ins say false (except the rotation kill switch)",
     (network) => {
       vi.stubEnv("NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP", "false");
       vi.stubEnv("NEXT_PUBLIC_FEATURE_STARTUP_RAISES", "false");
-      vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", "false");
+      vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", "");
       expect(features(network)).toEqual({ payoutAirdrop: true, startupRaises: true, issuerRotation: true });
+    },
+  );
+
+  it.each(["devnet", "testnet", "localnet"] as const)(
+    "turns issuer rotation off on %s only for the exact kill-switch value \"false\"",
+    (network) => {
+      vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", " false ");
+      expect(features(network).issuerRotation).toBe(false);
+      for (const value of ["", "true", "FALSE", "0", "off", "no"]) {
+        vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", value);
+        expect(features(network).issuerRotation, value).toBe(true);
+      }
     },
   );
 

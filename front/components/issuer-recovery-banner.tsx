@@ -19,21 +19,22 @@ import {
   issuerRecoveryState,
   type IssuerRecoveryRecord,
 } from "@/lib/issuer-authority";
-import { features } from "@/lib/features";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import { useChainAlignedClock } from "@/lib/use-chain-aligned-clock";
+import { LOCAL_CLOCK_NOTE, useChainAlignedClock } from "@/lib/use-chain-aligned-clock";
 import { walletSigner } from "@/lib/wallet-signer";
-
-const ENABLED = features().issuerRotation;
 
 /**
  * Issuer-facing notice of a pending timelocked recovery of THIS issuer's key.
  * The 7-day window only protects an issuer who sees it: the banner shows the
  * proposed wallet, a live chain-time countdown and, for the current authority
  * (or the super admin), a Cancel button. Renders nothing when no recovery is
- * pending or the feature is off.
+ * pending.
+ *
+ * Deliberately NOT behind the `issuerRotation` flag: the on-chain recovery
+ * stays callable (e.g. by an ops script) whatever the front flag says, and
+ * the banner only reads the IssuerRecovery PDA and cancels it.
  */
 export function IssuerRecoveryBanner({
   issuer,
@@ -48,14 +49,13 @@ export function IssuerRecoveryBanner({
   const conn = useWalletConnection();
   const tx = useSendTransaction();
   const toast = useToast();
-  const { now } = useChainAlignedClock(client.runtime.rpc);
+  const { now, fromChain } = useChainAlignedClock(client.runtime.rpc);
   const wallet = conn.wallet?.account.address?.toString() ?? null;
   const [recovery, setRecovery] = useState<IssuerRecoveryRecord | null>(null);
   const [platformAdmin, setPlatformAdmin] = useState<string | null>(null);
   const [confirm, setConfirm] = useState(false);
 
   const load = useCallback(async () => {
-    if (!ENABLED) return;
     try {
       const [platformPda] = await findPlatformPda();
       const [record, platform] = await Promise.all([
@@ -75,7 +75,7 @@ export function IssuerRecoveryBanner({
     void load();
   }, [load]);
 
-  if (!ENABLED || !recovery || now === null) return null;
+  if (!recovery || now === null) return null;
   const state = issuerRecoveryState(
     recovery,
     { address: issuer.toString(), authority: issuerAuthority.toString() },
@@ -124,27 +124,30 @@ export function IssuerRecoveryBanner({
   }
 
   return (
-    <div
-      role="alert"
+    <section
+      aria-labelledby="issuer-recovery-banner-heading"
       className={`mt-6 rounded-lg border px-4 py-3 text-sm ${
         urgent ? "border-red-300 bg-red-50 text-red-900" : "border-amber-200 bg-amber-50 text-amber-900"
       }`}
     >
-      <p className="font-semibold">
+      {/* Only the static heading is a live region: the ticking countdown
+          below must not be re-announced every second. */}
+      <p id="issuer-recovery-banner-heading" role="status" className="font-semibold">
         {urgent ? "A recovery of this issuer's key is pending" : "A stale issuer recovery is on record"}
       </p>
-      <p className="mt-1 text-xs">
+      <p className="mt-1 text-xs" aria-live="off">
         The Super Admin proposed moving this issuer&apos;s authority to{" "}
         <code className="break-all font-mono">{state.newAuthority}</code>.{" "}
         {describeRecoveryState(state)}
       </p>
       {state.kind === "waiting" && (
-        <p className="mt-1 text-xs">
+        <p className="mt-1 text-xs" aria-live="off">
           Countdown: <strong className="font-mono">{formatCountdown(state.remaining)}</strong> · expires{" "}
           {formatUtc(state.expiresAt)}. If you still hold this key and did not ask for a recovery, cancel it now
           and contact Manci.
         </p>
       )}
+      {!fromChain && <p className="mt-1 text-[11px] opacity-80">{LOCAL_CLOCK_NOTE}</p>}
       {can.canCancelRecovery && (
         <button
           type="button"
@@ -170,6 +173,6 @@ export function IssuerRecoveryBanner({
           </p>
         }
       />
-    </div>
+    </section>
   );
 }

@@ -7,7 +7,7 @@ import {
   useWalletConnection,
 } from "@solana/react-hooks";
 import { ConfirmModal } from "@/components/confirm-modal";
-import { fetchMaybePlatform, findPlatformPda } from "@/lib/generated/asset_registry";
+import { fetchMaybeIssuer, fetchMaybePlatform, findPlatformPda } from "@/lib/generated/asset_registry";
 import { loadNetwork } from "@/lib/enumerate";
 import { featureDisabledMessage, features } from "@/lib/features";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
@@ -24,8 +24,10 @@ import {
   issuerAuthorityActions,
   issuerRecoveryState,
   issuerSyncInstructions,
+  adminKeyRuleError,
   issuerTransferState,
   proposedIssuerAuthorityError,
+  sendBatches,
   type IssuerRecoveryRecord,
   type PendingIssuerTransfer,
 } from "@/lib/issuer-authority";
@@ -33,7 +35,7 @@ import { loadPayoutVaults } from "@/lib/payout-vault";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import { useChainAlignedClock } from "@/lib/use-chain-aligned-clock";
+import { LOCAL_CLOCK_NOTE, useChainAlignedClock } from "@/lib/use-chain-aligned-clock";
 import { walletSigner } from "@/lib/wallet-signer";
 
 const ENABLED = features().issuerRotation;
@@ -50,7 +52,7 @@ type Action = { kind: "propose"; newAuthority: string } | { kind: "cancel" } | {
  */
 export function IssuerRecoveryPanel({
   issuer,
-  authority,
+  authority: indexedAuthority,
   otherAuthorities,
   canEdit,
 }: {
@@ -64,7 +66,7 @@ export function IssuerRecoveryPanel({
   const conn = useWalletConnection();
   const tx = useSendTransaction();
   const toast = useToast();
-  const { now } = useChainAlignedClock(client.runtime.rpc);
+  const { now, fromChain } = useChainAlignedClock(client.runtime.rpc);
   const wallet = conn.wallet?.account.address?.toString() ?? null;
   const [recovery, setRecovery] = useState<IssuerRecoveryRecord | null>(null);
   const [transfer, setTransfer] = useState<PendingIssuerTransfer | null>(null);
@@ -74,24 +76,36 @@ export function IssuerRecoveryPanel({
   const [retyped, setRetyped] = useState("");
   const [action, setAction] = useState<Action | null>(null);
   const [syncs, setSyncs] = useState<Instruction[] | null>(null);
+  // The LIVE issuer authority: the `authority` prop comes from indexer-first
+  // data, which lags an accept / execute by a few seconds, exactly when the
+  // sync check and the recovery state matter most.
+  const [liveAuthority, setLiveAuthority] = useState<Address | null>(null);
+  const authority = liveAuthority ?? indexedAuthority;
+
+  const readLiveAuthority = useCallback(async (): Promise<Address | null> => {
+    const record = await fetchMaybeIssuer(client.runtime.rpc, issuer, { commitment: "confirmed" });
+    return record.exists ? record.data.authority : null;
+  }, [client, issuer]);
 
   const refresh = useCallback(async () => {
     if (!ENABLED) return;
     try {
       const [platformPda] = await findPlatformPda();
-      const [r, t, platform] = await Promise.all([
+      const [r, t, platform, live] = await Promise.all([
         fetchIssuerRecovery(client.runtime.rpc, issuer),
         fetchPendingIssuerTransfer(client.runtime.rpc, issuer),
         fetchMaybePlatform(client.runtime.rpc, platformPda),
+        readLiveAuthority(),
       ]);
       setRecovery(r);
       setTransfer(t);
+      setLiveAuthority(live);
       setPlatformAdmin(platform.exists ? platform.data.admin.toString() : null);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
-  }, [client, issuer]);
+  }, [client, issuer, readLiveAuthority]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -125,7 +139,9 @@ export function IssuerRecoveryPanel({
       const network = await loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc));
       const vaults = await loadPayoutVaults(client.runtime.rpc);
       const targets = await collectIssuerSyncTargets(network, vaults, issuer);
-      setSyncs(issuerSyncInstructions({ issuer, issuerAuthority: authority, ...targets }));
+      const live = (await readLiveAuthority()) ?? authority;
+      setLiveAuthority(live);
+      setSyncs(issuerSyncInstructions({ issuer, issuerAuthority: live, ...targets }));
     } catch (err) {
       toast.showError("Could not check sales and payout vaults", err instanceof Error ? err.message : undefined);
     }
@@ -146,6 +162,13 @@ export function IssuerRecoveryPanel({
       let batches: Instruction[][];
       if (current.kind === "propose") {
         metadata.new_authority = current.newAuthority;
+        const adminError = await adminKeyRuleError(
+          client.runtime.rpc,
+          "recovery",
+          authority,
+          current.newAuthority as Address,
+        );
+        if (adminError) throw new Error(adminError);
         batches = [[
           await buildProposeIssuerRecovery({
             superAdminSigner: signer,
@@ -168,13 +191,18 @@ export function IssuerRecoveryPanel({
         metadata.syncs = syncs.length;
         batches = bundleWithSync([], syncs, { feePayer: signer.address, order: "primary-first" });
       }
-      let signature = "";
-      for (const [i, instructions] of batches.entries()) {
-        const sig = await tx.send({ instructions, feePayer: signer });
-        if (i === 0) signature = typeof sig === "string" ? sig : "";
-      }
+      const result = await sendBatches(batches, (instructions) => tx.send({ instructions, feePayer: signer }));
+      const signature = result.signature;
       toast.dismiss(pendingId);
       toast.showTx(signature, { title: ixName.replaceAll("_", " ") });
+      if (result.error) {
+        metadata.syncs_pending = result.pending;
+        metadata.sync_error = explainSendError(result.error);
+        toast.showError(
+          `${result.pending} sync${result.pending === 1 ? "" : "s"} did not land`,
+          "The first transaction landed. Check the sales and payout vaults again and sync the rest.",
+        );
+      }
       void recordAudit({
         ix_name: ixName,
         category: "issuers",
@@ -245,6 +273,7 @@ export function IssuerRecoveryPanel({
               {recoveryState.kind === "waiting" && (
                 <span className="ml-1 font-mono font-semibold">({formatCountdown(recoveryState.remaining)} left)</span>
               )}
+              {!fromChain && <span className="mt-0.5 block text-[11px] text-slate-500">{LOCAL_CLOCK_NOTE}</span>}
             </>
           )}
         </dd>

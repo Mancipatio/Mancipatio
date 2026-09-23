@@ -73,11 +73,11 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { features } from "@/lib/features";
 import { issuerSyncInstructions, resolveIssuerChain } from "@/lib/issuer-authority";
 import type { Instruction } from "@solana/kit";
-
-const ISSUER_ROTATION = features().issuerRotation;
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
+
+const ISSUER_ROTATION = features().issuerRotation;
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -358,6 +358,11 @@ export default function MyRightsPage() {
 
   // Original investors may have sold every token. Keep every public vault
   // discoverable; the signed original proof determines actual entitlement.
+  // 2C-2: only an issuer's authority can be a vault's (rotated) founder.
+  const walletIsIssuer = useMemo(
+    () => !!wallet && !!data?.issuers.some((i) => i.authority.toString() === wallet.toString()),
+    [data, wallet],
+  );
   const myVaults = useMemo(() => {
     if (!vaults) return [];
     const out: Array<{ vault: PayoutVault; sc?: ShareClass; asset?: Asset }> =
@@ -440,6 +445,7 @@ export default function MyRightsPage() {
                     key={vault.sale.toString()}
                     vault={vault}
                     asset={asset}
+                    walletIsIssuer={walletIsIssuer}
                     onDone={refresh}
                   />
                 ))}
@@ -565,10 +571,14 @@ export default function MyRightsPage() {
 function VaultCard({
   vault,
   asset,
+  walletIsIssuer,
   onDone,
 }: {
   vault: PayoutVault;
   asset: Asset | undefined;
+  /** The wallet is SOME issuer's authority (indexer data): only then can it
+   *  be this vault's issuer key, so only then is the issuer chain read. */
+  walletIsIssuer: boolean;
   onDone: () => Promise<void>;
 }) {
   const conn = useWalletConnection();
@@ -582,9 +592,15 @@ function VaultCard({
   // CURRENT key, it is the founder in all but the snapshot: the founder
   // actions below prepend the (permissionless) sync.
   const [founderSync, setFounderSync] = useState<Instruction[]>([]);
+  const founder = vault.founder;
+  const shareClass = vault.shareClass;
+  const saleAddress = vault.sale;
   useEffect(() => {
     let cancelled = false;
-    if (!ISSUER_ROTATION || !wallet || wallet.toString() === vault.founder.toString()) {
+    // Three RPC reads per vault: skipped for every wallet that is no issuer
+    // (almost every investor), and keyed on the vault's fields, not the
+    // object a refresh() replaces.
+    if (!ISSUER_ROTATION || !walletIsIssuer || !wallet || wallet.toString() === founder.toString()) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
       setFounderSync([]);
       return;
@@ -592,15 +608,15 @@ function VaultCard({
     void (async () => {
       try {
         const [chain, vaultPda] = await Promise.all([
-          resolveIssuerChain(client.runtime.rpc, vault.shareClass),
-          payoutVaultPda(vault.sale),
+          resolveIssuerChain(client.runtime.rpc, shareClass),
+          payoutVaultPda(saleAddress),
         ]);
         if (cancelled || chain.issuerAuthority !== wallet.toString()) return;
         setFounderSync(
           issuerSyncInstructions({
             issuer: chain.issuer,
             issuerAuthority: chain.issuerAuthority,
-            vaults: [{ address: vaultPda, shareClass: vault.shareClass, asset: chain.asset, founder: vault.founder }],
+            vaults: [{ address: vaultPda, shareClass, asset: chain.asset, founder }],
           }),
         );
       } catch {
@@ -610,7 +626,7 @@ function VaultCard({
     return () => {
       cancelled = true;
     };
-  }, [client, wallet, vault]);
+  }, [client, wallet, walletIsIssuer, founder, shareClass, saleAddress]);
   const isFounder = wallet?.toString() === vault.founder.toString() || founderSync.length > 0;
   const [yieldProof, setYieldProof] = useState<
     SnapshotProof | "loading" | "missing"
