@@ -34,6 +34,7 @@ import { RequireRole } from "@/components/require-role";
 import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
+import { explainSendError } from "@/lib/tx-error";
 
 const TOKEN_CLASSIC_ADDRESS =
   "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
@@ -398,7 +399,7 @@ function SaleDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to close sale",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -605,7 +606,7 @@ function OpenSaleModal({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to open sale",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }

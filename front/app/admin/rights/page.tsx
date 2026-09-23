@@ -39,6 +39,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
 import { useToast } from "@/lib/toast";
+import { explainSendError } from "@/lib/tx-error";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -374,7 +375,7 @@ function IssuanceDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to publish",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -468,7 +469,7 @@ function IssuanceDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to claim",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -738,7 +739,7 @@ function CreateIssuanceModal({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to create issuance",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }

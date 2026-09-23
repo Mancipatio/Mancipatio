@@ -70,6 +70,7 @@ import { SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
+import { explainSendError } from "@/lib/tx-error";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -768,7 +769,7 @@ function VaultDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to trigger",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -812,7 +813,7 @@ function VaultDetail({
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       toast.showError("Failed to realize", message);
       void recordAudit({
         ix_name: "realize_custody",
@@ -862,7 +863,7 @@ function VaultDetail({
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       toast.showError("Failed to revert", message);
       void recordAudit({
         ix_name: "revert_custody",
@@ -978,7 +979,7 @@ function VaultDetail({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to return",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -1386,7 +1387,7 @@ function OpenVaultModal({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to open vault",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -1842,7 +1843,7 @@ function ConversionRequestsSection({
       await refreshAll();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       if (sentSignature)
         toast.showTx(sentSignature, {
           title: "Transaction sent — retry recording below",
@@ -1953,7 +1954,7 @@ function ConversionRequestsSection({
       await refreshAll();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       if (sentSignature)
         toast.showTx(sentSignature, {
           title: "Transaction sent — retry recording below",
@@ -2103,7 +2104,7 @@ function ConversionRequestsSection({
       await refreshAll();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       toast.showError("Failed to cancel", message);
       void recordAudit({
         ix_name: "conversion_cancel_no_deposit",
@@ -2571,7 +2572,7 @@ function ApproveConversionModal({
         recovery.hasPending()
           ? "Approval recording pending"
           : "Failed to open vault",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -3017,7 +3018,7 @@ function DeliveryRequestsSection({
       toast.dismiss(pendingId);
       toast.showError(
         "Cancel failed",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -3092,7 +3093,7 @@ function DeliveryRequestsSection({
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       if (sentSignature)
         toast.showTx(sentSignature, {
           title: "Transaction sent — retry recording below",
@@ -3203,7 +3204,7 @@ function DeliveryRequestsSection({
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      const message = err instanceof Error ? err.message : String(err);
+      const message = explainSendError(err);
       if (sentSignature)
         toast.showTx(sentSignature, {
           title: "Transaction sent — retry recording below",
@@ -3635,7 +3636,7 @@ function ApproveDeliveryModal({
         recovery.hasPending()
           ? "Approval recording pending"
           : "Failed to open vault",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }

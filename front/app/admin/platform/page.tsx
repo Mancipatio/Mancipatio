@@ -18,6 +18,8 @@ import {
   type Platform,
 } from "@/lib/generated/asset_registry";
 import { PauseFlagsPanel } from "@/components/pause-flags-panel";
+import { pauseStatus } from "@/lib/pause-flags";
+import { protocolTreasuryError } from "@/lib/protocol-treasury";
 import { buildInitializePlatformInstruction } from "@/lib/program-bootstrap";
 import { kycGates, loadKycAuthorityContext } from "@/lib/kyc-authority";
 import { AuthorityRotation } from "./authority-rotation";
@@ -29,6 +31,11 @@ import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { useToast } from "@/lib/toast";
 
 const CARD = "rounded-xl border border-slate-200 bg-white shadow-card p-6";
+const PAUSE_CHIP = {
+  active: "bg-emerald-100 text-emerald-700",
+  paused: "bg-red-100 text-red-700",
+  undefined: "bg-amber-100 text-amber-800",
+} as const;
 const BTN =
   "rounded-lg border border-slate-300/60 px-4 py-2 text-sm font-medium text-slate-900 transition-colors hover:border-slate-400 hover:text-slate-900 disabled:opacity-50";
 // protocol_fee_bps is a RESERVED on-chain field — no instruction charges or
@@ -36,8 +43,6 @@ const BTN =
 // Initialize it at 0: there is no update instruction, so a non-zero value
 // written here could never be corrected on-chain.
 const PROTOCOL_FEE_BPS = 0;
-// Pubkey::default() — set_protocol_treasury rejects it (InvalidProtocolTreasury).
-const DEFAULT_ADDRESS = "11111111111111111111111111111111";
 
 export default function AdminPage() {
   const conn = useWalletConnection();
@@ -124,15 +129,10 @@ export default function AdminPage() {
   }
 
   const treasuryCandidate = treasuryInput.trim();
-  const treasuryError = !treasuryCandidate
-    ? null
-    : !isAddress(treasuryCandidate)
-      ? "Not a valid Solana address."
-      : treasuryCandidate === DEFAULT_ADDRESS
-        ? "The default 1111…1111 address cannot be the treasury."
-        : platform && treasuryCandidate === platform.protocolTreasury
-          ? "This is already the treasury."
-          : null;
+  const treasuryError = protocolTreasuryError(
+    treasuryCandidate,
+    platform?.protocolTreasury,
+  );
 
   async function rotateTreasury(reason: string) {
     if (!walletAddress || !platform || !conn.wallet) return;
@@ -239,12 +239,10 @@ export default function AdminPage() {
               <h2 className="text-lg font-semibold text-slate-900">Platform</h2>
               <span
                 className={`rounded-full px-2 py-0.5 text-xs ${
-                  platform.pauseFlags !== 0
-                    ? "bg-red-100 text-red-700"
-                    : "bg-emerald-100 text-emerald-700"
+                  PAUSE_CHIP[pauseStatus(platform.pauseFlags).tone]
                 }`}
               >
-                {platform.pauseFlags !== 0 ? "paused" : "active"}
+                {pauseStatus(platform.pauseFlags).label}
               </span>
             </div>
             <dl className="mt-4 space-y-2 text-sm">

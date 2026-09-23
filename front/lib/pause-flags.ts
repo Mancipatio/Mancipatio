@@ -116,3 +116,99 @@ export function nextPauseFlags(
 ): number {
   return (old | setMask) & ~clearMask & 0xff;
 }
+
+export type PauseStatus = {
+  /** "undefined": only bits outside PAUSE_FLAGS_ALL are set (they gate nothing). */
+  tone: "active" | "paused" | "undefined";
+  label: string;
+};
+
+/**
+ * The one status every surface shows (dashboard card, /admin/platform chip),
+ * so a byte with only undefined bits (e.g. 0xC0 before a rollback
+ * normalization) reads the same everywhere: neither a plain "Active" nor
+ * "paused".
+ */
+export function pauseStatus(flags: number): PauseStatus {
+  const paused = pausedFlags(flags).length;
+  if (paused === PAUSE_FLAGS.length) return { tone: "paused", label: "Fully paused" };
+  if (paused > 0)
+    return { tone: "paused", label: `${paused} of ${PAUSE_FLAGS.length} paused` };
+  const unknown = unknownPauseBits(flags);
+  if (unknown !== 0)
+    return { tone: "undefined", label: `Undefined bits ${formatPauseFlags(unknown)}` };
+  return { tone: "active", label: "Active" };
+}
+
+export type PauseRole = { isAdmin: boolean; isSuperAdmin: boolean };
+
+/**
+ * Who may press what. The Super Admin is `Platform.admin` (it needs no Admin
+ * record); any Admin-record holder is an Admin. Mirrors `set_pause_flags`:
+ * any Admin SETS bits, only the Super Admin CLEARS them.
+ */
+export function pauseRole(
+  wallet: string | null | undefined,
+  platformAdmin: string,
+  hasAdminRecord: boolean,
+): PauseRole {
+  const isSuperAdmin = !!wallet && wallet === platformAdmin;
+  return { isSuperAdmin, isAdmin: isSuperAdmin || (!!wallet && hasAdminRecord) };
+}
+
+export type PauseControls = {
+  pauseEverything: boolean;
+  resumeEverything: boolean;
+  /** Per defined bit, in bit order: the one action this wallet may take. */
+  rows: { bit: number; paused: boolean; action: "pause" | "resume" | null }[];
+};
+
+export function pauseControls(flags: number, role: PauseRole): PauseControls {
+  return {
+    pauseEverything:
+      role.isAdmin && (flags & PAUSE_FLAGS_ALL) !== PAUSE_FLAGS_ALL,
+    // Clears undefined bits too (rollback normalization).
+    resumeEverything: role.isSuperAdmin && (flags & 0xff) !== 0,
+    rows: PAUSE_FLAGS.map(({ bit }) => {
+      const paused = isPaused(flags, bit);
+      return {
+        bit,
+        paused,
+        action: paused
+          ? role.isSuperAdmin
+            ? "resume"
+            : null
+          : role.isAdmin
+            ? "pause"
+            : null,
+      };
+    }),
+  };
+}
+
+/**
+ * Audit metadata for one `set_pause_flags`. `expected_*` come from the panel's
+ * last read of the Platform, which another Admin may have changed before this
+ * transaction landed (that is why the program takes masks). `observed_after`
+ * is a fresh read after confirmation (null when it failed). The authoritative
+ * before/after pair is the PauseFlagsChanged event in `tx_signature`.
+ */
+export function pauseAuditMetadata(
+  setMask: number,
+  clearMask: number,
+  cachedFlags: number,
+  observedAfter?: number | null,
+): Record<string, string | null> {
+  return {
+    set: formatPauseFlags(setMask),
+    clear: formatPauseFlags(clearMask),
+    expected_old: formatPauseFlags(cachedFlags),
+    expected_new: formatPauseFlags(nextPauseFlags(cachedFlags, setMask, clearMask)),
+    ...(observedAfter === undefined
+      ? {}
+      : {
+          observed_after:
+            observedAfter === null ? null : formatPauseFlags(observedAfter),
+        }),
+  };
+}

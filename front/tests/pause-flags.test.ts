@@ -14,8 +14,12 @@ import {
   PAUSE_ONBOARDING,
   PAUSE_PRIMARY,
   PAUSE_SECONDARY,
+  pauseAuditMetadata,
+  pauseControls,
   pausedFlags,
   pauseMasks,
+  pauseRole,
+  pauseStatus,
   unknownPauseBits,
 } from "@/lib/pause-flags";
 import { explainSendError, PLATFORM_PAUSED_HINT } from "@/lib/tx-error";
@@ -96,6 +100,82 @@ describe("emergency pause flags", () => {
     expect(bytes).toHaveLength(85);
     expect(bytes[74]).toBe(0x3f);
     expect(getPlatformDecoder().decode(bytes).pauseFlags).toBe(0x3f);
+  });
+});
+
+describe("pause panel and status rules", () => {
+  const SUPER = "Super1111111111111111111111111111111111111";
+  const ADMIN = "Admin1111111111111111111111111111111111111";
+
+  it("shows one status everywhere, including undefined-only bytes", () => {
+    expect(pauseStatus(0)).toEqual({ tone: "active", label: "Active" });
+    expect(pauseStatus(0x3f)).toEqual({ tone: "paused", label: "Fully paused" });
+    expect(pauseStatus(0xff).label).toBe("Fully paused");
+    expect(pauseStatus(0x0c)).toEqual({ tone: "paused", label: "2 of 6 paused" });
+    expect(pauseStatus(0xc4).tone).toBe("paused");
+    // Only undefined bits: neither "Active" nor "paused".
+    expect(pauseStatus(0xc0)).toEqual({
+      tone: "undefined",
+      label: "Undefined bits 0xc0",
+    });
+  });
+
+  it("derives Super Admin from Platform.admin and Admin from the record", () => {
+    expect(pauseRole(SUPER, SUPER, false)).toEqual({ isAdmin: true, isSuperAdmin: true });
+    expect(pauseRole(ADMIN, SUPER, true)).toEqual({ isAdmin: true, isSuperAdmin: false });
+    expect(pauseRole(ADMIN, SUPER, false)).toEqual({ isAdmin: false, isSuperAdmin: false });
+    expect(pauseRole(undefined, SUPER, true)).toEqual({ isAdmin: false, isSuperAdmin: false });
+  });
+
+  it("lets an Admin only pause and the Super Admin also resume", () => {
+    const admin = { isAdmin: true, isSuperAdmin: false };
+    const superAdmin = { isAdmin: true, isSuperAdmin: true };
+    const viewer = { isAdmin: false, isSuperAdmin: false };
+
+    const a = pauseControls(0x04, admin);
+    expect(a.pauseEverything).toBe(true);
+    expect(a.resumeEverything).toBe(false);
+    expect(a.rows.map((r) => r.action)).toEqual([
+      "pause", "pause", null, "pause", "pause", "pause",
+    ]);
+
+    const s = pauseControls(0x04, superAdmin);
+    expect(s.resumeEverything).toBe(true);
+    expect(s.rows.map((r) => r.action)).toEqual([
+      "pause", "pause", "resume", "pause", "pause", "pause",
+    ]);
+
+    const v = pauseControls(0x04, viewer);
+    expect(v.pauseEverything || v.resumeEverything).toBe(false);
+    expect(v.rows.every((r) => r.action === null)).toBe(true);
+
+    // Fully paused: nothing left to pause; only the Super Admin sees resume.
+    expect(pauseControls(0x3f, admin).pauseEverything).toBe(false);
+    expect(pauseControls(0x3f, admin).rows.every((r) => r.action === null)).toBe(true);
+    // Undefined-only byte: nothing is paused, resume-everything normalizes it.
+    expect(pauseControls(0xc0, superAdmin).resumeEverything).toBe(true);
+    expect(pauseControls(0, superAdmin).resumeEverything).toBe(false);
+  });
+
+  it("sends set-only for a pause and clear-only for a resume", () => {
+    expect(pauseMasks("pause", 0x3f)).toEqual({ setMask: 0x3f, clearMask: 0 });
+    // Resume everything clears the whole current byte, undefined bits too.
+    expect(pauseMasks("resume", 0xcc)).toEqual({ setMask: 0, clearMask: 0xcc });
+  });
+
+  it("labels the audit values as expected, with the observed read apart", () => {
+    // Panel saw 0x00, but another Admin paused custody entry in between.
+    expect(pauseAuditMetadata(0x04, 0, 0x00)).toEqual({
+      set: "0x04",
+      clear: "0x00",
+      expected_old: "0x00",
+      expected_new: "0x04",
+    });
+    expect(pauseAuditMetadata(0x04, 0, 0x00, 0x0c)).toMatchObject({
+      expected_new: "0x04",
+      observed_after: "0x0c",
+    });
+    expect(pauseAuditMetadata(0, 0x3f, 0x3f, null).observed_after).toBeNull();
   });
 });
 

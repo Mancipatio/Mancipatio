@@ -3,24 +3,29 @@
 import { createWalletTransactionSigner } from "@solana/client";
 import {
   useSendTransaction,
+  useSolanaClient,
   useWalletConnection,
 } from "@solana/react-hooks";
 import { useState } from "react";
 import {
+  fetchMaybePlatform,
+  findPlatformPda,
   getSetPauseFlagsInstructionAsync,
   type Platform,
 } from "@/lib/generated/asset_registry";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useRole } from "@/lib/auth";
+import { useMaintenance } from "@/lib/maintenance-client";
 import {
   describePausedAreas,
   formatPauseFlags,
-  isPaused,
-  nextPauseFlags,
   PAUSE_EXITS_OPEN,
   PAUSE_FLAGS,
   PAUSE_FLAGS_ALL,
+  pauseAuditMetadata,
+  pauseControls,
   pauseMasks,
+  pauseRole,
   unknownPauseBits,
 } from "@/lib/pause-flags";
 import { recordAudit } from "@/lib/supabase";
@@ -48,30 +53,43 @@ export function PauseFlagsPanel({
   onChanged: () => void | Promise<void>;
 }) {
   const conn = useWalletConnection();
+  const client = useSolanaClient();
   const tx = useSendTransaction();
   const role = useRole();
   const toast = useToast();
+  const maintenance = useMaintenance();
   const [pending, setPending] = useState<Pending | null>(null);
 
   const wallet = conn.wallet?.account.address;
   const flags = platform.pauseFlags;
-  const isSuperAdmin = !!wallet && platform.admin === wallet;
-  const isAdmin = isSuperAdmin || role.isAdmin;
+  const { isAdmin, isSuperAdmin } = pauseRole(
+    wallet,
+    platform.admin,
+    role.isAdmin,
+  );
+  const controls = pauseControls(flags, { isAdmin, isSuperAdmin });
   const unknown = unknownPauseBits(flags);
-  const allPaused = (flags & PAUSE_FLAGS_ALL) === PAUSE_FLAGS_ALL;
   const areas = describePausedAreas(flags);
+
+  /** The flags on chain right after this transaction confirmed (null when
+   *  the read fails; the tx's PauseFlagsChanged event stays authoritative). */
+  async function observedFlags(): Promise<number | null> {
+    try {
+      const [pda] = await findPlatformPda();
+      const maybe = await fetchMaybePlatform(client.runtime.rpc, pda, {
+        commitment: "confirmed",
+      });
+      return maybe.exists ? maybe.data.pauseFlags : null;
+    } catch {
+      return null;
+    }
+  }
 
   async function apply(reason: string) {
     if (!pending || !wallet || !conn.wallet) return;
     const { setMask, clearMask } = pauseMasks(pending.action, pending.bits);
-    const old = flags;
-    const next = nextPauseFlags(old, setMask, clearMask);
-    const metadata = {
-      set: formatPauseFlags(setMask),
-      clear: formatPauseFlags(clearMask),
-      old: formatPauseFlags(old),
-      new: formatPauseFlags(next),
-    };
+    // The panel's cached view: another Admin may have moved the flags since.
+    const metadata = pauseAuditMetadata(setMask, clearMask, flags);
     const pendingId = toast.showPending(`${pending.title}…`, reason);
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
@@ -84,16 +102,21 @@ export function PauseFlagsPanel({
       const sig = typeof result === "string" ? result : "";
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: pending.title });
-      void recordAudit({
-        ix_name: "set_pause_flags",
-        category: "platform",
-        actor_wallet: wallet.toString(),
-        reason,
-        target_label: pending.title,
-        tx_signature: sig || undefined,
-        status: "success",
-        metadata,
-      });
+      const title = pending.title;
+      // Recorded in the background: the confirmed re-read must not hold the
+      // modal open.
+      void observedFlags().then((observed) =>
+        recordAudit({
+          ix_name: "set_pause_flags",
+          category: "platform",
+          actor_wallet: wallet.toString(),
+          reason,
+          target_label: title,
+          tx_signature: sig || undefined,
+          status: "success",
+          metadata: pauseAuditMetadata(setMask, clearMask, flags, observed),
+        }),
+      );
       setPending(null);
       await onChanged();
     } catch (err) {
@@ -125,7 +148,7 @@ export function PauseFlagsPanel({
           </p>
         </div>
         <div className="flex gap-2">
-          {isAdmin && !allPaused && (
+          {controls.pauseEverything && (
             <button
               type="button"
               disabled={tx.isSending}
@@ -141,7 +164,7 @@ export function PauseFlagsPanel({
               Pause everything
             </button>
           )}
-          {isSuperAdmin && flags !== 0 && (
+          {controls.resumeEverything && (
             <button
               type="button"
               disabled={tx.isSending}
@@ -162,8 +185,8 @@ export function PauseFlagsPanel({
       </div>
 
       <ul className="mt-3 divide-y divide-slate-100 rounded-lg border border-slate-200">
-        {PAUSE_FLAGS.map((flag) => {
-          const paused = isPaused(flags, flag.bit);
+        {PAUSE_FLAGS.map((flag, i) => {
+          const { paused, action } = controls.rows[i];
           return (
             <li
               key={flag.bit}
@@ -188,45 +211,53 @@ export function PauseFlagsPanel({
                 >
                   {paused ? "Paused" : "Active"}
                 </span>
-                {paused
-                  ? isSuperAdmin && (
-                      <button
-                        type="button"
-                        disabled={tx.isSending}
-                        onClick={() =>
-                          setPending({
-                            action: "resume",
-                            bits: flag.bit,
-                            title: `Resume ${flag.label.toLowerCase()}`,
-                          })
-                        }
-                        className="rounded-md border border-slate-300 px-2 py-0.5 text-[11.5px] font-medium text-slate-800 hover:border-slate-400 disabled:opacity-50"
-                      >
-                        Resume
-                      </button>
-                    )
-                  : isAdmin && (
-                      <button
-                        type="button"
-                        disabled={tx.isSending}
-                        onClick={() =>
-                          setPending({
-                            action: "pause",
-                            bits: flag.bit,
-                            title: `Pause ${flag.label.toLowerCase()}`,
-                          })
-                        }
-                        className="rounded-md border border-red-200 px-2 py-0.5 text-[11.5px] font-medium text-red-800 hover:border-red-300 disabled:opacity-50"
-                      >
-                        Pause
-                      </button>
-                    )}
+                {action === "resume" && (
+                  <button
+                    type="button"
+                    disabled={tx.isSending}
+                    onClick={() =>
+                      setPending({
+                        action: "resume",
+                        bits: flag.bit,
+                        title: `Resume ${flag.label.toLowerCase()}`,
+                      })
+                    }
+                    className="rounded-md border border-slate-300 px-2 py-0.5 text-[11.5px] font-medium text-slate-800 hover:border-slate-400 disabled:opacity-50"
+                  >
+                    Resume
+                  </button>
+                )}
+                {action === "pause" && (
+                  <button
+                    type="button"
+                    disabled={tx.isSending}
+                    onClick={() =>
+                      setPending({
+                        action: "pause",
+                        bits: flag.bit,
+                        title: `Pause ${flag.label.toLowerCase()}`,
+                      })
+                    }
+                    className="rounded-md border border-red-200 px-2 py-0.5 text-[11.5px] font-medium text-red-800 hover:border-red-300 disabled:opacity-50"
+                  >
+                    Pause
+                  </button>
+                )}
               </div>
             </li>
           );
         })}
       </ul>
 
+      {maintenance?.enabled && isAdmin && (
+        <p className="mt-2 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-900">
+          Maintenance mode is on, so this site refuses every wallet
+          transaction, a pause included. To pause now, sign{" "}
+          <span className="font-mono">set_pause_flags</span> outside the site
+          (Solana CLI or the multisig) with an Admin key: the area bits shown
+          next to each area as the set mask and a clear mask of 0x00.
+        </p>
+      )}
       {unknown !== 0 && (
         <p className="mt-2 text-xs text-amber-700">
           Undefined bits {formatPauseFlags(unknown)} are set. They pause

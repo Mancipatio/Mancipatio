@@ -10,7 +10,29 @@ import {
 } from "@/lib/generated/asset_registry";
 import { PauseFlagsPanel } from "@/components/pause-flags-panel";
 import { SkeletonCard } from "@/components/skeleton";
-import { PAUSE_FLAGS, pausedFlags } from "@/lib/pause-flags";
+import { pauseStatus, type PauseStatus } from "@/lib/pause-flags";
+
+const STATUS_THEME: Record<
+  PauseStatus["tone"],
+  { bar: string; chip: string; dot: string }
+> = {
+  active: {
+    bar: "linear-gradient(90deg, #10b981 0%, #059669 100%)",
+    chip: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200",
+    dot: "bg-emerald-500 animate-pulse",
+  },
+  paused: {
+    bar: "linear-gradient(90deg, #ef4444 0%, #b91c1c 100%)",
+    chip: "bg-red-50 text-red-700 ring-1 ring-inset ring-red-200",
+    dot: "bg-red-500",
+  },
+  // Only undefined bits set: nothing is gated, but the byte is not clean.
+  undefined: {
+    bar: "linear-gradient(90deg, #f59e0b 0%, #d97706 100%)",
+    chip: "bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200",
+    dot: "bg-amber-500",
+  },
+};
 
 export function PlatformStatusCard() {
   const client = useSolanaClient();
@@ -58,24 +80,14 @@ export function PlatformStatusCard() {
     );
   }
 
-  const paused = pausedFlags(platform.pauseFlags).length;
-  const status =
-    paused === PAUSE_FLAGS.length
-      ? "Fully paused"
-      : paused > 0
-        ? `${paused} of ${PAUSE_FLAGS.length} paused`
-        : "Active";
-  const anyPaused = paused > 0;
+  const { tone, label: status } = pauseStatus(platform.pauseFlags);
+  const theme = STATUS_THEME[tone];
 
   return (
     <div className="panel overflow-hidden">
       <div
         className="h-0.5"
-        style={{
-          background: anyPaused
-            ? "linear-gradient(90deg, #ef4444 0%, #b91c1c 100%)"
-            : "linear-gradient(90deg, #10b981 0%, #059669 100%)",
-        }}
+        style={{ background: theme.bar }}
       />
       <div className="p-5">
         <div className="flex items-start justify-between gap-4">
@@ -86,16 +98,10 @@ export function PlatformStatusCard() {
             </h2>
           </div>
           <span
-            className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${
-              anyPaused
-                ? "bg-red-50 text-red-700 ring-1 ring-inset ring-red-200"
-                : "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-200"
-            }`}
+            className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-semibold uppercase tracking-[0.14em] ${theme.chip}`}
           >
             <span
-              className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${
-                anyPaused ? "bg-red-500" : "bg-emerald-500 animate-pulse"
-              }`}
+              className={`mr-1 inline-block h-1.5 w-1.5 rounded-full ${theme.dot}`}
             />
             {status}
           </span>

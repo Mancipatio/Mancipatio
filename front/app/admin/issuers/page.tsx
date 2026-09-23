@@ -29,6 +29,7 @@ import {
   upsertIssuerProfile,
   type IssuerProfile,
 } from "@/lib/issuer-profiles";
+import { explainSendError } from "@/lib/tx-error";
 
 type StatusFilter = "all" | "pending" | "verified" | "rejected" | "suspended";
 
@@ -411,11 +412,11 @@ function IssuerDetail({
         reason,
         target_label: `${legalId} · ${approved ? "approve" : "reject"}`,
         status: "failed",
-        metadata: { error: err instanceof Error ? err.message : String(err) },
+        metadata: { error: explainSendError(err) },
       });
       toast.showError(
         approved ? "Failed to verify" : "Failed to reject",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }
@@ -698,7 +699,7 @@ function RegisterIssuerModal({
       toast.dismiss(pendingId);
       toast.showError(
         "Failed to register issuer",
-        err instanceof Error ? err.message : String(err),
+        explainSendError(err),
       );
     }
   }

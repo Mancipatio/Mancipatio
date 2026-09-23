@@ -20,7 +20,6 @@ import {
 import {
   findAssetPda,
   getExpireOfferInstructionAsync,
-  getTakeOfferInstructionAsync,
   OfferStatus,
   type Asset,
   type Offer,
@@ -35,6 +34,7 @@ import {
   type ReceiverEligibility,
 } from "@/lib/passport";
 import { hookTransferMetas } from "@/lib/hook-metas";
+import { buildTakeOfferInstructions } from "@/lib/otc-transactions";
 import { findOfferPda } from "@/lib/pdas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
@@ -342,91 +342,16 @@ export default function TakeOfferPage({
     try {
       const signer = walletSigner(conn.wallet);
 
-      // Taker receives share units here (Token-2022, share mint).
-      const [takerShareAta] = await findAssociatedTokenPda({
-        owner: wallet,
-        tokenProgram: TOKEN_2022_ADDRESS,
-        mint: offer.mint,
-      });
-      const createTakerShareAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: wallet,
-          mint: offer.mint,
-          tokenProgram: TOKEN_2022_ADDRESS,
-        });
-
-      // Taker pays from here (classic SPL, payment mint).
-      const [takerPaymentAta] = await findAssociatedTokenPda({
-        owner: wallet,
-        tokenProgram: payTokenProgram,
-        mint: offer.paymentMint,
-      });
-      const createTakerPaymentAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: wallet,
-          mint: offer.paymentMint,
-          tokenProgram: payTokenProgram,
-        });
-
-      // Maker receives the payment here (classic SPL, payment mint). The
-      // on-chain constraint requires owner == offer.maker, which the maker's
-      // ATA satisfies; create it idempotently so settlement can't fail on a
-      // missing destination.
-      const [makerPaymentAta] = await findAssociatedTokenPda({
-        owner: offer.maker,
-        tokenProgram: payTokenProgram,
-        mint: offer.paymentMint,
-      });
-      const createMakerPaymentAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: offer.maker,
-          mint: offer.paymentMint,
-          tokenProgram: payTokenProgram,
-        });
-
-      // escrowMarker (["escrow_marker", offer PDA]) is auto-derived by the
-      // async builder — closed on-chain by this terminal path.
-      const baseIx = await getTakeOfferInstructionAsync({
-        taker: signer,
-        offer: offerPda,
-        mint: offer.mint,
-        escrow: offer.escrow,
-        takerShareAccount: takerShareAta,
-        paymentMint: offer.paymentMint,
-        takerPaymentAccount: takerPaymentAta,
-        makerPaymentAccount: makerPaymentAta,
-        shareTokenProgram: TOKEN_2022_ADDRESS,
-        paymentTokenProgram: payTokenProgram,
-      });
-      // Append the mode-aware hook tail for the escrow→taker release. The
-      // release is signed by the Offer PDA, so the source-authority blocklist
-      // entry is keyed on the Offer PDA (mirrors cancel_offer).
-      const takeIx = {
-        ...baseIx,
-        accounts: [
-          ...baseIx.accounts,
-          ...(await hookTransferMetas(client.runtime.rpc, offer.mint, {
-            sourceTokenAccount: offer.escrow,
-            destTokenAccount: takerShareAta,
-            transferAuthority: offerPda,
-            sourceOwner: offerPda,
-            destOwner: wallet,
-          })),
-        ],
-      };
-
-      const sig = await tx.send({
-        instructions: [
-          createTakerShareAtaIx,
-          createTakerPaymentAtaIx,
-          createMakerPaymentAtaIx,
-          takeIx,
-        ],
-        feePayer: signer,
-      });
+      const instructions = await buildTakeOfferInstructions(
+        client.runtime.rpc,
+        {
+          taker: signer,
+          offerPda,
+          offer,
+          paymentTokenProgram: payTokenProgram,
+        },
+      );
+      const sig = await tx.send({ instructions, feePayer: signer });
       toast.dismiss(pendingId);
       toast.showTx(sig ?? "", { title: "Offer taken" });
       setShowConfirm(false);
