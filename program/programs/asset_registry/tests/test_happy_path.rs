@@ -570,6 +570,7 @@ fn happy_path_registry_lifecycle() {
                 token_program: token_2022,
                 system_program: system_program::ID,
                 platform: pause::platform_pda(),
+                kyc_registry: None,
             }
             .to_account_metas(None),
         ),
@@ -655,6 +656,8 @@ fn happy_path_registry_lifecycle() {
                 escrow: escrow_pda,
                 escrow_marker: escrow_marker_of(&custody_pda),
                 token_program: token_2022,
+                kyc_registry: None,
+                kyc_entry: None,
             }
             .to_account_metas(None),
         ),
@@ -714,6 +717,7 @@ fn happy_path_registry_lifecycle() {
                 token_program: token_2022,
                 system_program: system_program::ID,
                 platform: pause::platform_pda(),
+                kyc_registry: None,
             }
             .to_account_metas(None),
         ),

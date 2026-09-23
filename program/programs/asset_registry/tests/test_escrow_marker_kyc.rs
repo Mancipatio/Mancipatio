@@ -31,8 +31,14 @@
 //!     which closes the two-hop `mint_to_treasury` → raw transfer into a
 //!     `DeliveryEscrow` → `return` laundering route;
 //!   * direct wallet→wallet to a non-KYC'd receiver still fails (no markers);
-//!   * the marker is closed after the terminal path (settle / cancel).
+//!   * the marker is closed after the terminal path (settle / cancel);
+//!   * 2C-3: a `DeliveryEscrow` realize (conversion / delivery) requires the
+//!     beneficiary's Approved, unexpired, jurisdiction-allowed `KycEntry` in
+//!     the registry the vault pinned at open; without it the holder's deposit
+//!     still leaves through `return_custody_vault`.
 
+#[path = "../../../tests/support/kyc_registry.rs"]
+mod kyc_registry;
 #[path = "../../../tests/support/pause.rs"]
 mod pause;
 #[path = "../../../tests/support/mod.rs"]
@@ -48,9 +54,9 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     asset_registry::{
-        accounts as acc, instruction as ixd, AssetType, CustodyVault, JurisdictionRules, Offer,
-        OfferStatus, OtcDeal, OtcDealStatus, RealizeAction, ShareClassType, VaultState, VaultType,
-        RIGHT_DIVIDEND, RIGHT_LIQ_PREF, RIGHT_VOTE,
+        accounts as acc, instruction as ixd, AssetType, CustodyRealized, CustodyVault,
+        JurisdictionRules, Offer, OfferStatus, OtcDeal, OtcDealStatus, RealizeAction,
+        ShareClassType, VaultState, VaultType, RIGHT_DIVIDEND, RIGHT_LIQ_PREF, RIGHT_VOTE,
     },
     litesvm::LiteSVM,
     solana_clock::Clock,
@@ -1825,6 +1831,7 @@ fn open_delivery_vault(
                 token_program: TOKEN_2022,
                 system_program: system_program::ID,
                 platform: pause::platform_pda(),
+                kyc_registry: Some(ctx.kyc_registry_pda),
             }
             .to_account_metas(None),
         )],
@@ -2280,4 +2287,461 @@ fn offer_deposit_is_capped_at_the_offer_amount() {
     );
     let offer: Offer = load(&svm, &offer_pda);
     assert_eq!(offer.deposited, OFFER_AMOUNT, "ledger unchanged by refusal");
+}
+
+// ── 2C-3: KYC at conversion / delivery (DeliveryEscrow realize gate) ─────────
+//
+// A `DeliveryEscrow` realize burns the beneficiary's deposit as the on-chain
+// half of an equity conversion or a physical delivery. Buying and holding need
+// no KYC, but that step does: the vault pins a `KycRegistry` at open and
+// `realize_custody_vault` requires the beneficiary's Approved, unexpired,
+// jurisdiction-allowed `KycEntry` in it. Without one the holder's exit is
+// `return_custody_vault`.
+
+/// Approves `holder` in the boot registry with an explicit expiry.
+fn approve_kyc_until(svm: &mut LiteSVM, ctx: &Ctx, holder: &Pubkey, expiry: i64) {
+    send(
+        svm,
+        &[&ctx.payer],
+        &[Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::ApproveHolder {
+                holder: *holder,
+                jurisdiction: JURISDICTION,
+                accreditation_level: 1,
+                expiry,
+                provider_id: 1,
+                external_ref_hash: [5u8; 32],
+            }
+            .data(),
+            acc::ApproveHolder {
+                authority: ctx.payer.pubkey(),
+                kyc_registry: ctx.kyc_registry_pda,
+                kyc_entry: kyc_registry::entry_pda(&ctx.kyc_registry_pda, holder),
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        )],
+        "approve_holder (explicit expiry)",
+    );
+}
+
+fn trigger_vault_ix(ctx: &Ctx, vault_id: u64) -> Instruction {
+    let (custody_pda, _) = custody_pdas(ctx, vault_id);
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::TriggerCustodyVault {}.data(),
+        acc::TriggerCustodyVault {
+            authority_admin_record: ctx.admin_pda,
+            authority: ctx.payer.pubkey(),
+            custody_vault: custody_pda,
+        }
+        .to_account_metas(None),
+    )
+}
+
+fn realize_vault_ix(
+    ctx: &Ctx,
+    vault_id: u64,
+    kyc_registry: Option<Pubkey>,
+    kyc_entry: Option<Pubkey>,
+) -> Instruction {
+    let (custody_pda, escrow_pda) = custody_pdas(ctx, vault_id);
+    Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::RealizeCustodyVault {}.data(),
+        acc::RealizeCustodyVault {
+            authority: ctx.payer.pubkey(),
+            share_class: ctx.share_class_pda,
+            custody_vault: custody_pda,
+            mint: ctx.mint_pda,
+            escrow: escrow_pda,
+            escrow_marker: escrow_marker_of(ctx, &custody_pda),
+            token_program: TOKEN_2022,
+            authority_admin_record: ctx.admin_pda,
+            kyc_registry,
+            kyc_entry,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// The boot registry + `holder`'s entry in it — the accounts the front passes.
+fn boot_kyc(ctx: &Ctx, holder: &Pubkey) -> (Option<Pubkey>, Option<Pubkey>) {
+    (
+        Some(ctx.kyc_registry_pda),
+        Some(kyc_registry::entry_pda(&ctx.kyc_registry_pda, holder)),
+    )
+}
+
+/// Opens a DeliveryEscrow for the seller, deposits `CUSTODY_DEPOSIT` of their
+/// own units (no KYC asked at open or deposit) and triggers it.
+fn seller_delivery_triggered(svm: &mut LiteSVM, ctx: &Ctx, vault_id: u64) -> (Pubkey, Pubkey) {
+    let seller_pk = ctx.seller.pubkey();
+    let (vault_pda, escrow_pda) = open_delivery_vault(svm, ctx, vault_id, &seller_pk);
+    send(
+        svm,
+        &[&ctx.seller],
+        &[deposit_to_vault_ix(
+            ctx,
+            vault_id,
+            &seller_pk,
+            &ctx.seller_share_ata,
+            CUSTODY_DEPOSIT,
+        )],
+        "deposit_to_custody_vault",
+    );
+    send(
+        svm,
+        &[&ctx.payer],
+        &[trigger_vault_ix(ctx, vault_id)],
+        "trigger_custody_vault",
+    );
+    (vault_pda, escrow_pda)
+}
+
+fn assert_realize_err(result: Result<(), String>, code: u32, what: &str) {
+    let err = result.expect_err(what);
+    assert!(
+        err.contains(&format!("Custom({code})")),
+        "{what}: expected {code}, got: {err}"
+    );
+}
+
+/// Positive path: an Approved beneficiary's DeliveryEscrow realizes — burn,
+/// `Realized`, marker closed, and the attestation names the beneficiary and
+/// the registry the passport was checked in.
+#[test]
+fn custody_realize_approved_beneficiary_burns_and_attests() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    approve_kyc(&mut svm, &ctx, &seller_pk);
+    let (vault_pda, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 30);
+    let supply_before: asset_registry::ShareClass = load(&svm, &ctx.share_class_pda);
+
+    let (registry, entry) = boot_kyc(&ctx, &seller_pk);
+    svm.expire_blockhash();
+    let bh = svm.latest_blockhash();
+    let msg = Message::new_with_blockhash(
+        &[realize_vault_ix(&ctx, 30, registry, entry)],
+        Some(&ctx.payer.pubkey()),
+        &bh,
+    );
+    let tx =
+        VersionedTransaction::try_new(VersionedMessage::Legacy(msg), &[&ctx.payer]).expect("sign");
+    let meta = svm
+        .send_transaction(tx)
+        .unwrap_or_else(|e| panic!("realize with an approved beneficiary: {e:?}"));
+
+    assert_eq!(token_balance(&svm, &escrow_pda), 0, "escrow burned");
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Realized);
+    assert!(
+        account_closed(&svm, &escrow_marker_of(&ctx, &vault_pda)),
+        "marker closed on realize"
+    );
+    let supply_after: asset_registry::ShareClass = load(&svm, &ctx.share_class_pda);
+    assert_eq!(
+        supply_after.circulating_supply,
+        supply_before.circulating_supply - CUSTODY_DEPOSIT
+    );
+    let events = kyc_registry::events::<CustodyRealized>(&meta.logs);
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].custody_vault, vault_pda);
+    assert_eq!(events[0].burned, CUSTODY_DEPOSIT);
+    assert_eq!(events[0].beneficiary, seller_pk);
+    assert_eq!(events[0].kyc_registry, ctx.kyc_registry_pda);
+}
+
+/// A revoked passport cannot convert / take delivery.
+#[test]
+fn custody_realize_revoked_beneficiary_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    approve_kyc(&mut svm, &ctx, &seller_pk);
+    let (_, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 31);
+    revoke_kyc(&mut svm, &ctx, &seller_pk);
+
+    let (registry, entry) = boot_kyc(&ctx, &seller_pk);
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 31, registry, entry)],
+        ),
+        6069,
+        "realize for a revoked beneficiary",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+}
+
+/// Omitting the entry account is `ReceiverNotApproved`; passing the PDA of an
+/// entry that was never created fails in account validation (3012) — either
+/// way nothing is burned.
+#[test]
+fn custody_realize_without_entry_account_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    let (vault_pda, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 32);
+
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 32, Some(ctx.kyc_registry_pda), None)],
+        ),
+        6069,
+        "realize without a kyc_entry account",
+    );
+    let (registry, entry) = boot_kyc(&ctx, &seller_pk);
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 32, registry, entry)],
+        ),
+        3012,
+        "realize with a never-created entry PDA",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Triggered);
+}
+
+/// A lapsed passport (expiry == now counts as lapsed) is `ReceiverKycExpired`.
+#[test]
+fn custody_realize_expired_beneficiary_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    approve_kyc_until(&mut svm, &ctx, &seller_pk, 5_000);
+    let (_, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 33);
+
+    warp_to(&mut svm, 5_000);
+    let (registry, entry) = boot_kyc(&ctx, &seller_pk);
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 33, registry, entry)],
+        ),
+        6070,
+        "realize for an expired beneficiary",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+
+    // Re-approval (in place) restores the path.
+    approve_kyc(&mut svm, &ctx, &seller_pk);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[realize_vault_ix(&ctx, 33, registry, entry)],
+        "realize after re-approval",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), 0);
+}
+
+/// The registry's jurisdiction bitmaps apply live: blocking the beneficiary's
+/// jurisdiction stops the realize (6071); unblocking it lets it through.
+#[test]
+fn custody_realize_blocked_jurisdiction_rejected_then_allowed() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    approve_kyc(&mut svm, &ctx, &seller_pk);
+    let (vault_pda, _) = seller_delivery_triggered(&mut svm, &ctx, 34);
+
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc_registry::update_jurisdictions_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            [0xFFu8; 128],
+            kyc_registry::bitmap(&[JURISDICTION]),
+        )],
+        "block the beneficiary's jurisdiction",
+    );
+    let (registry, entry) = boot_kyc(&ctx, &seller_pk);
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 34, registry, entry)],
+        ),
+        6071,
+        "realize from a blocked jurisdiction",
+    );
+
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[kyc_registry::update_jurisdictions_ix(
+            &ctx.payer.pubkey(),
+            &ctx.kyc_registry_pda,
+            [0xFFu8; 128],
+            [0u8; 128],
+        )],
+        "unblock the jurisdiction",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[realize_vault_ix(&ctx, 34, registry, entry)],
+        "realize once the jurisdiction is allowed again",
+    );
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Realized);
+}
+
+/// The pin is binding: an Approved entry in ANOTHER (admin-created, valid)
+/// registry does not satisfy the vault — `CustodyKycRegistryMismatch`.
+#[test]
+fn custody_realize_wrong_registry_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    let (_, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 35);
+
+    let other_provider = Keypair::new();
+    svm.airdrop(&other_provider.pubkey(), 10_000_000_000)
+        .unwrap();
+    let other_registry = kyc_registry::registry_pda(&other_provider.pubkey());
+    send(
+        &mut svm,
+        &[&other_provider, &ctx.payer],
+        &[kyc_registry::create_registry_ix(
+            &other_provider.pubkey(),
+            &ctx.payer.pubkey(),
+            [0xFFu8; 128],
+            [0u8; 128],
+        )],
+        "create a second registry",
+    );
+    send(
+        &mut svm,
+        &[&other_provider],
+        &[kyc_registry::approve_ix(
+            &other_provider.pubkey(),
+            &other_registry,
+            &seller_pk,
+            JURISDICTION,
+        )],
+        "approve the beneficiary in the second registry",
+    );
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(
+                &ctx,
+                35,
+                Some(other_registry),
+                Some(kyc_registry::entry_pda(&other_registry, &seller_pk)),
+            )],
+        ),
+        6136,
+        "realize against a registry the vault did not pin",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+}
+
+/// Omitting the registry account of a DeliveryEscrow is
+/// `CustodyKycRegistryRequired` (even with a valid entry passed).
+#[test]
+fn custody_realize_missing_registry_account_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    approve_kyc(&mut svm, &ctx, &seller_pk);
+    let (_, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 36);
+
+    let (_, entry) = boot_kyc(&ctx, &seller_pk);
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 36, None, entry)],
+        ),
+        6134,
+        "realize without the pinned registry account",
+    );
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 36, None, None)],
+        ),
+        6134,
+        "realize with no KYC accounts at all",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+}
+
+/// Somebody else's valid passport does not stand in for the beneficiary's.
+#[test]
+fn custody_realize_other_holders_entry_rejected() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let buyer_pk = ctx.buyer.pubkey();
+    approve_kyc(&mut svm, &ctx, &buyer_pk);
+    let (_, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 37);
+
+    let (registry, buyer_entry) = boot_kyc(&ctx, &buyer_pk);
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 37, registry, buyer_entry)],
+        ),
+        6069,
+        "realize with another holder's entry",
+    );
+    assert_eq!(token_balance(&svm, &escrow_pda), CUSTODY_DEPOSIT);
+}
+
+/// A holder who never had a passport opens, deposits (no KYC asked), gets
+/// triggered — the realize is refused — and still gets every unit back
+/// through `return_custody_vault`. Nothing is confiscated.
+#[test]
+fn custody_without_kyc_holder_still_returns_from_triggered() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let seller_pk = ctx.seller.pubkey();
+    let before = token_balance(&svm, &ctx.seller_share_ata);
+    let (vault_pda, escrow_pda) = seller_delivery_triggered(&mut svm, &ctx, 38);
+    assert_eq!(
+        token_balance(&svm, &ctx.seller_share_ata),
+        before - CUSTODY_DEPOSIT
+    );
+
+    assert_realize_err(
+        try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[realize_vault_ix(&ctx, 38, Some(ctx.kyc_registry_pda), None)],
+        ),
+        6069,
+        "realize for a holder without a passport",
+    );
+
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[return_vault_ix(
+            &ctx,
+            &ctx.payer.pubkey(),
+            38,
+            &seller_pk,
+            &ctx.seller_share_ata,
+        )],
+        "return_custody_vault from Triggered (no passport)",
+    );
+    assert_eq!(token_balance(&svm, &ctx.seller_share_ata), before);
+    assert_eq!(token_balance(&svm, &escrow_pda), 0);
+    let vault: CustodyVault = load(&svm, &vault_pda);
+    assert_eq!(vault.state, VaultState::Returned);
 }

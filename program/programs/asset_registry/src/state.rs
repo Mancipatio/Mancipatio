@@ -412,7 +412,12 @@ pub enum VaultType {
     Vesting,
     /// Equity token held pending an off-chain share conversion.
     ConversionPending,
-    /// RWA token locked pending physical delivery.
+    /// RWA token locked pending physical delivery — also the type the platform
+    /// uses for a holder's equity conversion. Its realize (the conversion or
+    /// delivery itself) is KYC-gated: the vault pins a `KycRegistry` at open
+    /// and `realize_custody_vault` requires the beneficiary's Approved,
+    /// unexpired, jurisdiction-allowed `KycEntry` in it (2C-3). Without one
+    /// the beneficiary's deposit leaves through `return_custody_vault`.
     DeliveryEscrow,
     /// Token held in a treasury buyback / redemption queue.
     RedemptionQueue,
@@ -480,6 +485,11 @@ pub struct CustodyVault {
     /// whose `KycEntry` passes. Appended last so the account's existing byte
     /// layout is unchanged up to `bump`.
     pub deposited: u64,
+    /// KYC registry pinned by `open_custody_vault` (DeliveryEscrow only;
+    /// `Pubkey::default()` otherwise). `realize_custody_vault` requires the
+    /// beneficiary's Approved, unexpired, jurisdiction-allowed `KycEntry` in
+    /// it. Appended last (v2, `CUSTODY_STATE_VERSION`): bytes 237..269.
+    pub kyc_registry: Pubkey,
 }
 
 /// Emitted by `deposit_to_custody_vault` — the beneficiary funded the escrow
@@ -501,6 +511,11 @@ pub struct CustodyRealized {
     pub mint: Pubkey,
     pub burned: u64,
     pub metadata_hash: [u8; 32],
+    /// The vault's beneficiary (DeliveryEscrow; default otherwise).
+    pub beneficiary: Pubkey,
+    /// The registry the beneficiary's KYC was checked in (DeliveryEscrow;
+    /// default otherwise).
+    pub kyc_registry: Pubkey,
 }
 
 /// Emitted by `revert_custody_vault` — the custodied tokens were returned

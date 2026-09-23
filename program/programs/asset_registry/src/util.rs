@@ -739,9 +739,13 @@ enum ReceiverKycOutcome {
 /// are units that a program instruction recorded as that same party's deposit
 /// (`deposit_to_offer_escrow`, `deposit_otc_asset`,
 /// `deposit_to_custody_vault`) — a refund of one's own property must never be
-/// stranded by a lapsed passport. Beyond that, only burn legs are unchecked
-/// (`realize_custody_vault` / `revert_custody_vault`) because they have no
-/// receiver at all; each carries a comment at its call site saying so.
+/// stranded by a lapsed passport. Beyond that, only burn legs skip the
+/// receiver check (`realize_custody_vault` / `revert_custody_vault`) because
+/// they have no receiver at all; each carries a comment at its call site
+/// saying so. The `DeliveryEscrow` realize burn IS the holder's conversion or
+/// delivery, so it is KYC-gated separately (2C-3): the beneficiary's
+/// `KycEntry` in the registry the vault pinned at open must pass
+/// `require_kyc_entry_current` + `require_jurisdiction_allowed`.
 ///
 /// Resolution:
 ///
@@ -806,14 +810,7 @@ fn receiver_kyc_outcome(
         let data = entry_ai.try_borrow_data()?;
         KycEntry::try_deserialize(&mut data.as_ref())?
     };
-    require!(
-        entry.status == KycStatus::Approved,
-        RegistryError::ReceiverNotApproved
-    );
-    require!(
-        entry.expiry > Clock::get()?.unix_timestamp,
-        RegistryError::ReceiverKycExpired
-    );
+    require_kyc_entry_current(&entry, Clock::get()?.unix_timestamp)?;
 
     // Jurisdiction bitmaps live on the registry (also asset_registry-owned).
     let registry_ai = remaining_accounts
@@ -828,7 +825,28 @@ fn receiver_kyc_outcome(
         let data = registry_ai.try_borrow_data()?;
         KycRegistry::try_deserialize(&mut data.as_ref())?
     };
-    let j = entry.jurisdiction as usize;
+    require_jurisdiction_allowed(&registry, entry.jurisdiction)?;
+
+    Ok(ReceiverKycOutcome::Approved)
+}
+
+/// A `KycEntry` counts as current when it is `Approved` (else
+/// `ReceiverNotApproved`, 6069) and its expiry is strictly after `now` (else
+/// `ReceiverKycExpired`, 6070) — in that order. Shared by the receiver-KYC
+/// gates and the `DeliveryEscrow` realize gate.
+pub fn require_kyc_entry_current(entry: &KycEntry, now: i64) -> Result<()> {
+    require!(
+        entry.status == KycStatus::Approved,
+        RegistryError::ReceiverNotApproved
+    );
+    require!(entry.expiry > now, RegistryError::ReceiverKycExpired);
+    Ok(())
+}
+
+/// `jurisdiction` must be set in the registry's approved bitmap and clear in
+/// its blocked bitmap (else `ReceiverJurisdictionBlocked`, 6071).
+pub fn require_jurisdiction_allowed(registry: &KycRegistry, jurisdiction: u16) -> Result<()> {
+    let j = jurisdiction as usize;
     let byte = j / 8;
     let bit = (j % 8) as u8;
     require!(
@@ -837,8 +855,7 @@ fn receiver_kyc_outcome(
             && (registry.blocked_jurisdictions[byte] & (1 << bit)) == 0,
         RegistryError::ReceiverJurisdictionBlocked
     );
-
-    Ok(ReceiverKycOutcome::Approved)
+    Ok(())
 }
 
 /// Receiver-KYC gate for hook-backstopped escrow-release legs (`take_offer`,
