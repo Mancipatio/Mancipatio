@@ -704,7 +704,8 @@ pub mod asset_registry {
     /// Revokes a holder's KYC entry — flips status to `Revoked`.
     /// The `transfer_hook` program checks only the RECEIVER, so a revoked
     /// holder can no longer receive — but keeps (and can still send) their
-    /// balance. Use `clawback_from_holder` to seize it.
+    /// balance. Use `clawback_from_holder` to seize it (or, for a wallet the
+    /// hook's BlocklistAuthority has blocked, `clawback_blocklisted_holder`).
     pub fn revoke_holder(ctx: Context<RevokeHolder>, holder: Pubkey) -> Result<()> {
         instructions::handle_revoke_holder(ctx, holder)
     }
@@ -806,6 +807,21 @@ pub mod asset_registry {
         amount: u64,
     ) -> Result<()> {
         instructions::handle_clawback_from_holder(ctx, holder, amount)
+    }
+
+    /// Admin claws back the units of a holder on the transfer-hook blocklist
+    /// into a burn-only quarantine escrow (a `RedemptionQueue` +
+    /// `BurnAndAttest` custody vault of the same share class) via the mint's
+    /// `PermanentDelegate`. `Open` or `KycGated` mints; two keys — the holder
+    /// must carry a live hook `BlockEntry` (created only by the hook's
+    /// BlocklistAuthority) and an Admin signs. `amount == 0` sweeps the
+    /// holder's full balance.
+    pub fn clawback_blocklisted_holder<'info>(
+        ctx: Context<'info, ClawbackBlocklistedHolder<'info>>,
+        holder: Pubkey,
+        amount: u64,
+    ) -> Result<()> {
+        instructions::handle_clawback_blocklisted_holder(ctx, holder, amount)
     }
 
     // ── Vesting series (spec: "11. Vesting — Mancipatio") ───────────────────

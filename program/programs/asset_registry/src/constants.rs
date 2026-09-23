@@ -34,6 +34,26 @@ pub const HOOK_CONFIG_KYC_REGISTRY_KEY_OFFSET: usize = 106;
 pub const HOOK_CONFIG_MIN_LEN: usize = 138;
 /// `RestrictionMode::KycGated` borsh discriminant.
 pub const RESTRICTION_MODE_KYC_GATED: u8 = 1;
+/// `TransferHookConfig.mint` (right after the discriminator).
+pub const HOOK_CONFIG_MINT_OFFSET: usize = 8;
+/// `TransferHookConfig.share_class`.
+pub const HOOK_CONFIG_SHARE_CLASS_OFFSET: usize = 40;
+
+// ── transfer_hook `BlockEntry` (read by offset; mirrored, 2C-4) ──────────────
+// `clawback_blocklisted_holder` requires the holder to carry a live hook
+// `BlockEntry` — created ONLY by the hook's `BlocklistAuthority`, never by an
+// admin of this program. Layout: disc(8) wallet(32) added_by(32) bump(1).
+// Pinned against the hook crate by `block_entry_layout_matches_hook`.
+/// Seed of the hook's per-wallet `BlockEntry` PDA: `["blocked", wallet]`.
+pub const HOOK_BLOCK_ENTRY_SEED: &[u8] = b"blocked";
+/// Anchor discriminator of `transfer_hook::BlockEntry`.
+pub const HOOK_BLOCK_ENTRY_DISCRIMINATOR: [u8; 8] = [160, 179, 255, 246, 122, 148, 254, 143];
+/// Full `BlockEntry` account length (`8 + INIT_SPACE`).
+pub const HOOK_BLOCK_ENTRY_LEN: usize = 73;
+/// `BlockEntry.wallet`.
+pub const HOOK_BLOCK_ENTRY_WALLET_OFFSET: usize = 8;
+/// `BlockEntry.added_by` — the BlocklistAuthority key that added the entry.
+pub const HOOK_BLOCK_ENTRY_ADDED_BY_OFFSET: usize = 40;
 
 // ── PDA seeds (docs/01-asset-registry-design.md §8) ──────────────────────────
 pub const PLATFORM_SEED: &[u8] = b"platform";
