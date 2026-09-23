@@ -937,6 +937,7 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
                     config: hook_config_pda,
                     extra_account_meta_list: extra_metas_pda,
                     system_program: system_program::ID,
+                    kyc_registry_account: Some(kyc_registry_pda),
                 }
                 .to_account_metas(None),
             )],
@@ -2016,6 +2017,19 @@ fn kyc_registry_layout_matches_hook_offsets() {
         "entries_count @ 296 — hook KYC_REGISTRY_MIN_LEN"
     );
     assert_eq!(data.len(), 306, "total serialized KycRegistry length");
+
+    // Cross-crate pin: `update_transfer_hook_config` validates a named
+    // registry by these two hardcoded hook constants.
+    assert_eq!(
+        KycRegistry::DISCRIMINATOR,
+        &transfer_hook::KYC_REGISTRY_DISCRIMINATOR[..],
+        "transfer_hook::KYC_REGISTRY_DISCRIMINATOR drifted from asset_registry::KycRegistry"
+    );
+    assert_eq!(
+        8 + <KycRegistry as anchor_lang::Space>::INIT_SPACE,
+        transfer_hook::KYC_REGISTRY_ACCOUNT_LEN,
+        "transfer_hook::KYC_REGISTRY_ACCOUNT_LEN drifted from asset_registry::KycRegistry"
+    );
 }
 
 // ── Fixed owner and source-owner sanctions invariants ───────────────────────
