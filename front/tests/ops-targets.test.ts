@@ -14,6 +14,9 @@ import { afterAll, describe, expect, it } from "vitest";
 import {
   loadTargets, resolveTarget, targetLine, TargetError, validateTargets,
 } from "../scripts/ops/target.mjs";
+import {
+  applyReconcileEnv, otherNetwork, reconcileRpcUrl, reconcileTarget, smokeTarget,
+} from "../scripts/ops/live-targets";
 
 const FRONT = process.cwd();
 const REAL_TARGETS = JSON.parse(readFileSync(join(FRONT, "scripts/ops/targets.json"), "utf8"));
@@ -448,5 +451,50 @@ describe("scripts/ops/supabase.sh", () => {
     const linked = box.run("scripts/ops/supabase.sh", ["devnet", "secrets", "list"]);
     expect(linked.stderr).toMatch(/Delete front\/supabase\/\.temp\//);
     expect(named(linked, "supabase")).toEqual([]);
+  });
+});
+
+describe("live operator runners (deployment smoke, index reconcile)", () => {
+  it("smoke: explicit network, the target's origin, mainnet only with the allow flag", () => {
+    expect(smokeTarget({ MANCIPATIO_LIVE_SMOKE: "devnet" })).toEqual({ network: "devnet", origin: "https://www.manci.io" });
+    expect(() => smokeTarget({})).toThrow(/Explicit MANCIPATIO_LIVE_SMOKE/);
+    expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "testnet" })).toThrow(/Explicit/);
+    expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet" })).toThrow(/MANCI_ALLOW_MAINNET=1/);
+    // The tracked mainnet target has no origin yet.
+    expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" })).toThrow(/no siteOrigin for mainnet/);
+    expect(smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" }, CONFIGURED))
+      .toEqual({ network: "mainnet", origin: "https://mainnet.manci.test" });
+    expect(otherNetwork("devnet")).toBe("mainnet");
+    expect(otherNetwork("mainnet")).toBe("devnet");
+  });
+
+  it("smoke: SMOKE_ORIGIN may name a preview, never another target's origin or a non-https URL", () => {
+    const env = { MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" };
+    expect(smokeTarget({ ...env, SMOKE_ORIGIN: "https://manci-git-x.vercel.app" }, CONFIGURED).origin).toBe("https://manci-git-x.vercel.app");
+    expect(() => smokeTarget({ ...env, SMOKE_ORIGIN: "https://www.manci.io" }, CONFIGURED)).toThrow(/another target's origin/);
+    for (const bad of ["http://preview.manci.test", "https://preview.manci.test/path", "https://preview.manci.test:8443"])
+      expect(() => smokeTarget({ ...env, SMOKE_ORIGIN: bad }, CONFIGURED), bad).toThrow(/https:\/\/<host>/);
+  });
+
+  it("reconcile: pinned project, env file rules, per-network RPC keys and no public mainnet RPC", () => {
+    expect(reconcileTarget({ MANCIPATIO_RECONCILE: "devnet", MANCIPATIO_RECONCILE_PROJECT: DEVNET_REF }))
+      .toEqual({ network: "devnet", project: DEVNET_REF, envFile: ".env.local" });
+    expect(() => reconcileTarget({ MANCIPATIO_RECONCILE: "devnet", MANCIPATIO_RECONCILE_PROJECT: MAINNET_REF })).toThrow(/must equal the devnet projectRef/);
+    expect(() => reconcileTarget({ MANCIPATIO_RECONCILE: "mainnet", MANCIPATIO_RECONCILE_PROJECT: MAINNET_REF }, CONFIGURED)).toThrow(/MANCI_ALLOW_MAINNET=1/);
+    const mainnet = { MANCIPATIO_RECONCILE: "mainnet", MANCI_ALLOW_MAINNET: "1", MANCIPATIO_RECONCILE_PROJECT: MAINNET_REF };
+    expect(() => reconcileTarget(mainnet, CONFIGURED)).toThrow(/MANCIPATIO_RECONCILE_ENV_FILE is required for mainnet/);
+    expect(reconcileTarget({ ...mainnet, MANCIPATIO_RECONCILE_ENV_FILE: "/secure/mainnet.env" }, CONFIGURED).envFile).toBe("/secure/mainnet.env");
+    expect(() => reconcileTarget({ ...mainnet, MANCIPATIO_RECONCILE_ENV_FILE: "x" })).toThrow(/no projectRef for mainnet/);
+
+    const env: Record<string, string | undefined> = {
+      HELIUS_DEVNET_RPC: "https://devnet.helius-rpc.com/?api-key=d", HELIUS_TESTNET_RPC: "https://t", SOLANA_LOCALNET_RPC: "http://l",
+      SUPABASE_SERVICE_ROLE_KEY: "inherited", UNRELATED: "kept",
+    };
+    applyReconcileEnv({ NEXT_PUBLIC_NETWORK: "mainnet", HELIUS_MAINNET_RPC: "https://mainnet.helius-rpc.com/?api-key=m", HELIUS_DEVNET_RPC: "https://x" }, "mainnet", env);
+    expect(env).toEqual({ NEXT_PUBLIC_NETWORK: "mainnet", HELIUS_MAINNET_RPC: "https://mainnet.helius-rpc.com/?api-key=m", UNRELATED: "kept" });
+    expect(reconcileRpcUrl(env, "mainnet").hostname).toBe("mainnet.helius-rpc.com");
+    expect(() => reconcileRpcUrl({}, "mainnet")).toThrow(/no public fallback/);
+    expect(reconcileRpcUrl({}, "devnet").href).toBe("https://api.devnet.solana.com/");
+    expect(() => reconcileRpcUrl({ HELIUS_DEVNET_RPC: "http://insecure.example" }, "devnet")).toThrow(/Invalid RPC/);
   });
 });

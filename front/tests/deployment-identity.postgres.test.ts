@@ -13,6 +13,7 @@ import {
   insertDeploymentIdentity,
   MIGRATIONS_DIR,
   SUPABASE_PLATFORM_SQL,
+  TEST_PROJECT_REFS,
 } from "./helpers/migrations";
 
 const clusters = { devnet: new LocalPostgres(), mainnet: new LocalPostgres() };
@@ -71,6 +72,25 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("deployment identi
   }, 120_000);
   afterAll(() => {
     for (const db of [...Object.values(clusters), bare]) db.close();
+  });
+
+  it("the identity preflight reports the identity, foreign rows, guards, defaults and browser insert paths", () => {
+    const preflight = (db: LocalPostgres) =>
+      JSON.parse(db.query(readFileSync(join(process.cwd(), "scripts/preflight/supabase-readonly-identity.sql"), "utf8")));
+    for (const network of ["devnet", "mainnet"] as const) {
+      const report = preflight(clusters[network]);
+      expect(report.identity, network).toMatchObject({ network, project_ref: TEST_PROJECT_REFS[network] });
+      expect(report.deployment_network_function).toBe(true);
+      expect(report.tables_without_guard).toEqual([]);
+      expect(report.defaults_not_dynamic).toEqual({});
+      // 0071 does not rewrite history: 0056 seeded both networks' raise limits.
+      expect(report.rows_of_other_networks).toEqual({ platform_raise_limits: { other_network: 1, guard_would_refuse: 1 } });
+      expect(report.retry_worker_config).toBeNull();
+      expect(report.network_tables).toBeGreaterThan(DYNAMIC_DEFAULT_TABLES.length);
+      expect(Array.isArray(report.browser_insert_paths)).toBe(true);
+    }
+    // Before the identity row (and with no network tables at all).
+    expect(preflight(bare)).toMatchObject({ identity: null, rows_of_other_networks: {}, tables_without_guard: [], network_tables: 0 });
   });
 
   it.each(["devnet", "mainnet"] as const)("%s: all 33 defaults resolve to the project's network for every API role", (network) => {

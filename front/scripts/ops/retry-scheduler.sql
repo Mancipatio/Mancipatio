@@ -1,7 +1,28 @@
--- Reviewed devnet only, after migrations 0044–0051 and matching Vercel deploy.
--- Vault must contain mancipatio_retry_worker_devnet with the same worker secret.
--- Installation always DISABLES the named job until a live check passes.
+-- Retry-worker scheduler: pg_cron calls the site's /api/internal/retry every
+-- minute. After migration 0070 (and the identity row); run through db.sh, which
+-- asserts the target and passes its site origin:
+--   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/retry-scheduler.sql
+-- (mainnet also needs MANCI_ALLOW_MAINNET=1). The same SQL serves every
+-- project: the network comes from public.deployment_network(), the origin
+-- from the target's siteOrigin in scripts/ops/targets.json (a target without
+-- one is refused), and both are stored in mancipatio_ops.retry_worker_config.
+--
+-- Vault must hold exactly one 'mancipatio_retry_worker_<network>' secret, the
+-- same worker secret the deployment at that origin has.
+-- Installation always DISABLES the job 'mancipatio-retry-<network>' until a
+-- live check passes; enable it with
+--   select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-retry-<network>';
+-- Re-running updates the config, the function and the job, and disables the
+-- job again. It also upgrades the legacy devnet install in place (same job
+-- name; mancipatio_ops.invoke_retry_worker_devnet() is dropped).
 -- Synchronous http keeps Authorization in memory; pg_net is not used here.
+
+-- psql does not substitute variables inside $$ bodies: hand the origin to
+-- the session first (db.sh set manci.target_network in assert-target.sql).
+\o /dev/null
+select pg_catalog.set_config('manci.retry_origin', :'target_origin', false);
+\o
+
 begin;
 
 create extension if not exists pg_cron with schema pg_catalog;
@@ -22,17 +43,34 @@ do $$ declare f record;begin
 end;$$;
 
 do $$
+declare
+  net text;
+  target_network text := current_setting('manci.target_network', true);
+  origin text := current_setting('manci.retry_origin', true);
 begin
   if to_regclass('public.purchase_evidence_jobs') is null
      or to_regclass('public.indexer_jobs') is null
      or to_regclass('public.distribution_plans') is null then
     raise exception 'Complete the reviewed migrations before installing the worker';
   end if;
+  if to_regprocedure('public.deployment_network()') is null then
+    raise exception 'Apply migration 0070 and insert the deployment identity before installing the worker';
+  end if;
+  net := public.deployment_network();
+  if target_network is null or target_network = '' then
+    raise exception 'Run this file through scripts/db.sh (MANCI_TARGET=<target>)';
+  end if;
+  if net is distinct from target_network then
+    raise exception 'Target mismatch: database is %, target is %', net, target_network;
+  end if;
+  if origin is null or origin = '-' or origin !~ '^https://[a-z0-9-]+(\.[a-z0-9-]+)+$' then
+    raise exception 'The target has no valid siteOrigin (https://<host>, no path) in scripts/ops/targets.json';
+  end if;
   if (select count(*) from vault.decrypted_secrets
-      where name='mancipatio_retry_worker_devnet'
+      where name='mancipatio_retry_worker_'||net
         and length(decrypted_secret)>=32
         and decrypted_secret !~ '[[:space:]]') <> 1 then
-    raise exception 'Expected one configured devnet retry credential in Vault';
+    raise exception 'Expected one configured % retry credential in Vault (mancipatio_retry_worker_%)', net, net;
   end if;
 end;
 $$;
@@ -59,20 +97,47 @@ revoke all on sequence mancipatio_ops.retry_http_runs_id_seq from public,anon,au
 create index if not exists retry_http_runs_requested_at_idx
   on mancipatio_ops.retry_http_runs(requested_at);
 
-create or replace function mancipatio_ops.invoke_retry_worker_devnet()
+-- Where the worker lives for this project. One row; the network must agree
+-- with the deployment identity (checked again on every invocation).
+create table if not exists mancipatio_ops.retry_worker_config (
+  singleton boolean primary key default true check (singleton),
+  network text not null check (network in ('devnet','mainnet','testnet','localnet')),
+  origin text not null check (origin ~ '^https://[a-z0-9-]+(\.[a-z0-9-]+)+$'),
+  updated_at timestamptz not null default now(),
+  updated_by text not null default current_user
+);
+alter table mancipatio_ops.retry_worker_config enable row level security;
+revoke all on mancipatio_ops.retry_worker_config from public,anon,authenticated,service_role;
+insert into mancipatio_ops.retry_worker_config(singleton,network,origin)
+values (true,public.deployment_network(),current_setting('manci.retry_origin'))
+on conflict (singleton) do update
+  set network=excluded.network,origin=excluded.origin,updated_at=now(),updated_by=current_user;
+
+create or replace function mancipatio_ops.invoke_retry_worker()
 returns bigint language plpgsql security definer set search_path='' set lock_timeout='3s' as $$
 declare
+  net text; worker_origin text;
   worker_secret text; result extensions.http_response; payload jsonb;
   started timestamptz:=clock_timestamp(); finished timestamptz; run_id bigint;
   status_code integer; succeeded boolean:=false; result_kind text:='configuration_error';
   worker_state text; counters integer[]:=array[null,null,null,null,null,null]::integer[];
   path text[]; value text; position integer:=1;
 begin
+  -- Configuration: the identity's network, and an origin stored for it.
   begin
-    select decrypted_secret into strict worker_secret
-      from vault.decrypted_secrets where name='mancipatio_retry_worker_devnet';
-  exception when others then worker_secret:=null;
+    net:=public.deployment_network();
+    select c.origin into strict worker_origin
+      from mancipatio_ops.retry_worker_config c where c.network=net;
+    if worker_origin !~ '^https://[a-z0-9-]+(\.[a-z0-9-]+)+$' then worker_origin:=null;end if;
+  exception when others then net:=null;worker_origin:=null;
   end;
+  if net is not null and worker_origin is not null then
+    begin
+      select decrypted_secret into strict worker_secret
+        from vault.decrypted_secrets where name='mancipatio_retry_worker_'||net;
+    exception when others then worker_secret:=null;
+    end;
+  end if;
   if worker_secret is not null and length(worker_secret)>=32 and worker_secret !~ '[[:space:]]' then
     begin
       perform extensions.http_reset_curlopt();
@@ -85,7 +150,7 @@ begin
       -- http 1.6's legacy setting can override curl's timeout; pin both.
       perform pg_catalog.set_config('http.timeout_msec','55000',true);
       select * into result from extensions.http((
-        'POST','https://www.manci.io/api/internal/retry?limit=10',
+        'POST',worker_origin||'/api/internal/retry?limit=10',
         array[('Authorization','Bearer '||worker_secret)::extensions.http_header],
         'application/json','{}'
       )::extensions.http_request);
@@ -96,7 +161,7 @@ begin
         result_kind:='invalid_response';
         begin
           payload:=result.content::jsonb;
-          if payload->'ok'='true'::jsonb and payload#>>'{data,network}'='devnet'
+          if payload->'ok'='true'::jsonb and payload#>>'{data,network}'=net
              and payload#>>'{data,status}' in ('busy','processed') then
             succeeded:=true;result_kind:='complete';
           end if;
@@ -137,17 +202,19 @@ begin
   return run_id;
 end;
 $$;
-revoke all on function mancipatio_ops.invoke_retry_worker_devnet()
+revoke all on function mancipatio_ops.invoke_retry_worker()
   from public,anon,authenticated,service_role;
 
 do $$
 begin
   if has_schema_privilege('anon','mancipatio_ops','USAGE')
      or has_schema_privilege('authenticated','mancipatio_ops','USAGE')
-     or has_function_privilege('anon','mancipatio_ops.invoke_retry_worker_devnet()','EXECUTE')
-     or has_function_privilege('authenticated','mancipatio_ops.invoke_retry_worker_devnet()','EXECUTE')
+     or has_function_privilege('anon','mancipatio_ops.invoke_retry_worker()','EXECUTE')
+     or has_function_privilege('authenticated','mancipatio_ops.invoke_retry_worker()','EXECUTE')
      or has_table_privilege('anon','mancipatio_ops.retry_http_runs','SELECT')
      or has_table_privilege('authenticated','mancipatio_ops.retry_http_runs','SELECT')
+     or has_table_privilege('anon','mancipatio_ops.retry_worker_config','SELECT')
+     or has_table_privilege('authenticated','mancipatio_ops.retry_worker_config','SELECT')
      or has_table_privilege('anon','vault.decrypted_secrets','SELECT')
      or has_table_privilege('authenticated','vault.decrypted_secrets','SELECT') then
     raise exception 'Worker operation or Vault is exposed to browser roles';
@@ -155,8 +222,15 @@ begin
 end;
 $$;
 
-select cron.schedule('mancipatio-retry-devnet','* * * * *',
-  'set statement_timeout=''60s''; select mancipatio_ops.invoke_retry_worker_devnet();');
+-- One job per project, named after its network. Scheduling an existing name
+-- updates it in place (the legacy devnet job keeps its name and jobid).
+select cron.schedule('mancipatio-retry-'||public.deployment_network(),'* * * * *',
+  'set statement_timeout=''60s''; select mancipatio_ops.invoke_retry_worker();');
 select cron.alter_job(jobid,active:=false)
-  from cron.job where jobname='mancipatio-retry-devnet';
+  from cron.job where jobname='mancipatio-retry-'||public.deployment_network();
+drop function if exists mancipatio_ops.invoke_retry_worker_devnet();
+
+select j.jobname, j.active, c.network, c.origin
+from cron.job j cross join mancipatio_ops.retry_worker_config c
+where j.jobname='mancipatio-retry-'||public.deployment_network();
 commit;
