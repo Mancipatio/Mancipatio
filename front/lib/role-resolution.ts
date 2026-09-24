@@ -478,11 +478,16 @@ export const ADMIN_ROUTE_DEFAULT: readonly Capability[] = ["admin"];
  */
 export const ADMIN_ROUTE_ACCESS: readonly AdminRouteRule[] = [
   // The overview; an operator without an Admin record lands on OperatorLanding.
-  { match: "/admin", exact: true, anyOf: ["admin", "kycProvider"] },
+  { match: "/admin", exact: true, anyOf: ["admin", "kycProvider", "blocklistAuthority"] },
   // K6: the KYC provider triages the queue and the dossiers. Its routes are
   // requireAdminOrKycProvider; AML evidence and admin-only actions are not.
   { match: "/admin/kyc", anyOf: ["admin", "kycProvider"] },
   { match: "/admin/clients", anyOf: ["admin", "kycProvider"] },
+  // K7/K8: the blocklist authority changes entries and the transfer-hook
+  // mode (both re-checked against the finalized BlocklistAuthority by the
+  // builders, and enforced by the hook). No server route is widened.
+  { match: "/admin/blocklist", anyOf: ["admin", "blocklistAuthority"] },
+  { match: "/admin/share-classes", anyOf: ["admin", "blocklistAuthority"] },
 ];
 
 function normalizePath(pathname: string): string {

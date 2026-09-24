@@ -159,7 +159,8 @@ export default function AdminsPage() {
       <h1 className="text-2xl font-semibold">Admins</h1>
       <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
         The super admin grants and revokes the admin role — admins operate
-        issuance, custody and the blocklist.
+        issuance and custody. The blocklist is changed only by the blocklist
+        authority, a separate key.
       </p>
 
       {!conn.isReady ? (
@@ -283,8 +284,9 @@ export default function AdminsPage() {
               {grantAddr.trim()}
             </p>
             <p className="mt-2 text-xs text-slate-500">
-              They will gain access to issuance, custody and the blocklist.
-              Reason will be recorded in the audit log.
+              They will gain access to issuance and custody (the blocklist
+              stays with the blocklist authority). Reason will be recorded in
+              the audit log.
             </p>
           </>
         }

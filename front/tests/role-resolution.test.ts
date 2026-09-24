@@ -342,6 +342,27 @@ describe("adminRouteAllows", () => {
     }
   });
 
+  it("the blocklist authority opens the overview, blocklist and share classes — nothing else (K7/K8)", () => {
+    const ba = caps("blocklistAuthority");
+    for (const path of ["/admin", "/admin/blocklist", "/admin/share-classes", "/admin/share-classes/x"]) {
+      expect(adminRouteAllows(path, ba)).toBe(true);
+    }
+    for (const path of [
+      "/admin/blocklist-audit",
+      "/admin/share-classesx",
+      "/admin/kyc",
+      "/admin/clients",
+      "/admin/fees",
+      "/admin/compliance",
+      "/admin/platform",
+    ]) {
+      expect(adminRouteAllows(path, ba)).toBe(false);
+    }
+    // And the KYC provider does not get the blocklist pages.
+    expect(adminRouteAllows("/admin/blocklist", caps("kycProvider"))).toBe(false);
+    expect(adminRouteAllows("/admin/share-classes", caps("kycProvider"))).toBe(false);
+  });
+
   it("every rule names at least one capability and lives under /admin", () => {
     for (const rule of ADMIN_ROUTE_ACCESS) {
       expect(rule.anyOf.length).toBeGreaterThan(0);

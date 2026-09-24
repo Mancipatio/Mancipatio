@@ -83,6 +83,32 @@ export async function loadOperationalAuthority(
     proposed: transfer.exists ? transfer.data.newAuthority : null,
   };
 }
+/**
+ * Refuses unless `signer` is the live blocklist authority (Talas 3.1 K7/K8):
+ * the BlocklistAuthority singleton read at `finalized`, owner-checked. Every
+ * blocklist change and hook-mode change calls it before building, so a wallet
+ * that merely looks like the authority in the UI (a confirmed-but-not-
+ * finalized rotation, a stale page) never signs a transaction the hook must
+ * reject. Returns the authority.
+ */
+export async function assertBlocklistAuthority(
+  rpc: Rpc,
+  signer: TransactionSigner | Address,
+): Promise<Address> {
+  const [pda] = await findBlocklistAuthorityPda();
+  const current = await fetchMaybeBlocklistAuthority(rpc, pda, {
+    commitment: "finalized",
+    abortSignal: AbortSignal.timeout(10_000),
+  });
+  if (!current.exists)
+    throw new Error("The blocklist authority is not initialized on this network");
+  if (current.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS)
+    throw new Error("Unexpected blocklist authority owner");
+  const wallet = typeof signer === "string" ? signer : signer.address;
+  if (current.data.authority !== wallet)
+    throw new Error(`Connect the blocklist authority (current: ${current.data.authority})`);
+  return current.data.authority;
+}
 export async function buildProposeOperationalAuthority(
   rpc: Rpc,
   kind: OperationalAuthorityKind,
