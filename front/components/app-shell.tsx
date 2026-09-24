@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { AccountMenu } from "@/components/account-menu";
 import { BrandLogo } from "@/components/brand-logo";
 import { TosGate } from "@/components/tos-gate";
@@ -54,6 +54,29 @@ export function AppShell({ children, section = "overview" }: {
   const [menuOpen, setMenuOpen] = useState(false);
   const menuButton = useRef<HTMLButtonElement>(null);
   const sidebar = useRef<HTMLElement>(null);
+  // The "Bring your asset on-chain" card is optional: it shows only while the
+  // sidebar has room for it, so the navigation itself never has to scroll.
+  const sidebarNav = useRef<HTMLElement>(null);
+  const sidebarBottom = useRef<HTMLDivElement>(null);
+  const promo = useRef<HTMLDivElement>(null);
+  const promoHeight = useRef(0);
+  const [promoFits, setPromoFits] = useState(true);
+  useLayoutEffect(() => {
+    const aside = sidebar.current, nav = sidebarNav.current, bottom = sidebarBottom.current, card = promo.current;
+    if (!aside || !nav || !bottom || !card) return;
+    const measure = () => {
+      if (!card.hidden) promoHeight.current = card.offsetHeight;
+      // The bottom block's auto top margin absorbs whatever space is free.
+      const slack = bottom.offsetTop - (nav.offsetTop + nav.offsetHeight);
+      setPromoFits(card.hidden
+        ? promoHeight.current > 0 && slack >= promoHeight.current
+        : aside.scrollHeight <= aside.clientHeight);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    for (const el of [aside, nav, card]) observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   const [previousPath, setPreviousPath] = useState(path);
   if (previousPath !== path) { setPreviousPath(path); setMenuOpen(false); }
   useEffect(() => {
@@ -96,7 +119,7 @@ export function AppShell({ children, section = "overview" }: {
       {menuOpen && <button className="app-sidebar-backdrop" aria-label="Close navigation" onClick={() => { setMenuOpen(false); menuButton.current?.focus(); }} />}
       <aside ref={sidebar} id="app-sidebar" className={`app-sidebar ${menuOpen ? "is-open" : ""}`} aria-label="Application navigation">
         <Link href="/" className="app-wordmark"><BrandLogo /></Link>
-        <nav aria-label="Main app">
+        <nav ref={sidebarNav} aria-label="Main app">
           <p className="app-nav-label">MARKETPLACE</p>{navItems(primary)}
           <p className="app-nav-label">YOUR WORKSPACE</p>{navItems(portfolio)}
           <p className="app-nav-label">BUILD ON MANCI</p>
@@ -104,8 +127,8 @@ export function AppShell({ children, section = "overview" }: {
           <Link href="/docs" className={`app-nav-link ${section === "documentation" ? "is-active" : ""}`} aria-current={section === "documentation" ? "location" : undefined}><IconFile className="h-[18px] w-[18px]" />Documentation</Link>
           {section === "admin" && <Link href="/admin" className="app-nav-link is-active" aria-current="location"><IconBuilding className="h-[18px] w-[18px]" />Administration</Link>}
         </nav>
-        <div className="app-sidebar-bottom">
-          <div className="app-issue-card"><span className="app-issue-symbol">↗</span><strong>Bring your asset on-chain.</strong><p>Start an equity raise or explore tokenization.</p><Link href="/apply">Create a raise <IconArrowUpRight className="h-4 w-4" /></Link></div>
+        <div ref={sidebarBottom} className="app-sidebar-bottom">
+          <div ref={promo} className="app-issue-card" hidden={!promoFits}><span className="app-issue-symbol">↗</span><strong>Bring your asset on-chain.</strong><p>Start an equity raise or explore tokenization.</p><Link href="/apply">Create a raise <IconArrowUpRight className="h-4 w-4" /></Link></div>
           <div className="app-sidebar-foot"><Link href="/about">About Manci ↗</Link><span><i />Solana · {networkLabel(network)}</span></div>
         </div>
       </aside>
