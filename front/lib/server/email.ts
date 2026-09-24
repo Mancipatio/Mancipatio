@@ -9,6 +9,13 @@
 //   SMTP_PORT       — optional, defaults to 465 (implicit TLS); 587 uses STARTTLS
 //   RESEND_API_KEY  — fallback transport when SMTP is not configured
 //   EMAIL_FROM      — sender; required for SMTP, optional for Resend
+//
+// `timeoutMs` (optional) is a HARD deadline: the SMTP connection, greeting
+// and socket timeouts are capped at it, and the whole send races a timer.
+// On expiry it returns { sent: false, error: "TIMEOUT" } and abandons the
+// send in progress (nodemailer cannot abort one; its late result is
+// swallowed and the capped socket timeout ends it soon after). A send that
+// completed anyway may therefore repeat: delivery is at-least-once.
 
 import "server-only";
 import nodemailer from "nodemailer";
@@ -38,11 +45,12 @@ async function sendSmtp(config: SmtpConfig, input: SendEmailInput): Promise<Send
     return { sent: false, error: "EMAIL_FROM not configured" };
   }
   try {
+    const cap = (value: number) => (input.timeoutMs ? Math.max(1, Math.min(value, input.timeoutMs)) : value);
     const transport = nodemailer.createTransport({
       host: config.host, port: config.port, secure: config.port === 465,
       requireTLS: config.port !== 465,
       auth: { user: config.user, pass: config.pass },
-      connectionTimeout: 10_000, greetingTimeout: 10_000, socketTimeout: 15_000,
+      connectionTimeout: cap(10_000), greetingTimeout: cap(10_000), socketTimeout: cap(15_000),
     });
     const info = await transport.sendMail({
       from, to: input.to, subject: input.subject, html: input.html,
@@ -74,6 +82,8 @@ export type SendEmailInput = {
   from?: string;
   /** Verification emails must not expose recipient/token diagnostics in logs. */
   redactErrors?: boolean;
+  /** Hard deadline for the whole send (see the header); absent = the defaults. */
+  timeoutMs?: number;
 };
 
 export type SendEmailResult = {
@@ -91,6 +101,23 @@ export type SendEmailResult = {
  *          (including when no transport is configured).
  */
 export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
+  const limit = input.timeoutMs;
+  if (limit === undefined) return sendOnce(input);
+  if (!Number.isFinite(limit) || limit <= 0) return { sent: false, error: "TIMEOUT" };
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<SendEmailResult>((resolve) => {
+    timer = setTimeout(() => resolve({ sent: false, error: "TIMEOUT" }), limit);
+  });
+  const attempt = sendOnce(input);
+  attempt.catch(() => {});
+  try {
+    return await Promise.race([attempt, expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function sendOnce(input: SendEmailInput): Promise<SendEmailResult> {
   const smtp = smtpConfig();
   if (smtp) return sendSmtp(smtp, input);
   const apiKey = process.env.RESEND_API_KEY;
@@ -110,7 +137,7 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   try {
     const res = await fetch("https://api.resend.com/emails", {
       method: "POST",
-      signal: AbortSignal.timeout(15_000),
+      signal: AbortSignal.timeout(input.timeoutMs ? Math.min(15_000, input.timeoutMs) : 15_000),
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",

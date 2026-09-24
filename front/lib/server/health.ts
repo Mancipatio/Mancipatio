@@ -104,11 +104,11 @@ export const FX_WARN_FRACTION = 0.8;
 const INDEX_FRESH_SECONDS = 5 * 60;
 const CACHE_MS = 5_000;
 
-const TIMEOUT = Symbol("timeout");
+export const TIMEOUT = Symbol("timeout");
 
 /** Run `work` with an abort signal; resolve TIMEOUT when it takes longer than
  * `ms`. The late result (or rejection) of the abandoned work is discarded. */
-async function bounded<T>(work: (signal: AbortSignal) => PromiseLike<T>, ms: number): Promise<T | typeof TIMEOUT> {
+export async function bounded<T>(work: (signal: AbortSignal) => PromiseLike<T>, ms: number): Promise<T | typeof TIMEOUT> {
   const controller = new AbortController();
   let timer: ReturnType<typeof setTimeout> | undefined;
   const expired = new Promise<typeof TIMEOUT>((resolve) => {
@@ -123,7 +123,7 @@ async function bounded<T>(work: (signal: AbortSignal) => PromiseLike<T>, ms: num
   }
 }
 
-function ageSeconds(value: unknown, now: number): number | null {
+export function ageSeconds(value: unknown, now: number): number | null {
   if (typeof value !== "string") return null;
   const at = Date.parse(value);
   if (!Number.isFinite(at)) return null;
@@ -162,8 +162,10 @@ async function checkIndexer(sb: SupabaseClient | null, network: Network, now: nu
   }
 }
 
-async function checkQueue(
-  sb: SupabaseClient | null, table: "indexer_jobs" | "purchase_evidence_jobs", network: Network, now: number,
+export type QueueTable = "indexer_jobs" | "purchase_evidence_jobs" | "onchain_event_jobs" | "spv_issuance_jobs";
+
+export async function checkQueue(
+  sb: SupabaseClient | null, table: QueueTable, network: Network, now: number,
   stalledStatus: "warn" | "fail",
 ): Promise<QueueCheck> {
   const empty = { pending: null, oldestPendingAgeSeconds: null } as const;
@@ -309,7 +311,7 @@ export function databaseNetworkMatches(database: Network, deployment: Network): 
 // PostgREST / PostgreSQL codes for "0070 or its identity row is missing".
 const IDENTITY_MISSING = new Set(["55000", "PGRST202", "42883"]);
 
-async function checkDatabaseNetwork(sb: SupabaseClient | null, network: Network): Promise<DatabaseNetworkCheck> {
+export async function checkDatabaseNetwork(sb: SupabaseClient | null, network: Network): Promise<DatabaseNetworkCheck> {
   if (!sb) return { status: "fail", reason: "not_configured", network: null };
   try {
     const result = await bounded((signal) => sb.rpc("deployment_network").abortSignal(signal), HEALTH_DB_TIMEOUT_MS);
