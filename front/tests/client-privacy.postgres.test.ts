@@ -6,6 +6,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LocalPostgres } from "./helpers/local-postgres";
+import { applyMigrations } from "./helpers/migrations";
 
 const db = new LocalPostgres();
 const dir = join(process.cwd(), "supabase/migrations");
@@ -62,7 +63,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("client privacy (m
           (7, now() - interval '1 days', '${A}', '${WA}', 'v2', 'onboarding');
         select setval(pg_get_serial_sequence('public.tos_acceptances', 'id'), 100);`);
       q(readFileSync(join(dir, target!), "utf8"));
-      for (const file of after) q(readFileSync(join(dir, file), "utf8"));
+      applyMigrations(db, { network: "devnet", files: after });
     } catch (error) {
       db.close();
       throw error;

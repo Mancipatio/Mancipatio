@@ -1,10 +1,12 @@
 // Local-only integration harness. It never reads DATABASE_URL or connects to an
 // existing server. Tests opt in through RUN_LOCAL_POSTGRES_TESTS=1. POSTGRES_BIN
 // can point at a platform-specific installation directory.
-import { spawn, spawnSync } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import { mkdtempSync, appendFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+
+export type PsqlVariables = Record<string, string>;
 
 export class LocalPostgres {
   private readonly bin = process.env.POSTGRES_BIN ?? "/opt/homebrew/opt/postgresql@15/bin";
@@ -20,9 +22,12 @@ export class LocalPostgres {
     }
     return result.stdout.trim();
   }
-  private args() {
+  private args(vars: PsqlVariables = {}) {
     if (!this.started) throw new Error("The isolated PostgreSQL cluster is not running");
-    return ["-X", "-h", this.socket, "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atq"];
+    return [
+      "-X", "-h", this.socket, "-U", "postgres", "-d", "postgres", "-v", "ON_ERROR_STOP=1", "-Atq",
+      ...Object.entries(vars).flatMap(([name, value]) => ["-v", `${name}=${value}`]),
+    ];
   }
   initialize() {
     if (this.dir) throw new Error("This isolated PostgreSQL cluster is already initialized");
@@ -50,12 +55,19 @@ export class LocalPostgres {
       this.started = false;
     }
   }
-  query(query: string) {
-    return this.command("psql", this.args(), query);
+  /** Run SQL (psql meta-commands allowed) from stdin. `vars` become psql
+   * variables (`-v name=value`), read in SQL as :'name'. */
+  query(query: string, vars?: PsqlVariables) {
+    return this.command("psql", this.args(vars), query);
   }
-  queryAsync(query: string): Promise<string> {
+  /** Run psql with extra arguments (e.g. several `-f`), never throwing: the
+   * caller inspects the exit status and output. */
+  psql(extra: string[], vars?: PsqlVariables): SpawnSyncReturns<string> {
+    return spawnSync(join(this.bin, "psql"), [...this.args(vars), ...extra], { encoding: "utf8", timeout: 20_000 });
+  }
+  queryAsync(query: string, vars?: PsqlVariables): Promise<string> {
     return new Promise((resolve, reject) => {
-      const child = spawn(join(this.bin, "psql"), this.args());
+      const child = spawn(join(this.bin, "psql"), this.args(vars));
       let out = ""; let err = "";
       child.stdout.on("data", (chunk) => { out += chunk; });
       child.stderr.on("data", (chunk) => { err += chunk; });

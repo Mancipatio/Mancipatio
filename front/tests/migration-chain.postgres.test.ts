@@ -1,8 +1,24 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LocalPostgres } from "./helpers/local-postgres";
+import {
+  applyMigrations,
+  DYNAMIC_DEFAULT_TABLES,
+  migrationFiles,
+  migrationNumber,
+  MIGRATIONS_DIR,
+  SUPABASE_PLATFORM_SQL,
+} from "./helpers/migrations";
 const db = new LocalPostgres();
+// Every public table with a `network` column, and its default expression.
+const NETWORK_COLUMNS = `select c.relname||'|'||coalesce(pg_get_expr(d.adbin,d.adrelid),'')
+  from pg_attribute a join pg_class c on c.oid=a.attrelid join pg_namespace n on n.oid=c.relnamespace
+  left join pg_attrdef d on d.adrelid=a.attrelid and d.adnum=a.attnum
+  where n.nspname='public' and c.relkind in ('r','p') and a.attname='network' and a.attnum>0 and not a.attisdropped
+  order by c.relname`;
+const GUARDED = `select c.relname from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace
+  where n.nspname='public' and t.tgname='manci_network_guard' and not t.tgisinternal order by c.relname`;
 describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
   "complete repository migration chain on isolated PostgreSQL",
   () => {
@@ -12,29 +28,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         db.initialize();
         // Model the platform-owned Storage schema and default Supabase grants.
         // All application tables/functions are created from actual migrations.
-        db.query(`create role anon;create role authenticated;create role service_role bypassrls;
-        create schema storage;
-        create table storage.buckets(id text primary key,name text,public boolean default false,file_size_limit bigint,allowed_mime_types text[]);
-        create table storage.objects(id uuid primary key default gen_random_uuid(),bucket_id text references storage.buckets(id),name text);
-        alter table storage.objects enable row level security;
-        grant usage on schema public,storage to anon,authenticated,service_role;
-        alter default privileges in schema public grant all on tables to anon,authenticated,service_role;
-        alter default privileges in schema public grant all on sequences to anon,authenticated,service_role;
-        grant all on storage.objects,storage.buckets to service_role;
-        grant all on storage.objects to anon,authenticated;`);
-        const dir = join(process.cwd(), "supabase/migrations");
-        for (const file of readdirSync(dir)
-          .filter((f) => /^\d+.*\.sql$/.test(f))
-          .sort()) {
-          try {
-            db.query(readFileSync(join(dir, file), "utf8"));
-            applied.push(file);
-          } catch (error) {
-            throw new Error(
-              `Migration ${file} failed: ${error instanceof Error ? error.message : error}`,
-            );
-          }
-        }
+        db.query(SUPABASE_PLATFORM_SQL);
+        applied.push(...applyMigrations(db, { network: "devnet" }));
       } catch (error) {
         db.close();
         throw error;
@@ -52,6 +47,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0067_sales_sale_approval.sql");
       expect(applied).toContain("0068_custody_vault_kyc_registry.sql");
       expect(applied).toContain("0069_indexer_closed_rows.sql");
+      expect(applied).toContain("0070_deployment_identity.sql");
+      expect(applied).toContain("0071_network_guard.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));
@@ -101,7 +98,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
     });
     it("publishes the maintenance flag read-only, without the operator, and re-applies cleanly", () => {
       const table = "public.platform_maintenance";
-      db.query(readFileSync(join(process.cwd(), "supabase/migrations/0061_maintenance_mode.sql"), "utf8"));
+      db.query(readFileSync(join(MIGRATIONS_DIR, "0061_maintenance_mode.sql"), "utf8"));
       db.query(`set role service_role;insert into ${table}(network,enabled,message,updated_by) values ('devnet',true,'Upgrade','ops')`);
       for (const role of ["anon", "authenticated"]) {
         expect(db.query(`set role ${role};select network,enabled,message from ${table}`)).toBe("devnet|t|Upgrade");
@@ -116,6 +113,63 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(() => db.query(`insert into ${table}(network) values ('prod')`)).toThrow(/check constraint/);
       expect(() => db.query(`update ${table} set message=repeat('x',501)`)).toThrow(/check constraint/);
       db.query(`delete from ${table}`);
+    });
+    it("guards every public network table and leaves no literal network default (0071 rules)", () => {
+      const columns = db.query(NETWORK_COLUMNS).split("\n").map((line) => line.split("|"));
+      expect(columns.length).toBeGreaterThanOrEqual(DYNAMIC_DEFAULT_TABLES.length);
+      // Rule 1: deployment_network() or no default, never a literal.
+      for (const [table, fallback] of columns)
+        expect(["", "deployment_network()"], `${table} default`).toContain(fallback);
+      expect(columns.filter(([, fallback]) => fallback === "deployment_network()").map(([table]) => table).sort())
+        .toEqual([...DYNAMIC_DEFAULT_TABLES].sort());
+      // Rule 2: every network table carries the guard.
+      expect(db.query(GUARDED).split("\n")).toEqual(columns.map(([table]) => table));
+      // Re-applying 0070 and 0071 is a no-op that keeps the identity and the guard.
+      for (const file of ["0070_deployment_identity.sql", "0071_network_guard.sql"])
+        db.query(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
+      expect(db.query("select public.deployment_network()")).toBe("devnet");
+      expect(db.query(GUARDED).split("\n")).toHaveLength(columns.length);
+    });
+    it("keeps the deployment identity private while every API role can read the network", () => {
+      for (const role of ["anon", "authenticated", "service_role"]) {
+        expect(() => db.query(`set role ${role};select * from mancipatio_ops.deployment_identity`)).toThrow(/permission denied/);
+        expect(db.query(`set role ${role};select public.deployment_network()`)).toBe("devnet");
+        expect(() => db.query(`set role ${role};select mancipatio_ops.install_network_guards()`)).toThrow(/permission denied/);
+      }
+    });
+    it("never seeds a literal network after 0071 (rule 3, source check)", () => {
+      for (const file of migrationFiles().filter((f) => migrationNumber(f) > 71)) {
+        const source = readFileSync(join(MIGRATIONS_DIR, file), "utf8").replace(/--.*$/gm, "");
+        expect(source, file).not.toMatch(/default\s+'(mainnet|devnet|testnet|localnet)'/i);
+      }
+    });
+  },
+);
+
+// The same chain on a project whose identity is mainnet. A later migration
+// that seeds a literal 'devnet' row (or defaults to one) fails here.
+const mainnet = new LocalPostgres();
+describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
+  "complete repository migration chain under a mainnet identity",
+  () => {
+    let applied: string[] = [];
+    beforeAll(() => {
+      try {
+        mainnet.initialize();
+        mainnet.query(SUPABASE_PLATFORM_SQL);
+        applied = applyMigrations(mainnet, { network: "mainnet" });
+      } catch (error) {
+        mainnet.close();
+        throw error;
+      }
+    }, 60_000);
+    afterAll(() => mainnet.close());
+    it("applies every migration, and every network default resolves to mainnet", () => {
+      expect(applied).toEqual(migrationFiles());
+      expect(mainnet.query("select public.deployment_network()")).toBe("mainnet");
+      expect(mainnet.query(GUARDED).split("\n")).toEqual(
+        mainnet.query(NETWORK_COLUMNS).split("\n").map((line) => line.split("|")[0]),
+      );
     });
   },
 );

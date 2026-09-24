@@ -2,10 +2,11 @@
 // Runs on an isolated PostgreSQL with the WHOLE migration chain applied, so
 // the 0027 SPV trigger, 0056 raise limits and the launch_applications
 // triggers are the real ones.
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { LocalPostgres } from "./helpers/local-postgres";
+import { applyMigrations } from "./helpers/migrations";
 
 const db = new LocalPostgres();
 const sql = (query: string) => db.query(query);
@@ -54,9 +55,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
         grant all on storage.objects,storage.buckets to service_role;
         grant all on storage.objects to anon,authenticated;`);
       const dir = join(process.cwd(), "supabase/migrations");
-      for (const file of readdirSync(dir).filter((f) => /^\d+.*\.sql$/.test(f)).sort()) {
-        sql(readFileSync(join(dir, file), "utf8"));
-      }
+      applyMigrations(db, { network: "devnet" });
       // Re-runnable: both files apply cleanly a second time.
       sql(readFileSync(join(dir, "0066_sale_capacity.sql"), "utf8"));
       sql(readFileSync(join(dir, "0067_sales_sale_approval.sql"), "utf8"));
@@ -275,7 +274,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
   });
 
   it("an SPV subject must belong to the network", () => {
-    sql(`update public.spvs set network='mainnet' where id='${SPV}'`);
+    sql(`update public.spvs set network='testnet' where id='${SPV}'`);
     expect(() => reserve({ saleId: 1 })).toThrow(/SPV_NOT_FOUND/);
     expect(() => capacity()).toThrow(/SPV_NOT_FOUND/);
   });
