@@ -25,10 +25,15 @@ function platform(db: LocalPostgres, network: Net) {
     create table vault.secrets(name text primary key,decrypted_secret text);
     insert into vault.secrets values('mancipatio_retry_worker_${network}',repeat('x',64));
     create view vault.decrypted_secrets as select * from vault.secrets;
-    create table cron.job(jobid bigint primary key,jobname text unique,schedule text,command text,active boolean);
+    -- pg_cron keys named jobs by (jobname, username); scheduling an existing
+    -- name for the same user updates schedule and command in place.
+    create table cron.job(jobid bigint primary key,jobname text,schedule text,command text,active boolean,
+      username text not null default current_user,unique(jobname,username));
     create table cron.job_run_details(jobid bigint,status text,start_time timestamptz);
-    create function cron.schedule(n text,s text,c text) returns bigint language plpgsql as $$ begin
-      insert into cron.job values(1,n,s,c,true) on conflict(jobname) do update set schedule=excluded.schedule,command=excluded.command;return 1;end;$$;
+    create function cron.schedule(n text,s text,c text) returns bigint language plpgsql as $$ declare id bigint;begin
+      insert into cron.job(jobid,jobname,schedule,command,active) values((select coalesce(max(jobid),0)+1 from cron.job),n,s,c,true)
+        on conflict(jobname,username) do update set schedule=excluded.schedule,command=excluded.command returning jobid into id;
+      return id;end;$$;
     create function cron.alter_job(bigint,active boolean) returns void language sql as $$ update cron.job set active=$2 where jobid=$1 $$;
     create type extensions.http_header as(field varchar,value varchar);
     create type extensions.http_request as(method text,uri varchar,headers extensions.http_header[],content_type varchar,content varchar);
@@ -149,6 +154,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1").each(["devnet", "m
     it("status and preflight SQL read this network's job and config", () => {
       const status = db.query(readFileSync(join(process.cwd(), "scripts/ops/retry-scheduler-status.sql"), "utf8"));
       expect(status).toContain(`mancipatio-retry-${network}`);
+      // jobid|jobname|username|schedule|active|command_ok
+      expect(status.split("\n")[0]).toBe(`1|mancipatio-retry-${network}|postgres|* * * * *|f|t`);
       expect(status).toContain(ORIGINS[network]);
       const preflight = JSON.parse(db.query(readFileSync(join(process.cwd(), "scripts/preflight/supabase-readonly-worker-status.sql"), "utf8")));
       expect(preflight).toMatchObject({
@@ -181,6 +188,26 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("retry scheduler: 
     }
   }, 30_000);
   afterAll(() => db.close());
+
+  // The install checks cron.job itself before commit, so a job the model
+  // above would not produce still stops it: nothing changes.
+  it.each([
+    ["the same job name under another role", "mancipatio-retry-devnet", "supabase_admin", /Expected exactly one disabled mancipatio-retry-devnet job/],
+    ["another job calling the legacy function", "mancipatio-retry-devnet-old", "postgres", /still calls mancipatio_ops\.invoke_retry_worker_devnet/],
+  ])("refuses and rolls back with %s", (_label, jobname, username, message) => {
+    db.query(`insert into cron.job values(7,'${jobname}','* * * * *','select mancipatio_ops.invoke_retry_worker_devnet();',true,'${username}')`);
+    try {
+      expect(() => install(db, "devnet", ORIGINS.devnet)).toThrow(message);
+      expect(db.query("select to_regprocedure('mancipatio_ops.invoke_retry_worker_devnet()') is not null")).toBe("t");
+      expect(db.query("select to_regclass('mancipatio_ops.retry_worker_config') is null")).toBe("t");
+      expect(db.query("select string_agg(jobid||'|'||active||'|'||command,';' order by jobid) from cron.job")).toBe(
+        "1|true|set statement_timeout='60s'; select mancipatio_ops.invoke_retry_worker_devnet();;" +
+        "7|true|select mancipatio_ops.invoke_retry_worker_devnet();",
+      );
+    } finally {
+      db.query("delete from cron.job where jobid=7");
+    }
+  });
 
   it("drops the devnet-only function, rewrites the job command in place and leaves the job disabled", () => {
     install(db, "devnet", ORIGINS.devnet);

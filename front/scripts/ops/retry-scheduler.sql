@@ -14,7 +14,10 @@
 --   select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-retry-<network>';
 -- Re-running updates the config, the function and the job, and disables the
 -- job again. It also upgrades the legacy devnet install in place (same job
--- name; mancipatio_ops.invoke_retry_worker_devnet() is dropped).
+-- name; mancipatio_ops.invoke_retry_worker_devnet() is dropped). The whole
+-- install rolls back unless cron.job then holds exactly one disabled
+-- 'mancipatio-retry-<network>' job running invoke_retry_worker() and no job
+-- still calling the dropped function; re-enable only after a clean run.
 -- Synchronous http keeps Authorization in memory; pg_net is not used here.
 
 -- psql does not substitute variables inside $$ bodies: hand the origin to
@@ -229,6 +232,29 @@ select cron.schedule('mancipatio-retry-'||public.deployment_network(),'* * * * *
 select cron.alter_job(jobid,active:=false)
   from cron.job where jobname='mancipatio-retry-'||public.deployment_network();
 drop function if exists mancipatio_ops.invoke_retry_worker_devnet();
+
+-- Postcondition, checked against the real cron.job before commit (pg_cron
+-- keys jobs by name AND user, so a copy scheduled by another role would
+-- survive the in-place update): exactly one job of this name, disabled,
+-- running the new function, and no job left calling the dropped one.
+do $$
+declare
+  job_name text := 'mancipatio-retry-'||public.deployment_network();
+  expected text := 'set statement_timeout=''60s''; select mancipatio_ops.invoke_retry_worker();';
+  named integer;
+  good integer;
+begin
+  select count(*), count(*) filter (where not active and command = expected)
+    into named, good
+    from cron.job where jobname = job_name;
+  if named <> 1 or good <> 1 then
+    raise exception 'Expected exactly one disabled % job running mancipatio_ops.invoke_retry_worker(); found % job(s) with that name. Check cron.job (jobname, username, active, command) and unschedule the stray one.', job_name, named;
+  end if;
+  if exists (select 1 from cron.job where command like '%invoke_retry_worker_devnet%') then
+    raise exception 'A cron job still calls mancipatio_ops.invoke_retry_worker_devnet(), which this install drops. Unschedule it first.';
+  end if;
+end;
+$$;
 
 select j.jobname, j.active, c.network, c.origin
 from cron.job j cross join mancipatio_ops.retry_worker_config c

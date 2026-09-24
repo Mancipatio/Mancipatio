@@ -1,7 +1,8 @@
 -- Read-only metadata from the synchronous worker. No request/response contents.
 --   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/retry-scheduler-status.sql
 begin read only;
-select jobid,jobname,schedule,active
+select jobid,jobname,username,schedule,active,
+  command='set statement_timeout=''60s''; select mancipatio_ops.invoke_retry_worker();' as command_ok
 from cron.job where jobname='mancipatio-retry-'||public.deployment_network();
 select network,origin,updated_at,updated_by from mancipatio_ops.retry_worker_config;
 select id,requested_at,completed_at,duration_ms,http_status,ok,outcome,worker_state,
