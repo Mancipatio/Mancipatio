@@ -36,13 +36,18 @@ import {
   OTTERSEC_VERIFY_PROGRAM,
   SQUADS_V4_PROGRAM,
   assertOnlyVaultSigner,
+  OTTER_VERIFY_IX,
   checkSquadsAccount,
   decodeMultisig,
+  decodeVerifyInstructionData,
   encodeVaultTransaction,
+  encodeVerifyInstructionData,
   inspectExternalTransaction,
   otterVerifyPda,
   splitBySize,
   squadsVaultPda,
+  verifyParamProblems,
+  type VerifyParams,
 } from "@/scripts/chain/lib/squads";
 import { assertSquadsVerified, squadsExportTool } from "@/scripts/chain/lib/squads-export";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
@@ -52,6 +57,19 @@ const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures/squ
 const blockhash = { blockhash: "11111111111111111111111111111111" as never, lastValidBlockHeight: BigInt(100) };
 /** discriminator, create_key, config_authority, threshold, time_lock, 2 × u64, rent_collector None, bump, member count. */
 const MULTISIG_HEADER = 8 + 32 + 32 + 2 + 4 + 8 + 8 + 1 + 1 + 4;
+/** The Release base image of the test Release (tests/helpers/chain-world releaseDir). */
+const BASE_IMAGE = "solanafoundation/solana-verifiable-build:3.1.13";
+/** Build arguments as `solana-verify export-pda-tx … --base-image <image>` stores them. */
+function verifyParams(library: string, overrides: Partial<VerifyParams> = {}): VerifyParams {
+  return {
+    version: "0.5.1",
+    gitUrl: "https://github.com/Mancipatio/Mancipatio",
+    commit: "a".repeat(40),
+    args: ["--mount-path", "program", "--library-name", library, "--base-image", BASE_IMAGE],
+    deployedSlot: BigInt(4000),
+    ...overrides,
+  };
+}
 
 type Exported = {
   header: { preconditions: string[]; postconditions: string[]; feePayer: string };
@@ -315,6 +333,7 @@ describe("chain:squads-export ops", () => {
     ): Instruction => {
       const program = opts.program ?? REGISTRY;
       const target = opts.pda === undefined ? pda : opts.pda;
+      const library = program === HOOK ? "transfer_hook" : "asset_registry";
       return {
         programAddress: OTTERSEC_VERIFY_PROGRAM,
         accounts: [
@@ -324,7 +343,7 @@ describe("chain:squads-export ops", () => {
           { address: SYSTEM, role: AccountRole.READONLY },
           ...(opts.extra ?? []),
         ],
-        data: new Uint8Array([1, 2, 3]),
+        data: encodeVerifyInstructionData("initialize", verifyParams(library)),
       };
     };
     const wrap = (ixs: Instruction[]) => exportOp(w, "wrap-external", { transactionBase58: external(ixs) });
@@ -413,6 +432,146 @@ describe("chain:squads-export ops", () => {
     const twoSigners = getTransferSolInstruction({ source: other, destination: key(81), amount: BigInt(5) });
     expect((await wrap([verify(), twoSigners])).error).toMatch(/vault as its only signer/);
     await expect(inspectExternalTransaction("not-base58!", vault, [REGISTRY])).rejects.toThrow(/not a base58 wire transaction/);
+  });
+
+  it("verify instruction data: initialize/update/close as solana-verify 0.5.1 builds them", () => {
+    // The instruction data of the 6.1 rehearsal's export-pda-tx for asset_registry (no --base-image).
+    const rehearsal = Buffer.from(
+      "afaf6d1f0d989bed05000000302e352e312800000068747470733a2f2f6769746875622e636f6d2f4d616e6369706174" +
+        "696f2f4d616e6369706174696f2800000065356334643161653165323034383033643237353262376632663865643932" +
+        "626365333739323337040000000c0000002d2d6d6f756e742d706174680700000070726f6772616d0e0000002d2d6c69" +
+        "62726172792d6e616d650e00000061737365745f7265676973747279b901000000000000",
+      "hex",
+    );
+    const decoded = decodeVerifyInstructionData(new Uint8Array(rehearsal));
+    expect(decoded).toEqual({
+      kind: "initialize",
+      params: {
+        version: "0.5.1",
+        gitUrl: "https://github.com/Mancipatio/Mancipatio",
+        commit: "e5c4d1ae1e204803d2752b7f2f8ed92bce379237",
+        args: ["--mount-path", "program", "--library-name", "asset_registry"],
+        deployedSlot: BigInt(441),
+      },
+    });
+    // Without --base-image the remote build infers another image: refused.
+    const expected = { libraryName: "asset_registry", commit: "e5c4d1ae1e204803d2752b7f2f8ed92bce379237", baseImage: BASE_IMAGE };
+    if (decoded.kind === "close") throw new Error("unreachable");
+    expect(verifyParamProblems(decoded.params, expected)).toEqual([
+      "--base-image is missing (the remote build would infer another image from Cargo.lock)",
+    ]);
+    const params = verifyParams("asset_registry");
+    for (const kind of ["initialize", "update"] as const) {
+      expect(decodeVerifyInstructionData(encodeVerifyInstructionData(kind, params))).toEqual({ kind, params });
+    }
+    expect(decodeVerifyInstructionData(OTTER_VERIFY_IX.close)).toEqual({ kind: "close" });
+    expect(() => decodeVerifyInstructionData(Uint8Array.of(...OTTER_VERIFY_IX.close, 0))).toThrow(/unexpected data/);
+    expect(() => decodeVerifyInstructionData(new Uint8Array([1, 2, 3]))).toThrow(/not initialize, update or close/);
+    const data = encodeVerifyInstructionData("initialize", params);
+    expect(() => decodeVerifyInstructionData(Uint8Array.of(...data, 0))).toThrow(/trailing bytes/);
+    expect(() => decodeVerifyInstructionData(data.subarray(0, data.length - 1))).toThrow(/truncated/);
+  });
+
+  it("verify build arguments must reproduce the Release: mount path, library, base image, commit", () => {
+    const expected = { libraryName: "transfer_hook", commit: "b".repeat(40), baseImage: BASE_IMAGE };
+    const ok = verifyParams("transfer_hook", { commit: "b".repeat(40) });
+    expect(verifyParamProblems(ok, expected)).toEqual([]);
+    expect(verifyParamProblems({ ...ok, args: [...ok.args, "--arch", "v3"] }, expected)).toEqual([]);
+    const problems = (args: string[], overrides: Partial<VerifyParams> = {}) => verifyParamProblems({ ...ok, args, ...overrides }, expected);
+    expect(problems(["--mount-path", "program", "--library-name", "asset_registry", "--base-image", BASE_IMAGE])).toEqual([
+      "--library-name is asset_registry, not transfer_hook",
+    ]);
+    expect(problems(["--library-name", "transfer_hook", "--base-image", BASE_IMAGE])).toEqual(["--mount-path is missing, not program"]);
+    expect(problems([...ok.args.slice(0, 4), "--base-image", "solanafoundation/solana-verifiable-build:3.0.1"])).toEqual([
+      `--base-image is solanafoundation/solana-verifiable-build:3.0.1, not the Release's ${BASE_IMAGE}`,
+    ]);
+    expect(problems([...ok.args, "--bpf"])).toEqual(['unexpected build argument "--bpf" (only --mount-path, --library-name, --base-image, --arch)']);
+    expect(problems([...ok.args, "--", "--features", "x"])[0]).toMatch(/unexpected build argument "--"/);
+    expect(problems([...ok.args, "--arch", "v9"])).toEqual(["--arch v9 is not v0..v3"]);
+    expect(problems([...ok.args, "--base-image", BASE_IMAGE])).toEqual(["--base-image is given twice"]);
+    expect(problems([...ok.args.slice(0, 4), "--base-image"])).toEqual([
+      "--base-image has no value",
+      "--base-image is missing (the remote build would infer another image from Cargo.lock)",
+    ]);
+    expect(problems(ok.args, { commit: "c".repeat(40) })).toEqual([`commit ${"c".repeat(40)} is not the Release commit ${"b".repeat(40)}`]);
+    expect(problems(ok.args, { commit: "HEAD" })).toEqual(['commit "HEAD" is not a full 40-hex commit']);
+    // Without a Release, the base image must still be pinned.
+    expect(verifyParamProblems(ok, { libraryName: "transfer_hook", commit: null, baseImage: null })).toEqual([]);
+    expect(verifyParamProblems({ ...ok, args: ok.args.slice(0, 4) }, { libraryName: "transfer_hook", commit: null, baseImage: null })).toEqual([
+      "--base-image is missing (the remote build would infer another image from Cargo.lock)",
+    ]);
+  });
+
+  it("wrap-external refuses verify args that would not reproduce the Release, and a stale deployed_slot", async () => {
+    const w = await handedOver();
+    const vault = w.keys.vault;
+    const release = releaseDir();
+    const pda = await otterVerifyPda(vault, HOOK);
+    const verifyIx = (params: VerifyParams, kind: "initialize" | "update" = "initialize"): Instruction => ({
+      programAddress: OTTERSEC_VERIFY_PROGRAM,
+      accounts: [
+        { address: pda, role: AccountRole.WRITABLE },
+        { address: vault, role: AccountRole.READONLY_SIGNER },
+        { address: HOOK, role: AccountRole.READONLY },
+        { address: "11111111111111111111111111111111" as Address, role: AccountRole.READONLY },
+      ],
+      data: encodeVerifyInstructionData(kind, params),
+    });
+    const closeIx: Instruction = {
+      programAddress: OTTERSEC_VERIFY_PROGRAM,
+      accounts: [
+        { address: pda, role: AccountRole.WRITABLE },
+        { address: vault, role: AccountRole.READONLY_SIGNER },
+        { address: HOOK, role: AccountRole.READONLY },
+      ],
+      data: OTTER_VERIFY_IX.close,
+    };
+    const external = (ix: Instruction) =>
+      getBase58Decoder().decode(
+        getTransactionEncoder().encode(
+          compileTransaction(
+            pipe(
+              createTransactionMessage({ version: "legacy" }),
+              (m) => setTransactionMessageFeePayer(vault, m),
+              (m) => setTransactionMessageLifetimeUsingBlockhash(blockhash, m),
+              (m) => appendTransactionMessageInstructions([setComputeUnitPriceInstruction(BigInt(100_000)), ix], m),
+            ),
+          ),
+        ),
+      );
+    const wrap = (ix: Instruction, withRelease = true) =>
+      exportOp(w, "wrap-external", { transactionBase58: external(ix) }, withRelease ? { CHAIN_RELEASE_DIR: release } : {});
+
+    const ok = await wrap(verifyIx(verifyParams("transfer_hook")));
+    expect(ok.error ?? null).toBeNull();
+    expect((ok.export as Exported).header.preconditions.join("\n")).toContain(
+      `transfer_hook verify initialize: https://github.com/Mancipatio/Mancipatio at ${"a".repeat(40)}, build args [--mount-path program --library-name transfer_hook --base-image ${BASE_IMAGE}], deployed_slot 4000, solana-verify 0.5.1 (commit and base image = the Release's hashes.txt)`,
+    );
+    const noRelease = await wrap(verifyIx(verifyParams("transfer_hook")), false);
+    expect((noRelease.export as Exported).header.preconditions.join("\n")).toContain("(not checked against a Release: no CHAIN_RELEASE_DIR)");
+    expect((await wrap(verifyIx(verifyParams("transfer_hook"), "update"))).error ?? null).toBeNull();
+
+    // What export-pda-tx writes without --base-image (the 6.1 rehearsal's PDAs).
+    const unpinned = await wrap(verifyIx(verifyParams("transfer_hook", { args: ["--mount-path", "program", "--library-name", "transfer_hook"] })));
+    expect(unpinned.status).toBe("failed");
+    expect(unpinned.error).toMatch(/transfer_hook verify initialize: --base-image is missing/);
+    expect(unpinned.export).toBeUndefined();
+    expect((await wrap(verifyIx(verifyParams("transfer_hook", { commit: "d".repeat(40) })))).error).toMatch(/is not the Release commit/);
+    expect((await wrap(verifyIx(verifyParams("asset_registry")))).error).toMatch(/--library-name is asset_registry, not transfer_hook/);
+    // deployed_slot must be the ProgramData's last deploy slot (4000 in the fake).
+    expect((await wrap(verifyIx(verifyParams("transfer_hook", { deployedSlot: BigInt(3999) })))).error).toMatch(
+      /deployed_slot 3999 is not the ProgramData's last deploy slot 4000/,
+    );
+    // A close carries no build arguments.
+    const closed = await wrap(closeIx);
+    expect(closed.error ?? null).toBeNull();
+    expect((closed.export as Exported).header.preconditions.join("\n")).toContain(`transfer_hook: close the verify PDA ${pda}`);
+    // One verify instruction per program.
+    const both: Instruction = {
+      ...verifyIx(verifyParams("transfer_hook")),
+      accounts: [...verifyIx(verifyParams("transfer_hook")).accounts!, { address: REGISTRY, role: AccountRole.READONLY }],
+    };
+    expect((await wrap(both)).error).toMatch(/more than one of our program IDs/);
   });
 
   it("refuses when the multisig does not match the role map (override off mainnet only)", async () => {

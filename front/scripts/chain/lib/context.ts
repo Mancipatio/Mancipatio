@@ -31,6 +31,7 @@ import {
   publicErrorMessage,
   readChainConfig,
   repoRoot,
+  sourceTreeDirty,
   toJson,
   type ChainConfig,
   type ChainEnv,
@@ -143,6 +144,7 @@ export async function runTool(
     genesisHash: config.expectedGenesis,
     rpcHost: config.rpcHost,
     headCommit: gitHead(root),
+    sourceTreeDirty: sourceTreeDirty(root),
     startedUtc: new Date().toISOString(),
   };
   const ctx: ToolContext = {

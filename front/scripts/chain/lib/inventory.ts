@@ -2,7 +2,8 @@
  * Tool 3: inventory (`chain:inventory`), read-only on any network
  * (design-3.3 §6). Collects programs, canonical IDL, platform, admins,
  * blocklist authority, KYC registries, authority transfers, issuer
- * recoveries, role drift, leftover buffers and the Squads multisig, then
+ * recoveries, role drift, leftover buffers, the Squads multisig and its
+ * proposals that are not final, then
  * classifies findings per phase (`in-progress | pre-handover | handed-over`).
  *
  * `F/scripts/ops/devnet-rollout-inventory.mjs` is unchanged; this tool is
@@ -71,7 +72,7 @@ import { executableHash, loadRelease, releaseEvidence, type Release } from "./re
 import { loadRoleMap, mapKeys, type RoleMap } from "./role-map";
 import type { ChainRpc } from "./rpc";
 import { ChainGateError, IDL_PROGRAMS, sha256Hex, type ProgramName } from "./safety";
-import { checkSquadsAccount, type SquadsCheck } from "./squads";
+import { checkSquadsAccount, scanOpenProposals, type ProposalScan, type SquadsCheck } from "./squads";
 
 export type InventoryPhase = "in-progress" | "pre-handover" | "handed-over";
 export const PHASES: InventoryPhase[] = ["in-progress", "pre-handover", "handed-over"];
@@ -138,6 +139,8 @@ export type Inventory = {
     scanErrors: string[];
   };
   squads: SquadsCheck | null;
+  /** Proposals of the multisig that are not Executed, Rejected or Cancelled. */
+  squadsProposals: ProposalScan | null;
   lockPresent: boolean;
   decodeErrors: string[];
 };
@@ -392,6 +395,10 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
     const account = await fetchRawAccount(rpc, map.squads.multisig);
     squads = await checkSquadsAccount(account ? { owner: account.owner, data: account.data } : null, map.squads);
   }
+  let squadsProposals: ProposalScan | null = null;
+  if (map && squads?.decoded) {
+    squadsProposals = await scanOpenProposals(map.squads.multisig, squads.decoded, (addresses) => fetchRawAccounts(rpc, addresses));
+  }
 
   return {
     programs,
@@ -414,6 +421,7 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
     drift,
     buffers,
     squads,
+    squadsProposals,
     lockPresent: input.lockPresent,
     decodeErrors,
   };
@@ -556,6 +564,18 @@ export function inventoryFindings(
   for (const admin of map.admins) if (!adminKeys.has(admin)) gate("admin-missing", `admin ${admin} has no Admin record`);
   if (inv.squads && !inv.squads.ok) {
     for (const error of inv.squads.errors) gate("squads", `Squads: ${error}`);
+  }
+  // A proposal whose execution failed stays Approved, and any member with
+  // Execute can still run it later (also once stale): cancel it. A stale
+  // Draft/Active one can no longer be approved and is only listed in the
+  // evidence.
+  if (inv.squadsProposals) {
+    for (const error of inv.squadsProposals.errors) add("warning", "squads-proposal", `Squads ${error}`);
+    for (const p of inv.squadsProposals.open) {
+      const text = `Squads proposal #${p.transactionIndex} ${p.proposal} is ${p.status} (${p.approvals} approvals)`;
+      if (p.status === "Approved" || p.status === "Executing") gate("squads-proposal", `${text} and can still be executed: cancel it`);
+      else if (!p.stale) add("warning", "squads-proposal", `${text}: reject it or finish it`);
+    }
   }
   return out;
 }

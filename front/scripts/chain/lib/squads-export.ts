@@ -66,6 +66,7 @@ import {
   inspectExternalTransaction,
   type ExternalInspection,
   splitBySize,
+  verifyParamProblems,
 } from "./squads";
 import type { LatestBlockhash } from "./tx";
 import type { Network } from "@/lib/network";
@@ -303,7 +304,7 @@ export async function planSquadsOp(input: {
     throw new ChainGateError(
       `A Squads vault cannot extend ${name}: loader-v3 ExtendProgram is not callable through CPI on mainnet. ` +
         `Extend it directly (permissionless, the payer signs): solana program extend ${PROGRAM_IDS[name]} <bytes ≥ ${MINIMUM_EXTEND_PROGRAM_BYTES}> ` +
-        "with the bufferWriter as --keypair (runbook §9.3)",
+        "--keypair <bufferWriter> --payer <bufferWriter>; it takes no priority fee, so check the Data Length before retrying (runbook §9.3)",
     );
   }
 
@@ -439,6 +440,35 @@ export async function planSquadsOp(input: {
       ? `System transfers only into the derived verify PDA: ${external.transfers.map((t) => `${t.lamports} lamports → ${t.destination} (PDA of ${t.program})`).join("; ")}`
       : "no top-level System instruction",
   );
+  // The build arguments OtterSec's remote build will use (EXTERNAL #5): they
+  // must reproduce the Release, so they are checked against its hashes.txt.
+  const names = new Map<Address, ProgramName>(
+    (Object.entries(PROGRAM_IDS) as [ProgramName, Address][]).map(([name, id]) => [id, name]),
+  );
+  for (const v of external.verifications) {
+    const name = names.get(v.program)!;
+    if (v.kind === "close") {
+      preconditions.push(`${name}: close the verify PDA ${v.pda}`);
+      continue;
+    }
+    const problems = verifyParamProblems(v.params, {
+      libraryName: name,
+      commit: release?.commit ?? null,
+      baseImage: release?.baseImage ?? null,
+    });
+    const programDataAccount = await fetchRawAccount(rpc, await programDataAddress(v.program));
+    const programData =
+      programDataAccount && programDataAccount.owner === LOADER_V3 ? decodeProgramData(programDataAccount.data) : null;
+    if (!programData) problems.push("the program's ProgramData is missing");
+    else if (v.params.deployedSlot !== programData.slot) {
+      problems.push(`deployed_slot ${v.params.deployedSlot} is not the ProgramData's last deploy slot ${programData.slot} (export again after the upgrade)`);
+    }
+    if (problems.length) throw new ChainGateError(`${name} verify ${v.kind}: ${problems.join("; ")}`);
+    preconditions.push(
+      `${name} verify ${v.kind}: ${v.params.gitUrl} at ${v.params.commit}, build args [${v.params.args.join(" ")}], deployed_slot ${v.params.deployedSlot}, solana-verify ${v.params.version}` +
+        (release ? " (commit and base image = the Release's hashes.txt)" : " (not checked against a Release: no CHAIN_RELEASE_DIR)"),
+    );
+  }
   if (external.droppedComputeBudget.length) {
     preconditions.push(
       `dropped ${external.droppedComputeBudget
