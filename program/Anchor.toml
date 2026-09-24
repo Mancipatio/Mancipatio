@@ -13,6 +13,13 @@ transfer_hook = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
 asset_registry = "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
 transfer_hook = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
 
+# Same program IDs on mainnet. [provider] stays on devnet: mainnet deploys go
+# through `solana program write-buffer` / `deploy --buffer` and the chain CLI
+# (ops/runbook-mainnet.md), never through `anchor deploy`.
+[programs.mainnet]
+asset_registry = "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
+transfer_hook = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+
 [provider]
 cluster = "devnet"
 wallet = "~/.config/solana/id-devnet.json"
