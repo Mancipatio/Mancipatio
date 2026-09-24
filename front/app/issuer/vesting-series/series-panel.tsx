@@ -900,7 +900,8 @@ export function SeriesPanel({
           {!escrowState.identity && (
             <p className="mt-2 font-semibold">
               The escrow identity could not be verified, so deposits and
-              surplus withdrawals are unavailable.
+              issuer withdrawals (active surplus or unvested remainder) are
+              unavailable.
             </p>
           )}
         </div>
