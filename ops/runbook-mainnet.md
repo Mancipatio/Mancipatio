@@ -311,9 +311,13 @@ exists for an emergency only.
   The export refuses any signer but the vault, any program but the verify
   program and System, a verify instruction that the vault does not sign or
   that names neither of our program IDs, and every System instruction except
-  a transfer from the vault into an account the verify instruction writes
-  (its PDA), 0.05 SOL at most in total. The preconditions list each program
-  and each transfer: check them before approving. Import, approve, execute.
+  a transfer from the vault into the derived verify PDA
+  (`["otter_verify", vault, program]` under the verify program), 0.05 SOL at
+  most in total. Each verify instruction must carry that PDA, and its
+  accounts are limited to the vault, the referenced program, its verify PDA,
+  its ProgramData and System, so an extra account cannot turn into a transfer
+  destination. The preconditions list each program, its PDA and each
+  transfer: check them before approving. Import, approve, execute.
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
 - Drain the deployer to the treasury or cold storage.
 - Other vault actions check their inputs against the role map:
@@ -458,8 +462,12 @@ in-flight signature to a resolution and writes the evidence.
    active (the tag-9 layout itself is confirmed).
 3. The PM `setData` buffer-authority rule.
 4. The Squads v4 `Multisig` layout (the S7 gate depends on the decode).
-5. The OtterSec verify program ID, the `export-pda-tx` flags and output
-   (instructions: verify signed by the vault, plus at most a System transfer
-   into the PDA), and whether a PDA uploaded by the hot UA before handover is
-   honoured after it.
+5. The OtterSec verify program ID, the verify PDA seeds
+   (`["otter_verify", uploader, program]`), the `export-pda-tx` flags and
+   output (instructions: verify signed by the vault, with only the vault,
+   program, PDA, ProgramData and System as accounts, plus at most a System
+   transfer into the PDA), and whether a PDA uploaded by the hot UA before
+   handover is honoured after it. If the real output differs, wrap-external
+   refuses it; change the inspector, never loosen it to "any writable
+   account".
 6. The mainnet feature list and validator version at rehearsal time.

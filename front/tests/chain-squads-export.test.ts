@@ -10,6 +10,7 @@ import {
   getBase58Decoder,
   getBase58Encoder,
   getCompiledTransactionMessageDecoder,
+  getProgramDerivedAddress,
   getTransactionDecoder,
   getTransactionEncoder,
   pipe,
@@ -21,7 +22,7 @@ import {
 import { getAssignInstruction, getTransferSolInstruction } from "@solana-program/system";
 import { describe, expect, it } from "vitest";
 import { runTool } from "@/scripts/chain/lib/context";
-import { LOADER_V3 } from "@/scripts/chain/lib/loader-v3";
+import { LOADER_V3, programDataAddress } from "@/scripts/chain/lib/loader-v3";
 import { pmWrite } from "@/scripts/chain/lib/program-metadata";
 import { type ChainEnv } from "@/scripts/chain/lib/safety";
 import {
@@ -34,6 +35,7 @@ import {
   decodeMultisig,
   encodeVaultTransaction,
   inspectExternalTransaction,
+  otterVerifyPda,
   splitBySize,
   squadsVaultPda,
 } from "@/scripts/chain/lib/squads";
@@ -280,10 +282,11 @@ describe("chain:squads-export ops", () => {
     expect((await exportOp(w, "extend-program", { program: "transfer_hook", bytes: 10 * 1024 * 1024 - 45 - 2048 })).error ?? null).toBeNull();
   });
 
-  it("wrap-external: vault-signed verify instructions for our programs; System only as a capped transfer into the verify PDA", async () => {
+  it("wrap-external: vault-signed verify instructions for our programs; System only as a capped transfer into the derived verify PDA", async () => {
     const w = await handedOver();
-    const vaultSigner = createNoopSigner(w.keys.vault);
-    const external = (ixs: Instruction[], feePayer: Address = w.keys.vault) =>
+    const vault = w.keys.vault;
+    const vaultSigner = createNoopSigner(vault);
+    const external = (ixs: Instruction[], feePayer: Address = vault) =>
       getBase58Decoder().decode(
         getTransactionEncoder().encode(
           compileTransaction(
@@ -296,48 +299,97 @@ describe("chain:squads-export ops", () => {
           ),
         ),
       );
-    const pda = key(90);
-    const verify = (program: Address = REGISTRY, withVault = true): Instruction => ({
-      programAddress: OTTERSEC_VERIFY_PROGRAM,
-      accounts: [
-        { address: pda, role: AccountRole.WRITABLE },
-        ...(withVault ? [{ address: w.keys.vault, role: AccountRole.WRITABLE_SIGNER }] : []),
-        { address: program, role: AccountRole.READONLY },
-        { address: "11111111111111111111111111111111" as Address, role: AccountRole.READONLY },
-      ],
-      data: new Uint8Array([1, 2, 3]),
-    });
+    const pda = await otterVerifyPda(vault, REGISTRY);
+    const hookPda = await otterVerifyPda(vault, HOOK);
+    const SYSTEM = "11111111111111111111111111111111" as Address;
+    const verify = (
+      opts: { program?: Address; withVault?: boolean; pda?: Address | null; extra?: { address: Address; role: AccountRole }[] } = {},
+    ): Instruction => {
+      const program = opts.program ?? REGISTRY;
+      const target = opts.pda === undefined ? pda : opts.pda;
+      return {
+        programAddress: OTTERSEC_VERIFY_PROGRAM,
+        accounts: [
+          ...(target ? [{ address: target, role: AccountRole.WRITABLE }] : []),
+          ...(opts.withVault === false ? [] : [{ address: vault, role: AccountRole.WRITABLE_SIGNER }]),
+          { address: program, role: AccountRole.READONLY },
+          { address: SYSTEM, role: AccountRole.READONLY },
+          ...(opts.extra ?? []),
+        ],
+        data: new Uint8Array([1, 2, 3]),
+      };
+    };
     const wrap = (ixs: Instruction[]) => exportOp(w, "wrap-external", { transactionBase58: external(ixs) });
+    const transfer = (destination: Address, amount = BigInt(2_000_000)) =>
+      getTransferSolInstruction({ source: vaultSigner, destination, amount });
+
+    // The PDA is ("otter_verify", uploader, program) under the verify program.
+    expect(pda).toBe(
+      (
+        await getProgramDerivedAddress({
+          programAddress: OTTERSEC_VERIFY_PROGRAM,
+          seeds: [new TextEncoder().encode("otter_verify"), getAddressEncoder().encode(vault), getAddressEncoder().encode(REGISTRY)],
+        })
+      )[0],
+    );
+    expect(hookPda).not.toBe(pda);
 
     const ok = await wrap([verify()]);
     expect(ok.error ?? null).toBeNull();
     const reemitted = (ok.export as Exported).transactions[0];
     expect(reemitted.instructions[0].program).toBe(OTTERSEC_VERIFY_PROGRAM);
     expect(reemitted.transactionBase58).not.toBe(external([verify()]));
-    expect((ok.export as Exported).header.preconditions.join("\n")).toMatch(new RegExp(`for ${REGISTRY}.*\\n.*no top-level System instruction`));
+    const okPre = (ok.export as Exported).header.preconditions.join("\n");
+    expect(okPre).toMatch(new RegExp(`for ${REGISTRY}.*\\n.*${REGISTRY} → ${pda}.*\\n.*no top-level System instruction`));
 
-    const rent = getTransferSolInstruction({ source: vaultSigner, destination: pda, amount: BigInt(2_000_000) });
-    const funded = await wrap([rent, verify()]);
+    const funded = await wrap([transfer(pda), verify()]);
     expect(funded.error ?? null).toBeNull();
-    expect((funded.export as Exported).header.preconditions.join("\n")).toMatch(new RegExp(`2000000 lamports → ${pda}`));
+    expect((funded.export as Exported).header.preconditions.join("\n")).toMatch(new RegExp(`2000000 lamports → ${pda} \\(PDA of ${REGISTRY}\\)`));
+    // The initialize-with-signer shape also names the program's ProgramData (read-only).
+    const withProgramData = await wrap([verify({ extra: [{ address: await programDataAddress(REGISTRY), role: AccountRole.READONLY }] })]);
+    expect(withProgramData.error ?? null).toBeNull();
 
     // A tampered transaction: the vault (the treasury, D5) pays someone else.
-    const theft = getTransferSolInstruction({ source: vaultSigner, destination: key(81), amount: BigInt(5) });
-    expect((await wrap([theft, verify()])).error).toMatch(/not into a verify-instruction account/);
+    const theft = transfer(key(81), BigInt(5));
+    expect((await wrap([theft, verify()])).error).toMatch(/only a transfer from the vault into the derived verify PDA/);
     expect((await wrap([theft])).error).toMatch(/no verify instruction/);
-    const tooMuch = getTransferSolInstruction({ source: vaultSigner, destination: pda, amount: MAX_EXTERNAL_TRANSFER_LAMPORTS + BigInt(1) });
+    // The same theft with the attacker's key added to the verify instruction's
+    // accounts (roles are message-wide, so "writable in a verify instruction"
+    // is not a proof of being the PDA): refused by the closed account set.
+    const attacker = key(86);
+    const bypass = [
+      transfer(attacker, MAX_EXTERNAL_TRANSFER_LAMPORTS),
+      verify({ extra: [{ address: attacker, role: AccountRole.WRITABLE }] }),
+    ];
+    expect((await wrap(bypass)).error).toMatch(new RegExp(`has the account ${attacker}, which is not the vault`));
+    await expect(inspectExternalTransaction(external(bypass), vault, [REGISTRY, HOOK])).rejects.toThrow(/not the vault, a referenced program/);
+    // Accounts that are allowed in the verify instruction but are not the PDA
+    // never receive a transfer: ProgramData, our program ID, the other
+    // program's PDA (not carried by any verify instruction).
+    const programData = await programDataAddress(REGISTRY);
+    const intoProgramData = [transfer(programData), verify({ extra: [{ address: programData, role: AccountRole.READONLY }] })];
+    expect((await wrap(intoProgramData)).error).toMatch(/only a transfer from the vault into the derived verify PDA/);
+    expect((await wrap([transfer(REGISTRY), verify()])).error).toMatch(/only a transfer from the vault into the derived verify PDA/);
+    expect((await wrap([transfer(hookPda), verify()])).error).toMatch(/only a transfer from the vault into the derived verify PDA/);
+    // A PDA derived for another uploader is not in the account set.
+    const foreignPda = await otterVerifyPda(key(81), REGISTRY);
+    expect((await wrap([verify({ pda: foreignPda })])).error).toMatch(new RegExp(`has the account ${foreignPda}`));
+    // Every verify instruction carries the PDA of a program it references.
+    expect((await wrap([verify({ pda: null })])).error).toMatch(/does not carry the verify PDA/);
+    expect((await wrap([verify({ pda: hookPda })])).error).toMatch(new RegExp(`has the account ${hookPda}`));
+    const tooMuch = transfer(pda, MAX_EXTERNAL_TRANSFER_LAMPORTS + BigInt(1));
     expect((await wrap([tooMuch, verify()])).error).toMatch(/at most 50000000 are allowed/);
     const assign = getAssignInstruction({ account: vaultSigner, programAddress: key(84) });
     expect((await wrap([assign, verify()])).error).toMatch(/System instruction other than a transfer/);
-    expect((await wrap([verify(key(85))])).error).toMatch(/none of our program IDs/);
-    expect((await wrap([verify(REGISTRY, false)])).error).toMatch(/does not name the vault/);
+    expect((await wrap([verify({ program: key(85) })])).error).toMatch(/none of our program IDs/);
+    expect((await wrap([verify({ withVault: false })])).error).toMatch(/does not name the vault/);
 
-    const foreign: Instruction = { programAddress: key(82), accounts: [{ address: w.keys.vault, role: AccountRole.WRITABLE_SIGNER }], data: new Uint8Array([1]) };
+    const foreign: Instruction = { programAddress: key(82), accounts: [{ address: vault, role: AccountRole.WRITABLE_SIGNER }], data: new Uint8Array([1]) };
     expect((await wrap([foreign, verify()])).error).toMatch(/only the verify and System programs/);
     const other = createNoopSigner(key(83));
     const twoSigners = getTransferSolInstruction({ source: other, destination: key(81), amount: BigInt(5) });
     expect((await wrap([verify(), twoSigners])).error).toMatch(/vault as its only signer/);
-    expect(() => inspectExternalTransaction("not-base58!", w.keys.vault, [REGISTRY])).toThrow(/not a base58 wire transaction/);
+    await expect(inspectExternalTransaction("not-base58!", vault, [REGISTRY])).rejects.toThrow(/not a base58 wire transaction/);
   });
 
   it("refuses when the multisig does not match the role map (override off mainnet only)", async () => {

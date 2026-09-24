@@ -427,7 +427,7 @@ export async function planSquadsOp(input: {
   if (typeof base58 !== "string") throw new ChainGateError("wrap-external needs transactionBase58 (solana-verify export-pda-tx output)");
   let external: ExternalInspection;
   try {
-    external = inspectExternalTransaction(base58, vault, Object.values(PROGRAM_IDS));
+    external = await inspectExternalTransaction(base58, vault, Object.values(PROGRAM_IDS));
   } catch (error) {
     throw new ChainGateError((error as Error).message);
   }
@@ -435,8 +435,11 @@ export async function planSquadsOp(input: {
     `external transaction: verify instructions signed by the vault for ${external.programs.join(", ")}; the vault is the only signer`,
   );
   preconditions.push(
+    `verify PDA(s) ("otter_verify", vault, program), accounts limited to the vault, program, PDA, ProgramData and System: ${external.pdas.map((p) => `${p.program} → ${p.pda}`).join("; ")}`,
+  );
+  preconditions.push(
     external.transfers.length
-      ? `System transfers only into verify accounts: ${external.transfers.map((t) => `${t.lamports} lamports → ${t.destination}`).join("; ")}`
+      ? `System transfers only into the derived verify PDA: ${external.transfers.map((t) => `${t.lamports} lamports → ${t.destination} (PDA of ${t.program})`).join("; ")}`
       : "no top-level System instruction",
   );
   postconditions.push("the verify PDA names the vault as uploader (EXTERNAL #5)");
