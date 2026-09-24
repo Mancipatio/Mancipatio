@@ -1,0 +1,18 @@
+{
+  "devnet": {
+    "network": "devnet",
+    "projectRef": "gvnckuzmuwozlcohtuhx",
+    "poolerHost": "aws-0-eu-west-1.pooler.supabase.com",
+    "poolerPort": 5432,
+    "siteOrigin": "https://www.manci.io",
+    "backupAgeRecipient": null
+  },
+  "mainnet": {
+    "network": "mainnet",
+    "projectRef": null,
+    "poolerHost": null,
+    "poolerPort": 5432,
+    "siteOrigin": null,
+    "backupAgeRecipient": null
+  }
+}

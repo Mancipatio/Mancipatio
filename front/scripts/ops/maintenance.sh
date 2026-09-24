@@ -18,6 +18,16 @@
 #   bash scripts/ops/maintenance.sh devnet on "Program upgrade in progress, back in about 15 minutes."
 #   bash scripts/ops/maintenance.sh devnet off
 #   bash scripts/ops/maintenance.sh devnet status
+#   MANCI_ALLOW_MAINNET=1 bash scripts/ops/maintenance.sh mainnet on "…"
+#
+# Target (Talas 4.3): for devnet and mainnet the database is the target of the
+# same name (scripts/ops/targets.json); a MANCI_TARGET that names another one
+# is refused. testnet and localnet flags live in some other project, so they
+# need MANCI_TARGET set explicitly, and never to mainnet. scripts/db.sh then
+# checks the database's identity row before any SQL (mainnet also needs
+# MANCI_ALLOW_MAINNET=1; on a project without the identity yet, set
+# MANCI_DB_BOOTSTRAP=1). The network guard (migration 0071) refuses a
+# 'mainnet' flag row in any other project, and the reverse.
 #
 # Values reach SQL only as psql variables quoted with :'name' (never spliced
 # into the statement). The connection goes through scripts/db.sh, which reads
@@ -33,7 +43,26 @@ usage() {
 [ $# -ge 2 ] || usage
 network="$1"
 action="$2"
-case "$network" in devnet|mainnet|testnet|localnet) ;; *) usage ;; esac
+case "$network" in
+  devnet|mainnet)
+    if [ -n "${MANCI_TARGET:-}" ] && [ "$MANCI_TARGET" != "$network" ]; then
+      echo "MANCI_TARGET=$MANCI_TARGET does not match the network argument $network; refusing." >&2
+      exit 1
+    fi
+    export MANCI_TARGET="$network"
+    ;;
+  testnet|localnet)
+    if [ -z "${MANCI_TARGET:-}" ]; then
+      echo "A $network flag lives in another project: set MANCI_TARGET to that project's target." >&2
+      exit 1
+    fi
+    if [ "$MANCI_TARGET" = "mainnet" ]; then
+      echo "The mainnet project only holds mainnet rows; refusing a $network flag there." >&2
+      exit 1
+    fi
+    ;;
+  *) usage ;;
+esac
 operator="${MAINTENANCE_OPERATOR:-${USER:-ops}}"
 
 # Shown after every change so the operator sees the stored state.
