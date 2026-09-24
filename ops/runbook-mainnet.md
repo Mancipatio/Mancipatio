@@ -369,8 +369,9 @@ Every `chain:*` command here runs in a **clean checkout of the new tag
 mainnet the tools refuse unless `front/idl` equals that Release's IDL and the
 source paths are clean (see "Safety rules").
 
-1. Maintenance on: `bash front/scripts/ops/maintenance.sh mainnet on "…"`, wait
-   about 70 s.
+1. Maintenance on:
+   `MANCI_ALLOW_MAINNET=1 bash front/scripts/ops/maintenance.sh mainnet on "…"`,
+   wait about 70 s.
 2. The bufferWriter writes both buffers (hook first) from pre-generated buffer
    keypairs outside the repository (D7; `--silent`, so no seed phrase reaches
    a log), and hands them to the vault:
@@ -532,6 +533,135 @@ Configuration and checks only; the front enforces the rules
   approval and reason. Resolve it by revoking the approval or adding the
   rate; an orphan that keeps failing is retried each minute (at most a few
   failures per run).
+
+## 14. Database projects and ops targets (Talas 4.3)
+
+Each Supabase project serves exactly one network. Migration 0070 records it
+(`mancipatio_ops.deployment_identity`, read through
+`public.deployment_network()`), and 0071 makes every `network` default follow
+it and installs `manci_network_guard`: a mainnet project accepts only
+`'mainnet'` rows, any other project never accepts `'mainnet'`.
+
+### Targets and tools
+
+`front/scripts/ops/targets.json` (tracked) names each project: network,
+`projectRef`, `poolerHost`, `poolerPort` (5432, the session pooler),
+`siteOrigin` and `backupAgeRecipient`. Mainnet stays `null` until Talas 7;
+`SUPABASE_PROJECT_REFS` in `front/next.config.ts` must match it (a test
+checks).
+
+| Variable | Rule |
+|---|---|
+| `MANCI_TARGET` | Required by `scripts/db.sh`, no default. `maintenance.sh`, `backup.sh` and `supabase.sh` take the target as an argument and refuse a different `MANCI_TARGET`. |
+| `MANCI_ALLOW_MAINNET=1` | Required for any target whose network is mainnet. |
+| `MANCI_DB_BOOTSTRAP=1` | Per command, only while the project has no identity row (0001–0070 and `deployment-identity.sql`). Refused once the row exists. |
+| `MANCI_PGPASSFILE` | Default `~/.mancipatio/pgpass`, mode 600: `<poolerHost>:5432:postgres:postgres.<ref>:<password>`. Devnet may fall back to `.env.local` `SUPABASE_DB_URL` until Talas 7; mainnet never reads `.env*`. |
+| `MANCI_PG_BIN` | `backup.sh`'s PostgreSQL client, default `/opt/homebrew/opt/postgresql@17/bin`; at least the server's major version. |
+
+`db.sh` runs `scripts/ops/assert-target.sql` first in the same psql session:
+unless the identity row matches the target (network and ref), psql stops
+before any of your SQL. Files that read the target (`retry-scheduler.sql`,
+`deployment-identity.sql`) must run via `-f`.
+
+Every command below runs from `front/`.
+
+### Rules for migrations after 0071
+
+1. A new `network` column uses `default public.deployment_network()` or no
+   default, never a literal.
+2. A migration that adds a `network` column ends with
+   `select mancipatio_ops.install_network_guards();`.
+3. Never seed rows with a literal network; use `public.deployment_network()`.
+
+`tests/migration-chain.postgres.test.ts` enforces all three, including a full
+chain run under a mainnet identity.
+
+Before every migration: `bash scripts/ops/backup.sh <target> pre-<migration>`.
+
+### Backups (D14, D17)
+
+- Devnet: `backup.sh devnet <label>` writes a full and a schema-only dump
+  (plaintext, 0600, test data) under `~/Backups/mancipatio/devnet/`.
+- Mainnet: Supabase PITR is the primary restore point. `backup.sh mainnet
+  <label>` is schema-only; `--data` pipes the dump through
+  `age -r <backupAgeRecipient>` (G10: `age` installed, offline recipient key
+  created and stored), so no plaintext reaches the disk. `--prune` removes
+  this target's dumps older than 30 days.
+- `pg_dump` does not copy Storage object bodies (D17, owner's choice: rclone
+  export to encrypted storage, or Supabase's own durability).
+- Restore drill (Talas 6.5): restore into a scratch project with its own
+  `restore-drill` target (network mainnet, own ref, null origin);
+  `pg_restore -l`, delete the `TABLE DATA mancipatio_ops deployment_identity`
+  line, `pg_restore -L`; insert the drill identity with
+  `deployment-identity.sql` (bootstrap); re-apply erasures (`anonymize_client`
+  for every client whose `anonymized_at` in the live database is newer than
+  the dump).
+
+### Rollback of 0071
+
+1. `backup.sh <target> pre-rollback-0071`.
+2. `MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/rollback-0071.sql`
+   (drops the guard; defaults stay dynamic and correct).
+3. Only if `deployment_network()` itself fails as a default:
+   `scripts/ops/rollback-0071-defaults.sql` (pins each default to the
+   project's own network). 0070 stays; re-applying 0071 restores both.
+
+### Edge function and Supabase CLI
+
+`scripts/ops/supabase.sh <target> …` allows only `functions deploy
+helius-webhook`, `secrets list`, `secrets set --env-file <file>` (mode 600)
+and `secrets unset NAME…`, and appends `--project-ref` from the target. Delete
+`front/supabase/.temp/` before the first use; the wrapper refuses while a
+linked project is recorded there.
+
+Per project: `MANCI_SUPABASE_SECRET_KEY` (the project's `sb_secret_` key; no
+legacy fallback), `HELIUS_WEBHOOK_SECRET`, `INDEXER_NETWORK`, and its own
+Helius webhook URL. Set the secrets first, then deploy. A wrong
+`INDEXER_NETWORK` is refused by the guard (503; Helius retries). G9: record
+Helius's retry window; a delivery lost past it is recovered only by the
+index reconcile (account state, not events).
+
+### Retry scheduler
+
+`MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/retry-scheduler.sql`
+needs the target's `siteOrigin` and the Vault secret
+`mancipatio_retry_worker_<network>`. It installs `mancipatio-retry-<network>`
+DISABLED (G6: record the active state first, re-enable with
+`cron.alter_job` if it was active). Mainnet's scheduler waits until the
+mainnet front answers at its origin, which happens only after devnet moves to
+`devnet.manci.io` (D15).
+
+### Mainnet project bootstrap (`MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1` throughout)
+
+1. Create the project in eu-west-1: PITR on, new API keys, legacy JWT keys
+   disabled. Record `projectRef`, `poolerHost` (G7: aws-0 or aws-1),
+   `siteOrigin` and `backupAgeRecipient` in `targets.json` and
+   `SUPABASE_PROJECT_REFS` (a PR). Add the pgpass line.
+2. `MANCI_DB_BOOTSTRAP=1` for 0001–0070 (`db.sh -f supabase/migrations/<file>`
+   each), then `MANCI_DB_BOOTSTRAP=1 bash scripts/db.sh -f
+   scripts/ops/deployment-identity.sql`, then 0071 and later without
+   bootstrap.
+3. Preflights: availability, schema, parity (against devnet: no
+   differences), `supabase-readonly-identity.sql` (identity mainnet, no
+   tables without guard, no non-dynamic defaults, `browser_insert_paths`
+   empty: G5).
+4. `bash scripts/ops/backup.sh mainnet post-bootstrap` (schema only).
+5. Enable pg_cron and http; add the Vault secret
+   `mancipatio_retry_worker_mainnet`.
+6. Retention: install, preview, enable.
+7. Retry scheduler: install disabled; enable once the mainnet front answers.
+8. `platform_raise_limits` for mainnet with FX headroom (D18); the USDC FX
+   row (kind `rate`, max age 7 days, weekly refresh); the 0008
+   integrations config for mainnet.
+9. Edge function secrets and deploy, Helius webhook, a signed test delivery
+   answers 202 (G3: supabase-js 2.106.2 with `sb_secret_`).
+10. Front: `NEXT_PUBLIC_SUPABASE_ANON_KEY` = `sb_publishable_…`,
+    `SUPABASE_SERVICE_ROLE_KEY` = `sb_secret_…` (the build and the server
+    refuse other formats on mainnet); `HEALTH_TOKEN` and an uptime monitor on
+    `/api/health` (D19). `/api/health` `ok:true` proves the database network
+    check passed.
+11. `MANCIPATIO_LIVE_SMOKE=mainnet MANCI_ALLOW_MAINNET=1 npx vitest run
+    --config scripts/ops/deployment-smoke.config.ts`.
 
 ## EXTERNAL checks (open until the rehearsal proves them)
 
