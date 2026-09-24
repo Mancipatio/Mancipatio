@@ -10,7 +10,11 @@
     "test": "vitest run",
     "codegen": "node codegen.mjs",
     "check:codegen": "node codegen.mjs --check",
-    "check:idl": "node scripts/check-program-idl.mjs"
+    "check:idl": "node scripts/check-program-idl.mjs",
+    "chain:inventory": "vitest run --config scripts/chain/inventory.config.ts --reporter=verbose",
+    "chain:bootstrap": "vitest run --config scripts/chain/bootstrap.config.ts --reporter=verbose",
+    "chain:idl": "vitest run --config scripts/chain/idl.config.ts --reporter=verbose",
+    "chain:squads-export": "vitest run --config scripts/chain/squads-export.config.ts --reporter=verbose"
   },
   "dependencies": {
     "@solana-program/token-2022": "^0.7.0",
@@ -28,6 +32,8 @@
   "devDependencies": {
     "@codama/nodes-from-anchor": "^1.4.1",
     "@codama/renderers-js": "^1.7.0",
+    "@solana-program/compute-budget": "^0.11.0",
+    "@solana-program/system": "^0.10.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/nodemailer": "^8.0.2",

@@ -1,0 +1,44 @@
+{
+  "schema": "mancipatio-squads-multisig-fixture-v1",
+  "source": "synthesized from the Squads v4 Multisig struct (EXTERNAL #4); replace with the 6.1 rehearsal account dump",
+  "generator": "hand-encoded: discriminator sha256('account:Multisig')[0..8], create_key, config_authority, threshold u16, time_lock u32, transaction_index u64, stale_transaction_index u64, rent_collector Option<Pubkey>, bump u8, members Vec<(Pubkey, u8 mask)>",
+  "owner": "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf",
+  "dataBase64": "4HR5ukShT+zJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJyQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAABwAAAAAAAAADAAAAAAAAAAD+AwAAAB8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fByAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgByEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhAg==",
+  "expected": {
+    "createKey": "EahQmXc3rwhY3CH1g3ZgUx8L4vHTNmzpK1xtiQ1RAxq6",
+    "configAuthority": null,
+    "threshold": 2,
+    "timeLock": 0,
+    "transactionIndex": "7",
+    "staleTransactionIndex": "3",
+    "rentCollector": null,
+    "bump": 254,
+    "members": [
+      {
+        "key": "36VASLSKLFD2KokjXG7V28veZvXEsyHRKefLonPaAKzv",
+        "mask": 7,
+        "permissions": [
+          "initiate",
+          "vote",
+          "execute"
+        ]
+      },
+      {
+        "key": "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd",
+        "mask": 7,
+        "permissions": [
+          "initiate",
+          "vote",
+          "execute"
+        ]
+      },
+      {
+        "key": "3EKkiwNLWqoUbzFkPrmKbtUB4EweE6f4STzevYUmezeL",
+        "mask": 2,
+        "permissions": [
+          "vote"
+        ]
+      }
+    ]
+  }
+}

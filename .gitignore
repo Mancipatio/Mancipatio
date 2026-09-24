@@ -1,7 +1,9 @@
 # Markdown files and the top-level docs/ directories are not tracked.
 # The docs/ rules are anchored so application routes such as front/app/docs
-# stay tracked.
+# stay tracked. The one exception is the mainnet runbook, which the chain CLI
+# (front/scripts/chain) and the Release workflow refer to by path.
 *.md
+!/ops/runbook-mainnet.md
 /docs/
 /front/docs/
 /program/docs/
