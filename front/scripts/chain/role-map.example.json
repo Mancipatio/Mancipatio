@@ -1,0 +1,63 @@
+{
+  "$comment": "Localnet example with placeholder public keys (fill-pattern addresses nobody holds). Replace every key, the genesisHash (solana genesis-hash of your validator) and the Squads multisig/vault before use. kyc.registry = KycRegistry PDA(deployer); squads.vault = PDA([multisig, multisig, vault, 0], SQDS4). No secrets ever go in a role map.",
+  "schema": "mancipatio-role-map-v2",
+  "network": "localnet",
+  "genesisHash": "8S5Wk8E83ofvLxWpyrt51HturU995zXCTtKBQovuBeUm",
+  "programs": {
+    "assetRegistry": "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+    "transferHook": "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+  },
+  "programDataMaxLen": {
+    "assetRegistry": 3145728,
+    "transferHook": 786432
+  },
+  "deployer": "F83muwL8bL5M9vH5ASB2oxJS2By4mHVNnHJ9BSND9dQk",
+  "bufferWriter": "D6UucuMprPAYyCmr5UPU5h9YhRf2ZNtn23JTS32EjdjY",
+  "superAdmin": "7DYCAhqwQSKqqL1h8V1XmY1BTcMWxrASQYKNMy87jeg3",
+  "admins": [
+    "Cgy8m6ZmJbPC8fGoTgRxLSWyEUPpWzmrfbJX5kkeFdoJ"
+  ],
+  "blocklistAuthority": "DZuyd1ctzUF8wqXQ8Zfu7pYtQY8SGphWvty3qhLRxxzV",
+  "kyc": {
+    "authority": "EnTJCS15dqbDTU2XywYSMaScoPv4Py4GzExrtY9DQxoD",
+    "registry": "GEn28vq5EiMUKqoGfHa6Ai3C1EtHuTvxKk8X5HbH56Es",
+    "approvedJurisdictions": "default",
+    "blockedJurisdictions": [],
+    "tempAdminGrant": false
+  },
+  "protocolTreasury": "GZYWNijBvxCecCnxFecwFFJdpKkUkZ8kjm123arAWVF4",
+  "protocolFeeBps": 0,
+  "squads": {
+    "multisig": "75hbt6uvDqjPZ9WgFtMhBnTeyHw7cinoHiz4FD2vEz2d",
+    "vaultIndex": 0,
+    "vault": "GZYWNijBvxCecCnxFecwFFJdpKkUkZ8kjm123arAWVF4",
+    "threshold": 2,
+    "timeLock": 0,
+    "configAuthority": null,
+    "members": [
+      {
+        "key": "GCkWCknJ46pyPNHC9DPjTxedvjLHYJUVioxe7X5o6xa4",
+        "permissions": [
+          "initiate",
+          "vote",
+          "execute"
+        ]
+      },
+      {
+        "key": "GGfoM4FJeQ8CXTXhaWiekqRQAtYVDNAKHDdJAu8PrHtm",
+        "permissions": [
+          "initiate",
+          "vote",
+          "execute"
+        ]
+      },
+      {
+        "key": "GLb6VMiKEhRRfYnD1p3a3iCAR3kgtRr8qdHxEHAzbdDU",
+        "permissions": [
+          "vote"
+        ]
+      }
+    ]
+  },
+  "unpauseBy": "superAdmin"
+}

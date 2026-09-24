@@ -10,7 +10,11 @@
     "test": "vitest run",
     "codegen": "node codegen.mjs",
     "check:codegen": "node codegen.mjs --check",
-    "check:idl": "node scripts/check-program-idl.mjs"
+    "check:idl": "node scripts/check-program-idl.mjs",
+    "chain:inventory": "vitest run --config scripts/chain/inventory.config.ts --reporter=verbose",
+    "chain:bootstrap": "vitest run --config scripts/chain/bootstrap.config.ts --reporter=verbose",
+    "chain:idl": "vitest run --config scripts/chain/idl.config.ts --reporter=verbose",
+    "chain:squads-export": "vitest run --config scripts/chain/squads-export.config.ts --reporter=verbose"
   },
   "dependencies": {
     "@solana-program/token-2022": "^0.7.0",
