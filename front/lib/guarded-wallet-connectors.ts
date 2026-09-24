@@ -1,5 +1,6 @@
 import type { WalletConnector, WalletSession } from "@solana/client";
 import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
+import { clearWalletChange, describeWalletChange, noteWalletChange } from "@/lib/wallet-changes";
 
 type AccountsListener = Parameters<NonNullable<WalletSession["onAccountsChanged"]>>[0];
 
@@ -61,8 +62,16 @@ export function guardWalletSession(
     } } : {}),
     ...(source.signTransaction ? { async signTransaction(...args: Parameters<NonNullable<WalletSession["signTransaction"]>>) {
       assertCurrent();
+      clearWalletChange();
       const result = await source.signTransaction!.apply(source, args);
       assertCurrent();
+      // The SDK sends the wallet's version; record what it changed, if anything
+      // (lib/wallet-changes), so a refusal by the network can say so.
+      const change = describeWalletChange(args[0]?.messageBytes, result?.messageBytes);
+      if (change) {
+        noteWalletChange(change);
+        console.warn(`[wallet] ${change}`);
+      }
       return result;
     } } : {}),
     ...(source.sendTransaction ? { async sendTransaction(...args: Parameters<NonNullable<WalletSession["sendTransaction"]>>) {

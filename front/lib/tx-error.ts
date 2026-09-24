@@ -40,9 +40,22 @@ import {
   ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
   ASSET_REGISTRY_ERROR__VAULT_NOT_ACCEPTING_DEPOSITS,
 } from "@/lib/generated/asset_registry";
+import {
+  isSolanaError,
+  SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_NOT_FOUND,
+  SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED,
+  SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND,
+  SOLANA_ERROR__TRANSACTION_ERROR__DUPLICATE_INSTRUCTION,
+  SOLANA_ERROR__TRANSACTION_ERROR__INSUFFICIENT_FUNDS_FOR_FEE,
+  SOLANA_ERROR__TRANSACTION_ERROR__INVALID_LOADED_ACCOUNTS_DATA_SIZE_LIMIT,
+  SOLANA_ERROR__TRANSACTION_ERROR__MAX_LOADED_ACCOUNTS_DATA_SIZE_EXCEEDED,
+  SOLANA_ERROR__TRANSACTION_ERROR__PROGRAM_ACCOUNT_NOT_FOUND,
+  SOLANA_ERROR__TRANSACTION_ERROR__SIGNATURE_FAILURE,
+} from "@solana/kit";
 import { features } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { MaintenanceModeError } from "@/lib/maintenance";
+import { recentWalletChange } from "@/lib/wallet-changes";
 
 // Pull a human-readable cause out of a @solana/react-hooks send() error.
 // Those errors wrap the real RPC simulation logs inside `transactionPlanResult`
@@ -314,6 +327,67 @@ function customErrorHint(text: string): string | null {
   return CUSTOM_ERROR_HINTS[match[1].toLowerCase()] ?? null;
 }
 
+// Transaction errors (kit 7050xxx) are the network refusing a transaction
+// before any instruction runs: no program logs, and in a production build the
+// message is only "Solana error #7050008". The preflight failure (-32002)
+// carries the one that applies as its `cause`.
+const TRANSACTION_ERROR_FIRST = 7_050_000;
+const TRANSACTION_ERROR_LAST = 7_050_999;
+
+function networkRefusalText(code: number, network: string): string {
+  switch (code) {
+    case SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND:
+      return `The network did not recognise the transaction's blockhash (BlockhashNotFound): it expired while the wallet was open, or it came from another network than ${network}. Check the wallet's network and try again.`;
+    case SOLANA_ERROR__TRANSACTION_ERROR__DUPLICATE_INSTRUCTION:
+      return "The transaction carries the same compute-budget instruction twice (DuplicateInstruction), usually because the wallet added its own priority fee to the app's.";
+    case SOLANA_ERROR__TRANSACTION_ERROR__ACCOUNT_NOT_FOUND:
+      return `The paying wallet has no SOL on ${network} (AccountNotFound).`;
+    case SOLANA_ERROR__TRANSACTION_ERROR__INSUFFICIENT_FUNDS_FOR_FEE:
+      return `The paying wallet does not have enough SOL on ${network} for the network fee (InsufficientFundsForFee).`;
+    case SOLANA_ERROR__TRANSACTION_ERROR__PROGRAM_ACCOUNT_NOT_FOUND:
+      return `The transaction calls a program that does not exist on ${network} (ProgramAccountNotFound).`;
+    case SOLANA_ERROR__TRANSACTION_ERROR__SIGNATURE_FAILURE:
+      return "The transaction's signature does not match its contents (SignatureFailure).";
+    case SOLANA_ERROR__TRANSACTION_ERROR__MAX_LOADED_ACCOUNTS_DATA_SIZE_EXCEEDED:
+    case SOLANA_ERROR__TRANSACTION_ERROR__INVALID_LOADED_ACCOUNTS_DATA_SIZE_LIMIT:
+      return "The transaction's loaded-account data limit is too small for the accounts it uses (MaxLoadedAccountsDataSizeExceeded), usually a limit the wallet added.";
+    case SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED:
+      return "This exact transaction was already processed (AlreadyProcessed); reload to see its result.";
+    default:
+      return `The network refused the transaction before running it (transaction error #${code}).`;
+  }
+}
+
+/**
+ * The network's pre-execution refusal anywhere in the cause chain, worded for
+ * the user, with what the wallet changed while signing when that is known
+ * (lib/wallet-changes). Null when the failure is anything else.
+ */
+export function explainNetworkRefusal(err: unknown): string | null {
+  const queue: unknown[] = [err];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 200) {
+    const cursor = queue.shift();
+    if (cursor == null || typeof cursor !== "object" || seen.has(cursor)) continue;
+    seen.add(cursor);
+    if (isSolanaError(cursor)) {
+      const code = cursor.context.__code;
+      if (code >= TRANSACTION_ERROR_FIRST && code <= TRANSACTION_ERROR_LAST) {
+        const text = networkRefusalText(code, detectNetwork());
+        const change = recentWalletChange();
+        return change ? `${text} Note: ${change}.` : text;
+      }
+    }
+    const obj = cursor as AnyRecord;
+    for (const key of ["cause", "error", "context", "transactionPlanResult", "plans"]) {
+      const next = obj[key];
+      if (Array.isArray(next)) queue.push(...next);
+      else if (next && typeof next === "object") queue.push(next);
+    }
+  }
+  return null;
+}
+
 export function explainSendError(err: unknown): string {
   if (err == null) return "Unknown error";
 
@@ -380,6 +454,8 @@ export function explainSendError(err: unknown): string {
   if (logs.length > 0) {
     return `${message} — ${logs[logs.length - 1]}`;
   }
+  const refusal = explainNetworkRefusal(err);
+  if (refusal) return refusal;
   const inner = nestedMessages.find((m) => m !== message && !/transaction plan/i.test(m));
   if (inner) return `${message} — ${inner}`;
 

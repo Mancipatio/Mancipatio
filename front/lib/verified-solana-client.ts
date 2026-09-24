@@ -1,10 +1,17 @@
-import type { SolanaClient, TransactionPrepared, TransactionPrepareRequest, WalletSession } from "@solana/client";
+import type {
+  SolanaClient,
+  TransactionPrepareAndSendRequest,
+  TransactionPrepared,
+  TransactionPrepareRequest,
+  WalletSession,
+} from "@solana/client";
 import { createNetworkVerifier } from "@/lib/network-identity";
 import { detectNetwork, type Network } from "@/lib/network";
 import { guardTransactionGraph } from "@/lib/transaction-session-guard";
 import { requestTransactionWalletPolicy, transactionWalletPolicyRevision, TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 import { assertSiteWritable } from "@/lib/maintenance";
 import { priceForRequest } from "@/lib/priority-fee";
+import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
@@ -19,7 +26,11 @@ import { priceForRequest } from "@/lib/priority-fee";
  * prepareAndSend set `computeUnitPrice` from lib/priority-fee (clamped to the
  * network's cap) before any wallet prompt, and `@solana/client` prepends the
  * one SetComputeUnitPrice. A caller-set price is refused, and a transaction
- * that would no longer fit the packet limit is sent without one. */
+ * that would no longer fit the packet limit is sent without one.
+ * prepareAndSend also puts the SetComputeUnitLimit in FRONT (see
+ * withLeadingComputeUnitLimit): a wallet that finds no compute budget where
+ * it looks adds its own, and the network then refuses the transaction before
+ * running it. */
 export function withVerifiedTransactions(
   client: SolanaClient,
   network: Network,
@@ -81,6 +92,33 @@ export function withVerifiedTransactions(
     return price === undefined ? request : { ...request, computeUnitPrice: price };
   }
 
+  /**
+   * prepareAndSend only. The SDK appends the SetComputeUnitLimit it estimates
+   * at the END of the message, so the wallet sees [price, ...app, limit] and
+   * may "enhance" it with its own compute budget (Phantom does when it finds
+   * none where it looks), which the network refuses before execution. With a
+   * price set and no limit from the caller, the request instead carries a
+   * placeholder limit (the 1.4M ceiling, so the estimate itself cannot run
+   * out) that the SDK places first and re-estimates in place by simulation:
+   * the wallet gets [limit, price, ...app], as the co-signed envelopes build
+   * it. `prepareTransaction: false` and a caller-set limit are left as they are.
+   */
+  function withLeadingComputeUnitLimit(request: TransactionPrepareAndSendRequest): TransactionPrepareAndSendRequest {
+    if (
+      request.computeUnitPrice === undefined ||
+      request.computeUnitLimit !== undefined ||
+      request.prepareTransaction === false ||
+      request.instructions.some((ix) => decodeComputeBudgetInstruction(ix)?.kind === "limit")
+    ) {
+      return request;
+    }
+    return {
+      ...request,
+      computeUnitLimit: MAX_COMPUTE_UNIT_LIMIT,
+      prepareTransaction: { ...request.prepareTransaction, computeUnitLimitReset: true },
+    };
+  }
+
   async function authorize(context: Context) {
     await assertSiteWritable();
     context.assertCurrent();
@@ -136,7 +174,7 @@ export function withVerifiedTransactions(
       await assertNetwork(context);
       checkAuthority(input, context);
       // The fee is settled before the policy check's wallet prompt.
-      const request = await withFee(input, context);
+      const request = withLeadingComputeUnitLimit(await withFee(input, context));
       await authorize(context);
       const result = await base.prepareAndSend(guardTransactionGraph(request, context.session, context.assertCurrent), options);
       context.assertCurrent();

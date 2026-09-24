@@ -3,7 +3,13 @@
 // maintenance, the wallet policy and the genesis check are mocked, and the
 // fee oracle is a mocked GET /api/priority-fee.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { SolanaClient, TransactionPrepared, TransactionPrepareRequest, WalletSession } from "@solana/client";
+import type {
+  SolanaClient,
+  TransactionPrepareAndSendRequest,
+  TransactionPrepared,
+  TransactionPrepareRequest,
+  WalletSession,
+} from "@solana/client";
 import { address, type Address, type Instruction } from "@solana/kit";
 
 const events = vi.hoisted(() => [] as string[]);
@@ -29,7 +35,7 @@ vi.mock("@/lib/network-identity", async (original) => ({
 import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
-import { setComputeUnitPriceInstruction } from "@/lib/compute-budget";
+import { setComputeUnitLimitInstruction, setComputeUnitPriceInstruction } from "@/lib/compute-budget";
 
 const WALLET = address("7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2");
 const PROGRAM = address("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
@@ -80,8 +86,8 @@ function fixture(network: "devnet" | "mainnet" = "devnet") {
   };
 }
 
-const request = (over: Partial<TransactionPrepareRequest> = {}) =>
-  ({ feePayer: WALLET, instructions: [ix()], ...over }) as TransactionPrepareRequest;
+const request = (over: Partial<TransactionPrepareAndSendRequest> = {}) =>
+  ({ feePayer: WALLET, instructions: [ix()], ...over }) as TransactionPrepareAndSendRequest;
 
 beforeEach(() => {
   events.length = 0;
@@ -177,5 +183,47 @@ describe("the verified client sets the priority fee", () => {
     await f.guarded.transaction.prepareAndSend(request());
     expect(f.prepareAndSend.mock.calls[0][0].computeUnitPrice).toBe(BigInt(1_000));
     warn.mockRestore();
+  });
+});
+
+// 24.9. regression: the SDK appended its estimated SetComputeUnitLimit at the
+// END; the wallet must see the compute budget first (tests/wallet-send-order
+// checks the real SDK's output).
+describe("prepareAndSend puts the compute unit limit first", () => {
+  it("asks for a placeholder limit that the SDK re-estimates in place", async () => {
+    const f = fixture();
+    await f.guarded.transaction.prepareAndSend(request());
+    const sent = f.prepareAndSend.mock.calls[0][0] as TransactionPrepareAndSendRequest;
+    expect(sent.computeUnitLimit).toBe(1_400_000);
+    expect(sent.prepareTransaction).toEqual({ computeUnitLimitReset: true });
+  });
+
+  it("keeps the caller's own prepareTransaction options", async () => {
+    const f = fixture();
+    await f.guarded.transaction.prepareAndSend(request({ prepareTransaction: { blockhashReset: false } }));
+    expect((f.prepareAndSend.mock.calls[0][0] as TransactionPrepareAndSendRequest).prepareTransaction).toEqual({
+      blockhashReset: false,
+      computeUnitLimitReset: true,
+    });
+  });
+
+  it("leaves a caller-set limit, a limit instruction and prepareTransaction: false alone", async () => {
+    const f = fixture();
+    await f.guarded.transaction.prepareAndSend(request({ computeUnitLimit: 900_000, prepareTransaction: false }));
+    await f.guarded.transaction.prepareAndSend(request({ instructions: [setComputeUnitLimitInstruction(300_000), ix()] }));
+    await f.guarded.transaction.prepareAndSend(request({ prepareTransaction: false }));
+    const [a, b, c] = f.prepareAndSend.mock.calls.map((call) => call[0] as TransactionPrepareAndSendRequest);
+    expect([a.computeUnitLimit, a.prepareTransaction]).toEqual([900_000, false]);
+    expect([b.computeUnitLimit, b.prepareTransaction]).toEqual([undefined, undefined]);
+    expect([c.computeUnitLimit, c.prepareTransaction]).toEqual([undefined, false]);
+    expect(a.computeUnitPrice).toBe(BigInt(5_000));
+  });
+
+  it("adds no limit without a price (too large) or on prepare, which does not estimate", async () => {
+    const f = fixture();
+    await f.guarded.transaction.prepareAndSend(request({ instructions: [ix(1_200)] }));
+    await f.guarded.transaction.prepare(request());
+    expect((f.prepareAndSend.mock.calls[0][0] as TransactionPrepareAndSendRequest).computeUnitLimit).toBeUndefined();
+    expect(f.prepare.mock.calls[0][0].computeUnitLimit).toBeUndefined();
   });
 });

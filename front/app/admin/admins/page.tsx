@@ -93,7 +93,8 @@ export default function AdminsPage() {
       invalidateRoles();
     } catch (err) {
       toast.dismiss(pendingId);
-      toast.showError("Failed to grant admin", explainSendError(err));
+      const explained = explainSendError(err);
+      toast.showError("Failed to grant admin", explained);
       const message = err instanceof Error ? err.message : String(err);
       void recordAudit({
         ix_name: "add_admin",
@@ -102,7 +103,7 @@ export default function AdminsPage() {
         reason,
         target_label: target,
         status: "failed",
-        metadata: { error: message },
+        metadata: { error: message, explained },
       });
     }
   }
@@ -136,8 +137,9 @@ export default function AdminsPage() {
       invalidateRoles();
     } catch (err) {
       toast.dismiss(pendingId);
+      const explained = explainSendError(err);
       const message = err instanceof Error ? err.message : String(err);
-      toast.showError("Failed to revoke admin", message);
+      toast.showError("Failed to revoke admin", explained);
       void recordAudit({
         ix_name: "remove_admin",
         category: "admins",
@@ -145,7 +147,7 @@ export default function AdminsPage() {
         reason,
         target_label: target,
         status: "failed",
-        metadata: { error: message },
+        metadata: { error: message, explained },
       });
     }
   }
