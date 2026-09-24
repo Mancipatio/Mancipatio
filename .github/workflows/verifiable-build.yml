@@ -1,4 +1,4 @@
-# Verifiable build — hermetic Docker build of both programs via solana-verify.
+# Verifiable build and GitHub Release of both programs.
 #
 # Why CI and not the dev machine: the reproducible build needs Docker
 # (solanafoundation/solana-verifiable-build image), which the dev Mac does not
@@ -13,8 +13,20 @@
 # local `solana-cli 3.1.13` toolchain). Bump it together with the toolchain —
 # a different image produces a different (still valid) hash.
 #
-# Trigger: manual (Run workflow) or a release tag push. Artifacts:
-# verifiable-programs.zip with both .so files + hashes.txt.
+# Triggers:
+# - a `v*` tag push: build, IDL drift check, then a GitHub Release (tags that
+#   contain `-` are prereleases) with the .so files, both IDLs, hashes.txt,
+#   sbf-sha256.txt and SHA256SUMS, plus build-provenance attestations. The
+#   tagged commit must be on main. Turn on immutable releases in the
+#   repository settings (D9).
+# - manual (Run workflow): build + IDL check; with `dry_release` the release
+#   bundle is assembled exactly as for a tag and uploaded as a 7-day workflow
+#   artifact instead of being published (no ancestry check, no attestation).
+#
+# Artifacts: verifiable-programs-<sha> (90 days): target/deploy/*.so,
+# hashes.txt, sbf-sha256.txt. The chain CLI (front/scripts/chain, runbook
+# ops/runbook-mainnet.md) reads either the downloaded Release (flat layout,
+# SHA256SUMS verified first) or this artifact (target/deploy layout).
 name: Verifiable build
 
 permissions:
@@ -22,6 +34,11 @@ permissions:
 
 on:
   workflow_dispatch:
+    inputs:
+      dry_release:
+        description: Assemble the Release bundle as a workflow artifact (never published)
+        type: boolean
+        default: false
   push:
     tags: ["v*"]
 
@@ -42,7 +59,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@1.89.0
 
+      # Release (tag) builds never restore a cache: the artifact comes from a
+      # clean toolchain install only.
       - uses: Swatinem/rust-cache@v2
+        if: github.ref_type != 'tag'
         with:
           workspaces: program
           cache-targets: false # only ~/.cargo (solana-verify install), not target/
@@ -80,10 +100,126 @@ jobs:
 
       - uses: actions/upload-artifact@v4
         with:
-          name: verifiable-programs
+          name: verifiable-programs-${{ github.sha }}
           path: |
             program/target/deploy/asset_registry.so
             program/target/deploy/transfer_hook.so
             program/hashes.txt
             program/sbf-sha256.txt
+          retention-days: 90
+          if-no-files-found: error
+
+  # The same check as front-ci `program-drift`: the committed IDLs (which the
+  # Release ships) are regenerated from program/ and both client layers match.
+  idl-check:
+    name: Program IDL + SDK drift
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: front
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@1.89.0
+
+      - uses: Swatinem/rust-cache@v2
+        if: github.ref_type != 'tag'
+        with:
+          workspaces: program
+          cache-targets: false
+
+      - name: Install pinned Anchor / Agave tooling
+        working-directory: program
+        run: bash scripts/install-ci-toolchain.sh
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Regenerate Rust IDL from program/ and compare both client layers
+        run: npm run check:idl -- --program-dir ../program
+
+  release:
+    name: GitHub Release
+    needs: [build, idl-check]
+    if: startsWith(github.ref, 'refs/tags/v') || inputs.dry_release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      # A release tag must point at a commit that is already on main. Dry
+      # releases run from branches, so they skip this check.
+      - name: Tagged commit is on main
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: verifiable-programs-${{ github.sha }}
+          path: art
+
+      - name: Assemble the Release bundle
+        run: |
+          set -euo pipefail
+          (cd art && sha256sum --check sbf-sha256.txt)
+          mkdir dist
+          cp art/target/deploy/*.so art/hashes.txt art/sbf-sha256.txt dist/
+          cp front/idl/asset_registry.json front/idl/transfer_hook.json dist/
+          grep -qx "commit: $GITHUB_SHA" dist/hashes.txt
+          (cd dist && sha256sum *.so *.json hashes.txt sbf-sha256.txt > SHA256SUMS)
+          cat dist/SHA256SUMS
+
+      - name: Build provenance
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/*
+
+      - name: Publish the Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          {
+            echo "Verifiable build of \`$GITHUB_SHA\` with \`$BASE_IMAGE\`."
+            echo
+            echo '```'
+            cat dist/hashes.txt
+            echo '```'
+            echo
+            echo "Check the files with \`sha256sum --check SHA256SUMS\` and"
+            echo "\`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`."
+          } > "$RUNNER_TEMP/release-notes.txt"
+          prerelease=()
+          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=(--prerelease); fi
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes-file "$RUNNER_TEMP/release-notes.txt" \
+            "${prerelease[@]}"
+
+      - name: Upload the dry-release bundle
+        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-dry-${{ github.sha }}
+          path: dist
+          retention-days: 7
           if-no-files-found: error
