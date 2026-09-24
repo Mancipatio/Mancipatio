@@ -92,6 +92,37 @@ that lives outside the repository and holds no keypair bytes.
 
 ## 0. Preflight
 
+### Merge gates (owner; before the chain CLI branch merges)
+
+The front gate proves the tools against a fake chain, and
+`tests/chain-release.test.ts` runs the workflow's own shell steps (build
+hashes, artifact layout, bundle assembly, publish re-check) on a synthetic
+workspace and loads the result with `loadRelease(…, {requireSums: true})`.
+`actionlint` 1.7.7 with shellcheck 0.10.0 is clean on
+`.github/workflows/*.yml`; re-run it after any workflow edit. What only a
+real runner and devnet can prove stays open until these pass:
+
+- [ ] Push the branch and run the workflow with a dry release:
+      `gh workflow run verifiable-build.yml --ref <branch> -f dry_release=true`.
+      The `build`, `idl-check` and `bundle` jobs pass; `publish` is skipped.
+- [ ] Download the bundle and check it:
+      `gh run download <run-id> -n release-dry-<sha> -D "$D/release-dry"`,
+      then `(cd "$D/release-dry" && sha256sum --check SHA256SUMS)`.
+- [ ] From `front/` on devnet (`CHAIN_NETWORK=devnet`, `CHAIN_RPC_URL`, a new
+      `CHAIN_OUTPUT` under `$D` for each run), store every evidence file:
+  - `npm run chain:inventory` without a role map, then with the devnet
+    `CHAIN_ROLE_MAP` and `CHAIN_RELEASE_DIR="$D/release-dry"`
+    (the Release must load; a ProgramData ≠ Release finding is expected when
+    devnet runs another build);
+  - `CHAIN_IDL_MODE=check npm run chain:idl`;
+  - `npm run chain:bootstrap` as a dry run (no `CHAIN_SEND`) with the map.
+- [ ] After the merge, before any mainnet tag: push a throwaway prerelease tag
+      `v0.0.0-rc.<n>` on main. The `publish` job must pass the ancestry check,
+      attest and create the prerelease; then run the attestation check below
+      against it (`--source-ref refs/tags/v0.0.0-rc.<n>`).
+
+### Mainnet preflight
+
 - [ ] **Release vX**: a `v*` tag on a commit that is on main, a GitHub Release
       produced by `verifiable-build.yml`, **immutable releases** turned on in
       the repository settings (D9). Download it to `~/mancipatio-mainnet/release-vX`

@@ -181,7 +181,7 @@ jobs:
           cp art/target/deploy/*.so art/hashes.txt art/sbf-sha256.txt dist/
           cp front/idl/asset_registry.json front/idl/transfer_hook.json dist/
           grep -qx "commit: $GITHUB_SHA" dist/hashes.txt
-          (cd dist && sha256sum *.so *.json hashes.txt sbf-sha256.txt > SHA256SUMS)
+          (cd dist && sha256sum -- *.so *.json hashes.txt sbf-sha256.txt > SHA256SUMS)
           cat dist/SHA256SUMS
 
       # A tag push hands the bundle to `publish`; a manual dry release keeps
