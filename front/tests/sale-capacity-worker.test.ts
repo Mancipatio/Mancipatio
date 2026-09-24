@@ -17,6 +17,8 @@ const state = vi.hoisted(() => ({
   txs: {} as Record<string, unknown>,
   rpc: {} as Record<string, unknown>,
   calls: [] as Array<{ kind: string; target: string; args: unknown }>,
+  jobs: [] as Record<string, unknown>[],
+  rpcErrors: {} as Record<string, { code: string; message: string }>,
 }));
 
 vi.mock("@/lib/network", async (importOriginal) => ({
@@ -64,14 +66,14 @@ vi.mock("@/lib/supabase-server", () => ({
         update: write("update"), insert: write("insert"),
         then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
           Promise.resolve({
-            data: table === "sale_capacity_reservations" ? state.rows : table === "sales" ? state.sales : null, error: null,
+            data: table === "sale_capacity_reservations" ? state.rows : table === "sales" ? state.sales : table === "spv_issuance_jobs" ? state.jobs : null, error: null,
           }).then(resolve, reject),
       });
       return builder;
     },
     rpc: (fn: string, args: unknown) => {
       state.calls.push({ kind: "rpc", target: fn, args });
-      const result = { data: state.rpc[fn] ?? null, error: null };
+      const result = state.rpcErrors[fn] ? { data: null, error: state.rpcErrors[fn] } : { data: state.rpc[fn] ?? null, error: null };
       return Object.assign(Promise.resolve(result), { abortSignal: () => Promise.resolve(result) });
     },
   }),
@@ -106,7 +108,9 @@ const sale = (over: Record<string, unknown> = {}) => ({
   saleApproval: APPROVAL, pricePerUnit: BigInt(10), totalForSale: BigInt(100_000), sold: BigInt(40_000),
   status: SaleStatus.Closed, ...over,
 });
-const rpcs = () => state.calls.filter((c) => c.kind === "rpc").map((c) => c.target);
+const ALERT_RPCS = new Set(["raise_system_alert", "report_incident", "place_capacity_hold", "clear_capacity_hold"]);
+const rpcs = () => state.calls.filter((c) => c.kind === "rpc" && !ALERT_RPCS.has(c.target)).map((c) => c.target);
+const alertRpcs = (fn = "raise_system_alert") => state.calls.filter((c) => c.kind === "rpc" && c.target === fn).map((c) => c.args as Record<string, unknown>);
 const rpcArgs = (fn: string) => state.calls.find((c) => c.kind === "rpc" && c.target === fn)?.args as Record<string, unknown>;
 
 beforeEach(() => {
@@ -120,6 +124,8 @@ beforeEach(() => {
   state.sales = [];
   state.signatures = { signatures: [], complete: true };
   state.txs = {};
+  state.jobs = [];
+  state.rpcErrors = {};
   state.rpc = {
     adopt_sale_approval: row({ action: "adopted_terms", over_cap: false, last_error: "Adopted" }),
     confirm_sale_reservation: row({ chain_confirmed_at: OLD }),
@@ -358,5 +364,83 @@ describe("reconcileSaleCapacity — orphan sales and treasury mints", () => {
     expect(state.calls.find((c) => c.kind === "insert" && c.target === "audit_events")?.args).toMatchObject({
       reason: expect.stringMatching(/landed although its reservation was released/),
     });
+    expect(alertRpcs()[0]).toMatchObject({ p_source: "ledger:treasury-late", p_severity: "high", p_category: "ledger" });
+  });
+});
+
+// ── Talas 5.1: ledger alerts, the shared coverage predicate, inner mints ─────
+
+import { ledgerDedupKey, saleCoverage, treasuryMintEvidence } from "@/lib/server/sale-capacity";
+import { getSupabaseAdmin } from "@/lib/supabase-server";
+
+describe("reconcileSaleCapacity — Talas 5.1", () => {
+  it("raises ledger alerts as system alerts keyed by code and discriminator; no wallet, no snapshot", async () => {
+    state.rows = [row()];
+    state.approval = approval({ maxGrossRaise: BigInt(2_000_000) });
+    state.rpc.adopt_sale_approval = row({ action: "adopted_terms", over_cap: true, last_error: "Adopted", application_snapshot: { secret: 1 } });
+    await reconcileSaleCapacity(5);
+    const [alert] = alertRpcs();
+    expect(alert).toMatchObject({ p_source: "ledger:terms-differ", p_severity: "critical", p_category: "ledger", p_notify: true });
+    expect(String(alert.p_dedup_key)).toMatch(/^ledger:1b6f7a52-3c1d-4e8f-9a2b-5c6d7e8f9a0c:TERMS_DIFFER:[0-9a-f]{16}$/);
+    expect(JSON.stringify(alert)).not.toMatch(/secret|application_snapshot|p_wallet/);
+  });
+
+  it("dedup keys differ by discriminator (a second distinct adoption alerts again) and repeat for a rerun", () => {
+    const r = { id: row().id };
+    const a = ledgerDedupKey(r, "ADOPTED", { action: "inserted", max_gross_raise: "1" });
+    expect(ledgerDedupKey(r, "ADOPTED", { max_gross_raise: "1", action: "inserted" })).toBe(a);
+    expect(ledgerDedupKey(r, "ADOPTED", { action: "adopted_terms", max_gross_raise: "2" })).not.toBe(a);
+    expect(ledgerDedupKey({ sale_pda: SALE }, "SALE_MISSING", "once")).toMatch(new RegExp(`^ledger:${SALE}:SALE_MISSING:`));
+  });
+
+  it("saleCoverage: booked, live and closed-unsold rows cover a sale; other releases do not", async () => {
+    const sb = getSupabaseAdmin();
+    state.rows = [row({ sale_pda: SALE, status: "released", release_reason: "revoked" })];
+    expect((await saleCoverage(sb, [SALE])).has(SALE)).toBe(false);
+    state.rows = [row({ sale_pda: SALE, status: "released", release_reason: "closed_unsold" })];
+    expect((await saleCoverage(sb, [SALE])).get(SALE)?.release_reason).toBe("closed_unsold");
+    state.rows = [row({ sale_pda: SALE, status: "released", release_reason: "revoked" }), row({ sale_pda: SALE, status: "booked" })];
+    expect((await saleCoverage(sb, [SALE])).get(SALE)?.status).toBe("booked");
+  });
+
+  it("an orphan sale without an EUR rate puts its subject on hold and raises fx-missing", async () => {
+    const salePda = await findSalePda(SC as never, BigInt(4));
+    state.sales = [{ pda: salePda, sale_approval: APPROVAL }];
+    state.finalizedSale = sale({ shareClass: SC, saleId: BigInt(4), paymentMint: MINT, raiseType: RaiseType.Mature,
+      cliffMonths: 0, vestingMonths: 0, applicationHash: new Uint8Array(32).fill(0xcd) });
+    state.rpcErrors = { adopt_sale_approval: { code: "P0001", message: "FX_RATE_MISSING" } };
+    await reconcileSaleCapacity(5);
+    expect(alertRpcs("place_capacity_hold")[0]).toMatchObject({ p_subject: `issuer:${ISSUER}`, p_ref: salePda, p_code: "ADOPTION_PENDING", p_payment_mint: MINT });
+    expect(alertRpcs("report_incident")[0]).toMatchObject({ p_check: `fx-missing:${MINT}`, p_state: "fail", p_severity: "high" });
+  });
+
+  it("never expires a treasury reservation while a treasury-mint ledger job of its share class is pending", async () => {
+    state.rows = [treasuryRow({ created_at: minutesAgo(40) })];
+    state.signatures = { signatures: [], complete: true };
+    state.jobs = [{ id: "job" }];
+    await reconcileSaleCapacity(5);
+    expect(rpcs()).not.toContain("release_sale_reservation");
+    state.jobs = [];
+    await reconcileSaleCapacity(5);
+    expect(rpcArgs("release_sale_reservation")).toMatchObject({ p_reason: "expired" });
+  });
+
+  it("treasuryMintEvidence accepts an inner (Squads CPI) mint; a top-level one must be signed by the authority", () => {
+    const top = treasuryTx(BigInt(500));
+    expect(treasuryMintEvidence(top as never, SIG, { shareClass: SC, authority: ADMIN, amount: BigInt(500) })).toMatchObject({ inner: false });
+    const squads = "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf";
+    const inner = {
+      ...top,
+      transaction: { ...top.transaction, message: { ...top.transaction.message,
+        accountKeys: [...top.transaction.message.accountKeys, squads],
+        header: { numRequiredSignatures: 1 },
+        instructions: [{ programIdIndex: 10, accounts: [], data: "" }] } },
+      meta: { ...top.meta, innerInstructions: [{ index: 0, instructions: top.transaction.message.instructions }] },
+    };
+    // The vault (account 0) is not a transaction signer: the CPI proves it.
+    inner.transaction.message.accountKeys[0] = ADMIN;
+    expect(treasuryMintEvidence(inner as never, SIG, { shareClass: SC, authority: ADMIN, amount: BigInt(500) })).toMatchObject({ inner: true });
+    const unsigned = { ...top, transaction: { ...top.transaction, message: { ...top.transaction.message, header: { numRequiredSignatures: 0 } } } };
+    expect(() => treasuryMintEvidence(unsigned as never, SIG, { shareClass: SC, authority: ADMIN, amount: BigInt(500) })).toThrow(/another key/);
   });
 });

@@ -17,7 +17,6 @@ import "server-only";
 import { createHash } from "node:crypto";
 import {
   address,
-  getBase58Encoder,
   isAddress,
   type Address,
   type ReadonlyUint8Array,
@@ -49,6 +48,8 @@ import {
   readApprovalAndSale,
   type LiveApproval,
 } from "@/lib/server/sale-capacity-chain";
+import { raiseSystemAlert, reportIncident, type Severity } from "@/lib/server/system-alerts";
+import { flattenInvocations, resolveAccountKeys } from "@/lib/server/tx-invocations";
 
 export const TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 export const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -235,6 +236,11 @@ export type Reservation = {
   approve_signature: string | null;
   mint_signature: string | null;
   booked_amount_eur: string | number | null;
+  booked_issued_at?: string | null;
+  booked_issuance_id?: string | number | null;
+  fx_kind?: "eur_peg" | "rate" | "declared" | null;
+  fx_rate?: string | number | null;
+  fx_as_of?: string | null;
   released_at?: string | null;
   release_reason: string | null;
   reason: string | null;
@@ -310,6 +316,11 @@ export function capacityError(error: { code?: string; message?: string } | null 
       ISSUED_AT_IN_FUTURE: [400, "issued_at cannot be in the future."],
       ISSUED_AT_BACKDATED: [403, "issued_at more than 30 days back needs the super admin."],
       APPLICATION_ALREADY_APPROVED: [409, "This application already backs a sale approval or a sale. One application backs one sale: revoke the live approval first, or ask for a new application."],
+      SUBJECT_ON_HOLD: [409, "The raise limit is on hold until an on-chain sale or mint is counted; update the EUR rate on the Raise limits page."],
+      SALE_PUBKEY_NOT_ALLOWED: [400, "A manual adjustment cannot name a sale: sales are booked by the server when they close."],
+      REF_IS_SALE: [409, "This reference is an on-chain sale. Sales are booked by the server when they close; record only off-platform issuances here."],
+      REVALUE_NOT_ALLOWED: [409, "Only a booked treasury mint that the ledger adopted at its floor value can be re-valued."],
+      NO_REVALUE_HOLD: [409, "This row has no pending FX revaluation."],
     };
     for (const [code, [status, text]] of Object.entries(known)) {
       if (message.startsWith(code)) return new CapacityError(code, status, text);
@@ -353,8 +364,12 @@ export const confirmReservation = (sb: SupabaseClient, id: string, signature: st
   rpcCall<Reservation>(sb, "confirm_sale_reservation", { p_id: id, p_signature: signature }, signal);
 export const consumeReservation = (sb: SupabaseClient, id: string, salePda: string, grossMax: bigint, signal?: AbortSignal) =>
   rpcCall<Reservation & { grew?: boolean }>(sb, "consume_sale_reservation", { p_id: id, p_sale_pda: salePda, p_sale_gross_max: grossMax.toString() }, signal);
-export const bookReservation = (sb: SupabaseClient, id: string, gross: bigint, signal?: AbortSignal) =>
-  rpcCall<Reservation & { book_error?: string }>(sb, "book_sale_reservation", { p_id: id, p_gross_base_units: gross.toString(), p_issued_at: null }, signal);
+export type BookResult = Reservation & {
+  book_error?: string; over_cap?: boolean; linked_existing?: boolean; linked_amount_eur?: string | number; amount_mismatch?: boolean;
+};
+/** Books a consumed sale. `issuedAt` (YYYY-MM-DD, UTC) is the proven close date; without it the SQL takes the ledger job's. */
+export const bookReservation = (sb: SupabaseClient, id: string, gross: bigint, signal?: AbortSignal, issuedAt: string | null = null) =>
+  rpcCall<BookResult>(sb, "book_sale_reservation", { p_id: id, p_gross_base_units: gross.toString(), p_issued_at: issuedAt }, signal);
 export const releaseReservation = (sb: SupabaseClient, id: string, reason: string, by: string | null, signal?: AbortSignal) =>
   rpcCall<Reservation>(sb, "release_sale_reservation", { p_id: id, p_reason: reason, p_by: by }, signal);
 
@@ -419,31 +434,65 @@ export function approvalMismatches(r: Reservation, a: SaleApproval): string[] {
 }
 
 /** Consume (if needed) and book a reservation from the sale's on-chain state. */
-async function applySale(sb: SupabaseClient, r: Reservation, sale: Sale, signal?: AbortSignal): Promise<Reservation & { book_error?: string }> {
-  let current: Reservation & { book_error?: string; grew?: boolean } = r;
+export async function applySale(
+  sb: SupabaseClient, r: Reservation, sale: Sale, signal?: AbortSignal, issuedAt: string | null = null,
+): Promise<BookResult> {
+  let current: BookResult & { grew?: boolean } = r;
   if (current.status === "reserved") {
     current = await consumeReservation(sb, r.id, r.sale_pda!, sale.pricePerUnit * sale.totalForSale, signal);
     // The chain allowed more than was reserved: counted at the sale's size.
-    if (current.grew) await alert(sb, r, current.last_error ?? "The sale is larger than its reservation");
+    if (current.grew) {
+      await ledgerAlert(sb, r, "SALE_GREW", "high", current.last_error ?? "The sale is larger than its reservation",
+        { max_gross_raise: (sale.pricePerUnit * sale.totalForSale).toString() });
+    }
   }
   if (current.status === "consumed" && sale.status === SaleStatus.Closed) {
-    current = await bookReservation(sb, r.id, sale.sold * sale.pricePerUnit, signal);
+    current = await bookReservation(sb, r.id, sale.sold * sale.pricePerUnit, signal, issuedAt);
+    await bookingFlags(sb, current, signal);
   }
   return current;
 }
 
+/** Alerts a booking result needs: refused, over the cap, a linked legacy row. */
+export async function bookingFlags(sb: SupabaseClient, booked: BookResult, signal?: AbortSignal) {
+  if (booked.book_error) {
+    await ledgerAlert(sb, booked, "BOOK_REFUSED", "high", `Booking refused: ${booked.book_error}`,
+      { code: /^[A-Z_]+/.exec(booked.book_error)?.[0] ?? "ERROR" }, {}, signal);
+  }
+  if (booked.over_cap) {
+    await ledgerAlert(sb, booked, "OVER_CAP", "critical", "A server booking took the subject OVER its raise cap (recorded, never refused)",
+      { issuance_id: String(booked.booked_issuance_id ?? booked.id) }, {}, signal);
+  }
+  if (booked.linked_existing) {
+    await ledgerAlert(sb, booked, "LINKED_EXISTING", booked.amount_mismatch ? "high" : "medium",
+      `The sale was already recorded (legacy row linked, not inserted again)${booked.amount_mismatch ? "; the amounts differ" : ""}`,
+      { issuance_id: String(booked.booked_issuance_id ?? "") },
+      { linked_amount_eur: String(booked.linked_amount_eur ?? ""), booked_amount_eur: String(booked.booked_amount_eur ?? "") }, signal);
+  }
+}
+
 /**
- * Settles one sale from its FINALIZED on-chain state: finds the reservation
- * by the approval the sale consumed, marks it consumed and, once the sale is
- * Closed, books what was sold. Idempotent.
+ * The ONE sale-coverage predicate (design §5.1.2), shared by the ledger jobs
+ * and the orphan-sale scan: a reservation of this sale PDA that is reserved,
+ * consumed or booked, or released as closed_unsold. Only an uncovered sale
+ * is adopted. Returns the covering row per sale PDA.
  */
-export async function settleSale(sb: SupabaseClient, salePda: string, signal?: AbortSignal) {
-  const sale = await fetchSale(salePda, "finalized", signal);
-  if (!sale) throw new SiwsError(409, "The sale is not finalized on-chain yet; try again shortly");
-  const r = await findReservationByApproval(sb, sale.saleApproval, signal);
-  if (!r) throw new SiwsError(409, "No reservation matches this sale's approval");
-  if (r.sale_pda !== salePda) throw new SiwsError(409, "The reservation belongs to another sale");
-  return { sale, reservation: await applySale(sb, r, sale, signal) };
+export async function saleCoverage(sb: SupabaseClient, salePdas: readonly string[], signal?: AbortSignal): Promise<Map<string, Reservation>> {
+  const covered = new Map<string, Reservation>();
+  if (!salePdas.length) return covered;
+  let query = sb.from("sale_capacity_reservations").select("*")
+    .eq("network", detectNetwork()).eq("kind", "sale").in("sale_pda", [...salePdas]);
+  if (signal) query = query.abortSignal(signal);
+  const { data, error } = await query;
+  if (error) throw new SiwsError(503, "Sale capacity ledger unavailable");
+  const rank = (r: Reservation) => (r.status === "booked" ? 0 : r.status === "consumed" ? 1 : r.status === "reserved" ? 2 : 3);
+  for (const row of (data ?? []) as Reservation[]) {
+    if (!row.sale_pda || !salePdas.includes(row.sale_pda)) continue;
+    if (row.status === "released" && row.release_reason !== "closed_unsold") continue;
+    const current = covered.get(row.sale_pda);
+    if (!current || rank(row) < rank(current)) covered.set(row.sale_pda, row);
+  }
+  return covered;
 }
 
 // ── Treasury-mint evidence ─────────────────────────────────────────────────
@@ -451,38 +500,69 @@ export async function settleSale(sb: SupabaseClient, salePda: string, signal?: A
 type CompiledIx = { programIdIndex: number | bigint; accounts: readonly (number | bigint)[]; data: string };
 type TokenBalance = { accountIndex: number | bigint; mint: string; owner?: string };
 export type TreasuryTx = {
+  blockTime?: number | bigint | null;
   transaction: { signatures: readonly string[]; message: { accountKeys: readonly string[]; header: { numRequiredSignatures: number | bigint }; instructions: readonly CompiledIx[] } };
-  meta: null | { err: unknown; postTokenBalances?: readonly TokenBalance[] | null; loadedAddresses?: { writable: readonly string[]; readonly: readonly string[] } };
+  meta: null | {
+    err: unknown; postTokenBalances?: readonly TokenBalance[] | null;
+    loadedAddresses?: { writable: readonly string[]; readonly: readonly string[] };
+    innerInstructions?: readonly { index: number | bigint; instructions: readonly CompiledIx[] }[] | null;
+    logMessages?: readonly string[] | null;
+  };
 };
 
+const isMintToTreasury = (data: ReadonlyUint8Array) => MINT_TO_TREASURY_DISCRIMINATOR.every((b, i) => data[i] === b);
+
+/** Every mint_to_treasury invocation of a transaction, top-level or inner (a Squads CPI), in execution order. */
+export function treasuryMintInvocations(tx: TreasuryTx) {
+  let invocations;
+  try {
+    invocations = flattenInvocations(tx);
+  } catch {
+    throw new SiwsError(400, "Malformed transaction");
+  }
+  return invocations.filter((inv) => inv.programId === ASSET_REGISTRY_PROGRAM_ADDRESS && isMintToTreasury(inv.data));
+}
+
 /**
- * Proves a finalized transaction ran exactly one top-level `mint_to_treasury`
- * of `amount` units of `shareClass` signed by `authority` into a token account
- * OWNED by that authority (the treasury path).
+ * Proves a finalized transaction ran exactly one `mint_to_treasury` (top-level
+ * or inner) of `amount` units of `shareClass` by `authority` into a token
+ * account OWNED by that authority (the treasury path). A top-level mint must
+ * be signed by the authority in this transaction; an inner one proves it by
+ * succeeding (the program's Signer constraint on account 0).
  */
 export function treasuryMintEvidence(tx: TreasuryTx, sig: string, expected: { shareClass: string; authority: string; amount: bigint }) {
   if (!tx.meta || tx.meta.err !== null) throw new SiwsError(400, "Transaction did not complete successfully");
   if (tx.transaction.signatures[0] !== sig) throw new SiwsError(400, "Transaction signature does not match");
-  const keys = [...tx.transaction.message.accountKeys, ...(tx.meta.loadedAddresses?.writable ?? []), ...(tx.meta.loadedAddresses?.readonly ?? [])];
+  const keys = resolveAccountKeys(tx);
   const signers = new Set(tx.transaction.message.accountKeys.slice(0, Number(tx.transaction.message.header.numRequiredSignatures)));
-  const matches = tx.transaction.message.instructions.filter((ix) => {
-    if (keys[Number(ix.programIdIndex)] !== ASSET_REGISTRY_PROGRAM_ADDRESS) return false;
-    const data = getBase58Encoder().encode(ix.data);
-    return MINT_TO_TREASURY_DISCRIMINATOR.every((b, i) => data[i] === b);
-  });
+  const matches = treasuryMintInvocations(tx);
   if (matches.length !== 1) throw new SiwsError(400, "The transaction must contain exactly one treasury mint");
   const ix = matches[0];
-  const account = (i: number) => keys[Number(ix.accounts[i])];
+  const account = (i: number) => ix.accounts[i];
   // MintToTreasury accounts: 0 authority, 1 admin_record, 2 issuer, 3 asset,
   // 4 share_class, 5 mint, 6 destination, 7 token_program, 8 platform.
-  const { amount } = getMintToTreasuryInstructionDataDecoder().decode(getBase58Encoder().encode(ix.data));
-  if (account(0) !== expected.authority || !signers.has(expected.authority)) throw new SiwsError(400, "The treasury mint was signed by another key");
+  let amount: bigint;
+  try {
+    ({ amount } = getMintToTreasuryInstructionDataDecoder().decode(ix.data));
+  } catch {
+    throw new SiwsError(400, "Malformed treasury mint");
+  }
+  if (account(0) !== expected.authority || (!ix.inner && !signers.has(expected.authority))) {
+    throw new SiwsError(400, "The treasury mint was signed by another key");
+  }
   if (account(4) !== expected.shareClass) throw new SiwsError(400, "The treasury mint is for another share class");
   if (amount !== expected.amount) throw new SiwsError(400, "The minted amount does not match the reservation");
   const destinationIndex = keys.indexOf(account(6));
   const balance = (tx.meta.postTokenBalances ?? []).find((b) => Number(b.accountIndex) === destinationIndex);
   if (!balance || balance.owner !== expected.authority) throw new SiwsError(400, "The destination is not the issuer treasury");
-  return { destination: account(6), mint: account(5) };
+  return { destination: account(6), mint: account(5), inner: ix.inner };
+}
+
+/** YYYY-MM-DD (UTC) of a block time in seconds, or null. */
+export function utcDate(blockTime: number | bigint | null | undefined): string | null {
+  if (blockTime === null || blockTime === undefined) return null;
+  const ms = Number(blockTime) * 1000;
+  return Number.isFinite(ms) && ms > 0 ? new Date(ms).toISOString().slice(0, 10) : null;
 }
 
 export async function finalizedTreasuryTx(sig: string, signal?: AbortSignal): Promise<TreasuryTx> {
@@ -507,7 +587,7 @@ export async function finalizedTreasuryTx(sig: string, signal?: AbortSignal): Pr
 export async function findTreasuryMint(
   sb: SupabaseClient, r: Pick<Reservation, "network" | "share_class_pda" | "reserved_by" | "amount_units" | "created_at">,
   untilMs: number, signal?: AbortSignal,
-): Promise<{ signature: string | null; complete: boolean }> {
+): Promise<{ signature: string | null; complete: boolean; blockTime?: number }> {
   const from = Math.floor(Date.parse(r.created_at) / 1000) - TREASURY_WINDOW_SLACK_SECS;
   const to = Math.ceil(untilMs / 1000) + TREASURY_WINDOW_SLACK_SECS;
   const { signatures, complete } = await listFinalizedSignatures(r.share_class_pda, from, to, signal);
@@ -520,7 +600,7 @@ export async function findTreasuryMint(
   const booked = new Set((data ?? []).map((row) => row.mint_signature as string));
   const expected = { shareClass: r.share_class_pda, authority: r.reserved_by, amount: dbU64(r.amount_units) };
   let checked = 0;
-  for (const { signature } of signatures) {
+  for (const { signature, blockTime } of signatures) {
     if (booked.has(signature)) continue;
     // Bounded: a share class sees few transactions around one treasury mint.
     if (++checked > 10) return { signature: null, complete: false };
@@ -528,7 +608,7 @@ export async function findTreasuryMint(
     if (!tx) continue;
     try {
       treasuryMintEvidence(tx, signature, expected);
-      return { signature, complete: true };
+      return { signature, complete: true, blockTime: tx.blockTime == null ? blockTime : Number(tx.blockTime) };
     } catch (err) {
       if (!(err instanceof SiwsError)) throw err;
     }
@@ -536,24 +616,115 @@ export async function findTreasuryMint(
   return { signature: null, complete };
 }
 
-/** Books a treasury reservation with a verified signature (0066 book_treasury_mint; reactivates a released row). */
-export const bookTreasuryMintRow = (sb: SupabaseClient, id: string, signature: string, signal?: AbortSignal) =>
-  rpcCall<Reservation & { book_error?: string; adopted?: boolean }>(sb, "book_treasury_mint", {
-    p_id: id, p_signature: signature, p_issued_at: null,
+/** Books a treasury reservation with a verified signature (0073 book_treasury_mint; reactivates a released row).
+ * `issuedAt` (YYYY-MM-DD, UTC) is the mint's block date; the SQL clamps it to today. */
+export const bookTreasuryMintRow = (sb: SupabaseClient, id: string, signature: string, signal?: AbortSignal, issuedAt: string | null = null) =>
+  rpcCall<BookResult & { adopted?: boolean }>(sb, "book_treasury_mint", {
+    p_id: id, p_signature: signature, p_issued_at: issuedAt,
   }, signal);
 
 // ── Retry-worker stage ─────────────────────────────────────────────────────
 
-/** Compliance alert, raised once per distinct message (not on every worker run). */
-async function alert(sb: SupabaseClient, r: Pick<Reservation, "id" | "network" | "approval_pda" | "subject" | "last_error">, message: string) {
-  console.error(`[sale-capacity] reservation ${r.id}: ${message}`);
-  if (r.last_error === message.slice(0, 2000)) return;
-  await sb.from("sale_capacity_reservations").update({ last_error: message.slice(0, 2000) }).eq("id", r.id);
-  await sb.from("audit_events").insert({
-    network: r.network, ix_name: "sale_capacity_alert", category: "launchpad", actor_wallet: "server",
-    target_label: r.approval_pda ?? r.id, reason: message.slice(0, 1000), status: "failed",
-    metadata: { reservation_id: r.id, subject: r.subject, actor_verified: false, actor_source: "retry-worker" },
-  });
+export type LedgerCode =
+  | "ADOPTED" | "SALE_GREW" | "TERMS_DIFFER" | "OTHER_APPROVAL" | "BOOK_REFUSED" | "OVER_CAP" | "LINKED_EXISTING"
+  | "TREASURY_LATE" | "UNRESERVED_MINT" | "ADOPTION_FAILED" | "REVALUED" | "FX_LOCK_DRIFT" | "SALE_MISSING"
+  | "TREASURY_SCAN_INCOMPLETE";
+
+export type LedgerSubject = Partial<Pick<Reservation, "id" | "network" | "approval_pda" | "sale_pda" | "subject" | "last_error"
+  | "amount_eur" | "fx_kind" | "kind" | "mint_signature">>;
+
+/** ledger:<reservation id | sale PDA | approval PDA>:<CODE>:<16 hex of sha256(canonical disc)>. */
+export function ledgerDedupKey(r: LedgerSubject, code: LedgerCode, disc: unknown): string {
+  const key = r.id ?? r.sale_pda ?? r.approval_pda ?? "unknown";
+  const hash = createHash("sha256").update(canonicalSnapshotJson(disc), "utf8").digest("hex").slice(0, 16);
+  return `ledger:${key}:${code}:${hash}`;
+}
+
+/**
+ * A ledger alert (design §5.3): the reservation's last_error and an
+ * audit_events row once per distinct message (as 2B did), plus a system alert
+ * (category ledger, emailed as label and time only) deduplicated by code and
+ * a discriminator, so a second distinct adoption of one reservation alerts
+ * again while a rerun does not. Evidence never carries application_snapshot.
+ * Never throws.
+ */
+export async function ledgerAlert(
+  sb: SupabaseClient, r: LedgerSubject, code: LedgerCode, severity: Severity, message: string, disc: unknown,
+  evidence: Record<string, unknown> = {}, signal?: AbortSignal,
+) {
+  const text = message.slice(0, 2000);
+  console.error(`[sale-capacity] ${code} ${r.id ?? r.sale_pda ?? r.approval_pda ?? ""}`);
+  try {
+    if (r.id && UUID_RE.test(r.id) && r.last_error !== text) {
+      await sb.from("sale_capacity_reservations").update({ last_error: text }).eq("id", r.id);
+      await sb.from("audit_events").insert({
+        network: r.network ?? detectNetwork(), ix_name: "sale_capacity_alert", category: "launchpad", actor_wallet: "server",
+        target_label: r.approval_pda ?? r.id, reason: message.slice(0, 1000), status: "failed",
+        metadata: { reservation_id: r.id, subject: r.subject, code, actor_verified: false, actor_source: "retry-worker" },
+      });
+    }
+  } catch {
+    console.error("[sale-capacity] alert audit write failed");
+  }
+  try {
+    await raiseSystemAlert(sb, {
+      dedupKey: ledgerDedupKey(r, code, disc), category: "ledger",
+      source: `ledger:${code.toLowerCase().replace(/_/g, "-")}`, severity, summary: message.slice(0, 500),
+      evidence: {
+        code, reservation_id: r.id ?? null, subject: r.subject ?? null, approval_pda: r.approval_pda ?? null,
+        sale_pda: r.sale_pda ?? null, kind: r.kind ?? null, amount_eur: r.amount_eur ?? null, fx_kind: r.fx_kind ?? null,
+        ...evidence,
+      },
+      notify: true,
+    }, signal);
+  } catch {
+    console.error(`[sale-capacity] ${code} system alert failed`);
+  }
+}
+
+/** Places a capacity hold (0073); never throws. */
+export async function placeHold(
+  sb: SupabaseClient, subject: string, ref: string, code: "ADOPTION_PENDING" | "FX_REVALUE", paymentMint: string | null,
+  signal?: AbortSignal,
+) {
+  try {
+    let q = sb.rpc("place_capacity_hold", {
+      p_network: detectNetwork(), p_subject: subject, p_ref: ref, p_code: code, p_payment_mint: paymentMint,
+    });
+    if (signal) q = q.abortSignal(signal);
+    const { error } = await q;
+    if (error) console.error("[sale-capacity] hold not placed");
+  } catch {
+    console.error("[sale-capacity] hold not placed");
+  }
+}
+
+/** Clears a capacity hold (0073); never throws. */
+export async function clearHold(sb: SupabaseClient, subject: string, ref: string, signal?: AbortSignal) {
+  try {
+    let q = sb.rpc("clear_capacity_hold", { p_network: detectNetwork(), p_subject: subject, p_ref: ref });
+    if (signal) q = q.abortSignal(signal);
+    await q;
+  } catch {
+    console.error("[sale-capacity] hold not cleared");
+  }
+}
+
+/** The on-chain fact cannot be counted (no EUR rate): hold the subject and raise fx-missing. Never throws. */
+export async function holdForMissingFx(
+  sb: SupabaseClient, subject: string, ref: string, paymentMint: string | null, signal?: AbortSignal,
+) {
+  await placeHold(sb, subject, ref, "ADOPTION_PENDING", paymentMint, signal);
+  if (!paymentMint) return;
+  try {
+    await reportIncident(sb, {
+      check: `fx-missing:${paymentMint}`, state: "fail", category: "fx", source: "fx:missing", severity: "high",
+      summary: `An on-chain sale or mint paid in ${paymentMint} cannot be counted: there is no EUR rate. New raises of the subject are on hold.`,
+      evidence: { payment_mint: paymentMint, subject, ref },
+    }, signal);
+  } catch {
+    console.error("[sale-capacity] fx-missing incident failed");
+  }
 }
 
 type Adopted = Reservation & { action: "none" | "adopted_terms" | "reactivated" | "inserted"; over_cap: boolean };
@@ -708,15 +879,44 @@ export function orphanTurn<T extends { address: string }>(list: readonly T[], mi
   return [...sorted.slice(turn), ...sorted.slice(0, turn)];
 }
 
+/** The discriminator of an ADOPTED alert: what the chain made the ledger count. */
+function adoptionDisc(adopted: Adopted) {
+  return {
+    action: adopted.action, payment_mint: adopted.payment_mint, max_gross_raise: String(adopted.max_gross_raise ?? ""),
+    min_price_per_unit: String(adopted.min_price_per_unit ?? ""), max_price_per_unit: String(adopted.max_price_per_unit ?? ""),
+    expires_at: adopted.expires_at, application_hash: adopted.application_hash, approved_by: adopted.reserved_by,
+  };
+}
+
+/** Raises the ADOPTED ledger alert (critical when the subject is now over its cap). */
+export async function adoptedAlert(sb: SupabaseClient, adopted: Adopted, what: string, signal?: AbortSignal) {
+  await ledgerAlert(sb, adopted, "ADOPTED", adopted.over_cap ? "critical" : "high", adoptionMessage(what, adopted),
+    adoptionDisc(adopted), { action: adopted.action, over_cap: adopted.over_cap }, signal);
+}
+
+/** The subject an approval counts against, from the chain (share class → asset) and the SPV registry. */
+async function approvalSubject(sb: SupabaseClient, a: SaleApproval, signal?: AbortSignal): Promise<string | null> {
+  try {
+    const sc = await fetchMaybeShareClass(getServerRpc(), a.shareClass, { commitment: "confirmed", abortSignal: chainSignal(signal) });
+    if (!sc.exists || sc.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) return null;
+    const spv = await resolveSubjectSpv(sb, sc.data.asset, a.issuer, false, signal);
+    return spv ? `spv:${spv}` : `issuer:${a.issuer}`;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Orphan scan: every on-chain SaleApproval must have a live reservation. An
  * Admin can call approve_sale on the program directly, and a reservation can
  * be released while its transaction is still in flight; the program does not
  * know the off-chain cap, so this is its safety net. Each approval is tried
  * on its own: one that cannot be counted (no EUR rate for its payment mint:
- * a compliance alert, raised by adoptApproval) never blocks the ones behind
- * it. A run stops after MAX_FAILED_ORPHAN_APPROVALS failures, which keeps
- * the stage budget of the stages after this one, and no orphan is starved:
+ * a compliance alert, raised by adoptApproval, plus a capacity hold on its
+ * subject and the fx-missing incident) never blocks the ones behind it; a
+ * ledger refusal raises ADOPTION_FAILED. A run stops after
+ * MAX_FAILED_ORPHAN_APPROVALS failures, which keeps the stage budget of the
+ * stages after this one, and no orphan is starved:
  * - Approvals nobody has been alerted about go first. That is every new
  *   orphan, but also one that keeps failing for another reason (share class
  *   missing, RPC or ledger errors: logged, not alerted), so this group is
@@ -751,13 +951,20 @@ async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, cou
       if (failed >= group.failures) break;
       try {
         const adopted = await adoptApproval(sb, a, a.address, null, "orphan-scan", signal);
-        await alert(sb, adopted, adoptionMessage("An on-chain sale approval had no live reservation", adopted));
+        await adoptedAlert(sb, adopted, "An on-chain sale approval had no live reservation", signal);
+        await clearHold(sb, adopted.subject, a.address, signal);
         counts.pending++;
       } catch (err) {
         if (signal.aborted) return;
         counts.pending++;
         failed++;
-        if (!isCapacityCode(err, "FX_RATE_MISSING")) {
+        if (isCapacityCode(err, "FX_RATE_MISSING")) {
+          const subject = await approvalSubject(sb, a, signal);
+          if (subject) await holdForMissingFx(sb, subject, a.address, a.paymentMint, signal);
+        } else if (err instanceof CapacityError) {
+          await ledgerAlert(sb, { approval_pda: a.address, network: detectNetwork() }, "ADOPTION_FAILED", "high",
+            `An on-chain sale approval could not be counted (${err.code})`, { pda: a.address, code: err.code }, {}, signal);
+        } else {
           console.error("[sale-capacity] orphan approval adoption failed", a.address, err instanceof Error ? err.message : err);
         }
       }
@@ -767,11 +974,14 @@ async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, cou
 
 /**
  * Orphan sales: an indexed Sale v2 whose consumed approval no reservation
- * covers — opened from an approval made straight on the program and consumed
- * before the approval scan saw it, or from one whose reservation was released
- * while it was still usable. Counted at the sale's own terms (price x total,
- * at the current rate even past the cap), consumed, booked once closed, and
- * alerted. A few per run; the rest are found again next run.
+ * covers (the shared saleCoverage predicate: a closed-unsold sale IS
+ * covered) — opened from an approval made straight on the program and
+ * consumed before the approval scan saw it, or from one whose reservation was
+ * released while it was still usable. Counted at the sale's own terms (price
+ * x total, at the current rate even past the cap), consumed, booked once
+ * closed, and alerted. No EUR rate: the subject is put on hold. A few per
+ * run; the rest are found again next run. The ledger jobs (0073) handle every
+ * closed sale; this scan also covers open ones.
  */
 async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts: { complete: number; pending: number; invalid: number }) {
   const { data, error } = await sb.from("sales").select("pda,sale_approval")
@@ -781,11 +991,7 @@ async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts:
   const sales = ((data ?? []) as Array<{ pda: unknown; sale_approval: unknown }>)
     .filter((row): row is { pda: string; sale_approval: string } => typeof row.pda === "string" && typeof row.sale_approval === "string");
   if (!sales.length) return;
-  const { data: rows, error: rowsError } = await sb.from("sale_capacity_reservations").select("sale_pda,status,release_reason")
-    .eq("network", detectNetwork()).eq("kind", "sale").in("sale_pda", sales.map((row) => row.pda)).abortSignal(signal);
-  if (rowsError) throw new SiwsError(503, "Sale capacity ledger unavailable");
-  const covered = new Set(((rows ?? []) as Array<{ sale_pda: string; status: string; release_reason: string | null }>)
-    .filter((row) => row.status !== "released" || row.release_reason === "closed_unsold").map((row) => row.sale_pda));
+  const covered = await saleCoverage(sb, sales.map((row) => row.pda), signal);
   let tried = 0;
   for (const row of sales) {
     if (covered.has(row.pda)) continue;
@@ -794,15 +1000,19 @@ async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts:
     // the ones behind it, and a not-yet-finalized or stale mirror row must not
     // use up this run's adoption attempts.
     let paymentMint: string | null = null;
+    let subject: string | null = null;
     try {
       const sale = await fetchSale(row.pda, "finalized", signal);
       // Not finalized yet, or a stale mirror row: the chain decides.
       if (!sale || (await findSalePda(sale.shareClass, sale.saleId)) !== row.pda) continue;
       tried++;
       paymentMint = sale.paymentMint;
-      const adopted = await adoptSale(sb, row.pda, sale, signal);
-      await alert(sb, adopted, adoptionMessage(`Sale ${row.pda} was opened from an approval with no live reservation`, adopted));
+      const resolved = await resolveSaleSubject(sb, sale, signal);
+      subject = resolved.subject;
+      const adopted = await adoptSale(sb, row.pda, sale, signal, resolved);
+      await adoptedAlert(sb, adopted, `Sale ${row.pda} was opened from an approval with no live reservation`, signal);
       await alarmIfNotAllowlisted(sb, row.pda, sale.paymentMint, null, signal);
+      await clearHold(sb, adopted.subject, row.pda, signal);
       await applySale(sb, adopted, sale, signal);
       counts.pending++;
     } catch (error) {
@@ -811,6 +1021,10 @@ async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts:
         await raisePaymentMintAlarm(sb, {
           network: detectNetwork(), key: row.pda, paymentMint, approvedBy: null, reason: "fx_rate_missing",
         }, signal);
+        if (subject) await holdForMissingFx(sb, subject, row.pda, paymentMint, signal);
+      } else if (error instanceof CapacityError) {
+        await ledgerAlert(sb, { sale_pda: row.pda, network: detectNetwork() }, "ADOPTION_FAILED", "high",
+          `An on-chain sale could not be counted (${error.code})`, { pda: row.pda, code: error.code }, {}, signal);
       } else {
         console.error("[sale-capacity] orphan sale adoption failed", row.pda, error instanceof Error ? error.message : error);
       }
@@ -818,18 +1032,28 @@ async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts:
   }
 }
 
-/** A sale's own terms as an adopted reservation (0066 adopt_sale_approval; the approval is closed). */
-async function adoptSale(sb: SupabaseClient, salePda: string, sale: Sale, signal?: AbortSignal): Promise<Adopted> {
+export type SaleSubject = { asset: string; issuer: string; spvId: string | null; subject: string };
+
+/** The subject a sale counts against: its share class's asset and issuer at finalized, and the SPV registry (non-strict). */
+export async function resolveSaleSubject(sb: SupabaseClient, sale: Pick<Sale, "shareClass">, signal?: AbortSignal): Promise<SaleSubject> {
   const config = { commitment: "finalized" as const, abortSignal: chainSignal(signal) };
   const sc = await fetchMaybeShareClass(getServerRpc(), sale.shareClass, config);
   if (!sc.exists || sc.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Sale share class not found");
   const asset = await fetchMaybeAsset(getServerRpc(), sc.data.asset, config);
   if (!asset.exists || asset.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Sale asset not found");
   const spvId = await resolveSubjectSpv(sb, sc.data.asset, asset.data.issuer, false, signal);
+  return { asset: sc.data.asset, issuer: asset.data.issuer, spvId, subject: spvId ? `spv:${spvId}` : `issuer:${asset.data.issuer}` };
+}
+
+/** A sale's own terms as an adopted reservation (0066 adopt_sale_approval; the approval is closed). */
+export async function adoptSale(
+  sb: SupabaseClient, salePda: string, sale: Sale, signal?: AbortSignal, resolved?: SaleSubject,
+): Promise<Adopted> {
+  const s = resolved ?? await resolveSaleSubject(sb, sale, signal);
   return rpcCall<Adopted>(sb, "adopt_sale_approval", {
     p_network: detectNetwork(), p_share_class_pda: sale.shareClass, p_sale_id: sale.saleId.toString(),
-    p_approval_pda: sale.saleApproval, p_sale_pda: salePda, p_asset_pda: sc.data.asset, p_issuer_pda: asset.data.issuer,
-    p_spv_id: spvId, p_payment_mint: sale.paymentMint, p_max_gross_raise: (sale.pricePerUnit * sale.totalForSale).toString(),
+    p_approval_pda: sale.saleApproval, p_sale_pda: salePda, p_asset_pda: s.asset, p_issuer_pda: s.issuer,
+    p_spv_id: s.spvId, p_payment_mint: sale.paymentMint, p_max_gross_raise: (sale.pricePerUnit * sale.totalForSale).toString(),
     p_min_price_per_unit: sale.pricePerUnit.toString(), p_max_price_per_unit: sale.pricePerUnit.toString(),
     p_raise_type: raiseTypeName(sale.raiseType), p_cliff_months: sale.cliffMonths, p_vesting_months: sale.vestingMonths,
     // The closed approval's expiry and approver are gone with it.
@@ -838,12 +1062,24 @@ async function adoptSale(sb: SupabaseClient, salePda: string, sale: Sale, signal
   }, signal);
 }
 
+/** Whether a mint_to_treasury ledger job of this share class is still pending (0073): its reservation must not expire. */
+async function treasuryJobPending(sb: SupabaseClient, shareClass: string, signal: AbortSignal): Promise<boolean> {
+  const { data, error } = await sb.from("spv_issuance_jobs").select("id")
+    .eq("network", detectNetwork()).eq("kind", "treasury_mint").eq("share_class_pda", shareClass).eq("status", "pending")
+    .limit(1).abortSignal(signal);
+  // Unknown counts as pending: never expire a reservation on a failed read.
+  if (error) return true;
+  return Array.isArray(data) && data.length > 0;
+}
+
 /**
  * Treasury-mint rows. A reserved row is booked from the chain when its
- * finalized mint is found (the browser failed or left before booking), and
- * expired once TREASURY_TTL_MS passed with the share class's history fully
- * read and no matching mint. A released row is rechecked for a day, since a
- * mint that landed before its release would otherwise go uncounted.
+ * finalized mint is found (the admin used "book with signature" or nobody
+ * did), at the mint's block date, and expired once TREASURY_TTL_MS passed
+ * with the share class's history fully read, no matching mint and no pending
+ * treasury-mint ledger job for the share class. A released row is rechecked
+ * for a day, since a mint that landed before its release would otherwise go
+ * uncounted.
  */
 async function reconcileTreasuryMints(sb: SupabaseClient, signal: AbortSignal, counts: { complete: number; pending: number; invalid: number }) {
   const now = Date.now();
@@ -857,23 +1093,23 @@ async function reconcileTreasuryMints(sb: SupabaseClient, signal: AbortSignal, c
   for (const r of ((data ?? []) as Reservation[]).filter((x) => x.kind === "treasury_mint" && x.status === "reserved")) {
     if (signal.aborted) return;
     const age = now - Date.parse(r.created_at);
-    // The admin's browser books it after finality.
+    // The admin may still book it with its signature.
     if (age < CONFIRM_GRACE_MS) continue;
     try {
       const found = await findTreasuryMint(sb, r, now, signal);
       if (found.signature) {
-        const booked = await bookTreasuryMintRow(sb, r.id, found.signature, signal);
-        if (booked.book_error) {
-          await alert(sb, booked, `Treasury mint ${found.signature} booking refused: ${booked.book_error}`);
-          counts.pending++;
-        } else counts.complete++;
-      } else if (age > TREASURY_TTL_MS && found.complete) {
+        const booked = await bookTreasuryMintRow(sb, r.id, found.signature, signal, utcDate(found.blockTime));
+        await bookingFlags(sb, booked, signal);
+        if (booked.book_error) counts.pending++;
+        else counts.complete++;
+      } else if (age > TREASURY_TTL_MS && found.complete && !(await treasuryJobPending(sb, r.share_class_pda, signal))) {
         // A released row is still rechecked for a day (below).
         await releaseReservation(sb, r.id, "expired", "retry-worker", signal);
         counts.complete++;
       } else {
-        if (age > TREASURY_TTL_MS) {
-          await alert(sb, r, "Treasury mint reservation: the share class's history is too long to scan; book it with its signature or release it by hand");
+        if (age > TREASURY_TTL_MS && !found.complete) {
+          await ledgerAlert(sb, r, "TREASURY_SCAN_INCOMPLETE", "medium",
+            "Treasury mint reservation: the share class's history is too long to scan; book it with its signature or release it by hand", "once", {}, signal);
         }
         counts.pending++;
         await touch(r.id);
@@ -898,8 +1134,11 @@ async function reconcileTreasuryMints(sb: SupabaseClient, signal: AbortSignal, c
         await touch(r.id);
         continue;
       }
-      const booked = await bookTreasuryMintRow(sb, r.id, found.signature, signal);
-      await alert(sb, booked, `Treasury mint ${found.signature} landed although its reservation was released (${r.release_reason}): counted again${booked.book_error ? `; booking refused: ${booked.book_error}` : ""}`);
+      const booked = await bookTreasuryMintRow(sb, r.id, found.signature, signal, utcDate(found.blockTime));
+      await ledgerAlert(sb, booked, "TREASURY_LATE", "high",
+        `Treasury mint ${found.signature} landed although its reservation was released (${r.release_reason}): counted again${booked.book_error ? `; booking refused: ${booked.book_error}` : ""}`,
+        { mint_key: found.signature }, { mint_signature: found.signature }, signal);
+      await bookingFlags(sb, { ...booked, book_error: undefined }, signal);
       counts.pending++;
     } catch (err) {
       if (signal.aborted) return;
@@ -916,8 +1155,8 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
   if (r.status === "consumed") {
     const sale = await fetchSale(r.sale_pda!, "finalized", signal);
     if (!sale) return "pending";
+    // The issue date comes from the sale's ledger job (book_sale_reservation v2).
     const done = await applySale(sb, r, sale, signal);
-    if (done.book_error) await alert(sb, r, `Booking refused: ${done.book_error}`);
     return done.status === "booked" || done.status === "released" ? "complete" : "pending";
   }
   // reserved
@@ -928,7 +1167,9 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
     const fields = approvalMismatches(r, approval);
     if (fields.length) {
       const adopted = await adoptApproval(sb, approval, r.approval_pda!, r, "worker", signal);
-      await alert(sb, adopted, adoptionMessage(`On-chain approval differs from its reservation (${fields.join(", ")})`, adopted));
+      await ledgerAlert(sb, adopted, "TERMS_DIFFER", adopted.over_cap ? "critical" : "high",
+        adoptionMessage(`On-chain approval differs from its reservation (${fields.join(", ")})`, adopted),
+        [...fields].sort(), { fields, action: adopted.action, over_cap: adopted.over_cap }, signal);
       return "pending";
     }
     if (!r.chain_confirmed_at) await confirmReservation(sb, r.id, null, signal);
@@ -942,7 +1183,8 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
   // The approval account is gone: consumed by open_sale, revoked, or never created.
   if (sale) {
     if (sale.saleApproval !== r.approval_pda) {
-      await alert(sb, r, "A sale exists for this id but consumed a different approval");
+      await ledgerAlert(sb, r, "OTHER_APPROVAL", "high", "A sale exists for this id but consumed a different approval",
+        { approval: sale.saleApproval }, { consumed_approval: sale.saleApproval }, signal);
       return "pending";
     }
     const finalized = await fetchSale(r.sale_pda!, "finalized", signal);
