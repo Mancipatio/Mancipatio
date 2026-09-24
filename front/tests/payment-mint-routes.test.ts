@@ -88,6 +88,8 @@ import { TOKEN_2022, TOKEN_CLASSIC, USDC } from "@/lib/payment-mints";
 import { POST as fxRatesRoute } from "@/app/api/admin-config/fx-rates/route";
 import { POST as reserveRoute } from "@/app/api/sale-approvals/reserve/route";
 import { POST as otcCreateRoute } from "@/app/api/otc/create/route";
+import { POST as payoutCreateRoute } from "@/app/api/payouts/create/route";
+import { POST as payoutScheduleRoute } from "@/app/api/payout-schedules/upsert/route";
 
 const MAINNET_USDC = USDC.mainnet!.mint;
 const DEVNET_USDC = USDC.devnet!.mint;
@@ -243,5 +245,46 @@ describe("POST /api/otc/create", () => {
     const { status } = await call(otcCreateRoute, request(PLAIN));
     expect(status).toBe(200);
     expect(writes("insert", "otc_requests")[0].args).toMatchObject({ network: "devnet", payment_mint: PLAIN });
+  });
+});
+
+describe("payouts: POST /api/payouts/create and /api/payout-schedules/upsert", () => {
+  const payout = (paymentMint: string | null) => ({
+    payout: {
+      asset_mint: "3n1mQ6zsrVpQyzFCkr9qFVGgU3qHiHQeAvGtaVJk9oNr", asset_label: "Test", kind: "dividend", total_amount: 10,
+      currency: "USDC", per_share: null, snapshot_source: "manual", total_shares: 10, merkle_root: null, status: "draft",
+      payment_mint: paymentMint, payment_decimals: 6, notes: "",
+    },
+    recipients: [{ wallet: AUTHORITY, shares: 10, amount: 10, merkle_index: 0, merkle_proof: [] }],
+  });
+  const schedule = (paymentMint: string | null) => ({
+    share_class_pda: "Pc4auCy8Fnwxs7EcFwBGKqV3SudxCKEEDLHbEHujBpK", payment_mint: paymentMint,
+    cadence: "quarterly", next_due: "2026-12-31", active: true,
+  });
+
+  it("mainnet: refuse a non-allowlisted payment mint; nothing is written", async () => {
+    state.network = "mainnet";
+    for (const [route, params, table] of [
+      [payoutCreateRoute, payout(PLAIN), "payouts"],
+      [payoutScheduleRoute, schedule(PLAIN), "payout_schedules"],
+    ] as const) {
+      const { status, body } = await call(route, params);
+      expect(status).toBe(400);
+      expect(body.error).toMatch(/not an allowed payment token on mainnet/);
+      expect(writes("insert", table)).toEqual([]);
+    }
+  });
+
+  it("accept USDC on mainnet, any mint elsewhere, and no mint (off-chain payout) everywhere", async () => {
+    state.network = "mainnet";
+    expect((await call(payoutCreateRoute, payout(MAINNET_USDC))).status).toBe(200);
+    expect((await call(payoutCreateRoute, payout(null))).status).toBe(200);
+    expect((await call(payoutScheduleRoute, schedule(MAINNET_USDC))).status).toBe(200);
+    expect((await call(payoutScheduleRoute, schedule(null))).status).toBe(200);
+    state.network = "devnet";
+    expect((await call(payoutCreateRoute, payout(PLAIN))).status).toBe(200);
+    expect((await call(payoutScheduleRoute, schedule(PLAIN))).status).toBe(200);
+    expect(writes("insert", "payouts")).toHaveLength(3);
+    expect(writes("insert", "payout_schedules")).toHaveLength(3);
   });
 });

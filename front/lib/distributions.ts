@@ -24,7 +24,6 @@ import {
   getDistributionDiscriminatorBytes,
   type Distribution,
 } from "@/lib/generated/asset_registry";
-import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { DISTRIBUTION_PLAN_BATCH_SIZE } from "@/lib/distribution-plans";
 import { merkleRoot, snapshotLeaf } from "@/lib/merkle";
 
@@ -32,7 +31,9 @@ type Rpc = SolanaClient["runtime"]["rpc"];
 
 export const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
-// A payment mint's token program is always read from chain (detectTokenProgram).
+// A payment mint's token program is always read from chain
+// (lib/transaction-builders: inspectPaymentMint on entry paths,
+// fetchMintTokenProgram on exits).
 const SYSTEM_PROGRAM_ADDRESS = "11111111111111111111111111111111" as Address;
 
 /**
@@ -397,7 +398,7 @@ export function computeDistributionAllocation(
   };
 }
 
-// ── Payment mint helpers ──────────────────────────────────────────────────────
+// ── Distribution ids ──────────────────────────────────────────────────────────
 
 /** Random u64 id, saved with the immutable plan before any funding. */
 export function newDistributionId(): bigint {
@@ -405,10 +406,3 @@ export function newDistributionId(): bigint {
   return new DataView(bytes.buffer).getBigUint64(0, true);
 }
 
-/** Fail closed on RPC failures and unsupported fee/hook-bearing payment mints. */
-export async function detectTokenProgram(
-  rpc: Rpc,
-  mint: Address,
-): Promise<Address> {
-  return fetchPlainPaymentMintTokenProgram(rpc, mint);
-}

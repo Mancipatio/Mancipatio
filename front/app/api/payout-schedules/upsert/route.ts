@@ -7,7 +7,9 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
+import { assertAllowedPaymentMint } from "@/lib/server/payment-mint";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { detectNetwork } from "@/lib/network";
 
 const CADENCES = new Set(["monthly", "quarterly", "annual"]);
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -52,6 +54,8 @@ export async function POST(request: Request) {
 
     const mint = optionalBase58(params.mint, "mint");
     const paymentMint = optionalBase58(params.payment_mint, "payment_mint");
+    // On mainnet a scheduled payout's token must be an allowlisted one.
+    if (paymentMint !== null) assertAllowedPaymentMint(detectNetwork(), paymentMint);
 
     const label = typeof params.label === "string" ? params.label.trim() : "";
     if (label.length > 120) {

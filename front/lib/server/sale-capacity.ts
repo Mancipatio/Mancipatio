@@ -563,6 +563,10 @@ type Adopted = Reservation & { action: "none" | "adopted_terms" | "reactivated" 
  * adopt_sale_approval): a live reservation with other terms takes them, a
  * released one is reactivated, and an approval nobody reserved gets a row.
  * The chain is the truth; the cap is only reported (over_cap), never refused.
+ * Every adoption path (orphan scan, worker, confirm) raises the payment-mint
+ * alarm here: when the ledger cannot count the chain's mint (no EUR rate;
+ * the error is rethrown) and, on mainnet, when the counted mint is not
+ * allowlisted.
  */
 export async function adoptApproval(
   sb: SupabaseClient, a: SaleApproval, approvalPda: string, row: Reservation | null, source: string, signal?: AbortSignal,
@@ -577,23 +581,38 @@ export async function adoptApproval(
     spvId = await resolveSubjectSpv(sb, asset, a.issuer, false, signal);
     salePda = await findSalePda(a.shareClass, a.saleId);
   }
-  return rpcCall<Adopted>(sb, "adopt_sale_approval", {
-    p_network: detectNetwork(), p_share_class_pda: a.shareClass, p_sale_id: a.saleId.toString(), p_approval_pda: approvalPda,
-    p_sale_pda: salePda, p_asset_pda: asset, p_issuer_pda: a.issuer, p_spv_id: spvId, p_payment_mint: a.paymentMint,
-    p_max_gross_raise: a.maxGrossRaise.toString(), p_min_price_per_unit: a.minPricePerUnit.toString(),
-    p_max_price_per_unit: a.maxPricePerUnit.toString(), p_raise_type: raiseTypeName(a.raiseType),
-    p_cliff_months: a.cliffMonths, p_vesting_months: a.vestingMonths,
-    p_expires_at: new Date(Number(a.expiresAt) * 1000).toISOString(), p_application_hash: hexOf(a.applicationHash),
-    p_approved_by: a.approvedBy, p_source: source,
-  }, signal);
+  let adopted: Adopted;
+  try {
+    adopted = await rpcCall<Adopted>(sb, "adopt_sale_approval", {
+      p_network: detectNetwork(), p_share_class_pda: a.shareClass, p_sale_id: a.saleId.toString(), p_approval_pda: approvalPda,
+      p_sale_pda: salePda, p_asset_pda: asset, p_issuer_pda: a.issuer, p_spv_id: spvId, p_payment_mint: a.paymentMint,
+      p_max_gross_raise: a.maxGrossRaise.toString(), p_min_price_per_unit: a.minPricePerUnit.toString(),
+      p_max_price_per_unit: a.maxPricePerUnit.toString(), p_raise_type: raiseTypeName(a.raiseType),
+      p_cliff_months: a.cliffMonths, p_vesting_months: a.vestingMonths,
+      p_expires_at: new Date(Number(a.expiresAt) * 1000).toISOString(), p_application_hash: hexOf(a.applicationHash),
+      p_approved_by: a.approvedBy, p_source: source,
+    }, signal);
+  } catch (err) {
+    if (isCapacityCode(err, "FX_RATE_MISSING")) {
+      await raisePaymentMintAlarm(sb, {
+        network: detectNetwork(), key: approvalPda, paymentMint: a.paymentMint, approvedBy: a.approvedBy, reason: "fx_rate_missing",
+      }, signal);
+    }
+    throw err;
+  }
+  await alarmIfNotAllowlisted(sb, approvalPda, a.paymentMint, a.approvedBy, signal);
+  return adopted;
 }
 
 const adoptionMessage = (what: string, adopted: Adopted) =>
   `${what}: counted at the on-chain terms (${adopted.action})${adopted.over_cap ? " — the subject is now OVER its raise cap" : ""}. Revoke the approval if it is not intended.`;
 
+/** Alert statuses that still need a decision (as /api/compliance/open-wallets). */
+const UNRESOLVED_ALERT_STATUSES = ["open", "escalated"] as const;
+
 export type PaymentMintAlarm = {
   network: string;
-  /** The approval (or sale) PDA the alarm is about; the dedup key. */
+  /** The approval (or sale) PDA the alarm is about; with `reason`, the dedup key. */
   key: string;
   paymentMint: string;
   approvedBy: string | null;
@@ -605,15 +624,20 @@ export type PaymentMintAlarm = {
 /**
  * A compliance alert (source "sale-capacity", severity high) for an on-chain
  * approval or sale whose payment mint the ledger cannot, or should not,
- * count (Talas 4.2 §3.5). One open alert per key: a later run skips the
- * insert while it is open (the retry-worker lease serializes runs). Never
- * throws; returns whether a row was written.
+ * count (Talas 4.2 §3.5). One unresolved (open or escalated) alert per key
+ * and reason: a later run skips the insert while one is unresolved (the
+ * retry-worker lease serializes runs), and an open "fx_rate_missing" alert
+ * never hides the "not_allowlisted" one raised once a hand-inserted rate
+ * lets the approval be counted. The alert has no subject wallet: it is about
+ * an approval, not a person, so the approving admin never becomes an AML
+ * subject (passport gate, client export); the approver is in the evidence.
+ * Never throws; returns whether a row was written.
  */
 export async function raisePaymentMintAlarm(sb: SupabaseClient, input: PaymentMintAlarm, signal?: AbortSignal): Promise<boolean> {
   try {
     let existing = sb.from("compliance_alerts").select("id")
-      .eq("network", input.network).eq("source", "sale-capacity").eq("status", "open")
-      .eq("evidence->>key", input.key).limit(1);
+      .eq("network", input.network).eq("source", "sale-capacity").in("status", [...UNRESOLVED_ALERT_STATUSES])
+      .eq("evidence->>key", input.key).eq("evidence->>reason", input.reason).limit(1);
     if (signal) existing = existing.abortSignal(signal);
     const { data, error } = await existing;
     if (error) {
@@ -624,13 +648,14 @@ export async function raisePaymentMintAlarm(sb: SupabaseClient, input: PaymentMi
     const what = input.reason === "fx_rate_missing"
       ? "has no EUR rate, so it is not counted against the raise cap"
       : "is not an allowed mainnet payment token";
+    const approvedBy = input.approvedBy && isAddress(input.approvedBy) ? input.approvedBy : null;
     const { error: insertError } = await sb.from("compliance_alerts").insert({
       network: input.network,
       source: "sale-capacity",
       severity: "high",
-      wallet: input.approvedBy && isAddress(input.approvedBy) ? input.approvedBy : null,
-      evidence: { kind: "unknown_payment_mint", key: input.key, payment_mint: input.paymentMint, reason: input.reason },
-      summary: `On-chain sale approval or sale ${input.key}: payment mint ${input.paymentMint} ${what}. Revoke it, or add the payment token's EUR rate if it is intended.`,
+      wallet: null,
+      evidence: { kind: "unknown_payment_mint", key: input.key, payment_mint: input.paymentMint, reason: input.reason, approved_by: approvedBy },
+      summary: `On-chain sale approval or sale ${input.key}${approvedBy ? ` (approved by ${approvedBy})` : ""}: payment mint ${input.paymentMint} ${what}. Revoke it, or add the payment token's EUR rate if it is intended.`,
     });
     if (insertError) {
       console.error("[sale-capacity] payment-mint alarm: insert failed");
@@ -652,13 +677,35 @@ async function alarmIfNotAllowlisted(sb: SupabaseClient, key: string, paymentMin
   }
 }
 
+/** Orphan approvals that may fail in one run; the rest are tried next run. */
+export const MAX_FAILED_ORPHAN_APPROVALS = 5;
+
+/** The keys among `keys` with an unresolved sale-capacity alert; empty when unknown (ordering only). */
+async function alertedKeys(sb: SupabaseClient, keys: string[], signal: AbortSignal): Promise<Set<string>> {
+  try {
+    const { data, error } = await sb.from("compliance_alerts").select("evidence")
+      .eq("network", detectNetwork()).eq("source", "sale-capacity").in("status", [...UNRESOLVED_ALERT_STATUSES])
+      .in("evidence->>key", keys).abortSignal(signal);
+    if (error || !Array.isArray(data)) return new Set();
+    return new Set(data.map((row) => (row as { evidence?: { key?: unknown } }).evidence?.key)
+      .filter((key): key is string => typeof key === "string"));
+  } catch {
+    return new Set();
+  }
+}
+
 /**
  * Orphan scan: every on-chain SaleApproval must have a live reservation. An
  * Admin can call approve_sale on the program directly, and a reservation can
  * be released while its transaction is still in flight; the program does not
  * know the off-chain cap, so this is its safety net. Each approval is tried
  * on its own: one that cannot be counted (no EUR rate for its payment mint:
- * a compliance alert) never blocks the ones behind it.
+ * a compliance alert, raised by adoptApproval) never blocks the ones behind
+ * it. Approvals nobody has been alerted about go first, the alerted ones
+ * after them (rotated each minute), and a run stops after
+ * MAX_FAILED_ORPHAN_APPROVALS failures, so orphans that keep failing can
+ * neither starve a new one nor use up the stage budget of the stages after
+ * this one.
  */
 async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, counts: { complete: number; pending: number; invalid: number }) {
   const approvals: LiveApproval[] = await listLiveApprovals(signal);
@@ -668,21 +715,24 @@ async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, cou
     .in("approval_pda", approvals.map((a) => a.address)).abortSignal(signal);
   if (error) throw new SiwsError(503, "Sale capacity ledger unavailable");
   const live = new Set((data ?? []).map((row) => row.approval_pda as string));
-  for (const a of approvals) {
-    if (live.has(a.address) || signal.aborted) continue;
+  const orphans = approvals.filter((a) => !live.has(a.address));
+  if (!orphans.length || signal.aborted) return;
+  const alerted = await alertedKeys(sb, orphans.map((a) => a.address), signal);
+  const fresh = orphans.filter((a) => !alerted.has(a.address));
+  const known = orphans.filter((a) => alerted.has(a.address));
+  const turn = known.length ? Math.floor(Date.now() / 60_000) % known.length : 0;
+  let failed = 0;
+  for (const a of [...fresh, ...known.slice(turn), ...known.slice(0, turn)]) {
+    if (signal.aborted || failed >= MAX_FAILED_ORPHAN_APPROVALS) return;
     try {
       const adopted = await adoptApproval(sb, a, a.address, null, "orphan-scan", signal);
       await alert(sb, adopted, adoptionMessage("An on-chain sale approval had no live reservation", adopted));
-      await alarmIfNotAllowlisted(sb, a.address, a.paymentMint, a.approvedBy, signal);
       counts.pending++;
     } catch (err) {
       if (signal.aborted) return;
       counts.pending++;
-      if (isCapacityCode(err, "FX_RATE_MISSING")) {
-        await raisePaymentMintAlarm(sb, {
-          network: detectNetwork(), key: a.address, paymentMint: a.paymentMint, approvedBy: a.approvedBy, reason: "fx_rate_missing",
-        }, signal);
-      } else {
+      failed++;
+      if (!isCapacityCode(err, "FX_RATE_MISSING")) {
         console.error("[sale-capacity] orphan approval adoption failed", a.address, err instanceof Error ? err.message : err);
       }
     }

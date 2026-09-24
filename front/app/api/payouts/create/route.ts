@@ -10,7 +10,9 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
+import { assertAllowedPaymentMint } from "@/lib/server/payment-mint";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { detectNetwork } from "@/lib/network";
 
 const KINDS = new Set(["dividend", "buyback", "airdrop", "other"]);
 const SOURCES = new Set(["csv", "indexer", "manual"]);
@@ -110,6 +112,9 @@ export async function POST(request: Request) {
     if (paymentMint === undefined) {
       throw new SiwsError(400, "payment_mint must be a base58 address");
     }
+    // An on-chain payout is paid in this token: on mainnet only an allowlisted
+    // one (the send paths re-check the mint and its decimals on chain).
+    if (paymentMint !== null) assertAllowedPaymentMint(detectNetwork(), paymentMint);
     const paymentDecimals =
       typeof p.payment_decimals === "number" &&
       Number.isInteger(p.payment_decimals) &&

@@ -13,10 +13,13 @@ const state = vi.hoisted(() => ({
   network: "devnet" as "devnet" | "mainnet",
   live: [] as Record<string, unknown>[],
   sales: [] as Record<string, unknown>[],
+  reservations: [] as Record<string, unknown>[],
+  chainApproval: null as Record<string, unknown> | null,
   finalizedSale: null as Record<string, unknown> | null,
   missingFx: new Set<string>(),
   alerts: [] as Alert[],
   adopted: [] as string[],
+  attempts: 0,
   audit: 0,
 }));
 
@@ -26,7 +29,7 @@ vi.mock("@/lib/network", async (importOriginal) => ({
 }));
 vi.mock("@/lib/server/rpc", () => ({ getServerRpc: () => ({}) }));
 vi.mock("@/lib/server/sale-capacity-chain", () => ({
-  readApprovalAndSale: vi.fn(async () => ({ approval: null, sale: null })),
+  readApprovalAndSale: vi.fn(async () => ({ approval: state.chainApproval, sale: null })),
   listLiveApprovals: vi.fn(async () => state.live),
   listFinalizedSignatures: vi.fn(async () => ({ signatures: [], complete: true })),
   finalizedTransaction: vi.fn(async () => null),
@@ -49,9 +52,13 @@ vi.mock("@/lib/supabase-server", () => ({
       const builder: Record<string, unknown> = {};
       const chain = () => builder;
       Object.assign(builder, {
-        select: chain, in: chain, order: chain, limit: chain, abortSignal: chain, not: chain, gte: chain, lte: chain, is: chain,
+        select: chain, order: chain, limit: chain, abortSignal: chain, not: chain, gte: chain, lte: chain, is: chain,
         eq: (column: string, value: unknown) => {
-          filters[column] = value;
+          filters[column] = [value];
+          return builder;
+        },
+        in: (column: string, values: unknown[]) => {
+          filters[column] = values;
           return builder;
         },
         update: () => builder,
@@ -62,11 +69,13 @@ vi.mock("@/lib/supabase-server", () => ({
         },
         then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => {
           let data: unknown = [];
+          const match = (column: string, value: unknown) => !(column in filters) || (filters[column] as unknown[]).includes(value);
           if (table === "sales") data = state.sales;
+          if (table === "sale_capacity_reservations") data = state.reservations;
           if (table === "compliance_alerts") {
             data = state.alerts.filter((a) =>
-              a.network === filters.network && a.source === filters.source && a.status === filters.status &&
-              a.evidence.key === filters["evidence->>key"]);
+              match("network", a.network) && match("source", a.source) && match("status", a.status) &&
+              match("evidence->>key", a.evidence.key) && match("evidence->>reason", a.evidence.reason));
           }
           return Promise.resolve({ data, error: null }).then(resolve, reject);
         },
@@ -76,6 +85,7 @@ vi.mock("@/lib/supabase-server", () => ({
     rpc: (fn: string, args: Record<string, unknown>) => {
       let result: { data: unknown; error: unknown } = { data: null, error: null };
       if (fn === "adopt_sale_approval") {
+        state.attempts++;
         if (state.missingFx.has(String(args.p_payment_mint))) {
           result = { data: null, error: { code: "P0001", message: "FX_RATE_MISSING" } };
         } else {
@@ -88,9 +98,12 @@ vi.mock("@/lib/supabase-server", () => ({
   }),
 }));
 
+import { getAddressDecoder } from "@solana/kit";
 import { RaiseType, SaleStatus } from "@/lib/generated/asset_registry";
 import { USDC } from "@/lib/payment-mints";
-import { capacityError, isCapacityCode, raisePaymentMintAlarm, reconcileSaleCapacity } from "@/lib/server/sale-capacity";
+import {
+  MAX_FAILED_ORPHAN_APPROVALS, capacityError, isCapacityCode, raisePaymentMintAlarm, reconcileSaleCapacity,
+} from "@/lib/server/sale-capacity";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 const ADMIN = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
@@ -107,15 +120,24 @@ const approval = (address: string, paymentMint: string, saleId: number) => ({
   applicationHash: new Uint8Array(32).fill(0xab), approvedBy: ADMIN, cliffMonths: 0, vestingMonths: 0,
 });
 
+const key = (n: number) => {
+  const bytes = new Uint8Array(32).fill(7);
+  bytes[0] = n;
+  return getAddressDecoder().decode(bytes) as string;
+};
+
 let errors: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   state.network = "devnet";
   state.live = [];
   state.sales = [];
+  state.reservations = [];
+  state.chainApproval = null;
   state.finalizedSale = null;
   state.missingFx = new Set();
   state.alerts = [];
   state.adopted = [];
+  state.attempts = 0;
   state.audit = 0;
   errors = vi.spyOn(console, "error").mockImplementation(() => {});
 });
@@ -129,11 +151,63 @@ describe("orphan approvals with an unknown payment mint", () => {
     expect(state.adopted).toEqual([A2]);
     expect(state.audit).toBe(1);
     expect(state.alerts).toHaveLength(1);
+    // No subject wallet: the approving admin is not an AML subject (the
+    // passport gate and the client export read compliance_alerts.wallet);
+    // the approver is kept in the evidence and the summary.
     expect(state.alerts[0]).toMatchObject({
-      network: "devnet", source: "sale-capacity", severity: "high", wallet: ADMIN, status: "open",
-      evidence: { kind: "unknown_payment_mint", key: A1, payment_mint: UNRATED, reason: "fx_rate_missing" },
+      network: "devnet", source: "sale-capacity", severity: "high", wallet: null, status: "open",
+      evidence: { kind: "unknown_payment_mint", key: A1, payment_mint: UNRATED, reason: "fx_rate_missing", approved_by: ADMIN },
     });
     expect(state.alerts[0].summary).toContain(A1);
+    expect(state.alerts[0].summary).toContain(ADMIN);
+  });
+
+  it("an escalated alert is unresolved too: no duplicate while it is escalated", async () => {
+    state.missingFx = new Set([UNRATED]);
+    state.live = [approval(A1, UNRATED, 4)];
+    await reconcileSaleCapacity(5);
+    state.alerts[0].status = "escalated";
+    await reconcileSaleCapacity(5);
+    expect(state.alerts).toHaveLength(1);
+    state.alerts[0].status = "dismissed";
+    await reconcileSaleCapacity(5);
+    expect(state.alerts).toHaveLength(2);
+  });
+
+  it("mainnet: an open fx_rate_missing alert does not hide the not_allowlisted one after a hand-inserted rate", async () => {
+    state.network = "mainnet";
+    state.missingFx = new Set([UNRATED]);
+    state.live = [approval(A1, UNRATED, 4)];
+    await reconcileSaleCapacity(5);
+    expect(state.alerts.map((a) => a.evidence.reason)).toEqual(["fx_rate_missing"]);
+    // An operator adds the rate by hand (the route refuses it) and the next
+    // run counts the approval while the first alert is still open.
+    state.missingFx = new Set();
+    await reconcileSaleCapacity(5);
+    expect(state.adopted).toEqual([A1]);
+    expect(state.alerts.map((a) => [a.evidence.key, a.evidence.reason, a.status])).toEqual([
+      [A1, "fx_rate_missing", "open"],
+      [A1, "not_allowlisted", "open"],
+    ]);
+  });
+
+  it("stops after a few failing orphans per run, trying un-alerted ones first so none is starved", async () => {
+    const unrated = Array.from({ length: MAX_FAILED_ORPHAN_APPROVALS + 2 }, (_, i) => approval(key(i + 1), UNRATED, 10 + i));
+    const good = approval(key(99), USDC.devnet!.mint, 99);
+    state.missingFx = new Set([UNRATED]);
+    state.live = [...unrated, good];
+    await reconcileSaleCapacity(5);
+    // Run 1: the first five fail (and alarm); the rest wait for the next run.
+    expect(state.attempts).toBe(MAX_FAILED_ORPHAN_APPROVALS);
+    expect(state.adopted).toEqual([]);
+    expect(state.alerts).toHaveLength(MAX_FAILED_ORPHAN_APPROVALS);
+    state.attempts = 0;
+    await reconcileSaleCapacity(5);
+    // Run 2: the two un-alerted ones and the good one go first; then the
+    // alerted ones until the failure bound. No duplicate alerts.
+    expect(state.adopted).toEqual([good.address]);
+    expect(state.alerts).toHaveLength(MAX_FAILED_ORPHAN_APPROVALS + 2);
+    expect(state.attempts).toBe(1 + MAX_FAILED_ORPHAN_APPROVALS);
   });
 
   it("a second run does not duplicate the open alert", async () => {
@@ -164,6 +238,31 @@ describe("orphan approvals with an unknown payment mint", () => {
     expect(state.adopted).toEqual([A1, A2]);
     expect(state.alerts).toHaveLength(1);
     expect(state.alerts[0].evidence).toMatchObject({ key: A1, payment_mint: UNRATED, reason: "not_allowlisted" });
+  });
+
+  it("mainnet: the worker adopting an approval whose on-chain mint differs from its reservation alarms too", async () => {
+    state.network = "mainnet";
+    const onChain = approval(A1, UNRATED, 4);
+    state.chainApproval = onChain;
+    state.reservations = [{
+      id: "2c7e8f9a-1b3d-4e5f-8a9b-0c1d2e3f4a5b", network: "mainnet", kind: "sale", status: "reserved",
+      share_class_pda: SC, sale_id: "4", approval_pda: A1, sale_pda: "BpTT41WYH3RAaj3qnW15gJcW2xFjTEVkb1coKWEpshAr",
+      asset_pda: "3n1mQ6zsrVpQyzFCkr9qFVGgU3qHiHQeAvGtaVJk9oNr", issuer_pda: ISSUER, spv_id: null, subject: "issuer:x",
+      application_hash: "ab".repeat(32), payment_mint: USDC.mainnet!.mint, payment_decimals: 6,
+      max_gross_raise: "1000000", min_price_per_unit: "10", max_price_per_unit: "10", raise_type: "mature",
+      cliff_months: 0, vesting_months: 0, expires_at: new Date(EXPIRES * 1000).toISOString(), reserved_by: ADMIN,
+      chain_confirmed_at: new Date().toISOString(), created_at: new Date().toISOString(), last_error: null,
+    }];
+    // No EUR rate for the chain's mint: the adoption fails (as before) and alarms.
+    state.missingFx = new Set([UNRATED]);
+    await reconcileSaleCapacity(5);
+    expect(state.adopted).toEqual([]);
+    expect(state.alerts.map((a) => [a.evidence.key, a.evidence.reason])).toEqual([[A1, "fx_rate_missing"]]);
+    // A hand-inserted rate: adopted at the chain's terms, with the mainnet alarm.
+    state.missingFx = new Set();
+    await reconcileSaleCapacity(5);
+    expect(state.adopted).toEqual([A1]);
+    expect(state.alerts.map((a) => [a.evidence.key, a.evidence.reason])).toEqual([[A1, "fx_rate_missing"], [A1, "not_allowlisted"]]);
   });
 
   it("an orphan sale without an FX rate alarms under the sale's key", async () => {
@@ -198,6 +297,7 @@ describe("helpers", () => {
     const sb = getSupabaseAdmin();
     await expect(raisePaymentMintAlarm(sb, { network: "devnet", key: A1, paymentMint: UNRATED, approvedBy: "unknown (orphan sale)", reason: "fx_rate_missing" })).resolves.toBe(true);
     expect(state.alerts[0].wallet).toBeNull();
+    expect(state.alerts[0].evidence.approved_by).toBeNull();
     const broken = { from: () => { throw new Error("down"); } } as unknown as typeof sb;
     await expect(raisePaymentMintAlarm(broken, { network: "devnet", key: A2, paymentMint: UNRATED, approvedBy: null, reason: "fx_rate_missing" })).resolves.toBe(false);
   });

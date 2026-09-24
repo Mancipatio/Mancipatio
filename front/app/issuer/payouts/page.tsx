@@ -27,7 +27,6 @@ import {
 import {
   DISTRIBUTION_STATUS_BADGE,
   DISTRIBUTION_STATUS_LABEL,
-  detectTokenProgram,
   loadDistributions,
   type DistributionRecord,
 } from "@/lib/distributions";
@@ -55,6 +54,7 @@ import {
   type PayoutSchedule,
 } from "@/lib/payout-schedules";
 import { walletSigner } from "@/lib/wallet-signer";
+import { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { features } from "@/lib/features";
 import { issuerSyncInstructions, issuerVaultsFor } from "@/lib/issuer-authority";
 import { explainSendError } from "@/lib/tx-error";
@@ -635,9 +635,14 @@ function VaultDetail({
       const signer = walletSigner(conn.wallet);
       const vaultPda = await payoutVaultPda(v.sale);
       const escrow = await payoutEscrowPda(vaultPda);
-      // The payment mint's actual token program (SPL Token or Token-2022,
-      // plain-payment rule), read from chain; never assumed classic.
-      const tokenProgram = await detectTokenProgram(client.runtime.rpc, v.paymentMint);
+      // The payment mint's actual token program (SPL Token or Token-2022),
+      // read from chain; never assumed classic. Releasing a tranche takes
+      // money OUT of the vault escrow — an exit path — so only the permissive
+      // owner check applies: an existing vault can always be paid out.
+      const tokenProgram = await fetchMintTokenProgram(client.runtime.rpc, v.paymentMint, {
+        commitment: "finalized",
+        abortSignal: AbortSignal.timeout(10_000),
+      });
       // Founder payment ATA — create idempotently in case it doesn't exist yet.
       const [founderAccount] = await findAssociatedTokenPda({
         owner: wallet,

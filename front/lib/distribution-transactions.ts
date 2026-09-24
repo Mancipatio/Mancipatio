@@ -31,7 +31,11 @@ import {
   type PreparedDistributionPlan,
   type DistributionPlanBatch,
 } from "@/lib/distribution-plans";
-import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
+import {
+  fetchPlainPaymentMintTokenProgram,
+  inspectPaymentMint,
+} from "@/lib/transaction-builders";
+import { detectNetwork } from "@/lib/network";
 import { vestingTransactionBytes } from "@/lib/vesting-creation";
 type Rpc = Parameters<typeof fetchPlainPaymentMintTokenProgram>[0];
 const options = { commitment: "finalized" as const };
@@ -150,9 +154,12 @@ export async function buildDistributionFunding(
   await verifyAndFreezePlan(plan);
   if (plan.funder !== signer.address)
     throw new Error("Connect the saved plan's funder wallet");
-  const tokenProgram = await fetchPlainPaymentMintTokenProgram(
+  // Funding deposits payment tokens into the escrow: an ENTRY path (plain
+  // rule, known USDC layout and, on mainnet, the allowlist).
+  const { owner: tokenProgram } = await inspectPaymentMint(
     rpc,
     address(plan.payment_mint),
+    detectNetwork(),
     options,
   );
   if (tokenProgram !== plan.payment_token_program)

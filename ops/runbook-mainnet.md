@@ -502,9 +502,23 @@ Configuration and checks only; the front enforces the rules
 - **Issuer recovery documents** are version 2 (compute budget included); a v1
   document is refused: prepare a new one.
 - **Mainnet payment tokens.** Only `MAINNET_PAYMENT_MINTS` (USDC, kind
-  `rate`) may enter a sale approval, an OTC request, an offer or a payout.
-  EURC (`eur_peg`) is added in code later, with its address verified from
-  Circle (D6).
+  `rate`) may enter. EURC (`eur_peg`) is added in code later, with its
+  address verified from Circle (D6). Where the rule is enforced:
+  - **Server (signed routes, authoritative):** FX rates
+    (`/api/admin-config/fx-rates`), sale-approval reservations
+    (`/api/sale-approvals/reserve`), OTC requests (`/api/otc/create`),
+    payouts and payout schedules (`/api/payouts/create`,
+    `/api/payout-schedules/upsert`) and new push-distribution plans
+    (`/api/distribution-plans/prepare`).
+  - **Browser only (before the wallet signs):** Buy, `create_offer`, the
+    resell board, OTC contract/take/deposit, the payout airdrop, yield
+    routing and push-distribution funding. `open_sale` uses the mint of an
+    approval the reserve route already checked.
+  - **Not enforced by the program:** a transaction built outside the app
+    (for example an admin calling `approve_sale` directly) can name any
+    mint. For sale approvals and sales the sale-capacity alarm below
+    catches it; exits (cancel, refund, reclaim, claim, expire, payout
+    release) are never blocked by the rule.
 - **USDC EUR rate** (D18): seed it on `/admin/limits` (Super Admin) as kind
   `rate` with a maximum age of at most 7 days, and refresh it weekly.
   `/api/health` fails (503, uptime alarm) when the row is missing or older
@@ -512,8 +526,12 @@ Configuration and checks only; the front enforces the rules
   `platform_raise_limits` cap with at least 3 % FX headroom.
 - **Unknown payment mints on chain.** An approval or sale the ledger cannot
   count (no EUR rate) or whose mint is not allowlisted raises a
-  `compliance_alerts` row (source `sale-capacity`, severity high); resolve it
-  by revoking the approval or adding the rate.
+  `compliance_alerts` row (source `sale-capacity`, severity high, no subject
+  wallet; the approver is in the evidence) from every adoption path: the
+  orphan scans, the worker and the confirm step. One unresolved alert per
+  approval and reason. Resolve it by revoking the approval or adding the
+  rate; an orphan that keeps failing is retried each minute (at most a few
+  failures per run).
 
 ## EXTERNAL checks (open until the rehearsal proves them)
 
