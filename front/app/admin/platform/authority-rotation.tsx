@@ -11,6 +11,9 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { invalidateRoles } from "@/lib/role-store";
+import { recordAudit } from "@/lib/supabase";
+import { explainSendError } from "@/lib/tx-error";
+import { ACCOUNT_ROLES_PATH } from "@/components/require-role";
 import {
   loadOperationalAuthority,
   buildProposeOperationalAuthority,
@@ -49,6 +52,14 @@ export function AuthorityRotation({
   }, [refresh]);
   async function submit() {
     if (!conn.wallet || !confirm) return;
+    const action = confirm;
+    const target = next.trim();
+    const ixName = AUDIT_IX[kind][action];
+    const metadata: Record<string, unknown> = {
+      kind,
+      current: state?.current ?? null,
+      new_authority: action === "propose" ? target : conn.wallet.account.address.toString(),
+    };
     try {
       const signer = walletSigner(conn.wallet);
       const ix =
@@ -67,9 +78,19 @@ export function AuthorityRotation({
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.showTx(sig, {
         title:
-          confirm === "propose"
+          action === "propose"
             ? "Authority proposal submitted"
             : "Authority acceptance submitted",
+      });
+      void recordAudit({
+        ix_name: ixName,
+        category: "platform",
+        actor_wallet: signer.address.toString(),
+        reason: AUDIT_REASON[action],
+        target_label: state?.target?.toString(),
+        tx_signature: typeof sig === "string" && sig ? sig : undefined,
+        status: "success",
+        metadata,
       });
       setConfirm(null);
       setNext("");
@@ -77,10 +98,17 @@ export function AuthorityRotation({
       invalidateRoles();
       void refresh();
     } catch (error) {
-      toast.showError(
-        "Authority change not completed",
-        error instanceof Error ? error.message : undefined,
-      );
+      const detail = explainSendError(error);
+      toast.showError("Authority change not completed", detail);
+      void recordAudit({
+        ix_name: ixName,
+        category: "platform",
+        actor_wallet: conn.wallet.account.address.toString(),
+        reason: AUDIT_REASON[action],
+        target_label: state?.target?.toString(),
+        status: "failed",
+        metadata: { ...metadata, error: detail },
+      });
     }
   }
   const label = kind === "platform" ? "Super Admin" : "blocklist authority";
@@ -138,12 +166,13 @@ export function AuthorityRotation({
           )}
           {state.proposed && wallet !== state.proposed && (
             <p className="mt-2 text-xs text-slate-500">
-              Connect the proposed wallet at{" "}
-              <Link href="/issuer/authority" className="underline">
-                Authority setup and acceptance
+              The proposed wallet accepts at{" "}
+              <Link href={ACCOUNT_ROLES_PATH} className="underline">
+                {ACCOUNT_ROLES_PATH}
               </Link>{" "}
-              after the proposal is finalized. This page is available before
-              that wallet has an Admin role.
+              once the proposal is finalized. That page needs no Admin role.
+              There is no cancel instruction: to withdraw a proposal, replace
+              it.
             </p>
           )}
         </>
@@ -167,9 +196,21 @@ export function AuthorityRotation({
             : `Propose a new ${label}?`
         }
         description={
-          confirm === "accept"
-            ? `The connected wallet becomes ${label}. ${kind === "platform" ? "The former Super Admin's Admin record is closed; issuer-specific or custody roles must be reviewed separately." : "Only the new wallet can manage the blocklist after acceptance."}`
-            : `Propose ${next.trim()}. The current authority remains active until that wallet accepts.`
+          confirm === "accept" ? (
+            kind === "platform" ? (
+              <div className="space-y-2">
+                <p>
+                  The connected wallet becomes Super Admin. The former Super
+                  Admin&apos;s Admin record is closed.
+                </p>
+                <PlatformAcceptChecklist />
+              </div>
+            ) : (
+              "The connected wallet becomes blocklist authority. Only the new wallet can manage the blocklist and the transfer-hook mode after acceptance."
+            )
+          ) : (
+            `Propose ${next.trim()}. The current authority remains active until that wallet accepts.`
+          )
         }
         kind="warning"
         confirmLabel={
@@ -181,5 +222,46 @@ export function AuthorityRotation({
         onClose={() => setConfirm(null)}
       />
     </section>
+  );
+}
+
+const AUDIT_IX: Record<OperationalAuthorityKind, Record<"propose" | "accept", string>> = {
+  platform: { propose: "propose_platform_admin", accept: "accept_platform_admin" },
+  blocklist: { propose: "propose_blocklist_authority", accept: "accept_blocklist_authority" },
+};
+
+const AUDIT_REASON: Record<"propose" | "accept", string> = {
+  propose: "Operational authority successor proposed",
+  accept: "Operational authority accepted by the proposed wallet",
+};
+
+/**
+ * What changes with the Super Admin (Talas 3.1 K10). Shown before a platform
+ * accept, here and on /account/roles: these follow the Super Admin and are
+ * not moved by the rotation itself.
+ */
+export function PlatformAcceptChecklist() {
+  return (
+    <div>
+      <p className="font-semibold">After accepting, review:</p>
+      <ul className="mt-1 list-disc space-y-1 pl-5">
+        <li>
+          Custody vaults operated by the former Super Admin: propose a new
+          custody operator for each on /admin/custody.
+        </li>
+        <li>
+          Custody operator proposals made by the former Super Admin become
+          stale: re-propose them.
+        </li>
+        <li>
+          Pending issuer recoveries become stale: cancel them and propose again
+          if still needed.
+        </li>
+        <li>
+          If the former Super Admin is also the KYC registry authority, rotate
+          the registry on /admin/kyc: it does not move with this role.
+        </li>
+      </ul>
+    </div>
   );
 }

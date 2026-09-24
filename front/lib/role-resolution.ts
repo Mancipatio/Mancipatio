@@ -183,9 +183,9 @@ function hasPrefix(data: ReadonlyUint8Array, prefix: ReadonlyUint8Array): boolea
 /**
  * Decodes `account` only after its owner, discriminator and length are
  * checked. Anything else (absent, foreign owner, wrong discriminator, short)
- * is null: never a role.
+ * is null: never a role. Shared with lib/pending-roles.
  */
-function decodeOwned<T>(
+export function decodeOwned<T>(
   account: MaybeEncodedAccount,
   owner: Address,
   discriminator: ReadonlyUint8Array,

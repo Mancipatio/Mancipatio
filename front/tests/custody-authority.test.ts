@@ -21,11 +21,15 @@ import {
   findAdminRecordPda,
   parseProposeCustodyAuthorityInstruction,
   parseAcceptCustodyAuthorityInstruction,
+  VaultState,
 } from "@/lib/generated/asset_registry";
 import { findCustodyVaultPda } from "@/lib/pdas";
 import {
   custodyAuthorityRecord,
   buildCustodyAuthorityChange,
+  custodyAcceptBlocker,
+  loadCustodyAuthority,
+  CUSTODY_STALE_PROPOSAL,
 } from "@/lib/custody-authority";
 const key = (n: number) =>
   getAddressDecoder().decode(new Uint8Array(32).fill(n));
@@ -39,7 +43,7 @@ beforeEach(() => {
   mocks.vault.mockResolvedValue({
     exists: true,
     programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-    data: { authority: operator, shareClass, vaultId: BigInt(4) },
+    data: { authority: operator, shareClass, vaultId: BigInt(4), state: VaultState.Active },
   });
   mocks.platform.mockResolvedValue({
     exists: true,
@@ -63,7 +67,7 @@ describe("custody operator proof and two-step rotation", () => {
     mocks.vault.mockResolvedValue({
       exists: true,
       programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-      data: { authority: next, shareClass, vaultId: BigInt(4) },
+      data: { authority: next, shareClass, vaultId: BigInt(4), state: VaultState.Active },
     });
     expect(await custodyAuthorityRecord(rpc, vault)).toBe(
       (await findAdminRecordPda({ authority: next }))[0],
@@ -88,7 +92,7 @@ describe("custody operator proof and two-step rotation", () => {
     mocks.transfer.mockResolvedValue({
       exists: true,
       programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-      data: { target: vault, currentAuthority: operator, newAuthority: next },
+      data: { target: vault, currentAuthority: operator, newAuthority: next, proposedBy: superAdmin },
     });
     const accept = await buildCustodyAuthorityChange(
       rpc,
@@ -125,19 +129,131 @@ describe("custody operator proof and two-step rotation", () => {
     await expect(custodyAuthorityRecord(rpc, key(9))).rejects.toThrow(
       /identity/,
     );
+    // A proposal of ANOTHER vault is not a stale proposal: it is invalid.
     mocks.transfer.mockResolvedValue({
       exists: true,
       programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-      data: { target: vault, currentAuthority: next, newAuthority: operator },
+      data: { target: key(9), currentAuthority: operator, newAuthority: next, proposedBy: superAdmin },
+    });
+    mocks.admin.mockResolvedValue({
+      exists: true,
+      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: { admin: next },
     });
     await expect(
-      buildCustodyAuthorityChange(
-        rpc,
-        vault,
-        createNoopSigner(superAdmin),
-        "propose",
-        next,
-      ),
-    ).rejects.toThrow(/stale/);
+      buildCustodyAuthorityChange(rpc, vault, createNoopSigner(superAdmin), "propose", next),
+    ).rejects.toThrow(/invalid/);
+  });
+});
+
+describe("stale custody proposals (Talas 3.1 K10)", () => {
+  const staleCases = [
+    ["the vault operator changed", { currentAuthority: next, proposedBy: superAdmin }],
+    ["the Super Admin changed", { currentAuthority: operator, proposedBy: key(7) }],
+  ] as const;
+
+  it.each(staleCases)("reports a proposal as stale when %s, instead of throwing", async (_label, fields) => {
+    const vault = await findCustodyVaultPda(shareClass, BigInt(4));
+    mocks.transfer.mockResolvedValue({
+      exists: true,
+      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: { target: vault, newAuthority: key(8), ...fields },
+    });
+    const state = await loadCustodyAuthority(rpc, vault);
+    expect(state.stale).toBe(true);
+    expect(state.proposed).toBe(key(8));
+    expect(state.proposedBy).toBe(fields.proposedBy);
+    expect(state.vaultState).toBe(VaultState.Active);
+  });
+
+  it("a live proposal is not stale", async () => {
+    const vault = await findCustodyVaultPda(shareClass, BigInt(4));
+    mocks.transfer.mockResolvedValue({
+      exists: true,
+      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: { target: vault, currentAuthority: operator, newAuthority: next, proposedBy: superAdmin },
+    });
+    expect((await loadCustodyAuthority(rpc, vault)).stale).toBe(false);
+    mocks.transfer.mockResolvedValue({ exists: false });
+    const none = await loadCustodyAuthority(rpc, vault);
+    expect(none.stale).toBe(false);
+    expect(none.proposed).toBeNull();
+  });
+
+  it("accept refuses a stale proposal; the Super Admin can re-propose over it", async () => {
+    const vault = await findCustodyVaultPda(shareClass, BigInt(4));
+    mocks.transfer.mockResolvedValue({
+      exists: true,
+      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: { target: vault, currentAuthority: operator, newAuthority: next, proposedBy: key(7) },
+    });
+    await expect(
+      buildCustodyAuthorityChange(rpc, vault, createNoopSigner(next), "accept"),
+    ).rejects.toThrow(CUSTODY_STALE_PROPOSAL);
+    const repropose = await buildCustodyAuthorityChange(
+      rpc,
+      vault,
+      createNoopSigner(superAdmin),
+      "propose",
+      next,
+    );
+    expect(
+      parseProposeCustodyAuthorityInstruction(
+        repropose as Parameters<typeof parseProposeCustodyAuthorityInstruction>[0],
+      ).data.newAuthority,
+    ).toBe(next);
+  });
+
+  it("still throws for a wrong-owner proposal", async () => {
+    const vault = await findCustodyVaultPda(shareClass, BigInt(4));
+    mocks.transfer.mockResolvedValue({
+      exists: true,
+      programAddress: key(6),
+      data: { target: vault, currentAuthority: operator, newAuthority: next, proposedBy: superAdmin },
+    });
+    await expect(loadCustodyAuthority(rpc, vault)).rejects.toThrow(/invalid/);
+  });
+
+  it("requires the vault to be Active or Triggered for accept and propose", async () => {
+    const vault = await findCustodyVaultPda(shareClass, BigInt(4));
+    mocks.transfer.mockResolvedValue({
+      exists: true,
+      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: { target: vault, currentAuthority: operator, newAuthority: next, proposedBy: superAdmin },
+    });
+    mocks.vault.mockResolvedValue({
+      exists: true,
+      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: { authority: operator, shareClass, vaultId: BigInt(4), state: VaultState.Triggered },
+    });
+    await expect(
+      buildCustodyAuthorityChange(rpc, vault, createNoopSigner(next), "accept"),
+    ).resolves.toBeDefined();
+    for (const closed of [VaultState.Realized, VaultState.Reverted, VaultState.Expired, VaultState.Returned]) {
+      mocks.vault.mockResolvedValue({
+        exists: true,
+        programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+        data: { authority: operator, shareClass, vaultId: BigInt(4), state: closed },
+      });
+      await expect(
+        buildCustodyAuthorityChange(rpc, vault, createNoopSigner(next), "accept"),
+      ).rejects.toThrow(/Active or Triggered/);
+      await expect(
+        buildCustodyAuthorityChange(rpc, vault, createNoopSigner(superAdmin), "propose", next),
+      ).rejects.toThrow(/Active or Triggered/);
+    }
+  });
+
+  it("custodyAcceptBlocker mirrors the accept constraints", () => {
+    expect(custodyAcceptBlocker({ stale: false, vaultState: VaultState.Active, acceptorIsAdmin: true })).toBeNull();
+    expect(custodyAcceptBlocker({ stale: true, vaultState: VaultState.Active, acceptorIsAdmin: true })).toBe(
+      CUSTODY_STALE_PROPOSAL,
+    );
+    expect(custodyAcceptBlocker({ stale: false, vaultState: VaultState.Triggered, acceptorIsAdmin: false })).toMatch(
+      /Admin record/,
+    );
+    expect(custodyAcceptBlocker({ stale: false, vaultState: VaultState.Realized, acceptorIsAdmin: true })).toMatch(
+      /Realized/,
+    );
   });
 });

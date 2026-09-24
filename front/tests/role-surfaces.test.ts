@@ -98,3 +98,44 @@ describe("blocklist authority pages (C, K7/K8)", () => {
     expect(page).toMatch(/blocklist authority/);
   });
 });
+
+describe("/account/roles and the rotation surface (D, K8, K10)", () => {
+  it("the page lives outside the admin gate and hands over the operational authorities", () => {
+    const page = src("app/account/roles/page.tsx");
+    expect(page).toContain('<AppShell section="account">');
+    expect(page).not.toMatch(/RequireRole|AdminGate/);
+    const roles = src("components/account-roles.tsx");
+    expect(roles).toContain('{role.isSuperAdmin && <AuthorityRotation kind="platform" />}');
+    expect(roles).toContain('{role.isBlocklistAuthority && <AuthorityRotation kind="blocklist" />}');
+    expect(roles).toContain('href="/admin/kyc"');
+    // The maintenance banner, and the panels are disabled meanwhile.
+    expect(roles).toContain("inMaintenance &&");
+    expect(roles).toContain("<PendingRolesPanel maintenance={inMaintenance} />");
+  });
+
+  it("every panel action re-reads through its builder, audits and drops the role cache", () => {
+    const panel = src("components/pending-roles-panel.tsx");
+    expect(panel).toContain("buildAcceptPendingRole(rpc, row, signer)");
+    expect(panel).toContain("buildCancelKycRegistryProposal(rpc, p.target, signer)");
+    expect(panel.match(/invalidateRoles\(\)/g)?.length).toBeGreaterThanOrEqual(2);
+    expect(panel.match(/recordAudit\(/g)?.length).toBeGreaterThanOrEqual(4);
+    expect(panel).toContain("<ConfirmModal");
+    // Issuer rows go to /issuer/rotation (or the CLI), never an inline accept.
+    expect(panel).toContain("/issuer/rotation?issuer=");
+    expect(panel).toContain("Issuer key, not a platform role · KYB:");
+  });
+
+  it("AuthorityRotation points the successor at /account/roles and shows the platform checklist", () => {
+    const rotation = src("app/admin/platform/authority-rotation.tsx");
+    expect(rotation).toContain("href={ACCOUNT_ROLES_PATH}");
+    expect(rotation).not.toContain('href="/issuer/authority"');
+    expect(rotation).toContain("<PlatformAcceptChecklist />");
+    expect(rotation).toContain("recordAudit(");
+  });
+
+  it("custody: a stale proposal hides Accept and offers the Super Admin a re-proposal", () => {
+    const custody = src("components/custody-authority-transfer.tsx");
+    expect(custody).toContain("!state.stale && state.proposed === wallet");
+    expect(custody).toContain("Re-propose");
+  });
+});
