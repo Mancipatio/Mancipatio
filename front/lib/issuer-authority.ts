@@ -66,6 +66,10 @@ import type { NetworkData } from "@/lib/enumerate";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
 import { findIssuerPermissionsAddress } from "@/lib/issuer-permissions";
 import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
+import {
+  setComputeUnitLimitInstruction,
+  setComputeUnitPriceInstruction,
+} from "@/lib/compute-budget";
 
 type Rpc = SolanaClient["runtime"]["rpc"];
 
@@ -82,7 +86,6 @@ export const NEW_AUTHORITY_OFFSET = 72;
 /** Solana's packet limit for one transaction. */
 export const TRANSACTION_SIZE_LIMIT = 1232;
 
-const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111" as Address;
 /**
  * What gets added to a transaction AFTER it is bundled: `useSendTransaction`
  * prepares it (`@solana/client` simulates and appends a SetComputeUnitLimit,
@@ -91,8 +94,8 @@ const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111" as 
  * placeholders included so the prepared transaction still fits.
  */
 export const SEND_OVERHEAD_INSTRUCTIONS: readonly Instruction[] = [
-  { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array([2, 0, 0, 0, 0]) },
-  { programAddress: COMPUTE_BUDGET_PROGRAM, data: new Uint8Array([3, 0, 0, 0, 0, 0, 0, 0, 0]) },
+  setComputeUnitLimitInstruction(0),
+  setComputeUnitPriceInstruction(BigInt(0)),
 ];
 /** Bytes kept free beyond the compute-budget placeholders (other wallet additions). */
 export const SEND_RESERVE_BYTES = 32;

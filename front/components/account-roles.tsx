@@ -109,6 +109,18 @@ export function AccountRoles() {
 
           <PendingRolesPanel maintenance={inMaintenance} />
           <OpenProposalsPanel maintenance={inMaintenance} />
+
+          {!role.kycRegistry && (
+            <p className="text-[12.5px] text-slate-600">
+              Creating the platform KYC registry with a KYC authority that is
+              a separate key from the Admin co-signer? Both keys sign one
+              transaction on{" "}
+              <Link href="/account/roles/kyc-registry" className="font-medium text-brand-700 underline-offset-2 hover:underline">
+                /account/roles/kyc-registry
+              </Link>
+              .
+            </p>
+          )}
         </>
       )}
     </section>

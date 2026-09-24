@@ -139,3 +139,31 @@ describe("/account/roles and the rotation surface (D, K8, K10)", () => {
     expect(custody).toContain("Re-propose");
   });
 });
+
+describe("K5 registry creation (E)", () => {
+  it("/admin/kyc: the bootstrap card is open to admin|kycProvider; create needs an Admin; OD6 fast path", () => {
+    const page = src("app/admin/kyc/page.tsx");
+    expect(page).toMatch(
+      /<RequireRole anyOf=\{\["admin", "kycProvider"\]\} fallback=\{<><\/>\}>\s*<KycRegistryBootstrap/,
+    );
+    expect(page).not.toContain('<RequireRole role="superAdmin"');
+    expect(page).toContain("if (!wallet || !conn.wallet || !isAdmin) return;");
+    // A pin that is not this wallet's seed slot goes to the envelope page.
+    expect(page).toContain('setRegistryState({ status: "envelope", pinned: ctx.pinned });');
+    expect(page).toContain('const REGISTRY_ENVELOPE_PATH = "/account/roles/kyc-registry";');
+    expect(page).toContain('registryState.status === "missing" && isAdmin');
+    expect(page).not.toContain("The connected wallet signs twice");
+  });
+
+  it("the envelope page sits outside the admin gate and finishes with the cache drops and the audit", () => {
+    const page = src("app/account/roles/kyc-registry/page.tsx");
+    expect(page).toContain('<AppShell section="account">');
+    expect(page).not.toMatch(/RequireRole|AdminGate/);
+    const flow = src("components/kyc-registry-creation-flow.tsx");
+    const submit = flow.slice(flow.indexOf("await submitKycRegistryCreation("));
+    for (const step of ["recordAudit(", "invalidateKycAuthorityContext(rpc)", "waitForKycRegistry(rpc)", "invalidateRoles()"]) {
+      expect(submit).toContain(step);
+    }
+    expect(flow).toContain("<ConfirmModal");
+  });
+});

@@ -115,7 +115,10 @@ export default function KycPage() {
           or revoke the on-chain passport.
         </p>
       </div>
-      <RequireRole role="superAdmin" fallback={<></>}>
+      {/* Creation needs an Admin co-signer (create_kyc_registry: admin_authority
+          + admin_record, any active Admin — OD5); the KYC provider sees the
+          live registry here too (Talas 3.1 K5). */}
+      <RequireRole anyOf={["admin", "kycProvider"]} fallback={<></>}>
         <KycRegistryBootstrap registryVersion={registryVersion} onChanged={registryChanged} />
       </RequireRole>
       {/* Admins and the KYC provider (registry authority, possibly without an
@@ -145,8 +148,18 @@ type RegistryState =
       authority: Address;
       platformAdmin: Address | null;
     }
+  /** The connected wallet may create it on the single-wallet fast path (OD6). */
   | { status: "missing"; pda: Address }
+  /**
+   * The pinned registry is missing and is NOT this wallet's seed slot: it can
+   * only be created by its own KYC authority, co-signed by an Admin, on the
+   * envelope page.
+   */
+  | { status: "envelope"; pinned: Address }
   | { status: "error"; message: string };
+
+/** The dual-signed creation page (Talas 3.1 K5). */
+const REGISTRY_ENVELOPE_PATH = "/account/roles/kyc-registry";
 
 type RegistryChangeProps = {
   /** Page-level version; a change re-reads the registry context. */
@@ -160,7 +173,7 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
-  const { isSuperAdmin } = useRole();
+  const { isAdmin } = useRole();
   const wallet = conn.wallet?.account.address;
 
   const [registryState, setRegistryState] = useState<RegistryState>({ status: "loading" });
@@ -194,16 +207,15 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
           platformAdmin: ctx.platformAdmin,
         });
       } else if (ctx.pinnedMissing && ctx.pinned) {
-        // Fail closed: never offer Create for some OTHER address. Only the
-        // wallet whose seed slot IS the pinned address may create it.
+        // Fail closed: never offer Create for some OTHER address. The
+        // single-wallet fast path is kept only when the pin IS this wallet's
+        // seed slot (OD6); any other pinned registry is created by its own
+        // KYC authority with an Admin co-signer on the envelope page.
         const pda = await getRegistryPda(wallet as Address);
         if (pda === ctx.pinned) {
           setRegistryState({ status: "missing", pda });
         } else {
-          setRegistryState({
-            status: "error",
-            message: `Pinned registry ${ctx.pinned} not found on ${detectNetwork()}. Check NEXT_PUBLIC_KYC_REGISTRY, or connect the wallet that creates it.`,
-          });
+          setRegistryState({ status: "envelope", pinned: ctx.pinned });
         }
       } else if (ctx.ambiguous) {
         setRegistryState({
@@ -228,7 +240,9 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
   }, [refreshRegistry, registryVersion]);
 
   async function createRegistry() {
-    if (!wallet || !conn.wallet || !isSuperAdmin) return;
+    // The one wallet signs as the KYC authority AND the Admin co-signer, so
+    // it needs an Admin record (the Super Admin has one).
+    if (!wallet || !conn.wallet || !isAdmin) return;
     const pendingId = toast.showPending("Creating KYC registry on-chain…");
     try {
       const signer = walletSigner(conn.wallet);
@@ -238,10 +252,10 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
       const blocked = jurisdictionBitmap(
         Array.from(blockedCodes).map((c) => parseInt(c, 10)),
       );
-      // adminSigner defaults to the same wallet: on the platform registry the
-      // super admin is both the provider authority and the admin co-signer
-      // the program requires (create_kyc_registry: admin_authority +
-      // admin_record). A separate provider key would pass its own signer here.
+      // Fast path (OD6/OD7): adminSigner defaults to the same wallet, an Admin
+      // that is both the provider authority and the co-signer the program
+      // requires. It then proposes the registry authority to the compliance
+      // key. Separate keys use the envelope page (REGISTRY_ENVELOPE_PATH).
       const ix = await buildCreateRegistry({
         authoritySigner: signer,
         approvedJurisdictions: approved,
@@ -296,7 +310,7 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-brand-600">
-            On-chain · Super Admin
+            On-chain · Admin
           </p>
           <h2 className="mt-0.5 text-base font-semibold text-brand-900">
             Platform KYC Registry
@@ -306,10 +320,16 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
             blocked jurisdiction bitmaps used by the transfer hook.
           </p>
           <p className="mt-1 text-[11px] text-brand-800/70">
-            The connected wallet signs twice: as the registry&apos;s KYC-provider
-            authority and as the platform admin co-signer the program now
-            requires (its on-chain <code className="font-mono">Admin</code>{" "}
-            record is derived from that key — grant one on /admin/admins first).
+            Recommended: an Admin creates the registry here, signing as both
+            the registry&apos;s KYC authority and the Admin co-signer the program
+            requires, then proposes the registry authority to the compliance
+            key below; that key accepts at /account/roles. When the KYC
+            authority is a separate key from the start, both keys sign one
+            transaction on{" "}
+            <Link href={REGISTRY_ENVELOPE_PATH} className="underline">
+              {REGISTRY_ENVELOPE_PATH}
+            </Link>
+            .
           </p>
         </div>
       </div>
@@ -321,6 +341,20 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
         )}
         {registryState.status === "error" && (
           <p className="text-sm text-red-600">{registryState.message}</p>
+        )}
+        {registryState.status === "envelope" && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+            <p className="text-sm font-semibold">Pinned registry not created yet</p>
+            <p className="mt-1 break-all">
+              The pinned registry <span className="font-mono">{registryState.pinned}</span> belongs to
+              another KYC authority, so the connected wallet cannot create it alone. Its KYC authority
+              and an Admin co-signer create it together on{" "}
+              <Link href={REGISTRY_ENVELOPE_PATH} className="font-semibold underline">
+                {REGISTRY_ENVELOPE_PATH}
+              </Link>
+              . If the pin is wrong, fix NEXT_PUBLIC_KYC_REGISTRY instead.
+            </p>
+          </div>
         )}
         {registryState.status === "exists" && (
           <div className="flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
@@ -366,8 +400,20 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
         )}
       </div>
 
-      {/* Create form — only when missing */}
-      {registryState.status === "missing" && (
+      {/* Only an Admin can use the single-wallet fast path. */}
+      {registryState.status === "missing" && !isAdmin && (
+        <p className="mt-4 text-xs text-brand-800">
+          Creating the registry needs an Admin co-signer. Connect an Admin
+          wallet, or create it with a separate KYC authority on{" "}
+          <Link href={REGISTRY_ENVELOPE_PATH} className="font-semibold underline">
+            {REGISTRY_ENVELOPE_PATH}
+          </Link>
+          .
+        </p>
+      )}
+
+      {/* Create form — only when missing, for an Admin */}
+      {registryState.status === "missing" && isAdmin && (
         <div className="mt-5 space-y-4 border-t border-brand-200 pt-5">
           <p className="text-xs font-semibold uppercase tracking-wider text-brand-700">
             Configure jurisdictions
