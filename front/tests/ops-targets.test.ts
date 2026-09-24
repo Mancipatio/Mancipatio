@@ -41,11 +41,12 @@ afterAll(() => {
 
 const STUB = `#!/bin/bash
 name="$(basename "$0")"
-{
-  printf '%s' "$name"
-  for a in "$@"; do printf '\\t%s' "$a"; done
-  printf '\\tENV PGPASSFILE=%s PGPASSWORD=%s PGSSLMODE=%s PGAPPNAME=%s\\n' "\${PGPASSFILE:-}" "\${PGPASSWORD:+set}" "\${PGSSLMODE:-}" "\${PGAPPNAME:-}"
-} >> "$STUB_LOG"
+# One write per call: stubs run concurrently in pipelines (pg_dump | age), and
+# several small writes to the shared log interleave between processes.
+line="$name"
+for a in "$@"; do line="$line"$'\\t'"$a"; done
+line="$line"$'\\t'"ENV PGPASSFILE=\${PGPASSFILE:-} PGPASSWORD=\${PGPASSWORD:+set} PGSSLMODE=\${PGSSLMODE:-} PGAPPNAME=\${PGAPPNAME:-}"
+printf '%s\\n' "$line" >> "$STUB_LOG"
 case "$name" in
   psql)
     case "$*" in *server_version_num*) echo "\${STUB_SERVER_VERSION:-170004}" ;; esac
