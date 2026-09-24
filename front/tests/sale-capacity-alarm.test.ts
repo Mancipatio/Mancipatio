@@ -4,7 +4,7 @@
 // counted and nothing raised an alarm. Now it raises one deduplicated
 // compliance alert and the scan continues. RPC and Supabase are mocked; the
 // stage runs for real.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 
@@ -102,7 +102,7 @@ import { getAddressDecoder } from "@solana/kit";
 import { RaiseType, SaleStatus } from "@/lib/generated/asset_registry";
 import { USDC } from "@/lib/payment-mints";
 import {
-  MAX_FAILED_ORPHAN_APPROVALS, capacityError, isCapacityCode, raisePaymentMintAlarm, reconcileSaleCapacity,
+  MAX_FAILED_ORPHAN_APPROVALS, capacityError, isCapacityCode, orphanTurn, raisePaymentMintAlarm, reconcileSaleCapacity,
 } from "@/lib/server/sale-capacity";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
@@ -126,6 +126,18 @@ const key = (n: number) => {
   return getAddressDecoder().decode(bytes) as string;
 };
 
+// The orphan scan rotates by the minute; tests that care pin the clock to a
+// minute divisible by every list length they use (840 = lcm(1..8)).
+const MINUTE0 = Math.floor(Date.UTC(2026, 8, 24) / 60_000 / 840) * 840;
+const atMinute = (offset: number) => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime((MINUTE0 + offset) * 60_000);
+};
+const MAX = MAX_FAILED_ORPHAN_APPROVALS;
+/** An approval whose adoption fails with an error that raises no alert (only logged). */
+const broken = (address: string, saleId: number) => ({ ...approval(address, USDC.devnet!.mint, saleId), shareClass: "bad" });
+const loggedFailures = () => errors.mock.calls.filter((c: unknown[]) => String(c[0]).includes("orphan approval adoption failed")).length;
+
 let errors: ReturnType<typeof vi.spyOn>;
 beforeEach(() => {
   state.network = "devnet";
@@ -140,6 +152,9 @@ beforeEach(() => {
   state.attempts = 0;
   state.audit = 0;
   errors = vi.spyOn(console, "error").mockImplementation(() => {});
+});
+afterEach(() => {
+  vi.useRealTimers();
 });
 
 describe("orphan approvals with an unknown payment mint", () => {
@@ -191,23 +206,71 @@ describe("orphan approvals with an unknown payment mint", () => {
     ]);
   });
 
-  it("stops after a few failing orphans per run, trying un-alerted ones first so none is starved", async () => {
-    const unrated = Array.from({ length: MAX_FAILED_ORPHAN_APPROVALS + 2 }, (_, i) => approval(key(i + 1), UNRATED, 10 + i));
-    const good = approval(key(99), USDC.devnet!.mint, 99);
+  it("stops after a few failing orphans per run; un-alerted ones go first", async () => {
+    atMinute(0);
+    const keys = Array.from({ length: MAX + 3 }, (_, i) => key(i + 1)).sort();
+    const good = approval(keys.pop()!, USDC.devnet!.mint, 99);
+    const unrated = keys.map((k, i) => approval(k, UNRATED, 10 + i));
     state.missingFx = new Set([UNRATED]);
     state.live = [...unrated, good];
     await reconcileSaleCapacity(5);
-    // Run 1: the first five fail (and alarm); the rest wait for the next run.
-    expect(state.attempts).toBe(MAX_FAILED_ORPHAN_APPROVALS);
+    // Run 1: the first five (address order) fail and alarm; the rest wait.
+    expect(state.attempts).toBe(MAX);
     expect(state.adopted).toEqual([]);
-    expect(state.alerts).toHaveLength(MAX_FAILED_ORPHAN_APPROVALS);
+    expect(state.alerts).toHaveLength(MAX);
     state.attempts = 0;
+    atMinute(1);
     await reconcileSaleCapacity(5);
     // Run 2: the two un-alerted ones and the good one go first; then the
     // alerted ones until the failure bound. No duplicate alerts.
     expect(state.adopted).toEqual([good.address]);
-    expect(state.alerts).toHaveLength(MAX_FAILED_ORPHAN_APPROVALS + 2);
-    expect(state.attempts).toBe(1 + MAX_FAILED_ORPHAN_APPROVALS);
+    expect(state.alerts).toHaveLength(MAX + 2);
+    expect(state.attempts).toBe(1 + MAX);
+  });
+
+  it("orphans that keep failing for another reason (logged, not alerted) cannot starve the ones behind them", async () => {
+    const keys = Array.from({ length: MAX + 2 }, (_, i) => key(i + 1)).sort();
+    const good = approval(keys.pop()!, USDC.devnet!.mint, 99);
+    const failing = keys.map((k, i) => broken(k, 10 + i));
+    const n = failing.length + 1;
+    // The un-alerted group moves on by MAX - 1 each minute, so from every
+    // phase of the rotation the good approval (last in address order, and
+    // last on chain) is adopted within ceil(n / (MAX - 1)) runs.
+    const bound = Math.ceil(n / (MAX - 1));
+    for (let start = 0; start < n; start++) {
+      state.live = [...failing, good];
+      state.adopted = [];
+      let runs = 0;
+      while (!state.adopted.length && runs < bound) {
+        atMinute(start + runs);
+        const before = loggedFailures();
+        await reconcileSaleCapacity(5);
+        expect(loggedFailures() - before).toBeLessThanOrEqual(MAX);
+        runs++;
+      }
+      expect(state.adopted, `rotation phase ${start}`).toEqual([good.address]);
+    }
+    expect(state.alerts).toEqual([]);
+  });
+
+  it("nor starve an alerted approval whose rate has since been added", async () => {
+    atMinute(0);
+    const failing = Array.from({ length: MAX + 1 }, (_, i) => broken(key(i + 1), 10 + i));
+    const rated = approval(key(99), UNRATED, 99);
+    // An earlier run alarmed it; the operator has since added the rate.
+    state.alerts = [{
+      network: "devnet", source: "sale-capacity", severity: "high", wallet: null, status: "open",
+      evidence: { kind: "unknown_payment_mint", key: rated.address, payment_mint: UNRATED, reason: "fx_rate_missing", approved_by: ADMIN },
+      summary: "earlier run",
+    }];
+    state.live = [...failing, rated];
+    const before = loggedFailures();
+    await reconcileSaleCapacity(5);
+    // The un-alerted group used MAX - 1 failures and left the last try to
+    // the alerted one.
+    expect(loggedFailures() - before).toBe(MAX - 1);
+    expect(state.adopted).toEqual([rated.address]);
+    expect(state.alerts).toHaveLength(1);
   });
 
   it("a second run does not duplicate the open alert", async () => {
@@ -300,5 +363,24 @@ describe("helpers", () => {
     expect(state.alerts[0].evidence.approved_by).toBeNull();
     const broken = { from: () => { throw new Error("down"); } } as unknown as typeof sb;
     await expect(raisePaymentMintAlarm(broken, { network: "devnet", key: A2, paymentMint: UNRATED, approvedBy: null, reason: "fx_rate_missing" })).resolves.toBe(false);
+  });
+
+  it("orphanTurn: address order whatever the chain order; every item leads within ceil(n / step) minutes", () => {
+    const items = [key(3), key(1), key(2)].map((address) => ({ address }));
+    expect(orphanTurn(items, 0, 1).map((a) => a.address)).toEqual([key(1), key(2), key(3)].sort());
+    expect(orphanTurn([], 5, 4)).toEqual([]);
+    for (const n of [1, 2, 3, 5, 7, 8, 13]) {
+      const list = Array.from({ length: n }, (_, i) => ({ address: key(i + 1) }));
+      for (const step of [1, 4, 5]) {
+        for (const first of [0, 3, 1000]) {
+          // A run tries (at least) `step` items from the start of its turn.
+          const tried = new Set<string>();
+          for (let m = first; m < first + Math.ceil(n / step); m++) {
+            for (const a of orphanTurn(list, m, step).slice(0, step)) tried.add(a.address);
+          }
+          expect(tried.size, `n=${n} step=${step} first=${first}`).toBe(n);
+        }
+      }
+    }
   });
 });

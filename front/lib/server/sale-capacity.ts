@@ -695,17 +695,36 @@ async function alertedKeys(sb: SupabaseClient, keys: string[], signal: AbortSign
 }
 
 /**
+ * `list` in address order (getProgramAccounts has no stable order), rotated
+ * to start at `minute * step`: a start that moves on by `step` each minute.
+ * A group that gets at least `step` failed tries every run therefore has
+ * every member tried within ceil(length / step) runs, whichever of them keep
+ * failing and for whatever reason.
+ */
+export function orphanTurn<T extends { address: string }>(list: readonly T[], minute: number, step: number): T[] {
+  if (!list.length) return [];
+  const sorted = [...list].sort((x, y) => (x.address < y.address ? -1 : x.address > y.address ? 1 : 0));
+  const turn = (minute * step) % sorted.length;
+  return [...sorted.slice(turn), ...sorted.slice(0, turn)];
+}
+
+/**
  * Orphan scan: every on-chain SaleApproval must have a live reservation. An
  * Admin can call approve_sale on the program directly, and a reservation can
  * be released while its transaction is still in flight; the program does not
  * know the off-chain cap, so this is its safety net. Each approval is tried
  * on its own: one that cannot be counted (no EUR rate for its payment mint:
  * a compliance alert, raised by adoptApproval) never blocks the ones behind
- * it. Approvals nobody has been alerted about go first, the alerted ones
- * after them (rotated each minute), and a run stops after
- * MAX_FAILED_ORPHAN_APPROVALS failures, so orphans that keep failing can
- * neither starve a new one nor use up the stage budget of the stages after
- * this one.
+ * it. A run stops after MAX_FAILED_ORPHAN_APPROVALS failures, which keeps
+ * the stage budget of the stages after this one, and no orphan is starved:
+ * - Approvals nobody has been alerted about go first. That is every new
+ *   orphan, but also one that keeps failing for another reason (share class
+ *   missing, RPC or ledger errors: logged, not alerted), so this group is
+ *   rotated too, MAX_FAILED_ORPHAN_APPROVALS - 1 further each minute.
+ * - The alerted ones follow, rotated one further each minute. While any
+ *   exist, the first group may use only MAX_FAILED_ORPHAN_APPROVALS - 1
+ *   failures, so at least one alerted approval is tried every run (e.g. one
+ *   whose rate has since been added).
  */
 async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, counts: { complete: number; pending: number; invalid: number }) {
   const approvals: LiveApproval[] = await listLiveApprovals(signal);
@@ -718,22 +737,29 @@ async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, cou
   const orphans = approvals.filter((a) => !live.has(a.address));
   if (!orphans.length || signal.aborted) return;
   const alerted = await alertedKeys(sb, orphans.map((a) => a.address), signal);
-  const fresh = orphans.filter((a) => !alerted.has(a.address));
   const known = orphans.filter((a) => alerted.has(a.address));
-  const turn = known.length ? Math.floor(Date.now() / 60_000) % known.length : 0;
+  const minute = Math.floor(Date.now() / 60_000);
+  const freshStep = MAX_FAILED_ORPHAN_APPROVALS - 1;
+  const groups = [
+    { list: orphanTurn(orphans.filter((a) => !alerted.has(a.address)), minute, freshStep), failures: known.length ? freshStep : MAX_FAILED_ORPHAN_APPROVALS },
+    { list: orphanTurn(known, minute, 1), failures: MAX_FAILED_ORPHAN_APPROVALS },
+  ];
   let failed = 0;
-  for (const a of [...fresh, ...known.slice(turn), ...known.slice(0, turn)]) {
-    if (signal.aborted || failed >= MAX_FAILED_ORPHAN_APPROVALS) return;
-    try {
-      const adopted = await adoptApproval(sb, a, a.address, null, "orphan-scan", signal);
-      await alert(sb, adopted, adoptionMessage("An on-chain sale approval had no live reservation", adopted));
-      counts.pending++;
-    } catch (err) {
+  for (const group of groups) {
+    for (const a of group.list) {
       if (signal.aborted) return;
-      counts.pending++;
-      failed++;
-      if (!isCapacityCode(err, "FX_RATE_MISSING")) {
-        console.error("[sale-capacity] orphan approval adoption failed", a.address, err instanceof Error ? err.message : err);
+      if (failed >= group.failures) break;
+      try {
+        const adopted = await adoptApproval(sb, a, a.address, null, "orphan-scan", signal);
+        await alert(sb, adopted, adoptionMessage("An on-chain sale approval had no live reservation", adopted));
+        counts.pending++;
+      } catch (err) {
+        if (signal.aborted) return;
+        counts.pending++;
+        failed++;
+        if (!isCapacityCode(err, "FX_RATE_MISSING")) {
+          console.error("[sale-capacity] orphan approval adoption failed", a.address, err instanceof Error ? err.message : err);
+        }
       }
     }
   }
