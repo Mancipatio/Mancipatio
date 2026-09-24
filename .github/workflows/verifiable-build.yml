@@ -14,14 +14,16 @@
 # a different image produces a different (still valid) hash.
 #
 # Triggers:
-# - a `v*` tag push: build, IDL drift check, then a GitHub Release (tags that
-#   contain `-` are prereleases) with the .so files, both IDLs, hashes.txt,
-#   sbf-sha256.txt and SHA256SUMS, plus build-provenance attestations. The
-#   tagged commit must be on main. Turn on immutable releases in the
-#   repository settings (D9).
-# - manual (Run workflow): build + IDL check; with `dry_release` the release
-#   bundle is assembled exactly as for a tag and uploaded as a 7-day workflow
-#   artifact instead of being published (no ancestry check, no attestation).
+# - a `v<digit>…` tag push: build, IDL drift check, then a GitHub Release
+#   (tags that contain `-` are prereleases) with the .so files, both IDLs,
+#   hashes.txt, sbf-sha256.txt and SHA256SUMS, plus build-provenance
+#   attestations. The tagged commit must be on main. Turn on immutable
+#   releases in the repository settings (D9).
+# - manual (Run workflow), on any ref including a tag: build + IDL check; with
+#   `dry_release` the release bundle is assembled exactly as for a tag and
+#   uploaded as the 7-day workflow artifact release-dry-<sha>. A manual run
+#   never publishes, attests or checks ancestry (those steps require a push
+#   event).
 #
 # Artifacts: verifiable-programs-<sha> (90 days): target/deploy/*.so,
 # hashes.txt, sbf-sha256.txt. The chain CLI (front/scripts/chain, runbook
@@ -40,7 +42,7 @@ on:
         type: boolean
         default: false
   push:
-    tags: ["v*"]
+    tags: ["v[0-9]*"]
 
 env:
   BASE_IMAGE: solanafoundation/solana-verifiable-build:3.1.13
@@ -145,29 +147,26 @@ jobs:
       - name: Regenerate Rust IDL from program/ and compare both client layers
         run: npm run check:idl -- --program-dir ../program
 
-  release:
-    name: GitHub Release
+  # The bundle is assembled read-only, for a tag push and for a dry release
+  # alike; only the tag-push `publish` job gets write, id-token and
+  # attestation permissions.
+  bundle:
+    name: Release bundle
     needs: [build, idl-check]
-    if: startsWith(github.ref, 'refs/tags/v') || inputs.dry_release
+    if: >-
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.dry_release)
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
-      contents: write
-      id-token: write
-      attestations: write
+      contents: read
     defaults:
       run:
         working-directory: .
     steps:
       - uses: actions/checkout@v5
         with:
-          fetch-depth: 0
-
-      # A release tag must point at a commit that is already on main. Dry
-      # releases run from branches, so they skip this check.
-      - name: Tagged commit is on main
-        if: startsWith(github.ref, 'refs/tags/v')
-        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:
@@ -185,16 +184,55 @@ jobs:
           (cd dist && sha256sum *.so *.json hashes.txt sbf-sha256.txt > SHA256SUMS)
           cat dist/SHA256SUMS
 
+      # A tag push hands the bundle to `publish`; a manual dry release keeps
+      # it as release-dry-<sha> (never published).
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ github.event_name == 'push' && format('release-bundle-{0}', github.sha) || format('release-dry-{0}', github.sha) }}
+          path: dist
+          retention-days: 7
+          if-no-files-found: error
+
+  publish:
+    name: GitHub Release
+    needs: [bundle]
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # A release tag must point at a commit that is already on main.
+      - name: Tagged commit is on main
+        run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-bundle-${{ github.sha }}
+          path: dist
+
+      - name: Re-check the bundle
+        run: (cd dist && sha256sum --check SHA256SUMS)
+
       - name: Build provenance
-        if: startsWith(github.ref, 'refs/tags/v')
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: dist/*
 
       - name: Publish the Release
-        if: startsWith(github.ref, 'refs/tags/v')
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           {
@@ -205,7 +243,7 @@ jobs:
             echo '```'
             echo
             echo "Check the files with \`sha256sum --check SHA256SUMS\` and"
-            echo "\`gh attestation verify <file> --repo $GITHUB_REPOSITORY\`."
+            echo "\`gh attestation verify <file> --repo $GITHUB_REPOSITORY --signer-workflow $GITHUB_REPOSITORY/.github/workflows/verifiable-build.yml --source-ref $GITHUB_REF\`."
           } > "$RUNNER_TEMP/release-notes.txt"
           prerelease=()
           if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease=(--prerelease); fi
@@ -214,12 +252,3 @@ jobs:
             --title "$GITHUB_REF_NAME" \
             --notes-file "$RUNNER_TEMP/release-notes.txt" \
             "${prerelease[@]}"
-
-      - name: Upload the dry-release bundle
-        if: ${{ !startsWith(github.ref, 'refs/tags/v') }}
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-dry-${{ github.sha }}
-          path: dist
-          retention-days: 7
-          if-no-files-found: error
