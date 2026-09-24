@@ -11,7 +11,6 @@
  */
 import {
   ASSET_REGISTRY_ERROR__OFFER_EXPIRED,
-  ASSET_REGISTRY_ERROR__OFFER_NOT_OPEN,
   ASSET_REGISTRY_ERROR__RECEIVER_NOT_APPROVED,
   ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED,
   ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE,
@@ -24,10 +23,11 @@ import {
 import { canonicalJson, sha256Hex } from "../safety";
 
 export type E2eNetwork = "devnet" | "localnet";
+
+/** Anchor's AccountNotInitialized: a required PDA (an Admin record, a closed marker) is missing. */
+export const ANCHOR_ACCOUNT_NOT_INITIALIZED = 3012;
 export type ProgramLabel = "asset_registry" | "transfer_hook";
 
-/** Anchor's AccountNotInitialized: a required PDA (e.g. an Admin record) is missing. */
-export const ANCHOR_ACCOUNT_NOT_INITIALIZED = 3012;
 
 export type Expect =
   | { ok: true }
@@ -114,7 +114,7 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "2.5c", group: 2, title: "revoke_sale_approval #3", networks: BOTH, signer: "admin", expect: ok },
   {
     id: "2.6", group: 2, title: "approve_sale signed by a buyer (no Admin record)", networks: BOTH, signer: "buyer1",
-    expect: fails(3012, "AccountNotInitialized"),
+    expect: fails(ANCHOR_ACCOUNT_NOT_INITIALIZED, "AccountNotInitialized"),
   },
   { id: "2.7a", group: 2, title: "approve_sale #5", networks: BOTH, signer: "admin", expect: ok },
   { id: "2.7b", group: 2, title: "open_sale #5 starting in an hour", networks: BOTH, signer: "issuer", expect: ok },
@@ -129,8 +129,10 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "3.3a", group: 3, title: "create_offer #2 + deposit_to_offer_escrow (B1)", networks: BOTH, signer: "buyer1", expect: ok },
   { id: "3.3b", group: 3, title: "cancel_offer #2 (B1)", networks: BOTH, signer: "buyer1", expect: ok },
   {
+    // cancel_offer closes the escrow marker, so the take is refused at account
+    // validation (3012) before the status check (OfferNotOpen) is reached.
     id: "3.3c", group: 3, title: "take the cancelled offer #2", networks: BOTH, signer: "buyer2",
-    expect: fails(ASSET_REGISTRY_ERROR__OFFER_NOT_OPEN, "OfferNotOpen"),
+    expect: fails(ANCHOR_ACCOUNT_NOT_INITIALIZED, "AccountNotInitialized"),
   },
   { id: "3.4a", group: 3, title: "create_offer #3 expiring in about a minute + deposit (B1)", networks: BOTH, signer: "buyer1", expect: ok },
   {
@@ -140,7 +142,9 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "3.4c", group: 3, title: "expire_offer #3 (permissionless)", networks: BOTH, signer: "buyer2", expect: ok },
   { id: "3.5a", group: 3, title: "create_otc_deal #1 (seller B1, buyer B2)", networks: BOTH, signer: "admin", expect: ok },
   {
-    id: "3.5b", group: 3, title: "deposit_otc_asset by the buyer (wrong party)", networks: BOTH, signer: "buyer2",
+    // A stranger (B3), not the deal's buyer: the buyer as "seller" would name its
+    // own share account twice and fail Anchor's duplicate-account check first.
+    id: "3.5b", group: 3, title: "deposit_otc_asset by a stranger (B3, wrong party)", networks: BOTH, signer: "buyer3",
     expect: fails(ASSET_REGISTRY_ERROR__WRONG_DEAL_PARTY, "WrongDealParty"),
   },
   { id: "3.5c", group: 3, title: "deposit_otc_asset (B1)", networks: BOTH, signer: "buyer1", expect: ok },

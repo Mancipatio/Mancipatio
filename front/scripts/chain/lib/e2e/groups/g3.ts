@@ -170,7 +170,7 @@ async function depositPaymentIxs(w: World, buyer: KeyPairSigner, deal: Address) 
 
 export async function runGroup3(w: World): Promise<"completed"> {
   const { admin, buyers } = w.roles;
-  const [b1, b2] = buyers;
+  const [b1, b2, b3] = buyers;
   const shareClass = entity(w.runner.state, "classA") as Address;
 
   // 3.4a first: offer #3 expires while the rest runs.
@@ -230,7 +230,7 @@ export async function runGroup3(w: World): Promise<"completed"> {
     const d = (await fetchOtcDeal(w.rpc, deal1, { commitment: "finalized" })).data;
     return buildDepositOtcAssetInstructions(w.rpc, { seller, dealPda: deal1, deal: d, paymentTokenProgram: TOKEN_CLASSIC });
   };
-  await w.runner.step("3.5b", async () => ({ payer: b2, ixs: await sellerDeposit(b2) }));
+  await w.runner.step("3.5b", async () => ({ payer: b3, ixs: await sellerDeposit(b3) }));
   await w.runner.step("3.5c", async () => ({ payer: b1, ixs: await sellerDeposit(b1) }), {
     done: async () => {
       const account = await fetchMaybeOtcDeal(w.rpc, deal1, { commitment: "finalized" });
