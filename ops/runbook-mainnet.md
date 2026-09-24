@@ -885,7 +885,11 @@ a watched program (asset_registry, transfer_hook, or a loader instruction on
 one of ours). A transaction that only lists one of those addresses (anyone
 can add the blocklist-authority PDA as a read-only account; the webhook
 never delivers it) is ignored, so the PDA does not need to be in the Helius
-list.
+list. A due scan that gets no time in a run (the cheap checks used the
+budget) makes that run partial, so `last_ok_at` stops and
+`/api/health/alarms` turns 503 within 5 minutes if it keeps happening; and
+`indexer:gap-scan-overdue` (high) opens once no scan has started for 15
+minutes. Before the first scan it only holds, so bootstrap raises no alert.
 
 ### Devnet rollout (migrations before the front)
 
@@ -1015,6 +1019,7 @@ before saving it.
 | `ledger:unreserved-mint` | Re-value the mint on the Raise limits page if its value is above the floor. |
 | `fx:missing`, `fx:stale`, `ledger:capacity-holds` | Add or refresh the EUR rate on the Raise limits page; the jobs unblock and revalue by themselves. |
 | `worker:retry-heartbeat`, `indexer:*` | `retry-scheduler-status.sql`, Vercel function logs, Helius delivery log. |
+| `indexer:gap-scan-overdue` | The alarm run has no time left for the gap scan: look at the `onchain_event_jobs` backlog (`worker:event-queue`) and database latency in the Vercel logs; `worker_heartbeats.last_gap_scan_at` for `alarms` moves again once a scan starts. |
 
 ### Operations
 
@@ -1071,7 +1076,11 @@ before saving it.
   under its own sub-deadline (checks deadline − 3 s); a scan that was started
   is stamped even when cut short (`gap-scan-incomplete`), and a checks stage
   that recorded fewer incidents than expected (or could not run a check) is
-  `failed`: a partial run that never moves `last_ok_at`.
+  `failed`: a partial run that never moves `last_ok_at`. The last scan's
+  stamp is read before the cheap checks; a due scan that gets no time, or a
+  stamp that cannot be read, counts as a check that could not run, and
+  `gap-scan-overdue` (pass / hold while due / fail after 15 minutes without
+  a scan) is reported on every run.
 - Loader alarms also cover upgradeable-loader `Migrate` (tag 8) and any
   loader-v4 instruction on one of our programs (critical).
 - Minimal-format on-chain alarms (holder or issuer related) carry only their

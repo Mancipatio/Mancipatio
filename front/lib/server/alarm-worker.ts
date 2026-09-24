@@ -15,8 +15,9 @@
 //
 // The checks stage is "failed" (a partial run: last_ok_at does not move)
 // whenever fewer incidents were recorded than expected, including a check
-// that could not run; a gap scan that was started still stamps
-// last_gap_scan_at, so a slow scan is not repeated every minute.
+// that could not run or a due gap scan that got no time; a gap scan that
+// was started still stamps last_gap_scan_at, so a slow scan is not repeated
+// every minute.
 
 import "server-only";
 import { randomUUID } from "node:crypto";

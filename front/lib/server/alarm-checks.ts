@@ -17,6 +17,14 @@
 // could not run; the alarm worker treats recorded < expected as a failed
 // stage (a partial run that never moves last_ok_at).
 //
+// When the last scan started is read FIRST (one heartbeat row), so a due
+// scan is known even when the cheap checks use the whole budget. A scan that
+// is due but gets no time, or whose due state could not be read, counts in
+// `expected` like any check that could not run (a partial stage), and every
+// run reports gap-scan-overdue from that stamp: pass when a scan ran or is
+// not yet due, hold while one is due, fail once none has started for
+// GAP_SCAN_OVERDUE_MS. A backstop that keeps being skipped is never silent.
+//
 // The gap scan (at most every 5 minutes) lists the finalized signatures of
 // the four watched addresses in [now − 20 min, now − 5 min]; any missing from
 // indexer_events is fetched (finalized) and, when it invokes a watched
@@ -44,6 +52,8 @@ export const GAP_SCAN_PAGES = 5;
 export const GAP_REPAIR_MAX = 20;
 /** The part of the checks budget kept for recording the gap scan's own incidents. */
 export const GAP_SCAN_RESERVE_MS = 3_000;
+/** No gap scan started for this long: gap-scan-overdue fails (three missed turns). */
+export const GAP_SCAN_OVERDUE_MS = 15 * 60_000;
 const LEDGER_QUEUE_FAIL_SECONDS = 30 * 60;
 const LEDGER_QUEUE_CLEAR_SECONDS = 15 * 60;
 const INDEXER_DEGRADED_SECONDS = 10 * 60;
@@ -299,19 +309,42 @@ export async function gapScan(sb: SupabaseClient, network: Network, now: number,
   return { missing, repaired, ignored, complete };
 }
 
-/** Whether a gap scan is due (last one ≥ 5 min ago, from the alarms heartbeat). */
-async function gapScanDue(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<boolean> {
+/** When the last gap scan started (the alarms heartbeat), or unknown on a read error. */
+type GapStamp = { known: true; at: number | null } | { known: false };
+
+async function lastGapScan(sb: SupabaseClient, network: Network, signal: AbortSignal): Promise<GapStamp> {
   const { data, error } = await sb.from("worker_heartbeats").select("last_gap_scan_at").eq("network", network).eq("worker", "alarms")
     .abortSignal(dbSignal(signal)).maybeSingle();
-  if (error) return false;
-  const at = (data as { last_gap_scan_at?: string | null } | null)?.last_gap_scan_at;
-  return !at || now - Date.parse(at) >= GAP_SCAN_EVERY_MS;
+  if (error) return { known: false };
+  const raw = (data as { last_gap_scan_at?: string | null } | null)?.last_gap_scan_at;
+  const at = raw ? Date.parse(raw) : NaN;
+  // An unreadable stamp counts as never: the scan is due, not skipped forever.
+  return { known: true, at: Number.isFinite(at) ? at : null };
+}
+
+/** Whether a gap scan is due (none started, or the last ≥ 5 min ago). */
+export function gapScanDue(at: number | null, now: number): boolean {
+  return at === null || now - at >= GAP_SCAN_EVERY_MS;
 }
 
 /**
- * The cheap checks, recorded at once; then the gap scan (when due) under its
- * own sub-deadline, and its incidents. Never throws: `expected` against
- * `reports.length` tells the worker whether the stage was complete.
+ * gap-scan-overdue: pass when a scan started in this run or none is due yet;
+ * fail when none has started for GAP_SCAN_OVERDUE_MS; hold in between, and
+ * while no scan has ever started (the first run that has time decides).
+ */
+export function gapScanOverdueState(at: number | null, ranNow: boolean, now: number): IncidentState {
+  if (ranNow) return "pass";
+  if (at === null) return "hold";
+  if (now - at >= GAP_SCAN_OVERDUE_MS) return "fail";
+  return gapScanDue(at, now) ? "hold" : "pass";
+}
+
+/**
+ * The last gap scan's stamp; the cheap checks, recorded at once; then the gap
+ * scan (when due) under its own sub-deadline, and its incidents plus
+ * gap-scan-overdue. Never throws: `expected` against `reports.length` tells
+ * the worker whether the stage was complete (a due scan that got no time, or
+ * an unreadable stamp, is a check that could not run).
  */
 export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, signal: AbortSignal): Promise<ChecksResult> {
   const network = detectNetwork();
@@ -333,6 +366,18 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
       }
     }
   };
+
+  // 0. When the last gap scan started: one row, read before the cheap checks
+  // so a due scan is known however long they take.
+  let stamp: GapStamp = { known: false };
+  if (!signal.aborted && Date.now() < deadlineMs) {
+    try {
+      stamp = await lastGapScan(sb, network, signal);
+    } catch {
+      stamp = { known: false };
+    }
+  }
+  const due = stamp.known && gapScanDue(stamp.at, now);
 
   // 1. The cheap checks. One that cannot run (error, timeout, deadline) is a miss.
   const cheap: Report[] = [];
@@ -363,14 +408,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   // 2. The gap scan, in what is left minus the reserve for its own incidents.
   let gap: ChecksResult["gapScan"] = null;
   const gapDeadline = deadlineMs - GAP_SCAN_RESERVE_MS;
-  let due = false;
-  if (!signal.aborted && Date.now() < gapDeadline) {
-    try {
-      due = await gapScanDue(sb, network, now, signal);
-    } catch {
-      due = false;
-    }
-  }
+  const reports: Report[] = [];
   if (due && !signal.aborted && Date.now() < gapDeadline) {
     const gapSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, gapDeadline - Date.now()))]);
     let result: GapScanResult | null = null;
@@ -381,7 +419,6 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
     }
     const cutShort = result === null || gapSignal.aborted;
     gap = { ran: true, cutShort, ...(result ?? { missing: 0, repaired: 0, ignored: 0, complete: false }) };
-    const reports: Report[] = [];
     if (result) {
       reports.push({ check: "indexer-gap", state: result.missing ? "fail" : cutShort ? "hold" : "pass", severity: "high",
         category: "indexer", source: "indexer:gap",
@@ -393,7 +430,23 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
       source: "indexer:gap-scan-incomplete",
       summary: cutShort ? "The gap scan could not finish within its time budget" : "The gap scan ran out of pages before the start of its window",
       evidence: { window_minutes: [GAP_WINDOW.fromMs / 60_000, GAP_WINDOW.toMs / 60_000], cut_short: cutShort } });
-    await record(reports);
+  } else if (!stamp.known) {
+    // Whether a scan was due could not be read: a check that could not run.
+    expected++;
+    console.error("[alarms] could not tell whether a gap scan was due");
+  } else if (due) {
+    // Due, but the cheap checks left no time for it: a check that could not
+    // run (the stage is partial), retried next minute; gap-scan-overdue below.
+    expected++;
+    console.error("[alarms] a due gap scan got no time in this run");
   }
+  if (stamp.known) {
+    const state = gapScanOverdueState(stamp.at, gap !== null, now);
+    const minutes = stamp.at === null ? null : Math.floor((now - stamp.at) / 60_000);
+    reports.unshift({ check: "gap-scan-overdue", state, severity: "high", category: "indexer", source: "indexer:gap-scan-overdue",
+      summary: minutes === null ? "No gap scan has started yet" : `The last gap scan started ${minutes} minute(s) ago`,
+      evidence: { minutes_since_last_scan: minutes, overdue_after_minutes: GAP_SCAN_OVERDUE_MS / 60_000, ran_now: gap !== null } });
+  }
+  await record(reports);
   return { reports: done, expected, gapScan: gap };
 }

@@ -32,7 +32,9 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => { throw new Er
 
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
-import { GAP_SCAN_RESERVE_MS, gapScan, invokesWatchedProgram, runAlarmChecks, thresholdState } from "@/lib/server/alarm-checks";
+import {
+  GAP_SCAN_OVERDUE_MS, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram, runAlarmChecks, thresholdState,
+} from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { buildTx } from "./helpers/chain-tx";
 
@@ -40,22 +42,28 @@ const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
 
 type Rpc = { fn: string; args: Record<string, unknown> };
-function mockSb(tables: Record<string, Record<string, unknown>[]>, broken: string[] = []) {
+// broken: a table name, or "table.columns" for one select only; slow: ms a table's reads take.
+function mockSb(tables: Record<string, Record<string, unknown>[]>, broken: string[] = [], slow: Record<string, number> = {}) {
   const rpcs: Rpc[] = [];
   const sb = {
     from: (table: string) => {
       const rows = tables[table] ?? [];
       const b: Record<string, unknown> = {};
       let counted = false;
-      b.select = (_cols: string, opts?: { count?: string }) => { counted = !!opts?.count; return b; };
+      let cols = "";
+      b.select = (c: string, opts?: { count?: string }) => { cols = c; counted = !!opts?.count; return b; };
       for (const m of ["eq", "in", "lte", "gte", "order", "limit", "is", "not", "like", "neq"]) b[m] = () => b;
-      const result = () => broken.includes(table)
+      const isBroken = () => broken.includes(table) || broken.includes(`${table}.${cols}`);
+      const later = <T>(v: () => T) => slow[table]
+        ? new Promise<T>((resolve) => setTimeout(() => resolve(v()), slow[table]))
+        : Promise.resolve(v());
+      const result = () => isBroken()
         ? { data: null, error: { code: "08006" } }
         : { data: rows, error: null, ...(counted ? { count: rows.length } : {}) };
-      const single = () => Promise.resolve(broken.includes(table) ? { data: null, error: { code: "08006" } } : { data: rows[0] ?? null, error: null });
+      const single = () => later(() => isBroken() ? { data: null, error: { code: "08006" } } : { data: rows[0] ?? null, error: null });
       b.maybeSingle = () => ({ abortSignal: single });
-      b.abortSignal = () => Object.assign(Promise.resolve(result()), { maybeSingle: single });
-      b.then = (resolve: (v: unknown) => unknown) => Promise.resolve(result()).then(resolve);
+      b.abortSignal = () => Object.assign(later(result), { maybeSingle: single });
+      b.then = (resolve: (v: unknown) => unknown) => later(result).then(resolve);
       return b;
     },
     rpc: (fn: string, args: Record<string, unknown>) => {
@@ -177,7 +185,67 @@ describe("runAlarmChecks", () => {
     const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(6) }] });
     const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
     expect(result.gapScan).toMatchObject({ ran: true, missing: 0, complete: false });
-    expect(reported(rpcs)).toMatchObject({ "indexer-gap": "pass/high", "gap-scan-incomplete": "fail/medium" });
+    expect(reported(rpcs)).toMatchObject({ "indexer-gap": "pass/high", "gap-scan-incomplete": "fail/medium", "gap-scan-overdue": "pass/high" });
+    expect(result.reports.length).toBe(result.expected);
+  });
+
+  it("gap-scan-overdue: pass when a scan ran or none is due, hold while one is due, fail after 15 minutes without one", () => {
+    const now = Date.now();
+    const ago = (m: number) => now - m * 60_000;
+    expect(gapScanOverdueState(ago(60), true, now)).toBe("pass");
+    expect(gapScanOverdueState(ago(3), false, now)).toBe("pass");
+    expect(gapScanOverdueState(ago(6), false, now)).toBe("hold");
+    expect(gapScanOverdueState(now - GAP_SCAN_OVERDUE_MS + 1, false, now)).toBe("hold");
+    expect(gapScanOverdueState(now - GAP_SCAN_OVERDUE_MS, false, now)).toBe("fail");
+    // Never scanned: the first run that has time decides (no bootstrap alert).
+    expect(gapScanOverdueState(null, false, now)).toBe("hold");
+  });
+
+  it("a due scan that the cheap checks leave no time for is expected (a partial stage) and reported, never silent", async () => {
+    // The cheap checks take 400 ms and the gap sub-deadline is 200 ms away.
+    const { sb, rpcs } = mockSb(
+      { worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(6) }] }, [], { indexer_sync_state: 400 });
+    const deadline = Date.now() + GAP_SCAN_RESERVE_MS + 200;
+    const result = await runAlarmChecks(sb, deadline, AbortSignal.timeout(GAP_SCAN_RESERVE_MS + 200));
+    expect(result.gapScan).toBeNull();
+    expect(state.pagesAsked).toEqual([]);
+    // Every cheap incident and gap-scan-overdue were recorded; the skipped scan is the one miss.
+    expect(Object.keys(reported(rpcs))).toEqual(expect.arrayContaining(
+      ["indexer-queue", "event-queue", "ledger-queue", "indexer-degraded", "event-invalid", "worker-retry", "capacity-holds"]));
+    expect(reported(rpcs)["gap-scan-overdue"]).toBe("hold/high");
+    expect(reported(rpcs)["gap-scan-incomplete"]).toBeUndefined();
+    expect(result.expected).toBe(result.reports.length + 1);
+    expect(Date.now()).toBeLessThan(deadline);
+  });
+
+  it("a scan skipped for 15 minutes fails gap-scan-overdue", async () => {
+    const { sb, rpcs } = mockSb(
+      { worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(16) }] }, [], { indexer_sync_state: 400 });
+    const result = await runAlarmChecks(sb, Date.now() + GAP_SCAN_RESERVE_MS + 200, AbortSignal.timeout(GAP_SCAN_RESERVE_MS + 200));
+    expect(result.gapScan).toBeNull();
+    expect(reported(rpcs)["gap-scan-overdue"]).toBe("fail/high");
+    const overdue = rpcs.find((r) => r.args.p_check === "gap-scan-overdue");
+    expect(overdue?.args).toMatchObject({ p_source: "indexer:gap-scan-overdue", p_evidence: { minutes_since_last_scan: 16, ran_now: false } });
+    expect(result.expected).toBe(result.reports.length + 1);
+  });
+
+  it("an unreadable due state is a check that could not run: no scan, no overdue report, the stage is partial", async () => {
+    const { sb, rpcs } = mockSb(
+      { worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(30) }] }, ["worker_heartbeats.last_gap_scan_at"]);
+    const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(result.gapScan).toBeNull();
+    expect(state.pagesAsked).toEqual([]);
+    expect(reported(rpcs)["worker-retry"]).toBe("pass/high");
+    expect(reported(rpcs)["gap-scan-overdue"]).toBeUndefined();
+    expect(result.expected).toBe(result.reports.length + 1);
+  });
+
+  it("an unparseable stamp counts as never scanned: the scan is due and runs", async () => {
+    const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: "not-a-date" }] });
+    const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(result.gapScan).toMatchObject({ ran: true, cutShort: false });
+    expect(reported(rpcs)["gap-scan-overdue"]).toBe("pass/high");
+    expect(result.reports.length).toBe(result.expected);
   });
 
   it("records the cheap incidents BEFORE the gap scan; a scan that overruns its sub-deadline is cut short, stamped and reported", async () => {

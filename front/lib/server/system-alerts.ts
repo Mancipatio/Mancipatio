@@ -47,6 +47,7 @@ export const SOURCE_LABELS: Record<string, { label: string; format: "platform" |
   "indexer:degraded": { label: "Indexer is degraded", format: "platform" },
   "indexer:gap": { label: "Transactions missing from the index", format: "platform" },
   "indexer:gap-scan-incomplete": { label: "Gap scan could not read the whole window", format: "platform" },
+  "indexer:gap-scan-overdue": { label: "Gap scan is not running", format: "platform" },
   "worker:event-queue": { label: "Alarm queue is lagging", format: "platform" },
   "worker:event-invalid": { label: "Alarm jobs could not be verified", format: "platform" },
   "worker:retry-heartbeat": { label: "Retry worker is not completing runs", format: "platform" },
