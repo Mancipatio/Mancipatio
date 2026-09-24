@@ -32,11 +32,12 @@ import {
   loadOtcDeals,
   withArchivedOtcDeals,
   TOKEN_2022_PROGRAM,
-  TOKEN_CLASSIC_PROGRAM,
   type LoadedOtcDeal,
   type OtcRequest,
 } from "@/lib/otc";
 import { walletSigner } from "@/lib/wallet-signer";
+import { detectNetwork } from "@/lib/network";
+import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -140,9 +141,7 @@ export default function MyDealsPage() {
       // deals where the connected wallet still owes the payment leg.
       const info = new Map<string, { program: Address; balance: bigint | null }>();
       for (const row of mine) {
-        const program =
-          (await detectTokenProgram(rpc, row.deal.paymentMint)) ??
-          TOKEN_CLASSIC_PROGRAM;
+        const program = await detectTokenProgram(rpc, row.deal.paymentMint);
         let balance: bigint | null = null;
         if (
           row.deal.buyer.toString() === wallet.toString() &&
@@ -185,11 +184,11 @@ export default function MyDealsPage() {
     [requests],
   );
 
+  /** The permissive owner check (exits and the seller's leg); throws, never guesses. */
   async function payTokenProgramFor(row: LoadedOtcDeal): Promise<Address> {
     return (
       payInfo.get(row.pda.toString())?.program ??
-      (await detectTokenProgram(client.runtime.rpc, row.deal.paymentMint)) ??
-      TOKEN_CLASSIC_PROGRAM
+      (await detectTokenProgram(client.runtime.rpc, row.deal.paymentMint))
     );
   }
 
@@ -246,7 +245,15 @@ export default function MyDealsPage() {
     );
     try {
       const signer = walletSigner(conn.wallet);
-      const payTokenProgram = await payTokenProgramFor(row);
+      // Entry path: the payment mint must pass the plain-payment rule (and,
+      // on mainnet, the allowlist) before the buyer deposits. A deal whose
+      // mint fails it expires and refunds through the exit paths.
+      const { owner: payTokenProgram } = await inspectPaymentMint(
+        client.runtime.rpc,
+        deal.paymentMint,
+        detectNetwork(),
+        { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) },
+      );
       const [buyerPaymentAta] = await findAssociatedTokenPda({
         owner: wallet,
         tokenProgram: payTokenProgram,

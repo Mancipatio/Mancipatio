@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-const mocks = vi.hoisted(() => ({ read: vi.fn(), rpc: vi.fn(), query: vi.fn(), verify: vi.fn(), admin: vi.fn(), filters: [] as unknown[][] }));
-vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
+const mocks = vi.hoisted(() => ({ read: vi.fn(), rpc: vi.fn(), query: vi.fn(), verify: vi.fn(), admin: vi.fn(), filters: [] as unknown[][], network: "devnet" }));
+vi.mock("@/lib/network", () => ({ detectNetwork: () => mocks.network }));
 vi.mock("@/lib/server/rpc", () => ({ getServerRpc: () => ({ getMultipleAccounts: (...args: unknown[]) => ({ send: (options: unknown) => mocks.read(...args, options) }) }) }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({
   rpc: (name: string, args: unknown) => ({ abortSignal: () => mocks.rpc(name, args) }),
@@ -44,7 +44,7 @@ function query(table: string, filters: unknown[][]) {
   return { data: table === "distribution_plan_metadata" ? stored() : filters.some((f) => f[0] === "contains") ? { batch_id: 0 } : plan.batches, error: null };
 }
 beforeEach(async () => {
-  vi.clearAllMocks(); mocks.filters.length = 0;
+  vi.clearAllMocks(); mocks.filters.length = 0; mocks.network = "devnet";
   const sc = (await getProgramDerivedAddress({ programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS, seeds: [new TextEncoder().encode("share_class"), getAddressEncoder().encode(A), new Uint8Array([2])] }))[0];
   const entries = await Promise.all([A, B].map(async (wallet) => ({ token_owner: wallet, token_account: (await findAssociatedTokenPda({ owner: wallet, mint: A, tokenProgram: B }))[0], amount: wallet === A ? "40" : "60" })));
   plan = await canonicalDistributionPlan({ distribution_pda: (await findDistributionPda({ shareClass: sc, distributionId: BigInt(7) }))[0], distribution_id: "7", share_class: sc, payment_mint: A, payment_token_program: B, funder: A, total_amount: "100", snapshot_supply: "30" }, entries);
@@ -78,6 +78,15 @@ describe("distribution plans bind original funding and private recipient evidenc
     mocks.read.mockResolvedValueOnce({ context: { slot: 123 }, value: [shareClass(), mint(), null] });
     const saved = await prepareDistributionPlan(A, plan, plan.batches[0].entries); expect(saved.status).toBe("prepared");
     expect(mocks.rpc.mock.calls[0][0]).toBe("prepare_distribution_plan");
+    mocks.read.mockResolvedValueOnce({ context: { slot: 123 }, value: [shareClass(), mint(), distribution()] });
+    await expect(prepareDistributionPlan(A, plan, plan.batches[0].entries)).resolves.toMatchObject({ id: ID });
+  });
+  it("mainnet: a new plan needs an allowlisted payment mint; recovering a funded distribution does not", async () => {
+    mocks.network = "mainnet";
+    mocks.read.mockResolvedValueOnce({ context: { slot: 123 }, value: [shareClass(), mint(), null] });
+    await expect(prepareDistributionPlan(A, plan, plan.batches[0].entries)).rejects.toMatchObject({ status: 400, message: expect.stringMatching(/not an allowed payment token on mainnet/) });
+    expect(mocks.rpc).not.toHaveBeenCalled();
+    // The distribution already exists on chain (exit side): the exact original plan is still recoverable.
     mocks.read.mockResolvedValueOnce({ context: { slot: 123 }, value: [shareClass(), mint(), distribution()] });
     await expect(prepareDistributionPlan(A, plan, plan.batches[0].entries)).resolves.toMatchObject({ id: ID });
   });

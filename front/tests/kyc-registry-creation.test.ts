@@ -27,10 +27,12 @@ import {
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import {
   COMPUTE_BUDGET_PROGRAM_ADDRESS,
+  MAX_COMPUTE_UNIT_PRICE,
   decodeComputeBudgetInstruction,
   setComputeUnitLimitInstruction,
   setComputeUnitPriceInstruction,
 } from "@/lib/compute-budget";
+import { PRIORITY_FEE_POLICY, resetPriorityFeeCache } from "@/lib/priority-fee";
 import { SEND_OVERHEAD_INSTRUCTIONS } from "@/lib/issuer-authority";
 import { jurisdictionBitmap } from "@/lib/jurisdiction-bitmap";
 import {
@@ -110,17 +112,25 @@ async function fixture(opts: { sameKey?: boolean; network?: "devnet" | "mainnet"
 }
 
 // Signing and sending read the maintenance flag in the browser first (fail
-// closed); by default the site is not in maintenance.
+// closed); by default the site is not in maintenance. Preparing reads the
+// priority-fee oracle (GET /api/priority-fee, mocked here).
 const flag = vi.hoisted(() => ({
   state: { enabled: false, message: null } as { enabled: boolean; message: string | null } | "down",
 }));
-const maintenanceFetch = vi.fn(async () => {
+const oracle = vi.hoisted(() => ({ network: "devnet", microLamports: "2500" }));
+const maintenanceFetch = vi.fn(async (url: unknown) => {
+  if (String(url) === "/api/priority-fee") {
+    return Response.json({ ok: true, network: oracle.network, microLamports: oracle.microLamports, source: "helius", level: "High" });
+  }
   if (flag.state === "down") throw new TypeError("Failed to fetch");
   return Response.json({ ...flag.state, network: "devnet" });
 });
 beforeEach(() => {
   vi.clearAllMocks();
+  resetPriorityFeeCache();
   flag.state = { enabled: false, message: null };
+  oracle.network = "devnet";
+  oracle.microLamports = "2500";
   vi.stubGlobal("window", { dispatchEvent: () => true });
   vi.stubGlobal("fetch", maintenanceFetch);
 });
@@ -149,23 +159,41 @@ describe("compute budget helper", () => {
     expect(decodeComputeBudgetInstruction({ programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS, data: [2, 0, 0, 0, 0] })).toBeNull();
   });
 
-  it("defaults: 100k units; price 0 off mainnet, a capped constant on mainnet", () => {
-    expect(defaultComputeBudget("devnet")).toEqual({ computeUnitLimit: DEFAULT_COMPUTE_UNIT_LIMIT, computeUnitPriceMicroLamports: "0" });
+  it("defaults: 100k units at the network's floor price; the envelope cap is the app-wide cap", () => {
+    expect(defaultComputeBudget("devnet")).toEqual({
+      computeUnitLimit: DEFAULT_COMPUTE_UNIT_LIMIT,
+      computeUnitPriceMicroLamports: PRIORITY_FEE_POLICY.devnet.floor.toString(),
+    });
     expect(defaultComputeBudget("localnet").computeUnitPriceMicroLamports).toBe("0");
     expect(BigInt(defaultComputeBudget("mainnet").computeUnitPriceMicroLamports)).toBe(DEFAULT_MAINNET_CU_PRICE);
-    expect(DEFAULT_MAINNET_CU_PRICE <= MAX_ENVELOPE_CU_PRICE).toBe(true);
+    expect(DEFAULT_MAINNET_CU_PRICE).toBe(PRIORITY_FEE_POLICY.mainnet.floor);
+    // D5: one cap for wallet sends, envelopes and the chain CLI (the KYC envelope dropped from 5M).
+    expect(MAX_ENVELOPE_CU_PRICE).toBe(MAX_COMPUTE_UNIT_PRICE);
+    expect(MAX_ENVELOPE_CU_PRICE).toBe(BigInt(2_000_000));
   });
 });
 
 describe("dual-signed create_kyc_registry", () => {
-  it("prepares canonical terms: sorted unique codes, the derived registry, default budget", async () => {
+  it("prepares canonical terms: sorted unique codes, the derived registry, the oracle's price", async () => {
     const f = await fixture();
     expect(f.envelope.approved).toEqual([40, 276, 688, 724]);
     expect(f.envelope.blocked).toEqual([364, 408]);
     expect(f.envelope.registry).toBe(f.registry);
     expect(f.envelope.computeUnitLimit).toBe(DEFAULT_COMPUTE_UNIT_LIMIT);
-    expect(f.envelope.computeUnitPriceMicroLamports).toBe("0");
+    expect(f.envelope.computeUnitPriceMicroLamports).toBe("2500");
     expect(f.envelope.signatures).toEqual({});
+    expect(maintenanceFetch).toHaveBeenCalledWith("/api/priority-fee", expect.anything());
+  });
+
+  it("clamps the oracle's price to the network policy, and uses the floor when it is down", async () => {
+    oracle.microLamports = "999999999";
+    expect((await fixture()).envelope.computeUnitPriceMicroLamports).toBe(PRIORITY_FEE_POLICY.devnet.cap.toString());
+    resetPriorityFeeCache();
+    oracle.microLamports = "not-a-number";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    expect((await fixture()).envelope.computeUnitPriceMicroLamports).toBe(PRIORITY_FEE_POLICY.devnet.floor.toString());
+    expect(warn).toHaveBeenCalledOnce();
+    warn.mockRestore();
   });
 
   it("two keys: both must sign; the fee payer is the KYC authority; compute budget first; bitmaps rebuilt", async () => {
@@ -192,7 +220,7 @@ describe("dual-signed create_kyc_registry", () => {
     });
     expect(decodeComputeBudgetInstruction({ programAddress: COMPUTE_BUDGET_PROGRAM_ADDRESS, data: price.data })).toEqual({
       kind: "price",
-      microLamports: BigInt(0),
+      microLamports: BigInt(2500),
     });
     expect(message.staticAccounts[create.programAddressIndex]).toBe(ASSET_REGISTRY_PROGRAM_ADDRESS);
     const data = getCreateKycRegistryInstructionDataDecoder().decode(create.data!);
@@ -335,10 +363,34 @@ describe("dual-signed create_kyc_registry", () => {
   });
 
   it("mainnet requires the pin, and the pin must be this registry", async () => {
+    oracle.network = "mainnet";
+    oracle.microLamports = "50";
     await expect(fixture({ network: "mainnet", pinned: null })).rejects.toThrow(/Mainnet requires the pinned platform registry/);
     const f = await fixture({ network: "mainnet", pinned: "registry" });
     expect(f.envelope.network).toBe("mainnet");
+    // Below the mainnet floor: clamped up to it.
     expect(BigInt(f.envelope.computeUnitPriceMicroLamports)).toBe(DEFAULT_MAINNET_CU_PRICE);
+  });
+
+  it("an oracle answer for another network is ignored (floor)", async () => {
+    oracle.network = "mainnet";
+    oracle.microLamports = "90000";
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const f = await fixture();
+    expect(f.envelope.computeUnitPriceMicroLamports).toBe(PRIORITY_FEE_POLICY.devnet.floor.toString());
+    warn.mockRestore();
+  });
+
+  it("an explicit price is kept (and capped by parse) without asking the oracle", async () => {
+    const f = await fixture();
+    maintenanceFetch.mockClear();
+    const input = { kycAuthority: f.kyc.address, adminAuthority: f.admin.address, approved: APPROVED, blocked: BLOCKED };
+    const custom = await prepareKycRegistryCreation(f.rpc, "devnet", { ...input, computeUnitPriceMicroLamports: "7" }, { pinned: null });
+    expect(custom.computeUnitPriceMicroLamports).toBe("7");
+    expect(maintenanceFetch).not.toHaveBeenCalledWith("/api/priority-fee", expect.anything());
+    await expect(
+      prepareKycRegistryCreation(f.rpc, "devnet", { ...input, computeUnitPriceMicroLamports: "2000001" }, { pinned: null }),
+    ).rejects.toThrow(/compute unit price/);
   });
 
   it("only the two named keys, with a sign-without-send wallet, may sign", async () => {

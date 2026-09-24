@@ -1,4 +1,5 @@
 import type { Network } from "@/lib/network";
+import { paymentMintLabel } from "@/lib/payment-mints";
 const MAX_U64=BigInt("18446744073709551615");
 /** Exact token-budget quote. No floating-point multiplication or rounding up. */
 export function purchaseQuote(input:string,decimals:number,pricePerUnit:bigint) {
@@ -11,11 +12,8 @@ export function purchaseQuote(input:string,decimals:number,pricePerUnit:bigint) 
   const units=budget/pricePerUnit;
   return {budget,units,cost:units*pricePerUnit};
 }
-/** Labels only; a token symbol never determines payment authorization.
- * Circle addresses verified 2026-09-07:
- * https://developers.circle.com/stablecoins/usdc-contract-addresses */
+/** Labels only; a token symbol never determines payment authorization
+ * (the addresses and labels live in lib/payment-mints). */
 export function paymentTokenLabel(mint:string,network:Network) {
-  if(network==="mainnet" && mint==="EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v")return "USDC";
-  if(network==="devnet" && mint==="4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU")return "test USDC";
-  return "payment tokens";
+  return paymentMintLabel(mint,network);
 }

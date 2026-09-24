@@ -13,6 +13,7 @@ import { canonicalDistributionPlan, assertStoredDistributionPlan, distributionPl
 import { snapshotHex } from "@/lib/payout-snapshots";
 import { detectNetwork } from "@/lib/network";
 import { getServerRpc } from "@/lib/server/rpc";
+import { assertAllowedPaymentMint } from "@/lib/server/payment-mint";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { SiwsError } from "@/lib/server/siws";
 
@@ -85,6 +86,9 @@ export async function prepareDistributionPlan(wallet: string, params: Record<str
   const { accounts } = await snapshot([pubkey(ctx.share_class), pubkey(ctx.payment_mint), pubkey(ctx.distribution_pda)]);
   await shareClassAndMint(ctx, accounts[0], accounts[1]);
   if (accounts[2]) await verifyDistributionPlanBinding(canonical); // Recovery must match the original funded plan.
+  // A new plan is funded next (an ENTRY path): on mainnet only an allowlisted
+  // payment mint. Recovering an existing funded distribution stays possible.
+  else assertAllowedPaymentMint(detectNetwork(), ctx.payment_mint);
   const { data, error } = await getSupabaseAdmin().rpc("prepare_distribution_plan", { p_plan: { ...canonical, batches: undefined, network: detectNetwork(), created_by: wallet }, p_batches: canonical.batches }).abortSignal(timeout());
   if (error || !data) throw new SiwsError(error?.message?.includes("Immutable distribution") ? 409 : 503, error?.message?.includes("Immutable distribution") ? "A different immutable plan already exists for this distribution id" : "Durable distribution preparation unavailable; retry the same id");
   return readDistributionPlan(data);

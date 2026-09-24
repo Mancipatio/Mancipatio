@@ -38,11 +38,12 @@ import {
   archiveOtcDealRecord,
   withArchivedOtcDeals,
   TOKEN_2022_PROGRAM,
-  TOKEN_CLASSIC_PROGRAM,
   type LoadedOtcDeal,
   type OtcRequest,
 } from "@/lib/otc";
 import { checkReceiverEligibility } from "@/lib/passport";
+import { detectNetwork } from "@/lib/network";
+import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
@@ -574,15 +575,15 @@ function OtcEscrowAdmin() {
       const rpc = client.runtime.rpc;
       const signer = walletSigner(conn.wallet);
       const dealId = newDealId();
-      const payTokenProgram = await detectTokenProgram(
+      // Entry path: the payment mint must pass the plain-payment rule (and,
+      // on mainnet, the allowlist) before an escrow names it. Throws with the
+      // reason (missing mint, hook, not allowed…); nothing is opened.
+      const { owner: payTokenProgram } = await inspectPaymentMint(
         rpc,
         req.payment_mint as Address,
+        detectNetwork(),
+        { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) },
       );
-      if (!payTokenProgram) {
-        throw new Error(
-          `Payment mint ${req.payment_mint} does not exist on this network.`,
-        );
-      }
       // Compliance re-screen BEFORE the deal exists. /api/otc/create refused
       // a suspended party when the request was filed, but compliance may have
       // suspended one since. Fails closed: if the screen cannot run, the
@@ -733,9 +734,8 @@ function OtcEscrowAdmin() {
     try {
       const rpc = client.runtime.rpc;
       const signer = walletSigner(conn.wallet);
-      const payTokenProgram =
-        (await detectTokenProgram(rpc, deal.paymentMint)) ??
-        TOKEN_CLASSIC_PROGRAM;
+      // Exit path: the permissive owner check, so any deal can be unwound.
+      const payTokenProgram = await detectTokenProgram(rpc, deal.paymentMint);
       const [sellerShareAta] = await findAssociatedTokenPda({
         owner: deal.seller,
         tokenProgram: TOKEN_2022_PROGRAM,
@@ -836,9 +836,8 @@ function OtcEscrowAdmin() {
     try {
       const rpc = client.runtime.rpc;
       const signer = walletSigner(conn.wallet);
-      const payTokenProgram =
-        (await detectTokenProgram(rpc, deal.paymentMint)) ??
-        TOKEN_CLASSIC_PROGRAM;
+      // Exit path: the permissive owner check.
+      const payTokenProgram = await detectTokenProgram(rpc, deal.paymentMint);
       const [asset, payment] = await Promise.all([
         fetchMaybeToken(rpc, deal.assetEscrow, { commitment: "confirmed" }),
         fetchMaybeToken(rpc, deal.paymentEscrow, { commitment: "confirmed" }),

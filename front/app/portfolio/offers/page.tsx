@@ -46,7 +46,12 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonTable } from "@/components/skeleton";
+import { PaymentMintStatus } from "@/components/payment-mint-status";
 import { useToast } from "@/lib/toast";
+import { detectNetwork } from "@/lib/network";
+import { defaultPaymentMint } from "@/lib/payment-mints";
+import { inspectPaymentMint } from "@/lib/transaction-builders";
+import { paymentAmountHint, usePaymentMintCheck } from "@/lib/use-payment-mint";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -704,9 +709,11 @@ function CreateOfferModal({
   onSuccess: () => void;
 }) {
   const conn = useWalletConnection();
+  const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
+  const network = detectNetwork();
 
   const [selectedScPda, setSelectedScPda] = useState(
     myShareClasses[0]?.pda ?? "",
@@ -714,8 +721,12 @@ function CreateOfferModal({
   const [offerId, setOfferId] = useState(randomAccountId);
   const [amount, setAmount] = useState("");
   const [price, setPrice] = useState("");
-  const [paymentMint, setPaymentMint] = useState("");
+  const [paymentMint, setPaymentMint] = useState(
+    () => defaultPaymentMint(network) ?? "",
+  );
   const [expiryDate, setExpiryDate] = useState("");
+  const mintCheck = usePaymentMintCheck(client.runtime.rpc, network, paymentMint);
+  const priceHint = paymentAmountHint(price, mintCheck);
 
   const selectedRef = myShareClasses.find((r) => r.pda === selectedScPda);
 
@@ -732,6 +743,14 @@ function CreateOfferModal({
     const pendingId = toast.showPending(`Creating offer #${offerId}…`);
     try {
       const signer = walletSigner(conn.wallet);
+      // Entry path: the payment mint must pass the plain-payment rule (and,
+      // on mainnet, the allowlist) before the offer names it on-chain.
+      await inspectPaymentMint(
+        client.runtime.rpc,
+        paymentMint.trim() as Address,
+        network,
+        { commitment: "confirmed", abortSignal: AbortSignal.timeout(10_000) },
+      );
       const ix = await getCreateOfferInstructionAsync({
         maker: signer,
         shareClass: selectedRef.pda as Address,
@@ -830,6 +849,9 @@ function CreateOfferModal({
                 onChange={(e) => setPrice(e.target.value.replace(/\D/g, ""))}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
+              {priceHint && (
+                <span className="mt-1 block text-[11px] text-slate-500">{priceHint}</span>
+              )}
             </label>
           </div>
 
@@ -843,6 +865,7 @@ function CreateOfferModal({
               placeholder="USDC mint address"
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono text-xs focus:border-slate-400 focus:outline-none"
             />
+            <PaymentMintStatus check={mintCheck} />
           </label>
 
           <label className="block">
@@ -884,7 +907,8 @@ function CreateOfferModal({
               !selectedRef ||
               !amount.trim() ||
               !price.trim() ||
-              !paymentMint.trim()
+              !paymentMint.trim() ||
+              mintCheck.status === "error"
             }
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >

@@ -28,6 +28,10 @@ import {
   type ResellStatus,
 } from "@/lib/resell";
 import { createOtcRequest } from "@/lib/otc";
+import { detectNetwork } from "@/lib/network";
+import { defaultPaymentMint } from "@/lib/payment-mints";
+import { paymentAmountHint, usePaymentMintCheck } from "@/lib/use-payment-mint";
+import { PaymentMintStatus } from "@/components/payment-mint-status";
 import {
   combine,
   maxLength,
@@ -732,22 +736,27 @@ function SellerOtcRequestModal({
   onRequested: () => void;
 }) {
   const conn = useWalletConnection();
+  const client = useSolanaClient();
   const toast = useToast();
+  const network = detectNetwork();
   const [buyer, setBuyer] = useState("");
   const [amount, setAmount] = useState(String(listing.amount));
   // Do NOT prefill from ask_price: it's a HUMAN figure (e.g. "1500 USDC") while
   // this field is integer payment-mint BASE units. Prefilling would settle
   // 10^decimals too little. Leave empty; the ask is shown as a reference.
   const [price, setPrice] = useState("");
-  const [paymentMint, setPaymentMint] = useState("");
+  const [paymentMint, setPaymentMint] = useState(() => defaultPaymentMint(network) ?? "");
   const [busy, setBusy] = useState(false);
+  // Convenience check of the entry rule; /api/otc/create re-checks it.
+  const mintCheck = usePaymentMintCheck(client.runtime.rpc, network, paymentMint);
+  const priceHint = paymentAmountHint(price, mintCheck);
 
   const base58Ok = (v: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v.trim());
   const buyerOk = base58Ok(buyer) && buyer.trim() !== sellerWallet;
   const amountOk = /^[1-9]\d*$/.test(amount.trim());
   const priceOk = /^[1-9]\d*$/.test(price.trim());
   const mintOk = base58Ok(paymentMint);
-  const valid = buyerOk && amountOk && priceOk && mintOk;
+  const valid = buyerOk && amountOk && priceOk && mintOk && mintCheck.status !== "error";
 
   async function submit() {
     if (!valid || busy || !listing.share_class_pda) return;
@@ -844,6 +853,9 @@ function SellerOtcRequestModal({
                   USDC/USDT), not the plain number.
                 </span>
               )}
+              {priceHint && (
+                <span className="mt-1 block text-[11px] text-slate-500">{priceHint}</span>
+              )}
             </label>
           </div>
           <label className="block">
@@ -855,8 +867,10 @@ function SellerOtcRequestModal({
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs focus:border-slate-400 focus:outline-none"
               disabled={busy}
             />
+            <PaymentMintStatus check={mintCheck} />
             <FieldHelp>
-              The token the buyer pays in (plain SPL or Token-2022).
+              The token the buyer pays in (plain SPL or Token-2022, without a
+              transfer hook).
             </FieldHelp>
             {paymentMint.trim().length > 0 && !mintOk && (
               <FieldError error="Not a valid mint address" />

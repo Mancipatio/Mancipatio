@@ -28,7 +28,7 @@ import {
 import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { isOfferFunded } from "@/lib/escrow-ledger";
-import { detectTokenProgram } from "@/lib/otc";
+import { inspectPaymentMint } from "@/lib/transaction-builders";
 import {
   checkReceiverEligibility,
   type ReceiverEligibility,
@@ -46,8 +46,6 @@ import { isClosedAccount } from "@/lib/closed-account";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
 
 type LoadedOffer = {
   offer: Offer;
@@ -77,11 +75,12 @@ export default function TakeOfferPage({
   const [showConfirm, setShowConfirm] = useState(false);
   // Taker's available payment-token balance (base units), or null while unknown.
   const [payBalance, setPayBalance] = useState<bigint | null>(null);
-  // The payment mint may be classic SPL or Token-2022 — detect it so ATAs and
-  // paymentTokenProgram are correct (hard-coding classic makes Token-2022
-  // payment offers untakeable). Defaults to classic until detection resolves.
-  const [payTokenProgram, setPayTokenProgram] =
-    useState<Address>(TOKEN_CLASSIC_ADDRESS);
+  // The payment mint may be SPL Token or Token-2022 — read it from chain under
+  // the entry rule (plain payment token; on mainnet an allowlisted one) so
+  // ATAs and paymentTokenProgram are correct. Take stays disabled until it
+  // resolves; a refused mint shows why.
+  const [payTokenProgram, setPayTokenProgram] = useState<Address | null>(null);
+  const [payMintError, setPayMintError] = useState<string | null>(null);
   // Investor-passport pre-check for KYC-gated mints (the program re-checks the
   // taker's passport on-chain; surface it before the wallet prompt). null =
   // unknown/not-gated.
@@ -163,16 +162,32 @@ export default function TakeOfferPage({
     };
   }, [client, offerPubkey]);
 
-  // ── detect the payment token program (classic vs Token-2022) ──────────────
+  // ── detect the payment token program (entry rule) ─────────────────────────
   useEffect(() => {
     let cancelled = false;
     async function detect() {
       if (loaded === null || typeof loaded === "string") return;
-      const prog = await detectTokenProgram(
-        client.runtime.rpc,
-        loaded.offer.paymentMint,
-      );
-      if (!cancelled && prog) setPayTokenProgram(prog);
+      try {
+        const { owner } = await inspectPaymentMint(
+          client.runtime.rpc,
+          loaded.offer.paymentMint,
+          detectNetwork(),
+          { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) },
+        );
+        if (!cancelled) {
+          setPayTokenProgram(owner);
+          setPayMintError(null);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setPayTokenProgram(null);
+          setPayMintError(
+            err instanceof Error
+              ? err.message
+              : "The payment token could not be checked.",
+          );
+        }
+      }
     }
     void detect();
     return () => {
@@ -185,6 +200,7 @@ export default function TakeOfferPage({
     let cancelled = false;
     async function readBalance() {
       if (!wallet || loaded === null || typeof loaded === "string") return;
+      if (payTokenProgram === null) return;
       try {
         const [takerPaymentAta] = await findAssociatedTokenPda({
           owner: wallet,
@@ -332,6 +348,7 @@ export default function TakeOfferPage({
     !insufficient &&
     !unfunded &&
     !passportBlocked &&
+    payTokenProgram !== null &&
     !tx.isSending;
 
   const blockedReason = expiredOpen
@@ -352,7 +369,11 @@ export default function TakeOfferPage({
               ? `This token is KYC-gated — you need a valid investor passport to take it. ${passportGate?.reason ?? ""} Request one from your portfolio, then retry.`
               : insufficient
                 ? "Your payment-token balance is below the offer price."
-                : "";
+                : payMintError
+                  ? `This offer's payment token cannot be used: ${payMintError}`
+                  : payTokenProgram === null
+                    ? "Checking the offer's payment token…"
+                    : "";
 
   async function take() {
     if (!wallet || !conn.wallet) {
@@ -374,6 +395,10 @@ export default function TakeOfferPage({
     }
     if (insufficient) {
       toast.showError("Insufficient balance", blockedReason);
+      return;
+    }
+    if (payTokenProgram === null) {
+      toast.showError("Payment token unavailable", blockedReason);
       return;
     }
 

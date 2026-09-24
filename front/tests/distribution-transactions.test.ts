@@ -7,6 +7,12 @@ const mocks = vi.hoisted(() => ({
   batch: vi.fn(),
   allBatches: vi.fn(),
   share: vi.fn(),
+  inspect: vi.fn(),
+  network: "devnet" as "devnet" | "mainnet",
+}));
+vi.mock("@/lib/network", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/network")>()),
+  detectNetwork: () => mocks.network,
 }));
 vi.mock("@/lib/generated/asset_registry", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -20,6 +26,7 @@ vi.mock("@/lib/transaction-builders", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   fetchPlainPaymentMintTokenProgram: async () =>
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  inspectPaymentMint: mocks.inspect,
 }));
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
@@ -129,7 +136,11 @@ async function fixture(count = 13) {
   );
   return { plan, signer, d };
 }
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  mocks.network = "devnet";
+  mocks.inspect.mockResolvedValue({ owner: program, decimals: 6 });
+});
 describe("distribution v2 real builders and receipts", () => {
   it("keeps the full 5000-recipient plan's longest proof payment within1232bytes, with separate idempotent ATA preparation", async () => {
     const f = await fixture(5000),
@@ -210,6 +221,34 @@ describe("distribution v2 real builders and receipts", () => {
     await expect(
       buildDistributionFunding(rpc, f.plan, createNoopSigner(key(77))),
     ).rejects.toThrow("funder wallet");
+  });
+  it("funding is an entry path: the payment mint passes the entry check for this network", async () => {
+    const f = await fixture();
+    await buildDistributionFunding(rpc, f.plan, f.signer);
+    expect(mocks.inspect).toHaveBeenCalledWith(
+      rpc,
+      f.plan.payment_mint,
+      "devnet",
+      expect.objectContaining({ commitment: "finalized" }),
+    );
+    // On mainnet the real entry check refuses a non-allowlisted mint before
+    // any RPC read, and nothing is built.
+    mocks.network = "mainnet";
+    const real = (await vi.importActual<typeof import("@/lib/transaction-builders")>(
+      "@/lib/transaction-builders",
+    )).inspectPaymentMint;
+    mocks.inspect.mockImplementationOnce(real);
+    await expect(
+      buildDistributionFunding(rpc, f.plan, f.signer),
+    ).rejects.toThrow(/not an allowed payment token on mainnet/);
+    // A token program other than the one the plan saved is refused.
+    mocks.inspect.mockResolvedValueOnce({
+      owner: address("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
+      decimals: 6,
+    });
+    await expect(
+      buildDistributionFunding(rpc, f.plan, f.signer),
+    ).rejects.toThrow(/differs from the prepared plan/);
   });
   it("allocates every base unit by largest remainder with deterministic wallet tie breaks", () => {
     const rows = [

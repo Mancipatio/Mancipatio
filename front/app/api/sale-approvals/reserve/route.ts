@@ -35,8 +35,9 @@ import {
 import {
   accountExists,
   applicantWallets,
+  assertAllowedPaymentMint,
   subjectSpvId,
-  paymentMintDecimals,
+  paymentMintInfo,
   saleAndApprovalPdas,
   shareClassChain,
 } from "../_lib";
@@ -114,7 +115,10 @@ export async function POST(request: Request) {
     const { sale, approval } = await saleAndApprovalPdas(shareClass, saleId);
     if (await accountExists(sale)) throw new SiwsError(409, "A sale with this id already exists for the share class");
     if (await accountExists(approval)) throw new SiwsError(409, "This sale id already has an on-chain approval");
-    const decimals = await paymentMintDecimals(paymentMint);
+    // Entry path: the plain-payment rule, and on mainnet the allowlist (defense
+    // in depth: fx_rates only admits allowlisted mints there, 4.2 §3.3).
+    assertAllowedPaymentMint(network, paymentMint);
+    const { decimals } = await paymentMintInfo(paymentMint, network);
     const spvId = await subjectSpvId(sb, chain.asset, chain.issuer);
 
     const terms: SaleApprovalTerms = {

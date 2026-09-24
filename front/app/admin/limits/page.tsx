@@ -7,6 +7,15 @@ import { adminGetRaiseLimits, adminUpdateRaiseLimits, type PlatformRaiseLimits }
 import { useToast } from "@/lib/toast";
 import { useRole } from "@/lib/auth";
 import { readFxRates, writeFxRate, type FxRate } from "@/lib/sale-approvals";
+import { detectNetwork } from "@/lib/network";
+import {
+  MAINNET_MAX_RATE_AGE_DAYS,
+  NOT_ALLOWED_ON_MAINNET,
+  defaultPaymentMint,
+  isAllowedPaymentMint,
+  paymentMintLabel,
+  requiredFxKind,
+} from "@/lib/payment-mints";
 
 export default function RaiseLimitsPage() {
   return (
@@ -40,14 +49,24 @@ function FxRatesCard() {
   const conn = useWalletConnection();
   const { isSuperAdmin } = useRole();
   const toast = useToast();
+  const network = detectNetwork();
   const [rates, setRates] = useState<FxRate[] | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [mint, setMint] = useState("");
-  const [kind, setKind] = useState<"eur_peg" | "rate">("eur_peg");
+  // The network's USDC is prefilled; it is a "rate" token everywhere.
+  const [mint, setMint] = useState(() => defaultPaymentMint(network) ?? "");
+  const [chosenKind, setKind] = useState<"eur_peg" | "rate">(() => (defaultPaymentMint(network) ? "rate" : "eur_peg"));
   const [rate, setRate] = useState("");
   const [source, setSource] = useState("");
-  const [maxAge, setMaxAge] = useState("7");
+  const [maxAge, setMaxAge] = useState(String(MAINNET_MAX_RATE_AGE_DAYS));
   const [saving, setSaving] = useState(false);
+  // Mainnet (D18): only allowlisted mints, the kind the allowlist fixes, a
+  // rate at most 7 days old. The server enforces the same rules.
+  const typedMint = mint.trim();
+  const mainnet = network === "mainnet";
+  const fixedKind = mainnet ? requiredFxKind(network, typedMint) : null;
+  const kind = fixedKind ?? chosenKind;
+  const notAllowed = mainnet && typedMint.length > 0 && !isAllowedPaymentMint(network, typedMint);
+  const maxAgeTooLong = mainnet && kind === "rate" && Number(maxAge) > MAINNET_MAX_RATE_AGE_DAYS;
 
   useEffect(() => {
     if (!conn.wallet) return;
@@ -60,11 +79,19 @@ function FxRatesCard() {
 
   async function save(event: FormEvent) {
     event.preventDefault();
+    if (notAllowed) {
+      setError(NOT_ALLOWED_ON_MAINNET);
+      return;
+    }
+    if (maxAgeTooLong) {
+      setError(`On mainnet a rate may be at most ${MAINNET_MAX_RATE_AGE_DAYS} days old.`);
+      return;
+    }
     setSaving(true);
     setError(null);
     try {
       setRates(await writeFxRate(conn.wallet, {
-        op: "upsert", payment_mint: mint.trim(), kind, source: source.trim(),
+        op: "upsert", payment_mint: typedMint, kind, source: source.trim(),
         ...(kind === "rate" ? { eur_per_token: rate.trim(), max_age_days: Number(maxAge) } : {}),
       }));
       toast.show({ kind: "success", title: "EUR rate saved" });
@@ -105,7 +132,10 @@ function FxRatesCard() {
           <tbody className="divide-y divide-slate-100 text-slate-700">
             {(rates ?? []).map((r) => (
               <tr key={r.payment_mint}>
-                <td className="py-1.5 font-mono">{r.payment_mint.slice(0, 6)}…{r.payment_mint.slice(-4)} ({r.decimals} dec.)</td>
+                <td className="py-1.5">
+                  {paymentMintLabel(r.payment_mint, network)}{" "}
+                  <span className="font-mono">{r.payment_mint.slice(0, 6)}…{r.payment_mint.slice(-4)}</span> ({r.decimals} dec.)
+                </td>
                 <td>{r.kind === "eur_peg" ? "EUR 1:1" : `${Number(r.eur_per_token)} EUR · max age ${r.max_age}`}</td>
                 <td>{r.source}</td>
                 <td>{new Date(r.as_of).toLocaleString("en-GB")}</td>
@@ -125,13 +155,22 @@ function FxRatesCard() {
         <form onSubmit={(e) => void save(e)} className="mt-5 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-2">
           <label className="text-xs text-slate-600 sm:col-span-2">Payment mint
             <input value={mint} onChange={(e) => setMint(e.target.value)} required
-              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-xs" /></label>
+              className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-xs" />
+            {typedMint && !notAllowed && (
+              <span className="mt-1 block text-[11px] text-slate-500">{paymentMintLabel(typedMint, network)}</span>
+            )}
+            {notAllowed && (
+              <span className="mt-1 block text-[11px] text-red-700" role="alert">{NOT_ALLOWED_ON_MAINNET}</span>
+            )}</label>
           <label className="text-xs text-slate-600">Kind
-            <select value={kind} onChange={(e) => setKind(e.target.value as "eur_peg" | "rate")}
-              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm">
+            <select value={kind} onChange={(e) => setKind(e.target.value as "eur_peg" | "rate")} disabled={fixedKind !== null}
+              className="mt-1 w-full rounded-md border border-slate-300 bg-white px-2 py-1.5 text-sm disabled:bg-slate-50">
               <option value="eur_peg">EUR stablecoin (1:1)</option>
               <option value="rate">Other token (EUR rate)</option>
-            </select></label>
+            </select>
+            {fixedKind !== null && (
+              <span className="mt-1 block text-[11px] text-slate-500">Fixed for this token on mainnet.</span>
+            )}</label>
           <label className="text-xs text-slate-600">Source
             <input value={source} onChange={(e) => setSource(e.target.value)} required maxLength={200}
               placeholder="e.g. ECB reference rate" className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
@@ -142,11 +181,16 @@ function FxRatesCard() {
                   className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
               <label className="text-xs text-slate-600">Maximum age (days)
                 <input value={maxAge} onChange={(e) => setMaxAge(e.target.value.replace(/\D/g, ""))} inputMode="numeric"
-                  className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" /></label>
+                  className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
+                {mainnet && (
+                  <span className={`mt-1 block text-[11px] ${maxAgeTooLong ? "text-red-700" : "text-slate-500"}`}>
+                    At most {MAINNET_MAX_RATE_AGE_DAYS} days on mainnet; refresh the rate weekly.
+                  </span>
+                )}</label>
             </>
           )}
           <div className="sm:col-span-2">
-            <button disabled={saving} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+            <button disabled={saving || notAllowed || maxAgeTooLong} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
               {saving ? "Saving…" : "Save rate"}
             </button>
             <span className="ml-3 text-xs text-slate-500">Decimals are read from the mint on-chain.</span>

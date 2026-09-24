@@ -54,6 +54,7 @@ import {
   type PayoutSchedule,
 } from "@/lib/payout-schedules";
 import { walletSigner } from "@/lib/wallet-signer";
+import { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { features } from "@/lib/features";
 import { issuerSyncInstructions, issuerVaultsFor } from "@/lib/issuer-authority";
 import { explainSendError } from "@/lib/tx-error";
@@ -61,9 +62,6 @@ import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 
-// Payment mint is classic SPL Token (USDC is classic-SPL).
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
 const ISSUER_ROTATION = features().issuerRotation;
 
 type VaultLink = {
@@ -551,6 +549,7 @@ function VaultDetail({
   onClose: () => void;
 }) {
   const conn = useWalletConnection();
+  const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
@@ -636,11 +635,18 @@ function VaultDetail({
       const signer = walletSigner(conn.wallet);
       const vaultPda = await payoutVaultPda(v.sale);
       const escrow = await payoutEscrowPda(vaultPda);
-      // Founder payment ATA (classic SPL) — create idempotently in case it
-      // doesn't exist yet.
+      // The payment mint's actual token program (SPL Token or Token-2022),
+      // read from chain; never assumed classic. Releasing a tranche takes
+      // money OUT of the vault escrow — an exit path — so only the permissive
+      // owner check applies: an existing vault can always be paid out.
+      const tokenProgram = await fetchMintTokenProgram(client.runtime.rpc, v.paymentMint, {
+        commitment: "finalized",
+        abortSignal: AbortSignal.timeout(10_000),
+      });
+      // Founder payment ATA — create idempotently in case it doesn't exist yet.
       const [founderAccount] = await findAssociatedTokenPda({
         owner: wallet,
-        tokenProgram: TOKEN_CLASSIC_ADDRESS,
+        tokenProgram,
         mint: v.paymentMint,
       });
       const createAtaIx =
@@ -648,7 +654,7 @@ function VaultDetail({
           payer: signer,
           owner: wallet,
           mint: v.paymentMint,
-          tokenProgram: TOKEN_CLASSIC_ADDRESS,
+          tokenProgram,
         });
       // Emergency-pause gate (read-only) — the last named account.
       const [platform] = await findPlatformPda();
@@ -658,7 +664,7 @@ function VaultDetail({
         escrow,
         paymentMint: v.paymentMint,
         founderAccount,
-        paymentTokenProgram: TOKEN_CLASSIC_ADDRESS,
+        paymentTokenProgram: tokenProgram,
       });
       const sig = await tx.send({
         instructions: [...founderSyncIxs(), createAtaIx, ix],

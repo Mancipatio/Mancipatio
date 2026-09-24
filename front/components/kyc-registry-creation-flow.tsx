@@ -16,6 +16,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { JurisdictionSelector } from "@/components/jurisdiction-selector";
 import { WalletRequired } from "@/components/wallet-required";
 import { invalidateRoles } from "@/lib/auth";
+import { formatLamportsAsSol, maxPriorityFeeLamports } from "@/lib/compute-budget";
 import { countryName } from "@/lib/countries";
 import {
   invalidateKycAuthorityContext,
@@ -55,8 +56,7 @@ function pinState(): { pin: Address | null; error: string | null } {
 
 /** Worst-case priority fee of the envelope, in SOL. */
 function priorityFeeSol(e: Pick<KycRegistryCreationEnvelope, "computeUnitLimit" | "computeUnitPriceMicroLamports">) {
-  const lamports = (BigInt(e.computeUnitLimit) * BigInt(e.computeUnitPriceMicroLamports)) / BigInt(1_000_000);
-  return (Number(lamports) / 1e9).toFixed(9).replace(/0+$/, "").replace(/\.$/, "");
+  return formatLamportsAsSol(maxPriorityFeeLamports(e.computeUnitLimit, BigInt(e.computeUnitPriceMicroLamports)));
 }
 
 export function KycRegistryCreationFlow() {

@@ -21,7 +21,6 @@ import {
   loadMintHolders,
   computeDistributionAllocation,
   parseWeightCsv,
-  detectTokenProgram,
   newDistributionId,
   DISTRIBUTION_STATUS_LABEL,
   type DistributionRecord,
@@ -48,11 +47,16 @@ import {
   readPaidDistributionBatches,
 } from "@/lib/distribution-transactions";
 import { waitForPurchasePreparation } from "@/lib/purchase-builder";
+import { VESTING_COMPUTE_UNITS } from "@/lib/vesting-creation";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { detectNetwork } from "@/lib/network";
-import { fetchMintTokenProgram } from "@/lib/transaction-builders";
+import { defaultPaymentMint } from "@/lib/payment-mints";
+import {
+  fetchMintTokenProgram,
+  inspectPaymentMint,
+} from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
 export type DistributionPrefill = {
   shareClassPda: string;
@@ -384,7 +388,9 @@ function CreateDistributionCard({
   const [share, setShare] = useState(
       initial?.shareClassPda ?? options[0]?.pda ?? "",
     ),
-    [mint, setMint] = useState(initial?.paymentMint ?? ""),
+    [mint, setMint] = useState(
+      initial?.paymentMint ?? defaultPaymentMint(detectNetwork()) ?? "",
+    ),
     [amount, setAmount] = useState(initial?.totalAmount ?? ""),
     [csv, setCsv] = useState(""),
     [rows, setRows] = useState<HolderWeight[] | null>(null),
@@ -447,8 +453,14 @@ function CreateDistributionCard({
     lock.current = true;
     setBusy(true);
     try {
+      // Funding this plan deposits payment tokens: the ENTRY check (plain
+      // rule, known USDC layout and, on mainnet, the allowlist).
       const paymentMint = address(mint.trim()),
-        program = await detectTokenProgram(client.runtime.rpc, paymentMint),
+        { owner: program } = await inspectPaymentMint(
+          client.runtime.rpc,
+          paymentMint,
+          detectNetwork(),
+        ),
         id = newDistributionId(),
         [distribution] = await findDistributionPda({
           shareClass: address(share),
@@ -684,8 +696,7 @@ function PreparedDistributionCard({
       instructions,
       feePayer: walletSigner(conn.wallet),
       version: 0,
-      computeUnitLimit: 400000,
-      computeUnitPrice: BigInt(0),
+      computeUnitLimit: VESTING_COMPUTE_UNITS,
       prepareTransaction: false,
     });
   }

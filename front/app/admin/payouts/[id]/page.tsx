@@ -6,7 +6,7 @@ import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { type Address } from "@solana/kit";
-import { useSendTransaction, useWalletConnection } from "@solana/react-hooks";
+import { useSendTransaction, useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
@@ -30,11 +30,11 @@ import { getSupabase, recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import { walletSigner } from "@/lib/wallet-signer";
-
-const TOKEN_2022_ADDRESS =
-  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
+import { detectNetwork } from "@/lib/network";
+import { TOKEN_2022 } from "@/lib/payment-mints";
+import { inspectPaymentMint } from "@/lib/transaction-builders";
+import { usePaymentMintCheck } from "@/lib/use-payment-mint";
+import { PaymentMintStatus } from "@/components/payment-mint-status";
 
 /** Recipients per transaction: 2 instructions each (create ATA + transfer). */
 const AIRDROP_BATCH = 8;
@@ -95,11 +95,15 @@ function PayoutDetail({ id }: { id: string }) {
   const [busy, setBusy] = useState(false);
   const [query, setQuery] = useState("");
   const tx = useSendTransaction();
+  const client = useSolanaClient();
+  const network = detectNetwork();
   const [confirmAirdrop, setConfirmAirdrop] = useState(false);
   const [airdropRunning, setAirdropRunning] = useState(false);
-  const [tokenProgramChoice, setTokenProgramChoice] = useState<
-    "classic" | "token2022"
-  >("classic");
+  // The payment mint's token program and decimals come from chain (entry
+  // rule), never from a manual choice or a stored default.
+  const payoutMint =
+    payout && payout !== "missing" ? (payout.payment_mint ?? "") : "";
+  const mintCheck = usePaymentMintCheck(client.runtime.rpc, network, payoutMint);
 
   const refresh = useCallback(async () => {
     const sb = getSupabase();
@@ -198,11 +202,22 @@ function PayoutDetail({ id }: { id: string }) {
     try {
       const signer = walletSigner(conn.wallet);
       const mint = payout.payment_mint as Address;
-      const tokenProgram =
-        tokenProgramChoice === "token2022"
-          ? TOKEN_2022_ADDRESS
-          : TOKEN_CLASSIC_ADDRESS;
-      const decimals = payout.payment_decimals ?? 6;
+      const { owner: tokenProgram, decimals } = await inspectPaymentMint(
+        client.runtime.rpc,
+        mint,
+        network,
+        { commitment: "confirmed", abortSignal: AbortSignal.timeout(10_000) },
+      );
+      // The recipient amounts were computed in the recorded decimals.
+      if (
+        payout.payment_decimals !== null &&
+        payout.payment_decimals !== undefined &&
+        payout.payment_decimals !== decimals
+      ) {
+        throw new Error(
+          `This payout records ${payout.payment_decimals} decimals but the payment mint has ${decimals} on-chain. Nothing was sent.`,
+        );
+      }
       const [sourceAta] = await findAssociatedTokenPda({
         owner: wallet,
         tokenProgram,
@@ -223,7 +238,7 @@ function PayoutDetail({ id }: { id: string }) {
           payout_id: id,
           payment_mint: payout.payment_mint,
           payment_decimals: decimals,
-          token_program: tokenProgramChoice,
+          token_program: tokenProgram === TOKEN_2022 ? "token2022" : "classic",
           pending: recipients.filter((r) => !r.claimed).length,
           total: recipients.length,
         },
@@ -599,13 +614,24 @@ function PayoutDetail({ id }: { id: string }) {
               <dd className="mt-1 break-all font-mono text-[11px] text-slate-700">
                 {payout.payment_mint ?? "— not set (created before airdrops)"}
               </dd>
+              <dd>
+                <PaymentMintStatus check={mintCheck} />
+              </dd>
             </div>
             <div>
               <dt className="text-[10px] uppercase tracking-wider text-slate-500">
-                Decimals
+                Decimals (on-chain)
               </dt>
               <dd className="mt-1 text-sm text-slate-900">
-                {payout.payment_decimals ?? 6}
+                {mintCheck.status === "ok" ? mintCheck.decimals : "—"}
+                {mintCheck.status === "ok" &&
+                  payout.payment_decimals !== null &&
+                  payout.payment_decimals !== undefined &&
+                  payout.payment_decimals !== mintCheck.decimals && (
+                    <span className="ml-2 text-xs text-red-700">
+                      recorded {payout.payment_decimals}: the airdrop is refused
+                    </span>
+                  )}
               </dd>
             </div>
             <div>
@@ -651,24 +677,6 @@ function PayoutDetail({ id }: { id: string }) {
           </p>
 
           <div className="mt-4 flex flex-wrap items-end gap-3">
-            <label className="block">
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Token program
-              </span>
-              <select
-                value={tokenProgramChoice}
-                onChange={(e) =>
-                  setTokenProgramChoice(
-                    e.target.value as "classic" | "token2022",
-                  )
-                }
-                disabled={airdropRunning}
-                className="mt-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-              >
-                <option value="classic">Classic SPL (USDC etc.)</option>
-                <option value="token2022">Token-2022</option>
-              </select>
-            </label>
             <button
               type="button"
               onClick={() => setConfirmAirdrop(true)}
@@ -677,6 +685,7 @@ function PayoutDetail({ id }: { id: string }) {
                 busy ||
                 !wallet ||
                 !payout.payment_mint ||
+                mintCheck.status !== "ok" ||
                 recipients === null ||
                 recipients.length === 0 ||
                 claimedCount === recipients.length

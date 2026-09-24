@@ -26,6 +26,8 @@ import {
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findShareClassPda } from "@/lib/pdas";
+import { detectNetwork } from "@/lib/network";
+import { defaultPaymentMint, paymentMintLabel } from "@/lib/payment-mints";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { recordAudit } from "@/lib/supabase";
@@ -419,7 +421,9 @@ function ApproveSaleModal({
       .then((r) => {
         if (cancelled) return;
         setRates(r);
-        if (r[0]) setPaymentMint(r[0].payment_mint);
+        // The network's USDC when it has a rate, else the first configured token.
+        const pick = r.find((x) => x.payment_mint === defaultPaymentMint(detectNetwork())) ?? r[0];
+        if (pick) setPaymentMint(pick.payment_mint);
       })
       .catch(() => {
         if (!cancelled) setRates([]);
@@ -640,7 +644,7 @@ function ApproveSaleModal({
                 >
                   {(rates ?? []).map((r) => (
                     <option key={r.payment_mint} value={r.payment_mint}>
-                      {r.payment_mint.slice(0, 6)}…{r.payment_mint.slice(-4)} · {r.kind === "eur_peg" ? "EUR 1:1" : `${r.eur_per_token} EUR`} · {r.source}
+                      {paymentMintLabel(r.payment_mint, detectNetwork())} · {r.payment_mint.slice(0, 6)}…{r.payment_mint.slice(-4)} · {r.kind === "eur_peg" ? "EUR 1:1" : `${r.eur_per_token} EUR`} · {r.source}
                     </option>
                   ))}
                 </select>

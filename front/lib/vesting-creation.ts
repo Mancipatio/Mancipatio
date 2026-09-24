@@ -32,6 +32,10 @@ import {
   type VestingTerms,
 } from "@/lib/vesting-terms";
 import type { ChainTransaction } from "@/lib/chain-evidence";
+import {
+  setComputeUnitLimitInstruction,
+  setComputeUnitPriceInstruction,
+} from "@/lib/compute-budget";
 
 export const VESTING_TRANSACTION_LIMIT = 1232;
 export const VESTING_COMPUTE_UNITS = 400_000;
@@ -51,21 +55,20 @@ export type VestingCreationStep = {
   instructions: Instruction[];
   bytes: number;
 };
-const computeBudget = address("ComputeBudget111111111111111111111111111111");
-/** Same compute limit/price pair as the send request. Signature slots included. */
+/**
+ * Same compute limit/price pair as the send request: the send sets the limit
+ * and the verified client adds SetComputeUnitPrice (a 9-byte instruction
+ * whatever the price, so a 0 placeholder measures it). Signature slots
+ * included.
+ */
 export function vestingTransactionBytes(
   instructions: readonly Instruction[],
   signer: TransactionSigner,
 ): number {
-  const limit = new Uint8Array(5);
-  limit[0] = 2;
-  new DataView(limit.buffer).setUint32(1, VESTING_COMPUTE_UNITS, true);
-  const price = new Uint8Array(9);
-  price[0] = 3;
   const message = appendTransactionMessageInstructions(
     [
-      { programAddress: computeBudget, data: limit },
-      { programAddress: computeBudget, data: price },
+      setComputeUnitLimitInstruction(VESTING_COMPUTE_UNITS),
+      setComputeUnitPriceInstruction(BigInt(0)),
       ...instructions,
     ],
     setTransactionMessageLifetimeUsingBlockhash(
