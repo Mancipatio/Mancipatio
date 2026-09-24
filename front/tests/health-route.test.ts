@@ -14,6 +14,7 @@ const m = vi.hoisted(() => ({
   rpcSend: (() => Promise.resolve(BigInt(0))) as (signal: AbortSignal) => Promise<unknown>,
   rpcSignal: null as AbortSignal | null,
   maintenance: vi.fn(),
+  dbRpc: [] as Call[],
 }));
 
 function from(table: string) {
@@ -39,10 +40,29 @@ function from(table: string) {
   });
   return q;
 }
+/** sb.rpc(name).abortSignal(signal), answered from m.replies[`rpc:${name}`]. */
+function rpc(name: string) {
+  const call: Call = { table: `rpc:${name}`, filters: [] };
+  m.dbRpc.push(call);
+  const settle = async () => {
+    const reply = m.replies[call.table];
+    if (reply === "hang") {
+      return new Promise((_resolve, reject) => call.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+    }
+    if (reply instanceof Error) throw reply;
+    return reply;
+  };
+  const q: Record<string, unknown> = {};
+  Object.assign(q, {
+    abortSignal: (signal: AbortSignal) => { call.signal = signal; return q; },
+    then: (resolve: (v: unknown) => unknown, reject: (e: unknown) => unknown) => settle().then(resolve, reject),
+  });
+  return q;
+}
 vi.mock("@/lib/supabase-server", () => ({
   getSupabaseAdmin: () => {
     if (m.adminError) throw m.adminError;
-    return { from };
+    return { from, rpc };
   },
 }));
 vi.mock("@/lib/server/rpc", () => ({
@@ -79,6 +99,7 @@ beforeEach(async () => {
   vi.stubEnv("VERCEL_GIT_COMMIT_SHA", "0123456789abcdef0123456789abcdef01234567");
   vi.stubEnv("HEALTH_TOKEN", TOKEN);
   m.calls = [];
+  m.dbRpc = [];
   m.adminError = null;
   m.rpcError = null;
   m.rpcCalls = 0;
@@ -89,6 +110,7 @@ beforeEach(async () => {
     indexer_jobs: { data: [], error: null, count: 0 },
     purchase_evidence_jobs: { data: [], error: null, count: 0 },
     fx_rates: { data: { kind: "rate", as_of: ago(3600), max_age: "7 days" }, error: null },
+    "rpc:deployment_network": { data: "devnet", error: null },
   };
   m.maintenance.mockReset();
   m.maintenance.mockResolvedValue({ enabled: false, message: null, fresh: true });
@@ -123,6 +145,7 @@ describe("GET /api/health", () => {
         purchaseQueue: { status: "ok", pending: 0, oldestPendingAgeSeconds: null },
         maintenance: { status: "ok", enabled: false },
         paymentFx: { status: "ok", kind: "rate", ageSeconds: 3600, maxAgeSeconds: 7 * 86_400 },
+        databaseNetwork: { status: "ok", network: "devnet" },
       },
     });
     expect(m.maintenance).toHaveBeenCalledWith("devnet");
@@ -141,7 +164,8 @@ describe("GET /api/health", () => {
     // The network's default payment mint (devnet test USDC).
     expect(byTable.fx_rates.filters).toEqual([["network", "devnet"], ["payment_mint", "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"]]);
     expect(byTable.fx_rates.select).toEqual(["kind,as_of,max_age"]);
-    for (const call of m.calls) expect(call.signal).toBeInstanceOf(AbortSignal);
+    for (const call of [...m.calls, ...m.dbRpc]) expect(call.signal).toBeInstanceOf(AbortSignal);
+    expect(m.dbRpc.map((call) => call.table)).toEqual(["rpc:deployment_network"]);
     expect(m.rpcSignal).toBeInstanceOf(AbortSignal);
   });
 
@@ -160,6 +184,7 @@ describe("GET /api/health", () => {
       ["an unparseable max age", fx(1, "soon"), 503, { status: "fail", reason: "invalid" }],
     ])("mainnet: %s", async (_label, reply, status, expected) => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
       m.replies.fx_rates = reply;
       const result = await get();
       expect(result.body.checks.paymentFx).toMatchObject(expected);
@@ -170,6 +195,7 @@ describe("GET /api/health", () => {
 
     it("mainnet: an anonymous caller sees ok:false (uptime alarms fire)", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
       m.replies.fx_rates = { data: null, error: null };
       const { status, body } = await get(null);
       expect(status).toBe(503);
@@ -178,6 +204,7 @@ describe("GET /api/health", () => {
 
     it("an eur_peg row never goes stale", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
       m.replies.fx_rates = fx(400, "7 days", "eur_peg");
       const { status, body } = await get();
       expect(status).toBe(200);
@@ -223,9 +250,11 @@ describe("GET /api/health", () => {
     m.replies.indexer_jobs = { data: null, error: { code: "57014", message: "statement timeout on secret-host" }, count: null };
     m.replies.purchase_evidence_jobs = new Error("ECONNREFUSED 10.0.0.7");
     m.maintenance.mockResolvedValue({ enabled: false, message: null, fresh: false });
+    m.replies["rpc:deployment_network"] = { data: null, error: { code: "PGRST000", message: "could not connect to secret-host" } };
     const { status, body } = await get();
     expect(status).toBe(503);
     expect(body.ok).toBe(false);
+    expect(body.checks.databaseNetwork).toEqual({ status: "fail", reason: "unavailable", network: null });
     expect(body.checks.indexer).toMatchObject({ status: "fail", reason: "unavailable", state: null });
     expect(body.checks.indexerQueue).toMatchObject({ status: "fail", reason: "unavailable", pending: null });
     expect(body.checks.purchaseQueue).toMatchObject({ status: "fail", reason: "unavailable", pending: null });
@@ -238,9 +267,10 @@ describe("GET /api/health", () => {
     m.adminError = new Error("SUPABASE_SERVICE_ROLE_KEY is not set");
     const { status, body } = await get();
     expect(status).toBe(503);
-    for (const check of ["indexer", "indexerQueue", "purchaseQueue"])
+    for (const check of ["indexer", "indexerQueue", "purchaseQueue", "databaseNetwork"])
       expect(body.checks[check]).toMatchObject({ status: "fail", reason: "not_configured" });
     expect(m.calls).toEqual([]);
+    expect(m.dbRpc).toEqual([]);
     expect(JSON.stringify(body)).not.toContain("SUPABASE_SERVICE_ROLE_KEY");
   });
 
@@ -340,6 +370,7 @@ describe("GET /api/health", () => {
     await get();
     expect(m.rpcCalls).toBe(1);
     expect(m.calls).toHaveLength(4);
+    expect(m.dbRpc).toHaveLength(1);
     vi.setSystemTime(NOW + 10_000);
     await get();
     expect(m.rpcCalls).toBe(2);
@@ -384,5 +415,63 @@ describe("GET /api/health", () => {
     const { body, headers } = await get(authorization);
     expect(Object.keys(body).sort()).toEqual(["checkedAt", "network", "ok"]);
     expect(headers.get("cache-control")).toBe("public, max-age=0, s-maxage=5");
+  });
+
+  describe("database network (0070 deployment identity)", () => {
+    it.each([
+      ["devnet", "devnet", "ok"],
+      ["mainnet", "mainnet", "ok"],
+      // A testnet front may use the devnet project (asymmetric, like the 0071 guard).
+      ["testnet", "devnet", "ok"],
+      ["localnet", "testnet", "ok"],
+      ["devnet", "mainnet", "fail"],
+      ["mainnet", "devnet", "fail"],
+      ["mainnet", "testnet", "fail"],
+    ] as const)("a %s deployment on a %s database: %s", async (deployment, database, expected) => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", deployment);
+      m.replies["rpc:deployment_network"] = { data: database, error: null };
+      const { status, body } = await get();
+      expect(body.checks.databaseNetwork).toEqual(
+        expected === "ok" ? { status: "ok", network: database } : { status: "fail", reason: "wrong_network", network: database },
+      );
+      expect(status).toBe(expected === "ok" ? 200 : 503);
+      // Anonymous callers see the verdict: ok:true proves the check passed.
+      vi.setSystemTime(NOW + 60_000);
+      expect((await get(null)).body.ok).toBe(expected === "ok");
+    });
+
+    it.each([
+      ["the identity row is missing", { code: "55000", message: "Deployment identity is not set" }],
+      ["0070 is not applied (PostgREST)", { code: "PGRST202", message: "Could not find the function public.deployment_network" }],
+      ["0070 is not applied (PostgreSQL)", { code: "42883", message: "function does not exist" }],
+    ])("fails as not configured when %s", async (_label, error) => {
+      m.replies["rpc:deployment_network"] = { data: null, error };
+      const { status, body } = await get();
+      expect(status).toBe(503);
+      expect(body.checks.databaseNetwork).toEqual({ status: "fail", reason: "not_configured", network: null });
+      expect(JSON.stringify(body)).not.toMatch(/identity is not set|Could not find|does not exist/);
+    });
+
+    it("fails on an unexpected value and on a hanging database, without detail", async () => {
+      m.replies["rpc:deployment_network"] = { data: "mainnet-beta", error: null };
+      expect((await get()).body.checks.databaseNetwork).toEqual({ status: "fail", reason: "unavailable", network: null });
+      vi.useFakeTimers();
+      vi.setSystemTime(NOW + 60_000);
+      const health = await import("@/lib/server/health");
+      m.replies["rpc:deployment_network"] = "hang";
+      const pending = route.GET(new Request("https://www.manci.io/api/health", { headers: { authorization: `Bearer ${TOKEN}` } }));
+      await vi.advanceTimersByTimeAsync(health.HEALTH_DB_TIMEOUT_MS);
+      const body = await (await pending).json();
+      expect(body.checks.databaseNetwork).toEqual({ status: "fail", reason: "timeout", network: null });
+      expect(m.dbRpc.at(-1)?.signal?.aborted).toBe(true);
+    });
+
+    it("shares the D8 rule with the guard", async () => {
+      const { databaseNetworkMatches } = await import("@/lib/server/health");
+      expect(databaseNetworkMatches("devnet", "testnet")).toBe(true);
+      expect(databaseNetworkMatches("mainnet", "mainnet")).toBe(true);
+      expect(databaseNetworkMatches("mainnet", "devnet")).toBe(false);
+      expect(databaseNetworkMatches("devnet", "mainnet")).toBe(false);
+    });
   });
 });

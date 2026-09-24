@@ -34,6 +34,12 @@
 //                 age → fail; at ≥ 80 % of its max age → warn. Other
 //                 networks: the same conditions only warn. An eur_peg row
 //                 never goes stale; a network without a default mint is ok.
+//   databaseNetwork  the database's public.deployment_network() (migration
+//                 0070) must serve this deployment: equal networks, or both
+//                 non-mainnet (a testnet front may use the devnet project,
+//                 like the 0071 guard) → ok; another network → fail
+//                 (wrong_network); no identity yet → fail (not_configured).
+//                 Fail-level, so an anonymous ok:true proves it passed.
 // Reports are shared for a few seconds per instance and concurrent requests
 // share one run, so a public endpoint cannot multiply database or RPC load.
 
@@ -68,6 +74,7 @@ export type PaymentFxCheck = Check & {
   ageSeconds: number | null;
   maxAgeSeconds: number | null;
 };
+export type DatabaseNetworkCheck = Check & { network: Network | null };
 
 export type HealthReport = {
   ok: boolean;
@@ -81,6 +88,7 @@ export type HealthReport = {
     purchaseQueue: QueueCheck;
     maintenance: MaintenanceCheck;
     paymentFx: PaymentFxCheck;
+    databaseNetwork: DatabaseNetworkCheck;
   };
 };
 
@@ -288,6 +296,36 @@ async function checkPaymentFx(sb: SupabaseClient | null, network: Network, now: 
   }
 }
 
+const NETWORKS: readonly Network[] = ["mainnet", "devnet", "testnet", "localnet"];
+
+/** The 0071 guard's rule (D8): a mainnet database serves only a mainnet
+ * deployment; any other database serves any non-mainnet deployment. */
+export function databaseNetworkMatches(database: Network, deployment: Network): boolean {
+  return database === deployment || (database !== "mainnet" && deployment !== "mainnet");
+}
+
+// PostgREST / PostgreSQL codes for "0070 or its identity row is missing".
+const IDENTITY_MISSING = new Set(["55000", "PGRST202", "42883"]);
+
+async function checkDatabaseNetwork(sb: SupabaseClient | null, network: Network): Promise<DatabaseNetworkCheck> {
+  if (!sb) return { status: "fail", reason: "not_configured", network: null };
+  try {
+    const result = await bounded((signal) => sb.rpc("deployment_network").abortSignal(signal), HEALTH_DB_TIMEOUT_MS);
+    if (result === TIMEOUT) return { status: "fail", reason: "timeout", network: null };
+    if (result.error) {
+      const code = (result.error as { code?: unknown }).code;
+      const missing = typeof code === "string" && IDENTITY_MISSING.has(code);
+      return { status: "fail", reason: missing ? "not_configured" : "unavailable", network: null };
+    }
+    const database = NETWORKS.find((value) => value === result.data) ?? null;
+    if (!database) return { status: "fail", reason: "unavailable", network: null };
+    if (!databaseNetworkMatches(database, network)) return { status: "fail", reason: "wrong_network", network: database };
+    return { status: "ok", network: database };
+  } catch {
+    return { status: "fail", reason: "unavailable", network: null };
+  }
+}
+
 function commitId(): string | null {
   const sha = process.env.VERCEL_GIT_COMMIT_SHA?.trim();
   return sha && /^[0-9a-f]{7,40}$/i.test(sha) ? sha.slice(0, 12) : null;
@@ -303,15 +341,16 @@ export async function runHealthChecks(): Promise<HealthReport> {
   } catch {
     sb = null;
   }
-  const [indexer, rpc, indexerQueue, purchaseQueue, maintenance, paymentFx] = await Promise.all([
+  const [indexer, rpc, indexerQueue, purchaseQueue, maintenance, paymentFx, databaseNetwork] = await Promise.all([
     checkIndexer(sb, network, now),
     checkRpc(),
     checkQueue(sb, "indexer_jobs", network, now, "warn"),
     checkQueue(sb, "purchase_evidence_jobs", network, now, "fail"),
     checkMaintenance(network),
     checkPaymentFx(sb, network, now),
+    checkDatabaseNetwork(sb, network),
   ]);
-  const checks = { indexer, rpc, indexerQueue, purchaseQueue, maintenance, paymentFx };
+  const checks = { indexer, rpc, indexerQueue, purchaseQueue, maintenance, paymentFx, databaseNetwork };
   return {
     ok: Object.values(checks).every((check) => check.status !== "fail"),
     network,

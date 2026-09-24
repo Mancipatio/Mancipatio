@@ -65,6 +65,70 @@ export function assertBuildNetwork(
 }
 
 /**
+ * The Supabase project each network's deployments use. Embedded (this file
+ * takes no runtime imports) and kept equal to the projectRef fields of
+ * scripts/ops/targets.json by tests/build-network-guard.test.ts. Mainnet is
+ * null until its project exists (Talas 7).
+ */
+export const SUPABASE_PROJECT_REFS: Readonly<Record<"devnet" | "mainnet", string | null>> = {
+  devnet: "gvnckuzmuwozlcohtuhx",
+  mainnet: null,
+};
+
+/**
+ * A production build must point at its own network's Supabase project
+ * (NEXT_PUBLIC_SUPABASE_URL = https://<ref>.supabase.co):
+ *   - a MAINNET build fails unless the mainnet ref is recorded, the URL is that
+ *     project's, and NEXT_PUBLIC_SUPABASE_ANON_KEY is a publishable key
+ *     (sb_publishable_…; D13 keeps the variable name);
+ *   - a devnet build that sets the URL must use the recorded devnet project;
+ *   - no other build may use the mainnet project. A testnet or localnet build
+ *     may share the devnet project (D8).
+ * Non-mainnet builds without the URL (local, CI), `next dev` and tests are
+ * unaffected.
+ */
+export function assertBuildSupabase(
+  phase: string,
+  env: Record<string, string | undefined> = process.env,
+  refs: Readonly<Record<"devnet" | "mainnet", string | null>> = SUPABASE_PROJECT_REFS,
+): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  const network = env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() ?? "";
+  const raw = env.NEXT_PUBLIC_SUPABASE_URL?.trim() ?? "";
+  const ref = /^https:\/\/([a-z0-9]{20})\.supabase\.co\/?$/.exec(raw)?.[1] ?? null;
+  const { mainnet: mainnetRef, devnet: devnetRef } = refs;
+  if (network === "mainnet") {
+    if (!mainnetRef) {
+      throw new Error(
+        "Refusing a mainnet build: no mainnet Supabase project is recorded (SUPABASE_PROJECT_REFS in " +
+          "next.config.ts and scripts/ops/targets.json).",
+      );
+    }
+    if (ref !== mainnetRef) {
+      throw new Error(
+        `Refusing a mainnet build: NEXT_PUBLIC_SUPABASE_URL must be https://${mainnetRef}.supabase.co.`,
+      );
+    }
+    if (!env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim().startsWith("sb_publishable_")) {
+      throw new Error(
+        "Refusing a mainnet build: NEXT_PUBLIC_SUPABASE_ANON_KEY must be a publishable key (sb_publishable_…).",
+      );
+    }
+    return;
+  }
+  if (ref && mainnetRef && ref === mainnetRef) {
+    throw new Error(
+      `Refusing a ${network || "non-mainnet"} build that points at the mainnet Supabase project.`,
+    );
+  }
+  if (network === "devnet" && devnetRef && raw && ref !== devnetRef) {
+    throw new Error(
+      `Refusing a devnet build: NEXT_PUBLIC_SUPABASE_URL must be https://${devnetRef}.supabase.co.`,
+    );
+  }
+}
+
+/**
  * Cloudflare Turnstile is on for a deployment only when both keys are set:
  * the server checks tokens when TURNSTILE_SECRET_KEY is set (read at
  * runtime), and pages render the widget only when NEXT_PUBLIC_TURNSTILE_SITE_KEY
@@ -240,6 +304,7 @@ const nextConfig: NextConfig = {
 
 export default function config(phase: string): NextConfig {
   assertBuildNetwork(phase);
+  assertBuildSupabase(phase);
   assertBuildTurnstile(phase);
   assertBuildKycRegistry(phase);
   return nextConfig;
