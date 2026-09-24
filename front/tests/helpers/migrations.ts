@@ -89,3 +89,14 @@ export const DYNAMIC_DEFAULT_TABLES = [
   "commitments",
   "launch_applications", "launch_listings", "launch_updates",
 ] as const;
+
+/** New `network` columns after 0071 (rule 1: default public.deployment_network()). */
+export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
+  // 0072 on-chain alarms
+  "onchain_event_jobs", "worker_leases", "worker_heartbeats", "alarm_incidents",
+  // 0073 ledger jobs and holds
+  "spv_issuance_jobs", "sale_capacity_holds",
+] as const;
+
+/** Every `network` column that defaults to public.deployment_network(). */
+export const ALL_DYNAMIC_DEFAULT_TABLES = [...DYNAMIC_DEFAULT_TABLES, ...POST_0071_DYNAMIC_DEFAULT_TABLES] as const;

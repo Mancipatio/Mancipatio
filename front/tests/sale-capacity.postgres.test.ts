@@ -56,9 +56,11 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
         grant all on storage.objects to anon,authenticated;`);
       const dir = join(process.cwd(), "supabase/migrations");
       applyMigrations(db, { network: "devnet" });
-      // Re-runnable: both files apply cleanly a second time.
-      sql(readFileSync(join(dir, "0066_sale_capacity.sql"), "utf8"));
-      sql(readFileSync(join(dir, "0067_sales_sale_approval.sql"), "utf8"));
+      // Re-runnable: both files apply cleanly a second time. Re-applying 0066
+      // restores its own function bodies, so 0073 and 0074 follow again (the
+      // order a rollback-and-reapply would take).
+      for (const file of ["0066_sale_capacity.sql", "0067_sales_sale_approval.sql", "0073_spv_issuance_jobs.sql", "0074_ledger_contract.sql"])
+        sql(readFileSync(join(dir, file), "utf8"));
     } catch (error) {
       db.close();
       throw error;
@@ -66,7 +68,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
   }, 90_000);
   afterAll(() => db.close());
   beforeEach(() => {
-    sql(`truncate public.sale_capacity_reservations, public.fx_rates, public.spv_issuances, public.spvs cascade;
+    sql(`truncate public.sale_capacity_reservations, public.fx_rates, public.spv_issuances, public.spvs,
+        public.spv_issuance_jobs, public.sale_capacity_holds cascade;
       delete from public.launch_applications;
       insert into public.spvs(id,network,name,annual_cap_eur) values
         ('${SPV}','devnet','SPV one',3000000), ('${SPV_SMALL}','devnet','SPV small',100);
@@ -174,16 +177,15 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     expect(() => sql(`select public.consume_sale_reservation('${r.id}','${b58("M")}',1)`)).toThrow(/SALE_MISMATCH/);
   });
 
-  it("keeps a sale consumed with last_error when the 0027 calendar-year trigger refuses the booking", () => {
+  it("books a sale even when the SPV is over its cap in the meantime (0073: server bookings are never refused)", () => {
     const r = reserve({ saleId: 1, maxGross: BigInt(1_000_000) * WHOLE, max: BigInt(1_000_000) * WHOLE });
     json(`select public.consume_sale_reservation('${r.id}','${row(r.id).sale_pda}',${BigInt(1_000_000) * WHOLE})`);
     // Someone recorded a large override this calendar year in the meantime.
     sql(`insert into public.spv_issuances(spv_id,amount_eur,issued_at,cap_override) values ('${SPV}',2500000,current_date,true)`);
     const result = json(`select public.book_sale_reservation('${r.id}',${BigInt(1_000_000) * WHOLE})`);
-    expect(result).toMatchObject({ status: "consumed" });
-    expect(String(result.book_error)).toMatch(/annual issuance cap exceeded/);
-    expect(String(row(r.id).last_error)).toMatch(/annual issuance cap exceeded/);
-    expect(sql("select count(*) from public.spv_issuances")).toBe("1");
+    expect(result).toMatchObject({ status: "booked", over_cap: true });
+    expect(result.book_error).toBeUndefined();
+    expect(sql("select count(*) from public.spv_issuances")).toBe("2");
   });
 
   it("keeps one live reservation per sale id: same terms are idempotent, other terms refuse, a release frees it", () => {
@@ -341,10 +343,10 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     sql(`delete from public.client_raise_limits; delete from public.clients; delete from public.issuers`);
   });
 
-  it("a manual SPV issuance counts live reservations, and is neither future-dated nor backdated", () => {
+  it("a manual SPV adjustment counts live reservations, and is neither future-dated nor backdated", () => {
     const record = (amount: number, opts: { issued?: string; override?: boolean; backdate?: boolean } = {}) =>
-      json(`select public.record_spv_issuance('${SPV}',${amount},null,null,${opts.issued ?? "null"},'note','admin-wallet',
-        ${opts.override ?? false},${opts.backdate ?? false})`);
+      json(`select public.record_spv_adjustment('${SPV}',${amount},null,${opts.issued ?? "null"},'correction','A correction note',
+        'admin-wallet',${opts.override ?? false},${opts.backdate ?? false})`);
     reserve({ maxGross: BigInt(2_500_000) * WHOLE });
     expect(() => record(500_001)).toThrow(/SALE_CAP_EXCEEDED remaining=500000/);
     expect(record(500_000)).toMatchObject({ amount_eur: 500000, source: "manual", capacity: { remaining: 0 } });
@@ -353,7 +355,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     // A super admin's override is recorded on the row (0027 lets it through too).
     expect(record(10, { override: true })).toMatchObject({ cap_override: true });
     expect(record(10, { issued: "current_date - 400", backdate: true, override: true })).toMatchObject({ amount_eur: 10 });
-    expect(() => sql(`select public.record_spv_issuance('30000000-0000-4000-8000-00000000000f',1,null,null,null,null,'a',false,false)`))
+    expect(() => sql(`select public.record_spv_adjustment('30000000-0000-4000-8000-00000000000f',1,null,null,'correction','A correction note','a',false,false)`))
       .toThrow(/SPV_NOT_FOUND/);
   });
 
@@ -386,11 +388,11 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     expect(booked.adopted_from).toMatchObject({ status: "released", release_reason: "expired" });
     expect(capacity()).toMatchObject({ reserved: 100, issued: 100 });
     expect(() => sql(`select public.book_treasury_mint('${b.id}','sig-late',null)`)).toThrow(/MINT_ALREADY_BOOKED/);
-    // The 0027 calendar-year trigger refusing the row keeps it reserved (counted), with book_error.
+    // 0073: a treasury mint over the cap is booked and flagged, never refused.
     sql(`update public.spvs set annual_cap_eur=150 where id='${SPV}'`);
-    const refused = json(`select public.book_treasury_mint('${b.id}','sig-b',null)`);
-    expect(refused).toMatchObject({ status: "reserved" });
-    expect(String(refused.book_error)).toMatch(/annual issuance cap/);
+    const over = json(`select public.book_treasury_mint('${b.id}','sig-b',current_date - 3)`);
+    expect(over).toMatchObject({ status: "booked", over_cap: true });
+    expect(sql(`select (current_date - booked_issued_at) from public.sale_capacity_reservations where id='${b.id}'`)).toBe("3");
   });
 
   it("publishes an application's listing from any wallet linked to the applicant's account", () => {
@@ -418,5 +420,183 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     }
     expect(JSON.parse(sql(`set role service_role; select public.sale_capacity('devnet','spv:${SPV}')`))).toMatchObject({ cap: 3000000 });
     expect(sql(`set role service_role; select count(*) from public.fx_rates`)).toBe("3");
+  });
+  // ── 0073: the ledger driven by the indexer (Talas 5.1) ────────────────────
+
+  const salesRow = (pda: string, status: number, approval: string | null, slot = 10) =>
+    `insert into public.sales(pda,network,share_class_pda,mint,payment_mint,proceeds,authority,sale_id,price_per_unit,
+      total_for_sale,layout_version,last_slot,last_signature,status,sale_approval)
+     values('${pda}','devnet','${SC}','m','${EURC}','p','a',9,1,10,2,${slot},'${"5".repeat(88)}',${status},${approval ? `'${approval}'` : "null"})
+     on conflict (network,pda) do update set status=excluded.status,last_slot=excluded.last_slot,sale_approval=excluded.sale_approval`;
+  const jobs = (kind = "sale_close") => sql(`select coalesce(string_agg(ref,',' order by ref),'') from public.spv_issuance_jobs where kind='${kind}'`);
+  const consumed = (o: Reserve = {}) => {
+    const r = reserve(o);
+    json(`select public.consume_sale_reservation('${r.id}','${row(r.id).sale_pda}',${o.maxGross ?? BigInt(1_000) * WHOLE})`);
+    return r;
+  };
+
+  it("enqueues one sale_close job when the mirror sees an approved sale close (never an open, unapproved or stale one)", () => {
+    const [open, noApproval, closing] = [b58("P"), b58("Q"), b58("R")];
+    sql(salesRow(open, 0, b58("G")));
+    sql(salesRow(noApproval, 1, null));
+    sql(salesRow(closing, 0, b58("G")));
+    expect(jobs()).toBe("");
+    sql(salesRow(closing, 1, b58("G"), 11));
+    sql(salesRow(closing, 1, b58("G"), 12));
+    expect(jobs()).toBe(closing);
+    expect(sql(`select observed_signature from public.spv_issuance_jobs`)).toBe("5".repeat(88));
+    // A stale snapshot (older slot than the tombstone) is dropped before the trigger.
+    const stale = b58("S");
+    sql(salesRow(stale, 0, b58("G"), 5));
+    sql(`insert into public.indexer_account_versions(network,pda,slot,table_name,closed) values('devnet','${stale}',50,'sales',false)
+      on conflict (network,pda) do update set slot=50`);
+    sql(salesRow(stale, 1, b58("G"), 6));
+    expect(jobs()).toBe(closing);
+    // Backfill: re-applying 0073 enqueues every closed approved sale once.
+    sql(`delete from public.spv_issuance_jobs`);
+    sql(readFileSync(join(process.cwd(), "supabase/migrations/0073_spv_issuance_jobs.sql"), "utf8"));
+    sql(readFileSync(join(process.cwd(), "supabase/migrations/0074_ledger_contract.sql"), "utf8"));
+    expect(jobs()).toBe(closing);
+    sql(`delete from public.sales; delete from public.indexer_account_versions where pda in ('${open}','${noApproval}','${closing}','${stale}')`);
+  });
+
+  it("books at the proven close date (never in the future) and counts issuers by that date", () => {
+    const r = consumed({ saleId: 1 });
+    const salePda = row(r.id).sale_pda as string;
+    sql(`insert into public.spv_issuance_jobs(network,kind,ref,closed_at) values('devnet','sale_close','${salePda}',now() - interval '40 days')`);
+    const booked = json(`select public.book_sale_reservation('${r.id}',${BigInt(100) * WHOLE})`);
+    expect(booked).toMatchObject({ status: "booked", over_cap: false });
+    expect(sql(`select (current_date - booked_issued_at) from public.sale_capacity_reservations where id='${r.id}'`)).toBe("40");
+    expect(sql(`select (current_date - issued_at) from public.spv_issuances`)).toBe("40");
+    // A close date in the future (clock skew) is clamped to today.
+    const future = consumed({ saleId: 2 });
+    sql(`insert into public.spv_issuance_jobs(network,kind,ref,closed_at) values('devnet','sale_close','${row(future.id).sale_pda}',now() + interval '3 days')`);
+    json(`select public.book_sale_reservation('${future.id}',${BigInt(1) * WHOLE})`);
+    expect(sql(`select booked_issued_at = current_date from public.sale_capacity_reservations where id='${future.id}'`)).toBe("t");
+    // An issuer subject closed 13 months ago no longer counts.
+    const old = consumed({ saleId: 3, spv: null });
+    sql(`insert into public.spv_issuance_jobs(network,kind,ref,closed_at) values('devnet','sale_close','${row(old.id).sale_pda}',now() - interval '13 months')`);
+    json(`select public.book_sale_reservation('${old.id}',${BigInt(500) * WHOLE})`);
+    expect(capacity(`issuer:${ISSUER}`)).toMatchObject({ issued: 0 });
+  });
+
+  it("books a server sale over the cap (flagged over_cap), never refuses it", () => {
+    const r = consumed({ saleId: 1, spv: SPV_SMALL, maxGross: BigInt(90) * WHOLE, max: BigInt(90) * WHOLE });
+    sql(`insert into public.spv_issuances(spv_id,amount_eur,issued_at,cap_override) values ('${SPV_SMALL}',50,current_date,true)`);
+    const booked = json(`select public.book_sale_reservation('${r.id}',${BigInt(90) * WHOLE})`);
+    expect(booked).toMatchObject({ status: "booked", over_cap: true, booked_amount_eur: 90 });
+    expect(capacity(`spv:${SPV_SMALL}`)).toMatchObject({ issued: 140 });
+  });
+
+  it("links a legacy sale row instead of inserting a second one, and reports a different amount", () => {
+    const r = consumed({ saleId: 1 });
+    const salePda = row(r.id).sale_pda;
+    sql(`insert into public.spv_issuances(spv_id,sale_pubkey,amount_eur,issued_at,source) values ('${SPV}','${salePda}',70,current_date,'sale')`);
+    expect(() => sql(`insert into public.spv_issuances(spv_id,sale_pubkey,amount_eur,source) values ('${SPV}','${salePda}',1,'sale')`))
+      .toThrow(/spv_issuances_sale_once/);
+    const booked = json(`select public.book_sale_reservation('${r.id}',${BigInt(100) * WHOLE})`);
+    expect(booked).toMatchObject({ status: "booked", linked_existing: true, linked_amount_eur: 70, amount_mismatch: true, booked_amount_eur: 100 });
+    expect(sql("select count(*) from public.spv_issuances")).toBe("1");
+    expect(capacity()).toMatchObject({ issued: 70 });
+    // The ledger job and the backstop booking the same reservation again: still one row.
+    json(`select public.book_sale_reservation('${r.id}',${BigInt(100) * WHOLE})`);
+    expect(sql("select count(*) from public.spv_issuances")).toBe("1");
+  });
+
+  it("manual adjustments: rolling cap, a reason and a note, never a sale; the trigger checks direct manual inserts too", () => {
+    const adjust = (amount: number, asset = "null", reason = "'correction'", note = "'A correction note'") =>
+      json(`select public.record_spv_adjustment('${SPV_SMALL}',${amount},${asset},null,${reason},${note},'admin-wallet',false,false)`);
+    expect(adjust(60)).toMatchObject({ source: "manual", reason_code: "correction", capacity: { remaining: 40 } });
+    expect(() => adjust(41)).toThrow(/SALE_CAP_EXCEEDED remaining=40/);
+    expect(() => adjust(1, "null", "'other'")).toThrow(/INVALID_TERMS/);
+    expect(() => adjust(1, "null", "'correction'", "'short'")).toThrow(/INVALID_TERMS/);
+    const r = reserve({ saleId: 3 });
+    expect(() => adjust(1, `'${row(r.id).sale_pda}'`)).toThrow(/REF_IS_SALE/);
+    expect(() => sql(`select public.spv_manual_row_checks('devnet','${SPV}',null,'${b58("Z")}',false)`)).toThrow(/SALE_PUBKEY_NOT_ALLOWED/);
+    // A direct manual insert still meets the (now rolling) trigger; older than 12 months counts against nothing.
+    expect(() => sql(`insert into public.spv_issuances(spv_id,amount_eur,issued_at) values ('${SPV_SMALL}',41,current_date)`))
+      .toThrow(/SPV annual issuance cap exceeded/);
+    sql(`insert into public.spv_issuances(spv_id,amount_eur,issued_at) values ('${SPV_SMALL}',500,current_date - interval '13 months')`);
+  });
+
+  it("a hold blocks new reservations and adjustments of its subject, never an adoption", () => {
+    sql(`select public.place_capacity_hold('devnet','spv:${SPV}','${b58("H")}','ADOPTION_PENDING','${USDC}')`);
+    expect(capacity()).toMatchObject({ holds: 1 });
+    expect(() => reserve({ saleId: 4 })).toThrow(/SUBJECT_ON_HOLD/);
+    expect(() => json(`select public.record_spv_adjustment('${SPV}',1,null,null,'correction','A correction note','a',false,false)`))
+      .toThrow(/SUBJECT_ON_HOLD/);
+    expect(json(`select public.record_spv_adjustment('${SPV}',1,null,null,'correction','A correction note','a',true,false)`))
+      .toMatchObject({ cap_override: true });
+    const adopted = json(`select public.adopt_sale_approval('devnet','${SC}',5,'${b58("J")}','${b58("L")}','${ASSET}','${ISSUER}','${SPV}',
+      '${EURC}',${BigInt(10) * WHOLE},1,1,'mature',0,0,now()+interval '1 day','${HASH}','admin','test')`);
+    expect(adopted).toMatchObject({ action: "inserted", adopted: true });
+    sql(`select public.clear_capacity_hold('devnet','spv:${SPV}','${b58("H")}')`);
+    expect(reserve({ saleId: 4 })).toMatchObject({ existing: false });
+  });
+
+  it("adopts an unreserved treasury mint at its floor, once per mint key, and never below the floor on re-value", () => {
+    const adopt = (key: string, units = 500) => json(`select public.adopt_treasury_mint('devnet','${SC}','${ASSET}','${ISSUER}','${SPV}',${units},
+      '${key}','admin-wallet',current_date,'{"v":1}'::jsonb,'${HASH}')`);
+    const sig = "4".repeat(88);
+    // No price anywhere: the EUR 1 minimum, critical for the caller.
+    expect(adopt(sig)).toMatchObject({ action: "adopted", basis: "minimum", amount_eur: 1, over_cap: false });
+    expect(adopt(sig)).toMatchObject({ action: "existing" });
+    expect(sql(`select count(*) from public.spv_issuances where source='treasury_mint'`)).toBe("1");
+    // The newest indexed sale price: 500 units x 4 USDC x 0.9 = 1800.
+    sql(`insert into public.sales(pda,network,share_class_pda,mint,payment_mint,proceeds,authority,sale_id,price_per_unit,total_for_sale,
+      layout_version,last_slot) values('${b58("K")}','devnet','${SC}','m','${USDC}','p','a',1,${BigInt(4) * WHOLE},10,2,1)`);
+    const priced = adopt(`${sig}:3`);
+    expect(priced).toMatchObject({ basis: "sale_price", amount_eur: 1800, fx_stale: false });
+    expect(capacity()).toMatchObject({ issued: 1801 });
+    // Re-value: never below the floor, then above it; the SPV row follows.
+    expect(() => sql(`select public.revalue_treasury_mint('${priced.id}',1799,'Appraisal by the auditor','super')`)).toThrow(/TREASURY_VALUE_BELOW_FLOOR/);
+    const up = json(`select public.revalue_treasury_mint('${priced.id}',2500,'Appraisal by the auditor','super')`);
+    expect(up).toMatchObject({ amount_eur: 2500, previous_amount_eur: 1800 });
+    expect(capacity()).toMatchObject({ issued: 2501 });
+    // A price whose mint has no rate: FX_RATE_MISSING, nothing counted silently.
+    sql(`delete from public.fx_rates where payment_mint='${USDC}'`);
+    expect(() => adopt(`${sig}:4`)).toThrow(/FX_RATE_MISSING/);
+    sql(`delete from public.sales`);
+  });
+
+  it("revalue_capacity_fx raises a value counted at a stale rate once a fresh rate exists, and never lowers one", () => {
+    const r = reserve({ saleId: 1, mint: USDC, maxGross: BigInt(1_000) * WHOLE, max: BigInt(1_000) * WHOLE });
+    expect(row(r.id).amount_eur).toBe(900);
+    expect(() => sql(`select public.revalue_capacity_fx('${r.id}')`)).toThrow(/NO_REVALUE_HOLD/);
+    sql(`select public.place_capacity_hold('devnet','spv:${SPV}','${r.id}','FX_REVALUE','${USDC}')`);
+    sql(`update public.fx_rates set as_of=now()-interval '8 days' where payment_mint='${USDC}'`);
+    expect(() => sql(`select public.revalue_capacity_fx('${r.id}')`)).toThrow(/FX_RATE_STALE/);
+    // A fresh LOWER rate never lowers the counted value.
+    sql(`update public.fx_rates set as_of=now(), eur_per_token=0.5 where payment_mint='${USDC}'`);
+    expect(json(`select public.revalue_capacity_fx('${r.id}')`)).toMatchObject({ revalued: true, amount_eur: 900 });
+    expect(capacity()).toMatchObject({ holds: 0 });
+    // A higher one raises it.
+    sql(`select public.place_capacity_hold('devnet','spv:${SPV}','${r.id}','FX_REVALUE','${USDC}')`);
+    sql(`update public.fx_rates set eur_per_token=1.2 where payment_mint='${USDC}'`);
+    expect(json(`select public.revalue_capacity_fx('${r.id}')`)).toMatchObject({ amount_eur: 1200 });
+  });
+
+  it("0073 refuses to run while two sale rows count one sale (SPV_SALE_DUPLICATES)", () => {
+    sql(`drop index public.spv_issuances_sale_once`);
+    try {
+      sql(`insert into public.spv_issuances(spv_id,sale_pubkey,amount_eur,source,cap_override) values
+        ('${SPV}','${b58("D")}',1,'sale',true),('${SPV}','${b58("D")}',1,'sale',true)`);
+      expect(() => sql(readFileSync(join(process.cwd(), "supabase/migrations/0073_spv_issuance_jobs.sql"), "utf8")))
+        .toThrow(/SPV_SALE_DUPLICATES/);
+    } finally {
+      sql(`delete from public.spv_issuances where sale_pubkey='${b58("D")}'`);
+      sql(readFileSync(join(process.cwd(), "supabase/migrations/0073_spv_issuance_jobs.sql"), "utf8"));
+      sql(readFileSync(join(process.cwd(), "supabase/migrations/0074_ledger_contract.sql"), "utf8"));
+    }
+  });
+
+  it("0074: browser roles cannot read spv_issuances; the ledger tables are service-role only", () => {
+    for (const role of ["anon", "authenticated"]) {
+      for (const table of ["spv_issuances", "spv_issuance_jobs", "sale_capacity_holds"]) {
+        expect(() => sql(`set role ${role}; select * from public.${table}`)).toThrow(/permission denied/);
+      }
+      expect(() => sql(`set role ${role}; select public.revalue_capacity_fx(gen_random_uuid())`)).toThrow(/permission denied/);
+    }
+    expect(sql("select to_regprocedure('public.record_spv_issuance(uuid,numeric,text,text,date,text,text,boolean,boolean)') is null")).toBe("t");
   });
 });

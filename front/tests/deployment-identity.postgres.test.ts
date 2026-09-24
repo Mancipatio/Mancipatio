@@ -9,6 +9,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LocalPostgres } from "./helpers/local-postgres";
 import {
   applyMigrations,
+  ALL_DYNAMIC_DEFAULT_TABLES,
   DYNAMIC_DEFAULT_TABLES,
   insertDeploymentIdentity,
   MIGRATIONS_DIR,
@@ -93,11 +94,11 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("deployment identi
     expect(preflight(bare)).toMatchObject({ identity: null, rows_of_other_networks: {}, tables_without_guard: [], network_tables: 0 });
   });
 
-  it.each(["devnet", "mainnet"] as const)("%s: all 33 defaults resolve to the project's network for every API role", (network) => {
+  it.each(["devnet", "mainnet"] as const)("%s: every dynamic default (0071's 33 and later tables') resolves to the project's network for every API role", (network) => {
     const db = clusters[network];
     for (const role of ["anon", "authenticated", "service_role"]) {
       const values = evaluateDefaults(db, role);
-      expect(Object.keys(values).sort(), role).toEqual([...DYNAMIC_DEFAULT_TABLES].sort());
+      expect(Object.keys(values).sort(), role).toEqual([...ALL_DYNAMIC_DEFAULT_TABLES].sort());
       expect(new Set(Object.values(values)), role).toEqual(new Set([network]));
     }
     // An actual insert that leaves network out.
@@ -135,8 +136,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("deployment identi
     expect(() => db.query(`set role service_role; select public.enqueue_indexer_events('devnet', '${event()}'::jsonb)`))
       .toThrow(/does not belong to this mainnet project/);
     expect(db.query(`set role service_role; select public.enqueue_indexer_events('mainnet', '${event()}'::jsonb)`)).toBe("1");
+    // 0072: the lease asserts the deployment network before the guard would refuse the row.
     expect(() => db.query("set role service_role; select public.acquire_retry_worker_lease('devnet', gen_random_uuid(), 120)"))
-      .toThrow(/does not belong to this mainnet project/);
+      .toThrow(/DEPLOYMENT_NETWORK_MISMATCH database=mainnet deployment=devnet/);
     expect(db.query("set role service_role; select public.acquire_retry_worker_lease('mainnet', gen_random_uuid(), 120)")).toBe("t");
     // And the reverse on devnet.
     expect(() => clusters.devnet.query(`set role service_role; select public.enqueue_indexer_events('mainnet', '${event()}'::jsonb)`))
