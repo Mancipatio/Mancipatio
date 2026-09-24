@@ -403,8 +403,9 @@ grant all on public.alarm_incidents to service_role;
 -- hold: the condition is not decided (keeps it, resets the pass streak);
 -- pass: after 3 passes and 5 minutes since the last failure, the incident is
 -- cleared and an OPEN alert resolved (escalated ones stay with humans, D9).
--- A failure within 30 minutes of a clear reopens the same alert silently.
--- Returns {action, alert_id}.
+-- A failure within 30 minutes of a clear reopens the same alert silently when
+-- the system resolved it; an alert a person resolved or dismissed is kept as
+-- it is and a new alert opens. Returns {action, alert_id}.
 create or replace function public.report_incident(
   p_network text, p_check text, p_state text, p_category text, p_source text, p_severity text,
   p_summary text, p_evidence jsonb, p_notify boolean
@@ -488,8 +489,12 @@ begin
        where network = p_network and check_key = p_check;
       return jsonb_build_object('action', 'acknowledged', 'alert_id', a.id);
     end if;
-  elsif have_alert and inc.cleared_at is not null and inc.cleared_at > now() - interval '30 minutes' then
-    -- (c) Flapping: reopen the same alert, without a new email unless it got worse.
+  elsif have_alert and inc.cleared_at is not null and inc.cleared_at > now() - interval '30 minutes'
+        and a.status = 'resolved' and a.resolved_by = 'system' then
+    -- (c) Flapping: reopen the same alert, without a new email unless it got
+    -- worse. Only an alert the system resolved: a person's resolution or
+    -- dismissal (and its note) is never overwritten; that case opens a new
+    -- alert (d).
     update public.compliance_alerts
        set status = 'open', resolved_by = null, resolved_at = null, resolution_note = null,
            summary = p_summary,

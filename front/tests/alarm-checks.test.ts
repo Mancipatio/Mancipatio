@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   complete: true,
   txs: {} as Record<string, unknown>,
   pagesAsked: [] as number[],
+  hang: false,
 }));
 vi.mock("@/lib/network", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/network")>()),
@@ -17,8 +18,12 @@ vi.mock("@/lib/network", async (importOriginal) => ({
 vi.mock("@/lib/server/rpc", () => ({ getServerRpc: () => ({}) }));
 vi.mock("@/lib/server/maintenance", () => ({ readMaintenance: async () => ({ enabled: false, fresh: true }) }));
 vi.mock("@/lib/server/sale-capacity-chain", () => ({
-  listFinalizedSignatures: vi.fn(async (account: string, _from: number, _to: number, _signal: unknown, pages: number) => {
+  listFinalizedSignatures: vi.fn(async (account: string, _from: number, _to: number, signal: AbortSignal, pages: number) => {
     state.pagesAsked.push(pages);
+    if (state.hang) {
+      // A slow RPC: answers only when the caller gives up.
+      await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    }
     return { signatures: state.lists[account] ?? [], complete: state.complete };
   }),
   finalizedTransaction: vi.fn(async (sig: string) => state.txs[sig] ?? null),
@@ -26,14 +31,16 @@ vi.mock("@/lib/server/sale-capacity-chain", () => ({
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => { throw new Error("not in tests"); } }));
 
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
-import { gapScan, runAlarmChecks, thresholdState } from "@/lib/server/alarm-checks";
+import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
+import { GAP_SCAN_RESERVE_MS, gapScan, invokesWatchedProgram, runAlarmChecks, thresholdState } from "@/lib/server/alarm-checks";
+import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { buildTx } from "./helpers/chain-tx";
 
 const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
 
 type Rpc = { fn: string; args: Record<string, unknown> };
-function mockSb(tables: Record<string, Record<string, unknown>[]>) {
+function mockSb(tables: Record<string, Record<string, unknown>[]>, broken: string[] = []) {
   const rpcs: Rpc[] = [];
   const sb = {
     from: (table: string) => {
@@ -42,9 +49,12 @@ function mockSb(tables: Record<string, Record<string, unknown>[]>) {
       let counted = false;
       b.select = (_cols: string, opts?: { count?: string }) => { counted = !!opts?.count; return b; };
       for (const m of ["eq", "in", "lte", "gte", "order", "limit", "is", "not", "like", "neq"]) b[m] = () => b;
-      const result = () => ({ data: rows, error: null, ...(counted ? { count: rows.length } : {}) });
-      b.maybeSingle = () => ({ abortSignal: () => Promise.resolve({ data: rows[0] ?? null, error: null }) });
-      b.abortSignal = () => Object.assign(Promise.resolve(result()), { maybeSingle: () => Promise.resolve({ data: rows[0] ?? null, error: null }) });
+      const result = () => broken.includes(table)
+        ? { data: null, error: { code: "08006" } }
+        : { data: rows, error: null, ...(counted ? { count: rows.length } : {}) };
+      const single = () => Promise.resolve(broken.includes(table) ? { data: null, error: { code: "08006" } } : { data: rows[0] ?? null, error: null });
+      b.maybeSingle = () => ({ abortSignal: single });
+      b.abortSignal = () => Object.assign(Promise.resolve(result()), { maybeSingle: single });
       b.then = (resolve: (v: unknown) => unknown) => Promise.resolve(result()).then(resolve);
       return b;
     },
@@ -61,6 +71,7 @@ beforeEach(() => {
   state.complete = true;
   state.txs = {};
   state.pagesAsked = [];
+  state.hang = false;
 });
 
 describe("thresholds", () => {
@@ -81,13 +92,38 @@ describe("gap scan", () => {
     state.txs[missing] = buildTx({ signature: missing, instructions: [{ ix: { program: ASSET_REGISTRY_PROGRAM_ADDRESS, accounts: [MINT], data: new Uint8Array([1]) } }] }).tx;
     const { sb, rpcs } = mockSb({ indexer_events: [{ signature: known }] });
     const result = await gapScan(sb, "devnet", Date.now(), AbortSignal.timeout(5_000));
-    expect(result).toEqual({ missing: 1, repaired: 1, complete: false });
+    expect(result).toEqual({ missing: 1, repaired: 1, ignored: 0, complete: false });
     expect(state.pagesAsked).toEqual([5, 5, 5, 5]);
     expect(rpcs).toHaveLength(1);
     expect(rpcs[0]).toMatchObject({ fn: "enqueue_indexer_events", args: { p_network: "devnet" } });
     const [event] = rpcs[0].args.p_events as Record<string, unknown>[];
     expect(event).toMatchObject({ signature: missing, ix_name: "GAP_SCAN", payload: { source: "gap-scan" } });
     expect(event.wallets).toEqual(expect.arrayContaining([MINT, ASSET_REGISTRY_PROGRAM_ADDRESS]));
+  });
+
+  it("ignores a listed transaction that invokes none of the watched programs (a read-only listing of the blocklist PDA)", async () => {
+    const [blocklistAuthority] = await findBlocklistAuthorityPda();
+    const junk = "6".repeat(88);
+    const hookAdmin = "7".repeat(88);
+    state.lists[blocklistAuthority] = [{ signature: junk, blockTime: 1_700_000_000 }, { signature: hookAdmin, blockTime: 1_700_000_001 }];
+    // Anyone can list the PDA read-only in a transaction of their own program.
+    state.txs[junk] = buildTx({ signature: junk, instructions: [{ ix: { program: MINT, accounts: [blocklistAuthority], data: new Uint8Array([9]) } }] }).tx;
+    state.txs[hookAdmin] = buildTx({ signature: hookAdmin, instructions: [{ ix: { program: TRANSFER_HOOK_PROGRAM_ADDRESS, accounts: [MINT, blocklistAuthority], data: new Uint8Array([1]) } }] }).tx;
+    const { sb, rpcs } = mockSb({ indexer_events: [] });
+    const result = await gapScan(sb, "devnet", Date.now(), AbortSignal.timeout(5_000));
+    expect(result).toEqual({ missing: 1, repaired: 1, ignored: 1, complete: true });
+    expect(rpcs.map((r) => (r.args.p_events as { signature: string }[])[0].signature)).toEqual([hookAdmin]);
+  });
+
+  it("watched programs: our two programs, the upgradeable loader on our ProgramData, loader v4 on our programs", async () => {
+    const pd = await programDataAddresses();
+    const tx = (program: string, accounts: string[]) =>
+      buildTx({ signature: "8".repeat(88), instructions: [{ ix: { program, accounts, data: new Uint8Array([0, 0, 0, 0]) } }] }).tx;
+    expect(invokesWatchedProgram(tx(ASSET_REGISTRY_PROGRAM_ADDRESS, [MINT]), pd)).toBe(true);
+    expect(invokesWatchedProgram(tx("BPFLoaderUpgradeab1e11111111111111111111111", [pd.transferHook]), pd)).toBe(true);
+    expect(invokesWatchedProgram(tx("BPFLoaderUpgradeab1e11111111111111111111111", [MINT]), pd)).toBe(false);
+    expect(invokesWatchedProgram(tx(LOADER_V4, [ASSET_REGISTRY_PROGRAM_ADDRESS]), pd)).toBe(true);
+    expect(invokesWatchedProgram(tx(MINT, [ASSET_REGISTRY_PROGRAM_ADDRESS]), pd)).toBe(false);
   });
 });
 
@@ -142,5 +178,36 @@ describe("runAlarmChecks", () => {
     const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
     expect(result.gapScan).toMatchObject({ ran: true, missing: 0, complete: false });
     expect(reported(rpcs)).toMatchObject({ "indexer-gap": "pass/high", "gap-scan-incomplete": "fail/medium" });
+  });
+
+  it("records the cheap incidents BEFORE the gap scan; a scan that overruns its sub-deadline is cut short, stamped and reported", async () => {
+    state.hang = true;
+    const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(6) }] });
+    const deadline = Date.now() + GAP_SCAN_RESERVE_MS + 300;
+    const result = await runAlarmChecks(sb, deadline, AbortSignal.timeout(GAP_SCAN_RESERVE_MS + 300));
+    const checks = rpcs.filter((r) => r.fn === "report_incident").map((r) => r.args.p_check);
+    // Every cheap check was recorded first, then the scan's own incident.
+    expect(checks.slice(0, 5)).toEqual(["indexer-queue", "event-queue", "ledger-queue", "indexer-degraded", "event-invalid"]);
+    expect(checks.at(-1)).toBe("gap-scan-incomplete");
+    expect(reported(rpcs)["gap-scan-incomplete"]).toBe("fail/medium");
+    expect(reported(rpcs)["indexer-gap"]).toBeUndefined();
+    expect(result.gapScan).toMatchObject({ ran: true, cutShort: true, complete: false });
+    expect(result.reports.length).toBe(result.expected);
+    expect(Date.now()).toBeLessThan(deadline);
+  });
+
+  it("a check that cannot run is expected but not recorded (the worker then counts the stage as failed)", async () => {
+    const { sb } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }] }, ["indexer_sync_state"]);
+    const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(result.expected).toBe(result.reports.length + 1);
+    expect(result.reports.map((r) => r.check)).not.toContain("indexer-degraded");
+  });
+
+  it("past the deadline nothing runs and everything is expected", async () => {
+    const { sb, rpcs } = mockSb({});
+    const result = await runAlarmChecks(sb, Date.now() - 1, AbortSignal.timeout(10_000));
+    expect(rpcs).toEqual([]);
+    expect(result).toMatchObject({ reports: [], gapScan: null });
+    expect(result.expected).toBeGreaterThan(0);
   });
 });

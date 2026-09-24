@@ -195,7 +195,8 @@ export type NotifyResult =
   | { status: "sent" | "failed"; count: number; error?: "SEND_FAILED" | "SEND_TIMEOUT" };
 
 /**
- * One digest of the due pending alerts (at most 25), within `deadlineMs`.
+ * One digest of the due pending alerts (at most 25; critical and high first),
+ * within `deadlineMs`.
  * No recipients or no transport: NOT_CONFIGURED, rows stay pending. Never
  * selects evidence.
  */
@@ -204,12 +205,22 @@ export async function notifyPendingAlerts(deadlineMs: number, signal?: AbortSign
   if (!recipients || !emailConfigured()) return { status: "not_configured" };
   if (deadlineMs - Date.now() < MIN_SEND_MS) return { status: "deferred" };
   const network = detectNetwork();
-  const { data, error } = await sb.from("compliance_alerts")
+  // Critical and high first, then the rest of the slots: a flood of older
+  // medium rows (bootstrap, backfill, SMTP recovery) never delays a new
+  // critical alert behind it.
+  const due = new Date().toISOString();
+  const read = (severities: readonly string[], limit: number) => sb.from("compliance_alerts")
     .select("id,created_at,source,severity,summary,tx_signature,category")
-    .eq("network", network).eq("notify_state", "pending").lte("next_notify_at", new Date().toISOString())
-    .order("next_notify_at").limit(DIGEST_LIMIT).abortSignal(dbSignal(signal));
-  if (error) throw new Error("Alert outbox unavailable");
-  const rows = (data ?? []) as DigestRow[];
+    .eq("network", network).eq("notify_state", "pending").lte("next_notify_at", due).in("severity", [...severities])
+    .order("next_notify_at").limit(limit).abortSignal(dbSignal(signal));
+  const urgent = await read(["critical", "high"], DIGEST_LIMIT);
+  if (urgent.error) throw new Error("Alert outbox unavailable");
+  const rows = [...((urgent.data ?? []) as DigestRow[])];
+  if (rows.length < DIGEST_LIMIT) {
+    const rest = await read(["medium", "low"], DIGEST_LIMIT - rows.length);
+    if (rest.error) throw new Error("Alert outbox unavailable");
+    rows.push(...((rest.data ?? []) as DigestRow[]));
+  }
   if (!rows.length) return { status: "none" };
   const remaining = deadlineMs - Date.now();
   if (remaining < MIN_SEND_MS) return { status: "deferred" };

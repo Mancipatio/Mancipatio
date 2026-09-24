@@ -12,6 +12,11 @@
 //   release  by +47 s
 // It never calls assertWritable: alarms keep running in maintenance mode and
 // while the program is paused. The response carries counts only.
+//
+// The checks stage is "failed" (a partial run: last_ok_at does not move)
+// whenever fewer incidents were recorded than expected, including a check
+// that could not run; a gap scan that was started still stamps
+// last_gap_scan_at, so a slow scan is not repeated every minute.
 
 import "server-only";
 import { randomUUID } from "node:crypto";
@@ -26,13 +31,14 @@ export const ALARM_DEADLINES_MS = { events: 20_000, checks: 30_000, notifyEnd: 4
 const LEASE_TTL_SECONDS = 120;
 const LEASE_RPC_TIMEOUT_MS = 3_000;
 
-type Stage<T> = { status: "processed"; counts: T } | { status: "deferred" | "failed"; counts: null };
+type Stage<T> = { status: "processed"; counts: T } | { status: "failed"; counts: T | null } | { status: "deferred"; counts: null };
+type CheckCounts = { reported: number; expected: number; failing: number; gapScan: boolean };
 export type AlarmWorkerResult =
   | { status: "busy"; network: Network }
   | {
     status: "processed" | "partial"; network: Network;
     events: Stage<JobCounts>;
-    checks: Stage<{ reported: number; failing: number; gapScan: boolean }>;
+    checks: Stage<CheckCounts>;
     notify: { status: NotifyResult["status"] | "failed"; count: number };
   };
 
@@ -76,15 +82,20 @@ export async function runAlarmWorker(limit = 10): Promise<AlarmWorkerResult> {
 
   try {
     const events = await run((deadline, signal) => reconcileEventJobs(limit, deadline, signal), at(ALARM_DEADLINES_MS.events));
-    const checks = await run(async (deadline, signal) => {
+    const ran = await run(async (deadline, signal): Promise<CheckCounts> => {
       const result = await runAlarmChecks(sb, deadline, signal);
       return {
         reported: result.reports.length,
+        expected: result.expected,
         failing: result.reports.filter((r) => r.state === "fail").length,
         gapScan: result.gapScan?.ran ?? false,
       };
     }, at(ALARM_DEADLINES_MS.checks));
-    const stagesOk = events.status !== "failed" && checks.status !== "failed";
+    // Incidents not recorded (deadline, database, a check that could not run): never "processed".
+    const checks: Stage<CheckCounts> = ran.status === "processed" && ran.counts.reported < ran.counts.expected
+      ? { status: "failed", counts: ran.counts } : ran;
+    // A checks stage that never ran (deferred) evaluated no incident either.
+    const stagesOk = events.status !== "failed" && checks.status === "processed";
     // Before notify: a hanging mail server can never hide that events and checks ran.
     await heartbeat(stagesOk ? "processed" : "partial", checks.counts?.gapScan ?? false, at(ALARM_DEADLINES_MS.checks + 2_000));
 

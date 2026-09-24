@@ -127,6 +127,26 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0072 on-chain ala
     expect(again.alert_id).not.toBe(worse.alert_id);
   });
 
+  it("a person's resolution is never overwritten by a flap: the refail within 30 minutes opens a new alert", () => {
+    const check = "event-queue";
+    const first = incident("fail", "high", check);
+    // A person resolves it with a note while the condition is ongoing (acknowledged)…
+    sql(`update public.compliance_alerts set status='resolved', resolved_by='admin-wallet', resolved_at=now(),
+      resolution_note='Known backlog, fixed upstream' where id='${first.alert_id}'`);
+    expect(incident("fail", "high", check).action).toBe("acknowledged");
+    // …the condition clears, then fails again within 30 minutes.
+    age(6, check); incident("pass", "high", check); incident("pass", "high", check);
+    expect(incident("pass", "high", check).action).toBe("cleared");
+    const again = incident("fail", "high", check);
+    expect(again.action).toBe("opened");
+    expect(again.alert_id).not.toBe(first.alert_id);
+    expect(row(first.alert_id)).toMatchObject({ status: "resolved", resolved_by: "admin-wallet", resolution_note: "Known backlog, fixed upstream" });
+    // A system-resolved alert still reopens silently.
+    age(6, check); incident("pass", "high", check); incident("pass", "high", check); incident("pass", "high", check);
+    expect(row(again.alert_id)).toMatchObject({ status: "resolved", resolved_by: "system" });
+    expect(incident("fail", "high", check)).toMatchObject({ action: "reopened", alert_id: again.alert_id });
+  });
+
   it("an indexer_events insert creates exactly one alarm job; a duplicate delivery none; the gap scan's payload marks its source", () => {
     const event = (sig: string, ix: string, payload: string) =>
       `select public.enqueue_indexer_events('devnet','[{"signature":"${sig}","slot":1,"ix_name":"${ix}","wallets":["${SIG.slice(0, 44)}"],"payload":${payload}}]'::jsonb)`;

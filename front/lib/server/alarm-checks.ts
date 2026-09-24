@@ -6,28 +6,44 @@
 // minutes of a clear reopens the same alert silently. Clear thresholds sit
 // below the fail thresholds; between them a check reports hold.
 //
+// Order: the cheap checks (queues, degraded, invalid jobs, the retry
+// heartbeat, FX and holds) are read AND recorded first; the gap scan runs
+// after them under its own sub-deadline (the checks deadline minus
+// GAP_SCAN_RESERVE_MS), so a slow RPC can never cost the other incidents,
+// and its own incidents are recorded in the reserve. A scan that was started
+// counts as run (last_gap_scan_at is stamped) even when it is cut short, and
+// reports gap-scan-incomplete, so a slow scan is retried every 5 minutes,
+// never every minute. `expected` counts every report and every check that
+// could not run; the alarm worker treats recorded < expected as a failed
+// stage (a partial run that never moves last_ok_at).
+//
 // The gap scan (at most every 5 minutes) lists the finalized signatures of
 // the four watched addresses in [now − 20 min, now − 5 min]; any missing from
-// indexer_events is fetched (finalized) and enqueued through the indexer's
-// own path (enqueue_indexer_events), which repairs the mirror, and whose
-// 0072 trigger creates the alarm job (source gap-scan). Only public account
-// keys and {"source":"gap-scan"} are written.
+// indexer_events is fetched (finalized) and, when it invokes a watched
+// program, enqueued through the indexer's own path (enqueue_indexer_events),
+// which repairs the mirror, and whose 0072 trigger creates the alarm job
+// (source gap-scan). A listed transaction that invokes none of them (anyone
+// can list the blocklist-authority PDA as a read-only account; the webhook
+// never delivers those) is ignored: not missing, not enqueued. Only public
+// account keys and {"source":"gap-scan"} are written.
 
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
-import { findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
+import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import { detectNetwork, type Network } from "@/lib/network";
 import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, type QueueTable } from "@/lib/server/health";
-import { programDataAddresses } from "@/lib/server/onchain-alarms";
+import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
-import { resolveAccountKeys, type InvocationTx } from "@/lib/server/tx-invocations";
+import { flattenInvocations, resolveAccountKeys, type InvocationTx } from "@/lib/server/tx-invocations";
 
 export const GAP_SCAN_EVERY_MS = 5 * 60_000;
 export const GAP_WINDOW = { fromMs: 20 * 60_000, toMs: 5 * 60_000 } as const;
 export const GAP_SCAN_PAGES = 5;
 export const GAP_REPAIR_MAX = 20;
+/** The part of the checks budget kept for recording the gap scan's own incidents. */
+export const GAP_SCAN_RESERVE_MS = 3_000;
 const LEDGER_QUEUE_FAIL_SECONDS = 30 * 60;
 const LEDGER_QUEUE_CLEAR_SECONDS = 15 * 60;
 const INDEXER_DEGRADED_SECONDS = 10 * 60;
@@ -37,9 +53,14 @@ const HOLD_FAIL_SECONDS = 30 * 60;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export type CheckReport = { check: string; state: IncidentState; severity: Severity };
+export type GapScanResult = { missing: number; repaired: number; ignored: number; complete: boolean };
 export type ChecksResult = {
+  /** The incidents recorded through report_incident. */
   reports: CheckReport[];
-  gapScan: { ran: boolean; missing: number; repaired: number; complete: boolean } | null;
+  /** Reports that should have been recorded plus checks that could not run. */
+  expected: number;
+  /** ran: a scan was started (last_gap_scan_at is stamped); cutShort: it did not finish. */
+  gapScan: ({ ran: true; cutShort: boolean } & GapScanResult) | null;
 };
 
 type Report = Omit<CheckReport, "severity"> & {
@@ -58,33 +79,26 @@ export function thresholdState(value: number | null, fail: number, clear: number
   return "hold";
 }
 
-async function queueReports(sb: SupabaseClient, network: Network, now: number): Promise<Report[]> {
-  const reports: Report[] = [];
-  const lag = async (table: QueueTable) => {
-    const q = await checkQueue(sb, table, network, now, "fail");
-    if (q.reason === "timeout" || q.reason === "unavailable" || q.reason === "not_configured") return undefined;
-    return q.oldestPendingAgeSeconds;
-  };
-  for (const [check, table, category, source, label] of [
-    ["indexer-queue", "indexer_jobs", "indexer", "indexer:queue-lag", "Indexer"],
-    ["event-queue", "onchain_event_jobs", "worker", "worker:event-queue", "Alarm"],
-  ] as const) {
-    const age = await lag(table);
-    if (age === undefined) continue;
-    const state = thresholdState(age, QUEUE_WARN_SECONDS, QUEUE_WARN_SECONDS / 2);
-    const severity: Severity = age !== null && age >= QUEUE_FAIL_SECONDS ? "high" : "medium";
-    reports.push({ check, state, severity, category, source,
-      summary: `${label} queue: the oldest pending job is ${Math.round((age ?? 0) / 60)} minutes old`,
-      evidence: { oldest_pending_seconds: age } });
-  }
-  const ledgerAge = await lag("spv_issuance_jobs");
-  if (ledgerAge !== undefined) {
-    reports.push({ check: "ledger-queue", state: thresholdState(ledgerAge, LEDGER_QUEUE_FAIL_SECONDS, LEDGER_QUEUE_CLEAR_SECONDS),
+/** One queue's lag incident; null when the queue could not be read. */
+async function queueReport(
+  sb: SupabaseClient, network: Network, now: number, table: QueueTable,
+): Promise<Report | null> {
+  const q = await checkQueue(sb, table, network, now, "fail");
+  if (q.reason === "timeout" || q.reason === "unavailable" || q.reason === "not_configured") return null;
+  const age = q.oldestPendingAgeSeconds;
+  if (table === "spv_issuance_jobs") {
+    return { check: "ledger-queue", state: thresholdState(age, LEDGER_QUEUE_FAIL_SECONDS, LEDGER_QUEUE_CLEAR_SECONDS),
       severity: "high", category: "ledger", source: "ledger:queue-lag",
-      summary: `Raise-cap ledger queue: the oldest pending job is ${Math.round((ledgerAge ?? 0) / 60)} minutes old`,
-      evidence: { oldest_pending_seconds: ledgerAge } });
+      summary: `Raise-cap ledger queue: the oldest pending job is ${Math.round((age ?? 0) / 60)} minutes old`,
+      evidence: { oldest_pending_seconds: age } };
   }
-  return reports;
+  const [check, category, source, label] = table === "indexer_jobs"
+    ? ["indexer-queue", "indexer", "indexer:queue-lag", "Indexer"] as const
+    : ["event-queue", "worker", "worker:event-queue", "Alarm"] as const;
+  return { check, state: thresholdState(age, QUEUE_WARN_SECONDS, QUEUE_WARN_SECONDS / 2),
+    severity: age !== null && age >= QUEUE_FAIL_SECONDS ? "high" : "medium", category, source,
+    summary: `${label} queue: the oldest pending job is ${Math.round((age ?? 0) / 60)} minutes old`,
+    evidence: { oldest_pending_seconds: age } };
 }
 
 /** Degraded for ≥ 10 min, approximated by a degraded state whose oldest pending indexer job is that old. */
@@ -130,8 +144,8 @@ async function retryHeartbeat(sb: SupabaseClient, network: Network, now: number,
 type Hold = { subject: string; ref: string; code: string; payment_mint: string | null; created_at: string };
 type FxRow = { payment_mint: string; kind: string; as_of: string; max_age: string };
 
-/** fx-stale:<mint>, fx-missing:<mint> and capacity-holds. */
-async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report[]> {
+/** fx-stale:<mint>, fx-missing:<mint> and capacity-holds; null when they could not be read. */
+async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report[] | null> {
   const [holdsRes, fxRes, liveRes, openSalesRes, openIncidents] = await Promise.all([
     sb.from("sale_capacity_holds").select("subject,ref,code,payment_mint,created_at").eq("network", network).limit(500).abortSignal(dbSignal(signal)),
     sb.from("fx_rates").select("payment_mint,kind,as_of,max_age").eq("network", network).abortSignal(dbSignal(signal)),
@@ -141,7 +155,7 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
     sb.from("alarm_incidents").select("check_key").eq("network", network).is("cleared_at", null).not("last_fail_at", "is", null)
       .like("check_key", "fx-%").abortSignal(dbSignal(signal)),
   ]);
-  if (holdsRes.error || fxRes.error || liveRes.error || openSalesRes.error) return [];
+  if (holdsRes.error || fxRes.error || liveRes.error || openSalesRes.error) return null;
   const holds = (holdsRes.data ?? []) as Hold[];
   const rates = new Map(((fxRes.data ?? []) as FxRow[]).map((r) => [r.payment_mint, r]));
   const inUse = new Set<string>();
@@ -202,8 +216,34 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
   return reports;
 }
 
-/** Gap scan of the four watched addresses; repairs up to GAP_REPAIR_MAX missing transactions. */
-export async function gapScan(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal) {
+/**
+ * Whether a finalized transaction invokes a watched program (top-level or
+ * inner): asset_registry, transfer_hook, or a loader instruction on one of
+ * our programs (upgradeable loader on its ProgramData, loader-v4 on the
+ * program). Only those are delivered by the webhook and matter to the alarms.
+ * An undecodable transaction counts as watched (conservative).
+ */
+export function invokesWatchedProgram(tx: InvocationTx, pd: ProgramDataAddresses): boolean {
+  let invocations;
+  try {
+    invocations = flattenInvocations(tx);
+  } catch {
+    return true;
+  }
+  const programData = new Set([pd.assetRegistry, pd.transferHook]);
+  const programs = new Set<string>([ASSET_REGISTRY_PROGRAM_ADDRESS, TRANSFER_HOOK_PROGRAM_ADDRESS]);
+  return invocations.some((inv) => programs.has(inv.programId)
+    || (inv.programId === BPF_LOADER_UPGRADEABLE && programData.has(inv.accounts[0]))
+    || (inv.programId === LOADER_V4 && programs.has(inv.accounts[0])));
+}
+
+/**
+ * Gap scan of the four watched addresses; repairs up to GAP_REPAIR_MAX missing
+ * transactions. `missing` counts the missing transactions that invoke a
+ * watched program, plus those not fetched this run (unknown: counted);
+ * `ignored` the ones that invoke none (never enqueued).
+ */
+export async function gapScan(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<GapScanResult> {
   const pd = await programDataAddresses();
   const [blocklistAuthority] = await findBlocklistAuthorityPda();
   const addresses = [ASSET_REGISTRY_PROGRAM_ADDRESS, blocklistAuthority, pd.assetRegistry, pd.transferHook];
@@ -224,12 +264,26 @@ export async function gapScan(sb: SupabaseClient, network: Network, now: number,
     if (error) throw new Error("Indexer events unavailable");
     for (const row of (data ?? []) as { signature: string }[]) known.add(row.signature);
   }
-  const missing = signatures.filter((s) => !known.has(s));
+  const candidates = signatures.filter((s) => !known.has(s));
+  let missing = Math.max(0, candidates.length - GAP_REPAIR_MAX);
   let repaired = 0;
-  for (const sig of missing.slice(0, GAP_REPAIR_MAX)) {
-    if (signal.aborted) break;
+  let ignored = 0;
+  for (const [i, sig] of candidates.slice(0, GAP_REPAIR_MAX).entries()) {
+    if (signal.aborted) {
+      // Not verified this run: counted as missing.
+      missing += Math.min(GAP_REPAIR_MAX, candidates.length) - i;
+      break;
+    }
     const tx = (await finalizedTransaction(sig, signal)) as (InvocationTx & { slot?: number | bigint }) | null;
-    if (!tx) continue;
+    if (!tx) {
+      missing++;
+      continue;
+    }
+    if (!invokesWatchedProgram(tx, pd)) {
+      ignored++;
+      continue;
+    }
+    missing++;
     const wallets = [...new Set(resolveAccountKeys(tx))].filter((k) => BASE58.test(k)).slice(0, 500);
     const blockTime = tx.blockTime ?? seen.get(sig) ?? null;
     const { error } = await sb.rpc("enqueue_indexer_events", {
@@ -242,7 +296,7 @@ export async function gapScan(sb: SupabaseClient, network: Network, now: number,
     }).abortSignal(dbSignal(signal));
     if (!error) repaired++;
   }
-  return { missing: missing.length, repaired, complete };
+  return { missing, repaired, ignored, complete };
 }
 
 /** Whether a gap scan is due (last one ≥ 5 min ago, from the alarms heartbeat). */
@@ -254,54 +308,92 @@ async function gapScanDue(sb: SupabaseClient, network: Network, now: number, sig
   return !at || now - Date.parse(at) >= GAP_SCAN_EVERY_MS;
 }
 
-/** Every check, then report_incident for each. Throws only when nothing could be read. */
+/**
+ * The cheap checks, recorded at once; then the gap scan (when due) under its
+ * own sub-deadline, and its incidents. Never throws: `expected` against
+ * `reports.length` tells the worker whether the stage was complete.
+ */
 export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, signal: AbortSignal): Promise<ChecksResult> {
   const network = detectNetwork();
   const now = Date.now();
-  const reports: Report[] = [];
+  const done: CheckReport[] = [];
+  let expected = 0;
+  const record = async (reports: readonly Report[]) => {
+    expected += reports.length;
+    for (const r of reports) {
+      if (signal.aborted) return;
+      try {
+        await reportIncident(sb, {
+          network, check: r.check, state: r.state, category: r.category, source: r.source, severity: r.severity,
+          summary: r.summary, evidence: r.evidence, notify: true,
+        }, signal);
+        done.push({ check: r.check, state: r.state, severity: r.severity });
+      } catch {
+        console.error(`[alarms] incident ${r.check} not recorded`);
+      }
+    }
+  };
+
+  // 1. The cheap checks. One that cannot run (error, timeout, deadline) is a miss.
+  const cheap: Report[] = [];
   const collect = async (work: () => Promise<Report | Report[] | null>) => {
-    if (signal.aborted || Date.now() >= deadlineMs) return;
+    if (signal.aborted || Date.now() >= deadlineMs) {
+      expected++;
+      return;
+    }
     try {
       const r = await work();
-      if (Array.isArray(r)) reports.push(...r);
-      else if (r) reports.push(r);
+      if (r === null) expected++;
+      else if (Array.isArray(r)) cheap.push(...r);
+      else cheap.push(r);
     } catch {
+      expected++;
       console.error("[alarms] a check could not run");
     }
   };
-  await collect(() => queueReports(sb, network, now));
+  for (const table of ["indexer_jobs", "onchain_event_jobs", "spv_issuance_jobs"] as const) {
+    await collect(() => queueReport(sb, network, now, table));
+  }
   await collect(() => indexerDegraded(sb, network, now, signal));
   await collect(() => eventInvalid(sb, network, now, signal));
   await collect(() => retryHeartbeat(sb, network, now, signal));
   await collect(() => fxAndHolds(sb, network, now, signal));
+  await record(cheap);
+
+  // 2. The gap scan, in what is left minus the reserve for its own incidents.
   let gap: ChecksResult["gapScan"] = null;
-  if (!signal.aborted && Date.now() < deadlineMs && (await gapScanDue(sb, network, now, signal))) {
+  const gapDeadline = deadlineMs - GAP_SCAN_RESERVE_MS;
+  let due = false;
+  if (!signal.aborted && Date.now() < gapDeadline) {
     try {
-      const result = await gapScan(sb, network, now, signal);
-      gap = { ran: true, ...result };
-      reports.push({ check: "indexer-gap", state: result.missing ? "fail" : "pass", severity: "high", category: "indexer",
-        source: "indexer:gap", summary: `${result.missing} finalized program transaction(s) were missing from the index (${result.repaired} re-queued)`,
-        evidence: { missing: result.missing, repaired: result.repaired } });
-      reports.push({ check: "gap-scan-incomplete", state: result.complete ? "pass" : "fail", severity: "medium", category: "indexer",
-        source: "indexer:gap-scan-incomplete", summary: "The gap scan ran out of pages before the start of its window",
-        evidence: { window_minutes: [GAP_WINDOW.fromMs / 60_000, GAP_WINDOW.toMs / 60_000] } });
+      due = await gapScanDue(sb, network, now, signal);
     } catch {
-      console.error("[alarms] gap scan failed");
+      due = false;
     }
   }
-  const done: CheckReport[] = [];
-  for (const r of reports) {
-    if (signal.aborted) break;
+  if (due && !signal.aborted && Date.now() < gapDeadline) {
+    const gapSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, gapDeadline - Date.now()))]);
+    let result: GapScanResult | null = null;
     try {
-      await reportIncident(sb, {
-        network, check: r.check, state: r.state, category: r.category, source: r.source, severity: r.severity,
-        summary: r.summary, evidence: r.evidence, notify: true,
-      }, signal);
-      done.push({ check: r.check, state: r.state, severity: r.severity });
+      result = await gapScan(sb, network, now, gapSignal);
     } catch {
-      console.error(`[alarms] incident ${r.check} not recorded`);
+      console.error("[alarms] gap scan failed or ran out of time");
     }
+    const cutShort = result === null || gapSignal.aborted;
+    gap = { ran: true, cutShort, ...(result ?? { missing: 0, repaired: 0, ignored: 0, complete: false }) };
+    const reports: Report[] = [];
+    if (result) {
+      reports.push({ check: "indexer-gap", state: result.missing ? "fail" : cutShort ? "hold" : "pass", severity: "high",
+        category: "indexer", source: "indexer:gap",
+        summary: `${result.missing} finalized program transaction(s) were missing from the index (${result.repaired} re-queued)`,
+        evidence: { missing: result.missing, repaired: result.repaired, ignored: result.ignored } });
+    }
+    const incomplete = cutShort || !result?.complete;
+    reports.push({ check: "gap-scan-incomplete", state: incomplete ? "fail" : "pass", severity: "medium", category: "indexer",
+      source: "indexer:gap-scan-incomplete",
+      summary: cutShort ? "The gap scan could not finish within its time budget" : "The gap scan ran out of pages before the start of its window",
+      evidence: { window_minutes: [GAP_WINDOW.fromMs / 60_000, GAP_WINDOW.toMs / 60_000], cut_short: cutShort } });
+    await record(reports);
   }
-  if (reports.length && !done.length) throw new Error("Incidents unavailable");
-  return { reports: done, gapScan: gap };
+  return { reports: done, expected, gapScan: gap };
 }

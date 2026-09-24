@@ -83,6 +83,8 @@ import { transactionInvocations, type AttributedInvocation, type InvocationTx } 
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export const BPF_LOADER_UPGRADEABLE = "BPFLoaderUpgradeab1e11111111111111111111111";
+/** Loader v4: after a Migrate our programs would be owned by it (account 0 = the program). */
+export const LOADER_V4 = "LoaderV411111111111111111111111111111111111";
 /** Issuer capability bit that allows minting (lib/issuer-permissions.ts). */
 const CAP_MINT = 1;
 /** RentReclaimed.kind for a KYC entry (program constants RECLAIM_KYC). */
@@ -119,6 +121,9 @@ type Entry = {
   format: AlarmFormat;
   /** Used when the arguments cannot be decoded: the most severe outcome. */
   fallback: Severity;
+  /** Only `classify` evidence reaches the alert for the minimal (holder or
+   * issuer related) format; the platform format also carries the decoded
+   * arguments (design §4.1, §8.5). */
   classify: (ctx: Ctx) => Classified;
 };
 
@@ -247,17 +252,17 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
     } },
   { name: "clawback_from_holder", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CLAWBACK_FROM_HOLDER_DISCRIMINATOR),
     decode: dec(getClawbackFromHolderInstructionDataDecoder()), accounts: { authority: 0, share_class: 2, custody_vault: 7 }, format: "minimal", fallback: "medium",
-    classify: ({ args, events }) => ({ source: "onchain:clawback", severity: "medium", summary: "KYC clawback from a holder",
-      evidence: { holder: args?.holder, reason: events.HolderClawback?.reason ?? null } }) },
+    classify: ({ events }) => ({ source: "onchain:clawback", severity: "medium", summary: "KYC clawback from a holder",
+      evidence: { reason: events.HolderClawback?.reason ?? null } }) },
   { name: "clawback_blocklisted_holder", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CLAWBACK_BLOCKLISTED_HOLDER_DISCRIMINATOR),
     decode: dec(getClawbackBlocklistedHolderInstructionDataDecoder()), accounts: { authority: 0, share_class: 2, block_entry: 6, custody_vault: 8 }, format: "minimal", fallback: "high",
-    classify: ({ args, events }) => {
+    classify: ({ events }) => {
       const ev = events.BlocklistClawback;
       // One key both blocked and seized: high. Two keys: medium. Unknown: high.
       const sameKey = ev ? ev.admin === ev.blocked_by : true;
       return { source: "onchain:clawback", severity: sameKey ? "high" : "medium",
         summary: sameKey ? "Blocklist clawback (blocked and seized by the same key, or unknown)" : "Blocklist clawback",
-        evidence: { holder: args?.holder, blocked_by: ev?.blocked_by ?? null, admin: ev?.admin ?? null } };
+        evidence: { blocked_by: ev?.blocked_by ?? null, admin: ev?.admin ?? null } };
     } },
   { name: "reclaim_rent", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(RECLAIM_RENT_DISCRIMINATOR),
     decode: null, accounts: { caller: 0, owner: 1, target: 2 }, format: "minimal", fallback: "low",
@@ -285,14 +290,25 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
     classify: ({ account }) => ({ source: "onchain:hook-config", severity: "high", summary: `Transfer hook configuration of mint ${account(2)} changed` }) },
 ];
 
-/** Loader instruction tags that act on a ProgramData account (bincode u32 LE). */
-const LOADER_TAGS: Record<number, { name: string; severity: Severity }> = {
+/** Upgradeable-loader instruction tags that act on a ProgramData account (bincode u32 LE). */
+export const LOADER_TAGS: Readonly<Record<number, { name: string; severity: Severity }>> = {
   3: { name: "Upgrade", severity: "critical" },
   4: { name: "SetAuthority", severity: "critical" },
   5: { name: "Close", severity: "critical" },
   6: { name: "ExtendProgram", severity: "medium" },
   7: { name: "SetAuthorityChecked", severity: "critical" },
+  // Moves the program to loader v4 (account 0 = ProgramData, upgrade authority signs).
+  8: { name: "Migrate", severity: "critical" },
   9: { name: "ExtendProgramChecked", severity: "medium" },
+};
+
+/**
+ * Loader-v4 instruction tags (bincode u32 LE); account 0 is the program. Any
+ * of them on one of our programs changes its code, authority or
+ * executability: all critical. An unknown tag is critical too.
+ */
+export const LOADER_V4_TAGS: Readonly<Record<number, string>> = {
+  0: "Write", 1: "Copy", 2: "SetProgramLength", 3: "Deploy", 4: "Retract", 5: "TransferAuthority", 6: "Finalize",
 };
 
 const startsWith = (data: Uint8Array, d: Uint8Array) => data.length >= d.length && d.every((b, i) => data[i] === b);
@@ -348,8 +364,21 @@ export function alarmsForTransaction(
   const issues: string[] = [];
   const invocations = transactionInvocations(tx, ASSET_REGISTRY_PROGRAM_ADDRESS);
   const ours = new Set([programData.assetRegistry, programData.transferHook]);
+  const programs = new Set<string>([ASSET_REGISTRY_PROGRAM_ADDRESS, TRANSFER_HOOK_PROGRAM_ADDRESS]);
   for (const inv of invocations) {
     const base = { program: inv.programId, ordinal: inv.ordinal, inner: inv.inner };
+    if (inv.programId === LOADER_V4) {
+      if (!programs.has(inv.accounts[0])) continue;
+      const tag = inv.data.length >= 4 ? new DataView(inv.data.buffer, inv.data.byteOffset, inv.data.byteLength).getUint32(0, true) : null;
+      const name = (tag !== null && LOADER_V4_TAGS[tag]) || `instruction ${tag ?? "?"}`;
+      const which = inv.accounts[0] === ASSET_REGISTRY_PROGRAM_ADDRESS ? "asset_registry" : "transfer_hook";
+      alarms.push({
+        dedupKey: `onchain:${sig}:${inv.ordinal}`, source: "onchain:program-upgrade", severity: "critical", format: "platform",
+        summary: `Loader v4 ${name} on the ${which} program`,
+        evidence: { ...base, instruction: `loader-v4:${name}`, target_program: which, accounts: inv.accounts.slice(0, 4), event_state: "complete" },
+      });
+      continue;
+    }
     if (inv.programId === BPF_LOADER_UPGRADEABLE) {
       if (inv.data.length < 4 || !ours.has(inv.accounts[0])) continue;
       const tag = new DataView(inv.data.buffer, inv.data.byteOffset, inv.data.byteLength).getUint32(0, true);
@@ -395,7 +424,8 @@ export function alarmsForTransaction(
       alarms.push({
         dedupKey: `onchain:${sig}:${inv.ordinal}`, source: classified.source, severity: classified.severity, format: entry.format,
         summary: classified.summary.slice(0, 500),
-        evidence: sanitize({ ...base, instruction: entry.name, accounts, ...(args ? { args: Object.fromEntries(
+        // Minimal format: never the raw arguments (a holder's wallet or amount), only the entry's own evidence.
+        evidence: sanitize({ ...base, instruction: entry.name, accounts, ...(args && entry.format === "platform" ? { args: Object.fromEntries(
           Object.entries(args).filter(([k]) => k !== "discriminator")) } : {}), ...classified.evidence,
           event_state: inv.eventState }) as Record<string, unknown>,
       });

@@ -84,10 +84,15 @@ function outbox(rows: DigestRow[]) {
   const sb = {
     from: () => {
       const b: Record<string, unknown> = {};
+      let severities: string[] | null = null;
       b.select = (cols: string) => { selected = cols; return b; };
       for (const m of ["eq", "lte", "order"]) b[m] = () => b;
+      b.in = (_col: string, values: string[]) => { severities = values; return b; };
       b.limit = (n: number) => { limit = n; return b; };
-      b.abortSignal = () => Promise.resolve({ data: rows.slice(0, limit), error: null });
+      // Rows come in next_notify_at order (the array order), filtered by severity.
+      b.abortSignal = () => Promise.resolve({
+        data: rows.filter((r) => !severities || severities.includes(r.severity)).slice(0, limit), error: null,
+      });
       return b;
     },
     rpc: (_fn: string, args: Finish) => {
@@ -99,6 +104,14 @@ function outbox(rows: DigestRow[]) {
 }
 
 describe("notifyPendingAlerts", () => {
+  it("critical and high rows go first, even behind a flood of older medium rows", async () => {
+    const box = outbox([...Array.from({ length: 30 }, () => row({ severity: "medium" })), row({ severity: "critical", id: "c1" })]);
+    await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);
+    const sent = box.finishes[0].p_rows;
+    expect(sent).toHaveLength(DIGEST_LIMIT);
+    expect(sent[0]).toMatchObject({ id: "c1", severity: "critical" });
+  });
+
   it("sends one digest of at most 25 rows, never reading evidence, and marks them sent", async () => {
     const box = outbox(Array.from({ length: 30 }, () => row()));
     const result = await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);

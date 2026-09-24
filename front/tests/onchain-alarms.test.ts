@@ -37,6 +37,8 @@ import {
 import {
   ALARM_INSTRUCTIONS,
   BPF_LOADER_UPGRADEABLE,
+  LOADER_TAGS,
+  LOADER_V4,
   alarmsForTransaction,
   processEventJob,
   programDataAddresses,
@@ -131,6 +133,12 @@ describe("instruction catalogue (design §4.1)", () => {
     expect(one(run([claw], { logs: "none" })).severity).toBe("high");
     const fromHolder = { program: R, accounts: accounts(12), data: bytes(getClawbackFromHolderInstructionDataEncoder(), { holder: B as Address, amount: BigInt(5) }) };
     expect(one(run([fromHolder])).severity).toBe("medium");
+    // Minimal format: never the holder's wallet or the clawed-back amount (design §4.1, §8.5).
+    for (const alarm of [one(run([claw], { events: [[same]] })), one(run([fromHolder]))]) {
+      expect(alarm.evidence).not.toHaveProperty("holder");
+      expect(alarm.evidence).not.toHaveProperty("args");
+      expect(JSON.stringify(alarm.evidence)).not.toMatch(/"(holder|amount)"/);
+    }
   });
 
   it("reclaim_rent alarms (low) only for a KYC entry, or when the kind is unknown", () => {
@@ -162,6 +170,23 @@ describe("instruction catalogue (design §4.1)", () => {
     expect(one(run([loader(6, PD.assetRegistry)])).severity).toBe("medium");
     const [foreign] = await getProgramDerivedAddress({ programAddress: BPF_LOADER_UPGRADEABLE as Address, seeds: [getAddressEncoder().encode(SQUADS as Address)] });
     expect(run([loader(3, foreign)], { inner: true }).alarms).toEqual([]);
+    // Migrate (tag 8) moves the program to loader v4, out of this loader's sight: critical.
+    expect(LOADER_TAGS[8]).toEqual({ name: "Migrate", severity: "critical" });
+    expect(one(run([loader(8, PD.assetRegistry)], { inner: true }))).toMatchObject({ severity: "critical", summary: expect.stringMatching(/Migrate/) });
+  });
+
+  it("any loader-v4 instruction on one of our programs is critical; on another program it is nothing", () => {
+    const v4 = (tag: number, program: string) => {
+      const data = new Uint8Array(8);
+      new DataView(data.buffer).setUint32(0, tag, true);
+      return { program: LOADER_V4, accounts: [program, A, B], data };
+    };
+    for (const tag of [0, 3, 4, 5, 6, 42]) {
+      expect(one(run([v4(tag, R)], { inner: true }))).toMatchObject({ source: "onchain:program-upgrade", severity: "critical",
+        evidence: { target_program: "asset_registry" } });
+    }
+    expect(one(run([v4(5, TRANSFER_HOOK_PROGRAM_ADDRESS)])).summary).toMatch(/TransferAuthority on the transfer_hook/);
+    expect(run([v4(3, SQUADS)]).alarms).toEqual([]);
   });
 
   it("mint_to_treasury, top-level or inner, becomes one ledger job for the transaction (no alarm)", () => {
