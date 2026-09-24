@@ -192,22 +192,27 @@ real runner and devnet can prove stays open until these pass:
 | kyc.authority | compliance Ledger | KYC registry authority (no Admin record) |
 | Squads vault | multisig | both upgrade authorities, protocol treasury, IDL authority (as UA) |
 
-Re-check every figure with `getMinimumBalanceForRentExemption` (rent is
-6,960 lamports per byte plus 128 bytes of overhead):
+Re-check every figure with `getMinimumBalanceForRentExemption` on the
+mainnet RPC. Mainnet rent is **5,080 lamports per byte** (plus 128 bytes of
+overhead) since SIMD-0437-2 (epoch 1033); SIMD-0437-3 to -5 (2,575, 1,322,
+696) are not active yet (feature status 2026-09-24, Agave 4.3.0), so the
+figures may still drop. A local validator keeps the old 6,960 in its genesis
+rent sysvar even with `--clone-feature-set`, so rehearsal balances overstate
+mainnet rent by about 37 %.
 
-| Item | SOL |
+| Item | SOL at 5,080 |
 |---|---|
-| Registry ProgramData (3 MiB) | ≈ 21.90 |
-| Hook ProgramData (768 KiB) | ≈ 5.47 |
-| Registry deploy buffer (transient) | ≈ 17.19 |
-| Hook deploy buffer (transient) | ≈ 2.72 |
-| IDL metadata (both programs) | ≈ 0.36 |
-| IDL update buffer (transient) | ≈ 0.33 |
+| Registry ProgramData (3 MiB) | ≈ 15.98 |
+| Hook ProgramData (768 KiB) | ≈ 4.00 |
+| Registry deploy buffer (transient) | ≈ 12.55 |
+| Hook deploy buffer (transient) | ≈ 1.98 |
+| IDL metadata (both programs) | ≈ 0.26 |
+| IDL update buffer (transient) | ≈ 0.24 |
 | Bootstrap PDAs | < 0.05 |
 
-Deployer peak ≈ 45.5 SOL: **fund 50**. About 27.7 SOL stays locked. With the
-CI-budget sizes instead of D8: peak ≈ 38.3, locked ≈ 20.8. `chain:bootstrap`
-refuses a cycle the deployer cannot pay for (P0).
+The sum of every row is ≈ 35.1 SOL, an upper bound for the deployer's peak:
+**fund 40**. About 20.3 SOL stays locked. `chain:bootstrap` refuses a cycle
+the deployer cannot pay for (P0).
 
 ## 2. Deploy (hook first)
 
@@ -333,12 +338,28 @@ exists for an emergency only.
 
 ## 8. After handover
 
-- **Verify PDA through Squads** (EXTERNAL #5): `solana-verify export-pda-tx …
-  --uploader <vault>` for each program, then
+- **Verify PDA through Squads** (EXTERNAL #5): fund the vault with about
+  0.01 SOL (it pays each PDA's rent through the verify program), then for
+  each program (`solana-verify` 0.5.1, rehearsed 2026-09-24):
   ```sh
+  solana-verify export-pda-tx https://github.com/Mancipatio/Mancipatio \
+    --program-id <program id> --uploader <vault> --commit-hash <tag commit> \
+    --library-name <asset_registry|transfer_hook> --mount-path program \
+    --encoding base58 --url "$MAINNET_RPC" > "$E/08-export-pda-<program>.txt"
+  # the base58 transaction is the last line of that file
   CHAIN_OUTPUT=$E/08-verify-pda.json CHAIN_SQUADS_OP=wrap-external \
     CHAIN_SQUADS_INPUT=<file with {"transactionBase58": "…"}> npm run chain:squads-export
   ```
+  `export-pda-tx` answered at once in the rehearsal (no Docker build, no
+  clone left behind) and adds a
+  `SetComputeUnitPrice(100000)` unless `--compute-unit-price 0`; the export
+  drops it (a no-op inside a vault transaction) and lists it in the
+  preconditions. The real verify instruction (`initialize`) names only the
+  PDA, the vault (signer, pays the rent), the program and System: no
+  ProgramData, so the program itself never checks who the upgrade authority
+  is. Whether OtterSec's service honours a PDA depends on its off-chain
+  check of the uploader against the current upgrade authority: upload from
+  the vault, after the handover.
   The export refuses any signer but the vault, any program but the verify
   program and System, a verify instruction that the vault does not sign or
   that names neither of our program IDs, and every System instruction except
@@ -385,20 +406,43 @@ source paths are clean (see "Safety rules").
        --new-buffer-authority <vault> --keypair "$K/bufferWriter.json" --url "$MAINNET_RPC"
    done
    ```
-   A failed write is resumed with the same `--buffer` keypair.
-3. If capacity is short: `CHAIN_SQUADS_OP=extend-program`, input
-   `{"program": "asset_registry", "bytes": <n ≥ 10240>}` (SIMD-0431 minimum;
-   EXTERNAL #2). Fund the vault for the rent first.
+   A failed write is resumed with the same `--buffer` keypair. The export
+   reads at finalized: wait until the `set-buffer-authority` is finalized
+   (about 15–30 s), or it refuses with "buffer authority is <bufferWriter>,
+   not the vault".
+3. If capacity is short, extend **directly, not through Squads** (EXTERNAL
+   #2, closed by the rehearsal): a vault transaction runs its instructions
+   as CPIs, and loader-v3 refuses ExtendProgram through CPI ("not supported
+   by inner instructions"); ExtendProgramChecked, the only CPI-able form, is
+   abandoned (feature `ExtendProgCheckedWi11BeDe1eted…`, inactive). The
+   unchecked ExtendProgram needs no authority, so the bufferWriter pays:
+   ```sh
+   solana program extend <program id> <bytes> --keypair "$K/bufferWriter.json" \
+     --url "$MAINNET_RPC" --with-compute-unit-price "$CU_PRICE"
+   ```
+   `<bytes>` is at least 10240 (SIMD-0431, active on mainnet and enforced
+   on-chain) unless it reaches the maximum size. Anyone can extend any
+   upgradeable program this way; it changes no authority and no code.
+   `CHAIN_SQUADS_OP=extend-program` refuses and prints this command.
 4. `CHAIN_SQUADS_OP=upgrade`, input
    `{"buffers": {"transferHook": "<buffer>", "assetRegistry": "<buffer>"}}`,
    `CHAIN_RELEASE_DIR` = the new Release. One vault transaction, hook before
    registry; split exports say "execute strictly in order" (EXTERNAL #1). Import
    into the Squads Transaction Builder, approve, execute.
-5. `chain:inventory` against the new Release.
+5. `chain:inventory` against the new Release, once the execution is
+   finalized (every `chain:*` read is at finalized; a check right after the
+   execute still sees the old state).
 6. IDL: `CHAIN_IDL_MODE=prepare-export` with the bufferWriter keypair (`send`
    then refuses: the UA is the vault), then `CHAIN_SQUADS_OP=idl-update` with
-   `CHAIN_SQUADS_INPUT=<CHAIN_OUTPUT>.idl-export.json`. The setData buffer
-   authority rule is EXTERNAL #3.
+   `CHAIN_SQUADS_INPUT=<CHAIN_OUTPUT>.idl-export.json`. EXTERNAL #3 (closed):
+   Program Metadata's `setData` copies a buffer whatever its authority (the
+   rehearsal executed it from a buffer the bufferWriter still held), so the
+   hand-over of the buffer to the vault is what freezes the reviewed bytes
+   between approval and execution; `idl-update` refuses a buffer the vault
+   does not hold, and its `close` needs the vault as buffer authority.
+   `setData` also resizes the metadata account to the new length, so a
+   shrinking update is already trimmed; the planned `trim` only returns the
+   excess rent.
 7. Refresh the verify PDA (step 8).
 8. Maintenance off.
 
@@ -464,27 +508,68 @@ in-flight signature to a resolution and writes the evidence.
 
 ## 12. 6.1 rehearsal
 
-- **Features**: list the features inactive on mainnet
-  (`solana feature status -um`) and start `solana-test-validator --reset` with
-  `--deactivate-feature <id>` for each (EXTERNAL #6), using the validator
-  version that matches mainnet.
-- **Programs**: `--upgradeable-program` for both Release `.so` files, and
-  `--clone-upgradeable-program ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S
-  SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf --url mainnet-beta`.
+- **Validator and features** (EXTERNAL #6): use the Agave release most of
+  mainnet's stake runs (`solana feature status -um` lists software versions;
+  4.3.0 on 2026-09-24). An older CLI does not know newer feature IDs, so read
+  the feature list with that release too. Unpack its tarball outside the
+  repository and run its binaries by path; the installed toolchain stays
+  untouched. `solana-test-validator --clone-feature-set --url mainnet-beta`
+  copies mainnet's activations into genesis (0 differences in the
+  rehearsal), but not the rent sysvar (see §1).
+- **Programs**: `--upgradeable-program <id> <Release .so> <throwaway
+  deployer pubkey>` for both programs (the program keypairs are never
+  needed), `--clone-upgradeable-program` for
+  `SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf`,
+  `ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S` and
+  `verifycLy8mB96wd9wqq3WDXQwM4oU6r42Th37Db9fC`, and `--clone` of the
+  Squads program config (`BSTq9w3kZwNwpBXJEvTZz2G9ZTNyKBvoSeXMvwb4cNZr`) and
+  its treasury. Genesis programs have exactly the `.so` size: the deployer
+  extends them to `programDataMaxLen` (`solana program extend`) before the
+  first inventory. Pass `--mint <throwaway pubkey>`, `--bind-address
+  127.0.0.1` and a scratch `solana -C <config>` everywhere, so no operator
+  key or config is read.
 - **Flow** (`CHAIN_NETWORK=localnet`, `CHAIN_GENESIS_HASH=$(solana genesis-hash)`):
   1. Create the multisig with the Squads CLI; dump its account and replace
      `front/tests/fixtures/squads-multisig-v4.json` (EXTERNAL #4).
   2. `chain:idl` send.
   3. `chain:bootstrap` cycles with `CHAIN_REHEARSAL_SIGNERS` for X1/X2/X3/S6.
   4. Inventory `pre-handover`, then S7.
-  5. `chain:squads-export` `upgrade`, `idl-update`, `extend-program` and
-     `wrap-external`, each executed through Squads (EXTERNAL #1, #2, #3, #5).
+  5. `chain:squads-export` `upgrade`, `idl-update` and `wrap-external`, each
+     executed through Squads (EXTERNAL #1, #3, #5); the direct extend of §9.3
+     (EXTERNAL #2).
   6. `CHAIN_RECOVER` drill: kill the process in the middle of an IDL send;
      also Ctrl-C once and `kill -TERM <lock pid>` once, and check that the
      evidence file exists after each.
   7. Rollback drill (section 10) from the previous tag's checkout.
   8. Operator-front drill on localnet with a Ledger.
 - Resolve every EXTERNAL item below.
+
+### Rehearsal record (2026-09-24, localnet only)
+
+Agave 4.3.0 validator with mainnet's feature set, Release v0.0.0-rc.1 at the
+real program IDs, cloned Squads v4 / Program Metadata / verify programs, a
+real Squads multisig (threshold 2, members 2 × all + 1 × vote, vault index
+0), throwaway keys. Evidence: `docs/mainnet-readiness/rehearsal-6.1/` (not
+tracked).
+
+- §3 IDL init by the deployer, §4 cycle 1 (S1–S5), §5 X3/X2/X1/S6 through
+  `CHAIN_REHEARSAL_SIGNERS`, §6 pre-handover inventory 0 blockers, §7 S7,
+  handed-over inventory 0 findings.
+- §9 upgrade of both programs in one vault transaction (hook first) to
+  another verifiable build, and the §10 rollback to rc.1 the same way;
+  `idl-update` both ways (a growing update, then a shrinking one with
+  `trim`); after the rollback, `chain:inventory` against rc.1 has 0
+  findings.
+- §8 verify PDAs for both programs uploaded by the vault through Squads.
+- Drills: SIGTERM to the lock pid mid-send (evidence `aborted`, in-flight
+  write drained, lock released), SIGKILL (no evidence, lock kept, a second
+  send refused, `CHAIN_RECOVER` finalized the in-flight write and removed
+  the lock), resume of the journalled IDL buffer (only missing chunks
+  written). An external interrupt during cycle 1 left S5 drained and
+  finalized; the next dry run skipped every landed step.
+- Not rehearsed: the Squads web app (Transaction Builder import), a Ledger
+  on the operator front, a rollback from the previous tag's checkout (the
+  rollback used the rc.1 Release directory with the current CLI).
 
 ## 13. App priority fee and payment tokens (Talas 4.2)
 
@@ -1102,21 +1187,41 @@ before saving it.
 
 ## EXTERNAL checks (open until the rehearsal proves them)
 
-1. Squads Transaction Builder import format, vault seeds and the inner size
-   budget (800 B assumed).
-2. Whether mainnet rejects the unchecked ExtendProgram and whether SIMD-0431 is
-   active (the tag-9 layout itself is confirmed).
-3. The PM `setData` buffer-authority rule.
-4. The Squads v4 `Multisig` layout (the S7 gate depends on the decode).
-5. The OtterSec verify program ID, the verify PDA seeds
-   (`["otter_verify", uploader, program]`), the `export-pda-tx` flags and
-   output (instructions: verify signed by the vault, with only the vault,
-   program, PDA, ProgramData and System as accounts, plus at most a System
-   transfer into the PDA), and whether a PDA uploaded by the hot UA before
-   handover is honoured after it. If the real output differs, wrap-external
-   refuses it; change the inspector, never loosen it to "any writable
-   account".
-6. The mainnet feature list and validator version at rehearsal time.
+Status after the 6.1 rehearsal (2026-09-24, localnet; see §12):
+
+1. **Partly open.** Proven: the vault seeds (`["multisig", multisig,
+   "vault", 0]`, equal to `@sqds/multisig`), and that every exported
+   transaction decompiles into a vault transaction the real Squads v4
+   program creates, approves (2 of 3) and executes; the inner messages were
+   283–417 B and the `vault_transaction_create` transaction about 260 B
+   larger (417 B → 676 B), so the 800 B budget leaves room. Open: the Squads
+   web app's Transaction Builder import of the exported base58/base64
+   transaction (not reachable from a local validator).
+2. **Closed.** SIMD-0431 is active on mainnet and enforced on-chain (an
+   extend of 100 B fails). ExtendProgramChecked is abandoned
+   (`ExtendProgCheckedWi11BeDe1eted…`, inactive), the unchecked
+   ExtendProgram is accepted top-level and needs no authority, and neither
+   form works through CPI, so never through Squads (§9.3).
+3. **Closed.** `setData` accepts a buffer whatever its authority; the
+   hand-over to the vault is the content freeze (§9.6).
+4. **Closed.** A real multisig decodes with the repository decoder exactly
+   as with `@sqds/multisig` (members sorted by key, 32 unused bytes at the
+   end); it is the test fixture now.
+5. **Mostly closed.** The verify program ID and the PDA seeds match
+   `export-pda-tx` 0.5.1; its output is a legacy transaction with a
+   `SetComputeUnitPrice` (dropped by the export) and one `initialize` over
+   [PDA, vault (signer, payer), program, System]; wrapped and executed
+   through Squads it created both PDAs. Open: whether OtterSec's service
+   honours a PDA uploaded before the handover (off-chain; upload from the
+   vault after it).
+6. **Closed for 2026-09-24.** Mainnet runs Agave 4.3.0 on 71.5 % of stake;
+   250 of the 287 features 4.3.0 knows are active, and a 4.3.0 validator with
+   `--clone-feature-set` had the same activations. Watch before the deploy:
+   SIMD-0500 (no deployment of SBPF v0–v2 programs) is inactive, and both
+   Release programs are SBPF v0 (ELF `e_flags` 0); once it activates, this
+   Release can neither be deployed nor used for an upgrade, and the build
+   must move to SBPF v3. SIMD-0437-3..5 (rent) are inactive too. Repeat the
+   feature check right before the mainnet deploy.
 7. Phantom and Solflare keep an app-set SetComputeUnitPrice (G2), and the
    mainnet RPC's answer to `getPriorityFeeEstimate` (G8: `source`, 24 h of
    samples; retune the floor if it never leaves it).
