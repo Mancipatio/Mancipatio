@@ -12,6 +12,7 @@ import { JurisdictionSelector } from "@/components/jurisdiction-selector";
 import type { KycRegistry } from "@/lib/generated/asset_registry";
 import { countryName } from "@/lib/countries";
 import { invalidateKycAuthorityContext } from "@/lib/kyc-authority";
+import { invalidateRoles } from "@/lib/role-store";
 import {
   bitmapCodeStrings,
   jurisdictionDiff,
@@ -214,6 +215,7 @@ export function KycRegistryPanel({
       if (current.kind === "propose") setProposeInput("");
       if (current.kind === "jurisdictions") setEditing(false);
       invalidateKycAuthorityContext(client.runtime.rpc);
+      invalidateRoles();
       await loadPending();
       await onChanged();
     } catch (err) {
@@ -322,8 +324,7 @@ export function KycRegistryPanel({
           </p>
         )}
         <p className="mt-2 text-[11px] text-slate-500">
-          This page requires an Admin role. A new authority without one can
-          accept from the CLI, or be added as an Admin for the handover.
+          The new authority accepts at /account/roles.
         </p>
       </section>
 

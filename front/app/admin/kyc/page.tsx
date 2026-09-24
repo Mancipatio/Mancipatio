@@ -6,7 +6,7 @@ import { WalletRequired } from "@/components/wallet-required";
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
-import { type Address } from "@solana/kit";
+import { isAddress, type Address } from "@solana/kit";
 import {
   useSendTransaction,
   useSolanaClient,
@@ -20,7 +20,8 @@ import { ClawbackPanel } from "./clawback-panel";
 import { KycRegistryPanel } from "@/components/kyc-registry-panel";
 import { JurisdictionSelector } from "@/components/jurisdiction-selector";
 import { toggleJurisdiction } from "@/lib/kyc-registry-rotation";
-import { useRole } from "@/lib/auth";
+import { invalidateRoles, useRole } from "@/lib/auth";
+import { explainRoleRefusal } from "@/lib/role-resolution";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { countryName } from "@/lib/countries";
@@ -53,8 +54,8 @@ import {
   type ClientKycStatus,
   type ClientRow,
 } from "@/lib/clients";
-import { listBlockEntries } from "@/lib/blocklist";
-import { listAlerts } from "@/lib/compliance";
+import { fetchBlockEntries, fetchBlockEntry } from "@/lib/blocklist";
+import { listWalletsWithOpenAlerts } from "@/lib/compliance";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { detectNetwork } from "@/lib/network";
@@ -114,13 +115,22 @@ export default function KycPage() {
           or revoke the on-chain passport.
         </p>
       </div>
-      <RequireRole role="superAdmin" fallback={<></>}>
+      {/* Creation needs an Admin co-signer (create_kyc_registry: admin_authority
+          + admin_record, any active Admin — OD5); the KYC provider sees the
+          live registry here too (Talas 3.1 K5). */}
+      <RequireRole anyOf={["admin", "kycProvider"]} fallback={<></>}>
         <KycRegistryBootstrap registryVersion={registryVersion} onChanged={registryChanged} />
       </RequireRole>
-      <RequireRole role="admin">
+      {/* Admins and the KYC provider (registry authority, possibly without an
+          Admin record — Talas 3.1 K6). The routes behind these cards accept
+          both; issuing stays gated on the live registry authority. */}
+      <RequireRole anyOf={["admin", "kycProvider"]}>
         <KycRegistryAuthorityCard registryVersion={registryVersion} onChanged={registryChanged} />
         <PassportRequests registryVersion={registryVersion} />
         <KycOps />
+      </RequireRole>
+      {/* Clawback needs an Admin (clawback_blocklisted_holder signer). */}
+      <RequireRole role="admin" fallback={<></>}>
         <ClawbackPanel />
       </RequireRole>
     </section>
@@ -138,8 +148,18 @@ type RegistryState =
       authority: Address;
       platformAdmin: Address | null;
     }
+  /** The connected wallet may create it on the single-wallet fast path (OD6). */
   | { status: "missing"; pda: Address }
+  /**
+   * The pinned registry is missing and is NOT this wallet's seed slot: it can
+   * only be created by its own KYC authority, co-signed by an Admin, on the
+   * envelope page.
+   */
+  | { status: "envelope"; pinned: Address }
   | { status: "error"; message: string };
+
+/** The dual-signed creation page (Talas 3.1 K5). */
+const REGISTRY_ENVELOPE_PATH = "/account/roles/kyc-registry";
 
 type RegistryChangeProps = {
   /** Page-level version; a change re-reads the registry context. */
@@ -153,7 +173,7 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
-  const { isSuperAdmin } = useRole();
+  const { isAdmin } = useRole();
   const wallet = conn.wallet?.account.address;
 
   const [registryState, setRegistryState] = useState<RegistryState>({ status: "loading" });
@@ -187,16 +207,15 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
           platformAdmin: ctx.platformAdmin,
         });
       } else if (ctx.pinnedMissing && ctx.pinned) {
-        // Fail closed: never offer Create for some OTHER address. Only the
-        // wallet whose seed slot IS the pinned address may create it.
+        // Fail closed: never offer Create for some OTHER address. The
+        // single-wallet fast path is kept only when the pin IS this wallet's
+        // seed slot (OD6); any other pinned registry is created by its own
+        // KYC authority with an Admin co-signer on the envelope page.
         const pda = await getRegistryPda(wallet as Address);
         if (pda === ctx.pinned) {
           setRegistryState({ status: "missing", pda });
         } else {
-          setRegistryState({
-            status: "error",
-            message: `Pinned registry ${ctx.pinned} not found on ${detectNetwork()}. Check NEXT_PUBLIC_KYC_REGISTRY, or connect the wallet that creates it.`,
-          });
+          setRegistryState({ status: "envelope", pinned: ctx.pinned });
         }
       } else if (ctx.ambiguous) {
         setRegistryState({
@@ -221,7 +240,9 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
   }, [refreshRegistry, registryVersion]);
 
   async function createRegistry() {
-    if (!wallet || !conn.wallet || !isSuperAdmin) return;
+    // The one wallet signs as the KYC authority AND the Admin co-signer, so
+    // it needs an Admin record (the Super Admin has one).
+    if (!wallet || !conn.wallet || !isAdmin) return;
     const pendingId = toast.showPending("Creating KYC registry on-chain…");
     try {
       const signer = walletSigner(conn.wallet);
@@ -231,10 +252,10 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
       const blocked = jurisdictionBitmap(
         Array.from(blockedCodes).map((c) => parseInt(c, 10)),
       );
-      // adminSigner defaults to the same wallet: on the platform registry the
-      // super admin is both the provider authority and the admin co-signer
-      // the program requires (create_kyc_registry: admin_authority +
-      // admin_record). A separate provider key would pass its own signer here.
+      // Fast path (OD6/OD7): adminSigner defaults to the same wallet, an Admin
+      // that is both the provider authority and the co-signer the program
+      // requires. It then proposes the registry authority to the compliance
+      // key. Separate keys use the envelope page (REGISTRY_ENVELOPE_PATH).
       const ix = await buildCreateRegistry({
         authoritySigner: signer,
         approvedJurisdictions: approved,
@@ -244,6 +265,7 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "KYC registry created" });
       invalidateKycAuthorityContext(client.runtime.rpc);
+      invalidateRoles();
       await refreshRegistry(true);
       onChanged();
     } catch (err) {
@@ -288,7 +310,7 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
       <div className="flex items-start justify-between gap-4">
         <div>
           <p className="text-[10px] font-semibold uppercase tracking-[0.14em] text-brand-600">
-            On-chain · Super Admin
+            On-chain · Admin
           </p>
           <h2 className="mt-0.5 text-base font-semibold text-brand-900">
             Platform KYC Registry
@@ -298,10 +320,16 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
             blocked jurisdiction bitmaps used by the transfer hook.
           </p>
           <p className="mt-1 text-[11px] text-brand-800/70">
-            The connected wallet signs twice: as the registry&apos;s KYC-provider
-            authority and as the platform admin co-signer the program now
-            requires (its on-chain <code className="font-mono">Admin</code>{" "}
-            record is derived from that key — grant one on /admin/admins first).
+            Recommended: an Admin creates the registry here, signing as both
+            the registry&apos;s KYC authority and the Admin co-signer the program
+            requires, then proposes the registry authority to the compliance
+            key below; that key accepts at /account/roles. When the KYC
+            authority is a separate key from the start, both keys sign one
+            transaction on{" "}
+            <Link href={REGISTRY_ENVELOPE_PATH} className="underline">
+              {REGISTRY_ENVELOPE_PATH}
+            </Link>
+            .
           </p>
         </div>
       </div>
@@ -313,6 +341,20 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
         )}
         {registryState.status === "error" && (
           <p className="text-sm text-red-600">{registryState.message}</p>
+        )}
+        {registryState.status === "envelope" && (
+          <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+            <p className="text-sm font-semibold">Pinned registry not created yet</p>
+            <p className="mt-1 break-all">
+              The pinned registry <span className="font-mono">{registryState.pinned}</span> belongs to
+              another KYC authority, so the connected wallet cannot create it alone. Its KYC authority
+              and an Admin co-signer create it together on{" "}
+              <Link href={REGISTRY_ENVELOPE_PATH} className="font-semibold underline">
+                {REGISTRY_ENVELOPE_PATH}
+              </Link>
+              . If the pin is wrong, fix NEXT_PUBLIC_KYC_REGISTRY instead.
+            </p>
+          </div>
         )}
         {registryState.status === "exists" && (
           <div className="flex items-center gap-3 rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-3">
@@ -336,10 +378,10 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
                     registry was handed to a separate key, or the platform
                     admin was rotated). Passports are issued and revoked only
                     by the registry authority above. That key reaches this
-                    queue and the client detail pages only with an Admin
-                    record — add it via add_admin on /admin/roles if it has
-                    none. The registry authority itself moves only through the
-                    propose/accept rotation below.
+                    queue and the client detail pages as the KYC provider,
+                    without an Admin record; Admins are managed on
+                    /admin/admins. The registry authority itself moves only
+                    through the propose/accept rotation below.
                   </p>
                 )}
             </div>
@@ -358,8 +400,20 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
         )}
       </div>
 
-      {/* Create form — only when missing */}
-      {registryState.status === "missing" && (
+      {/* Only an Admin can use the single-wallet fast path. */}
+      {registryState.status === "missing" && !isAdmin && (
+        <p className="mt-4 text-xs text-brand-800">
+          Creating the registry needs an Admin co-signer. Connect an Admin
+          wallet, or create it with a separate KYC authority on{" "}
+          <Link href={REGISTRY_ENVELOPE_PATH} className="font-semibold underline">
+            {REGISTRY_ENVELOPE_PATH}
+          </Link>
+          .
+        </p>
+      )}
+
+      {/* Create form — only when missing, for an Admin */}
+      {registryState.status === "missing" && isAdmin && (
         <div className="mt-5 space-y-4 border-t border-brand-200 pt-5">
           <p className="text-xs font-semibold uppercase tracking-wider text-brand-700">
             Configure jurisdictions
@@ -579,6 +633,19 @@ function writeUnsyncedIssues(map: UnsyncedIssueMap): void {
   unsyncedListeners.forEach((l) => l());
 }
 
+/** Wallets whose status was read (`checked`) and those that were hits. */
+type GateCheck = { checked: Set<string>; hits: Set<string> };
+
+/** true / false for a checked wallet; null (unknown → blocks) otherwise. */
+function gateValue(check: GateCheck | null, wallet: string): boolean | null {
+  if (!check || !check.checked.has(wallet)) return null;
+  return check.hits.has(wallet);
+}
+
+function errorText(err: unknown): string {
+  return explainRoleRefusal(err instanceof Error ? err.message : String(err));
+}
+
 function shortWallet(w: string): string {
   return `${w.slice(0, 6)}…${w.slice(-4)}`;
 }
@@ -605,8 +672,13 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
   const [registryAddress, setRegistryAddress] = useState<Address | null>(null);
   const [platformAdmin, setPlatformAdmin] = useState<Address | null>(null);
   const { isKycProvider } = kycGates(wallet, registryAuthority, platformAdmin);
-  const [blockedWallets, setBlockedWallets] = useState<Set<string> | null>(null);
-  const [alertWallets, setAlertWallets] = useState<Set<string> | null>(null);
+  // Issue-gate checks over the queue's wallets. `checked` = wallets whose
+  // status was read; a wallet outside it (or a failed read → null) is
+  // UNKNOWN and blocks issuing (fail closed, Talas 3.1 OD3).
+  const [blockCheck, setBlockCheck] = useState<GateCheck | null>(null);
+  const [alertCheck, setAlertCheck] = useState<GateCheck | null>(null);
+  // A list that did not load says so instead of looking empty.
+  const [loadErrors, setLoadErrors] = useState<string[]>([]);
   const [tab, setTab] = useState<ReqTab>("new");
   const [confirm, setConfirm] = useState<
     { action: "issue" | "reject"; req: PassportRequest } | null
@@ -662,10 +734,24 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
     // The queue is no longer anon-readable — the signed admin read needs the
     // connected wallet (one signature per refresh, same as /admin/fees).
     if (!conn.wallet) return;
-    const [requests, clients] = await Promise.all([
+    // Each list reports its own failure (a failed dossier read must not look
+    // like "no dossier", nor a failed queue read like an empty queue).
+    const [requestsResult, clientsResult] = await Promise.allSettled([
       listPassportRequests(conn.wallet),
       listClients(conn.wallet),
     ]);
+    const errors: string[] = [];
+    const requests = requestsResult.status === "fulfilled" ? requestsResult.value : [];
+    if (requestsResult.status === "rejected") {
+      errors.push(`Passport requests could not be loaded: ${errorText(requestsResult.reason)}`);
+    }
+    const clients = clientsResult.status === "fulfilled" ? clientsResult.value : [];
+    if (clientsResult.status === "rejected") {
+      errors.push(
+        `Client dossiers could not be loaded — issuing is blocked until they load: ${errorText(clientsResult.reason)}`,
+      );
+    }
+    setLoadErrors(errors);
     setRows(requests);
     // wallet → client row. FAIL-CLOSED when a wallet carries several dossiers
     // (historic duplicates: 0041's unique index is skipped when they already
@@ -683,30 +769,29 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
     }
     setClientByWallet(map);
 
-    // Best-effort issue-gate context. Each source degrades independently: a
-    // failed load leaves `null` (= "unknown", surfaced in the blocker text)
-    // rather than blocking triage outright — the chain still enforces the
-    // registry bitmap and blocklist on every transfer.
+    // Issue-gate context. The blocklist is sender-only on-chain: the hook
+    // derives ["blocked", source_owner] and never checks the receiver, so
+    // THIS gate is what keeps a blocklisted wallet from receiving a passport.
+    // Each source degrades independently to "unknown", and unknown blocks
+    // issuing (fail closed) while triage keeps working. Both are re-read for
+    // the single wallet at send time (issueFromRequest).
     await loadRegistryContext();
+    const queueWallets = [...new Set(requests.map((r) => r.wallet))].filter((w) =>
+      isAddress(w),
+    ) as Address[];
     try {
-      const entries = await listBlockEntries(client.runtime.rpc);
-      setBlockedWallets(new Set(entries.map((e) => e.entry.wallet.toString())));
+      const entries = await fetchBlockEntries(client.runtime.rpc, queueWallets);
+      setBlockCheck({ checked: new Set(queueWallets), hits: new Set(entries.keys()) });
     } catch (err) {
       console.warn("[admin/kyc] blocklist load failed:", err);
-      setBlockedWallets(null);
+      setBlockCheck(null);
     }
     try {
-      const alerts = await listAlerts(conn.wallet);
-      setAlertWallets(
-        new Set(
-          alerts
-            .filter((a) => a.status === "open" && a.wallet)
-            .map((a) => a.wallet as string),
-        ),
-      );
+      const open = await listWalletsWithOpenAlerts(conn.wallet, queueWallets);
+      setAlertCheck({ checked: new Set(queueWallets), hits: open });
     } catch (err) {
-      console.warn("[admin/kyc] compliance alerts load failed:", err);
-      setAlertWallets(null);
+      console.warn("[admin/kyc] compliance alert status load failed:", err);
+      setAlertCheck(null);
     }
   }, [conn.wallet, client, loadRegistryContext]);
 
@@ -729,14 +814,17 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
    * runs the exact same gate, so neither path can drift.
    */
   const issueBlockers = useCallback(
-    (req: PassportRequest): string[] => {
+    (
+      req: PassportRequest,
+      fresh?: { walletBlocked: boolean; hasOpenAlert: boolean },
+    ): string[] => {
       const linked = clientByWallet.get(req.wallet);
       const blockers = computeIssueBlockers({
         client: linked ?? null,
         jurisdiction: req.jurisdiction,
         registry,
-        walletBlocked: blockedWallets ? blockedWallets.has(req.wallet) : null,
-        hasOpenAlert: alertWallets ? alertWallets.has(req.wallet) : null,
+        walletBlocked: fresh ? fresh.walletBlocked : gateValue(blockCheck, req.wallet),
+        hasOpenAlert: fresh ? fresh.hasOpenAlert : gateValue(alertCheck, req.wallet),
       });
       // Idempotency stop: an on-chain passport already exists for THIS
       // request — only the off-chain write-back is missing. A pending entry
@@ -749,7 +837,7 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
       }
       return blockers;
     },
-    [clientByWallet, registry, blockedWallets, alertWallets, unsyncedIssues],
+    [clientByWallet, registry, blockCheck, alertCheck, unsyncedIssues],
   );
 
   const counts = useMemo(() => {
@@ -794,8 +882,24 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
       return;
     }
     // Hard gate re-checked at send time — the button being enabled is UI
-    // convenience, this is the authoritative client-side stop.
-    const blockers = issueBlockers(req);
+    // convenience, this is the authoritative client-side stop. The blocklist
+    // entry and the alert status of THIS wallet are re-read now (not the
+    // queue snapshot); any read error aborts.
+    let fresh: { walletBlocked: boolean; hasOpenAlert: boolean };
+    try {
+      const [entry, open] = await Promise.all([
+        fetchBlockEntry(client.runtime.rpc, req.wallet as Address),
+        listWalletsWithOpenAlerts(conn.wallet, [req.wallet]),
+      ]);
+      fresh = { walletBlocked: entry !== null, hasOpenAlert: open.has(req.wallet) };
+    } catch (err) {
+      toast.showError(
+        "Cannot issue passport",
+        `The blocklist and compliance alert status could not be re-checked — retry. ${errorText(err)}`,
+      );
+      return;
+    }
+    const blockers = issueBlockers(req, fresh);
     if (blockers.length > 0) {
       toast.showError("Cannot issue passport", blockers[0]);
       return;
@@ -1016,12 +1120,22 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
         <p className="mt-1 text-[13px] text-slate-600">
           Self-service applications submitted by investors from their portfolio.
           Every application is linked to a client dossier (auto-provisioned on
-          submit). Admins triage here — open the dossier, request documents,
-          approve the off-chain KYC — and the Super Admin issues the on-chain
-          passport (approve_holder) only once the dossier is{" "}
-          <span className="font-semibold">verified</span>.
+          submit). Admins and the KYC provider triage here — open the dossier,
+          request documents, approve the off-chain KYC — and the KYC provider
+          (the registry authority) issues the on-chain passport
+          (approve_holder) only once the dossier is{" "}
+          <span className="font-semibold">verified</span> and the wallet is
+          neither blocklisted nor under an unresolved compliance alert.
         </p>
       </div>
+
+      {loadErrors.length > 0 && (
+        <div className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-xs text-red-800" role="alert">
+          {loadErrors.map((e) => (
+            <p key={e}>{e}</p>
+          ))}
+        </div>
+      )}
 
       {/* Tabs */}
       <div className="mt-4 flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs">

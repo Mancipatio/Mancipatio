@@ -8,6 +8,7 @@ import { detectNetwork, rpcUrl, wsUrl } from "@/lib/network";
 import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 import { guardWalletConnectors } from "@/lib/guarded-wallet-connectors";
 import { WalletSigningNotice } from "@/components/wallet-signing-notice";
+import { RoleProvider } from "@/lib/auth";
 
 // NEXT_PUBLIC_SOLANA_RPC_URL wins; otherwise derived from NEXT_PUBLIC_NETWORK
 // (lib/network.ts) — never a silent devnet fallback on a mainnet deployment.
@@ -30,10 +31,12 @@ const solanaClient = withVerifiedTransactions(baseClient, detectNetwork());
 export function Providers({ children }: { children: ReactNode }) {
   return (
     <SolanaProvider client={solanaClient} walletPersistence={{ autoConnect: true }}>
-      <ToastProvider>
-        {children}
-        <WalletSigningNotice />
-      </ToastProvider>
+      <RoleProvider>
+        <ToastProvider>
+          {children}
+          <WalletSigningNotice />
+        </ToastProvider>
+      </RoleProvider>
     </SolanaProvider>
   );
 }

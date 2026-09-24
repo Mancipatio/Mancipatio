@@ -15,6 +15,7 @@ import {
 import { PlatformStatusCard } from "@/components/platform-status-card";
 import { RequireRole } from "@/components/require-role";
 import { NetworkDashboard } from "./network-dashboard";
+import { OperatorLanding } from "./operator-landing";
 
 const SHORTCUTS = [
   {
@@ -85,7 +86,9 @@ export default function AdminOverview() {
         </p>
       </div>
 
-      <RequireRole role="admin" allowBootstrap>
+      {/* An operator role without an Admin record lands on its own summary.
+          Bootstrap (no Platform yet) runs on /issuer/authority. */}
+      <RequireRole role="admin" fallback={<OperatorLanding />}>
         <div className="mt-6 grid gap-4 lg:grid-cols-2">
           <PlatformStatusCard />
           <AlertsCard />

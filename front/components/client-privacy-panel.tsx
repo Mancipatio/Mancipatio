@@ -1,7 +1,8 @@
 "use client";
 
 // Data protection (GDPR) actions on /admin/clients/[id]:
-//   * Export data — any admin; JSON bundle of what is stored about the client
+//   * Export data — any admin (not the KYC provider: /api/clients/export is
+//     requireAdmin, Talas 3.1 K6); JSON bundle of what is stored about the client
 //     (/api/clients/export, fresh wallet signature, logged server-side).
 //   * Anonymize   — Super Admin only; typed confirmation + reason
 //     (/api/clients/anonymize). Not reversible.
@@ -43,7 +44,7 @@ export function ClientPrivacyPanel({
   passportCheck: ErasurePassportCheck;
   onChanged: () => Promise<void> | void;
 }) {
-  const { isSuperAdmin } = useRole();
+  const { isSuperAdmin, isAdmin } = useRole();
   const toast = useToast();
   const [exporting, setExporting] = useState(false);
   const [open, setOpen] = useState(false);
@@ -87,14 +88,16 @@ export function ClientPrivacyPanel({
         Every export and erasure is recorded in the audit log.
       </p>
       <div className="mt-4 flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={() => void exportData()}
-          disabled={exporting}
-          className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50"
-        >
-          {exporting ? "Preparing export…" : "Export data"}
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => void exportData()}
+            disabled={exporting}
+            className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50"
+          >
+            {exporting ? "Preparing export…" : "Export data"}
+          </button>
+        )}
         {isSuperAdmin && (
           <button
             type="button"
@@ -125,7 +128,11 @@ export function ClientPrivacyPanel({
         </p>
       )}
       {!isSuperAdmin && (
-        <p className="mt-2 text-xs text-slate-500">Only the Super Admin can anonymize a client.</p>
+        <p className="mt-2 text-xs text-slate-500">
+          {isAdmin
+            ? "Only the Super Admin can anonymize a client."
+            : "Only an Admin can export, and only the Super Admin can anonymize, a client."}
+        </p>
       )}
       {open && (
         <AnonymizeModal

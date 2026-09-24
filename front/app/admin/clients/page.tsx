@@ -13,6 +13,8 @@ import {
 } from "@/components/icons";
 import { Kpi } from "@/components/kpi";
 import { RequireRole } from "@/components/require-role";
+import { useRole } from "@/lib/auth";
+import { explainRoleRefusal } from "@/lib/role-resolution";
 import { SkeletonTable } from "@/components/skeleton";
 import {
   createClient as createClientRow,
@@ -59,7 +61,9 @@ export default function ClientsPage() {
           onboarding.
         </p>
       </div>
-      <RequireRole role="admin">
+      {/* Admins and the KYC provider (Talas 3.1 K6). Creating a client stays
+          admin-only (/api/clients/create is requireAdmin). */}
+      <RequireRole anyOf={["admin", "kycProvider"]}>
         {/* useSearchParams needs a Suspense boundary for the static build. */}
         <Suspense fallback={null}>
           <ClientsOps />
@@ -71,6 +75,7 @@ export default function ClientsPage() {
 
 function ClientsOps() {
   const conn = useWalletConnection();
+  const { isAdmin } = useRole({ kyc: true });
   const [rows, setRows] = useState<ClientRow[] | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   // `?q=` seeds the search — the custody page links here by wallet to issue
@@ -88,7 +93,7 @@ function ClientsOps() {
       setRows(data);
       setFailed(null);
     } catch (err) {
-      setFailed(err instanceof Error ? err.message : String(err));
+      setFailed(explainRoleRefusal(err instanceof Error ? err.message : String(err)));
     }
   }, [conn.wallet]);
 
@@ -203,13 +208,15 @@ function ClientsOps() {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() => setShowAdd(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          + Add client
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowAdd(true)}
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            + Add client
+          </button>
+        )}
       </div>
 
       {rows === null ? (
@@ -311,7 +318,7 @@ function ClientsOps() {
         </div>
       )}
 
-      {showAdd && (
+      {showAdd && isAdmin && (
         <AddClientModal
           onClose={() => setShowAdd(false)}
           onSuccess={() => {

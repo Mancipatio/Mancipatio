@@ -1,112 +1,168 @@
 "use client";
 
+import Link from "next/link";
+import { useState, type ReactNode } from "react";
 import { WalletRequired } from "@/components/wallet-required";
-
-import type { ReactNode } from "react";
-import { useRole, type Role } from "@/lib/auth";
 import { SkeletonCard } from "@/components/skeleton";
+import { useRole, type Role, type RoleState } from "@/lib/auth";
+import { CAPABILITY_LABEL } from "@/lib/role-resolution";
+import {
+  gateOutcome,
+  holdsOperatorRole,
+  requirementKey,
+  type GateDecision,
+  type RequiredRole,
+  type RoleRequirement as Requirement,
+} from "@/lib/role-state";
 
-type RequiredRole = "superAdmin" | "admin" | "issuer";
+/** Where a wallet accepts a proposed role or proposes a successor (Talas 3.1 §4). */
+export const ACCOUNT_ROLES_PATH = "/account/roles";
 
-const RANK: Record<Role, number> = {
-  disconnected: -1,
-  public: 0,
-  issuer: 1,
-  admin: 2,
-  superAdmin: 3,
-};
+/** The bootstrap page of a fresh deployment (platform / blocklist init, K2/K3). */
+export const AUTHORITY_SETUP_PATH = "/issuer/authority";
 
-const REQUIRED: Record<RequiredRole, number> = {
-  issuer: 1,
-  admin: 2,
-  superAdmin: 3,
-};
-
+/**
+ * Client-side gate. A hint only: every privileged builder and server route
+ * re-checks on-chain state. Stays closed while loading and on a role-read
+ * error (never falls back to "public"). Right after a role change
+ * (invalidateRoles) it keeps its previous decision until the re-read lands,
+ * so the gated page is not unmounted and keeps its local state; the stale
+ * roles never make a new decision (lib/role-state gateOutcome).
+ */
 export function RequireRole({
-  role: required,
   children,
   fallback,
-  allowBootstrap = false,
-}: {
-  role: RequiredRole;
+  ...requirement
+}: Requirement & {
   children: ReactNode;
   fallback?: ReactNode;
-  /**
-   * Allow access (with a banner) when the Platform PDA is not initialized yet —
-   * needed so the program upgrade authority can call `initialize_platform`.
-   */
-  allowBootstrap?: boolean;
 }) {
-  const { loading, role, platformInitialized } = useRole();
+  const anyOf = requirement.anyOf;
+  const state = useRole({ kyc: anyOf?.includes("kycProvider") ?? false });
+  const [last, setLast] = useState<GateDecision | null>(null);
 
-  if (loading) {
-    return <SkeletonCard rows={3} className="max-w-md" />;
+  const outcome = gateOutcome(state, requirement, last);
+  // Remember each decision made on a fresh read (adjusting state while
+  // rendering: React re-renders this component before committing).
+  if ((outcome === "allowed" || outcome === "denied") && !state.stale && state.walletAddress) {
+    const req = requirementKey(requirement);
+    if (last?.wallet !== state.walletAddress || last.requirement !== req || last.outcome !== outcome) {
+      setLast({ wallet: state.walletAddress, requirement: req, outcome });
+    }
   }
 
-  // Bootstrap escape hatch: Platform not initialized AND wallet is connected →
-  // the user must be allowed through so they can hit Initialize.
-  if (
-    allowBootstrap &&
-    !platformInitialized &&
-    role !== "disconnected"
-  ) {
-    return (
-      <>
-        <div className="mb-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm">
-          <p className="font-semibold text-amber-900">
-            Bootstrap mode — Platform not initialized
-          </p>
-          <p className="mt-1 text-xs text-amber-800/90">
-            The program upgrade authority can call <code className="rounded bg-amber-100 px-1">initialize_platform</code>{" "}
-            to establish the initial Super Admin. Later changes require an explicit
-            proposal and acceptance by the new authority. This page remains available
-            during setup; the program verifies who can initialize it.
-          </p>
-        </div>
-        {children}
-      </>
-    );
+  switch (outcome) {
+    case "loading":
+      return <SkeletonCard rows={3} className="max-w-md" />;
+    case "disconnected":
+      return fallback ?? <WalletRequired />;
+    case "error":
+      return fallback ?? <RoleReadError message={state.error ?? ""} onRetry={state.refresh} />;
+    case "denied":
+      return fallback ?? <NotAuthorized requirement={requirement} state={state} />;
+    case "allowed":
+      return <>{children}</>;
   }
-
-  if (RANK[role] < REQUIRED[required]) {
-    return fallback ?? <NotAuthorized required={required} current={role} />;
-  }
-
-  return <>{children}</>;
 }
 
-function NotAuthorized({
-  required,
-  current,
-}: {
-  required: RequiredRole;
-  current: Role;
-}) {
-  if (current === "disconnected") return <WalletRequired />;
+export function RoleReadError({ message, onRetry }: { message: string; onRetry: () => void }) {
+  return (
+    <div className="max-w-md rounded-xl border border-red-200 bg-red-50 p-6" role="alert">
+      <p className="text-sm font-semibold uppercase tracking-wider text-red-900">
+        Could not verify your on-chain roles
+      </p>
+      <p className="mt-2 text-xs text-red-800/90">{message}</p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="mt-3 rounded-lg border border-red-300 bg-white px-3 py-1.5 text-xs font-semibold text-red-900 hover:bg-red-100"
+      >
+        Retry
+      </button>
+    </div>
+  );
+}
 
-  const label: Record<RequiredRole, string> = {
-    superAdmin: "Super Admin",
-    admin: "Admin",
-    issuer: "verified Issuer",
-  };
-  const currentLabel: Record<Role, string> = {
-    disconnected: "no wallet connected",
-    public: "Public",
-    issuer: "Issuer (unverified)",
-    admin: "Admin",
-    superAdmin: "Super Admin",
-  };
+const ROLE_LABEL: Record<RequiredRole, string> = {
+  superAdmin: "Super Admin",
+  admin: "Admin",
+  issuer: "verified Issuer",
+};
+
+const CURRENT_LABEL: Record<Role, string> = {
+  disconnected: "no wallet connected",
+  public: "Public",
+  issuer: "Issuer (unverified)",
+  admin: "Admin",
+  superAdmin: "Super Admin",
+};
+
+/** "Admin", plus any operator roles the wallet holds. */
+export function connectedAsLabel(state: RoleState): string {
+  const side = [
+    state.isKycProvider ? CAPABILITY_LABEL.kycProvider : null,
+    state.isBlocklistAuthority ? CAPABILITY_LABEL.blocklistAuthority : null,
+  ].filter(Boolean);
+  const main = state.role === "issuer" && state.isVerifiedIssuer ? "Issuer" : CURRENT_LABEL[state.role];
+  return side.length > 0 && state.role === "public" ? side.join(" · ") : [main, ...side].join(" · ");
+}
+
+function NotAuthorized({ requirement, state }: { requirement: Requirement; state: RoleState }) {
+  const required = requirement.anyOf
+    ? requirement.anyOf.map((c) => CAPABILITY_LABEL[c])
+    : [ROLE_LABEL[requirement.role]];
+  const kycMatters = requirement.anyOf?.includes("kycProvider") ?? false;
   return (
     <div className="max-w-md rounded-xl border border-amber-200 bg-amber-50 p-6">
       <p className="text-sm font-semibold uppercase tracking-wider text-amber-900">
         Access denied
       </p>
       <p className="mt-2 text-sm text-amber-900">
-        This page requires the <strong>{label[required]}</strong> role.
+        {required.length === 1 ? (
+          <>
+            This page requires the <strong>{required[0]}</strong> role.
+          </>
+        ) : (
+          <>
+            This page requires one of these roles:{" "}
+            <strong>{required.join(", ")}</strong>.
+          </>
+        )}
       </p>
-      <p className="mt-1 text-xs text-amber-800/80">
-        Connected as: {currentLabel[current]}
-      </p>
+      <p className="mt-1 text-xs text-amber-800/80">Connected as: {connectedAsLabel(state)}</p>
+      {kycMatters && state.kycUnavailable && (
+        <p className="mt-2 text-xs text-amber-800">{state.kycUnavailable}</p>
+      )}
+      {state.pending.length > 0 ? (
+        <p className="mt-3 text-xs text-amber-900">
+          A role is waiting for this wallet to accept it:{" "}
+          <Link href={ACCOUNT_ROLES_PATH} className="font-semibold underline">
+            review pending roles
+          </Link>
+          .
+        </p>
+      ) : (
+        holdsOperatorRole(state) && (
+          <p className="mt-3 text-xs text-amber-900">
+            This wallet&apos;s on-chain roles, and the successor proposals it
+            can make, are on{" "}
+            <Link href={ACCOUNT_ROLES_PATH} className="font-semibold underline">
+              {ACCOUNT_ROLES_PATH}
+            </Link>
+            .
+          </p>
+        )
+      )}
+      {!state.platformInitialized && (
+        <p className="mt-2 text-xs text-amber-900">
+          The platform is not initialized on this network. Its program upgrade
+          authority sets it up on{" "}
+          <Link href={AUTHORITY_SETUP_PATH} className="font-semibold underline">
+            {AUTHORITY_SETUP_PATH}
+          </Link>
+          .
+        </p>
+      )}
     </div>
   );
 }

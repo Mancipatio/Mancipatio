@@ -2,7 +2,9 @@
 // "client-documents" bucket via the service-role client (never the anon key).
 //
 // multipart/form-data with TWO auth modes:
-//   * ADMIN  — field `auth` = JSON SiwsRequestBody signed for action
+//   * OPERATOR — an admin or the KYC provider (requireAdminOrKycProvider,
+//     Talas 3.1 K6; the recompute only moves more_info → pending).
+//     Field `auth` = JSON SiwsRequestBody signed for action
 //     "clients.upload" with params { client_id, kind, sha256, size,
 //     requirement_id? }. The server recomputes the file's SHA-256 and requires
 //     it to equal the signed one — the signature is bound to the exact bytes.
@@ -33,7 +35,7 @@
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { assertWritable } from "@/lib/server/maintenance";
 import { detectNetwork } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
@@ -132,7 +134,7 @@ export async function POST(request: Request) {
 
     const authRaw = formString(form, "auth");
     if (authRaw) {
-      // ── Admin mode: verify the SIWS envelope carried in the `auth` field ──
+      // ── Operator mode (admin or KYC provider): verify the SIWS envelope ──
       const synthetic = new Request(request.url, {
         method: "POST",
         headers: {
@@ -144,7 +146,7 @@ export async function POST(request: Request) {
         body: authRaw,
       });
       const { wallet, params } = await verifySigned(synthetic, "clients.upload");
-      await requireAdmin(wallet);
+      await requireAdminOrKycProvider(wallet);
 
       clientId = assertUuid(params.client_id, "client_id");
       if (typeof params.kind !== "string" || params.kind.length === 0 || params.kind.length > 40) {

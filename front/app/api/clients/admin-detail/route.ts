@@ -1,12 +1,13 @@
-// POST /api/clients/admin-detail — admin read of one client's full record:
-// the client row, internal notes, KYC requirements and document metadata.
-// Signed + requireAdmin. clients / client_notes / client_documents /
-// kyc_requirements have no anon SELECT (PII + internal notes), so the admin
-// client-detail page loads everything through this one route (one signature).
+// POST /api/clients/admin-detail — admin / KYC-provider read of one client's
+// full record: the client row, internal notes, KYC requirements and document
+// metadata. Signed + requireAdminOrKycProvider (Talas 3.1 K6). clients /
+// client_notes / client_documents / kyc_requirements have no anon SELECT (PII
+// + internal notes), so the client-detail page loads everything through this
+// one route (one signature). AML evidence (compliance_alerts) is not here.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { getRaiseCapacity } from "@/lib/server/raise-limits";
@@ -22,7 +23,7 @@ const ANONYMIZED_COLUMN = "anonymized_at";
 export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "clients.adminDetail");
-    await requireAdmin(wallet);
+    await requireAdminOrKycProvider(wallet);
 
     const id = typeof params.id === "string" ? params.id : "";
     if (!id) throw new SiwsError(400, "id is required");

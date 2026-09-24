@@ -4,6 +4,8 @@ import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useBalance, useWalletConnection } from "@solana/react-hooks";
 import { useRole } from "@/lib/auth";
+import { adminRouteAllows } from "@/lib/role-resolution";
+import { ACCOUNT_ROLES_PATH } from "@/components/require-role";
 import { WalletButton } from "@/app/wallet-button";
 import { IconUsers as IconUser, IconWallet } from "@/components/icons";
 import { clearWalletSession } from "@/lib/siws-client";
@@ -17,8 +19,10 @@ export function AccountMenu() {
   const conn = useWalletConnection();
   const signedIn = useSignedInAccount();
   const balance = useBalance(conn.wallet?.account.address);
-  const { isAdmin, isIssuer } = useRole();
   const [open, setOpen] = useState(false);
+  // The KYC role is resolved only while the menu is open (an unpinned build
+  // scans for the registry on demand; public pages pay nothing extra).
+  const { isIssuer, capabilities, pending } = useRole({ kyc: open });
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -82,7 +86,14 @@ export function AccountMenu() {
     { label: "Portfolio", href: "/portfolio" },
   ];
   if (isIssuer) links.push({ label: "Issuer dashboard", href: "/issuer" });
-  if (isAdmin) links.push({ label: "Admin", href: "/admin" });
+  // Admins and operator roles (KYC provider, blocklist authority) alike: the
+  // same table the AdminGate enforces decides who sees the link.
+  if (adminRouteAllows("/admin", capabilities)) links.push({ label: "Admin", href: "/admin" });
+  // Platform roles only (platform, blocklist, KYC registry); issuer-key
+  // proposals are never counted here.
+  if (pending.length > 0) {
+    links.push({ label: `Pending roles (${pending.length})`, href: ACCOUNT_ROLES_PATH });
+  }
 
   return (
     <div ref={ref} className="relative">

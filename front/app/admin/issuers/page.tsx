@@ -753,6 +753,11 @@ function RegisterIssuerModal({
             needs to be verified by Super Admin before the issuer can create
             assets.
           </p>
+          <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            Use a dedicated issuer key, not an Admin key: the issuer authority
+            signs the issuer&apos;s own operations, and keeping it separate
+            lets either role be rotated or revoked without touching the other.
+          </p>
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
               Legal entity ID

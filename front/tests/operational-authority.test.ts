@@ -30,6 +30,8 @@ import {
 } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
 import {
+  PROPOSAL_NOT_FINALIZED_HINT,
+  assertBlocklistAuthority,
   buildAcceptOperationalAuthority,
   buildProposeOperationalAuthority,
   loadOperationalAuthority,
@@ -116,6 +118,28 @@ describe("live operational authority builders", () => {
       }
     },
   );
+  it.each(["platform", "blocklist"] as const)(
+    "an accept the finalized re-read cannot see yet names the finality lag (%s)",
+    async (kind) => {
+      // /account/roles lists the proposal at `confirmed`; the builder re-reads
+      // at `finalized`, which has no proposal yet.
+      await expect(
+        buildAcceptOperationalAuthority(rpc, kind, createNoopSigner(next)),
+      ).rejects.toThrow(PROPOSAL_NOT_FINALIZED_HINT);
+    },
+  );
+  it.each(["platform", "blocklist"] as const)(
+    "never proposes the default address as the next %s authority (K2/K3)",
+    async (kind) => {
+      mocks.platform.mockResolvedValue(account({ admin: next }));
+      mocks.hook.mockResolvedValue(account({ authority: next }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+      await expect(
+        buildProposeOperationalAuthority(rpc, kind, createNoopSigner(next), "11111111111111111111111111111111"),
+      ).rejects.toThrow(/default/);
+      expect(mocks.platform).not.toHaveBeenCalled();
+      expect(mocks.hook).not.toHaveBeenCalled();
+    },
+  );
   it("rejects cross-target, stale and wrong-owner proposals", async () => {
     const [target] = await findPlatformPda();
     for (const data of [
@@ -133,6 +157,30 @@ describe("live operational authority builders", () => {
     await expect(loadOperationalAuthority(rpc, "platform")).rejects.toThrow(
       "owner",
     );
+  });
+});
+// Talas 3.1 K7/K8: blocklist and hook-mode builders re-check the live,
+// finalized blocklist authority before building.
+describe("assertBlocklistAuthority", () => {
+  it("passes the live authority (signer or address) and reads at finalized", async () => {
+    await expect(assertBlocklistAuthority(rpc, createNoopSigner(current))).resolves.toBe(current);
+    await expect(assertBlocklistAuthority(rpc, current)).resolves.toBe(current);
+    expect(mocks.hook.mock.calls[0][2]).toMatchObject({ commitment: "finalized" });
+  });
+  it("names the current authority when another wallet signs", async () => {
+    await expect(assertBlocklistAuthority(rpc, createNoopSigner(next))).rejects.toThrow(
+      `Connect the blocklist authority (current: ${current})`,
+    );
+  });
+  it("refuses a missing or foreign-owned BlocklistAuthority", async () => {
+    mocks.hook.mockResolvedValue({ exists: false });
+    await expect(assertBlocklistAuthority(rpc, current)).rejects.toThrow("not initialized");
+    mocks.hook.mockResolvedValue(account({ authority: current }, ASSET_REGISTRY_PROGRAM_ADDRESS));
+    await expect(assertBlocklistAuthority(rpc, current)).rejects.toThrow("owner");
+  });
+  it("propagates an RPC failure (never passes on error)", async () => {
+    mocks.hook.mockRejectedValue(new Error("rpc down"));
+    await expect(assertBlocklistAuthority(rpc, current)).rejects.toThrow("rpc down");
   });
 });
 describe("issuer-scoped permission proofs", () => {

@@ -9,9 +9,11 @@ import {
   fetchMaybeAdmin,
   getProposeCustodyAuthorityInstructionAsync,
   getAcceptCustodyAuthorityInstructionAsync,
+  VaultState,
 } from "@/lib/generated/asset_registry";
 import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { findCustodyVaultPda } from "@/lib/pdas";
+import { PROPOSAL_NOT_FINALIZED_HINT } from "@/lib/operational-authority";
 /** Bind the proof to the vault's current operator. The PDA may be absent after
  * revocation: permissionless deadline returns must still be constructible. */
 export async function custodyAuthorityRecord(
@@ -35,8 +37,66 @@ export async function custodyAuthorityRecord(
   return record;
 }
 
+// ── Custody operator rotation (Talas 3.1 K10) ───────────────────────────────
+//
+// `accept_custody_authority` requires the vault to be Active or Triggered,
+// `transfer.current_authority == vault.authority` and `transfer.proposed_by ==
+// platform.admin`. A proposal made before the vault operator or the Super
+// Admin changed is therefore STALE: it can never be accepted, and only a new
+// proposal by the live Super Admin (which overwrites it) helps. A stale
+// proposal is reported, not thrown; a transfer of the wrong owner or target
+// still throws.
+
+/** Accept (and propose) need the vault in one of these states. */
+export function isCustodyRotatable(state: VaultState): boolean {
+  return state === VaultState.Active || state === VaultState.Triggered;
+}
+
+export const CUSTODY_STALE_PROPOSAL =
+  "Proposal is stale — the Super Admin must re-propose";
+
+/**
+ * Why the proposed wallet cannot accept custody responsibility now, or null.
+ * Mirrors the `accept_custody_authority` constraints (the acceptor's live
+ * Admin record included).
+ */
+export function custodyAcceptBlocker(p: {
+  stale: boolean;
+  vaultState: VaultState;
+  acceptorIsAdmin: boolean;
+}): string | null {
+  if (!isCustodyRotatable(p.vaultState))
+    return `The vault is ${VaultState[p.vaultState] ?? "closed"}; custody responsibility can move only while it is Active or Triggered.`;
+  if (p.stale) return CUSTODY_STALE_PROPOSAL;
+  if (!p.acceptorIsAdmin)
+    return "This wallet needs an active Admin record before it can accept custody responsibility.";
+  return null;
+}
+
 type Rpc = Parameters<typeof fetchMaybeLiveCustodyVault>[0];
-export async function loadCustodyAuthority(rpc: Rpc, vaultPda: Address) {
+
+export type CustodyAuthorityState = {
+  vaultPda: Address;
+  platformPda: Address;
+  transferPda: Address;
+  /** The vault's live operator. */
+  current: Address;
+  superAdmin: Address;
+  vaultState: VaultState;
+  /** The staged operator, or null. */
+  proposed: Address | null;
+  proposedBy: Address | null;
+  /**
+   * A proposal exists but accept would fail: the vault operator or the Super
+   * Admin changed after it was made. The Super Admin re-proposes.
+   */
+  stale: boolean;
+};
+
+export async function loadCustodyAuthority(
+  rpc: Rpc,
+  vaultPda: Address,
+): Promise<CustodyAuthorityState> {
   const options = {
     commitment: "finalized" as const,
     abortSignal: AbortSignal.timeout(10_000),
@@ -60,17 +120,23 @@ export async function loadCustodyAuthority(rpc: Rpc, vaultPda: Address) {
   if (
     transfer.exists &&
     (transfer.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS ||
-      transfer.data.target !== vaultPda ||
-      transfer.data.currentAuthority !== vault.data.authority)
+      transfer.data.target !== vaultPda)
   )
-    throw new Error("Custody authority proposal is stale or invalid");
+    throw new Error("Custody authority proposal is invalid");
+  const stale =
+    transfer.exists &&
+    (transfer.data.proposedBy !== platform.data.admin ||
+      transfer.data.currentAuthority !== vault.data.authority);
   return {
     vaultPda,
     platformPda,
     transferPda,
     current: vault.data.authority,
     superAdmin: platform.data.admin,
+    vaultState: vault.data.state,
     proposed: transfer.exists ? transfer.data.newAuthority : null,
+    proposedBy: transfer.exists ? transfer.data.proposedBy : null,
+    stale,
   };
 }
 export async function buildCustodyAuthorityChange(
@@ -83,12 +149,18 @@ export async function buildCustodyAuthorityChange(
   const state = await loadCustodyAuthority(rpc, vaultPda);
   const newAuthority =
     action === "propose" ? address(next ?? "") : signer.address;
+  if (!isCustodyRotatable(state.vaultState))
+    throw new Error(
+      "Custody responsibility can move only while the vault is Active or Triggered",
+    );
   if (action === "propose" && state.superAdmin !== signer.address)
     throw new Error(
       "Only the current Super Admin may propose a custody operator",
     );
   if (action === "accept" && state.proposed !== signer.address)
-    throw new Error("Connect the proposed custody operator to accept");
+    throw new Error(`Connect the proposed custody operator to accept (${PROPOSAL_NOT_FINALIZED_HINT})`);
+  if (action === "accept" && state.stale)
+    throw new Error(CUSTODY_STALE_PROPOSAL);
   if (newAuthority === state.current)
     throw new Error("Choose a different custody operator");
   const [newAdminRecord] = await findAdminRecordPda({

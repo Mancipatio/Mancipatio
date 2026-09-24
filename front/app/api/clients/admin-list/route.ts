@@ -1,11 +1,12 @@
-// POST /api/clients/admin-list — admin read of the client directory.
-// Signed + requireAdmin. clients has no anon SELECT (the row set is the full
-// client directory: names, emails, KYC verdicts — PII), so the admin pages
-// load it through this route. Mirror of /api/compliance/list.
+// POST /api/clients/admin-list — admin / KYC-provider read of the client
+// directory. Signed + requireAdminOrKycProvider (Talas 3.1 K6: the KYC
+// provider triages the queue without an Admin record). clients has no anon
+// SELECT (the row set is the full client directory: names, emails, KYC
+// verdicts — PII), so the operator pages load it through this route.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 
@@ -20,7 +21,7 @@ const CLIENT_COLUMNS =
 export async function POST(request: Request) {
   try {
     const { wallet } = await verifySigned(request, "clients.adminList");
-    await requireAdmin(wallet);
+    await requireAdminOrKycProvider(wallet);
 
     const sb = getSupabaseAdmin();
     const { data, error } = await sb

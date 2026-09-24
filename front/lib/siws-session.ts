@@ -30,6 +30,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "clients.lookup",
   "clients.me",
   "compliance.list",
+  // Which of N wallets have an unresolved alert — addresses only (issue gate).
+  "compliance.openWallets",
   "conversion.adminList",
   "conversion.listMine",
   "delivery.adminList",

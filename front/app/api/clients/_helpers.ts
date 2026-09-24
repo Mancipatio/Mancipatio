@@ -2,7 +2,12 @@
 // Underscore-prefixed file → never routed; only route.ts files are served.
 //
 // Two auth modes exist in this domain (see app/api/_exemplar/route.ts):
-//   * admin actions  — SIWS signed envelope (verifySigned) + requireAdmin
+//   * operator actions — SIWS signed envelope (verifySigned) + requireAdmin,
+//     or requireAdminOrKycProvider on the dossier routes the KYC provider
+//     works on (Talas 3.1 K6: admin-list, admin-detail, doc-url, note,
+//     status, request-docs, review-requirement, upload). A provider without
+//     an Admin record can never move a client out of `suspended` /
+//     `rejected` (applyClientStatus `forbidLeavingTerminal`).
 //   * magic-link     — the onboarding token is the credential; validated here
 //     against clients.onboarding_token (requireClientToken)
 //
@@ -441,6 +446,10 @@ export async function insertNote(
   }
 }
 
+/** Why a KYC provider (no Admin record) cannot make a status change. */
+export const LEAVE_TERMINAL_ADMIN_ONLY =
+  "Only an Admin can lift a suspension or reverse a rejection";
+
 /**
  * Shared kyc_status patch (mirrors lib/clients.ts updateClientStatus).
  *
@@ -452,13 +461,26 @@ export async function insertNote(
  *   * the onboarding magic-link token is invalidated — onboarding is complete
  *     and every further access is wallet-signed (request-docs re-issues a
  *     fresh token when documents are needed again).
+ *
+ * `opts.forbidLeavingTerminal` (set for a KYC provider without an Admin
+ * record, Talas 3.1 OD1): the update carries the extra filter
+ * `kyc_status NOT IN (suspended, rejected)` — also on the pre-0041 retry —
+ * and returns the affected row. When nothing was updated because the client
+ * is terminal, it throws 403. The filter makes this atomic: there is no
+ * check-then-write race with a concurrent suspension.
  */
 export async function applyClientStatus(
   sb: SupabaseClient,
   clientId: string,
   kycStatus: ServerKycStatus,
   onboardingStatus?: (typeof ONBOARDING_STATUSES)[number],
-  opts?: { kycExpiresAt?: string },
+  opts?: {
+    kycExpiresAt?: string;
+    /** Refuse (atomically) to move a suspended / rejected client (OD1). */
+    forbidLeavingTerminal?: boolean;
+    /** Compare-and-set: write only while the row still has this status. */
+    expectedStatus?: ServerKycStatus;
+  },
 ): Promise<void> {
   const patch: Record<string, unknown> = { kyc_status: kycStatus };
   if (onboardingStatus) patch.onboarding_status = onboardingStatus;
@@ -472,7 +494,21 @@ export async function applyClientStatus(
     patch.onboarding_token_expires_at = null;
   }
   if (kycStatus === "suspended") patch.suspended_at = new Date().toISOString();
-  let { error } = await sb.from("clients").update(patch).eq("id", clientId);
+  const forbidTerminal = opts?.forbidLeavingTerminal === true;
+  const expected = opts?.expectedStatus;
+  const guarded = forbidTerminal || expected !== undefined;
+  const write = async (row: Record<string, unknown>) => {
+    let query = sb.from("clients").update(row).eq("id", clientId);
+    if (!guarded) {
+      const { error } = await query;
+      return { error, updated: null as number | null };
+    }
+    if (forbidTerminal) query = query.not("kyc_status", "in", `(${TERMINAL_KYC_STATUSES.join(",")})`);
+    if (expected !== undefined) query = query.eq("kyc_status", expected);
+    const { data, error } = await query.select("id");
+    return { error, updated: Array.isArray(data) ? data.length : 0 };
+  };
+  let { error, updated } = await write(patch);
   if (error && isMissingTtlColumnError(error)) {
     // Pre-0041 database — retry without the TTL column so a KYC verdict never
     // 500s over a missing hygiene column (see deploy notes: apply 0041 first).
@@ -480,18 +516,35 @@ export async function applyClientStatus(
       "[api/clients] 0041 not applied — retrying status patch without",
       TTL_COLUMN,
     );
-    ({ error } = await sb
-      .from("clients")
-      .update(withoutTtlColumn(patch))
-      .eq("id", clientId));
+    ({ error, updated } = await write(withoutTtlColumn(patch)));
   }
   if (error) throw new SiwsError(500, "Status update failed");
+  if (guarded && updated === 0) {
+    // Nothing matched: either the client is terminal (the filter) or it is
+    // gone. Say which.
+    const { data: row, error: readErr } = await sb
+      .from("clients")
+      .select("kyc_status")
+      .eq("id", clientId)
+      .maybeSingle();
+    if (readErr) throw new SiwsError(500, "Status update failed");
+    if (!row) throw new SiwsError(404, "Client not found");
+    if (forbidTerminal && isTerminalKycStatus((row as { kyc_status?: unknown }).kyc_status)) {
+      throw new SiwsError(403, LEAVE_TERMINAL_ADMIN_ONLY);
+    }
+    throw new SiwsError(409, "The client changed while updating — reload and retry");
+  }
 }
 
 /**
  * Server port of recomputeClientKycFromRequirements: a `more_info` client with
  * no remaining OPEN requirements (requested/rejected) flips back to `pending`.
  * Returns the new status, or null when nothing changed. Never throws.
+ *
+ * The flip is a compare-and-set on `more_info`: a suspension or rejection
+ * (or any other change) landing between the read below and the write is
+ * never overwritten. A KYC provider reaches this through review-requirement
+ * and upload, and must never lift a terminal status (OD1).
  */
 export async function recomputeKycFromRequirements(
   sb: SupabaseClient,
@@ -518,8 +571,9 @@ export async function recomputeKycFromRequirements(
   if ((openReqs ?? []).length > 0) return null;
 
   try {
-    await applyClientStatus(sb, clientId, "pending");
+    await applyClientStatus(sb, clientId, "pending", undefined, { expectedStatus: "more_info" });
   } catch {
+    // 0 rows: the status moved on meanwhile (or the client is gone).
     return null;
   }
   return "pending";

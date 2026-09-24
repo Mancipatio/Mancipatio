@@ -53,6 +53,8 @@ import { shareClassTypesForAssetType } from "@/lib/asset-types";
 import { walletSigner } from "@/lib/wallet-signer";
 import { buildUpdateMintMetadataInstruction } from "@/lib/transaction-builders";
 import { loadKycAuthorityContext } from "@/lib/kyc-authority";
+import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
+import { assertBlocklistAuthority } from "@/lib/operational-authority";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { recordAudit } from "@/lib/supabase";
 import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
@@ -124,7 +126,9 @@ export default function ShareClassesPage() {
           rights bitfield and lifecycle actions.
         </p>
       </div>
-      <RequireRole role="admin">
+      {/* Admins, and the blocklist authority for the transfer-hook mode
+          (Talas 3.1 K7; every other action here needs an Admin). */}
+      <RequireRole anyOf={["admin", "blocklistAuthority"]}>
         <ShareClassesOps />
       </RequireRole>
     </section>
@@ -133,6 +137,7 @@ export default function ShareClassesPage() {
 
 function ShareClassesOps() {
   const client = useSolanaClient();
+  const { isAdmin } = useRole();
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [assetPdaMap, setAssetPdaMap] = useState<Map<string, Asset>>(new Map());
@@ -244,13 +249,15 @@ function ShareClassesOps() {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() => setShowAdd(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          + Add share class
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => setShowAdd(true)}
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            + Add share class
+          </button>
+        )}
       </div>
 
       {/* Table */}
@@ -363,7 +370,7 @@ function ShareClassesOps() {
       )}
 
       {/* Add modal */}
-      {showAdd && data && (
+      {showAdd && isAdmin && data && (
         <AddShareClassModal
           data={data}
           onClose={() => setShowAdd(false)}
@@ -438,7 +445,12 @@ function ShareClassDetail({
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
-  const { isSuperAdmin } = useRole();
+  // The hook mode is a blocklist-authority op (update_transfer_hook_config
+  // is gated on the BlocklistAuthority, Talas 3.1 K7). Every other action
+  // below needs the issuer authority plus an Admin record or an
+  // IssuerPermissions grant (and the treasury-mint route is admin-only), so a
+  // blocklist authority without an Admin record sees only the hook section.
+  const { isAdmin, isBlocklistAuthority } = useRole();
   const wallet = conn.wallet?.account.address;
   const [mintAmount, setMintAmount] = useState("");
   // Declared EUR value of a treasury mint (counted against the raise limit).
@@ -447,6 +459,11 @@ function ShareClassDetail({
   const [confirmLock, setConfirmLock] = useState(false);
   const [scPda, setScPda] = useState<Address | null>(null);
   const [hookMode, setHookMode] = useState<HookMode>("loading");
+  // The registry the KycGated hook config names (config.kyc_registry).
+  const [hookRegistry, setHookRegistry] = useState<Address | null>(null);
+  // The pinned platform registry, when it exists on-chain (Re-point target).
+  const [platformRegistry, setPlatformRegistry] = useState<Address | null>(null);
+  const [confirmRepoint, setConfirmRepoint] = useState(false);
   // Asset.issuer IS the Issuer PDA — no derivation needed.
   const issuerPda = asset?.issuer ?? null;
 
@@ -655,11 +672,15 @@ function ShareClassDetail({
         if (cancelled) return;
         if (!maybe.exists) {
           setHookMode("none");
+          setHookRegistry(null);
         } else {
           setHookMode(
             maybe.data.restrictionMode === RestrictionMode.KycGated
               ? "kyc-gated"
               : "open",
+          );
+          setHookRegistry(
+            maybe.data.kycRegistry.__option === "Some" ? maybe.data.kycRegistry.value : null,
           );
         }
       } catch {
@@ -672,15 +693,49 @@ function ShareClassDetail({
     };
   }, [sc.mint, sc.mintInitialized, client]);
 
+  // Re-point (OD9): only on a PINNED deployment whose pinned registry exists,
+  // for a KycGated mint that names another registry.
+  useEffect(() => {
+    let cancelled = false;
+    async function loadPlatformRegistry() {
+      let pin: Address | null = null;
+      try {
+        pin = configuredKycRegistry();
+      } catch {
+        pin = null; // an invalid pin never offers a re-point
+      }
+      if (!pin || hookMode !== "kyc-gated") {
+        if (!cancelled) setPlatformRegistry(null);
+        return;
+      }
+      try {
+        const ctx = await loadKycAuthorityContext(client.runtime.rpc);
+        if (!cancelled) setPlatformRegistry(ctx.registry?.address === pin ? pin : null);
+      } catch {
+        if (!cancelled) setPlatformRegistry(null);
+      }
+    }
+    void loadPlatformRegistry();
+    return () => {
+      cancelled = true;
+    };
+  }, [hookMode, client]);
+  const repointable =
+    hookMode === "kyc-gated" &&
+    platformRegistry !== null &&
+    hookRegistry !== null &&
+    hookRegistry !== platformRegistry;
+
   // Flip the hook config between Open and KycGated via
-  // update_transfer_hook_config (super-admin op, gated on-chain by the
-  // BlocklistAuthority). Config creation itself is CPI-only — legacy mints
-  // without a config cannot be configured from here.
+  // update_transfer_hook_config — a blocklist-authority op, not a
+  // super-admin one: the hook gates it on the BlocklistAuthority. Config
+  // creation itself is CPI-only — legacy mints without a config cannot be
+  // configured from here.
   async function updateHookMode(target: "open" | "kyc-gated") {
     if (
       !wallet ||
       !conn.wallet ||
-      !isSuperAdmin ||
+      !isBlocklistAuthority ||
       !scPda ||
       !sc.mintInitialized
     )
@@ -689,6 +744,8 @@ function ShareClassDetail({
     const pendingId = toast.showPending(`Setting transfer hook to ${label}…`);
     try {
       const signer = walletSigner(conn.wallet);
+      // The live (finalized) blocklist authority only.
+      await assertBlocklistAuthority(client.runtime.rpc, signer);
       let kycRegistry: Address | null = null;
       if (target === "kyc-gated") {
         // Pin the hook to the LIVE registry, by ADDRESS (the deployment pin,
@@ -753,11 +810,55 @@ function ShareClassDetail({
         tx_signature: sig,
       });
       setHookMode(target);
+      setHookRegistry(kycRegistry);
       await onRefresh();
     } catch (err) {
       toast.dismiss(pendingId);
       const message = explainSendError(err);
       toast.showError(`Failed to set ${label}`, message);
+    }
+  }
+
+  // Re-point a KycGated mint at the pinned platform registry (OD9). The
+  // builder re-checks the blocklist authority and that the pin still
+  // resolves to a live registry before it builds.
+  async function repointHookRegistry() {
+    if (!wallet || !conn.wallet || !isBlocklistAuthority || !scPda || !repointable) return;
+    const from = hookRegistry;
+    const pendingId = toast.showPending("Re-pointing the transfer hook…");
+    try {
+      const signer = walletSigner(conn.wallet);
+      await assertBlocklistAuthority(client.runtime.rpc, signer);
+      const pin = configuredKycRegistry();
+      const ctx = await loadKycAuthorityContext(client.runtime.rpc, { fresh: true });
+      if (!pin || ctx.registry?.address !== pin) {
+        throw new Error("The pinned platform registry is not available — nothing was changed.");
+      }
+      const ix = await getUpdateTransferHookConfigInstructionAsync({
+        authority: signer,
+        mint: sc.mint,
+        restrictionMode: RestrictionMode.KycGated,
+        kycRegistry: pin,
+        kycRegistryAccount: pin,
+      });
+      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      toast.dismiss(pendingId);
+      toast.showTx(sig, { title: "Transfer hook re-pointed" });
+      void recordAudit({
+        ix_name: "update_transfer_hook_config",
+        category: "share-class",
+        actor_wallet: wallet.toString(),
+        reason: `Re-point KycGated registry ${from} → ${pin}`,
+        target_label: scPda.toString(),
+        tx_signature: sig,
+        metadata: { from_registry: from, to_registry: pin },
+      });
+      setConfirmRepoint(false);
+      setHookRegistry(pin);
+      await onRefresh();
+    } catch (err) {
+      toast.dismiss(pendingId);
+      toast.showError("Failed to re-point the transfer hook", explainSendError(err));
     }
   }
 
@@ -1051,7 +1152,7 @@ function ShareClassDetail({
               <span className="text-xs text-slate-400">checking…</span>
             )}
           </div>
-          {hookMode === "open" && isSuperAdmin && (
+          {hookMode === "open" && isBlocklistAuthority && (
             <div>
               <p className="text-[13px] text-slate-600">
                 Enable the KYC transfer hook — restricts all token transfers to
@@ -1074,7 +1175,27 @@ function ShareClassDetail({
                 Transfer hook is active — all transfers require a valid KYC
                 passport.
               </p>
-              {isSuperAdmin && (
+              {repointable && (
+                <div className="mt-3 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] leading-relaxed text-amber-900">
+                  <p>
+                    Points at registry{" "}
+                    <span className="break-all font-mono text-xs">{hookRegistry}</span>, not
+                    the platform registry{" "}
+                    <span className="break-all font-mono text-xs">{platformRegistry}</span>.
+                  </p>
+                  {isBlocklistAuthority && (
+                    <button
+                      type="button"
+                      disabled={tx.isSending}
+                      onClick={() => setConfirmRepoint(true)}
+                      className="mt-2 rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                    >
+                      Re-point
+                    </button>
+                  )}
+                </div>
+              )}
+              {isBlocklistAuthority && (
                 <>
                   <button
                     type="button"
@@ -1099,6 +1220,14 @@ function ShareClassDetail({
         </div>
       )}
 
+      {!isAdmin && (
+        <p className="mt-6 border-t border-slate-100 pt-5 text-xs text-slate-500">
+          The other share-class actions need an Admin (issuer authority with an
+          Admin record or an issuer permission).
+        </p>
+      )}
+
+      {isAdmin && (<>
       {/* Conversion target (set_convertible_to) */}
       <div className="mt-6 space-y-3 border-t border-slate-100 pt-5">
         <div className="flex items-center justify-between gap-4">
@@ -1322,6 +1451,32 @@ function ShareClassDetail({
           </p>
         )}
       </div>
+      </>)}
+
+      <ConfirmModal
+        open={confirmRepoint}
+        onClose={() => setConfirmRepoint(false)}
+        onConfirm={() => void repointHookRegistry()}
+        title="Re-point the KYC transfer hook"
+        kind="warning"
+        confirmLabel="Re-point"
+        requireReason={false}
+        busy={tx.isSending}
+        description={
+          <>
+            <p>
+              The hook of <strong>#{sc.classIndex}</strong> will check passports
+              in the platform registry{" "}
+              <span className="break-all font-mono text-xs">{platformRegistry}</span>.
+            </p>
+            <p className="mt-2">
+              Holders approved only in registry{" "}
+              <span className="break-all font-mono text-xs">{hookRegistry}</span>{" "}
+              stop passing the hook as soon as this lands.
+            </p>
+          </>
+        }
+      />
 
       <ConfirmModal
         open={confirmMint}

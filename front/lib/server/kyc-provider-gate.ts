@@ -12,7 +12,8 @@
 //
 // Usage (after verifySigned):
 //   await requireKycProvider(wallet);         // 403 unless wallet === registry.authority
-//   await requireAdminOrKycProvider(wallet);  // 403 unless admin/super admin OR provider
+//   const role = await requireAdminOrKycProvider(wallet);
+//     // 403 unless admin/super admin OR provider; role = "admin" | "kycProvider"
 //
 // Same stance as lib/server/admin-gate.ts: finalized reads on every request
 // (no positive cache), fail closed (503) when the chain cannot be consulted.
@@ -121,23 +122,29 @@ export async function requireKycProvider(wallet: string): Promise<void> {
   }
 }
 
+/** Which role let a wallet through requireAdminOrKycProvider. */
+export type AdminOrKycRole = "admin" | "kycProvider";
+
 /**
- * Require the wallet to be a platform admin / super admin OR the KYC provider.
- * For the passport-request triage routes: the queue is an admin surface, but
- * a rotated provider — the only key that can still decide those requests
- * on-chain — must not be locked out of stamping its own decisions. A 503 from
- * either check propagates (fail closed); only a clean 403 falls through to
- * the other role.
+ * Require the wallet to be a platform admin / super admin OR the KYC provider,
+ * and say which one passed. For the passport-request triage routes and the
+ * client-dossier routes the KYC provider works on (Talas 3.1 K6): the queue is
+ * an admin surface, but the provider — the only key that can decide those
+ * requests on-chain — must not need an Admin record to do its job. Routes
+ * that must stay narrower for a provider (never lifting a suspension or a
+ * rejection) branch on the returned role. A 503 from either check propagates
+ * (fail closed); only a clean 403 falls through to the other role.
  */
-export async function requireAdminOrKycProvider(wallet: string): Promise<void> {
+export async function requireAdminOrKycProvider(wallet: string): Promise<AdminOrKycRole> {
   try {
     await requireAdmin(wallet);
-    return;
+    return "admin";
   } catch (err) {
     if (!(err instanceof SiwsError) || err.status !== 403) throw err;
   }
   try {
     await requireKycProvider(wallet);
+    return "kycProvider";
   } catch (err) {
     if (err instanceof SiwsError && err.status === 403) {
       throw new SiwsError(403, "Admin or KYC provider privileges required");

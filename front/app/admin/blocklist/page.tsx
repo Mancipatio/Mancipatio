@@ -24,6 +24,7 @@ import { detectNetwork, explorerAddressUrl } from "@/lib/network";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
+import { assertBlocklistAuthority } from "@/lib/operational-authority";
 
 export default function BlocklistPage() {
   return (
@@ -39,10 +40,14 @@ export default function BlocklistPage() {
           On-chain sender blocklist enforced by the transfer_hook program on
           every Token-2022 transfer. A wallet on this list cannot move any
           Manci token — add entries for sanctions hits and court orders,
-          remove them once the restriction lifts.
+          remove them once the restriction lifts. The hook checks the sender
+          only; passport issuance reads this list so a blocked wallet is not
+          given a passport to receive KYC-gated units.
         </p>
       </div>
-      <RequireRole role="admin">
+      {/* Admins view; only the blocklist authority (with or without an Admin
+          record — Talas 3.1 K8) changes entries. */}
+      <RequireRole anyOf={["admin", "blocklistAuthority"]}>
         <BlocklistOps />
       </RequireRole>
     </section>
@@ -99,6 +104,8 @@ function BlocklistOps() {
     );
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
+      // The live (finalized) blocklist authority only — never a stale page.
+      await assertBlocklistAuthority(client.runtime.rpc, signer);
       const ix =
         kind === "add_to_blocklist"
           ? await getAddToBlocklistInstructionAsync({
@@ -230,8 +237,10 @@ function BlocklistOps() {
                 alreadyBlocked ||
                 authority == null ||
                 !wallet ||
+                !isAuthority ||
                 tx.isSending
               }
+              title={isAuthority ? undefined : "Blocklist authority only"}
               onClick={() => setConfirmAdd(true)}
               className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
             >
@@ -290,13 +299,19 @@ function BlocklistOps() {
                       {r.pda.slice(0, 6)}…{r.pda.slice(-4)}
                     </td>
                     <td className="px-4 py-3 text-right text-xs">
-                      <button
-                        type="button"
-                        onClick={() => setConfirmRemove(r)}
-                        className="text-red-700 underline-offset-2 hover:underline"
-                      >
-                        Remove
-                      </button>
+                      {isAuthority ? (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmRemove(r)}
+                          className="text-red-700 underline-offset-2 hover:underline"
+                        >
+                          Remove
+                        </button>
+                      ) : (
+                        <span className="text-slate-400" title="Only the blocklist authority can remove entries">
+                          BA only
+                        </span>
+                      )}
                     </td>
                   </tr>
                 ))}

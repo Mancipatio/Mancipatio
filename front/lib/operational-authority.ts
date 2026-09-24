@@ -19,6 +19,7 @@ import {
   getAcceptBlocklistAuthorityInstructionAsync,
 } from "@/lib/generated/transfer_hook";
 import type { fetchMintTokenProgram } from "@/lib/transaction-builders";
+import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
 export type OperationalAuthorityKind = "platform" | "blocklist";
 type Rpc = Parameters<typeof fetchMintTokenProgram>[0];
 export type OperationalAuthorityState = {
@@ -83,14 +84,43 @@ export async function loadOperationalAuthority(
     proposed: transfer.exists ? transfer.data.newAuthority : null,
   };
 }
+/**
+ * Refuses unless `signer` is the live blocklist authority (Talas 3.1 K7/K8):
+ * the BlocklistAuthority singleton read at `finalized`, owner-checked. Every
+ * blocklist change and hook-mode change calls it before building, so a wallet
+ * that merely looks like the authority in the UI (a confirmed-but-not-
+ * finalized rotation, a stale page) never signs a transaction the hook must
+ * reject. Returns the authority.
+ */
+export async function assertBlocklistAuthority(
+  rpc: Rpc,
+  signer: TransactionSigner | Address,
+): Promise<Address> {
+  const [pda] = await findBlocklistAuthorityPda();
+  const current = await fetchMaybeBlocklistAuthority(rpc, pda, {
+    commitment: "finalized",
+    abortSignal: AbortSignal.timeout(10_000),
+  });
+  if (!current.exists)
+    throw new Error("The blocklist authority is not initialized on this network");
+  if (current.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS)
+    throw new Error("Unexpected blocklist authority owner");
+  const wallet = typeof signer === "string" ? signer : signer.address;
+  if (current.data.authority !== wallet)
+    throw new Error(`Connect the blocklist authority (current: ${current.data.authority})`);
+  return current.data.authority;
+}
 export async function buildProposeOperationalAuthority(
   rpc: Rpc,
   kind: OperationalAuthorityKind,
   signer: TransactionSigner,
   newAuthority: string,
 ) {
-  const next = address(newAuthority),
-    state = await loadOperationalAuthority(rpc, kind);
+  const next = address(newAuthority);
+  // validate_new_authority rejects Pubkey::default(); refuse before signing.
+  if (next === DEFAULT_ADDRESS)
+    throw new Error("The default 1111…1111 address cannot be an authority");
+  const state = await loadOperationalAuthority(rpc, kind);
   if (!state || state.current !== signer.address)
     throw new Error(
       "Only the current operational authority can propose this change",
@@ -111,6 +141,13 @@ export async function buildProposeOperationalAuthority(
         newAuthority: next,
       });
 }
+/**
+ * Appended when a builder's finalized re-read does not (yet) show the
+ * proposal /account/roles listed at `confirmed` (~15–30 s behind).
+ */
+export const PROPOSAL_NOT_FINALIZED_HINT =
+  "a new proposal may not be finalized yet — retry in about 30 s";
+
 export async function buildAcceptOperationalAuthority(
   rpc: Rpc,
   kind: OperationalAuthorityKind,
@@ -119,7 +156,7 @@ export async function buildAcceptOperationalAuthority(
   const state = await loadOperationalAuthority(rpc, kind);
   if (!state?.proposed || state.proposed !== signer.address)
     throw new Error(
-      "Connect the proposed new authority wallet to accept this change",
+      `Connect the proposed new authority wallet to accept this change (${PROPOSAL_NOT_FINALIZED_HINT})`,
     );
   if (kind === "blocklist")
     return getAcceptBlocklistAuthorityInstructionAsync({

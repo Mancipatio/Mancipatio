@@ -45,6 +45,8 @@ const state = vi.hoisted(() => ({
   /** Reads of this table fail (null = none). */
   failSelectTable: null as string | null,
   passport: "none" as "none" | "live" | "error",
+  /** The live KycRegistry.authority (Talas 3.1 K6 provider), or none. */
+  kycProvider: null as string | null,
   maintenance: false,
   rpc: (() => ({ data: null, error: null })) as (fn: string, args: Record<string, unknown>) => {
     data: unknown;
@@ -72,6 +74,44 @@ vi.mock("@/lib/server/admin-gate", async () => {
     requireSuperAdmin: vi.fn(async (wallet: string) => {
       if (!state.superAdmins.has(wallet)) throw new SiwsError(403, "Super admin privileges required");
     }),
+  };
+});
+
+// Talas 3.1 K6: doc-url is requireAdminOrKycProvider. The admin-gate mock
+// above refuses non-admins with a clean 403, so the REAL provider fallback
+// runs — against these lower-level mocks, never a real RPC.
+vi.mock("@/lib/server/rpc", () => ({
+  getServerRpc: () =>
+    new Proxy({}, {
+      get: () => {
+        throw new Error("tests must not reach a real RPC");
+      },
+    }),
+}));
+vi.mock("@/lib/network-identity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/network-identity")>()),
+  createNetworkVerifier: () => async () => {},
+}));
+vi.mock("@/lib/generated/asset_registry", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/generated/asset_registry")>();
+  return {
+    ...real,
+    findPlatformPda: async () => ["platform-pda", 255],
+    fetchMaybePlatform: async () => ({
+      exists: true,
+      programAddress: real.ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: { admin: "SuperWa11etSuperWa11etSuperWa11et1" },
+    }),
+  };
+});
+vi.mock("@/lib/kyc-authority", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/kyc-authority")>();
+  const registry = () =>
+    state.kycProvider ? { address: "registry-pda", registry: { authority: state.kycProvider } } : null;
+  return {
+    ...real,
+    listKycRegistries: async () => (registry() ? [registry()] : []),
+    fetchKycRegistryAt: async () => registry(),
   };
 });
 
@@ -281,6 +321,7 @@ vi.mock("@/lib/supabase-server", () => ({
 const ADMIN = "AdminWa11etAdminWa11etAdminWa11et1";
 const SUPER = "SuperWa11etSuperWa11etSuperWa11et1";
 const STRANGER = "StrangerWa11etStrangerWa11etStra1";
+const PROVIDER = "ProviderWa11etProviderWa11etProv1";
 const CLIENT_WALLET = "C1ientWa11etC1ientWa11etC1ientWa1";
 const CLIENT_ID = "c0000000-0000-4000-8000-000000000003";
 const DOC_PATH = `clients/${CLIENT_ID}/passport/aaaa-passport.pdf`;
@@ -318,6 +359,7 @@ beforeEach(() => {
   state.onInsert = null;
   state.failSelectTable = null;
   state.passport = "none";
+  state.kycProvider = PROVIDER;
   state.maintenance = false;
   state.nextId = 1;
   state.rpc = () => ({ data: null, error: null });
@@ -388,6 +430,27 @@ describe("KYC document view (/api/clients/doc-url)", () => {
     expect(opsOf("sign", "insert")).toEqual([]);
   });
 
+  it("serves the KYC provider (no Admin record) and logs the view under its wallet", async () => {
+    const { POST } = await import("@/app/api/clients/doc-url/route");
+    state.wallet = PROVIDER;
+    state.params = { document_id: 11 };
+    const { status, body } = await post(POST);
+    expect(status).toBe(200);
+    expect(String(body.data?.url)).toContain("storage.test");
+    expect(auditRows()).toEqual([
+      expect.objectContaining({ ix_name: "kyc_document_view", actor_wallet: PROVIDER }),
+    ]);
+  });
+
+  it("refuses a former provider once the registry rotated away", async () => {
+    const { POST } = await import("@/app/api/clients/doc-url/route");
+    state.kycProvider = STRANGER;
+    state.wallet = PROVIDER;
+    state.params = { document_id: 11 };
+    expect((await post(POST)).status).toBe(403);
+    expect(opsOf("sign", "insert")).toEqual([]);
+  });
+
   it("gives a legacy file outside the private bucket no link (404), and logs no view", async () => {
     const { POST } = await import("@/app/api/clients/doc-url/route");
     state.params = { document_id: 12 };
@@ -436,6 +499,14 @@ describe("GDPR export (/api/clients/export)", () => {
   it("is admin-only and reads nothing for anyone else", async () => {
     const { POST } = await import("@/app/api/clients/export/route");
     state.wallet = STRANGER;
+    state.params = { client_id: CLIENT_ID };
+    expect((await post(POST)).status).toBe(403);
+    expect(state.calls).toEqual([]);
+  });
+
+  it("stays 403 for the KYC provider (Talas 3.1 K6: export is not widened)", async () => {
+    const { POST } = await import("@/app/api/clients/export/route");
+    state.wallet = PROVIDER;
     state.params = { client_id: CLIENT_ID };
     expect((await post(POST)).status).toBe(403);
     expect(state.calls).toEqual([]);
