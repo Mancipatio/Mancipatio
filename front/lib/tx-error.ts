@@ -55,7 +55,7 @@ import {
 import { features } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { MaintenanceModeError } from "@/lib/maintenance";
-import { recentWalletChange } from "@/lib/wallet-changes";
+import { takeWalletChange } from "@/lib/wallet-changes";
 
 // Pull a human-readable cause out of a @solana/react-hooks send() error.
 // Those errors wrap the real RPC simulation logs inside `transactionPlanResult`
@@ -333,8 +333,22 @@ function customErrorHint(text: string): string | null {
 // carries the one that applies as its `cause`.
 const TRANSACTION_ERROR_FIRST = 7_050_000;
 const TRANSACTION_ERROR_LAST = 7_050_999;
+/** The Agave TransactionError name of each kit code 7050000 + i (kit 5.5.1). */
+const TRANSACTION_ERROR_NAMES: readonly string[] = [
+  "Unknown", "AccountInUse", "AccountLoadedTwice", "AccountNotFound", "ProgramAccountNotFound",
+  "InsufficientFundsForFee", "InvalidAccountForFee", "AlreadyProcessed", "BlockhashNotFound",
+  "CallChainTooDeep", "MissingSignatureForFee", "InvalidAccountIndex", "SignatureFailure",
+  "InvalidProgramForExecution", "SanitizeFailure", "ClusterMaintenance", "AccountBorrowOutstanding",
+  "WouldExceedMaxBlockCostLimit", "UnsupportedVersion", "InvalidWritableAccount",
+  "WouldExceedMaxAccountCostLimit", "WouldExceedAccountDataBlockLimit", "TooManyAccountLocks",
+  "AddressLookupTableNotFound", "InvalidAddressLookupTableOwner", "InvalidAddressLookupTableData",
+  "InvalidAddressLookupTableIndex", "InvalidRentPayingAccount", "WouldExceedMaxVoteCostLimit",
+  "WouldExceedAccountDataTotalLimit", "DuplicateInstruction", "InsufficientFundsForRent",
+  "MaxLoadedAccountsDataSizeExceeded", "InvalidLoadedAccountsDataSizeLimit", "ResanitizationNeeded",
+  "ProgramExecutionTemporarilyRestricted", "UnbalancedTransaction",
+];
 
-function networkRefusalText(code: number, network: string): string {
+function networkRefusalText(code: number, network: string, errorName: unknown): string {
   switch (code) {
     case SOLANA_ERROR__TRANSACTION_ERROR__BLOCKHASH_NOT_FOUND:
       return `The network did not recognise the transaction's blockhash (BlockhashNotFound): it expired while the wallet was open, or it came from another network than ${network}. Check the wallet's network and try again.`;
@@ -349,19 +363,24 @@ function networkRefusalText(code: number, network: string): string {
     case SOLANA_ERROR__TRANSACTION_ERROR__SIGNATURE_FAILURE:
       return "The transaction's signature does not match its contents (SignatureFailure).";
     case SOLANA_ERROR__TRANSACTION_ERROR__MAX_LOADED_ACCOUNTS_DATA_SIZE_EXCEEDED:
-    case SOLANA_ERROR__TRANSACTION_ERROR__INVALID_LOADED_ACCOUNTS_DATA_SIZE_LIMIT:
       return "The transaction's loaded-account data limit is too small for the accounts it uses (MaxLoadedAccountsDataSizeExceeded), usually a limit the wallet added.";
+    case SOLANA_ERROR__TRANSACTION_ERROR__INVALID_LOADED_ACCOUNTS_DATA_SIZE_LIMIT:
+      return "The transaction sets a loaded-account data limit of zero or an invalid one (InvalidLoadedAccountsDataSizeLimit), usually a limit the wallet added.";
     case SOLANA_ERROR__TRANSACTION_ERROR__ALREADY_PROCESSED:
       return "This exact transaction was already processed (AlreadyProcessed); reload to see its result.";
-    default:
-      return `The network refused the transaction before running it (transaction error #${code}).`;
+    default: {
+      const name =
+        (typeof errorName === "string" && errorName) || TRANSACTION_ERROR_NAMES[code - TRANSACTION_ERROR_FIRST];
+      return `The network refused the transaction before running it (${name ?? `transaction error #${code}`}).`;
+    }
   }
 }
 
 /**
  * The network's pre-execution refusal anywhere in the cause chain, worded for
- * the user, with what the wallet changed while signing when that is known
- * (lib/wallet-changes). Null when the failure is anything else.
+ * the user, with what the wallet changed while signing it when that is known
+ * (lib/wallet-changes; the note is consumed here). Null when the failure is
+ * anything else.
  */
 export function explainNetworkRefusal(err: unknown): string | null {
   const queue: unknown[] = [err];
@@ -373,8 +392,9 @@ export function explainNetworkRefusal(err: unknown): string | null {
     if (isSolanaError(cursor)) {
       const code = cursor.context.__code;
       if (code >= TRANSACTION_ERROR_FIRST && code <= TRANSACTION_ERROR_LAST) {
-        const text = networkRefusalText(code, detectNetwork());
-        const change = recentWalletChange();
+        const errorName = (cursor.context as { errorName?: unknown }).errorName;
+        const text = networkRefusalText(code, detectNetwork(), errorName);
+        const change = takeWalletChange();
         return change ? `${text} Note: ${change}.` : text;
       }
     }

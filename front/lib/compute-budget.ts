@@ -122,9 +122,10 @@ export const TRANSACTION_SIZE_LIMIT = 1232;
 
 /**
  * What the send path adds to a transaction after the app built it: the
- * verified client sets SetComputeUnitPrice (lib/priority-fee) and
- * `@solana/client` simulates and appends a SetComputeUnitLimit (about 40 B
- * with the Compute Budget program key). Callers that pack instructions
+ * verified client sets SetComputeUnitPrice (lib/priority-fee) and a
+ * SetComputeUnitLimit that `@solana/client` re-estimates by simulation, both
+ * in front of the app's instructions (about 40 B with the Compute Budget
+ * program key). Callers that pack instructions
  * measure every candidate with these placeholders included, so the prepared
  * transaction still fits.
  */

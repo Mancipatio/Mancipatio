@@ -76,6 +76,8 @@ export function guardWalletSession(
     } } : {}),
     ...(source.sendTransaction ? { async sendTransaction(...args: Parameters<NonNullable<WalletSession["sendTransaction"]>>) {
       assertCurrent();
+      // The wallet signs and sends itself: nothing to compare, no stale note.
+      clearWalletChange();
       const result = await source.sendTransaction!.apply(source, args);
       assertCurrent();
       return result;

@@ -7,7 +7,10 @@
 // it before execution with no program logs, and the error alone does not
 // say why. The guarded wallet session (lib/guarded-wallet-connectors) keeps
 // a one-line description of the latest change here, logs it to the console,
-// and lib/tx-error adds it to the explanation of such a refusal.
+// and lib/tx-error adds it to the explanation of such a refusal (once).
+// The note is cleared when a signing or a verified send starts and when a
+// verified send succeeds, so it describes the latest signing only; two sends
+// signed at the same moment can still share it.
 import { getCompiledTransactionMessageDecoder, type ReadonlyUint8Array } from "@solana/kit";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 
@@ -91,4 +94,11 @@ export function noteWalletChange(text: string, now: number = Date.now()): void {
 /** The change noted for the latest signing request, if it is recent. */
 export function recentWalletChange(now: number = Date.now()): string | null {
   return latest && now - latest.at <= WALLET_CHANGE_TTL_MS ? latest.text : null;
+}
+
+/** recentWalletChange, then cleared: a note explains one failure at most. */
+export function takeWalletChange(now: number = Date.now()): string | null {
+  const text = recentWalletChange(now);
+  latest = null;
+  return text;
 }

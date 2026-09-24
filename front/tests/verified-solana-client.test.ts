@@ -219,11 +219,12 @@ describe("prepareAndSend puts the compute unit limit first", () => {
     expect(a.computeUnitPrice).toBe(BigInt(5_000));
   });
 
-  it("adds no limit without a price (too large) or on prepare, which does not estimate", async () => {
+  it("puts the limit first without a price too (same bytes), but not on prepare, which does not estimate", async () => {
     const f = fixture();
     await f.guarded.transaction.prepareAndSend(request({ instructions: [ix(1_200)] }));
     await f.guarded.transaction.prepare(request());
-    expect((f.prepareAndSend.mock.calls[0][0] as TransactionPrepareAndSendRequest).computeUnitLimit).toBeUndefined();
+    const tooLarge = f.prepareAndSend.mock.calls[0][0] as TransactionPrepareAndSendRequest;
+    expect([tooLarge.computeUnitPrice, tooLarge.computeUnitLimit]).toEqual([undefined, 1_400_000]);
     expect(f.prepare.mock.calls[0][0].computeUnitLimit).toBeUndefined();
   });
 });

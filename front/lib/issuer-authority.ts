@@ -84,9 +84,9 @@ export const ISSUER_RECOVERY_WINDOW_SECONDS = 1_209_600;
  */
 export const NEW_AUTHORITY_OFFSET = 72;
 // What gets added to a transaction AFTER it is bundled
-// (SEND_OVERHEAD_INSTRUCTIONS): `useSendTransaction` prepares it
-// (`@solana/client` simulates and appends a SetComputeUnitLimit) and the
-// verified client adds SetComputeUnitPrice (lib/priority-fee).
+// (SEND_OVERHEAD_INSTRUCTIONS): the verified client puts SetComputeUnitLimit
+// (re-estimated by `@solana/client` simulation) and SetComputeUnitPrice
+// (lib/priority-fee) in front of it when `useSendTransaction` sends.
 // `bundleWithSync` measures every candidate with these placeholders included
 // so the prepared transaction still fits.
 /** Bytes kept free beyond the compute-budget placeholders (other wallet additions). */

@@ -134,6 +134,19 @@ describe("the guarded session records what the wallet changed", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^\[wallet\] the wallet changed its instructions/));
   });
 
+  it("clears an older note when the wallet signs and sends itself", async () => {
+    noteWalletChange("stale");
+    const source: WalletSession = {
+      account: { address: WALLET, publicKey: new Uint8Array(32) },
+      connector: { id: "fixture", name: "Fixture" },
+      disconnect: vi.fn(async () => {}),
+      sendTransaction: vi.fn(async () => "signature" as never),
+    };
+    const guarded: WalletSession = guardWalletSession(source, () => guarded);
+    await guarded.sendTransaction!(tx([app]) as never);
+    expect(recentWalletChange()).toBeNull();
+  });
+
   it("clears an older note when the wallet signs unchanged", async () => {
     noteWalletChange("stale");
     const handed = tx([app]);
@@ -172,13 +185,28 @@ describe("a pre-execution refusal by the network", () => {
     );
   });
 
-  it("falls back to the code for a refusal it has no words for", () => {
+  it("names a refusal it has no words for, including variants newer than kit", () => {
     expect(explainNetworkRefusal(preflightFailure("AccountInUse"))).toBe(
-      "The network refused the transaction before running it (transaction error #7050001).",
+      "The network refused the transaction before running it (AccountInUse).",
+    );
+    expect(explainNetworkRefusal(preflightFailure("SomeFutureRefusal"))).toBe(
+      "The network refused the transaction before running it (SomeFutureRefusal).",
     );
   });
 
-  it("leaves program failures (with logs) to the existing explanation", () => {
+  it("gives InvalidLoadedAccountsDataSizeLimit its own wording", () => {
+    expect(explainNetworkRefusal(preflightFailure("InvalidLoadedAccountsDataSizeLimit"))).toMatch(
+      /limit of zero or an invalid one \(InvalidLoadedAccountsDataSizeLimit\)/,
+    );
+  });
+
+  it("a note explains one failure only", () => {
+    noteWalletChange("the wallet replaced its blockhash before signing");
+    expect(explainNetworkRefusal(preflightFailure("BlockhashNotFound"))).toMatch(/Note: the wallet replaced its blockhash before signing\.$/);
+    expect(explainNetworkRefusal(preflightFailure("BlockhashNotFound"))).not.toMatch(/Note:/);
+  });
+
+  it("an InstructionError (a program failure) is not a network refusal", () => {
     const programFailure = getSolanaErrorFromJsonRpcError({
       code: -32002,
       message: "Transaction simulation failed",
@@ -186,5 +214,14 @@ describe("a pre-execution refusal by the network", () => {
     });
     expect(explainNetworkRefusal(programFailure)).toBeNull();
     expect(explainSendError(programFailure)).toMatch(/Error: nope/);
+  });
+
+  it("program logs, when there are any, win over a refusal code", () => {
+    const withLogs = getSolanaErrorFromJsonRpcError({
+      code: -32002,
+      message: "Transaction simulation failed",
+      data: { accounts: null, err: "AccountInUse", logs: ["Program log: Error: the real reason"], unitsConsumed: 0 },
+    });
+    expect(explainSendError(withLogs)).toMatch(/Error: the real reason/);
   });
 });

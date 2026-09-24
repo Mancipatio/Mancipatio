@@ -28,7 +28,9 @@ export function walletChain(network: Network): IdentifierString {
 /**
  * `overrides` for autoDiscover(): every wallet that lists the build's chain
  * gets it as its `defaultChain`. A wallet that does not list it (a local
- * validator, which wallets rarely declare) keeps the SDK default.
+ * validator, which wallets rarely declare) keeps the SDK default. The list is
+ * the wallet's own `chains`, read once when the connectors are created; a
+ * wallet that fills it in later keeps the SDK default too.
  */
 export function walletConnectorOverrides(network: Network) {
   const chain = walletChain(network);
