@@ -1,0 +1,391 @@
+{
+  "schema": "mancipatio-pm-golden-vectors-v1",
+  "generator": "program/scripts/fixtures/pm-vectors.mjs",
+  "pmVersion": "0.8.0",
+  "pmPackageJsonSha256": "83dd467de8324eb1bc0d7eea74e13851e6ebdb20a43213297199f0b9aa6ebb80",
+  "constants": {
+    "programAddress": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+    "accountHeaderLength": 96,
+    "reallocLimit": 10240
+  },
+  "keys": {
+    "AUTHORITY": "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+    "BUFFER": "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+    "METADATA": "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+    "PROGRAM_DATA": "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+    "DESTINATION": "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc",
+    "NEW_AUTHORITY": "29d2S7vB453rNYFdR5Ycwt7y9haRT5fwVwL9zTmBhfV2",
+    "REGISTRY": "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+    "HOOK": "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+  },
+  "dataB64": "AwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dzj6vH4/w==",
+  "canonicalIdlPdas": {
+    "asset_registry": "FwjL6UVuqGcSA5ywbbCucJyzwdySqyLgvsfU9NZWVUGc",
+    "transfer_hook": "DGWC8qULMiJemStSJZAxV6kRCFCid6uoHo7rRHaS9ceA"
+  },
+  "instructions": {
+    "write": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ]
+      ],
+      "dataB64": "AAgHAAADChEYHyYtNDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fj/"
+    },
+    "writeFromSource": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          0
+        ]
+      ],
+      "dataB64": "AAAAAAA="
+    },
+    "initializeCanonicalNoData": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ]
+      ],
+      "dataB64": "AWlkbAAAAAAAAAAAAAAAAAABAgEA"
+    },
+    "initializeWithData": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ],
+        [
+          "11111111111111111111111111111111",
+          0
+        ]
+      ],
+      "dataB64": "AWlkbAAAAAAAAAAAAAAAAAABAgEAAwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dzj6vH4/w=="
+    },
+    "setAuthorityBuffer": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          1
+        ],
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          2
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ]
+      ],
+      "dataB64": "AgEHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBw=="
+    },
+    "setAuthorityCanonical": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ]
+      ],
+      "dataB64": "AgEREREREREREREREREREREREREREREREREREREREREREQ=="
+    },
+    "setAuthorityNone": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ]
+      ],
+      "dataB64": "AgA="
+    },
+    "setDataFromBuffer": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          1
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ]
+      ],
+      "dataB64": "AwECAQA="
+    },
+    "setDataInline": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ]
+      ],
+      "dataB64": "AwECAQADChEYHyYtNDtCSVBXXmVsc3qBiI+WnaSrsrnAx87V3OPq8fj/"
+    },
+    "setImmutable": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ]
+      ],
+      "dataB64": "BA=="
+    },
+    "trim": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ],
+        [
+          "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc",
+          1
+        ],
+        [
+          "SysvarRent111111111111111111111111111111111",
+          0
+        ]
+      ],
+      "dataB64": "BQ=="
+    },
+    "closeBuffer": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ],
+        [
+          "21nS9Wz9sUTQ6MkcYUtnN8aSfPA26xJJP7zqshfzCzqc",
+          1
+        ]
+      ],
+      "dataB64": "Bg=="
+    },
+    "allocateCanonical": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ],
+        [
+          "11111111111111111111111111111111",
+          0
+        ]
+      ],
+      "dataB64": "B2lkbAAAAAAAAAAAAAAAAAA="
+    },
+    "allocateBuffer": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          1
+        ],
+        [
+          "cGfHiC6Kgg3FpFZvgwGcswsCRtp4aBP2fzuXRQPizuN",
+          2
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ],
+        [
+          "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+          0
+        ],
+        [
+          "11111111111111111111111111111111",
+          0
+        ]
+      ],
+      "dataB64": "Bw=="
+    },
+    "extendCanonical": {
+      "program": "ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S",
+      "accounts": [
+        [
+          "k7FaK87WHGVXzkaoHb7CdVPgkKDQhZ29VLDeBVbDfYn",
+          1
+        ],
+        [
+          "US517G5965aydkZ46HS38QLi7UQiSojurfbQfKCELFx",
+          2
+        ],
+        [
+          "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS",
+          0
+        ],
+        [
+          "swqrv48gsrwpBFbftEwnP2vB4jckpvfGJfXkwaniLCC",
+          0
+        ]
+      ],
+      "dataB64": "CAAo"
+    }
+  },
+  "accounts": {
+    "metadata": "AtSXB8eRpAFh+zHlK1XwCwJ63c1ZwnfEwf6nYC3joFrLAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAWlkbAAAAAAAAAAAAAAAAAABAgEAJQAAAAAAAAAAAwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dzj6vH4/w==",
+    "metadataWithAuthority": "AuF9yO2P8M94uBa93PxT+AVLnClxsVsAo3lbhqBRFTDoEREREREREREREREREREREREREREREREREREREREREREAAWlkbAAAAAAAAAAAAAAAAAABAgEAJQAAAAAAAAAAAwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dzj6vH4/w==",
+    "buffer": "AQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwoRGB8mLTQ7QklQV15lbHN6gYiPlp2kq7K5wMfO1dzj6vH4/w=="
+  }
+}
