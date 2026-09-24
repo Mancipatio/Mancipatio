@@ -546,6 +546,35 @@ export async function applyClientStatus(
  * never overwritten. A KYC provider reaches this through review-requirement
  * and upload, and must never lift a terminal status (OD1).
  */
+/**
+ * The requirements that still stand between a client and `verified`: every
+ * requested document must be approved before the whole dossier is (product
+ * rule, 25.9.2026). `requested`, `submitted` and `rejected` all block; a
+ * client with no requirements has nothing to approve first.
+ */
+export async function unapprovedRequirements(
+  sb: SupabaseClient,
+  clientId: string,
+): Promise<{ id: number; label: string; status: string }[]> {
+  const { data, error } = await sb
+    .from("kyc_requirements")
+    .select("id, label, doc_kind, status")
+    .eq("client_id", clientId)
+    .in("status", ["requested", "submitted", "rejected"]);
+  if (error) throw new SiwsError(500, "Database read failed");
+  return ((data ?? []) as { id: number; label?: string | null; doc_kind?: string | null; status: string }[]).map((r) => ({
+    id: r.id,
+    label: r.label || r.doc_kind || `requirement #${r.id}`,
+    status: r.status,
+  }));
+}
+
+/** 409 text for a verification refused by unapprovedRequirements. */
+export function documentsFirstMessage(open: { label: string; status: string }[]): string {
+  const list = open.map((r) => `${r.label} (${r.status})`).join(", ");
+  return `Approve every uploaded document before verifying the client. Still open: ${list}.`;
+}
+
 export async function recomputeKycFromRequirements(
   sb: SupabaseClient,
   clientId: string,

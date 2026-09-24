@@ -881,6 +881,17 @@ function ClientDetail({ id }: { id: string }) {
   const lockedProps = statusLocked
     ? { disabled: true, title: ADMIN_ONLY_TERMINAL }
     : {};
+  // Documents first, then the dossier (the status route refuses with 409 too).
+  const openRequirements = requirements.filter((r) => r.status !== "approved");
+  const documentsFirst =
+    openRequirements.length > 0
+      ? `Approve every uploaded document first (still open: ${openRequirements.map((r) => r.label || r.doc_kind).join(", ")})`
+      : null;
+  const verifyProps = statusLocked
+    ? lockedProps
+    : documentsFirst
+      ? { disabled: true, title: documentsFirst }
+      : {};
 
   return (
     <div className="mt-4">
@@ -929,7 +940,7 @@ function ClientDetail({ id }: { id: string }) {
             <>
               <button
                 type="button"
-                {...lockedProps}
+                {...verifyProps}
                 onClick={() => setConfirm("approve")}
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
@@ -991,6 +1002,9 @@ function ClientDetail({ id }: { id: string }) {
 
         {statusLocked && (
           <p className="mt-3 text-xs text-slate-600">{ADMIN_ONLY_TERMINAL}</p>
+        )}
+        {!statusLocked && documentsFirst && client.kyc_status !== "verified" && client.kyc_status !== "suspended" && (
+          <p className="mt-3 text-xs text-slate-600">{documentsFirst}.</p>
         )}
 
         {/* Terms of Service acceptance */}

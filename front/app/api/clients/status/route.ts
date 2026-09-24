@@ -14,6 +14,9 @@
 // "[KYC provider] status → X" kyc-event note (best-effort; that marker is
 // reserved for this route, see /api/clients/note).
 //
+// Verifying needs every KYC requirement approved first (409 otherwise): the
+// uploaded documents are reviewed one by one, then the dossier.
+//
 // When a reason is supplied it is recorded on the client timeline as a
 // kyc-event note (system note for suspensions), matching the pre-P1 UX where
 // the ConfirmModal reason became an addNote() call. The verdict is also
@@ -32,12 +35,14 @@ import {
   LEAVE_TERMINAL_ADMIN_ONLY,
   applyClientStatus,
   assertUuid,
+  documentsFirstMessage,
   fetchClientOr404,
   insertNote,
   isTerminalKycStatus,
   oneOf,
   optString,
   type ServerKycStatus,
+  unapprovedRequirements,
 } from "../_helpers";
 
 /** Short, plain verdict emails — mirrors the /api/applications/review style. */
@@ -139,6 +144,12 @@ export async function POST(request: Request) {
     // stop for a suspension that lands in between.
     if (provider && isTerminalKycStatus(client.kyc_status)) {
       throw new SiwsError(403, LEAVE_TERMINAL_ADMIN_ONLY);
+    }
+    // Documents first, then the dossier: nothing is verified while a
+    // requested document is still open, submitted-but-unreviewed or rejected.
+    if (kycStatus === "verified") {
+      const open = await unapprovedRequirements(sb, id);
+      if (open.length) throw new SiwsError(409, documentsFirstMessage(open));
     }
     let audit: ServerAuditInput | null = null;
     if (provider) {

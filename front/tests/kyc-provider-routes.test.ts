@@ -216,7 +216,7 @@ beforeEach(() => {
     ],
     client_notes: [],
     client_documents: [{ id: 11, client_id: CLIENT_ID, kind: "passport", storage_path: `clients/${CLIENT_ID}/p.pdf` }],
-    kyc_requirements: [{ id: 7, client_id: CLIENT_ID, status: "submitted", doc_kind: "passport" }],
+    kyc_requirements: [{ id: 7, client_id: CLIENT_ID, status: "approved", doc_kind: "passport", label: "Passport" }],
     client_verification_details: [],
     client_raise_limits: [],
     audit_events: [],
@@ -549,5 +549,46 @@ describe("/api/compliance/open-wallets (OD2, OD14)", () => {
     expect((await call("compliance/open-wallets", { wallets: [W_OPEN, 42] })).status).toBe(400);
     // Exactly 200 is fine (duplicates collapse).
     expect((await call("compliance/open-wallets", { wallets: many.slice(0, 200) })).status).toBe(200);
+  });
+});
+
+// Product rule (25.9.2026): the uploaded documents are approved one by one,
+// then the whole dossier. /api/clients/status refuses `verified` while any
+// requirement is requested, submitted or rejected — for the Admin and the
+// KYC provider alike — before it writes anything.
+describe("documents first, then the dossier", () => {
+  for (const open of ["requested", "submitted", "rejected"]) {
+    it(`verified is refused (409) while a requirement is ${open}, for the Admin and the provider`, async () => {
+      state.tables.kyc_requirements[0].status = open;
+      const auditBefore = state.tables.audit_events.length;
+      for (const signer of [ADMIN, PROVIDER]) {
+        state.signer = signer;
+        const res = await call("clients/status", { id: CLIENT_ID, kyc_status: "verified" });
+        expect(res.status).toBe(409);
+        expect(res.body.error).toBe(`Approve every uploaded document before verifying the client. Still open: Passport (${open}).`);
+      }
+      expect(client().kyc_status).toBe("pending");
+      expect(state.tables.audit_events).toHaveLength(auditBefore);
+    });
+  }
+
+  it("the other decisions are not held back by open documents", async () => {
+    state.tables.kyc_requirements[0].status = "submitted";
+    state.signer = ADMIN;
+    for (const next of ["more_info", "rejected", "suspended"]) {
+      client().kyc_status = "pending";
+      expect((await call("clients/status", { id: CLIENT_ID, kyc_status: next })).status).toBe(200);
+      expect(client().kyc_status).toBe(next);
+    }
+  });
+
+  it("verified goes through once every requirement is approved, or when none was requested", async () => {
+    state.signer = ADMIN;
+    state.tables.kyc_requirements[0].status = "approved";
+    expect((await call("clients/status", { id: CLIENT_ID, kyc_status: "verified" })).status).toBe(200);
+    client().kyc_status = "pending";
+    state.tables.kyc_requirements.length = 0;
+    expect((await call("clients/status", { id: CLIENT_ID, kyc_status: "verified" })).status).toBe(200);
+    expect(client().kyc_status).toBe("verified");
   });
 });
