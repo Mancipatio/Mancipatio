@@ -819,6 +819,7 @@ export async function planBootstrap(
         pre(`blocklist.authority=${map.blocklistAuthority}`, (s) => s.blocklist?.authority === map.blocklistAuthority),
         pre(`kycRegistry.authority=${map.kyc.authority}`, (s) => s.registry?.authority === map.kyc.authority),
       );
+      if (!h.whilePaused) labels.push(pre("platform.pauseFlags=0x00", (s) => s.platform?.pauseFlags === 0));
       plan.steps.push({
         id: "S7",
         title: `SetAuthority → vault ${V} for both ProgramData accounts (one transaction)`,
