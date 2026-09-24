@@ -17,7 +17,7 @@ import {
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
 import { getServerRpc } from "@/lib/server/rpc";
 import { SiwsError } from "@/lib/server/siws";
-import { TOKEN_2022_PROGRAM, TOKEN_PROGRAM, resolveSubjectSpv } from "@/lib/server/sale-capacity";
+import { resolveSubjectSpv } from "@/lib/server/sale-capacity";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork } from "@/lib/network";
 
@@ -80,22 +80,12 @@ export async function accountExists(key: Address): Promise<boolean> {
   }
 }
 
-/** A payment mint's decimals, read from chain (SPL Token or Token-2022). */
-export async function paymentMintDecimals(mint: Address): Promise<number> {
-  let account;
-  try {
-    account = await fetchEncodedAccount(getServerRpc(), mint, { ...read, abortSignal: AbortSignal.timeout(12_000) });
-  } catch (err) {
-    console.error("[api/sale-approvals] RPC failure reading the payment mint:", err);
-    throw new SiwsError(503, "On-chain check unavailable — try again");
-  }
-  if (!account.exists || (account.programAddress !== TOKEN_PROGRAM && account.programAddress !== TOKEN_2022_PROGRAM)
-    || account.data.length < 82 || account.data[45] !== 1) {
-    throw new SiwsError(400, "payment_mint is not an initialized token mint");
-  }
-  // Mint layout: mint_authority COption(36) supply u64(8) decimals u8 @44 is_initialized @45.
-  return account.data[44];
-}
+/**
+ * A payment mint's token program and decimals, read from chain (SPL Token or
+ * Token-2022) under the plain-payment rule and the known USDC layout
+ * (lib/server/payment-mint). The mainnet allowlist is a separate check.
+ */
+export { assertAllowedPaymentMint, paymentMintInfo } from "@/lib/server/payment-mint";
 
 /** The wallets of the same person (0056 applicant_wallets). */
 export async function applicantWallets(sb: SupabaseClient, wallet: string): Promise<string[]> {

@@ -30,7 +30,7 @@ import {
   fetchMaybeTransferHookConfig,
   RestrictionMode,
 } from "@/lib/generated/transfer_hook";
-import { fetchMaybeMint as fetchMaybeClassicMint } from "@solana-program/token";
+import { loadSalePaymentDecimals } from "@/lib/transaction-builders";
 import {
   bitmapHasCode,
   fetchPassport,
@@ -86,10 +86,6 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { InfoBox, YieldSplit } from "@/components/launchpad/primitives";
 import { SkeletonCard } from "@/components/skeleton";
-
-// Payment mints (USDC etc.) are classic SPL Token; share-class mints are Token-2022.
-const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 /** Returns the URL only when it is a safe http(s) link, otherwise null.
@@ -450,25 +446,21 @@ export default function DealPage({
   }, [client, sale, walletAddress]);
 
   // ── payment-mint decimals (needed to price an on-chain Buy) ───────────────
+  // SPL Token or Token-2022, read from chain under the entry rule (plain
+  // payment token; on mainnet an allowlisted one). Until they load, or when
+  // the mint is refused, Buy stays disabled.
   useEffect(() => {
     let cancelled = false;
     async function loadDecimals() {
       if (!sale || sale === "not_found") return;
       const paymentMint = (sale as Sale).paymentMint;
       try {
-        const maybe = await fetchMaybeClassicMint(
+        const decimals = await loadSalePaymentDecimals(
           client.runtime.rpc,
           paymentMint,
+          detectNetwork(),
         );
-        if (!cancelled) {
-          setPaymentDecimals(
-            maybe.exists &&
-              maybe.programAddress === TOKEN_CLASSIC_ADDRESS &&
-              maybe.data.decimals <= 18
-              ? maybe.data.decimals
-              : null,
-          );
-        }
+        if (!cancelled) setPaymentDecimals(decimals);
       } catch {
         if (!cancelled) setPaymentDecimals(null);
       }
@@ -801,7 +793,7 @@ export default function DealPage({
 
   // ── on-chain primary Buy (Mature path) ──────────────────────────────────────
   // Mirrors the admin launchpad caller: idempotently create the buyer's
-  // share-class (Token-2022) and payment (classic SPL) ATAs, then `buy` the
+  // share-class (Token-2022) and payment (its own token program) ATAs, then `buy` the
   // computed number of whole share units. Delivery is a `mint_to` CPI (not a
   // transfer), so the transfer hook never fires here — instead the program's
   // buy handler re-checks the receiver FAIL-CLOSED

@@ -138,6 +138,11 @@ const holdings = vi.hoisted(() => ({
   })),
 }));
 vi.mock("@/lib/server/token-holdings", () => holdings);
+// The OTC payment-mint read (plain rule; tests/payment-mint-routes.test.ts).
+vi.mock("@/lib/server/payment-mint", async (original) => ({
+  ...(await original<typeof import("@/lib/server/payment-mint")>()),
+  paymentMintInfo: vi.fn(async () => ({ owner: "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA", decimals: 6 })),
+}));
 vi.mock("@/lib/server/admin-gate", async () => {
   const { SiwsError } = await import("@/lib/server/siws");
   return {

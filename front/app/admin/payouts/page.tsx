@@ -48,7 +48,9 @@ import {
   validateAll,
 } from "@/lib/form-validation";
 import { getSupabase, recordAudit } from "@/lib/supabase";
-import { fetchMintTokenProgram } from "@/lib/transaction-builders";
+import { inspectPaymentMint } from "@/lib/transaction-builders";
+import { detectNetwork } from "@/lib/network";
+import { defaultPaymentMint } from "@/lib/payment-mints";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
@@ -89,9 +91,6 @@ import {
   type PayoutCadence,
   type PayoutSchedule,
 } from "@/lib/payout-schedules";
-
-// Payment mint is classic SPL Token (USDC is classic-SPL).
-
 
 const KIND_LABEL: Record<PayoutKind, string> = {
   dividend: "Dividend",
@@ -367,7 +366,7 @@ function CreateModal({
   const [kind, setKind] = useState<PayoutKind>("dividend");
   const [totalAmount, setTotalAmount] = useState("");
   const [currency, setCurrency] = useState("USDC");
-  const [paymentMint, setPaymentMint] = useState("");
+  const [paymentMint, setPaymentMint] = useState(() => defaultPaymentMint(detectNetwork()) ?? "");
   const [paymentDecimals, setPaymentDecimals] = useState("6");
   const [notes, setNotes] = useState("");
   const [csvText, setCsvText] = useState("");
@@ -1408,14 +1407,16 @@ function RouteYieldModal({
 
   // Resolve the finalized protocol treasury and actual payment token program.
   // The program independently binds treasury token ownership to Platform.
+  // Routing yield deposits into the vault (an entry path): the payment mint
+  // must pass the plain-payment rule (and, on mainnet, the allowlist).
   const resolveTreasury = useCallback(async () => {
     setTreasury(null);
     setTreasuryError(null);
     try {
       const [platformPda] = await findPlatformPda();
-      const [maybe, tokenProgram] = await Promise.all([
+      const [maybe, { owner: tokenProgram }] = await Promise.all([
         fetchMaybePlatform(client.runtime.rpc, platformPda, { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) }),
-        fetchMintTokenProgram(client.runtime.rpc, paymentMint, { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) }),
+        inspectPaymentMint(client.runtime.rpc, paymentMint, detectNetwork(), { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) }),
       ]);
       if (!maybe.exists || maybe.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) {
         throw new Error("Platform account not found on this network.");
@@ -2181,7 +2182,10 @@ function ScheduleModal({
       ? String(schedule.amount_hint)
       : "",
   );
-  const [paymentMint, setPaymentMint] = useState(schedule?.payment_mint ?? "");
+  // A new schedule starts with the network's USDC; an edited one keeps its own (or none).
+  const [paymentMint, setPaymentMint] = useState(() =>
+    schedule ? (schedule.payment_mint ?? "") : (defaultPaymentMint(detectNetwork()) ?? ""),
+  );
   const [active, setActive] = useState(schedule?.active ?? true);
   const [notes, setNotes] = useState(schedule?.notes ?? "");
   const [busy, setBusy] = useState(false);

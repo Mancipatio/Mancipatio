@@ -45,9 +45,7 @@ import {
   groupDigits,
   localZoneLabel,
 } from "@/lib/vesting-amounts";
-
-const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
-const TOKEN_CLASSIC = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
+import { TOKEN_CLASSIC, fetchMintTokenProgram } from "@/lib/transaction-builders";
 
 /** Background re-read of positions/series while the page stays open. */
 const REFRESH_INTERVAL_MS = 60_000;
@@ -166,11 +164,12 @@ export default function PortfolioVestingPage() {
     );
     try {
       const mint = series.tokenMint;
-      const info = await client.runtime.rpc
-        .getAccountInfo(mint, { encoding: "base64" })
-        .send();
-      const program =
-        info.value?.owner === TOKEN_CLASSIC ? TOKEN_CLASSIC : TOKEN_2022;
+      // The mint's actual token program (a release is an exit: permissive
+      // check). A missing or foreign account fails here, never "Token-2022".
+      const program = await fetchMintTokenProgram(client.runtime.rpc, mint, {
+        commitment: "confirmed",
+        abortSignal: AbortSignal.timeout(10_000),
+      });
       const {
         getCreateAssociatedTokenIdempotentInstructionAsync: createAtaIx,
       } =

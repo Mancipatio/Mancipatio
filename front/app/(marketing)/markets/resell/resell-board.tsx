@@ -25,6 +25,9 @@ import {
 } from "@/lib/otc";
 import { useToast } from "@/lib/toast";
 import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
+import { defaultPaymentMint } from "@/lib/payment-mints";
+import { paymentAmountHint, usePaymentMintCheck } from "@/lib/use-payment-mint";
+import { PaymentMintStatus } from "@/components/payment-mint-status";
 
 type Row = {
   offer: Offer;
@@ -519,20 +522,25 @@ function RequestOtcModal({
   onRequested: (r: OtcRequest) => void;
 }) {
   const conn = useWalletConnection();
+  const client = useSolanaClient();
   const toast = useToast();
+  const network = detectNetwork();
   const [amount, setAmount] = useState(String(post.amount));
   // Do NOT prefill from the listing's ask_price: that is a HUMAN-denominated
   // figure (e.g. "1500 USDC") while this field is integer payment-mint BASE
   // units. Prefilling 1500 would settle 1500 base units = 0.0015 USDC. Leave it
   // empty and show the ask as a reference below the field.
   const [price, setPrice] = useState("");
-  const [paymentMint, setPaymentMint] = useState("");
+  const [paymentMint, setPaymentMint] = useState(() => defaultPaymentMint(network) ?? "");
   const [busy, setBusy] = useState(false);
+  // Convenience check of the entry rule; /api/otc/create re-checks it.
+  const mintCheck = usePaymentMintCheck(client.runtime.rpc, network, paymentMint);
+  const priceHint = paymentAmountHint(price, mintCheck);
 
   const amountOk = /^[1-9]\d*$/.test(amount.trim());
   const priceOk = /^[1-9]\d*$/.test(price.trim());
   const mintOk = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(paymentMint.trim());
-  const valid = amountOk && priceOk && mintOk;
+  const valid = amountOk && priceOk && mintOk && mintCheck.status !== "error";
 
   async function submit() {
     if (!valid || busy) return;
@@ -644,6 +652,9 @@ function RequestOtcModal({
                   not the plain number.
                 </span>
               )}
+              {priceHint && (
+                <span className="mt-1 block text-[11px] text-slate-500">{priceHint}</span>
+              )}
             </label>
           </div>
           <label className="block">
@@ -656,9 +667,11 @@ function RequestOtcModal({
               placeholder="USDC mint address"
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs focus:border-slate-400 focus:outline-none"
             />
+            <PaymentMintStatus check={mintCheck} />
             <span className="mt-1 block text-[11px] text-slate-400">
-              The token you will pay in (plain SPL or Token-2022). You deposit
-              the price into escrow once the platform opens the deal.
+              The token you will pay in (plain SPL or Token-2022, without a
+              transfer hook). You deposit the price into escrow once the
+              platform opens the deal.
             </span>
           </label>
           {!mintOk && paymentMint.trim().length > 0 && (

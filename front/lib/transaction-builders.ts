@@ -5,7 +5,6 @@ import {
   type Address,
   type FetchAccountConfig,
 } from "@solana/kit";
-import { getMintDecoder, type Mint } from "@solana-program/token-2022";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   findMintPda,
@@ -21,11 +20,20 @@ import {
   findConfigPda,
 } from "@/lib/generated/transfer_hook";
 import { hookTransferMetas, mintHasManciHook } from "@/lib/hook-metas";
+import type { Network } from "@/lib/network";
+import {
+  NOT_ALLOWED_ON_MAINNET,
+  TOKEN_2022,
+  TOKEN_CLASSIC,
+  assertKnownMintLayout,
+  assertVestingMintExtensions,
+  classifyMintAccount,
+  isAllowedPaymentMint,
+} from "@/lib/payment-mints";
 
-export const TOKEN_CLASSIC =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
-export const TOKEN_2022 =
-  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
+// The mint classification lives in lib/payment-mints (pure, shared with the
+// server routes); re-exported for the callers that import it from here.
+export { TOKEN_2022, TOKEN_CLASSIC, assertVestingMintExtensions };
 
 type Rpc = Parameters<typeof hookTransferMetas>[0];
 
@@ -34,71 +42,24 @@ async function inspectMint(
   rpc: Rpc,
   mint: Address,
   config?: FetchAccountConfig,
+  opts: { plainPayment: boolean } = { plainPayment: false },
 ) {
   const account = await fetchEncodedAccount(rpc, mint, config);
   assertAccountExists(account);
-  const owner = account.programAddress;
-  if (owner !== TOKEN_CLASSIC && owner !== TOKEN_2022) {
-    throw new Error(
-      "The selected mint is not owned by a supported token program.",
-    );
-  }
-  // Token-2022 uses the 82-byte base mint, or padding + Mint account type (1)
-  // at offset 165 before extensions. A 165-byte token account is not a mint.
-  const baseMint = account.data.length === 82;
-  const extendedMint =
-    owner === TOKEN_2022 &&
-    account.data.length >= 166 &&
-    account.data[165] === 1;
-  if (
-    (!baseMint && !extendedMint) ||
-    !getMintDecoder().decode(account.data).isInitialized
-  ) {
-    throw new Error("The selected account is not an initialized token mint.");
-  }
-  return { owner, mint: getMintDecoder().decode(account.data) };
+  return classifyMintAccount(account, opts);
 }
 
+/**
+ * The permissive EXIT check (cancel, refund, reclaim, claim, expire): the
+ * mint's actual token program, whatever its extensions, so an existing
+ * position can always be unwound.
+ */
 export async function fetchMintTokenProgram(
   rpc: Rpc,
   mint: Address,
   config?: FetchAccountConfig,
 ) {
   return (await inspectMint(rpc, mint, config)).owner;
-}
-
-/** This flow has no net-fee accounting, confidential transfers or foreign hook resolver. */
-export function assertVestingMintExtensions(mint: Mint) {
-  const extensions = isSome(mint.extensions) ? mint.extensions.value : [];
-  const benign = new Set([
-    "MintCloseAuthority",
-    "MetadataPointer",
-    "TokenMetadata",
-    "GroupPointer",
-    "TokenGroup",
-    "GroupMemberPointer",
-    "TokenGroupMember",
-  ]);
-  for (const extension of extensions) {
-    if (benign.has(extension.__kind)) continue;
-    if (
-      extension.__kind === "TransferHook" &&
-      extension.programId === TRANSFER_HOOK_PROGRAM_ADDRESS
-    )
-      continue;
-    if (
-      extension.__kind === "PermanentDelegate" &&
-      extensions.some(
-        (e) =>
-          e.__kind === "TransferHook" &&
-          e.programId === TRANSFER_HOOK_PROGRAM_ADDRESS,
-      )
-    )
-      continue;
-    throw new Error(
-      `This vesting flow does not support the mint extension ${extension.__kind}. No escrow should be funded for this mint.`,
-    );
-  }
 }
 export async function fetchVestingMintTokenProgram(
   rpc: Rpc,
@@ -241,16 +202,38 @@ export async function fetchPlainPaymentMintTokenProgram(
   mint: Address,
   config?: FetchAccountConfig,
 ) {
-  const inspected = await inspectMint(rpc, mint, config);
-  assertVestingMintExtensions(inspected.mint);
-  if (
-    isSome(inspected.mint.extensions) &&
-    inspected.mint.extensions.value.some(
-      (e) => e.__kind === "TransferHook" || e.__kind === "PermanentDelegate",
-    )
-  )
-    throw new Error(
-      "This payment flow requires a token without a transfer hook or permanent delegate.",
-    );
-  return inspected.owner;
+  return (await inspectMint(rpc, mint, config, { plainPayment: true })).owner;
+}
+
+/**
+ * The ENTRY check for a payment mint (create, take, deposit, reserve, buy):
+ * the plain-payment rule, the known USDC layout (a mismatch means a wrong
+ * cluster or RPC) and, on mainnet, the allowlist. Returns the mint's actual
+ * token program and decimals.
+ */
+export async function inspectPaymentMint(
+  rpc: Rpc,
+  mint: Address,
+  network: Network,
+  config?: FetchAccountConfig,
+): Promise<{ owner: Address; decimals: number }> {
+  if (!isAllowedPaymentMint(network, mint)) throw new Error(NOT_ALLOWED_ON_MAINNET);
+  const { owner, decimals } = await inspectMint(rpc, mint, config, { plainPayment: true });
+  assertKnownMintLayout(network, mint, { owner, decimals });
+  return { owner, decimals };
+}
+
+/**
+ * A sale's payment-mint decimals for pricing a Buy (entry path): SPL Token
+ * or Token-2022, read from chain, at most 18.
+ */
+export async function loadSalePaymentDecimals(
+  rpc: Rpc,
+  paymentMint: Address,
+  network: Network,
+  config?: FetchAccountConfig,
+): Promise<number> {
+  const { decimals } = await inspectPaymentMint(rpc, paymentMint, network, config);
+  if (decimals > 18) throw new Error("The payment token has more than 18 decimals.");
+  return decimals;
 }

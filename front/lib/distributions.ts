@@ -32,9 +32,7 @@ type Rpc = SolanaClient["runtime"]["rpc"];
 
 export const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
-// Payment mints (USDC/USDT) are usually classic SPL Token.
-export const TOKEN_CLASSIC_ADDRESS =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
+// A payment mint's token program is always read from chain (detectTokenProgram).
 const SYSTEM_PROGRAM_ADDRESS = "11111111111111111111111111111111" as Address;
 
 /**

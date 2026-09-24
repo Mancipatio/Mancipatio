@@ -260,13 +260,13 @@ export async function loadOtcDeals(rpc: Rpc): Promise<LoadedOtcDeal[]> {
   return out;
 }
 
-export const TOKEN_CLASSIC_PROGRAM =
-  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" as Address;
 export const TOKEN_2022_PROGRAM =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
 
 /** Resolve an initialized payment mint or fail explicitly; no classic-token
- * fallback is allowed after RPC failure or an unsupported owner. */
+ * fallback is allowed after RPC failure or an unsupported owner. This is the
+ * permissive EXIT check (cancel, expire, reclaim, the seller's leg); entry
+ * paths use inspectPaymentMint (lib/transaction-builders). */
 export function detectTokenProgram(rpc: Rpc, mint: Address): Promise<Address> {
   return fetchMintTokenProgram(rpc, mint, { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) });
 }

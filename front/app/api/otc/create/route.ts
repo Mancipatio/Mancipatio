@@ -21,10 +21,11 @@
 // because a party can be suspended while the request waits in the queue.
 //
 // On-chain request checks (now that any signing wallet may file a request,
-// not only a verified client): the share class must be the real ShareClass
-// behind `mint`, and the seller must hold at least `amount` units — so the
-// admin queue only receives deals that can actually be funded. Both fail
-// closed (503) on RPC trouble, as in /api/resell/create.
+// not only a verified client): the payment mint must pass the plain-payment
+// rule (and, on mainnet, the allowlist), the share class must be the real
+// ShareClass behind `mint`, and the seller must hold at least `amount` units
+// — so the admin queue only receives deals that can actually be funded. All
+// fail closed (503) on RPC trouble, as in /api/resell/create.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -35,6 +36,8 @@ import {
 } from "@/lib/server/token-holdings";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { assertAllowedPaymentMint, paymentMintInfo } from "@/lib/server/payment-mint";
+import type { Address } from "@solana/kit";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
@@ -100,6 +103,11 @@ export async function POST(request: Request) {
     if (expiresAt !== null && Number.isNaN(new Date(expiresAt).getTime())) {
       throw new SiwsError(400, "expires_at is not a valid timestamp");
     }
+    // The buyer pays in this mint when the escrow opens (an entry path): on
+    // mainnet the allowlist here, the plain-payment rule with the on-chain
+    // checks below (Talas 4.2 §3.3).
+    const network = detectNetwork();
+    assertAllowedPaymentMint(network, paymentMint);
 
     // The other party of a platform-mediated deal gets the same suspension
     // screen. Generic copy: the requester is not told the counterparty's
@@ -118,6 +126,7 @@ export async function POST(request: Request) {
     }
 
     // On-chain request checks (see header) — after the cheap DB screens.
+    await paymentMintInfo(paymentMint as Address, network);
     await verifyShareClassMint(shareClassPda, mint);
     const sellerBalance = await getToken2022Balance(sellerWallet, mint);
     if (BigInt(amount) > sellerBalance) {
@@ -130,7 +139,7 @@ export async function POST(request: Request) {
     const { data, error } = await sb
       .from("otc_requests")
       .insert({
-        network: detectNetwork(),
+        network,
         share_class_pda: shareClassPda,
         mint,
         asset_label: assetLabel,
