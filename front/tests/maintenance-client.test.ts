@@ -12,6 +12,12 @@ import { accountErrorMessage } from "@/lib/account-client";
 
 const remote = vi.hoisted(() => ({ signedFetch: vi.fn() }));
 vi.mock("@/lib/siws-client", () => ({ signedFetch: remote.signedFetch }));
+// The priority fee (its own oracle request) is covered by
+// tests/verified-solana-client.test.ts; here only /api/maintenance is served.
+vi.mock("@/lib/priority-fee", async (original) => ({
+  ...(await original<typeof import("@/lib/priority-fee")>()),
+  priceForRequest: async () => undefined,
+}));
 // These fake wallets return placeholder signatures for a placeholder key, so
 // stub only the signing strategy (the client now refuses to send a signature
 // it can prove invalid); formats and local checks: tests/siws-signing.test.ts.

@@ -48,6 +48,7 @@ import {
   readPaidDistributionBatches,
 } from "@/lib/distribution-transactions";
 import { waitForPurchasePreparation } from "@/lib/purchase-builder";
+import { VESTING_COMPUTE_UNITS } from "@/lib/vesting-creation";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -684,8 +685,7 @@ function PreparedDistributionCard({
       instructions,
       feePayer: walletSigner(conn.wallet),
       version: 0,
-      computeUnitLimit: 400000,
-      computeUnitPrice: BigInt(0),
+      computeUnitLimit: VESTING_COMPUTE_UNITS,
       prepareTransaction: false,
     });
   }

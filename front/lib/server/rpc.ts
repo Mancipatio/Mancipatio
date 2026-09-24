@@ -11,13 +11,17 @@
 import "server-only";
 
 import { createNetworkVerifiedRpc } from "@/lib/network-identity";
-import { detectNetwork } from "@/lib/network";
+import { detectNetwork, type Network } from "@/lib/network";
 
 type Rpc = ReturnType<typeof createNetworkVerifiedRpc>;
 let cached: Rpc | null = null;
 let cachedKey: string | null = null;
 
-export function getServerRpc(): Rpc {
+/**
+ * The current network and its server RPC URL (the URL can carry a provider
+ * API key: never log it). Throws on mainnet without a configured provider.
+ */
+export function serverRpcEndpoint(): { network: Network; url: string } {
   const network = detectNetwork();
   let url: string | undefined;
   switch (network) {
@@ -41,6 +45,11 @@ export function getServerRpc(): Rpc {
       url = process.env.HELIUS_DEVNET_RPC || "https://api.devnet.solana.com";
       break;
   }
+  return { network, url };
+}
+
+export function getServerRpc(): Rpc {
+  const { network, url } = serverRpcEndpoint();
   const key = `${network}:${url}:${process.env.NEXT_PUBLIC_SOLANA_GENESIS_HASH ?? ""}`;
   if (cached && cachedKey === key) return cached;
   cached = createNetworkVerifiedRpc(url, network);

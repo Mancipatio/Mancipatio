@@ -5,6 +5,7 @@ import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { WalletRequired } from "@/components/wallet-required";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { detectNetwork } from "@/lib/network";
+import { formatLamportsAsSol, maxPriorityFeeLamports } from "@/lib/compute-budget";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import {
@@ -158,8 +159,8 @@ export default function IssuerRecoveryPage() {
               Copy the document between the two wallets. It contains public
               terms and signatures, never private keys. The blockhash expires
               quickly; after expiry prepare again and collect both signatures
-              again. Imported content is rebuilt as a single recovery
-              instruction.
+              again. Imported content is rebuilt as the reviewed compute
+              budget and a single recovery instruction.
             </p>
             <textarea
               aria-label="Public recovery document"
@@ -191,6 +192,19 @@ export default function IssuerRecoveryPage() {
                 </p>
                 <p>Jurisdiction: {envelope.jurisdiction}</p>
                 <p className="break-all">KYB SHA-256: {envelope.kybDocHash}</p>
+                <p>
+                  Compute budget:{" "}
+                  {envelope.computeUnitLimit.toLocaleString("en-US")} units at{" "}
+                  {envelope.computeUnitPriceMicroLamports} micro-lamports per
+                  unit (priority fee at most{" "}
+                  {formatLamportsAsSol(
+                    maxPriorityFeeLamports(
+                      envelope.computeUnitLimit,
+                      BigInt(envelope.computeUnitPriceMicroLamports),
+                    ),
+                  )}{" "}
+                  SOL).
+                </p>
                 <p className="break-all">
                   Super Admin: {envelope.superAdmin} —{" "}
                   {envelope.signatures[envelope.superAdmin]
@@ -239,7 +253,7 @@ export default function IssuerRecoveryPage() {
         }
         description={
           envelope
-            ? `Reassign issuer ${envelope.issuer} to ${envelope.newAuthority} on ${envelope.network}, reset KYB to Pending, jurisdiction ${envelope.jurisdiction}, document hash ${envelope.kybDocHash}. The Super Admin pays the network fee.`
+            ? `Reassign issuer ${envelope.issuer} to ${envelope.newAuthority} on ${envelope.network}, reset KYB to Pending, jurisdiction ${envelope.jurisdiction}, document hash ${envelope.kybDocHash}. The Super Admin pays the network fee (priority fee at most ${formatLamportsAsSol(maxPriorityFeeLamports(envelope.computeUnitLimit, BigInt(envelope.computeUnitPriceMicroLamports)))} SOL).`
             : ""
         }
         kind="warning"

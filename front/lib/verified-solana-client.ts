@@ -4,6 +4,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { guardTransactionGraph } from "@/lib/transaction-session-guard";
 import { requestTransactionWalletPolicy, transactionWalletPolicyRevision, TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 import { assertSiteWritable } from "@/lib/maintenance";
+import { priceForRequest } from "@/lib/priority-fee";
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
@@ -13,7 +14,12 @@ import { assertSiteWritable } from "@/lib/maintenance";
  * does not use this default-primary flow; linked profiles confer no roles.
  * Maintenance mode is read (at most a few seconds old) before preparing and
  * before any wallet prompt, so no transaction is offered while the site is
- * paused; the server's refusal of the policy check backs it up. */
+ * paused; the server's refusal of the policy check backs it up.
+ * This is the one place a wallet send gets its priority fee: prepare and
+ * prepareAndSend set `computeUnitPrice` from lib/priority-fee (clamped to the
+ * network's cap) before any wallet prompt, and `@solana/client` prepends the
+ * one SetComputeUnitPrice. A caller-set price is refused, and a transaction
+ * that would no longer fit the packet limit is sent without one. */
 export function withVerifiedTransactions(
   client: SolanaClient,
   network: Network,
@@ -68,6 +74,13 @@ export function withVerifiedTransactions(
     }
   }
 
+  /** The app-set priority fee, resolved against the captured session; no wallet prompt. */
+  async function withFee<R extends TransactionPrepareRequest>(request: R, context: Context): Promise<R> {
+    const price = await priceForRequest(network, context.session.account.address, request);
+    context.assertCurrent();
+    return price === undefined ? request : { ...request, computeUnitPrice: price };
+  }
+
   async function authorize(context: Context) {
     await assertSiteWritable();
     context.assertCurrent();
@@ -85,11 +98,12 @@ export function withVerifiedTransactions(
   }
   const base = client.transaction;
   const transaction: SolanaClient["transaction"] = Object.freeze({
-    prepare: async (request) => {
+    prepare: async (input) => {
       const context = capture();
       await assertSiteWritable();
       await assertNetwork(context);
-      checkAuthority(request, context);
+      checkAuthority(input, context);
+      const request = await withFee(input, context);
       // Preparation does not prompt for a message signature. The server policy
       // is read only when sign/send/toWire is explicitly requested.
       const prepared = await base.prepare(guardTransactionGraph(request, context.session, context.assertCurrent));
@@ -117,10 +131,12 @@ export function withVerifiedTransactions(
       context.assertCurrent();
       return result;
     },
-    prepareAndSend: async (request, options) => {
+    prepareAndSend: async (input, options) => {
       const context = capture();
       await assertNetwork(context);
-      checkAuthority(request, context);
+      checkAuthority(input, context);
+      // The fee is settled before the policy check's wallet prompt.
+      const request = await withFee(input, context);
       await authorize(context);
       const result = await base.prepareAndSend(guardTransactionGraph(request, context.session, context.assertCurrent), options);
       context.assertCurrent();

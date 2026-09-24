@@ -18,6 +18,7 @@ import {
   type Address,
   type KeyPairSigner,
 } from "@solana/kit";
+import { MAX_COMPUTE_UNIT_PRICE } from "@/lib/compute-budget";
 import type { Network } from "@/lib/network";
 import {
   CLUSTER_GENESIS_HASHES,
@@ -153,7 +154,8 @@ export const DEFAULT_DEADLINE_MIN: Record<ChainTool, number> = {
 };
 /** The runner's own vitest timeout is 4 h; the internal deadline stays below it. */
 export const MAX_DEADLINE_MIN = 230;
-export const MAX_CU_PRICE = BigInt(2_000_000);
+/** The app-wide priority-fee cap (lib/compute-budget), shared with the wallet send path. */
+export const MAX_CU_PRICE = MAX_COMPUTE_UNIT_PRICE;
 export const DEFAULT_RPS = 2;
 export const MAX_RPS = 20;
 

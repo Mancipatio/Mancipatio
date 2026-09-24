@@ -353,7 +353,6 @@ export default function IssuerVestingSeriesPage() {
           feePayer: signer,
           version: 0,
           computeUnitLimit: VESTING_COMPUTE_UNITS,
-          computeUnitPrice: BigInt(0),
           prepareTransaction: false,
         });
         setLastCreationSignature(signature);

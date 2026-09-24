@@ -860,7 +860,6 @@ export default function DealPage({
           feePayer: signer,
           version: 0,
           computeUnitLimit: VESTING_COMPUTE_UNITS,
-          computeUnitPrice: BigInt(0),
           prepareTransaction: false,
         });
         toast.showTx(preparationSignature, {
@@ -876,7 +875,6 @@ export default function DealPage({
         feePayer: signer,
         version: 0,
         computeUnitLimit: VESTING_COMPUTE_UNITS,
-        computeUnitPrice: BigInt(0),
         prepareTransaction: false,
       });
       if (!sig)

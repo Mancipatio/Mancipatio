@@ -26,7 +26,10 @@ import {
   signIssuerRecovery,
   submitIssuerRecovery,
   recoveryPathFor,
+  RECOVERY_COMPUTE_UNIT_LIMIT,
 } from "@/lib/issuer-recovery";
+import { decodeComputeBudgetInstruction, MAX_COMPUTE_UNIT_PRICE } from "@/lib/compute-budget";
+import { PRIORITY_FEE_POLICY, resetPriorityFeeCache } from "@/lib/priority-fee";
 const issuer = address("TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb"),
   previousAuthority = address("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA");
 async function fixture() {
@@ -77,14 +80,21 @@ async function fixture() {
 }
 // Recovery reads the maintenance flag in the browser before signing and
 // before sending (fail closed); by default the site is not in maintenance.
+// Preparing reads the priority-fee oracle (GET /api/priority-fee, mocked).
 const flag = vi.hoisted(() => ({ state: { enabled: false, message: null } as { enabled: boolean; message: string | null } | "down" }));
-const maintenanceFetch = vi.fn(async () => {
+const oracle = vi.hoisted(() => ({ microLamports: "4321" }));
+const maintenanceFetch = vi.fn(async (url: unknown) => {
+  if (String(url) === "/api/priority-fee") {
+    return Response.json({ ok: true, network: "devnet", microLamports: oracle.microLamports, source: "helius", level: "High" });
+  }
   if (flag.state === "down") throw new TypeError("Failed to fetch");
   return Response.json({ ...flag.state, network: "devnet" });
 });
 beforeEach(() => {
   vi.clearAllMocks();
+  resetPriorityFeeCache();
   flag.state = { enabled: false, message: null };
+  oracle.microLamports = "4321";
   vi.stubGlobal("window", { dispatchEvent: () => true });
   vi.stubGlobal("fetch", maintenanceFetch);
 });
@@ -108,8 +118,19 @@ describe("issuer recovery co-signing", () => {
     const message = getCompiledTransactionMessageDecoder().decode(
       tx.messageBytes,
     );
-    expect(message.instructions).toHaveLength(1);
-    const ix = message.instructions[0];
+    // The reviewed compute budget, then the one recovery instruction.
+    expect(message.instructions).toHaveLength(3);
+    const budget = message.instructions.slice(0, 2).map((b) =>
+      decodeComputeBudgetInstruction({
+        programAddress: message.staticAccounts[b.programAddressIndex],
+        data: b.data,
+      }),
+    );
+    expect(budget).toEqual([
+      { kind: "limit", units: RECOVERY_COMPUTE_UNIT_LIMIT },
+      { kind: "price", microLamports: BigInt(4321) },
+    ]);
+    const ix = message.instructions[2];
     expect(message.staticAccounts[ix.programAddressIndex]).toBe(
       ASSET_REGISTRY_PROGRAM_ADDRESS,
     );
@@ -148,6 +169,46 @@ describe("issuer recovery co-signing", () => {
         "devnet",
       ),
     ).toThrow("Unexpected recovery signer");
+  });
+  it("v2: the document carries the oracle's price (clamped) and the recovery limit", async () => {
+    const f = await fixture();
+    expect(f.envelope.version).toBe(2);
+    expect(f.envelope.computeUnitLimit).toBe(RECOVERY_COMPUTE_UNIT_LIMIT);
+    expect(f.envelope.computeUnitPriceMicroLamports).toBe("4321");
+    expect(maintenanceFetch).toHaveBeenCalledWith("/api/priority-fee", expect.anything());
+    resetPriorityFeeCache();
+    oracle.microLamports = "5000000";
+    const g = await fixture();
+    expect(g.envelope.computeUnitPriceMicroLamports).toBe(PRIORITY_FEE_POLICY.devnet.cap.toString());
+  });
+  it("rejects a v1 document, and a compute budget above the cap or out of range", async () => {
+    const f = await fixture();
+    const { computeUnitLimit, computeUnitPriceMicroLamports, ...rest } = f.envelope;
+    void computeUnitLimit;
+    void computeUnitPriceMicroLamports;
+    expect(() =>
+      parseIssuerRecovery(JSON.stringify({ ...rest, version: 1 }), "devnet"),
+    ).toThrow("Prepare a new document");
+    expect(() =>
+      parseIssuerRecovery(JSON.stringify({ ...f.envelope, version: 3 }), "devnet"),
+    ).toThrow("Invalid recovery terms");
+    for (const over of [
+      { computeUnitPriceMicroLamports: (MAX_COMPUTE_UNIT_PRICE + BigInt(1)).toString() },
+      { computeUnitPriceMicroLamports: "01" },
+      { computeUnitPriceMicroLamports: 5 },
+      { computeUnitLimit: 0 },
+      { computeUnitLimit: 1_400_001 },
+      { computeUnitLimit: undefined },
+    ]) {
+      expect(() =>
+        parseIssuerRecovery(JSON.stringify({ ...f.envelope, ...over }), "devnet"),
+      ).toThrow(/compute unit/);
+    }
+    // A tampered price no longer matches what the signers reviewed.
+    const one = await signIssuerRecovery(f.rpc, f.envelope, f.admin);
+    await expect(
+      compileIssuerRecovery({ ...one, computeUnitPriceMicroLamports: "4322" }),
+    ).rejects.toThrow("does not match");
   });
   it("rechecks live admin, unused registration and expiry before either signing or sending", async () => {
     const f = await fixture();

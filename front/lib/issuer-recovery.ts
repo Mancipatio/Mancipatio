@@ -33,12 +33,20 @@ import {
 } from "@/lib/network-identity";
 import type { Network } from "@/lib/network";
 import { assertSiteWritable } from "@/lib/maintenance";
+import {
+  parseEnvelopeComputeBudget,
+  setComputeUnitLimitInstruction,
+  setComputeUnitPriceInstruction,
+} from "@/lib/compute-budget";
+import { resolveComputeUnitPrice } from "@/lib/priority-fee";
 import type { fetchMintTokenProgram } from "@/lib/transaction-builders";
 type Rpc = Parameters<typeof fetchMintTokenProgram>[0];
 /** Only typed recovery terms are imported. The transaction is rebuilt locally;
- * an imported document can never insert a transfer or arbitrary instruction. */
+ * an imported document can never insert a transfer or arbitrary instruction.
+ * Version 2 (Talas 4.2) carries the compute budget both signers review: the
+ * priority fee is fixed when the document is prepared. */
 export type IssuerRecoveryEnvelope = {
-  version: 1;
+  version: 2;
   network: Network;
   genesisHash: string;
   issuer: string;
@@ -47,18 +55,30 @@ export type IssuerRecoveryEnvelope = {
   newAuthority: string;
   jurisdiction: number;
   kybDocHash: string;
+  /** 1..1_400_000 (RECOVERY_COMPUTE_UNIT_LIMIT when prepared here). */
+  computeUnitLimit: number;
+  /** Decimal u64 string, 0..MAX_COMPUTE_UNIT_PRICE. */
+  computeUnitPriceMicroLamports: string;
   blockhash: string;
   lastValidBlockHeight: string;
   signatures: Record<string, string>;
 };
+/** The compute units a recovery may use: the runtime's implicit
+ * per-instruction default that the v1 transaction ran with. */
+export const RECOVERY_COMPUTE_UNIT_LIMIT = 200_000;
 export function parseIssuerRecovery(
   raw: string,
   network: Network,
 ): IssuerRecoveryEnvelope {
   if (raw.length > 16_000) throw new Error("Recovery document is too large");
   const e = JSON.parse(raw) as IssuerRecoveryEnvelope;
+  if ((e as { version?: unknown } | null)?.version === 1)
+    throw new Error(
+      "This recovery document uses an older format. Prepare a new document and collect both signatures again.",
+    );
   if (
-    e.version !== 1 ||
+    !e ||
+    e.version !== 2 ||
     e.network !== network ||
     e.genesisHash !== expectedGenesisHash(network) ||
     !Number.isInteger(e.jurisdiction) ||
@@ -71,6 +91,13 @@ export function parseIssuerRecovery(
     Array.isArray(e.signatures)
   )
     throw new Error("Invalid recovery terms or network");
+  try {
+    parseEnvelopeComputeBudget(e);
+  } catch (err) {
+    throw new Error(
+      "Invalid recovery terms: " + (err instanceof Error ? err.message : "compute budget"),
+    );
+  }
   for (const value of [
     e.issuer,
     e.previousAuthority,
@@ -140,22 +167,25 @@ export async function prepareIssuerRecovery(
   await createNetworkVerifier(rpc, network)();
   const [platformPda] = await findPlatformPda(),
     opts = { commitment: "finalized" as const };
-  const [platform, issuer, lifetime] = await Promise.all([
+  const [platform, issuer, lifetime, price] = await Promise.all([
     fetchMaybePlatform(rpc, platformPda, opts),
     fetchMaybeIssuer(rpc, input.issuer, opts),
     rpc.getLatestBlockhash({ commitment: "confirmed" }).send(),
+    resolveComputeUnitPrice(network),
   ]);
   if (!platform.exists || !issuer.exists)
     throw new Error("Issuer or platform account is unavailable");
   const e = parseIssuerRecovery(
     JSON.stringify({
-      version: 1,
+      version: 2,
       network,
       genesisHash: expectedGenesisHash(network),
       ...input,
       previousAuthority: issuer.data.authority,
       superAdmin: platform.data.admin,
       kybDocHash: input.kybDocHash.toLowerCase(),
+      computeUnitLimit: RECOVERY_COMPUTE_UNIT_LIMIT,
+      computeUnitPriceMicroLamports: price.toString(),
       blockhash: lifetime.value.blockhash,
       lastValidBlockHeight: String(lifetime.value.lastValidBlockHeight),
       signatures: {},
@@ -184,7 +214,11 @@ export async function compileIssuerRecovery(e: IssuerRecoveryEnvelope) {
     ),
   });
   const message = appendTransactionMessageInstructions(
-    [ix],
+    [
+      setComputeUnitLimitInstruction(e.computeUnitLimit),
+      setComputeUnitPriceInstruction(BigInt(e.computeUnitPriceMicroLamports)),
+      ix,
+    ],
     setTransactionMessageLifetimeUsingBlockhash(
       {
         blockhash: blockhash(e.blockhash),

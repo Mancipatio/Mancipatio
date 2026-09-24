@@ -49,10 +49,16 @@ import {
   getCreateKycRegistryInstructionAsync,
 } from "@/lib/generated/asset_registry";
 import {
-  MAX_COMPUTE_UNIT_LIMIT,
+  MAX_COMPUTE_UNIT_PRICE,
+  parseEnvelopeComputeBudget,
   setComputeUnitLimitInstruction,
   setComputeUnitPriceInstruction,
 } from "@/lib/compute-budget";
+import {
+  PRIORITY_FEE_POLICY,
+  clampComputeUnitPrice,
+  resolveComputeUnitPrice,
+} from "@/lib/priority-fee";
 import { jurisdictionBitmap } from "@/lib/jurisdiction-bitmap";
 import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
 import { assertSiteWritable } from "@/lib/maintenance";
@@ -93,26 +99,26 @@ export const MAX_ENVELOPE_BYTES = 16 * 1024;
 export const DEFAULT_COMPUTE_UNIT_LIMIT = 100_000;
 /**
  * The highest priority fee an envelope may carry, in micro-lamports per
- * compute unit: 5 lamports / CU, i.e. at most 0.0005 SOL at the default
- * limit and 0.007 SOL at the 1.4M ceiling. Both signers see the value.
+ * compute unit: the app-wide cap (D5), 2 lamports / CU, i.e. at most 0.0002
+ * SOL at the default limit and 0.0028 SOL at the 1.4M ceiling. Both signers
+ * see the value.
  */
-export const MAX_ENVELOPE_CU_PRICE = BigInt(5_000_000);
-/**
- * Mainnet default priority fee (micro-lamports / CU) until Talas 4 prices it
- * dynamically: 0.00001 SOL at the default limit. Devnet, testnet and
- * localnet default to 0.
- */
-export const DEFAULT_MAINNET_CU_PRICE = BigInt(100_000);
+export const MAX_ENVELOPE_CU_PRICE = MAX_COMPUTE_UNIT_PRICE;
+/** Mainnet's floor price (micro-lamports / CU): 0.00001 SOL at the default limit. */
+export const DEFAULT_MAINNET_CU_PRICE = PRIORITY_FEE_POLICY.mainnet.floor;
 
-/** The compute budget a new envelope starts with on `network`. */
+/**
+ * The compute budget a new envelope starts from on `network`: the default
+ * limit and the network's floor price. prepareKycRegistryCreation replaces
+ * the price with the fee oracle's (lib/priority-fee) unless the caller sets one.
+ */
 export function defaultComputeBudget(network: Network): {
   computeUnitLimit: number;
   computeUnitPriceMicroLamports: string;
 } {
-  const price = network === "mainnet" ? DEFAULT_MAINNET_CU_PRICE : BigInt(0);
   return {
     computeUnitLimit: DEFAULT_COMPUTE_UNIT_LIMIT,
-    computeUnitPriceMicroLamports: (price > MAX_ENVELOPE_CU_PRICE ? MAX_ENVELOPE_CU_PRICE : price).toString(),
+    computeUnitPriceMicroLamports: clampComputeUnitPrice(null, PRIORITY_FEE_POLICY[network]).toString(),
   };
 }
 
@@ -190,13 +196,11 @@ export async function parseKycRegistryCreation(
   const approvedSet = new Set(approved);
   const overlap = blocked.find((c) => approvedSet.has(c));
   if (overlap !== undefined) fail(`jurisdiction ${overlap} is both approved and blocked`);
-  const limit = e.computeUnitLimit;
-  if (!Number.isInteger(limit) || (limit as number) < 1 || (limit as number) > MAX_COMPUTE_UNIT_LIMIT) {
-    fail(`the compute unit limit must be 1..${MAX_COMPUTE_UNIT_LIMIT}`);
-  }
-  const price = e.computeUnitPriceMicroLamports;
-  if (typeof price !== "string" || !/^(0|[1-9]\d{0,19})$/.test(price) || BigInt(price) > MAX_ENVELOPE_CU_PRICE) {
-    fail(`the compute unit price must be a whole number of micro-lamports, 0..${MAX_ENVELOPE_CU_PRICE}`);
+  let budget: { computeUnitLimit: number; computeUnitPriceMicroLamports: string };
+  try {
+    budget = parseEnvelopeComputeBudget(e);
+  } catch (err) {
+    fail(err instanceof Error ? err.message : "invalid compute budget");
   }
   if (typeof e.blockhash !== "string") fail("blockhash is missing");
   try {
@@ -226,8 +230,8 @@ export async function parseKycRegistryCreation(
     registry,
     approved,
     blocked,
-    computeUnitLimit: limit as number,
-    computeUnitPriceMicroLamports: price,
+    computeUnitLimit: budget.computeUnitLimit,
+    computeUnitPriceMicroLamports: budget.computeUnitPriceMicroLamports,
     blockhash: e.blockhash,
     lastValidBlockHeight: e.lastValidBlockHeight,
     signatures,
@@ -294,9 +298,11 @@ export async function prepareKycRegistryCreation(
 ): Promise<KycRegistryCreationEnvelope> {
   const pinned = opts.pinned !== undefined ? opts.pinned : configuredKycRegistry();
   await createNetworkVerifier(rpc, network)();
-  const lifetime = await rpc
-    .getLatestBlockhash({ commitment: "confirmed" })
-    .send({ abortSignal: AbortSignal.timeout(10_000) });
+  const [lifetime, price] = await Promise.all([
+    rpc.getLatestBlockhash({ commitment: "confirmed" }).send({ abortSignal: AbortSignal.timeout(10_000) }),
+    // The oracle price unless the caller set one (parse caps either).
+    input.computeUnitPriceMicroLamports === undefined ? resolveComputeUnitPrice(network) : Promise.resolve(null),
+  ]);
   const budget = defaultComputeBudget(network);
   const e = await parseKycRegistryCreation(
     JSON.stringify({
@@ -310,7 +316,7 @@ export async function prepareKycRegistryCreation(
       approved: normalizeCodes(input.approved),
       blocked: normalizeCodes(input.blocked),
       computeUnitLimit: input.computeUnitLimit ?? budget.computeUnitLimit,
-      computeUnitPriceMicroLamports: input.computeUnitPriceMicroLamports ?? budget.computeUnitPriceMicroLamports,
+      computeUnitPriceMicroLamports: input.computeUnitPriceMicroLamports ?? price?.toString() ?? budget.computeUnitPriceMicroLamports,
       blockhash: lifetime.value.blockhash,
       lastValidBlockHeight: String(lifetime.value.lastValidBlockHeight),
       signatures: {},

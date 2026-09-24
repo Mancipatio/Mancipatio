@@ -30,9 +30,9 @@ import {
   type TransactionSigner,
 } from "@solana/kit";
 import {
-  getSetComputeUnitLimitInstruction,
-  getSetComputeUnitPriceInstruction,
-} from "@solana-program/compute-budget";
+  setComputeUnitLimitInstruction,
+  setComputeUnitPriceInstruction,
+} from "@/lib/compute-budget";
 import type { Journal } from "./journal";
 import type { ChainRpc } from "./rpc";
 import {
@@ -137,10 +137,11 @@ export function buildMessage(input: {
   cuLimit?: number | null;
   cuPrice?: bigint | null;
 }) {
+  // One byte source with the wallet send path (lib/compute-budget).
   const budget: Instruction[] = [];
-  if (input.cuLimit) budget.push(getSetComputeUnitLimitInstruction({ units: input.cuLimit }));
+  if (input.cuLimit) budget.push(setComputeUnitLimitInstruction(input.cuLimit));
   if (input.cuPrice && input.cuPrice > BigInt(0)) {
-    budget.push(getSetComputeUnitPriceInstruction({ microLamports: input.cuPrice }));
+    budget.push(setComputeUnitPriceInstruction(input.cuPrice));
   }
   return pipe(
     createTransactionMessage({ version: 0 }),

@@ -16,17 +16,12 @@
 //   issuer authority. Anyone may copy the live authority into them; close,
 //   vault and payout flows prepend the sync whenever it is out of date.
 import {
-  appendTransactionMessageInstructions,
-  createTransactionMessage,
   fetchEncodedAccount,
   getAddressDecoder,
   getAddressEncoder,
   getBase58Decoder,
   getProgramDerivedAddress,
-  getTransactionMessageSize,
   isAddress,
-  pipe,
-  setTransactionMessageFeePayer,
   type Address,
   type Base58EncodedBytes,
   type Instruction,
@@ -67,9 +62,14 @@ import { findSalePda, findShareClassPda } from "@/lib/pdas";
 import { findIssuerPermissionsAddress } from "@/lib/issuer-permissions";
 import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
 import {
-  setComputeUnitLimitInstruction,
-  setComputeUnitPriceInstruction,
+  SEND_OVERHEAD_INSTRUCTIONS,
+  TRANSACTION_SIZE_LIMIT,
+  transactionSize,
 } from "@/lib/compute-budget";
+
+// The size helpers live in lib/compute-budget (one byte source for the send
+// path's overhead); re-exported for the callers that import them from here.
+export { SEND_OVERHEAD_INSTRUCTIONS, TRANSACTION_SIZE_LIMIT, transactionSize };
 
 type Rpc = SolanaClient["runtime"]["rpc"];
 
@@ -83,20 +83,12 @@ export const ISSUER_RECOVERY_WINDOW_SECONDS = 1_209_600;
  * finds every rotation or recovery staged for a wallet.
  */
 export const NEW_AUTHORITY_OFFSET = 72;
-/** Solana's packet limit for one transaction. */
-export const TRANSACTION_SIZE_LIMIT = 1232;
-
-/**
- * What gets added to a transaction AFTER it is bundled: `useSendTransaction`
- * prepares it (`@solana/client` simulates and appends a SetComputeUnitLimit,
- * about 40 B with the Compute Budget program key) and a wallet may add a
- * SetComputeUnitPrice. `bundleWithSync` measures every candidate with these
- * placeholders included so the prepared transaction still fits.
- */
-export const SEND_OVERHEAD_INSTRUCTIONS: readonly Instruction[] = [
-  setComputeUnitLimitInstruction(0),
-  setComputeUnitPriceInstruction(BigInt(0)),
-];
+// What gets added to a transaction AFTER it is bundled
+// (SEND_OVERHEAD_INSTRUCTIONS): `useSendTransaction` prepares it
+// (`@solana/client` simulates and appends a SetComputeUnitLimit) and the
+// verified client adds SetComputeUnitPrice (lib/priority-fee).
+// `bundleWithSync` measures every candidate with these placeholders included
+// so the prepared transaction still fits.
 /** Bytes kept free beyond the compute-budget placeholders (other wallet additions). */
 export const SEND_RESERVE_BYTES = 32;
 
@@ -408,16 +400,6 @@ export function describeRecoveryState(state: IssuerRecoveryState): string {
     case "stale-admin":
       return "Stale: the Super Admin changed after this recovery was proposed, so it can no longer be executed. Cancel it to return the rent.";
   }
-}
-
-/** Serialized size of one transaction carrying `instructions` (all signatures included). */
-export function transactionSize(feePayer: Address, instructions: readonly Instruction[]): number {
-  const message = pipe(
-    createTransactionMessage({ version: 0 }),
-    (m) => setTransactionMessageFeePayer(feePayer, m),
-    (m) => appendTransactionMessageInstructions(instructions, m),
-  );
-  return getTransactionMessageSize(message);
 }
 
 /**
