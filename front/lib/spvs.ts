@@ -33,11 +33,34 @@ export type SpvIssuance = {
   issued_at: string;
   note: string | null;
   recorded_by: string | null;
-  /** 'manual' (admin registry), 'sale' (booked by the server when a sale closes)
-   *  or 'treasury_mint' (an Admin-issuer treasury mint). Absent on pre-0027 rows. */
+  /** 'manual' (an off-chain adjustment), 'sale' (booked by the server when a
+   *  sale closes) or 'treasury_mint' (booked from a finalized treasury mint). */
   source?: string;
-  /** True when the row was recorded past the annual cap via super-admin override. Absent on pre-0027 rows. */
+  /** True when the row was recorded past the cap via super-admin override. */
   cap_override?: boolean;
+  /** Manual adjustments since 0073: why the chain does not show it. */
+  reason_code?: AdjustmentReason | null;
+};
+
+export type AdjustmentReason = "off_platform_issuance" | "correction" | "legacy_import";
+export const ADJUSTMENT_REASONS: readonly { value: AdjustmentReason; label: string }[] = [
+  { value: "off_platform_issuance", label: "Off-platform issuance" },
+  { value: "correction", label: "Correction" },
+  { value: "legacy_import", label: "Legacy import" },
+];
+
+/** Rolling 12-month capacity of an SPV or of an asset's subject (POST /api/spvs/capacity). */
+export type SpvCapacity = {
+  subject: string;
+  spv_id: string | null;
+  cap: number;
+  issued: number;
+  reserved: number;
+  used: number;
+  remaining: number;
+  window_start: string;
+  cap_source: string;
+  holds: number;
 };
 
 export type SpvCreateInput = {
@@ -50,9 +73,6 @@ export type SpvCreateInput = {
   incorporated_at?: string;
   notes?: string;
 };
-
-/** Legal ceiling per the Flows & Fact Sheets doc: EUR 3M issued per SPV per calendar year. */
-export const SPV_ANNUAL_CAP_EUR = 3_000_000;
 
 export async function listSpvs(): Promise<SpvRow[]> {
   const sb = getSupabase();
@@ -141,37 +161,52 @@ export async function updateSpv(
   }
 }
 
-export async function listIssuances(spvId: string): Promise<SpvIssuance[]> {
-  const sb = getSupabase();
-  if (!sb) return [];
-  const { data, error } = await sb
-    .from("spv_issuances")
-    .select("*")
-    .eq("spv_id", spvId)
-    .order("issued_at", { ascending: false });
-  if (error) {
-    console.warn("[spvs] issuances failed:", error.message);
-    return [];
+/** The SPV's issuance ledger through the signed admin route (anonymous reads end with 0074). Null when it could not be read. */
+export async function listIssuances(
+  session: WalletSession | null | undefined,
+  spvId: string,
+): Promise<SpvIssuance[] | null> {
+  try {
+    return await signedFetch<SpvIssuance[]>(session, "/api/spvs/issuances", "spvs.issuances", { spv_id: spvId });
+  } catch (err) {
+    console.warn("[spvs] issuances failed:", err instanceof Error ? err.message : err);
+    return null;
   }
-  return (data ?? []) as SpvIssuance[];
 }
 
+/** Rolling 12-month capacity: an SPV (admin) or the subject behind an asset (admin or its issuer). Null when unavailable. */
+export async function spvCapacity(
+  session: WalletSession | null | undefined,
+  target: { spv_id: string } | { asset: string },
+): Promise<SpvCapacity | null> {
+  try {
+    const data = await signedFetch<SpvCapacity>(session, "/api/spvs/capacity", "spvs.capacity", target);
+    const num = (v: unknown) => Number(v ?? 0);
+    return { ...data, cap: num(data.cap), issued: num(data.issued), reserved: num(data.reserved), used: num(data.used),
+      remaining: num(data.remaining), holds: num(data.holds) };
+  } catch (err) {
+    console.warn("[spvs] capacity failed:", err instanceof Error ? err.message : err);
+    return null;
+  }
+}
+
+/** An off-chain adjustment (Talas 5.1): on-chain sales and mints are booked by the server. */
 export type SpvIssuanceInput = {
   spv_id: string;
   amount_eur: number;
+  /** An asset PDA (never a sale). */
   asset_pda?: string;
-  sale_pubkey?: string;
   issued_at?: string;
-  note?: string;
-  /** IGNORED by the server — recorded_by is stamped with the verified signer wallet. */
-  recorded_by?: string;
-  /** Defaults to 'manual' at the DB level (migration 0027); pass 'sale' for auto-booked sale proceeds. */
-  source?: string;
+  reason_code: AdjustmentReason;
+  /** At least 10 characters. */
+  note: string;
+  /** After a POSSIBLE_DUPLICATE answer: the admin confirmed it is another issuance. */
+  confirm_not_duplicate?: boolean;
   /** Super-admin cap bypass — server-enforced via requireSuperAdmin. Only send when true. */
   cap_override?: boolean;
 };
 
-export type RecordIssuanceResult = { ok: boolean; error?: string };
+export type RecordIssuanceResult = { ok: boolean; error?: string; possibleDuplicate?: boolean };
 
 /**
  * Book an issuance via the signed admin route
@@ -191,10 +226,10 @@ export async function recordIssuance(
         spv_id: input.spv_id,
         amount_eur: input.amount_eur,
         asset_pda: input.asset_pda,
-        sale_pubkey: input.sale_pubkey,
         issued_at: input.issued_at,
+        reason_code: input.reason_code,
         note: input.note,
-        source: input.source,
+        ...(input.confirm_not_duplicate ? { confirm_not_duplicate: true } : {}),
         ...(input.cap_override ? { cap_override: true } : {}),
       },
     );
@@ -202,23 +237,6 @@ export async function recordIssuance(
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.warn("[spvs] record issuance failed:", msg);
-    return { ok: false, error: msg };
+    return { ok: false, error: msg, possibleDuplicate: /^Possible duplicate/.test(msg) };
   }
-}
-
-/** Sum of issuances (EUR) booked against an SPV within one calendar year. */
-export async function yearIssuanceTotal(spvId: string, year: number): Promise<number> {
-  const sb = getSupabase();
-  if (!sb) return 0;
-  const { data, error } = await sb
-    .from("spv_issuances")
-    .select("amount_eur")
-    .eq("spv_id", spvId)
-    .gte("issued_at", `${year}-01-01`)
-    .lt("issued_at", `${year + 1}-01-01`);
-  if (error) {
-    console.warn("[spvs] year total failed:", error.message);
-    return 0;
-  }
-  return (data ?? []).reduce((sum, r) => sum + Number(r.amount_eur ?? 0), 0);
 }

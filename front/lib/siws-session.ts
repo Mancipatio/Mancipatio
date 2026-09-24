@@ -50,6 +50,9 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "saleApprovals.capacity",
   "saleApprovals.list",
   "saleApprovals.mine",
+  // Rolling EUR capacity and the issuance ledger of an SPV (Talas 5.1).
+  "spvs.capacity",
+  "spvs.issuances",
   "storage.documents.list",
   // Signs ONE confidential document on click; its only write is the access-log row.
   "storage.documents.url",

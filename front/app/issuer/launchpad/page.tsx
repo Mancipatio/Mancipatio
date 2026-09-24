@@ -54,7 +54,6 @@ import {
   listIssuerSaleApprovals,
   maxUnitsAt,
   mySaleApprovals,
-  settleWhenFinalized,
   type MyApproval,
   type SaleApprovalAccount,
 } from "@/lib/sale-approvals";
@@ -200,23 +199,10 @@ function LaunchpadInner() {
   const canOpen = verified && mintableScs.length > 0;
 
   // After a sale closes (instant close_sale for Mature, or the
-  // open_payout_vault close flow for Startup) the server books what was sold
-  // against the raise cap, at the FX rate locked when Manci approved the
-  // sale. It reads the sale at `finalized`, so this waits for finality first.
-  // Best effort: the retry worker books it anyway if this page is left.
-  function settleAfterClose(s: Sale, salePda: Address, signature: string) {
-    void settleWhenFinalized(client.runtime.rpc, conn.wallet, salePda, signature)
-      .then((result) => {
-        if (result?.status === "booked" && result.booked_amount_eur !== null) {
-          toast.show({
-            kind: "success",
-            title: "Raise recorded",
-            description: `€${Number(result.booked_amount_eur).toLocaleString("en-US")} of sale #${s.saleId} counted against the annual raise limit.`,
-          });
-        }
-      })
-      .catch((err) => console.warn("[launchpad] raise-limit settlement deferred to the worker:", err));
-  }
+  // open_payout_vault close flow for Startup) the server alone books what was
+  // sold against the raise cap, at the FX rate locked when Manci approved the
+  // sale and at the proven close date: the indexer enqueues the closed sale
+  // and the retry worker books it (Talas 5.1). Nothing to do here.
 
   async function closeSale(s: Sale) {
     if (!wallet || !conn.wallet) return;
@@ -270,7 +256,6 @@ function LaunchpadInner() {
         toast.dismiss(pendingId);
         toast.showTx(sig, { title: "Vault opened" });
         setConfirmClose(null);
-        settleAfterClose(s, salePda, sig);
         await refresh();
         return;
       }
@@ -307,7 +292,6 @@ function LaunchpadInner() {
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Sale closed" });
       setConfirmClose(null);
-      settleAfterClose(s, salePda, sig);
       await refresh();
     } catch (err) {
       toast.dismiss(pendingId);

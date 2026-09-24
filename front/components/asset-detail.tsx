@@ -20,10 +20,7 @@ import {
   safeHttpUrl,
 } from "@/lib/format";
 import { shareClassKey } from "@/lib/asset-links";
-import { listSpvs, yearIssuanceTotal, type SpvRow } from "@/lib/spvs";
-
-/** EUR annual issuance cap per SPV (flows doc 1.2.8). */
-const SPV_ANNUAL_CAP_EUR = 3_000_000;
+import { listSpvs, spvCapacity, type SpvCapacity, type SpvRow } from "@/lib/spvs";
 import { signedUpload } from "@/lib/storage-client";
 import { SkeletonCard } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
@@ -769,25 +766,25 @@ function WhitepaperCard({
     };
   }, []);
 
-  // Current-year issuance booked against the linked SPV's EUR 3M annual cap, so
-  // the issuer can see remaining headroom before a sale close would blow it.
-  const [spvYtd, setSpvYtd] = useState<number | null>(null);
+  // The rolling 12-month raise limit of the asset's subject (its SPV), from
+  // the signed route (the admin or the asset's issuer), so the issuer sees the
+  // headroom before a sale approval or a close would need it.
+  const [spvCap, setSpvCap] = useState<SpvCapacity | null>(null);
   const linkedSpvId = profile?.spv_id ?? "";
   useEffect(() => {
     let cancelled = false;
-    if (!linkedSpvId) {
+    if (!linkedSpvId || !conn.wallet) {
       // eslint-disable-next-line react-hooks/set-state-in-effect
-      setSpvYtd(null);
+      setSpvCap(null);
       return;
     }
-    const year = new Date().getFullYear();
-    void yearIssuanceTotal(linkedSpvId, year).then((total) => {
-      if (!cancelled) setSpvYtd(total);
+    void spvCapacity(conn.wallet, { asset: assetPda }).then((capacity) => {
+      if (!cancelled) setSpvCap(capacity);
     });
     return () => {
       cancelled = true;
     };
-  }, [linkedSpvId]);
+  }, [linkedSpvId, assetPda, conn.wallet]);
 
   const fileUrl = whitepaperFileUrl(profile?.whitepaper_path ?? null);
   const currentStatus = profile?.whitepaper_status ?? "none";
@@ -1155,30 +1152,34 @@ function WhitepaperCard({
               ) : (
                 "Not yet assigned"
               )}
-              {currentSpv && spvYtd !== null && (
+              {currentSpv && spvCap !== null && (
                 <span className="mt-1.5 block text-[11px]">
                   <span className="text-slate-500">
-                    {new Date().getFullYear()} issuance: €
-                    {spvYtd.toLocaleString("en-US")} of €
-                    {SPV_ANNUAL_CAP_EUR.toLocaleString("en-US")}
+                    Last 12 months: issued €{spvCap.issued.toLocaleString("en-US")}
+                    {spvCap.reserved > 0 ? ` + reserved €${spvCap.reserved.toLocaleString("en-US")}` : ""} of €
+                    {spvCap.cap.toLocaleString("en-US")}
                   </span>{" "}
                   <span
                     className={
-                      SPV_ANNUAL_CAP_EUR - spvYtd <= 0
+                      spvCap.remaining <= 0
                         ? "font-medium text-red-600"
-                        : SPV_ANNUAL_CAP_EUR - spvYtd < SPV_ANNUAL_CAP_EUR * 0.1
+                        : spvCap.remaining < spvCap.cap * 0.1
                           ? "font-medium text-amber-700"
                           : "text-emerald-700"
                     }
                   >
-                    (€{Math.max(0, SPV_ANNUAL_CAP_EUR - spvYtd).toLocaleString("en-US")}{" "}
-                    remaining)
+                    (€{Math.max(0, spvCap.remaining).toLocaleString("en-US")} remaining)
                   </span>
+                  {spvCap.holds > 0 && (
+                    <span className="mt-0.5 block font-medium text-red-600">
+                      On hold until an on-chain sale or mint is counted.
+                    </span>
+                  )}
                 </span>
               )}
               <span className="mt-1 block text-[11px] text-slate-400">
-                Serbian SPV this issuance runs through (EUR 3M/year cap) —
-                assigned by the Manci team.
+                Serbian SPV this issuance runs through (EUR 3M limit over the
+                last 12 months) — assigned by the Manci team.
               </span>
             </div>
           )}

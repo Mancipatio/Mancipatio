@@ -16,13 +16,15 @@ import { useRole } from "@/lib/auth";
 import { listClients, type ClientRow } from "@/lib/clients";
 import { COUNTRIES, countryName } from "@/lib/countries";
 import {
+  ADJUSTMENT_REASONS,
   createSpv,
   listIssuances,
   listSpvs,
   recordIssuance,
-  SPV_ANNUAL_CAP_EUR,
+  spvCapacity,
   updateSpv,
-  yearIssuanceTotal,
+  type AdjustmentReason,
+  type SpvCapacity,
   type SpvIssuance,
   type SpvRow,
   type SpvStatus,
@@ -65,7 +67,7 @@ export default function SpvsPage() {
         <p className="page-sub">
           Serbian special-purpose vehicles used for token issuance. Issuers
           without a Serbian company get an SPV incorporated by Manci.
-          Each SPV may issue at most EUR 3,000,000 per calendar year.
+          Each SPV may issue at most its annual cap (EUR 3,000,000 by default) over any rolling 12 months.
         </p>
       </div>
       <RequireRole role="admin">
@@ -79,13 +81,11 @@ function SpvsOps() {
   const conn = useWalletConnection();
   const [rows, setRows] = useState<SpvRow[] | null>(null);
   const [clients, setClients] = useState<ClientRow[]>([]);
-  const [yearTotals, setYearTotals] = useState<Record<string, number>>({});
+  const [capacities, setCapacities] = useState<Record<string, SpvCapacity | null>>({});
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<SpvStatus | "all">("all");
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [showAdd, setShowAdd] = useState(false);
-
-  const currentYear = new Date().getFullYear();
 
   const refresh = useCallback(async () => {
     if (!conn.wallet) return;
@@ -95,11 +95,12 @@ function SpvsOps() {
     ]);
     setRows(spvs);
     setClients(clientRows);
+    // Rolling 12 months (issued + live reservations), from the signed route.
     const totals = await Promise.all(
-      spvs.map(async (s) => [s.id, await yearIssuanceTotal(s.id, currentYear)] as const),
+      spvs.map(async (s) => [s.id, await spvCapacity(conn.wallet, { spv_id: s.id })] as const),
     );
-    setYearTotals(Object.fromEntries(totals));
-  }, [currentYear, conn.wallet]);
+    setCapacities(Object.fromEntries(totals));
+  }, [conn.wallet]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -132,12 +133,12 @@ function SpvsOps() {
   const kpis = useMemo(() => {
     if (!rows) return null;
     const aggregate = rows.reduce(
-      (sum, r) => sum + (yearTotals[r.id] ?? 0),
+      (sum, r) => sum + (capacities[r.id]?.used ?? 0),
       0,
     );
     const nearCap = rows.filter((r) => {
-      const cap = r.annual_cap_eur || SPV_ANNUAL_CAP_EUR;
-      return (yearTotals[r.id] ?? 0) >= cap * 0.8;
+      const c = capacities[r.id];
+      return c ? c.used >= c.cap * 0.8 : false;
     }).length;
     return {
       total: rows.length,
@@ -145,7 +146,7 @@ function SpvsOps() {
       aggregate,
       nearCap,
     };
-  }, [rows, yearTotals]);
+  }, [rows, capacities]);
 
   const selected = useMemo(
     () => rows?.find((r) => r.id === selectedId) ?? null,
@@ -169,7 +170,7 @@ function SpvsOps() {
             tone="good"
           />
           <Kpi
-            label={`Issued ${currentYear} (all SPVs)`}
+            label="Used, last 12 months (all SPVs)"
             value={fmtEur(kpis.aggregate)}
             icon={<IconCoins />}
           />
@@ -235,15 +236,15 @@ function SpvsOps() {
                 <th className="px-4 py-3 font-medium">Country</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium">Client</th>
-                <th className="px-4 py-3 font-medium">{currentYear} issuance / cap</th>
+                <th className="px-4 py-3 font-medium">Last 12 months / cap</th>
                 <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
               {filtered.map((r) => {
                 const isSelected = r.id === selectedId;
-                const cap = r.annual_cap_eur || SPV_ANNUAL_CAP_EUR;
-                const used = yearTotals[r.id] ?? 0;
+                const cap = capacities[r.id]?.cap ?? r.annual_cap_eur;
+                const used = capacities[r.id]?.used ?? 0;
                 const pct = cap > 0 ? used / cap : 0;
                 return (
                   <tr
@@ -310,7 +311,7 @@ function SpvsOps() {
           key={selected.id}
           spv={selected}
           clients={clients}
-          currentYearTotal={yearTotals[selected.id] ?? 0}
+          capacity={capacities[selected.id] ?? null}
           onRefresh={refresh}
           onClose={() => setSelectedId(null)}
         />
@@ -355,13 +356,13 @@ function CapBar({ pct, className = "" }: { pct: number; className?: string }) {
 function SpvDetail({
   spv,
   clients,
-  currentYearTotal,
+  capacity,
   onRefresh,
   onClose,
 }: {
   spv: SpvRow;
   clients: ClientRow[];
-  currentYearTotal: number;
+  capacity: SpvCapacity | null;
   onRefresh: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -386,28 +387,17 @@ function SpvDetail({
   const [issuances, setIssuances] = useState<SpvIssuance[] | null>(null);
 
   const loadIssuances = useCallback(async () => {
-    setIssuances(await listIssuances(spv.id));
-  }, [spv.id]);
+    setIssuances((await listIssuances(conn.wallet, spv.id)) ?? []);
+  }, [spv.id, conn.wallet]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void loadIssuances();
   }, [loadIssuances]);
 
-  const cap = spv.annual_cap_eur || SPV_ANNUAL_CAP_EUR;
-  const pct = cap > 0 ? currentYearTotal / cap : 0;
-  const currentYear = new Date().getFullYear();
-
-  const priorYearTotals = useMemo(() => {
-    if (!issuances) return [];
-    const byYear = new Map<number, number>();
-    for (const i of issuances) {
-      const y = Number(String(i.issued_at).slice(0, 4));
-      if (!Number.isFinite(y) || y >= currentYear) continue;
-      byYear.set(y, (byYear.get(y) ?? 0) + Number(i.amount_eur ?? 0));
-    }
-    return [...byYear.entries()].sort((a, b) => b[0] - a[0]);
-  }, [issuances, currentYear]);
+  const cap = capacity?.cap ?? spv.annual_cap_eur;
+  const used = capacity?.used ?? 0;
+  const pct = cap > 0 ? used / cap : 0;
 
   const isRetiring = statusVal === "retired" && spv.status !== "retired";
 
@@ -503,34 +493,37 @@ function SpvDetail({
       >
         <div className="flex flex-wrap items-baseline justify-between gap-2">
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-            {currentYear} issuance cap
+            Raise limit, last 12 months
           </p>
           <p className="text-sm font-medium text-slate-900">
-            {fmtEur(currentYearTotal)}{" "}
+            {capacity ? fmtEur(used) : "—"}{" "}
             <span className="font-normal text-slate-500">
               of {fmtEur(cap)} ({Math.round(pct * 100)}%)
             </span>
           </p>
         </div>
         <CapBar pct={pct} className="mt-2" />
+        {capacity && (
+          <p className="mt-2 text-[11px] text-slate-500">
+            Issued {fmtEur(capacity.issued)} · reserved by live sale approvals and treasury mints {fmtEur(capacity.reserved)} ·
+            window from {String(capacity.window_start).slice(0, 10)}
+          </p>
+        )}
+        {capacity && capacity.holds > 0 && (
+          <p className="mt-2 text-xs font-medium text-red-800">
+            On hold: an on-chain sale or mint could not be counted yet (missing or out-of-date EUR rate). New raises and
+            adjustments are blocked until the rate is updated on the Raise limits page.
+          </p>
+        )}
         {pct >= 1 ? (
           <p className="mt-2 text-xs font-medium text-red-800">
-            EUR 3M annual cap reached — issuance beyond this requires legal
-            review.
+            EUR raise limit reached for the last 12 months — issuance beyond it requires legal review.
           </p>
         ) : pct >= 0.8 ? (
           <p className="mt-2 text-xs font-medium text-amber-800">
-            This SPV is approaching the EUR 3M annual cap.
+            This SPV is approaching its raise limit for the last 12 months.
           </p>
         ) : null}
-        {priorYearTotals.length > 0 && (
-          <p className="mt-2 text-[11px] text-slate-500">
-            Prior years:{" "}
-            {priorYearTotals
-              .map(([y, total]) => `${y} — ${fmtEur(total)}`)
-              .join(" · ")}
-          </p>
-        )}
       </div>
 
       {/* Edit form */}
@@ -669,7 +662,7 @@ function SpvDetail({
                   <th className="px-3 py-2 text-right font-medium">
                     Amount (EUR)
                   </th>
-                  <th className="px-3 py-2 font-medium">Asset / sale ref</th>
+                  <th className="px-3 py-2 font-medium">Asset / sale</th>
                   <th className="px-3 py-2 font-medium">Note</th>
                   <th className="px-3 py-2 font-medium">Recorded by</th>
                 </tr>
@@ -696,9 +689,14 @@ function SpvDetail({
                           cap override
                         </span>
                       )}
-                      {i.source === "sale" && (
+                      {(i.source === "sale" || i.source === "treasury_mint") && (
                         <span className="mr-1.5 inline-flex rounded-full border border-slate-300 bg-slate-100 px-1.5 py-0.5 text-[10px] font-semibold text-slate-600">
-                          auto · sale
+                          server · {i.source === "sale" ? "sale" : "treasury mint"}
+                        </span>
+                      )}
+                      {i.source === "manual" && i.reason_code && (
+                        <span className="mr-1.5 inline-flex rounded-full border border-brand-200 bg-brand-50 px-1.5 py-0.5 text-[10px] font-semibold text-brand-800">
+                          adjustment · {ADJUSTMENT_REASONS.find((r) => r.value === i.reason_code)?.label ?? i.reason_code}
                         </span>
                       )}
                       {i.note ?? "—"}
@@ -719,6 +717,7 @@ function SpvDetail({
           spv={spv}
           wallet={wallet}
           issuances={issuances}
+          capacity={capacity}
           onRecorded={async () => {
             await Promise.all([loadIssuances(), onRefresh()]);
           }}
@@ -753,11 +752,13 @@ function RecordIssuanceForm({
   spv,
   wallet,
   issuances,
+  capacity,
   onRecorded,
 }: {
   spv: SpvRow;
   wallet: string;
   issuances: SpvIssuance[] | null;
+  capacity: SpvCapacity | null;
   onRecorded: () => Promise<void>;
 }) {
   const conn = useWalletConnection();
@@ -767,91 +768,64 @@ function RecordIssuanceForm({
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(today);
   const [ref, setRef] = useState("");
+  const [reasonCode, setReasonCode] = useState<AdjustmentReason>("off_platform_issuance");
   const [note, setNote] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [confirmOverride, setConfirmOverride] = useState(false);
+  const [duplicate, setDuplicate] = useState(false);
 
   const amountNum = Number(amount);
   const amountValid = Number.isFinite(amountNum) && amountNum > 0;
+  const noteValid = note.trim().length >= 10;
+  const cap = capacity?.cap ?? spv.annual_cap_eur;
+  const used = capacity?.used ?? null;
+  const projected = (used ?? 0) + (amountValid ? amountNum : 0);
+  // Display only: the server's rolling check (with live reservations) is the authority.
+  const overCap = amountValid && used !== null && projected > cap;
+  const onHold = (capacity?.holds ?? 0) > 0;
 
-  const cap = spv.annual_cap_eur || SPV_ANNUAL_CAP_EUR;
-  const issuanceYear = Number(date.slice(0, 4));
+  // Server bookings (sales, treasury mints) of the entered asset in the last
+  // 12 months: an adjustment must not repeat one of them.
+  const serverBookings = useMemo(() => {
+    const asset = ref.trim();
+    if (!issuances || !asset) return [];
+    const since = new Date(Date.parse(`${today}T00:00:00Z`) - 366 * 86_400_000).toISOString().slice(0, 10);
+    return issuances.filter((i) => i.asset_pda === asset && (i.source === "sale" || i.source === "treasury_mint")
+      && String(i.issued_at).slice(0, 10) >= since);
+  }, [issuances, ref, today]);
 
-  // Calendar-year total for the year of the selected issuance date, from the
-  // already-loaded ledger (kept fresh by the parent's loadIssuances()).
-  const yearTotal = useMemo(() => {
-    if (!issuances || !Number.isFinite(issuanceYear)) return null;
-    return issuances
-      .filter((i) => Number(String(i.issued_at).slice(0, 4)) === issuanceYear)
-      .reduce((sum, i) => sum + Number(i.amount_eur ?? 0), 0);
-  }, [issuances, issuanceYear]);
-
-  const projected = (yearTotal ?? 0) + (amountValid ? amountNum : 0);
-  const overCap = amountValid && yearTotal !== null && projected > cap;
-
-  async function submit(overrideReason?: string) {
-    if (!amountValid || !date) return;
+  async function submit(overrideReason?: string, confirmNotDuplicate = false) {
+    if (!amountValid || !date || !noteValid) return;
     setSubmitting(true);
-    const pendingId = toast.showPending(
-      "Recording issuance…",
-      `${fmtEur(amountNum)} against ${spv.name}`,
-    );
+    const pendingId = toast.showPending("Recording adjustment…", `${fmtEur(amountNum)} against ${spv.name}`);
     try {
-      // Fresh cap check at submit time (the loaded ledger may be stale if
-      // another admin recorded in the meantime). The 0027 DB trigger is the
-      // authoritative guard; this closes the gap client-side with a clear error.
-      if (!overrideReason) {
-        const freshTotal = await yearIssuanceTotal(spv.id, issuanceYear);
-        if (freshTotal + amountNum > cap) {
-          throw new Error(
-            `Annual cap exceeded: ${fmtEur(freshTotal)} already issued in ${issuanceYear}; adding ${fmtEur(amountNum)} would exceed the ${fmtEur(cap)} cap. ${
-              isSuperAdmin
-                ? "Use the override flow to record anyway."
-                : "Only a super admin can override the cap."
-            }`,
-          );
-        }
-      }
       const refTrim = ref.trim();
       const res = await recordIssuance(conn.wallet, {
         spv_id: spv.id,
         amount_eur: amountNum,
         issued_at: date,
         asset_pda: refTrim || undefined,
-        note: note.trim() || undefined,
-        recorded_by: wallet || undefined,
+        reason_code: reasonCode,
+        note: overrideReason ? `${note.trim()} — override: ${overrideReason}` : note.trim(),
+        confirm_not_duplicate: confirmNotDuplicate || undefined,
         cap_override: overrideReason ? true : undefined,
       });
       if (!res.ok) {
-        throw new Error(res.error ?? "Insert failed — Supabase unreachable?");
+        if (res.possibleDuplicate) {
+          toast.dismiss(pendingId);
+          setDuplicate(true);
+          return;
+        }
+        throw new Error(res.error ?? "The adjustment could not be recorded");
       }
       toast.dismiss(pendingId);
       toast.show({
         kind: "success",
-        title: overrideReason
-          ? "Issuance recorded (cap override)"
-          : "Issuance recorded",
+        title: overrideReason ? "Adjustment recorded (cap override)" : "Adjustment recorded",
         description: `${fmtEur(amountNum)} booked against ${spv.name} for ${date}.`,
       });
-      void recordAudit({
-        ix_name: overrideReason ? "spv_issuance_cap_override" : "spv_issuance",
-        category: "other",
-        actor_wallet: wallet,
-        reason:
-          overrideReason ??
-          (note.trim() || "Issuance recorded via SPV registry"),
-        target_label: `${spv.name} · ${fmtEur(amountNum)} · ${date}`,
-        status: "success",
-        metadata: {
-          spv_id: spv.id,
-          amount_eur: amountNum,
-          ref: refTrim || null,
-          cap_override: Boolean(overrideReason),
-          annual_cap_eur: cap,
-          year_total_before: yearTotal,
-        },
-      });
       setConfirmOverride(false);
+      setDuplicate(false);
       setAmount("");
       setDate(today);
       setRef("");
@@ -859,49 +833,35 @@ function RecordIssuanceForm({
       await onRecorded();
     } catch (err) {
       toast.dismiss(pendingId);
-      toast.showError(
-        "Failed to record issuance",
-        err instanceof Error ? err.message : String(err),
-      );
-      void recordAudit({
-        ix_name: overrideReason ? "spv_issuance_cap_override" : "spv_issuance",
-        category: "other",
-        actor_wallet: wallet,
-        reason:
-          overrideReason ??
-          (note.trim() || "Issuance recorded via SPV registry"),
-        target_label: `${spv.name} · ${fmtEur(amountNum)}`,
-        status: "failed",
-        metadata: {
-          spv_id: spv.id,
-          cap_override: Boolean(overrideReason),
-          error: err instanceof Error ? err.message : String(err),
-        },
-      });
+      toast.showError("Failed to record the adjustment", err instanceof Error ? err.message : String(err));
     } finally {
       setSubmitting(false);
     }
   }
 
   function onRecordClick() {
-    if (!amountValid || !date) return;
-    if (overCap) {
+    if (!amountValid || !date || !noteValid) return;
+    if (overCap || onHold) {
       if (isSuperAdmin) setConfirmOverride(true);
-      return; // non-super-admins are blocked (button is disabled anyway)
+      return;
     }
     void submit();
   }
 
+  const blocked = (overCap || onHold) && !isSuperAdmin;
+
   return (
     <div className="mt-4 rounded-lg border border-slate-200 bg-slate-50 p-4">
       <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-        Record issuance
+        Record an off-chain adjustment
+      </p>
+      <p className="mt-1 text-[11px] text-slate-500">
+        On-chain sales and treasury mints are booked by the server when they happen. Record here only what the chain
+        cannot show: an off-platform issuance, a correction or a legacy import.
       </p>
       <div className="mt-2 grid gap-3 sm:grid-cols-4">
         <label className="block">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
-            Amount (EUR) *
-          </span>
+          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Amount (EUR) *</span>
           <input
             value={amount}
             inputMode="decimal"
@@ -910,65 +870,94 @@ function RecordIssuanceForm({
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
           />
           {amount.trim() !== "" && !amountValid && (
-            <span className="mt-1 block text-[11px] text-red-700">
-              Must be a positive number
-            </span>
+            <span className="mt-1 block text-[11px] text-red-700">Must be a positive number</span>
           )}
         </label>
         <label className="block">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
-            Date
-          </span>
+          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Date</span>
           <input
             type="date"
             value={date}
+            max={today}
             onChange={(e) => setDate(e.target.value)}
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
           />
         </label>
         <label className="block">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
-            Asset / sale ref (optional)
-          </span>
+          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Reason *</span>
+          <select
+            value={reasonCode}
+            onChange={(e) => setReasonCode(e.target.value as AdjustmentReason)}
+            className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
+          >
+            {ADJUSTMENT_REASONS.map((r) => (
+              <option key={r.value} value={r.value}>{r.label}</option>
+            ))}
+          </select>
+        </label>
+        <label className="block">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Asset (optional)</span>
           <input
             value={ref}
-            onChange={(e) => setRef(e.target.value)}
-            placeholder="Asset PDA or sale pubkey"
+            onChange={(e) => { setRef(e.target.value); setDuplicate(false); }}
+            placeholder="Asset PDA (never a sale)"
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs focus:border-slate-400 focus:outline-none"
           />
         </label>
-        <label className="block">
-          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">
-            Note (optional)
-          </span>
+        <label className="block sm:col-span-4">
+          <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Note * (at least 10 characters)</span>
           <input
             value={note}
             onChange={(e) => setNote(e.target.value)}
-            placeholder="e.g. primary sale tranche 2"
+            placeholder="What was issued, and where the evidence is"
             className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
           />
         </label>
       </div>
-      {amountValid && yearTotal !== null && (
-        <p
-          className={`mt-2 text-[11px] font-medium ${
-            overCap ? "text-red-700" : "text-slate-500"
-          }`}
-        >
-          Projected {issuanceYear} total: {fmtEur(projected)} of {fmtEur(cap)}{" "}
-          cap ({fmtEur(yearTotal)} already recorded)
+      {serverBookings.length > 0 && (
+        <div className="mt-2 rounded-md border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          <p className="font-semibold">The server already booked this asset in the last 12 months:</p>
+          <ul className="mt-1 list-disc pl-4">
+            {serverBookings.map((b) => (
+              <li key={b.id}>
+                {String(b.issued_at).slice(0, 10)} · {fmtEur(Number(b.amount_eur ?? 0))} · {b.source === "sale" ? "sale" : "treasury mint"}
+              </li>
+            ))}
+          </ul>
+          <p className="mt-1">Record an adjustment only for a different issuance.</p>
+        </div>
+      )}
+      {duplicate && (
+        <div className="mt-2 rounded-md border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          <p className="font-semibold">Possible duplicate of a server booking.</p>
+          <p className="mt-1">Confirm only if this adjustment is a different issuance than the bookings listed above.</p>
+          <button
+            type="button"
+            onClick={() => void submit(undefined, true)}
+            disabled={submitting}
+            className="mt-2 rounded-md bg-amber-700 px-3 py-1.5 text-xs font-medium text-white hover:bg-amber-800 disabled:opacity-50"
+          >
+            It is a different issuance — record it
+          </button>
+        </div>
+      )}
+      {amountValid && used !== null && (
+        <p className={`mt-2 text-[11px] font-medium ${overCap ? "text-red-700" : "text-slate-500"}`}>
+          Projected use of the last 12 months: {fmtEur(projected)} of {fmtEur(cap)} (issued {fmtEur(capacity?.issued ?? 0)},
+          reserved by live approvals {fmtEur(capacity?.reserved ?? 0)})
         </p>
       )}
-      {overCap && (
+      {(overCap || onHold) && (
         <div className="mt-2 rounded-md border border-red-200 bg-red-50 p-3 text-xs text-red-800">
           <p className="font-semibold">
-            This issuance would exceed the {fmtEur(cap)} annual cap for{" "}
-            {spv.name} in {issuanceYear}.
+            {onHold
+              ? "This SPV's raise limit is on hold until an on-chain sale or mint is counted."
+              : `This adjustment would exceed the ${fmtEur(cap)} limit over the last 12 months for ${spv.name}.`}
           </p>
           <p className="mt-1">
             {isSuperAdmin
               ? "As super admin you may record it anyway with a mandatory, audited override reason."
-              : "Recording is blocked. Only the platform super admin can override the cap, and every override is recorded in the audit log."}
+              : "Recording is blocked. Only the platform super admin can override, and every override is audited."}
           </p>
         </div>
       )}
@@ -979,20 +968,12 @@ function RecordIssuanceForm({
         <button
           type="button"
           onClick={onRecordClick}
-          disabled={
-            submitting || !amountValid || !date || (overCap && !isSuperAdmin)
-          }
+          disabled={submitting || !amountValid || !date || !noteValid || blocked}
           className={`rounded-md px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50 ${
-            overCap && isSuperAdmin
-              ? "bg-red-600 hover:bg-red-700"
-              : "bg-slate-900 hover:bg-slate-800"
+            (overCap || onHold) && isSuperAdmin ? "bg-red-600 hover:bg-red-700" : "bg-slate-900 hover:bg-slate-800"
           }`}
         >
-          {submitting
-            ? "Saving…"
-            : overCap && isSuperAdmin
-              ? "Record with override…"
-              : "Record issuance"}
+          {submitting ? "Saving…" : (overCap || onHold) && isSuperAdmin ? "Record with override…" : "Record adjustment"}
         </button>
       </div>
 
@@ -1000,22 +981,18 @@ function RecordIssuanceForm({
         open={confirmOverride}
         onClose={() => setConfirmOverride(false)}
         onConfirm={(reason) => void submit(reason)}
-        title="Override the EUR 3M annual cap"
+        title="Override the EUR raise limit"
         kind="destructive"
         confirmLabel="Record with override"
-        reasonPlaceholder="Legal basis for exceeding the annual cap (visible in audit log)"
+        reasonPlaceholder="Legal basis for recording past the limit (visible in the audit log)"
         description={
           <>
             <p>
-              Recording {amountValid ? fmtEur(amountNum) : "this amount"}{" "}
-              pushes <strong>{spv.name}</strong> to{" "}
-              <strong>{fmtEur(projected)}</strong> for {issuanceYear} — over
-              its annual cap of <strong>{fmtEur(cap)}</strong>.
+              Recording {amountValid ? fmtEur(amountNum) : "this amount"} brings <strong>{spv.name}</strong> to{" "}
+              <strong>{fmtEur(projected)}</strong> over the last 12 months — its limit is <strong>{fmtEur(cap)}</strong>.
             </p>
             <p className="mt-2 text-xs text-slate-500">
-              The row is permanently flagged as a cap override and your reason
-              is recorded in the audit log. Issuance beyond the cap normally
-              requires legal review.
+              The row is permanently flagged as a cap override and your reason is recorded in the audit log.
             </p>
           </>
         }

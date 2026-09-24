@@ -22,7 +22,7 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { bookTreasuryMintRow, findTreasuryMint, loadReservation, releaseReservation } from "@/lib/server/sale-capacity";
+import { bookTreasuryMintRow, bookingFlags, findTreasuryMint, loadReservation, releaseReservation, utcDate } from "@/lib/server/sale-capacity";
 import { blockhashExpired, readApprovalAndSale, signatureOutcome } from "@/lib/server/sale-capacity-chain";
 
 const REASONS = new Set(["tx_failed", "revoked", "admin"]);
@@ -83,7 +83,9 @@ export async function POST(request: Request) {
       // Every block the mint could have landed in is final: look for it.
       const found = await chain(() => findTreasuryMint(sb, reservation, Date.now()));
       if (found.signature) {
-        const booked = await bookTreasuryMintRow(sb, reservation.id, found.signature);
+        // At the mint's block date, with the same flags as every other booking path.
+        const booked = await bookTreasuryMintRow(sb, reservation.id, found.signature, undefined, utcDate(found.blockTime));
+        await bookingFlags(sb, booked);
         throw new SiwsError(409, booked.book_error
           ? `The treasury mint landed (${found.signature}); it stays counted, but booking was refused: ${booked.book_error}`
           : `The treasury mint landed (${found.signature}); it was booked instead of released`);

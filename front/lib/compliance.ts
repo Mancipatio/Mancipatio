@@ -24,7 +24,17 @@ export type ComplianceAlert = {
   resolved_by: string | null;
   resolved_at: string | null;
   tx_signature: string | null;
+  /** System alerts (migration 0072): onchain | indexer | worker | ledger | fx; null for AML rows. */
+  category?: AlertCategory | null;
+  dedup_key?: string | null;
+  notify_state?: "pending" | "sent" | "skipped" | "failed" | null;
+  notified_at?: string | null;
 };
+
+export type AlertCategory = "onchain" | "indexer" | "worker" | "ledger" | "fx";
+/** The list filter: a system category, or "aml" for rows without one. */
+export type AlertCategoryFilter = AlertCategory | "aml";
+export const ALERT_CATEGORIES: readonly AlertCategoryFilter[] = ["onchain", "indexer", "worker", "ledger", "fx", "aml"];
 
 /**
  * Admin-only alert list via the signed route (POST /api/compliance/list).
@@ -35,14 +45,24 @@ export type ComplianceAlert = {
  */
 export async function listAlerts(
   session: WalletSession | null | undefined,
+  category: AlertCategoryFilter | null = null,
 ): Promise<ComplianceAlert[]> {
-  const data = await signedFetch<{ alerts: ComplianceAlert[] }>(
+  return (await listAlertsPage(session, category)).alerts;
+}
+
+/** The list with its truncation flags: open and escalated alerts come first
+ * (up to 1000), then the newest 200 others (Talas 4.4b). */
+export async function listAlertsPage(
+  session: WalletSession | null | undefined,
+  category: AlertCategoryFilter | null = null,
+): Promise<{ alerts: ComplianceAlert[]; truncated: { open: boolean; other: boolean } }> {
+  const data = await signedFetch<{ alerts: ComplianceAlert[]; truncated?: { open: boolean; other: boolean } }>(
     session,
     "/api/compliance/list",
     "compliance.list",
-    {},
+    category ? { category } : {},
   );
-  return data.alerts ?? [];
+  return { alerts: data.alerts ?? [], truncated: data.truncated ?? { open: false, other: false } };
 }
 
 /** Most wallets one /api/compliance/open-wallets request may carry. */

@@ -1,12 +1,19 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import { useWalletConnection } from "@solana/react-hooks";
 import { RequireRole } from "@/components/require-role";
 import { adminGetRaiseLimits, adminUpdateRaiseLimits, type PlatformRaiseLimits } from "@/lib/launchpad";
 import { useToast } from "@/lib/toast";
 import { useRole } from "@/lib/auth";
-import { readFxRates, writeFxRate, type FxRate } from "@/lib/sale-approvals";
+import {
+  listSaleReservations,
+  readFxRates,
+  revalueTreasuryMint,
+  writeFxRate,
+  type FxRate,
+  type ReservationRow,
+} from "@/lib/sale-approvals";
 import { detectNetwork } from "@/lib/network";
 import {
   MAINNET_MAX_RATE_AGE_DAYS,
@@ -33,6 +40,7 @@ export default function RaiseLimitsPage() {
       <RequireRole role="admin">
         <LimitsForm />
         <FxRatesCard />
+        <AdoptedTreasuryMintsCard />
       </RequireRole>
     </section>
   );
@@ -265,5 +273,123 @@ function LimitsForm() {
         </>
       )}
     </form>
+  );
+}
+
+/**
+ * Treasury mints nobody reserved, counted by the ledger at their floor value
+ * (0073 adopt_treasury_mint: at least EUR 1, else the units at the share
+ * class's latest sale or approved price). The super admin re-values them
+ * with a reason; the value can never go below the floor.
+ */
+function AdoptedTreasuryMintsCard() {
+  const conn = useWalletConnection();
+  const { isSuperAdmin } = useRole();
+  const toast = useToast();
+  const [rows, setRows] = useState<ReservationRow[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [editing, setEditing] = useState<string | null>(null);
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!conn.wallet) return;
+    try {
+      setRows(await listSaleReservations(conn.wallet, { adopted_treasury: true }));
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not load the adopted treasury mints");
+    }
+  }, [conn.wallet]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
+
+  async function revalue(event: FormEvent) {
+    event.preventDefault();
+    const value = Number(amount);
+    if (!editing || !Number.isFinite(value) || value <= 0 || reason.trim().length < 10) return;
+    setSaving(true);
+    try {
+      const result = await revalueTreasuryMint(conn.wallet, editing, value, reason.trim());
+      toast.show({
+        kind: result.over_cap ? "error" : "success",
+        title: "Treasury mint re-valued",
+        description: `Now counted at €${Number(result.amount_eur).toLocaleString("en-US")}${result.over_cap ? " — the subject is OVER its raise limit" : ""}.`,
+      });
+      setEditing(null);
+      setAmount("");
+      setReason("");
+      await load();
+    } catch (e) {
+      toast.showError("Re-valuation refused", e instanceof Error ? e.message : String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-6 max-w-3xl rounded-xl border border-slate-200 bg-white p-6 shadow-card">
+      <p className="text-sm font-medium text-slate-800">Adopted treasury mints</p>
+      <p className="mt-0.5 text-xs text-slate-500">
+        Treasury mints that landed without a reservation are counted at their floor value so they are never left out
+        of the raise limit. Re-value one when its real value is higher{isSuperAdmin ? "" : " (super admin only)"}.
+      </p>
+      {error && <p className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{error}</p>}
+      {rows === null && !error ? (
+        <p className="mt-3 text-sm text-slate-500">Loading…</p>
+      ) : rows && rows.length === 0 ? (
+        <p className="mt-3 text-sm text-slate-500">None: every treasury mint was reserved before it landed.</p>
+      ) : (
+        <table className="mt-3 w-full text-left text-xs">
+          <thead className="text-slate-500">
+            <tr><th className="py-1">Share class</th><th>Units</th><th>Counted</th><th>Subject</th><th>Booked</th><th /></tr>
+          </thead>
+          <tbody className="divide-y divide-slate-100 text-slate-700">
+            {(rows ?? []).map((r) => (
+              <tr key={r.id}>
+                <td className="py-1.5 font-mono">{r.share_class_pda.slice(0, 6)}…{r.share_class_pda.slice(-4)}</td>
+                <td>{String(r.amount_units ?? "—")}</td>
+                <td>€{Number(r.booked_amount_eur ?? r.amount_eur).toLocaleString("en-US")}</td>
+                <td className="font-mono">{r.subject.length > 20 ? `${r.subject.slice(0, 14)}…` : r.subject}</td>
+                <td>{String(r.booked_issued_at ?? r.created_at).slice(0, 10)}</td>
+                <td className="text-right">
+                  {isSuperAdmin && (
+                    <button type="button" onClick={() => { setEditing(r.id); setAmount(String(r.booked_amount_eur ?? r.amount_eur)); }}
+                      className="rounded-md border border-slate-300 px-2 py-1 text-[11px] font-medium text-slate-700 hover:bg-slate-50">
+                      Re-value
+                    </button>
+                  )}
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {editing && isSuperAdmin && (
+        <form onSubmit={(e) => void revalue(e)} className="mt-4 grid gap-3 rounded-lg border border-slate-200 bg-slate-50 p-4 sm:grid-cols-3">
+          <label className="block">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">New value (EUR)</span>
+            <input value={amount} inputMode="decimal" onChange={(e) => setAmount(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none" />
+          </label>
+          <label className="block sm:col-span-2">
+            <span className="text-[11px] font-medium uppercase tracking-wide text-slate-500">Reason (at least 10 characters)</span>
+            <input value={reason} onChange={(e) => setReason(e.target.value)}
+              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none" />
+          </label>
+          <div className="flex justify-end gap-2 sm:col-span-3">
+            <button type="button" onClick={() => setEditing(null)} className="rounded-md px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100">Cancel</button>
+            <button type="submit" disabled={saving || reason.trim().length < 10 || !(Number(amount) > 0)}
+              className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
+              {saving ? "Saving…" : "Re-value"}
+            </button>
+          </div>
+        </form>
+      )}
+    </div>
   );
 }

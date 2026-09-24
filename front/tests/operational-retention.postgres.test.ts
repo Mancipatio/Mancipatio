@@ -62,7 +62,9 @@ const prune = (args = "") => {
   return JSON.parse(db.query(LAST_RUN));
 };
 const preview = (args = "") => JSON.parse(db.query(`select ${PREVIEW}(${args})`));
-const TASKS = ["indexer_jobs", "indexer_event_payloads", "purchase_evidence_jobs", "auth_login_tokens", "auth_google_states", "cron_job_run_details"];
+const TASKS = ["indexer_jobs", "indexer_event_payloads", "purchase_evidence_jobs", "auth_login_tokens", "auth_google_states", "cron_job_run_details", "onchain_event_jobs"];
+// 0072 redefines retention_tasks() with task 7 (onchain_event_jobs, 90 days).
+const ALARMS_MIGRATION = "0072_onchain_alarms.sql";
 const taskCounts = (result: Record<string, unknown>) => Object.fromEntries(TASKS.map((task) => [task, result[task]]));
 
 describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("operational data retention", () => {
@@ -92,6 +94,22 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("operational data 
   it("is a numbered migration that re-applies cleanly", () => {
     expect(retentionMigration).toBeDefined();
     db.query(readFileSync(join(migrations, retentionMigration!), "utf8"));
+    // Re-applying 0063 restores its six tasks; 0072 (re-runnable) adds task 7 back.
+    db.query(readFileSync(join(migrations, ALARMS_MIGRATION), "utf8"));
+    expect(db.query("select string_agg(task_name, ',' order by task_position) from mancipatio_ops.retention_tasks()"))
+      .toBe(TASKS.join(","));
+  });
+
+  it("task 7 prunes complete and invalid alarm jobs after 90 days, never pending ones", () => {
+    db.query(`truncate public.onchain_event_jobs;
+      insert into public.onchain_event_jobs(network, signature, source, status, created_at, updated_at) values
+        ('devnet', repeat('2', 88), 'webhook', 'complete', now() - interval '100 days', now() - interval '91 days'),
+        ('devnet', repeat('3', 88), 'gap-scan', 'invalid', now() - interval '100 days', now() - interval '91 days'),
+        ('devnet', repeat('4', 88), 'webhook', 'pending', now() - interval '200 days', now() - interval '200 days'),
+        ('devnet', repeat('6', 88), 'webhook', 'complete', now() - interval '89 days', now() - interval '89 days');`);
+    expect(prune()).toMatchObject({ onchain_event_jobs: 2 });
+    expect(db.query("select string_agg(left(signature, 1), ',' order by signature) from public.onchain_event_jobs")).toBe("4,6");
+    db.query("truncate public.onchain_event_jobs");
   });
 
   it("prunes exactly the expired operational rows and keeps what users and audits read", () => {
@@ -130,7 +148,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("operational data 
     expect(runs).toHaveLength(1);
     expect(Object.keys(runs[0]).sort()).toEqual([
       "auth_google_states", "auth_login_tokens", "cron_job_run_details", "duration_ms", "indexer_event_payloads",
-      "indexer_jobs", "interrupted", "more", "purchase_evidence_jobs", "skipped",
+      "indexer_jobs", "interrupted", "more", "onchain_event_jobs", "purchase_evidence_jobs", "skipped",
     ]);
     expect(JSON.stringify(runs)).not.toMatch(/@x\.test|Wallet|Buyer|complete-|event-/);
   });

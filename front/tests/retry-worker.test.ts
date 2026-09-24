@@ -1,9 +1,12 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-const mocks = vi.hoisted(() => ({ rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), capacity: vi.fn(), abortSignals: [] as AbortSignal[] }));
+const mocks = vi.hoisted(() => ({
+  rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), ledger: vi.fn(), capacity: vi.fn(), abortSignals: [] as AbortSignal[],
+}));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ rpc: mocks.rpc }) }));
 vi.mock("@/lib/server/indexer-sync", () => ({ reconcileIndexerJobs: mocks.indexer }));
 vi.mock("@/lib/server/purchase-records", () => ({ reconcilePurchases: mocks.purchases }));
+vi.mock("@/lib/server/spv-issuance-jobs", () => ({ reconcileLedger: mocks.ledger }));
 vi.mock("@/lib/server/sale-capacity", () => ({ reconcileSaleCapacity: mocks.capacity }));
 vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
 import { POST, maxDuration } from "@/app/api/internal/retry/route";
@@ -17,11 +20,12 @@ function rpcResult(data: boolean | null = true, error: unknown = null) {
 const request = (authorization: string | null = `Bearer ${SECRET}`, query = "") => new Request(`http://localhost/api/internal/retry${query}`, {
   method: "POST", headers: authorization ? { authorization } : {}, body: JSON.stringify({ network: "mainnet", limit: 999 }),
 });
+const rpcNames = () => mocks.rpc.mock.calls.map((c) => c[0]);
 beforeEach(() => {
   vi.clearAllMocks(); mocks.abortSignals.length = 0;
   vi.stubEnv("RETRY_WORKER_SECRET", SECRET);
   mocks.rpc.mockImplementation(() => rpcResult());
-  mocks.indexer.mockResolvedValue(COUNTS); mocks.purchases.mockResolvedValue(COUNTS); mocks.capacity.mockResolvedValue(COUNTS);
+  for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity]) m.mockResolvedValue(COUNTS);
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
@@ -39,8 +43,9 @@ describe("scheduler authorization", () => {
     const response = await POST(request()); const body = await response.json();
     expect(response.status).toBe(200); expect(body.data.network).toBe("devnet");
     expect(mocks.rpc).toHaveBeenNthCalledWith(1, "acquire_retry_worker_lease", expect.objectContaining({ p_network: "devnet", p_ttl_seconds: 120 }));
-    expect(mocks.indexer.mock.calls[0][0]).toBe(10); expect(mocks.purchases.mock.calls[0][0]).toBe(10);
-    expect(mocks.capacity.mock.calls[0][0]).toBe(10); expect(body.data.capacity).toEqual({ status: "processed", counts: COUNTS });
+    for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity]) expect(m.mock.calls[0][0]).toBe(10);
+    expect(body.data.capacity).toEqual({ status: "processed", counts: COUNTS });
+    expect(body.data.ledger).toEqual({ status: "processed", counts: COUNTS });
     expect(response.headers.get("Cache-Control")).toBe("private, no-store"); expect(maxDuration).toBe(60);
   });
   it.each(["0", "21", "1.5", "-1", "NaN", "01"])("rejects an invalid query limit %s without leasing", async (limit) => {
@@ -55,14 +60,35 @@ describe("scheduler authorization", () => {
 });
 
 describe("persistent worker lease and deadlines", () => {
-  it("runs the raise-cap reservation stage third and reports its failure as partial", async () => {
+  it("runs indexer, purchases, the ledger, then the raise-cap backstop; a failure is partial", async () => {
     mocks.capacity.mockRejectedValue(new Error("ledger-internal-detail"));
     const response = await POST(request()); const body = await response.json();
     expect(response.status).toBe(503); expect(body.data.capacity.status).toBe("failed");
     expect(body.data.indexer.status).toBe("processed"); expect(body.data.purchases.status).toBe("processed");
+    expect(body.data.ledger.status).toBe("processed");
     expect(JSON.stringify(body)).not.toContain("ledger-internal-detail");
-    const order = [mocks.indexer, mocks.purchases, mocks.capacity].map((m) => m.mock.invocationCallOrder[0]);
+    const order = [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity].map((m) => m.mock.invocationCallOrder[0]);
     expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+  it("records its heartbeat (partial after a failure) before releasing the lease", async () => {
+    mocks.ledger.mockRejectedValue(new Error("x"));
+    await POST(request());
+    expect(rpcNames()).toEqual(["acquire_retry_worker_lease", "record_worker_heartbeat", "release_retry_worker_lease"]);
+    expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_network: "devnet", p_worker: "retry", p_status: "partial", p_gap_scan: false });
+    mocks.rpc.mockClear(); mocks.ledger.mockResolvedValue(COUNTS);
+    await POST(request());
+    expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_status: "processed" });
+  });
+  it("a heartbeat failure never fails the run", async () => {
+    mocks.rpc.mockImplementation((name: string) => (name === "record_worker_heartbeat" ? rpcResult(null, { message: "down" }) : rpcResult()));
+    expect((await POST(request())).status).toBe(200);
+  });
+  it("answers 503 'Deployment network mismatch' when the lease's network assertion refuses", async () => {
+    mocks.rpc.mockImplementationOnce(() => rpcResult(null, { code: "P0001", message: "DEPLOYMENT_NETWORK_MISMATCH database=mainnet deployment=devnet" }));
+    const response = await POST(request());
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ ok: false, error: "Deployment network mismatch" });
+    expect(mocks.indexer).not.toHaveBeenCalled();
   });
   it("skips overlapping runs without executing work or releasing the other owner's lease", async () => {
     mocks.rpc.mockImplementation(() => rpcResult(false));
@@ -83,19 +109,16 @@ describe("persistent worker lease and deadlines", () => {
     const owner = mocks.rpc.mock.calls[0][1].p_owner;
     expect(owner).toMatch(/^[a-f0-9-]{36}$/);
     expect(mocks.rpc).toHaveBeenLastCalledWith("release_retry_worker_lease", { p_network: "devnet", p_owner: owner });
-    expect(mocks.abortSignals).toHaveLength(2); expect(mocks.abortSignals[1]).not.toBe(mocks.abortSignals[0]);
+    expect(mocks.abortSignals).toHaveLength(3); expect(mocks.abortSignals[2]).not.toBe(mocks.abortSignals[0]);
   });
-  it("bounds each queue deadline to twenty seconds within the total work budget", async () => {
+  it("gives each stage its budget (15/10/10 s) and the backstop what is left of the 47 s", async () => {
     let now = 100_000; vi.spyOn(Date, "now").mockImplementation(() => now);
     mocks.indexer.mockImplementation(async (_limit, deadline, signal) => {
-      expect(deadline).toBe(120_000); expect(signal).toBeInstanceOf(AbortSignal);
-      now = 120_000; return COUNTS;
+      expect(deadline).toBe(115_000); expect(signal).toBeInstanceOf(AbortSignal);
+      now = 115_000; return COUNTS;
     });
-    mocks.purchases.mockImplementation(async (_limit, deadline, signal) => {
-      expect(deadline).toBe(140_000); expect(signal).toBeInstanceOf(AbortSignal);
-      now = 140_000; return COUNTS;
-    });
-    // The raise-cap stage gets what is left of the 47 s work budget.
+    mocks.purchases.mockImplementation(async (_limit, deadline) => { expect(deadline).toBe(125_000); now = 125_000; return COUNTS; });
+    mocks.ledger.mockImplementation(async (_limit, deadline) => { expect(deadline).toBe(135_000); now = 135_000; return COUNTS; });
     mocks.capacity.mockImplementation(async (_limit, deadline, signal) => {
       expect(deadline).toBe(147_000); expect(signal).toBeInstanceOf(AbortSignal);
       now = 146_000; return COUNTS;
@@ -108,12 +131,15 @@ describe("persistent worker lease and deadlines", () => {
     let now = 100_000; vi.spyOn(Date, "now").mockImplementation(() => now);
     mocks.indexer.mockImplementation(async () => { now = 147_000; throw new Error("deadline"); });
     const result = await runRetryWorker();
-    expect(result).toMatchObject({ status: "processed", indexer: { status: "deferred" }, purchases: { status: "deferred" }, capacity: { status: "deferred" } });
-    expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.capacity).not.toHaveBeenCalled(); expect(mocks.rpc).toHaveBeenCalledTimes(2);
-    expect(mocks.abortSignals[1].aborted).toBe(false);
+    expect(result).toMatchObject({
+      status: "processed", indexer: { status: "deferred" }, purchases: { status: "deferred" },
+      ledger: { status: "deferred" }, capacity: { status: "deferred" },
+    });
+    expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.capacity).not.toHaveBeenCalled(); expect(mocks.rpc).toHaveBeenCalledTimes(3);
+    expect(mocks.abortSignals[2].aborted).toBe(false);
   });
   it("surfaces failed release instead of reporting a fully successful run", async () => {
-    mocks.rpc.mockImplementationOnce(() => rpcResult()).mockImplementationOnce(() => rpcResult(false));
+    mocks.rpc.mockImplementation((name: string) => (name === "release_retry_worker_lease" ? rpcResult(false) : rpcResult()));
     expect((await POST(request())).status).toBe(503);
     expect(mocks.indexer).toHaveBeenCalledOnce(); expect(mocks.purchases).toHaveBeenCalledOnce();
   });

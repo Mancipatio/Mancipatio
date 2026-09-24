@@ -37,6 +37,8 @@ type TokenBalance = {
 };
 export type ChainTransaction = {
   slot: Index;
+  /** Unix seconds (json getTransaction); null when the node does not know it. */
+  blockTime?: Index | null;
   transaction: {
     signatures: readonly string[];
     message: {
@@ -59,6 +61,8 @@ export type ChainTransaction = {
       | null;
     preTokenBalances?: readonly TokenBalance[] | null;
     postTokenBalances?: readonly TokenBalance[] | null;
+    /** Program logs; events (`Program data:`) appear only here. */
+    logMessages?: readonly string[] | null;
   };
 };
 
