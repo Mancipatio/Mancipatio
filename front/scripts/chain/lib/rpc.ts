@@ -116,10 +116,22 @@ export function createChainRpc(options: ChainRpcOptions) {
         throw new ChainGateError(`RPC method ${method} is not allowed in ${options.mode} mode`);
       }
       const signal = combineSignals(config.signal, runSignal);
+      // Only the run's signal is an abort of the run; a per-call signal (a
+      // caller's timeout) failing is an RPC failure of that one call.
+      const aborted = () => {
+        if (runSignal?.aborted) return new ChainAbortError();
+        if (config.signal?.aborted) return new ChainRpcError(method);
+        return null;
+      };
       const maxAttempts = method === "sendTransaction" ? 1 : 3;
       for (let attempt = 1; ; attempt++) {
-        if (signal?.aborted) throw new ChainAbortError();
-        await take(signal);
+        const stop = aborted();
+        if (stop) throw stop;
+        try {
+          await take(signal);
+        } catch (error) {
+          throw aborted() ?? error;
+        }
         let retryable = false;
         let code: number | null = null;
         try {
@@ -135,7 +147,8 @@ export function createChainRpc(options: ChainRpcOptions) {
           }
         } catch (error) {
           if (error instanceof ChainGateError) throw error;
-          if (signal?.aborted) throw new ChainAbortError();
+          const stop = aborted();
+          if (stop) throw stop;
           code = httpStatus(error);
           retryable = code === null || code === 429 || code >= 500;
         }

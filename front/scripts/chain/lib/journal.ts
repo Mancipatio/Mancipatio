@@ -19,7 +19,10 @@ export type JournalEventName =
   | "post-check"
   | "abort"
   | "recover"
-  | "buffer";
+  | "buffer"
+  | "e2e-step"
+  | "e2e-result"
+  | "checkpoint";
 
 export type JournalEvent = {
   t: string;

@@ -133,6 +133,44 @@ describe("RPC guard", () => {
     expect(await drainRpc.getSlot().send()).toBe(BigInt(5000));
   });
 
+  it("a per-call signal (a caller's timeout) is an RPC failure of that call, not an abort of the run", async () => {
+    const chain = new FakeChain();
+    const run = new AbortController();
+    const { rpc, drainRpc } = clients(chain, "read", { signal: run.signal });
+    await rpc.getSlot().send(); // proves the genesis first
+    const before = new AbortController();
+    before.abort();
+    await expect(rpc.getSlot().send({ abortSignal: before.signal })).rejects.toBeInstanceOf(ChainRpcError);
+    await expect(drainRpc.getSlot().send({ abortSignal: before.signal })).rejects.toBeInstanceOf(ChainRpcError);
+
+    // Aborted mid-request: the transport rejects once the call's signal fires.
+    const hanging: RpcTransport = async <T>(config: Parameters<RpcTransport>[0]): Promise<T> => {
+      const method = (config.payload as { method: string }).method;
+      if (method === "getGenesisHash") return chain.transport<T>(config);
+      return new Promise<T>((_, reject) => config.signal?.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    };
+    const slow = createChainRpc({
+      url: "https://rpc.example.test/",
+      network: "devnet",
+      expectedGenesis: CLUSTER_GENESIS_HASHES.devnet,
+      mode: "read",
+      rps: Infinity,
+      transport: hanging,
+      sleep: fastSleep,
+      retryDelayMs: 0,
+      signal: run.signal,
+    });
+    const call = new AbortController();
+    const pending = slow.rpc.getSlot().send({ abortSignal: call.signal });
+    setTimeout(() => call.abort(), 5);
+    await expect(pending).rejects.toSatisfy((e) => e instanceof ChainRpcError && !(e instanceof ChainAbortError));
+
+    // The run's own signal stays an abort, even with a per-call signal present.
+    const stuck = slow.rpc.getSlot().send({ abortSignal: new AbortController().signal });
+    setTimeout(() => run.abort(), 5);
+    await expect(stuck).rejects.toBeInstanceOf(ChainAbortError);
+  });
+
   it("mainnet needs the explicit flag before any RPC exists", () => {
     const dir = tempDir();
     expect(() =>
