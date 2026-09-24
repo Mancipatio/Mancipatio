@@ -1,21 +1,22 @@
 {
   "schema": "mancipatio-squads-multisig-fixture-v1",
-  "source": "synthesized from the Squads v4 Multisig struct (EXTERNAL #4); replace with the 6.1 rehearsal account dump",
-  "generator": "hand-encoded: discriminator sha256('account:Multisig')[0..8], create_key, config_authority, threshold u16, time_lock u32, transaction_index u64, stale_transaction_index u64, rent_collector Option<Pubkey>, bump u8, members Vec<(Pubkey, u8 mask)>",
+  "source": "6.1 rehearsal (2026-09-24): a real Multisig account created by the mainnet Squads v4 program (SQDS4ep6\u2026, cloned with solana-test-validator 4.3.0 --clone-upgradeable-program) through @sqds/multisig 2.1.4 multisigCreateV2, dumped at finalized",
+  "generator": "@sqds/multisig multisigCreateV2: threshold 2, time_lock 0, config_authority none, rent_collector none; members 2 \u00d7 Permissions.all() and 1 \u00d7 Vote (throwaway localnet keys)",
+  "address": "CkWseWSsVUKZcP4GD6N4QqPjDFJyzkCuYAFYyirjZRG1",
   "owner": "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf",
-  "dataBase64": "4HR5ukShT+zJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnJyQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAABwAAAAAAAAADAAAAAAAAAAD+AwAAAB8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fHx8fByAgICAgICAgICAgICAgICAgICAgICAgICAgICAgICAgByEhISEhISEhISEhISEhISEhISEhISEhISEhISEhISEhAg==",
+  "dataBase64": "4HR5ukShT+xzOjxAjOqYH5CxJ3dP7EXbHbrS68IW088Tj+vZo80ilQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/AwAAABA1pzx8fvF3iOUMtBZ7+3cuX4GzY1VouL8ZAmdwSMAjB0IdGDzmRrtc06Ge+aGbkmuYFRc5miAGnqsqGenuNH3yAoADJZjgBPD2W8V2ACoBE/aHqMiyobrw+fcdEB4HLPxfBwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   "expected": {
-    "createKey": "EahQmXc3rwhY3CH1g3ZgUx8L4vHTNmzpK1xtiQ1RAxq6",
+    "createKey": "8koPZE8PJDWAExgKRRqduZ9yxPhwfjKCYSENkx1g7TKz",
     "configAuthority": null,
     "threshold": 2,
     "timeLock": 0,
-    "transactionIndex": "7",
-    "staleTransactionIndex": "3",
+    "transactionIndex": "0",
+    "staleTransactionIndex": "0",
     "rentCollector": null,
-    "bump": 254,
+    "bump": 255,
     "members": [
       {
-        "key": "36VASLSKLFD2KokjXG7V28veZvXEsyHRKefLonPaAKzv",
+        "key": "26GyWqFdXYX9emPqFgXHGt7k3BaWddXefjpNSBueNZVt",
         "mask": 7,
         "permissions": [
           "initiate",
@@ -24,19 +25,19 @@
         ]
       },
       {
-        "key": "3AQTaduKvYWFTu1ExZSQK1hQp5jSZ2yEt4KzsASAufKd",
-        "mask": 7,
-        "permissions": [
-          "initiate",
-          "vote",
-          "execute"
-        ]
-      },
-      {
-        "key": "3EKkiwNLWqoUbzFkPrmKbtUB4EweE6f4STzevYUmezeL",
+        "key": "5T5e6PmhLDbxwo7LPb875k39GSPd762xJrMqg3Wv6nnu",
         "mask": 2,
         "permissions": [
           "vote"
+        ]
+      },
+      {
+        "key": "9chyAkZCj2ERgb56niycKLemX842kDqC5YGcviv2C4wG",
+        "mask": 7,
+        "permissions": [
+          "initiate",
+          "vote",
+          "execute"
         ]
       }
     ]

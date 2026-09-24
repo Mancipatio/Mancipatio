@@ -3,11 +3,14 @@
  * `Multisig` decoder, the map comparison, the only-vault-signer guard, the
  * vault-transaction encoder and the external-transaction inspector.
  *
- * EXTERNAL #4: the `Multisig` layout is taken from the v4 struct
- * (create_key, config_authority, threshold u16, time_lock u32,
+ * EXTERNAL #4 (closed by the 6.1 rehearsal): the `Multisig` layout is the v4
+ * struct (create_key, config_authority, threshold u16, time_lock u32,
  * transaction_index u64, stale_transaction_index u64, rent_collector
- * Option<Pubkey>, bump u8, members Vec<(key, permissions mask u8)>). The 6.1
- * rehearsal replaces the synthesized fixture with a real account dump.
+ * Option<Pubkey>, bump u8, members Vec<(key, permissions mask u8)>). The
+ * account is sized for Some(rent_collector), so without one it ends in 32
+ * unused zero bytes; Squads stores the members sorted by key. The test
+ * fixture is a real account created on a local validator by the mainnet
+ * Squads v4 program.
  */
 import { createHash } from "node:crypto";
 import {
@@ -34,11 +37,16 @@ import {
   type Address,
   type Instruction,
 } from "@solana/kit";
+import {
+  COMPUTE_BUDGET_PROGRAM_ADDRESS,
+  decodeComputeBudgetInstruction,
+  type DecodedComputeBudget,
+} from "@/lib/compute-budget";
 import { SYSTEM_PROGRAM, programDataAddress } from "./loader-v3";
 import type { LatestBlockhash } from "./tx";
 
 export const SQUADS_V4_PROGRAM = address("SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf");
-/** EXTERNAL #5: the OtterSec verify program (solana-verify's PDA uploads). */
+/** The OtterSec verify program (solana-verify's PDA uploads; seen on mainnet and cloned in the 6.1 rehearsal). */
 export const OTTERSEC_VERIFY_PROGRAM = address("verifycLy8mB96wd9wqq3WDXQwM4oU6r42Th37Db9fC");
 export const DEFAULT_PUBKEY = address("11111111111111111111111111111111");
 /** EXTERNAL #1: the inner vault-message budget; bigger exports are split. */
@@ -305,9 +313,10 @@ export function splitBySize(
 export const MAX_EXTERNAL_TRANSFER_LAMPORTS = BigInt(50_000_000);
 
 /**
- * EXTERNAL #5: the OtterSec verify PDA of `program` uploaded by `uploader`,
- * seeds ["otter_verify", uploader, program] under OTTERSEC_VERIFY_PROGRAM
- * (the `build_params` account of initialize/update/close).
+ * The OtterSec verify PDA of `program` uploaded by `uploader`, seeds
+ * ["otter_verify", uploader, program] under OTTERSEC_VERIFY_PROGRAM (the
+ * `build_params` account of initialize/update/close). The 6.1 rehearsal
+ * matched it against `solana-verify export-pda-tx` 0.5.1 output.
  */
 export async function otterVerifyPda(uploader: Address, program: Address): Promise<Address> {
   const [pda] = await getProgramDerivedAddress({
@@ -318,7 +327,17 @@ export async function otterVerifyPda(uploader: Address, program: Address): Promi
 }
 
 export type ExternalInspection = {
+  /** The instructions the vault transaction carries (ComputeBudget ones removed). */
   instructions: Instruction[];
+  /**
+   * Top-level ComputeBudget SetComputeUnitLimit / SetComputeUnitPrice
+   * instructions of the external transaction, removed from `instructions`:
+   * inside a vault transaction they would only be a no-op CPI (the member who
+   * executes sets the real price). `solana-verify export-pda-tx` adds a
+   * SetComputeUnitPrice by default (`--compute-unit-price`, 100000; the 6.1
+   * rehearsal saw it).
+   */
+  droppedComputeBudget: DecodedComputeBudget[];
   /** Our program IDs the verify instructions reference. */
   programs: Address[];
   /** The verify PDA of each referenced program, uploader = the vault. */
@@ -340,7 +359,10 @@ const SYSTEM_TRANSFER_TAG = 2;
  *   their verify PDAs, their ProgramData accounts and the System program; or
  * - a System `Transfer` from the vault into the derived verify PDA of a
  *   referenced program; all transfers together at most
- *   MAX_EXTERNAL_TRANSFER_LAMPORTS.
+ *   MAX_EXTERNAL_TRANSFER_LAMPORTS; or
+ * - a ComputeBudget SetComputeUnitLimit / SetComputeUnitPrice without
+ *   accounts, which is dropped from the vault transaction and reported
+ *   (`droppedComputeBudget`); any other ComputeBudget instruction is refused.
  * Any other System instruction (a transfer elsewhere, assign, allocate, …) is
  * refused: the vault is also the protocol treasury (D5). Account roles in a
  * compiled message are message-wide, so a destination is never accepted for
@@ -367,11 +389,23 @@ export async function inspectExternalTransaction(
     throw new Error("The external transaction must have the vault as its only signer and fee payer");
   }
   const message = decompileTransactionMessage(compiled);
-  const instructions = ([...message.instructions] as Instruction[]).map((ix) => ({
+  const decompiled = ([...message.instructions] as Instruction[]).map((ix) => ({
     programAddress: ix.programAddress,
     accounts: (ix.accounts ?? []).map((meta) => ({ address: meta.address, role: meta.role })),
     data: ix.data ? new Uint8Array(ix.data) : new Uint8Array(),
   }));
+  // ComputeBudget: only SetComputeUnitLimit / SetComputeUnitPrice without
+  // accounts, and they are dropped (a no-op inside a vault transaction).
+  const droppedComputeBudget: DecodedComputeBudget[] = [];
+  const instructions = decompiled.filter((ix) => {
+    if (ix.programAddress !== COMPUTE_BUDGET_PROGRAM_ADDRESS) return true;
+    const decoded = decodeComputeBudgetInstruction(ix);
+    if (!decoded || ix.accounts.length) {
+      throw new Error("The external transaction has a ComputeBudget instruction other than SetComputeUnitLimit or SetComputeUnitPrice");
+    }
+    droppedComputeBudget.push(decoded);
+    return false;
+  });
   for (const ix of instructions) {
     if (ix.programAddress !== OTTERSEC_VERIFY_PROGRAM && ix.programAddress !== SYSTEM_PROGRAM) {
       throw new Error(`The external transaction calls ${ix.programAddress}; only the verify and System programs are allowed`);
@@ -438,6 +472,7 @@ export async function inspectExternalTransaction(
   const programsOut = [...referenced];
   return {
     instructions,
+    droppedComputeBudget,
     programs: programsOut,
     pdas: programsOut.map((program) => ({ program, pda: derived.get(program)!.pda })),
     transfers,

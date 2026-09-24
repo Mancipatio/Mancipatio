@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { getAddressEncoder } from "@solana/kit";
+import { getAddressEncoder, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
 import { getAuthorityTransferEncoder } from "@/lib/generated/asset_registry";
 import { bootstrapTool } from "@/scripts/chain/lib/bootstrap-plan";
@@ -249,13 +249,17 @@ describe("inventory collection on a live-shaped chain", () => {
   it("decodes the Squads v4 fixture account and reports its mismatch with the map", async () => {
     const w = await world();
     const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures/squads-multisig-v4.json"), "utf8"));
-    w.chain.set(w.keys.multisig, { owner: SQUADS_V4_PROGRAM, lamports: rent(200), data: new Uint8Array(Buffer.from(fixture.dataBase64, "base64")) });
+    w.chain.set(w.keys.multisig, { owner: SQUADS_V4_PROGRAM, lamports: rent(231), data: new Uint8Array(Buffer.from(fixture.dataBase64, "base64")) });
     const idlSources = resolveIdlSources({ env: {}, config: { network: "devnet" } as never, frontDir: path.join(root, "front") }, null);
-    const inv = await collectInventory(rpcFor(w), { map: w.map, release: null, idlSources, lockPresent: false, kycPin: null, scanBuffers: false });
-    expect(inv.squads?.decoded?.members.map((m) => m.permissions.join("+"))).toEqual(["initiate+vote+execute", "initiate+vote+execute", "vote"]);
+    // The real dump's members, all with every permission in the map.
+    const members = (fixture.expected.members as { key: Address }[]).map((m) => ({ key: m.key, permissions: ["initiate", "vote", "execute"] }));
+    const map = { ...w.map, squads: { ...w.map.squads, members } };
+    const inv = await collectInventory(rpcFor(w), { map, release: null, idlSources, lockPresent: false, kycPin: null, scanBuffers: false });
+    // Squads stores the members sorted by key: the vote-only member is second.
+    expect(inv.squads?.decoded?.members.map((m) => m.permissions.join("+"))).toEqual(["initiate+vote+execute", "vote", "initiate+vote+execute"]);
     expect(inv.squads?.decoded?.threshold).toBe(fixture.expected.threshold);
-    // The map gives the third member every permission: a mismatch.
-    const findings = inventoryFindings(inv, w.map, "pre-handover").filter((f) => f.code === "squads");
+    // The map gives the vote-only member every permission: a mismatch.
+    const findings = inventoryFindings(inv, map, "pre-handover").filter((f) => f.code === "squads");
     expect(findings.map((f) => f.severity)).toEqual(["blocker"]);
     expect(findings[0].message).toMatch(/permissions vote ≠ map initiate\+vote\+execute/);
   });
