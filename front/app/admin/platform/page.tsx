@@ -25,7 +25,7 @@ import {
   kycRegistryUnavailableReason,
   loadKycAuthorityContext,
 } from "@/lib/kyc-authority";
-import { AuthorityRotation } from "./authority-rotation";
+import { AuthorityRotation, initKey } from "./authority-rotation";
 import { BlocklistBootstrap } from "./blocklist-bootstrap";
 import { PlatformInitCard } from "./platform-init-card";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -62,8 +62,10 @@ export default function AdminPage() {
   // network, or several registries and no pin); null = simply none yet.
   const [kycProviderNote, setKycProviderNote] = useState<string | null>(null);
   // The permanent keys entered at bootstrap pre-fill the rotation panels.
-  const [platformSuccessor, setPlatformSuccessor] = useState<string | null>(null);
-  const [blocklistSuccessor, setBlocklistSuccessor] = useState<string | null>(null);
+  /** undefined until this page initialized the platform; then the permanent key (or null). */
+  const [platformSuccessor, setPlatformSuccessor] = useState<string | null | undefined>(undefined);
+  /** undefined until this page initialized the blocklist authority; then the permanent key (or null). */
+  const [blocklistSuccessor, setBlocklistSuccessor] = useState<string | null | undefined>(undefined);
   const toast = useToast();
 
   const refresh = useCallback(async () => {
@@ -292,14 +294,16 @@ export default function AdminPage() {
       </div>
       <BlocklistBootstrap onInitialized={setBlocklistSuccessor} />
       <AuthorityRotation
-        key={`platform:${platformSuccessor ?? ""}`}
+        key={`platform:${initKey(platformSuccessor)}`}
         kind="platform"
         initialNext={platformSuccessor ?? undefined}
+        awaitInitialization={platformSuccessor !== undefined}
       />
       <AuthorityRotation
-        key={`blocklist:${blocklistSuccessor ?? ""}`}
+        key={`blocklist:${initKey(blocklistSuccessor)}`}
         kind="blocklist"
         initialNext={blocklistSuccessor ?? undefined}
+        awaitInitialization={blocklistSuccessor !== undefined}
       />
       {platform && confirmTreasury && !treasuryError && treasuryCandidate && (
         <ConfirmModal

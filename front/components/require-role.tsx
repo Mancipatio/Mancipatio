@@ -1,41 +1,33 @@
 "use client";
 
 import Link from "next/link";
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import { WalletRequired } from "@/components/wallet-required";
 import { SkeletonCard } from "@/components/skeleton";
 import { useRole, type Role, type RoleState } from "@/lib/auth";
-import { CAPABILITY_LABEL, type Capability } from "@/lib/role-resolution";
-
-type RequiredRole = "superAdmin" | "admin" | "issuer";
-
-const RANK: Record<Role, number> = {
-  disconnected: -1,
-  public: 0,
-  issuer: 1,
-  admin: 2,
-  superAdmin: 3,
-};
-
-const REQUIRED: Record<RequiredRole, number> = {
-  issuer: 1,
-  admin: 2,
-  superAdmin: 3,
-};
+import { CAPABILITY_LABEL } from "@/lib/role-resolution";
+import {
+  gateOutcome,
+  holdsOperatorRole,
+  requirementKey,
+  type GateDecision,
+  type RequiredRole,
+  type RoleRequirement as Requirement,
+} from "@/lib/role-state";
 
 /** Where a wallet accepts a proposed role or proposes a successor (Talas 3.1 §4). */
 export const ACCOUNT_ROLES_PATH = "/account/roles";
 
-type Requirement =
-  /** Ranking semantics: the role or any higher one. */
-  | { role: RequiredRole; anyOf?: never }
-  /** Any one of these capabilities (operator roles do not rank). */
-  | { role?: never; anyOf: readonly Capability[] };
+/** The bootstrap page of a fresh deployment (platform / blocklist init, K2/K3). */
+export const AUTHORITY_SETUP_PATH = "/issuer/authority";
 
 /**
  * Client-side gate. A hint only: every privileged builder and server route
  * re-checks on-chain state. Stays closed while loading and on a role-read
- * error (never falls back to "public").
+ * error (never falls back to "public"). Right after a role change
+ * (invalidateRoles) it keeps its previous decision until the re-read lands,
+ * so the gated page is not unmounted and keeps its local state; the stale
+ * roles never make a new decision (lib/role-state gateOutcome).
  */
 export function RequireRole({
   children,
@@ -47,23 +39,30 @@ export function RequireRole({
 }) {
   const anyOf = requirement.anyOf;
   const state = useRole({ kyc: anyOf?.includes("kycProvider") ?? false });
+  const [last, setLast] = useState<GateDecision | null>(null);
 
-  if (state.loading) {
-    return <SkeletonCard rows={3} className="max-w-md" />;
+  const outcome = gateOutcome(state, requirement, last);
+  // Remember each decision made on a fresh read (adjusting state while
+  // rendering: React re-renders this component before committing).
+  if ((outcome === "allowed" || outcome === "denied") && !state.stale && state.walletAddress) {
+    const req = requirementKey(requirement);
+    if (last?.wallet !== state.walletAddress || last.requirement !== req || last.outcome !== outcome) {
+      setLast({ wallet: state.walletAddress, requirement: req, outcome });
+    }
   }
-  if (state.role === "disconnected") {
-    return fallback ?? <WalletRequired />;
+
+  switch (outcome) {
+    case "loading":
+      return <SkeletonCard rows={3} className="max-w-md" />;
+    case "disconnected":
+      return fallback ?? <WalletRequired />;
+    case "error":
+      return fallback ?? <RoleReadError message={state.error ?? ""} onRetry={state.refresh} />;
+    case "denied":
+      return fallback ?? <NotAuthorized requirement={requirement} state={state} />;
+    case "allowed":
+      return <>{children}</>;
   }
-  if (state.error) {
-    return fallback ?? <RoleReadError message={state.error} onRetry={state.refresh} />;
-  }
-  const allowed = anyOf
-    ? anyOf.some((c) => state.capabilities.has(c))
-    : RANK[state.role] >= REQUIRED[requirement.role];
-  if (!allowed) {
-    return fallback ?? <NotAuthorized requirement={requirement} state={state} />;
-  }
-  return <>{children}</>;
 }
 
 export function RoleReadError({ message, onRetry }: { message: string; onRetry: () => void }) {
@@ -134,11 +133,32 @@ function NotAuthorized({ requirement, state }: { requirement: Requirement; state
       {kycMatters && state.kycUnavailable && (
         <p className="mt-2 text-xs text-amber-800">{state.kycUnavailable}</p>
       )}
-      {state.pending.length > 0 && (
+      {state.pending.length > 0 ? (
         <p className="mt-3 text-xs text-amber-900">
           A role is waiting for this wallet to accept it:{" "}
           <Link href={ACCOUNT_ROLES_PATH} className="font-semibold underline">
             review pending roles
+          </Link>
+          .
+        </p>
+      ) : (
+        holdsOperatorRole(state) && (
+          <p className="mt-3 text-xs text-amber-900">
+            This wallet&apos;s on-chain roles, and the successor proposals it
+            can make, are on{" "}
+            <Link href={ACCOUNT_ROLES_PATH} className="font-semibold underline">
+              {ACCOUNT_ROLES_PATH}
+            </Link>
+            .
+          </p>
+        )
+      )}
+      {!state.platformInitialized && (
+        <p className="mt-2 text-xs text-amber-900">
+          The platform is not initialized on this network. Its program upgrade
+          authority sets it up on{" "}
+          <Link href={AUTHORITY_SETUP_PATH} className="font-semibold underline">
+            {AUTHORITY_SETUP_PATH}
           </Link>
           .
         </p>

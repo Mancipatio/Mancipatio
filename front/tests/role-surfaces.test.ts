@@ -212,3 +212,57 @@ describe("K2/K3 bootstrap (F)", () => {
     expect(rotation).toContain("next.trim() === DEFAULT_ADDRESS");
   });
 });
+
+describe("review follow-ups (3.1)", () => {
+  it("K17: Grant and Revoke on the Admins page are Super Admin only", () => {
+    const page = src("app/admin/admins/page.tsx");
+    expect(page).toContain("const { isSuperAdmin } = useRole();");
+    expect(page).toContain("disabled={!isSuperAdmin || tx.isSending || !grantAddr.trim()}");
+    expect(page).toContain("disabled={!isSuperAdmin || tx.isSending || !revokeAddr.trim()}");
+    expect(page.match(/if \(!isSuperAdmin \|\| !wallet/g)?.length).toBe(2);
+  });
+
+  it("K18: issuer registration asks for a dedicated issuer key", () => {
+    expect(src("app/admin/issuers/page.tsx")).toContain("Use a dedicated issuer key, not an Admin key");
+  });
+
+  it("RequireRole decides through gateOutcome and remembers only fresh decisions", () => {
+    const gate = src("components/require-role.tsx");
+    expect(gate).toContain("gateOutcome(state, requirement, last)");
+    expect(gate).toContain("!state.stale && state.walletAddress");
+  });
+
+  it("Access denied points operators to /account/roles and an uninitialized platform to the setup page", () => {
+    const gate = src("components/require-role.tsx");
+    expect(gate).toContain("holdsOperatorRole(state) && (");
+    expect(gate).toContain("{!state.platformInitialized && (");
+    expect(gate).toContain('AUTHORITY_SETUP_PATH = "/issuer/authority"');
+  });
+
+  it("the pending roles panel shows only the connected wallet's latest load", () => {
+    const panel = src("components/pending-roles-panel.tsx");
+    expect(panel).toContain("const current = valueForWallet(loaded, wallet);");
+    expect(panel).toContain("const isLatest = latest.begin();");
+    expect(panel).not.toContain("setResult(");
+  });
+
+  it("bootstrap cards wait for finality instead of offering a second init", () => {
+    const card = src("app/admin/platform/blocklist-bootstrap.tsx");
+    expect(card).toContain("const waiting = submitted && !authority;");
+    expect(card).toContain("startFinalityPoll(refresh,");
+    expect(card).toContain(") : waiting ? (");
+    const rotation = src("app/admin/platform/authority-rotation.tsx");
+    expect(rotation).toContain("const waitingForInit = awaitInitialization && state === null;");
+    for (const rel of ["app/issuer/authority/page.tsx", "app/admin/platform/page.tsx"]) {
+      const page = src(rel);
+      expect(page).toContain("awaitInitialization={blocklistSuccessor !== undefined}");
+      expect(page).toContain("awaitInitialization={platformSuccessor !== undefined}");
+    }
+  });
+
+  it("an imported registry-creation document is verified before review", () => {
+    const flow = src("components/kyc-registry-creation-flow.tsx");
+    expect(flow).toContain("await inspectKycRegistryCreation(raw, network)");
+    expect(flow).not.toContain("verified before use");
+  });
+});

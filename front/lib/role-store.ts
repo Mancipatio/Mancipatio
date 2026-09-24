@@ -14,6 +14,12 @@
 //   published for the key until then.
 // * An entry read without the (unpinned) KYC scan is upgraded by a request
 //   that needs it; the lower-level read in flight is superseded.
+// * `invalidate()` keeps each key's last value as a STALE view (flagged
+//   `stale: true`) until that key's next read settles, so consumers do not
+//   unmount their pages on every role change. A stale value is never reused
+//   as a cache hit (every request after an invalidation reads again) and is
+//   dropped when the fresh read succeeds or fails; gates never open on it
+//   (components/require-role).
 import type { RoleSnapshot } from "@/lib/role-resolution";
 
 export const ROLE_CACHE_TTL_MS = 30_000;
@@ -22,8 +28,12 @@ export type RoleStoreView<T> =
   /** Nothing requested for this key yet (or invalidated). */
   | { status: "idle" }
   | { status: "loading" }
-  /** `refreshing`: a newer read (TTL refresh or KYC upgrade) is in flight. */
-  | { status: "ready"; value: T; withKyc: boolean; refreshing: boolean }
+  /**
+   * `refreshing`: a newer read (TTL refresh or KYC upgrade) is in flight.
+   * `stale`: the value predates the last invalidation (a role change); the
+   * fresh read is in flight or about to start. Display only.
+   */
+  | { status: "ready"; value: T; withKyc: boolean; refreshing: boolean; stale?: true }
   | { status: "error"; error: unknown };
 
 type Entry<T> = {
@@ -48,7 +58,10 @@ export type RoleStore<T> = {
   request(key: string, withKyc: boolean, read: RoleReader<T>, opts?: { force?: boolean }): Promise<void>;
   getView(key: string): RoleStoreView<T>;
   subscribe(listener: () => void): () => void;
-  /** Drop every cached role and every read in flight (after a role change). */
+  /**
+   * Drop every cached role and every read in flight (after a role change).
+   * The last values stay visible as `stale` views until each key re-reads.
+   */
   invalidate(): void;
   getGeneration(): number;
 };
@@ -64,6 +77,8 @@ export function createRoleStore<T>(
   let generation = 0;
   const entries = new Map<string, Entry<T>>();
   const errors = new Map<string, unknown>();
+  /** Each key's last value from before the last invalidation (display only). */
+  let stale = new Map<string, { value: T; withKyc: boolean }>();
   const views = new Map<string, RoleStoreView<T>>();
   const listeners = new Set<() => void>();
 
@@ -114,10 +129,12 @@ export function createRoleStore<T>(
       const value = await promise;
       if (!current()) return; // invalidated or superseded: drop the result
       entries.set(key, { gen, at: now(), withKyc, promise: null, snapshot: value, snapshotWithKyc: withKyc });
+      stale.delete(key);
       emit();
     } catch (err) {
       if (!current()) return;
       entries.delete(key);
+      stale.delete(key);
       errors.set(key, err);
       emit();
     }
@@ -128,20 +145,20 @@ export function createRoleStore<T>(
     if (cached) return cached;
     let view: RoleStoreView<T>;
     const e = entries.get(key);
-    if (e) {
-      view =
-        e.snapshot !== undefined
-          ? {
-              status: "ready",
-              value: e.snapshot,
-              withKyc: e.snapshotWithKyc ?? false,
-              refreshing: e.promise !== null,
-            }
-          : LOADING;
-    } else if (errors.has(key)) {
+    const old = stale.get(key);
+    if (e?.snapshot !== undefined) {
+      view = {
+        status: "ready",
+        value: e.snapshot,
+        withKyc: e.snapshotWithKyc ?? false,
+        refreshing: e.promise !== null,
+      };
+    } else if (!e && errors.has(key)) {
       view = { status: "error", error: errors.get(key) };
+    } else if (old) {
+      view = { status: "ready", value: old.value, withKyc: old.withKyc, refreshing: true, stale: true };
     } else {
-      view = IDLE;
+      view = e ? LOADING : IDLE;
     }
     views.set(key, view);
     return view;
@@ -156,6 +173,17 @@ export function createRoleStore<T>(
 
   function invalidate() {
     generation += 1;
+    // Keep each key's last value for display while it re-reads; a key still
+    // waiting for its first post-invalidation value keeps its older one.
+    const next = new Map<string, { value: T; withKyc: boolean }>();
+    for (const [key, e] of entries) {
+      if (e.snapshot !== undefined) next.set(key, { value: e.snapshot, withKyc: e.snapshotWithKyc ?? false });
+      else {
+        const old = stale.get(key);
+        if (old) next.set(key, old);
+      }
+    }
+    stale = next;
     entries.clear();
     errors.clear();
     emit();

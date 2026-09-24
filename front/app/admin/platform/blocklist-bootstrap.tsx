@@ -30,6 +30,7 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import { invalidateRoles } from "@/lib/role-store";
+import { startFinalityPoll } from "@/lib/finality-poll";
 import { UpgradeAuthorityNote, useUpgradeAuthorityStatus } from "./upgrade-authority-status";
 
 export function BlocklistBootstrap({
@@ -52,7 +53,11 @@ export function BlocklistBootstrap({
     ),
     [error, setError] = useState<string | null>(null),
     [successor, setSuccessor] = useState(""),
-    [ack, setAck] = useState(false);
+    [ack, setAck] = useState(false),
+    // The init landed (confirmed) but the finalized read may trail it: never
+    // offer a second init meanwhile (it would only fail on-chain).
+    [submitted, setSubmitted] = useState(false),
+    [gaveUp, setGaveUp] = useState(false);
   const refused = network === "mainnet";
   const upgrade = useUpgradeAuthorityStatus(
     TRANSFER_HOOK_PROGRAM_ADDRESS,
@@ -66,7 +71,8 @@ export function BlocklistBootstrap({
     blocklistAuthority: wallet,
     permanentBlocklistAuthority: successor,
   });
-  const refresh = useCallback(async () => {
+  /** Resolves true once the finalized authority exists. */
+  const refresh = useCallback(async (): Promise<boolean> => {
     try {
       const [pda] = await findBlocklistAuthorityPda();
       const result = await fetchMaybeBlocklistAuthority(
@@ -76,10 +82,12 @@ export function BlocklistBootstrap({
       );
       setAuthority(result.exists ? result.data.authority : null);
       setError(null);
+      return result.exists;
     } catch {
       setError(
         "Could not verify the hook's operational authority. Retry after RPC recovery.",
       );
+      return false;
     }
   }, [client]);
   useEffect(() => {
@@ -87,6 +95,12 @@ export function BlocklistBootstrap({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
+  const waiting = submitted && !authority;
+  useEffect(() => {
+    // After the init: re-read until the finalized account appears.
+    if (!waiting) return;
+    return startFinalityPoll(refresh, { onGiveUp: () => setGaveUp(true) });
+  }, [waiting, refresh]);
   async function initialize() {
     if (!conn.wallet || !wallet) return;
     const recheck = bootstrapRoleErrors({
@@ -125,6 +139,8 @@ export function BlocklistBootstrap({
         status: "success",
         metadata,
       });
+      setSubmitted(true);
+      setGaveUp(false);
       invalidateRoles();
       onInitialized?.(permanent);
       void refresh();
@@ -155,6 +171,17 @@ export function BlocklistBootstrap({
       ) : authority ? (
         <p className="mt-2 break-all font-mono text-xs text-slate-600">
           {authority}
+        </p>
+      ) : waiting ? (
+        <p className="mt-2 text-sm text-slate-600" role="status">
+          Initialization submitted. Waiting for it to be finalized (usually
+          under 30 s) before the authority shows here and can be rotated.
+          {gaveUp && (
+            <>
+              {" "}Still not finalized: use Refresh authority, or reload the
+              page if the transaction did not land.
+            </>
+          )}
         </p>
       ) : refused ? (
         <p className="mt-2 text-sm text-slate-700">

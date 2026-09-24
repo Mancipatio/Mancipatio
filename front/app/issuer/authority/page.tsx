@@ -21,7 +21,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { detectNetwork } from "@/lib/network";
 import { MAINNET_BOOTSTRAP_REFUSAL } from "@/lib/program-bootstrap";
-import { AuthorityRotation } from "@/app/admin/platform/authority-rotation";
+import { AuthorityRotation, initKey } from "@/app/admin/platform/authority-rotation";
 import { BlocklistBootstrap } from "@/app/admin/platform/blocklist-bootstrap";
 import { PlatformInitCard } from "@/app/admin/platform/platform-init-card";
 
@@ -32,8 +32,10 @@ export default function AuthoritySetupPage() {
   const [platformPda, setPlatformPda] = useState("");
   /** undefined = loading, null = read failed. */
   const [platformExists, setPlatformExists] = useState<boolean | null | undefined>(undefined);
-  const [platformSuccessor, setPlatformSuccessor] = useState<string | null>(null);
-  const [blocklistSuccessor, setBlocklistSuccessor] = useState<string | null>(null);
+  /** undefined until this page initialized the platform; then the permanent key (or null). */
+  const [platformSuccessor, setPlatformSuccessor] = useState<string | null | undefined>(undefined);
+  /** undefined until this page initialized the blocklist authority; then the permanent key (or null). */
+  const [blocklistSuccessor, setBlocklistSuccessor] = useState<string | null | undefined>(undefined);
 
   const refresh = useCallback(async () => {
     try {
@@ -102,14 +104,16 @@ export default function AuthoritySetupPage() {
           )}
           <BlocklistBootstrap hideWhenInitialized onInitialized={setBlocklistSuccessor} />
           <AuthorityRotation
-            key={`platform:${platformSuccessor ?? ""}`}
+            key={`platform:${initKey(platformSuccessor)}`}
             kind="platform"
             initialNext={platformSuccessor ?? undefined}
+            awaitInitialization={platformSuccessor !== undefined}
           />
           <AuthorityRotation
-            key={`blocklist:${blocklistSuccessor ?? ""}`}
+            key={`blocklist:${initKey(blocklistSuccessor)}`}
             kind="blocklist"
             initialNext={blocklistSuccessor ?? undefined}
+            awaitInitialization={blocklistSuccessor !== undefined}
           />
           <p className="text-[12.5px] text-slate-600">
             Proposed a role to this wallet? Accept it at{" "}

@@ -39,6 +39,7 @@ import {
   MAX_ENVELOPE_CU_PRICE,
   compileKycRegistryCreation,
   defaultComputeBudget,
+  inspectKycRegistryCreation,
   kycRegistryCreationSigned,
   parseKycRegistryCreation,
   prepareKycRegistryCreation,
@@ -254,6 +255,23 @@ describe("dual-signed create_kyc_registry", () => {
     await expect(
       signKycRegistryCreation(f.rpc, f.envelope, { address: f.admin.address, signTransactions: async () => wrong }, { pinned: null }),
     ).rejects.toThrow("does not match");
+  });
+
+  it("an imported document is refused at inspection when a stored signature does not verify", async () => {
+    const f = await fixture();
+    const one = await signKycRegistryCreation(f.rpc, f.envelope, f.kyc, { pinned: null });
+    // The genuine document passes inspection with its signature.
+    const ok = await inspectKycRegistryCreation(JSON.stringify(one), "devnet");
+    expect(ok.signatures[f.kyc.address]).toBe(one.signatures[f.kyc.address]);
+    // A forged signature, or a genuine one over other terms, is refused here
+    // (before any review or Submit), not only at sign / submit time.
+    const forged = { ...one, signatures: { [f.kyc.address]: getBase58Decoder().decode(new Uint8Array(64).fill(1)) } };
+    await expect(inspectKycRegistryCreation(JSON.stringify(forged), "devnet")).rejects.toThrow("does not match");
+    await expect(
+      inspectKycRegistryCreation(JSON.stringify({ ...one, blocked: [364] }), "devnet"),
+    ).rejects.toThrow("does not match");
+    // Inspection never sends anything.
+    expect(f.sendTransaction).not.toHaveBeenCalled();
   });
 
   it("parse rejects bad documents", async () => {

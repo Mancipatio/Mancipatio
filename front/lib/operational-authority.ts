@@ -141,6 +141,13 @@ export async function buildProposeOperationalAuthority(
         newAuthority: next,
       });
 }
+/**
+ * Appended when a builder's finalized re-read does not (yet) show the
+ * proposal /account/roles listed at `confirmed` (~15–30 s behind).
+ */
+export const PROPOSAL_NOT_FINALIZED_HINT =
+  "a new proposal may not be finalized yet — retry in about 30 s";
+
 export async function buildAcceptOperationalAuthority(
   rpc: Rpc,
   kind: OperationalAuthorityKind,
@@ -149,7 +156,7 @@ export async function buildAcceptOperationalAuthority(
   const state = await loadOperationalAuthority(rpc, kind);
   if (!state?.proposed || state.proposed !== signer.address)
     throw new Error(
-      "Connect the proposed new authority wallet to accept this change",
+      `Connect the proposed new authority wallet to accept this change (${PROPOSAL_NOT_FINALIZED_HINT})`,
     );
   if (kind === "blocklist")
     return getAcceptBlocklistAuthorityInstructionAsync({

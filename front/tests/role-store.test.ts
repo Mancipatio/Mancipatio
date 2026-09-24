@@ -80,6 +80,59 @@ describe("role store", () => {
     expect(store.getView(A)).toMatchObject({ status: "ready", value: "post-rotation roles" });
   });
 
+  it("after an invalidate the last value stays visible as STALE but is never reused", async () => {
+    const store = createRoleStore<string>();
+    const r = controllableReader<string>();
+    const first = store.request(A, false, r.read);
+    r.calls[0].d.resolve("pre-change");
+    await first;
+    store.invalidate();
+    // Shown (so pages do not unmount), flagged stale and refreshing.
+    expect(store.getView(A)).toEqual({ status: "ready", value: "pre-change", withKyc: false, refreshing: true, stale: true });
+    // Never a cache hit: the next request reads again...
+    const again = store.request(A, false, r.read);
+    expect(r.calls).toHaveLength(2);
+    expect(store.getView(A)).toMatchObject({ value: "pre-change", stale: true });
+    // ...and its result replaces the stale value.
+    r.calls[1].d.resolve("post-change");
+    await again;
+    expect(store.getView(A)).toEqual({ status: "ready", value: "post-change", withKyc: false, refreshing: false });
+  });
+
+  it("a failed re-read replaces the stale value with the error", async () => {
+    const store = createRoleStore<string>();
+    const r = controllableReader<string>();
+    const first = store.request(A, false, r.read);
+    r.calls[0].d.resolve("pre-change");
+    await first;
+    store.invalidate();
+    const again = store.request(A, false, r.read);
+    const boom = new Error("rpc down");
+    r.calls[1].d.reject(boom);
+    await again;
+    expect(store.getView(A)).toEqual({ status: "error", error: boom });
+  });
+
+  it("a stale value survives a second invalidate only while its key is re-reading", async () => {
+    const store = createRoleStore<string>();
+    const r = controllableReader<string>();
+    const pa = store.request(A, false, r.read);
+    const pb = store.request(B, false, r.read);
+    r.calls[0].d.resolve("roles-A");
+    r.calls[1].d.resolve("roles-B");
+    await Promise.all([pa, pb]);
+    store.invalidate();
+    // A re-reads (the connected wallet); B is not requested any more.
+    const again = store.request(A, false, r.read);
+    store.invalidate();
+    expect(store.getView(A)).toMatchObject({ value: "roles-A", stale: true });
+    expect(store.getView(B)).toEqual({ status: "idle" });
+    // The re-read that started before the second invalidate is dropped.
+    r.calls[2].d.resolve("between");
+    await again;
+    expect(store.getView(A)).toMatchObject({ value: "roles-A", stale: true });
+  });
+
   it("a stale read that fails after an invalidate publishes no error", async () => {
     const store = createRoleStore<string>();
     const r = controllableReader<string>();

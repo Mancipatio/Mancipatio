@@ -31,6 +31,7 @@ import {
   loadCustodyAuthority,
   CUSTODY_STALE_PROPOSAL,
 } from "@/lib/custody-authority";
+import { PROPOSAL_NOT_FINALIZED_HINT } from "@/lib/operational-authority";
 const key = (n: number) =>
   getAddressDecoder().decode(new Uint8Array(32).fill(n));
 const operator = key(1),
@@ -114,6 +115,14 @@ describe("custody operator proof and two-step rotation", () => {
       ),
     ).rejects.toThrow(/proposed/);
   });
+  it("an accept the finalized re-read cannot see yet names the finality lag", async () => {
+    const vault = await findCustodyVaultPda(shareClass, BigInt(4));
+    // No finalized proposal yet (the page listed it at `confirmed`).
+    await expect(
+      buildCustodyAuthorityChange(rpc, vault, createNoopSigner(next), "accept"),
+    ).rejects.toThrow(PROPOSAL_NOT_FINALIZED_HINT);
+  });
+
   it("rejects revoked replacement roles and stale or mismatched vaults", async () => {
     const vault = await findCustodyVaultPda(shareClass, BigInt(4));
     mocks.admin.mockResolvedValue({ exists: false });

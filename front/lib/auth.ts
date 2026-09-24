@@ -31,87 +31,21 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { loadNetwork } from "@/lib/enumerate";
 import { createNetworkVerifier } from "@/lib/network-identity";
 import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
-import type { KycRegistryRecord } from "@/lib/kyc-authority";
-import {
-  capabilitiesOf,
-  deriveRoles,
-  readRoleSnapshot,
-  type Capability,
-  type OutgoingProposal,
-  type PendingRole,
-  type RoleFlags,
-  type Rpc,
-} from "@/lib/role-resolution";
+import { readRoleSnapshot, type Rpc } from "@/lib/role-resolution";
 import { roleStore, type RoleReadResult, type RoleStoreView } from "@/lib/role-store";
+import {
+  deriveView,
+  roleKeyFor,
+  toRoleState,
+  type DerivedRoles,
+  type RoleState,
+  type RoleStateInput,
+} from "@/lib/role-state";
 
 export { invalidateRoles } from "@/lib/role-store";
 export type { Capability } from "@/lib/role-resolution";
 
-export type Role = "superAdmin" | "admin" | "issuer" | "public" | "disconnected";
-
-export type RoleState = {
-  loading: boolean;
-  /** Ranking role (super admin > admin > issuer > public). Side roles are flags. */
-  role: Role;
-  walletAddress: string | null;
-  isSuperAdmin: boolean;
-  /** Covers the super admin. */
-  isAdmin: boolean;
-  isIssuer: boolean;
-  isVerifiedIssuer: boolean;
-  platformInitialized: boolean;
-  /**
-   * Live `KycRegistry.authority` of the platform registry. On an unpinned
-   * build this is resolved only for consumers that pass `{ kyc: true }`;
-   * for the others it stays false.
-   */
-  isKycProvider: boolean;
-  /** transfer_hook `BlocklistAuthority.authority`. */
-  isBlocklistAuthority: boolean;
-  /** The platform KYC registry (see isKycProvider for when it is resolved). */
-  kycRegistry: KycRegistryRecord | null;
-  /** Why the platform registry could not be resolved, when it could not. */
-  kycUnavailable: string | null;
-  /** The current blocklist authority key, or null when not initialised. */
-  blocklistAuthority: Address | null;
-  /** Live proposals naming this wallet (platform, blocklist, KYC registry). */
-  pending: PendingRole[];
-  /** Proposals this wallet made as the current authority. */
-  outgoing: OutgoingProposal[];
-  capabilities: ReadonlySet<Capability>;
-  /** The role read failed: gates stay closed and offer `refresh`. */
-  error: string | null;
-  /** Re-read now, bypassing the cache. */
-  refresh: () => void;
-};
-
-const NO_CAPABILITIES: ReadonlySet<Capability> = new Set();
-const noop = () => {};
-
-const BASE: Omit<RoleState, "loading" | "role" | "walletAddress" | "refresh"> = {
-  isSuperAdmin: false,
-  isAdmin: false,
-  isIssuer: false,
-  isVerifiedIssuer: false,
-  platformInitialized: false,
-  isKycProvider: false,
-  isBlocklistAuthority: false,
-  kycRegistry: null,
-  kycUnavailable: null,
-  blocklistAuthority: null,
-  pending: [],
-  outgoing: [],
-  capabilities: NO_CAPABILITIES,
-  error: null,
-};
-
-const INITIAL: RoleState = {
-  ...BASE,
-  loading: true,
-  role: "disconnected",
-  walletAddress: null,
-  refresh: noop,
-};
+export type { Role, RoleState } from "@/lib/role-state";
 
 // ── Reading ─────────────────────────────────────────────────────────────────
 
@@ -207,20 +141,9 @@ async function readRoles(
 
 // ── Provider ────────────────────────────────────────────────────────────────
 
-type Derived = {
-  flags: RoleFlags;
-  result: RoleReadResult;
-  withKyc: boolean;
-};
-
-type RoleContextValue = {
-  isReady: boolean;
-  wallet: string | null;
-  view: RoleStoreView<RoleReadResult>;
-  derived: Derived | null;
+type RoleContextValue = RoleStateInput & {
   /** Registers a consumer that needs the KYC-provider role; returns its release. */
   demandKyc: () => () => void;
-  refresh: () => void;
 };
 
 const RoleContext = createContext<RoleContextValue | null>(null);
@@ -236,7 +159,7 @@ export function RoleProvider({ children }: { children: ReactNode }) {
 
   const isReady = conn.isReady;
   const wallet = conn.connected ? (conn.wallet?.account.address.toString() ?? null) : null;
-  const key = isReady && wallet ? `${network}|${wallet}` : null;
+  const key = roleKeyFor(isReady, wallet, network);
 
   const [kycDemand, setKycDemand] = useState(0);
   // Pinned builds read the registry in the same batch at no extra cost, so
@@ -276,14 +199,7 @@ export function RoleProvider({ children }: { children: ReactNode }) {
     return () => setKycDemand((n) => n - 1);
   }, []);
 
-  const derived = useMemo<Derived | null>(() => {
-    if (view.status !== "ready" || !wallet) return null;
-    return {
-      flags: deriveRoles(wallet, view.value.snapshot),
-      result: view.value,
-      withKyc: view.withKyc,
-    };
-  }, [view, wallet]);
+  const derived = useMemo<DerivedRoles | null>(() => deriveView(view, wallet), [view, wallet]);
 
   const value = useMemo<RoleContextValue>(
     () => ({ isReady, wallet, view, derived, demandKyc, refresh }),
@@ -293,54 +209,6 @@ export function RoleProvider({ children }: { children: ReactNode }) {
 }
 
 // ── Consumer ────────────────────────────────────────────────────────────────
-
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
-function toRoleState(ctx: RoleContextValue | null, needKyc: boolean): RoleState {
-  if (!ctx || !ctx.isReady) return INITIAL;
-  if (!ctx.wallet) {
-    return { ...INITIAL, loading: false, role: "disconnected", refresh: ctx.refresh };
-  }
-  const base = { ...BASE, walletAddress: ctx.wallet, refresh: ctx.refresh };
-  if (ctx.view.status === "error") {
-    // Never fall back to "public" silently: gates show the error and a retry.
-    return { ...base, loading: false, role: "public", error: errorMessage(ctx.view.error) };
-  }
-  const d = ctx.derived;
-  if (!d) return { ...base, loading: true, role: "disconnected" };
-  const { flags, result } = d;
-  const role: Role = flags.isSuperAdmin
-    ? "superAdmin"
-    : flags.isAdmin
-      ? "admin"
-      : result.isIssuer
-        ? "issuer"
-        : "public";
-  const snapshot = result.snapshot;
-  return {
-    ...base,
-    // A consumer that needs the KYC role keeps loading until a read resolved
-    // it (unpinned builds scan only on demand); the other flags are already
-    // final, so menus need not flicker meanwhile.
-    loading: needKyc && !d.withKyc,
-    role,
-    isSuperAdmin: flags.isSuperAdmin,
-    isAdmin: flags.isAdmin,
-    isIssuer: result.isIssuer,
-    isVerifiedIssuer: result.isVerifiedIssuer,
-    platformInitialized: flags.platformInitialized,
-    isKycProvider: flags.isKycProvider,
-    isBlocklistAuthority: flags.isBlocklistAuthority,
-    kycRegistry: snapshot.kycRegistry,
-    kycUnavailable: snapshot.kycUnavailable,
-    blocklistAuthority: snapshot.blocklistAuthority?.data.authority ?? null,
-    pending: flags.pending,
-    outgoing: flags.outgoing,
-    capabilities: capabilitiesOf({ ...flags, isIssuer: result.isIssuer }),
-  };
-}
 
 /**
  * The connected wallet's roles. Pass `{ kyc: true }` where the KYC-provider

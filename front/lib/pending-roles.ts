@@ -102,7 +102,7 @@ import {
   buildCustodyAuthorityChange,
   custodyAcceptBlocker,
 } from "@/lib/custody-authority";
-import { buildAcceptOperationalAuthority } from "@/lib/operational-authority";
+import { PROPOSAL_NOT_FINALIZED_HINT, buildAcceptOperationalAuthority } from "@/lib/operational-authority";
 import { findAuthorityTransferPda } from "@/lib/pdas";
 import { decodeOwned, type OwnedAccount, type Rpc } from "@/lib/role-resolution";
 
@@ -585,7 +585,7 @@ export async function buildAcceptKycRegistryRole(
   const { state, transferPda } = await liveKycProposal(rpc, registry);
   if (state.kind !== "live" || state.newAuthority !== signer.address) {
     throw new Error(
-      "No live proposal names this wallet for this KYC registry (a new proposal may not be finalized yet — retry in about 30 s).",
+      `No live proposal names this wallet for this KYC registry (${PROPOSAL_NOT_FINALIZED_HINT}).`,
     );
   }
   return getAcceptKycRegistryAuthorityInstructionAsync({

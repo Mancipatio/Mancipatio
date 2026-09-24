@@ -24,8 +24,8 @@ import {
 import {
   MAX_ENVELOPE_CU_PRICE,
   kycRegistryAddressFor,
+  inspectKycRegistryCreation,
   kycRegistryCreationSigned,
-  parseKycRegistryCreation,
   prepareKycRegistryCreation,
   signKycRegistryCreation,
   submitKycRegistryCreation,
@@ -124,8 +124,11 @@ export function KycRegistryCreationFlow() {
 
   async function inspect() {
     try {
-      setEnvelope(await parseKycRegistryCreation(raw, network));
+      // Parsed and rebuilt: stored signatures are verified before review.
+      setEnvelope(await inspectKycRegistryCreation(raw, network));
     } catch (err) {
+      // Never keep reviewing (or offer Submit for) an unusable document.
+      setEnvelope(null);
       toast.showError("Invalid registry creation document", err instanceof Error ? err.message : undefined);
     }
   }
@@ -312,13 +315,13 @@ export function KycRegistryCreationFlow() {
                 <p className="break-all">Registry: {envelope.registry}</p>
                 <p className="break-all">
                   KYC authority (fee payer): {envelope.kycAuthority} —{" "}
-                  {envelope.signatures[envelope.kycAuthority] ? "signature supplied (verified before use)" : "signature needed"}
+                  {envelope.signatures[envelope.kycAuthority] ? "signature verified" : "signature needed"}
                 </p>
                 <p className="break-all">
                   Admin co-signer: {envelope.adminAuthority}
                   {envelope.adminAuthority === envelope.kycAuthority
                     ? " (the same key: one signature)"
-                    : ` — ${envelope.signatures[envelope.adminAuthority] ? "signature supplied (verified before use)" : "signature needed"}`}
+                    : ` — ${envelope.signatures[envelope.adminAuthority] ? "signature verified" : "signature needed"}`}
                 </p>
                 <p>
                   Approved ({envelope.approved.length}): {names(envelope.approved)}

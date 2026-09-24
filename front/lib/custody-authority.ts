@@ -13,6 +13,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
 import { findCustodyVaultPda } from "@/lib/pdas";
+import { PROPOSAL_NOT_FINALIZED_HINT } from "@/lib/operational-authority";
 /** Bind the proof to the vault's current operator. The PDA may be absent after
  * revocation: permissionless deadline returns must still be constructible. */
 export async function custodyAuthorityRecord(
@@ -157,7 +158,7 @@ export async function buildCustodyAuthorityChange(
       "Only the current Super Admin may propose a custody operator",
     );
   if (action === "accept" && state.proposed !== signer.address)
-    throw new Error("Connect the proposed custody operator to accept");
+    throw new Error(`Connect the proposed custody operator to accept (${PROPOSAL_NOT_FINALIZED_HINT})`);
   if (action === "accept" && state.stale)
     throw new Error(CUSTODY_STALE_PROPOSAL);
   if (newAuthority === state.current)

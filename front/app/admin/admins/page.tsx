@@ -20,6 +20,7 @@ import {
 import { ConfirmModal } from "@/components/confirm-modal";
 import { recordAudit } from "@/lib/supabase";
 import { invalidateRoles } from "@/lib/role-store";
+import { useRole } from "@/lib/auth";
 import { explainSendError } from "@/lib/tx-error";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { useToast } from "@/lib/toast";
@@ -37,6 +38,10 @@ export default function AdminsPage() {
   const client = useSolanaClient();
   const tx = useSendTransaction();
   const wallet = conn.wallet?.account.address;
+  // add_admin / remove_admin require the Super Admin on-chain (K17, OD12):
+  // other Admins see the forms but cannot submit them.
+  const { isSuperAdmin } = useRole();
+  const superAdminOnly = isSuperAdmin ? undefined : "Super Admin only: the program rejects this from any other wallet";
 
   const [grantAddr, setGrantAddr] = useState("");
   const [revokeAddr, setRevokeAddr] = useState("");
@@ -47,7 +52,7 @@ export default function AdminsPage() {
   const toast = useToast();
 
   async function grant(reason: string) {
-    if (!wallet || !conn.wallet || !grantAddr.trim()) return;
+    if (!isSuperAdmin || !wallet || !conn.wallet || !grantAddr.trim()) return;
     const target = grantAddr.trim();
     // add_admin creates the Admin record with `init`: an existing admin makes
     // the transaction fail with an opaque wrapper error, so check first.
@@ -103,7 +108,7 @@ export default function AdminsPage() {
   }
 
   async function revoke(reason: string) {
-    if (!wallet || !conn.wallet || !revokeAddr.trim()) return;
+    if (!isSuperAdmin || !wallet || !conn.wallet || !revokeAddr.trim()) return;
     const target = revokeAddr.trim();
     const pendingId = toast.showPending(
       `Revoking admin ${target.slice(0, 6)}…`,
@@ -183,7 +188,8 @@ export default function AdminsPage() {
               />
               <button
                 type="button"
-                disabled={tx.isSending || !grantAddr.trim()}
+                disabled={!isSuperAdmin || tx.isSending || !grantAddr.trim()}
+                title={superAdminOnly}
                 onClick={() => setConfirmGrant(true)}
                 className={`shrink-0 ${BTN}`}
               >
@@ -206,7 +212,8 @@ export default function AdminsPage() {
               />
               <button
                 type="button"
-                disabled={tx.isSending || !revokeAddr.trim()}
+                disabled={!isSuperAdmin || tx.isSending || !revokeAddr.trim()}
+                title={superAdminOnly}
                 onClick={() => setConfirmRevoke(true)}
                 className={`shrink-0 ${BTN2}`}
               >

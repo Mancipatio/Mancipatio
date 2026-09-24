@@ -11,6 +11,7 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { invalidateRoles } from "@/lib/role-store";
+import { startFinalityPoll } from "@/lib/finality-poll";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { ACCOUNT_ROLES_PATH } from "@/components/require-role";
@@ -25,6 +26,7 @@ import {
 export function AuthorityRotation({
   kind,
   initialNext,
+  awaitInitialization = false,
 }: {
   kind: OperationalAuthorityKind;
   /**
@@ -32,6 +34,11 @@ export function AuthorityRotation({
    * parent remounts the panel (key) when it changes.
    */
   initialNext?: string;
+  /**
+   * The parent just initialized this authority: the finalized read trails
+   * the init, so re-read until the account appears (no manual Refresh).
+   */
+  awaitInitialization?: boolean;
 }) {
   const client = useSolanaClient(),
     conn = useWalletConnection(),
@@ -41,15 +48,20 @@ export function AuthorityRotation({
   const [state, setState] = useState<OperationalAuthorityState | null>(null),
     [error, setError] = useState<string | null>(null),
     [next, setNext] = useState(initialNext ?? ""),
-    [confirm, setConfirm] = useState<"propose" | "accept" | null>(null);
-  const refresh = useCallback(async () => {
+    [confirm, setConfirm] = useState<"propose" | "accept" | null>(null),
+    [gaveUp, setGaveUp] = useState(false);
+  /** Resolves true once the finalized authority exists. */
+  const refresh = useCallback(async (): Promise<boolean> => {
     try {
-      setState(await loadOperationalAuthority(client.runtime.rpc, kind));
+      const loaded = await loadOperationalAuthority(client.runtime.rpc, kind);
+      setState(loaded);
       setError(null);
+      return loaded !== null;
     } catch {
       setError(
         "Could not read the current authority and proposal. Retry after RPC recovery.",
       );
+      return false;
     }
   }, [client, kind]);
   useEffect(() => {
@@ -57,6 +69,11 @@ export function AuthorityRotation({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
+  const waitingForInit = awaitInitialization && state === null;
+  useEffect(() => {
+    if (!waitingForInit) return;
+    return startFinalityPoll(refresh, { onGiveUp: () => setGaveUp(true) });
+  }, [waitingForInit, refresh]);
   async function submit() {
     if (!conn.wallet || !confirm) return;
     const action = confirm;
@@ -195,6 +212,13 @@ export function AuthorityRotation({
             </p>
           )}
         </>
+      ) : waitingForInit ? (
+        <p className="mt-3 text-xs text-slate-500" role="status">
+          Initialized: waiting for it to be finalized (usually under 30 s)
+          before a replacement can be proposed
+          {initialNext ? ", then the permanent key is pre-filled" : ""}.
+          {gaveUp && " Still not finalized: use Refresh authority."}
+        </p>
       ) : (
         <p className="mt-3 text-xs text-slate-500">
           Initialize this authority before proposing a replacement.
@@ -242,6 +266,14 @@ export function AuthorityRotation({
       />
     </section>
   );
+}
+
+/**
+ * The rotation panel's key part after a bootstrap on the same page: remounts
+ * it (fresh pre-fill, finality wait) once the init landed.
+ */
+export function initKey(successor: string | null | undefined): string {
+  return successor === undefined ? "" : `init:${successor ?? ""}`;
 }
 
 const AUDIT_IX: Record<OperationalAuthorityKind, Record<"propose" | "accept", string>> = {

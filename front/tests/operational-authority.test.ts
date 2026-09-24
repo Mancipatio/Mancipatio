@@ -30,6 +30,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
 import {
+  PROPOSAL_NOT_FINALIZED_HINT,
   assertBlocklistAuthority,
   buildAcceptOperationalAuthority,
   buildProposeOperationalAuthority,
@@ -115,6 +116,16 @@ describe("live operational authority builders", () => {
           newRecord,
         ]);
       }
+    },
+  );
+  it.each(["platform", "blocklist"] as const)(
+    "an accept the finalized re-read cannot see yet names the finality lag (%s)",
+    async (kind) => {
+      // /account/roles lists the proposal at `confirmed`; the builder re-reads
+      // at `finalized`, which has no proposal yet.
+      await expect(
+        buildAcceptOperationalAuthority(rpc, kind, createNoopSigner(next)),
+      ).rejects.toThrow(PROPOSAL_NOT_FINALIZED_HINT);
     },
   );
   it.each(["platform", "blocklist"] as const)(

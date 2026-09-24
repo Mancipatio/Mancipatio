@@ -367,6 +367,21 @@ export async function compileKycRegistryCreation(input: KycRegistryCreationEnvel
 }
 
 /**
+ * An imported document, parsed AND rebuilt: every stored signature is
+ * verified over the exact message now, so a forged or mismatched signature
+ * is refused at import instead of only at sign / submit time. Offline (no
+ * RPC); the live checks still run before signing and sending.
+ */
+export async function inspectKycRegistryCreation(
+  raw: string,
+  network: Network,
+): Promise<KycRegistryCreationEnvelope> {
+  const e = await parseKycRegistryCreation(raw, network);
+  await compileKycRegistryCreation(e);
+  return e;
+}
+
+/**
  * Adds the connected signer's signature. The signer must be one of the two
  * named keys and able to sign without sending; maintenance (fail closed) and
  * the live state are re-checked before the wallet is asked.

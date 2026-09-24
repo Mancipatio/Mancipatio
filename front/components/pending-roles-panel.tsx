@@ -37,6 +37,7 @@ import { recordAudit, type AuditCategory } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import { walletSigner } from "@/lib/wallet-signer";
+import { createLatestGate, valueForWallet, type ForWallet } from "@/lib/latest-load";
 
 const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`;
 
@@ -136,8 +137,13 @@ export function PendingRolesPanel({ maintenance }: { maintenance: boolean }) {
   const wallet = conn.wallet?.account.address?.toString() ?? null;
   const platformRegistry = role.kycRegistry?.address ?? null;
 
-  const [result, setResult] = useState<PendingRoles | null>(null);
-  const [fatal, setFatal] = useState<string | null>(null);
+  // Tagged with the wallet it was loaded for: after a wallet switch the old
+  // wallet's rows are never shown, and only the latest load may commit.
+  const [loaded, setLoaded] = useState<ForWallet<{ result: PendingRoles | null; fatal: string | null }> | null>(null);
+  const [latest] = useState(createLatestGate);
+  const current = valueForWallet(loaded, wallet);
+  const result = current?.result ?? null;
+  const fatal = current?.fatal ?? null;
   const [confirm, setConfirm] = useState<Acceptable | null>(null);
   const [busy, setBusy] = useState(false);
 
@@ -153,20 +159,20 @@ export function PendingRolesPanel({ maintenance }: { maintenance: boolean }) {
 
   const load = useCallback(async () => {
     if (!wallet || role.loading) return;
+    const isLatest = latest.begin();
     try {
-      setResult(
-        await findPendingRolesForWallet(rpc, wallet as Address, {
-          platformRegistry,
-          verifyNetwork,
-          commitment: "confirmed",
-        }),
-      );
-      setFatal(null);
+      const found = await findPendingRolesForWallet(rpc, wallet as Address, {
+        platformRegistry,
+        verifyNetwork,
+        commitment: "confirmed",
+      });
+      if (isLatest()) setLoaded({ wallet, value: { result: found, fatal: null } });
     } catch (err) {
-      setResult(null);
-      setFatal(err instanceof Error ? err.message : String(err));
+      if (isLatest()) {
+        setLoaded({ wallet, value: { result: null, fatal: err instanceof Error ? err.message : String(err) } });
+      }
     }
-  }, [rpc, wallet, role.loading, platformRegistry, verifyNetwork]);
+  }, [rpc, wallet, role.loading, platformRegistry, verifyNetwork, latest]);
 
   useEffect(() => {
     // Load the chain state after hydration and whenever the roles change.
