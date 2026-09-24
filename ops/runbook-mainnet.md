@@ -485,6 +485,36 @@ in-flight signature to a resolution and writes the evidence.
   8. Operator-front drill on localnet with a Ledger.
 - Resolve every EXTERNAL item below.
 
+## 13. App priority fee and payment tokens (Talas 4.2)
+
+Configuration and checks only; the front enforces the rules
+(`front/lib/priority-fee.ts`, `front/lib/payment-mints.ts`).
+
+- **Priority fee.** Wallet sends and the co-signed envelopes (issuer recovery
+  v2, KYC registry creation) get their price from `/api/priority-fee`,
+  clamped per network (mainnet floor 100,000, cap 2,000,000 µL/CU; devnet
+  1,000..100,000). The route asks the server RPC (`HELIUS_MAINNET_RPC` or
+  `SOLANA_MAINNET_RPC`) for `getPriorityFeeEstimate`; an RPC that does not
+  support that method answers the floor (`source: "floor"`). Helius is not
+  required. After a deploy: `curl https://<origin>/api/priority-fee` and
+  record `source` and `microLamports` (G8). Hotfix if it misbehaves: set the
+  network's policy to `mode: "fixed"` at its floor.
+- **Issuer recovery documents** are version 2 (compute budget included); a v1
+  document is refused: prepare a new one.
+- **Mainnet payment tokens.** Only `MAINNET_PAYMENT_MINTS` (USDC, kind
+  `rate`) may enter a sale approval, an OTC request, an offer or a payout.
+  EURC (`eur_peg`) is added in code later, with its address verified from
+  Circle (D6).
+- **USDC EUR rate** (D18): seed it on `/admin/limits` (Super Admin) as kind
+  `rate` with a maximum age of at most 7 days, and refresh it weekly.
+  `/api/health` fails (503, uptime alarm) when the row is missing or older
+  than its maximum age and warns from 80 % of it. Set the mainnet
+  `platform_raise_limits` cap with at least 3 % FX headroom.
+- **Unknown payment mints on chain.** An approval or sale the ledger cannot
+  count (no EUR rate) or whose mint is not allowlisted raises a
+  `compliance_alerts` row (source `sale-capacity`, severity high); resolve it
+  by revoking the approval or adding the rate.
+
 ## EXTERNAL checks (open until the rehearsal proves them)
 
 1. Squads Transaction Builder import format, vault seeds and the inner size
@@ -502,3 +532,6 @@ in-flight signature to a resolution and writes the evidence.
    refuses it; change the inspector, never loosen it to "any writable
    account".
 6. The mainnet feature list and validator version at rehearsal time.
+7. Phantom and Solflare keep an app-set SetComputeUnitPrice (G2), and the
+   mainnet RPC's answer to `getPriorityFeeEstimate` (G8: `source`, 24 h of
+   samples; retune the floor if it never leaves it).

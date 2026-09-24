@@ -88,6 +88,7 @@ beforeEach(async () => {
     indexer_sync_state: { data: { status: "ready", last_slot: 412_345_000, checked_at: ago(30), completed_at: ago(3600) }, error: null },
     indexer_jobs: { data: [], error: null, count: 0 },
     purchase_evidence_jobs: { data: [], error: null, count: 0 },
+    fx_rates: { data: { kind: "rate", as_of: ago(3600), max_age: "7 days" }, error: null },
   };
   m.maintenance.mockReset();
   m.maintenance.mockResolvedValue({ enabled: false, message: null, fresh: true });
@@ -121,6 +122,7 @@ describe("GET /api/health", () => {
         indexerQueue: { status: "ok", pending: 0, oldestPendingAgeSeconds: null },
         purchaseQueue: { status: "ok", pending: 0, oldestPendingAgeSeconds: null },
         maintenance: { status: "ok", enabled: false },
+        paymentFx: { status: "ok", kind: "rate", ageSeconds: 3600, maxAgeSeconds: 7 * 86_400 },
       },
     });
     expect(m.maintenance).toHaveBeenCalledWith("devnet");
@@ -136,8 +138,84 @@ describe("GET /api/health", () => {
       expect(byTable[table].order).toEqual(["created_at", { ascending: true }]);
       expect(byTable[table].limit).toBe(1);
     }
+    // The network's default payment mint (devnet test USDC).
+    expect(byTable.fx_rates.filters).toEqual([["network", "devnet"], ["payment_mint", "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"]]);
+    expect(byTable.fx_rates.select).toEqual(["kind,as_of,max_age"]);
     for (const call of m.calls) expect(call.signal).toBeInstanceOf(AbortSignal);
     expect(m.rpcSignal).toBeInstanceOf(AbortSignal);
+  });
+
+  describe("payment FX (Talas 4.2 §3.6)", () => {
+    const DAY = 86_400;
+    const MAINNET_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
+    const fx = (ageDays: number, maxAge = "7 days", kind = "rate") => ({ data: { kind, as_of: ago(ageDays * DAY), max_age: maxAge }, error: null });
+
+    it.each<[string, Reply, number, Record<string, unknown>]>([
+      ["missing", { data: null, error: null }, 503, { status: "fail", reason: "missing", kind: null }],
+      ["stale", fx(8), 503, { status: "fail", reason: "stale", kind: "rate", ageSeconds: 8 * DAY, maxAgeSeconds: 7 * DAY }],
+      ["at its max age", fx(7), 503, { status: "fail", reason: "stale" }],
+      ["at 80 % of its max age", fx(5.6), 200, { status: "warn", reason: "expiring", kind: "rate" }],
+      ["fresh", fx(5), 200, { status: "ok", kind: "rate", ageSeconds: 5 * DAY }],
+      ["unreadable", { data: null, error: { code: "57014", message: "timeout" } }, 503, { status: "fail", reason: "unavailable" }],
+      ["an unparseable max age", fx(1, "soon"), 503, { status: "fail", reason: "invalid" }],
+    ])("mainnet: %s", async (_label, reply, status, expected) => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies.fx_rates = reply;
+      const result = await get();
+      expect(result.body.checks.paymentFx).toMatchObject(expected);
+      expect(result.status).toBe(status);
+      expect(m.calls.find((call) => call.table === "fx_rates")?.filters).toContainEqual(["payment_mint", MAINNET_USDC]);
+      expect(JSON.stringify(result.body)).not.toMatch(/57014|timeout"|EPjF/);
+    });
+
+    it("mainnet: an anonymous caller sees ok:false (uptime alarms fire)", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies.fx_rates = { data: null, error: null };
+      const { status, body } = await get(null);
+      expect(status).toBe(503);
+      expect(body.ok).toBe(false);
+    });
+
+    it("an eur_peg row never goes stale", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies.fx_rates = fx(400, "7 days", "eur_peg");
+      const { status, body } = await get();
+      expect(status).toBe(200);
+      expect(body.checks.paymentFx).toMatchObject({ status: "ok", kind: "eur_peg", maxAgeSeconds: null });
+    });
+
+    it.each<[string, Reply]>([
+      ["missing", { data: null, error: null }],
+      ["stale", fx(30)],
+      ["unreadable", { data: null, error: { code: "x", message: "y" } }],
+    ])("devnet: %s only warns", async (_label, reply) => {
+      m.replies.fx_rates = reply;
+      const { status, body } = await get();
+      expect(status).toBe(200);
+      expect(body.ok).toBe(true);
+      expect(body.checks.paymentFx.status).toBe("warn");
+    });
+
+    it("a network without a default payment mint has nothing to check", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "localnet");
+      const { body } = await get();
+      expect(body.checks.paymentFx).toEqual({ status: "ok", kind: null, ageSeconds: null, maxAgeSeconds: null });
+      expect(m.calls.find((call) => call.table === "fx_rates")).toBeUndefined();
+    });
+
+    it("parses Postgres intervals in both output styles", async () => {
+      const { intervalSeconds } = await import("@/lib/server/health");
+      expect(intervalSeconds("7 days")).toBe(7 * DAY);
+      expect(intervalSeconds("1 day")).toBe(DAY);
+      expect(intervalSeconds("1 day 12:00:00")).toBe(DAY + 12 * 3600);
+      expect(intervalSeconds("12:30:00")).toBe(12.5 * 3600);
+      expect(intervalSeconds("1 mon 2 days")).toBe(32 * DAY);
+      expect(intervalSeconds("P7D")).toBe(7 * DAY);
+      expect(intervalSeconds("P1DT12H")).toBe(DAY + 12 * 3600);
+      for (const bad of ["", "7", "days", "-7 days", "00:00:00", "P", "P1DT", "soon", null, 7]) {
+        expect(intervalSeconds(bad)).toBeNull();
+      }
+    });
   });
 
   it("reports an unreachable database per check with 503 and without error details", async () => {
@@ -261,7 +339,7 @@ describe("GET /api/health", () => {
     expect(a.body).toEqual(b.body);
     await get();
     expect(m.rpcCalls).toBe(1);
-    expect(m.calls).toHaveLength(3);
+    expect(m.calls).toHaveLength(4);
     vi.setSystemTime(NOW + 10_000);
     await get();
     expect(m.rpcCalls).toBe(2);
