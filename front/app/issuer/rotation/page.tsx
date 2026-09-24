@@ -59,6 +59,7 @@ import { loadPayoutVaults } from "@/lib/payout-vault";
 import { getSupabase, recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
+import { invalidateRoles } from "@/lib/role-store";
 import { LOCAL_CLOCK_NOTE, useChainAlignedClock } from "@/lib/use-chain-aligned-clock";
 import { walletSigner } from "@/lib/wallet-signer";
 
@@ -312,6 +313,7 @@ function Rotation() {
       });
       setAction(null);
       setProposeInput("");
+      invalidateRoles();
       if (current.kind === "accept" || current.kind === "execute") {
         setStatus("Waiting for the indexer to record the new issuer key…");
         const sb = getSupabase();
@@ -329,6 +331,7 @@ function Rotation() {
         if (indexed) {
           // The issuer pages resolve "my issuer" from the indexer, which now
           // names this wallet.
+          invalidateRoles();
           router.push("/issuer");
           return;
         }

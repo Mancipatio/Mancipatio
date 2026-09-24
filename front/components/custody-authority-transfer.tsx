@@ -1,4 +1,5 @@
 "use client";
+import { invalidateRoles } from "@/lib/role-store";
 import { useCallback, useEffect, useState } from "react";
 import { type Address, isAddress } from "@solana/kit";
 import {
@@ -64,6 +65,7 @@ export function CustodyAuthorityTransfer({
             ? "Custody operator proposed"
             : "Custody operator accepted",
       });
+      invalidateRoles();
       await refresh();
       await onRefresh();
     } catch (error) {

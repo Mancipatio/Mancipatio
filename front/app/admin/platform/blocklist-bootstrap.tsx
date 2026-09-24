@@ -13,6 +13,7 @@ import { buildInitializeBlocklistAuthorityInstruction } from "@/lib/program-boot
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
+import { invalidateRoles } from "@/lib/role-store";
 export function BlocklistBootstrap() {
   const client = useSolanaClient(),
     conn = useWalletConnection(),
@@ -55,6 +56,7 @@ export function BlocklistBootstrap() {
       toast.showTx(signature, {
         title: "Blocklist authority initialization submitted",
       });
+      invalidateRoles();
       void refresh();
     } catch (error) {
       toast.showError("Initialization unavailable", explainSendError(error));

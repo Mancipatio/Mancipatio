@@ -19,6 +19,7 @@ import {
   getBase58Decoder,
   type Address,
   type Base58EncodedBytes,
+  type MaybeEncodedAccount,
 } from "@solana/kit";
 import type { SolanaClient } from "@solana/client";
 import {
@@ -174,10 +175,31 @@ export async function listKycRegistries(rpc: Rpc): Promise<KycRegistryRecord[]> 
 }
 
 /**
+ * Decodes an encoded account as a KycRegistry after checking its owner,
+ * discriminator and length. Returns null when nothing exists there. Throws
+ * when the account exists but is not a KycRegistry, so a mistyped pin fails
+ * loudly instead of resolving to some other account. Shared by
+ * fetchKycRegistryAt and the batched role read (lib/role-resolution).
+ */
+export function decodeKycRegistryAccount(
+  account: MaybeEncodedAccount,
+): KycRegistryRecord | null {
+  if (!account.exists) return null;
+  if (account.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) {
+    throw new Error(`KYC registry ${account.address} is not owned by asset_registry`);
+  }
+  const disc = getKycRegistryDiscriminatorBytes();
+  const bytes = account.data;
+  if (bytes.length < getKycRegistrySize() || !disc.every((b, i) => b === bytes[i])) {
+    throw new Error(`Account ${account.address} is not a KycRegistry`);
+  }
+  return { address: account.address, registry: getKycRegistryDecoder().decode(bytes) };
+}
+
+/**
  * Reads ONE registry by address (the pinned path, with no program scan).
  * Returns null when nothing exists there. Throws when the account exists but
- * is not a KycRegistry (wrong owner, discriminator or length), so a mistyped
- * pin fails loudly instead of resolving to some other account.
+ * is not a KycRegistry (wrong owner, discriminator or length).
  */
 export async function fetchKycRegistryAt(
   rpc: Rpc,
@@ -189,16 +211,7 @@ export async function fetchKycRegistryAt(
     registryAddress,
     { commitment, abortSignal: AbortSignal.timeout(10_000) },
   );
-  if (!account.exists) return null;
-  if (account.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) {
-    throw new Error(`KYC registry ${registryAddress} is not owned by asset_registry`);
-  }
-  const disc = getKycRegistryDiscriminatorBytes();
-  const bytes = account.data;
-  if (bytes.length < getKycRegistrySize() || !disc.every((b, i) => b === bytes[i])) {
-    throw new Error(`Account ${registryAddress} is not a KycRegistry`);
-  }
-  return { address: registryAddress, registry: getKycRegistryDecoder().decode(bytes) };
+  return decodeKycRegistryAccount(account);
 }
 
 async function fetchKycAuthorityContext(

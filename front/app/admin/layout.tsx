@@ -1,4 +1,3 @@
-import type { ReactNode } from "react";
 import {
   IconActivity,
   IconBell,
@@ -26,15 +25,25 @@ import {
   IconWallet,
   IconWarning,
 } from "@/components/icons";
-import { AdminNav } from "./admin-nav";
+import { AdminNavGroups, type AdminNavGroup, type AdminNavItem } from "./admin-nav-groups";
 import { AppShell } from "@/components/app-shell";
 import { AdminNavigation } from "@/components/admin-navigation";
-import { RequireRole } from "@/components/require-role";
+import { AdminGate } from "@/components/admin-gate";
+import { adminRouteRequirement } from "@/lib/role-resolution";
 
-const GROUPS: Array<{
-  label: string | null;
-  items: { href: string; label: string; icon: ReactNode }[];
-}> = [
+/**
+ * Each menu item carries its access roles, taken from the same default-deny
+ * table the AdminGate enforces (lib/role-resolution ADMIN_ROUTE_ACCESS), so
+ * the menu can never offer a page its gate would refuse.
+ */
+function withRoles(groups: Array<{ label: string | null; items: Omit<AdminNavItem, "roles">[] }>): AdminNavGroup[] {
+  return groups.map((group) => ({
+    label: group.label,
+    items: group.items.map((item) => ({ ...item, roles: adminRouteRequirement(item.href) })),
+  }));
+}
+
+const GROUPS: AdminNavGroup[] = withRoles([
   {
     label: null,
     items: [{ href: "/admin", label: "Overview", icon: <IconHome /> }],
@@ -95,24 +104,19 @@ const GROUPS: Array<{
       { href: "/admin/services", label: "Services", icon: <IconGavel /> },
     ],
   },
-];
+]);
 
 export default function AdminLayout({ children }: { children: React.ReactNode }) {
   return (
     <AppShell section="admin">
-      <RequireRole role="admin">
+      <AdminGate>
         <div className="app-admin-layout">
           <AdminNavigation>
-            {GROUPS.map((group, index) => (
-              <div key={group.label ?? `group-${index}`} className="app-admin-nav-group">
-                {group.label && <p>{group.label}</p>}
-                <AdminNav items={group.items} />
-              </div>
-            ))}
+            <AdminNavGroups groups={GROUPS} />
           </AdminNavigation>
           <div className="app-admin-content">{children}</div>
         </div>
-      </RequireRole>
+      </AdminGate>
     </AppShell>
   );
 }

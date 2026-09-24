@@ -33,6 +33,21 @@ export async function findExtraMetasPda(mint: Address): Promise<Address> {
   return pda;
 }
 
+/**
+ * asset_registry `["authority_transfer", target]` — the staged authority
+ * transfer of a rotatable target (KycRegistry, Issuer, CustodyVault; the
+ * Platform's uses the same seed over the Platform PDA). Hand-written on
+ * purpose: Codama names this PDA per instruction because the `transfer` seed
+ * collides across targets, so those generated names are not a stable import.
+ */
+export async function findAuthorityTransferPda(target: Address): Promise<Address> {
+  const [pda] = await getProgramDerivedAddress({
+    programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+    seeds: [seed("authority_transfer"), addr.encode(target)],
+  });
+  return pda;
+}
+
 function u64le(value: bigint): Uint8Array {
   const bytes = new Uint8Array(8);
   new DataView(bytes.buffer).setBigUint64(0, value, true);

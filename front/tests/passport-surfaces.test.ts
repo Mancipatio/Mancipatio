@@ -49,11 +49,21 @@ describe("admin share classes — KycGated hook registry (§5)", () => {
 
 describe("useRole stays cheap", () => {
   const auth = src("lib/auth.ts");
+  const resolution = src("lib/role-resolution.ts");
 
+  // Talas 3.1: useRole now reports the KYC provider, but never by scanning
+  // per mount. A pinned build reads the registry in the single batched
+  // getMultipleAccounts; an unpinned one scans (30 s cached) only while a
+  // consumer passes { kyc: true }.
   it("does not scan KycRegistry accounts on every role compute", () => {
-    expect(auth).not.toMatch(/from "@\/lib\/kyc-authority"/);
+    expect(auth).not.toMatch(/import \{[^}]*\bloadKycAuthorityContext\b[^}]*\} from "@\/lib\/kyc-authority"/);
     expect(auth).not.toContain("loadKycAuthorityContext(");
-    expect(auth).not.toContain("isKycProvider:");
+    expect(auth).not.toContain("listKycRegistries(");
+    expect(auth).toContain("withKycScan: withKyc && pin.error === null");
+    expect(resolution).toContain("if (!opts.withKycScan) return snapshot;");
+    expect(resolution.indexOf("if (!opts.withKycScan) return snapshot;")).toBeLessThan(
+      resolution.indexOf("loadKycAuthorityContext(rpc"),
+    );
   });
 });
 

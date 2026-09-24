@@ -10,6 +10,7 @@ import {
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { invalidateRoles } from "@/lib/role-store";
 import {
   loadOperationalAuthority,
   buildProposeOperationalAuthority,
@@ -72,6 +73,8 @@ export function AuthorityRotation({
       });
       setConfirm(null);
       setNext("");
+      // The platform / blocklist authority (or its proposal) changed.
+      invalidateRoles();
       void refresh();
     } catch (error) {
       toast.showError(

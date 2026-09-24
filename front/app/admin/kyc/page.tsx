@@ -20,7 +20,7 @@ import { ClawbackPanel } from "./clawback-panel";
 import { KycRegistryPanel } from "@/components/kyc-registry-panel";
 import { JurisdictionSelector } from "@/components/jurisdiction-selector";
 import { toggleJurisdiction } from "@/lib/kyc-registry-rotation";
-import { useRole } from "@/lib/auth";
+import { invalidateRoles, useRole } from "@/lib/auth";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { countryName } from "@/lib/countries";
@@ -244,6 +244,7 @@ function KycRegistryBootstrap({ registryVersion, onChanged }: RegistryChangeProp
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "KYC registry created" });
       invalidateKycAuthorityContext(client.runtime.rpc);
+      invalidateRoles();
       await refreshRegistry(true);
       onChanged();
     } catch (err) {

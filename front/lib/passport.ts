@@ -13,16 +13,9 @@
  * table (the table is not anon-readable — see 0031).
  */
 
-import {
-  getAddressEncoder,
-  getProgramDerivedAddress,
-  getUtf8Encoder,
-  type Address,
-  type TransactionSigner,
-} from "@solana/kit";
+import { type Address, type TransactionSigner } from "@solana/kit";
 import type { WalletSession } from "@solana/client";
 import {
-  ASSET_REGISTRY_PROGRAM_ADDRESS,
   findKycRegistryPda,
   findKycEntryPda,
   getAcceptKycRegistryAuthorityInstructionAsync,
@@ -47,6 +40,12 @@ import {
 } from "@/lib/generated/transfer_hook";
 import { signedFetch } from "@/lib/siws-client";
 import { countryName } from "@/lib/countries";
+import { findAuthorityTransferPda } from "@/lib/pdas";
+import {
+  JURISDICTION_BITMAP_BYTES,
+  bitmapHasCode,
+  isJurisdictionRepresentable,
+} from "@/lib/jurisdiction-bitmap";
 
 // ── Re-exports ────────────────────────────────────────────────────────────────
 
@@ -166,20 +165,10 @@ export async function buildClosePassport(params: BuildRevokePassportParams) {
 
 /**
  * The registry's staged authority transfer: ["authority_transfer", registry].
- * Hand-written on purpose. Codama names this PDA per instruction because the
- * `transfer` seed collides across targets, so those generated names are not
- * a stable import.
+ * The derivation lives in lib/pdas (`findAuthorityTransferPda`, shared by
+ * every authority-transfer target); this name stays for existing callers.
  */
-export async function findKycRegistryTransferPda(registry: Address): Promise<Address> {
-  const [pda] = await getProgramDerivedAddress({
-    programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-    seeds: [
-      getUtf8Encoder().encode("authority_transfer"),
-      getAddressEncoder().encode(registry),
-    ],
-  });
-  return pda;
-}
+export const findKycRegistryTransferPda = findAuthorityTransferPda;
 
 /** The pending registry authority transfer, or null when none is staged. */
 export async function fetchPendingKycAuthorityTransfer(
@@ -323,58 +312,15 @@ export async function dossierHash(canonical: string): Promise<Uint8Array> {
   return new Uint8Array(hashBuf);
 }
 
-/**
- * Size in bytes of every on-chain jurisdiction bitmap — mirrors
- * `asset_registry::state::JURISDICTION_BITMAP_BYTES`. 128 bytes = 1024 bits
- * covers the whole ISO-3166-1 numeric range (000–899 assigned, 900–999
- * user-assigned); the pre-2026-08-10 maps were 32 bytes and could not encode
- * most of the world (Germany 276, Serbia 688, Spain 724, UK 826 …).
- */
-export const JURISDICTION_BITMAP_BYTES = 128;
-
-/**
- * Build a 128-byte jurisdiction bitmap from an array of ISO numeric country
- * codes.  Each code sets bit (code % 8) of byte (code >> 3). Codes outside
- * the bitmap (≥ 1024 — no such ISO code exists) are dropped, exactly as the
- * chain would reject them; use isJurisdictionRepresentable() to detect that
- * before issuing a passport.
- */
-export function jurisdictionBitmap(codes: number[]): Uint8Array {
-  const bitmap = new Uint8Array(JURISDICTION_BITMAP_BYTES);
-  for (const code of codes) {
-    const byte = code >> 3;      // Math.floor(code / 8)
-    const bit = code & 0x7;     // code % 8
-    if (byte < JURISDICTION_BITMAP_BYTES) {
-      bitmap[byte] |= 1 << bit;
-    }
-  }
-  return bitmap;
-}
-
-/**
- * True when the ISO numeric code fits in the on-chain 128-byte (1024-bit)
- * registry bitmap. Every assigned ISO-3166-1 numeric code (≤ 999) now fits;
- * only a malformed code ≥ 1024 would fail the program's byte-bound check
- * (ReceiverJurisdictionBlocked, fail-closed).
- */
-export function isJurisdictionRepresentable(code: number): boolean {
-  return (
-    Number.isInteger(code) && code >= 0 && code < JURISDICTION_BITMAP_BYTES * 8
-  );
-}
-
-/**
- * Mirror of the on-chain jurisdiction check (util.rs): bit (code % 8) of byte
- * (code / 8) must be set AND the byte index must be < JURISDICTION_BITMAP_BYTES.
- * Accepts any byte-indexable bitmap (Uint8Array, the generated
- * ReadonlyUint8Array, or a plain number array).
- */
-export function bitmapHasCode(bitmap: ArrayLike<number>, code: number): boolean {
-  if (!isJurisdictionRepresentable(code)) return false;
-  const byte = code >> 3;
-  const bit = code & 0x7;
-  return byte < bitmap.length && (bitmap[byte] & (1 << bit)) !== 0;
-}
+// The bitmap helpers live in the dependency-free lib/jurisdiction-bitmap
+// (server, CLI and role resolution import them without this module's
+// browser-side imports); re-exported here for existing callers.
+export {
+  JURISDICTION_BITMAP_BYTES,
+  bitmapHasCode,
+  isJurisdictionRepresentable,
+  jurisdictionBitmap,
+} from "@/lib/jurisdiction-bitmap";
 
 /**
  * Chain-accurate passport expiry semantics: a KycEntry is valid only while

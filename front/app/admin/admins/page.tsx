@@ -19,6 +19,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { recordAudit } from "@/lib/supabase";
+import { invalidateRoles } from "@/lib/role-store";
 import { explainSendError } from "@/lib/tx-error";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { useToast } from "@/lib/toast";
@@ -84,6 +85,7 @@ export default function AdminsPage() {
       });
       setConfirmGrant(false);
       setGrantAddr("");
+      invalidateRoles();
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError("Failed to grant admin", explainSendError(err));
@@ -126,6 +128,7 @@ export default function AdminsPage() {
       });
       setConfirmRevoke(false);
       setRevokeAddr("");
+      invalidateRoles();
     } catch (err) {
       toast.dismiss(pendingId);
       const message = err instanceof Error ? err.message : String(err);

@@ -12,6 +12,7 @@ import { JurisdictionSelector } from "@/components/jurisdiction-selector";
 import type { KycRegistry } from "@/lib/generated/asset_registry";
 import { countryName } from "@/lib/countries";
 import { invalidateKycAuthorityContext } from "@/lib/kyc-authority";
+import { invalidateRoles } from "@/lib/role-store";
 import {
   bitmapCodeStrings,
   jurisdictionDiff,
@@ -214,6 +215,7 @@ export function KycRegistryPanel({
       if (current.kind === "propose") setProposeInput("");
       if (current.kind === "jurisdictions") setEditing(false);
       invalidateKycAuthorityContext(client.runtime.rpc);
+      invalidateRoles();
       await loadPending();
       await onChanged();
     } catch (err) {

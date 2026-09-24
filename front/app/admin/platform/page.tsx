@@ -30,6 +30,7 @@ import { AuthorityRotation } from "./authority-rotation";
 import { BlocklistBootstrap } from "./blocklist-bootstrap";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { recordAudit } from "@/lib/supabase";
+import { invalidateRoles } from "@/lib/role-store";
 import { explainSendError } from "@/lib/tx-error";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { useToast } from "@/lib/toast";
@@ -119,6 +120,7 @@ export default function AdminPage() {
         tx_signature: sig || undefined,
         status: "success",
       });
+      invalidateRoles();
       await refresh();
     } catch (err) {
       toast.dismiss(pendingId);
