@@ -838,6 +838,174 @@ Preview first, then Production:
 11. `MANCIPATIO_LIVE_SMOKE=mainnet MANCI_ALLOW_MAINNET=1 npx vitest run
     --config scripts/ops/deployment-smoke.config.ts`.
 
+## 15. Alarms and the €3M ledger (Talas 4.4b + 5.1)
+
+Design: `docs/mainnet-readiness/design-4.4b-5.1.md` (its migrations
+0070/0071/0072 are **0072/0073/0074** here; the deployment network is 0070's
+`public.deployment_network()`, there is no second identity table and no
+`set-deployment-network.sql`).
+
+### What runs
+
+| Piece | Where | What |
+|---|---|---|
+| 0072 `onchain_event_jobs` | trigger on `indexer_events` | one alarm job per program transaction the indexer saw (webhook or gap scan) |
+| Alarm worker | `POST /api/internal/alarms`, cron `mancipatio-alarms-<network>` | events → `compliance_alerts` (instruction-first, Squads CPIs and ALT keys included); checks → incidents with hysteresis; one email digest per run |
+| Retry worker, stage 3 | `POST /api/internal/retry` (existing cron) | 0073 `spv_issuance_jobs`: closed sales and treasury mints booked from the finalized chain at the proven date; FX revaluations of held rows |
+| Dead-man switch | `GET /api/health/alarms` (anonymous, 200/503) | database network, alarm heartbeat ≤ 5 min, no stuck or failed notification |
+
+Both leases assert the deployment network (0072
+`assert_deployment_network`, the 0071 guard's rule). Alarms ignore
+maintenance mode and the program pause. System alerts never carry a wallet
+or client (the passport gate is unaffected); emails carry a fixed label,
+severity and time only, plus the summary and an explorer link for platform
+alarms (pause, treasury, authorities, upgrades, incidents). Low alerts are
+never emailed; high and critical notifications never give up.
+
+### Configuration
+
+| Variable | Where | Rule |
+|---|---|---|
+| `COMPLIANCE_ALERT_EMAIL` | Vercel (server) | Comma-separated, at most 5. **Devnet: `office@mancipatio.io`** (owner decision). Required on mainnet: without it `/api/health/alarms` answers 503 and alarm runs are `partial`. |
+| `RETRY_WORKER_SECRET` | Vercel + Vault | Reused by the alarm worker (D8); the Vault secret stays `mancipatio_retry_worker_<network>`. |
+| `NEXT_PUBLIC_SITE_URL`, `SMTP_*`, `EMAIL_FROM` | Vercel | Reused: the digest links `<site>/admin/compliance`. |
+
+Helius (D22): the webhook of each project must list **both program IDs and
+both ProgramData PDAs** (loader `SetAuthority` and `Close` do not reference
+the program ID). Print the PDAs with:
+
+```
+node -e 'import("@solana/kit").then(async k=>{for(const p of ["FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS","GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"]){const [a]=await k.getProgramDerivedAddress({programAddress:"BPFLoaderUpgradeab1e11111111111111111111111",seeds:[k.getAddressEncoder().encode(p)]});console.log(p,"→",a)}})'
+```
+
+The gap scan (every 5 minutes, window now−20 min … now−5 min) reads the
+asset_registry program, the blocklist-authority PDA and both ProgramData
+PDAs, and re-queues any finalized transaction the index misses.
+
+### Devnet rollout (migrations before the front)
+
+**A. Preflight (read-only, from the branch).**
+
+```
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/ledger-preflight.sql
+```
+
+Section 1 (duplicate sale bookings) must be empty, or 0073 refuses to run.
+Decide on every row of sections 2 and 3 (manual rows that name a sale, or
+sit on assets with server bookings) before 0073: keep, or correct by hand.
+
+**B. 0072, then 0073** (the live front keeps working: expand steps only).
+
+```
+bash scripts/ops/backup.sh devnet pre-0072
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0072_onchain_alarms.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0073_spv_issuance_jobs.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+```
+
+The identity preflight must still show `tables_without_guard` `[]` and
+`defaults_not_dynamic` `{}` (the new tables default to
+`deployment_network()` and carry the guard). Expected effects: event jobs
+start queueing with the next webhook delivery; every closed approved sale is
+backfilled as a `sale_close` job (covered ones complete on their first
+pass); a booking the old calendar-year trigger refused books on the next
+retry run. Look for `OVER_CAP` alerts afterwards.
+
+**C. Front.** Merge, then check that the production deployment is READY on
+the merge commit and `curl -s https://www.manci.io/api/health` answers
+`"ok":true`. Browser settle and treasury nudges are gone
+(`/api/sale-approvals/settle` answers 410 for one release).
+
+**D. Owner / operator settings.**
+
+1. Vercel, devnet project, Production: `COMPLIANCE_ALERT_EMAIL=office@mancipatio.io`; redeploy.
+2. Helius dashboard, the devnet webhook: add both ProgramData PDAs (above).
+3. Alarm scheduler (after the retry scheduler, whose worker target it uses):
+   ```
+   MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/alarm-scheduler.sql
+   MANCI_TARGET=devnet bash scripts/db.sh -c "select mancipatio_ops.invoke_alarm_worker()"
+   MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/alarm-scheduler-status.sql
+   ```
+   Pass: the install ends with `mancipatio-alarms-devnet | f | devnet |
+   https://www.manci.io`; the manual run is `complete` in `alarm_http_runs`
+   and `worker_heartbeats` shows `alarms` with a fresh `last_ok_at` (and
+   `retry` from the retry worker).
+4. Test email:
+   ```
+   MANCI_TARGET=devnet bash scripts/db.sh -c "select public.raise_system_alert(public.deployment_network(),'test:rollout-'||to_char(now(),'YYYYMMDDHH24MISS'),'worker','worker:test','medium','Alarm email test (rollout)','{}'::jsonb,null,true)"
+   ```
+   The next alarm run sends it to `office@mancipatio.io` (status `sent`).
+5. Enable the job:
+   `MANCI_TARGET=devnet bash scripts/db.sh -c "select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-alarms-devnet'"`.
+6. External monitor (D10): every 5 minutes on
+   `https://www.manci.io/api/health/alarms`, alert on anything but 200.
+
+**E. 0074 (contract), at least a day after C.** It drops the anonymous read
+of `spv_issuances` and `record_spv_issuance`; the new front reads through
+`/api/spvs/capacity` and `/api/spvs/issuances`.
+
+```
+bash scripts/ops/backup.sh devnet pre-0074
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0074_ledger_contract.sql
+```
+
+**Expected bootstrap alerts** (D17): the first runs raise incidents for
+whatever is already true (a stale USDC rate in use, old invalid jobs, an
+indexer backlog) and the backfilled sales may raise `LINKED_EXISTING` or
+`OVER_CAP`. Review them, then resolve in bulk on `/admin/compliance`.
+
+### Mainnet project
+
+Apply 0001–0074 in order (0074 is safe on a fresh project), the identity
+first as in §14. Then: env (`COMPLIANCE_ALERT_EMAIL` required), Vault
+secret, retry scheduler, alarm scheduler (`MANCI_TARGET=mainnet
+MANCI_ALLOW_MAINNET=1`), the Helius webhook with all four addresses, the
+external monitor — **all before** the program deploy and bootstrap (§2–§7),
+so every bootstrap action (including the loader alarms) is recorded. FX rows
+only through the Raise limits page by the super admin after bootstrap
+(D16); check the EURC mint address against Circle's published address
+before saving it.
+
+### Responses
+
+| Alert | First response |
+|---|---|
+| `onchain:program-upgrade` critical | Confirm a Squads proposal you expected (§9). Unexpected: incident (§11), pause (§11), rotate keys. |
+| `onchain:treasury`, `onchain:platform-admin` accept, `onchain:blocklist-authority` accept | Compare with the signer matrix; unexpected = compromised key, §11. |
+| `onchain:pause` critical (unpause) | Only the super admin clears; confirm who and why. |
+| `onchain:issuer-permissions` critical (mint bit) | Check the issuer's KYB and the approval record. |
+| `ledger:over-cap` critical | The chain acted past the limit; legal review, and stop new approvals for the subject. |
+| `ledger:unreserved-mint` | Re-value the mint on the Raise limits page if its value is above the floor. |
+| `fx:missing`, `fx:stale`, `ledger:capacity-holds` | Add or refresh the EUR rate on the Raise limits page; the jobs unblock and revalue by themselves. |
+| `worker:retry-heartbeat`, `indexer:*` | `retry-scheduler-status.sql`, Vercel function logs, Helius delivery log. |
+
+### Operations
+
+- Re-queue notifications that gave up (after fixing SMTP):
+  `update compliance_alerts set notify_state='pending', notify_attempts=0, next_notify_at=now() where notify_state='failed';`
+  (a `failed` notification on an open alert keeps `/api/health/alarms` at 503
+  until it is re-queued and sent, or the alert is resolved).
+- Clear a hold after a manual review (the fact is counted another way):
+  `select public.clear_capacity_hold(public.deployment_network(), '<subject>', '<ref>');`
+  then resolve the related alerts.
+- Delivery is at-least-once: a digest that timed out may arrive twice.
+
+### Rollback
+
+- Front: revert the Vercel deployment; disable the job with
+  `select cron.alter_job(jobid, active := false) from cron.job where jobname = 'mancipatio-alarms-<network>'`.
+  The previous front works against 0072/0073 (signatures unchanged; the
+  settle route is valid again with the old code before 0074).
+- 0072: `drop trigger indexer_events_enqueue_alarm_job on public.indexer_events;`
+  and restore 0047's `acquire_retry_worker_lease` (the same body without its
+  first `perform`). Tables and columns stay.
+- 0073: `drop trigger sales_enqueue_close_job on public.sales; drop trigger
+  sale_capacity_hold_guard on public.sale_capacity_reservations;` then
+  re-apply `0066_sale_capacity.sql` and `0027_spv_cap_trigger.sql` (both
+  re-runnable). Keep `spv_issuances_sale_once` and the new tables.
+- 0074: `create policy "spv_issuances anon read" on public.spv_issuances for select using (true); grant select on public.spv_issuances to anon, authenticated;`
+  and re-apply 0073 section 15 (`record_spv_issuance`).
+
 ## EXTERNAL checks (open until the rehearsal proves them)
 
 1. Squads Transaction Builder import format, vault seeds and the inner size
