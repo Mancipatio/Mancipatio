@@ -440,6 +440,25 @@ export function capabilitiesOf(
   return caps;
 }
 
+// ── Server refusals right after a rotation ──────────────────────────────────
+
+/** The UI reads roles at `confirmed`, the server gates at `finalized`. */
+export const ROLE_NOT_FINALIZED_HINT = "Role change not finalized yet — retry in about 30 s.";
+
+/** A server gate refused the caller's role (admin / KYC-provider 403). */
+export function isRoleRefusal(message: string): boolean {
+  return /privileges required/i.test(message);
+}
+
+/**
+ * Error copy for a signed read on a role-gated page: a refusal of a role the
+ * UI already shows is most likely a rotation that is confirmed but not yet
+ * finalized.
+ */
+export function explainRoleRefusal(message: string): string {
+  return isRoleRefusal(message) ? `${message}. ${ROLE_NOT_FINALIZED_HINT}` : message;
+}
+
 // ── Admin area access (default deny, whole path segments) ───────────────────
 
 export type AdminRouteRule = {
@@ -458,7 +477,12 @@ export const ADMIN_ROUTE_DEFAULT: readonly Capability[] = ["admin"];
  * Each role is widened in its own slice together with its safety changes.
  */
 export const ADMIN_ROUTE_ACCESS: readonly AdminRouteRule[] = [
-  { match: "/admin", exact: true, anyOf: ["admin"] },
+  // The overview; an operator without an Admin record lands on OperatorLanding.
+  { match: "/admin", exact: true, anyOf: ["admin", "kycProvider"] },
+  // K6: the KYC provider triages the queue and the dossiers. Its routes are
+  // requireAdminOrKycProvider; AML evidence and admin-only actions are not.
+  { match: "/admin/kyc", anyOf: ["admin", "kycProvider"] },
+  { match: "/admin/clients", anyOf: ["admin", "kycProvider"] },
 ];
 
 function normalizePath(pathname: string): string {

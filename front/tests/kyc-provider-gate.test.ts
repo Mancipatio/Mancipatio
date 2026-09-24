@@ -166,15 +166,47 @@ describe("requireKycProvider after a registry authority rotation (2C-1)", () => 
 });
 
 describe("requireAdminOrKycProvider", () => {
+  // Talas 3.1 K6: the gate says WHICH role passed, so a route can keep a
+  // provider narrower than an Admin (never lifting a terminal status).
   it("admits an admin without consulting the registry", async () => {
-    await expect(requireAdminOrKycProvider(NEW_ADMIN)).resolves.toBeUndefined();
+    await expect(requireAdminOrKycProvider(NEW_ADMIN)).resolves.toBe("admin");
     expect(chain.registries).not.toHaveBeenCalled();
   });
 
   it("admits the rotated provider that is no longer an admin", async () => {
-    await expect(requireAdminOrKycProvider(PROVIDER)).resolves.toBeUndefined();
+    await expect(requireAdminOrKycProvider(PROVIDER)).resolves.toBe("kycProvider");
     expect(chain.requireAdmin).toHaveBeenCalledWith(PROVIDER);
     expect(chain.registries).toHaveBeenCalledTimes(1);
+  });
+
+  it("an admin who is also the provider passes as admin", async () => {
+    chain.registries.mockResolvedValue([registryOf(NEW_ADMIN)]);
+    await expect(requireAdminOrKycProvider(NEW_ADMIN)).resolves.toBe("admin");
+  });
+
+  it("403 once a rotation away from the provider is finalized", async () => {
+    const REGISTRY = "registry-seeded-by-provider";
+    chain.registries.mockResolvedValue([registryOf(PROVIDER, REGISTRY)]);
+    await expect(requireAdminOrKycProvider(PROVIDER)).resolves.toBe("kycProvider");
+    // The registry authority moved to STRANGER and that is now finalized.
+    finalized.set(REGISTRY, registryOf(STRANGER, REGISTRY));
+    await expect(requireAdminOrKycProvider(PROVIDER)).rejects.toMatchObject({
+      status: 403,
+      message: "Admin or KYC provider privileges required",
+    });
+    await expect(requireAdminOrKycProvider(STRANGER)).resolves.toBe("kycProvider");
+  });
+
+  it("403 (never the heuristic) when the pinned registry is missing", async () => {
+    chain.pin.mockReturnValue("pinned-registry");
+    finalized.set("pinned-registry", null);
+    await expect(requireAdminOrKycProvider(PROVIDER)).rejects.toMatchObject({ status: 403 });
+    expect(chain.registries).not.toHaveBeenCalled();
+  });
+
+  it("503 when the registry cannot be read (never grants)", async () => {
+    chain.registries.mockRejectedValueOnce(new Error("rpc down"));
+    await expect(requireAdminOrKycProvider(PROVIDER)).rejects.toMatchObject({ status: 503 });
   });
 
   it("refuses a wallet that is neither", async () => {

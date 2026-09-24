@@ -1,5 +1,6 @@
 // POST /api/clients/doc-url — resolve ONE KYC document to a signed URL for an
-// admin, and log the access (SIWS or wallet session + requireAdmin).
+// admin or the KYC provider, and log the access (SIWS or wallet session +
+// requireAdminOrKycProvider, Talas 3.1 K6).
 // Action: "clients.doc-url". Client half: lib/clients.ts getClientDocumentUrl().
 //
 // Documents live in the PRIVATE "client-documents" bucket; the URL is signed
@@ -22,7 +23,7 @@
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { actorSourceOf, writeServerAudit } from "@/lib/server/audit";
 import { getMaintenance } from "@/lib/server/maintenance";
@@ -38,7 +39,7 @@ import {
 export async function POST(request: Request) {
   try {
     const { wallet, params, via } = await verifySigned(request, "clients.doc-url");
-    await requireAdmin(wallet);
+    await requireAdminOrKycProvider(wallet);
 
     const documentId = assertPositiveInt(params.document_id, "document_id");
 

@@ -33,6 +33,7 @@ import {
   adminRouteRequirement,
   capabilitiesOf,
   deriveRoles,
+  explainRoleRefusal,
   readRoleSnapshot,
   type AdminRouteRule,
   type Capability,
@@ -264,6 +265,15 @@ describe("deriveRoles", () => {
   });
 });
 
+describe("explainRoleRefusal", () => {
+  it("adds the not-finalized hint to a server role refusal only", () => {
+    expect(explainRoleRefusal("Admin or KYC provider privileges required")).toBe(
+      "Admin or KYC provider privileges required. Role change not finalized yet — retry in about 30 s.",
+    );
+    expect(explainRoleRefusal("Client not found")).toBe("Client not found");
+  });
+});
+
 describe("capabilitiesOf", () => {
   it("maps flags to capabilities; the super admin carries admin", () => {
     const none = { isSuperAdmin: false, isAdmin: false, isKycProvider: false, isBlocklistAuthority: false };
@@ -312,6 +322,24 @@ describe("adminRouteAllows", () => {
     expect(adminRouteAllows("/admin/blocklist-audit", caps("blocklistAuthority"), table)).toBe(false);
     // `exact` keeps /admin from opening its sub-paths.
     expect(adminRouteAllows("/admin/platform", op, table)).toBe(false);
+  });
+
+  it("the KYC provider opens the overview, KYC and client pages — nothing else (K6)", () => {
+    const kyc = caps("kycProvider");
+    for (const path of ["/admin", "/admin/kyc", "/admin/clients", "/admin/clients/abc", "/admin/clients/abc/"]) {
+      expect(adminRouteAllows(path, kyc)).toBe(true);
+    }
+    for (const path of [
+      "/admin/kycx",
+      "/admin/clientsexport",
+      "/admin/fees",
+      "/admin/compliance",
+      "/admin/admins",
+      "/admin/platform",
+      "/admin/audit",
+    ]) {
+      expect(adminRouteAllows(path, kyc)).toBe(false);
+    }
   });
 
   it("every rule names at least one capability and lives under /admin", () => {

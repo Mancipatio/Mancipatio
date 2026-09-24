@@ -282,11 +282,10 @@ export default function AdminPage() {
                   The KYC provider (registry authority) differs from the Super
                   Admin. Passports are issued and revoked only by the registry
                   authority; it moves only through the propose/accept rotation
-                  on /admin/kyc, never with an admin rotation. That key needs an
-                  Admin record (add_admin on /admin/roles) to reach /admin/kyc
-                  and the client detail pages — e.g. after an admin rotation
-                  closed the old record, or when the registry was handed to a
-                  separate compliance key.
+                  on /admin/kyc, never with an admin rotation. That key reaches
+                  /admin/kyc and the client detail pages as the KYC provider,
+                  without an Admin record (Admins are managed on
+                  /admin/admins).
                 </p>
               )}
             <div className="mt-6">

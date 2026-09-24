@@ -1,6 +1,12 @@
-// POST /api/clients/request-docs — admin requests KYC documents from a client
-// (SIWS + requireAdmin). Action: "clients.request-docs".
-// Client half: lib/clients.ts requestRequirements().
+// POST /api/clients/request-docs — an admin or the KYC provider requests KYC
+// documents from a client (SIWS + requireAdminOrKycProvider, Talas 3.1 K6).
+// Action: "clients.request-docs". Client half: lib/clients.ts
+// requestRequirements().
+//
+// The request parks the client in `more_info`. A KYC provider without an
+// Admin record must not use that to lift a suspension or a rejection (OD1):
+// a terminal client is refused before any write, and the status patch
+// carries `forbidLeavingTerminal` (atomic 403).
 //
 // Side effects mirror the pre-P1 client flow: kyc_requirements rows inserted,
 // the client parked in `more_info`, and a kyc-event note on the timeline.
@@ -10,16 +16,18 @@
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
 import {
+  LEAVE_TERMINAL_ADMIN_ONLY,
   applyClientStatus,
   assertUuid,
   DEGRADED_TTL_MESSAGE,
   fetchClientOr404,
   insertNote,
   isMissingTtlColumnError,
+  isTerminalKycStatus,
   isOnboardingTokenLive,
   onboardingTokenExpiry,
   randomOnboardingToken,
@@ -29,7 +37,8 @@ import {
 export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "clients.request-docs");
-    await requireAdmin(wallet);
+    const role = await requireAdminOrKycProvider(wallet);
+    const provider = role === "kycProvider";
 
     const clientId = assertUuid(params.client_id, "client_id");
     const rawItems = params.items;
@@ -62,6 +71,9 @@ export async function POST(request: Request) {
 
     const sb = getSupabaseAdmin();
     const client = await fetchClientOr404(sb, clientId);
+    if (provider && isTerminalKycStatus(client.kyc_status)) {
+      throw new SiwsError(403, LEAVE_TERMINAL_ADMIN_ONLY);
+    }
 
     const { error } = await sb.from("kyc_requirements").insert(
       items.map((i) => ({
@@ -77,7 +89,9 @@ export async function POST(request: Request) {
       throw new SiwsError(500, error.message);
     }
 
-    await applyClientStatus(sb, clientId, "more_info");
+    await applyClientStatus(sb, clientId, "more_info", undefined, {
+      forbidLeavingTerminal: provider,
+    });
 
     // Re-issue the magic-link when it is gone (verification nulls it) or
     // refresh its TTL — the client needs a working upload credential.

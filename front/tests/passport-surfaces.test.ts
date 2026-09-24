@@ -31,7 +31,11 @@ describe("admin client detail — on-chain passport surface (§5)", () => {
 
   it("gates issue/revoke on isKycProvider instead of the Super Admin role", () => {
     expect(page).not.toContain("isSuperAdmin");
-    expect(page).not.toContain("useRole");
+    // useRole only decides the admin-only actions (Talas 3.1 K6); the
+    // passport gate stays on the live registry authority of passportAuthorityFor.
+    expect(page).toContain("const { isAdmin } = useRole({ kyc: true });");
+    expect(page).not.toMatch(/isKycProvider[^\n]*useRole/);
+    expect(page).toContain("const { isKycProvider, registryAddress, registryAuthority } = passportAuth;");
     expect(page).toContain("if (!isKycProvider || !registryAuthority || !registryAddress)");
     expect(page).toContain("client.wallet && isKycProvider && (");
   });
@@ -74,9 +78,17 @@ describe("KYC bootstrap and rotation copy", () => {
     expect(page).toContain("invalidateKycAuthorityContext(client.runtime.rpc)");
   });
 
-  it("tells the operator the provider must be re-added via add_admin after rotation", () => {
-    expect(src("app/admin/kyc/page.tsx")).toMatch(/add_admin/);
-    expect(src("app/admin/platform/page.tsx")).toMatch(/add_admin/);
+  // Talas 3.1 K6: the provider reaches the KYC and client pages without an
+  // Admin record, so the copy no longer asks for one (and /admin/roles never
+  // existed: Admins live on /admin/admins).
+  it("tells the operator the provider needs no Admin record", () => {
+    for (const rel of ["app/admin/kyc/page.tsx", "app/admin/platform/page.tsx"]) {
+      const page = src(rel);
+      expect(page).not.toMatch(/add_admin on \/admin\/roles/);
+      expect(page).not.toContain("/admin/roles");
+      expect(page).toMatch(/without an Admin record/);
+      expect(page).toContain("/admin/admins");
+    }
   });
 });
 

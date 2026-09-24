@@ -1,10 +1,11 @@
-// POST /api/clients/note — admin posts an internal note on a client timeline
-// (SIWS + requireAdmin). Action: "clients.note". Client half: lib/clients.ts
-// addNote(). The author is ALWAYS the verified signing wallet.
+// POST /api/clients/note — an admin or the KYC provider posts an internal
+// note on a client timeline (SIWS + requireAdminOrKycProvider, Talas 3.1 K6).
+// Action: "clients.note". Client half: lib/clients.ts addNote(). The author
+// is ALWAYS the verified signing wallet.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import {
   NOTE_KINDS,
@@ -18,7 +19,7 @@ import {
 export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "clients.note");
-    await requireAdmin(wallet);
+    await requireAdminOrKycProvider(wallet);
 
     const clientId = assertUuid(params.client_id, "client_id");
     const body = reqString(params, "body", 4000);

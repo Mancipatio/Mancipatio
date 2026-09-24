@@ -375,6 +375,8 @@ describe("issueBlockers", () => {
         client: { kyc_status: "verified", kyc_expires_at: null },
         jurisdiction: 40,
         registry,
+        walletBlocked: false,
+        hasOpenAlert: false,
         nowMs: NOW,
       }),
     ).toEqual([]);
@@ -435,18 +437,21 @@ describe("issueBlockers", () => {
         nowMs: NOW,
       }).some((b) => b.includes("BLOCKED")),
     ).toBe(true);
-    // Registry unknown (load failure) → bitmap checks are skipped, not failed.
+    // Registry unknown (load failure) → bitmap checks are skipped, not failed
+    // (the chain enforces the receiver's jurisdiction on every gated transfer).
     expect(
       issueBlockers({
         client: verified(180),
         jurisdiction: 56,
         registry: null,
+        walletBlocked: false,
+        hasOpenAlert: false,
         nowMs: NOW,
       }),
     ).toEqual([]);
   });
 
-  it("blocks sanctioned wallets and open compliance alerts; unknown (null) skips", () => {
+  it("blocks sanctioned wallets and unresolved compliance alerts", () => {
     expect(
       issueBlockers({
         client: verified(180),
@@ -465,16 +470,42 @@ describe("issueBlockers", () => {
         nowMs: NOW,
       }).some((b) => b.includes("compliance alert")),
     ).toBe(true);
-    expect(
-      issueBlockers({
-        client: verified(180),
-        jurisdiction: 40,
-        registry,
-        walletBlocked: null,
-        hasOpenAlert: null,
-        nowMs: NOW,
-      }),
-    ).toEqual([]);
+  });
+
+  // Talas 3.1 OD3: the blocklist is sender-only on-chain, so a passport issued
+  // to a blocklisted wallet would let it RECEIVE KycGated units. Unknown
+  // blocklist or alert status must block, never skip.
+  it("fails closed when the blocklist or the alert status is unknown", () => {
+    const unknownBoth = issueBlockers({
+      client: verified(180),
+      jurisdiction: 40,
+      registry,
+      walletBlocked: null,
+      hasOpenAlert: null,
+      nowMs: NOW,
+    });
+    expect(unknownBoth).toEqual([
+      "Blocklist status could not be loaded — retry before issuing.",
+      "Compliance alert status could not be loaded — retry before issuing.",
+    ]);
+    const blocklistOnly = issueBlockers({
+      client: verified(180),
+      jurisdiction: 40,
+      registry,
+      walletBlocked: null,
+      hasOpenAlert: false,
+      nowMs: NOW,
+    });
+    expect(blocklistOnly).toEqual(["Blocklist status could not be loaded — retry before issuing."]);
+    // An omitted value is unknown too.
+    const alertOmitted = issueBlockers({
+      client: verified(180),
+      jurisdiction: 40,
+      registry,
+      walletBlocked: false,
+      nowMs: NOW,
+    });
+    expect(alertOmitted).toEqual(["Compliance alert status could not be loaded — retry before issuing."]);
   });
 });
 

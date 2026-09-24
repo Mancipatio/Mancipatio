@@ -1,6 +1,13 @@
-// POST /api/clients/status — admin KYC decision: approve / reject / suspend /
-// more_info / expired (SIWS + requireAdmin). Action: "clients.status".
-// Client half: lib/clients.ts updateClientStatus() / suspendClient().
+// POST /api/clients/status — KYC decision: approve / reject / suspend /
+// more_info / expired (SIWS + requireAdminOrKycProvider, Talas 3.1 K6).
+// Action: "clients.status". Client half: lib/clients.ts updateClientStatus() /
+// suspendClient().
+//
+// The KYC provider (registry authority without an Admin record) decides
+// verdicts but can NEVER move a client out of `suspended` / `rejected`
+// (OD1): the status patch carries `forbidLeavingTerminal`, which makes the
+// refusal atomic (403). Every provider decision is recorded on the timeline
+// as a "[KYC provider] status → X" kyc-event note.
 //
 // When a reason is supplied it is recorded on the client timeline as a
 // kyc-event note (system note for suspensions), matching the pre-P1 UX where
@@ -9,17 +16,19 @@
 // problem never fails the decision).
 
 import { NextResponse } from "next/server";
-import { verifySigned, siwsErrorResponse } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
+import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
 import {
   KYC_STATUSES,
   ONBOARDING_STATUSES,
+  LEAVE_TERMINAL_ADMIN_ONLY,
   applyClientStatus,
   assertUuid,
   fetchClientOr404,
   insertNote,
+  isTerminalKycStatus,
   oneOf,
   optString,
   type ServerKycStatus,
@@ -88,7 +97,8 @@ function verdictEmail(
 export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "clients.status");
-    await requireAdmin(wallet);
+    const role = await requireAdminOrKycProvider(wallet);
+    const provider = role === "kycProvider";
 
     const id = assertUuid(params.id, "id");
     const kycStatus = oneOf(params.kyc_status, KYC_STATUSES, "kyc_status");
@@ -100,9 +110,26 @@ export async function POST(request: Request) {
 
     const sb = getSupabaseAdmin();
     const client = await fetchClientOr404(sb, id);
-    await applyClientStatus(sb, id, kycStatus, onboardingStatus);
+    // Fast refusal before any write; the guarded update below is the atomic
+    // stop for a suspension that lands in between.
+    if (provider && isTerminalKycStatus(client.kyc_status)) {
+      throw new SiwsError(403, LEAVE_TERMINAL_ADMIN_ONLY);
+    }
+    await applyClientStatus(sb, id, kycStatus, onboardingStatus, {
+      forbidLeavingTerminal: provider,
+    });
 
-    if (reason) {
+    if (provider) {
+      // Always on the timeline: who (the signing wallet) decided what, as
+      // the KYC provider rather than an Admin.
+      await insertNote(
+        sb,
+        id,
+        wallet,
+        `[KYC provider] status → ${kycStatus}${reason ? ` — ${reason}` : ""}`,
+        "kyc-event",
+      );
+    } else if (reason) {
       await insertNote(
         sb,
         id,

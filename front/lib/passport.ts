@@ -519,9 +519,15 @@ export type IssueGateInput = {
     approvedJurisdictions: ArrayLike<number>;
     blockedJurisdictions: ArrayLike<number>;
   } | null;
-  /** Wallet is on the on-chain sanctions blocklist; null = unknown. */
+  /**
+   * Wallet is on the on-chain sanctions blocklist (its BlockEntry PDA is
+   * live); null/undefined = unknown → BLOCKS issuance (fail closed).
+   */
   walletBlocked?: boolean | null;
-  /** There is an OPEN compliance alert for the wallet; null = unknown. */
+  /**
+   * There is an UNRESOLVED (open or escalated) compliance alert for the
+   * wallet; null/undefined = unknown → BLOCKS issuance (fail closed).
+   */
   hasOpenAlert?: boolean | null;
   /** Clock override (ms) for tests. */
   nowMs?: number;
@@ -539,9 +545,13 @@ export type IssueGateInput = {
  *   * `verified` but kyc_expires_at in the past → fail-closed (issuing would
  *     silently extend an expired verification by the policy default)
  *   * unparseable kyc_expires_at               → fail-closed
- *   * registry / blocklist / alerts unknown    → those checks are skipped
- *     (fail-open with the caller expected to log) — the chain re-enforces the
- *     bitmap and blocklist on every transfer.
+ *   * blocklist or alert status unknown         → fail-closed (Talas 3.1
+ *     OD3). The blocklist is enforced on the SENDER only (transfer_hook
+ *     derives ["blocked", source_owner]); nothing on-chain stops a passport
+ *     issued to a blocklisted wallet from RECEIVING KycGated units, so the
+ *     receiver is gated here and nowhere else.
+ *   * registry bitmaps unknown                  → those checks are skipped;
+ *     the chain enforces the receiver's jurisdiction on every gated transfer.
  */
 export function issueBlockers(input: IssueGateInput): string[] {
   const blockers: string[] = [];
@@ -588,12 +598,16 @@ export function issueBlockers(input: IssueGateInput): string[] {
     }
   }
 
-  if (input.walletBlocked === true) {
+  if (input.walletBlocked == null) {
+    blockers.push("Blocklist status could not be loaded — retry before issuing.");
+  } else if (input.walletBlocked) {
     blockers.push("This wallet is on the on-chain sanctions blocklist.");
   }
-  if (input.hasOpenAlert === true) {
+  if (input.hasOpenAlert == null) {
+    blockers.push("Compliance alert status could not be loaded — retry before issuing.");
+  } else if (input.hasOpenAlert) {
     blockers.push(
-      "There is an OPEN compliance alert for this wallet — resolve it first.",
+      "There is an unresolved (open or escalated) compliance alert for this wallet — resolve it first.",
     );
   }
   return blockers;
@@ -681,30 +695,22 @@ export async function submitPassportRequest(
 }
 
 /**
- * List all passport requests, newest first (admin queue) via the signed
- * admin route (POST /api/passport/list). The table is no longer
- * anon-readable — it deanonymizes the KYC pipeline — so the read requires a
- * connected admin wallet. Best-effort: returns [] on failure (unchanged
- * caller contract).
+ * List all passport requests, newest first (admin / KYC-provider queue) via
+ * the signed route (POST /api/passport/list). The table is not anon-readable
+ * — it deanonymizes the KYC pipeline — so the read requires the connected
+ * operator wallet. Throws on failure, so the queue can say it did not load
+ * instead of showing an empty queue.
  */
 export async function listPassportRequests(
   session: WalletSession | null | undefined,
 ): Promise<PassportRequest[]> {
-  try {
-    const data = await signedFetch<{ requests: PassportRequest[] }>(
-      session,
-      "/api/passport/list",
-      "passport.list",
-      {},
-    );
-    return data.requests ?? [];
-  } catch (err) {
-    console.warn(
-      "[passport] request list failed:",
-      err instanceof Error ? err.message : err,
-    );
-    return [];
-  }
+  const data = await signedFetch<{ requests: PassportRequest[] }>(
+    session,
+    "/api/passport/list",
+    "passport.list",
+    {},
+  );
+  return data.requests ?? [];
 }
 
 /** Minimal shape the unsigned status probe exposes (no jurisdiction/note). */

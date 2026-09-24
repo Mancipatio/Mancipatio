@@ -72,8 +72,10 @@ import {
   type KycAuthorityContext,
 } from "@/lib/kyc-authority";
 import { detectNetwork } from "@/lib/network";
-import { listBlockEntries } from "@/lib/blocklist";
-import { listAlerts } from "@/lib/compliance";
+import { fetchBlockEntries, fetchBlockEntry } from "@/lib/blocklist";
+import { listWalletsWithOpenAlerts } from "@/lib/compliance";
+import { useRole } from "@/lib/auth";
+import { explainRoleRefusal } from "@/lib/role-resolution";
 import { ClientPrivacyPanel } from "@/components/client-privacy-panel";
 import { erasurePassportCheck } from "@/lib/client-privacy";
 
@@ -133,15 +135,29 @@ export default function ClientDetailPage({
       >
         ← Clients
       </Link>
-      <RequireRole role="admin">
+      {/* Admins and the KYC provider (Talas 3.1 K6); admin-only actions
+          are hidden below and refused by their routes. */}
+      <RequireRole anyOf={["admin", "kycProvider"]}>
         <ClientDetail id={id} />
       </RequireRole>
     </section>
   );
 }
 
+/** Dossier states only an Admin can lift (TERMINAL_KYC_STATUSES server-side). */
+const TERMINAL_KYC_STATUSES = new Set<string>(["suspended", "rejected"]);
+const ADMIN_ONLY_TERMINAL =
+  "Admin only — a KYC provider cannot lift a suspension or reverse a rejection.";
+
+function errorText(err: unknown): string {
+  return explainRoleRefusal(err instanceof Error ? err.message : String(err));
+}
+
 function ClientDetail({ id }: { id: string }) {
   const conn = useWalletConnection();
+  // Admin vs KYC provider (Talas 3.1 K6): identity edits, KYB decisions,
+  // raise limits and export stay admin-only (their routes are requireAdmin).
+  const { isAdmin } = useRole({ kyc: true });
   const solanaClient = useSolanaClient();
   const tx = useSendTransaction();
   const toast = useToast();
@@ -160,6 +176,8 @@ function ClientDetail({ id }: { id: string }) {
   const [limitNote, setLimitNote] = useState("");
   const [limitBusy, setLimitBusy] = useState(false);
   const [noteBody, setNoteBody] = useState("");
+  // Why the dossier could not be loaded (shown instead of an endless skeleton).
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [confirm, setConfirm] = useState<
     null | "approve" | "reject" | "suspend"
   >(null);
@@ -211,8 +229,10 @@ function ClientDetail({ id }: { id: string }) {
       setLimitCap(detail.raise_limits?.annual_raise_cap_eur != null ? String(Number(detail.raise_limits.annual_raise_cap_eur)) : "");
       setLimitEquity(detail.raise_limits?.max_equity_percent != null ? String(Number(detail.raise_limits.max_equity_percent)) : "");
       setLimitNote(detail.raise_limits?.note ?? "");
+      setLoadError(null);
     } catch (err) {
       console.warn("[admin/clients] detail load failed:", err);
+      setLoadError(errorText(err));
     }
   }, [id, conn.wallet]);
 
@@ -272,34 +292,46 @@ function ClientDetail({ id }: { id: string }) {
   }, [client?.wallet, refreshPassport]);
 
   // Issue-gate context (SHARED gate — lib/passport.ts issueBlockers, same as
-  // /admin/kyc): live registry + on-chain blocklist, loaded via plain RPC
-  // (no signature prompt). Each source degrades independently to null =
-  // "unknown, check skipped" — the chain still enforces both on transfer.
-  // Compliance alerts are a SIGNED read and are fetched at send time instead,
-  // to avoid an extra wallet popup on every page load.
+  // /admin/kyc): the live registry, this wallet's BlockEntry PDA and its
+  // unresolved-alert status. The blocklist is sender-only on-chain (the hook
+  // derives ["blocked", source_owner]); the receiver is gated HERE, so an
+  // unknown status (null) blocks issuing. The alert status is a session read
+  // (the admin-detail read above already opened the session); both are
+  // re-read at send time.
   const gateRegistry: KycRegistry | null = kycCtx?.registry?.registry ?? null;
-  const [gateBlocked, setGateBlocked] = useState<Set<string> | null>(null);
+  const [gateBlocked, setGateBlocked] = useState<boolean | null>(null);
+  const [gateAlert, setGateAlert] = useState<boolean | null>(null);
 
-  const refreshGate = useCallback(async () => {
-    try {
-      setKycCtx(await loadKycAuthorityContext(solanaClient.runtime.rpc));
-    } catch (err) {
-      console.warn("[admin/clients] registry load failed:", err);
-      setKycCtx(null);
-    }
-    try {
-      const entries = await listBlockEntries(solanaClient.runtime.rpc);
-      setGateBlocked(new Set(entries.map((e) => e.entry.wallet.toString())));
-    } catch (err) {
-      console.warn("[admin/clients] blocklist load failed:", err);
-      setGateBlocked(null);
-    }
-  }, [solanaClient]);
+  const refreshGate = useCallback(
+    async (clientWallet: string) => {
+      try {
+        setKycCtx(await loadKycAuthorityContext(solanaClient.runtime.rpc));
+      } catch (err) {
+        console.warn("[admin/clients] registry load failed:", err);
+        setKycCtx(null);
+      }
+      try {
+        const entries = await fetchBlockEntries(solanaClient.runtime.rpc, [clientWallet as Address]);
+        setGateBlocked(entries.has(clientWallet));
+      } catch (err) {
+        console.warn("[admin/clients] blocklist load failed:", err);
+        setGateBlocked(null);
+      }
+      try {
+        const open = await listWalletsWithOpenAlerts(conn.wallet, [clientWallet]);
+        setGateAlert(open.has(clientWallet));
+      } catch (err) {
+        console.warn("[admin/clients] compliance alert status load failed:", err);
+        setGateAlert(null);
+      }
+    },
+    [solanaClient, conn.wallet],
+  );
 
   useEffect(() => {
     if (!client?.wallet) return;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void refreshGate();
+    void refreshGate(client.wallet);
   }, [client?.wallet, refreshGate]);
 
   // Open edit mode: initialise form from current client
@@ -505,24 +537,33 @@ function ClientDetail({ id }: { id: string }) {
     let pendingId: number | null = null;
     try {
       // ── SHARED issue gate (lib/passport.ts) — the authoritative send-time
-      // stop; this page must run the exact same checks as /admin/kyc.
-      // Alerts are a signed read, fetched here (deliberate action) instead of
-      // on page load; a failed load degrades to "unknown" like /admin/kyc.
-      let hasOpenAlert: boolean | null = null;
+      // stop; this page must run the exact same checks as /admin/kyc. This
+      // wallet's BlockEntry and alert status are re-read NOW; any read error
+      // aborts (fail closed).
+      let walletBlocked: boolean;
+      let hasOpenAlert: boolean;
       try {
-        const alerts = await listAlerts(conn.wallet);
-        hasOpenAlert = alerts.some(
-          (a) => a.status === "open" && a.wallet === client.wallet,
-        );
+        const [entry, open] = await Promise.all([
+          fetchBlockEntry(solanaClient.runtime.rpc, client.wallet as Address),
+          listWalletsWithOpenAlerts(conn.wallet, [client.wallet]),
+        ]);
+        walletBlocked = entry !== null;
+        hasOpenAlert = open.has(client.wallet);
       } catch (err) {
-        console.warn("[admin/clients] compliance alerts load failed:", err);
+        toast.showError(
+          "Cannot issue passport",
+          `The blocklist and compliance alert status could not be re-checked — retry. ${errorText(err)}`,
+        );
+        return;
       }
+      setGateBlocked(walletBlocked);
+      setGateAlert(hasOpenAlert);
       const jurisdictionCode = parseJurisdictionCode(client.jurisdiction);
       const blockers = computeIssueBlockers({
         client,
         jurisdiction: jurisdictionCode,
         registry: gateRegistry,
-        walletBlocked: gateBlocked ? gateBlocked.has(client.wallet) : null,
+        walletBlocked,
         hasOpenAlert,
       });
       if (blockers.length > 0 || jurisdictionCode == null) {
@@ -790,7 +831,13 @@ function ClientDetail({ id }: { id: string }) {
   if (client === undefined) {
     return (
       <div className="mt-4">
-        <SkeletonCard rows={6} />
+        {loadError ? (
+          <p className="text-sm text-red-600" role="alert">
+            Could not load the client: {loadError}
+          </p>
+        ) : (
+          <SkeletonCard rows={6} />
+        )}
       </div>
     );
   }
@@ -814,20 +861,26 @@ function ClientDetail({ id }: { id: string }) {
   const clientTypes =
     client.types && client.types.length > 0 ? client.types : [client.type];
 
-  // UI hint for the Issue button — same SHARED gate as /admin/kyc. Alerts are
-  // a signed read checked at send time, so they are "unknown" (null) here.
-  // nowSec keeps the render pure (no Date.now() during render).
+  // UI hint for the Issue button — same SHARED gate as /admin/kyc, over the
+  // statuses loaded with the page (unknown blocks). nowSec keeps the render
+  // pure (no Date.now() during render).
   const uiIssueBlockers =
     isKycProvider && client.wallet
       ? computeIssueBlockers({
           client,
           jurisdiction: parseJurisdictionCode(client.jurisdiction),
           registry: gateRegistry,
-          walletBlocked: gateBlocked ? gateBlocked.has(client.wallet) : null,
-          hasOpenAlert: null,
+          walletBlocked: gateBlocked,
+          hasOpenAlert: gateAlert,
           nowMs: nowSec * 1000,
         })
       : [];
+  // A KYC provider without an Admin record never moves a client out of a
+  // terminal status (the status / request-docs routes refuse it too).
+  const statusLocked = !isAdmin && TERMINAL_KYC_STATUSES.has(client.kyc_status);
+  const lockedProps = statusLocked
+    ? { disabled: true, title: ADMIN_ONLY_TERMINAL }
+    : {};
 
   return (
     <div className="mt-4">
@@ -876,8 +929,9 @@ function ClientDetail({ id }: { id: string }) {
             <>
               <button
                 type="button"
+                {...lockedProps}
                 onClick={() => setConfirm("approve")}
-                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700"
+                className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {client.kyc_status === "expired" ||
                 client.kyc_status === "rejected"
@@ -887,8 +941,9 @@ function ClientDetail({ id }: { id: string }) {
               {client.kyc_status !== "rejected" && (
                 <button
                   type="button"
+                  {...lockedProps}
                   onClick={() => setConfirm("reject")}
-                  className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-900 hover:bg-red-100"
+                  className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-900 hover:bg-red-100 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   Reject
                 </button>
@@ -899,15 +954,17 @@ function ClientDetail({ id }: { id: string }) {
             <>
               <button
                 type="button"
+                {...lockedProps}
                 onClick={() => setConfirm("suspend")}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400"
+                className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Suspend
               </button>
               <button
                 type="button"
+                {...lockedProps}
                 onClick={() => setShowMoreInfo(true)}
-                className="rounded-lg border border-brand-300 bg-brand-50 px-4 py-2 text-sm font-medium text-brand-900 hover:bg-brand-100"
+                className="rounded-lg border border-brand-300 bg-brand-50 px-4 py-2 text-sm font-medium text-brand-900 hover:bg-brand-100 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 Request more info
               </button>
@@ -931,6 +988,10 @@ function ClientDetail({ id }: { id: string }) {
             </>
           )}
         </div>
+
+        {statusLocked && (
+          <p className="mt-3 text-xs text-slate-600">{ADMIN_ONLY_TERMINAL}</p>
+        )}
 
         {/* Terms of Service acceptance */}
         <div className="mt-4 flex items-center gap-2 border-t border-slate-100 pt-4 text-sm">
@@ -1135,7 +1196,7 @@ function ClientDetail({ id }: { id: string }) {
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
             Identity
           </p>
-          {!editing && (
+          {!editing && isAdmin && (
             <button
               type="button"
               onClick={openEdit}
@@ -1146,7 +1207,7 @@ function ClientDetail({ id }: { id: string }) {
           )}
         </div>
 
-        {editing ? (
+        {editing && isAdmin ? (
           <div className="mt-4 space-y-4">
             {/* Types multi-toggle */}
             <label className="block">
@@ -1357,6 +1418,7 @@ function ClientDetail({ id }: { id: string }) {
             <span className="ml-2 text-xs text-slate-500">({raiseCapacity.cap_source === "client" ? "client override" : "platform default"})</span>
           </p>
         ) : <p className="mt-3 text-sm text-slate-500">No wallet linked — limits apply once the client has a wallet.</p>}
+        {isAdmin && (<>
         <div className="mt-4 grid gap-3 md:grid-cols-3">
           <label className="text-xs text-slate-600">Annual cap (EUR)
             <input value={limitCap} onChange={(e) => setLimitCap(e.target.value)} inputMode="decimal" placeholder="platform default"
@@ -1386,6 +1448,7 @@ function ClientDetail({ id }: { id: string }) {
               finally { setLimitBusy(false); }
             }}>Use platform defaults</button>}
         </div>
+        </>)}
       </section>
 
       {/* Self-service verification details (/verify) */}
@@ -1429,6 +1492,7 @@ function ClientDetail({ id }: { id: string }) {
                         {v.reviewed_at && <span className="ml-2 text-xs text-slate-500">{new Date(v.reviewed_at).toLocaleString("en-GB")}</span>}
                       </p>
                       {v.review_note && <p className="mt-1 text-xs text-slate-600">{v.review_note}</p>}
+                      {isAdmin && (<>
                       <p className="mt-1 text-xs text-slate-500">Approving KYB lets this wallet submit raise applications. Review the company documents first.</p>
                       <input value={kybNote} onChange={(e) => setKybNote(e.target.value)} maxLength={1000} placeholder="Note / reason (optional, saved to the dossier)"
                         className="mt-2 w-full rounded-md border border-slate-300 px-2 py-1 text-xs" aria-label="KYB decision note" />
@@ -1440,6 +1504,7 @@ function ClientDetail({ id }: { id: string }) {
                         {v.status !== "pending" && <button type="button" disabled={kybBusy} className="rounded-md border border-slate-300 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
                           onClick={async () => { setKybBusy(true); try { await adminDecideKyb(conn.wallet, id, "pending"); toast.show({ kind: "success", title: "KYB reopened" }); await refresh(); } catch (e) { toast.show({ kind: "error", title: e instanceof Error ? e.message : "Could not reopen KYB" }); } finally { setKybBusy(false); } }}>Reopen</button>}
                       </div>
+                      </>)}
                     </div>
                   )}
                 </div>

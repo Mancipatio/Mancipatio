@@ -324,8 +324,7 @@ export function KycRegistryPanel({
           </p>
         )}
         <p className="mt-2 text-[11px] text-slate-500">
-          This page requires an Admin role. A new authority without one can
-          accept from the CLI, or be added as an Admin for the handover.
+          The new authority accepts at /account/roles.
         </p>
       </section>
 
