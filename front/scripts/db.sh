@@ -25,19 +25,24 @@
 # .env.local SUPABASE_DB_URL when that URL names the same project. Mainnet
 # never reads .env.local. TLS is required (PGSSLMODE=require).
 #
-# Connection options (-h, -p, -U, -d, a positional database or user) and the
-# reserved psql variables are refused: the target decides where this goes.
-# bash 3.2-safe.
+# Connection options (-h, -p, -U, -d, --host, --port, --username, --dbname, a
+# positional database or user) and the reserved psql variables are refused:
+# the target decides where this goes. Long options must be spelled out in
+# full; psql would also take an abbreviation (--hos=, --d=, --va=), which
+# could otherwise carry a connection option or a reserved variable past
+# these checks. bash 3.2-safe.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 # shellcheck source=ops/target-env.sh
 . scripts/ops/target-env.sh
 
-# Short options that take a value, and the long ones that take it as the next
-# argument (psql 15–17).
+# psql's options (15–17). Short options that take a value; long options that
+# take one (as --name=value or as the next argument); long options without a
+# required value. A long option db.sh does not know is refused.
 VALUE_SHORT="cdfFhLopPRTUv"
-VALUE_LONG=" --command --dbname --file --field-separator --host --log-file --output --port --pset --record-separator --table-attr --username --set --variable "
+VALUE_LONG=" command dbname file field-separator host log-file output port pset record-separator table-attr username set variable "
+FLAG_LONG=" csv echo-all echo-errors echo-hidden echo-queries expanded field-separator-zero help html list no-align no-password no-psqlrc no-readline password quiet record-separator-zero single-line single-step single-transaction tuples-only version "
 RESERVED_VARS=" ON_ERROR_STOP target_network target_ref target_origin bootstrap "
 
 refuse() {
@@ -60,15 +65,29 @@ for arg in ${@+"$@"}; do
     continue
   fi
   case "$arg" in
-    --host|--host=*|--port|--port=*|--username|--username=*|--dbname|--dbname=*)
-      refuse "$arg is not allowed" ;;
-    --file|--command) interactive=0; expect_value="x" ;;
-    --file=*|--command=*) interactive=0 ;;
-    --set=*|--variable=*) check_variable "${arg#*=}" ;;
-    --set|--variable) expect_value="v" ;;
-    --*=*) ;;
     --*)
-      case "$VALUE_LONG" in *" $arg "*) expect_value="x" ;; esac ;;
+      # Resolved by exact name only: getopt_long would also accept any
+      # unambiguous prefix (--hos, --po, --use, --d, --va, --se).
+      name="${arg#--}"
+      name="${name%%=*}"
+      case "$name" in
+        ""|*[!a-z-]*) refuse "\"$arg\" is not a psql option db.sh accepts" ;;
+        host|port|username|dbname) refuse "--$name is not allowed" ;;
+      esac
+      case "$VALUE_LONG" in
+        *" $name "*)
+          case "$name" in command|file) interactive=0 ;; esac
+          if [ "$arg" = "--$name" ]; then
+            case "$name" in set|variable) expect_value="v" ;; *) expect_value="x" ;; esac
+          else
+            case "$name" in set|variable) check_variable "${arg#*=}" ;; esac
+          fi ;;
+        *)
+          case "$FLAG_LONG" in
+            *" $name "*) ;;
+            *) refuse "--$name is not a psql option db.sh accepts (spell long options out in full; psql would read an abbreviation such as --hos as --host)" ;;
+          esac ;;
+      esac ;;
     -?*)
       i=1
       while [ "$i" -lt "${#arg}" ]; do

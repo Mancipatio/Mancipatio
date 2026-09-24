@@ -243,20 +243,47 @@ describe("scripts/db.sh", () => {
     [["-v", "target_ref=otherprojectref00001", "-c", "select 1"]],
     [["-vbootstrap=1", "-c", "select 1"]],
     [["--set=ON_ERROR_STOP=0", "-f", "x.sql"]],
+    [["--variable", "ON_ERROR_STOP=0", "-f", "x.sql"]],
     [["-qAtc"]],
+    // psql (getopt_long) takes any unambiguous abbreviation of a long option,
+    // and a later option overrides db.sh's -h/-p/-U/-d/-v.
+    [["--hos=db.other.supabase.co", "-c", "select 1"]],
+    [["--hos", "db.other.supabase.co", "-c", "select 1"]],
+    [["--po=6543", "-c", "select 1"]],
+    [["--use=postgres", "-c", "select 1"]],
+    [["--d=postgresql://postgres.otherprojectref0001@aws-0-eu-west-1.pooler.supabase.com/postgres", "-c", "select 1"]],
+    [["--va=ON_ERROR_STOP=0", "-f", "x.sql"]],
+    [["--var", "target_ref=otherprojectref00001", "-c", "select 1"]],
+    [["--se=bootstrap=1", "-c", "select 1"]],
+    [["--comm=select 1"]],
+    [["--Host=db.other.supabase.co", "-c", "select 1"]],
+    [["--", "-c", "select 1"]],
+    [["--=x", "-c", "select 1"]],
   ])("refuses caller connection overrides and reserved variables: %j", (args) => {
     const box = sandbox();
     const run = box.run("scripts/db.sh", args, { MANCI_TARGET: "devnet", MANCI_PGPASSFILE: box.pgpass() });
     expect(run.status).toBe(1);
+    expect(run.stderr).toMatch(/^db\.sh: /);
     expect(named(run, "psql")).toEqual([]);
   });
 
-  it("accepts ordinary psql options, including bundled ones", () => {
+  it("accepts ordinary psql options, including bundled ones and long options spelled out in full", () => {
     const box = sandbox();
-    const run = box.run("scripts/db.sh", ["-X", "-qAt", "-P", "pager=off", "-v", "network=devnet", "-f", "-"],
-      { MANCI_TARGET: "devnet", MANCI_PGPASSFILE: box.pgpass() });
+    const env = { MANCI_TARGET: "devnet", MANCI_PGPASSFILE: box.pgpass() };
+    const run = box.run("scripts/db.sh", ["-X", "-qAt", "-P", "pager=off", "-v", "network=devnet", "-f", "-"], env);
     expect(run.status).toBe(0);
     expect(named(run, "psql")).toHaveLength(1);
+    const long = box.run("scripts/db.sh", [
+      "--no-psqlrc", "--quiet", "--tuples-only", "--pset", "pager=off", "--set=network=devnet",
+      "--variable", "operator=ops", "--file=-", "--command", "select 1", "--help=variables",
+    ], env);
+    expect(long.status, long.stderr).toBe(0);
+    const [call] = named(long, "psql");
+    expect(named(long, "psql")).toHaveLength(1);
+    expect(call.slice(call.indexOf("--no-psqlrc"), -1)).toEqual([
+      "--no-psqlrc", "--quiet", "--tuples-only", "--pset", "pager=off", "--set=network=devnet",
+      "--variable", "operator=ops", "--file=-", "--command", "select 1", "--help=variables",
+    ]);
   });
 
   it("refuses a pgpass file readable by others", () => {
@@ -293,6 +320,29 @@ describe("scripts/db.sh", () => {
     expect(other.status).toBe(1);
     expect(other.stderr).toMatch(/does not belong to target devnet/);
     expect(named(other, "psql")).toEqual([]);
+  });
+
+  // db.sh classifies long options by exact name, so its tables must be
+  // psql's own: every long option `psql --help` lists, with the same
+  // "takes a value" split. Runs against the local client when one exists
+  // (POSTGRES_BIN, as the PostgreSQL suites use).
+  const realPsql = join(process.env.POSTGRES_BIN ?? "/opt/homebrew/opt/postgresql@15/bin", "psql");
+  it.skipIf(!existsSync(realPsql))("its long-option tables match the installed psql exactly", () => {
+    const help = spawnSync(realPsql, ["--help"], { encoding: "utf8" }).stdout;
+    const psqlValue = new Set<string>();
+    const psqlFlag = new Set<string>();
+    for (const [, name, suffix] of help.matchAll(/--([a-z][a-z-]*)(=|\[=)?/g)) {
+      (suffix === "=" ? psqlValue : psqlFlag).add(name);
+    }
+    // --help[=topic]: the value is optional, so it never takes the next argument.
+    for (const name of psqlFlag) psqlValue.delete(name);
+    const script = readFileSync(join(FRONT, "scripts/db.sh"), "utf8");
+    const table = (name: string) => new Set(new RegExp(`^${name}="([^"]*)"$`, "m").exec(script)![1].trim().split(/\s+/));
+    const dbValue = table("VALUE_LONG");
+    const dbFlag = table("FLAG_LONG");
+    expect(psqlValue.size + psqlFlag.size).toBeGreaterThanOrEqual(36);
+    expect([...dbValue].sort()).toEqual([...psqlValue].sort());
+    expect([...dbFlag].sort()).toEqual([...psqlFlag].sort());
   });
 });
 
@@ -413,6 +463,10 @@ describe("scripts/ops/supabase.sh", () => {
     const deploy = box.run("scripts/ops/supabase.sh", ["devnet", "functions", "deploy", "helius-webhook"]);
     expect(deploy.status, deploy.stderr).toBe(0);
     expect(named(deploy, "supabase")[0].slice(1, -1)).toEqual(["functions", "deploy", "helius-webhook", "--project-ref", DEVNET_REF]);
+    // Server-side bundling for a machine without Docker; the project still comes from the target.
+    const viaApi = box.run("scripts/ops/supabase.sh", ["devnet", "functions", "deploy", "helius-webhook", "--use-api"]);
+    expect(viaApi.status, viaApi.stderr).toBe(0);
+    expect(named(viaApi, "supabase")[0].slice(1, -1)).toEqual(["functions", "deploy", "helius-webhook", "--use-api", "--project-ref", DEVNET_REF]);
     const env = join(box.root, "secrets.env");
     writeFileSync(env, "MANCI_SUPABASE_SECRET_KEY=x\n");
     chmodSync(env, 0o600);
@@ -430,6 +484,12 @@ describe("scripts/ops/supabase.sh", () => {
     [["devnet", "secrets", "set", "MANCI_SUPABASE_SECRET_KEY=sb_secret_x"]],
     [["devnet", "secrets", "unset", "lower-case"]],
     [["devnet", "functions", "deploy", "other-function"]],
+    [["devnet", "functions", "deploy", "other-function", "--use-api"]],
+    [["devnet", "functions", "deploy", "--use-api", "helius-webhook"]],
+    [["devnet", "functions", "deploy", "helius-webhook", "--no-verify-jwt"]],
+    [["devnet", "functions", "deploy", "helius-webhook", "--prune"]],
+    [["devnet", "functions", "deploy", "helius-webhook", "--use-api", "--prune"]],
+    [["devnet", "functions", "deploy", "helius-webhook", "--workdir", "/tmp"]],
     [["devnet", "projects", "list"]],
     [["mainnet", "secrets", "list"]],
     [["staging", "secrets", "list"]],

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Supabase CLI against ONE explicit target (Talas 4.3). Only these commands:
 #
-#   bash scripts/ops/supabase.sh <target> functions deploy helius-webhook
+#   bash scripts/ops/supabase.sh <target> functions deploy helius-webhook [--use-api]
 #   bash scripts/ops/supabase.sh <target> secrets list
 #   bash scripts/ops/supabase.sh <target> secrets set --env-file <file>
 #   bash scripts/ops/supabase.sh <target> secrets unset NAME [NAME...]
@@ -11,6 +11,9 @@
 # any `db` command (migrations go through scripts/db.sh), and secret values
 # on the command line (NAME=VALUE ends up in shell history; use an env file,
 # mode 600). A mainnet target needs MANCI_ALLOW_MAINNET=1.
+#
+# `--use-api` bundles the function on Supabase's side instead of in Docker
+# (for a machine without a running Docker); it does not change the project.
 #
 # Delete front/supabase/.temp/ (project-ref, linked-project.json,
 # pooler-url) before the first use: a linked project must never decide where
@@ -69,8 +72,13 @@ name_ok() {
 
 case "$1 ${2:-}" in
   "functions deploy")
-    [ $# -eq 3 ] && [ "$3" = "helius-webhook" ] || die "Only: functions deploy helius-webhook"
-    set -- functions deploy helius-webhook
+    { [ $# -eq 3 ] || { [ $# -eq 4 ] && [ "$4" = "--use-api" ]; }; } && [ "$3" = "helius-webhook" ] \
+      || die "Only: functions deploy helius-webhook [--use-api]"
+    if [ $# -eq 4 ]; then
+      set -- functions deploy helius-webhook --use-api
+    else
+      set -- functions deploy helius-webhook
+    fi
     ;;
   "secrets list")
     [ $# -eq 2 ] || die "Only: secrets list"
