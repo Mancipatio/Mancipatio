@@ -46,7 +46,7 @@ writes `<CHAIN_OUTPUT>.journal.jsonl`.
 | `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10. |
 | `CHAIN_REHEARSAL_SIGNERS` | localnet/devnet only: `superAdmin=<file>,blocklistAuthority=<file>,kycAuthority=<file>`, so the CLI signs X1/X2/X3/S6 in a rehearsal. |
 | `CHAIN_RECOVER=1` | Resolves a leftover lock (see "Crash recovery"). Sends nothing. |
-| `CHAIN_STATE_DIR` | Lock directory; default `~/.mancipatio/chain`. |
+| `CHAIN_STATE_DIR` | Lock directory; default `~/.mancipatio/chain`. Refused on mainnet unless it is the default (the lock only excludes runs that share its directory). |
 
 Tool-specific: `CHAIN_PHASE`, `CHAIN_SCAN_BUFFERS=0` (inventory);
 `CHAIN_IDL_MODE`, `CHAIN_IDL_PROGRAM`, `CHAIN_IDL_SOURCE` (`release` is
@@ -79,9 +79,13 @@ that lives outside the repository and holds no keypair bytes.
   on the same network is refused until the first one's signatures are
   resolved.
 - On mainnet: the Release is mandatory, `front/idl/*.json` must be byte-equal
-  to the Release IDLs, `front/idl`, `front/lib` and `front/scripts/chain` must
-  be clean (commit or stash first), and the Release `.so` must equal the live
-  ProgramData before a bootstrap or IDL send.
+  to the Release IDLs, and `front/idl`, `front/lib`, `front/scripts/chain`,
+  `front/scripts/ops/artifact-provenance.mjs`, `front/package.json` and
+  `front/package-lock.json` must be clean (commit or stash first); the
+  Release `.so` must equal the live ProgramData before a bootstrap or IDL
+  send. In practice every mainnet `chain:idl`, `chain:bootstrap` and
+  `chain:squads-export` run happens in a clean checkout of the tag whose
+  Release is `CHAIN_RELEASE_DIR`.
 - Hot keys: the deployer (bootstrap, IDL before handover) and the
   bufferWriter (buffers after handover). The tools refuse any other key, and
   never load a Ledger key on mainnet.
@@ -94,8 +98,15 @@ that lives outside the repository and holds no keypair bytes.
       and check:
       ```sh
       cd ~/mancipatio-mainnet/release-vX && sha256sum --check SHA256SUMS
-      for f in *.so *.json hashes.txt sbf-sha256.txt; do gh attestation verify "$f" --repo <owner>/<repo>; done
+      for f in *.so *.json hashes.txt sbf-sha256.txt SHA256SUMS; do
+        gh attestation verify "$f" --repo Mancipatio/Mancipatio \
+          --signer-workflow Mancipatio/Mancipatio/.github/workflows/verifiable-build.yml \
+          --source-ref refs/tags/vX --deny-self-hosted-runners
+      done
       ```
+      Pinning the signer workflow and the tag matters: without them any
+      workflow of the repository, on any branch, could produce a passing
+      attestation.
 - [ ] **security.txt** decided before the rc tag (D16).
 - [ ] **Program keypairs** backed up offline (two copies, not on the operator
       machine's synced folders).
@@ -198,8 +209,15 @@ CHAIN_OUTPUT=$E/02-inventory.json \
 npm run chain:inventory
 ```
 
-Expect `release-bytes` absent, `capacity` absent, `deployer-ua` info, and
-`platform-missing` / `blocklist-missing` warnings (phase `in-progress`).
+At this point (phase `in-progress`, IDL not yet initialized, bootstrap not
+yet run) expect exactly:
+
+- info: `deployer-ua` (both programs);
+- warnings: `platform-missing`, `blocklist-missing`, `idl` for both programs
+  (status `init`), `kyc-registry` (the registry does not exist yet),
+  `admin-missing` for every `admins[]` key, and `kyc-pin` if
+  `NEXT_PUBLIC_KYC_REGISTRY` is exported in the shell;
+- no `release-bytes`, `capacity`, `squads`, `buffer` or blocker.
 
 ## 3. IDL init
 
@@ -290,22 +308,48 @@ exists for an emergency only.
   CHAIN_OUTPUT=$E/08-verify-pda.json CHAIN_SQUADS_OP=wrap-external \
     CHAIN_SQUADS_INPUT=<file with {"transactionBase58": "…"}> npm run chain:squads-export
   ```
-  The export refuses anything but the verify and System programs, and any
-  signer but the vault. Import, approve, execute.
+  The export refuses any signer but the vault, any program but the verify
+  program and System, a verify instruction that the vault does not sign or
+  that names neither of our program IDs, and every System instruction except
+  a transfer from the vault into an account the verify instruction writes
+  (its PDA), 0.05 SOL at most in total. The preconditions list each program
+  and each transfer: check them before approving. Import, approve, execute.
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
 - Drain the deployer to the treasury or cold storage.
+- Other vault actions check their inputs against the role map:
+  `registry-ix` targets (`add_admin` → `admins[]`, `propose_platform_admin` →
+  the SA or the vault, `initialize_blocklist_authority` → the map BA,
+  `set_protocol_treasury` → the vault) need `"confirmTarget": "<same key>"`
+  next to `instruction`/`args` for any other key; `initialize_platform` takes
+  only the map treasury and fee; pause masks are integers 0–255.
+  `set-upgrade-authority` to a new key needs `"confirmNewAuthority"`, and
+  `metadata-set-authority` needs it for a key other than `metadataAuthority`.
+  The deployer and bufferWriter are always refused as targets.
 - Talas 7 (public launch) may proceed.
 
 ## 9. Upgrade through Squads
 
+Every `chain:*` command here runs in a **clean checkout of the new tag
+`vX+1`** with `CHAIN_RELEASE_DIR` = its downloaded Release (`$R2`): on
+mainnet the tools refuse unless `front/idl` equals that Release's IDL and the
+source paths are clean (see "Safety rules").
+
 1. Maintenance on: `bash front/scripts/ops/maintenance.sh mainnet on "…"`, wait
    about 70 s.
-2. The bufferWriter writes both buffers (hook first) and hands them to the
-   vault:
+2. The bufferWriter writes both buffers (hook first) from pre-generated buffer
+   keypairs outside the repository (D7; `--silent`, so no seed phrase reaches
+   a log), and hands them to the vault:
    ```sh
-   solana program write-buffer "$R2/transfer_hook.so" --keypair "$K/bufferWriter.json" --url "$MAINNET_RPC" --with-compute-unit-price "$CU_PRICE"
-   solana program set-buffer-authority <buffer> --new-buffer-authority <vault> --keypair "$K/bufferWriter.json" --url "$MAINNET_RPC"
+   for p in transfer_hook asset_registry; do
+     solana-keygen new --no-bip39-passphrase --silent -o "$K/upgrade-buffer-$p.json"
+     solana program write-buffer "$R2/$p.so" \
+       --buffer "$K/upgrade-buffer-$p.json" --keypair "$K/bufferWriter.json" \
+       --url "$MAINNET_RPC" --with-compute-unit-price "$CU_PRICE"
+     solana program set-buffer-authority "$(solana-keygen pubkey "$K/upgrade-buffer-$p.json")" \
+       --new-buffer-authority <vault> --keypair "$K/bufferWriter.json" --url "$MAINNET_RPC"
+   done
    ```
+   A failed write is resumed with the same `--buffer` keypair.
 3. If capacity is short: `CHAIN_SQUADS_OP=extend-program`, input
    `{"program": "asset_registry", "bytes": <n ≥ 10240>}` (SIMD-0431 minimum;
    EXTERNAL #2). Fund the vault for the rent first.
@@ -324,11 +368,18 @@ exists for an emergency only.
 
 ## 10. Rollback
 
-- Deploy the previous Release `.so` through the same Squads flow (step 9).
+- **Check out the previous tag `vX`** (clean) and use its Release as
+  `CHAIN_RELEASE_DIR`: the mainnet release-source guard refuses a checkout
+  whose `front/idl` differs from the Release, so a rollback runs that tag's
+  CLI. Rehearse this in 6.1.
+- Deploy the previous Release `.so` through the same Squads flow (step 9,
+  with `$R2` = the previous Release).
 - The SA normalizes pause bits first (it may clear undefined bits).
 - State-layout changes are not rollback-safe: fix forward.
-- IDL from the previous Release, or from the pre-snapshot
-  (`CHAIN_SNAPSHOT_DIR/<program>-idl-pre.json`).
+- IDL: `CHAIN_IDL_MODE=prepare-export` with `CHAIN_IDL_SOURCE=release` from
+  that same checkout, then `idl-update` (step 9.6). The pre-snapshot
+  (`CHAIN_SNAPSHOT_DIR/<program>-idl-pre.json`) is evidence only; no tool
+  path uploads it.
 - Front: Vercel Instant Rollback.
 
 ## 11. Incidents
@@ -354,10 +405,26 @@ A leftover lock blocks every send run on that network. Run the same tool with
 points at, resolves every in-flight signature (finalized, failed, or dropped
 after expiry) without sending anything, appends the outcomes and removes the
 lock. A signature that landed but did not finalize keeps the lock; run
-recovery again later. Then start a new dry run: steps that landed are skipped.
+recovery again later. Recovery refuses while the process named in the lock is
+still alive (a run between two steps has nothing unresolved, but still holds
+the lock), and it only ever removes the lock it resolved. Then start a new dry
+run: steps that landed are skipped.
+
 An interrupted IDL update can resume its buffer with
 `CHAIN_IDL_RESUME_BUFFER=<address>` (the journal records it before the buffer
-is created); only chunks that differ are rewritten.
+is created); only chunks that differ are rewritten. If it stopped after
+`setData`, the IDL already reads `in-sync`: the next `send` dry run plans the
+missing `trim` (a shrinking update), and with `CHAIN_IDL_RESUME_BUFFER` set to
+the journalled buffer it also closes that buffer. After handover,
+`prepare-export` on such an IDL writes a trim-only spec for `idl-update`.
+
+**Stopping a run.** Ctrl-C in the terminal also stops the vitest main
+process, which can take the worker (the tool) down before it has drained its
+in-flight signature and written the evidence; the lock and journal keep that
+safe, but `CHAIN_RECOVER` is then needed. To stop gracefully, send SIGTERM to
+the tool only: `kill -TERM <pid>` with the `pid` from the lock file
+(`~/.mancipatio/chain/<network>-*.lock`). The tool stops sending, polls the
+in-flight signature to a resolution and writes the evidence.
 
 ## 12. 6.1 rehearsal
 
@@ -376,8 +443,11 @@ is created); only chunks that differ are rewritten.
   4. Inventory `pre-handover`, then S7.
   5. `chain:squads-export` `upgrade`, `idl-update`, `extend-program` and
      `wrap-external`, each executed through Squads (EXTERNAL #1, #2, #3, #5).
-  6. `CHAIN_RECOVER` drill: kill the process in the middle of an IDL send.
-  7. Operator-front drill on localnet with a Ledger.
+  6. `CHAIN_RECOVER` drill: kill the process in the middle of an IDL send;
+     also Ctrl-C once and `kill -TERM <lock pid>` once, and check that the
+     evidence file exists after each.
+  7. Rollback drill (section 10) from the previous tag's checkout.
+  8. Operator-front drill on localnet with a Ledger.
 - Resolve every EXTERNAL item below.
 
 ## EXTERNAL checks (open until the rehearsal proves them)
@@ -388,6 +458,8 @@ is created); only chunks that differ are rewritten.
    active (the tag-9 layout itself is confirmed).
 3. The PM `setData` buffer-authority rule.
 4. The Squads v4 `Multisig` layout (the S7 gate depends on the decode).
-5. The OtterSec verify program ID, the `export-pda-tx` flags, and whether a
-   PDA uploaded by the hot UA before handover is honoured after it.
+5. The OtterSec verify program ID, the `export-pda-tx` flags and output
+   (instructions: verify signed by the vault, plus at most a System transfer
+   into the PDA), and whether a PDA uploaded by the hot UA before handover is
+   honoured after it.
 6. The mainnet feature list and validator version at rehearsal time.
