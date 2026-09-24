@@ -117,6 +117,18 @@ describe("live operational authority builders", () => {
       }
     },
   );
+  it.each(["platform", "blocklist"] as const)(
+    "never proposes the default address as the next %s authority (K2/K3)",
+    async (kind) => {
+      mocks.platform.mockResolvedValue(account({ admin: next }));
+      mocks.hook.mockResolvedValue(account({ authority: next }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+      await expect(
+        buildProposeOperationalAuthority(rpc, kind, createNoopSigner(next), "11111111111111111111111111111111"),
+      ).rejects.toThrow(/default/);
+      expect(mocks.platform).not.toHaveBeenCalled();
+      expect(mocks.hook).not.toHaveBeenCalled();
+    },
+  );
   it("rejects cross-target, stale and wrong-owner proposals", async () => {
     const [target] = await findPlatformPda();
     for (const data of [

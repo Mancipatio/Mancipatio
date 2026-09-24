@@ -167,3 +167,48 @@ describe("K5 registry creation (E)", () => {
     expect(flow).toContain("<ConfirmModal");
   });
 });
+
+describe("K2/K3 bootstrap (F)", () => {
+  it("/issuer/authority is a dedicated bootstrap page, not the platform console", () => {
+    const page = src("app/issuer/authority/page.tsx");
+    expect(page).not.toContain('export { default } from "@/app/admin/platform/page"');
+    expect(page).toContain("{platformExists === false && (");
+    expect(page).toContain("<PlatformInitCard");
+    expect(page).toContain("<BlocklistBootstrap hideWhenInitialized");
+    expect(page).toContain('kind="platform"');
+    expect(page).toContain('kind="blocklist"');
+    expect(page).toContain("href={ACCOUNT_ROLES_PATH}");
+    // /admin/platform keeps using the same extracted card.
+    const console = src("app/admin/platform/page.tsx");
+    expect(console).toContain("<PlatformInitCard");
+    expect(console).not.toContain("buildInitializePlatformInstruction");
+  });
+
+  it("platform init: explicit treasury, acknowledged self-appointment, refused on mainnet", () => {
+    const card = src("app/admin/platform/platform-init-card.tsx");
+    expect(card).not.toContain("Super Admin (you)");
+    expect(card).not.toMatch(/Super Admin and treasury/);
+    expect(card).toContain("protocolTreasury: treasury.trim() as Address");
+    expect(card).not.toContain("protocolTreasury: walletAddress");
+    expect(card).toContain("This wallet becomes Super Admin and admin #1; I will propose the");
+    expect(card).toContain("disabled={tx.isSending || !ack || check.errors.length > 0 || upgrade.status !== \"ok\"}");
+    expect(card).toContain('surface: "browser"');
+    expect(card).toContain("{refused ? (");
+    expect(card).toContain("metadata = { treasury: treasury.trim(), upgradeAuthority: wallet, permanentSuperAdmin }");
+  });
+
+  it("blocklist init: only the connected upgrade authority, acknowledged, refused on mainnet", () => {
+    const card = src("app/admin/platform/blocklist-bootstrap.tsx");
+    expect(card).toContain("authority: signer.address");
+    expect(card).toContain("I will propose the permanent blocklist authority next.");
+    expect(card).toContain("!ack ||");
+    expect(card).toContain("MAINNET_BOOTSTRAP_REFUSAL");
+    expect(card).toContain('surface: "browser"');
+  });
+
+  it("the successor entered at init pre-fills the rotation panel", () => {
+    const rotation = src("app/admin/platform/authority-rotation.tsx");
+    expect(rotation).toContain('useState(initialNext ?? "")');
+    expect(rotation).toContain("next.trim() === DEFAULT_ADDRESS");
+  });
+});

@@ -14,6 +14,7 @@ import { invalidateRoles } from "@/lib/role-store";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { ACCOUNT_ROLES_PATH } from "@/components/require-role";
+import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
 import {
   loadOperationalAuthority,
   buildProposeOperationalAuthority,
@@ -23,8 +24,14 @@ import {
 } from "@/lib/operational-authority";
 export function AuthorityRotation({
   kind,
+  initialNext,
 }: {
   kind: OperationalAuthorityKind;
+  /**
+   * Pre-fills the successor (the permanent key entered at bootstrap). The
+   * parent remounts the panel (key) when it changes.
+   */
+  initialNext?: string;
 }) {
   const client = useSolanaClient(),
     conn = useWalletConnection(),
@@ -33,7 +40,7 @@ export function AuthorityRotation({
     wallet = conn.wallet?.account.address;
   const [state, setState] = useState<OperationalAuthorityState | null>(null),
     [error, setError] = useState<string | null>(null),
-    [next, setNext] = useState(""),
+    [next, setNext] = useState(initialNext ?? ""),
     [confirm, setConfirm] = useState<"propose" | "accept" | null>(null);
   const refresh = useCallback(async () => {
     try {
@@ -132,6 +139,12 @@ export function AuthorityRotation({
               Proposed: {state.proposed}
             </p>
           )}
+          {wallet === state.current && initialNext && next.trim() === initialNext && (
+            <p className="mt-3 text-xs text-brand-800">
+              Pre-filled with the permanent key entered at bootstrap: propose
+              it now.
+            </p>
+          )}
           {wallet === state.current && (
             <div className="mt-3 flex flex-wrap gap-2">
               <input
@@ -145,6 +158,7 @@ export function AuthorityRotation({
                 disabled={
                   tx.isSending ||
                   !isAddress(next.trim()) ||
+                  next.trim() === DEFAULT_ADDRESS ||
                   next.trim() === state.current
                 }
                 onClick={() => setConfirm("propose")}
@@ -152,6 +166,11 @@ export function AuthorityRotation({
               >
                 {state.proposed ? "Replace proposal" : "Propose replacement"}
               </button>
+              {next.trim() === DEFAULT_ADDRESS && (
+                <p className="w-full text-xs text-red-600">
+                  The default 1111…1111 address cannot be an authority.
+                </p>
+              )}
             </div>
           )}
           {wallet === state.proposed && (

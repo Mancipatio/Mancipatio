@@ -19,6 +19,7 @@ import {
   getAcceptBlocklistAuthorityInstructionAsync,
 } from "@/lib/generated/transfer_hook";
 import type { fetchMintTokenProgram } from "@/lib/transaction-builders";
+import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
 export type OperationalAuthorityKind = "platform" | "blocklist";
 type Rpc = Parameters<typeof fetchMintTokenProgram>[0];
 export type OperationalAuthorityState = {
@@ -115,8 +116,11 @@ export async function buildProposeOperationalAuthority(
   signer: TransactionSigner,
   newAuthority: string,
 ) {
-  const next = address(newAuthority),
-    state = await loadOperationalAuthority(rpc, kind);
+  const next = address(newAuthority);
+  // validate_new_authority rejects Pubkey::default(); refuse before signing.
+  if (next === DEFAULT_ADDRESS)
+    throw new Error("The default 1111…1111 address cannot be an authority");
+  const state = await loadOperationalAuthority(rpc, kind);
   if (!state || state.current !== signer.address)
     throw new Error(
       "Only the current operational authority can propose this change",

@@ -20,7 +20,6 @@ import {
 import { PauseFlagsPanel } from "@/components/pause-flags-panel";
 import { pauseStatus } from "@/lib/pause-flags";
 import { protocolTreasuryError } from "@/lib/protocol-treasury";
-import { buildInitializePlatformInstruction } from "@/lib/program-bootstrap";
 import {
   kycGates,
   kycRegistryUnavailableReason,
@@ -28,9 +27,9 @@ import {
 } from "@/lib/kyc-authority";
 import { AuthorityRotation } from "./authority-rotation";
 import { BlocklistBootstrap } from "./blocklist-bootstrap";
+import { PlatformInitCard } from "./platform-init-card";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { recordAudit } from "@/lib/supabase";
-import { invalidateRoles } from "@/lib/role-store";
 import { explainSendError } from "@/lib/tx-error";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { useToast } from "@/lib/toast";
@@ -43,11 +42,6 @@ const PAUSE_CHIP = {
 } as const;
 const BTN =
   "rounded-lg border border-slate-300/60 px-4 py-2 text-sm font-medium text-slate-900 transition-colors hover:border-slate-400 hover:text-slate-900 disabled:opacity-50";
-// protocol_fee_bps is a RESERVED on-chain field — no instruction charges or
-// collects it, and pricing is agreed per engagement (settled off-chain).
-// Initialize it at 0: there is no update instruction, so a non-zero value
-// written here could never be corrected on-chain.
-const PROTOCOL_FEE_BPS = 0;
 
 export default function AdminPage() {
   const conn = useWalletConnection();
@@ -67,6 +61,9 @@ export default function AdminPage() {
   // Why there is no provider when a registry is expected (pin missing on this
   // network, or several registries and no pin); null = simply none yet.
   const [kycProviderNote, setKycProviderNote] = useState<string | null>(null);
+  // The permanent keys entered at bootstrap pre-fill the rotation panels.
+  const [platformSuccessor, setPlatformSuccessor] = useState<string | null>(null);
+  const [blocklistSuccessor, setBlocklistSuccessor] = useState<string | null>(null);
   const toast = useToast();
 
   const refresh = useCallback(async () => {
@@ -90,54 +87,6 @@ export default function AdminPage() {
   }, [refresh]);
 
   const walletAddress = conn.wallet?.account.address;
-
-  async function initializePlatform() {
-    if (!walletAddress || !conn.wallet) return;
-    const pendingId = toast.showPending(
-      "Initializing platform…",
-      "Program upgrade authority authorizes the initial Super Admin",
-    );
-    const reason =
-      "Program upgrade authority authorizes the initial Super Admin";
-    try {
-      const { signer } = createWalletTransactionSigner(conn.wallet);
-      const ix = await buildInitializePlatformInstruction(client.runtime.rpc, {
-        admin: signer,
-        upgradeAuthority: signer,
-        protocolTreasury: walletAddress,
-        protocolFeeBps: PROTOCOL_FEE_BPS,
-      });
-      const result = await tx.send({ instructions: [ix], feePayer: signer });
-      const sig = typeof result === "string" ? result : "";
-      toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Platform initialized" });
-      void recordAudit({
-        ix_name: "initialize_platform",
-        category: "platform",
-        actor_wallet: walletAddress.toString(),
-        reason,
-        target_label: walletAddress.toString(),
-        tx_signature: sig || undefined,
-        status: "success",
-      });
-      invalidateRoles();
-      await refresh();
-    } catch (err) {
-      toast.dismiss(pendingId);
-      const detail = explainSendError(err);
-      toast.showError("Failed to initialize platform", detail);
-      void recordAudit({
-        ix_name: "initialize_platform",
-        category: "platform",
-        actor_wallet: walletAddress.toString(),
-        reason,
-        target_label: walletAddress.toString(),
-        status: "failed",
-        metadata: { error: detail },
-      });
-      console.error("[initialize_platform] full error:", err);
-    }
-  }
 
   const treasuryCandidate = treasuryInput.trim();
   const treasuryError = protocolTreasuryError(
@@ -211,39 +160,13 @@ export default function AdminPage() {
         ) : platform === undefined ? (
           <p className="mt-8 text-slate-500">Loading platform…</p>
         ) : platform === null ? (
-          <div className={`mt-8 ${CARD}`}>
-            <h2 className="text-lg font-semibold text-slate-900">
-              Platform not initialized
-            </h2>
-            <p className="mt-2 text-sm text-slate-600">
-              Connect the deployed registry program’s current upgrade-authority
-              wallet. This setup appoints the connected wallet as initial Super
-              Admin and treasury; program upgrade authority is unchanged.
-            </p>
-            <p className="mt-2 text-sm text-amber-800">
-              The platform starts <strong>fully paused</strong>: every
-              emergency-pause area is on until the Super Admin resumes them.
-              Finish the bootstrap (blocklist authority, admins) first, then
-              resume every area in the Emergency pause panel on this page
-              before handing authority over.
-            </p>
-            <dl className="mt-4 space-y-2 text-sm">
-              <Row label="Platform PDA" value={platformPda} />
-              <Row label="Super Admin (you)" value={walletAddress} />
-              <Row
-                label="Protocol fee"
-                value={`${PROTOCOL_FEE_BPS} bps — reserved field, not charged`}
-              />
-            </dl>
-            <button
-              type="button"
-              disabled={tx.isSending}
-              onClick={() => void initializePlatform()}
-              className={`mt-6 ${BTN}`}
-            >
-              {tx.isSending ? "Sending…" : "Initialize Platform"}
-            </button>
-          </div>
+          <PlatformInitCard
+            platformPda={platformPda}
+            onInitialized={async ({ permanentSuperAdmin }) => {
+              setPlatformSuccessor(permanentSuperAdmin);
+              await refresh();
+            }}
+          />
         ) : (
           <div className={`mt-8 ${CARD}`}>
             <div className="flex items-center justify-between">
@@ -367,9 +290,17 @@ export default function AdminPage() {
           </Link>
         </p>
       </div>
-      <BlocklistBootstrap />
-      <AuthorityRotation kind="platform" />
-      <AuthorityRotation kind="blocklist" />
+      <BlocklistBootstrap onInitialized={setBlocklistSuccessor} />
+      <AuthorityRotation
+        key={`platform:${platformSuccessor ?? ""}`}
+        kind="platform"
+        initialNext={platformSuccessor ?? undefined}
+      />
+      <AuthorityRotation
+        key={`blocklist:${blocklistSuccessor ?? ""}`}
+        kind="blocklist"
+        initialNext={blocklistSuccessor ?? undefined}
+      />
       {platform && confirmTreasury && !treasuryError && treasuryCandidate && (
         <ConfirmModal
           open={confirmTreasury}
