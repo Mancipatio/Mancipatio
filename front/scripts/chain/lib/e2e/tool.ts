@@ -15,13 +15,13 @@ import path from "node:path";
 import type { Address } from "@solana/kit";
 import { fetchMaybeAdmin, findAdminRecordPda } from "@/lib/generated/asset_registry";
 import type { ToolContext, ToolStatus } from "../context";
-import { ChainGateError, loadHotSigner, toJson } from "../safety";
+import { ChainGateError, loadHotSigner, publicErrorMessage, toJson } from "../safety";
 import { DEFAULT_TIMING } from "../tx";
 import { readE2eConfig, type E2eConfig } from "./config";
 import { loadOrCreateRoleKey } from "./keys";
 import { e2ePlanDigest, stepsFor } from "./matrix";
 import { E2eRunner } from "./runner";
-import { assertStateMatches, loadState, newState, saveState, type E2eState } from "./state";
+import { acquireDirLock, assertStateMatches, loadState, newState, saveState, type E2eState } from "./state";
 import type { Roles, World } from "./world";
 import { runGroup0 } from "./groups/g0";
 import { runGroup1 } from "./groups/g1";
@@ -31,12 +31,36 @@ import { runGroup3 } from "./groups/g3";
 /** Groups this version implements (6.3a); later groups arrive with 6.3b/6.3c. */
 export const IMPLEMENTED_GROUPS = [0, 1, 2, 3];
 
-function assertIgnoredDir(dir: string, root: string): void {
-  const relative = path.relative(root, path.join(dir, "state.json"));
-  const inside = relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+/**
+ * E2E_DIR holds private keys: inside the repository every file the run
+ * writes must be git-ignored. One check per path (`check-ignore -q` with
+ * several paths succeeds when any one of them is ignored).
+ */
+export function assertIgnoredDir(dir: string, root: string): void {
+  const relativeDir = path.relative(root, dir);
+  const inside = !relativeDir.startsWith("..") && !path.isAbsolute(relativeDir);
   if (!inside) return;
-  const result = spawnSync("git", ["check-ignore", "-q", "--", relative], { cwd: root });
-  if (result.status !== 0) throw new ChainGateError("E2E_DIR is inside the repository and not git-ignored");
+  const files = ["state.json", "summary.json", "summary.md", "e2e.lock", "keys/", "keys/deployer.json", "keys/admin.json"];
+  for (const file of files) {
+    const relative = path.join(relativeDir, file) + (file.endsWith("/") ? "/" : "");
+    const result = spawnSync("git", ["check-ignore", "-q", "--", relative], { cwd: root });
+    if (result.status !== 0) throw new ChainGateError(`E2E_DIR is inside the repository and ${file} there is not git-ignored`);
+  }
+}
+
+/**
+ * A resumed run must sign with the keys it started with: a regenerated or
+ * swapped key file would silently replace a role (and its holdings).
+ */
+export function assertSameRoles(recorded: Record<string, string>, loaded: Record<string, string>): void {
+  if (Object.keys(recorded).length === 0) return;
+  for (const role of new Set([...Object.keys(recorded), ...Object.keys(loaded)])) {
+    if (recorded[role] !== loaded[role]) {
+      throw new ChainGateError(
+        `role ${role} is ${loaded[role] ?? "missing"} now but ${recorded[role] ?? "absent"} in state.json; restore its key or use a new E2E_DIR`,
+      );
+    }
+  }
 }
 
 async function loadRoles(e2e: E2eConfig, payer: Awaited<ReturnType<typeof loadHotSigner>>): Promise<Roles> {
@@ -66,9 +90,9 @@ async function loadRoles(e2e: E2eConfig, payer: Awaited<ReturnType<typeof loadHo
   };
 }
 
-function writeSummary(dir: string, state: E2eState, runner: E2eRunner, status: ToolStatus, network: string): void {
+export function writeSummary(dir: string, state: E2eState, runner: E2eRunner, status: ToolStatus, network: string, error: string | null): void {
   const rows = runner.results;
-  const summary = { network, runId: state.runId, status, finishedUtc: new Date().toISOString(), results: rows, steps: state.steps };
+  const summary = { network, runId: state.runId, status, error, finishedUtc: new Date().toISOString(), results: rows, steps: state.steps };
   fs.writeFileSync(path.join(dir, "summary.json"), `${toJson(summary)}\n`, { mode: 0o600 });
   const explorer = (sig: string) =>
     network === "devnet" ? `[${sig.slice(0, 10)}…](https://explorer.solana.com/tx/${sig}?cluster=devnet)` : `${sig.slice(0, 10)}…`;
@@ -80,6 +104,19 @@ function writeSummary(dir: string, state: E2eState, runner: E2eRunner, status: T
     ...rows.map((r) => `| ${r.id} | ${r.title} | ${r.outcome} | ${r.actual} | ${r.signature ? explorer(r.signature) : ""} |`),
     "",
   ];
+  // What a re-run must look at first: failed, still inflight (halted) and not-run steps.
+  const open = Object.entries(state.steps).filter(([, s]) => s.status !== "passed");
+  if (error || open.length) {
+    lines.push("## Stopped or not run", "");
+    if (error) lines.push(`- run: ${error}`);
+    for (const [id, s] of open) {
+      if (s.status === "failed") lines.push(`- ${id}: failed — ${s.detail}`);
+      else if (s.status === "inflight") {
+        lines.push(`- ${id}: halted inflight — ${s.signature.slice(0, 10)}… unresolved; the next run resolves it before anything else`);
+      } else if (s.status === "skipped") lines.push(`- ${id}: not run — ${s.detail}`);
+    }
+    lines.push("");
+  }
   fs.writeFileSync(path.join(dir, "summary.md"), lines.join("\n"), { mode: 0o600 });
 }
 
@@ -107,6 +144,26 @@ export async function e2eTool(ctx: ToolContext): Promise<ToolStatus> {
   }
   if (config.confirmPlan !== digest) throw new ChainGateError("CHAIN_CONFIRM_PLAN does not match the e2e plan digest");
 
+  // One run per E2E_DIR; state.json is read again under the lock, since
+  // another run may have written it after the read above.
+  const releaseLock = acquireDirLock(e2e.dir);
+  try {
+    const current = loadState(e2e.dir);
+    if (current) assertStateMatches(current, { network: e2e.network, genesis: config.expectedGenesis, runId });
+    else if (existing) throw new ChainGateError("state.json disappeared while the run started; inspect E2E_DIR before resuming");
+    return await sendRun(ctx, e2e, { state: current, runId, digest, steps: steps.map((s) => s.id) });
+  } finally {
+    releaseLock();
+  }
+}
+
+async function sendRun(
+  ctx: ToolContext,
+  e2e: E2eConfig,
+  input: { state: E2eState | null; runId: string; digest: string; steps: string[] },
+): Promise<ToolStatus> {
+  const { config, evidence } = ctx;
+  const { runId, digest } = input;
   ctx.phase = "signers";
   const payer = await loadHotSigner(config.keypairPath!, e2e.payer, e2e.network === "devnet" ? "admin" : "deployer");
   const balance = (await ctx.rpc.getBalance(payer.address, { commitment: "confirmed" }).send()).value;
@@ -121,7 +178,7 @@ export async function e2eTool(ctx: ToolContext): Promise<ToolStatus> {
     }
   }
   const roles = await loadRoles(e2e, payer);
-  const state = existing ?? newState({ network: e2e.network, genesis: config.expectedGenesis, runId });
+  const state = input.state ?? newState({ network: e2e.network, genesis: config.expectedGenesis, runId });
   const roleAddresses: Record<string, Address> = {
     funder: roles.funder.address,
     admin: roles.admin.address,
@@ -132,13 +189,14 @@ export async function e2eTool(ctx: ToolContext): Promise<ToolStatus> {
     ...(roles.blocklistAuthority ? { blocklistAuthority: roles.blocklistAuthority.address } : {}),
     ...(roles.kycAuthority ? { kycAuthority: roles.kycAuthority.address } : {}),
   };
+  assertSameRoles(state.roles, roleAddresses);
   state.roles = roleAddresses;
   saveState(e2e.dir, state);
   evidence.roles = roleAddresses;
 
   ctx.phase = "send";
   const journal = ctx.beginSend();
-  journal.append({ event: "plan", digest, runId, groups: e2e.groups, steps: steps.map((s) => s.id) });
+  journal.append({ event: "plan", digest, runId, groups: e2e.groups, steps: input.steps });
   const runner = new E2eRunner({
     network: e2e.network,
     groups: e2e.groups,
@@ -168,6 +226,7 @@ export async function e2eTool(ctx: ToolContext): Promise<ToolStatus> {
   };
 
   let status: ToolStatus = "completed";
+  let failure: string | null = null;
   try {
     for (const group of e2e.groups) {
       ctx.phase = `group ${group}`;
@@ -187,10 +246,11 @@ export async function e2eTool(ctx: ToolContext): Promise<ToolStatus> {
     }
   } catch (error) {
     status = "failed";
+    failure = publicErrorMessage("e2e", ctx.phase, error);
     throw error;
   } finally {
     evidence.results = runner.results;
-    writeSummary(e2e.dir, state, runner, status, e2e.network);
+    writeSummary(e2e.dir, state, runner, status, e2e.network, failure);
   }
   return status;
 }

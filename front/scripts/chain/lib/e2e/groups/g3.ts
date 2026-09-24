@@ -29,9 +29,9 @@ import { hookTransferMetas } from "@/lib/hook-metas";
 import { buildDepositOtcAssetInstructions, buildTakeOfferInstructions } from "@/lib/otc-transactions";
 import { findOfferPda } from "@/lib/pdas";
 import { TOKEN_2022, TOKEN_CLASSIC } from "@/lib/transaction-builders";
-import { chainNow, waitForChainTime } from "../clock";
+import { waitForChainTime } from "../clock";
 import { entity } from "../state";
-import { accountExists, type World } from "../world";
+import { accountExists, expiringDeadline, type World } from "../world";
 import { UNIT_PRICE } from "./g1";
 
 const EXPIRING_OFFER_S = BigInt(75);
@@ -174,15 +174,21 @@ export async function runGroup3(w: World): Promise<"completed"> {
   const shareClass = entity(w.runner.state, "classA") as Address;
 
   // 3.4a first: offer #3 expires while the rest runs.
-  const t0 = await chainNow(w.rpc);
-  if (!w.runner.state.entities.offer3ExpiresAt) w.runner.setEntity("offer3ExpiresAt", t0 + EXPIRING_OFFER_S);
-  const offer3Expiry = BigInt(entity(w.runner.state, "offer3ExpiresAt"));
   const offer3 = await findOfferPda(shareClass, BigInt(3));
   await w.runner.step(
     "3.4a",
-    async () => ({ payer: b1, ixs: (await createAndFundOffer(w, b1, 3, BigInt(1), UNIT_PRICE, offer3Expiry)).ixs }),
+    async () => {
+      const expiresAt = await expiringDeadline(w, {
+        key: "offer3ExpiresAt",
+        step: "3.4a",
+        seconds: EXPIRING_OFFER_S,
+        exists: () => accountExists(w.rpc, offer3),
+      });
+      return { payer: b1, ixs: (await createAndFundOffer(w, b1, 3, BigInt(1), UNIT_PRICE, expiresAt)).ixs };
+    },
     { done: () => accountExists(w.rpc, offer3) },
   );
+  const offer3Expiry = BigInt(entity(w.runner.state, "offer3ExpiresAt"));
 
   const offer1 = await findOfferPda(shareClass, BigInt(1));
   await w.runner.step(
@@ -230,7 +236,21 @@ export async function runGroup3(w: World): Promise<"completed"> {
     const d = (await fetchOtcDeal(w.rpc, deal1, { commitment: "finalized" })).data;
     return buildDepositOtcAssetInstructions(w.rpc, { seller, dealPda: deal1, deal: d, paymentTokenProgram: TOKEN_CLASSIC });
   };
-  await w.runner.step("3.5b", async () => ({ payer: b3, ixs: await sellerDeposit(b3) }));
+  // B3's share account exists only if group 2 ran (2.4b); created here (in
+  // the simulation only) so the refusal is the party check, not a missing
+  // account, whichever groups ran before.
+  await w.runner.step("3.5b", async () => ({
+    payer: b3,
+    ixs: [
+      await getCreateAssociatedTokenIdempotentInstructionAsync({
+        payer: b3,
+        owner: b3.address,
+        mint: entity(w.runner.state, "mintA") as Address,
+        tokenProgram: TOKEN_2022,
+      }),
+      ...(await sellerDeposit(b3)),
+    ],
+  }));
   await w.runner.step("3.5c", async () => ({ payer: b1, ixs: await sellerDeposit(b1) }), {
     done: async () => {
       const account = await fetchMaybeOtcDeal(w.rpc, deal1, { commitment: "finalized" });

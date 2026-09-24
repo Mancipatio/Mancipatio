@@ -28,12 +28,24 @@ const MAX_CYCLES = 4;
 
 async function roleMap(w: World, genesis: string): Promise<RoleMap> {
   const saved = w.runner.state.entities.roleMap;
+  const { funder, superAdmin, blocklistAuthority, kycAuthority, admin } = w.roles;
+  if (!superAdmin || !blocklistAuthority || !kycAuthority) throw new ChainPlanError("G0 needs the localnet role keys");
   let json: unknown;
   if (saved) {
     json = JSON.parse(saved);
+    // The saved map must still name the keys this run signs with.
+    const m = json as { deployer?: string; superAdmin?: string; blocklistAuthority?: string; kyc?: { authority?: string }; admins?: string[] };
+    const expected: [string, string | undefined, string][] = [
+      ["deployer (funder)", m.deployer, funder.address],
+      ["superAdmin", m.superAdmin, superAdmin.address],
+      ["blocklistAuthority", m.blocklistAuthority, blocklistAuthority.address],
+      ["kycAuthority", m.kyc?.authority, kycAuthority.address],
+      ["admin", m.admins?.[0], admin.address],
+    ];
+    for (const [role, inMap, loaded] of expected) {
+      if (inMap !== loaded) throw new ChainPlanError(`the saved role map names another ${role} than the loaded key; use a new E2E_DIR`);
+    }
   } else {
-    const { funder, superAdmin, blocklistAuthority, kycAuthority, admin } = w.roles;
-    if (!superAdmin || !blocklistAuthority || !kycAuthority) throw new ChainPlanError("G0 needs the localnet role keys");
     const key = async (role: string) => (await loadOrCreateRoleKey(w.config.dir, role)).address;
     const multisig = await key("squads-multisig");
     const vault = await squadsVaultPda(multisig as Address, 0);

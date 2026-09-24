@@ -11,6 +11,7 @@ import type { Address, KeyPairSigner } from "@solana/kit";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import type { ChainRpc } from "../rpc";
 import type { Timing } from "../tx";
+import { chainNow } from "./clock";
 import type { E2eConfig } from "./config";
 import type { E2eNetwork } from "./matrix";
 import type { E2eRunner } from "./runner";
@@ -69,3 +70,26 @@ export async function accountExists(rpc: ChainRpc, address: Address): Promise<bo
 }
 
 export const ONE_DAY = BigInt(86_400);
+
+/**
+ * The deadline of an account a step creates only to watch it expire (2.5a,
+ * 3.4a). Called from the step's build: a saved value is reused only while
+ * that account may exist (the step passed or is inflight, or the chain
+ * shows it); otherwise it is chain time + `seconds`, saved before the send.
+ * A value saved by a run whose step never landed would already be past and
+ * make every resume fail.
+ */
+export async function expiringDeadline(
+  w: World,
+  input: { key: string; step: string; seconds: bigint; exists: () => Promise<boolean> },
+): Promise<bigint> {
+  const saved = w.runner.state.entities[input.key];
+  const status = w.runner.state.steps[input.step]?.status;
+  if (saved !== undefined && (status === "passed" || status === "inflight" || (await input.exists()))) return BigInt(saved);
+  const deadline = (await chainNow(w.rpc)) + input.seconds;
+  w.runner.setEntity(input.key, deadline);
+  return deadline;
+}
+
+/** Margin (s) so a clock guard never races the simulation that follows it. */
+export const CLOCK_GUARD_S = BigInt(10);

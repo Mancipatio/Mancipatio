@@ -17,6 +17,7 @@ import {
   ShareClassType,
   fetchMaybeAsset,
   fetchMaybeIssuer,
+  fetchMaybeSale,
   fetchMaybeShareClass,
   fetchSale,
   findAssetPda,
@@ -48,6 +49,7 @@ import { findSalePda, findShareClassPda } from "@/lib/pdas";
 import { buildDocumentedPurchase } from "@/lib/purchase-builder";
 import { TOKEN_2022, TOKEN_CLASSIC } from "@/lib/transaction-builders";
 import { ChainPlanError } from "../../safety";
+import { waitForCheckpoint } from "../checkpoint";
 import { chainNow } from "../clock";
 import {
   PAYMENT_UNIT,
@@ -68,6 +70,16 @@ const RIGHTS_B = 1 | 2 | 32;
 const PAYMENT_PER_BUYER = BigInt(1_000) * PAYMENT_UNIT;
 export const UNIT_PRICE = PAYMENT_UNIT;
 export const SALE1_TOTAL = BigInt(100);
+const HOUR = BigInt(3_600);
+
+/**
+ * A sale's end: two hours on devnet, so e2e sales do not linger on the
+ * public marketplace (devnet shares the app with real users); a week on the
+ * private localnet.
+ */
+export function saleEnd(w: World, start: bigint): bigint {
+  return start + (w.network === "devnet" ? BigInt(2) * HOUR : BigInt(7) * ONE_DAY);
+}
 
 export function saleTerms(salePda: Address, asset: Address, runId: string, saleId: number) {
   const digest = Buffer.from(sha256Bytes(`manci-e2e:${runId}:sale:${saleId}`)).toString("hex");
@@ -179,6 +191,17 @@ export async function saleExists(w: World, classKey: "classA" | "classB", saleId
   return accountExists(w.rpc, await findSalePda(entity(w.runner.state, classKey) as Address, BigInt(saleId)));
 }
 
+/**
+ * A buy's `done` probe: the sale has sold at least `units` (each e2e sale
+ * has one buying step, so this survives later transfers of the shares).
+ */
+export async function saleSold(w: World, classKey: "classA" | "classB", saleId: number, units: bigint): Promise<boolean> {
+  const sale = await fetchMaybeSale(w.rpc, await findSalePda(entity(w.runner.state, classKey) as Address, BigInt(saleId)), {
+    commitment: "finalized",
+  });
+  return sale.exists && sale.data.sold >= units;
+}
+
 /** A documented purchase (the app's builder): ATAs, terms memo, buy + receiver-KYC tail. */
 export async function buyIxs(w: World, buyer: KeyPairSigner, classKey: "classA" | "classB", saleId: number, amount: bigint) {
   const salePda = await findSalePda(entity(w.runner.state, classKey) as Address, BigInt(saleId));
@@ -250,16 +273,12 @@ export async function runGroup1(w: World): Promise<"completed" | "awaiting"> {
         w.log(
           `ACTION REQUIRED C1: Super Admin → /admin/issuers → Pending → legal ID ${code} (issuer ${issuer}, authority ${issuerKey.address}) → Verify KYB`,
         );
-        const deadline = Date.now() + w.config.checkpointWaitMin * 60_000;
-        let verified = false;
-        while (Date.now() < deadline) {
-          await w.sleep(20_000);
-          if (w.signal.aborted) break;
-          if (await kybVerified()) {
-            verified = true;
-            break;
-          }
-        }
+        const verified = await waitForCheckpoint({
+          check: kybVerified,
+          waitMs: w.config.checkpointWaitMin * 60_000,
+          sleep: w.sleep,
+          signal: w.signal,
+        });
         if (!verified) return "awaiting";
       }
       w.runner.markPassed("1.3", "KYB verified by the Super Admin in the browser (checkpoint C1)");
@@ -416,12 +435,14 @@ export async function runGroup1(w: World): Promise<"completed" | "awaiting"> {
     "1.9",
     async () => ({
       payer: issuerKey,
-      ixs: await openSaleIxs(w, { classKey: "classA", saleId: 1, price: UNIT_PRICE, total: SALE1_TOTAL, startTs: now, endTs: now + BigInt(7) * ONE_DAY }),
+      ixs: await openSaleIxs(w, { classKey: "classA", saleId: 1, price: UNIT_PRICE, total: SALE1_TOTAL, startTs: now, endTs: saleEnd(w, now) }),
     }),
     { done: () => saleExists(w, "classA", 1) },
   );
   w.runner.setEntity("sale1", await findSalePda(entity(w.runner.state, "classA") as Address, BigInt(1)));
-  await w.runner.step("1.10", async () => ({ payer: b1, ixs: await buyIxs(w, b1, "classA", 1, BigInt(10)) }));
+  await w.runner.step("1.10", async () => ({ payer: b1, ixs: await buyIxs(w, b1, "classA", 1, BigInt(10)) }), {
+    done: () => saleSold(w, "classA", 1, BigInt(10)),
+  });
 
   if (w.network !== "localnet") return "completed";
 
@@ -492,7 +513,7 @@ export async function runGroup1(w: World): Promise<"completed" | "awaiting"> {
     "1.12c",
     async () => ({
       payer: issuerKey,
-      ixs: await openSaleIxs(w, { classKey: "classB", saleId: 4, price: UNIT_PRICE, total: SALE1_TOTAL, startTs: later, endTs: later + BigInt(7) * ONE_DAY }),
+      ixs: await openSaleIxs(w, { classKey: "classB", saleId: 4, price: UNIT_PRICE, total: SALE1_TOTAL, startTs: later, endTs: saleEnd(w, later) }),
     }),
     { done: () => saleExists(w, "classB", 4) },
   );
@@ -518,7 +539,10 @@ export async function runGroup1(w: World): Promise<"completed" | "awaiting"> {
     }),
     { done: async () => accountExists(w.rpc, await getEntryPda(registry, b2.address)) },
   );
-  await w.runner.step("1.12f", async () => ({ payer: b2, ixs: await buyIxs(w, b2, "classB", 4, BigInt(3)) }));
+  // 1.12d (the refused buy) sold nothing, so any sale on #4 is 1.12f's.
+  await w.runner.step("1.12f", async () => ({ payer: b2, ixs: await buyIxs(w, b2, "classB", 4, BigInt(3)) }), {
+    done: () => saleSold(w, "classB", 4, BigInt(3)),
+  });
   void b3;
   void b4;
   return "completed";
