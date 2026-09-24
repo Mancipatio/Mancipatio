@@ -1,7 +1,10 @@
 -- Daily operational retention (migration 0063). Network-agnostic: ONE job per
 -- database prunes every network's rows by age; nothing here names a network,
--- a URL or a secret. Installation always DISABLES the job. Review first:
---   psql -f scripts/ops/retention-scheduler-status.sql   (read-only preview)
+-- a URL or a secret, so the SQL is identical for every project. Install it
+-- through db.sh, which asserts the target first:
+--   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/retention-scheduler.sql
+-- Installation always DISABLES the job. Review first:
+--   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/retention-scheduler-status.sql   (read-only preview)
 -- then enable:
 --   select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-retention';
 -- Re-running this file updates the schedule/command and disables the job again.

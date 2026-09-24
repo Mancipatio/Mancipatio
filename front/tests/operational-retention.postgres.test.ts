@@ -2,6 +2,7 @@ import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { LocalPostgres } from "./helpers/local-postgres";
+import { applyMigrations } from "./helpers/migrations";
 
 const db = new LocalPostgres();
 const migrations = join(process.cwd(), "supabase/migrations");
@@ -17,7 +18,7 @@ const SEED = `
   delete from public.indexer_events;
   insert into public.indexer_jobs(network, signature, status, created_at, updated_at) values
     ('devnet', 'complete-31d', 'complete', now() - interval '40 days', now() - interval '31 days'),
-    ('mainnet', 'complete-45d-mainnet', 'complete', now() - interval '50 days', now() - interval '45 days'),
+    ('testnet', 'complete-45d-testnet', 'complete', now() - interval '50 days', now() - interval '45 days'),
     ('devnet', 'complete-29d', 'complete', now() - interval '30 days', now() - interval '29 days'),
     ('devnet', 'pending-60d', 'pending', now() - interval '60 days', now() - interval '60 days');
   insert into public.indexer_events(created_at, network, signature, slot, block_time, program, ix_name, decoded, wallets, payload) values
@@ -80,9 +81,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("operational data 
         alter default privileges in schema public grant all on sequences to anon,authenticated,service_role;
         grant all on storage.objects,storage.buckets to service_role;
         grant all on storage.objects to anon,authenticated;`);
-      for (const file of readdirSync(migrations).filter((f) => /^\d+.*\.sql$/.test(f)).sort()) {
-        db.query(readFileSync(join(migrations, file), "utf8"));
-      }
+      applyMigrations(db, { network: "devnet" });
     } catch (error) {
       db.close();
       throw error;

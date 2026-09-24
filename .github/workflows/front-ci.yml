@@ -1,5 +1,6 @@
-# Front CI — typecheck, lint, unit tests, a production build and program
-# IDL/SDK drift for front/. The build runs without deployment secrets (only the
+# Front CI — typecheck, lint, unit tests, a production build (plus a Deno
+# type-check of the Supabase edge function) and program IDL/SDK drift for
+# front/. The build runs without deployment secrets (only the
 # public network name is set), so a merge that would break the Vercel build is
 # caught here first. The drift job also watches program/ because the client
 # SDK in front/lib/generated is derived from the program source.
@@ -88,6 +89,11 @@ jobs:
 
       - name: Production build
         run: npx next build
+
+      # The Supabase edge function (Deno) is outside tsc and eslint; type-check
+      # it against its own import map before anyone deploys it.
+      - name: Type-check the helius-webhook edge function (Deno)
+        run: npm run check:edge
 
   program-drift:
     name: Program IDL + SDK drift

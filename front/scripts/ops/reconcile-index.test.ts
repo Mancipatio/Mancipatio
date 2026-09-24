@@ -3,23 +3,21 @@ import path from "node:path";
 import { parseEnv } from "node:util";
 import { it, vi } from "vitest";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
+import { applyReconcileEnv, reconcileRpcUrl, reconcileTarget } from "./live-targets";
 
 // This marker shim is local to the operator process. RPC, decoding, Supabase
 // authorization and the actual server reconciliation helper are not mocked.
 vi.mock("server-only", () => ({}));
 
-it("completely reconciles the explicitly selected devnet index", async () => {
-  if (process.env.MANCIPATIO_RECONCILE !== "devnet") {
-    throw new Error(
-      "Explicit MANCIPATIO_RECONCILE=devnet is required; no environment file or network was accessed",
-    );
-  }
-  const project = process.env.MANCIPATIO_RECONCILE_PROJECT;
-  if (!project || !/^[a-z0-9]{20}$/.test(project)) {
-    throw new Error(
-      "MANCIPATIO_RECONCILE_PROJECT must pin the reviewed Supabase project reference",
-    );
-  }
+// MANCIPATIO_RECONCILE=<devnet|mainnet> (mainnet also needs
+// MANCI_ALLOW_MAINNET=1), MANCIPATIO_RECONCILE_PROJECT = that target's
+// projectRef in scripts/ops/targets.json, and an env file: .env.local by
+// default on devnet only, MANCIPATIO_RECONCILE_ENV_FILE always on mainnet.
+// Only the network's own RPC keys are taken from it (every other *_RPC key is
+// removed); mainnet has no public RPC fallback. The database must report the
+// same network (public.deployment_network(), migration 0070) before any work.
+it("completely reconciles the explicitly selected index", async () => {
+  const { network, project, envFile } = reconcileTarget(process.env);
   const output = process.env.MANCIPATIO_RECONCILE_OUTPUT;
   if (!output)
     throw new Error(
@@ -31,24 +29,8 @@ it("completely reconciles the explicitly selected devnet index", async () => {
   const originalFetch = globalThis.fetch;
   let phase = "configuration";
   try {
-    const parsed = parseEnv(
-      readFileSync(
-        path.resolve(process.env.MANCIPATIO_RECONCILE_ENV_FILE ?? ".env.local"),
-        "utf8",
-      ),
-    );
-    const keys = [
-      "NEXT_PUBLIC_NETWORK",
-      "NEXT_PUBLIC_SOLANA_GENESIS_HASH",
-      "NEXT_PUBLIC_SUPABASE_URL",
-      "SUPABASE_SERVICE_ROLE_KEY",
-      "HELIUS_DEVNET_RPC",
-    ] as const;
-    for (const key of keys) {
-      if (parsed[key] === undefined) delete process.env[key];
-      else process.env[key] = parsed[key];
-    }
-    if (process.env.NEXT_PUBLIC_NETWORK !== "devnet")
+    applyReconcileEnv(parseEnv(readFileSync(path.resolve(envFile), "utf8")), network);
+    if (process.env.NEXT_PUBLIC_NETWORK !== network)
       throw new Error("Network mismatch");
     const supabaseUrl = new URL(process.env.NEXT_PUBLIC_SUPABASE_URL ?? "");
     if (
@@ -57,11 +39,7 @@ it("completely reconciles the explicitly selected devnet index", async () => {
       throw new Error("Project mismatch");
     if (!process.env.SUPABASE_SERVICE_ROLE_KEY)
       throw new Error("Missing operator credential");
-    const rpcUrl = new URL(
-      process.env.HELIUS_DEVNET_RPC || "https://api.devnet.solana.com",
-    );
-    if (rpcUrl.protocol !== "https:" || rpcUrl.username || rpcUrl.password)
-      throw new Error("Invalid RPC configuration");
+    const rpcUrl = reconcileRpcUrl(process.env, network);
 
     // Bound every real request, including genesis verification and cleanup.
     // Refuse Solana writes and requests outside the selected two endpoints.
@@ -105,13 +83,19 @@ it("completely reconciles the explicitly selected devnet index", async () => {
     const genesis = await getServerRpc()
       .getGenesisHash()
       .send({ abortSignal: AbortSignal.timeout(10_000) });
-    if (genesis !== CLUSTER_GENESIS_HASHES.devnet)
+    if (genesis !== CLUSTER_GENESIS_HASHES[network])
       throw new Error("Genesis mismatch");
+    phase = "database-identity";
+    const identity = await getSupabaseAdmin()
+      .rpc("deployment_network")
+      .abortSignal(AbortSignal.timeout(Math.max(1, deadline - Date.now())));
+    if (identity.error || identity.data !== network)
+      throw new Error("Database network mismatch");
     phase = "database-access";
     const access = await getSupabaseAdmin()
       .from("indexer_jobs")
       .select("id", { count: "exact", head: true })
-      .eq("network", "devnet")
+      .eq("network", network)
       .abortSignal(AbortSignal.timeout(Math.max(1, deadline - Date.now())));
     if (access.error || access.count === null)
       throw new Error(
@@ -132,7 +116,7 @@ it("completely reconciles the explicitly selected devnet index", async () => {
     const state = await getSupabaseAdmin()
       .from("indexer_sync_state")
       .select("network,status,last_slot")
-      .eq("network", "devnet")
+      .eq("network", network)
       .abortSignal(AbortSignal.timeout(Math.max(1, deadline - Date.now())))
       .single();
     if (

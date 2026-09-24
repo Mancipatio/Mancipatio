@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
  * Read-only devnet rollout inventory. Requires Node >=22 and this repo's npm deps.
+ * Devnet only, and it stays that way: mainnet uses `npm run chain:inventory`
+ * (scripts/chain, ops/runbook-mainnet.md), which also covers roles and buffers.
  * Usage: node scripts/ops/devnet-rollout-inventory.mjs --program-dir PATH --output NEW_FILE [--env-file PATH]
  *        node scripts/ops/devnet-rollout-inventory.mjs --dry-metadata [--program-dir PATH] [--env-file PATH]
  * --program-dir is required (except with --dry-metadata, where it defaults to ../program). It must

@@ -2,11 +2,20 @@ import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { getAddressDecoder } from "@solana/kit";
 import { beforeAll, describe, expect, it } from "vitest";
+import { networkLabel } from "@/lib/network";
 import { siwsMessage, type SiwsPayload } from "@/lib/siws-client";
+import { otherNetwork, smokeTarget } from "./live-targets";
 
 // No existing wallet or Solana asset mutation is used. The worker may update
 // verified DB records. This key lives only in memory and has no funds/roles.
-const origin = process.env.SMOKE_ORIGIN ?? "https://www.manci.io";
+//
+// MANCIPATIO_LIVE_SMOKE=<devnet|mainnet> picks the target (mainnet also needs
+// MANCI_ALLOW_MAINNET=1). The origin is that target's siteOrigin in
+// scripts/ops/targets.json; SMOKE_ORIGIN may point at a preview instead, but
+// never at another target's origin. Every network expectation below follows
+// the selected target.
+let network: "devnet" | "mainnet" = "devnet";
+let origin = "";
 const ephemeral = generateKeyPairSync("ed25519");
 const wallet = getAddressDecoder().decode(
   ephemeral.publicKey.export({ format: "der", type: "spki" }).subarray(-32),
@@ -15,7 +24,7 @@ function envelope(action: string, override: Partial<SiwsPayload> = {}) {
   const payload: SiwsPayload = {
     v: 2,
     origin,
-    network: "devnet",
+    network,
     action,
     wallet,
     ts: new Date().toISOString(),
@@ -43,20 +52,17 @@ async function post(path: string, body: unknown) {
   });
 }
 beforeAll(async () => {
-  if (process.env.MANCIPATIO_LIVE_SMOKE !== "devnet") {
-    throw new Error(
-      "Explicit MANCIPATIO_LIVE_SMOKE=devnet is required for these live API probes",
-    );
-  }
+  // Throws before any request without an explicit, configured target.
+  ({ network, origin } = smokeTarget(process.env));
   const response = await fetch(origin, { signal: AbortSignal.timeout(15_000) });
   expect(response.status).toBe(200);
-  // Stop if this canonical deployment has moved to a different environment.
+  // Stop if this deployment serves a different network than the target.
   const page = await response.text();
-  expect(page).toContain("Devnet");
-  expect(page).toContain('title="Connected to Solana Devnet"');
+  expect(page).toContain(networkLabel(network));
+  expect(page).toContain(`title="Connected to Solana ${networkLabel(network)}"`);
 });
 
-describe("deployed devnet release: public access and SIWS boundaries", () => {
+describe("deployed release: public access and SIWS boundaries", () => {
   it("serves the new pilot documentation", async () => {
     const response = await fetch(origin + "/docs/pilot", {
       signal: AbortSignal.timeout(15_000),
@@ -104,7 +110,7 @@ describe("deployed devnet release: public access and SIWS boundaries", () => {
   it("rejects a signature for a different network", async () => {
     const response = await post(
       "/api/clients/me",
-      envelope("clients.me", { network: "mainnet" }),
+      envelope("clients.me", { network: otherNetwork(network) }),
     );
     expect(response.status).toBe(401);
   });
@@ -141,6 +147,6 @@ describe("deployed devnet release: public access and SIWS boundaries", () => {
     const result = await response.json();
     expect(result.ok).toBe(true);
     expect(["processed", "busy"]).toContain(result.data.status);
-    expect(result.data.network).toBe("devnet");
+    expect(result.data.network).toBe(network);
   });
 });

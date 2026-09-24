@@ -2,6 +2,7 @@
 -- no row contents. The preview runs plain COUNT queries over the same
 -- predicates a run uses: it changes nothing and takes no row locks, and the
 -- whole file runs read-only under a 60 s statement timeout.
+--   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/retention-scheduler-status.sql
 begin read only;
 set local statement_timeout = '60s';
 select jobid, jobname, schedule, active
