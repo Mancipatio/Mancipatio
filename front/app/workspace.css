@@ -31,6 +31,9 @@
 .app-issue-card p { font-size:12px; line-height:1.65; color:#99b3a3; margin:7px 0 16px; }
 .app-issue-card a { font-size:12px; color:#daf1ca; display:flex; align-items:center; justify-content:space-between; padding-top:12px; border-top:1px solid #385744; }
 .app-sidebar-foot { display:flex; flex-direction:column; gap:20px; padding:22px 10px 3px; font-size:11px; }
+.app-sidebar-foot>a { display:flex; align-items:center; justify-content:center; background:#fff; color:var(--app-green); font-size:12px; font-weight:600; padding:9px 12px; border-radius:6px; box-shadow:0 1px 2px #00000033; transition:background .15s; }
+.app-sidebar-foot>a:hover { background:#e8f5ee; }
+.app-sidebar-foot>a:focus-visible { outline:2px solid #c8eaa9; outline-offset:2px; }
 .app-sidebar-foot>span { color:#87a398; display:flex; align-items:center; gap:7px; font-size:10px; }
 .app-sidebar-foot i { width:5px; height:5px; border-radius:50%; background:#86d3a9; }
 .app-body { position:relative; margin-left:232px; min-height:100vh; display:flex; flex-direction:column; }
