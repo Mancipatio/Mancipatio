@@ -372,7 +372,6 @@ describe("sync selection and bundling", () => {
     const data = {
       assets: [{ issuer: ISSUER, assetId: "a-1" }, { issuer: STRANGER, assetId: "b-1" }],
       shareClasses: [{ asset: assetPda, classIndex: 0 }],
-      legacyShareClasses: [],
       sales: [
         { shareClass: scPda, saleId: BigInt(1), status: SaleStatus.Open, authority: A },
         { shareClass: scPda, saleId: BigInt(2), status: SaleStatus.Closed, authority: A },

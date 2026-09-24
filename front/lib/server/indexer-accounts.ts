@@ -1,6 +1,5 @@
 import "server-only";
 import { address, getProgramDerivedAddress, getAddressEncoder, getU64Encoder, getU16Encoder, isSome, type Decoder, type ReadonlyUint8Array } from "@solana/kit";
-import { decodeReadableShareClass, isLegacyShareClass } from "@/lib/legacy-accounts";
 import * as accounts from "@/lib/generated/asset_registry";
 
 /** One generated-codec projection shared by live jobs and complete reconciliation. */
@@ -56,16 +55,17 @@ export const INDEXER_ENTITIES: readonly Entry[] = [
     share_classes_count: a.shareClassesCount, extra_kyc_registry: isSome(a.extraKycRegistry) ? a.extraKycRegistry.value : null,
     jurisdiction_rules: { allowed_countries: hex(a.jurisdictionRules.allowedCountries), max_holders: a.jurisdictionRules.maxHolders, restricted_period_end: numberString(a.jurisdictionRules.restrictedPeriodEnd), allow_p2p: a.jurisdictionRules.allowP2p },
   }), (a) => pda([text("asset"), key(a.issuer), text(a.assetId)])),
-  spec("share_classes", accounts.getShareClassDiscriminatorBytes(), { decode: decodeReadableShareClass } as Decoder<ReturnType<typeof decodeReadableShareClass>>, (a) => {
-    const legacy = isLegacyShareClass(a);
-    return { asset_pda: a.asset, mint: a.mint, class_index: a.classIndex, class_type: a.classType,
-      rights_bitfield: a.rightsBitfield, liq_pref_multi_bps: a.liqPrefMultiplierBps, liq_seniority: a.liqSeniority,
-      voting_weight: a.votingWeight, convertible_to: isSome(a.convertibleTo) ? a.convertibleTo.value : null,
-      max_supply: isSome(a.maxSupply) ? numberString(a.maxSupply.value) : null,
-      circulating_supply: numberString(a.circulatingSupply), locked_supply: numberString(a.lockedSupply),
-      mintable_post_launch: a.mintablePostLaunch, mint_initialized: a.mintInitialized, supply_locked: a.supplyLocked,
-      lifetime_minted: legacy ? null : numberString(a.lifetimeMinted), cumulative_cap: legacy ? null : a.cumulativeCap, readonly_legacy: legacy };
-  }, (a) => pda([text("share_class"), key(a.asset), new Uint8Array([a.classIndex])]), [1, 2]),
+  // ShareClass v2 only (the program has no v1 path). `readonly_legacy: false`
+  // stays until the contract migration: apply_indexer_snapshot (0047) requires it.
+  spec("share_classes", accounts.getShareClassDiscriminatorBytes(), accounts.getShareClassDecoder(), (a) => ({
+    asset_pda: a.asset, mint: a.mint, class_index: a.classIndex, class_type: a.classType,
+    rights_bitfield: a.rightsBitfield, liq_pref_multi_bps: a.liqPrefMultiplierBps, liq_seniority: a.liqSeniority,
+    voting_weight: a.votingWeight, convertible_to: isSome(a.convertibleTo) ? a.convertibleTo.value : null,
+    max_supply: isSome(a.maxSupply) ? numberString(a.maxSupply.value) : null,
+    circulating_supply: numberString(a.circulatingSupply), locked_supply: numberString(a.lockedSupply),
+    mintable_post_launch: a.mintablePostLaunch, mint_initialized: a.mintInitialized, supply_locked: a.supplyLocked,
+    lifetime_minted: numberString(a.lifetimeMinted), cumulative_cap: a.cumulativeCap, readonly_legacy: false,
+  }), (a) => pda([text("share_class"), key(a.asset), new Uint8Array([a.classIndex])]), 2),
   spec("sales", accounts.getSaleDiscriminatorBytes(), accounts.getSaleDecoder(), (a) => ({
     share_class_pda: a.shareClass, mint: a.mint, payment_mint: a.paymentMint, proceeds: a.proceeds,
     authority: a.authority, sale_id: numberString(a.saleId), price_per_unit: numberString(a.pricePerUnit),

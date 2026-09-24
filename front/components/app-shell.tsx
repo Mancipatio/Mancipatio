@@ -5,7 +5,6 @@ import { usePathname } from "next/navigation";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { AccountMenu } from "@/components/account-menu";
 import { BrandLogo } from "@/components/brand-logo";
-import { LegacyAccountsNotice } from "@/components/legacy-accounts-notice";
 import { TosGate } from "@/components/tos-gate";
 import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
 import { detectNetwork, networkLabel } from "@/lib/network";
@@ -118,7 +117,6 @@ export function AppShell({ children, section = "overview" }: {
         </header>
         {/* Desktop: the overview heading hosts the wallet menu inline; elsewhere it floats top-right. */}
         {path !== "/" && <div className="app-floating-account"><AccountMenu /></div>}
-        <LegacyAccountsNotice />
         {tabs && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
           {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{children}</div> : children}

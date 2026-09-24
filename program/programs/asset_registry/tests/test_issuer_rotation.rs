@@ -32,11 +32,11 @@ use {
         AccountSerialize, Discriminator, InstructionData, Space, ToAccountMetas,
     },
     asset_registry::{
-        accounts as acc, error::RegistryError, instruction as ixd, legacy::LegacyShareClass,
-        AuthorityTransfer, Issuer, IssuerAuthorityChangeKind, IssuerAuthorityChanged,
-        IssuerAuthorityProposalCancelled, IssuerAuthorityProposed, IssuerPermissions,
-        IssuerRecovery, IssuerRecoveryCancelled, IssuerRecoveryProposed, KybStatus,
-        PayoutFounderSynced, PayoutVault, RaiseType, Sale, SaleAuthoritySynced,
+        accounts as acc, error::RegistryError, instruction as ixd, AuthorityTransfer, Issuer,
+        IssuerAuthorityChangeKind, IssuerAuthorityChanged, IssuerAuthorityProposalCancelled,
+        IssuerAuthorityProposed, IssuerPermissions, IssuerRecovery, IssuerRecoveryCancelled,
+        IssuerRecoveryProposed, KybStatus, PayoutFounderSynced, PayoutVault, RaiseType, Sale,
+        SaleAuthoritySynced,
     },
     issuer::*,
     solana_keypair::Keypair,
@@ -1531,7 +1531,7 @@ fn payout_vaults_follow_the_synced_founder() {
 // ── 18. Sync guards ──────────────────────────────────────────────────────────
 
 #[test]
-fn sync_refuses_a_foreign_or_forged_chain_is_idempotent_and_reads_legacy_share_classes() {
+fn sync_refuses_a_foreign_or_forged_chain_is_idempotent() {
     let Scene { mut w, a, b, c, fx } = scene();
     let other = {
         let issuer = w.register(&c, legal_id(9));
@@ -1572,7 +1572,7 @@ fn sync_refuses_a_foreign_or_forged_chain_is_idempotent_and_reads_legacy_share_c
         ERR_UNAUTHORIZED,
         "forged owner",
     );
-    w.svm.set_account(fx.share_class, real.clone()).unwrap();
+    w.svm.set_account(fx.share_class, real).unwrap();
 
     // Forged discriminator on the real asset address.
     let real_asset = w.svm.get_account(&fx.asset).unwrap();
@@ -1588,14 +1588,10 @@ fn sync_refuses_a_foreign_or_forged_chain_is_idempotent_and_reads_legacy_share_c
     w.svm.set_account(fx.asset, real_asset).unwrap();
     assert_eq!(w.load::<Sale>(&s).authority, a.pubkey(), "nothing written");
 
-    // A legacy v1 share class (shorter layout, `asset` still at byte 8).
-    let mut legacy = real.clone();
-    legacy.data.truncate(8 + LegacyShareClass::INIT_SPACE);
-    w.svm.set_account(fx.share_class, legacy).unwrap();
     let logs = w.send(
         &[],
         &[sync_sale_authority_ix(&s, &fx)],
-        "sync via a v1 share class",
+        "sync via the real share class",
     );
     assert_eq!(events::<SaleAuthoritySynced>(&logs).len(), 1);
     assert_eq!(w.load::<Sale>(&s).authority, b.pubkey());

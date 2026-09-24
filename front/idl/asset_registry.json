@@ -8462,41 +8462,6 @@
       ]
     },
     {
-      "name": "prepare_legacy_account",
-      "docs": [
-        "Registers an issuer in `Pending` KYB state."
-      ],
-      "discriminator": [
-        75,
-        126,
-        227,
-        84,
-        183,
-        183,
-        94,
-        147
-      ],
-      "accounts": [
-        {
-          "name": "payer",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "legacy_account",
-          "docs": [
-            "are validated below before resizing. No arbitrary program account write."
-          ],
-          "writable": true
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": []
-    },
-    {
       "name": "propose_custody_authority",
       "discriminator": [
         109,
@@ -9736,6 +9701,9 @@
     },
     {
       "name": "register_issuer",
+      "docs": [
+        "Registers an issuer in `Pending` KYB state."
+      ],
       "discriminator": [
         145,
         117,
@@ -9825,180 +9793,6 @@
           }
         }
       ]
-    },
-    {
-      "name": "register_rights_escrow_identity",
-      "discriminator": [
-        153,
-        1,
-        95,
-        147,
-        162,
-        8,
-        109,
-        85
-      ],
-      "accounts": [
-        {
-          "name": "payer",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "rights_issuance",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  114,
-                  105,
-                  103,
-                  104,
-                  116,
-                  115
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "rights_issuance.share_class",
-                "account": "RightsIssuance"
-              },
-              {
-                "kind": "account",
-                "path": "rights_issuance.issuance_id",
-                "account": "RightsIssuance"
-              }
-            ]
-          }
-        },
-        {
-          "name": "identity",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  101,
-                  115,
-                  99,
-                  114,
-                  111,
-                  119,
-                  95,
-                  109,
-                  97,
-                  114,
-                  107,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "rights_issuance"
-              }
-            ]
-          }
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": []
-    },
-    {
-      "name": "register_vesting_escrow_identity",
-      "discriminator": [
-        30,
-        96,
-        200,
-        199,
-        207,
-        176,
-        153,
-        183
-      ],
-      "accounts": [
-        {
-          "name": "payer",
-          "writable": true,
-          "signer": true
-        },
-        {
-          "name": "series",
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  118,
-                  101,
-                  115,
-                  116,
-                  105,
-                  110,
-                  103,
-                  95,
-                  115,
-                  101,
-                  114,
-                  105,
-                  101,
-                  115
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "series.authority",
-                "account": "VestingSeries"
-              },
-              {
-                "kind": "account",
-                "path": "series.series_id",
-                "account": "VestingSeries"
-              }
-            ]
-          }
-        },
-        {
-          "name": "identity",
-          "writable": true,
-          "pda": {
-            "seeds": [
-              {
-                "kind": "const",
-                "value": [
-                  101,
-                  115,
-                  99,
-                  114,
-                  111,
-                  119,
-                  95,
-                  109,
-                  97,
-                  114,
-                  107,
-                  101,
-                  114
-                ]
-              },
-              {
-                "kind": "account",
-                "path": "series"
-              }
-            ]
-          }
-        },
-        {
-          "name": "system_program",
-          "address": "11111111111111111111111111111111"
-        }
-      ],
-      "args": []
     },
     {
       "name": "release_payout",

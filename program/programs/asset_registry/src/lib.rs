@@ -8,7 +8,6 @@
 pub mod constants;
 pub mod error;
 pub mod instructions;
-pub mod legacy;
 pub mod state;
 pub mod util;
 
@@ -117,21 +116,6 @@ pub mod asset_registry {
     }
 
     /// Registers an issuer in `Pending` KYB state.
-    pub fn prepare_legacy_account(ctx: Context<PrepareLegacyAccount>) -> Result<()> {
-        handle_prepare_legacy_account(ctx)
-    }
-
-    pub fn register_vesting_escrow_identity(
-        ctx: Context<RegisterVestingEscrowIdentity>,
-    ) -> Result<()> {
-        handle_register_vesting_escrow_identity(ctx)
-    }
-    pub fn register_rights_escrow_identity(
-        ctx: Context<RegisterRightsEscrowIdentity>,
-    ) -> Result<()> {
-        handle_register_rights_escrow_identity(ctx)
-    }
-
     pub fn register_issuer(
         ctx: Context<RegisterIssuer>,
         legal_entity_id: [u8; 32],

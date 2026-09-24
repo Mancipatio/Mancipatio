@@ -77,7 +77,6 @@ import {
   parseOpenSaleInstruction,
   parseOpenVaultVoteInstruction,
   parsePostUpdateInstruction,
-  parsePrepareLegacyAccountInstruction,
   parseProposeCustodyAuthorityInstruction,
   parseProposeIssuerAuthorityInstruction,
   parseProposeIssuerRecoveryInstruction,
@@ -90,8 +89,6 @@ import {
   parseRecoverIssuerRegistrationInstruction,
   parseRecoverVestingPositionInstruction,
   parseRegisterIssuerInstruction,
-  parseRegisterRightsEscrowIdentityInstruction,
-  parseRegisterVestingEscrowIdentityInstruction,
   parseReleasePayoutInstruction,
   parseRemoveAdminInstruction,
   parseReturnCustodyVaultInstruction,
@@ -173,7 +170,6 @@ import {
   type ParsedOpenSaleInstruction,
   type ParsedOpenVaultVoteInstruction,
   type ParsedPostUpdateInstruction,
-  type ParsedPrepareLegacyAccountInstruction,
   type ParsedProposeCustodyAuthorityInstruction,
   type ParsedProposeIssuerAuthorityInstruction,
   type ParsedProposeIssuerRecoveryInstruction,
@@ -186,8 +182,6 @@ import {
   type ParsedRecoverIssuerRegistrationInstruction,
   type ParsedRecoverVestingPositionInstruction,
   type ParsedRegisterIssuerInstruction,
-  type ParsedRegisterRightsEscrowIdentityInstruction,
-  type ParsedRegisterVestingEscrowIdentityInstruction,
   type ParsedReleasePayoutInstruction,
   type ParsedRemoveAdminInstruction,
   type ParsedReturnCustodyVaultInstruction,
@@ -659,7 +653,6 @@ export enum AssetRegistryInstruction {
   OpenSale,
   OpenVaultVote,
   PostUpdate,
-  PrepareLegacyAccount,
   ProposeCustodyAuthority,
   ProposeIssuerAuthority,
   ProposeIssuerRecovery,
@@ -672,8 +665,6 @@ export enum AssetRegistryInstruction {
   RecoverIssuerRegistration,
   RecoverVestingPosition,
   RegisterIssuer,
-  RegisterRightsEscrowIdentity,
-  RegisterVestingEscrowIdentity,
   ReleasePayout,
   RemoveAdmin,
   ReturnCustodyVault,
@@ -1365,17 +1356,6 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
-        new Uint8Array([75, 126, 227, 84, 183, 183, 94, 147]),
-      ),
-      0,
-    )
-  ) {
-    return AssetRegistryInstruction.PrepareLegacyAccount;
-  }
-  if (
-    containsBytes(
-      data,
-      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([109, 75, 237, 194, 252, 255, 135, 128]),
       ),
       0,
@@ -1503,28 +1483,6 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.RegisterIssuer;
-  }
-  if (
-    containsBytes(
-      data,
-      fixEncoderSize(getBytesEncoder(), 8).encode(
-        new Uint8Array([153, 1, 95, 147, 162, 8, 109, 85]),
-      ),
-      0,
-    )
-  ) {
-    return AssetRegistryInstruction.RegisterRightsEscrowIdentity;
-  }
-  if (
-    containsBytes(
-      data,
-      fixEncoderSize(getBytesEncoder(), 8).encode(
-        new Uint8Array([30, 96, 200, 199, 207, 176, 153, 183]),
-      ),
-      0,
-    )
-  ) {
-    return AssetRegistryInstruction.RegisterVestingEscrowIdentity;
   }
   if (
     containsBytes(
@@ -1946,9 +1904,6 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.PostUpdate;
     } & ParsedPostUpdateInstruction<TProgram>)
   | ({
-      instructionType: AssetRegistryInstruction.PrepareLegacyAccount;
-    } & ParsedPrepareLegacyAccountInstruction<TProgram>)
-  | ({
       instructionType: AssetRegistryInstruction.ProposeCustodyAuthority;
     } & ParsedProposeCustodyAuthorityInstruction<TProgram>)
   | ({
@@ -1984,12 +1939,6 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.RegisterIssuer;
     } & ParsedRegisterIssuerInstruction<TProgram>)
-  | ({
-      instructionType: AssetRegistryInstruction.RegisterRightsEscrowIdentity;
-    } & ParsedRegisterRightsEscrowIdentityInstruction<TProgram>)
-  | ({
-      instructionType: AssetRegistryInstruction.RegisterVestingEscrowIdentity;
-    } & ParsedRegisterVestingEscrowIdentityInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.ReleasePayout;
     } & ParsedReleasePayoutInstruction<TProgram>)
@@ -2480,13 +2429,6 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parsePostUpdateInstruction(instruction),
       };
     }
-    case AssetRegistryInstruction.PrepareLegacyAccount: {
-      assertIsInstructionWithAccounts(instruction);
-      return {
-        instructionType: AssetRegistryInstruction.PrepareLegacyAccount,
-        ...parsePrepareLegacyAccountInstruction(instruction),
-      };
-    }
     case AssetRegistryInstruction.ProposeCustodyAuthority: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2569,20 +2511,6 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.RegisterIssuer,
         ...parseRegisterIssuerInstruction(instruction),
-      };
-    }
-    case AssetRegistryInstruction.RegisterRightsEscrowIdentity: {
-      assertIsInstructionWithAccounts(instruction);
-      return {
-        instructionType: AssetRegistryInstruction.RegisterRightsEscrowIdentity,
-        ...parseRegisterRightsEscrowIdentityInstruction(instruction),
-      };
-    }
-    case AssetRegistryInstruction.RegisterVestingEscrowIdentity: {
-      assertIsInstructionWithAccounts(instruction);
-      return {
-        instructionType: AssetRegistryInstruction.RegisterVestingEscrowIdentity,
-        ...parseRegisterVestingEscrowIdentityInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.ReleasePayout: {

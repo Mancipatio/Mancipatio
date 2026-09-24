@@ -71,8 +71,7 @@ pub fn handle_withdraw_unvested<'info>(ctx: Context<'info, WithdrawUnvested<'inf
 
 /// Sweeps only assets above every outstanding finalized allocation. A client's
 /// own deposit first backs the entire allocation, so a donated excess cannot
-/// borrow that deposit's KYC refund exception. Legacy identity attachment starts
-/// with no own ledger and therefore requires normal recipient eligibility.
+/// borrow that deposit's KYC refund exception.
 pub fn handle_withdraw_vesting_surplus<'info>(
     ctx: Context<'info, WithdrawUnvested<'info>>,
 ) -> Result<()> {
@@ -103,8 +102,8 @@ fn withdraw_available<'info>(
     let s = &ctx.accounts.series;
     let available = ctx.accounts.escrow.amount.saturating_sub(reserved);
     // Conservatively count every recipient release against the client's own
-    // deposits first. Gifts, raw transfers and pre-attach history never create
-    // an unverified refund allowance. The allowance is consumed after CPI.
+    // deposits first. Gifts and raw transfers never create an unverified
+    // refund allowance. The allowance is consumed after CPI.
     let own_remaining = ctx
         .accounts
         .identity

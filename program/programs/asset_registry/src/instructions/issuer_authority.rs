@@ -430,7 +430,7 @@ pub fn handle_execute_issuer_recovery(ctx: Context<ExecuteIssuerRecovery>) -> Re
 
 /// Checks `share_class -> asset -> issuer` by the parent key in each account's
 /// first field (owner + discriminator checked), without deserializing the
-/// share class, so legacy v1 share classes sync too.
+/// share class.
 fn require_issuer_chain(
     share_class: &AccountInfo,
     expected_share_class: &Pubkey,
@@ -503,8 +503,7 @@ pub struct SyncPayoutFounder<'info> {
 }
 
 /// Anyone may copy the live `issuer.authority` into `PayoutVault.founder` (any
-/// vault state). A no-op when already in sync. Legacy v1 vaults run
-/// `prepare_legacy_account` first, as `release_payout` already requires.
+/// vault state). A no-op when already in sync.
 pub fn handle_sync_payout_founder(ctx: Context<SyncPayoutFounder>) -> Result<()> {
     let issuer = ctx.accounts.issuer.key();
     require_issuer_chain(

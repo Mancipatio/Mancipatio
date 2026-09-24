@@ -139,4 +139,19 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0047 complete sna
     for (const role of ["anon", "authenticated"])
       expect(() => db.query(`set role ${role}; insert into public.indexer_closed_rows(network,table_name,pda,row) values ('devnet','offers','x','{}');`)).toThrow();
   });
+  it("2E preflight counts every share-class row the front's v2-only decoder rejects, NULLs included", () => {
+    const sql = readFileSync(join(process.cwd(), "scripts/preflight/supabase-readonly-data.sql"), "utf8");
+    const count = /'share_class_rows_not_v2',\((select count\(\*\) from public\.share_classes where [^)]+)\)/.exec(sql)?.[1];
+    expect(count).toBeTruthy();
+    db.query(apply(20, [rows[3]]));
+    expect(db.query(`${count};`)).toBe("0");
+    // Rows written before 0047 carry NULL versions; the trigger would refuse them now.
+    const force = (set: string) => db.query(`set session_replication_role=replica; update public.share_classes set ${set};`);
+    for (const set of ["account_version=null", "account_version=1, readonly_legacy=true", "account_version=3", "readonly_legacy=null", "layout_version=null"]) {
+      force("account_version=2, layout_version=2, readonly_legacy=false");
+      expect(db.query(`${count};`)).toBe("0");
+      force(set);
+      expect(db.query(`${count};`), set).toBe("1");
+    }
+  });
 });

@@ -307,7 +307,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "Funding and surplus",
-        body: "New deposits cannot exceed the scheduled total. The app shows cumulative deposits and the actual remaining escrow balance separately. Active surplus can be withdrawn only above the unreleased recipient reserve; legacy or gifted surplus may require receiver verification.",
+        body: "New deposits cannot exceed the scheduled total. The app shows cumulative deposits and the actual remaining escrow balance separately. Active surplus can be withdrawn only above the unreleased recipient reserve; gifted or transferred surplus may require receiver verification.",
       },
       {
         title: "Resume after interruption",

@@ -27,9 +27,7 @@ import {
   type VestingMilestone,
 } from "@/lib/generated/asset_registry";
 
-import { detectNetwork } from "@/lib/network";
-import { decodeReadableShareClass, isLegacyShareClass, type LegacyShareClass } from "@/lib/legacy-accounts";
-import { publishLegacyShareClasses } from "@/lib/legacy-accounts-store";
+import { decodeShareClassV2 } from "@/lib/account-versions";
 
 type Rpc = SolanaClient["runtime"]["rpc"];
 type Raw = { address: Address; data: Uint8Array };
@@ -85,7 +83,6 @@ export type NetworkData = {
   issuers: Issuer[];
   assets: Asset[];
   shareClasses: ShareClass[];
-  legacyShareClasses?: LegacyShareClass[];
   sales: Sale[];
   offers: Offer[];
   rightsIssuances: RightsIssuance[];
@@ -94,9 +91,6 @@ export type NetworkData = {
 
 export async function loadNetwork(rpc: Rpc): Promise<NetworkData> {
   const raws = await fetchAll(rpc);
-  const readable = ofType(raws, getShareClassDiscriminatorBytes(), decodeReadableShareClass, "ShareClass");
-  const legacyShareClasses = readable.filter(isLegacyShareClass);
-  publishLegacyShareClasses(detectNetwork(), legacyShareClasses);
   return {
     issuers: ofType(
       raws,
@@ -110,8 +104,7 @@ export async function loadNetwork(rpc: Rpc): Promise<NetworkData> {
       (d) => getAssetDecoder().decode(d),
       "Asset",
     ),
-    shareClasses: readable.filter((a): a is ShareClass => !isLegacyShareClass(a)),
-    legacyShareClasses,
+    shareClasses: ofType(raws, getShareClassDiscriminatorBytes(), decodeShareClassV2, "ShareClass"),
     sales: ofType(
       raws,
       getSaleDiscriminatorBytes(),

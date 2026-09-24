@@ -16,6 +16,7 @@ import {
   getProposalDecoder,
   getRightsIssuanceDecoder,
   getSaleDecoder,
+  getShareClassDecoder,
   getVestingMilestoneDecoder,
   getVoteRecordDecoder,
   type Asset,
@@ -29,8 +30,6 @@ import {
   type VestingMilestone,
   type VoteRecord,
 } from "@/lib/generated/asset_registry";
-import { decodeReadableShareClass, isLegacyShareClass } from "@/lib/legacy-accounts";
-import { publishLegacyShareClasses } from "@/lib/legacy-accounts-store";
 import { getSupabase } from "@/lib/supabase";
 import { detectNetwork } from "@/lib/network";
 import { mergeableArchivedOffers } from "@/lib/closed-account";
@@ -120,7 +119,7 @@ async function fetchAllRaw(
   return out;
 }
 
-/** A malformed/legacy row invalidates the snapshot; never hide funded rows. */
+/** A malformed or out-of-date row invalidates the snapshot; never hide funded rows. */
 function decodeAll<T>(rows: Row[], decoder: { decode: (b: Uint8Array) => T }, expectedVersion = 1): T[] {
   return rows.map((row) => {
     const b64 = row.raw?.base64;
@@ -166,15 +165,8 @@ export async function loadNetworkFromIndexer(): Promise<NetworkData> {
 
   const issuers = decodeAll<Issuer>(issuersR, getIssuerDecoder());
   const assets = decodeAll<Asset>(assetsR, getAssetDecoder());
-  const readable = shareClassesR.map((row) => {
-    if (!row.raw?.base64 || row.layout_version !== 2 || ![1, 2].includes(row.account_version ?? 0)) throw new Error("Indexer share class requires reconciliation");
-    const a = decodeReadableShareClass(base64ToBytes(row.raw.base64));
-    if (a.version !== row.account_version) throw new Error("Indexer account version mismatch");
-    return a;
-  });
-  const legacyShareClasses = readable.filter(isLegacyShareClass);
-  const shareClasses = readable.filter((a): a is ShareClass => !isLegacyShareClass(a));
-  publishLegacyShareClasses(network, legacyShareClasses);
+  // ShareClass v2 only: the program has no v1 path, so a v1 row fails closed.
+  const shareClasses = decodeAll<ShareClass>(shareClassesR, getShareClassDecoder(), 2);
   // Sale v2 (program 2B, SALE_STATE_VERSION): v1 rows are not on chain.
   const sales = decodeAll<Sale>(salesR, getSaleDecoder(), 2);
   const offers = decodeAll<Offer>(offersR, getOfferDecoder());
@@ -191,7 +183,6 @@ export async function loadNetworkFromIndexer(): Promise<NetworkData> {
     issuers,
     assets,
     shareClasses,
-    legacyShareClasses,
     sales,
     offers,
     rightsIssuances,

@@ -152,9 +152,3 @@ pub mod issuer_authority;
 pub use issuer_authority::*;
 pub mod update_kyc_registry_jurisdictions;
 pub use update_kyc_registry_jurisdictions::*;
-
-pub mod register_escrow_identity;
-pub use register_escrow_identity::*;
-
-pub mod prepare_legacy_account;
-pub use prepare_legacy_account::*;

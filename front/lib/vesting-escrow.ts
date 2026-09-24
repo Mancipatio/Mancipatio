@@ -40,6 +40,10 @@ export async function loadVestingEscrow(
     series.status === VestingSeriesStatus.Active
       ? series.totalAllocated - series.totalReleased
       : BigInt(0);
+  // Every current series is created with its EscrowIdentity and the program
+  // has no attach instruction, so a missing identity is only reported
+  // (`identity: null`), never repaired: balances and reserves stay readable
+  // while deposits and surplus withdrawals remain disabled.
   return {
     identityPda,
     identity: identity.exists ? identity.data : null,

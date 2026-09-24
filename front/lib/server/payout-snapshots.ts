@@ -1,8 +1,8 @@
 import "server-only";
 import { address } from "@solana/kit";
-import { ASSET_REGISTRY_PROGRAM_ADDRESS, getVaultVoteDecoder, getVaultVoteDiscriminatorBytes, findVaultPda, PayoutVaultState, VaultVoteOutcome } from "@/lib/generated/asset_registry";
-import { decodeReadablePayoutVault, isLegacyPayoutVault, decodeReadableVaultVote, isLegacyVaultVote } from "@/lib/legacy-accounts";
-import { vaultVotePda, legacyVaultVotePda } from "@/lib/payout-vote-pda";
+import { ASSET_REGISTRY_PROGRAM_ADDRESS, getVaultVoteDecoder, getVaultVoteDiscriminatorBytes, findVaultPda, PayoutVaultState, type PayoutVault } from "@/lib/generated/asset_registry";
+import { decodePayoutVaultV2 } from "@/lib/account-versions";
+import { vaultVotePda } from "@/lib/payout-vote-pda";
 import { canonicalPayoutSnapshot, snapshotHex, type PayoutSnapshotKind, type PreparedPayoutSnapshot } from "@/lib/payout-snapshots";
 import { getServerRpc } from "@/lib/server/rpc";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
@@ -13,7 +13,7 @@ export type StoredPayoutSnapshot = PreparedPayoutSnapshot & { network: string; r
 const timeout = () => AbortSignal.timeout(10_000);
 export function payoutSnapshotLocator(params: Record<string, unknown>, requireTotal = true): SnapshotLocator {
   const { kind, target_pda, round, root_hex, total_weight } = params;
-  if (kind !== "vault_vote" && kind !== "investor_yield" && kind !== "legacy_vault_vote") throw new SiwsError(400, "Invalid snapshot kind");
+  if (kind !== "vault_vote" && kind !== "investor_yield") throw new SiwsError(400, "Invalid snapshot kind");
   if (typeof target_pda !== "string") throw new SiwsError(400, "Invalid payout vault address");
   try { address(target_pda); } catch { throw new SiwsError(400, "Invalid payout vault address"); }
   if (typeof round !== "string" || !/^(0|[1-9]\d{0,19})$/.test(round) || BigInt(round) > BigInt("18446744073709551615") || (kind === "vault_vote" ? round === "0" : round !== "0")) throw new SiwsError(400, "Invalid snapshot round");
@@ -29,26 +29,25 @@ function accountBytes(value: unknown): Uint8Array {
 async function vaultSnapshot(locator: SnapshotLocator, withVote: boolean) {
   const addrs = [address(locator.target_pda)];
   if (withVote && locator.kind === "vault_vote") addrs.push(await vaultVotePda(addrs[0], BigInt(locator.round)));
-  if (withVote && locator.kind === "legacy_vault_vote") addrs.push(await legacyVaultVotePda(addrs[0]));
   const snapshot = await getServerRpc().getMultipleAccounts(addrs, { commitment: "finalized", encoding: "base64" }).send({ abortSignal: timeout() }).catch(() => { throw new SiwsError(503, "Finalized payout snapshot unavailable — retry"); });
   if (!snapshot?.context || !["number", "bigint"].includes(typeof snapshot.context.slot) || !Array.isArray(snapshot.value)) throw new SiwsError(503, "Incomplete finalized snapshot");
   const slot = Number(snapshot.context.slot);
   if (!Number.isSafeInteger(slot) || slot < 0 || snapshot.value.length !== addrs.length) throw new SiwsError(503, "Incomplete finalized snapshot");
   if (!snapshot.value[0]) throw new SiwsError(409, "Payout vault is not finalized on this network");
-  const vault = decodeReadablePayoutVault(accountBytes(snapshot.value[0]));
+  const bytes = accountBytes(snapshot.value[0]);
+  let vault: PayoutVault;
+  try { vault = decodePayoutVaultV2(bytes); } catch (err) { throw new SiwsError(409, err instanceof Error ? err.message : "Unsupported payout vault account"); }
   if ((await findVaultPda({ sale: vault.sale }))[0] !== locator.target_pda) throw new SiwsError(409, "Payout vault identity mismatch");
   return { vault, snapshot, slot };
 }
+/** Stored rows reach this from the bind and proof routes without passing the
+ * locator, so the kind dispatch is exhaustive: any other kind fails closed. */
 export async function verifyPayoutSnapshotBinding(locator: SnapshotLocator) {
+  const kind: string = locator.kind;
+  if (kind !== "vault_vote" && kind !== "investor_yield") throw new SiwsError(409, "Unsupported payout snapshot kind");
   const { vault, snapshot, slot } = await vaultSnapshot(locator, true);
   let root: string;
-  if (locator.kind === "legacy_vault_vote") {
-    if (!isLegacyPayoutVault(vault) || vault.state !== PayoutVaultState.Cancelled || !snapshot.value[1]) throw new SiwsError(409, "Only a cancelled legacy vault with an original return-capital vote supports this recovery");
-    const vote = decodeReadableVaultVote(accountBytes(snapshot.value[1]));
-    if (!isLegacyVaultVote(vote) || vote.payoutVault !== locator.target_pda || vote.outcome !== VaultVoteOutcome.ReturnCapital) throw new SiwsError(409, "The original legacy vote has no terminal return-capital decision");
-    root = snapshotHex(vote.snapshotRoot);
-  } else if (isLegacyPayoutVault(vault)) throw new SiwsError(409, "Legacy payout vault requires its separately verified terminal refund flow");
-  else if (locator.kind === "vault_vote") {
+  if (kind === "vault_vote") {
     if (!snapshot.value[1]) throw new SiwsError(409, "Vote round is not finalized yet; retry snapshot verification");
     const bytes = accountBytes(snapshot.value[1]);
     if (!getVaultVoteDiscriminatorBytes().every((b, i) => b === bytes[i])) throw new SiwsError(409, "Unexpected vote account discriminator");
@@ -64,12 +63,7 @@ export async function prepareOriginalPayoutSnapshot(wallet: string, params: Reco
   let canonical: Awaited<ReturnType<typeof canonicalPayoutSnapshot>>;
   try { canonical = await canonicalPayoutSnapshot(input); } catch (err) { throw new SiwsError(400, err instanceof Error ? err.message : "Invalid snapshot"); }
   if (params.rows_hash !== canonical.rows_hash || locator.root_hex !== canonical.root_hex || locator.total_weight !== canonical.total_weight) throw new SiwsError(400, "Snapshot rows do not match signed digest, root or total");
-  if (locator.kind === "legacy_vault_vote") {
-    await verifyPayoutSnapshotBinding(locator);
-    return persistOriginalSnapshot(wallet, locator, canonical);
-  }
   const { vault } = await vaultSnapshot(locator, false);
-  if (isLegacyPayoutVault(vault)) throw new SiwsError(409, "Legacy payout vault requires its separately verified terminal refund flow");
   if (vault.totalWeight !== BigInt(0) && vault.totalWeight.toString() !== locator.total_weight) throw new SiwsError(409, "Original investor total weight cannot change");
   if (locator.kind === "vault_vote") {
     const round = BigInt(locator.round);

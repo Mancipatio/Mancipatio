@@ -18,7 +18,6 @@ import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   VestingSeriesStatus,
   findCreateVestingSeriesIdentityPda,
-  getRegisterVestingEscrowIdentityInstructionAsync,
   getWithdrawUnvestedInstruction,
   getWithdrawVestingSurplusInstruction,
   type VestingSeries,
@@ -52,7 +51,7 @@ beforeEach(() => {
     },
   });
 });
-it("reserves unreleased allocations, reads actual balance and does not invent legacy refund history", async () => {
+it("reserves unreleased allocations, reads actual balance and reports a missing identity as null", async () => {
   const state = await loadVestingEscrow(rpc, seriesPda, series);
   expect(state.identity).toBeNull();
   expect(state.reserved).toBe(BigInt(70));
@@ -97,16 +96,11 @@ it("rejects spoofed identity/refund ownership and escrow token owners", async ()
     "owner or mint",
   );
 });
-it("builds legacy attach and both withdrawal instructions with the same canonical identity PDA", async () => {
+it("builds both withdrawal instructions with the same canonical identity PDA", async () => {
   const signer = createNoopSigner(authority),
     [identity] = await findCreateVestingSeriesIdentityPda({
       series: seriesPda,
-    }),
-    attach = await getRegisterVestingEscrowIdentityInstructionAsync({
-      payer: signer,
-      series: seriesPda,
     });
-  expect(attach.accounts[2].address).toBe(identity);
   const args = {
       authority: signer,
       series: seriesPda,

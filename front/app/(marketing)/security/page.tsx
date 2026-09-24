@@ -98,8 +98,7 @@ export default function SecurityPage() {
           A verified program escrow can receive units under its defined route.
           Exiting an escrow does not grant a general identity exemption:
           recipient checks still apply, with narrow returns of recorded deposits
-          handled by the program. Attaching a legacy escrow identity does not
-          invent past funding or make gifted surplus exempt.
+          handled by the program.
         </Body>
       </Section>
 

@@ -35,9 +35,7 @@ import {
   type PayoutVault,
 } from "@/lib/generated/asset_registry";
 
-import { decodeReadablePayoutVault, isLegacyPayoutVault, type LegacyPayoutVault } from "@/lib/legacy-accounts";
-import { publishLegacyPayoutVaults } from "@/lib/legacy-accounts-store";
-import { detectNetwork } from "@/lib/network";
+import { decodePayoutVaultV2 } from "@/lib/account-versions";
 
 type Rpc = SolanaClient["runtime"]["rpc"];
 
@@ -115,7 +113,6 @@ export async function loadPayoutVaults(rpc: Rpc): Promise<PayoutVaultRecord[]> {
     .getProgramAccounts(ASSET_REGISTRY_PROGRAM_ADDRESS, { encoding: "base64", commitment: "finalized" })
     .send();
   const disc = getPayoutVaultDiscriminatorBytes();
-  const legacy: { address: string; vault: LegacyPayoutVault }[] = [];
   const out: PayoutVaultRecord[] = [];
   for (const r of res) {
     const b64 = (r.account.data as readonly [string, string])[0];
@@ -132,13 +129,11 @@ export async function loadPayoutVaults(rpc: Rpc): Promise<PayoutVaultRecord[]> {
     }
     if (match) {
       if (r.account.owner !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Unexpected payout vault owner");
-      const vault = decodeReadablePayoutVault(bytes);
+      const vault = decodePayoutVaultV2(bytes);
       if (await payoutVaultPda(vault.sale) !== r.pubkey) throw new Error("Payout vault PDA mismatch");
-      if (isLegacyPayoutVault(vault)) legacy.push({ address: r.pubkey, vault });
-      else out.push({ address: r.pubkey, vault });
+      out.push({ address: r.pubkey, vault });
     }
   }
-  publishLegacyPayoutVaults(detectNetwork(), legacy);
   return out;
 }
 
