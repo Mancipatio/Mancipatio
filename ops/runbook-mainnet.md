@@ -555,7 +555,7 @@ checks).
 | `MANCI_TARGET` | Required by `scripts/db.sh`, no default. `maintenance.sh`, `backup.sh` and `supabase.sh` take the target as an argument and refuse a different `MANCI_TARGET`. |
 | `MANCI_ALLOW_MAINNET=1` | Required for any target whose network is mainnet. |
 | `MANCI_DB_BOOTSTRAP=1` | Per command, only while the project has no identity row (0001–0070 and `deployment-identity.sql`). Refused once the row exists. |
-| `MANCI_PGPASSFILE` | Default `~/.mancipatio/pgpass`, mode 600: `<poolerHost>:5432:postgres:postgres.<ref>:<password>`. Devnet may fall back to `.env.local` `SUPABASE_DB_URL` until Talas 7; mainnet never reads `.env*`. |
+| `MANCI_PGPASSFILE` | Default `~/.mancipatio/pgpass`, mode 600: `<poolerHost>:5432:postgres:postgres.<ref>:<password>`, with `:` and `\` in the password escaped as `\:` and `\\` (see "Credential files"). Devnet may fall back to `.env.local` `SUPABASE_DB_URL` until Talas 7; mainnet never reads `.env*`. |
 | `MANCI_PG_BIN` | `backup.sh`'s PostgreSQL client, default `/opt/homebrew/opt/postgresql@17/bin`; at least the server's major version. |
 
 `db.sh` runs `scripts/ops/assert-target.sql` first in the same psql session:
@@ -564,6 +564,46 @@ before any of your SQL. Files that read the target (`retry-scheduler.sql`,
 `deployment-identity.sql`) must run via `-f`.
 
 Every command below runs from `front/`.
+
+### Credential files
+
+Never put a password or key in a command line: the shell saves it to its
+history file (zsh does by default). Create each file empty and mode 600
+first, then add the secret from a silent prompt or an editor. `umask 077`
+alone is not enough, because `>` keeps the mode of a file that already
+exists.
+
+```
+install -d -m 700 ~/.mancipatio
+install -m 600 /dev/null ~/.mancipatio/pgpass          # replaces any old file, mode 600
+printf 'DB password: '; IFS= read -rs PW; echo
+printf '%s:5432:postgres:postgres.%s:%s\n' aws-0-eu-west-1.pooler.supabase.com gvnckuzmuwozlcohtuhx \
+  "$(printf '%s' "$PW" | sed 's/[\\:]/\\&/g')" >> ~/.mancipatio/pgpass
+unset PW
+```
+
+The `sed` escapes `:` and `\` in the password as `\:` and `\\`, which
+pgpass requires. If they are not escaped, the line silently fails to match,
+and because the tools always pass `-w`, psql then reports only
+`fe_sendauth: no password supplied`. The same applies if you edit the file by
+hand (`${EDITOR:-vi} ~/.mancipatio/pgpass` after the `install` line). One line
+per project; a mainnet line uses that target's `poolerHost` and `projectRef`.
+The `install` line replaces an existing file: to add a second project, skip
+it and only append (the file must still be mode 600; `db.sh` refuses
+anything else).
+
+Edge function secrets (`supabase.sh … secrets set --env-file`) work the same
+way:
+
+```
+install -m 600 /dev/null ~/.mancipatio/devnet-edge.env
+printf 'sb_secret key: '; IFS= read -rs KEY; echo
+printf 'MANCI_SUPABASE_SECRET_KEY=%s\n' "$KEY" >> ~/.mancipatio/devnet-edge.env
+unset KEY
+```
+
+For a bearer token (`HEALTH_TOKEN`), read it the same way into a variable
+and pass `"$HEALTH_TOKEN"`; never paste the value into the command.
 
 ### Rules for migrations after 0071
 
@@ -609,10 +649,33 @@ Before every migration: `bash scripts/ops/backup.sh <target> pre-<migration>`.
 ### Edge function and Supabase CLI
 
 `scripts/ops/supabase.sh <target> …` allows only `functions deploy
-helius-webhook`, `secrets list`, `secrets set --env-file <file>` (mode 600)
-and `secrets unset NAME…`, and appends `--project-ref` from the target. Delete
-`front/supabase/.temp/` before the first use; the wrapper refuses while a
-linked project is recorded there.
+helius-webhook [--use-api]`, `secrets list`, `secrets set --env-file <file>`
+(mode 600) and `secrets unset NAME…`, and appends `--project-ref` from the
+target. Delete `front/supabase/.temp/` before the first use; the wrapper
+refuses while a linked project is recorded there. A plain deploy bundles the
+function in Docker; without a running Docker, add `--use-api` (Supabase
+bundles it server-side; the project still comes from the target).
+
+Before every deploy, `npm run check:edge` type-checks the function with Deno
+against its import map (`deno.json`; Front CI runs the same step). It proves
+the imports resolve and the code types; only a deploy proves the bundle (G4).
+
+Rollback of the function: redeploy the code of the last commit before the
+change, with the current wrapper (older commits may not have it), then
+restore the working tree:
+
+```
+git checkout <previous commit> -- supabase/functions
+bash scripts/ops/supabase.sh <target> functions deploy helius-webhook   # add --use-api without Docker
+git checkout HEAD -- supabase/functions
+git status --short supabase/functions                                   # expect no output
+```
+
+For the Talas 4.3 change, `<previous commit>` is the first parent of PR-B's
+merge commit (`git rev-parse <merge commit>^1`; `e5c4d1a` if main has not
+moved). That code reads the key Supabase injects
+(`SUPABASE_SERVICE_ROLE_KEY`), so it needs no secret change while the
+project's legacy API keys are still enabled.
 
 Per project: `MANCI_SUPABASE_SECRET_KEY` (the project's `sb_secret_` key; no
 legacy fallback), `HELIUS_WEBHOOK_SECRET`, `INDEXER_NETWORK`, and its own
@@ -627,9 +690,119 @@ index reconcile (account state, not events).
 needs the target's `siteOrigin` and the Vault secret
 `mancipatio_retry_worker_<network>`. It installs `mancipatio-retry-<network>`
 DISABLED (G6: record the active state first, re-enable with
-`cron.alter_job` if it was active). Mainnet's scheduler waits until the
+`cron.alter_job` if it was active). The install rolls back unless `cron.job`
+ends with exactly one disabled job of that name running
+`mancipatio_ops.invoke_retry_worker()` and no job still calling the dropped
+`invoke_retry_worker_devnet()`; its last output is that job's row. That, and
+the status SQL showing the same single job and the target's origin, are the
+pass/fail gate before re-enabling. Mainnet's scheduler waits until the
 mainnet front answers at its origin, which happens only after devnet moves to
 `devnet.manci.io` (D15).
+
+### Devnet rollout of Talas 4.3 (PR-B)
+
+The database steps run from the PR-B branch before the merge; the deployed
+front and edge function keep working throughout, because 0070/0071 change
+no behaviour for correct devnet rows and the old function keeps its key
+until it is redeployed.
+
+**A. Before the merge (owner, no writes).**
+
+1. Vercel, devnet project, Settings → Environment Variables, **Production**
+   scope: `NEXT_PUBLIC_SUPABASE_URL` must be exactly
+   `https://gvnckuzmuwozlcohtuhx.supabase.co` (a trailing slash is fine).
+   The production build now refuses any other devnet URL, and the PR's
+   preview build proves only the Preview-scoped value. A failed production
+   build leaves the previous deployment serving, so step C could not tell.
+2. Credential files as above; `pg_dump` at least the server's major version
+   (`brew install postgresql@17`, or set `MANCI_PG_BIN`).
+3. `npm run check:edge` passes on the branch.
+
+**B. Database (maintenance window of about 10 minutes).**
+
+```
+MANCI_DB_BOOTSTRAP=1 bash scripts/ops/backup.sh devnet pre-0070
+MANCI_TARGET=devnet MANCI_DB_BOOTSTRAP=1 bash scripts/db.sh -Atc "select jobname||' active='||active from cron.job where jobname like 'mancipatio-%'"
+MANCI_DB_BOOTSTRAP=1 bash scripts/ops/maintenance.sh devnet on "Database upgrade in progress, back in about 10 minutes."
+sleep 70
+MANCI_TARGET=devnet MANCI_DB_BOOTSTRAP=1 bash scripts/db.sh -f supabase/migrations/0070_deployment_identity.sql
+MANCI_TARGET=devnet MANCI_DB_BOOTSTRAP=1 bash scripts/db.sh -f scripts/ops/deployment-identity.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0071_network_guard.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-parity.sql
+bash scripts/ops/maintenance.sh devnet off
+```
+
+- Record the second command's output (G6: whether `mancipatio-retry-devnet`
+  is active).
+- The identity preflight must show identity `devnet` /
+  `gvnckuzmuwozlcohtuhx`, `tables_without_guard` `[]`,
+  `defaults_not_dynamic` `{}` and `browser_insert_paths` `[]` (G5).
+  `rows_of_other_networks` lists `platform_raise_limits` with its one
+  `'mainnet'` seed row (0056); existing rows stay and are harmless.
+- On any failure: maintenance stays on, then "Rollback of 0071" above.
+
+**C. Merge PR-B, then prove the new front serves.**
+
+1. Vercel → Deployments, Production: the deployment serving `www.manci.io`
+   is READY **on the merge commit**. READY on an older commit means the
+   production build failed; fix it (usually A.1) before going on.
+2. `curl -s https://www.manci.io/api/health` returns `"ok":true`. This proves
+   the database network check passed only together with C.1: the anonymous
+   answer carries no commit.
+3. When `HEALTH_TOKEN` is set on the deployment, also check the details
+   (read the token with `IFS= read -rs HEALTH_TOKEN` first):
+   `curl -s -H "Authorization: Bearer $HEALTH_TOKEN" https://www.manci.io/api/health`
+   shows `commit` = the merge commit's first 12 characters and
+   `checks.databaseNetwork.status` = `"ok"`.
+
+**D. Retry scheduler.**
+
+```
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/retry-scheduler.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/retry-scheduler-status.sql
+```
+
+Pass: the install ends with one row `mancipatio-retry-devnet | f | devnet |
+https://www.manci.io`, and the status shows that single job (one row, your
+role as `username`) and the same config. Only then, and only if G6 recorded
+it active:
+`MANCI_TARGET=devnet bash scripts/db.sh -c "select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-retry-devnet'"`.
+Afterwards `retry-scheduler-status.sql` shows `complete` runs within a few
+minutes.
+
+**E. Edge function.**
+
+1. Supabase dashboard: enable the new API keys (the legacy ones stay
+   enabled).
+2. `rm -rf supabase/.temp`, then create `~/.mancipatio/devnet-edge.env` as
+   under "Credential files".
+3. ```
+   bash scripts/ops/supabase.sh devnet secrets set --env-file ~/.mancipatio/devnet-edge.env
+   bash scripts/ops/supabase.sh devnet secrets list
+   bash scripts/ops/supabase.sh devnet functions deploy helius-webhook   # add --use-api without Docker
+   ```
+   `secrets list` must show `MANCI_SUPABASE_SECRET_KEY`,
+   `HELIUS_WEBHOOK_SECRET` and `INDEXER_NETWORK`.
+4. Send a signed test delivery: it answers 202 and its `indexer_jobs` are
+   processed (G3, server side). Record Helius's retry window (G9).
+5. On failure: the function rollback above (the old code needs no secret
+   change).
+
+**F. Front keys (design §8 5.5).** Switch the devnet front to the new keys,
+Preview first, then Production:
+
+1. Vercel, **Preview** scope: `NEXT_PUBLIC_SUPABASE_ANON_KEY` =
+   `sb_publishable_…` and `SUPABASE_SERVICE_ROLE_KEY` = `sb_secret_…`
+   (names unchanged, D13). Redeploy a preview (public variables are baked
+   in at build time).
+2. On the preview: sign in, open a page that reads data, make one signed
+   write, and check that `/api/health` answers `"ok":true` (G3, browser and
+   server).
+3. The same two values in **Production** scope, redeploy production, then
+   repeat C.1 and C.2 for that deployment.
+4. Keep the legacy keys enabled for 7 green days. Rollback: set the legacy
+   values back in the affected scope and redeploy.
 
 ### Mainnet project bootstrap (`MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1` throughout)
 
@@ -658,8 +831,10 @@ mainnet front answers at its origin, which happens only after devnet moves to
 10. Front: `NEXT_PUBLIC_SUPABASE_ANON_KEY` = `sb_publishable_…`,
     `SUPABASE_SERVICE_ROLE_KEY` = `sb_secret_…` (the build and the server
     refuse other formats on mainnet); `HEALTH_TOKEN` and an uptime monitor on
-    `/api/health` (D19). `/api/health` `ok:true` proves the database network
-    check passed.
+    `/api/health` (D19). Once the production deployment is READY on the
+    intended commit, `/api/health` `ok:true` proves the database network
+    check passed; with `HEALTH_TOKEN`, check `commit` and
+    `checks.databaseNetwork.status` too.
 11. `MANCIPATIO_LIVE_SMOKE=mainnet MANCI_ALLOW_MAINNET=1 npx vitest run
     --config scripts/ops/deployment-smoke.config.ts`.
 

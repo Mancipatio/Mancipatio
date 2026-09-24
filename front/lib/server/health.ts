@@ -39,7 +39,9 @@
 //                 non-mainnet (a testnet front may use the devnet project,
 //                 like the 0071 guard) → ok; another network → fail
 //                 (wrong_network); no identity yet → fail (not_configured).
-//                 Fail-level, so an anonymous ok:true proves it passed.
+//                 Fail-level, so an anonymous ok:true from a deployment
+//                 that has this check proves it passed (the anonymous
+//                 answer names no commit: confirm which deployment serves).
 // Reports are shared for a few seconds per instance and concurrent requests
 // share one run, so a public endpoint cannot multiply database or RPC load.
 
