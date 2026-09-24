@@ -254,7 +254,8 @@ export type IdlExportSpec = {
   programAddress: Address;
   programData: Address;
   metadata: Address;
-  buffer: Address;
+  /** null: a trim-only spec (the IDL is in sync but the account is not trimmed). */
+  buffer: Address | null;
   vault: Address;
   spill: Address;
   oldDataLength: number;
@@ -296,9 +297,7 @@ export async function planIdl(input: IdlPlanInput): Promise<IdlPlan> {
   if (probe.status === "immutable" || probe.status === "foreign-format") {
     throw new ChainPlanError(`${probe.program}: canonical IDL is ${probe.status}; the tool stops`);
   }
-  if (probe.status === "in-sync") {
-    return { steps, watched: [M], placeholders, bufferAddress: null, exportSpec: null, notes: ["in sync; nothing to send"] };
-  }
+  if (probe.status === "in-sync") return planInSyncRepair(input);
 
   if (probe.status === "init" || probe.status === "init-resume") {
     if (mode !== "send") throw new ChainPlanError(`${probe.program}: IDL init needs the UA (before handover); prepare-export only updates`);
@@ -393,6 +392,9 @@ export async function planIdl(input: IdlPlanInput): Promise<IdlPlan> {
   const decoded = probe.decoded!;
   const oldLength = decoded.dataLength;
   const delta = L - oldLength;
+  // setData never shrinks the account: trim whenever it is (or would stay)
+  // longer than the new data, also after an earlier interrupted shrink.
+  const needsTrim = Math.max(probe.account?.data.length ?? 0, PM_HEADER_LENGTH + oldLength) > target;
   const resume = input.resumeBuffer ?? null;
   const buffer = resume ? resume.address : input.newBuffer.address;
   if (!resume) placeholders.set(input.newBuffer.address, `<idl-buffer:${probe.program}>`);
@@ -509,7 +511,7 @@ export async function planIdl(input: IdlPlanInput): Promise<IdlPlan> {
         oldDataLength: oldLength,
         newDataLength: L,
         extendLengths: extendSteps,
-        trim: delta < 0,
+        trim: needsTrim,
         sourceSha256: sha256Hex(probe.source.bytes),
         compressedSha256: sha256Hex(compressed),
       },
@@ -540,7 +542,7 @@ export async function planIdl(input: IdlPlanInput): Promise<IdlPlan> {
     idempotency: "replay-safe",
     required: "finalized",
   });
-  if (delta < 0) {
+  if (needsTrim) {
     steps.push({
       ...base,
       id: id("trim"),
@@ -555,6 +557,87 @@ export async function planIdl(input: IdlPlanInput): Promise<IdlPlan> {
   const last = steps[steps.length - 1];
   last.postCheck = (s) => verifyIdl(classifyIdl(probe.program, M, s.get(M) ?? null, probe.source)).length === 0;
   return { steps, watched: [M, buffer], placeholders, bufferAddress: buffer, exportSpec: null, notes };
+}
+
+/**
+ * The IDL bytes are in sync. What an interrupted update can still leave:
+ * - the account is not trimmed (a shrinking update stopped after setData):
+ *   send plans `trim`; prepare-export writes a trim-only spec for the vault;
+ * - the update buffer was not closed (send only): given as
+ *   CHAIN_IDL_RESUME_BUFFER (the journal's `buffer` event), it is closed.
+ */
+async function planInSyncRepair(input: IdlPlanInput): Promise<IdlPlan> {
+  const { probe, signer, mode } = input;
+  const M = probe.metadata;
+  const P = probe.programAddress;
+  const PD = input.programData;
+  const steps: PlanStep<IdlState>[] = [];
+  const notes: string[] = [];
+  const id = (suffix: string) => `${probe.program}:${suffix}`;
+  const base = { signer, signerRole: input.signerRole, simulate: "at-send" as const };
+  const target = PM_HEADER_LENGTH + (probe.decoded?.dataLength ?? 0);
+  const leftover = input.resumeBuffer ?? null;
+  let bufferAddress: Address | null = null;
+  if (leftover) {
+    if (mode !== "send") throw new ChainGateError("CHAIN_IDL_RESUME_BUFFER on an in-sync IDL is only closed in send mode");
+    const decodedBuffer = decodePmBufferAccount(leftover.data);
+    if (!decodedBuffer || leftover.owner !== PM_PROGRAM || decodedBuffer.authority !== signer.address) {
+      throw new ChainGateError("CHAIN_IDL_RESUME_BUFFER is not a PM buffer owned by the signer");
+    }
+    bufferAddress = leftover.address;
+    const buffer = leftover.address;
+    steps.push({
+      ...base,
+      id: id("close-buffer"),
+      title: "close the leftover IDL buffer (rent back to the signer)",
+      ixs: [pmClose({ account: buffer, authority: signer, destination: signer.address })],
+      preconditions: [],
+      skip: (s) => !s.get(buffer),
+      idempotency: "replay-safe",
+      required: "finalized",
+    });
+    notes.push(`in sync; closing the leftover buffer ${buffer}`);
+  }
+  let exportSpec: IdlExportSpec | null = null;
+  if (probe.trimmed === false) {
+    notes.push("in sync but not trimmed (an interrupted shrinking update); trim planned");
+    if (mode === "send") {
+      steps.push({
+        ...base,
+        id: id("trim"),
+        title: "trim the metadata account",
+        ixs: [pmTrim({ account: M, authority: signer, program: P, programData: PD, destination: signer.address })],
+        preconditions: [],
+        skip: (s) => lengthOf(s, M) === target,
+        idempotency: "replay-safe",
+        required: "finalized",
+      });
+    } else {
+      if (!input.vault) throw new ChainGateError("prepare-export needs the Squads vault from the role map");
+      const compressed = compressIdl(probe.source.bytes);
+      exportSpec = {
+        schema: "mancipatio-idl-export-spec-v1",
+        program: probe.program,
+        programAddress: P,
+        programData: PD,
+        metadata: M,
+        buffer: null,
+        vault: input.vault,
+        spill: signer.address,
+        oldDataLength: probe.decoded!.dataLength,
+        newDataLength: probe.decoded!.dataLength,
+        extendLengths: [],
+        trim: true,
+        sourceSha256: sha256Hex(probe.source.bytes),
+        compressedSha256: sha256Hex(compressed),
+      };
+    }
+  }
+  if (steps.length) {
+    steps[steps.length - 1].postCheck = (s) => verifyIdl(classifyIdl(probe.program, M, s.get(M) ?? null, probe.source)).length === 0;
+  }
+  if (!steps.length && !exportSpec) notes.push("in sync; nothing to send");
+  return { steps, watched: bufferAddress ? [M, bufferAddress] : [M], placeholders: new Map(), bufferAddress: null, exportSpec, notes };
 }
 
 // ── Tool ────────────────────────────────────────────────────────────────────
@@ -749,7 +832,12 @@ export async function idlTool(ctx: ToolContext): Promise<ToolStatus> {
   evidence.notes = plans.flatMap((p) => p.notes);
   ctx.log(`plan: ${steps.length} transactions, digest ${digest}`);
   for (const step of steps) ctx.log(`  ${step.id.padEnd(34)} ${step.title}`);
-  if (!steps.length) return "completed";
+  if (!steps.length) {
+    const specs = plans.map((p) => p.exportSpec).filter(Boolean);
+    // A trim-only spec needs no bufferWriter transaction: write it now.
+    if (mode === "prepare-export" && specs.length) return writeExportSpec(ctx, specs);
+    return "completed";
+  }
   if (!config.send) {
     const blockhash = (await ctx.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
     const simulations: Record<string, string> = {};
@@ -770,10 +858,14 @@ export async function idlTool(ctx: ToolContext): Promise<ToolStatus> {
   }
   if (config.confirmPlan !== digest) throw new ChainPlanError("CHAIN_CONFIRM_PLAN does not match the recomputed plan digest");
 
-  // Snapshot of the inflated pre-state (no overwrite).
+  // Snapshot of the inflated pre-state (no overwrite). Every path is checked
+  // first, and nothing is written before the network lock is held, so a
+  // refused lock leaves no snapshot behind.
   const snapshotDir = env.CHAIN_SNAPSHOT_DIR?.trim();
+  const snapshots: { file: string; bytes: Uint8Array }[] = [];
   for (const probe of probes) {
-    if (!probe.onChain) continue;
+    // An in-sync IDL is only trimmed or its buffer closed: nothing is replaced.
+    if (!probe.onChain || probe.status === "in-sync") continue;
     if (!snapshotDir) {
       // send replaces the IDL now; prepare-export only stages a buffer.
       if (mode === "send") throw new ChainGateError("CHAIN_SNAPSHOT_DIR is required when an existing IDL is replaced");
@@ -781,12 +873,15 @@ export async function idlTool(ctx: ToolContext): Promise<ToolStatus> {
     }
     const file = path.resolve(snapshotDir, `${probe.program}-idl-pre.json`);
     assertOutputPath(file, ctx.root, "the IDL snapshot");
-    fs.mkdirSync(path.dirname(file), { recursive: true });
-    fs.writeFileSync(file, probe.onChain, { flag: "wx", mode: 0o600 });
+    snapshots.push({ file, bytes: probe.onChain });
   }
 
   ctx.phase = "send";
   const journal = ctx.beginSend();
+  for (const { file, bytes } of snapshots) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, bytes, { flag: "wx", mode: 0o600 });
+  }
   journal.append({ event: "plan", digest, steps: steps.map((s) => s.id) });
   // The fresh buffer address is journalled before its createAccount is sent,
   // so a crash never loses it (its keypair is never persisted; the same
@@ -828,11 +923,14 @@ export async function idlTool(ctx: ToolContext): Promise<ToolStatus> {
     if (failures.length) throw new ChainPlanError(`IDL verification failed: ${failures.join("; ")}`);
     return "completed";
   }
-  const specs = plans.map((p) => p.exportSpec).filter(Boolean);
-  const specFile = `${config.output}.idl-export.json`;
+  return writeExportSpec(ctx, plans.map((p) => p.exportSpec).filter(Boolean));
+}
+
+function writeExportSpec(ctx: ToolContext, specs: (IdlExportSpec | null)[]): ToolStatus {
+  const specFile = `${ctx.config.output}.idl-export.json`;
   assertOutputPath(specFile, ctx.root, "the IDL export spec");
   fs.writeFileSync(specFile, `${toJson(specs)}\n`, { flag: "wx", mode: 0o600 });
-  evidence.exportSpec = path.basename(specFile);
+  ctx.evidence.exportSpec = path.basename(specFile);
   ctx.log(`export spec written: ${path.basename(specFile)} (use with chain:squads-export op=idl-update)`);
   return "awaiting";
 }

@@ -10,7 +10,10 @@ import type { RpcTransport } from "@solana/kit";
 import {
   Journal,
   acquireLock,
+  acquireRecoveryLock,
+  lockMatches,
   lockPath,
+  pidAlive,
   readJournal,
   readLock,
   releaseLock,
@@ -90,7 +93,17 @@ export async function runTool(
   const root = deps.root ?? repoRoot();
   const frontDir = deps.frontDir ?? FRONT_DIR;
   const config = readChainConfig(tool, env, { root, home: deps.home });
-  const log = deps.log ?? ((line: string) => process.stdout.write(`${line}\n`));
+  const rawLog = deps.log ?? ((line: string) => process.stdout.write(`${line}\n`));
+  // A closed stdout (the terminal or vitest's main process went away after
+  // Ctrl-C) must never stop the drain or the evidence write in `finally`.
+  const log = (line: string) => {
+    try {
+      rawLog(line);
+    } catch {
+      // ignored: the evidence file is the record
+    }
+  };
+  const ignoreStreamError = () => {};
 
   const controller = new AbortController();
   const abort = () => controller.abort();
@@ -104,6 +117,7 @@ export async function runTool(
   if (handlers) {
     process.once("SIGINT", abort);
     process.once("SIGTERM", abort);
+    process.stdout.on("error", ignoreStreamError);
   }
   const restoreFetch = installFetchGuard(config.rpcUrl);
   const clients = createChainRpc({
@@ -194,6 +208,7 @@ export async function runTool(
     fs.writeFileSync(config.output, `${toJson(evidence)}\n`, { flag: "wx", mode: 0o600 });
     log(`evidence: ${path.basename(config.output)} (status ${String(evidence.status)})`);
     if (evidence.error) log(`error: ${String(evidence.error)}`);
+    if (handlers) process.stdout.removeListener("error", ignoreStreamError);
   }
   return evidence;
 }
@@ -224,6 +239,23 @@ export async function runRecovery(ctx: ToolContext): Promise<ToolStatus> {
   if (!info.journalPath || !fs.existsSync(info.journalPath)) {
     throw new ChainGateError("The lock names no readable journal; inspect it manually before removing it");
   }
+  // A live holder is still sending (maybe between steps, with nothing
+  // unresolved): recovering now would delete its lock and let a second
+  // sender in. Stop it (kill -TERM <pid> lets it drain) or wait for it.
+  if (info.pid !== process.pid && pidAlive(info.pid)) {
+    throw new ChainGateError(
+      `The lock holder (pid ${info.pid}, ${info.tool}) is still running; stop it with kill -TERM ${info.pid} or wait. If that pid is not a chain tool, check the journal and remove the lock by hand`,
+    );
+  }
+  const releaseRecovery = acquireRecoveryLock(file);
+  try {
+    return await recoverJournal(ctx, file, info);
+  } finally {
+    releaseRecovery();
+  }
+}
+
+async function recoverJournal(ctx: ToolContext, file: string, info: NonNullable<ReturnType<typeof readLock>>): Promise<ToolStatus> {
   const pending = unresolvedSignatures(readJournal(info.journalPath));
   const journal = new Journal(info.journalPath);
   const outcomes: { step: string; signature: string; status: string }[] = [];
@@ -246,13 +278,15 @@ export async function runRecovery(ctx: ToolContext): Promise<ToolStatus> {
     journal.close();
   }
   const still = unresolvedSignatures(readJournal(info.journalPath));
-  if (still.length === 0) fs.rmSync(file, { force: true });
+  // Remove exactly the lock that was resolved, never a newer one.
+  const removed = still.length === 0 && lockMatches(file, info);
+  if (removed) fs.rmSync(file, { force: true });
   ctx.evidence.recovery = {
     lockFound: true,
     lockTool: info.tool,
     lockStartedUtc: info.startedUtc,
     outcomes,
-    lockRemoved: still.length === 0,
+    lockRemoved: removed,
   };
-  return still.length === 0 ? "completed" : "failed";
+  return removed ? "completed" : "failed";
 }

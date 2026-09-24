@@ -283,6 +283,14 @@ export async function pollSignature(input: {
   let landedAt: number | null = null;
   let lastBroadcast = t.now();
   let failures = 0;
+  // Block-height and history failures are counted apart: a status call that
+  // keeps answering null must not reset them, or the loop never ends.
+  let expiryFailures = 0;
+  const expiryFailed = (): TxOutcome | null => {
+    if (++expiryFailures < t.maxPollFailures) return null;
+    record("unknown", { reason: "block height or history polling kept failing" });
+    return { status: "unknown", signature };
+  };
   for (;;) {
     await t.sleep(t.pollMs);
     let status: StatusValue;
@@ -316,6 +324,8 @@ export async function pollSignature(input: {
     try {
       height = await rpc.getBlockHeight({ commitment: "finalized" }).send();
     } catch {
+      const gaveUp = expiryFailed();
+      if (gaveUp) return gaveUp;
       continue;
     }
     if (height > input.lastValidBlockHeight) {
@@ -325,8 +335,11 @@ export async function pollSignature(input: {
           await rpc.getSignatureStatuses([signature], { searchTransactionHistory: true }).send()
         ).value[0] as StatusValue;
       } catch {
+        const gaveUp = expiryFailed();
+        if (gaveUp) return gaveUp;
         continue;
       }
+      expiryFailures = 0;
       if (history === null) {
         record("dropped", { finalizedBlockHeight: height.toString() });
         return { status: "dropped", signature };
@@ -337,6 +350,7 @@ export async function pollSignature(input: {
       record("landed", { confirmationStatus: history.confirmationStatus ?? null });
       continue;
     }
+    expiryFailures = 0;
     if (input.rebroadcast && !input.signal?.aborted && t.now() - lastBroadcast >= t.rebroadcastMs) {
       lastBroadcast = t.now();
       await input.rebroadcast();

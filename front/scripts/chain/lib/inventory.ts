@@ -519,6 +519,15 @@ export function inventoryFindings(
   if (adminKeys.has(map.kyc.authority)) {
     add(atHandover && !map.allowKycAdmin ? "blocker" : "warning", "kyc-admin", "kyc.authority holds an Admin record");
   }
+  // Any other Admin can pause and run Admin instructions: only the map's
+  // admins and the SA may hold a record at handover (the deployer,
+  // bufferWriter and kyc.authority have their own findings above).
+  const expectedAdmins = new Set<string>([...map.admins, map.superAdmin, map.deployer, map.bufferWriter, map.kyc.authority]);
+  for (const record of inv.admins) {
+    if (!expectedAdmins.has(record.admin)) {
+      gate("admin-unknown", `Admin record ${record.record} belongs to ${record.admin}, which is not in the role map`);
+    }
+  }
   if (inv.platform && inv.platform.admin !== map.superAdmin && adminKeys.has(map.superAdmin)) {
     add("warning", "sa-early-admin", "superAdmin has an Admin record before accepting the platform (K10 premise is out of date)");
   }

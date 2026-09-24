@@ -152,8 +152,46 @@ export function acquireLock(input: {
   return { path: file, info, released: false };
 }
 
+/** True when `info` (pid and start time) still describes the lock file on disk. */
+export function lockMatches(file: string, info: Pick<LockInfo, "pid" | "startedUtc">): boolean {
+  const current = readLock(file);
+  return Boolean(current && current.pid === info.pid && current.startedUtc === info.startedUtc);
+}
+
+/**
+ * Removes the lock only if it is still this run's lock: a lock file that a
+ * later run created (after a recovery removed ours) is left alone.
+ */
 export function releaseLock(lock: HeldLock): void {
   if (lock.released) return;
-  fs.rmSync(lock.path, { force: true });
+  if (lockMatches(lock.path, lock.info)) fs.rmSync(lock.path, { force: true });
   lock.released = true;
+}
+
+/** Whether a process with this pid exists (EPERM: it exists, owned by someone else). */
+export function pidAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+/** A second, short-lived lock so two recoveries never run at once. */
+export function acquireRecoveryLock(lockFile: string): () => void {
+  const file = `${lockFile}.recover`;
+  let fd: number;
+  try {
+    fd = fs.openSync(file, "wx", 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+      throw new ChainGateError("Another CHAIN_RECOVER run holds the recovery lock (or one crashed; remove the .recover file after checking)");
+    }
+    throw new ChainGateError("Cannot create the recovery lock file");
+  }
+  fs.writeSync(fd, `${JSON.stringify({ pid: process.pid, startedUtc: new Date().toISOString() })}\n`);
+  fs.closeSync(fd);
+  return () => fs.rmSync(file, { force: true });
 }

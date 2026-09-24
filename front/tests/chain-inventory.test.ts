@@ -111,6 +111,18 @@ describe("inventory findings (§6)", () => {
     expect(bySeverity(inventoryFindings(inv, { ...map, allowKycAdmin: true }, "handed-over"), "kyc-admin")).toEqual(["warning"]);
   });
 
+  it("an Admin record outside the role map: warning in progress, blocker at and after handover", async () => {
+    const { map } = await world();
+    const inv = clean(map);
+    inv.admins.push({ record: key(143), admin: key(144), addedBy: map.superAdmin });
+    expect(phases.map((phase) => bySeverity(inventoryFindings(inv, map, phase), "admin-unknown"))).toEqual([["warning"], ["blocker"], ["blocker"]]);
+    // Keys with their own findings are not reported twice.
+    const own = clean(map);
+    own.admins.push({ record: key(145), admin: map.deployer, addedBy: map.deployer });
+    own.admins.push({ record: key(146), admin: map.kyc.authority, addedBy: map.deployer });
+    expect(bySeverity(inventoryFindings(own, map, "handed-over"), "admin-unknown")).toEqual([]);
+  });
+
   it("an Admin record for the SA before it accepted is a warning (C4)", async () => {
     const { map } = await world();
     const inv = clean(map);

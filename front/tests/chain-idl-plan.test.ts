@@ -267,6 +267,94 @@ describe("resume after a crash (C7)", () => {
   });
 });
 
+describe("interrupted shrink (after setData): trim and close on the next run", () => {
+  it("in-sync but untrimmed plans trim; CHAIN_IDL_RESUME_BUFFER closes the leftover buffer", async () => {
+    const w = await world();
+    const parsed = JSON.parse(Buffer.from(hookIdl).toString("utf8"));
+    const bigger = new Uint8Array(Buffer.from(JSON.stringify({ ...parsed, docs: [randomBytes(12_000).toString("base64")] })));
+    const metadata = await seedIdl(w, HOOK, bigger);
+    const extra = { CHAIN_IDL_MODE: "send", CHAIN_IDL_PROGRAM: "transfer_hook", CHAIN_SNAPSHOT_DIR: path.join(w.dir, "snap") };
+    // setData lands; the close-buffer transaction never does (a crash / expiry).
+    const doomed = new Set<string>();
+    w.chain.onSend = (sig) => {
+      const events = readJournal(path.join(w.dir, `evidence-${w.outputs}.json.journal.jsonl`));
+      if (events.filter((e) => e.event === "signed").pop()?.step === "transfer_hook:close-buffer") doomed.add(sig);
+    };
+    w.chain.behavior = (sig) => (doomed.has(sig) ? "drop" : "land");
+    const failed = await send(w, extra, "deployer", { ...deps(w), timing: instantTiming(w.chain, BigInt(20)) });
+    expect(failed.status).toBe("failed");
+    const journal = readJournal(path.join(w.dir, `evidence-${w.outputs}.json.journal.jsonl`));
+    const buffer = journal.find((e) => e.event === "buffer")!.address as Address;
+    w.chain.onSend = undefined;
+    w.chain.behavior = () => "land";
+
+    const check = await dry(w, { CHAIN_IDL_PROGRAM: "transfer_hook" });
+    expect(statuses(check)).toEqual({ transfer_hook: "in-sync" });
+    expect((check.idl as { trimmed: boolean }[])[0].trimmed).toBe(false);
+    expect(w.chain.get(buffer)).toBeDefined();
+
+    const trimOnly = await dry(w, { ...extra, CHAIN_SNAPSHOT_DIR: path.join(w.dir, "snap2") });
+    expect((trimOnly.plan as { id: string }[]).map((s) => s.id)).toEqual(["transfer_hook:trim"]);
+    const repair = { ...extra, CHAIN_IDL_RESUME_BUFFER: buffer, CHAIN_SNAPSHOT_DIR: path.join(w.dir, "snap2") };
+    const plan = await dry(w, repair);
+    expect((plan.plan as { id: string }[]).map((s) => s.id)).toEqual(["transfer_hook:close-buffer", "transfer_hook:trim"]);
+    const repaired = await send(w, repair);
+    expect(repaired.error ?? null).toBeNull();
+    expect(repaired.status).toBe("completed");
+    expect(w.chain.get(metadata)!.data.length).toBe(PM_HEADER_LENGTH + compressIdl(hookIdl).length);
+    expect(w.chain.get(buffer)).toBeUndefined();
+    // Nothing is replaced, so no snapshot is taken.
+    expect(fs.existsSync(path.join(w.dir, "snap2"))).toBe(false);
+    const after = await dry(w, { ...extra, CHAIN_SNAPSHOT_DIR: path.join(w.dir, "snap3") });
+    expect(after.plan).toEqual([]);
+    expect(after.notes).toEqual(["in sync; nothing to send"]);
+  });
+
+  it("after handover, prepare-export writes a trim-only spec and idl-update exports one vault trim", async () => {
+    const w = await world();
+    await w.chain.deployProgram(HOOK, { authority: w.keys.vault, payload: new Uint8Array([4, 5, 6]), capacity: 2048 });
+    await seedIdl(w, HOOK, hookIdl, { extraBytes: 700 });
+    const prepared = await dry(w, { CHAIN_IDL_MODE: "prepare-export", CHAIN_IDL_PROGRAM: "transfer_hook" });
+    expect(prepared.error ?? null).toBeNull();
+    expect(prepared.status).toBe("awaiting");
+    expect(prepared.plan).toEqual([]);
+    const specFile = path.join(w.dir, `evidence-${w.outputs}.json.idl-export.json`);
+    const [spec] = JSON.parse(fs.readFileSync(specFile, "utf8"));
+    expect(spec).toMatchObject({ program: "transfer_hook", buffer: null, trim: true, extendLengths: [] });
+
+    const exported = await runTool("squads-export", env(w, { CHAIN_SQUADS_OP: "idl-update", CHAIN_SQUADS_INPUT: specFile }), squadsExportTool, deps(w));
+    expect(exported.error ?? null).toBeNull();
+    const out = exported.export as { header: { preconditions: string[] }; transactions: { instructions: { program: string; accounts: { address: string; signer: boolean }[] }[] }[] };
+    const instructions = out.transactions.flatMap((t) => t.instructions);
+    expect(instructions).toHaveLength(1);
+    expect(instructions[0].program).toBe("ProgM6JCCvbYkfKqJYHePx4xxSUSqJp7rh8Lyv7nk7S");
+    expect(instructions[0].accounts.filter((a) => a.signer).map((a) => a.address)).toEqual([w.keys.vault]);
+    expect(out.header.preconditions.join("\n")).toMatch(/in sync .* account not trimmed/);
+
+    // Once trimmed, the same spec is refused.
+    await seedIdl(w, HOOK, hookIdl);
+    const again = await runTool("squads-export", env(w, { CHAIN_SQUADS_OP: "idl-update", CHAIN_SQUADS_INPUT: specFile }), squadsExportTool, deps(w));
+    expect(again.error).toMatch(/already trimmed/);
+  });
+
+  it("a refused lock leaves no IDL snapshot behind", async () => {
+    const w = await world();
+    const pretty = new Uint8Array(Buffer.from(JSON.stringify(JSON.parse(Buffer.from(hookIdl).toString("utf8")), null, 4)));
+    await seedIdl(w, HOOK, pretty);
+    const extra = { CHAIN_IDL_MODE: "send", CHAIN_IDL_PROGRAM: "transfer_hook", CHAIN_SNAPSHOT_DIR: path.join(w.dir, "snap") };
+    fs.mkdirSync(path.join(w.dir, "state"), { recursive: true });
+    const lock = path.join(w.dir, "state", "devnet-EtWTRABZ.lock");
+    fs.writeFileSync(lock, JSON.stringify({ pid: -1, tool: "idl", journalPath: "", startedUtc: "" }));
+    const refused = await send(w, extra);
+    expect(refused.error).toMatch(/chain lock for devnet already exists/);
+    expect(fs.existsSync(path.join(w.dir, "snap", "transfer_hook-idl-pre.json"))).toBe(false);
+    fs.rmSync(lock);
+    const sent = await send(w, extra);
+    expect(sent.error ?? null).toBeNull();
+    expect(fs.existsSync(path.join(w.dir, "snap", "transfer_hook-idl-pre.json"))).toBe(true);
+  });
+});
+
 describe("program IDs", () => {
   it("match the committed IDL addresses", () => {
     expect(JSON.parse(Buffer.from(registryIdl).toString("utf8")).address).toBe(PROGRAM_IDS.asset_registry);

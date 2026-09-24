@@ -301,12 +301,32 @@ export function splitBySize(
   return groups;
 }
 
+/** Upper bound of the System transfers into the verify PDA (its rent), in total. */
+export const MAX_EXTERNAL_TRANSFER_LAMPORTS = BigInt(50_000_000);
+
+export type ExternalInspection = {
+  instructions: Instruction[];
+  /** Our program IDs the verify instructions reference. */
+  programs: Address[];
+  /** System transfers from the vault into a verify-instruction account. */
+  transfers: { destination: Address; lamports: bigint }[];
+};
+
+const SYSTEM_TRANSFER_TAG = 2;
+
 /**
  * Decodes an external transaction (EXTERNAL #5: `solana-verify
- * export-pda-tx`). Only the OtterSec verify program and the System program
- * may appear, and the vault must be the fee payer and the only signer.
+ * export-pda-tx`). The vault must be the fee payer and the only signer. Every
+ * instruction is either
+ * - an OtterSec verify instruction that the vault signs and that references
+ *   one of `programs` (our program IDs), or
+ * - a System `Transfer` from the vault into an account a verify instruction
+ *   writes (its PDA); all transfers together at most
+ *   MAX_EXTERNAL_TRANSFER_LAMPORTS.
+ * Any other System instruction (a transfer elsewhere, assign, allocate, …) is
+ * refused: the vault is also the protocol treasury (D5).
  */
-export function inspectExternalTransaction(base58: string, vault: Address): Instruction[] {
+export function inspectExternalTransaction(base58: string, vault: Address, programs: readonly Address[]): ExternalInspection {
   let messageBytes: Uint8Array;
   try {
     messageBytes = new Uint8Array(getTransactionDecoder().decode(getBase58Encoder().encode(base58.trim())).messageBytes);
@@ -323,16 +343,49 @@ export function inspectExternalTransaction(base58: string, vault: Address): Inst
     throw new Error("The external transaction must have the vault as its only signer and fee payer");
   }
   const message = decompileTransactionMessage(compiled);
-  const instructions = [...message.instructions] as Instruction[];
-  const allowed = new Set<string>([OTTERSEC_VERIFY_PROGRAM, SYSTEM_PROGRAM]);
-  for (const ix of instructions) {
-    if (!allowed.has(ix.programAddress)) {
-      throw new Error(`The external transaction calls ${ix.programAddress}; only the verify and System programs are allowed`);
-    }
-  }
-  return instructions.map((ix) => ({
+  const instructions = ([...message.instructions] as Instruction[]).map((ix) => ({
     programAddress: ix.programAddress,
     accounts: (ix.accounts ?? []).map((meta) => ({ address: meta.address, role: meta.role })),
     data: ix.data ? new Uint8Array(ix.data) : new Uint8Array(),
   }));
+  for (const ix of instructions) {
+    if (ix.programAddress !== OTTERSEC_VERIFY_PROGRAM && ix.programAddress !== SYSTEM_PROGRAM) {
+      throw new Error(`The external transaction calls ${ix.programAddress}; only the verify and System programs are allowed`);
+    }
+  }
+  const verify = instructions.filter((ix) => ix.programAddress === OTTERSEC_VERIFY_PROGRAM);
+  if (!verify.length) throw new Error("The external transaction has no verify instruction");
+  const ours = new Set<string>(programs);
+  const referenced = new Set<Address>();
+  const verifyWritable = new Set<string>();
+  for (const ix of verify) {
+    if (!ix.accounts.some((meta) => meta.address === vault && isSignerRole(meta.role))) {
+      throw new Error("A verify instruction does not name the vault as its signer (uploader)");
+    }
+    const mine = ix.accounts.filter((meta) => ours.has(meta.address)).map((meta) => meta.address);
+    if (!mine.length) throw new Error("A verify instruction references none of our program IDs");
+    for (const program of mine) referenced.add(program);
+    for (const meta of ix.accounts) {
+      if (meta.role === AccountRole.WRITABLE && meta.address !== vault) verifyWritable.add(meta.address);
+    }
+  }
+  const transfers: ExternalInspection["transfers"] = [];
+  let total = BigInt(0);
+  for (const ix of instructions) {
+    if (ix.programAddress !== SYSTEM_PROGRAM) continue;
+    const view = new DataView(ix.data.buffer, ix.data.byteOffset, ix.data.byteLength);
+    const isTransfer = ix.data.length === 12 && view.getUint32(0, true) === SYSTEM_TRANSFER_TAG && ix.accounts.length === 2;
+    if (!isTransfer) throw new Error("The external transaction has a System instruction other than a transfer into the verify PDA");
+    const [source, destination] = ix.accounts;
+    const lamports = view.getBigUint64(4, true);
+    if (source.address !== vault || !verifyWritable.has(destination.address)) {
+      throw new Error(`The external transaction transfers lamports to ${destination.address}, not into a verify-instruction account`);
+    }
+    total += lamports;
+    if (total > MAX_EXTERNAL_TRANSFER_LAMPORTS) {
+      throw new Error(`The external transaction transfers ${total} lamports; at most ${MAX_EXTERNAL_TRANSFER_LAMPORTS} are allowed`);
+    }
+    transfers.push({ destination: destination.address, lamports });
+  }
+  return { instructions, programs: [...referenced], transfers };
 }

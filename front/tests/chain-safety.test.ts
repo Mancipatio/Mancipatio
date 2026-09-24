@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import {
   ChainGateError,
+  SOURCE_INTEGRITY_PATHS,
   assertOutputPath,
   assertReleaseSource,
   installFetchGuard,
@@ -180,6 +181,22 @@ describe("fetch guard", () => {
     restore();
     restore = null;
     expect(globalThis.fetch).toBe(original);
+  });
+});
+
+describe("source-integrity paths", () => {
+  it("cover every module the chain lib imports outside scripts/chain, and the dependency pins", () => {
+    const libDir = path.join(root, "front", "scripts", "chain");
+    const files = fs.readdirSync(libDir, { recursive: true }).map(String).filter((f) => f.endsWith(".ts"));
+    const imported = new Set<string>();
+    for (const file of files) {
+      const text = fs.readFileSync(path.join(libDir, file), "utf8");
+      for (const match of text.matchAll(/from "@\/([^"]+)"/g)) imported.add(`front/${match[1]}`);
+    }
+    for (const target of imported) {
+      expect(SOURCE_INTEGRITY_PATHS.some((p) => target === p || target.startsWith(`${p}/`)), target).toBe(true);
+    }
+    expect(SOURCE_INTEGRITY_PATHS).toEqual(expect.arrayContaining(["front/package.json", "front/package-lock.json"]));
   });
 });
 

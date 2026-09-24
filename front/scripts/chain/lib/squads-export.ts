@@ -33,6 +33,7 @@ import { PROGRAM_IDS, resolveIdlSources } from "./idl-plan";
 import {
   LOADER_V3,
   MINIMUM_EXTEND_PROGRAM_BYTES,
+  PROGRAMDATA_METADATA_SIZE,
   comparePayload,
   decodeLoaderBuffer,
   decodeProgramData,
@@ -43,6 +44,7 @@ import {
 } from "./loader-v3";
 import {
   IDL_HEADER,
+  PM_HEADER_LENGTH,
   PM_PROGRAM,
   decodeMetadataAccount,
   decodePmBufferAccount,
@@ -55,7 +57,7 @@ import {
   pmTrim,
 } from "./program-metadata";
 import { loadRelease, releaseEvidence, type Release } from "./release";
-import { loadRoleMap, type RoleMap } from "./role-map";
+import { MAX_PROGRAM_DATA_LEN, loadRoleMap, type RoleMap } from "./role-map";
 import type { ChainRpc } from "./rpc";
 import { ChainGateError, assertReleaseSource, readLocalIdl, sha256Hex, type ProgramName } from "./safety";
 import {
@@ -64,10 +66,12 @@ import {
   describeInstruction,
   encodeVaultTransaction,
   inspectExternalTransaction,
+  type ExternalInspection,
   splitBySize,
 } from "./squads";
 import type { LatestBlockhash } from "./tx";
 import type { Network } from "@/lib/network";
+import { describePausedAreas, formatPauseFlags } from "@/lib/pause-flags";
 
 export const SQUADS_OPS = [
   "upgrade",
@@ -109,6 +113,34 @@ function programName(value: unknown): ProgramName {
 function addressInput(value: unknown, label: string): Address {
   if (typeof value !== "string" || !isAddress(value)) throw new ChainGateError(`${label} is not a valid address`);
   return value as Address;
+}
+
+/** The hot keys never receive an authority (D19). */
+function refuseHotKey(target: Address, map: RoleMap, label: string) {
+  if (target === map.deployer || target === map.bufferWriter) {
+    throw new ChainGateError(`${label} ${target} is a hot key (deployer or bufferWriter); refused`);
+  }
+}
+
+/**
+ * A target outside `allowed` (the role-map keys for this role) needs an
+ * explicit `confirmTarget` equal to it, so a typo cannot slip through.
+ */
+function mapTarget(value: unknown, label: string, map: RoleMap, allowed: Address[], confirm: unknown): Address {
+  const target = addressInput(value, label);
+  refuseHotKey(target, map, label);
+  if (!allowed.includes(target) && confirm !== target) {
+    throw new ChainGateError(`${label} ${target} is not the role-map key (${allowed.join(" / ") || "none"}); set confirmTarget to it to proceed`);
+  }
+  return target;
+}
+
+function maskInput(value: unknown, label: string): number {
+  const mask = value ?? 0;
+  if (typeof mask !== "number" || !Number.isInteger(mask) || mask < 0 || mask > 0xff) {
+    throw new ChainGateError(`${label} must be an integer from 0 to 255`);
+  }
+  return mask;
 }
 
 async function uaIsVault(rpc: ChainRpc, name: ProgramName, vault: Address, preconditions: string[]) {
@@ -177,11 +209,36 @@ export async function planSquadsOp(input: {
       const name = programName(spec.program);
       const metadata = await findCanonicalMetadataPda(PROGRAM_IDS[name]);
       const programData = await programDataAddress(PROGRAM_IDS[name]);
-      const buffer = addressInput(spec.buffer, "spec.buffer");
       if (spec.vault !== vault || spec.spill !== map.bufferWriter || spec.metadata !== metadata || spec.programData !== programData) {
         throw new ChainGateError(`${name}: the export spec does not match the role map / canonical accounts`);
       }
       await uaIsVault(rpc, name, vault, preconditions);
+      if (spec.buffer === null) {
+        // Trim-only: the IDL is already in sync, the account is longer than it.
+        const source = input.idlSources?.[name];
+        const metadataAccount = await fetchRawAccount(rpc, metadata);
+        const decoded = metadataAccount ? decodeMetadataAccount(metadataAccount.data) : null;
+        const inflated = decoded ? inflateIdl(decoded.data) : null;
+        if (
+          spec.trim !== true ||
+          !decoded ||
+          !inflated ||
+          !source ||
+          !Buffer.from(inflated).equals(Buffer.from(source.bytes)) ||
+          sha256Hex(inflated) !== spec.sourceSha256 ||
+          decoded.dataLength !== spec.oldDataLength
+        ) {
+          throw new ChainGateError(`${name}: a trim-only spec needs the canonical IDL in sync with the ${source?.label ?? "source"} IDL`);
+        }
+        if (decoded.accountLength === PM_HEADER_LENGTH + decoded.dataLength) {
+          throw new ChainGateError(`${name}: the metadata account is already trimmed`);
+        }
+        preconditions.push(`${name}: canonical IDL in sync (sha256 ${spec.sourceSha256}), account not trimmed`);
+        ixs.push(pmTrim({ account: metadata, authority: vaultSigner, program: PROGRAM_IDS[name], programData, destination: map.bufferWriter }));
+        postconditions.push(`${name}: chain:idl check reports in-sync and trimmed`);
+        continue;
+      }
+      const buffer = addressInput(spec.buffer, "spec.buffer");
       const bufferAccount = await fetchRawAccount(rpc, buffer);
       const decodedBuffer = bufferAccount && bufferAccount.owner === PM_PROGRAM ? decodePmBufferAccount(bufferAccount.data) : null;
       if (!decodedBuffer || decodedBuffer.authority !== vault) throw new ChainGateError(`${name}: IDL buffer is not a PM buffer held by the vault`);
@@ -217,6 +274,15 @@ export async function planSquadsOp(input: {
     if (next === null && params.confirmImmutable !== true) {
       throw new ChainGateError("newAuthority null makes the program immutable; it needs confirmImmutable: true");
     }
+    if (next !== null) {
+      refuseHotKey(next, map, "newAuthority");
+      if (next === vault) throw new ChainGateError("newAuthority is already the vault; nothing to export");
+      // A new upgrade authority is irreversible from the vault's side: retype it.
+      if (params.confirmNewAuthority !== next) {
+        throw new ChainGateError("newAuthority needs confirmNewAuthority set to the same address");
+      }
+      preconditions.push(`new upgrade authority ${next} confirmed (not a hot key)`);
+    }
     for (const name of programs) {
       await uaIsVault(rpc, name, vault, preconditions);
       ixs.push(await setUpgradeAuthorityInstruction({ program: PROGRAM_IDS[name], current: vaultSigner, next }));
@@ -232,6 +298,10 @@ export async function planSquadsOp(input: {
       throw new ChainGateError(`extend-program bytes must be an integer ≥ ${MINIMUM_EXTEND_PROGRAM_BYTES} (SIMD-0431)`);
     }
     const programData = await uaIsVault(rpc, name, vault, preconditions);
+    const room = MAX_PROGRAM_DATA_LEN - PROGRAMDATA_METADATA_SIZE - programData.payload.length;
+    if (bytes > room) {
+      throw new ChainGateError(`extend-program bytes ${bytes} exceed the ${room} B left under the 10 MiB account limit`);
+    }
     ixs.push(
       await extendProgramCheckedInstruction({ program: PROGRAM_IDS[name], authority: vaultSigner, payer: vaultSigner, additionalBytes: bytes }),
     );
@@ -243,6 +313,13 @@ export async function planSquadsOp(input: {
   if (op === "metadata-set-authority") {
     const name = programName(params.program);
     const next = params.newAuthority === null ? null : addressInput(params.newAuthority, "newAuthority");
+    if (next !== null) {
+      refuseHotKey(next, map, "newAuthority");
+      if (next !== map.metadataAuthority && params.confirmNewAuthority !== next) {
+        throw new ChainGateError("newAuthority is not the role-map metadataAuthority (D6); set confirmNewAuthority to it to proceed");
+      }
+      preconditions.push(`new extra metadata authority ${next}${next === map.metadataAuthority ? " = role-map metadataAuthority" : " (confirmed)"}`);
+    }
     await uaIsVault(rpc, name, vault, preconditions);
     const metadata = await findCanonicalMetadataPda(PROGRAM_IDS[name]);
     const account = await fetchRawAccount(rpc, metadata);
@@ -268,53 +345,78 @@ export async function planSquadsOp(input: {
     }
     const [platformAddress] = await findPlatformPda();
     const platform = await fetchMaybePlatform(rpc, platformAddress, { commitment: "finalized" });
+    const confirm = params.confirmTarget;
     switch (name) {
-      case "initialize_platform":
+      case "initialize_platform": {
+        const treasury = addressInput(args.protocolTreasury ?? map.protocolTreasury, "args.protocolTreasury");
+        if (treasury !== map.protocolTreasury) throw new ChainGateError(`args.protocolTreasury must be the role-map treasury ${map.protocolTreasury} (D5)`);
+        const fee = args.protocolFeeBps ?? map.protocolFeeBps;
+        if (typeof fee !== "number" || !Number.isInteger(fee) || fee !== map.protocolFeeBps) {
+          throw new ChainGateError(`args.protocolFeeBps must equal the role-map protocolFeeBps ${map.protocolFeeBps} (the fee has no setter)`);
+        }
         ixs.push(
           await buildInitializePlatformInstruction(rpc, {
             admin: vaultSigner,
             upgradeAuthority: vaultSigner,
-            protocolTreasury: addressInput(args.protocolTreasury, "args.protocolTreasury"),
-            protocolFeeBps: Number(args.protocolFeeBps ?? 0),
+            protocolTreasury: treasury,
+            protocolFeeBps: fee,
           }),
         );
+        preconditions.push(`treasury ${treasury} = role map; protocol fee ${fee} bps = role map`);
         break;
-      case "initialize_blocklist_authority":
-        ixs.push(
-          await buildInitializeBlocklistAuthorityInstruction(rpc, {
-            payer: vaultSigner,
-            upgradeAuthority: vaultSigner,
-            authority: addressInput(args.authority, "args.authority"),
-          }),
-        );
+      }
+      case "initialize_blocklist_authority": {
+        // Irreversible: only the BA itself can ever propose a successor.
+        const authority = mapTarget(args.authority ?? map.blocklistAuthority, "args.authority", map, [map.blocklistAuthority], confirm);
+        ixs.push(await buildInitializeBlocklistAuthorityInstruction(rpc, { payer: vaultSigner, upgradeAuthority: vaultSigner, authority }));
+        preconditions.push(`blocklist authority ${authority}${authority === map.blocklistAuthority ? " = role map" : " (confirmed)"}`);
         break;
-      case "propose_platform_admin":
-        ixs.push(await getProposePlatformAdminInstructionAsync({ authority: vaultSigner, newAdmin: addressInput(args.newAdmin, "args.newAdmin") }));
+      }
+      case "propose_platform_admin": {
+        const newAdmin = mapTarget(args.newAdmin, "args.newAdmin", map, [map.superAdmin, vault], confirm);
+        ixs.push(await getProposePlatformAdminInstructionAsync({ authority: vaultSigner, newAdmin }));
+        preconditions.push(`proposed platform admin ${newAdmin}${newAdmin === map.superAdmin ? " = role-map superAdmin" : newAdmin === vault ? " = the vault" : " (confirmed)"}`);
         break;
+      }
       case "accept_platform_admin": {
         if (!platform.exists) throw new ChainGateError("accept_platform_admin: Platform missing");
         const [oldAdminRecord] = await findAdminRecordPda({ authority: platform.data.admin });
         ixs.push(await getAcceptPlatformAdminInstructionAsync({ newAdmin: vaultSigner, oldAdminRecord }));
         break;
       }
-      case "add_admin":
-        ixs.push(await getAddAdminInstructionAsync({ superAdmin: vaultSigner, newAdmin: addressInput(args.newAdmin, "args.newAdmin") }));
+      case "add_admin": {
+        const newAdmin = mapTarget(args.newAdmin, "args.newAdmin", map, map.admins, confirm);
+        if (newAdmin === map.kyc.authority && !map.allowKycAdmin) {
+          throw new ChainGateError("args.newAdmin is kyc.authority; an Admin record for it needs allowKycAdmin in the role map");
+        }
+        ixs.push(await getAddAdminInstructionAsync({ superAdmin: vaultSigner, newAdmin }));
+        preconditions.push(`new Admin ${newAdmin}${map.admins.includes(newAdmin) ? " is in role-map admins" : " (confirmed)"}`);
         break;
-      case "remove_admin":
-        ixs.push(await getRemoveAdminInstructionAsync({ superAdmin: vaultSigner, admin: addressInput(args.admin, "args.admin") }));
+      }
+      case "remove_admin": {
+        // Any Admin record may be removed (also one outside the map); a wrong
+        // key only fails on-chain, it grants nothing.
+        const admin = addressInput(args.admin, "args.admin");
+        ixs.push(await getRemoveAdminInstructionAsync({ superAdmin: vaultSigner, admin }));
+        preconditions.push(`remove the Admin record of ${admin}`);
         break;
-      case "set_pause_flags":
-        ixs.push(
-          await getSetPauseFlagsInstructionAsync({
-            authority: vaultSigner,
-            setMask: Number(args.setMask ?? 0) & 0xff,
-            clearMask: Number(args.clearMask ?? 0) & 0xff,
-          }),
+      }
+      case "set_pause_flags": {
+        const setMask = maskInput(args.setMask, "args.setMask");
+        const clearMask = maskInput(args.clearMask, "args.clearMask");
+        if (setMask === 0 && clearMask === 0) throw new ChainGateError("set_pause_flags with both masks 0 changes nothing");
+        ixs.push(await getSetPauseFlagsInstructionAsync({ authority: vaultSigner, setMask, clearMask }));
+        preconditions.push(
+          `pause set ${formatPauseFlags(setMask)} (${describePausedAreas(setMask) || "no defined area"}), clear ${formatPauseFlags(clearMask)} (${describePausedAreas(clearMask) || "no defined area"})`,
         );
         break;
-      case "set_protocol_treasury":
-        ixs.push(await getSetProtocolTreasuryInstructionAsync({ superAdmin: vaultSigner, newTreasury: addressInput(args.newTreasury, "args.newTreasury") }));
+      }
+      case "set_protocol_treasury": {
+        const newTreasury = mapTarget(args.newTreasury, "args.newTreasury", map, [vault], confirm);
+        ixs.push(await getSetProtocolTreasuryInstructionAsync({ superAdmin: vaultSigner, newTreasury }));
+        preconditions.push(`new treasury ${newTreasury}${newTreasury === vault ? " = the vault (D5)" : " (confirmed)"}`);
         break;
+      }
     }
     preconditions.push(`registry-ix ${String(name)} signed by the vault ${vault}`);
     return { ixs, preconditions, postconditions, ordered: false };
@@ -323,15 +425,22 @@ export async function planSquadsOp(input: {
   // wrap-external
   const base58 = params.transactionBase58;
   if (typeof base58 !== "string") throw new ChainGateError("wrap-external needs transactionBase58 (solana-verify export-pda-tx output)");
-  let external: Instruction[];
+  let external: ExternalInspection;
   try {
-    external = inspectExternalTransaction(base58, vault);
+    external = inspectExternalTransaction(base58, vault, Object.values(PROGRAM_IDS));
   } catch (error) {
     throw new ChainGateError((error as Error).message);
   }
-  preconditions.push("external transaction: only the verify and System programs; the vault is the only signer");
+  preconditions.push(
+    `external transaction: verify instructions signed by the vault for ${external.programs.join(", ")}; the vault is the only signer`,
+  );
+  preconditions.push(
+    external.transfers.length
+      ? `System transfers only into verify accounts: ${external.transfers.map((t) => `${t.lamports} lamports → ${t.destination}`).join("; ")}`
+      : "no top-level System instruction",
+  );
   postconditions.push("the verify PDA names the vault as uploader (EXTERNAL #5)");
-  return { ixs: external, preconditions, postconditions, ordered: true };
+  return { ixs: external.instructions, preconditions, postconditions, ordered: true };
 }
 
 export type ExportedTransaction = {

@@ -18,14 +18,16 @@ import {
   type Address,
   type Instruction,
 } from "@solana/kit";
-import { getTransferSolInstruction } from "@solana-program/system";
+import { getAssignInstruction, getTransferSolInstruction } from "@solana-program/system";
 import { describe, expect, it } from "vitest";
 import { runTool } from "@/scripts/chain/lib/context";
 import { LOADER_V3 } from "@/scripts/chain/lib/loader-v3";
 import { pmWrite } from "@/scripts/chain/lib/program-metadata";
 import { type ChainEnv } from "@/scripts/chain/lib/safety";
 import {
+  MAX_EXTERNAL_TRANSFER_LAMPORTS,
   MULTISIG_DISCRIMINATOR,
+  OTTERSEC_VERIFY_PROGRAM,
   SQUADS_V4_PROGRAM,
   assertOnlyVaultSigner,
   checkSquadsAccount,
@@ -37,7 +39,7 @@ import {
 } from "@/scripts/chain/lib/squads";
 import { assertSquadsVerified, squadsExportTool } from "@/scripts/chain/lib/squads-export";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
-import { deps, env, releaseDir, world, type World } from "./helpers/chain-world";
+import { deps, env, releaseDir, seedIdl, world, type World } from "./helpers/chain-world";
 
 const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures/squads-multisig-v4.json"), "utf8"));
 const blockhash = { blockhash: "11111111111111111111111111111111" as never, lastValidBlockHeight: BigInt(100) };
@@ -215,14 +217,70 @@ describe("chain:squads-export ops", () => {
   it("registry-ix: only the allowlist, built with the vault as signer", async () => {
     const w = await handedOver();
     expect((await exportOp(w, "registry-ix", { instruction: "close_sale", args: {} })).error).toMatch(/registry-ix instruction must be one of/);
-    const ok = await exportOp(w, "registry-ix", { instruction: "add_admin", args: { newAdmin: key(80) } });
+    const ok = await exportOp(w, "registry-ix", { instruction: "add_admin", args: { newAdmin: w.keys.admins[0] } });
     expect(ok.error ?? null).toBeNull();
     const ix = (ok.export as Exported).transactions[0].instructions[0];
     expect(ix.program).toBe(REGISTRY);
     expect(ix.accounts.filter((a) => a.signer).map((a) => a.address)).toEqual([w.keys.vault]);
+    expect((ok.export as Exported).header.preconditions.join("\n")).toMatch(/is in role-map admins/);
   });
 
-  it("wrap-external: only verify/System programs and the vault as sole signer; re-emitted with a fresh blockhash", async () => {
+  it("registry-ix: arguments are checked against the role map (targets, treasury, fee, masks)", async () => {
+    const w = await handedOver();
+    const run = (instruction: string, args: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      exportOp(w, "registry-ix", { instruction, args, ...extra });
+    // Targets outside the map need an explicit confirmTarget; hot keys never.
+    expect((await run("add_admin", { newAdmin: key(80) })).error).toMatch(/not the role-map key .*confirmTarget/);
+    expect((await run("add_admin", { newAdmin: key(80) }, { confirmTarget: key(80) })).error ?? null).toBeNull();
+    expect((await run("add_admin", { newAdmin: w.keys.deployer }, { confirmTarget: w.keys.deployer })).error).toMatch(/hot key/);
+    expect((await run("add_admin", { newAdmin: w.keys.kycAuthority }, { confirmTarget: w.keys.kycAuthority })).error).toMatch(/allowKycAdmin/);
+    expect((await run("propose_platform_admin", { newAdmin: key(88) })).error).toMatch(/not the role-map key/);
+    expect((await run("propose_platform_admin", { newAdmin: w.keys.superAdmin })).error ?? null).toBeNull();
+    expect((await run("initialize_blocklist_authority", { authority: key(87) })).error).toMatch(/not the role-map key/);
+    expect((await run("initialize_blocklist_authority", {})).error ?? null).toBeNull();
+    expect((await run("set_protocol_treasury", { newTreasury: key(89) })).error).toMatch(/not the role-map key/);
+    // initialize_platform: treasury = vault and fee = map (no setter).
+    expect((await run("initialize_platform", { protocolTreasury: key(86) })).error).toMatch(/must be the role-map treasury/);
+    expect((await run("initialize_platform", { protocolFeeBps: 5 })).error).toMatch(/must equal the role-map protocolFeeBps 0/);
+    expect((await run("initialize_platform", { protocolFeeBps: "0" })).error).toMatch(/must equal the role-map protocolFeeBps/);
+    const platform = await run("initialize_platform", {});
+    expect(platform.error ?? null).toBeNull();
+    expect((platform.export as Exported).header.preconditions.join("\n")).toMatch(/protocol fee 0 bps = role map/);
+    // Pause masks: integers 0..255, no coercion, not both zero.
+    expect((await run("set_pause_flags", { clearMask: "all" })).error).toMatch(/clearMask must be an integer from 0 to 255/);
+    expect((await run("set_pause_flags", { setMask: 0x13f })).error).toMatch(/setMask must be an integer from 0 to 255/);
+    expect((await run("set_pause_flags", { setMask: 1.5 })).error).toMatch(/setMask must be an integer/);
+    expect((await run("set_pause_flags", {})).error).toMatch(/both masks 0 changes nothing/);
+    const resume = await run("set_pause_flags", { clearMask: 0x3f });
+    expect(resume.error ?? null).toBeNull();
+    expect((resume.export as Exported).header.preconditions.join("\n")).toMatch(/pause set 0x00 .*clear 0x3f \(Onboarding/);
+  });
+
+  it("set-upgrade-authority and metadata-set-authority: hot keys refused, a new key must be confirmed", async () => {
+    const w = await handedOver();
+    const op = "set-upgrade-authority";
+    expect((await exportOp(w, op, { programs: ["transfer_hook"], newAuthority: key(90) })).error).toMatch(/confirmNewAuthority/);
+    expect((await exportOp(w, op, { programs: ["transfer_hook"], newAuthority: w.keys.deployer, confirmNewAuthority: w.keys.deployer })).error).toMatch(/hot key/);
+    expect((await exportOp(w, op, { programs: ["transfer_hook"], newAuthority: w.keys.vault })).error).toMatch(/already the vault/);
+    const moved = await exportOp(w, op, { programs: ["transfer_hook"], newAuthority: key(90), confirmNewAuthority: key(90) });
+    expect(moved.error ?? null).toBeNull();
+    expect((moved.export as Exported).header.postconditions).toEqual([`transfer_hook: upgrade authority = ${key(90)}`]);
+
+    await seedIdl(w, HOOK, new Uint8Array(Buffer.from(JSON.stringify({ address: HOOK }))));
+    const meta = "metadata-set-authority";
+    expect((await exportOp(w, meta, { program: "transfer_hook", newAuthority: key(91) })).error).toMatch(/not the role-map metadataAuthority/);
+    expect((await exportOp(w, meta, { program: "transfer_hook", newAuthority: w.keys.bufferWriter, confirmNewAuthority: w.keys.bufferWriter })).error).toMatch(/hot key/);
+    expect((await exportOp(w, meta, { program: "transfer_hook", newAuthority: key(91), confirmNewAuthority: key(91) })).error ?? null).toBeNull();
+    expect((await exportOp(w, meta, { program: "transfer_hook", newAuthority: null })).error ?? null).toBeNull();
+  });
+
+  it("extend-program refuses more bytes than the 10 MiB account limit leaves", async () => {
+    const w = await handedOver();
+    expect((await exportOp(w, "extend-program", { program: "transfer_hook", bytes: 2 ** 32 })).error).toMatch(/exceed the \d+ B left under the 10 MiB/);
+    expect((await exportOp(w, "extend-program", { program: "transfer_hook", bytes: 10 * 1024 * 1024 - 45 - 2048 })).error ?? null).toBeNull();
+  });
+
+  it("wrap-external: vault-signed verify instructions for our programs; System only as a capped transfer into the verify PDA", async () => {
     const w = await handedOver();
     const vaultSigner = createNoopSigner(w.keys.vault);
     const external = (ixs: Instruction[], feePayer: Address = w.keys.vault) =>
@@ -238,19 +296,48 @@ describe("chain:squads-export ops", () => {
           ),
         ),
       );
-    const transfer = getTransferSolInstruction({ source: vaultSigner, destination: key(81), amount: BigInt(5) });
-    const ok = await exportOp(w, "wrap-external", { transactionBase58: external([transfer]) });
+    const pda = key(90);
+    const verify = (program: Address = REGISTRY, withVault = true): Instruction => ({
+      programAddress: OTTERSEC_VERIFY_PROGRAM,
+      accounts: [
+        { address: pda, role: AccountRole.WRITABLE },
+        ...(withVault ? [{ address: w.keys.vault, role: AccountRole.WRITABLE_SIGNER }] : []),
+        { address: program, role: AccountRole.READONLY },
+        { address: "11111111111111111111111111111111" as Address, role: AccountRole.READONLY },
+      ],
+      data: new Uint8Array([1, 2, 3]),
+    });
+    const wrap = (ixs: Instruction[]) => exportOp(w, "wrap-external", { transactionBase58: external(ixs) });
+
+    const ok = await wrap([verify()]);
     expect(ok.error ?? null).toBeNull();
     const reemitted = (ok.export as Exported).transactions[0];
-    expect(reemitted.instructions[0].program).toBe("11111111111111111111111111111111");
-    expect(reemitted.transactionBase58).not.toBe(external([transfer]));
+    expect(reemitted.instructions[0].program).toBe(OTTERSEC_VERIFY_PROGRAM);
+    expect(reemitted.transactionBase58).not.toBe(external([verify()]));
+    expect((ok.export as Exported).header.preconditions.join("\n")).toMatch(new RegExp(`for ${REGISTRY}.*\\n.*no top-level System instruction`));
+
+    const rent = getTransferSolInstruction({ source: vaultSigner, destination: pda, amount: BigInt(2_000_000) });
+    const funded = await wrap([rent, verify()]);
+    expect(funded.error ?? null).toBeNull();
+    expect((funded.export as Exported).header.preconditions.join("\n")).toMatch(new RegExp(`2000000 lamports → ${pda}`));
+
+    // A tampered transaction: the vault (the treasury, D5) pays someone else.
+    const theft = getTransferSolInstruction({ source: vaultSigner, destination: key(81), amount: BigInt(5) });
+    expect((await wrap([theft, verify()])).error).toMatch(/not into a verify-instruction account/);
+    expect((await wrap([theft])).error).toMatch(/no verify instruction/);
+    const tooMuch = getTransferSolInstruction({ source: vaultSigner, destination: pda, amount: MAX_EXTERNAL_TRANSFER_LAMPORTS + BigInt(1) });
+    expect((await wrap([tooMuch, verify()])).error).toMatch(/at most 50000000 are allowed/);
+    const assign = getAssignInstruction({ account: vaultSigner, programAddress: key(84) });
+    expect((await wrap([assign, verify()])).error).toMatch(/System instruction other than a transfer/);
+    expect((await wrap([verify(key(85))])).error).toMatch(/none of our program IDs/);
+    expect((await wrap([verify(REGISTRY, false)])).error).toMatch(/does not name the vault/);
 
     const foreign: Instruction = { programAddress: key(82), accounts: [{ address: w.keys.vault, role: AccountRole.WRITABLE_SIGNER }], data: new Uint8Array([1]) };
-    expect((await exportOp(w, "wrap-external", { transactionBase58: external([foreign]) })).error).toMatch(/only the verify and System programs/);
+    expect((await wrap([foreign, verify()])).error).toMatch(/only the verify and System programs/);
     const other = createNoopSigner(key(83));
     const twoSigners = getTransferSolInstruction({ source: other, destination: key(81), amount: BigInt(5) });
-    expect((await exportOp(w, "wrap-external", { transactionBase58: external([transfer, twoSigners]) })).error).toMatch(/vault as its only signer/);
-    expect(() => inspectExternalTransaction("not-base58!", w.keys.vault)).toThrow(/not a base58 wire transaction/);
+    expect((await wrap([verify(), twoSigners])).error).toMatch(/vault as its only signer/);
+    expect(() => inspectExternalTransaction("not-base58!", w.keys.vault, [REGISTRY])).toThrow(/not a base58 wire transaction/);
   });
 
   it("refuses when the multisig does not match the role map (override off mainnet only)", async () => {

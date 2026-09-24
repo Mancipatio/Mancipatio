@@ -27,6 +27,16 @@ async function rejects(json: unknown, ctx: RoleMapContext = devnet): Promise<str
 }
 
 describe("role map v2 validation", () => {
+  it("kyc.authority may not get an Admin record (in admins, or as the SA) unless allowKycAdmin", async () => {
+    const { keys, json } = await map();
+    expect(await rejects({ ...json, admins: [...keys.admins, keys.kycAuthority] })).toMatch(/kyc.authority must not be in admins/);
+    const kycIsSa = { ...json, superAdmin: keys.kycAuthority };
+    expect(await rejects(kycIsSa)).toMatch(/kyc.authority must not be the superAdmin/);
+    await expect(validateRoleMap({ ...kycIsSa, allowKycAdmin: true }, devnet)).resolves.toBeTruthy();
+    await expect(validateRoleMap({ ...json, admins: [...keys.admins, keys.kycAuthority], allowKycAdmin: true }, devnet)).resolves.toBeTruthy();
+  });
+
+
   it("accepts a complete devnet map and derives the registry pin", async () => {
     const { keys, json } = await map();
     const { map: parsed, warnings } = await validateRoleMap(json, devnet);

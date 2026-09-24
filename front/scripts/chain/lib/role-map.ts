@@ -261,6 +261,14 @@ export async function validateRoleMap(
   }
   if (squadsKeys.has(blocklistAuthority)) errors.push("blocklistAuthority must not be the Squads vault or multisig");
   if (squadsKeys.has(kycAuthority)) errors.push("kyc.authority must not be the Squads vault or multisig");
+  // Either layout gives kyc.authority an Admin record (S3, or accept_platform_admin),
+  // which the S7 handover gate blocks unless allowKycAdmin: refuse it up front.
+  if (!allowKycAdmin && admins.includes(kycAuthority)) {
+    errors.push("kyc.authority must not be in admins (its Admin record blocks the handover unless allowKycAdmin)");
+  }
+  if (!allowKycAdmin && kycAuthority === superAdmin) {
+    errors.push("kyc.authority must not be the superAdmin (its Admin record blocks the handover unless allowKycAdmin)");
+  }
   if (blocklistAuthority === superAdmin) warnings.push("blocklistAuthority == superAdmin (one Ledger holds both roles)");
   if (squadsKeys.has(superAdmin) && !k4Fallback) errors.push("superAdmin must not be the Squads vault or multisig (unless k4Fallback)");
 

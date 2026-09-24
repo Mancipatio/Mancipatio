@@ -355,9 +355,14 @@ export function readChainConfig(
   }
 
   const rehearsalSigners = parseRehearsal(nonEmpty(env, "CHAIN_REHEARSAL_SIGNERS"), network);
-  const stateDir = path.resolve(
-    nonEmpty(env, "CHAIN_STATE_DIR") ?? path.join(options.home ?? os.homedir(), ".mancipatio", "chain"),
-  );
+  // The per-network lock only excludes runs that share its directory: on
+  // mainnet every run uses the one default directory.
+  const defaultStateDir = path.join(options.home ?? os.homedir(), ".mancipatio", "chain");
+  const stateDirRaw = nonEmpty(env, "CHAIN_STATE_DIR");
+  if (network === "mainnet" && stateDirRaw !== null && path.resolve(stateDirRaw) !== path.resolve(defaultStateDir)) {
+    throw new ChainGateError("CHAIN_STATE_DIR cannot move the lock directory on mainnet");
+  }
+  const stateDir = path.resolve(stateDirRaw ?? defaultStateDir);
 
   return {
     tool,
@@ -480,8 +485,19 @@ export function installFetchGuard(rpcUrl: string): () => void {
 export const IDL_PROGRAMS = ["asset_registry", "transfer_hook"] as const;
 export type ProgramName = (typeof IDL_PROGRAMS)[number];
 
-/** Paths whose working tree must be clean for a mainnet run. */
-export const SOURCE_INTEGRITY_PATHS = ["front/idl", "front/lib", "front/scripts/chain"];
+/**
+ * Paths whose working tree must be clean for a mainnet run: everything the
+ * chain lib imports (front/lib, the Release parsers in scripts/ops) plus the
+ * dependency pins.
+ */
+export const SOURCE_INTEGRITY_PATHS = [
+  "front/idl",
+  "front/lib",
+  "front/scripts/chain",
+  "front/scripts/ops/artifact-provenance.mjs",
+  "front/package.json",
+  "front/package-lock.json",
+];
 
 export function dirtySourcePaths(root: string): string[] {
   const result = spawnSync("git", ["status", "--porcelain", "--", ...SOURCE_INTEGRITY_PATHS], {

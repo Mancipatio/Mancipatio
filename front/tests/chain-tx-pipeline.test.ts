@@ -12,9 +12,9 @@ import { describe, expect, it } from "vitest";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import { runTool } from "@/scripts/chain/lib/context";
 import { inventoryTool } from "@/scripts/chain/lib/inventory";
-import { Journal, acquireLock, lockPath, readJournal, unresolvedSignatures } from "@/scripts/chain/lib/journal";
+import { Journal, acquireLock, lockPath, readJournal, releaseLock, unresolvedSignatures } from "@/scripts/chain/lib/journal";
 import { createChainRpc } from "@/scripts/chain/lib/rpc";
-import { ChainGateError, repoRoot } from "@/scripts/chain/lib/safety";
+import { ChainGateError, readChainConfig, repoRoot } from "@/scripts/chain/lib/safety";
 import { buildMessage, submitAndConfirm, type Timing } from "@/scripts/chain/lib/tx";
 import { FakeChain, key, tempDir } from "./helpers/chain-fake";
 
@@ -184,6 +184,20 @@ describe("transaction pipeline (§3.6)", () => {
   });
 });
 
+describe("polling budget", () => {
+  it("block height failures count even while status calls answer null → unknown, lock kept", async () => {
+    const h = await harness();
+    const tx = await signedTransfer(h);
+    h.chain.behavior = () => "drop";
+    h.chain.failMethods.add("getBlockHeight");
+    const outcome = await submit(h, tx, timing());
+    expect(outcome.status).toBe("unknown");
+    const unknown = readJournal(h.journal.path).find((e) => e.status === "unknown");
+    expect(unknown?.reason).toMatch(/block height or history polling kept failing/);
+    expect(unresolvedSignatures(readJournal(h.journal.path)).map((u) => u.sig)).toEqual([tx.signature]);
+  });
+});
+
 describe("lock and recovery (§3.7)", () => {
   it("a second process is refused by the lock", () => {
     const dir = tempDir();
@@ -192,6 +206,67 @@ describe("lock and recovery (§3.7)", () => {
     expect(fs.existsSync(first.path)).toBe(true);
     expect(() => acquireLock(input)).toThrow(ChainGateError);
     expect(() => acquireLock(input)).toThrow(/CHAIN_RECOVER=1/);
+  });
+
+  it("releaseLock never removes a newer run's lock", () => {
+    const dir = tempDir();
+    const input = { stateDir: dir, network: "devnet", genesis: CLUSTER_GENESIS_HASHES.devnet, tool: "idl", journalPath: path.join(dir, "j") };
+    const mine = acquireLock(input);
+    // A recovery removed our lock and a second run took it.
+    fs.writeFileSync(mine.path, JSON.stringify({ pid: mine.info.pid + 1, tool: "bootstrap", journalPath: "k", startedUtc: "2026-09-24T00:00:00.000Z" }));
+    releaseLock(mine);
+    expect(fs.existsSync(mine.path)).toBe(true);
+    fs.rmSync(mine.path);
+    const again = acquireLock(input);
+    releaseLock(again);
+    expect(fs.existsSync(again.path)).toBe(false);
+  });
+
+  it("CHAIN_RECOVER refuses while the lock holder is alive, and while another recovery runs", async () => {
+    const h = await harness();
+    const stateDir = path.join(h.dir, "state");
+    fs.mkdirSync(stateDir, { recursive: true });
+    const file = lockPath(stateDir, "devnet", CLUSTER_GENESIS_HASHES.devnet);
+    const recover = () =>
+      runTool(
+        "inventory",
+        {
+          CHAIN_NETWORK: "devnet",
+          CHAIN_RPC_URL: "https://rpc.example.test/",
+          CHAIN_OUTPUT: path.join(h.dir, `recover-${Math.random().toString(36).slice(2)}.json`),
+          CHAIN_STATE_DIR: stateDir,
+          CHAIN_RECOVER: "1",
+        },
+        inventoryTool,
+        { transport: h.chain.transport, rps: Infinity, timing: timing(), root: repoRoot(), log: () => {} },
+      );
+    h.journal.append({ event: "plan", digest: "x" });
+    // The parent process (vitest) is alive and is not this process.
+    fs.writeFileSync(file, JSON.stringify({ pid: process.ppid, tool: "idl", journalPath: h.journal.path, startedUtc: "t0" }));
+    const live = await recover();
+    expect(live.status).toBe("failed");
+    expect(live.error).toMatch(new RegExp(`lock holder \\(pid ${process.ppid}, idl\\) is still running`));
+    expect(fs.existsSync(file)).toBe(true);
+    // A dead holder: another recovery in progress still blocks.
+    fs.writeFileSync(file, JSON.stringify({ pid: 999_999, tool: "idl", journalPath: h.journal.path, startedUtc: "t0" }));
+    fs.writeFileSync(`${file}.recover`, "{}");
+    expect((await recover()).error).toMatch(/Another CHAIN_RECOVER run holds the recovery lock/);
+    fs.rmSync(`${file}.recover`);
+    const done = await recover();
+    expect(done.status).toBe("completed");
+    expect(fs.existsSync(file)).toBe(false);
+    expect(fs.existsSync(`${file}.recover`)).toBe(false);
+  });
+
+  it("CHAIN_STATE_DIR cannot move the lock directory on mainnet", () => {
+    const dir = tempDir();
+    const mainnet = { CHAIN_NETWORK: "mainnet", CHAIN_ALLOW_MAINNET: "1", CHAIN_RPC_URL: "https://rpc.example.test/", CHAIN_OUTPUT: path.join(dir, "e.json") };
+    expect(() => readChainConfig("inventory", { ...mainnet, CHAIN_STATE_DIR: path.join(dir, "elsewhere") }, { root: repoRoot(), home: dir })).toThrow(
+      /CHAIN_STATE_DIR cannot move the lock directory on mainnet/,
+    );
+    expect(readChainConfig("inventory", { ...mainnet, CHAIN_STATE_DIR: path.join(dir, ".mancipatio", "chain") }, { root: repoRoot(), home: dir }).stateDir).toBe(
+      path.join(dir, ".mancipatio", "chain"),
+    );
   });
 
   it("CHAIN_RECOVER resolves the journalled signatures and removes the lock", async () => {
