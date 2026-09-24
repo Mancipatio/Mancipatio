@@ -124,6 +124,7 @@ import { POST as releaseRoute } from "@/app/api/sale-approvals/release/route";
 import { POST as settleRoute } from "@/app/api/sale-approvals/settle/route";
 import { POST as recordIssuanceRoute } from "@/app/api/spvs/record-issuance/route";
 import { POST as treasuryRevalueRoute } from "@/app/api/sale-approvals/treasury-revalue/route";
+import { POST as treasuryMintRoute } from "@/app/api/sale-approvals/treasury-mint/route";
 
 const ADMIN = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
 const ISSUER_KEY = "8sHgqRqBEXaSkhcyzXtY3vBSfGqBbTeR2SkVFDcxrfd9";
@@ -401,7 +402,7 @@ describe("release", () => {
     const { status, body } = await release({ last_valid_block_height: "1000" });
     expect(status).toBe(409);
     expect(body.error).toMatch(/booked instead of released/);
-    expect(rpcCall("book_treasury_mint")).toMatchObject({ p_id: RESERVATION_ID, p_signature: sig });
+    expect(rpcCall("book_treasury_mint")).toMatchObject({ p_id: RESERVATION_ID, p_signature: sig, p_issued_at: new Date(NOW * 1000).toISOString().slice(0, 10) });
     expect(rpcCall("release_sale_reservation")).toBeUndefined();
     // A history too long to read proves nothing: refused, left to the worker.
     state.calls = [];
@@ -433,6 +434,44 @@ function treasuryTx(amount: bigint, signature: string) {
     meta: { err: null, postTokenBalances: [{ accountIndex: 6, mint: MINT, owner: ADMIN }] },
   };
 }
+
+describe("treasury-mint book with signature (manual, D11)", () => {
+  const BLOCK = 1_760_000_000; // 2025-10-09
+  const sig = "5".repeat(88);
+  const book = async (params: Record<string, unknown>, wallet = ADMIN) => {
+    state.params = params;
+    state.wallet = wallet;
+    const response = await treasuryMintRoute(new Request("http://localhost/api/test", {
+      method: "POST", body: JSON.stringify({ payload: { action: "saleApprovals.treasuryMintBook" } }),
+    }));
+    return { status: response.status, body: (await response.json()) as { ok: boolean; error?: string; data?: Record<string, unknown> } };
+  };
+  beforeEach(() => {
+    state.rows.sale_capacity_reservations = reservation({ kind: "treasury_mint", approval_pda: null, sale_pda: null, amount_units: "500" });
+    state.txs = { [sig]: { ...treasuryTx(BigInt(500), sig), blockTime: BLOCK } };
+  });
+
+  it("checks the evidence and books at the mint's block date; over the cap it is booked and alerted", async () => {
+    state.rpc.book_treasury_mint = reservation({ kind: "treasury_mint", status: "booked", mint_signature: sig, booked_amount_eur: 250000, over_cap: true });
+    const { status, body } = await book({ reservation_id: RESERVATION_ID, signature: sig });
+    expect(status).toBe(200);
+    expect(body.data).toMatchObject({ reservation_id: RESERVATION_ID, status: "booked", over_cap: true });
+    expect(rpcCall("book_treasury_mint")).toMatchObject({ p_id: RESERVATION_ID, p_signature: sig, p_issued_at: "2025-10-09" });
+    expect(JSON.stringify(rpcCall("raise_system_alert"))).toContain("ledger:over-cap");
+  });
+
+  it("refuses another admin, a wrong amount, and maps MINT_ALREADY_BOOKED to 409", async () => {
+    expect((await book({ reservation_id: RESERVATION_ID, signature: sig }, STRANGER)).status).toBe(403);
+    state.txs = { [sig]: { ...treasuryTx(BigInt(501), sig), blockTime: BLOCK } };
+    expect((await book({ reservation_id: RESERVATION_ID, signature: sig })).status).toBeGreaterThanOrEqual(400);
+    expect(rpcCall("book_treasury_mint")).toBeUndefined();
+    state.txs = { [sig]: { ...treasuryTx(BigInt(500), sig), blockTime: BLOCK } };
+    state.rpcErrors.book_treasury_mint = { code: "P0001", message: "MINT_ALREADY_BOOKED" };
+    const refused = await book({ reservation_id: RESERVATION_ID, signature: sig });
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/already booked/);
+  });
+});
 
 describe("record-issuance (off-chain adjustment, Talas 5.1)", () => {
   const SPV_ID = "30000000-0000-4000-8000-000000000001";

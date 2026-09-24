@@ -48,6 +48,7 @@ import {
   readApprovalAndSale,
   type LiveApproval,
 } from "@/lib/server/sale-capacity-chain";
+import { intervalSeconds } from "@/lib/server/health";
 import { raiseSystemAlert, reportIncident, type Severity } from "@/lib/server/system-alerts";
 import { flattenInvocations, resolveAccountKeys } from "@/lib/server/tx-invocations";
 
@@ -453,7 +454,13 @@ export async function applySale(
   return current;
 }
 
-/** Alerts a booking result needs: refused, over the cap, a linked legacy row. */
+/**
+ * Alerts a booking result needs: refused, over the cap, a linked legacy row,
+ * and FX_LOCK_DRIFT after a booking at a locked rate (D20). Every booking path
+ * (ledger job, 2B backstop, orphan scans, the manual route) runs it, so the
+ * drift check never depends on which of them booked first; its "once" key
+ * makes a repeat harmless.
+ */
 export async function bookingFlags(sb: SupabaseClient, booked: BookResult, signal?: AbortSignal) {
   if (booked.book_error) {
     await ledgerAlert(sb, booked, "BOOK_REFUSED", "high", `Booking refused: ${booked.book_error}`,
@@ -468,6 +475,13 @@ export async function bookingFlags(sb: SupabaseClient, booked: BookResult, signa
       `The sale was already recorded (legacy row linked, not inserted again)${booked.amount_mismatch ? "; the amounts differ" : ""}`,
       { issuance_id: String(booked.booked_issuance_id ?? "") },
       { linked_amount_eur: String(booked.linked_amount_eur ?? ""), booked_amount_eur: String(booked.booked_amount_eur ?? "") }, signal);
+  }
+  if (!booked.book_error) {
+    try {
+      await lockDrift(sb, booked, signal ?? AbortSignal.timeout(8_000));
+    } catch {
+      console.error("[sale-capacity] FX drift check failed");
+    }
   }
 }
 
@@ -493,6 +507,60 @@ export async function saleCoverage(sb: SupabaseClient, salePdas: readonly string
     if (!current || rank(row) < rank(current)) covered.set(row.sale_pda, row);
   }
   return covered;
+}
+
+/** FX_LOCK_DRIFT above this relative rise of a fresh rate over the locked one (D20). */
+const FX_DRIFT = 0.02;
+
+export type FxRow = { kind: string; eur_per_token: string | number; as_of: string; max_age: string };
+
+export async function fxRow(sb: SupabaseClient, mint: string, signal: AbortSignal): Promise<FxRow | null> {
+  const { data, error } = await sb.from("fx_rates").select("kind,eur_per_token,as_of,max_age")
+    .eq("network", detectNetwork()).eq("payment_mint", mint).abortSignal(AbortSignal.any([signal, AbortSignal.timeout(8_000)])).maybeSingle();
+  if (error) return null;
+  return (data as FxRow | null) ?? null;
+}
+
+export function fxStale(row: FxRow | null, now = Date.now()): boolean {
+  if (!row || row.kind !== "rate") return false;
+  const maxAge = intervalSeconds(row.max_age);
+  return maxAge === null || now - Date.parse(row.as_of) >= maxAge * 1000;
+}
+
+/** After a booking at a locked `rate`: a fresh current rate more than 2% above it (D20). */
+export async function lockDrift(sb: SupabaseClient, booked: BookResult, signal: AbortSignal) {
+  if (booked.status !== "booked" || booked.fx_kind !== "rate" || !booked.payment_mint || booked.fx_rate == null) return;
+  const row = await fxRow(sb, booked.payment_mint, signal);
+  if (!row || row.kind !== "rate" || fxStale(row)) return;
+  const fresh = Number(row.eur_per_token);
+  const locked = Number(booked.fx_rate);
+  if (locked > 0 && fresh > locked * (1 + FX_DRIFT)) {
+    await ledgerAlert(sb, booked, "FX_LOCK_DRIFT", "medium",
+      `Booked at the locked rate ${locked}; the current rate ${fresh} is more than 2% higher`, "once",
+      { locked_rate: String(locked), current_rate: String(fresh) }, signal);
+  }
+}
+
+/**
+ * A stale current rate was used to adopt (a closed or open orphan sale, an
+ * orphan approval, a job's adoption): hold the row for revaluation
+ * (revalue_capacity_fx raises it once a fresh rate exists) and raise
+ * fx-stale (high). Only when the row's rate is the current stale row.
+ */
+export async function holdIfStaleAdoption(sb: SupabaseClient, adopted: Reservation, signal: AbortSignal) {
+  if (adopted.fx_kind !== "rate" || !adopted.payment_mint) return;
+  const row = await fxRow(sb, adopted.payment_mint, signal);
+  if (!row || !fxStale(row) || !adopted.fx_as_of || Date.parse(row.as_of) !== Date.parse(adopted.fx_as_of)) return;
+  await placeHold(sb, adopted.subject, adopted.id, "FX_REVALUE", adopted.payment_mint, signal);
+  try {
+    await reportIncident(sb, {
+      check: `fx-stale:${adopted.payment_mint}`, state: "fail", category: "fx", source: "fx:stale", severity: "high",
+      summary: `An on-chain sale was counted at an out-of-date EUR rate for ${adopted.payment_mint}; the subject is on hold until the rate is updated.`,
+      evidence: { payment_mint: adopted.payment_mint, subject: adopted.subject, reservation_id: adopted.id, fx_stale: true },
+    }, signal);
+  } catch {
+    console.error("[ledger] fx-stale incident failed");
+  }
 }
 
 // ── Treasury-mint evidence ─────────────────────────────────────────────────
@@ -708,6 +776,17 @@ export async function clearHold(sb: SupabaseClient, subject: string, ref: string
   } catch {
     console.error("[sale-capacity] hold not cleared");
   }
+}
+
+/**
+ * Clears the holds a counted sale settles: the sale PDA's, and its consumed
+ * approval's (an orphan approval that could not be adopted put the hold on
+ * the approval PDA; open_sale then closed the approval, so the approval scan
+ * never sees it again). Never throws.
+ */
+export async function clearSaleHolds(sb: SupabaseClient, subject: string, salePda: string, approvalPda: string | null, signal?: AbortSignal) {
+  await clearHold(sb, subject, salePda, signal);
+  if (approvalPda && approvalPda !== salePda) await clearHold(sb, subject, approvalPda, signal);
 }
 
 /** The on-chain fact cannot be counted (no EUR rate): hold the subject and raise fx-missing. Never throws. */
@@ -952,6 +1031,7 @@ async function adoptOrphanApprovals(sb: SupabaseClient, signal: AbortSignal, cou
       try {
         const adopted = await adoptApproval(sb, a, a.address, null, "orphan-scan", signal);
         await adoptedAlert(sb, adopted, "An on-chain sale approval had no live reservation", signal);
+        if (adopted.action !== "none") await holdIfStaleAdoption(sb, adopted, signal);
         await clearHold(sb, adopted.subject, a.address, signal);
         counts.pending++;
       } catch (err) {
@@ -1012,7 +1092,8 @@ async function adoptOrphanSales(sb: SupabaseClient, signal: AbortSignal, counts:
       const adopted = await adoptSale(sb, row.pda, sale, signal, resolved);
       await adoptedAlert(sb, adopted, `Sale ${row.pda} was opened from an approval with no live reservation`, signal);
       await alarmIfNotAllowlisted(sb, row.pda, sale.paymentMint, null, signal);
-      await clearHold(sb, adopted.subject, row.pda, signal);
+      if (adopted.action !== "none") await holdIfStaleAdoption(sb, adopted, signal);
+      await clearSaleHolds(sb, adopted.subject, row.pda, sale.saleApproval, signal);
       await applySale(sb, adopted, sale, signal);
       counts.pending++;
     } catch (error) {
@@ -1167,6 +1248,7 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
     const fields = approvalMismatches(r, approval);
     if (fields.length) {
       const adopted = await adoptApproval(sb, approval, r.approval_pda!, r, "worker", signal);
+      if (adopted.action !== "none") await holdIfStaleAdoption(sb, adopted, signal);
       await ledgerAlert(sb, adopted, "TERMS_DIFFER", adopted.over_cap ? "critical" : "high",
         adoptionMessage(`On-chain approval differs from its reservation (${fields.join(", ")})`, adopted),
         [...fields].sort(), { fields, action: adopted.action, over_cap: adopted.over_cap }, signal);

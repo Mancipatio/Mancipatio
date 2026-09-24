@@ -26,7 +26,9 @@ export async function POST(request: Request) {
       query = query.eq("kind", "sale").is("application_id", null);
     } else if (params.adopted_treasury === true) {
       // Treasury mints nobody reserved, counted at their floor (0073): the super admin may re-value them.
-      query = query.eq("kind", "treasury_mint").eq("adopted", true).eq("status", "booked");
+      // Not a reactivated reservation (also adopted): that one carries the admin's declared value.
+      query = query.eq("kind", "treasury_mint").eq("adopted", true).eq("status", "booked")
+        .eq("adopted_from->>kind", "unreserved_treasury_mint");
     } else if (params.share_class !== undefined) {
       query = query.eq("share_class_pda", addressParam(params.share_class, "share_class"));
     } else {

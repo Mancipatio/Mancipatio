@@ -67,7 +67,7 @@ export default function SpvsPage() {
         <p className="page-sub">
           Serbian special-purpose vehicles used for token issuance. Issuers
           without a Serbian company get an SPV incorporated by Manci.
-          Each SPV may issue at most EUR 3,000,000 per calendar year.
+          Each SPV may issue at most its annual cap (EUR 3,000,000 by default) over any rolling 12 months.
         </p>
       </div>
       <RequireRole role="admin">

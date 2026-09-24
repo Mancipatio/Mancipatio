@@ -64,6 +64,9 @@ import {
   getMintToTreasuryInstructionDataEncoder,
 } from "@/lib/generated/asset_registry";
 import { processIssuanceJob, type IssuanceJob } from "@/lib/server/spv-issuance-jobs";
+import { bookingFlags, reconcileSaleCapacity, type BookResult } from "@/lib/server/sale-capacity";
+import { finalizedTransaction } from "@/lib/server/sale-capacity-chain";
+import { findSalePda } from "@/lib/pdas";
 import { buildTx } from "./helpers/chain-tx";
 
 const R = "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS";
@@ -176,6 +179,67 @@ describe("sale_close jobs", () => {
     await run(job({ closed_at: new Date().toISOString() }));
     const sources = rpcArgs("raise_system_alert").map((a) => `${a.p_source}/${a.p_severity}`);
     expect(sources).toEqual(["ledger:over-cap/critical", "ledger:linked-existing/high"]);
+  });
+});
+
+describe("ledger review fixes", () => {
+  const alerts = () => rpcArgs("raise_system_alert").map((a) => JSON.stringify(a));
+  const holds = (fn: string) => rpcArgs(fn).map((a) => `${a.p_ref}${a.p_code ? `:${a.p_code}` : ""}`);
+  const daysAgo = (d: number) => new Date(Date.now() - d * 86_400_000).toISOString();
+
+  it("a sale already booked completes without proving its close date (no RPC, nothing persisted)", async () => {
+    s.tables.sale_capacity_reservations = [reservation({ status: "booked" })];
+    vi.mocked(finalizedTransaction).mockClear();
+    expect(await run(job({ observed_signature: CLOSE_SIG }))).toBe("complete");
+    expect(finalizedTransaction).not.toHaveBeenCalled();
+    const updates = s.calls.filter((c) => c.kind === "update" && c.target === "spv_issuance_jobs");
+    expect(updates).toHaveLength(1);
+    expect(updates[0].args).not.toHaveProperty("closed_at");
+  });
+
+  it("adopting a sale also clears the hold its consumed approval left (orphan approval without an EUR rate, then open_sale)", async () => {
+    s.rpc.adopt_sale_approval = reservation({ status: "reserved", action: "inserted", over_cap: false });
+    s.rpc.consume_sale_reservation = reservation();
+    expect(await run(job({ closed_at: new Date().toISOString() }))).toBe("complete");
+    expect(holds("clear_capacity_hold")).toEqual(expect.arrayContaining([SALE, APPROVAL]));
+  });
+
+  it("FX_LOCK_DRIFT: above 2% alerts; at most 2% or a stale current rate does not; a backstop booking alerts too", async () => {
+    const booked = reservation({ status: "booked", fx_kind: "rate", fx_rate: 0.9, booked_amount_eur: 400 }) as unknown as BookResult;
+    const drift = async (rate: number, asOf = new Date().toISOString()) => {
+      s.calls = [];
+      s.tables.fx_rates = [{ kind: "rate", eur_per_token: rate, as_of: asOf, max_age: "7 days" }];
+      // The 2B backstop books through applySale → bookingFlags, like the job.
+      await bookingFlags(getSupabaseAdmin(), booked, AbortSignal.timeout(5_000));
+      return alerts().filter((a) => a.includes("fx-lock-drift")).length;
+    };
+    expect(await drift(0.95)).toBe(1);
+    expect(await drift(0.918)).toBe(0);
+    expect(await drift(0.95, daysAgo(8))).toBe(0);
+    // Through the job: booked by applySale in processSaleClose.
+    s.calls = [];
+    s.tables.fx_rates = [{ kind: "rate", eur_per_token: 0.95, as_of: new Date().toISOString(), max_age: "7 days" }];
+    s.tables.sale_capacity_reservations = [reservation({ fx_kind: "rate", fx_rate: 0.9 })];
+    s.rpc.book_sale_reservation = booked;
+    expect(await run(job({ closed_at: new Date().toISOString() }))).toBe("complete");
+    expect(alerts().filter((a) => a.includes("fx-lock-drift"))).toHaveLength(1);
+  });
+
+  it("an orphan sale adopted at a stale current rate is held for revaluation (FX_REVALUE) and fx-stale raised", async () => {
+    const shareClass = ADMIN;
+    const salePda = await findSalePda(shareClass as never, BigInt(4));
+    s.sale = { ...closedSale(), shareClass, status: SaleStatus.Open };
+    const asOf = daysAgo(8);
+    s.tables.sales = [{ pda: salePda, sale_approval: APPROVAL }];
+    s.tables.sale_capacity_reservations = [];
+    s.tables.fx_rates = [{ kind: "rate", eur_per_token: 0.9, as_of: asOf, max_age: "7 days" }];
+    s.rpc.adopt_sale_approval = reservation({ status: "reserved", action: "inserted", over_cap: false, sale_pda: salePda,
+      fx_kind: "rate", fx_rate: 0.9, fx_as_of: asOf });
+    s.rpc.consume_sale_reservation = reservation({ sale_pda: salePda });
+    await reconcileSaleCapacity(10, Date.now() + 5_000, AbortSignal.timeout(5_000));
+    expect(holds("place_capacity_hold")).toEqual([`${RID}:FX_REVALUE`]);
+    expect(rpcArgs("report_incident").map((a) => `${a.p_check}/${a.p_state}/${a.p_severity}`)).toEqual([`fx-stale:${MINT}/fail/high`]);
+    expect(holds("clear_capacity_hold")).toEqual(expect.arrayContaining([salePda, APPROVAL]));
   });
 });
 

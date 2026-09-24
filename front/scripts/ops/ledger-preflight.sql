@@ -7,7 +7,13 @@
 --      sale_pda or a source='sale' row's sale_pubkey): probably the same sale
 --      booked twice (by hand and by the server);
 --   3. manual rows on assets that have server bookings in the last 12 months:
---      possibly the same issuance.
+--      possibly the same issuance;
+--   4. server bookings still to come: consumed sale reservations and reserved
+--      treasury mints (0073 books them on the next retry run, including the
+--      ones the old calendar-year trigger refused: refused_by_0027) next to
+--      the manual rows of the same SPV and asset (or with no asset) from the
+--      last 12 months. A manual row that worked around such a refusal would
+--      be counted twice once 0073 books the server row: correct it first.
 -- Nothing is changed.
 begin read only;
 
@@ -42,5 +48,24 @@ where i.source = 'manual' and i.asset_pda is not null and i.issued_at > current_
                where x.spv_id = i.spv_id and x.asset_pda = i.asset_pda and x.source in ('sale', 'treasury_mint')
                  and x.issued_at > current_date - interval '12 months')
 order by i.issued_at desc;
+
+\echo '4. Server bookings still to come, next to manual rows of the same SPV and asset'
+select r.id as reservation_id, r.kind, r.status, r.spv_id, r.asset_pda, r.sale_pda, r.amount_eur, r.created_at,
+  coalesce(r.last_error ilike '%SPV annual issuance cap exceeded%', false) as refused_by_0027,
+  left(r.last_error, 200) as last_error,
+  (select jsonb_agg(jsonb_build_object('id', i.id, 'issued_at', i.issued_at, 'amount_eur', i.amount_eur,
+      'asset_pda', i.asset_pda, 'note', left(i.note, 120)) order by i.issued_at)
+     from public.spv_issuances i
+    where i.source = 'manual' and i.spv_id = r.spv_id
+      and (i.asset_pda is null or i.asset_pda = r.asset_pda)
+      and i.issued_at > current_date - interval '12 months') as manual_rows
+from public.sale_capacity_reservations r
+where r.spv_id is not null
+  and ((r.kind = 'sale' and r.status = 'consumed') or (r.kind = 'treasury_mint' and r.status = 'reserved'))
+  and exists (select 1 from public.spv_issuances i
+               where i.source = 'manual' and i.spv_id = r.spv_id
+                 and (i.asset_pda is null or i.asset_pda = r.asset_pda)
+                 and i.issued_at > current_date - interval '12 months')
+order by refused_by_0027 desc, r.created_at;
 
 rollback;

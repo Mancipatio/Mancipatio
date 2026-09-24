@@ -388,6 +388,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     expect(booked.adopted_from).toMatchObject({ status: "released", release_reason: "expired" });
     expect(capacity()).toMatchObject({ reserved: 100, issued: 100 });
     expect(() => sql(`select public.book_treasury_mint('${b.id}','sig-late',null)`)).toThrow(/MINT_ALREADY_BOOKED/);
+    // A reactivated reservation carries the admin's declared value: not a floor adoption, never re-valued.
+    expect(() => sql(`select public.revalue_treasury_mint('${a.id}',1,'Lower it to the floor','super-admin')`)).toThrow(/REVALUE_NOT_ALLOWED/);
     // 0073: a treasury mint over the cap is booked and flagged, never refused.
     sql(`update public.spvs set annual_cap_eur=150 where id='${SPV}'`);
     const over = json(`select public.book_treasury_mint('${b.id}','sig-b',current_date - 3)`);
@@ -501,6 +503,15 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
     // The ledger job and the backstop booking the same reservation again: still one row.
     json(`select public.book_sale_reservation('${r.id}',${BigInt(100) * WHOLE})`);
     expect(sql("select count(*) from public.spv_issuances")).toBe("1");
+  });
+
+  it("the ledger job and the backstop booking one reservation at the same time write exactly one row", async () => {
+    const r = consumed({ saleId: 7 });
+    const book = `select public.book_sale_reservation('${r.id}',${BigInt(100) * WHOLE})`;
+    // The first holds the subject lock for a moment; the second waits, then finds it booked.
+    await Promise.all([db.queryAsync(`begin; ${book}; select pg_sleep(0.5); commit;`), db.queryAsync(book)]);
+    expect(sql(`select count(*) from public.spv_issuances where sale_pubkey='${row(r.id).sale_pda}'`)).toBe("1");
+    expect(row(r.id)).toMatchObject({ status: "booked", booked_amount_eur: 100 });
   });
 
   it("manual adjustments: rolling cap, a reason and a note, never a sale; the trigger checks direct manual inserts too", () => {

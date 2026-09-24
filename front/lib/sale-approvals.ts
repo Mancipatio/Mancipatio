@@ -203,11 +203,6 @@ export const reserveTreasuryMint = (
 ) => signedFetch<{ reservation_id: string; amount_eur: number; subject: string; capacity: Capacity }>(
   session, "/api/sale-approvals/treasury-mint", "saleApprovals.treasuryMint", input);
 
-/** The admin's manual "book with signature" for a treasury reservation stuck as reserved. */
-export const bookTreasuryMint = (session: Session, reservationId: string, signature: string) =>
-  signedFetch<{ reservation_id: string; status: string; booked_amount_eur: number }>(
-    session, "/api/sale-approvals/treasury-mint", "saleApprovals.treasuryMintBook", { reservation_id: reservationId, signature });
-
 /** The super admin re-values a treasury mint the ledger adopted at its floor (never below it). */
 export const revalueTreasuryMint = (session: Session, reservationId: string, amountEur: number, reason: string) =>
   signedFetch<{ reservation_id: string; amount_eur: number; previous_amount_eur: number | null; over_cap: boolean }>(

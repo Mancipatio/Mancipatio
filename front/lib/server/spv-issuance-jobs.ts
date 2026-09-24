@@ -42,9 +42,11 @@ import {
   bookTreasuryMintRow,
   bookingFlags,
   clearHold,
+  clearSaleHolds,
   dbU64,
   fetchSale,
   holdForMissingFx,
+  holdIfStaleAdoption,
   isCapacityCode,
   ledgerAlert,
   placeHold,
@@ -55,13 +57,10 @@ import {
   treasuryMintEvidence,
   treasuryMintInvocations,
   utcDate,
-  type BookResult,
   type Reservation,
   type TreasuryTx,
 } from "@/lib/server/sale-capacity";
 import { finalizedTransaction } from "@/lib/server/sale-capacity-chain";
-import { intervalSeconds } from "@/lib/server/health";
-import { reportIncident } from "@/lib/server/system-alerts";
 import { flattenInvocations, resolveAccountKeys, type InvocationTx } from "@/lib/server/tx-invocations";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
@@ -95,8 +94,6 @@ const CLOSE_SCAN_PAGES = 2;
 const CLOSE_SCAN_TX = 6;
 const TREASURY_MATCH_SLACK_SECS = 120;
 const TREASURY_RELEASED_RECHECK_MS = 24 * 60 * MINUTE;
-/** FX_LOCK_DRIFT above this relative rise of a fresh rate over the locked one (D20). */
-const FX_DRIFT = 0.02;
 
 const backoff = (attempts: number) => Math.min(MINUTE * 2 ** Math.min(attempts, 10), 60 * MINUTE);
 const codeOf = (err: unknown, fallback: string) => {
@@ -154,52 +151,6 @@ export async function proveCloseDate(job: IssuanceJob, signal: AbortSignal): Pro
   return { closedAt: job.created_at, signature: null, source: "observed" };
 }
 
-type FxRow = { kind: string; eur_per_token: string | number; as_of: string; max_age: string };
-
-async function fxRow(sb: SupabaseClient, mint: string, signal: AbortSignal): Promise<FxRow | null> {
-  const { data, error } = await sb.from("fx_rates").select("kind,eur_per_token,as_of,max_age")
-    .eq("network", detectNetwork()).eq("payment_mint", mint).abortSignal(dbSignal(signal)).maybeSingle();
-  if (error) return null;
-  return (data as FxRow | null) ?? null;
-}
-
-export function fxStale(row: FxRow | null, now = Date.now()): boolean {
-  if (!row || row.kind !== "rate") return false;
-  const maxAge = intervalSeconds(row.max_age);
-  return maxAge === null || now - Date.parse(row.as_of) >= maxAge * 1000;
-}
-
-/** After a booking at a locked `rate`: a fresh current rate more than 2% above it (D20). */
-async function lockDrift(sb: SupabaseClient, booked: BookResult, signal: AbortSignal) {
-  if (booked.status !== "booked" || booked.fx_kind !== "rate" || !booked.payment_mint || booked.fx_rate == null) return;
-  const row = await fxRow(sb, booked.payment_mint, signal);
-  if (!row || row.kind !== "rate" || fxStale(row)) return;
-  const fresh = Number(row.eur_per_token);
-  const locked = Number(booked.fx_rate);
-  if (locked > 0 && fresh > locked * (1 + FX_DRIFT)) {
-    await ledgerAlert(sb, booked, "FX_LOCK_DRIFT", "medium",
-      `Booked at the locked rate ${locked}; the current rate ${fresh} is more than 2% higher`, "once",
-      { locked_rate: String(locked), current_rate: String(fresh) }, signal);
-  }
-}
-
-/** A stale current rate was used to adopt: hold for revaluation and raise fx-stale (high). */
-async function holdIfStaleAdoption(sb: SupabaseClient, adopted: Reservation, signal: AbortSignal) {
-  if (adopted.fx_kind !== "rate" || !adopted.payment_mint) return;
-  const row = await fxRow(sb, adopted.payment_mint, signal);
-  if (!row || !fxStale(row) || !adopted.fx_as_of || Date.parse(row.as_of) !== Date.parse(adopted.fx_as_of)) return;
-  await placeHold(sb, adopted.subject, adopted.id, "FX_REVALUE", adopted.payment_mint, signal);
-  try {
-    await reportIncident(sb, {
-      check: `fx-stale:${adopted.payment_mint}`, state: "fail", category: "fx", source: "fx:stale", severity: "high",
-      summary: `An on-chain sale was counted at an out-of-date EUR rate for ${adopted.payment_mint}; the subject is on hold until the rate is updated.`,
-      evidence: { payment_mint: adopted.payment_mint, subject: adopted.subject, reservation_id: adopted.id, fx_stale: true },
-    }, signal);
-  } catch {
-    console.error("[ledger] fx-stale incident failed");
-  }
-}
-
 async function processSaleClose(sb: SupabaseClient, job: IssuanceJob, signal: AbortSignal): Promise<Outcome> {
   const sale = await fetchSale(job.ref, "finalized", signal);
   const age = Date.now() - Date.parse(job.created_at);
@@ -211,28 +162,31 @@ async function processSaleClose(sb: SupabaseClient, job: IssuanceJob, signal: Ab
   }
   if (sale.status !== SaleStatus.Closed) return { status: "pending", code: "NOT_CLOSED", delayMs: 5 * MINUTE };
 
+  // Coverage first: a booked or closed-unsold sale needs no close date (no RPC).
+  let row = (await saleCoverage(sb, [job.ref], signal)).get(job.ref) ?? null;
+  if (row && (row.status === "booked" || row.status === "released")) {
+    await clearSaleHolds(sb, row.subject, job.ref, sale.saleApproval, signal);
+    return { status: "complete", fields: { spv_id: row.spv_id, subject: row.subject, reservation_id: row.id } };
+  }
+  if (row && row.approval_pda !== sale.saleApproval) {
+    await ledgerAlert(sb, row, "OTHER_APPROVAL", "high", "A closed sale consumed another approval than its reservation's",
+      { approval: sale.saleApproval }, { consumed_approval: sale.saleApproval }, signal);
+    return { status: "pending", code: "OTHER_APPROVAL", delayMs: FX_BLOCKED_DELAY_MS };
+  }
+
+  // This job books or adopts: prove the close date once, and persist it at
+  // once (book_sale_reservation v2 reads it, also for the backstop's booking).
   const fields: Record<string, unknown> = {};
   let closedAt = job.closed_at;
   if (!closedAt) {
     const proof = await proveCloseDate(job, signal);
     closedAt = proof.closedAt;
     Object.assign(fields, { closed_at: proof.closedAt, closed_signature: proof.signature, issued_at_source: proof.source });
-    // Persist the proof at once: the booking reads it (book_sale_reservation v2).
     const { error } = await sb.from("spv_issuance_jobs").update(fields).eq("id", job.id).abortSignal(dbSignal(signal));
     if (error) return { status: "pending", code: "DB_UNAVAILABLE", delayMs: backoff(job.attempts) };
   }
   const issuedAt = new Date(closedAt).toISOString().slice(0, 10);
 
-  let row = (await saleCoverage(sb, [job.ref], signal)).get(job.ref) ?? null;
-  if (row && (row.status === "booked" || row.status === "released")) {
-    await clearHold(sb, row.subject, job.ref, signal);
-    return { status: "complete", fields: { ...fields, spv_id: row.spv_id, subject: row.subject, reservation_id: row.id } };
-  }
-  if (row && row.approval_pda !== sale.saleApproval) {
-    await ledgerAlert(sb, row, "OTHER_APPROVAL", "high", "A closed sale consumed another approval than its reservation's",
-      { approval: sale.saleApproval }, { consumed_approval: sale.saleApproval }, signal);
-    return { status: "pending", code: "OTHER_APPROVAL", delayMs: FX_BLOCKED_DELAY_MS, fields };
-  }
   if (!row) {
     const resolved = await resolveSaleSubject(sb, sale, signal);
     let adopted;
@@ -248,15 +202,15 @@ async function processSaleClose(sb: SupabaseClient, job: IssuanceJob, signal: Ab
     }
     await adoptedAlert(sb, adopted, `Closed sale ${job.ref} had no reservation`, signal);
     await holdIfStaleAdoption(sb, adopted, signal);
-    await clearHold(sb, adopted.subject, job.ref, signal);
+    await clearSaleHolds(sb, adopted.subject, job.ref, sale.saleApproval, signal);
     row = adopted;
   }
+  // applySale → bookingFlags also checks FX_LOCK_DRIFT (D20), whoever books.
   const booked = await applySale(sb, row, sale as Sale, signal, issuedAt);
-  await lockDrift(sb, booked, signal);
   const done = booked.status === "booked" || (booked.status === "released" && booked.release_reason === "closed_unsold");
   const linked = { spv_id: booked.spv_id, subject: booked.subject, reservation_id: booked.id };
   if (!done) return { status: "pending", code: booked.book_error ? "BOOK_REFUSED" : "NOT_BOOKED", delayMs: backoff(job.attempts), fields: { ...fields, ...linked } };
-  await clearHold(sb, booked.subject, job.ref, signal);
+  await clearSaleHolds(sb, booked.subject, job.ref, sale.saleApproval, signal);
   return { status: "complete", fields: { ...fields, ...linked } };
 }
 

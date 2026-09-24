@@ -432,6 +432,8 @@ begin
 end $$;
 
 -- ── 12. revalue_treasury_mint (super admin, via a route) ──────────────────
+-- Only rows adopt_treasury_mint wrote (adopted_from.kind
+-- 'unreserved_treasury_mint'); never below the floor.
 create or replace function public.revalue_treasury_mint(p_id uuid, p_amount_eur numeric, p_reason text, p_by text)
 returns jsonb language plpgsql security definer set search_path = '' as $$
 declare r public.sale_capacity_reservations%rowtype; f jsonb; amount numeric := ceil(p_amount_eur * 100) / 100;
@@ -441,7 +443,10 @@ begin
   if not found then raise exception 'RESERVATION_NOT_FOUND' using errcode = 'P0001'; end if;
   perform public.sale_capacity_lock(r.network, r.spv_id, r.issuer_pda);
   select * into r from public.sale_capacity_reservations where id = p_id for update;
-  if r.kind <> 'treasury_mint' or r.status <> 'booked' or not r.adopted then
+  -- Only a mint the ledger adopted at its floor: a reactivated reservation
+  -- (book_treasury_mint also sets adopted) carries the admin's declared value.
+  if r.kind <> 'treasury_mint' or r.status <> 'booked' or not r.adopted
+     or r.adopted_from->>'kind' is distinct from 'unreserved_treasury_mint' then
     raise exception 'REVALUE_NOT_ALLOWED' using errcode = 'P0001';
   end if;
   if amount is null or amount <= 0 or p_reason is null or length(trim(p_reason)) < 10 or p_by is null then
@@ -501,7 +506,8 @@ begin
         update public.spv_issuances set amount_eur = greatest(amount_eur, r.booked_amount_eur) where id = r.booked_issuance_id;
       end if;
     end if;
-  elsif r.kind = 'treasury_mint' and r.adopted and r.status = 'booked' then
+  elsif r.kind = 'treasury_mint' and r.adopted and r.status = 'booked'
+        and r.adopted_from->>'kind' = 'unreserved_treasury_mint' then
     f := public.treasury_mint_floor(r.network, r.share_class_pda, r.amount_units);
     if (f->>'fx_missing')::boolean then raise exception 'FX_RATE_MISSING' using errcode = 'P0001'; end if;
     if (f->>'fx_stale')::boolean then raise exception 'FX_RATE_STALE' using errcode = 'P0001'; end if;

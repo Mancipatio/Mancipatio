@@ -7,8 +7,12 @@
 // declared EUR value ("saleApprovals.treasuryMint": share_class, amount_units,
 // amount_eur, reason). After the transaction finalizes it books it
 // ("saleApprovals.treasuryMintBook": reservation_id, signature): the server
-// requires exactly one top-level mint_to_treasury of that share class and
-// amount, signed by the reserving admin, into an account the admin owns.
+// requires exactly one mint_to_treasury of that share class and amount,
+// signed by the reserving admin, into an account the admin owns, and books it
+// at the mint's block date (over the cap it is still booked and alerted).
+// Since Talas 5.1 the browser never calls it on its own: the ledger job and
+// the retry worker book every finalized mint; this stays for an admin who
+// books a reservation stuck as reserved by hand (D11).
 // A failed mint is released through /api/sale-approvals/release. The declared
 // EUR value has a floor (0066: at least EUR 1 and the units at the share
 // class's latest price). The retry worker books a mint the browser never
@@ -22,6 +26,7 @@ import { detectNetwork } from "@/lib/network";
 import {
   addressParam,
   bookTreasuryMintRow,
+  bookingFlags,
   capacityError,
   dbU64,
   finalizedTreasuryTx,
@@ -29,6 +34,7 @@ import {
   snapshotHash,
   treasuryMintEvidence,
   u64Param,
+  utcDate,
 } from "@/lib/server/sale-capacity";
 import { subjectSpvId, shareClassChain } from "../_lib";
 
@@ -53,10 +59,14 @@ export async function POST(request: Request) {
       treasuryMintEvidence(tx, signature, {
         shareClass: reservation.share_class_pda, authority: reservation.reserved_by, amount: dbU64(reservation.amount_units),
       });
-      const booked = await bookTreasuryMintRow(sb, reservation.id, signature);
-      // The 0027 calendar-year trigger refused the SPV row: still counted (reserved).
+      // At the mint's block date, like the ledger job and the backstop (never today's date).
+      // MINT_ALREADY_BOOKED / RESERVATION_ALREADY_BOOKED map to 409 (capacityError).
+      const booked = await bookTreasuryMintRow(sb, reservation.id, signature, undefined, utcDate(tx.blockTime));
+      await bookingFlags(sb, booked);
       if (booked.book_error) throw new SiwsError(409, `Booking refused: ${booked.book_error}`);
-      return NextResponse.json({ ok: true, data: { reservation_id: booked.id, status: booked.status, booked_amount_eur: booked.booked_amount_eur } });
+      return NextResponse.json({ ok: true, data: {
+        reservation_id: booked.id, status: booked.status, booked_amount_eur: booked.booked_amount_eur, over_cap: booked.over_cap === true,
+      } });
     }
 
     const shareClass = addressParam(params.share_class, "share_class");
