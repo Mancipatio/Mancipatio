@@ -7,6 +7,7 @@ import { ToastProvider } from "@/lib/toast";
 import { detectNetwork, rpcUrl, wsUrl } from "@/lib/network";
 import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 import { guardWalletConnectors } from "@/lib/guarded-wallet-connectors";
+import { walletConnectorOverrides } from "@/lib/wallet-chain";
 import { WalletSigningNotice } from "@/components/wallet-signing-notice";
 import { RoleProvider } from "@/lib/auth";
 
@@ -17,7 +18,8 @@ const endpoint = rpcUrl();
 const websocketEndpoint = wsUrl();
 
 // One Solana client for the whole app — network RPC + Wallet Standard discovery.
-const connectors = guardWalletConnectors(autoDiscover(), () => {
+// Wallets are told the build's chain (lib/wallet-chain), not their first one.
+const connectors = guardWalletConnectors(autoDiscover({ overrides: walletConnectorOverrides(detectNetwork()) }), () => {
   const wallet = baseClient.store.getState().wallet;
   return wallet.status === "connected" ? wallet.session : undefined;
 });
