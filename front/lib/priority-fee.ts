@@ -73,25 +73,42 @@ export function resetPriorityFeeCache(): void {
   inflight.clear();
 }
 
+async function readOracle(network: Network, policy: FeePolicy, signal: AbortSignal | undefined): Promise<bigint> {
+  const res = await fetch("/api/priority-fee", { cache: "no-store", signal });
+  if (!res.ok) throw new Error("status");
+  const body = (await res.json()) as { ok?: unknown; network?: unknown; microLamports?: unknown } | null;
+  if (
+    !body || body.ok !== true || body.network !== network ||
+    typeof body.microLamports !== "string" || !MICRO_LAMPORTS_RE.test(body.microLamports)
+  ) {
+    throw new Error("shape");
+  }
+  return clampComputeUnitPrice(BigInt(body.microLamports), policy);
+}
+
+/**
+ * The oracle's price, or the floor after ORACLE_TIMEOUT_MS whatever happens:
+ * the deadline is an own timer racing the whole read (headers AND body), so
+ * a stalled response never holds a send, even in a WebView without
+ * AbortSignal.timeout. The timer also aborts the request where it can.
+ */
 async function fetchOraclePrice(network: Network, policy: FeePolicy): Promise<bigint> {
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller?.abort();
+      reject(new Error("timeout"));
+    }, ORACLE_TIMEOUT_MS);
+  });
   try {
-    const res = await fetch("/api/priority-fee", {
-      cache: "no-store",
-      signal: typeof AbortSignal.timeout === "function" ? AbortSignal.timeout(ORACLE_TIMEOUT_MS) : undefined,
-    });
-    if (!res.ok) throw new Error("status");
-    const body = (await res.json()) as { ok?: unknown; network?: unknown; microLamports?: unknown } | null;
-    if (
-      !body || body.ok !== true || body.network !== network ||
-      typeof body.microLamports !== "string" || !MICRO_LAMPORTS_RE.test(body.microLamports)
-    ) {
-      throw new Error("shape");
-    }
-    return clampComputeUnitPrice(BigInt(body.microLamports), policy);
+    return await Promise.race([readOracle(network, policy, controller?.signal), deadline]);
   } catch {
     // No detail: a response body or error text is never echoed.
     console.warn("[priority-fee] the fee oracle is unavailable; using the network floor");
     return policy.floor;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

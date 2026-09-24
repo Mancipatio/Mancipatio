@@ -132,13 +132,30 @@ describe("resolveComputeUnitPrice", () => {
     expect(warn.mock.calls[0].join(" ")).not.toMatch(/5000|nope|Failed|503/);
   });
 
-  it("uses the floor when the oracle times out", async () => {
-    vi.useRealTimers();
+  it("uses the floor when the oracle times out, and aborts the request", async () => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
     reply = "hang";
-    const timeout = vi.spyOn(AbortSignal, "timeout").mockImplementation(() => AbortSignal.abort(new DOMException("t", "TimeoutError")));
-    await expect(resolveComputeUnitPrice("devnet")).resolves.toBe(BigInt(1_000));
-    expect(timeout).toHaveBeenCalledWith(ORACLE_TIMEOUT_MS);
-    timeout.mockRestore();
+    const price = resolveComputeUnitPrice("devnet");
+    await vi.advanceTimersByTimeAsync(ORACLE_TIMEOUT_MS);
+    await expect(price).resolves.toBe(BigInt(1_000));
+    expect((fetchMock.mock.calls[0][1] as RequestInit).signal?.aborted).toBe(true);
+  });
+
+  it.each([
+    ["a response that ignores the abort signal", () => new Promise<Response>(() => {})],
+    ["a body that never finishes", async () => ({ ok: true, json: () => new Promise(() => {}) }) as unknown as Response],
+  ])("the 2 s deadline holds for %s (own timer, even without AbortSignal.timeout)", async (_label, stalled) => {
+    vi.useFakeTimers({ toFake: ["Date", "setTimeout", "clearTimeout"] });
+    vi.stubGlobal("AbortSignal", Object.assign(function AbortSignalStub() {}, { timeout: undefined }));
+    fetchMock.mockImplementationOnce(stalled);
+    const price = resolveComputeUnitPrice("devnet");
+    let settled = false;
+    void price.then(() => (settled = true));
+    await vi.advanceTimersByTimeAsync(ORACLE_TIMEOUT_MS - 1);
+    expect(settled).toBe(false);
+    await vi.advanceTimersByTimeAsync(1);
+    await expect(price).resolves.toBe(BigInt(1_000));
+    expect(warn).toHaveBeenCalledOnce();
   });
 
   it("shares one request between concurrent callers and reuses the price for 10 s", async () => {
