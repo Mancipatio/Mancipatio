@@ -880,7 +880,12 @@ node -e 'import("@solana/kit").then(async k=>{for(const p of ["FJs1EM1ND89L9sUXa
 
 The gap scan (every 5 minutes, window now−20 min … now−5 min) reads the
 asset_registry program, the blocklist-authority PDA and both ProgramData
-PDAs, and re-queues any finalized transaction the index misses.
+PDAs, and re-queues any finalized transaction the index misses that invokes
+a watched program (asset_registry, transfer_hook, or a loader instruction on
+one of ours). A transaction that only lists one of those addresses (anyone
+can add the blocklist-authority PDA as a read-only account; the webhook
+never delivers it) is ignored, so the PDA does not need to be in the Helius
+list.
 
 ### Devnet rollout (migrations before the front)
 
@@ -891,10 +896,18 @@ MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/ledger-preflight.sql
 ```
 
 Section 1 (duplicate sale bookings) must be empty, or 0073 refuses to run.
-Decide on every row of sections 2 and 3 (manual rows that name a sale, or
-sit on assets with server bookings) before 0073: keep, or correct by hand.
+Decide on every row of sections 2, 3 and 4 before 0073: keep, or correct by
+hand. Section 2 lists manual rows that name a sale, section 3 manual rows on
+assets with server bookings, section 4 the server bookings 0073 will still
+make (consumed sales and reserved treasury mints, `refused_by_0027` for the
+ones the old calendar-year trigger refused) next to manual rows of the same
+SPV and asset: a manual row that worked around such a refusal is counted
+twice once the retry worker books the server row.
 
 **B. 0072, then 0073** (the live front keeps working: expand steps only).
+Do B, C and D on the same day: from 0072 on, every program transaction
+queues an alarm job that nothing processes until the alarm job is enabled in
+D.5 (and treasury-mint ledger jobs are created only by the alarm worker).
 
 ```
 bash scripts/ops/backup.sh devnet pre-0072
@@ -934,7 +947,13 @@ the merge commit and `curl -s https://www.manci.io/api/health` answers
    ```
    MANCI_TARGET=devnet bash scripts/db.sh -c "select public.raise_system_alert(public.deployment_network(),'test:rollout-'||to_char(now(),'YYYYMMDDHH24MISS'),'worker','worker:test','medium','Alarm email test (rollout)','{}'::jsonb,null,true)"
    ```
-   The next alarm run sends it to `office@mancipatio.io` (status `sent`).
+   The cron job is still disabled, so send it with one more manual run and
+   check that the alert's `notify_state` is `sent` (and the email arrived at
+   `office@mancipatio.io`):
+   ```
+   MANCI_TARGET=devnet bash scripts/db.sh -c "select mancipatio_ops.invoke_alarm_worker()"
+   MANCI_TARGET=devnet bash scripts/db.sh -c "select notify_state, notify_error from public.compliance_alerts where dedup_key like 'test:rollout-%' order by created_at desc limit 1"
+   ```
 5. Enable the job:
    `MANCI_TARGET=devnet bash scripts/db.sh -c "select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-alarms-devnet'"`.
 6. External monitor (D10): every 5 minutes on
@@ -952,16 +971,34 @@ MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0074_ledger_contra
 **Expected bootstrap alerts** (D17): the first runs raise incidents for
 whatever is already true (a stale USDC rate in use, old invalid jobs, an
 indexer backlog) and the backfilled sales may raise `LINKED_EXISTING` or
-`OVER_CAP`. Review them, then resolve in bulk on `/admin/compliance`.
+`OVER_CAP`. The first runs also drain the alarm jobs queued since 0072: an
+on-chain alarm (and its email) for every admin, authority, pause or loader
+transaction made between B and D.5, and an `event-queue` incident (high when
+the oldest job passed the fail threshold) until the queue is empty. Review
+them, then resolve in bulk on `/admin/compliance`.
 
 ### Mainnet project
 
 Apply 0001–0074 in order (0074 is safe on a fresh project), the identity
 first as in §14. Then: env (`COMPLIANCE_ALERT_EMAIL` required), Vault
-secret, retry scheduler, alarm scheduler (`MANCI_TARGET=mainnet
-MANCI_ALLOW_MAINNET=1`), the Helius webhook with all four addresses, the
-external monitor — **all before** the program deploy and bootstrap (§2–§7),
-so every bootstrap action (including the loader alarms) is recorded. FX rows
+secret, retry scheduler, the Helius webhook with all four addresses, and the
+alarm scheduler **enabled and proven** — **all before** the program deploy
+and bootstrap (§2–§7), so every bootstrap action (including the loader
+alarms) is alarmed and emailed. `alarm-scheduler.sql` installs the job
+disabled; repeat the devnet steps D.3–D.6 with `MANCI_TARGET=mainnet
+MANCI_ALLOW_MAINNET=1` and job `mancipatio-alarms-mainnet`:
+
+1. install `alarm-scheduler.sql`, run `select mancipatio_ops.invoke_alarm_worker()`
+   once, and check `alarm-scheduler-status.sql` (the run `complete`, a fresh
+   `alarms` `last_ok_at`);
+2. raise a `test:` alert (D.4), run `invoke_alarm_worker()` again, and confirm
+   `notify_state = 'sent'` and the email at the mainnet recipients;
+3. enable the job (`cron.alter_job(..., active := true)` on
+   `mancipatio-alarms-mainnet`);
+4. `curl -s -o /dev/null -w '%{http_code}' https://<mainnet site>/api/health/alarms`
+   answers `200`, and the external monitor watches it.
+
+**Gate:** §2–§7 do not start until all four hold. FX rows
 only through the Raise limits page by the super admin after bootstrap
 (D16); check the EURC mint address against Circle's published address
 before saving it.
@@ -995,7 +1032,15 @@ before saving it.
 - Front: revert the Vercel deployment; disable the job with
   `select cron.alter_job(jobid, active := false) from cron.job where jobname = 'mancipatio-alarms-<network>'`.
   The previous front works against 0072/0073 (signatures unchanged; the
-  settle route is valid again with the old code before 0074).
+  settle route is valid again with the old code before 0074), but it has no
+  ledger stage: nothing processes `spv_issuance_jobs` (they wait for the new
+  front) and nothing clears capacity holds, while 0073's
+  `sale_capacity_hold_guard` and `record_spv_issuance` v2 keep refusing a
+  held subject with `SUBJECT_ON_HOLD`, which the old front does not map.
+  After the revert, list the holds
+  (`select subject, ref, code, created_at from public.sale_capacity_holds where network = public.deployment_network();`)
+  and clear each one after review with `clear_capacity_hold`, or drop the
+  `sale_capacity_hold_guard` trigger as in the 0073 rollback below.
 - 0072: `drop trigger indexer_events_enqueue_alarm_job on public.indexer_events;`
   and restore 0047's `acquire_retry_worker_lease` (the same body without its
   first `perform`). Tables and columns stay.
@@ -1005,6 +1050,46 @@ before saving it.
   re-runnable). Keep `spv_issuances_sale_once` and the new tables.
 - 0074: `create policy "spv_issuances anon read" on public.spv_issuances for select using (true); grant select on public.spv_issuances to anon, authenticated;`
   and re-apply 0073 section 15 (`record_spv_issuance`).
+
+### Implementation notes (where the code differs from the design text)
+
+- Renumbered migrations 0072/0073/0074; the deployment network is 0070's
+  `deployment_network()`. `assert_deployment_network` (0072) uses the 0071
+  guard's rule (equal, or both non-mainnet), as `/api/health` does;
+  `/api/health/alarms` checks it through 4.3's `checkDatabaseNetwork` (the
+  same rule), not through the RPC.
+- The 0072 trigger marks a job as a gap-scan job only when `ix_name =
+  'GAP_SCAN'` and `payload.source = 'gap-scan'` (both, stricter than the
+  design text).
+- `sale_capacity_holds` has a `payment_mint` column (the FX incidents read it).
+- `/api/compliance/list` accepts the pseudo-category `aml` (rows with no
+  category: the AML alerts that predate 0072).
+- `readAlarmHealth` lives in `lib/server/alarm-health.ts`, not `health.ts`.
+- The retry worker also writes its heartbeat for a `partial` run (status
+  `partial`; `last_ok_at` moves only on `processed`).
+- The alarm checks record the cheap incidents before the gap scan, which runs
+  under its own sub-deadline (checks deadline − 3 s); a scan that was started
+  is stamped even when cut short (`gap-scan-incomplete`), and a checks stage
+  that recorded fewer incidents than expected (or could not run a check) is
+  `failed`: a partial run that never moves `last_ok_at`.
+- Loader alarms also cover upgradeable-loader `Migrate` (tag 8) and any
+  loader-v4 instruction on one of our programs (critical).
+- Minimal-format on-chain alarms (holder or issuer related) carry only their
+  own evidence fields, never the decoded arguments (no holder wallet or
+  amount in clawback evidence).
+- The digest reads critical and high rows first, then fills the rest.
+- `report_incident` reopens only an alert the system resolved; a person's
+  resolution or dismissal stays, and a refail opens a new alert.
+- `FX_LOCK_DRIFT` runs in `bookingFlags`, i.e. on every booking path;
+  every adoption at the current stale rate (job, orphan sale, orphan
+  approval, terms that differ) places the `FX_REVALUE` hold; a counted sale
+  also clears the hold its consumed approval left.
+- `revalue_treasury_mint` and the Raise limits list accept only floor
+  adoptions (`adopted_from.kind = 'unreserved_treasury_mint'`), never a
+  reactivated reservation.
+- The manual "book with signature" stays as the route
+  `saleApprovals.treasuryMintBook` (block date, over-cap flags); it has no
+  button: the ledger job and the backstop book every finalized mint.
 
 ## EXTERNAL checks (open until the rehearsal proves them)
 
