@@ -20,7 +20,7 @@ import {
   unresolvedSignatures,
   type HeldLock,
 } from "./journal";
-import { createChainRpc, type ChainRpc } from "./rpc";
+import { createChainRpc, type ChainRpc, type RpcCallRecord } from "./rpc";
 import {
   ChainAbortError,
   ChainGateError,
@@ -64,6 +64,8 @@ export type ToolContext = {
   deps: ToolDeps;
   rpc: ChainRpc;
   drainRpc: ChainRpc;
+  /** Every RPC call of this run so far (request budgets). */
+  calls: readonly RpcCallRecord[];
   signal: AbortSignal;
   root: string;
   frontDir: string;
@@ -150,6 +152,7 @@ export async function runTool(
     deps,
     rpc: clients.rpc,
     drainRpc: clients.drainRpc,
+    calls: clients.calls,
     signal: controller.signal,
     root,
     frontDir,

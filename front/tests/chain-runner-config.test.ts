@@ -5,6 +5,7 @@ import bootstrapConfig from "@/scripts/chain/bootstrap.config";
 import idlConfig from "@/scripts/chain/idl.config";
 import inventoryConfig from "@/scripts/chain/inventory.config";
 import squadsConfig from "@/scripts/chain/squads-export.config";
+import e2eConfig from "@/scripts/chain/e2e.config";
 import { runTool } from "@/scripts/chain/lib/context";
 import { inventoryTool } from "@/scripts/chain/lib/inventory";
 import { DEFAULT_DEADLINE_MIN, MAX_DEADLINE_MIN, repoRoot, type ChainTool } from "@/scripts/chain/lib/safety";
@@ -15,6 +16,7 @@ const configs: Record<ChainTool, typeof bootstrapConfig> = {
   idl: idlConfig,
   inventory: inventoryConfig,
   "squads-export": squadsConfig,
+  e2e: e2eConfig,
 };
 
 describe("chain runner configs (§3.8)", () => {

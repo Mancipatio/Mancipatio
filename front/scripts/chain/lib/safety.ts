@@ -64,7 +64,7 @@ export class ChainRpcError extends Error {
   }
 }
 
-export type ChainTool = "bootstrap" | "idl" | "inventory" | "squads-export";
+export type ChainTool = "bootstrap" | "idl" | "inventory" | "squads-export" | "e2e";
 
 /** The text a runner may print or store for `error`. */
 export function publicErrorMessage(
@@ -151,6 +151,7 @@ export const DEFAULT_DEADLINE_MIN: Record<ChainTool, number> = {
   bootstrap: 60,
   idl: 120,
   "squads-export": 10,
+  e2e: 230,
 };
 /** The runner's own vitest timeout is 4 h; the internal deadline stays below it. */
 export const MAX_DEADLINE_MIN = 230;
@@ -298,6 +299,10 @@ export function readChainConfig(
     throw new ChainGateError("CHAIN_NETWORK conflicts with NEXT_PUBLIC_NETWORK");
   }
   const allowMainnet = flag(env, "CHAIN_ALLOW_MAINNET");
+  if (tool === "e2e" && network !== "devnet" && network !== "localnet") {
+    // The e2e matrix creates test issuers, sales and passports: never on mainnet.
+    throw new ChainGateError("chain:e2e runs on devnet or localnet only");
+  }
   if (network === "mainnet" && !allowMainnet) {
     throw new ChainGateError("A mainnet run needs CHAIN_ALLOW_MAINNET=1");
   }
