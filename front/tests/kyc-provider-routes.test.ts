@@ -19,6 +19,8 @@ const state = vi.hoisted(() => ({
   tables: {} as Record<string, Row[]>,
   /** Called right before an update is applied (race simulation). */
   beforeUpdate: null as null | ((table: string) => void),
+  /** Inserts into this table fail (DB error simulation). */
+  failInsert: null as null | string,
   nextId: 100,
 }));
 const chain = vi.hoisted(() => ({
@@ -105,6 +107,7 @@ function from(table: string) {
   let head = false;
   const run = async (single: boolean) => {
     if (op === "insert") {
+      if (state.failInsert === table) return { data: null, error: { message: "insert failed" } };
       const rows = (Array.isArray(payload) ? payload : [payload ?? {}]).map((r) => ({
         // audit_events ids are uuids (writeServerAudit checks for a string).
         id: table === "audit_events" ? `audit-${state.nextId++}` : state.nextId++,
@@ -194,6 +197,7 @@ beforeEach(() => {
   state.signer = PROVIDER;
   state.params = {};
   state.beforeUpdate = null;
+  state.failInsert = null;
   state.nextId = 100;
   state.tables = {
     clients: [
@@ -417,6 +421,38 @@ describe("transition rule (OD1): a provider never lifts a terminal status", () =
     expect(state.tables.client_notes.every((n) => n.kind === "kyc-event" && n.author === PROVIDER)).toBe(true);
   });
 
+  it("a provider's decision is attributed by a server audit row before it is applied", async () => {
+    state.signer = PROVIDER;
+    expect((await call("clients/status", { id: CLIENT_ID, kyc_status: "verified", reason: "docs ok" })).status).toBe(200);
+    const rows = state.tables.audit_events.filter((r) => r.ix_name === "kyc_provider_status");
+    expect(rows.map((r) => r.status)).toEqual(["pending", "success"]);
+    for (const r of rows) {
+      expect(r).toMatchObject({ category: "kyc", actor_wallet: PROVIDER, target_label: CLIENT_ID });
+      expect(r.metadata).toMatchObject({ role: "kycProvider", from: "pending", to: "verified", actor_verified: true });
+    }
+  });
+
+  it("no attribution, no decision: a failed audit write refuses with 503 and applies nothing", async () => {
+    state.signer = PROVIDER;
+    state.failInsert = "audit_events";
+    const res = await call("clients/status", { id: CLIENT_ID, kyc_status: "verified" });
+    expect(res.status).toBe(503);
+    expect(client().kyc_status).toBe("pending");
+    expect(client().kyc_verified_at).toBeUndefined();
+    expect(notes()).toEqual([]);
+  });
+
+  it("a refused provider decision is recorded as failed after its pending row", async () => {
+    state.signer = PROVIDER;
+    state.beforeUpdate = (table) => {
+      if (table === "clients" && client().kyc_status === "pending") client().kyc_status = "rejected";
+    };
+    expect((await call("clients/status", { id: CLIENT_ID, kyc_status: "verified" })).status).toBe(403);
+    const rows = state.tables.audit_events.filter((r) => r.ix_name === "kyc_provider_status");
+    expect(rows.map((r) => r.status)).toEqual(["pending", "failed"]);
+    expect(client().kyc_status).toBe("rejected");
+  });
+
   it("an Admin's decision keeps the old note behaviour (only with a reason)", async () => {
     state.signer = ADMIN;
     expect((await call("clients/status", { id: CLIENT_ID, kyc_status: "more_info" })).status).toBe(200);
@@ -429,6 +465,67 @@ describe("transition rule (OD1): a provider never lifts a terminal status", () =
     state.signer = PROVIDER;
     expect((await call("clients/status", { id: CLIENT_ID, kyc_status: "suspended" })).status).toBe(200);
     expect(client().kyc_status).toBe("suspended");
+  });
+});
+
+describe("requirement recompute (OD1): never lifts a concurrent terminal status", () => {
+  it("a provider's approval flips a more_info client back to pending", async () => {
+    client().kyc_status = "more_info";
+    state.signer = PROVIDER;
+    const res = await call("clients/review-requirement", { id: 7, status: "approved" });
+    expect(res.status).toBe(200);
+    expect(res.body.data?.recomputed).toBe("pending");
+    expect(client().kyc_status).toBe("pending");
+  });
+
+  it("a suspension landing between the recompute's read and its write wins", async () => {
+    client().kyc_status = "more_info";
+    state.signer = PROVIDER;
+    state.beforeUpdate = (table) => {
+      if (table === "clients" && client().kyc_status === "more_info") client().kyc_status = "suspended";
+    };
+    const res = await call("clients/review-requirement", { id: 7, status: "approved" });
+    expect(res.status).toBe(200);
+    expect(res.body.data?.recomputed).toBeNull();
+    expect(client().kyc_status).toBe("suspended");
+  });
+
+  it("the same holds for an operator-mode upload that answers the last requirement", async () => {
+    client().kyc_status = "more_info";
+    state.tables.kyc_requirements[0].status = "requested";
+    state.signer = PROVIDER;
+    state.beforeUpdate = (table) => {
+      if (table === "clients" && client().kyc_status === "more_info") client().kyc_status = "rejected";
+    };
+    expect(await upload()).toBe(200);
+    expect(client().kyc_status).toBe("rejected");
+  });
+});
+
+describe("/api/clients/note: provider notes cannot imitate decisions", () => {
+  for (const kind of ["kyc-event", "system"]) {
+    it(`the provider may not post a ${kind} entry`, async () => {
+      state.signer = PROVIDER;
+      const res = await call("clients/note", { client_id: CLIENT_ID, body: "approved", kind });
+      expect(res.status).toBe(403);
+      expect(state.tables.client_notes).toHaveLength(0);
+    });
+  }
+
+  it("the provider posts notes and communications", async () => {
+    state.signer = PROVIDER;
+    expect((await call("clients/note", { client_id: CLIENT_ID, body: "called", kind: "communication" })).status).toBe(200);
+    expect((await call("clients/note", { client_id: CLIENT_ID, body: "memo" })).status).toBe(200);
+    expect(state.tables.client_notes.map((n) => n.kind)).toEqual(["communication", "note"]);
+  });
+
+  it("nobody can post the reserved [KYC provider] marker", async () => {
+    for (const signer of [PROVIDER, ADMIN]) {
+      state.signer = signer;
+      const res = await call("clients/note", { client_id: CLIENT_ID, body: " [KYC provider] status → verified" });
+      expect(res.status).toBe(400);
+    }
+    expect(state.tables.client_notes).toHaveLength(0);
   });
 });
 

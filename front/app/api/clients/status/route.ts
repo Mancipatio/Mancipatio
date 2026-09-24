@@ -6,8 +6,13 @@
 // The KYC provider (registry authority without an Admin record) decides
 // verdicts but can NEVER move a client out of `suspended` / `rejected`
 // (OD1): the status patch carries `forbidLeavingTerminal`, which makes the
-// refusal atomic (403). Every provider decision is recorded on the timeline
-// as a "[KYC provider] status → X" kyc-event note.
+// refusal atomic (403). Every provider decision is attributed server-side
+// before it is applied: a "kyc_provider_status" audit row (category "kyc",
+// which only the server can write) is inserted first and the decision is
+// refused (503, nothing applied) when that row cannot be written; the
+// outcome follows as a second, best-effort row. The timeline also gets a
+// "[KYC provider] status → X" kyc-event note (best-effort; that marker is
+// reserved for this route, see /api/clients/note).
 //
 // When a reason is supplied it is recorded on the client timeline as a
 // kyc-event note (system note for suspensions), matching the pre-P1 UX where
@@ -18,6 +23,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
+import { actorSourceOf, writeServerAudit, type ServerAuditInput } from "@/lib/server/audit";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
 import {
@@ -94,9 +100,28 @@ function verdictEmail(
   }
 }
 
+/** The outcome row of a provider decision; its attribution row already exists. */
+async function bestEffortAudit(
+  input: ServerAuditInput,
+  sb: ReturnType<typeof getSupabaseAdmin>,
+  err?: unknown,
+): Promise<void> {
+  try {
+    await writeServerAudit(sb, {
+      ...input,
+      metadata: {
+        ...input.metadata,
+        ...(err === undefined ? {} : { error: err instanceof Error ? err.message : String(err) }),
+      },
+    });
+  } catch {
+    // The pending row already attributes the decision.
+  }
+}
+
 export async function POST(request: Request) {
   try {
-    const { wallet, params } = await verifySigned(request, "clients.status");
+    const { wallet, params, via } = await verifySigned(request, "clients.status");
     const role = await requireAdminOrKycProvider(wallet);
     const provider = role === "kycProvider";
 
@@ -115,9 +140,36 @@ export async function POST(request: Request) {
     if (provider && isTerminalKycStatus(client.kyc_status)) {
       throw new SiwsError(403, LEAVE_TERMINAL_ADMIN_ONLY);
     }
-    await applyClientStatus(sb, id, kycStatus, onboardingStatus, {
-      forbidLeavingTerminal: provider,
-    });
+    let audit: ServerAuditInput | null = null;
+    if (provider) {
+      audit = {
+        ix_name: "kyc_provider_status",
+        category: "kyc",
+        actor_wallet: wallet,
+        actor_source: actorSourceOf(via),
+        reason: "KYC provider status decision",
+        target_label: client.id,
+        metadata: {
+          role: "kycProvider",
+          client_id: client.id,
+          from: client.kyc_status,
+          to: kycStatus,
+          onboarding_status: onboardingStatus ?? null,
+          decision_reason: reason,
+        },
+      };
+      // Attribution first; a failed write throws 503 and nothing is applied.
+      await writeServerAudit(sb, { ...audit, status: "pending" });
+    }
+    try {
+      await applyClientStatus(sb, id, kycStatus, onboardingStatus, {
+        forbidLeavingTerminal: provider,
+      });
+    } catch (err) {
+      if (audit) await bestEffortAudit({ ...audit, status: "failed" }, sb, err);
+      throw err;
+    }
+    if (audit) await bestEffortAudit({ ...audit, status: "success" }, sb);
 
     if (provider) {
       // Always on the timeline: who (the signing wallet) decided what, as

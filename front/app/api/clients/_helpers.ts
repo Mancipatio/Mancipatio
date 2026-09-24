@@ -474,7 +474,13 @@ export async function applyClientStatus(
   clientId: string,
   kycStatus: ServerKycStatus,
   onboardingStatus?: (typeof ONBOARDING_STATUSES)[number],
-  opts?: { kycExpiresAt?: string; forbidLeavingTerminal?: boolean },
+  opts?: {
+    kycExpiresAt?: string;
+    /** Refuse (atomically) to move a suspended / rejected client (OD1). */
+    forbidLeavingTerminal?: boolean;
+    /** Compare-and-set: write only while the row still has this status. */
+    expectedStatus?: ServerKycStatus;
+  },
 ): Promise<void> {
   const patch: Record<string, unknown> = { kyc_status: kycStatus };
   if (onboardingStatus) patch.onboarding_status = onboardingStatus;
@@ -488,16 +494,18 @@ export async function applyClientStatus(
     patch.onboarding_token_expires_at = null;
   }
   if (kycStatus === "suspended") patch.suspended_at = new Date().toISOString();
-  const guarded = opts?.forbidLeavingTerminal === true;
+  const forbidTerminal = opts?.forbidLeavingTerminal === true;
+  const expected = opts?.expectedStatus;
+  const guarded = forbidTerminal || expected !== undefined;
   const write = async (row: Record<string, unknown>) => {
-    const base = sb.from("clients").update(row).eq("id", clientId);
+    let query = sb.from("clients").update(row).eq("id", clientId);
     if (!guarded) {
-      const { error } = await base;
+      const { error } = await query;
       return { error, updated: null as number | null };
     }
-    const { data, error } = await base
-      .not("kyc_status", "in", `(${TERMINAL_KYC_STATUSES.join(",")})`)
-      .select("id");
+    if (forbidTerminal) query = query.not("kyc_status", "in", `(${TERMINAL_KYC_STATUSES.join(",")})`);
+    if (expected !== undefined) query = query.eq("kyc_status", expected);
+    const { data, error } = await query.select("id");
     return { error, updated: Array.isArray(data) ? data.length : 0 };
   };
   let { error, updated } = await write(patch);
@@ -521,7 +529,7 @@ export async function applyClientStatus(
       .maybeSingle();
     if (readErr) throw new SiwsError(500, "Status update failed");
     if (!row) throw new SiwsError(404, "Client not found");
-    if (isTerminalKycStatus((row as { kyc_status?: unknown }).kyc_status)) {
+    if (forbidTerminal && isTerminalKycStatus((row as { kyc_status?: unknown }).kyc_status)) {
       throw new SiwsError(403, LEAVE_TERMINAL_ADMIN_ONLY);
     }
     throw new SiwsError(409, "The client changed while updating — reload and retry");
@@ -532,6 +540,11 @@ export async function applyClientStatus(
  * Server port of recomputeClientKycFromRequirements: a `more_info` client with
  * no remaining OPEN requirements (requested/rejected) flips back to `pending`.
  * Returns the new status, or null when nothing changed. Never throws.
+ *
+ * The flip is a compare-and-set on `more_info`: a suspension or rejection
+ * (or any other change) landing between the read below and the write is
+ * never overwritten. A KYC provider reaches this through review-requirement
+ * and upload, and must never lift a terminal status (OD1).
  */
 export async function recomputeKycFromRequirements(
   sb: SupabaseClient,
@@ -558,8 +571,9 @@ export async function recomputeKycFromRequirements(
   if ((openReqs ?? []).length > 0) return null;
 
   try {
-    await applyClientStatus(sb, clientId, "pending");
+    await applyClientStatus(sb, clientId, "pending", undefined, { expectedStatus: "more_info" });
   } catch {
+    // 0 rows: the status moved on meanwhile (or the client is gone).
     return null;
   }
   return "pending";

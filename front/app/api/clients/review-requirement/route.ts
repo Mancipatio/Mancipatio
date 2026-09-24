@@ -3,7 +3,8 @@
 // requireAdminOrKycProvider, Talas 3.1 K6). Action:
 // "clients.review-requirement". Client half: lib/clients.ts
 // reviewRequirement(). The recompute below only ever moves `more_info` →
-// `pending`, so it never lifts a terminal status.
+// `pending`, as a compare-and-set on `more_info`, so it never lifts a
+// terminal status, even one that lands concurrently.
 //
 // On approval the parent client's kyc_status is recomputed server-side:
 // a `more_info` client with no remaining open requirements flips to `pending`
