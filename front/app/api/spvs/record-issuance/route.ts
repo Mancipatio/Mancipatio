@@ -1,143 +1,147 @@
-// POST /api/spvs/record-issuance — book a manual admin issuance against an
-// SPV's EUR 3M annual cap. Sale proceeds are booked by the server instead
-// (/api/sale-approvals/settle, 0066).
+// POST /api/spvs/record-issuance — an OFF-CHAIN adjustment of an SPV's EUR 3M
+// rolling ledger ("spvs.record_issuance", signed; Talas 5.1).
+//
+// Every on-chain issuance is booked by the server: a closed sale and a
+// treasury mint through the ledger jobs (migration 0073, the retry worker).
+// This route records only what the chain cannot show, with a reason code:
+//   off_platform_issuance | correction | legacy_import
+// and a note of at least 10 characters. It can never name a sale: sale_pubkey
+// is refused, and an asset_pda that is an on-chain sale is refused by the
+// ledger (REF_IS_SALE). When the asset already has server bookings in the
+// last 12 months the route answers 409 POSSIBLE_DUPLICATE with them (date,
+// amount, source) unless the admin confirms (confirm_not_duplicate: true).
 //
 // Authorization tiers:
-//   * cap_override: true            -> requireSuperAdmin (server-enforced; the
-//                                      UI's ConfirmModal reason flow is
-//                                      cosmetic — THIS is the real gate).
-//   * source === "sale"             -> 410 Gone (program package 2B): sale
-//                                      proceeds are booked by the server from
-//                                      the sale-approval reservation
-//                                      (/api/sale-approvals/settle, retry
-//                                      worker). Kept only so an old client
-//                                      gets a clear answer.
-//   * source === "manual"           -> requireAdmin (admin ledger entry).
+//   * cap_override or an issued_at more than 30 days back -> requireSuperAdmin
+//   * otherwise                                            -> requireAdmin
 //
-// The row is written by 0066 record_spv_issuance under the raise-cap ledger's
-// subject lock: without cap_override it must also fit the SPV's rolling
-// 12-month capacity INCLUDING live sale approvals and treasury-mint
-// reservations (so a manual entry cannot take capacity an approved sale
-// already holds). The 0027 BEFORE INSERT trigger still rejects any insert
-// that would push the calendar year over the cap; its message is surfaced
-// verbatim so the client toast stays meaningful. issued_at may not be in the
-// future, and more than 30 days back needs the super admin (a backdated row
-// would fall out of the rolling window).
-//
-// `recorded_by` is stamped with the VERIFIED signer wallet (client value is
-// ignored). Client wrapper: recordIssuance() in
-// lib/spvs.ts (action "spvs.record_issuance").
+// Written by 0073 record_spv_adjustment under the ledger's subject lock: it
+// must fit the rolling 12-month capacity including live reservations, and a
+// subject on hold takes none without the override. The audit row is written
+// by the server (writeServerAudit), attributed to the verified signer.
+// Client wrapper: recordIssuance() in lib/spvs.ts.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin, requireSuperAdmin } from "@/lib/server/admin-gate";
+import { actorSourceOf, writeServerAudit } from "@/lib/server/audit";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { capacityError } from "@/lib/server/sale-capacity";
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-const SOURCES = new Set(["manual", "sale"]);
+const REASON_CODES = new Set(["off_platform_issuance", "correction", "legacy_import"]);
 
 export async function POST(request: Request) {
   try {
-    const { wallet, params } = await verifySigned(
+    const { wallet, params, via } = await verifySigned(
       request,
       "spvs.record_issuance",
     );
 
-    const source =
-      typeof params.source === "string" ? params.source : "manual";
-    if (!SOURCES.has(source)) {
-      throw new SiwsError(400, "source must be 'manual' or 'sale'");
-    }
-
-    // Sale proceeds are booked by the server from the sale's approval
-    // reservation (/api/sale-approvals/settle and the retry worker, 0066).
-    // A second, browser-side booking would count the same sale twice.
-    if (source === "sale") {
+    // Sale proceeds are booked by the server (0073 ledger jobs). An old
+    // client that still sends source 'sale' gets a clear answer.
+    if (params.source !== undefined && params.source !== "manual") {
       throw new SiwsError(
         410,
-        "Sale issuances are booked by the server from the sale approval; nothing to record here",
+        "Sale issuances are booked by the server from the chain; nothing to record here",
       );
+    }
+    if (typeof params.sale_pubkey === "string" && params.sale_pubkey.trim()) {
+      throw new SiwsError(400, "A manual adjustment cannot name a sale: sales are booked by the server when they close.");
     }
 
     const capOverride = params.cap_override === true;
-
     const spvId = typeof params.spv_id === "string" ? params.spv_id.trim() : "";
-    if (!UUID_RE.test(spvId)) {
-      throw new SiwsError(400, "spv_id must be a UUID");
-    }
+    if (!UUID_RE.test(spvId)) throw new SiwsError(400, "spv_id must be a UUID");
 
-    const amountEur =
-      typeof params.amount_eur === "number" ? params.amount_eur : NaN;
+    const amountEur = typeof params.amount_eur === "number" ? params.amount_eur : NaN;
     if (!Number.isFinite(amountEur) || amountEur <= 0) {
       throw new SiwsError(400, "amount_eur must be a positive number");
     }
 
-    const assetPda =
-      typeof params.asset_pda === "string" ? params.asset_pda.trim() : "";
-    if (assetPda.length > 64) {
-      throw new SiwsError(400, "asset_pda too long");
-    }
-    const salePubkey =
-      typeof params.sale_pubkey === "string" ? params.sale_pubkey.trim() : "";
-    if (salePubkey.length > 64) {
-      throw new SiwsError(400, "sale_pubkey too long");
-    }
+    const assetPda = typeof params.asset_pda === "string" ? params.asset_pda.trim() : "";
+    if (assetPda.length > 64) throw new SiwsError(400, "asset_pda too long");
 
-    const issuedAt =
-      typeof params.issued_at === "string" && params.issued_at.trim()
-        ? params.issued_at.trim()
-        : new Date().toISOString().slice(0, 10);
+    const reasonCode = typeof params.reason_code === "string" ? params.reason_code : "";
+    if (!REASON_CODES.has(reasonCode)) {
+      throw new SiwsError(400, "reason_code must be off_platform_issuance, correction or legacy_import");
+    }
+    const note = typeof params.note === "string" ? params.note.trim() : "";
+    if (note.length < 10) throw new SiwsError(400, "A note of at least 10 characters is required");
+    if (note.length > 2000) throw new SiwsError(400, "note too long (≤2000 chars)");
+
+    const today = new Date().toISOString().slice(0, 10);
+    const issuedAt = typeof params.issued_at === "string" && params.issued_at.trim() ? params.issued_at.trim() : today;
     if (!DATE_RE.test(issuedAt) || Number.isNaN(Date.parse(`${issuedAt}T00:00:00Z`))) {
       throw new SiwsError(400, "issued_at must be YYYY-MM-DD");
     }
-    const backdated =
-      Date.parse(`${issuedAt}T00:00:00Z`) < Date.parse(`${new Date().toISOString().slice(0, 10)}T00:00:00Z`) - 30 * 86_400_000;
-
-    const note = typeof params.note === "string" ? params.note.trim() : "";
-    if (note.length > 2000) {
-      throw new SiwsError(400, "note too long (≤2000 chars)");
-    }
+    const backdated = Date.parse(`${issuedAt}T00:00:00Z`) < Date.parse(`${today}T00:00:00Z`) - 30 * 86_400_000;
 
     // ---- Authorization (see header) ----
-    if (capOverride || backdated) {
-      // Escalated path: only THE super admin may bypass the annual cap or
-      // backdate an entry out of the rolling window.
-      await requireSuperAdmin(wallet);
-    } else {
-      // Manual admin ledger entry.
-      await requireAdmin(wallet);
-    }
+    if (capOverride || backdated) await requireSuperAdmin(wallet);
+    else await requireAdmin(wallet);
 
     const sb = getSupabaseAdmin();
-    const { error } = await sb.rpc("record_spv_issuance", {
+
+    // Server bookings of this asset in the window: possibly the same issuance.
+    if (assetPda && params.confirm_not_duplicate !== true) {
+      const since = new Date(Date.now() - 366 * 86_400_000).toISOString().slice(0, 10);
+      const { data: bookings, error: bookingsError } = await sb.from("spv_issuances")
+        .select("issued_at,amount_eur,source")
+        .eq("spv_id", spvId).eq("asset_pda", assetPda).in("source", ["sale", "treasury_mint"])
+        .gte("issued_at", since).order("issued_at", { ascending: false }).limit(20);
+      if (bookingsError) throw new SiwsError(503, "The issuance ledger is unavailable; nothing was changed.");
+      if (Array.isArray(bookings) && bookings.length) {
+        return NextResponse.json({
+          ok: false,
+          code: "POSSIBLE_DUPLICATE",
+          error: "Possible duplicate: this asset already has server bookings in the last 12 months. Confirm that this adjustment is a different issuance.",
+          data: { bookings },
+        }, { status: 409 });
+      }
+    }
+
+    const { data, error } = await sb.rpc("record_spv_adjustment", {
       p_spv_id: spvId,
       p_amount_eur: amountEur,
       p_asset_pda: assetPda || null,
-      p_sale_pubkey: salePubkey || null,
       p_issued_at: issuedAt,
-      p_note: note || null,
+      p_reason_code: reasonCode,
+      p_note: note,
       p_recorded_by: wallet,
       p_cap_override: capOverride,
       p_allow_backdate: backdated,
     });
     if (error) {
-      // Surface the 0027 trigger's cap message verbatim — the client relies
-      // on it ("SPV annual issuance cap exceeded: …"). The ledger's own
-      // refusals (rolling cap with live reservations, dates) are mapped.
-      if (/annual issuance cap/i.test(error.message ?? "")) {
-        throw new SiwsError(409, error.message);
-      }
+      // The trigger's cap message is surfaced verbatim ("SPV annual issuance
+      // cap exceeded: …"); the ledger's own refusals are mapped.
+      if (/annual issuance cap/i.test(error.message ?? "")) throw new SiwsError(409, error.message);
       if (error.code === "P0001") throw capacityError(error);
-      console.error("[api/spvs/record-issuance] insert failed:", error.message);
+      console.error("[api/spvs/record-issuance] insert failed:", error.code);
       throw new SiwsError(500, "Issuance insert failed");
     }
 
+    // The row is written: an audit failure must not invite a second submit.
+    await writeServerAudit(sb, {
+      ix_name: "spv_adjustment",
+      category: "platform",
+      actor_wallet: wallet,
+      actor_source: actorSourceOf(via),
+      reason: `${reasonCode}: ${note}`.slice(0, 1000),
+      target_label: spvId,
+      metadata: {
+        spv_id: spvId, amount_eur: amountEur, issued_at: issuedAt, reason_code: reasonCode,
+        asset_pda: assetPda || null, cap_override: capOverride, backdated,
+        confirmed_not_duplicate: params.confirm_not_duplicate === true,
+        issuance_id: (data as { id?: unknown } | null)?.id ?? null,
+      },
+    }).catch(() => console.error("[api/spvs/record-issuance] audit row not written"));
+
     return NextResponse.json({
       ok: true,
-      data: { spv_id: spvId, amount_eur: amountEur, issued_at: issuedAt },
+      data: { spv_id: spvId, amount_eur: amountEur, issued_at: issuedAt, reason_code: reasonCode },
     });
   } catch (err) {
     return siwsErrorResponse(err);

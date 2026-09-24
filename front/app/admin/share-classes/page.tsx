@@ -63,7 +63,6 @@ import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import {
-  bookTreasuryMintWhenFinalized,
   releaseWhenExpired,
   reserveTreasuryMint,
 } from "@/lib/sale-approvals";
@@ -993,22 +992,9 @@ function ShareClassDetail({
           reservation_id: reservationId,
         },
       });
-      const bookingId = reservationId;
-      void bookTreasuryMintWhenFinalized(client.runtime.rpc, conn.wallet, bookingId, sig)
-        .then((booked) => {
-          if (!booked) {
-            toast.showError(
-              "Treasury mint not booked yet",
-              `The mint landed, but its booking against the raise limit is still pending (reservation ${bookingId}). It stays counted at the reserved value.`,
-            );
-          }
-        })
-        .catch((e) =>
-          toast.showError(
-            "Treasury mint not booked",
-            `${e instanceof Error ? e.message : "Booking failed"} (reservation ${bookingId}). It stays counted at the reserved value.`,
-          ),
-        );
+      // The server books it: the alarm worker sees the finalized mint and the
+      // retry worker's ledger stage books the reservation at the block date
+      // (Talas 5.1). Until then it stays counted at the reserved value.
       setConfirmMint(false);
       setMintAmount("");
       setMintEur("");

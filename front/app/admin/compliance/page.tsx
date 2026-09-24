@@ -8,16 +8,46 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { Kpi } from "@/components/kpi";
 import { SkeletonTable } from "@/components/skeleton";
 import {
+  ALERT_CATEGORIES,
   createAlert,
-  listAlerts,
+  listAlertsPage,
   resolveAlert,
+  type AlertCategoryFilter,
   type AlertSeverity,
   type AlertStatus,
   type ComplianceAlert,
 } from "@/lib/compliance";
 import { listClients, type ClientRow } from "@/lib/clients";
 import { useToast } from "@/lib/toast";
-import { detectNetwork, explorerTxUrl } from "@/lib/network";
+import { detectNetwork, explorerAddressUrl, explorerTxUrl } from "@/lib/network";
+
+const CATEGORY_LABEL: Record<AlertCategoryFilter, string> = {
+  onchain: "On-chain", indexer: "Indexer", worker: "Worker", ledger: "Ledger", fx: "FX", aml: "AML",
+};
+
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const BASE58_SIGNATURE = /^[1-9A-HJ-NP-Za-km-z]{64,96}$/;
+
+/** One evidence value: pubkeys and signatures in mono with an explorer link. */
+function EvidenceValue({ value }: { value: unknown }) {
+  if (typeof value === "string" && BASE58_SIGNATURE.test(value)) {
+    return (
+      <a href={explorerTxUrl(value, detectNetwork())} target="_blank" rel="noopener noreferrer"
+        className="break-all font-mono text-[11px] text-slate-700 underline-offset-2 hover:underline">{value}</a>
+    );
+  }
+  if (typeof value === "string" && BASE58_ADDRESS.test(value)) {
+    return (
+      <a href={explorerAddressUrl(value, detectNetwork())} target="_blank" rel="noopener noreferrer"
+        className="break-all font-mono text-[11px] text-slate-700 underline-offset-2 hover:underline">{value}</a>
+    );
+  }
+  if (value === null || value === undefined) return <span className="text-slate-400">—</span>;
+  if (typeof value === "object") {
+    return <span className="break-all font-mono text-[11px] text-slate-600">{JSON.stringify(value)}</span>;
+  }
+  return <span className="break-all text-slate-700">{String(value)}</span>;
+}
 
 const SEVERITY_BADGE: Record<AlertSeverity, string> = {
   low: "bg-slate-100 text-slate-700 border-slate-300",
@@ -65,6 +95,8 @@ function ComplianceOps() {
   const [alerts, setAlerts] = useState<ComplianceAlert[] | null>(null);
   const [clients, setClients] = useState<ClientRow[]>([]);
   const [tab, setTab] = useState<Tab>("open");
+  const [category, setCategory] = useState<AlertCategoryFilter | null>(null);
+  const [truncated, setTruncated] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<ComplianceAlert | null>(null);
   const [confirm, setConfirm] = useState<{
@@ -78,16 +110,17 @@ function ComplianceOps() {
     if (!conn.wallet) return;
     try {
       const [a, c] = await Promise.all([
-        listAlerts(conn.wallet),
+        listAlertsPage(conn.wallet, category),
         listClients(conn.wallet),
       ]);
-      setAlerts(a);
+      setAlerts(a.alerts);
+      setTruncated(a.truncated.open || a.truncated.other);
       setClients(c ?? []);
     } catch {
       setAlerts([]);
       setClients([]);
     }
-  }, [conn.wallet]);
+  }, [conn.wallet, category]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -240,6 +273,26 @@ function ComplianceOps() {
         </button>
       </div>
 
+      {/* Category filter (system alerts, Talas 4.4b) */}
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className="font-semibold uppercase tracking-wider text-slate-500">Category</span>
+        {[null, ...ALERT_CATEGORIES].map((c) => (
+          <button
+            key={c ?? "all"}
+            type="button"
+            onClick={() => setCategory(c)}
+            className={`rounded-full border px-2.5 py-1 font-medium ${category === c
+              ? "border-slate-800 bg-slate-800 text-white"
+              : "border-slate-200 bg-white text-slate-600 hover:border-slate-300"}`}
+          >
+            {c ? CATEGORY_LABEL[c] : "All"}
+          </button>
+        ))}
+        {truncated && (
+          <span className="text-amber-700">Showing every open or escalated alert (up to 1000) and the newest 200 others.</span>
+        )}
+      </div>
+
       {/* Table */}
       {alerts === null ? (
         <SkeletonTable rows={5} cols={6} />
@@ -297,7 +350,7 @@ function ComplianceOps() {
                         <p className="font-mono text-[11px] text-slate-700">
                           {a.wallet
                             ? `${a.wallet.slice(0, 6)}…${a.wallet.slice(-4)}`
-                            : "(no subject)"}
+                            : a.category ? "System" : "(no subject)"}
                         </p>
                       )}
                       {a.summary && (
@@ -307,6 +360,11 @@ function ComplianceOps() {
                       )}
                     </td>
                     <td className="px-4 py-3 text-xs uppercase tracking-wider text-slate-600">
+                      {a.category && (
+                        <span className="mr-1.5 inline-flex rounded-full border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] font-semibold normal-case tracking-normal text-slate-600">
+                          {CATEGORY_LABEL[a.category]}
+                        </span>
+                      )}
                       {a.source}
                     </td>
                     <td className="max-w-[200px] truncate px-4 py-3 text-xs text-slate-700">
@@ -445,7 +503,7 @@ function AlertDetail({
             Alert detail
           </p>
           <h2 className="mt-1 text-lg font-semibold text-slate-900">
-            {client?.display_name ?? alert.wallet ?? "(no subject)"}
+            {client?.display_name ?? alert.wallet ?? (alert.category ? "System" : "(no subject)")}
           </h2>
           <p className="mt-1 text-xs text-slate-500">
             {alert.source} · {alert.severity} severity · confidence {alert.confidence}%
@@ -487,6 +545,20 @@ function AlertDetail({
             Summary
           </p>
           <p className="mt-1 whitespace-pre-wrap">{alert.summary}</p>
+        </div>
+      )}
+
+      {alert.evidence && Object.keys(alert.evidence).length > 0 && (
+        <div className="mt-4 rounded-lg border border-slate-100 bg-slate-50 p-4 text-sm">
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">Evidence</p>
+          <dl className="mt-2 grid gap-x-4 gap-y-1.5 sm:grid-cols-[minmax(0,12rem)_1fr]">
+            {Object.entries(alert.evidence).map(([key, value]) => (
+              <div key={key} className="contents">
+                <dt className="font-mono text-[11px] text-slate-500">{key}</dt>
+                <dd className="min-w-0"><EvidenceValue value={value} /></dd>
+              </div>
+            ))}
+          </dl>
         </div>
       )}
 

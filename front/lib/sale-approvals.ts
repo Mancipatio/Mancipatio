@@ -6,7 +6,7 @@
 // the EUR raise-cap ledger around them (0066).
 
 import type { SolanaClient, WalletSession } from "@solana/client";
-import { getBase58Decoder, signature as toSignature, type Address, type Base58EncodedBytes } from "@solana/kit";
+import { getBase58Decoder, type Address, type Base58EncodedBytes } from "@solana/kit";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   getSaleApprovalDecoder,
@@ -126,6 +126,7 @@ export type ReservationRow = {
   raise_type: "mature" | "startup" | null; expires_at: string | null; amount_eur: number; booked_amount_eur: number | null;
   chain_confirmed_at: string | null; release_reason: string | null; last_error: string | null; reserved_by: string;
   subject: string; created_at: string;
+  amount_units?: string | number | null; booked_issued_at?: string | null; adopted?: boolean;
 };
 
 export type MyApproval = {
@@ -176,33 +177,14 @@ export async function releaseWhenExpired(session: Session, reservationId: string
   return null;
 }
 
-export type SettleResult = { reservation_id: string; status: string; booked_amount_eur: number | null; book_error: string | null };
-
-/** Best effort after close_sale / open_payout_vault; the retry worker is the backstop. */
-export const settleSaleCapacity = (session: Session, sale: string) =>
-  signedFetch<SettleResult>(session, "/api/sale-approvals/settle", "saleApprovals.settle", { sale });
-
-/**
- * The server books a sale from its FINALIZED state, so wait for the close
- * transaction to finalize (up to 90 s) before settling. Null when it did not
- * finalize in time or failed: the retry worker books it later.
- */
-export async function settleWhenFinalized(rpc: Rpc, session: Session, sale: string, signature: string): Promise<SettleResult | null> {
-  const until = Date.now() + 90_000;
-  while (Date.now() < until) {
-    const status = (
-      await rpc.getSignatureStatuses([toSignature(signature)], { searchTransactionHistory: true })
-        .send({ abortSignal: AbortSignal.timeout(10_000) })
-    ).value[0];
-    if (status?.err) return null;
-    if (status?.confirmationStatus === "finalized") return settleSaleCapacity(session, sale);
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-  }
-  return null;
-}
+// Closed sales and treasury mints are booked by the server alone (Talas 5.1:
+// the indexer and alarm worker enqueue them, the retry worker books them from
+// the finalized chain). The browser never settles or books on its own.
 
 export const listSaleReservations = (
-  session: Session, filter: { application_id: string } | { share_class: string } | { manual: true }, live = false,
+  session: Session,
+  filter: { application_id: string } | { share_class: string } | { manual: true } | { adopted_treasury: true },
+  live = false,
 ) =>
   signedFetch<ReservationRow[]>(session, "/api/sale-approvals/list", "saleApprovals.list", { ...filter, ...(live ? { live } : {}) });
 
@@ -221,24 +203,16 @@ export const reserveTreasuryMint = (
 ) => signedFetch<{ reservation_id: string; amount_eur: number; subject: string; capacity: Capacity }>(
   session, "/api/sale-approvals/treasury-mint", "saleApprovals.treasuryMint", input);
 
+/** The admin's manual "book with signature" for a treasury reservation stuck as reserved. */
 export const bookTreasuryMint = (session: Session, reservationId: string, signature: string) =>
   signedFetch<{ reservation_id: string; status: string; booked_amount_eur: number }>(
     session, "/api/sale-approvals/treasury-mint", "saleApprovals.treasuryMintBook", { reservation_id: reservationId, signature });
 
-/** Books a treasury mint once its transaction finalized (up to 90 s); null when it did not. */
-export async function bookTreasuryMintWhenFinalized(rpc: Rpc, session: Session, reservationId: string, signature: string) {
-  const until = Date.now() + 90_000;
-  while (Date.now() < until) {
-    const status = (
-      await rpc.getSignatureStatuses([toSignature(signature)], { searchTransactionHistory: true })
-        .send({ abortSignal: AbortSignal.timeout(10_000) })
-    ).value[0];
-    if (status?.err) return null;
-    if (status?.confirmationStatus === "finalized") return bookTreasuryMint(session, reservationId, signature);
-    await new Promise((resolve) => setTimeout(resolve, 3_000));
-  }
-  return null;
-}
+/** The super admin re-values a treasury mint the ledger adopted at its floor (never below it). */
+export const revalueTreasuryMint = (session: Session, reservationId: string, amountEur: number, reason: string) =>
+  signedFetch<{ reservation_id: string; amount_eur: number; previous_amount_eur: number | null; over_cap: boolean }>(
+    session, "/api/sale-approvals/treasury-revalue", "saleApprovals.treasuryRevalue",
+    { reservation_id: reservationId, amount_eur: amountEur, reason });
 
 export const readFxRates = (session: Session) =>
   signedFetch<FxRate[]>(session, "/api/admin-config/fx-rates", "adminConfig.fxRatesRead", {});

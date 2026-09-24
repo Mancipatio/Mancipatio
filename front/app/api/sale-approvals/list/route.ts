@@ -1,6 +1,7 @@
 // POST /api/sale-approvals/list — admin read of capacity reservations
 // ("saleApprovals.list"; a wallet session may authorize it).
-// Params: application_id (uuid), share_class (address) or manual: true (sale
+// Params: application_id (uuid), share_class (address), adopted_treasury: true
+// (treasury mints the ledger adopted at their floor, 0073) or manual: true (sale
 // approvals without an application, the super admin's); optional `live`
 // (only reserved / consumed rows).
 
@@ -23,6 +24,9 @@ export async function POST(request: Request) {
       query = query.eq("application_id", params.application_id);
     } else if (params.manual === true) {
       query = query.eq("kind", "sale").is("application_id", null);
+    } else if (params.adopted_treasury === true) {
+      // Treasury mints nobody reserved, counted at their floor (0073): the super admin may re-value them.
+      query = query.eq("kind", "treasury_mint").eq("adopted", true).eq("status", "booked");
     } else if (params.share_class !== undefined) {
       query = query.eq("share_class_pda", addressParam(params.share_class, "share_class"));
     } else {

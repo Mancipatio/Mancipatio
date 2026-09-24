@@ -112,4 +112,5 @@ export const RESERVATION_FIELDS =
   "id,kind,status,share_class_pda,sale_id,approval_pda,sale_pda,asset_pda,issuer_pda,spv_id,subject,application_id," +
   "application_hash,payment_mint,payment_decimals,max_gross_raise,min_price_per_unit,max_price_per_unit,raise_type," +
   "expires_at,amount_units,amount_eur,fx_rate,fx_kind,fx_source,fx_as_of,reason,chain_confirmed_at,approve_signature," +
-  "mint_signature,consumed_at,booked_amount_eur,booked_at,released_at,release_reason,last_error,reserved_by,created_at,updated_at";
+  "mint_signature,consumed_at,booked_amount_eur,booked_at,booked_issued_at,released_at,release_reason,last_error,reserved_by," +
+  "adopted,adopted_from,created_at,updated_at";

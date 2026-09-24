@@ -26,6 +26,7 @@ const state = vi.hoisted(() => ({
   lists: {} as Record<string, unknown[]>,
   rpc: {} as Record<string, unknown>,
   calls: [] as Array<{ kind: string; target: string; args: unknown }>,
+  rpcErrors: {} as Record<string, { code: string; message: string }>,
   fixtures: { issuer: "", asset: "", shareClass: "", assetId: "sale-approval-01", legalEntityId: new Uint8Array(32) },
 }));
 
@@ -89,9 +90,10 @@ vi.mock("@/lib/supabase-server", () => ({
         return builder;
       };
       Object.assign(builder, {
-        select: chain, eq: chain, in: chain, order: chain, limit: chain, abortSignal: chain,
+        select: chain, eq: chain, in: chain, order: chain, limit: chain, abortSignal: chain, gte: chain, is: chain, not: chain,
         update: write("update"), insert: write("insert"),
         maybeSingle: async () => ({ data: state.rows[table] ?? null, error: null }),
+        single: async () => ({ data: { id: `${table}-row` }, error: null }),
         then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) =>
           Promise.resolve({ data: state.lists[table] ?? [], error: null }).then(resolve, reject),
       });
@@ -99,7 +101,7 @@ vi.mock("@/lib/supabase-server", () => ({
     },
     rpc: (fn: string, args: unknown) => {
       state.calls.push({ kind: "rpc", target: fn, args });
-      const result = { data: state.rpc[fn] ?? null, error: null };
+      const result = state.rpcErrors[fn] ? { data: null, error: state.rpcErrors[fn] } : { data: state.rpc[fn] ?? null, error: null };
       return Object.assign(Promise.resolve(result), { abortSignal: () => Promise.resolve(result) });
     },
   }),
@@ -112,7 +114,6 @@ import {
   findSaleApprovalPda,
   getMintToTreasuryInstructionDataEncoder,
   RaiseType,
-  SaleStatus,
 } from "@/lib/generated/asset_registry";
 import { getBase58Decoder } from "@solana/kit";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
@@ -122,6 +123,7 @@ import { POST as confirmRoute } from "@/app/api/sale-approvals/confirm/route";
 import { POST as releaseRoute } from "@/app/api/sale-approvals/release/route";
 import { POST as settleRoute } from "@/app/api/sale-approvals/settle/route";
 import { POST as recordIssuanceRoute } from "@/app/api/spvs/record-issuance/route";
+import { POST as treasuryRevalueRoute } from "@/app/api/sale-approvals/treasury-revalue/route";
 
 const ADMIN = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
 const ISSUER_KEY = "8sHgqRqBEXaSkhcyzXtY3vBSfGqBbTeR2SkVFDcxrfd9";
@@ -208,6 +210,7 @@ beforeEach(() => {
     reserve_sale_capacity: { id: RESERVATION_ID, amount_eur: 250000, subject: "issuer:x", existing: false, capacity: {} },
   };
   state.calls = [];
+  state.rpcErrors = {};
 });
 
 describe("reserve", () => {
@@ -409,41 +412,13 @@ describe("release", () => {
 });
 
 describe("settle", () => {
-  beforeEach(() => {
-    state.admin = false;
-    state.sale = {
-      shareClass: state.fixtures.shareClass, saleId: BigInt(4), pricePerUnit: BigInt(1_000_000), totalForSale: BigInt(200_000),
-      sold: BigInt(150_000), status: SaleStatus.Closed, saleApproval: APPROVAL, raiseType: RaiseType.Mature,
-    };
-    state.lists.sale_capacity_reservations = [reservation({ status: "consumed" })];
-    state.rpc.book_sale_reservation = reservation({ status: "booked", booked_amount_eur: 150000 });
-  });
-
-  it("is the sale's issuer authority or an admin, nobody else", async () => {
-    expect((await call(settleRoute, { sale: SALE }, STRANGER)).status).toBe(403);
-    const { status, body } = await call(settleRoute, { sale: SALE }, ISSUER_KEY);
-    expect(status).toBe(200);
-    expect(body.data).toMatchObject({ status: "booked", booked_amount_eur: 150000 });
-    // sold x price, never a browser-supplied amount.
-    expect(rpcCall("book_sale_reservation")).toMatchObject({ p_id: RESERVATION_ID, p_gross_base_units: "150000000000" });
-    state.admin = true;
-    expect((await call(settleRoute, { sale: SALE }, STRANGER)).status).toBe(200);
-  });
-
-  it("consumes a still-reserved row first, and does not book an open sale", async () => {
-    state.lists.sale_capacity_reservations = [reservation()];
-    state.rpc.consume_sale_reservation = reservation({ status: "consumed" });
-    state.sale = { ...state.sale!, status: SaleStatus.Open };
-    const { status, body } = await call(settleRoute, { sale: SALE }, ISSUER_KEY);
-    expect(status).toBe(200);
-    expect(body.data?.status).toBe("consumed");
-    expect(rpcCall("consume_sale_reservation")).toMatchObject({ p_sale_pda: SALE, p_sale_gross_max: "200000000000" });
-    expect(rpcCall("book_sale_reservation")).toBeUndefined();
-  });
-
-  it("refuses a sale whose approval has no reservation", async () => {
-    state.lists.sale_capacity_reservations = [];
-    expect((await call(settleRoute, { sale: SALE }, ISSUER_KEY)).status).toBe(409);
+  it("is gone: the server books closed sales (410), whoever asks, and books nothing", async () => {
+    for (const wallet of [STRANGER, ISSUER_KEY, ADMIN]) {
+      const { status, body } = await call(settleRoute, { sale: SALE }, wallet);
+      expect(status).toBe(410);
+      expect(body.error).toMatch(/booked by the server/);
+    }
+    expect(state.calls).toHaveLength(0);
   });
 });
 
@@ -459,38 +434,101 @@ function treasuryTx(amount: bigint, signature: string) {
   };
 }
 
-describe("record-issuance", () => {
+describe("record-issuance (off-chain adjustment, Talas 5.1)", () => {
   const SPV_ID = "30000000-0000-4000-8000-000000000001";
   const today = () => new Date().toISOString().slice(0, 10);
   const daysAgo = (n: number) => new Date(Date.now() - n * 86_400_000).toISOString().slice(0, 10);
+  const adjustment = (over: Record<string, unknown> = {}) => ({
+    spv_id: SPV_ID, amount_eur: 100, issued_at: today(), reason_code: "off_platform_issuance",
+    note: "Notarised share issue outside the platform", ...over,
+  });
 
-  it("records a manual issuance through the ledger (live reservations count), never a direct insert", async () => {
-    state.rpc.record_spv_issuance = { id: 1 };
-    const { status } = await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, issued_at: today() });
+  it("records an adjustment through the ledger with a reason code and a server audit row, never a direct insert", async () => {
+    state.rpc.record_spv_adjustment = { id: 1 };
+    const { status } = await call(recordIssuanceRoute, adjustment());
     expect(status).toBe(200);
-    expect(rpcCall("record_spv_issuance")).toMatchObject({
+    expect(rpcCall("record_spv_adjustment")).toMatchObject({
       p_spv_id: SPV_ID, p_amount_eur: 100, p_recorded_by: ADMIN, p_cap_override: false, p_allow_backdate: false,
+      p_reason_code: "off_platform_issuance", p_note: "Notarised share issue outside the platform", p_asset_pda: null,
     });
-    expect(state.calls.filter((c) => c.kind === "insert")).toHaveLength(0);
+    expect(rpcCall("record_spv_issuance")).toBeUndefined();
+    const inserts = state.calls.filter((c) => c.kind === "insert");
+    expect(inserts.map((c) => c.target)).toEqual(["audit_events"]);
+    expect(inserts[0].args).toMatchObject({ ix_name: "spv_adjustment", actor_wallet: ADMIN, target_label: SPV_ID });
+  });
+
+  it("requires a reason code and a note of 10 characters; never a sale (no source, no sale_pubkey)", async () => {
+    expect((await call(recordIssuanceRoute, adjustment({ reason_code: undefined }))).status).toBe(400);
+    expect((await call(recordIssuanceRoute, adjustment({ reason_code: "sale" }))).status).toBe(400);
+    expect((await call(recordIssuanceRoute, adjustment({ note: "too short" }))).status).toBe(400);
+    expect((await call(recordIssuanceRoute, adjustment({ sale_pubkey: SALE }))).status).toBe(400);
+    const gone = await call(recordIssuanceRoute, adjustment({ source: "sale" }));
+    expect(gone.status).toBe(410);
+    expect(gone.body.error).toMatch(/booked by the server/);
+    expect(rpcCall("record_spv_adjustment")).toBeUndefined();
   });
 
   it("needs the super admin to backdate more than 30 days or to override the cap", async () => {
-    state.rpc.record_spv_issuance = { id: 1 };
-    expect((await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, issued_at: daysAgo(40) })).status).toBe(403);
-    expect((await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, cap_override: true })).status).toBe(403);
-    expect(rpcCall("record_spv_issuance")).toBeUndefined();
+    state.rpc.record_spv_adjustment = { id: 1 };
+    expect((await call(recordIssuanceRoute, adjustment({ issued_at: daysAgo(40) }))).status).toBe(403);
+    expect((await call(recordIssuanceRoute, adjustment({ cap_override: true }))).status).toBe(403);
+    expect(rpcCall("record_spv_adjustment")).toBeUndefined();
     state.superAdmin = true;
-    expect((await call(recordIssuanceRoute, { spv_id: SPV_ID, amount_eur: 100, issued_at: daysAgo(40) })).status).toBe(200);
-    expect(rpcCall("record_spv_issuance")).toMatchObject({ p_allow_backdate: true, p_cap_override: false });
+    expect((await call(recordIssuanceRoute, adjustment({ issued_at: daysAgo(40) }))).status).toBe(200);
+    expect(rpcCall("record_spv_adjustment")).toMatchObject({ p_allow_backdate: true, p_cap_override: false });
     state.superAdmin = false;
   });
 
-  it("no longer books sale proceeds from the browser (410)", async () => {
-    const { status, body } = await call(recordIssuanceRoute, {
-      spv_id: "30000000-0000-4000-8000-000000000001", amount_eur: 100, source: "sale", asset_pda: state.fixtures.asset,
-    });
-    expect(status).toBe(410);
-    expect(body.error).toMatch(/booked by the server/);
-    expect(state.calls.filter((c) => c.kind === "insert")).toHaveLength(0);
+  it("answers POSSIBLE_DUPLICATE with the asset's server bookings unless the admin confirms", async () => {
+    state.rpc.record_spv_adjustment = { id: 2 };
+    state.lists.spv_issuances = [{ issued_at: today(), amount_eur: 500, source: "sale" }];
+    const first = await call(recordIssuanceRoute, adjustment({ asset_pda: state.fixtures.asset }));
+    expect(first.status).toBe(409);
+    expect(first.body).toMatchObject({ ok: false, code: "POSSIBLE_DUPLICATE", data: { bookings: [{ amount_eur: 500, source: "sale" }] } });
+    expect(first.body.error).toMatch(/^Possible duplicate/);
+    expect(rpcCall("record_spv_adjustment")).toBeUndefined();
+    const confirmed = await call(recordIssuanceRoute, adjustment({ asset_pda: state.fixtures.asset, confirm_not_duplicate: true }));
+    expect(confirmed.status).toBe(200);
+    expect(rpcCall("record_spv_adjustment")).toMatchObject({ p_asset_pda: state.fixtures.asset });
+  });
+
+  it("maps the ledger's refusals (REF_IS_SALE, SUBJECT_ON_HOLD)", async () => {
+    for (const [code, status, text] of [["REF_IS_SALE", 409, /on-chain sale/], ["SUBJECT_ON_HOLD", 409, /on hold/]] as const) {
+      state.rpcErrors = { record_spv_adjustment: { code: "P0001", message: code } };
+      const { status: got, body } = await call(recordIssuanceRoute, adjustment());
+      expect(got).toBe(status);
+      expect(body.error).toMatch(text);
+    }
+    state.rpcErrors = {};
+  });
+});
+
+describe("treasury-revalue", () => {
+  const params = { reservation_id: RESERVATION_ID, amount_eur: 2500, reason: "Independent appraisal of the units" };
+
+  it("is the super admin's alone, audited, and raises a REVALUED ledger alert", async () => {
+    state.rpc.revalue_treasury_mint = { ...reservation({ kind: "treasury_mint", status: "booked", adopted: true, amount_eur: 2500 }), previous_amount_eur: 1800, over_cap: false };
+    expect((await call(treasuryRevalueRoute, params)).status).toBe(403);
+    expect(rpcCall("revalue_treasury_mint")).toBeUndefined();
+    state.superAdmin = true;
+    const { status, body } = await call(treasuryRevalueRoute, params);
+    expect(status).toBe(200);
+    expect(body.data).toMatchObject({ amount_eur: 2500, previous_amount_eur: 1800, over_cap: false });
+    expect(rpcCall("revalue_treasury_mint")).toMatchObject({ p_id: RESERVATION_ID, p_amount_eur: 2500, p_by: ADMIN });
+    expect(rpcCall("raise_system_alert")).toMatchObject({ p_source: "ledger:revalued", p_severity: "medium" });
+    expect(state.calls.find((c) => c.kind === "insert" && c.target === "audit_events")?.args).toMatchObject({ ix_name: "treasury_mint_revalue" });
+    state.superAdmin = false;
+  });
+
+  it("validates the value and the reason, and maps a value below the floor", async () => {
+    state.superAdmin = true;
+    expect((await call(treasuryRevalueRoute, { ...params, reason: "short" })).status).toBe(400);
+    expect((await call(treasuryRevalueRoute, { ...params, amount_eur: -1 })).status).toBe(400);
+    state.rpcErrors = { revalue_treasury_mint: { code: "P0001", message: "TREASURY_VALUE_BELOW_FLOOR floor=1800.00" } };
+    const { status, body } = await call(treasuryRevalueRoute, params);
+    expect(status).toBe(409);
+    expect(body.error).toMatch(/below the floor/);
+    state.rpcErrors = {};
+    state.superAdmin = false;
   });
 });
