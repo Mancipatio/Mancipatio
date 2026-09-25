@@ -47,7 +47,12 @@ export function expectedGenesisHash(
   return configured;
 }
 
-/** A verifier belongs to one RPC instance and one expected genesis identity. */
+/**
+ * A verifier belongs to one RPC instance and one expected genesis identity.
+ * Concurrent callers share one check (bounded by its own 10 s timeout). A
+ * caller's `signal` bounds only that caller's wait: it rejects with the
+ * signal's reason when it aborts, and the shared check goes on for the others.
+ */
 export function createNetworkVerifier(
   rpc: Rpc<GetGenesisHashApi>,
   network: Network,
@@ -58,33 +63,46 @@ export function createNetworkVerifier(
   let verifiedAt: number | null = null;
   let pending: Promise<void> | null = null;
 
-  return async function assertNetwork(): Promise<void> {
-    if (verifiedAt !== null && Date.now() - verifiedAt < cacheMs) return;
-    if (pending) return pending;
-    pending = (async () => {
-      let actual: string;
-      try {
-        actual = await rpc
-          .getGenesisHash()
-          .send({ abortSignal: AbortSignal.timeout(10_000) });
-      } catch {
-        // RPC exceptions can contain URLs/API keys. Return only this safe message.
-        throw new NetworkIdentityError(
-          "Cannot verify the Solana network. Check the RPC connection and try again.",
-        );
-      }
-      if (actual !== expected) {
-        throw new NetworkIdentityError(
-          `The RPC is connected to a different network. Expected ${network}; the blockchain action was stopped.`,
-        );
-      }
-      verifiedAt = Date.now();
-    })();
+  const check = async () => {
+    let actual: string;
     try {
-      await pending;
-    } finally {
-      pending = null;
+      actual = await rpc
+        .getGenesisHash()
+        .send({ abortSignal: AbortSignal.timeout(10_000) });
+    } catch {
+      // RPC exceptions can contain URLs/API keys. Return only this safe message.
+      throw new NetworkIdentityError(
+        "Cannot verify the Solana network. Check the RPC connection and try again.",
+      );
     }
+    if (actual !== expected) {
+      throw new NetworkIdentityError(
+        `The RPC is connected to a different network. Expected ${network}; the blockchain action was stopped.`,
+      );
+    }
+    verifiedAt = Date.now();
+  };
+
+  return async function assertNetwork(signal?: AbortSignal): Promise<void> {
+    if (verifiedAt !== null && Date.now() - verifiedAt < cacheMs) return;
+    signal?.throwIfAborted();
+    if (!pending) {
+      // Cleared once it settles (before any waiter resumes), so a failed
+      // check is never cached.
+      const current: Promise<void> = Promise.resolve()
+        .then(check)
+        .finally(() => {
+          if (pending === current) pending = null;
+        });
+      pending = current;
+    }
+    const shared = pending;
+    if (!signal) return shared;
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => reject(signal.reason);
+      signal.addEventListener("abort", onAbort, { once: true });
+      shared.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+    });
   };
 }
 
@@ -101,7 +119,8 @@ export function createNetworkVerifiedRpc(
     cacheMs: 30_000,
   });
   const transport: RpcTransport = async (config) => {
-    await assertNetwork();
+    // The request's own abort signal also bounds the genesis wait.
+    await assertNetwork(config.signal);
     config.signal?.throwIfAborted();
     return rawTransport(config);
   };

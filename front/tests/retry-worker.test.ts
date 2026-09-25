@@ -1,10 +1,13 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 const mocks = vi.hoisted(() => ({
-  rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), ledger: vi.fn(), capacity: vi.fn(), abortSignals: [] as AbortSignal[],
+  rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), ledger: vi.fn(), capacity: vi.fn(), heartbeat: vi.fn(),
+  abortSignals: [] as AbortSignal[],
 }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ rpc: mocks.rpc }) }));
 vi.mock("@/lib/server/indexer-sync", () => ({ reconcileIndexerJobs: mocks.indexer }));
+// The freshness heartbeat (0075) has its own suite (indexer-heartbeat.test.ts).
+vi.mock("@/lib/server/indexer-heartbeat", () => ({ runIndexerHeartbeat: mocks.heartbeat }));
 vi.mock("@/lib/server/purchase-records", () => ({ reconcilePurchases: mocks.purchases }));
 vi.mock("@/lib/server/spv-issuance-jobs", () => ({ reconcileLedger: mocks.ledger }));
 vi.mock("@/lib/server/sale-capacity", () => ({ reconcileSaleCapacity: mocks.capacity }));
@@ -26,6 +29,7 @@ beforeEach(() => {
   vi.stubEnv("RETRY_WORKER_SECRET", SECRET);
   mocks.rpc.mockImplementation(() => rpcResult());
   for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity]) m.mockResolvedValue(COUNTS);
+  mocks.heartbeat.mockResolvedValue({ status: "would_bump" });
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
 
@@ -137,6 +141,37 @@ describe("persistent worker lease and deadlines", () => {
     });
     expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.capacity).not.toHaveBeenCalled(); expect(mocks.rpc).toHaveBeenCalledTimes(3);
     expect(mocks.abortSignals[2].aborted).toBe(false);
+  });
+  it("runs the freshness heartbeat after the job loop, inside the indexer stage (same deadline and signal)", async () => {
+    let now = 100_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+    let jobSignal: AbortSignal | undefined;
+    mocks.indexer.mockImplementation(async (_limit, _deadline, signal) => { jobSignal = signal; now = 100_500; return COUNTS; });
+    mocks.heartbeat.mockImplementation(async (deadline, signal) => {
+      expect(deadline).toBe(115_000); expect(signal).toBe(jobSignal);
+      now = 112_000; return { status: "bumped" };
+    });
+    mocks.purchases.mockImplementation(async (_limit, deadline) => { expect(deadline).toBe(122_000); return COUNTS; });
+    const result = await runRetryWorker();
+    expect(result).toMatchObject({ status: "processed", indexer: { status: "processed", counts: COUNTS }, freshness: { status: "bumped" } });
+    expect(mocks.heartbeat.mock.invocationCallOrder[0]).toBeGreaterThan(mocks.indexer.mock.invocationCallOrder[0]);
+    expect(mocks.heartbeat.mock.invocationCallOrder[0]).toBeLessThan(mocks.purchases.mock.invocationCallOrder[0]);
+  });
+  it("a declined or throwing heartbeat never makes the run partial; freshness is its own field", async () => {
+    mocks.heartbeat.mockResolvedValueOnce({ status: "declined", reason: "UNINDEXED_SIGNATURE", expired: false });
+    let response = await POST(request()); let body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.data).toMatchObject({ status: "processed", indexer: { status: "processed" }, freshness: { status: "declined", reason: "UNINDEXED_SIGNATURE" } });
+    mocks.heartbeat.mockRejectedValueOnce(new Error("https://rpc.invalid/?api-key=secret"));
+    response = await POST(request()); body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.data).toMatchObject({ status: "processed", freshness: { status: "declined", reason: "INTERNAL_ERROR" } });
+    expect(JSON.stringify(body)).not.toContain("api-key");
+  });
+  it("a failed job loop skips the heartbeat (freshness INDEXER_STAGE)", async () => {
+    mocks.indexer.mockRejectedValue(new Error("queue down"));
+    const result = await runRetryWorker();
+    expect(result).toMatchObject({ status: "partial", indexer: { status: "failed" }, freshness: { status: "skipped", reason: "INDEXER_STAGE" } });
+    expect(mocks.heartbeat).not.toHaveBeenCalled();
   });
   it("surfaces failed release instead of reporting a fully successful run", async () => {
     mocks.rpc.mockImplementation((name: string) => (name === "release_retry_worker_lease" ? rpcResult(false) : rpcResult()));

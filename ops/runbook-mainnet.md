@@ -963,14 +963,15 @@ the program ID). Print the PDAs with:
 node -e 'import("@solana/kit").then(async k=>{for(const p of ["FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS","GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"]){const [a]=await k.getProgramDerivedAddress({programAddress:"BPFLoaderUpgradeab1e11111111111111111111111",seeds:[k.getAddressEncoder().encode(p)]});console.log(p,"→",a)}})'
 ```
 
-The gap scan (every 5 minutes, window now−20 min … now−5 min) reads the
-asset_registry program, the blocklist-authority PDA and both ProgramData
-PDAs, and re-queues any finalized transaction the index misses that invokes
-a watched program (asset_registry, transfer_hook, or a loader instruction on
-one of ours). A transaction that only lists one of those addresses (anyone
-can add the blocklist-authority PDA as a read-only account; the webhook
-never delivers it) is ignored, so the PDA does not need to be in the Helius
-list. A due scan that gets no time in a run (the cheap checks used the
+The gap scan (every 5 minutes, window now−20 min … now−5 min) reads both
+program IDs (asset_registry and, since 0075, transfer_hook), the
+blocklist-authority PDA and both ProgramData PDAs, and re-queues any
+finalized transaction the index misses that invokes a watched program
+(asset_registry, transfer_hook, or a loader instruction on one of ours). A
+transaction that only lists one of those addresses (anyone can add the
+blocklist-authority PDA or a program ID as a read-only account; the webhook
+never delivers the PDA ones) is ignored, so the PDA does not need to be in
+the Helius list. A due scan that gets no time in a run (the cheap checks used the
 budget) makes that run partial, so `last_ok_at` stops and
 `/api/health/alarms` turns 503 within 5 minutes if it keeps happening; and
 `indexer:gap-scan-overdue` (high) opens once no scan has started for 15
@@ -1184,6 +1185,140 @@ before saving it.
 - The manual "book with signature" stays as the route
   `saleApprovals.treasuryMintBook` (block date, over-cap flags); it has no
   button: the ledger job and the backstop book every finalized mint.
+
+## 16. Indexer freshness heartbeat (0075)
+
+Design: `docs/mainnet-readiness/indexer-heartbeat-design.md` and its
+critique (the code follows the critique where they differ).
+
+### What runs
+
+The mirror counts as fresh for 5 minutes after
+`indexer_sync_state.checked_at`. Jobs and the full reconcile move it; on a
+quiet network nothing did, so the site fell back to RPC reads and the
+Issuers / Assets / Launchpad / Governance badges went muted. The retry
+worker's indexer stage (after its job loop, inside the stage's 15 s budget,
+at most once per `interval_seconds`) gathers chain evidence, and
+`confirm_indexer_quiet` (SQL, under the sync-row lock that
+`finish_indexer_job` and the reconcile take) moves `checked_at` to the plan's
+database time only when the mirror is proven in sync. A run it cannot prove
+leaves `checked_at` alone: the mirror goes stale and the site reads the
+chain. The heartbeat never writes `status`, `last_slot` or `completed_at`,
+never throws, and never makes a retry run `partial` (its outcome is the
+response's `data.freshness`).
+
+Per run (quiet network, 4 RPC calls plus the genesis check of the server
+RPC, whose 30 s cache is cold at these intervals): `getSlot('confirmed')`;
+per program `getSignaturesForAddress` at `confirmed`, `minContextSlot` =
+tip − 75, 20 rows then 100 per page, at most 3 pages; one
+`getMultipleAccounts` at `finalized` (up to `sample_size` mirrored accounts,
+rotating); at most 2 finalized `getTransaction` probes when a listed
+signature is missing from `indexer_events`. At the default 120 s that is
+about 2.5 calls a minute per network, 1 440 `getSignaturesForAddress` pairs
+a day. Check the Helius plan's credit weight for `getSignaturesForAddress`
+(it may bill it as a history call) before lowering the interval.
+
+The proof (the first failing condition is `last_reason`):
+
+| Code | Meaning | Response |
+|---|---|---|
+| `TIP_BASELINE`, `TIP_TOO_SOON` | first tip reading, or one too close / too old to judge a rate | none: the next run judges |
+| `RPC_BEHIND`, `RPC_TIP_STALLED`, `RPC_TIP_IMPLAUSIBLE` | the confirmed tip went back, moved under 1 slot/s, or over 4 slots/s | provider health; persistent: change the RPC |
+| `RPC_ERROR`, `RPC_TIMEOUT`, `NO_BUDGET` | no evidence this run (RPC failure, deadline, the job loop used the stage) | Vercel logs (codes only), provider status |
+| `NOT_INITIALIZED`, `NOT_READY`, `NOT_RECONCILED`, `RECONCILE_TOO_OLD` | no ready row, `warming`/`degraded`, no reconcile, or the last full reconcile is older than `reconcile_max_age_hours` (default 168) | run a full reconcile (`/admin/health` → Reconcile) |
+| `PENDING_JOBS`, `OPEN_INCIDENT` | a pending / retrying / leased job, or an open `indexer-gap` / `indexer-degraded` | none while busy (jobs keep `checked_at` fresh); otherwise §15 |
+| `LISTING_INCOMPLETE`, `CATCHING_UP`, `CURSOR_MOVED` | the listing did not reach the floor (its oldest row must be at or below it; a short page proves nothing); a cursor continues it next run | none: it catches up by itself (about 220 rows per program per run); persistent: reconcile |
+| `RPC_INDEX_BEHIND` | an event delivered 1–10 min ago is above every listed row: the provider's signature index lags the webhook (also a ProgramData-only admin transaction, for up to 10 min) | provider; persistent: change the RPC |
+| `UNINDEXED_SIGNATURE`, `UNDECODED_SIGNATURE`, `UNPROVEN_EVENT_SLOT`, `SLOT_MISMATCH` | a successful program transaction above the floor is not in the index, not decoded, was delivered without a slot, or with another slot | Helius delivery log; the gap scan re-queues within ~20 min; persistent: reconcile |
+| `SAMPLE_MISMATCH` | a sampled mirrored account differs from the finalized chain (a job refreshed the wrong accounts, a skipped snapshot, a manual edit) | reconcile |
+| `PLAN_SUPERSEDED`, `PLAN_EXPIRED` | a second run planned meanwhile, or the evidence took over 30 s | none |
+| `OFF`, `DB_ERROR`, `INTERNAL_ERROR` | switched off at confirm time; the plan/confirm call failed (`DB_ERROR` is not recorded) | `DB_ERROR` persistent: is 0075 applied? |
+
+In mode `on`, a successful program transaction missing for more than about
+a minute also **expires** freshness at once (`checked_at` moved just past
+the 5-minute window, `status` untouched, `last_expired_at` stamped), so the
+site stops trusting the mirror before the window would end.
+
+A missing signature whose transaction only lists a program ID (read-only, or
+through a lookup table) is probed with a finalized `getTransaction` on the
+next run and exempted when it invokes no watched program; until then it
+blocks the proof and (mode `on`) expires freshness. The watermarks advance
+only on a live tip with a current index and a listing down to the floor,
+capped at tip − 150 and at the finalized slot of the same run.
+
+Alarm `indexer:freshness` (check `indexer-freshness`): age of the newer of
+`checked_at` and the last proof; pass under 3 min, fail at 15 min; hold while
+the indexer is not ready (`indexer-degraded` reports that) or the heartbeat
+never ran; low in `observe` (never emailed), medium in `on`.
+
+### Configuration
+
+One row per network in `public.indexer_heartbeat_state` (service role only):
+`mode` `off` | `observe` (seeded: evaluate and record, never bump) | `on`;
+`interval_seconds` 60–180 (default 120); `sample_size` 0–100 (default 100);
+`reconcile_max_age_hours` (default 168: run a full reconcile at least weekly,
+or the heartbeat stops with `RECONCILE_TOO_OLD` and `indexer-freshness`
+fails 15 minutes later). No env var and no cron change: it
+rides the existing `mancipatio-retry-<network>` job and the server RPC
+(`HELIUS_DEVNET_RPC`; on mainnet `HELIUS_MAINNET_RPC` is required, without
+it every run is `RPC_ERROR`).
+
+```
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/indexer-heartbeat-status.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "update public.indexer_heartbeat_state set mode = 'on', updated_at = now() where network = public.deployment_network()"
+```
+
+Operator reset of a program's watermark (e.g. after a provider was found to
+have served an incomplete history): `delete from
+public.indexer_heartbeat_watermarks where network =
+public.deployment_network() and program = '<program ID>';` then run a full
+reconcile (the floor falls back to its `last_slot`).
+
+### Devnet rollout (migration before the front)
+
+1. Preconditions (read-only): 0070–0074 applied; the retry job
+   `mancipatio-retry-devnet` active and `worker_heartbeats` `retry`
+   `last_ok_at` recent (`retry-scheduler-status.sql`); the Helius devnet
+   webhook is **enhanced**, transaction types **ANY**, with no transaction
+   status or type filter (any filter leaves signatures undelivered and the
+   proof fails with `UNINDEXED_SIGNATURE` forever), and lists both program
+   IDs and both ProgramData PDAs (§15).
+2. `bash scripts/ops/backup.sh devnet pre-0075`, then
+   `MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0075_indexer_heartbeat.sql`,
+   then `scripts/preflight/supabase-readonly-identity.sql` still shows
+   `tables_without_guard` `[]`. Expand-only: the live front ignores it.
+3. Deploy the front (merge; production READY on the merge commit). Before
+   0075 the plan call fails (`DB_ERROR`, runs stay `processed`) and the
+   freshness alarm reports nothing, so the order is safe either way.
+4. Run one full reconcile (`/admin/health` → Reconcile): the floor must be
+   recent enough for the first listing to reach it, and the reconcile must be
+   younger than `reconcile_max_age_hours`.
+5. Provider checks on the devnet endpoint (the one `HELIUS_DEVNET_RPC` names):
+   a `getSignaturesForAddress` for the asset_registry program ID with
+   `minContextSlot` = current slot + 10 000 must fail with "Minimum context
+   slot has not been reached"; and one devnet transaction that lists the
+   asset_registry program ID read-only, and one that loads it through an
+   address lookup table, must each show up in `indexer_events` (if not, they
+   are only ever exempted by probes, which costs a few minutes of
+   staleness each).
+6. Observe for at least 2 hours with the status script: one `TIP_BASELINE`,
+   then `would_bump` in quiet minutes, short `PENDING_JOBS` /
+   `UNDECODED_SIGNATURE` around activity, watermarks set, and
+   `indexer-freshness` pass or low. Make one devnet transaction (e.g. a KYB
+   step): the outcome is `would_bump` again within one or two runs.
+7. Switch on (the `update ... mode = 'on'` above). Within one interval
+   `checked_at` is fresh and the four badges show numbers.
+
+Mainnet: the same steps on the mainnet project (`MANCI_TARGET=mainnet
+MANCI_ALLOW_MAINNET=1`) after `HELIUS_MAINNET_RPC` and the webhook are
+configured, with step 5 against the mainnet endpoint and at least 24 hours
+of `observe`.
+
+### Rollback
+
+`mode = 'observe'` stops the bumps and expiries at once; `mode = 'off'` also
+stops the RPC calls. A front revert leaves the tables inert. Nothing else
+depends on 0075.
 
 ## EXTERNAL checks (open until the rehearsal proves them)
 

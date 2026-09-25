@@ -7,8 +7,8 @@
 // below the fail thresholds; between them a check reports hold.
 //
 // Order: the cheap checks (queues, degraded, invalid jobs, the retry
-// heartbeat, FX and holds) are read AND recorded first; the gap scan runs
-// after them under its own sub-deadline (the checks deadline minus
+// heartbeat, FX and holds, indexer freshness) are read AND recorded first;
+// the gap scan runs after them under its own sub-deadline (the checks deadline minus
 // GAP_SCAN_RESERVE_MS), so a slow RPC can never cost the other incidents,
 // and its own incidents are recorded in the reserve. A scan that was started
 // counts as run (last_gap_scan_at is stamped) even when it is cut short, and
@@ -26,14 +26,26 @@
 // GAP_SCAN_OVERDUE_MS. A backstop that keeps being skipped is never silent.
 //
 // The gap scan (at most every 5 minutes) lists the finalized signatures of
-// the four watched addresses in [now − 20 min, now − 5 min]; any missing from
+// the five watched addresses (both program IDs, the blocklist-authority PDA,
+// both ProgramData PDAs) in [now − 20 min, now − 5 min]; any missing from
 // indexer_events is fetched (finalized) and, when it invokes a watched
 // program, enqueued through the indexer's own path (enqueue_indexer_events),
 // which repairs the mirror, and whose 0072 trigger creates the alarm job
 // (source gap-scan). A listed transaction that invokes none of them (anyone
-// can list the blocklist-authority PDA as a read-only account; the webhook
-// never delivers those) is ignored: not missing, not enqueued. Only public
-// account keys and {"source":"gap-scan"} are written.
+// can list the blocklist-authority PDA or a program ID as a read-only
+// account; the webhook never delivers the PDA ones) is ignored: not missing,
+// not enqueued. Only public account keys and {"source":"gap-scan"} are written.
+// The transfer_hook program ID is listed so that a missed hook-only
+// transaction is repaired too: the freshness heartbeat (0075) requires every
+// successful transaction of both programs to be indexed.
+//
+// indexer-freshness (0075): how long the mirror has gone without being
+// proven in sync, from the newer of indexer_sync_state.checked_at (jobs and
+// reconciles keep it fresh while the network is busy) and the heartbeat's
+// last proof. Pass while the heartbeat is off, hold while the indexer is not
+// ready (indexer-degraded reports that) or the heartbeat never ran; low
+// severity in observe mode (never emailed), medium in on. Before 0075 is
+// applied it reports nothing.
 
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -60,6 +72,8 @@ const INDEXER_DEGRADED_SECONDS = 10 * 60;
 const RETRY_FAIL_SECONDS = 10 * 60;
 const RETRY_CLEAR_SECONDS = 3 * 60;
 const HOLD_FAIL_SECONDS = 30 * 60;
+const FRESHNESS_FAIL_SECONDS = 15 * 60;
+const FRESHNESS_CLEAR_SECONDS = 3 * 60;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export type CheckReport = { check: string; state: IncidentState; severity: Severity };
@@ -123,6 +137,47 @@ async function indexerDegraded(sb: SupabaseClient, network: Network, now: number
   const age = q.oldestPendingAgeSeconds;
   return { ...base, state: age !== null && age >= INDEXER_DEGRADED_SECONDS ? "fail" : "hold",
     summary: "The indexer is degraded: a webhook job keeps failing", evidence: { oldest_pending_seconds: age } };
+}
+
+/** An error that means the relation is not there yet (0075 not applied). */
+function missingRelation(error: { code?: unknown } | null): boolean {
+  return error?.code === "42P01" || error?.code === "PGRST205";
+}
+
+/** indexer-freshness; [] before 0075 is applied (nothing to watch), null when it could not be read. */
+async function indexerFreshness(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report[] | null> {
+  const [hbRes, syncRes] = await Promise.all([
+    sb.from("indexer_heartbeat_state").select("mode,last_attempt_at,last_proven_at,last_reason").eq("network", network)
+      .abortSignal(dbSignal(signal)).maybeSingle(),
+    sb.from("indexer_sync_state").select("status,checked_at,completed_at").eq("network", network)
+      .abortSignal(dbSignal(signal)).maybeSingle(),
+  ]);
+  if (hbRes.error && missingRelation(hbRes.error)) return [];
+  if (hbRes.error || syncRes.error) return null;
+  type Heartbeat = { mode?: string; last_attempt_at?: string | null; last_proven_at?: string | null; last_reason?: string | null };
+  const hb = hbRes.data as Heartbeat | null;
+  const sync = syncRes.data as { status?: string; checked_at?: string | null; completed_at?: string | null } | null;
+  const mode = hb?.mode ?? null;
+  const reason = hb?.last_reason && /^[A-Z_]{1,40}$/.test(hb.last_reason) ? hb.last_reason : null;
+  const base = {
+    check: "indexer-freshness", category: "indexer" as const, source: "indexer:freshness",
+    severity: (mode === "on" ? "medium" : "low") as Severity,
+  };
+  if (mode === "off") return [{ ...base, state: "pass", summary: "The indexer freshness heartbeat is off", evidence: { mode } }];
+  if (!hb || !hb.last_attempt_at) {
+    return [{ ...base, state: "hold", summary: "The indexer freshness heartbeat has not run yet", evidence: { mode } }];
+  }
+  if (sync?.status !== "ready" || !sync.completed_at) {
+    return [{ ...base, state: "hold", summary: "The indexer is not ready, so the heartbeat cannot prove it", evidence: { mode, reason } }];
+  }
+  const proven = Math.max(Date.parse(sync.checked_at ?? ""), Date.parse(hb.last_proven_at ?? ""));
+  const age = Number.isFinite(proven) ? Math.max(0, (now - proven) / 1000) : Number.POSITIVE_INFINITY;
+  const minutes = Number.isFinite(age) ? Math.floor(age / 60) : null;
+  const summary = minutes === null
+    ? "The indexer mirror has never been proven in sync; the site reads the chain"
+    : `The indexer mirror was last proven in sync ${minutes} minute(s) ago${reason ? ` (heartbeat: ${reason})` : ""}; the site reads the chain`;
+  return [{ ...base, state: thresholdState(age, FRESHNESS_FAIL_SECONDS, FRESHNESS_CLEAR_SECONDS), summary,
+    evidence: { mode, reason, minutes_since_proof: minutes } }];
 }
 
 async function eventInvalid(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report | null> {
@@ -248,7 +303,7 @@ export function invokesWatchedProgram(tx: InvocationTx, pd: ProgramDataAddresses
 }
 
 /**
- * Gap scan of the four watched addresses; repairs up to GAP_REPAIR_MAX missing
+ * Gap scan of the five watched addresses; repairs up to GAP_REPAIR_MAX missing
  * transactions. `missing` counts the missing transactions that invoke a
  * watched program, plus those not fetched this run (unknown: counted);
  * `ignored` the ones that invoke none (never enqueued).
@@ -256,7 +311,7 @@ export function invokesWatchedProgram(tx: InvocationTx, pd: ProgramDataAddresses
 export async function gapScan(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<GapScanResult> {
   const pd = await programDataAddresses();
   const [blocklistAuthority] = await findBlocklistAuthorityPda();
-  const addresses = [ASSET_REGISTRY_PROGRAM_ADDRESS, blocklistAuthority, pd.assetRegistry, pd.transferHook];
+  const addresses = [ASSET_REGISTRY_PROGRAM_ADDRESS, TRANSFER_HOOK_PROGRAM_ADDRESS, blocklistAuthority, pd.assetRegistry, pd.transferHook];
   const from = Math.floor((now - GAP_WINDOW.fromMs) / 1000);
   const to = Math.floor((now - GAP_WINDOW.toMs) / 1000);
   const seen = new Map<string, number>();
@@ -403,6 +458,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => eventInvalid(sb, network, now, signal));
   await collect(() => retryHeartbeat(sb, network, now, signal));
   await collect(() => fxAndHolds(sb, network, now, signal));
+  await collect(() => indexerFreshness(sb, network, now, signal));
   await record(cheap);
 
   // 2. The gap scan, in what is left minus the reserve for its own incidents.
