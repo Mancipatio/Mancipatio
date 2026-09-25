@@ -6,6 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { renderOwnerPlan } from "@/scripts/sim/lib/cohorts/owner";
 import { buildRoster } from "@/scripts/sim/lib/identity";
 import type { JournalEntry } from "@/scripts/sim/lib/journal";
 import { planSummary, renderPlan, userCost } from "@/scripts/sim/lib/plan";
@@ -135,6 +136,89 @@ describe("owner queue", () => {
   });
 });
 
+describe("owner queue with the owner actor (SIM_OWNER=1)", () => {
+  const view = (tags: Record<string, string> = {}, stopped: string | null = null) => ({ admin: "CekAgg4nCW8tgUETKstwBxKXcWDC5SFRTaZPyQ1vM8vA", stopped, tags: new Map(Object.entries(tags)) });
+
+  it("says the actor decides, tags each waiting user, and lists what only the super admin / KYC provider can sign", () => {
+    const state = newState("q00001", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
+    const plans = buildRoster();
+    const at = "2026-09-25T10:00:00.000Z";
+    state.users.u001 = { ...newUserState(plans[0], "W1"), awaitingOwner: true, stage: "await.dossier", ownerTask: "KYC SIM-001: approve" };
+    state.users.u002 = {
+      ...newUserState(plans[1], "W2"),
+      awaitingOwner: true,
+      stage: "await.passport",
+      ownerTask: "KYC passport",
+      data: {
+        owner: {
+          attempts: 0,
+          passport: { phase: "in-review", requestId: "r-2" },
+          manual: [{ kind: "passport", line: "passport u002 SIM-002 wallet W2: /admin/kyc → request r-2 (in review) → Issue passport", at }],
+          log: [`${at.slice(0, 19)}Z passport request r-2 marked in review`],
+        },
+      },
+    };
+    state.users.u004 = {
+      ...newUserState(plans[3], "W4"),
+      terminal: "done",
+      data: { owner: { attempts: 0, manual: [{ kind: "verify_issuer_kyb", line: "issuer KYB u004 SIM Test d.o.o. 004: /admin/issuers → Verify KYB (verify_issuer_kyb, signed by the super admin 6AnF…)", at }] } },
+    };
+    state.users.u006 = {
+      ...newUserState(plans[5], "W6"),
+      awaitingOwner: true,
+      stage: "await.dossier",
+      ownerTask: "KYC SIM-006: reject",
+      data: { owner: { attempts: 3, handedBack: { task: "KYC dossier https://www.manci.io/admin/clients/c6", reason: "clients.status answered 409: Approve every uploaded document first", at, attempts: 3 } } },
+    };
+    state.users.u037 = { ...newUserState(plans[36], "W37"), awaitingOwner: true, stage: "await.dossier", data: { clientId: "c37" } };
+    state.users.u005 = { ...newUserState(plans[4], "W5"), terminal: "done", data: { clientId: "c-5" } };
+    const text = renderOwnerQueue(state, [], { owner: view({ u001: "[owner actor: next]", u002: "[manual]", u006: "[manual]" }) });
+    expect(text).toContain(
+      "# SIM_OWNER=1: the owner actor (CLI Admin CekAgg…) decides the dossiers, KYB verdicts, applications and OTC escrows below as planned; it re-reads before every write, so a decision you make by hand is detected and skipped.",
+    );
+    expect(text).not.toContain("never approves anything itself");
+    expect(text).toContain("- [manual] /admin/limits: the e2e payment mint");
+    expect(text).toContain("u001 [K/kyc, pilot, review=approve] [owner actor: next] wallet W1: KYC SIM-001: approve");
+    expect(text).toMatch(/## Needs the super admin \/ KYC provider wallet \(CekAgg cannot sign these\)\npassport u002 .*request r-2 \(in review\).*\nissuer KYB u004 /);
+    expect(text).toContain(
+      "## Handed back by the owner actor (decide by hand)\nu006 [K/kyc-reject-doc] KYC dossier https://www.manci.io/admin/clients/c6: clients.status answered 409: Approve every uploaded document first (after 3 attempts)",
+    );
+    expect(text).toContain("## Decided by the owner actor (information)\nu002 [I/buyer-kyc, review=approve]: 2026-09-25T10:00:00Z passport request r-2 marked in review");
+    expect(text).toContain("u037 [K/kyc] review=leave: /admin/clients/c37 — leave it");
+    expect(text).toMatch(/\d+ passport requests of K \/ founder wallets with no passport planned/);
+    // The edge section is unchanged.
+    expect(text).toContain("## Edge-cohort dossiers (opened only to test bad uploads): leave them untouched\nu005 client c-5 wallet W5");
+    expect(renderOwnerQueue(state, [], { owner: view({}, "SIM_OWNER_MAX=3 reached") })).toContain("# The owner actor takes no more tasks: SIM_OWNER_MAX=3 reached");
+  });
+});
+
+describe("report: the owner actor", () => {
+  it("names the target user of an owner line in the findings and the grouped examples, and adds the owner section with the known gaps", () => {
+    const state = newState("r3p0r2", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
+    state.owner = { decisions: 2 };
+    const plans = buildRoster();
+    state.users.u001 = {
+      ...newUserState(plans[0], "W1"),
+      terminal: "done",
+      data: { owner: { attempts: 0, dossier: { verdict: "approve", phase: "decided", decision: "verified" }, log: ["2026-09-25T10:00:00Z dossier verified"] } },
+    };
+    const lines = [
+      entry({ user: "owner", cohort: "owner", target: "u001", step: "owner.clients.status", route: "POST /api/clients/status", httpStatus: 500, expected: "2xx", outcome: "5xx", body: '{"ok":false,"error":"Status update failed"}' }),
+      entry({ user: "owner", cohort: "owner", target: "u004", step: "owner.C-O5", kind: "check", outcome: "consistency", err: "C-O5: still counts" }),
+    ];
+    const text = renderReport(state, lines);
+    expect(text).toContain("| owner (u001) | owner |");
+    expect(groupFindings(lines).map((g) => g.users)).toEqual([["u001"], ["u004"]]);
+    expect(text).toContain("## Owner actor (SIM_OWNER=1)");
+    expect(text).toContain("2 final decisions by the owner actor (CLI Admin) in this run.");
+    expect(text).toContain("| u001 | K/kyc, review approve | dossier approve: decided (verified) | 2026-09-25T10:00:00Z dossier verified | done |");
+    expect(text).toContain("### Known admin-API gaps (code review)");
+    expect(text).toMatch(/G6: a per-document reject neither moves the dossier to more_info nor emails the client/);
+    // Without the owner actor the report has no such section.
+    expect(renderReport(newState("r3p0r3", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"), [])).not.toContain("Owner actor");
+  });
+});
+
 describe("plan", () => {
   it("prints counts, the review split, the request budget and the pilot command", () => {
     const text = renderPlan(planSummary("preview"));
@@ -175,6 +259,43 @@ describe("plan", () => {
     expect(x.map((p) => userCost(p, "preview")).every((c) => c.writes === 3 && c.uploads === 0)).toBe(true);
     const plans = planSummary("preview");
     expect(plans.tokenOwners).toBe(35 + 12 + 2);
+  });
+
+  it("describes the owner actor, and with SIM_OWNER=1 previews its decision table, order, queue lines and budget", () => {
+    expect(renderPlan(planSummary("preview"))).toContain("owner actor: SIM_CMD=watch SIM_OWNER=1 makes the owner's planned decisions");
+    const off = { max: null, only: null, retry: false, appReject: false, passportReject: false };
+    const text = renderOwnerPlan(off, null);
+    expect(text).toContain(
+      "dossiers 65: approve 45 (KYB 8: u004 u029 u048 u053 u067 u072 u085 u090) · reject 7: u006 u007 u008 u015 u019 u027 u046 · more_info 7: reject-doc u012 u016 u022 u032 / request-doc u013 u017 u024 · leave 6 untouched: u020 u037 u039 u041 u065 u083",
+    );
+    expect(text).toContain("applications 14: needs_changes first, then approved u048 u067");
+    expect(text).toContain("(SIM_OWNER_APP_REJECT=1 rejects u090 instead)");
+    expect(text).toContain("OTC escrows 2: pair 3 u049 (seller requests) · pair 4 u073 (buyer requests)");
+    expect(text).toMatch(/passports 18: marked in review/);
+    expect(text).toContain("owner queue (CekAgg cannot sign): 18 passports (the KYC provider) · 9 verify_issuer_kyb");
+    expect(text).toContain("never touched: edge u005 u010 u031 u036 u050 u055 u069 u087");
+    expect(text).toMatch(/budget ≈ \d+ signed writes · \d+ session reads · 2 transactions/);
+    expect(renderOwnerPlan({ ...off, appReject: true, passportReject: true }, null)).toMatch(/then the wallet's passport request[\s\S]*rejected u090 · approved/);
+  });
+
+  it("previews each task's status from a run's state.json (read-only) through runSim", async () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "sim-owner-plan-"));
+    const simDir = path.join(repo, "sim");
+    const state = newState("abc123", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
+    const plans = buildRoster();
+    state.users.u001 = { ...newUserState(plans[0], "W1"), stage: "await.dossier", awaitingOwner: true, data: { owner: { attempts: 0, dossier: { verdict: "approve", phase: "open" } } } };
+    state.users.u004 = { ...newUserState(plans[3], "W4"), terminal: "done" };
+    state.owner = { decisions: 4 };
+    fs.mkdirSync(path.join(simDir, "abc123"), { recursive: true });
+    saveState(path.join(simDir, "abc123"), state);
+    const before = fs.readFileSync(path.join(simDir, "abc123", "state.json"), "utf8");
+    const lines: string[] = [];
+    expect(await runSim({ SIM_CMD: "plan", SIM_OWNER: "1", SIM_RUN_ID: "abc123", SIM_DIR: simDir }, { root: repo, log: (l) => lines.push(l) })).toEqual({ status: "planned" });
+    const text = lines.join("\n");
+    expect(text).toContain("run abc123: 4 decisions by the owner actor so far; per task:");
+    expect(text).toContain("u001 [K/kyc, review=approve]: await.dossier (dossier open)");
+    expect(text).toContain("u004 [B/company, review=approve]: done");
+    expect(fs.readFileSync(path.join(simDir, "abc123", "state.json"), "utf8")).toBe(before);
   });
 
   it("runs offline through runSim", async () => {

@@ -22,11 +22,13 @@
 import {
   SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
   createDefaultRpcTransport,
+  getBase58Decoder,
   getBase64EncodedWireTransaction,
   getSignatureFromTransaction,
   isSolanaError,
   signTransactionMessageWithSigners,
   type Address,
+  type Base58EncodedBytes,
   type Instruction,
   type KeyPairSigner,
   type RpcTransport,
@@ -40,14 +42,20 @@ import {
 } from "@solana-program/token-2022";
 import type { SaleDocumentTerms } from "@/lib/document-terms";
 import {
+  ASSET_REGISTRY_PROGRAM_ADDRESS,
   OfferStatus,
   OtcDealStatus,
+  fetchMaybeAdmin,
+  fetchMaybeKycRegistry,
   fetchMaybeOffer,
   fetchMaybeOtcDeal,
+  fetchMaybePlatform,
   fetchOffer,
   fetchOtcDeal,
   fetchSale,
   fetchShareClass,
+  findAdminRecordPda,
+  findDealPda,
   findEscrowMarkerPda,
   findIssuerPda,
   findPlatformPda,
@@ -56,15 +64,19 @@ import {
   getDepositOtcPaymentInstructionAsync,
   getDepositToOfferEscrowInstruction,
   getExpireOfferInstructionAsync,
+  getOtcDealDecoder,
+  getOtcDealDiscriminatorBytes,
   getRegisterIssuerInstructionAsync,
+  type OtcDeal,
 } from "@/lib/generated/asset_registry";
 import { toBytes32 } from "@/lib/format";
 import { hookTransferMetas } from "@/lib/hook-metas";
+import { createOtcDealInstruction, type OtcDealRequestFields } from "@/lib/otc-deal";
 import { buildDepositOtcAssetInstructions, buildTakeOfferInstructions } from "@/lib/otc-transactions";
 import { checkReceiverEligibility, getEntryPda, type ReceiverEligibility } from "@/lib/passport";
 import { findOfferPda } from "@/lib/pdas";
 import { buildDocumentedPurchase } from "@/lib/purchase-builder";
-import { TOKEN_2022, fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
+import { TOKEN_2022, fetchPlainPaymentMintTokenProgram, inspectPaymentMint } from "@/lib/transaction-builders";
 import { chainNow } from "@/scripts/chain/lib/e2e/clock";
 import { classifyFailure, describeFailure, type ChainFailure } from "@/scripts/chain/lib/e2e/errors";
 import { type InFlight, type Journal, readJournal, unresolvedSignatures } from "@/scripts/chain/lib/journal";
@@ -158,7 +170,12 @@ export class SimRetryLater extends Error {
   }
 }
 
-export type OwnerMeta = { cohort: string; wave: number | null };
+/**
+ * Who a transaction's journal lines are about. The owner actor's escrow is
+ * recorded on the requester (so resume and settlement walk it as today) but
+ * journalled as `actor` "owner" with the requester as `target`.
+ */
+export type OwnerMeta = { cohort: string; wave: number | null; actor?: string; target?: string };
 
 export type ExecutorDeps = {
   rpc: ChainRpc;
@@ -190,7 +207,7 @@ export class TxExecutor {
   private note(owner: TxOwner, meta: OwnerMeta, label: string, fields: { outcome: "ok" | "tx-error" | "info"; sig?: string | null; err?: string; logs?: string[] }) {
     this.d.journal.append({
       wave: meta.wave,
-      user: owner.label,
+      user: meta.actor ?? owner.label,
       cohort: meta.cohort,
       step: label,
       kind: "tx",
@@ -199,6 +216,7 @@ export class TxExecutor {
       txSig: fields.sig ?? null,
       err: fields.err,
       logMessages: fields.logs,
+      ...(meta.target ? { target: meta.target } : {}),
     });
   }
 
@@ -274,7 +292,7 @@ export class TxExecutor {
    * call), plus any signature the tx journal shows as unresolved: one state.json
    * lost, and an earlier signature of a step that was re-sent since (`orphans`).
    */
-  async resolveAll(state: SimState, metaOf: (owner: TxOwner) => OwnerMeta): Promise<{ pending: number; orphans: number }> {
+  async resolveAll(state: SimState, metaOf: (owner: TxOwner, label?: string) => OwnerMeta): Promise<{ pending: number; orphans: number }> {
     const owners: TxOwner[] = [state.market, state.funding, ...Object.values(state.users)];
     const byLabel = new Map(owners.map((o) => [o.label, o]));
     this.reconcileJournal(byLabel);
@@ -311,7 +329,7 @@ export class TxExecutor {
         .getSignatureStatuses(batch.map((p) => p.record.sig as Signature), { searchTransactionHistory: true })
         .send();
       batch.forEach((p, j) => {
-        const result = this.decide(p.owner, metaOf(p.owner), p.label, p.record, value[j] as StatusValue, height);
+        const result = this.decide(p.owner, metaOf(p.owner, p.label), p.label, p.record, value[j] as StatusValue, height);
         if (result === "pending") left += 1;
       });
     }
@@ -334,7 +352,7 @@ export class TxExecutor {
    * still land. One that finalized next to another landed signature of the
    * same step is a possible double send: a finding.
    */
-  private closeOrphan(byLabel: Map<string, TxOwner>, metaOf: (owner: TxOwner) => OwnerMeta, orphan: InFlight, status: StatusValue, height: bigint | null): boolean {
+  private closeOrphan(byLabel: Map<string, TxOwner>, metaOf: (owner: TxOwner, label?: string) => OwnerMeta, orphan: InFlight, status: StatusValue, height: bigint | null): boolean {
     let outcome: "finalized" | "failed" | "dropped" | null = null;
     if (status?.err) outcome = "failed";
     else if (status?.confirmationStatus === "finalized") outcome = "finalized";
@@ -346,7 +364,7 @@ export class TxExecutor {
     const label = rest.join(":");
     const record = owner?.tx[label];
     if (owner && outcome === "finalized" && record?.sig && record.status === "landed") {
-      this.note(owner, metaOf(owner), label, {
+      this.note(owner, metaOf(owner, label), label, {
         outcome: "tx-error",
         sig: orphan.sig,
         err: `an earlier signature of ${label} finalized too (the step holds ${record.sig}): check for a double send`,
@@ -522,7 +540,37 @@ export type OfferView = { status: OfferStatus; deposited: bigint; expiresAt: big
 export type TokenAccountView = { program: string; mint: string; owner: string; amount: bigint; immutableOwner: boolean };
 /** Who signs a cohort-X send; its accounts and amount come from the persisted snapshot. */
 export type XferSend = { authority: KeyPairSigner; payer: KeyPairSigner; createDst?: boolean };
-export type DealView = { status: OtcDealStatus; assetDeposited: boolean; paymentDeposited: boolean; seller: string; buyer: string };
+export type DealView = {
+  status: OtcDealStatus;
+  assetDeposited: boolean;
+  paymentDeposited: boolean;
+  seller: string;
+  buyer: string;
+  // What the owner actor's C-O7 compares with the request (all read at finalized).
+  amount?: bigint;
+  price?: bigint;
+  admin?: string;
+  paymentMint?: string;
+  mint?: string;
+  shareClass?: string;
+  expiresAt?: bigint;
+  dealId?: bigint;
+};
+
+/** The owner actor's start-up reads (design-owner-actor §6, S14): who may sign what. */
+export type OwnerChainView = {
+  /** requireAdmin's rule at finalized: the super admin, or an Admin record naming the wallet. */
+  isAdmin: boolean;
+  /** Platform.admin: the super admin (verify_issuer_kyb). */
+  platformAdmin: string | null;
+  /** KycRegistry(registry).authority: the KYC provider (approve_holder); null when the registry is missing. */
+  kycAuthority: string | null;
+  /** The CLI Admin's SOL (lamports, confirmed): an escrow's rent. */
+  lamports: bigint;
+};
+
+/** An escrow the owner actor opens: the persisted deal id and expiry, and the request row's terms. */
+export type OtcDealOpen = { dealId: bigint; expiresAt: bigint; paymentTokenProgram: Address; request: OtcDealRequestFields };
 
 /** What a cohort may do on chain. Faked in the offline tests. */
 export interface ChainOps {
@@ -541,6 +589,18 @@ export interface ChainOps {
   deal(pda: Address): Promise<DealView | null>;
   /** wallet → KycEntry exists (one getMultipleAccounts per 100 wallets); empty without a registry. */
   passports(wallets: string[]): Promise<Map<string, boolean>>;
+
+  // ── The owner actor (SIM_OWNER=1) ──
+  /** The payment mint's token program, by the admin page's entry check (inspectPaymentMint, finalized). */
+  paymentMintProgram(mint: Address): Promise<Address>;
+  /** The deal PDA of (share class, deal id), as the page derives it. */
+  dealPda(shareClass: Address, dealId: bigint): Promise<Address>;
+  /** Every OTC deal of a share class on chain (one filtered getProgramAccounts; the page's loadOtcDeals reads them all). */
+  otcDeals(shareClass: Address): Promise<({ pda: string } & DealView)[]>;
+  /** create_otc_deal signed by the CLI Admin, recorded on the requester `u` (idempotent: done when the PDA exists). */
+  openOtcDeal(u: UserState, admin: KeyPairSigner, deal: OtcDealOpen): Promise<string | null>;
+  /** The Admin record, Platform.admin, the registry's authority and the admin's SOL. */
+  ownerView(admin: Address, registry: Address): Promise<OwnerChainView>;
 
   // ── Cohort X: direct transfers of class A (design-transfers §D.3) ──
   /** e2e buyer3 when its signer is loaded (SIM_DONOR_KEYPAIR); null: no loan. */
@@ -567,6 +627,27 @@ export interface ChainOps {
 }
 
 const FIN = { commitment: "finalized" as const };
+
+/** OtcDeal: the 8-byte discriminator, then admin, buyer, seller and share_class (32 bytes each). */
+export const OTC_DEAL_SHARE_CLASS_OFFSET = 8 + 32 * 3;
+
+function dealView(d: OtcDeal): DealView {
+  return {
+    status: d.status,
+    assetDeposited: d.assetDeposited,
+    paymentDeposited: d.paymentDeposited,
+    seller: d.seller,
+    buyer: d.buyer,
+    amount: d.amount,
+    price: d.price,
+    admin: d.admin,
+    paymentMint: d.paymentMint,
+    mint: d.mint,
+    shareClass: d.shareClass,
+    expiresAt: d.expiresAt,
+    dealId: d.dealId,
+  };
+}
 
 export class SimChainOps implements ChainOps {
   readonly donor: Address | null;
@@ -758,8 +839,78 @@ export class SimChainOps implements ChainOps {
   async deal(pda: Address): Promise<DealView | null> {
     const account = await fetchMaybeOtcDeal(this.rpc, pda, FIN);
     if (!account.exists) return null;
-    const d = account.data;
-    return { status: d.status, assetDeposited: d.assetDeposited, paymentDeposited: d.paymentDeposited, seller: d.seller, buyer: d.buyer };
+    return dealView(account.data);
+  }
+
+  // ── The owner actor ────────────────────────────────────────────────────────
+
+  async paymentMintProgram(mint: Address): Promise<Address> {
+    const { owner } = await inspectPaymentMint(this.rpc, mint, "devnet", FIN);
+    return owner;
+  }
+
+  async dealPda(shareClass: Address, dealId: bigint): Promise<Address> {
+    const [pda] = await findDealPda({ shareClass, dealId });
+    return pda;
+  }
+
+  async otcDeals(shareClass: Address): Promise<({ pda: string } & DealView)[]> {
+    const disc = getBase58Decoder().decode(getOtcDealDiscriminatorBytes()) as Base58EncodedBytes;
+    const rows = await this.rpc
+      .getProgramAccounts(ASSET_REGISTRY_PROGRAM_ADDRESS, {
+        encoding: "base64",
+        ...FIN,
+        filters: [
+          { memcmp: { offset: BigInt(0), encoding: "base58", bytes: disc } },
+          { memcmp: { offset: BigInt(OTC_DEAL_SHARE_CLASS_OFFSET), encoding: "base58", bytes: shareClass as unknown as Base58EncodedBytes } },
+        ],
+      })
+      .send();
+    const out: ({ pda: string } & DealView)[] = [];
+    for (const r of rows) {
+      if (r.account.owner !== ASSET_REGISTRY_PROGRAM_ADDRESS) continue;
+      const d = getOtcDealDecoder().decode(Buffer.from((r.account.data as readonly [string, string])[0], "base64"));
+      if (d.shareClass !== shareClass) continue;
+      out.push({ pda: r.pubkey, ...dealView(d) });
+    }
+    return out;
+  }
+
+  async openOtcDeal(u: UserState, admin: KeyPairSigner, deal: OtcDealOpen): Promise<string | null> {
+    const pda = await this.dealPda(deal.request.share_class_pda as Address, deal.dealId);
+    const meta: OwnerMeta = { cohort: "owner", wave: u.plan.wave, actor: "owner", target: u.plan.label };
+    const { signature } = await this.exec.run(
+      u,
+      meta,
+      "owner.otc.create",
+      admin,
+      async () => [
+        await createOtcDealInstruction({
+          authority: admin,
+          request: deal.request,
+          dealId: deal.dealId,
+          expiresAt: deal.expiresAt,
+          paymentTokenProgram: deal.paymentTokenProgram,
+        }),
+      ],
+      { done: async () => (await this.deal(pda)) !== null },
+    );
+    return signature;
+  }
+
+  async ownerView(admin: Address, registry: Address): Promise<OwnerChainView> {
+    const [platformPda] = await findPlatformPda();
+    const platform = await fetchMaybePlatform(this.rpc, platformPda, FIN);
+    const [adminPda] = await findAdminRecordPda({ authority: admin });
+    const record = await fetchMaybeAdmin(this.rpc, adminPda, FIN);
+    const kyc = await fetchMaybeKycRegistry(this.rpc, registry, FIN);
+    const { value } = await this.rpc.getBalance(admin, { commitment: "confirmed" }).send();
+    return {
+      isAdmin: (platform.exists && platform.data.admin === admin) || (record.exists && record.data.admin === admin),
+      platformAdmin: platform.exists ? platform.data.admin : null,
+      kycAuthority: kyc.exists ? kyc.data.authority : null,
+      lamports: value,
+    };
   }
 
   async depositDealAsset(u: UserState, signer: KeyPairSigner, dealPda: Address): Promise<void> {

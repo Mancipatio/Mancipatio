@@ -122,6 +122,9 @@ export async function issuerStep(ctx: SimCtx, u: UserState): Promise<boolean> {
         params: { id: u.data.applicationId, application: content, ...(u.plan.variant === "founder" ? { company_formation_requested: true } : {}) },
       });
       if (r.outcome !== "ok") return (retry(ctx, u, `applications.resubmit ${r.status}`), true);
+      // The route sets the row back to pending; the owner actor waits for this count to move.
+      u.data.applicationStatus = "pending";
+      u.data.resubmits = (u.data.resubmits ?? 0) + 1;
       awaitOwner(ctx, u, "await.app", appTask(u));
       return true;
     }
