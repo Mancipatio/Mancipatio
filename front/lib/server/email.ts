@@ -16,6 +16,13 @@
 // send in progress (nodemailer cannot abort one; its late result is
 // swallowed and the capped socket timeout ends it soon after). A send that
 // completed anyway may therefore repeat: delivery is at-least-once.
+//
+// Reserved domains (RFC 2606 / RFC 6761) are never mailed: example.com/.net/
+// .org and their subdomains, the .test/.example/.invalid/.localhost TLDs and
+// localhost. Seeded and simulated devnet users carry such addresses, and a
+// send to them can only bounce, which hurts the sender's reputation. Each
+// recipient is filtered; with none left the call returns { sent: false }
+// before any transport is opened.
 
 import "server-only";
 import nodemailer from "nodemailer";
@@ -98,9 +105,13 @@ export type SendEmailResult = {
  * Send a transactional email. Best-effort: never throws.
  *
  * @returns { sent: true, id } on success; { sent: false, error } otherwise
- *          (including when no transport is configured).
+ *          (including when no transport is configured or every recipient
+ *          is on a reserved domain).
  */
-export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult> {
+export async function sendEmail(request: SendEmailInput): Promise<SendEmailResult> {
+  const recipients = deliverableRecipients(request.to);
+  if (!recipients) return { sent: false, error: "Reserved recipient domain" };
+  const input = recipients === request.to ? request : { ...request, to: recipients };
   const limit = input.timeoutMs;
   if (limit === undefined) return sendOnce(input);
   if (!Number.isFinite(limit) || limit <= 0) return { sent: false, error: "TIMEOUT" };
@@ -115,6 +126,54 @@ export async function sendEmail(input: SendEmailInput): Promise<SendEmailResult>
   } finally {
     clearTimeout(timer);
   }
+}
+
+// Special-use names that can never receive mail (RFC 2606 §2–3, RFC 6761 §6).
+const RESERVED_DOMAINS = ["example.com", "example.net", "example.org"];
+const RESERVED_TLDS = new Set(["test", "example", "invalid", "localhost"]);
+
+/** Domain of one recipient ("a@b.io" or "Name <a@b.io>"), lower-cased; null without "@". */
+function recipientDomain(recipient: string): string | null {
+  const angle = /<([^<>]*)>\s*$/.exec(recipient);
+  const address = (angle ? angle[1] : recipient).trim();
+  const at = address.lastIndexOf("@");
+  if (at < 0) return null;
+  // A trailing dot is the same DNS name ("example.com." === "example.com").
+  return address.slice(at + 1).trim().toLowerCase().replace(/\.+$/, "");
+}
+
+/** True for RFC 2606 / RFC 6761 names; exact labels only, so myexample.com is not. */
+export function isReservedEmailDomain(domain: string): boolean {
+  const name = domain.trim().toLowerCase().replace(/\.+$/, "");
+  if (!name) return false;
+  if (RESERVED_TLDS.has(name.slice(name.lastIndexOf(".") + 1))) return true;
+  return RESERVED_DOMAINS.some((d) => name === d || name.endsWith(`.${d}`));
+}
+
+/**
+ * Recipients minus reserved-domain ones. Returns `to` itself when nothing was
+ * dropped (so the transport sees the input unchanged) and null when nothing is
+ * left. A string may hold a comma-separated list, so it is split to classify.
+ * The log names only the domains: the local part is the user's.
+ */
+function deliverableRecipients(to: string | string[]): string | string[] | null {
+  // Non-strings (a null column slipping past the types) are left for the
+  // transport to reject, as before: this check must never make sendEmail throw.
+  const all = (Array.isArray(to) ? to : [to])
+    .filter((r): r is string => typeof r === "string")
+    .flatMap((r) => r.split(","))
+    .map((r) => r.trim())
+    .filter(Boolean);
+  const skipped = new Set<string>();
+  const kept = all.filter((r) => {
+    const domain = recipientDomain(r);
+    if (domain === null || !isReservedEmailDomain(domain)) return true;
+    skipped.add(domain);
+    return false;
+  });
+  if (!skipped.size) return to;
+  console.info(`[email] skipped reserved domain ${[...skipped].join(", ")}`);
+  return kept.length ? kept : null;
 }
 
 async function sendOnce(input: SendEmailInput): Promise<SendEmailResult> {
