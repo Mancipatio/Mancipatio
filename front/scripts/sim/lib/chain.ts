@@ -170,6 +170,8 @@ export type ExecutorDeps = {
   cuPrice?: bigint | null;
   timing?: Partial<Timing>;
   signal?: AbortSignal;
+  /** The run's clock (ctx.now): the records' `at`, which the cohort-X windows compare with their own. */
+  now?: () => number;
 };
 
 type StatusValue = { err: unknown; confirmationStatus?: string | null } | null;
@@ -179,6 +181,10 @@ export class TxExecutor {
 
   get rpc(): ChainRpc {
     return this.d.rpc;
+  }
+
+  private stamp(): string {
+    return new Date((this.d.now ?? Date.now)()).toISOString();
   }
 
   private note(owner: TxOwner, meta: OwnerMeta, label: string, fields: { outcome: "ok" | "tx-error" | "info"; sig?: string | null; err?: string; logs?: string[] }) {
@@ -208,7 +214,7 @@ export class TxExecutor {
 
   /** Classifies one looked-up status for an inflight record (null = not seen). */
   private decide(owner: TxOwner, meta: OwnerMeta, label: string, record: TxRecord, status: StatusValue, height: bigint | null): "landed" | "failed" | "dropped" | "pending" {
-    const at = new Date().toISOString();
+    const at = this.stamp();
     if (status) {
       if (status.err) {
         const err = toJson(status.err, 0);
@@ -279,7 +285,7 @@ export class TxExecutor {
       const label = rest.join(":");
       if (owner && label && !owner.tx[label]) {
         // Signed, but state.json lost it (crash between the two writes).
-        owner.tx[label] = { status: "inflight", sig: inflight.sig, lvbh: inflight.lastValidBlockHeight.toString(), at: new Date().toISOString() };
+        owner.tx[label] = { status: "inflight", sig: inflight.sig, lvbh: inflight.lastValidBlockHeight.toString(), at: this.stamp() };
       } else if (!owner || !label || owner.tx[label].sig !== inflight.sig) {
         // The step now holds another signature: an older build settled this one
         // (dropped, failed) without a journal event and the step was sent again.
@@ -380,7 +386,7 @@ export class TxExecutor {
       if (result === "pending") throw new SimRetryLater(`${label}: an earlier signature is still unresolved`);
     }
     if (options.done && (await options.done())) {
-      this.settle(owner, label, { status: "landed", sig: null, at: new Date().toISOString() });
+      this.settle(owner, label, { status: "landed", sig: null, at: this.stamp() });
       return { signature: null, skipped: true };
     }
     const unlock = await this.d.limiter.lockTx();
@@ -411,7 +417,7 @@ export class TxExecutor {
         status: "inflight",
         sig: signature,
         lvbh: blockhash.lastValidBlockHeight.toString(),
-        at: new Date().toISOString(),
+        at: this.stamp(),
       });
       const outcome = await submitAndConfirm({
         drainRpc: this.d.drainRpc,
@@ -424,7 +430,7 @@ export class TxExecutor {
         signal: this.d.signal,
         timing: this.d.timing,
       });
-      const at = new Date().toISOString();
+      const at = this.stamp();
       if (outcome.status === "finalized") {
         this.settle(owner, label, { status: "landed", sig: signature, at });
         this.note(owner, meta, label, { outcome: "ok", sig: signature });

@@ -132,8 +132,10 @@ export async function schedule(ctx: SimCtx, o: ScheduleOptions): Promise<RunResu
       }
     }
   };
+  // A virtual clock (tests) runs the workers so it moves time only while all of them sleep on it.
+  const run = (body: () => Promise<void>) => (o.clock.worker ? o.clock.worker(body) : body());
   // allSettled: no worker may still be writing when the caller closes the journals.
-  const settled = await Promise.allSettled(Array.from({ length: Math.max(1, o.workers) }, () => worker()));
+  const settled = await Promise.allSettled(Array.from({ length: Math.max(1, o.workers) }, () => run(worker)));
   const failed = settled.find((s): s is PromiseRejectedResult => s.status === "rejected");
   if (failed) throw failed.reason;
   return result ?? "finished";
@@ -271,7 +273,7 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
     state = loadState(runDir) ?? newState(runId, cfg.expectedGenesis);
     if (state.genesis !== cfg.expectedGenesis) throw new SimGateError("state.json belongs to another cluster");
     persist();
-    exec = new TxExecutor({ rpc, drainRpc, txJournal, journal, limiter, persist, signal: controller.signal, timing: { pollMs: 3_000 } });
+    exec = new TxExecutor({ rpc, drainRpc, txJournal, journal, limiter, persist, signal: controller.signal, timing: { pollMs: 3_000 }, now: clock.now });
     const metaOf = (owner: TxOwner): OwnerMeta =>
       "plan" in owner ? { cohort: (owner as UserState).plan.cohort, wave: (owner as UserState).plan.wave } : { cohort: "setup", wave: null };
     const resolved = await exec.resolveAll(state, metaOf);

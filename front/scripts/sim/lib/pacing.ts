@@ -14,7 +14,8 @@
  * network failures) stop it, two RPC 429s within 60 s pause the chain for
  * 120 s, and an HTTP 429 from the site pauses HTTP for 60 s.
  *
- * Time is injected (`now`, `sleep`) so the tests drive a fake clock.
+ * Time is injected (`now`, `sleep`, and for a virtual clock the scheduler's
+ * `worker`s) so the tests drive a fake clock.
  */
 import { PACE } from "./constants";
 import { SimStopError } from "./safety";
@@ -52,7 +53,18 @@ export const BREAKERS = {
   http429PauseMs: 60_000,
 } as const;
 
-export type Clock = { now: () => number; sleep: (ms: number) => Promise<void> };
+export type Clock = {
+  now: () => number;
+  sleep: (ms: number) => Promise<void>;
+  /**
+   * Runs one of the scheduler's concurrent workers. A virtual clock (the
+   * tests') needs to know them: it moves time only while every worker is
+   * asleep on it, so a step's real awaits (WebCrypto signing, verification and
+   * PDA digests) take no simulated time and cannot let another worker's sleep
+   * run ahead. The real clock has none: the worker just runs.
+   */
+  worker?: <T>(run: () => Promise<T>) => Promise<T>;
+};
 
 export const realClock: Clock = {
   now: () => Date.now(),

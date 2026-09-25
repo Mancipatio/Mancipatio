@@ -425,15 +425,20 @@ export class FakeChainOps implements ChainOps {
   txInFlight = 0;
   txPeak = 0;
   txTimes: number[] = [];
+  /** The world's clock: the tx records' `at` (as TxExecutor's, on the run's clock) and txTimes. */
   now_?: () => number;
 
   constructor(private readonly site: FakeSite) {
     this.tokens.set(this.ataKey(DONOR), { owner: DONOR, amount: BigInt(5), immutableOwner: true });
   }
 
+  private stamp(): string {
+    return new Date((this.now_ ?? Date.now)()).toISOString();
+  }
+
   private land(u: UserState, label: string, detail?: unknown): string {
     const sig = `sig-${u.plan.label}-${label}`;
-    u.tx[label] = { status: "landed", sig, at: new Date().toISOString() };
+    u.tx[label] = { status: "landed", sig, at: this.stamp() };
     this.calls.push({ op: label, user: u.plan.label, detail });
     this.signedSteps.add(`${u.plan.label}:${label}`);
     this.wires.add(sig);
@@ -634,11 +639,11 @@ export class FakeChainOps implements ChainOps {
     // The executor's done(): the snapshot's post-state lands without a send.
     const balances = await this.balances([snap.srcAta as Address, snap.dstAta as Address]);
     if (transferLanded(label, snap, balances)) {
-      u.tx[label] = { status: "landed", sig: null, at: new Date().toISOString() };
+      u.tx[label] = { status: "landed", sig: null, at: this.stamp() };
       return;
     }
     if (fault === "crash-before-send") {
-      u.tx[label] = { status: "inflight", sig: `sig-${u.plan.label}-${label}`, lvbh: "0", at: new Date().toISOString() };
+      u.tx[label] = { status: "inflight", sig: `sig-${u.plan.label}-${label}`, lvbh: "0", at: this.stamp() };
       this.signedSteps.add(`${u.plan.label}:${label}`);
       this.onFault?.(label, fault);
       throw new SimRetryLater(`${label}: an earlier signature is still unresolved`);
@@ -646,7 +651,7 @@ export class FakeChainOps implements ChainOps {
     if (fault === "sim-error") this.refuse(u, label);
     if (fault === "process-death") {
       // settle(inflight) persists before the send; the wire lands; the process dies before the landed record.
-      u.tx[label] = { status: "inflight", sig: `sig-${u.plan.label}-${label}`, lvbh: "0", at: new Date().toISOString() };
+      u.tx[label] = { status: "inflight", sig: `sig-${u.plan.label}-${label}`, lvbh: "0", at: this.stamp() };
       this.persist?.();
     }
     await this.paced(() => {
