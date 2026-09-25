@@ -66,12 +66,12 @@ describe("badge wording", () => {
   it("tooltips name the parts, the overlap and what is not counted", () => {
     expect(badgeTitle("/admin/clients", { count: 65, parts: { final: 41, documents: 30, kyb: 4 } }))
       .toBe("65 dossiers to review — 41 final decision · 30 documents to check · 4 KYB decision; a dossier can be in several");
-    expect(badgeTitle("/admin/kyc", { count: 1, parts: { new: 1 }, aside: { inReview: 2 } }))
-      .toBe("1 new passport request (not counted: 2 in review)");
+    expect(badgeTitle("/admin/kyc", { count: 3, parts: { new: 1, inReview: 2 } }))
+      .toBe("3 passport requests to decide — 1 new · 2 in review");
     expect(badgeTitle("/admin/assets", { count: 2, parts: { ready: 2 }, aside: { issuerNotVerified: 1, noShareClasses: 0 } }))
       .toBe("2 draft assets ready to activate (not counted: 1 issuer not KYB-verified); activation needs this wallet's admin record");
-    expect(badgeTitle("/admin/launchpad", { count: 2, parts: { yours: 0, issuers: 2 } }))
-      .toBe("2 expired sales still open — 2 need the issuer's key");
+    expect(badgeTitle("/admin/launchpad", { count: 1, parts: { yours: 1 }, aside: { issuers: 2 } }))
+      .toBe("1 expired sale you can close (not counted: 2 for the issuer to close)");
     expect(badgeTitle("/admin/otc", { count: 2 })).toBe("2 OTC requests waiting for an escrow deal");
     expect(badgeTitle("/admin/clients", { count: 7, atLeast: true, parts: { final: 7, documents: 0 } }))
       .toBe("7+ dossiers to review — 7 final decision; a dossier can be in several");
@@ -87,9 +87,13 @@ describe("badge wording", () => {
     expect(badgeView("/admin/otc", { count: 0 })).toBeNull();
     expect(badgeView("/admin/otc", { count: null, reason: "unavailable" })).toMatchObject({ text: "•", muted: true, srText: "count unavailable" });
     expect(badgeView("/admin/otc", { count: 120 })).toMatchObject({ text: "99+", muted: false, fresh: false, srText: "99+ waiting" });
-    const stale = badgeView("/admin/otc", { count: 2 }, { stale: true })!;
+    const stale = badgeView("/admin/otc", { count: 2 }, { stale: true, staleCause: "session" })!;
     expect(stale).toMatchObject({ text: "2", muted: true });
-    expect(stale.title).toContain("Not updated for a while");
+    expect(stale.title).toContain("Not updated for a while — it refreshes once this wallet's session is renewed");
+    // Failing reads do not blame the session.
+    const failing = badgeView("/admin/otc", { count: 2 }, { stale: true, staleCause: "error" })!;
+    expect(failing.title).toContain("the last reads failed; it keeps retrying");
+    expect(failing.title).not.toContain("session");
     expect(badgeView("/admin/kyc", { count: 2 }, { fresh: true })).toMatchObject({ fresh: true, srText: "2 waiting, new since your last visit" });
   });
 });
@@ -319,11 +323,52 @@ describe("admin badges store: outcomes", () => {
     expect(h.store.getSnapshot().stale).toBe(false);
     h.advance(70_000);
     await h.store.refresh("poll");
-    expect(h.store.getSnapshot().stale).toBe(true);
-    expect(badgeMenu(h.store.getSnapshot(), ADMIN).view("/admin/otc")).toMatchObject({ text: "2", muted: true });
+    expect(h.store.getSnapshot()).toMatchObject({ stale: true, staleCause: "session" });
+    const view = badgeMenu(h.store.getSnapshot(), ADMIN).view("/admin/otc");
+    expect(view).toMatchObject({ text: "2", muted: true });
+    expect(view?.title).toContain("session is renewed");
     h.env.session = true;
     await h.store.refresh("poll");
+    expect(h.store.getSnapshot()).toMatchObject({ stale: false, staleCause: null });
+  });
+
+  it("a hidden tab's polls never grey the numbers, and a tab coming back keeps them bright while it reads", async () => {
+    const h = harness({ pollMs: 45_000 });
+    await h.store.refresh("mount");
+    h.env.visible = false;
+    for (let i = 0; i < 5; i++) {
+      h.advance(45_000);
+      await h.store.refresh("poll");
+    }
+    expect(h.loads).toHaveLength(1);
     expect(h.store.getSnapshot().stale).toBe(false);
+    // Back on the tab: the focus read starts with the old numbers still amber.
+    h.env.visible = true;
+    const gate = deferred<AdminBadges>();
+    h.setLoad(() => gate.promise);
+    const back = h.store.refresh("focus");
+    expect(h.loads).toHaveLength(2);
+    expect(h.store.getSnapshot().stale).toBe(false);
+    expect(badgeMenu(h.store.getSnapshot(), ADMIN).view("/admin/otc")).toMatchObject({ muted: false });
+    gate.resolve(response({ "/admin/otc": { count: 3 } }));
+    await back;
+    expect(h.store.getSnapshot()).toMatchObject({ stale: false, badges: { "/admin/otc": { count: 3 } } });
+  });
+
+  it("reads that keep failing go muted with their own cause, not the session's", async () => {
+    const h = harness({ pollMs: 45_000 });
+    await h.store.refresh("mount");
+    h.setLoad(async () => { throw new Error("Admin badges unavailable — try again"); });
+    h.advance(45_000);
+    await h.store.refresh("poll");
+    expect(h.store.getSnapshot().stale).toBe(false);
+    h.advance(70_000);
+    await h.store.refresh("poll");
+    expect(h.store.getSnapshot()).toMatchObject({ stale: true, staleCause: "error", badges: { "/admin/otc": { count: 2 } } });
+    const view = badgeMenu(h.store.getSnapshot(), ADMIN).view("/admin/otc");
+    expect(view).toMatchObject({ text: "2", muted: true });
+    expect(view?.title).toContain("the last reads failed");
+    expect(view?.title).not.toContain("session");
   });
 
   it("a key change drops the snapshot, and a late answer for the old key is ignored", async () => {

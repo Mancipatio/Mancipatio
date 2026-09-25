@@ -9,7 +9,10 @@
 // with a document `submitted` and, for admins, the ones with KYB `pending`),
 // scoped to this network through `clients` and without erased dossiers.
 // Their requirement and /verify-details statuses are then read by id and the
-// pure rule decides. Ids and statuses never leave the server through the
+// pure rule decides. A dossier has any number of requirements (3 KYC + 4 KYB
+// on /verify, plus every re-request), so the requirement read of each id
+// chunk is paged to the end: a silently capped page would drop a `requested`
+// row and turn a dossier that waits on the client into a `final`. Ids and statuses never leave the server through the
 // badge; admin-list attaches only the reason keys to rows it already returns.
 // kyc_requirements and client_verification_details have no network column:
 // they are scoped through their clients row.
@@ -21,12 +24,19 @@ import type { Network } from "@/lib/network";
 import { clientReviewReasons, type ClientReviewReason } from "@/lib/admin-badge-rules";
 import type { AdminOrKycRole } from "@/lib/server/kyc-provider-gate";
 
-/** PostgREST caps an un-ranged select at 1000 rows without an error. */
+/** PostgREST caps an un-ranged select at 1000 rows without an error (max_rows). */
 export const REVIEW_ID_CAP = 1000;
+/** Rows per page of a paged read: the same cap, so a short page is the last one. */
+const PAGE_ROWS = REVIEW_ID_CAP;
 /** Ids per `.in()` read: 150 uuids keep the request URL well under 8 KB. */
 const ID_CHUNK = 150;
 /** At most this many chunk reads in flight at once. */
 const CHUNK_CONCURRENCY = 4;
+/**
+ * Time budget of one queue read where the caller must not wait on it (the
+ * directory in admin-list); the same as a badge source's budget.
+ */
+export const REVIEW_QUEUE_TIMEOUT_MS = 4_000;
 
 export type ClientReviewQueue = {
   /** Client id → why it waits (only dossiers that do). */
@@ -52,6 +62,16 @@ async function rows<T>(table: string, query: Rows<T>): Promise<T[]> {
   const { data, error } = await query;
   if (error) throw new QueueReadError(table, error);
   return data ?? [];
+}
+
+/** Every row of a read, one `.range()` page at a time until a short page. */
+async function allPages<T>(table: string, page: (from: number, to: number) => Rows<T>): Promise<T[]> {
+  const out: T[] = [];
+  for (let from = 0; ; from += PAGE_ROWS) {
+    const batch = await rows<T>(table, page(from, from + PAGE_ROWS - 1));
+    out.push(...batch);
+    if (batch.length < PAGE_ROWS) return out;
+  }
 }
 
 function chunks<T>(items: readonly T[], size = ID_CHUNK): T[][] {
@@ -147,9 +167,13 @@ export async function readClientReviewQueue(
 
   const ids = [...status.keys()];
   const [requirements, details] = await Promise.all([
-    mapLimited(chunks(ids), (chunk) => rows<RequirementRow>("kyc_requirements", bounded(
-      sb.from("kyc_requirements").select("client_id,status,updated_at").in("client_id", chunk),
+    // Ordered by the primary key, so the pages neither overlap nor skip.
+    mapLimited(chunks(ids), (chunk) => allPages<RequirementRow>("kyc_requirements", (from, to) => bounded(
+      sb.from("kyc_requirements").select("client_id,status,updated_at").in("client_id", chunk)
+        .order("id", { ascending: true }).range(from, to),
     ))),
+    // At most one kyc and one kyb row per dossier (primary key client_id,
+    // kind): 2 × ID_CHUNK rows, well under the cap.
     mapLimited(chunks(ids), (chunk) => rows<DetailsRow>("client_verification_details", bounded(
       sb.from("client_verification_details").select("client_id,kind,status,updated_at").in("client_id", chunk),
     ))),

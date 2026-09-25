@@ -77,8 +77,9 @@ describe("route guard matrix", () => {
     expect(source).toContain("readAdminBadges({ wallet, role,");
     expect(source).toContain('"Cache-Control": "private, no-store"');
     expect(SESSION_READ_ACTIONS.has("admin.badges")).toBe(true);
-    // admin-list reads the review reasons for the role that passed its gate.
-    expect(src("clients/admin-list")).toContain("readClientReviewQueue(sb, network, role)");
+    // admin-list reads the review reasons for the role that passed its gate,
+    // under its own time budget.
+    expect(src("clients/admin-list")).toContain("(signal) => readClientReviewQueue(sb, network, role, signal)");
   });
 
   it("open-wallets returns addresses only and is a session read", () => {

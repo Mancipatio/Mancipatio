@@ -87,14 +87,14 @@ const NOUN: Record<AdminBadgeHref, [one: string, many: string]> = {
   "/admin/issuers": ["issuer waiting for a KYB decision", "issuers waiting for a KYB decision"],
   "/admin/applications": ["launch application to review", "launch applications to review"],
   "/admin/assets": ["draft asset ready to activate", "draft assets ready to activate"],
-  "/admin/launchpad": ["expired sale still open", "expired sales still open"],
+  "/admin/launchpad": ["expired sale you can close", "expired sales you can close"],
   "/admin/custody": ["custody request to act on", "custody requests to act on"],
   "/admin/otc": ["OTC request waiting for an escrow deal", "OTC requests waiting for an escrow deal"],
   "/admin/governance": ["ended proposal to finalize", "ended proposals to finalize"],
   "/admin/vesting": ["vesting series awaiting review", "vesting series awaiting review"],
   "/admin/clients": ["dossier to review", "dossiers to review"],
   "/admin/inquiries": ["inquiry to handle", "inquiries to handle"],
-  "/admin/kyc": ["new passport request", "new passport requests"],
+  "/admin/kyc": ["passport request to decide", "passport requests to decide"],
   "/admin/compliance": ["compliance alert to handle", "compliance alerts to handle"],
   "/admin/payouts": ["payout schedule overdue", "payout schedules overdue"],
 };
@@ -114,7 +114,7 @@ const PART_LABEL: Record<BadgePart, string> = {
   issuerNotVerified: "issuer not KYB-verified",
   noShareClasses: "no share class yet",
   yours: "closable by you",
-  issuers: "need the issuer's key",
+  issuers: "for the issuer to close",
 };
 
 /** Extra context per page, appended to the tooltip. */
@@ -151,8 +151,13 @@ export function badgeTitle(href: AdminBadgeHref, badge: AdminBadge): string {
   return title;
 }
 
+/** Why the numbers are out of date: no usable wallet session, or the reads keep failing. */
+export type StaleCause = "session" | "error";
+
+export type BadgeFlags = { stale?: boolean; staleCause?: StaleCause | null; fresh?: boolean };
+
 /** Screen-reader suffix read after the link label: "Clients, 65 waiting". */
-export function badgeSrText(badge: AdminBadge, flags: { stale?: boolean; fresh?: boolean } = {}): string {
+export function badgeSrText(badge: AdminBadge, flags: BadgeFlags = {}): string {
   if (badge.count === null) return "count unavailable";
   const text = badgeText(badge.count, badge.atLeast) ?? "0";
   return `${text} waiting${flags.fresh ? ", new since your last visit" : ""}${flags.stale ? ", may be out of date" : ""}`;
@@ -173,7 +178,7 @@ export type BadgeView = {
 export function badgeView(
   href: AdminBadgeHref,
   badge: AdminBadge | undefined,
-  flags: { stale?: boolean; fresh?: boolean } = {},
+  flags: BadgeFlags = {},
 ): BadgeView | null {
   if (!badge) return null;
   if (badge.count === null) {
@@ -184,7 +189,11 @@ export function badgeView(
   const fresh = Boolean(flags.fresh);
   let title = badgeTitle(href, badge);
   if (fresh) title += ". New since your last visit";
-  if (flags.stale) title += ". Not updated for a while — it refreshes once this wallet's session is renewed";
+  if (flags.stale) {
+    title += flags.staleCause === "error"
+      ? ". Not updated for a while — the last reads failed; it keeps retrying"
+      : ". Not updated for a while — it refreshes once this wallet's session is renewed";
+  }
   return { text, srText: badgeSrText(badge, { stale: flags.stale, fresh }), title, muted: Boolean(flags.stale), fresh };
 }
 
@@ -215,7 +224,7 @@ export const NO_BADGE_MENU: BadgeMenu = Object.freeze({ view: () => null, total:
 export function badgeMenu(snapshot: AdminBadgesSnapshot, caps: ReadonlySet<Capability>): BadgeMenu {
   const flags = (href: AdminBadgeHref) => {
     const badge = snapshot.badges[href];
-    return { stale: snapshot.stale, fresh: isNewSinceSeen(badge?.latest, snapshot.seen[href]) };
+    return { stale: snapshot.stale, staleCause: snapshot.staleCause, fresh: isNewSinceSeen(badge?.latest, snapshot.seen[href]) };
   };
   const view = (href: string): BadgeView | null =>
     badgeVisible(href, caps) ? badgeView(href, snapshot.badges[href], flags(href)) : null;
@@ -296,8 +305,13 @@ export type AdminBadgesSnapshot = {
   badges: Partial<Record<AdminBadgeHref, AdminBadge>>;
   /** When the last successful read finished (0 = never, this key). */
   updatedAt: number;
-  /** No successful read for BADGE_STALE_POLLS poll periods: show muted. */
+  /**
+   * No successful read for BADGE_STALE_POLLS poll periods: show muted. Judged
+   * only when a read was skipped for want of a session or has failed — never
+   * right before a read starts, so a tab coming back does not flash grey.
+   */
   stale: boolean;
+  staleCause: StaleCause | null;
   seen: SeenMap;
   /** Last error text (display/debug only); null after a success. */
   error: string | null;
@@ -323,6 +337,7 @@ export const EMPTY_BADGES_SNAPSHOT: AdminBadgesSnapshot = Object.freeze({
   badges: Object.freeze({}),
   updatedAt: 0,
   stale: false,
+  staleCause: null,
   seen: Object.freeze({}),
   error: null,
 }) as AdminBadgesSnapshot;
@@ -356,10 +371,11 @@ export function createAdminBadgesStore(opts: { now?: () => number; minGapMs?: nu
     return seen;
   }
 
-  function checkStale() {
+  function checkStale(cause: StaleCause) {
     if (!deps || snapshot.updatedAt === 0) return;
     const stale = now() - snapshot.updatedAt > deps.pollMs * BADGE_STALE_POLLS + minGapMs;
-    if (stale !== snapshot.stale) update({ stale });
+    const staleCause = stale ? cause : null;
+    if (stale !== snapshot.stale || staleCause !== snapshot.staleCause) update({ stale, staleCause });
   }
 
   async function read(boundKey: string, d: AdminBadgesStoreDeps, reason: BadgeRefreshReason, mode: BadgeReadMode) {
@@ -378,13 +394,20 @@ export function createAdminBadgesStore(opts: { now?: () => number; minGapMs?: nu
       }
     } catch (err) {
       if (key !== boundKey) return;
-      // No session and no prompt allowed: nothing changes, the next tick re-checks.
-      if (err instanceof WalletSessionRequiredError) return;
+      // No session and no prompt allowed: the numbers stay, the next tick re-checks.
+      if (err instanceof WalletSessionRequiredError) {
+        checkStale("session");
+        return;
+      }
       const message = err instanceof Error ? err.message : String(err);
       // A role refusal right after a grant (confirmed vs finalized): no numbers
       // until the next poll. Anything else keeps the last numbers.
-      if (isRoleRefusal(message)) update({ badges: {}, error: message });
-      else update({ error: message });
+      if (isRoleRefusal(message)) {
+        update({ badges: {}, error: message });
+      } else {
+        update({ error: message });
+        checkStale("error");
+      }
       return;
     }
     if (key !== boundKey) return;
@@ -394,6 +417,7 @@ export function createAdminBadgesStore(opts: { now?: () => number; minGapMs?: nu
       badges,
       updatedAt: now(),
       stale: false,
+      staleCause: null,
       seen: saveSeen(nextSeen(snapshot.seen, badges, path)),
       error: null,
     });
@@ -403,7 +427,6 @@ export function createAdminBadgesStore(opts: { now?: () => number; minGapMs?: nu
     const boundKey = key;
     const d = deps;
     if (!boundKey || !d) return Promise.resolve();
-    if (reason === "poll" || reason === "focus") checkStale();
     if (inFlight && inFlight.key === boundKey) {
       // An admin action during a read: run once more afterwards, fresh.
       if (reason === "event") eventPending = true;
@@ -416,7 +439,12 @@ export function createAdminBadgesStore(opts: { now?: () => number; minGapMs?: nu
     let mode: BadgeReadMode;
     if (d.hasSession()) mode = false;
     else if (reason === "mount" && !prompted.has(boundKey)) mode = "session-only";
-    else return Promise.resolve(); // no session and no prompt allowed: skip the call
+    else {
+      // No session and no prompt allowed: skip the call (a hidden tab's poll
+      // returned above, so this is a viewer looking at old numbers).
+      checkStale("session");
+      return Promise.resolve();
+    }
 
     lastAttemptAt = now();
     const promise = read(boundKey, d, reason, mode).finally(() => {

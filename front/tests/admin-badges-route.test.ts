@@ -7,7 +7,8 @@
 // for the operators these readers use and records every call, so the tests
 // pin authorization (role filtering before any read), network scoping,
 // per-source failure isolation, the indexer freshness gate, the counting
-// rules and the memo. No real RPC and no database.
+// rules, PostgREST's silent 1000-row cap and the memo. No real RPC and no
+// database.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { ADMIN_BADGE_HREFS, VESTING_REVIEW_FILTER, vestingSeriesNeedsReview } from "@/lib/admin-badge-rules";
 
@@ -23,6 +24,8 @@ const state = vi.hoisted(() => ({
   calls: [] as Array<{ table: string; ops: Op[] }>,
   /** Per-table failure: an `{ error }` result, a thrown error, or a query that never settles. */
   fail: {} as Record<string, "error" | "throw" | "hang">,
+  /** Per-table delay: the rows are read when the query runs, the answer waits for this. */
+  hold: {} as Record<string, Promise<void>>,
   noDb: false,
 }));
 const mocks = vi.hoisted(() => ({ verify: vi.fn(), gate: vi.fn() }));
@@ -35,6 +38,9 @@ vi.mock("@/lib/server/kyc-provider-gate", () => ({ requireAdminOrKycProvider: mo
 
 // ── In-memory Supabase ───────────────────────────────────────────────────────
 
+/** PostgREST's max_rows (supabase/config.toml): a select returns at most this many rows, silently. */
+const MAX_ROWS = 1000;
+
 function compare(a: unknown, b: unknown): number {
   if (typeof a === "string" && typeof b === "string" && Number.isNaN(Number(a))) return a < b ? -1 : a > b ? 1 : 0;
   return Number(a) - Number(b);
@@ -46,6 +52,7 @@ function from(table: string) {
   const filters: Array<(r: Row) => boolean> = [];
   let head = false;
   let limit: number | null = null;
+  let range: [number, number] | null = null;
   let order: { column: string; ascending: boolean } | null = null;
   let patch: Row | null = null;
   const run = async (single: boolean) => {
@@ -63,9 +70,15 @@ function from(table: string) {
       const { column, ascending } = order;
       matched = [...matched].sort((x, y) => (ascending ? 1 : -1) * compare(x[column], y[column]));
     }
+    if (range) matched = matched.slice(range[0], range[1] + 1);
     if (limit !== null) matched = matched.slice(0, limit);
-    if (head) return { data: null, error: null, count: matched.length };
-    return single ? { data: matched[0] ?? null, error: null } : { data: matched, error: null };
+    const capped = matched.slice(0, MAX_ROWS);
+    const result = head
+      ? { data: null, error: null, count: matched.length }
+      : single ? { data: capped[0] ?? null, error: null } : { data: capped, error: null };
+    const hold = state.hold[table];
+    if (hold) await hold;
+    return result;
   };
   const b: Record<string, unknown> = {};
   const op = (name: string, filter?: (...args: never[]) => (r: Row) => boolean) =>
@@ -101,6 +114,11 @@ function from(table: string) {
     limit: (n: number) => {
       ops.push(["limit", n]);
       limit = n;
+      return b;
+    },
+    range: (from: number, to: number) => {
+      ops.push(["range", from, to]);
+      range = [from, to];
       return b;
     },
     abortSignal: (signal: AbortSignal) => {
@@ -152,7 +170,8 @@ function fixtures() {
   const client = (n: number, kyc_status: string, extra: Row = {}) => ({
     id: uuid(n), network: "devnet", kyc_status, anonymized_at: null, ...extra,
   });
-  const req = (n: number, status: string, updated_at = "2026-09-20T00:00:00.000Z") => ({ client_id: uuid(n), status, updated_at });
+  let reqId = 0;
+  const req = (n: number, status: string, updated_at = "2026-09-20T00:00:00.000Z") => ({ id: ++reqId, client_id: uuid(n), status, updated_at });
   const details = (n: number, kind: string, status: string, updated_at = "2026-09-19T00:00:00.000Z") => ({ client_id: uuid(n), kind, status, updated_at });
   return {
     indexer_sync_state: [{ network: "devnet", status: "ready", completed_at: iso(-3_600_000), checked_at: iso(-10_000) }],
@@ -291,6 +310,7 @@ beforeEach(() => {
   state.tables = fixtures();
   state.calls = [];
   state.fail = {};
+  state.hold = {};
   state.noDb = false;
   mocks.verify.mockReset().mockImplementation(async () => ({ wallet: state.signer, params: state.params, via: "session" }));
   mocks.gate.mockReset().mockResolvedValue("admin");
@@ -368,16 +388,18 @@ describe("admin badges: what each queue counts", () => {
     expect(b["/admin/assets"]).toEqual({
       count: 1, parts: { ready: 1 }, aside: { issuerNotVerified: 1, noShareClasses: 1 },
     });
-    // S1: every expired open sale; the parts say who can close it.
-    expect(b["/admin/launchpad"]).toEqual({ count: 2, parts: { yours: 1, issuers: 1 } });
+    // Only the expired open sale this wallet can close (close_sale is has_one =
+    // authority); the other issuer's is named, not counted.
+    expect(b["/admin/launchpad"]).toEqual({ count: 1, parts: { yours: 1 }, aside: { issuers: 1 } });
     // M5: requested + deposited (+ in_delivery); never vault_opened or the legacy approved.
     expect(b["/admin/custody"]).toEqual({ count: 5, parts: { delivery: 3, conversion: 2 } });
     expect(b["/admin/otc"]).toEqual({ count: 2 });
     expect(b["/admin/governance"]).toEqual({ count: 1 });
     expect(b["/admin/vesting"]).toEqual({ count: 2 });
     expect(b["/admin/inquiries"]).toEqual({ count: 3, parts: { new: 2, inReview: 1 } });
-    // S3: new requests are the number; in-review ones are named, not counted.
-    expect(b["/admin/kyc"]).toEqual({ count: 2, parts: { new: 2 }, aside: { inReview: 1 }, latest: "2026-09-25T11:00:00.000Z" });
+    // Every undecided request: "Mark in review" is triage, an in-review one
+    // still waits for Issue passport or Reject.
+    expect(b["/admin/kyc"]).toEqual({ count: 3, parts: { new: 2, inReview: 1 }, latest: "2026-09-25T12:00:00.000Z" });
     expect(b["/admin/compliance"]).toEqual({ count: 3, parts: { open: 2, escalated: 1 } });
     expect(b["/admin/payouts"]).toEqual({ count: 1 });
   });
@@ -401,6 +423,13 @@ describe("admin badges: what each queue counts", () => {
     expect(vesting.ops).toContainEqual(["or", VESTING_REVIEW_FILTER]);
   });
 
+  it("KYC: marking every request in review leaves the number unchanged", async () => {
+    for (const r of state.tables.passport_requests) if (r.status === "new") r.status = "in_review";
+    const { POST } = await load();
+    const { body } = await call(POST);
+    expect(body.data.badges["/admin/kyc"]).toMatchObject({ count: 3, parts: { new: 0, inReview: 3 } });
+  });
+
   it("Launchpad's own part filters on the caller's wallet", async () => {
     const { POST } = await load();
     await call(POST);
@@ -419,6 +448,28 @@ describe("admin badges: what each queue counts", () => {
     const byId = state.calls.filter((c) => c.table === "kyc_requirements" && c.ops.some((o) => o[0] === "in"));
     expect(byId.length).toBeGreaterThan(1);
     for (const c of byId) expect((c.ops.find((o) => o[0] === "in")![2] as unknown[]).length).toBeLessThanOrEqual(150);
+  });
+
+  it("Clients: each chunk's requirement read is paged, so a row past the 1000-row cap still decides", async () => {
+    // 150 pending dossiers (one id chunk) × 7 requirements = 1050 rows: six
+    // approved each, and the one still `requested` last in id order — beyond
+    // a single capped page, where it would make every dossier look `final`.
+    const ids = Array.from({ length: 150 }, (_, i) => uuid(2000 + i));
+    state.tables.clients = ids.map((id) => ({ id, network: "devnet", kyc_status: "pending", anonymized_at: null }));
+    let next = 0;
+    const row = (client_id: string, status: string) => ({ id: ++next, client_id, status, updated_at: iso(-1000) });
+    state.tables.kyc_requirements = [
+      ...ids.flatMap((id) => Array.from({ length: 6 }, () => row(id, "approved"))),
+      ...ids.map((id) => row(id, "requested")),
+    ];
+    state.tables.client_verification_details = [];
+    const { POST } = await load();
+    const { body } = await call(POST);
+    // Every dossier still waits on the client: nothing to review.
+    expect(body.data.badges["/admin/clients"]).toEqual({ count: 0, parts: { final: 0, documents: 0, kyb: 0 } });
+    const paged = state.calls.filter((c) => c.table === "kyc_requirements" && c.ops.some((o) => o[0] === "range"));
+    expect(paged.map((c) => c.ops.find((o) => o[0] === "range")!.slice(1))).toEqual([[0, 999], [1000, 1999]]);
+    for (const c of paged) expect(c.ops).toContainEqual(["order", "id"]);
   });
 
   it("hygiene: only integers, fixed keys, reason keys and timestamps leave the server", async () => {
@@ -556,11 +607,36 @@ describe("admin badges: memo", () => {
     state.tables.otc_requests.push({ id: 7, network: "devnet", status: "requested" });
     const stale = (await call(POST)).body.data.badges["/admin/otc"];
     expect(stale).toEqual({ count: 2 });
-    // `fresh` right after the memo was filled is throttled for a second…
-    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + 1_500 });
+    // `fresh` right after the memo was filled still reads again at once.
     const fresh = (await call(POST, { fresh: true })).body.data.badges["/admin/otc"];
     expect(fresh).toEqual({ count: 3 });
     expect(state.calls.length).toBeGreaterThan(first);
+  });
+
+  it("`fresh` during a read in flight never gets that read's (pre-write) count; a burst shares one queued run", async () => {
+    const { POST } = await load();
+    const otcReads = () => state.calls.filter((c) => c.table === "otc_requests").length;
+    let release!: () => void;
+    state.hold.otc_requests = new Promise<void>((resolve) => { release = resolve; });
+    // A poll reads otc_requests (2 rows) and its answer is still on the way…
+    const poll = call(POST);
+    await vi.waitFor(() => expect(otcReads()).toBe(1));
+    // …when the admin's write commits and its fresh reads arrive.
+    state.tables.otc_requests.push({ id: 7, network: "devnet", status: "requested" });
+    const shared = call(POST);
+    const burst = [call(POST, { fresh: true }), call(POST, { fresh: true }), call(POST, { fresh: true })];
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    // Nothing runs next to the read in flight.
+    expect(otcReads()).toBe(1);
+    release();
+    expect((await poll).body.data.badges["/admin/otc"]).toEqual({ count: 2 });
+    expect((await shared).body.data.badges["/admin/otc"]).toEqual({ count: 2 });
+    for (const pending of burst) expect((await pending).body.data.badges["/admin/otc"]).toEqual({ count: 3 });
+    // One run for the poll, one queued run for the whole burst.
+    expect(otcReads()).toBe(2);
+    // The queued run's value is the memo now.
+    expect((await call(POST)).body.data.badges["/admin/otc"]).toEqual({ count: 3 });
+    expect(otcReads()).toBe(2);
   });
 
   it("roles and wallets never share an entry", async () => {
@@ -612,6 +688,23 @@ describe("clients/admin-list: the 'Needs review' tab uses the badge's reader", (
     const { body } = await adminList();
     expect(body.data.clients.find((c) => c.id === uuid(7))?.review_reasons).toEqual([]);
     expect(body.data.clients.find((c) => c.id === uuid(12))?.review_reasons).toEqual(["final"]);
+  });
+
+  it("a slow review read is cut at 4 s: the directory still loads, flagged unavailable", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    state.fail = { client_verification_details: "hang" };
+    vi.resetModules();
+    state.params = { review: true };
+    const { POST } = await import("@/app/api/clients/admin-list/route");
+    const pending = POST(new Request("https://manci.test/api/clients/admin-list", { method: "POST", body: "{}" }));
+    await vi.advanceTimersByTimeAsync(4_100);
+    const res = await pending;
+    const body = (await res.json()) as { data: { clients: unknown[]; review_available: boolean } };
+    expect(res.status).toBe(200);
+    expect(body.data.review_available).toBe(false);
+    expect(body.data.clients.length).toBeGreaterThan(0);
+    expect(warn).toHaveBeenCalledWith("[api/clients/admin-list] review queue unavailable:", "timed out");
   });
 
   it("a failing review read still returns the directory, flagged unavailable", async () => {

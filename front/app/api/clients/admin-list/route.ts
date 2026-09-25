@@ -9,13 +9,15 @@
 // kyb — kyb for admins only), from the same reader as the /admin/clients menu
 // badge (lib/server/client-review-queue.ts), so the page's "Needs review" tab
 // reproduces that number. The other pages that only need the directory skip
-// those reads. The reasons are best-effort: if they cannot be read,
-// `review_available` is false and the directory still loads.
+// those reads. The reasons are best-effort: if they cannot be read within
+// REVIEW_QUEUE_TIMEOUT_MS (4 s, aborted), `review_available` is false and the
+// directory still loads — it never waits longer on the review tables.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
-import { readClientReviewQueue } from "@/lib/server/client-review-queue";
+import { readClientReviewQueue, REVIEW_QUEUE_TIMEOUT_MS } from "@/lib/server/client-review-queue";
+import { withTimeout } from "@/lib/server/with-timeout";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 
@@ -42,7 +44,7 @@ export async function POST(request: Request) {
         .eq("network", network)
         .order("created_at", { ascending: false }),
       withReview
-        ? readClientReviewQueue(sb, network, role).catch((err: unknown) => {
+        ? withTimeout(REVIEW_QUEUE_TIMEOUT_MS, (signal) => readClientReviewQueue(sb, network, role, signal)).catch((err: unknown) => {
           console.warn("[api/clients/admin-list] review queue unavailable:", err instanceof Error ? err.message : err);
           return null;
         })

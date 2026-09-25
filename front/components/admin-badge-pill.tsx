@@ -5,12 +5,14 @@ import type { BadgeView } from "@/lib/admin-badges";
  * The visible number is aria-hidden; screen readers get the sr-only text
  * inside the link instead ("Clients, 65 waiting") — an aria-label on a plain
  * span is not reliably announced. Amber like the custody "to act" pills;
- * on the active (brand) row it turns translucent white.
+ * on the active (brand-600) row a solid white pill. Every tone keeps the
+ * 10px number at WCAG AA (4.5:1) or better: amber-800 on amber-100, brand-700
+ * on white, slate-600 on slate-100 and on brand-100 for the muted ones.
  */
 export function AdminBadgePill({ view, active = false }: { view: BadgeView; active?: boolean }) {
   const tone = view.muted
-    ? active ? "bg-white/20 text-white/70" : "bg-slate-100 text-slate-400"
-    : active ? "bg-white/20 text-white" : "bg-amber-100 text-amber-800";
+    ? active ? "bg-brand-100 text-slate-600" : "bg-slate-100 text-slate-600"
+    : active ? "bg-white text-brand-700" : "bg-amber-100 text-amber-800";
   return (
     <span
       title={view.title}
@@ -21,7 +23,7 @@ export function AdminBadgePill({ view, active = false }: { view: BadgeView; acti
         <span
           aria-hidden="true"
           data-admin-badge-new=""
-          className={`h-1.5 w-1.5 rounded-full ${active ? "bg-white" : "bg-red-500"}`}
+          className="h-1.5 w-1.5 rounded-full bg-red-500"
         />
       )}
       <span aria-hidden="true">{view.text}</span>

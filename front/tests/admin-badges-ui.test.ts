@@ -46,14 +46,24 @@ describe("AdminNav pills", () => {
     expect(clients).toMatch(/clients<\/span><span title=/);
   });
 
-  it("caps at 99+ and turns translucent on the active row", () => {
+  it("caps at 99+ and turns solid white (AA contrast) on the active row", () => {
     nav.path = "/admin/kyc";
     const markup = html(createElement(AdminNav, {
       items: items({ "/admin/kyc": badgeView("/admin/kyc", { count: 250, parts: { new: 250 } }) }),
     }));
     expect(markup).toContain('<span aria-hidden="true">99+</span>');
-    expect(markup).toContain("bg-white/20 text-white");
+    expect(markup).toContain("bg-white text-brand-700");
+    expect(markup).not.toContain("bg-white/20");
     expect(markup).not.toContain("bg-amber-100");
+  });
+
+  it("a muted pill keeps a readable number on the active row too", () => {
+    nav.path = "/admin/otc";
+    const markup = html(createElement(AdminNav, {
+      items: items({ "/admin/otc": badgeView("/admin/otc", { count: 2 }, { stale: true, staleCause: "error" }) }),
+    }));
+    expect(markup).toContain("bg-brand-100 text-slate-600");
+    expect(markup).not.toMatch(/text-white\/70|text-slate-400/);
   });
 
   it("an unavailable count is a muted dot, a new row adds the dot marker", () => {
@@ -66,7 +76,7 @@ describe("AdminNav pills", () => {
     }));
     expect(pills(markup)).toBe(2);
     expect(markup).toContain('<span aria-hidden="true">•</span>');
-    expect(markup).toContain("bg-slate-100 text-slate-400");
+    expect(markup).toContain("bg-slate-100 text-slate-600");
     expect(markup).toContain("count unavailable");
     expect(markup).toContain('data-admin-badge-new=""');
     expect(markup).toContain("3 waiting, new since your last visit");

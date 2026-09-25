@@ -13,10 +13,13 @@
 // * Indexer sources (issuers, assets, sales, proposals) share one
 //   indexer_sync_state read and run only while the mirror is fresh
 //   (lib/indexer-freshness.ts); otherwise they are `null` ("indexer").
-// * Memo: 10 s per network|role|wallet, concurrent callers share one run;
-//   `fresh` (sent right after an admin action) reads again. Per instance and
-//   best effort — it absorbs several tabs of one admin, it does not protect
-//   the database.
+// * Memo: 10 s per network|role|wallet, concurrent callers share one run.
+//   `fresh` (sent right after an admin action) never takes a value or a run
+//   that started before it arrived — those may have read before the action's
+//   write committed. It waits for the run in flight and reads once more after
+//   it; every fresh caller meanwhile shares that one queued run, so a key has
+//   at most one run in flight and one queued. Per instance and best effort —
+//   it absorbs several tabs of one admin, it does not protect the database.
 // * passport_requests and payout_schedules have no network column; their
 //   pages read them unscoped too (one Supabase project serves one network).
 
@@ -28,6 +31,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { SiwsError } from "@/lib/server/siws";
 import type { AdminOrKycRole } from "@/lib/server/kyc-provider-gate";
 import { readClientReviewQueue } from "@/lib/server/client-review-queue";
+import { withTimeout } from "@/lib/server/with-timeout";
 import { isIndexerStateFresh } from "@/lib/indexer-freshness";
 import { AssetStatus } from "@/lib/generated/asset_registry/types/assetStatus";
 import { KybStatus } from "@/lib/generated/asset_registry/types/kybStatus";
@@ -46,8 +50,6 @@ import {
 
 export const BADGE_SOURCE_TIMEOUT_MS = 4_000;
 export const BADGE_MEMO_MS = 10_000;
-/** A `fresh` burst still re-reads at most this often per key. */
-const FRESH_MIN_GAP_MS = 1_000;
 const MEMO_MAX_KEYS = 64;
 /** Bounded row reads (PostgREST caps an un-ranged select at 1000 rows). */
 const ROW_CAP = 1000;
@@ -181,20 +183,22 @@ export const BADGE_SOURCES: readonly Source[] = [
     },
   },
   {
-    // Every expired sale that is still open — the page's "Expired (open)"
-    // filter. close_sale needs the sale's issuer key, so the parts say how
-    // many the caller can close itself.
+    // Expired sales still open that the caller can close: close_sale is
+    // has_one = authority, and sale.authority is the issuer key that opened
+    // it. Other issuers' expired sales (the rest of the page's "Expired
+    // (open)" filter) wait on that issuer: named, not counted — Overview's
+    // AlertsCard warns about them.
     href: "/admin/launchpad",
     roles: ADMIN,
     indexer: true,
     read: async ({ sb, network, wallet, nowSec, signal }) => {
       const expiredOpen = () => sb.from("sales").select("pda", HEAD)
         .eq("network", network).eq("status", SaleStatus.Open).gt("end_ts", 0).lte("end_ts", nowSec);
-      const [count, yours] = await Promise.all([
+      const [all, yours] = await Promise.all([
         headCount(expiredOpen().abortSignal(signal)),
         headCount(expiredOpen().eq("authority", wallet).abortSignal(signal)),
       ]);
-      return withParts(count, { yours, issuers: Math.max(0, count - yours) });
+      return { count: yours, parts: { yours }, aside: { issuers: Math.max(0, all - yours) } };
     },
   },
   {
@@ -272,10 +276,10 @@ export const BADGE_SOURCES: readonly Source[] = [
     },
   },
   {
-    // New passport requests — the queue's default "New" tab. "Mark in review"
-    // is triage, not a decision, and an in-review request often waits on the
-    // KYC provider or on the dossier (Clients), so it is named, not counted.
-    // No network column (see the header).
+    // Passport requests not yet decided — the tabs "New" and "In review".
+    // "Mark in review" is triage, not a decision: an in-review request still
+    // gets Issue passport (KYC provider) and Reject, and only approved or
+    // rejected is handled. No network column (see the header).
     href: "/admin/kyc",
     roles: ADMIN_OR_PROVIDER,
     read: async ({ sb, signal }) => {
@@ -284,10 +288,11 @@ export const BADGE_SOURCES: readonly Source[] = [
       const [fresh, inReview, latest] = await Promise.all([
         status("new"),
         status("in_review"),
-        newest(sb.from("passport_requests").select("created_at").eq("status", "new")
+        newest(sb.from("passport_requests").select("created_at").in("status", ["new", "in_review"])
           .order("created_at", { ascending: false }).limit(1).abortSignal(signal), "created_at"),
       ]);
-      return { count: fresh, parts: { new: fresh }, aside: { inReview }, ...(fresh > 0 && latest ? { latest } : {}) };
+      const count = fresh + inReview;
+      return { count, parts: { new: fresh, inReview }, ...(count > 0 && latest ? { latest } : {}) };
     },
   },
   {
@@ -316,23 +321,6 @@ export const BADGE_SOURCES: readonly Source[] = [
 
 const UNAVAILABLE: AdminBadge = Object.freeze({ count: null, reason: "unavailable" as const });
 const INDEXER_BEHIND: AdminBadge = Object.freeze({ count: null, reason: "indexer" as const });
-
-/** Runs `read` with its own abort signal; rejects after `ms` even if the query ignores it. */
-async function withTimeout<T>(ms: number, read: (signal: AbortSignal) => Promise<T>): Promise<T> {
-  const controller = new AbortController();
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => {
-      controller.abort();
-      reject(new Error("timed out"));
-    }, ms);
-  });
-  try {
-    return await Promise.race([read(controller.signal), timeout]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 async function indexerIsFresh(sb: SupabaseClient, network: Network): Promise<boolean> {
   try {
@@ -380,8 +368,37 @@ async function computeBadges(
   return { network, checkedAt: now.toISOString(), badges };
 }
 
-type MemoEntry = { at: number; value?: AdminBadges; running?: Promise<AdminBadges> };
+type MemoEntry = {
+  /** When the reads behind `value` started: it holds writes committed before then. */
+  at: number;
+  value?: AdminBadges;
+  /** The one computation in flight for this key. */
+  running?: Promise<AdminBadges>;
+  /** A `fresh` run queued behind `running`, shared by every fresh caller until it starts. */
+  queued?: Promise<AdminBadges>;
+};
 const memo = new Map<string, MemoEntry>();
+
+/** Starts a computation for `key` and records it as the one in flight. */
+function begin(key: string, compute: () => Promise<AdminBadges>): Promise<AdminBadges> {
+  const at = Date.now();
+  const running = compute();
+  const prev = memo.get(key);
+  // Re-insert: the Map's order is the eviction order (oldest first).
+  memo.delete(key);
+  memo.set(key, { at: prev?.at ?? 0, value: prev?.value, running });
+  while (memo.size > MEMO_MAX_KEYS) memo.delete(memo.keys().next().value as string);
+  const settle = (value: AdminBadges | null) => {
+    const entry = memo.get(key);
+    if (entry?.running !== running) return;
+    const queued = entry.queued ? { queued: entry.queued } : {};
+    if (value) memo.set(key, { at, value, ...queued });
+    else if (entry.queued) memo.set(key, { at: 0, ...queued });
+    else memo.delete(key);
+  };
+  running.then(settle, () => settle(null));
+  return running;
+}
 
 /**
  * The badges of `wallet` in `role` on this deployment's network. Never
@@ -394,12 +411,13 @@ export async function readAdminBadges(opts: {
   fresh?: boolean;
 }): Promise<AdminBadges> {
   const network = detectNetwork();
-  // The wallet is part of the key: the Launchpad parts are per wallet.
+  // The wallet is part of the key: the Launchpad count is per wallet.
   const key = `${network}|${opts.role}|${opts.wallet}`;
   const hit = memo.get(key);
-  const now = Date.now();
-  if (hit?.running && !opts.fresh) return hit.running;
-  if (hit?.value && now - hit.at < (opts.fresh ? FRESH_MIN_GAP_MS : BADGE_MEMO_MS)) return hit.value;
+  if (!opts.fresh) {
+    if (hit?.running) return hit.running;
+    if (hit?.value && Date.now() - hit.at < BADGE_MEMO_MS) return hit.value;
+  }
 
   let sb: SupabaseClient;
   try {
@@ -408,16 +426,14 @@ export async function readAdminBadges(opts: {
     console.error("[api/admin/badges] database client unavailable:", err instanceof Error ? err.message : err);
     throw new SiwsError(503, "Admin badges unavailable — try again");
   }
-  const running = computeBadges(sb, network, opts.wallet, opts.role);
-  memo.delete(key);
-  memo.set(key, { at: hit?.at ?? 0, value: hit?.value, running });
-  while (memo.size > MEMO_MAX_KEYS) memo.delete(memo.keys().next().value as string);
-  try {
-    const value = await running;
-    if (memo.get(key)?.running === running) memo.set(key, { at: Date.now(), value });
-    return value;
-  } catch (err) {
-    if (memo.get(key)?.running === running) memo.delete(key);
-    throw err;
-  }
+  const compute = () => computeBadges(sb, network, opts.wallet, opts.role);
+  // fresh: join the queued run (it has not started yet, so its reads start
+  // after this request arrived) …
+  if (opts.fresh && hit?.queued) return hit.queued;
+  if (!opts.fresh || !hit?.running) return begin(key, compute);
+  // … or queue one behind the run in flight, which may have read before the
+  // admin's write committed.
+  const queued = hit.running.then(() => undefined, () => undefined).then(() => begin(key, compute));
+  hit.queued = queued;
+  return queued;
 }
