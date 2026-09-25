@@ -16,7 +16,8 @@
     "chain:bootstrap": "vitest run --config scripts/chain/bootstrap.config.ts --reporter=verbose",
     "chain:idl": "vitest run --config scripts/chain/idl.config.ts --reporter=verbose",
     "chain:squads-export": "vitest run --config scripts/chain/squads-export.config.ts --reporter=verbose",
-    "chain:e2e": "vitest run --config scripts/chain/e2e.config.ts --reporter=verbose"
+    "chain:e2e": "vitest run --config scripts/chain/e2e.config.ts --reporter=verbose",
+    "sim": "vitest run --config scripts/sim/sim.config.ts --reporter=verbose"
   },
   "dependencies": {
     "@solana-program/token-2022": "^0.7.0",

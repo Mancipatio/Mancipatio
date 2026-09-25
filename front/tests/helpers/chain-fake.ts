@@ -96,6 +96,11 @@ export class FakeChain {
   onSend?: (sig: string, wire: string) => void;
   /** Extra account mutation right after a landed transaction. */
   afterLand?: (sig: string) => void;
+  /**
+   * A scripted simulation result (the fake cannot execute Token-2022): return
+   * `{ err, logs }` to answer a simulateTransaction, or null to execute as usual.
+   */
+  simulateOverride?: (wire: Uint8Array) => { err: unknown; logs: string[] } | null;
   private attempts = new Map<string, number>();
   private blockhashCounter = 0;
 
@@ -193,6 +198,10 @@ export class FakeChain {
       case "simulateTransaction": {
         const wire = Buffer.from(params[0] as string, "base64");
         const config = (params[1] ?? {}) as { sigVerify?: boolean };
+        const scripted = this.simulateOverride?.(new Uint8Array(wire));
+        if (scripted) {
+          return { context: this.context(), value: { err: scripted.err, logs: scripted.logs, unitsConsumed: 12_000, accounts: null, returnData: null } };
+        }
         const staged = this.clone();
         const { err } = this.execute(new Uint8Array(wire), staged, Boolean(config.sigVerify));
         return {
