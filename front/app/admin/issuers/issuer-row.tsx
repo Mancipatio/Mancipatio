@@ -21,6 +21,33 @@ const STATUS_BADGE: Record<number, string> = {
 export const ISSUER_TABLE_COLUMNS = 5;
 
 /**
+ * Whether a row that just closed hands the focus back to its Review button:
+ * only when the focus was dropped (it sat in the detail that unmounted, e.g.
+ * on its Close button) and no other review opened instead. Opening row B
+ * while A is open closes A in the same render; A must not pull the focus, and
+ * with it the page, back to itself.
+ */
+export function returnsFocusOnClose(opts: {
+  wasExpanded: boolean;
+  expanded: boolean;
+  anotherOpen: boolean;
+  focusDropped: boolean;
+}): boolean {
+  return opts.wasExpanded && !opts.expanded && !opts.anotherOpen && opts.focusDropped;
+}
+
+/**
+ * How an opened review is scrolled into view: its row at the top (under the
+ * group's scroll margin), so the name and the Verify / Reject block right
+ * below it show. "nearest" aligned the BOTTOM of a review that is taller than
+ * the viewport and starts above it (e.g. it moved up because the review above
+ * it closed), which left its decision block off-screen.
+ */
+export function reviewScrollOptions(reduceMotion: boolean): ScrollIntoViewOptions {
+  return { block: "start", behavior: reduceMotion ? "auto" : "smooth" };
+}
+
+/**
  * One issuer of the /admin/issuers table: its row and, when open, the review
  * detail in a full-width row directly underneath. Both live in their own
  * <tbody> so the pair scrolls into view together. The Review button is the
@@ -32,6 +59,7 @@ export function IssuerRowGroup({
   legalId,
   sync,
   expanded,
+  anotherOpen = false,
   groupRef,
   onToggle,
   children,
@@ -41,6 +69,8 @@ export function IssuerRowGroup({
   /** Set while the row shows a chain status the indexer has not caught up to. */
   sync: KybOverride["phase"] | null;
   expanded: boolean;
+  /** Another row's review is open (this one closing never takes the focus). */
+  anotherOpen?: boolean;
   groupRef?: Ref<HTMLTableSectionElement>;
   onToggle: () => void;
   /** The review detail, rendered while expanded. */
@@ -54,14 +84,22 @@ export function IssuerRowGroup({
   const name = legalId || "—";
 
   // Closing from inside the detail (its Close button) drops the focus with
-  // the unmounted detail: hand it back to the row's Review button.
+  // the unmounted detail: hand it back to the row's Review button, without
+  // scrolling (a just-decided row may have moved to another part of the list).
   useEffect(() => {
-    if (wasExpanded.current && !expanded) {
-      const active = document.activeElement;
-      if (!active || active === document.body) reviewButton.current?.focus();
+    const active = document.activeElement;
+    if (
+      returnsFocusOnClose({
+        wasExpanded: wasExpanded.current,
+        expanded,
+        anotherOpen,
+        focusDropped: !active || active === document.body,
+      })
+    ) {
+      reviewButton.current?.focus({ preventScroll: true });
     }
     wasExpanded.current = expanded;
-  }, [expanded]);
+  }, [expanded, anotherOpen]);
 
   return (
     <tbody

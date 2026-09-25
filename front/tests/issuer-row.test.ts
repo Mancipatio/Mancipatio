@@ -8,7 +8,12 @@ import { address } from "@solana/kit";
 import { KybStatus, type Issuer } from "@/lib/generated/asset_registry";
 import { toBytes32 } from "@/lib/format";
 import type { KybOverride } from "@/lib/issuer-directory";
-import { ISSUER_TABLE_COLUMNS, IssuerRowGroup } from "@/app/admin/issuers/issuer-row";
+import {
+  ISSUER_TABLE_COLUMNS,
+  IssuerRowGroup,
+  returnsFocusOnClose,
+  reviewScrollOptions,
+} from "@/app/admin/issuers/issuer-row";
 
 const AUTHORITY = "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS";
 
@@ -95,5 +100,36 @@ describe("inline review detail", () => {
     const html = render(KybStatus.Verified);
     const cells = html.match(/<td[\s>]/g) ?? [];
     expect(cells).toHaveLength(ISSUER_TABLE_COLUMNS);
+  });
+});
+
+describe("focus and scroll when reviews open and close", () => {
+  const closed = { wasExpanded: true, expanded: false };
+
+  it("hands the focus back only when the detail took it along and nothing else opened", () => {
+    // Close ✕ inside the detail: the focus went with the unmounted detail.
+    expect(returnsFocusOnClose({ ...closed, anotherOpen: false, focusDropped: true })).toBe(true);
+    // Opening row B closes row A: A must not pull the focus (and the page) back.
+    expect(returnsFocusOnClose({ ...closed, anotherOpen: true, focusDropped: true })).toBe(false);
+    // The focus is somewhere else already (e.g. on the button that closed it).
+    expect(returnsFocusOnClose({ ...closed, anotherOpen: false, focusDropped: false })).toBe(false);
+    // Not a close.
+    expect(
+      returnsFocusOnClose({ wasExpanded: false, expanded: true, anotherOpen: false, focusDropped: true }),
+    ).toBe(false);
+    expect(
+      returnsFocusOnClose({ wasExpanded: false, expanded: false, anotherOpen: false, focusDropped: true }),
+    ).toBe(false);
+  });
+
+  it("scrolls an opened review to the top, so its row and decision block show", () => {
+    expect(reviewScrollOptions(false)).toEqual({ block: "start", behavior: "smooth" });
+    expect(reviewScrollOptions(true)).toEqual({ block: "start", behavior: "auto" });
+  });
+
+  it("gives the group a scroll margin for the maintenance banner", () => {
+    expect(render(KybStatus.Pending, { expanded: true })).toMatch(
+      /<tbody class="[^"]*scroll-mt-\[calc\(16px\+var\(--maintenance-banner-h,0px\)\)\]/,
+    );
   });
 });

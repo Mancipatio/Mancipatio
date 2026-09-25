@@ -6,9 +6,11 @@
 // reject the list therefore still reads "Pending"; a reviewer who then tried
 // again hit an error because the issuer was already decided on chain. The
 // page now (1) re-reads the issuer on chain before sending and refuses when
-// it is no longer pending, (2) overlays the decided status on the row
-// (`KybOverrides`) until the indexer-backed list agrees, and (3) polls that
-// list for a bounded time (`startKybReconcile`).
+// it is no longer pending, (2) waits for the sent decision to confirm
+// (`waitForKybConfirmation`), (3) overlays the decided status on the row
+// (`KybOverrides`) until the indexer-backed list agrees, and (4) polls that
+// list for a bounded time (`startKybReconcile`), checking the chain again
+// when the list never agreed (`giveUpOverride`).
 
 import { KybStatus } from "@/lib/generated/asset_registry";
 import { fromBytes32, KYB_LABEL } from "@/lib/format";
@@ -61,44 +63,64 @@ export function matchesStatus(
   return status === "all" || STATUS_TO_FILTER[issuer.kybStatus] === status;
 }
 
+type Ranked = { legalId: string; authority: string; pending: boolean };
+
+function compareRanked(a: Ranked, b: Ranked): number {
+  if (a.pending !== b.pending) return a.pending ? -1 : 1;
+  const byName = a.legalId.localeCompare(b.legalId);
+  if (byName !== 0) return byName;
+  return a.authority.localeCompare(b.authority);
+}
+
+function ranked(issuer: DirectoryIssuer, legalId = issuerLegalId(issuer)): Ranked {
+  return { legalId, authority: String(issuer.authority), pending: isPendingKyb(issuer) };
+}
+
 /**
  * Review-queue order: pending KYB first, then by legal-entity id, then by
  * authority (a stable tie-break for two rows with the same name).
  */
 export function compareForReview(a: DirectoryIssuer, b: DirectoryIssuer): number {
-  const pa = isPendingKyb(a) ? 0 : 1;
-  const pb = isPendingKyb(b) ? 0 : 1;
-  if (pa !== pb) return pa - pb;
-  const byName = issuerLegalId(a).localeCompare(issuerLegalId(b));
-  if (byName !== 0) return byName;
-  return String(a.authority).localeCompare(String(b.authority));
+  return compareRanked(ranked(a), ranked(b));
 }
 
 /**
+ * The open review: its row, and whether it was pending when it was opened
+ * (its place in the review queue at that moment).
+ */
+export type OpenReview = { legalId: string; pending: boolean };
+
+/**
  * The visible rows, in review-queue order. The query matches the legal-entity
- * id, the authority wallet or the jurisdiction code. `keepLegalId` (the open
- * row) stays visible under the status chip even after its status changed, so
- * a verify / reject never makes the open review vanish under the reviewer;
- * it still has to match the query.
+ * id, the authority wallet or the jurisdiction code. The open row (`keep`)
+ * stays visible under the status chip even after its status changed, and
+ * keeps the queue position it had when it was opened: a verify / reject (or
+ * a chain read that finds it already decided) neither hides the open review
+ * nor moves it away from the reviewer. It still has to match the query.
  */
 export function filterIssuers<T extends DirectoryIssuer>(
   issuers: readonly T[],
-  opts: { query: string; status: IssuerStatusFilter; keepLegalId?: string | null },
+  opts: { query: string; status: IssuerStatusFilter; keep?: OpenReview | null },
 ): T[] {
   const q = opts.query.trim().toLowerCase();
-  return issuers
-    .filter((issuer) => {
-      const legalId = issuerLegalId(issuer);
-      const kept = !!opts.keepLegalId && legalId === opts.keepLegalId;
-      if (!kept && !matchesStatus(issuer, opts.status)) return false;
-      if (!q) return true;
-      return (
-        legalId.toLowerCase().includes(q) ||
-        String(issuer.authority).toLowerCase().includes(q) ||
-        String(issuer.jurisdiction).includes(q)
-      );
-    })
-    .sort(compareForReview);
+  const keep = opts.keep ?? null;
+  const rows: { issuer: T; rank: Ranked }[] = [];
+  for (const issuer of issuers) {
+    const legalId = issuerLegalId(issuer);
+    const kept = keep !== null && legalId === keep.legalId;
+    if (!kept && !matchesStatus(issuer, opts.status)) continue;
+    if (
+      q &&
+      !legalId.toLowerCase().includes(q) &&
+      !String(issuer.authority).toLowerCase().includes(q) &&
+      !String(issuer.jurisdiction).includes(q)
+    ) {
+      continue;
+    }
+    const rank = ranked(issuer, legalId);
+    rows.push({ issuer, rank: kept ? { ...rank, pending: keep.pending } : rank });
+  }
+  return rows.sort((a, b) => compareRanked(a.rank, b.rank)).map((row) => row.issuer);
 }
 
 export type IssuerStatusCounts = Record<IssuerStatusFilter, number>;
@@ -175,6 +197,110 @@ export function kybDecisionPreflight(
   return { ok: true };
 }
 
+/** A getSignatureStatuses entry, as far as the confirmation wait reads it. */
+export type SignatureStatusLike = {
+  err: unknown;
+  confirmationStatus?: string | null;
+} | null;
+
+/**
+ * `confirmed`: the decision landed. `failed`: it landed with an error.
+ * `unconfirmed`: no confirmation within the wait (it may still land, or it
+ * was dropped).
+ */
+export type KybSendOutcome = "confirmed" | "failed" | "unconfirmed";
+
+export const KYB_CONFIRM_TIMEOUT_MS = 45_000;
+export const KYB_CONFIRM_INTERVAL_MS = 1_500;
+
+/**
+ * Waits for a sent KYB decision to confirm. The send resolves once the RPC
+ * accepted the transaction, not once it landed: a dropped one (an expired
+ * blockhash, a skipped leader) never lands, and treating it as decided showed
+ * an approved issuer that the chain still held as Pending. Reads the status
+ * every `intervalMs` for at most `timeoutMs`; a failed read counts as "not
+ * yet".
+ */
+export async function waitForKybConfirmation(
+  readStatus: () => Promise<SignatureStatusLike>,
+  opts: {
+    timeoutMs?: number;
+    intervalMs?: number;
+    now?: () => number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<KybSendOutcome> {
+  const timeoutMs = opts.timeoutMs ?? KYB_CONFIRM_TIMEOUT_MS;
+  const intervalMs = opts.intervalMs ?? KYB_CONFIRM_INTERVAL_MS;
+  const now = opts.now ?? (() => Date.now());
+  const sleep =
+    opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const until = now() + timeoutMs;
+  for (;;) {
+    let status: SignatureStatusLike = null;
+    try {
+      status = await readStatus();
+    } catch {
+      status = null;
+    }
+    if (status?.err) return "failed";
+    if (
+      status?.confirmationStatus === "confirmed" ||
+      status?.confirmationStatus === "finalized"
+    ) {
+      return "confirmed";
+    }
+    if (now() >= until) return "unconfirmed";
+    await sleep(intervalMs);
+  }
+}
+
+/**
+ * The KYB decision in flight for an issuer: being signed and sent, or sent
+ * and waiting for confirmation.
+ */
+export type KybDecisionPhase = "sending" | "confirming";
+
+export type KybDecisionGuard = {
+  /** Claims the issuer for one decision; false while one is in flight. */
+  begin(legalId: string): boolean;
+  /** The decision was sent and now waits for confirmation. */
+  confirming(legalId: string): void;
+  /** The decision finished (whatever the outcome). */
+  end(legalId: string): void;
+};
+
+/**
+ * The KYB decisions in flight, by legal-entity id. The page holds it, not the
+ * review detail: the detail unmounts whenever its row closes, and a review
+ * re-opened while the first decision is still being sent or confirmed must
+ * not offer Verify / Reject again (a second send either decides twice or
+ * fails as already decided). `onChange` gets a fresh snapshot on every
+ * change (the page's state).
+ */
+export function createKybDecisionGuard(
+  onChange: (phases: ReadonlyMap<string, KybDecisionPhase>) => void,
+): KybDecisionGuard {
+  const phases = new Map<string, KybDecisionPhase>();
+  const emit = () => onChange(new Map(phases));
+  return {
+    begin(legalId) {
+      if (phases.has(legalId)) return false;
+      phases.set(legalId, "sending");
+      emit();
+      return true;
+    },
+    confirming(legalId) {
+      if (phases.get(legalId) !== "sending") return;
+      phases.set(legalId, "confirming");
+      emit();
+    },
+    end(legalId) {
+      if (phases.delete(legalId)) emit();
+    },
+  };
+}
+
 /**
  * The status to show after a confirmed decision, given a fresh chain read.
  * A read that still says Pending is RPC lag (keep the decision); any other
@@ -248,6 +374,29 @@ export function markChainOnly(overrides: KybOverrides, legalId: string): KybOver
   return { ...overrides, [legalId]: { ...current, phase: "chain" } };
 }
 
+/**
+ * The poll gave up (the indexer never showed the status), so the row is
+ * checked against the chain before it claims "on-chain": the chain's status
+ * is kept as chain-only, and a chain that still says Pending drops the
+ * override (the decision never landed; the row is reviewable again). A failed
+ * read or a missing account (`null`) keeps the override, marked chain-only.
+ * A no-op when the override is already gone.
+ */
+export function giveUpOverride(
+  overrides: KybOverrides,
+  legalId: string,
+  live: KybStatus | null,
+): KybOverrides {
+  if (!overrides[legalId]) return overrides;
+  if (live === null) return markChainOnly(overrides, legalId);
+  if (live === KybStatus.Pending) {
+    const next = { ...overrides };
+    delete next[legalId];
+    return next;
+  }
+  return { ...overrides, [legalId]: { status: live, phase: "chain" } };
+}
+
 export const KYB_RECONCILE_INTERVAL_MS = 5_000;
 /** 12 × 5 s = one minute, well past the usual indexer lag. */
 export const KYB_RECONCILE_ATTEMPTS = 12;
@@ -290,13 +439,58 @@ export function startKybReconcile(
   };
 }
 
-/**
- * Asks the admin menu to re-count its badges (pending KYB and the like). The
- * menu listens for this event; nothing happens when nobody does.
- */
-export const ADMIN_BADGES_REFRESH_EVENT = "admin:badges-refresh";
+export type ReconcileRegistry = {
+  /**
+   * Starts the poll `begin` returns (its stop function) for `key`, stopping
+   * the one it replaces. `begin` gets `release`, which the poll calls once it
+   * finished on its own. A no-op while closed.
+   */
+  start(key: string, begin: (release: () => void) => () => void): void;
+  /** Whether new polls start (false between `close` and `open`). */
+  readonly isOpen: boolean;
+  /** The polls still running. */
+  readonly size: number;
+  open(): void;
+  /** Stops every poll and refuses new ones (the page unmounted). */
+  close(): void;
+};
 
-export function requestAdminBadgesRefresh(): void {
-  if (typeof window === "undefined") return;
-  window.dispatchEvent(new Event(ADMIN_BADGES_REFRESH_EVENT));
+/**
+ * The page's reconcile polls, one per issuer. A decision settles
+ * asynchronously (a chain read comes first), so it can try to start a poll
+ * after the page unmounted; a closed registry never starts it, where a bare
+ * map emptied on unmount would have kept that poll running for a minute.
+ */
+export function createReconcileRegistry(): ReconcileRegistry {
+  const running = new Map<string, () => void>();
+  let open = true;
+  return {
+    get isOpen() {
+      return open;
+    },
+    get size() {
+      return running.size;
+    },
+    open() {
+      open = true;
+    },
+    close() {
+      open = false;
+      for (const stop of running.values()) stop();
+      running.clear();
+    },
+    start(key, begin) {
+      if (!open) return;
+      running.get(key)?.();
+      running.delete(key);
+      let finished = false;
+      let stop: (() => void) | null = null;
+      const release = () => {
+        finished = true;
+        if (stop && running.get(key) === stop) running.delete(key);
+      };
+      stop = begin(release);
+      if (!finished) running.set(key, stop);
+    },
+  };
 }

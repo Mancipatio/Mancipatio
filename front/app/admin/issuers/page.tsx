@@ -23,8 +23,11 @@ import { toBytes32 } from "@/lib/format";
 import { createLatestGate } from "@/lib/latest-load";
 import {
   applyKybOverrides,
+  createKybDecisionGuard,
+  createReconcileRegistry,
   decisionStatus,
   filterIssuers,
+  giveUpOverride,
   ISSUER_STATUS_FILTERS,
   isPendingKyb,
   issuerLegalId,
@@ -32,16 +35,18 @@ import {
   kybDecisionPreflight,
   kybDossierHref,
   kybLabel,
-  markChainOnly,
   matchesStatus,
   reconciledStatus,
-  requestAdminBadgesRefresh,
   startKybReconcile,
   statusChipLabel,
   unsettledOverrides,
+  waitForKybConfirmation,
   type IssuerStatusFilter,
+  type KybDecisionGuard,
+  type KybDecisionPhase,
   type KybOverride,
   type KybOverrides,
+  type OpenReview,
 } from "@/lib/issuer-directory";
 import { SkeletonTable, SkeletonCard } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -50,7 +55,7 @@ import { useToast } from "@/lib/toast";
 import { recordAudit } from "@/lib/supabase";
 import { IssuerPermissionsPanel } from "./issuer-permissions-panel";
 import { IssuerRecoveryPanel } from "./issuer-recovery-panel";
-import { IssuerRowGroup } from "./issuer-row";
+import { IssuerRowGroup, reviewScrollOptions } from "./issuer-row";
 import { recoveryPathFor } from "@/lib/issuer-recovery";
 import { RequireRole } from "@/components/require-role";
 import {
@@ -98,14 +103,21 @@ function IssuersOps() {
   const [query, setQuery] = useState("");
   // "All" stays the default even with pending issuers: pending rows are
   // listed first anyway, and the chip counts show the queue, so nothing is
-  // hidden and a just-decided row never jumps out of view.
+  // hidden. The open review keeps its queue position while it is open
+  // (filterIssuers `keep`), so a just-decided row never jumps out of view.
   const [status, setStatus] = useState<IssuerStatusFilter>("all");
-  const [selectedLegalId, setSelectedLegalId] = useState<string | null>(null);
+  const [openReview, setOpenReview] = useState<OpenReview | null>(null);
+  const selectedLegalId = openReview?.legalId ?? null;
   const [showAdd, setShowAdd] = useState(false);
   // KYB statuses seen on chain that the indexer-backed list may not show yet.
   const [overrides, setOverrides] = useState<KybOverrides>({});
   const [loadGate] = useState(createLatestGate);
-  const polls = useRef(new Map<string, () => void>());
+  const [polls] = useState(createReconcileRegistry);
+  // KYB decisions in flight, held here so a re-opened review stays locked.
+  const [decisionPhases, setDecisionPhases] = useState<
+    ReadonlyMap<string, KybDecisionPhase>
+  >(() => new Map());
+  const [decisions] = useState(() => createKybDecisionGuard(setDecisionPhases));
   const selectedGroup = useRef<HTMLTableSectionElement | null>(null);
   const scrolledFor = useRef<string | null>(null);
 
@@ -135,24 +147,23 @@ function IssuersOps() {
     void refresh();
   }, [refresh]);
 
+  // Polls stop on unmount, and one that a decision settling after the
+  // unmount would start never does (the registry is closed).
   useEffect(() => {
-    const running = polls.current;
-    return () => {
-      for (const stop of running.values()) stop();
-      running.clear();
-    };
-  }, []);
+    polls.open();
+    return () => polls.close();
+  }, [polls]);
 
   // A KYB status is known from the chain: show it on the row at once, then
   // poll the indexer-backed list (bounded) until it agrees.
   const settleKyb = useCallback<KybSettled>(
     (legalId, issuerPda, decided, sent) => {
+      if (!polls.isOpen) return;
       setOverrides((prev) => ({
         ...prev,
         [legalId]: { status: decided, phase: "syncing" },
       }));
-      if (sent) requestAdminBadgesRefresh();
-      else void load().catch(() => undefined);
+      if (!sent) void load().catch(() => undefined);
       void (async () => {
         let target = decided;
         if (sent) {
@@ -169,31 +180,43 @@ function IssuersOps() {
           } catch {
             // Keep the confirmed decision; the poll below still reconciles.
           }
-          if (target !== decided) {
+          if (target !== decided && polls.isOpen) {
             setOverrides((prev) => ({
               ...prev,
               [legalId]: { status: target, phase: "syncing" },
             }));
           }
         }
-        polls.current.get(legalId)?.();
-        const stop = startKybReconcile({
-          legalId,
-          status: target,
-          load: async () => (await load()).issuers,
-          onAgree: () => {
-            if (polls.current.get(legalId) === stop) polls.current.delete(legalId);
-            requestAdminBadgesRefresh();
-          },
-          onGiveUp: () => {
-            if (polls.current.get(legalId) === stop) polls.current.delete(legalId);
-            setOverrides((prev) => markChainOnly(prev, legalId));
-          },
-        });
-        polls.current.set(legalId, stop);
+        polls.start(legalId, (release) =>
+          startKybReconcile({
+            legalId,
+            status: target,
+            load: async () => (await load()).issuers,
+            onAgree: release,
+            onGiveUp: () => {
+              release();
+              // The indexer never agreed: check the chain before the row
+              // claims "on-chain" (a Pending chain drops the override).
+              void (async () => {
+                let live: KybStatus | null = null;
+                try {
+                  const account = await fetchMaybeIssuer(
+                    client.runtime.rpc,
+                    issuerPda,
+                    { commitment: "confirmed" },
+                  );
+                  live = account.exists ? account.data.kybStatus : null;
+                } catch {
+                  // Unknown: the row keeps the status it read from the chain.
+                }
+                setOverrides((prev) => giveUpOverride(prev, legalId, live));
+              })();
+            },
+          }),
+        );
       })();
     },
-    [client, load],
+    [client, load, polls],
   );
 
   const issuers = useMemo(
@@ -207,9 +230,8 @@ function IssuersOps() {
   );
 
   const filtered = useMemo(
-    () =>
-      filterIssuers(issuers, { query, status, keepLegalId: selectedLegalId }),
-    [issuers, query, status, selectedLegalId],
+    () => filterIssuers(issuers, { query, status, keep: openReview }),
+    [issuers, query, status, openReview],
   );
 
   const selectedVisible =
@@ -227,16 +249,13 @@ function IssuersOps() {
     const reduceMotion =
       typeof window.matchMedia === "function" &&
       window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-    selectedGroup.current?.scrollIntoView({
-      block: "nearest",
-      behavior: reduceMotion ? "auto" : "smooth",
-    });
+    selectedGroup.current?.scrollIntoView(reviewScrollOptions(reduceMotion));
   }, [selectedLegalId, selectedVisible]);
 
   function changeStatus(next: IssuerStatusFilter) {
     setStatus(next);
     const open = issuers.find((i) => issuerLegalId(i) === selectedLegalId);
-    if (open && !matchesStatus(open, next)) setSelectedLegalId(null);
+    if (open && !matchesStatus(open, next)) setOpenReview(null);
   }
 
   if (failed) {
@@ -346,9 +365,12 @@ function IssuersOps() {
                   legalId={legalId}
                   sync={overrides[legalId]?.phase ?? null}
                   expanded={isSelected}
+                  anotherOpen={selectedLegalId !== null && !isSelected}
                   groupRef={isSelected ? selectedGroup : undefined}
                   onToggle={() =>
-                    setSelectedLegalId(isSelected ? null : legalId)
+                    setOpenReview(
+                      isSelected ? null : { legalId, pending: isPendingKyb(i) },
+                    )
                   }
                 >
                   {isSelected && (
@@ -358,8 +380,10 @@ function IssuersOps() {
                       otherAuthorities={issuers
                         .filter((other) => issuerLegalId(other) !== legalId)
                         .map((other) => other.authority.toString())}
+                      decision={decisionPhases.get(legalId) ?? null}
+                      decisions={decisions}
                       onKybSettled={settleKyb}
-                      onClose={() => setSelectedLegalId(null)}
+                      onClose={() => setOpenReview(null)}
                     />
                   )}
                 </IssuerRowGroup>
@@ -375,7 +399,8 @@ function IssuersOps() {
           onClose={() => setShowAdd(false)}
           onSuccess={(legalId) => {
             void refresh();
-            setSelectedLegalId(legalId);
+            // register_issuer always starts at Pending KYB.
+            setOpenReview({ legalId, pending: true });
             setShowAdd(false);
           }}
         />
@@ -388,6 +413,8 @@ function IssuerDetail({
   issuer,
   sync,
   otherAuthorities,
+  decision,
+  decisions,
   onKybSettled,
   onClose,
 }: {
@@ -396,6 +423,9 @@ function IssuerDetail({
   sync: KybOverride["phase"] | null;
   /** Authorities of every other issuer (a recovery key must not be one). */
   otherAuthorities: readonly string[];
+  /** This issuer's KYB decision in flight, if any (it outlives this detail). */
+  decision: KybDecisionPhase | null;
+  decisions: KybDecisionGuard;
   onKybSettled: KybSettled;
   onClose: () => void;
 }) {
@@ -410,11 +440,10 @@ function IssuerDetail({
   const [profileError, setProfileError] = useState<string | null>(null);
   const [profileLoading, setProfileLoading] = useState(true);
   const [confirm, setConfirm] = useState<"verify" | "reject" | null>(null);
-  // One KYB decision at a time: the ref closes the window before the first
-  // re-render disables the buttons (a double click would send twice).
-  const deciding = useRef(false);
-  const [sending, setSending] = useState(false);
-  const busy = sending || tx.isSending;
+  // One KYB decision at a time per issuer: the page-level guard closes the
+  // window before the first re-render disables the buttons (a double click
+  // would send twice), and it survives this detail closing and re-opening.
+  const busy = decision !== null || tx.isSending;
   const pending = isPendingKyb(issuer);
   // Onboarding-profile edit state (admin may create/fix it — SD4: the upsert
   // route authorizes platform admins, so this fills the gap where an issuer's
@@ -515,15 +544,12 @@ function IssuerDetail({
   }
 
   async function review(approved: boolean, reason: string) {
-    if (deciding.current) return;
     if (!wallet || !conn.wallet || !issuerPda) return;
-    deciding.current = true;
-    setSending(true);
+    if (!decisions.begin(legalId)) return;
     try {
       await decide(conn.wallet, issuerPda, approved, reason);
     } finally {
-      deciding.current = false;
-      setSending(false);
+      decisions.end(legalId);
     }
   }
 
@@ -563,7 +589,7 @@ function IssuerDetail({
       return;
     }
 
-    const pendingId = toast.showPending(
+    let pendingId = toast.showPending(
       approved ? "Approving issuer KYB…" : "Rejecting issuer KYB…",
       reason,
     );
@@ -575,20 +601,74 @@ function IssuerDetail({
         approved,
       });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
-      toast.dismiss(pendingId);
-      toast.showTx(sig, {
-        title: approved ? "Issuer verified" : "Issuer rejected",
-      });
-      void recordAudit({
+      const audit = {
         ix_name: "verify_issuer_kyb",
         category: "issuers",
         actor_wallet: wallet?.toString() ?? "",
         reason,
-        target_label: `${legalId} · ${approved ? "approved" : "rejected"}`,
         tx_signature: sig,
+      } as const;
+      // Attribution first (it survives a closed tab); the outcome follows.
+      void recordAudit({
+        ...audit,
+        target_label: `${legalId} · ${approved ? "approve" : "reject"}`,
+        status: "pending",
+      });
+      // Sent is not landed: the row changes only once the chain confirms.
+      setConfirm(null);
+      decisions.confirming(legalId);
+      toast.dismiss(pendingId);
+      pendingId = toast.showPending("Confirming the KYB decision on chain…");
+      const outcome = await waitForKybConfirmation(async () =>
+        (
+          await client.runtime.rpc
+            .getSignatureStatuses([sig])
+            .send({ abortSignal: AbortSignal.timeout(10_000) })
+        ).value[0],
+      );
+      toast.dismiss(pendingId);
+      if (outcome === "failed") {
+        void recordAudit({
+          ...audit,
+          target_label: `${legalId} · ${approved ? "approve" : "reject"}`,
+          status: "failed",
+          metadata: { error: "Transaction failed on chain" },
+        });
+        toast.showError(
+          approved ? "Failed to verify" : "Failed to reject",
+          "The transaction failed on chain; the issuer is still pending.",
+        );
+        return;
+      }
+      if (outcome === "unconfirmed") {
+        // The pending audit row stands: the outcome is not known.
+        toast.show({
+          kind: "info",
+          title: "Not confirmed yet",
+          description:
+            "The decision was sent but the chain has not confirmed it. Re-open the review in a minute: Verify / Reject read the chain before sending again.",
+        });
+        // It may have landed after all: show it if the chain already has it.
+        try {
+          const after = await fetchMaybeIssuer(client.runtime.rpc, pda, {
+            commitment: "confirmed",
+          });
+          if (after.exists && !isPendingKyb(after.data)) {
+            onKybSettled(legalId, pda, after.data.kybStatus, false);
+          }
+        } catch {
+          // The row stays Pending; the next decision re-reads the chain.
+        }
+        return;
+      }
+      toast.showTx(sig, {
+        title: approved ? "Issuer verified" : "Issuer rejected",
+      });
+      void recordAudit({
+        ...audit,
+        target_label: `${legalId} · ${approved ? "approved" : "rejected"}`,
         status: "success",
       });
-      setConfirm(null);
       onKybSettled(legalId, pda, decisionStatus(approved), true);
     } catch (err) {
       toast.dismiss(pendingId);
@@ -665,7 +745,7 @@ function IssuerDetail({
                 </button>
                 {busy && (
                   <span className="text-xs text-amber-900" role="status">
-                    Sending…
+                    {decision === "confirming" ? "Confirming…" : "Sending…"}
                   </span>
                 )}
               </>
