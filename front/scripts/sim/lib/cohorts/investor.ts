@@ -10,11 +10,12 @@
  *                    a 202 is polled again (≤ 1 per 30 s), > 3 min is a lag finding
  *   buy.aggregate    POST /api/launchpad/commitment-aggregate (the progress bar)
  *
- * KYC'd investors buy on sale [0], no-KYC buyers and traders on sale [1].
+ * KYC'd investors buy on sale [0], no-KYC buyers, traders and transfer hubs
+ * (cohort X, when they buy their own units) on sale [1].
  */
 import type { Address } from "@solana/kit";
 import type { SaleDocumentTerms } from "@/lib/document-terms";
-import { SITE_ORIGIN } from "../constants";
+import { SITE_ORIGIN, XFER_UNITS } from "../constants";
 import { prng } from "../identity";
 import type { UserState } from "../state";
 import { CONSISTENCY_MS, actor, awaitOwner, check, finish, go, later, note, retry, walletPolicy, type SimCtx } from "./common";
@@ -27,6 +28,8 @@ export function saleFor(ctx: SimCtx, u: UserState): string {
 export function buyUnits(runId: string, u: UserState): number {
   if (u.plan.variant === "maker") return 40;
   if (u.plan.variant === "taker") return 5;
+  // A transfer hub buys exactly what a loan would have lent (every S/P amount assumes it).
+  if (u.plan.cohort === "X") return Number(XFER_UNITS);
   const rand = prng("sim-buy", runId, u.plan.n);
   return u.plan.variant === "buyer-kyc" ? 10 + Math.floor(rand() * 51) : 5 + Math.floor(rand() * 36);
 }
@@ -34,10 +37,11 @@ export function buyUnits(runId: string, u: UserState): number {
 type Aggregate = { pledged?: string; settled?: string; backers?: number };
 type Recorded = { id?: string | null; jobId?: string; status?: "pending" | "complete" };
 
-/** After the buy: investors are done, traders continue with their offers. */
+/** After the buy: investors are done, traders continue with their offers, transfer hubs with their pair. */
 function afterBuy(u: UserState): void {
   if (u.plan.variant === "maker") return go(u, "offer.create");
   if (u.plan.variant === "taker") return go(u, "offer.wait");
+  if (u.plan.variant === "xfer-hub" || u.plan.variant === "xfer-buyer") return go(u, "xfer.ready");
   finish(u, "done", "bought and recorded");
 }
 

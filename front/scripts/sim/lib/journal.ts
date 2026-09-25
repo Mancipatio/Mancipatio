@@ -13,6 +13,8 @@ import { ensurePrivateDir } from "./safety";
 /**
  * How a step ended, compared with what it expected:
  * ok / expected-error — as expected; the rest are findings for the report.
+ * `unexpected-accept`: a transfer probe the chain should refuse simulated OK
+ * (it is never sent).
  */
 export type Outcome =
   | "ok"
@@ -23,6 +25,7 @@ export type Outcome =
   | "network"
   | "tx-error"
   | "consistency"
+  | "unexpected-accept"
   | "info";
 
 export const FINDING_OUTCOMES: ReadonlySet<Outcome> = new Set([
@@ -32,6 +35,7 @@ export const FINDING_OUTCOMES: ReadonlySet<Outcome> = new Set([
   "network",
   "tx-error",
   "consistency",
+  "unexpected-accept",
 ]);
 
 export type JournalEntry = {
@@ -40,7 +44,7 @@ export type JournalEntry = {
   user: string;
   cohort: string;
   step: string;
-  kind: "http" | "tx" | "check" | "note";
+  kind: "http" | "tx" | "probe" | "check" | "note";
   route?: string;
   action?: string;
   ix?: string;

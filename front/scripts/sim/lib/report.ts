@@ -6,10 +6,12 @@
  *   status/body and transaction error per user and step — the point of the
  *   run is to find site bugs — then the same findings grouped by
  *   (route or instruction, status, message) with a count and 3 example users,
- *   the split expected / unexpected 4xx / 5xx / on-chain / consistency, and
- *   every user's stage;
+ *   the split expected / unexpected 4xx / 5xx / on-chain / consistency /
+ *   unexpected accept, the transfer probes, the largest balance lag and the
+ *   donor loan (cohort X), and every user's stage;
  * - summary.json in the run directory (the grouped findings, machine-readable);
- * - owner-queue.txt: what each waiting SIM user expects the owner to do.
+ * - owner-queue.txt: what each waiting SIM user expects the owner to do, and
+ *   the cohort-X loan and early leavers as information (no task).
  */
 import path from "node:path";
 import { FINDING_OUTCOMES, type JournalEntry, type Outcome } from "./journal";
@@ -51,10 +53,30 @@ export function groupFindings(entries: JournalEntry[]): Group[] {
 }
 
 export function tally(entries: JournalEntry[]) {
-  const t = { requests: 0, expected: 0, unexpected4xx: 0, unexpected2xx: 0, fivexx: 0, network: 0, onchain: 0, consistency: 0, tx: 0 };
+  const t = {
+    requests: 0,
+    expected: 0,
+    unexpected4xx: 0,
+    unexpected2xx: 0,
+    fivexx: 0,
+    network: 0,
+    onchain: 0,
+    consistency: 0,
+    unexpectedAccept: 0,
+    tx: 0,
+    probes: 0,
+    probesPassed: 0,
+    probesMismatch: 0,
+  };
   for (const e of entries) {
     if (e.kind === "http") t.requests += 1;
     if (e.kind === "tx" && e.outcome === "ok") t.tx += 1;
+    if (e.kind === "probe") {
+      t.probes += 1;
+      if (e.outcome === "ok" || e.outcome === "expected-error") t.probesPassed += 1;
+      if (e.outcome === "tx-error") t.probesMismatch += 1;
+    }
+    if (e.outcome === "unexpected-accept") t.unexpectedAccept += 1;
     if (e.outcome === "ok" || e.outcome === "expected-error") t.expected += 1;
     if (e.outcome === "unexpected-4xx") t.unexpected4xx += 1;
     if (e.outcome === "unexpected-2xx") t.unexpected2xx += 1;
@@ -66,6 +88,26 @@ export function tally(entries: JournalEntry[]) {
   return t;
 }
 
+/** The largest C1 lag (seconds) after a cohort-X transfer: checks `xfer.<row>.balance` with body "lag Ns". */
+export function largestTransferLag(entries: JournalEntry[]): number | null {
+  let max: number | null = null;
+  for (const e of entries) {
+    if (e.kind !== "check" || !/^xfer\.S\d\.balance$/.test(e.step)) continue;
+    const lag = /^lag (\d+)s$/.exec(e.body ?? "");
+    const seconds = lag ? Number(lag[1]) : e.outcome === "ok" ? 0 : null;
+    if (seconds !== null) max = Math.max(max ?? 0, seconds);
+  }
+  return max;
+}
+
+/** The donor loan: outstanding (who holds it), returned, or none taken. */
+export function loanLine(state: SimState | null): string {
+  const loan = state?.market.loan;
+  if (loan) return `outstanding: ${loan.units} class A units of e2e buyer3 lent to pair ${loan.pair} (hub ${loan.hub}) since ${loan.at.slice(0, 19)}Z`;
+  const returned = Object.values(state?.users ?? {}).filter((u) => u.data.xferSource === "donor" && u.tx["xfer.r2"]?.status === "landed");
+  return returned.length ? `returned (${returned.map((u) => u.plan.label).join(", ")})` : "none taken";
+}
+
 export function userStage(u: UserState): string {
   if (u.terminal) return u.terminal;
   return u.awaitingOwner ? `awaiting_owner (${u.stage})` : u.stage;
@@ -73,6 +115,7 @@ export function userStage(u: UserState): string {
 
 export function renderReport(state: SimState | null, entries: JournalEntry[], now = new Date()): string {
   const t = tally(entries);
+  const lag = largestTransferLag(entries);
   const findings = entries.filter((e) => FINDING_OUTCOMES.has(e.outcome));
   const lines: string[] = [
     `# Manci devnet simulator — run ${state?.runId ?? "?"}`,
@@ -90,6 +133,10 @@ export function renderReport(state: SimState | null, entries: JournalEntry[], no
     `| no response (network, timeout) | ${t.network} |`,
     `| on-chain / builder errors | ${t.onchain} |`,
     `| consistency / lag | ${t.consistency} |`,
+    `| unexpected accept (a rule the chain should enforce accepted the transfer; never sent) | ${t.unexpectedAccept} |`,
+    `| transfer probes: as expected / mismatch / unexpected accept (simulated only) | ${t.probesPassed} / ${t.probesMismatch} / ${t.unexpectedAccept} |`,
+    `| largest balance lag after a transfer (C1) | ${lag === null ? "-" : `${lag} s`} |`,
+    `| donor loan (cohort X) | ${cell(loanLine(state))} |`,
     "",
     findings.length === 0 ? "**No unexpected results.**" : `**${findings.length} unexpected results** — each is listed below.`,
     "",
@@ -146,6 +193,17 @@ export function renderOwnerQueue(state: SimState, extra: string[] = []): string 
   const edge = Object.values(state.users)
     .filter((u) => u.plan.cohort === "E" && u.data.clientId)
     .sort((a, b) => a.plan.n - b.plan.n);
+  const xfer = Object.values(state.users)
+    .filter((u) => u.plan.cohort === "X")
+    .sort((a, b) => a.plan.n - b.plan.n);
+  const transfers = xfer.length || state.market.loan
+    ? [
+        "## Transfers (cohort X): information, no action",
+        `- donor loan: ${loanLine(state)}`,
+        ...xfer.filter((u) => u.terminal && u.terminal !== "done").map((u) => `- ${u.plan.label} [X/${u.plan.variant}] ended ${u.terminal}: ${u.reason ?? ""}`),
+        "",
+      ]
+    : [];
   const lines = [
     `# Manci simulator run ${state.runId} — what the owner is asked to do (${new Date().toISOString()})`,
     "# The simulator never approves anything itself; it polls every 2 min and continues each user.",
@@ -165,6 +223,7 @@ export function renderOwnerQueue(state: SimState, extra: string[] = []): string 
     "## Edge-cohort dossiers (opened only to test bad uploads): leave them untouched",
     ...edge.map((u) => `${u.plan.label} client ${u.data.clientId} wallet ${u.wallet}`),
     "",
+    ...transfers,
   ];
   return lines.join("\n");
 }

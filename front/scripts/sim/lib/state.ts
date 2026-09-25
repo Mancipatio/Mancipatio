@@ -31,6 +31,44 @@ export type Requirement = {
 
 export type OfferRecord = { offerId: string; pda: string; amount: string; price: string; expiresAt: string };
 
+/**
+ * A cohort-X transfer row's pre-send snapshot (design-transfers §D.5), taken
+ * at finalized and persisted BEFORE the send; never re-taken once a signature
+ * for the row exists. Amounts are decimal strings.
+ */
+export type XferSnapshot = {
+  srcOwner: string;
+  srcAta: string;
+  dstOwner: string;
+  dstAta: string;
+  amount: string;
+  srcBefore: string;
+  dstBefore: string;
+  /** The destination token account did not exist (C1b checks the new ATA). */
+  newDst?: boolean;
+  /** Epoch ms of the first C1 read, and how many reads the lag window took. */
+  checkAt?: number;
+  reads?: number;
+  /** C1 settled (ok, lag or a finding): never journalled twice. */
+  checked?: boolean;
+};
+
+/** A cohort-X pair's conservation baseline (C3), taken when its units arrive. */
+export type XferBase = {
+  /** ISO time the baseline was read (tx records carry ISO times too). */
+  at: string;
+  /** Balances counted: donor (loan route only), hub, peer. */
+  parts: Record<string, string>;
+  sum: string;
+  supply: string;
+  circulating: string;
+  /** commitment-aggregate of both simulator sales (C5; loan route only). */
+  aggregates?: Record<string, { pledged: string; settled: string; backers: number }>;
+};
+
+/** A probe's verdict (the journal holds the detail). */
+export type ProbeVerdict = "passed" | "mismatch" | "unexpected-accept" | "skipped";
+
 export type UserData = {
   accountId?: string;
   clientId?: string;
@@ -54,6 +92,12 @@ export type UserData = {
   flags?: Record<string, boolean>;
   edgeDone?: string[];
   pollCount?: number;
+  /** Cohort X: snapshots per transfer row (S1, S2, S4–S7). */
+  xfer?: Record<string, XferSnapshot>;
+  /** Cohort X hub: where its units came from (a donor loan or its own buy). */
+  xferSource?: "donor" | "own";
+  xferBase?: XferBase;
+  probes?: Record<string, ProbeVerdict>;
 };
 
 export type Terminal = "done" | "stopped" | "rejected" | "failed";
@@ -84,6 +128,11 @@ export type MarketState = TxOwner & {
   fxKind?: string;
   approvalExpiresAt?: string;
   saleStart?: string;
+  /**
+   * The one outstanding cohort-X loan of e2e buyer3's class A units: set
+   * before the seed leg, cleared after the return leg and its checks.
+   */
+  loan?: { pair: number; hub: string; donor: string; units: string; donorBefore: string; at: string };
 };
 
 export type SimState = {

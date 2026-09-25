@@ -10,16 +10,24 @@ import { randomUUID } from "node:crypto";
 import { getPublicKeyFromAddress, getUtf8Encoder, verifySignature, type Address, type KeyPairSigner } from "@solana/kit";
 import type { SaleDocumentTerms } from "@/lib/document-terms";
 import { OfferStatus, OtcDealStatus } from "@/lib/generated/asset_registry";
-import { isDefaultApprovedJurisdiction } from "@/lib/passport";
+import { isDefaultApprovedJurisdiction, type ReceiverEligibility } from "@/lib/passport";
 import { siwsMessage, type SiwsPayload } from "@/lib/siws-client";
 import { isSessionReadAction } from "@/lib/siws-session";
 import { TOS_VERSION } from "@/lib/tos-version";
-import type { ChainOps, DealView, OfferView } from "@/scripts/sim/lib/chain";
+import { TOKEN_2022 } from "@/lib/transaction-builders";
+import { SimRetryLater, SimTxError, type ChainOps, type DealView, type OfferView, type TokenAccountView } from "@/scripts/sim/lib/chain";
 import { SITE_ORIGIN } from "@/scripts/sim/lib/constants";
-import type { OfferRecord, UserState } from "@/scripts/sim/lib/state";
+import type { JournalSink } from "@/scripts/sim/lib/journal";
+import type { Limiter } from "@/scripts/sim/lib/pacing";
+import type { OfferRecord, UserState, XferSnapshot } from "@/scripts/sim/lib/state";
+import { describeExpect, describeResult, matchProbe, transferLanded, type ProbeExpect, type ProbeOutcome, type ProbeResult, type TransferSpec } from "@/scripts/sim/lib/transfers";
 
 export const ASSET = "8YnEMkoDmMknKqJuxdyeChV9GuafyMudYxdHcMYbFVVn" as Address;
 export const SALES = ["75CuSX8gJqtjNkPjz3jR7P9eFxGP9bR1wJ2ugoRw4Haf", "AvQjGoQDreVZgsA4GJXndViY4qCBEYBBa1cJf9NJLAqg"];
+/** e2e buyer3 in the cohort-X tests (a valid address nobody holds) and the class A mint the world uses. */
+export const DONOR = "6uNWmFjnXJqrHMSPNjmhmHLPgd4GRfJtAjjKUKwVcyB3" as Address;
+export const FAKE_MINT_A = SALES[0] as Address;
+export const FAKE_MINT_B = "EVAiScjWTEhT9fweDht22jR3VK9M6KVpeMdrVu3dkGaK" as Address;
 
 type Requirement = { id: number; doc_kind: string; status: string };
 type Dossier = {
@@ -331,29 +339,125 @@ export class FakeSite {
   }
 }
 
-/** The chain side: records each operation, lands it at once, keeps offers and deals. */
+/** A scripted failure of one cohort-X send (by tx label), consumed once. */
+export type XferFault =
+  /** The signature was saved inflight, then the process died before the send. */
+  | "crash-before-send"
+  /** It landed, but the status was lost: the executor saw "dropped". */
+  | "landed-status-lost"
+  /** The simulation refused it (a SimTxError, as the executor throws). */
+  | "sim-error";
+
+/**
+ * The chain side: records each operation, lands it at once, keeps offers and
+ * deals — and, for cohort X, class A token balances per account (ATAs are
+ * `ata-<owner>`, an offer escrow `escrow-<offer>`), the donor, escrow markers
+ * and scripted probe results. A landed label is never landed twice (as the
+ * executor skips it); an optional limiter paces sends like the real one.
+ */
 export class FakeChainOps implements ChainOps {
   calls: { op: string; user: string; detail?: unknown }[] = [];
   offers = new Map<string, OfferView>();
   deals = new Map<string, DealView>();
   issued = new Set<string>();
   chainTime = BigInt(1_790_000_000);
+  // ── cohort X ──
+  donor: Address | null = DONOR;
+  tokens = new Map<string, { owner: string; amount: bigint; immutableOwner: boolean }>();
+  markers = new Set<string>();
+  supplyUnits = BigInt(1_000);
+  eligible: ReceiverEligibility = { gated: false, ok: true, reason: "" };
+  /** Probe id → the simulated result (default: exactly the expected one). */
+  probeResults = new Map<string, ProbeResult>();
+  faults = new Map<string, XferFault>();
+  /** Labels whose simulation always refuses (until removed). */
+  failAlways = new Set<string>();
+  /** Called when a scripted fault fires (a test moves balances "outside the simulator" here). */
+  onFault?: (label: string, fault: XferFault) => void;
+  /** Account → values the next reads return instead of the real one (installed after a label lands). */
+  staleAfter = new Map<string, { account: string; values: (bigint | null)[] }>();
+  private stale = new Map<string, (bigint | null)[]>();
+  signedSteps = new Set<string>();
+  journal?: JournalSink;
+  limiter?: Limiter;
+  txInFlight = 0;
+  txPeak = 0;
+  txTimes: number[] = [];
+  now_?: () => number;
 
-  constructor(private readonly site: FakeSite) {}
+  constructor(private readonly site: FakeSite) {
+    this.tokens.set(this.ataKey(DONOR), { owner: DONOR, amount: BigInt(5), immutableOwner: true });
+  }
 
   private land(u: UserState, label: string, detail?: unknown): string {
     const sig = `sig-${u.plan.label}-${label}`;
     u.tx[label] = { status: "landed", sig, at: new Date().toISOString() };
     this.calls.push({ op: label, user: u.plan.label, detail });
+    this.signedSteps.add(`${u.plan.label}:${label}`);
+    const stale = this.staleAfter.get(label);
+    if (stale) {
+      this.stale.set(stale.account, [...stale.values]);
+      this.staleAfter.delete(label);
+    }
     return sig;
+  }
+
+  /** One transaction in flight, ≤ 3/min — when the test gives a limiter. */
+  private async paced<T>(send: () => Promise<T> | T): Promise<T> {
+    if (!this.limiter) return send();
+    const unlock = await this.limiter.lockTx();
+    try {
+      await this.limiter.acquire(["tx"], { http: false });
+      this.txInFlight += 1;
+      this.txPeak = Math.max(this.txPeak, this.txInFlight);
+      if (this.now_) this.txTimes.push(this.now_());
+      return await send();
+    } finally {
+      this.txInFlight -= 1;
+      unlock();
+    }
+  }
+
+  /** A refused simulation, journalled as the executor does (tx-error) and thrown as its SimTxError. */
+  private refuse(u: UserState, label: string): never {
+    const err = `${label}: signed simulation failed: asset_registry: PlatformPaused (6001)`;
+    this.journal?.append({ wave: u.plan.wave, user: u.plan.label, cohort: u.plan.cohort, step: label, kind: "tx", ix: label, outcome: "tx-error", err });
+    throw new SimTxError(label, { program: "asset_registry", code: 6001, name: "PlatformPaused" }, [], err);
+  }
+  private takeFault(label: string): XferFault | undefined {
+    if (this.failAlways.has(label)) return "sim-error";
+    const fault = this.faults.get(label);
+    this.faults.delete(label);
+    return fault;
+  }
+
+  ataKey(owner: string): string {
+    return `ata-${owner}`;
+  }
+  balanceOf(owner: string): bigint {
+    return this.tokens.get(this.ataKey(owner))?.amount ?? BigInt(0);
+  }
+  private move(from: string, to: string, amount: bigint, toOwner: string) {
+    const src = this.tokens.get(from);
+    if (!src || src.amount < amount) throw new Error(`fake: ${from} holds too little`);
+    src.amount -= amount;
+    const dst = this.tokens.get(to) ?? { owner: toOwner, amount: BigInt(0), immutableOwner: true };
+    dst.amount += amount;
+    this.tokens.set(to, dst);
   }
 
   async now(): Promise<bigint> {
     return this.chainTime;
   }
   async buy(u: UserState, _signer: KeyPairSigner, sale: Address, amount: bigint, terms: SaleDocumentTerms): Promise<string | null> {
-    const sig = this.land(u, "buy", { sale, amount, terms: terms.versionId });
+    if (u.tx.buy?.status === "landed") return u.tx.buy.sig;
+    const sig = await this.paced(() => this.land(u, "buy", { sale, amount, terms: terms.versionId }));
     this.site.purchases.set(sig, { buyer: u.wallet, sale, amount: Number(amount) });
+    // The units arrive in the buyer's ATA (cohort X's own-buy route reads them).
+    const ata = this.tokens.get(this.ataKey(u.wallet)) ?? { owner: u.wallet, amount: BigInt(0), immutableOwner: true };
+    ata.amount += amount;
+    this.tokens.set(this.ataKey(u.wallet), ata);
+    this.supplyUnits += amount;
     return sig;
   }
   async offerPda(offerId: bigint): Promise<Address> {
@@ -363,16 +467,30 @@ export class FakeChainOps implements ChainOps {
     return this.offers.get(pda) ?? null;
   }
   async createOffer(u: UserState, _s: KeyPairSigner, key: string, offer: OfferRecord): Promise<void> {
-    this.land(u, `${key}.create`);
-    this.offers.set(offer.pda, { status: OfferStatus.Open, deposited: BigInt(0), expiresAt: BigInt(offer.expiresAt), maker: u.wallet });
+    if (u.tx[`${key}.create`]?.status === "landed") return;
+    if (this.takeFault(`${key}.create`) === "sim-error") this.refuse(u, `${key}.create`);
+    await this.paced(() => this.land(u, `${key}.create`));
+    this.offers.set(offer.pda, { status: OfferStatus.Open, deposited: BigInt(0), expiresAt: BigInt(offer.expiresAt), maker: u.wallet, escrow: `escrow-${offer.pda}` });
+    this.tokens.set(`escrow-${offer.pda}`, { owner: offer.pda, amount: BigInt(0), immutableOwner: true });
+    this.markers.add(offer.pda);
   }
   async depositOffer(u: UserState, _s: KeyPairSigner, key: string, offer: OfferRecord): Promise<void> {
-    this.land(u, `${key}.deposit`);
+    if (u.tx[`${key}.deposit`]?.status === "landed") return;
+    await this.paced(() => this.land(u, `${key}.deposit`));
     this.offers.get(offer.pda)!.deposited = BigInt(offer.amount);
+    const maker = this.tokens.get(this.ataKey(u.wallet));
+    if (maker) this.move(this.ataKey(u.wallet), `escrow-${offer.pda}`, BigInt(offer.amount), offer.pda);
   }
   async cancelOffer(u: UserState, _s: KeyPairSigner, key: string, offer: OfferRecord): Promise<void> {
-    this.land(u, `${key}.cancel`);
-    this.offers.get(offer.pda)!.status = OfferStatus.Cancelled;
+    if (u.tx[`${key}.cancel`]?.status === "landed") return;
+    await this.paced(() => this.land(u, `${key}.cancel`));
+    const view = this.offers.get(offer.pda)!;
+    view.status = OfferStatus.Cancelled;
+    // As cancel_offer: the whole escrow back to the maker, the ledger to 0, the marker closed (the Offer stays).
+    const escrow = this.tokens.get(`escrow-${offer.pda}`);
+    if (escrow && escrow.amount > BigInt(0)) this.move(`escrow-${offer.pda}`, this.ataKey(u.wallet), escrow.amount, u.wallet);
+    view.deposited = BigInt(0);
+    this.markers.delete(offer.pda);
   }
   async takeOffer(u: UserState, _s: KeyPairSigner, key: string, pda: Address): Promise<void> {
     this.land(u, `${key}.take`);
@@ -409,5 +527,90 @@ export class FakeChainOps implements ChainOps {
   async passports(wallets: string[]): Promise<Map<string, boolean>> {
     this.calls.push({ op: "passports", user: "-", detail: wallets.length });
     return new Map(wallets.map((w) => [w, this.issued.has(w)]));
+  }
+
+  // ── Cohort X ───────────────────────────────────────────────────────────────
+
+  async ata(owner: Address): Promise<Address> {
+    return this.ataKey(owner) as Address;
+  }
+  async balances(accounts: Address[]): Promise<(bigint | null)[]> {
+    return accounts.map((a) => {
+      const forced = this.stale.get(a);
+      if (forced?.length) return forced.shift()!;
+      return this.tokens.get(a)?.amount ?? null;
+    });
+  }
+  async supply(): Promise<{ supply: bigint; circulating: bigint }> {
+    return { supply: this.supplyUnits, circulating: this.supplyUnits };
+  }
+  async tokenAccount(address: Address): Promise<TokenAccountView | null> {
+    const t = this.tokens.get(address);
+    return t ? { program: TOKEN_2022, mint: FAKE_MINT_A, owner: t.owner, amount: t.amount, immutableOwner: t.immutableOwner } : null;
+  }
+  async escrowMarker(owner: Address): Promise<boolean> {
+    return this.markers.has(owner);
+  }
+  async eligibility(): Promise<ReceiverEligibility> {
+    return this.eligible;
+  }
+  private async send(u: UserState, label: string, snap: XferSnapshot): Promise<void> {
+    if (u.tx[label]?.status === "landed") return;
+    if (u.tx[label]?.status === "inflight") delete u.tx[label]; // resolved on resume as dropped: never sent
+    const fault = this.takeFault(label);
+    // The executor's done(): the snapshot's post-state lands without a send.
+    const balances = await this.balances([snap.srcAta as Address, snap.dstAta as Address]);
+    if (transferLanded(label, snap, balances)) {
+      u.tx[label] = { status: "landed", sig: null, at: new Date().toISOString() };
+      return;
+    }
+    if (fault === "crash-before-send") {
+      u.tx[label] = { status: "inflight", sig: `sig-${u.plan.label}-${label}`, lvbh: "0", at: new Date().toISOString() };
+      this.signedSteps.add(`${u.plan.label}:${label}`);
+      this.onFault?.(label, fault);
+      throw new SimRetryLater(`${label}: an earlier signature is still unresolved`);
+    }
+    if (fault === "sim-error") this.refuse(u, label);
+    await this.paced(() => {
+      this.move(snap.srcAta, snap.dstAta, BigInt(snap.amount), snap.dstOwner);
+      this.land(u, label, { from: snap.srcOwner, to: snap.dstOwner, amount: snap.amount });
+    });
+    if (fault === "landed-status-lost") {
+      delete u.tx[label];
+      throw new SimRetryLater(`${label} expired without landing`);
+    }
+  }
+  /** The signers do not matter to the fake: the snapshot names the accounts. */
+  transfer(u: UserState, label: string, snap: XferSnapshot): Promise<void> {
+    return this.send(u, label, snap);
+  }
+  seedFromDonor(u: UserState, label: string, snap: XferSnapshot): Promise<void> {
+    if (!this.donor || snap.srcOwner !== this.donor) throw new SimRetryLater(`${label}: the donor signer is not loaded (SIM_DONOR_KEYPAIR)`);
+    return this.send(u, label, snap);
+  }
+  async probe(u: UserState, id: string, spec: TransferSpec, expect: ProbeExpect): Promise<ProbeOutcome> {
+    this.calls.push({ op: `probe ${id}`, user: u.plan.label, detail: spec });
+    const expected: ProbeResult = expect.ok
+      ? { ok: true, failure: null, hookInvoked: expect.hookInvoked ?? true }
+      : { ok: false, failure: { program: expect.program, code: expect.code, name: expect.names[0] }, hookInvoked: false };
+    const result = this.probeResults.get(id) ?? expected;
+    const outcome = matchProbe(expect, result);
+    const finding = outcome === "tx-error" || outcome === "unexpected-accept";
+    this.journal?.append({
+      wave: u.plan.wave,
+      user: u.plan.label,
+      cohort: u.plan.cohort,
+      step: `xfer.${id}`,
+      kind: "probe",
+      ix: `probe ${id}`,
+      expected: describeExpect(expect),
+      outcome,
+      body: finding ? undefined : describeResult(result),
+      err: finding ? `expected ${describeExpect(expect)}, simulated ${describeResult(result)}` : undefined,
+    });
+    return outcome;
+  }
+  everSigned(u: UserState, label: string): boolean {
+    return Boolean(u.tx[label]) || this.signedSteps.has(`${u.plan.label}:${label}`);
   }
 }

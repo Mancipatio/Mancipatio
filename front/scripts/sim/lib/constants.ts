@@ -34,8 +34,23 @@ export const ONE_DAY = BigInt(86_400);
 
 /** SOL each cohort receives from the deployer (lamports). */
 export const LAMPORTS_PER_SOL = BigInt(1_000_000_000);
-export const SOL_BUYER = BigInt(30_000_000); // 0.03 SOL: I and T
+export const SOL_BUYER = BigInt(30_000_000); // 0.03 SOL: I, T and X
 export const SOL_ISSUER = BigInt(20_000_000); // 0.02 SOL: B companies (register_issuer)
+
+/**
+ * Cohort X (design-transfers.md): class A units a pair moves. The hub gets
+ * XFER_UNITS (a loan from e2e buyer3, or its own buy), sends XFER_PEER_UNITS
+ * to its peer, and pair 1 puts XFER_OFFER_UNITS of the P2P units in an offer.
+ */
+export const XFER_UNITS = BigInt(3);
+export const XFER_PEER_UNITS = BigInt(2);
+export const XFER_OFFER_UNITS = BigInt(1);
+/**
+ * The devnet platform KYC registry (authority: the owner's wallet). Only the
+ * B4 probe names it, as the registry of a KycGated-shaped tail on an Open
+ * mint; any registry address gives the same result there.
+ */
+export const DEVNET_PLATFORM_KYC_REGISTRY = "5MofiJNCoCRkNg1f2Yd7368WkjiNxkZZmUTaQo7xLhku" as Address;
 /** System transfers per funding transaction (fits one packet with margin). */
 export const FUND_BATCH = 16;
 /** Payment-token owners per mint transaction (ATA create + mint each). */
@@ -49,6 +64,8 @@ export const PACE = {
   verificationPerMin: 5,
   readsPerMin: 15,
   txPerMin: 3,
+  /** Transfer probes: simulated only (never sent), still paced. */
+  probesPerMin: 6,
   chainRps: 1,
   watchIntervalMs: 120_000,
 } as const;

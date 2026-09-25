@@ -25,8 +25,12 @@ export type MarketView = {
   classA: Address;
   mintA: Address;
   paymentMint: Address;
-  /** False while /api/launchpad/terms answers 409 (no published whitepaper). */
+  /** False while /api/launchpad/terms answers 409 (no published whitepaper). Read once per command. */
   termsOk: boolean;
+  /** Class B's mint (cohort X probe P7); null when the e2e state has none. */
+  mintB?: Address | null;
+  /** The passport registry the simulator reads, if any (cohort X probe B4 names it). */
+  kycRegistry?: Address | null;
 };
 
 export type SimCtx = {
@@ -42,6 +46,11 @@ export type SimCtx = {
   log: (line: string) => void;
   /** Passport lookup for a waiting investor (batched chain read, cached per watch cycle). */
   passport: (wallet: string) => Promise<boolean | null>;
+  /**
+   * Takes (once) the chain CLI's devnet lock before a cohort-X loan starts;
+   * false while another chain tool holds it. Absent: no lock to take (tests).
+   */
+  chainLock?: () => boolean;
 };
 
 export const RETRY_MS = 60_000;
@@ -119,6 +128,7 @@ export function note(ctx: SimCtx, u: UserState, step: string, detail: string): v
 export function entryStage(u: UserState): string {
   const v = u.plan.variant;
   if (u.plan.cohort === "E") return "edge";
+  if (u.plan.cohort === "X") return "xfer.gate";
   if (v === "buyer-nokyc" || u.plan.cohort === "T") return "buy.terms";
   return "dossier.submit";
 }
@@ -171,9 +181,16 @@ type WalletPolicy = { wallet?: string; network?: string; account_id?: string; pr
 
 /**
  * The pre-send policy read the UI runs before every on-chain send
- * (lib/transaction-wallet-policy.ts). False when the site refuses the send.
+ * (lib/transaction-wallet-policy.ts). False when the site refuses the send;
+ * `fail` then decides what happens to the user (default: the backoff retry;
+ * cohort X keeps lent units returnable).
  */
-export async function walletPolicy(ctx: SimCtx, u: UserState, step: string): Promise<boolean> {
+export async function walletPolicy(
+  ctx: SimCtx,
+  u: UserState,
+  step: string,
+  fail: (ctx: SimCtx, u: UserState, reason: string) => void = retry,
+): Promise<boolean> {
   const r = await ctx.http.read<WalletPolicy>(actor(ctx, u), {
     step: `${step}.policy`,
     route: "/api/account/wallets/transaction",
@@ -181,11 +198,11 @@ export async function walletPolicy(ctx: SimCtx, u: UserState, step: string): Pro
     params: {},
   });
   if (r.outcome !== "ok") {
-    retry(ctx, u, `account.wallets.transaction ${r.status}`);
+    fail(ctx, u, `account.wallets.transaction ${r.status}`);
     return false;
   }
   const ok = r.data?.wallet === u.wallet && r.data?.primary_wallet === u.wallet && r.data?.network === "devnet";
   check(ctx, u, `${step}.policy`, ok, "wallet policy does not name this wallet as the primary devnet wallet");
-  if (!ok) retry(ctx, u, "the wallet policy refused this wallet");
+  if (!ok) fail(ctx, u, "the wallet policy refused this wallet");
   return ok;
 }

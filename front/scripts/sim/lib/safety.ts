@@ -1,7 +1,8 @@
 /**
  * Safety layer of the simulator (design-sim §7): the environment contract,
  * the devnet-only gates, the two-origin fetch guard, private files, the
- * STOP / PAUSE switches and the redaction every journal line goes through.
+ * STOP / PAUSE switches, the chain CLI's devnet lock during a cohort-X loan
+ * and the redaction every journal line goes through.
  *
  * Error messages are public: they never carry the RPC URL, a local path or
  * key material.
@@ -11,6 +12,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { isAddress } from "@solana/kit";
+import { acquireLock, lockPath, readLock, type HeldLock } from "@/scripts/chain/lib/journal";
 import {
   ChainGateError,
   parseRpcUrl,
@@ -23,7 +25,8 @@ export const SIM_CMDS = ["plan", "pilot", "wave", "watch", "report"] as const;
 export type SimCmd = (typeof SIM_CMDS)[number];
 /** Commands that talk to the site and the chain. */
 export const NETWORK_CMDS: readonly SimCmd[] = ["pilot", "wave", "watch"];
-export const WAVES = [1, 2, 3, 4, 5] as const;
+/** Waves 1–5 hold the first 100 users; wave 6 the transfer pairs (cohort X). */
+export const WAVES = [1, 2, 3, 4, 5, 6] as const;
 
 export class SimGateError extends ChainGateError {
   constructor(message: string) {
@@ -53,6 +56,10 @@ export type SimConfig = {
   send: boolean;
   deployerKeypair: string;
   adminKeypair: string;
+  /** e2e buyer3's key (SIM_DONOR_KEYPAIR): signs only a cohort-X loan's seed leg; null = no loan. */
+  donorKeypair: string | null;
+  /** The chain CLI's lock directory (CHAIN_STATE_DIR, default ~/.mancipatio/chain). */
+  chainStateDir: string;
   e2eStatePath: string;
   kycRegistry: string | null;
   workers: number;
@@ -91,7 +98,7 @@ export function readSimConfig(
   let wave: number | null = null;
   if (cmd === "wave") {
     wave = intIn(env, "SIM_WAVE", 0, 1, WAVES.length);
-    if (wave === 0) throw new SimGateError("SIM_WAVE (1-5) is required for SIM_CMD=wave");
+    if (wave === 0) throw new SimGateError(`SIM_WAVE (1-${WAVES.length}) is required for SIM_CMD=wave`);
   } else if (value(env, "SIM_WAVE") !== null) {
     throw new SimGateError("SIM_WAVE is only read by SIM_CMD=wave");
   }
@@ -143,6 +150,7 @@ export function readSimConfig(
   const kycRegistry = value(env, "SIM_KYC_REGISTRY");
   if (kycRegistry !== null && !isAddress(kycRegistry)) throw new SimGateError("SIM_KYC_REGISTRY is not an address");
   const watchOnce = value(env, "SIM_WATCH_ONCE") === "1";
+  const donor = value(env, "SIM_DONOR_KEYPAIR");
   return {
     cmd,
     wave,
@@ -155,6 +163,9 @@ export function readSimConfig(
     send,
     deployerKeypair: path.resolve(value(env, "SIM_DEPLOYER_KEYPAIR") ?? path.join(home, ".config", "solana", "id-devnet.json")),
     adminKeypair: path.resolve(value(env, "SIM_ADMIN_KEYPAIR") ?? path.join(home, ".config", "solana", "manci-e2e-admin.json")),
+    donorKeypair: donor === null ? null : path.resolve(donor),
+    // The same default as the chain CLI (scripts/chain/lib/safety.ts): one lock per network.
+    chainStateDir: path.resolve(value(env, "CHAIN_STATE_DIR") ?? path.join(home, ".mancipatio", "chain")),
     e2eStatePath: path.resolve(
       value(env, "SIM_E2E_STATE") ?? path.join(options.root, "docs", "mainnet-readiness", "e2e-6.3", "devnet", "state.json"),
     ),
@@ -273,6 +284,42 @@ export function acquireSimLock(simRoot: string): () => void {
       // already gone
     }
   };
+}
+
+// ── The chain CLI's devnet lock ─────────────────────────────────────────────
+
+/** The tool name the simulator writes into the chain CLI's lock file. */
+export const SIM_CHAIN_TOOL = "manci-sim";
+
+/**
+ * Takes the chain CLI's per-network lock (`<CHAIN_STATE_DIR>/devnet-<genesis8>.lock`,
+ * scripts/chain/lib/journal.ts) for a cohort-X loan of e2e buyer3's units
+ * (design-transfers §A(iii)): while the simulator holds it a `chain:e2e`
+ * devnet run is refused, and while chain:e2e holds it no loan starts.
+ *
+ * - The lock names the simulator's tx-journal, so CHAIN_RECOVER=1 can resolve
+ *   a lock a crashed simulator left behind.
+ * - A lock this tool left (same journal, its pid gone) is taken over; any
+ *   other lock is refused. No error names a path.
+ * - It does not protect a loan between two commands: report.md and
+ *   owner-queue.txt show an outstanding loan instead.
+ */
+export function acquireChainLock(input: { stateDir: string; genesis: string; journalPath: string }): HeldLock {
+  const args = { stateDir: input.stateDir, network: SIM_NETWORK, genesis: input.genesis, tool: SIM_CHAIN_TOOL, journalPath: input.journalPath };
+  try {
+    return acquireLock(args);
+  } catch (error) {
+    if (!(error instanceof ChainGateError)) throw error;
+    const file = lockPath(input.stateDir, SIM_NETWORK, input.genesis);
+    const held = readLock(file);
+    const ours = held !== null && held.tool === SIM_CHAIN_TOOL && held.journalPath === input.journalPath;
+    if (!held || !ours || pidAlive(held.pid)) {
+      const who = held ? `${held.tool}${pidAlive(held.pid) ? `, pid ${held.pid}` : ", no live process"}` : "unreadable";
+      throw new SimGateError(`The chain CLI's devnet lock is held (${who}); no cohort-X loan while another chain run may send`);
+    }
+    fs.rmSync(file, { force: true });
+    return acquireLock(args);
+  }
 }
 
 // ── STOP / PAUSE ─────────────────────────────────────────────────────────────

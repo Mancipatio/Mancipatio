@@ -13,13 +13,20 @@
  * every 2 min while the others continue. pilot/wave return once every user
  * of the wave is finished or waiting for the owner; watch keeps polling
  * until every started user finished (or SIM_WATCH_MAX_MIN, STOP, SIGINT).
+ *
+ * Wave 6 (cohort X, direct transfers): e2e buyer3's key is loaded only with
+ * SIM_DONOR_KEYPAIR and only for a scope with X users; the chain CLI's devnet
+ * lock is held while a loan is out (taken at start when one is outstanding,
+ * else just before the loan) and released on exit only when no signature is
+ * unresolved. One simulator process at a time (sim.lock): wave 6 runs when no
+ * other simulator command does; `watch` then continues it with the others.
  */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { KeyPairSigner } from "@solana/kit";
 import { networkLabel } from "@/lib/network";
-import { Journal } from "@/scripts/chain/lib/journal";
+import { Journal, releaseLock as releaseHeldLock, type HeldLock } from "@/scripts/chain/lib/journal";
 import { ChainAbortError, loadHotSigner, repoRoot, type ChainEnv } from "@/scripts/chain/lib/safety";
 import { SimChainOps, SimRetryLater, TxExecutor, createSimRpc, type ChainOps, type OwnerMeta } from "./chain";
 import { CLI_ADMIN, DEPLOYER, PACE, SIM_NETWORK, SITE_ORIGIN } from "./constants";
@@ -35,6 +42,7 @@ import {
   SimGateError,
   SimStopError,
   StopControl,
+  acquireChainLock,
   acquireSimLock,
   assertIgnoredDir,
   ensurePrivateDir,
@@ -240,6 +248,14 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
   let journal: SimJournal | null = null;
   let txJournal: Journal | null = null;
   let state: SimState | null = null;
+  let exec: TxExecutor | null = null;
+  let chainLock: HeldLock | null = null;
+  // The chain CLI's rule: the lock goes only when every signature is resolved (else the next run or CHAIN_RECOVER=1).
+  const releaseChainLock = () => {
+    if (!chainLock) return;
+    if (exec && state && exec.settled(state)) releaseHeldLock(chainLock);
+    else log("chain lock kept: a signature is still unresolved; the next simulator command (or CHAIN_RECOVER=1) resolves it");
+  };
   const persist = () => state && saveState(runDir, state);
   try {
     await assertDevnetSite(globalThis.fetch);
@@ -253,7 +269,7 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
     state = loadState(runDir) ?? newState(runId, cfg.expectedGenesis);
     if (state.genesis !== cfg.expectedGenesis) throw new SimGateError("state.json belongs to another cluster");
     persist();
-    const exec = new TxExecutor({ rpc, drainRpc, txJournal, journal, limiter, persist, signal: controller.signal, timing: { pollMs: 3_000 } });
+    exec = new TxExecutor({ rpc, drainRpc, txJournal, journal, limiter, persist, signal: controller.signal, timing: { pollMs: 3_000 } });
     const metaOf = (owner: TxOwner): OwnerMeta =>
       "plan" in owner ? { cohort: (owner as UserState).plan.cohort, wave: (owner as UserState).plan.wave } : { cohort: "setup", wave: null };
     const resolved = await exec.resolveAll(state, metaOf);
@@ -276,6 +292,22 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
     persist();
     const users = scope.map((p) => state!.users[p.label]);
 
+    // Cohort X: the donor's key (never logged, its path never printed) and the chain CLI lock.
+    const transfers = scope.some((p) => p.cohort === "X");
+    let donor: KeyPairSigner | null = null;
+    if (transfers && cfg.donorKeypair) {
+      if (!market.donor) throw new SimGateError("SIM_DONOR_KEYPAIR is set but the e2e state names no buyer3");
+      donor = await loadHotSigner(cfg.donorKeypair, market.donor, "donor");
+    }
+    const loan = state.market.loan;
+    if (transfers && loan && !donor && state.users[loan.hub]?.tx["xfer.s1"]?.status !== "landed") {
+      throw new SimGateError(`SIM_DONOR_KEYPAIR is required: ${loan.hub} holds a loan whose seed leg has not landed`);
+    }
+    const journalPath = txJournal.path;
+    const takeChainLock = () => (chainLock ??= acquireChainLock({ stateDir: cfg.chainStateDir, genesis: cfg.expectedGenesis, journalPath }));
+    // An outstanding loan: refuse to start while chain:e2e holds the lock.
+    if (transfers && loan) takeChainLock();
+
     const setupDeps = { state, exec, rpc, http, journal, persist, log };
     if (cfg.cmd === "pilot" || cfg.cmd === "wave") {
       const admin = await loadHotSigner(cfg.adminKeypair, CLI_ADMIN, "CLI Admin");
@@ -295,8 +327,10 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
       mintA: market.mintA,
       paymentMint: market.paymentMint,
       termsOk: state.market.termsOk,
+      mintB: market.mintB,
+      kycRegistry: market.kycRegistry,
     };
-    const ops: ChainOps = new SimChainOps(exec, market);
+    const ops: ChainOps = new SimChainOps(exec, market, donor);
     const passportCache = { at: 0, map: new Map<string, boolean>() };
     const ctx: SimCtx = {
       runId,
@@ -322,6 +356,16 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
           passportCache.at = clock.now();
         }
         return passportCache.map.get(wallet) ?? false;
+      },
+      chainLock: () => {
+        try {
+          takeChainLock();
+          return true;
+        } catch (error) {
+          if (!(error instanceof SimGateError)) throw error;
+          log(error.message);
+          return false;
+        }
       },
     };
     const writeQueue = () => writePrivateFile(path.join(runDir, "owner-queue.txt"), renderOwnerQueue(state!));
@@ -353,6 +397,7 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
     throw error;
   } finally {
     persist();
+    releaseChainLock();
     journal?.close();
     txJournal?.close();
     restoreFetch();

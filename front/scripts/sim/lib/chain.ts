@@ -11,10 +11,13 @@
  *   transaction in flight, at most 3 per minute.
  * - Resume: every signature still "inflight" is resolved first (batched
  *   getSignatureStatuses); unseen counts as dropped only after the finalized
- *   block height passed its lastValidBlockHeight.
+ *   block height passed its lastValidBlockHeight. Each resolution is also a
+ *   terminal tx-journal event, so the journal (and the chain CLI's lock rule:
+ *   released only when nothing is unresolved) agrees with state.json.
+ * - Probes (cohort X): signed and simulated, never sent (TxExecutor.probe).
  * - Builders: the app's own (buildDocumentedPurchase, buildTakeOfferInstructions,
- *   buildDepositOtcAssetInstructions, hookTransferMetas) and the generated
- *   instruction builders the pages use.
+ *   buildDepositOtcAssetInstructions, hookTransferMetas), the generated
+ *   instruction builders the pages use, and transfers.ts for direct transfers.
  */
 import {
   SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
@@ -33,6 +36,7 @@ import {
 import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
+  getTokenDecoder,
 } from "@solana-program/token-2022";
 import type { SaleDocumentTerms } from "@/lib/document-terms";
 import {
@@ -43,6 +47,8 @@ import {
   fetchOffer,
   fetchOtcDeal,
   fetchSale,
+  fetchShareClass,
+  findEscrowMarkerPda,
   findIssuerPda,
   findPlatformPda,
   getCancelOfferInstructionAsync,
@@ -55,7 +61,7 @@ import {
 import { toBytes32 } from "@/lib/format";
 import { hookTransferMetas } from "@/lib/hook-metas";
 import { buildDepositOtcAssetInstructions, buildTakeOfferInstructions } from "@/lib/otc-transactions";
-import { getEntryPda } from "@/lib/passport";
+import { checkReceiverEligibility, getEntryPda, type ReceiverEligibility } from "@/lib/passport";
 import { findOfferPda } from "@/lib/pdas";
 import { buildDocumentedPurchase } from "@/lib/purchase-builder";
 import { TOKEN_2022, fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
@@ -76,7 +82,19 @@ import {
 } from "@/scripts/chain/lib/tx";
 import type { JournalSink } from "./journal";
 import type { Limiter } from "./pacing";
-import type { OfferRecord, SimState, TxOwner, TxRecord, UserState } from "./state";
+import type { OfferRecord, SimState, TxOwner, TxRecord, UserState, XferSnapshot } from "./state";
+import {
+  buildDirectTransfer,
+  describeExpect,
+  describeResult,
+  matchProbe,
+  probeResult,
+  simulationInfraFailure,
+  transferLanded,
+  type ProbeExpect,
+  type ProbeOutcome,
+  type TransferSpec,
+} from "./transfers";
 
 // ── RPC ─────────────────────────────────────────────────────────────────────
 
@@ -183,6 +201,11 @@ export class TxExecutor {
     this.d.persist();
   }
 
+  /** A resolution is also a terminal tx-journal event (the chain CLI's `recover`). */
+  private journalResolved(owner: TxOwner, label: string, sig: string | null, status: "finalized" | "failed" | "dropped"): void {
+    if (sig) this.d.txJournal.append({ event: "recover", step: `${owner.label}:${label}`, sig, status });
+  }
+
   /** Classifies one looked-up status for an inflight record (null = not seen). */
   private decide(owner: TxOwner, meta: OwnerMeta, label: string, record: TxRecord, status: StatusValue, height: bigint | null): "landed" | "failed" | "dropped" | "pending" {
     const at = new Date().toISOString();
@@ -190,11 +213,13 @@ export class TxExecutor {
       if (status.err) {
         const err = toJson(status.err, 0);
         this.settle(owner, label, { ...record, status: "failed", err, at });
+        this.journalResolved(owner, label, record.sig, "failed");
         this.note(owner, meta, label, { outcome: "tx-error", sig: record.sig, err: `landed with an error (resolved on resume): ${err}` });
         return "failed";
       }
       if (status.confirmationStatus === "finalized") {
         this.settle(owner, label, { ...record, status: "landed", at });
+        this.journalResolved(owner, label, record.sig, "finalized");
         return "landed";
       }
       return "pending";
@@ -202,10 +227,40 @@ export class TxExecutor {
     if (height !== null && record.lvbh && height > BigInt(record.lvbh)) {
       delete owner.tx[label];
       this.d.persist();
+      this.journalResolved(owner, label, record.sig, "dropped");
       this.note(owner, meta, label, { outcome: "info", sig: record.sig, err: "expired without landing; the step is rebuilt" });
       return "dropped";
     }
     return "pending";
+  }
+
+  /**
+   * Terminal tx-journal events for signatures state.json already settled
+   * without one (a resume by an earlier build), so an unresolved journal
+   * signature always means an unresolved transaction.
+   */
+  private reconcileJournal(byLabel: Map<string, TxOwner>): void {
+    for (const inflight of unresolvedSignatures(readJournal(this.d.txJournal.path))) {
+      const [ownerLabel, ...rest] = inflight.step.split(":");
+      const record = byLabel.get(ownerLabel)?.tx[rest.join(":")];
+      if (!record || record.sig !== inflight.sig || record.status === "inflight") continue;
+      this.d.txJournal.append({ event: "recover", step: inflight.step, sig: inflight.sig, status: record.status === "landed" ? "finalized" : "failed" });
+    }
+  }
+
+  /** True when neither state.json nor the tx journal holds an unresolved signature (the chain lock may go). */
+  settled(state: SimState): boolean {
+    const owners: TxOwner[] = [state.market, state.funding, ...Object.values(state.users)];
+    this.reconcileJournal(new Map(owners.map((o) => [o.label, o])));
+    const inflight = owners.some((o) => Object.values(o.tx).some((r) => r.status === "inflight"));
+    return !inflight && unresolvedSignatures(readJournal(this.d.txJournal.path)).length === 0;
+  }
+
+  /** True when a signature for this step was ever created (a state record or a signed tx-journal line). */
+  everSigned(owner: TxOwner, label: string): boolean {
+    if (owner.tx[label]) return true;
+    const step = `${owner.label}:${label}`;
+    return readJournal(this.d.txJournal.path).some((e) => e.event === "signed" && e.step === step);
   }
 
   /**
@@ -215,6 +270,7 @@ export class TxExecutor {
   async resolveAll(state: SimState, metaOf: (owner: TxOwner) => OwnerMeta): Promise<{ pending: number }> {
     const owners: TxOwner[] = [state.market, state.funding, ...Object.values(state.users)];
     const byLabel = new Map(owners.map((o) => [o.label, o]));
+    this.reconcileJournal(byLabel);
     // A signature the tx journal saw signed but state.json lost (crash between the two writes).
     for (const inflight of unresolvedSignatures(readJournal(this.d.txJournal.path))) {
       const [ownerLabel, ...rest] = inflight.step.split(":");
@@ -349,6 +405,50 @@ export class TxExecutor {
       unlock();
     }
   }
+
+  /**
+   * A transfer probe (design-transfers §D.3): built, signed at MAX CU and
+   * simulated with sigVerify — NEVER sent. It takes no tx lock, no tx window,
+   * no state record and no tx-journal line; only the RPC bucket and its own
+   * pace class (≤ 6/min). The verdict is one journal line (kind "probe"); a
+   * simulation that says nothing about the transfer is retried later. A
+   * mismatch is returned, never thrown: it is deterministic and not retried.
+   */
+  async probe(
+    owner: TxOwner,
+    meta: OwnerMeta,
+    id: string,
+    payer: TransactionSigner,
+    build: () => Promise<Instruction[]>,
+    expect: ProbeExpect,
+  ): Promise<ProbeOutcome> {
+    await this.d.limiter.acquire(["probe"], { http: false });
+    const ixs = await build();
+    const blockhash = (await this.d.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
+    const signed = await signTransactionMessageWithSigners(
+      buildMessage({ feePayer: payer, ixs, blockhash, cuLimit: MAX_COMPUTE_UNITS, cuPrice: this.d.cuPrice ?? null }),
+    );
+    const simulation = await simulateSigned(this.d.rpc, getBase64EncodedWireTransaction(signed));
+    const infra = simulationInfraFailure(simulation);
+    if (infra) throw new SimRetryLater(`probe ${id}: the simulation answered ${infra}`);
+    const result = probeResult(simulation);
+    const outcome = matchProbe(expect, result);
+    const finding = outcome === "tx-error" || outcome === "unexpected-accept";
+    this.d.journal.append({
+      wave: meta.wave,
+      user: owner.label,
+      cohort: meta.cohort,
+      step: `xfer.${id}`,
+      kind: "probe",
+      ix: `probe ${id}`,
+      expected: describeExpect(expect),
+      outcome,
+      body: finding ? undefined : describeResult(result),
+      err: finding ? `expected ${describeExpect(expect)}, simulated ${describeResult(result)}` : undefined,
+      logMessages: simulation.logs.slice(-8),
+    });
+    return outcome;
+  }
 }
 
 // ── Market operations used by the cohorts ───────────────────────────────────
@@ -361,9 +461,18 @@ export type MarketAddrs = {
   paymentMint: Address;
   /** The KYC registry whose KycEntry proves a passport (null: HTTP checks only). */
   kycRegistry: Address | null;
+  /** Class B of the e2e asset (cohort X's P7 names its mint); null when the e2e state has none. */
+  classB: Address | null;
+  mintB: Address | null;
+  /** e2e buyer3 (`roles.buyer3`): the donor of cohort X's loan. */
+  donor: Address | null;
 };
 
-export type OfferView = { status: OfferStatus; deposited: bigint; expiresAt: bigint; maker: string };
+export type OfferView = { status: OfferStatus; deposited: bigint; expiresAt: bigint; maker: string; escrow: string };
+/** A decoded class token account (C1b). */
+export type TokenAccountView = { program: string; mint: string; owner: string; amount: bigint; immutableOwner: boolean };
+/** Who signs a cohort-X send; its accounts and amount come from the persisted snapshot. */
+export type XferSend = { authority: KeyPairSigner; payer: KeyPairSigner; createDst?: boolean };
 export type DealView = { status: OtcDealStatus; assetDeposited: boolean; paymentDeposited: boolean; seller: string; buyer: string };
 
 /** What a cohort may do on chain. Faked in the offline tests. */
@@ -383,15 +492,43 @@ export interface ChainOps {
   deal(pda: Address): Promise<DealView | null>;
   /** wallet → KycEntry exists (one getMultipleAccounts per 100 wallets); empty without a registry. */
   passports(wallets: string[]): Promise<Map<string, boolean>>;
+
+  // ── Cohort X: direct transfers of class A (design-transfers §D.3) ──
+  /** e2e buyer3 when its signer is loaded (SIM_DONOR_KEYPAIR); null: no loan. */
+  readonly donor: Address | null;
+  /** The owner's class A ATA. */
+  ata(owner: Address): Promise<Address>;
+  /** Raw amounts at finalized in one getMultipleAccounts (null: no such account). */
+  balances(accounts: Address[]): Promise<(bigint | null)[]>;
+  /** Class A mint supply and ShareClass.circulating_supply (two separate reads). */
+  supply(): Promise<{ supply: bigint; circulating: bigint }>;
+  tokenAccount(address: Address): Promise<TokenAccountView | null>;
+  /** Whether an EscrowMarker exists for `owner` (an offer's marker closes on cancel). */
+  escrowMarker(owner: Address): Promise<boolean>;
+  /** The site's own receiver pre-check (lib/passport.ts checkReceiverEligibility). */
+  eligibility(mint: Address, wallet: Address): Promise<ReceiverEligibility>;
+  /** A holder's transfer_checked of class A; `snap` (persisted first) decides a resume (transferLanded). */
+  transfer(u: UserState, label: string, snap: XferSnapshot, send: XferSend): Promise<void>;
+  /** The loan's seed leg donor → hub, paid by the hub; the donor signer never leaves the chain layer. */
+  seedFromDonor(u: UserState, label: string, snap: XferSnapshot, payer: KeyPairSigner): Promise<void>;
+  /** Signed and simulated, never sent. */
+  probe(u: UserState, id: string, spec: TransferSpec, expect: ProbeExpect): Promise<ProbeOutcome>;
+  /** True when a signature for this step was ever created: its snapshot must then never be re-taken. */
+  everSigned(u: UserState, label: string): boolean;
 }
 
 const FIN = { commitment: "finalized" as const };
 
 export class SimChainOps implements ChainOps {
+  readonly donor: Address | null;
+
   constructor(
     private readonly exec: TxExecutor,
     private readonly m: MarketAddrs,
-  ) {}
+    private readonly donorSigner: KeyPairSigner | null = null,
+  ) {
+    this.donor = donorSigner?.address ?? null;
+  }
 
   private get rpc(): ChainRpc {
     return this.exec.rpc;
@@ -423,7 +560,8 @@ export class SimChainOps implements ChainOps {
   async offer(pda: Address): Promise<OfferView | null> {
     const account = await fetchMaybeOffer(this.rpc, pda, FIN);
     if (!account.exists) return null;
-    return { status: account.data.status, deposited: account.data.deposited, expiresAt: account.data.expiresAt, maker: account.data.maker };
+    const d = account.data;
+    return { status: d.status, deposited: d.deposited, expiresAt: d.expiresAt, maker: d.maker, escrow: d.escrow };
   }
 
   async createOffer(u: UserState, signer: KeyPairSigner, key: string, offer: OfferRecord): Promise<void> {
@@ -644,5 +782,79 @@ export class SimChainOps implements ChainOps {
       batch.forEach((w, j) => out.set(w, value[j] !== null));
     }
     return out;
+  }
+
+  // ── Cohort X ───────────────────────────────────────────────────────────────
+
+  async ata(owner: Address): Promise<Address> {
+    const [ata] = await findAssociatedTokenPda({ owner, tokenProgram: TOKEN_2022, mint: this.m.mintA });
+    return ata;
+  }
+
+  async balances(accounts: Address[]): Promise<(bigint | null)[]> {
+    // The amount at offset 64 of each token account: what /portfolio renders.
+    const { value } = await this.rpc.getMultipleAccounts(accounts, { encoding: "base64", ...FIN, dataSlice: { offset: 64, length: 8 } }).send();
+    return value.map((a) => (a ? Buffer.from(a.data[0], "base64").readBigUInt64LE(0) : null));
+  }
+
+  async supply(): Promise<{ supply: bigint; circulating: bigint }> {
+    // A dataSlice applies to a whole call, so the mint and the ShareClass are read apart.
+    const { value } = await this.rpc.getAccountInfo(this.m.mintA, { encoding: "base64", ...FIN, dataSlice: { offset: 36, length: 8 } }).send();
+    const share = await fetchShareClass(this.rpc, this.m.classA, FIN);
+    return { supply: value ? Buffer.from(value.data[0], "base64").readBigUInt64LE(0) : BigInt(0), circulating: share.data.circulatingSupply };
+  }
+
+  async tokenAccount(address: Address): Promise<TokenAccountView | null> {
+    const { value } = await this.rpc.getAccountInfo(address, { encoding: "base64", ...FIN }).send();
+    if (!value) return null;
+    const token = getTokenDecoder().decode(Buffer.from(value.data[0], "base64"));
+    const extensions = token.extensions.__option === "Some" ? token.extensions.value : [];
+    return { program: value.owner, mint: token.mint, owner: token.owner, amount: token.amount, immutableOwner: extensions.some((e) => e.__kind === "ImmutableOwner") };
+  }
+
+  async escrowMarker(owner: Address): Promise<boolean> {
+    const [marker] = await findEscrowMarkerPda({ offer: owner });
+    return (await this.rpc.getAccountInfo(marker, { encoding: "base64", ...FIN, dataSlice: { offset: 0, length: 0 } }).send()).value !== null;
+  }
+
+  eligibility(mint: Address, wallet: Address): Promise<ReceiverEligibility> {
+    return checkReceiverEligibility(this.rpc, mint, wallet);
+  }
+
+  private async sendTransfer(u: UserState, label: string, snap: XferSnapshot, authority: KeyPairSigner, payer: KeyPairSigner, createDst: boolean): Promise<void> {
+    const spec: TransferSpec = {
+      mint: this.m.mintA,
+      srcOwner: snap.srcOwner as Address,
+      src: snap.srcAta as Address,
+      dstOwner: snap.dstOwner as Address,
+      dst: snap.dstAta as Address,
+      authority,
+      payer,
+      amount: BigInt(snap.amount),
+      createDst,
+    };
+    await this.exec.run(u, this.meta(u), label, payer, () => buildDirectTransfer(this.rpc, spec), {
+      done: async () => transferLanded(label, snap, await this.balances([snap.srcAta as Address, snap.dstAta as Address])),
+    });
+  }
+
+  transfer(u: UserState, label: string, snap: XferSnapshot, send: XferSend): Promise<void> {
+    return this.sendTransfer(u, label, snap, send.authority, send.payer, Boolean(send.createDst));
+  }
+
+  async seedFromDonor(u: UserState, label: string, snap: XferSnapshot, payer: KeyPairSigner): Promise<void> {
+    if (!this.donorSigner || snap.srcOwner !== this.donorSigner.address) {
+      throw new SimRetryLater(`${label}: the donor signer is not loaded (SIM_DONOR_KEYPAIR)`);
+    }
+    // The hub pays the fee and creates its own ATA; the donor only signs the token leg.
+    await this.sendTransfer(u, label, snap, this.donorSigner, payer, true);
+  }
+
+  probe(u: UserState, id: string, spec: TransferSpec, expect: ProbeExpect): Promise<ProbeOutcome> {
+    return this.exec.probe(u, this.meta(u), id, spec.payer, () => buildDirectTransfer(this.rpc, spec), expect);
+  }
+
+  everSigned(u: UserState, label: string): boolean {
+    return this.exec.everSigned(u, label);
   }
 }

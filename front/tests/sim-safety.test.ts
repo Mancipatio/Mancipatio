@@ -6,9 +6,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { Address } from "@solana/kit";
+import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
+import { acquireLock, lockPath, readLock, releaseLock } from "@/scripts/chain/lib/journal";
+import { loadHotSigner } from "@/scripts/chain/lib/safety";
+import { CLI_ADMIN, DEPLOYER, E2E_PAYMENT_MINT } from "@/scripts/sim/lib/constants";
 import { userSigner } from "@/scripts/sim/lib/identity";
+import { readE2eState } from "@/scripts/sim/lib/setup";
 import {
+  SIM_CHAIN_TOOL,
   StopControl,
+  acquireChainLock,
   acquireSimLock,
   assertIgnoredDir,
   installSimFetchGuard,
@@ -55,12 +63,19 @@ describe("config gates", () => {
     ["an RPC naming mainnet", { SIM_CMD: "pilot", ...base, CHAIN_RPC_URL: "https://api.mainnet-beta.solana.com" }, /another cluster/],
     ["a mainnet genesis pin", { SIM_CMD: "pilot", ...base, CHAIN_GENESIS_HASH: "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d" }, /conflicts/],
     ["CHAIN_RPS above 5", { SIM_CMD: "pilot", ...base, CHAIN_RPS: "6" }, /CHAIN_RPS/],
-    ["a wave without SIM_WAVE", { SIM_CMD: "wave", ...base }, /SIM_WAVE/],
-    ["wave 6", { SIM_CMD: "wave", ...base, SIM_WAVE: "6" }, /SIM_WAVE/],
+    ["a wave without SIM_WAVE", { SIM_CMD: "wave", ...base }, /SIM_WAVE \(1-6\)/],
+    ["wave 7", { SIM_CMD: "wave", ...base, SIM_WAVE: "7" }, /SIM_WAVE/],
     ["SIM_WAVE outside a wave", { SIM_CMD: "pilot", ...base, SIM_WAVE: "1" }, /only read/],
     ["a malformed run id", { SIM_CMD: "report", SIM_RUN_ID: "../x" }, /SIM_RUN_ID/],
   ])("refuses %s", (_label, env, message) => {
     expect(() => read(env as Record<string, string>)).toThrow(message);
+  });
+
+  it("accepts wave 6 (the transfer pairs); the donor key only when given, the chain lock dir as the chain CLI's", () => {
+    const cfg = read({ SIM_CMD: "wave", ...base, SIM_WAVE: "6" });
+    expect(cfg).toMatchObject({ cmd: "wave", wave: 6, donorKeypair: null, chainStateDir: path.join(ROOT, ".mancipatio", "chain") });
+    const given = read({ SIM_CMD: "wave", ...base, SIM_WAVE: "6", SIM_DONOR_KEYPAIR: "/keys/buyer3.json", CHAIN_STATE_DIR: "/tmp/chain-state" });
+    expect(given).toMatchObject({ donorKeypair: "/keys/buyer3.json", chainStateDir: "/tmp/chain-state" });
   });
 
   it("never echoes the RPC URL (it can carry an API key)", () => {
@@ -153,6 +168,57 @@ describe("files and switches", () => {
     const again = acquireSimLock(simRoot);
     expect(JSON.parse(fs.readFileSync(path.join(simRoot, "sim.lock"), "utf8")).pid).toBe(process.pid);
     again();
+  });
+
+  it("holds the chain CLI's devnet lock for a loan: refused while another tool (or a live run) holds it, its own stale lock taken over", () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "sim-chainlock-"));
+    const journalPath = path.join(stateDir, "run", "tx-journal.jsonl");
+    const genesis = CLUSTER_GENESIS_HASHES.devnet;
+    const file = lockPath(stateDir, "devnet", genesis);
+    const held = acquireChainLock({ stateDir, genesis, journalPath });
+    expect(path.basename(held.path)).toBe(`devnet-${genesis.slice(0, 8)}.lock`);
+    expect(readLock(file)).toMatchObject({ pid: process.pid, tool: SIM_CHAIN_TOOL, journalPath });
+    // chain:e2e (or any chain CLI run) is refused while the simulator holds it — and this process's own live lock too.
+    expect(() => acquireLock({ stateDir, network: "devnet", genesis, tool: "e2e", journalPath: "/elsewhere" })).toThrow(/CHAIN_RECOVER=1/);
+    expect(() => acquireChainLock({ stateDir, genesis, journalPath })).toThrow(/devnet lock is held \(manci-sim, pid \d+\)/);
+    releaseLock(held);
+    expect(fs.existsSync(file)).toBe(false);
+    // A chain:e2e lock is never taken over, even with its process gone.
+    fs.writeFileSync(file, JSON.stringify({ pid: 2 ** 22 + 12345, tool: "e2e", journalPath: "/elsewhere", startedUtc: "" }));
+    try {
+      acquireChainLock({ stateDir, genesis, journalPath });
+      expect.unreachable();
+    } catch (error) {
+      expect(String(error)).toMatch(/devnet lock is held \(e2e, no live process\)/);
+      expect(String(error)).not.toContain(stateDir);
+    }
+    // The simulator's own lock left by a crash (same journal, pid gone) is taken over.
+    fs.writeFileSync(file, JSON.stringify({ pid: 2 ** 22 + 12345, tool: SIM_CHAIN_TOOL, journalPath, startedUtc: "" }));
+    const again = acquireChainLock({ stateDir, genesis, journalPath });
+    expect(readLock(file)?.pid).toBe(process.pid);
+    releaseLock(again);
+  });
+
+  it("loads the donor only as e2e buyer3, never naming the key file", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sim-donor-"));
+    const other = await userSigner(dir, "someone");
+    const keyFile = path.join(dir, "keys", "someone.json");
+    const buyer3 = "6uNWmFjnXJqrHMSPNjmhmHLPgd4GRfJtAjjKUKwVcyB3" as Address;
+    await expect(loadHotSigner(keyFile, buyer3, "donor")).rejects.toThrow(/The donor keypair is not the expected key 6uNW/);
+    await expect(loadHotSigner(keyFile, buyer3, "donor")).rejects.not.toThrow(new RegExp(dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    expect((await loadHotSigner(keyFile, other.address, "donor")).address).toBe(other.address);
+  });
+
+  it("reads class B and the donor from the e2e state, and runs without them", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sim-e2e-"));
+    const file = path.join(dir, "state.json");
+    const entities = { issuer: DEPLOYER, asset: DEPLOYER, classA: DEPLOYER, mintA: DEPLOYER, paymentMint: E2E_PAYMENT_MINT };
+    const doc = (extra: Record<string, unknown>, roles: Record<string, string> = {}) =>
+      JSON.stringify({ schema: "mancipatio-e2e-state-v1", network: "devnet", genesis: CLUSTER_GENESIS_HASHES.devnet, runId: "42eac4", roles: { admin: CLI_ADMIN, issuer: CLI_ADMIN, ...roles }, entities: { ...entities, ...extra } });
+    fs.writeFileSync(file, doc({}));
+    expect(readE2eState(file)).toMatchObject({ classB: null, mintB: null, donor: null });
+    fs.writeFileSync(file, doc({ classB: CLI_ADMIN, mintB: E2E_PAYMENT_MINT }, { buyer3: "6uNWmFjnXJqrHMSPNjmhmHLPgd4GRfJtAjjKUKwVcyB3" }));
+    expect(readE2eState(file)).toMatchObject({ classB: CLI_ADMIN, mintB: E2E_PAYMENT_MINT, donor: "6uNWmFjnXJqrHMSPNjmhmHLPgd4GRfJtAjjKUKwVcyB3" });
   });
 
   it("reports STOP (file or signal) and PAUSE", () => {

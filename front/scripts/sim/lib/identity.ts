@@ -1,7 +1,8 @@
 /**
- * The 100 simulated users (design-sim §1–§3): the roster (cohort, variant,
- * wave, the review the owner is asked to give), seeded synthetic identity
- * data, and the per-user keypairs.
+ * The 100 simulated users (design-sim §1–§3) and the 4 transfer users after
+ * them (design-transfers §D.1): the roster (cohort, variant, wave, the review
+ * the owner is asked to give), seeded synthetic identity data, and the
+ * per-user keypairs.
  *
  * Everything is a pure function of the run id, so a resumed run regenerates
  * the same names, documents and choices. Names start with `SIM-`, e-mails are
@@ -13,7 +14,7 @@ import type { KeyPairSigner } from "@solana/kit";
 import { DEFAULT_APPROVED_JURISDICTIONS } from "@/lib/passport";
 import { loadOrCreateRoleKey } from "@/scripts/chain/lib/e2e/keys";
 
-export type Cohort = "K" | "I" | "T" | "B" | "E";
+export type Cohort = "K" | "I" | "T" | "B" | "E" | "X";
 export type Variant =
   | "kyc"
   | "kyc-reject-doc"
@@ -27,7 +28,10 @@ export type Variant =
   | "company-needs-changes"
   | "company-over-cap"
   | "founder"
-  | "edge";
+  | "edge"
+  | "xfer-hub"
+  | "xfer-peer"
+  | "xfer-buyer";
 
 /** What owner-queue.txt asks the owner to decide for this user's dossier. */
 export type Review = "approve" | "reject" | "more_info" | "leave" | "none";
@@ -38,17 +42,21 @@ export type UserPlan = {
   label: string;
   cohort: Cohort;
   variant: Variant;
-  /** 0 = pilot, 1–5 = waves. */
+  /** 0 = pilot, 1–5 = waves, 6 = the transfer pairs (cohort X). */
   wave: number;
   review: Review;
   /** Trader pair 1–6 (maker i sells to taker i). */
   pair?: number;
   /** Edge-case group 1–8. */
   edgeGroup?: number;
+  /** Transfer pair 1–2: the hub (xfer-hub / xfer-buyer) sends to its peer. */
+  xpair?: 1 | 2;
 };
 
-export const COHORT_SIZES = { K: 30, I: 35, T: 12, B: 15, E: 8 } as const;
+export const COHORT_SIZES = { K: 30, I: 35, T: 12, B: 15, E: 8, X: 4 } as const;
 export const PILOT_SIZE = 5;
+/** The wave of cohort X: after the other five, so no earlier plan moves. */
+export const XFER_WAVE = 6;
 
 export function userLabel(n: number): string {
   return `u${String(n).padStart(3, "0")}`;
@@ -68,6 +76,8 @@ function repeat(count: number, slot: Slot): Slot[] {
  * The fixed roster. Pilot (wave 0): one KYC user, one KYC buyer, one no-KYC
  * buyer, one KYB company and one edge user. The other 95 are dealt into
  * waves 1–5 round-robin (cohorts mixed); a trader pair always shares a wave.
+ * Cohort X is appended after them (u101–u104, wave 6), so the first 100
+ * plans, their labels, keys and reviews never change.
  */
 export function buildRoster(): UserPlan[] {
   const pilot: Slot[] = [
@@ -112,6 +122,11 @@ export function buildRoster(): UserPlan[] {
     }
   });
   assignReviews(plans);
+  // Two transfer pairs: u101 hub → u102 peer, u103 buyer-hub → u104 peer (no dossier).
+  for (const xpair of [1, 2] as const) {
+    push({ cohort: "X", variant: xpair === 1 ? "xfer-hub" : "xfer-buyer", xpair }, XFER_WAVE);
+    push({ cohort: "X", variant: "xfer-peer", xpair }, XFER_WAVE);
+  }
   return plans;
 }
 

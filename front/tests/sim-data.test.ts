@@ -3,6 +3,7 @@
 // every field within the route limits (the application through the real
 // narrowApplication), the documents' formats, watermarks and size limits,
 // and the funding transactions fitting one packet.
+import { createHash } from "node:crypto";
 import { inflateSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -37,8 +38,27 @@ const RUN = "a1b2c3";
 const roster = buildRoster();
 
 describe("roster", () => {
+  it("keeps the first 100 plans of 3de3386 byte for byte (no one is renumbered by cohort X)", () => {
+    const first = createHash("sha256").update(JSON.stringify(roster.slice(0, 100))).digest("hex");
+    expect(first).toBe("6cbd976ce9dc95a869960d2603718d0636bae918f070dc1efbe3c348bfa65304");
+  });
+
+  it("appends the two transfer pairs as u101–u104 in wave 6, without dossiers", () => {
+    expect(roster).toHaveLength(104);
+    const x = roster.slice(100);
+    expect(x.map((p) => [p.label, p.cohort, p.variant, p.xpair, p.wave, p.review])).toEqual([
+      ["u101", "X", "xfer-hub", 1, 6, "none"],
+      ["u102", "X", "xfer-peer", 1, 6, "none"],
+      ["u103", "X", "xfer-buyer", 2, 6, "none"],
+      ["u104", "X", "xfer-peer", 2, 6, "none"],
+    ]);
+    expect(x.some(hasDossier)).toBe(false);
+    expect(roster.filter((p) => p.wave === 6)).toEqual(x);
+    expect(roster.slice(0, 100).every((p) => p.cohort !== "X" && p.wave <= 5)).toBe(true);
+  });
+
   it("has the design's 100 users and cohort sizes", () => {
-    expect(roster).toHaveLength(100);
+    expect(roster.filter((p) => p.cohort !== "X")).toHaveLength(100);
     const count = (f: (p: (typeof roster)[number]) => boolean) => roster.filter(f).length;
     expect(count((p) => p.cohort === "K")).toBe(30);
     expect(count((p) => p.cohort === "I")).toBe(35);
@@ -54,7 +74,8 @@ describe("roster", () => {
     expect(count((p) => p.variant === "kyc-invalid-first")).toBe(1);
     expect(count((p) => p.variant === "company-needs-changes")).toBe(2);
     expect(count((p) => p.variant === "company-over-cap")).toBe(1);
-    expect(new Set(roster.map((p) => p.label)).size).toBe(100);
+    expect(count((p) => p.cohort === "X")).toBe(4);
+    expect(new Set(roster.map((p) => p.label)).size).toBe(104);
   });
 
   it("puts one of each kind in the pilot and ~19 users in each wave", () => {

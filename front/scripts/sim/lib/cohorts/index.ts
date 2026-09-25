@@ -14,8 +14,10 @@ import { buyStep } from "./investor";
 import { issuerStep } from "./issuer";
 import { dossierStep } from "./kyc";
 import { traderStep } from "./trader";
+import { transferStep } from "./transfer";
 
-const MACHINES = [setupStep, dossierStep, issuerStep, buyStep, traderStep, edgeStep];
+// transferStep handles its own failures (cohort X never strands lent units).
+const MACHINES = [setupStep, dossierStep, issuerStep, buyStep, traderStep, edgeStep, transferStep];
 
 export async function advance(ctx: SimCtx, u: UserState): Promise<void> {
   if (u.terminal) return;

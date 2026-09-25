@@ -12,7 +12,9 @@
  * - the terms check: without a published whitepaper the terms route answers
  *   409 and the buyers wait (owner-queue.txt says what to publish);
  * - SOL from the deployer (16 transfers per tx) and payment tokens from the
- *   mint authority (4 owners per tx), only to users that still need them.
+ *   mint authority (4 owners per tx), only to users that still need them
+ *   (cohort X: SOL for all four, payment tokens for the two hubs, which buy
+ *   their own units when the donor cannot lend).
  *
  * The devnet faucet is never used.
  */
@@ -80,6 +82,8 @@ export function readE2eState(file: string): E2eAddrs {
     throw new SimGateError("The e2e Admin/issuer is not the pinned CLI Admin CekAgg…");
   }
   const kyc = parsed.roles?.kycAuthority;
+  // Cohort X only: class B (probe P7) and e2e buyer3 (the loan's donor); optional.
+  const optional = (value: string | undefined) => (value && isAddress(value) ? (value as Address) : null);
   return {
     runId: parsed.runId ?? "",
     issuer: e.issuer as Address,
@@ -89,6 +93,9 @@ export function readE2eState(file: string): E2eAddrs {
     paymentMint: e.paymentMint as Address,
     kycAuthority: kyc && isAddress(kyc) ? (kyc as Address) : null,
     kycRegistry: null,
+    classB: optional(e.classB),
+    mintB: optional(e.mintB),
+    donor: optional(parsed.roles?.buyer3),
   };
 }
 
@@ -107,6 +114,10 @@ export async function assertMarket(rpc: ChainRpc, m: E2eAddrs): Promise<void> {
   if (issuer.data.authority !== CLI_ADMIN) throw new SimGateError("The e2e issuer's authority is not the CLI Admin");
   const share = await fetchMaybeShareClass(rpc, m.classA, { commitment: "finalized" });
   if (!share.exists || share.data.mint !== m.mintA || share.data.asset !== m.asset) throw new SimGateError("The e2e class A does not match its mint and asset");
+  if (m.classB && m.mintB) {
+    const b = await fetchMaybeShareClass(rpc, m.classB, { commitment: "finalized" });
+    if (!b.exists || b.data.mint !== m.mintB || b.data.asset !== m.asset) throw new SimGateError("The e2e class B does not match its mint and asset");
+  }
 }
 
 async function exists(rpc: ChainRpc, address: Address): Promise<boolean> {
@@ -244,13 +255,14 @@ export async function ensureMarket(d: SetupDeps, admin: KeyPairSigner, m: E2eAdd
 }
 
 export function solTarget(u: UserState): bigint {
-  if (u.plan.cohort === "I" || u.plan.cohort === "T") return SOL_BUYER;
+  // Cohort X: 2 ATA rents, the offer and escrow rent (cancel refunds only the marker's) and ~8 fees.
+  if (u.plan.cohort === "I" || u.plan.cohort === "T" || u.plan.cohort === "X") return SOL_BUYER;
   if (u.plan.cohort === "B" && u.plan.variant.startsWith("company")) return SOL_ISSUER;
   return BigInt(0);
 }
 
 export function needsTokens(u: UserState): boolean {
-  return u.plan.cohort === "I" || u.plan.cohort === "T";
+  return u.plan.cohort === "I" || u.plan.cohort === "T" || u.plan.variant === "xfer-hub" || u.plan.variant === "xfer-buyer";
 }
 
 export function chunks<T>(list: readonly T[], size: number): T[][] {

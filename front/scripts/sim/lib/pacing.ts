@@ -7,7 +7,8 @@
  * - one signed write every 8 s;
  * - uploads ≤ 10/min, verification.submit ≤ 5/min, token/status reads ≤ 15/min;
  * - program transactions ≤ 3/min with one in flight (CHAIN_RPS=1 is the
- *   RPC token bucket in scripts/chain/lib/rpc.ts).
+ *   RPC token bucket in scripts/chain/lib/rpc.ts);
+ * - transfer probes (simulated, never sent) ≤ 6/min, outside the tx lock.
  *
  * Circuit breakers: a 503 `maintenance` stops the run, 5 consecutive 5xx (or
  * network failures) stop it, two RPC 429s within 60 s pause the chain for
@@ -18,7 +19,7 @@
 import { PACE } from "./constants";
 import { SimStopError } from "./safety";
 
-export type PaceClass = "write" | "verify" | "upload" | "read" | "tx";
+export type PaceClass = "write" | "verify" | "upload" | "read" | "tx" | "probe";
 
 export type PaceRules = {
   httpConcurrency: number;
@@ -34,8 +35,14 @@ export const DEFAULT_RULES: PaceRules = {
     upload: { max: PACE.uploadsPerMin, ms: 60_000 },
     read: { max: PACE.readsPerMin, ms: 60_000 },
     tx: { max: PACE.txPerMin, ms: 60_000 },
+    probe: { max: PACE.probesPerMin, ms: 60_000 },
   },
 };
+
+/** Classes that go to the RPC (held by the RPC breaker), not to the site. */
+function chainClass(classes: readonly PaceClass[]): boolean {
+  return classes.includes("tx") || classes.includes("probe");
+}
 
 export const BREAKERS = {
   consecutive5xx: 5,
@@ -65,7 +72,7 @@ export class Limiter {
   private rpcPausedUntil = 0;
   private stopped: string | null = null;
   /** Grants per class (the plan's budget check and the tests read these). */
-  readonly granted: Record<PaceClass, number> = { write: 0, verify: 0, upload: 0, read: 0, tx: 0 };
+  readonly granted: Record<PaceClass, number> = { write: 0, verify: 0, upload: 0, read: 0, tx: 0, probe: 0 };
 
   /** The STOP file / SIGINT switch, asked before every grant. */
   private readonly externalStop: () => string | null;
@@ -103,7 +110,7 @@ export class Limiter {
         if (recent.length >= window.max) wait = Math.max(wait, recent[recent.length - window.max] + window.ms - now);
       }
     }
-    if (classes.includes("tx")) wait = Math.max(wait, this.rpcPausedUntil - now);
+    if (chainClass(classes)) wait = Math.max(wait, this.rpcPausedUntil - now);
     else wait = Math.max(wait, this.httpPausedUntil - now);
     return Math.max(0, wait);
   }
@@ -124,7 +131,7 @@ export class Limiter {
    * returned function releases it (call it in `finally`).
    */
   async acquire(classes: readonly PaceClass[], options: { http?: boolean } = {}): Promise<() => void> {
-    const http = options.http ?? !classes.includes("tx");
+    const http = options.http ?? !chainClass(classes);
     for (;;) {
       const external = this.externalStop();
       if (external) this.stop(external);
