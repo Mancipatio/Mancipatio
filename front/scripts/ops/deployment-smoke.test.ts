@@ -59,7 +59,10 @@ beforeAll(async () => {
   // Stop if this deployment serves a different network than the target.
   const page = await response.text();
   expect(page).toContain(networkLabel(network));
-  expect(page).toContain(`title="Connected to Solana ${networkLabel(network)}"`);
+  // The build's network, as the server reports it (page markup changes with the layout).
+  const health = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(15_000), redirect: "error" });
+  expect(health.status).toBe(200);
+  expect(((await health.json()) as { network?: string }).network).toBe(network);
 });
 
 describe("deployed release: public access and SIWS boundaries", () => {

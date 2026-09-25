@@ -3,7 +3,7 @@
  *
  * pilot / wave / watch, in order:
  *   config gates (devnet only) → sim dir git-ignored → fetch guard (only
- *   https://www.manci.io and the RPC URL) → the site's home page reports
+ *   https://www.manci.io and the RPC URL) → the site's /api/health reports
  *   devnet → the e2e addresses and the genesis-pinned RPC → state.json and
  *   the journals → every inflight signature resolved → (pilot/wave) market
  *   setup and funding as the CLI Admin / deployer → the scheduler.
@@ -22,7 +22,7 @@ import { networkLabel } from "@/lib/network";
 import { Journal } from "@/scripts/chain/lib/journal";
 import { ChainAbortError, loadHotSigner, repoRoot, type ChainEnv } from "@/scripts/chain/lib/safety";
 import { SimChainOps, SimRetryLater, TxExecutor, createSimRpc, type ChainOps, type OwnerMeta } from "./chain";
-import { CLI_ADMIN, DEPLOYER, PACE, SITE_ORIGIN } from "./constants";
+import { CLI_ADMIN, DEPLOYER, PACE, SIM_NETWORK, SITE_ORIGIN } from "./constants";
 import { advance } from "./cohorts";
 import type { MarketView, SimCtx } from "./cohorts/common";
 import { SimHttp } from "./http";
@@ -152,13 +152,25 @@ function resolveRunId(cfg: SimConfig): string {
   return randomBytes(3).toString("hex");
 }
 
-/** The site must answer and name devnet, as scripts/ops/deployment-smoke.test.ts checks. */
+/**
+ * The site must be healthy and name devnet. /api/health reports the network
+ * the deployment was built for (and fails when the database serves another),
+ * so it is checked instead of page markup, which changes with the layout.
+ */
 export async function assertDevnetSite(fetchImpl: typeof fetch): Promise<void> {
-  let page: string;
+  let health: { ok?: unknown; network?: unknown };
   try {
-    const response = await fetchImpl(SITE_ORIGIN, { redirect: "error", signal: AbortSignal.timeout(20_000) });
-    if (response.status !== 200) throw new SimGateError(`${SITE_ORIGIN} answered ${response.status}`);
-    page = await response.text();
+    const response = await fetchImpl(`${SITE_ORIGIN}/api/health`, {
+      redirect: "error",
+      cache: "no-store",
+      signal: AbortSignal.timeout(20_000),
+    });
+    if (response.status !== 200) throw new SimGateError(`${SITE_ORIGIN}/api/health answered ${response.status}`);
+    try {
+      health = (await response.json()) as typeof health;
+    } catch {
+      throw new SimGateError(`${SITE_ORIGIN}/api/health did not answer JSON`);
+    }
     // SIWS allows ±300 s: a skewed local clock would turn every request into a 401.
     const served = Date.parse(response.headers.get("date") ?? "");
     if (Number.isFinite(served) && Math.abs(Date.now() - served) > 120_000) {
@@ -168,8 +180,8 @@ export async function assertDevnetSite(fetchImpl: typeof fetch): Promise<void> {
     if (error instanceof SimGateError) throw error;
     throw new SimGateError(`${SITE_ORIGIN} is unreachable`);
   }
-  if (!page.includes(`title="Connected to Solana ${networkLabel("devnet")}"`)) {
-    throw new SimGateError(`${SITE_ORIGIN} does not report Solana ${networkLabel("devnet")}; refusing to run`);
+  if (health?.ok !== true || health?.network !== SIM_NETWORK) {
+    throw new SimGateError(`${SITE_ORIGIN} does not report a healthy Solana ${networkLabel(SIM_NETWORK)}; refusing to run`);
   }
 }
 

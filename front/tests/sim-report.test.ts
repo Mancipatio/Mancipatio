@@ -105,19 +105,34 @@ describe("plan", () => {
 });
 
 describe("site preflight", () => {
-  const page = (body: string, date = new Date().toUTCString()) =>
-    (async () => new Response(body, { status: 200, headers: { date } })) as unknown as typeof fetch;
+  const DEVNET = JSON.stringify({ ok: true, network: "devnet" });
+  const health = (body: string, { status = 200, date = new Date().toUTCString(), urls = [] as string[] } = {}) =>
+    (async (input: RequestInfo | URL) => {
+      urls.push(String(input));
+      return new Response(body, { status, headers: { date, "content-type": "application/json" } });
+    }) as unknown as typeof fetch;
 
-  it("accepts the devnet site", async () => {
-    await expect(assertDevnetSite(page('<span title="Connected to Solana Devnet">'))).resolves.toBeUndefined();
+  it("accepts a healthy devnet site, read from /api/health", async () => {
+    const urls: string[] = [];
+    await expect(assertDevnetSite(health(DEVNET, { urls }))).resolves.toBeUndefined();
+    expect(urls).toEqual(["https://www.manci.io/api/health"]);
   });
 
   it("refuses a site that does not report devnet", async () => {
-    await expect(assertDevnetSite(page('<span title="Connected to Solana Mainnet">'))).rejects.toThrow(/does not report Solana Devnet/);
+    await expect(assertDevnetSite(health(JSON.stringify({ ok: true, network: "mainnet" })))).rejects.toThrow(/does not report a healthy Solana Devnet/);
+  });
+
+  it("refuses an unhealthy devnet site", async () => {
+    await expect(assertDevnetSite(health(JSON.stringify({ ok: false, network: "devnet" })))).rejects.toThrow(/does not report a healthy Solana Devnet/);
+    await expect(assertDevnetSite(health(DEVNET, { status: 503 }))).rejects.toThrow(/answered 503/);
+  });
+
+  it("refuses an answer that is not JSON", async () => {
+    await expect(assertDevnetSite(health('<span title="Connected to Solana Devnet">'))).rejects.toThrow(/did not answer JSON/);
   });
 
   it("refuses a skewed local clock", async () => {
-    await expect(assertDevnetSite(page('<span title="Connected to Solana Devnet">', new Date(Date.now() - 600_000).toUTCString()))).rejects.toThrow(/clock/);
+    await expect(assertDevnetSite(health(DEVNET, { date: new Date(Date.now() - 600_000).toUTCString() }))).rejects.toThrow(/clock/);
   });
 
   it("refuses an unreachable site without leaking details", async () => {
