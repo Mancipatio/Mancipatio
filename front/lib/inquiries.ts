@@ -13,6 +13,7 @@
 
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 export type InquiryStatus =
   | "new"
@@ -130,6 +131,7 @@ export async function updateInquiry(
     if (patch.status !== undefined) params.status = patch.status;
     if (patch.admin_note !== undefined) params.admin_note = patch.admin_note;
     await signedFetch(session, "/api/inquiries/update", "inquiries.update", params);
+    notifyAdminBadges();
     return true;
   } catch (err) {
     console.warn("[inquiries] update failed:", err);

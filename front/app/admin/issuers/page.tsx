@@ -64,6 +64,7 @@ import {
   type IssuerProfile,
 } from "@/lib/issuer-profiles";
 import { explainSendError } from "@/lib/tx-error";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 /** Called once a KYB status is known from the chain for an issuer. */
 type KybSettled = (
@@ -159,6 +160,8 @@ function IssuersOps() {
   const settleKyb = useCallback<KybSettled>(
     (legalId, issuerPda, decided, sent) => {
       if (!polls.isOpen) return;
+      // Issuers and Assets menu counts follow the indexer mirror.
+      notifyAdminBadges({ afterIndexer: true });
       setOverrides((prev) => ({
         ...prev,
         [legalId]: { status: decided, phase: "syncing" },
@@ -1000,6 +1003,8 @@ function RegisterIssuerModal({
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Issuer registered" });
+      // A new issuer starts KYB Pending (the Issuers menu count).
+      notifyAdminBadges({ afterIndexer: true });
       onSuccess(regId.trim());
     } catch (err) {
       toast.dismiss(pendingId);

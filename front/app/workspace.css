@@ -87,6 +87,10 @@
   .wallet-access-description { font-size:13px; }
   .app-admin-menu nav.is-open { grid-template-columns:repeat(2,minmax(0,1fr)); }
 }
+/* Phones: one column, so a count pill never truncates labels like "Applications" (a 2-column cell is ~139px at 360px). */
+@media(max-width:480px) {
+  .app-admin-menu nav.is-open { grid-template-columns:minmax(0,1fr); }
+}
 .app-section-tabs { padding:0 250px 0 32px; background:#fff; border-bottom:1px solid var(--app-line); display:flex; gap:23px; overflow-x:auto; }
 .app-section-tabs>a { font-size:12px; padding:14px 0; border-bottom:2px solid transparent; color:var(--app-muted); white-space:nowrap; }
 .app-section-tabs>a.is-active { border-color:var(--app-green); color:var(--app-green); }

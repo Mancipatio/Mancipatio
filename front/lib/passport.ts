@@ -39,6 +39,7 @@ import {
   RestrictionMode,
 } from "@/lib/generated/transfer_hook";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { countryName } from "@/lib/countries";
 import { findAuthorityTransferPda } from "@/lib/pdas";
 import {
@@ -773,6 +774,7 @@ export async function updatePassportRequest(
       patch,
       reason: reason ?? null,
     });
+    notifyAdminBadges();
     return true;
   } catch (err) {
     console.warn(

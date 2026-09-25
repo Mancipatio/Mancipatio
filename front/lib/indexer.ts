@@ -36,6 +36,7 @@ import { mergeableArchivedOffers } from "@/lib/closed-account";
 import type { NetworkData } from "@/lib/enumerate";
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
+import { isIndexerStateFresh } from "@/lib/indexer-freshness";
 
 export type ReconcileReport = Record<
   string,
@@ -83,8 +84,8 @@ function base64ToBytes(b64: string): Uint8Array {
 type Row = { raw: { base64?: string } | null; layout_version: number | null; account_version: number | null };
 async function requireReady(sb: NonNullable<ReturnType<typeof getSupabase>>, network: string) {
   const { data, error } = await sb.from("indexer_sync_state").select("status,checked_at,completed_at").eq("network", network).maybeSingle();
-  const checked = Date.parse(data?.checked_at ?? "");
-  if (error || data?.status !== "ready" || !data?.completed_at || !Number.isFinite(checked) || checked > Date.now() + 30_000 || Date.now() - checked > 5 * 60_000) {
+  // One freshness rule for every mirror reader (lib/indexer-freshness.ts).
+  if (error || !isIndexerStateFresh(data)) {
     throw new Error("Indexer is warming, stale or unavailable; a chain read is required");
   }
 }

@@ -13,7 +13,10 @@
 //
 // Params: { client_id, event: "issued" | "revoked", tx_signature, expires_at? }
 //   * issued  → kyc_provider='manual', kyc_provider_ref=tx signature,
-//               kyc_expires_at=on-chain expiry; approval email (best-effort).
+//               kyc_expires_at=on-chain expiry; approval email (best-effort);
+//               the wallet's undecided passport request(s) → 'approved', so
+//               a passport issued from the dossier page also clears the
+//               /admin/kyc queue (best-effort).
 //   * revoked → kyc_status='suspended' (a revoked passport is an operator
 //               action against a previously verified client — suspension, not
 //               'rejected', which describes a failed application) +
@@ -39,6 +42,33 @@ import {
 const EVENTS = ["issued", "revoked"] as const;
 // Base58 transaction signatures are 87–88 chars; accept a safe range.
 const TX_SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,96}$/;
+
+/**
+ * An issued passport decides the wallet's undecided passport request(s): the
+ * /admin/kyc queue (and its menu badge) must not keep offering a request the
+ * dossier page already issued — the only other way out of `new` is Reject,
+ * which emails the applicant "not approved". Same stamp as the queue's own
+ * approval (handled_by = the signer). Best-effort: the passport exists
+ * on-chain and the dossier is already synced; a failure is logged and the
+ * queue can still close the row by hand.
+ */
+async function closeOpenPassportRequests(
+  sb: ReturnType<typeof getSupabaseAdmin>,
+  holder: string | null | undefined,
+  signer: string,
+): Promise<void> {
+  if (!holder) return;
+  try {
+    const { error } = await sb
+      .from("passport_requests")
+      .update({ status: "approved", handled_by: signer, handled_at: new Date().toISOString() })
+      .eq("wallet", holder)
+      .in("status", ["new", "in_review"]);
+    if (error) console.warn("[api/clients/passport-sync] passport request close failed:", error.code ?? error.message);
+  } catch (err) {
+    console.warn("[api/clients/passport-sync] passport request close failed:", err instanceof Error ? err.message : err);
+  }
+}
 
 export async function POST(request: Request) {
   try {
@@ -79,6 +109,7 @@ export async function POST(request: Request) {
         console.error("[api/clients/passport-sync] issued update failed:", error.message);
         throw new SiwsError(500, "Passport sync failed");
       }
+      await closeOpenPassportRequests(sb, client.wallet, wallet);
       await insertNote(
         sb,
         clientId,

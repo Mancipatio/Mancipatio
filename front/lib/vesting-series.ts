@@ -26,6 +26,7 @@ import {
   type VestingTranche,
 } from "@/lib/generated/asset_registry";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 export {
   VestingDeliveryMode,
@@ -408,6 +409,7 @@ export async function adminReviewVestingSeries(
     "vesting-series.admin-review",
     { id, decision, reason },
   );
+  notifyAdminBadges();
 }
 
 export async function prepareVestingCreation(

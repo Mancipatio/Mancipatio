@@ -14,6 +14,7 @@ import type { SolanaClient, WalletSession } from "@solana/client";
 import type { Address } from "@solana/kit";
 import { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { loadClosedRows } from "@/lib/indexer";
 import { getSupabase } from "@/lib/supabase";
 import {
@@ -172,6 +173,7 @@ export async function adminUpdateOtcRequest(
       id,
       ...patch,
     });
+    notifyAdminBadges();
     return true;
   } catch (err) {
     console.warn("[otc] admin update failed:", err);
@@ -192,6 +194,7 @@ export async function archiveOtcDealRecord(
     archive: true,
     deal_pda: dealPda,
   });
+  notifyAdminBadges();
 }
 
 /**

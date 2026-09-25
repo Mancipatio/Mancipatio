@@ -3,8 +3,16 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import type { ReactNode } from "react";
+import { AdminBadgePill } from "@/components/admin-badge-pill";
+import type { BadgeView } from "@/lib/admin-badges";
 
-type Item = { href: string; label: string; icon?: ReactNode };
+type Item = {
+  href: string;
+  label: string;
+  icon?: ReactNode;
+  /** What waits for the viewer on this page (hidden at 0; AdminBadgesProvider). */
+  badge?: BadgeView | null;
+};
 
 export function AdminNav({ items }: { items: Item[] }) {
   const path = usePathname();
@@ -35,6 +43,7 @@ export function AdminNav({ items }: { items: Item[] }) {
               </span>
             )}
             <span className="truncate">{item.label}</span>
+            {item.badge && <AdminBadgePill view={item.badge} active={active} />}
           </Link>
         );
       })}

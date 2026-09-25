@@ -18,11 +18,12 @@ import { explainRoleRefusal } from "@/lib/role-resolution";
 import { SkeletonTable } from "@/components/skeleton";
 import {
   createClient as createClientRow,
-  listClients,
+  listClientDirectory,
   type ClientKycStatus,
   type ClientRow,
   type ClientType,
 } from "@/lib/clients";
+import type { ClientReviewReason } from "@/lib/admin-badge-rules";
 import { COUNTRIES, countryName } from "@/lib/countries";
 import { useToast } from "@/lib/toast";
 
@@ -38,6 +39,30 @@ const TYPE_BADGE: Record<ClientType, string> = {
   investor: "bg-emerald-50 text-emerald-700 border-emerald-200",
   delegate: "bg-brand-50 text-brand-700 border-brand-200",
   officer: "bg-amber-50 text-amber-700 border-amber-200",
+};
+
+/** Why a dossier is in "Needs review" (the same reasons as the Clients menu count). */
+const REVIEW_LABEL: Record<ClientReviewReason, string> = {
+  documents: "documents to check",
+  final: "ready for the KYC decision",
+  kyb: "KYB decision",
+};
+
+// "needs_review": dossiers with a reviewer step — the Clients menu count.
+type KycFilter = ClientKycStatus | "all" | "needs_review";
+
+const KYC_FILTERS: readonly KycFilter[] = [
+  "needs_review", "all", "pending", "more_info", "verified", "rejected", "suspended",
+];
+
+const KYC_FILTER_LABEL: Record<Exclude<KycFilter, "needs_review">, string> = {
+  all: "All",
+  pending: "Pending",
+  more_info: "More info",
+  verified: "Verified",
+  rejected: "Rejected",
+  suspended: "Suspended",
+  expired: "Expired",
 };
 
 const KYC_BADGE: Record<ClientKycStatus, string> = {
@@ -77,20 +102,23 @@ function ClientsOps() {
   const conn = useWalletConnection();
   const { isAdmin } = useRole({ kyc: true });
   const [rows, setRows] = useState<ClientRow[] | null>(null);
+  // False when the server could not read the review reasons (tab disabled).
+  const [reviewAvailable, setReviewAvailable] = useState(true);
   const [failed, setFailed] = useState<string | null>(null);
   // `?q=` seeds the search — the custody page links here by wallet to issue
   // a holder's passport (2C-3).
   const searchParams = useSearchParams();
   const [query, setQuery] = useState(() => searchParams.get("q") ?? "");
   const [typeFilter, setTypeFilter] = useState<ClientType | "all">("all");
-  const [kycFilter, setKycFilter] = useState<ClientKycStatus | "all">("all");
+  const [kycFilter, setKycFilter] = useState<KycFilter>("all");
   const [showAdd, setShowAdd] = useState(false);
 
   const refresh = useCallback(async () => {
     if (!conn.wallet) return;
     try {
-      const data = await listClients(conn.wallet);
-      setRows(data);
+      const data = await listClientDirectory(conn.wallet);
+      setRows(data.clients);
+      setReviewAvailable(data.reviewAvailable);
       setFailed(null);
     } catch (err) {
       setFailed(explainRoleRefusal(err instanceof Error ? err.message : String(err)));
@@ -111,7 +139,9 @@ function ClientsOps() {
         !(r.types?.length ? r.types : [r.type]).includes(typeFilter)
       )
         return false;
-      if (kycFilter !== "all" && r.kyc_status !== kycFilter) return false;
+      if (kycFilter === "needs_review") {
+        if (!r.review_reasons?.length) return false;
+      } else if (kycFilter !== "all" && r.kyc_status !== kycFilter) return false;
       if (!q) return true;
       return (
         r.display_name.toLowerCase().includes(q) ||
@@ -131,6 +161,7 @@ function ClientsOps() {
       investors: rows.filter((r) => r.type === "investor").length,
       verified: rows.filter((r) => r.kyc_status === "verified").length,
       pending: rows.filter((r) => r.kyc_status === "pending").length,
+      needsReview: rows.filter((r) => (r.review_reasons?.length ?? 0) > 0).length,
     };
   }, [rows]);
 
@@ -190,21 +221,29 @@ function ClientsOps() {
           <option value="delegate">Delegate</option>
           <option value="officer">Officer</option>
         </select>
-        <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs">
-          {(
-            ["all", "pending", "verified", "rejected", "suspended"] as const
-          ).map((s) => (
+        <div className="flex flex-wrap gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs">
+          {KYC_FILTERS.map((s) => (
             <button
               key={s}
               type="button"
               onClick={() => setKycFilter(s)}
-              className={`rounded-md px-3 py-1.5 transition-colors ${
+              disabled={s === "needs_review" && !reviewAvailable}
+              title={
+                s === "needs_review"
+                  ? reviewAvailable
+                    ? "Dossiers with a reviewer step: documents to check, a KYC decision (every document approved) or a KYB decision — the Clients menu count"
+                    : "The review queue could not be read — reload to try again"
+                  : undefined
+              }
+              className={`rounded-md px-3 py-1.5 transition-colors disabled:opacity-50 ${
                 kycFilter === s
                   ? "bg-slate-900 text-white"
                   : "text-slate-600 hover:bg-slate-100"
               }`}
             >
-              {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+              {s === "needs_review"
+                ? `Needs review${counts && reviewAvailable ? ` (${counts.needsReview})` : ""}`
+                : KYC_FILTER_LABEL[s]}
             </button>
           ))}
         </div>
@@ -282,6 +321,11 @@ function ClientsOps() {
                     >
                       {r.kyc_status}
                     </span>
+                    {r.review_reasons && r.review_reasons.length > 0 && (
+                      <p className="mt-1 text-[11px] text-amber-700">
+                        Review: {r.review_reasons.map((reason) => REVIEW_LABEL[reason]).join(" · ")}
+                      </p>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-xs text-slate-500">
                     {r.onboarding_status}

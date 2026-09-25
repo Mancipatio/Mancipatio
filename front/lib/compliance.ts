@@ -2,6 +2,7 @@
 
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 export type AlertSeverity = "low" | "medium" | "high" | "critical";
 export type AlertStatus = "open" | "dismissed" | "escalated" | "resolved";
@@ -119,6 +120,7 @@ export async function createAlert(
     summary: input.summary,
     tx_signature: input.tx_signature,
   });
+  notifyAdminBadges();
 }
 
 /**
@@ -141,4 +143,5 @@ export async function resolveAlert(
     note,
     resolved_by_hint: resolvedBy,
   });
+  notifyAdminBadges();
 }

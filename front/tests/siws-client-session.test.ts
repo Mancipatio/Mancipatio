@@ -70,3 +70,96 @@ describe("wallet session in signedFetch", () => {
     expect(bodies().at(-1)!.body.signature).toEqual(expect.any(String));
   });
 });
+
+// Background reads (the admin menu counts, lib/admin-badges.ts) must never
+// cost a per-request signature, and at most the one session prompt.
+describe("signedFetch interactive modes", () => {
+  it("interactive:false with no session throws WalletSessionRequiredError without a prompt or a request", async () => {
+    const { signedFetch, WalletSessionRequiredError } = await import("@/lib/siws-client");
+    await expect(signedFetch(session, "/api/admin/badges", "admin.badges", {}, { interactive: false }))
+      .rejects.toBeInstanceOf(WalletSessionRequiredError);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("interactive:false with a live session makes exactly one session POST", async () => {
+    const { signedFetch } = await import("@/lib/siws-client");
+    await signedFetch(session, "/api/clients/me", "clients.me"); // starts the session
+    signMessage.mockClear();
+    fetchMock.mockClear();
+    await signedFetch(session, "/api/admin/badges", "admin.badges", { fresh: true }, { interactive: false });
+    expect(signMessage).not.toHaveBeenCalled();
+    const calls = bodies();
+    expect(calls.map((c) => c.path)).toEqual(["/api/admin/badges"]);
+    expect(calls[0].body).toMatchObject({ session: true, payload: { action: "admin.badges", params: { fresh: true } } });
+    expect(calls[0].body.signature).toBeUndefined();
+  });
+
+  it("interactive:false forgets a session the server refused (401) and never signs instead", async () => {
+    const { signedFetch, hasWalletSession, WalletSessionRequiredError } = await import("@/lib/siws-client");
+    await signedFetch(session, "/api/clients/me", "clients.me");
+    signMessage.mockClear();
+    fetchMock.mockImplementationOnce(async () => Response.json({ ok: false, error: "expired" }, { status: 401 }));
+    await expect(signedFetch(session, "/api/admin/badges", "admin.badges", {}, { interactive: false }))
+      .rejects.toBeInstanceOf(WalletSessionRequiredError);
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(hasWalletSession(wallet)).toBe(false);
+  });
+
+  it("a write action is refused before any request in a non-interactive mode", async () => {
+    const { signedFetch } = await import("@/lib/siws-client");
+    for (const interactive of [false, "session-only"] as const) {
+      await expect(signedFetch(session, "/api/clients/update", "clients.update", { id: "x" }, { interactive }))
+        .rejects.toThrow(/needs a wallet signature/);
+    }
+    expect(signMessage).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('"session-only" starts the session once (one prompt), then reads over it', async () => {
+    const { signedFetch } = await import("@/lib/siws-client");
+    await signedFetch(session, "/api/admin/badges", "admin.badges", {}, { interactive: "session-only" });
+    expect(signMessage).toHaveBeenCalledTimes(1);
+    expect(bodies().map((c) => c.path)).toEqual(["/api/auth/session", "/api/admin/badges"]);
+    expect(bodies()[1].body.session).toBe(true);
+  });
+
+  it('"session-only" costs one prompt, never two, when the session route fails', async () => {
+    const { signedFetch, WalletSessionRequiredError } = await import("@/lib/siws-client");
+    // e.g. SESSION_SECRET unset: /api/auth/session is not ok.
+    fetchMock.mockImplementation(async (path) => path === "/api/auth/session"
+      ? Response.json({ ok: false, error: "sessions are off" }, { status: 503 })
+      : Response.json({ ok: true, data: {} }));
+    await expect(signedFetch(session, "/api/admin/badges", "admin.badges", {}, { interactive: "session-only" }))
+      .rejects.toBeInstanceOf(WalletSessionRequiredError);
+    expect(signMessage).toHaveBeenCalledTimes(1);
+    expect(bodies().map((c) => c.path)).toEqual(["/api/auth/session"]);
+  });
+
+  it('"session-only" turns a declined prompt into WalletSessionRequiredError and sends nothing', async () => {
+    const { signedFetch, WalletSessionRequiredError } = await import("@/lib/siws-client");
+    signMessage.mockRejectedValueOnce(new Error("User rejected the request"));
+    await expect(signedFetch(session, "/api/admin/badges", "admin.badges", {}, { interactive: "session-only" }))
+      .rejects.toBeInstanceOf(WalletSessionRequiredError);
+    expect(signMessage).toHaveBeenCalledTimes(1);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('"session-only" never signs after a 401 over the session', async () => {
+    const { signedFetch, WalletSessionRequiredError } = await import("@/lib/siws-client");
+    fetchMock.mockImplementation(async (path) => path === "/api/auth/session"
+      ? Response.json({ ok: true, data: { expires_at: new Date(Date.now() + 3_600_000).toISOString() } })
+      : Response.json({ ok: false, error: "expired" }, { status: 401 }));
+    await expect(signedFetch(session, "/api/admin/badges", "admin.badges", {}, { interactive: "session-only" }))
+      .rejects.toBeInstanceOf(WalletSessionRequiredError);
+    expect(signMessage).toHaveBeenCalledTimes(1);
+    expect(bodies().every((c) => c.body?.signature === undefined || c.path === "/api/auth/session")).toBe(true);
+  });
+
+  it("admin.badges is a session read (so it rides the cookie and stays allowed in maintenance)", async () => {
+    const { SESSION_READ_ACTIONS } = await import("@/lib/siws-session");
+    const { refusedInMaintenance } = await import("@/lib/maintenance");
+    expect(SESSION_READ_ACTIONS.has("admin.badges")).toBe(true);
+    expect(refusedInMaintenance("admin.badges")).toBe(false);
+  });
+});

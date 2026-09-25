@@ -3,6 +3,7 @@
 import type { WalletSession } from "@solana/client";
 import { getSupabase } from "@/lib/supabase";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { detectNetwork } from "@/lib/network";
 
 export type RaiseType = "startup" | "mature";
@@ -375,7 +376,7 @@ export async function reviewApplication(
   decision: Exclude<ApplicationStatus, "pending">,
   reason: string,
 ): Promise<{ emailSent: boolean }> {
-  return await signedFetch<{
+  const result = await signedFetch<{
     id: string;
     decision: string;
     emailSent: boolean;
@@ -384,6 +385,8 @@ export async function reviewApplication(
     decision,
     reason,
   });
+  notifyAdminBadges();
+  return result;
 }
 
 // ── listings ──────────────────────────────────────────────────────────────

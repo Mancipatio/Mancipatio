@@ -30,6 +30,8 @@ import { TOS_VERSION } from "@/lib/tos-version";
 import { MAINTENANCE_CODE, maintenanceRefusal } from "@/lib/maintenance";
 import { detectNetwork } from "@/lib/network";
 import type { AnonymizeResult } from "@/lib/client-privacy";
+import type { ClientReviewReason } from "@/lib/admin-badge-rules";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 /** Current Terms-of-Service version (single source: lib/tos-version.ts). */
 export { TOS_VERSION };
@@ -80,6 +82,12 @@ export type ClientRow = {
   tos_version: string | null;
   /** When the dossier's personal data was last erased (0065); null = never. */
   anonymized_at?: string | null;
+  /**
+   * Why the dossier waits for a reviewer ([] = it does not), from the reader
+   * of the /admin/clients menu badge. admin-list only, and absent when the
+   * server could not read it.
+   */
+  review_reasons?: ClientReviewReason[];
 };
 
 export type ClientNote = {
@@ -124,6 +132,23 @@ export async function listClients(
     "clients.adminList",
   );
   return data.clients ?? [];
+}
+
+/**
+ * The directory with each row's `review_reasons`, and whether they could be
+ * read — the /admin/clients "Needs review" tab, which reproduces the menu
+ * badge. THROWS.
+ */
+export async function listClientDirectory(
+  session: WalletSession | null | undefined,
+): Promise<{ clients: ClientRow[]; reviewAvailable: boolean }> {
+  const data = await signedFetch<{ clients: ClientRow[]; review_available?: boolean }>(
+    session,
+    "/api/clients/admin-list",
+    "clients.adminList",
+    { review: true },
+  );
+  return { clients: data.clients ?? [], reviewAvailable: data.review_available === true };
 }
 
 /**
@@ -226,6 +251,7 @@ export async function adminDecideKyb(
   await signedFetch(session, "/api/clients/kyb-decision", "clients.kybDecision", {
     client_id: clientId, decision, ...(note ? { note } : {}),
   });
+  notifyAdminBadges();
 }
 
 export type ClientDetail = {
@@ -300,12 +326,15 @@ export async function adminAnonymizeClient(
   confirm: string,
   reason: string,
 ): Promise<AnonymizeResult> {
-  return await signedFetch<AnonymizeResult>(
+  const result = await signedFetch<AnonymizeResult>(
     session,
     "/api/clients/anonymize",
     "clients.anonymize",
     { client_id: clientId, confirm, reason },
   );
+  // An erased dossier leaves the review queue.
+  notifyAdminBadges();
+  return result;
 }
 
 /**
@@ -414,6 +443,7 @@ export async function updateClientStatus(
       onboarding_status: onboarding_status ?? null,
       reason: reason ?? null,
     });
+    notifyAdminBadges();
   } catch (err) {
     console.warn("[clients] status update failed:", err);
     throw err instanceof Error ? err : new Error(String(err));
@@ -430,6 +460,7 @@ export async function suspendClient(
     kyc_status: "suspended",
     reason: reason ?? null,
   });
+  notifyAdminBadges();
 }
 
 /**
@@ -473,6 +504,8 @@ export async function syncPassportToClient(
   try {
     const params = passportSyncParams(clientId, event, txSignature, expiresAtIso);
     await signedFetch(session, "/api/clients/passport-sync", "clients.passport-sync", params);
+    // An issued passport also closes the wallet's passport request (/admin/kyc).
+    notifyAdminBadges();
     return true;
   } catch (err) {
     console.warn("[clients] passport sync failed:", err);
@@ -786,6 +819,7 @@ export async function requestRequirements(
       client_id: clientId,
       items,
     });
+    notifyAdminBadges();
     // Set when the server could NOT include a working upload link in the
     // client's email (pre-0041 database: a fresh token has no expiry stamp and
     // the fallback TTL is already in the past for an older dossier).
@@ -817,6 +851,7 @@ export async function reviewRequirement(
       "clients.review-requirement",
       { id, status },
     );
+    notifyAdminBadges();
     return { ok: true, recomputed: data?.recomputed ?? null };
   } catch (err) {
     console.warn("[kyc_req] review failed:", err);
@@ -873,7 +908,9 @@ export async function uploadClientDocument(
     form.set("file", file);
     const res = await fetch("/api/clients/upload", { method: "POST", body: form });
     const json = await res.json().catch(() => null);
-    return parseUploadResponse(json, res.ok);
+    const result = parseUploadResponse(json, res.ok);
+    if (result.ok) notifyAdminBadges();
+    return result;
   } catch (e) {
     console.warn("[client_docs] upload threw:", e);
     return { ok: false, recomputed: null };
