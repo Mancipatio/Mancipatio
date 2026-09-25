@@ -44,7 +44,8 @@ function ownerTask(ctx: SimCtx, u: UserState): string {
         : review === "more_info"
           ? "reject ONE document or request one more (request-docs); approve after the replacement arrives"
           : "leave it untouched";
-  const passport = u.plan.variant === "buyer-kyc" && review !== "reject" ? "; then /admin/kyc → issue the passport" : "";
+  // A passport follows a verified dossier only: never for a rejected or an untouched one.
+  const passport = u.plan.variant === "buyer-kyc" && (review === "approve" || review === "more_info") ? "; then /admin/kyc → issue the passport" : "";
   return `${kind.toUpperCase()} ${who(ctx, u).displayName}: ${base} → ${verdict}${passport}`;
 }
 
