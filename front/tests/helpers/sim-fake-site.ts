@@ -15,10 +15,12 @@ import { siwsMessage, type SiwsPayload } from "@/lib/siws-client";
 import { isSessionReadAction } from "@/lib/siws-session";
 import { TOS_VERSION } from "@/lib/tos-version";
 import { TOKEN_2022 } from "@/lib/transaction-builders";
+import { ChainRpcError } from "@/scripts/chain/lib/safety";
 import { SimRetryLater, SimTxError, type ChainOps, type DealView, type OfferView, type TokenAccountView } from "@/scripts/sim/lib/chain";
 import { SITE_ORIGIN } from "@/scripts/sim/lib/constants";
 import type { JournalSink } from "@/scripts/sim/lib/journal";
 import type { Limiter } from "@/scripts/sim/lib/pacing";
+import { SimStopError } from "@/scripts/sim/lib/safety";
 import type { OfferRecord, UserState, XferSnapshot } from "@/scripts/sim/lib/state";
 import { describeExpect, describeResult, matchProbe, transferLanded, type ProbeExpect, type ProbeOutcome, type ProbeResult, type TransferSpec } from "@/scripts/sim/lib/transfers";
 
@@ -71,6 +73,8 @@ export class FakeSite {
   requests: { route: string; status: number }[] = [];
   /** Route → forced status (failure injection). */
   fail = new Map<string, { status: number; code?: string }>();
+  /** Route → a forced status for the next `times` requests only. */
+  failNext = new Map<string, { status: number; times: number }>();
   private reqId = 1;
 
   // ── The owner's decisions ─────────────────────────────────────────────
@@ -117,7 +121,12 @@ export class FakeSite {
     const extra: Record<string, string> = {};
     try {
       if (url.origin !== SITE_ORIGIN) throw new Refused(421, "wrong host");
-      const forced = this.fail.get(route);
+      let forced: { status: number; code?: string } | undefined = this.fail.get(route);
+      const once = this.failNext.get(route);
+      if (once && once.times > 0) {
+        once.times -= 1;
+        forced = { status: once.status };
+      }
       if (forced) {
         status = forced.status;
         payload = { ok: false, error: "forced", code: forced.code };
@@ -345,8 +354,22 @@ export type XferFault =
   | "crash-before-send"
   /** It landed, but the status was lost: the executor saw "dropped". */
   | "landed-status-lost"
+  /** It was sent and landed, but did not finalize in time ("unknown"): the record stays inflight. */
+  | "unresolved"
+  /** The inflight record was persisted and the wire landed, then the process died before the landed record. */
+  | "process-death"
   /** The simulation refused it (a SimTxError, as the executor throws). */
   | "sim-error";
+
+/** What the inflight branch answers on one pass (scripted): still unresolved, or the status lookup failed. */
+export type InflightAnswer = "pending" | "rpc-error";
+
+/** The process died (fault "process-death"): nothing after it is persisted. */
+export class FakeProcessDeath extends SimStopError {
+  constructor(label: string) {
+    super(`fake process death after sending ${label}`);
+  }
+}
 
 /**
  * The chain side: records each operation, lands it at once, keeps offers and
@@ -374,6 +397,23 @@ export class FakeChainOps implements ChainOps {
   failAlways = new Set<string>();
   /** Called when a scripted fault fires (a test moves balances "outside the simulator" here). */
   onFault?: (label: string, fault: XferFault) => void;
+  /** Called after every landing (a test injects a failure at a point of the flow here). */
+  onLand?: (u: UserState, label: string) => void;
+  /** Label → answers of the inflight branch, one per pass, before the chain's truth (TxExecutor.run). */
+  inflightAnswers = new Map<string, InflightAnswer[]>();
+  /** Probe id → how many times its RPC fails (a ChainRpcError, as the guarded client throws after 3 tries). */
+  probeFaults = new Map<string, number>();
+  /** Label → how many times the send's done() balance read fails (a ChainRpcError) before anything is sent. */
+  doneFaults = new Map<string, number>();
+  /** Every wire that reached the chain, as `user:label` — a double send shows here, not only in balances. */
+  sentWires: string[] = [];
+  /** Signatures whose wire reached the chain: an inflight record of one resolves as landed, of another as dropped. */
+  private wires = new Set<string>();
+  /** The executor's settle() persists the inflight record before the send (the world's ctx.persist). */
+  persist?: () => void;
+  /** A fake process death: the world stops persisting (onDeath) until the test reloads it (onRevive). */
+  onDeath?: () => void;
+  onRevive?: () => void;
   /** Account → values the next reads return instead of the real one (installed after a label lands). */
   staleAfter = new Map<string, { account: string; values: (bigint | null)[] }>();
   private stale = new Map<string, (bigint | null)[]>();
@@ -394,11 +434,14 @@ export class FakeChainOps implements ChainOps {
     u.tx[label] = { status: "landed", sig, at: new Date().toISOString() };
     this.calls.push({ op: label, user: u.plan.label, detail });
     this.signedSteps.add(`${u.plan.label}:${label}`);
+    this.wires.add(sig);
+    this.sentWires.push(`${u.plan.label}:${label}`);
     const stale = this.staleAfter.get(label);
     if (stale) {
       this.stale.set(stale.account, [...stale.values]);
       this.staleAfter.delete(label);
     }
+    this.onLand?.(u, label);
     return sig;
   }
 
@@ -476,6 +519,7 @@ export class FakeChainOps implements ChainOps {
   }
   async depositOffer(u: UserState, _s: KeyPairSigner, key: string, offer: OfferRecord): Promise<void> {
     if (u.tx[`${key}.deposit`]?.status === "landed") return;
+    if (this.takeFault(`${key}.deposit`) === "sim-error") this.refuse(u, `${key}.deposit`);
     await this.paced(() => this.land(u, `${key}.deposit`));
     this.offers.get(offer.pda)!.deposited = BigInt(offer.amount);
     const maker = this.tokens.get(this.ataKey(u.wallet));
@@ -554,9 +598,30 @@ export class FakeChainOps implements ChainOps {
   async eligibility(): Promise<ReceiverEligibility> {
     return this.eligible;
   }
+  /**
+   * As TxExecutor.run: a landed label is skipped; an inflight record is never
+   * re-signed — the scripted answers first (still unresolved, or the status
+   * lookup failing), then the chain's truth (its wire landed: landed; never
+   * sent: dropped once expired, and rebuilt).
+   */
   private async send(u: UserState, label: string, snap: XferSnapshot): Promise<void> {
-    if (u.tx[label]?.status === "landed") return;
-    if (u.tx[label]?.status === "inflight") delete u.tx[label]; // resolved on resume as dropped: never sent
+    const prior = u.tx[label];
+    if (prior?.status === "landed") return;
+    if (prior?.status === "inflight") {
+      const answer = this.inflightAnswers.get(label)?.shift();
+      if (answer === "rpc-error") throw new ChainRpcError("getSignatureStatuses", 429);
+      if (answer === "pending") throw new SimRetryLater(`${label}: an earlier signature is still unresolved`);
+      if (prior.sig && this.wires.has(prior.sig)) {
+        u.tx[label] = { ...prior, status: "landed" };
+        return;
+      }
+      delete u.tx[label];
+    }
+    const doneFails = this.doneFaults.get(label) ?? 0;
+    if (doneFails > 0) {
+      this.doneFaults.set(label, doneFails - 1);
+      throw new ChainRpcError("getMultipleAccounts", 503);
+    }
     const fault = this.takeFault(label);
     // The executor's done(): the snapshot's post-state lands without a send.
     const balances = await this.balances([snap.srcAta as Address, snap.dstAta as Address]);
@@ -571,24 +636,44 @@ export class FakeChainOps implements ChainOps {
       throw new SimRetryLater(`${label}: an earlier signature is still unresolved`);
     }
     if (fault === "sim-error") this.refuse(u, label);
+    if (fault === "process-death") {
+      // settle(inflight) persists before the send; the wire lands; the process dies before the landed record.
+      u.tx[label] = { status: "inflight", sig: `sig-${u.plan.label}-${label}`, lvbh: "0", at: new Date().toISOString() };
+      this.persist?.();
+    }
     await this.paced(() => {
       this.move(snap.srcAta, snap.dstAta, BigInt(snap.amount), snap.dstOwner);
       this.land(u, label, { from: snap.srcOwner, to: snap.dstOwner, amount: snap.amount });
     });
+    if (fault === "process-death") {
+      this.onDeath?.();
+      this.onFault?.(label, fault);
+      throw new FakeProcessDeath(label);
+    }
     if (fault === "landed-status-lost") {
       delete u.tx[label];
       throw new SimRetryLater(`${label} expired without landing`);
+    }
+    if (fault === "unresolved") {
+      u.tx[label] = { ...u.tx[label], status: "inflight", lvbh: "0" };
+      throw new SimRetryLater(`${label} unknown; resolved on the next pass`);
     }
   }
   /** The signers do not matter to the fake: the snapshot names the accounts. */
   transfer(u: UserState, label: string, snap: XferSnapshot): Promise<void> {
     return this.send(u, label, snap);
   }
-  seedFromDonor(u: UserState, label: string, snap: XferSnapshot): Promise<void> {
+  async seedFromDonor(u: UserState, label: string, snap: XferSnapshot): Promise<void> {
+    if (u.tx[label]?.status === "landed") return; // as SimChainOps: a landed seed needs no signer
     if (!this.donor || snap.srcOwner !== this.donor) throw new SimRetryLater(`${label}: the donor signer is not loaded (SIM_DONOR_KEYPAIR)`);
     return this.send(u, label, snap);
   }
   async probe(u: UserState, id: string, spec: TransferSpec, expect: ProbeExpect): Promise<ProbeOutcome> {
+    const rpcFails = this.probeFaults.get(id) ?? 0;
+    if (rpcFails > 0) {
+      this.probeFaults.set(id, rpcFails - 1);
+      throw new ChainRpcError("getLatestBlockhash", 429);
+    }
     this.calls.push({ op: `probe ${id}`, user: u.plan.label, detail: spec });
     const expected: ProbeResult = expect.ok
       ? { ok: true, failure: null, hookInvoked: expect.hookInvoked ?? true }

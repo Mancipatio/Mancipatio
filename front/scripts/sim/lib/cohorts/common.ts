@@ -177,19 +177,25 @@ export async function setupStep(ctx: SimCtx, u: UserState): Promise<boolean> {
   }
 }
 
+/** An HTTP status that says nothing about the request itself: no response, rate limited, or a server error. */
+export function transientStatus(status: number): boolean {
+  return status === 0 || status === 429 || status >= 500;
+}
+
 type WalletPolicy = { wallet?: string; network?: string; account_id?: string; primary_wallet?: string };
 
 /**
  * The pre-send policy read the UI runs before every on-chain send
  * (lib/transaction-wallet-policy.ts). False when the site refuses the send;
  * `fail` then decides what happens to the user (default: the backoff retry;
- * cohort X keeps lent units returnable).
+ * cohort X keeps lent units returnable). `transient`: the read itself failed
+ * (no response, 429, 5xx) and says nothing about the wallet.
  */
 export async function walletPolicy(
   ctx: SimCtx,
   u: UserState,
   step: string,
-  fail: (ctx: SimCtx, u: UserState, reason: string) => void = retry,
+  fail: (ctx: SimCtx, u: UserState, reason: string, transient?: boolean) => void = retry,
 ): Promise<boolean> {
   const r = await ctx.http.read<WalletPolicy>(actor(ctx, u), {
     step: `${step}.policy`,
@@ -198,7 +204,7 @@ export async function walletPolicy(
     params: {},
   });
   if (r.outcome !== "ok") {
-    fail(ctx, u, `account.wallets.transaction ${r.status}`);
+    fail(ctx, u, `account.wallets.transaction ${r.status}`, transientStatus(r.status));
     return false;
   }
   const ok = r.data?.wallet === u.wallet && r.data?.primary_wallet === u.wallet && r.data?.network === "devnet";

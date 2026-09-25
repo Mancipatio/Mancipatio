@@ -31,27 +31,36 @@
  *
  * Once units are out (the seed landed, or the hub bought its own) no user of
  * the pair goes terminal until they are back: a failure anywhere else jumps
- * straight to the return legs (xo.cancel when a unit sits in the offer
- * escrow, xfer.r1, xfer.r2), which retry without a limit — parked as a
- * no-action owner-queue line after MAX_ATTEMPTS, so a wave still ends
- * "blocked" and the next command continues them. A user waiting on a partner
- * that waits for the owner mirrors that wait.
+ * straight to the return legs (xo.cancel while the hub's offer may be open,
+ * xfer.r1, xfer.r2), which retry without a limit — parked as a no-action
+ * owner-queue line after MAX_ATTEMPTS, so a wave still ends "blocked" and the
+ * next command continues them. A user waiting on a partner that waits for
+ * the owner mirrors that wait.
+ *
+ * Nothing unwinds past an unresolved send: while one of the user's own
+ * signatures is inflight a failure only backs off (then parks) until it
+ * resolves. An RPC failure or a 5xx/429/no-response HTTP read is transient:
+ * the ordinary backoff first, the unwind only after MAX_ATTEMPTS. A route
+ * decision reads what may have moved (a send that did not fail, or a
+ * signature the tx journal saw), never only a landed status.
  */
 import type { Address } from "@solana/kit";
 import { OfferStatus } from "@/lib/generated/asset_registry";
 import { TOKEN_2022 } from "@/lib/transaction-builders";
-import { ChainAbortError } from "@/scripts/chain/lib/safety";
+import { ChainAbortError, ChainRpcError } from "@/scripts/chain/lib/safety";
 import { SimRetryLater, SimTxError, type OfferView } from "../chain";
 import { DEVNET_PLATFORM_KYC_REGISTRY, PACE, PAYMENT_UNIT, XFER_OFFER_UNITS, XFER_PEER_UNITS, XFER_UNITS } from "../constants";
 import { prng } from "../identity";
 import { SimStopError } from "../safety";
 import type { UserState, XferBase, XferSnapshot } from "../state";
 import { PROBES, XferDiverged, probeDef, type ProbePair } from "../transfers";
-import { MAX_ATTEMPTS, RETRY_MS, actor, check, finish, go, later, note, retry, walletPolicy, type SimCtx } from "./common";
+import { MAX_ATTEMPTS, RETRY_MS, actor, check, finish, go, later, note, retry, transientStatus, walletPolicy, type SimCtx } from "./common";
 
 /** The tx label of each sent row (S3–S5 are the offer instructions' own labels). */
 export const XFER_LABELS = { S1: "xfer.s1", S2: "xfer.s2", S4: "xo.deposit", S5: "xo.cancel", S6: "xfer.r1", S7: "xfer.r2" } as const;
 type Row = keyof typeof XFER_LABELS;
+/** Every label a cohort-X user sends under (the own route's buy included). */
+const SEND_LABELS = ["buy.prep", "buy", XFER_LABELS.S1, XFER_LABELS.S2, "xo.create", XFER_LABELS.S4, XFER_LABELS.S5, XFER_LABELS.S6, XFER_LABELS.S7];
 
 const HUB_STAGES = ["xfer.gate", "xfer.seed", "xfer.ready", "xfer.p1", "xfer.s2", "xo.create", "xo.deposit", "xo.cancel", "xfer.r2"];
 const PEER_STAGES = ["xfer.gate", "xfer.probes", "xfer.escrow", "xfer.r1"];
@@ -104,6 +113,23 @@ function waitOn(ctx: SimCtx, u: UserState, other: UserState | undefined, ms = WA
   later(ctx, u, ms);
 }
 
+/**
+ * A cohort-X user that no longer waits for the owner (its send landed, it
+ * finished) releases the users mirroring it at once: a stale mirror would let
+ * a wave end "blocked" and keep a stale owner-queue line for up to 2 min.
+ * Mirrors of mirrors carry the first one's task, so they are released too.
+ */
+export function releaseMirrors(ctx: SimCtx, u: UserState): void {
+  if (u.plan.cohort !== "X" || u.awaitingOwner) return;
+  const task = `${MIRROR} waits for ${u.plan.label} (`;
+  for (const o of Object.values(ctx.state.users)) {
+    if (o === u || o.terminal || !o.awaitingOwner || !o.ownerTask?.startsWith(task)) continue;
+    o.awaitingOwner = false;
+    o.ownerTask = undefined;
+    o.notBefore = Math.min(o.notBefore, ctx.now());
+  }
+}
+
 /** Parks the user with a no-action owner-queue line and re-checks every 2 min. */
 function park(ctx: SimCtx, u: UserState, task: string): void {
   u.awaitingOwner = true;
@@ -124,35 +150,85 @@ function unitsOut(ctx: SimCtx, u: UserState): boolean {
   return landed(hub, XFER_LABELS.S1) || (hub.data.xferSource === "own" && landed(hub, "buy"));
 }
 
+/** The user's own send whose signature is still unresolved, if any. */
+function pendingSend(u: UserState): string | null {
+  return SEND_LABELS.find((label) => u.tx[label]?.status === "inflight") ?? null;
+}
+
+/**
+ * Whether a send may have moved anything: a record that did not fail
+ * (inflight counts), or — with no record — a signature the tx journal saw
+ * (a drop resolved on the way may still have landed). Only a failed or a
+ * never-signed send moved nothing.
+ */
+function mayHaveMoved(ctx: SimCtx, u: UserState, label: string): boolean {
+  const record = u.tx[label];
+  if (record) return record.status !== "failed";
+  return ctx.chain.everSigned(u, label);
+}
+
+/** A send landed (or already had): a parked failure of this stage is over. */
+function sent(u: UserState): void {
+  u.attempts = 0;
+  u.awaitingOwner = false;
+  u.ownerTask = undefined;
+}
+
+/** A failure the step retries next pass: RPC failures (after the client's own 3 tries). */
+function isTransient(error: unknown): boolean {
+  return error instanceof ChainRpcError;
+}
+
+/** Whether fail() will retry this user in its stage (rather than unwind or give up). */
+function willRetry(u: UserState): boolean {
+  return RETURN_STAGES.has(u.stage) || pendingSend(u) !== null || u.attempts + 1 < MAX_ATTEMPTS;
+}
+
 /**
  * What a failure does to a cohort-X user (a thrown error, an HTTP refusal,
- * the wallet-policy read): a return leg retries without a limit; with units
- * out any other stage unwinds the pair; before that the ordinary backoff.
+ * the wallet-policy read): a return leg retries without a limit; a user with
+ * an unresolved send waits for it (nothing unwinds past it); a transient
+ * failure gets the ordinary backoff first; then, with units out, the pair
+ * unwinds; before that the ordinary backoff.
  */
-function fail(ctx: SimCtx, u: UserState, reason: string): void {
+function fail(ctx: SimCtx, u: UserState, reason: string, transient = false): void {
   if (RETURN_STAGES.has(u.stage)) return keepReturning(ctx, u, reason);
+  const pending = pendingSend(u);
+  if (pending) {
+    return keepTrying(ctx, u, `${pending} is still unresolved (${reason.slice(0, 160)}); nothing moves or unwinds until it resolves, re-checked every ${PACE.watchIntervalMs / 60_000} min`);
+  }
+  if (transient && u.attempts + 1 < MAX_ATTEMPTS) {
+    u.attempts += 1;
+    return later(ctx, u, RETRY_MS * u.attempts);
+  }
   if (u.stage === "xfer.seed" && !landed(u, XFER_LABELS.S1)) return seedFailed(ctx, u, reason);
   if (unitsOut(ctx, u)) return unwind(ctx, u, reason);
   retry(ctx, u, reason);
 }
 
-/** Return legs are exempt from MAX_ATTEMPTS: backoff, then parked and retried every 2 min. */
-function keepReturning(ctx: SimCtx, u: UserState, reason: string): void {
+/** Backoff, then parked (a no-action owner-queue line) and retried every 2 min, without a limit. */
+function keepTrying(ctx: SimCtx, u: UserState, task: string): void {
   u.attempts += 1;
   if (u.attempts < MAX_ATTEMPTS) {
     u.awaitingOwner = false;
     u.ownerTask = undefined;
     return later(ctx, u, RETRY_MS * u.attempts);
   }
-  park(ctx, u, `${u.stage} keeps failing (${reason.slice(0, 160)}); the units stay out until it lands, retried every ${PACE.watchIntervalMs / 60_000} min`);
+  park(ctx, u, task);
 }
 
-/** Straight to the return legs: a unit in the offer escrow first, then the peer, then the hub. */
+/** Return legs are exempt from MAX_ATTEMPTS. */
+function keepReturning(ctx: SimCtx, u: UserState, reason: string): void {
+  keepTrying(ctx, u, `${u.stage} keeps failing (${reason.slice(0, 160)}); the units stay out until it lands, retried every ${PACE.watchIntervalMs / 60_000} min`);
+}
+
+/** Straight to the return legs: the hub's offer first (it may hold a unit), then the peer, then the hub. */
 function unwind(ctx: SimCtx, u: UserState, reason: string): void {
   note(ctx, u, `${u.stage}.unwind`, `${reason.slice(0, 200)} — units are out, so the pair returns them now`);
   setFlag(u, "xferAbort");
   if (isHub(u)) {
-    go(u, landed(u, XFER_LABELS.S4) && !landed(u, XFER_LABELS.S5) ? "xo.cancel" : "xfer.r2");
+    // An offer that may exist is cancelled even with nothing deposited: none is left Open (it never expires).
+    go(u, mayHaveMoved(ctx, u, "xo.create") && !landed(u, XFER_LABELS.S5) ? "xo.cancel" : "xfer.r2");
   } else {
     setFlag(u, "probesDone");
     setFlag(u, "escrowProbesDone");
@@ -189,10 +265,14 @@ function diverged(ctx: SimCtx, u: UserState, error: XferDiverged): void {
   park(ctx, u, `${error.label} saw balances it did not expect (${error.detail}); nothing is sent until they match`);
 }
 
-/** C6 on a return leg is evidence, not a gate: the units go back even while the site refuses. */
+/**
+ * C6 on a return leg is evidence, not a gate: the units go back even while
+ * the site refuses. A refusal is walletPolicy's own check; a failed read is
+ * SimHttp's own line (5xx, network, 4xx), so it only gets an info note here.
+ */
 async function returnPolicy(ctx: SimCtx, u: UserState, step: string): Promise<void> {
   await walletPolicy(ctx, u, step, (c, user, reason) => {
-    if (reason.startsWith("account.wallets")) check(c, user, `${step}.policy`, false, `${reason}; the return is sent anyway`);
+    if (reason.startsWith("account.wallets")) note(c, user, `${step}.policy`, `${reason}; the return is sent anyway`);
   });
 }
 
@@ -281,12 +361,12 @@ function describeOffer(view: OfferView | null): string {
 type Aggregate = { pledged?: string; settled?: string; backers?: number };
 
 /** commitment-aggregate of both simulator sales (C5): a P2P transfer is never counted as a purchase. */
-async function readAggregates(ctx: SimCtx, u: UserState, onFail: (reason: string) => void): Promise<NonNullable<XferBase["aggregates"]> | null> {
+async function readAggregates(ctx: SimCtx, u: UserState, onFail: (reason: string, transient: boolean) => void): Promise<NonNullable<XferBase["aggregates"]> | null> {
   const out: NonNullable<XferBase["aggregates"]> = {};
   for (const sale of ctx.market.sales) {
     const r = await ctx.http.post<Aggregate>(actor(ctx, u), { step: "xfer.aggregate", route: "/api/launchpad/commitment-aggregate", body: { sale_pubkey: sale } });
     if (r.outcome !== "ok") {
-      onFail(`commitment-aggregate ${r.status}`);
+      onFail(`commitment-aggregate ${r.status}`, transientStatus(r.status));
       return null;
     }
     out[sale] = { pledged: String(r.data?.pledged ?? "0"), settled: String(r.data?.settled ?? "0"), backers: r.data?.backers ?? 0 };
@@ -337,6 +417,23 @@ async function conservation(ctx: SimCtx, hub: UserState, peer: UserState): Promi
   setFlag(hub, "c3");
 }
 
+/**
+ * S7 returns exactly the loan, so it is snapshotted only once the hub holds
+ * all of it again (else it could never land: InsufficientFunds on every
+ * retry). A shortfall is one consistency finding and a parked no-action
+ * line, re-checked every 2 min; nothing is sent until the units are back.
+ */
+async function holdsLoan(ctx: SimCtx, u: UserState, units: bigint): Promise<boolean> {
+  const [held] = await ctx.chain.balances([await ctx.chain.ata(u.wallet as Address)]);
+  if (n(held) >= units) return true;
+  if (!flag(u, "loanShort")) {
+    check(ctx, u, "xfer.S7.held", false, `the hub holds ${n(held)} of the ${units} lent units before S7; the rest is still at the peer or in the offer escrow`);
+    setFlag(u, "loanShort");
+  }
+  park(ctx, u, `xfer.r2: the hub holds ${n(held)} of the ${units} lent units; S7 waits until they are all back`);
+  return false;
+}
+
 /** C5 at the end (once, loan route): the aggregates did not move, unless a buy landed in the window. */
 async function aggregatesUnchanged(ctx: SimCtx, hub: UserState): Promise<boolean> {
   const base = hub.data.xferBase;
@@ -385,6 +482,8 @@ async function runProbe(ctx: SimCtx, u: UserState, id: string): Promise<void> {
     const outcome = await ctx.chain.probe(u, id, spec, def.expect);
     probes[id] = outcome === "ok" || outcome === "expected-error" ? "passed" : outcome === "unexpected-accept" ? "unexpected-accept" : "mismatch";
   }
+  // A verdict: an earlier transient failure in this stage is over (the next probe starts afresh).
+  u.attempts = 0;
   ctx.persist();
 }
 
@@ -412,7 +511,7 @@ async function hubGate(ctx: SimCtx, u: UserState, peer: UserState): Promise<void
     const sale = ctx.market.sales[1];
     const r = await ctx.http.get(actor(ctx, u), { step: "xfer.terms", route: `/api/launchpad/terms?sale=${sale}`, expect: [200, 409] });
     if (r.status === 200) return ownRoute(ctx, u, "the launchpad terms answer 200");
-    if (r.outcome !== "expected-error") return fail(ctx, u, `launchpad.terms ${r.status}`);
+    if (r.outcome !== "expected-error") return fail(ctx, u, `launchpad.terms ${r.status}`, transientStatus(r.status));
     // Pair 1 borrows first: pair 2 decides once pair 1's hub has left its gate.
     const first = Object.values(ctx.state.users).find((o) => o.plan.cohort === "X" && o.plan.xpair === 1 && isHub(o));
     if (first && !first.terminal && (first.stage === "xfer.gate" || SETUP_STAGES.has(first.stage))) return waitOn(ctx, u, first);
@@ -421,7 +520,16 @@ async function hubGate(ctx: SimCtx, u: UserState, peer: UserState): Promise<void
   const other = loanOf(ctx);
   if (other) return waitOn(ctx, u, ctx.state.users[other.hub], PACE.watchIntervalMs);
   const donor = ctx.chain.donor;
-  if (!donor) return ownRoute(ctx, u, "no donor signer (SIM_DONOR_KEYPAIR unset)");
+  if (!donor) {
+    // The own route is the fallback of a run whose owner gave no donor key (design §A, F2), not
+    // of a later command that merely left it out: a run that lent before waits for the key.
+    const lent = Object.values(ctx.state.users).find((o) => o.plan.cohort === "X" && o.data.xferSource === "donor");
+    if (!lent) return ownRoute(ctx, u, "no donor signer (SIM_DONOR_KEYPAIR unset)");
+    u.awaitingOwner = true;
+    u.ownerTask = `run the simulator with SIM_DONOR_KEYPAIR (e2e buyer3's key): this run lent to ${lent.plan.label} and pair ${u.plan.xpair} borrows next; nothing moves until then`;
+    u.notBefore = ctx.now() + PACE.watchIntervalMs;
+    return;
+  }
   const atas = await Promise.all([donor, u.wallet, peer.wallet].map((w) => ctx.chain.ata(w as Address)));
   const [d, h, q] = await ctx.chain.balances(atas);
   if (n(d) < XFER_UNITS) return ownRoute(ctx, u, `the donor holds ${n(d)} class A units (fewer than ${XFER_UNITS})`);
@@ -431,7 +539,7 @@ async function hubGate(ctx: SimCtx, u: UserState, peer: UserState): Promise<void
   const supply = await ctx.chain.supply();
   // C5 needs a quiet window: a buy still being sent or recorded would move the aggregate inside it.
   const quiet = !simulatorBuys(ctx, new Date().toISOString()).busy;
-  const aggregates = quiet ? await readAggregates(ctx, u, (reason) => fail(ctx, u, reason)) : undefined;
+  const aggregates = quiet ? await readAggregates(ctx, u, (reason, transient) => fail(ctx, u, reason, transient)) : undefined;
   if (aggregates === null) return;
   if (!quiet) note(ctx, u, "xfer.aggregate", "C5 skipped: a simulator buy was being sent or recorded at the gate");
   // Re-checked after the reads, with no await before the loan is set: two workers never both take one.
@@ -454,6 +562,11 @@ async function hubGate(ctx: SimCtx, u: UserState, peer: UserState): Promise<void
 
 /** The seed gave up: the loan is released only when nothing moved (a landed seed continues). */
 async function abandonSeed(ctx: SimCtx, u: UserState): Promise<boolean> {
+  if (u.tx[XFER_LABELS.S1]?.status === "inflight") {
+    // It may still land: the stage resolves it first (never give a loan up past it).
+    u.data.flags = { ...u.data.flags, seedGiveUp: false };
+    return false;
+  }
   const snap = u.data.xfer?.S1;
   const moved = snap && ctx.chain.everSigned(u, XFER_LABELS.S1) ? await ctx.chain.balances([snap.srcAta as Address, snap.dstAta as Address]) : null;
   if (snap && moved && BigInt(snap.srcBefore) - BigInt(snap.amount) === n(moved[0]) && BigInt(snap.dstBefore) + BigInt(snap.amount) === n(moved[1])) {
@@ -482,7 +595,9 @@ async function hubStep(ctx: SimCtx, u: UserState): Promise<void> {
       if (flag(u, "seedGiveUp") && (await abandonSeed(ctx, u))) return;
       if (!u.tx[XFER_LABELS.S1] && !(await walletPolicy(ctx, u, XFER_LABELS.S1, fail))) return;
       const snap = await snapshot(ctx, u, "S1", { srcOwner: loan.donor, dstOwner: u.wallet, amount: BigInt(loan.units) });
-      await ctx.chain.seedFromDonor(u, XFER_LABELS.S1, snap, a.signer);
+      // Landed: only C1 is left, which needs no donor signer (a resume without SIM_DONOR_KEYPAIR).
+      if (!landed(u, XFER_LABELS.S1)) await ctx.chain.seedFromDonor(u, XFER_LABELS.S1, snap, a.signer);
+      sent(u);
       if (!(await c1(ctx, u, "S1"))) return later(ctx, u, C1_REREAD_MS);
       return go(u, u.plan.xpair === 1 ? "xfer.p1" : "xfer.s2");
     }
@@ -512,6 +627,7 @@ async function hubStep(ctx: SimCtx, u: UserState): Promise<void> {
       }
       const snap = await snapshot(ctx, u, "S2", { srcOwner: u.wallet, dstOwner: peer.wallet, amount: XFER_PEER_UNITS });
       await ctx.chain.transfer(u, XFER_LABELS.S2, snap, { authority: a.signer, payer: a.signer, createDst: true });
+      sent(u);
       if (!(await c1(ctx, u, "S2"))) return later(ctx, u, C1_REREAD_MS);
       if (!flag(u, "c4")) {
         // C4: the site's own receiver pre-check agrees with the chain, which just accepted.
@@ -546,6 +662,7 @@ async function hubStep(ctx: SimCtx, u: UserState): Promise<void> {
       // The P2P units into a platform flow.
       const snap = await snapshot(ctx, u, "S4", { srcOwner: u.wallet, dstOwner: offer.pda, dst: escrow, amount: BigInt(offer.amount) });
       await ctx.chain.depositOffer(u, a.signer, "xo", offer);
+      sent(u);
       const settled = await c1(ctx, u, "S4", async () => {
         const view = await ctx.chain.offer(offer.pda as Address);
         return view?.status === OfferStatus.Open && view.deposited === BigInt(snap.amount) ? null : `expected Open with ${snap.amount} deposited, saw ${describeOffer(view)}`;
@@ -557,12 +674,20 @@ async function hubStep(ctx: SimCtx, u: UserState): Promise<void> {
       const offer = u.data.offers!.xo;
       // E1/E2 need the live escrow; an unwinding hub does not wait for them.
       if (!flag(peer, "escrowProbesDone") && !flag(u, "xferAbort")) return waitOn(ctx, u, peer);
-      if (!u.tx[XFER_LABELS.S5]) await returnPolicy(ctx, u, XFER_LABELS.S5);
       const escrow = u.data.xfer?.S5?.srcAta ?? (await ctx.chain.offer(offer.pda as Address))?.escrow;
-      if (!escrow) throw new Error(`offer ${offer.pda} is missing before cancel_offer`);
-      // cancel_offer pays the whole escrow balance back to the maker.
+      if (!escrow) {
+        // An unwind after a create_offer that never landed (a drop): there is no offer to cancel.
+        if (!landed(u, "xo.create")) {
+          note(ctx, u, "xo.cancel", `offer ${offer.pda} does not exist; nothing to cancel`);
+          return go(u, "xfer.r2");
+        }
+        throw new Error(`offer ${offer.pda} is missing before cancel_offer`);
+      }
+      if (!u.tx[XFER_LABELS.S5]) await returnPolicy(ctx, u, XFER_LABELS.S5);
+      // cancel_offer pays the whole escrow balance back to the maker (nothing, when the deposit never landed).
       const snap = await snapshot(ctx, u, "S5", { srcOwner: offer.pda, src: escrow, dstOwner: u.wallet, amount: "all" });
       await ctx.chain.cancelOffer(u, a.signer, "xo", offer);
+      sent(u);
       const settled = await c1(ctx, u, "S5", async () => {
         const view = await ctx.chain.offer(offer.pda as Address);
         // Only the EscrowMarker closes: the Offer stays (Cancelled, nothing deposited) with its empty escrow.
@@ -574,14 +699,16 @@ async function hubStep(ctx: SimCtx, u: UserState): Promise<void> {
       return go(u, "xfer.r2");
     }
     case "xfer.r2": {
-      // The peer returns first (S6); the hub leaves its ATA alone until then.
-      if (landed(u, XFER_LABELS.S2) && !peer.terminal) return waitOn(ctx, u, peer);
+      // The peer returns first (S6) whenever S2 may have reached it; the hub leaves its ATA alone until then.
+      if (mayHaveMoved(ctx, u, XFER_LABELS.S2) && !peer.terminal) return waitOn(ctx, u, peer);
       const loan = ctx.state.market.loan;
       const lent = u.data.xferSource === "donor" && loan?.hub === u.plan.label;
       if (lent && landed(u, XFER_LABELS.S1)) {
+        if (!u.data.xfer?.S7 && !(await holdsLoan(ctx, u, BigInt(loan.units)))) return;
         if (!u.tx[XFER_LABELS.S7]) await returnPolicy(ctx, u, XFER_LABELS.S7);
         const snap = await snapshot(ctx, u, "S7", { srcOwner: u.wallet, dstOwner: loan.donor, amount: BigInt(loan.units) });
         await ctx.chain.transfer(u, XFER_LABELS.S7, snap, { authority: a.signer, payer: a.signer });
+        sent(u);
         if (!(await c1(ctx, u, "S7"))) return later(ctx, u, C1_REREAD_MS);
       }
       await conservation(ctx, u, peer);
@@ -606,11 +733,23 @@ async function peerStep(ctx: SimCtx, u: UserState): Promise<void> {
   const hub = xferPartner(ctx, u);
   if (!hub) return finish(u, "failed", "transfer hub missing from the roster");
   switch (u.stage) {
-    case "xfer.gate":
+    case "xfer.gate": {
       if (landed(hub, XFER_LABELS.S2)) return go(u, u.plan.xpair === 1 && !flag(hub, "xferAbort") ? "xfer.probes" : "xfer.r1");
+      if (!hub.terminal && hub.stage !== "xfer.r2") return waitOn(ctx, u, hub);
+      // The hub is past S2 without it landing. Leave only when S2 cannot have moved anything.
+      if (hub.tx[XFER_LABELS.S2]?.status === "inflight") {
+        // Only a command's resume resolves a signature whose stage is behind its user.
+        return park(ctx, u, `hub ${hub.plan.label} is past S2 while its signature is unresolved; the next simulator command resolves it`);
+      }
+      if (mayHaveMoved(ctx, hub, XFER_LABELS.S2)) {
+        note(ctx, u, "xfer.gate", `hub ${hub.plan.label} unwound after signing S2; returning whatever arrived`);
+        setFlag(u, "probesDone");
+        setFlag(u, "escrowProbesDone");
+        return go(u, "xfer.r1");
+      }
       if (hub.terminal) return leave(ctx, u, `hub ${hub.plan.label} ended ${hub.terminal} before sending anything`);
-      if (hub.stage === "xfer.r2") return leave(ctx, u, `hub ${hub.plan.label} unwound before S2; nothing to return`);
-      return waitOn(ctx, u, hub);
+      return leave(ctx, u, `hub ${hub.plan.label} unwound before S2; nothing to return`);
+    }
     case "xfer.probes": {
       if (flag(hub, "xferAbort")) return unwind(ctx, u, `hub ${hub.plan.label} unwound`);
       const next = PEER_PROBES.find((id) => !u.data.probes?.[id]);
@@ -620,9 +759,10 @@ async function peerStep(ctx: SimCtx, u: UserState): Promise<void> {
     }
     case "xfer.escrow": {
       const live = landed(hub, XFER_LABELS.S4) && !landed(hub, XFER_LABELS.S5);
-      if (!live) {
+      // An unwinding hub cancels without waiting for E1/E2, so they are not run against a closing escrow.
+      if (!live || flag(hub, "xferAbort")) {
         if (!flag(hub, "xferAbort")) return waitOn(ctx, u, hub);
-        note(ctx, u, "xfer.escrow", `hub ${hub.plan.label} unwound without a live escrow; E1/E2 skipped`);
+        note(ctx, u, "xfer.escrow", `hub ${hub.plan.label} unwound ${live ? "and cancels its offer" : "without a live escrow"}; E1/E2 skipped`);
         setFlag(u, "escrowProbesDone");
         return go(u, "xfer.r1");
       }
@@ -636,11 +776,13 @@ async function peerStep(ctx: SimCtx, u: UserState): Promise<void> {
       if (hub.stage !== "xfer.r2" && !hub.terminal) return waitOn(ctx, u, hub);
       // Drains to zero: the amount is the snapshot's, never a later balance.
       const snap = await snapshot(ctx, u, "S6", { srcOwner: u.wallet, dstOwner: hub.wallet, amount: "all" });
-      if (BigInt(snap.amount) === ZERO) return finish(u, "done", "held nothing to return");
+      const unwound = flag(u, "xferAbort") || flag(hub, "xferAbort");
+      if (BigInt(snap.amount) === ZERO) return unwound ? leave(ctx, u, `hub ${hub.plan.label} unwound; nothing arrived, nothing to return`) : finish(u, "done", "held nothing to return");
       if (!u.tx[XFER_LABELS.S6]) await returnPolicy(ctx, u, XFER_LABELS.S6);
       await ctx.chain.transfer(u, XFER_LABELS.S6, snap, { authority: a.signer, payer: a.signer });
+      sent(u);
       if (!(await c1(ctx, u, "S6"))) return later(ctx, u, C1_REREAD_MS);
-      if (flag(u, "xferAbort") || flag(hub, "xferAbort")) return finish(u, "failed", "unwound after a failure (see the journal); its units are back at the hub");
+      if (unwound) return finish(u, "failed", "unwound after a failure (see the journal); its units are back at the hub");
       return finish(u, "done", "returned its units to the hub");
     }
     default:
@@ -665,11 +807,14 @@ export async function transferStep(ctx: SimCtx, u: UserState): Promise<boolean> 
       return true;
     }
     const message = error instanceof Error ? error.message : "unexpected error";
-    // The executor journals its own SimTxError; anything else here, as advance() does.
+    const transient = isTransient(error);
+    // The executor journals its own SimTxError; anything else here, as advance() does — except an
+    // RPC failure that is retried in its stage: infrastructure, not a finding (design §D.3).
     if (!(error instanceof SimTxError)) {
-      ctx.journal.append({ wave: u.plan.wave, user: u.plan.label, cohort: u.plan.cohort, step: u.stage, kind: "note", outcome: "tx-error", err: message.slice(0, 500) });
+      const outcome = transient && willRetry(u) ? "info" : "tx-error";
+      ctx.journal.append({ wave: u.plan.wave, user: u.plan.label, cohort: u.plan.cohort, step: u.stage, kind: "note", outcome, err: message.slice(0, 500) });
     }
-    fail(ctx, u, message.slice(0, 200));
+    fail(ctx, u, message.slice(0, 200), transient);
   }
   return true;
 }

@@ -19,7 +19,9 @@
  * lock is held while a loan is out (taken at start when one is outstanding,
  * else just before the loan) and released on exit only when no signature is
  * unresolved. One simulator process at a time (sim.lock): wave 6 runs when no
- * other simulator command does; `watch` then continues it with the others.
+ * other simulator command does; `watch` then continues it with the others
+ * (with SIM_DONOR_KEYPAIR until both pairs borrowed: a pair yet to borrow in a
+ * run that lent waits for the key, never switching to its own buy).
  */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
@@ -274,6 +276,7 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
       "plan" in owner ? { cohort: (owner as UserState).plan.cohort, wave: (owner as UserState).plan.wave } : { cohort: "setup", wave: null };
     const resolved = await exec.resolveAll(state, metaOf);
     if (resolved.pending) log(`resume: ${resolved.pending} signature(s) still unresolved; their steps wait`);
+    if (resolved.orphans) log(`resume: ${resolved.orphans} earlier signature(s) of re-sent steps still unresolved; the chain lock is kept until they are`);
 
     await assertMarket(rpc, e2e);
     const market: E2eAddrs = { ...e2e, kycRegistry: await resolveKycRegistry(rpc, cfg.kycRegistry, e2e.kycAuthority) };

@@ -181,6 +181,50 @@ describe("the tx journal agrees with state.json (the chain CLI lock rule)", () =
     expect(exec.settled(state)).toBe(true);
     expect(readJournal(txJournal.path).at(-1)).toMatchObject({ event: "recover", step: "market:open.9002", status: "finalized" });
   });
+
+  it("closes an earlier signature of a re-sent step on resume (an older build settled it without a journal event), so the lock can go", async () => {
+    const { chain, exec, journal, txJournal } = await setup();
+    const state = newState("abc123", CLUSTER_GENESIS_HASHES.devnet);
+    const expired = "7".repeat(88);
+    const young = "9".repeat(88);
+    const resent = "8".repeat(88);
+    // sol.9: the first signature was resolved as dropped by the older build, then the step was sent again.
+    txJournal.append({ event: "signed", step: "funding:sol.9", sig: expired, lastValidBlockHeight: "10" });
+    txJournal.append({ event: "signed", step: "funding:sol.9", sig: resent, lastValidBlockHeight: "5000" });
+    txJournal.append({ event: "status", step: "funding:sol.9", sig: resent, status: "finalized" });
+    state.funding.tx["sol.9"] = { status: "landed", sig: resent, at: "" };
+    // sol.10: an earlier signature still inside its blockhash window.
+    txJournal.append({ event: "signed", step: "funding:sol.10", sig: young, lastValidBlockHeight: "5000" });
+    state.funding.tx["sol.10"] = { status: "landed", sig: null, at: "" };
+    expect(exec.settled(state)).toBe(false);
+    expect(await exec.resolveAll(state, () => meta)).toEqual({ pending: 0, orphans: 1 });
+    expect(readJournal(txJournal.path).filter((e) => e.event === "recover").map((e) => [e.step, e.sig, e.status])).toEqual([["funding:sol.9", expired, "dropped"]]);
+    // The state records belong to the other signatures and are left alone.
+    expect(state.funding.tx["sol.9"]).toMatchObject({ status: "landed", sig: resent });
+    expect(state.funding.tx["sol.10"]).toMatchObject({ status: "landed", sig: null });
+    expect(exec.settled(state)).toBe(false); // sol.10's earlier signature could still land
+    // It landed after all (the null record was a false drop settled from its effect): closed, no finding.
+    chain.statuses.set(young, { slot: 1, err: null, confirmationStatus: "finalized" } as never);
+    expect(await exec.resolveAll(state, () => meta)).toEqual({ pending: 0, orphans: 0 });
+    expect(exec.settled(state)).toBe(true);
+    expect(journal.entries.filter((e) => e.outcome === "tx-error")).toEqual([]);
+  });
+
+  it("an earlier signature that finalized beside another landed one of the same step is a possible double send", async () => {
+    const { chain, exec, journal, txJournal } = await setup();
+    const state = newState("abc123", CLUSTER_GENESIS_HASHES.devnet);
+    const first = "6".repeat(88);
+    const second = "5".repeat(88);
+    txJournal.append({ event: "signed", step: "funding:sol.11", sig: first, lastValidBlockHeight: "5000" });
+    txJournal.append({ event: "signed", step: "funding:sol.11", sig: second, lastValidBlockHeight: "5000" });
+    txJournal.append({ event: "status", step: "funding:sol.11", sig: second, status: "finalized" });
+    state.funding.tx["sol.11"] = { status: "landed", sig: second, at: "" };
+    chain.statuses.set(first, { slot: 1, err: null, confirmationStatus: "finalized" } as never);
+    expect(await exec.resolveAll(state, () => meta)).toEqual({ pending: 0, orphans: 0 });
+    expect(exec.settled(state)).toBe(true);
+    expect(journal.entries.filter((e) => e.outcome === "tx-error").map((e) => [e.step, e.txSig])).toEqual([["sol.11", first]]);
+    expect(journal.entries[0].err).toMatch(/finalized too .*check for a double send/);
+  });
 });
 
 describe("transfer probes and sends (cohort X)", () => {
@@ -285,5 +329,8 @@ describe("transfer probes and sends (cohort X)", () => {
     const u = { ...newUserState(buildRoster().find((p) => p.label === "u101")!, hub.address) };
     const snap = { srcOwner: mint, srcAta: mint, dstOwner: hub.address, dstAta: mint, amount: "3", srcBefore: "5", dstBefore: "0" };
     await expect(ops.seedFromDonor(u, "xfer.s1", snap, hub)).rejects.toThrow(/donor signer is not loaded/);
+    // A landed seed needs no signer: a resume without SIM_DONOR_KEYPAIR goes on (to its C1 re-reads).
+    u.tx["xfer.s1"] = { status: "landed", sig: "4".repeat(88), at: "" };
+    await expect(ops.seedFromDonor(u, "xfer.s1", snap, hub)).resolves.toBeUndefined();
   });
 });

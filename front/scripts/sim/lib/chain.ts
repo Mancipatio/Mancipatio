@@ -67,7 +67,7 @@ import { buildDocumentedPurchase } from "@/lib/purchase-builder";
 import { TOKEN_2022, fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { chainNow } from "@/scripts/chain/lib/e2e/clock";
 import { classifyFailure, describeFailure, type ChainFailure } from "@/scripts/chain/lib/e2e/errors";
-import { type Journal, readJournal, unresolvedSignatures } from "@/scripts/chain/lib/journal";
+import { type InFlight, type Journal, readJournal, unresolvedSignatures } from "@/scripts/chain/lib/journal";
 import { createChainRpc, type ChainRpc, type ChainRpcClients } from "@/scripts/chain/lib/rpc";
 import { toJson } from "@/scripts/chain/lib/safety";
 import {
@@ -265,19 +265,25 @@ export class TxExecutor {
 
   /**
    * Resolves every inflight signature in one pass (≤256 per getSignatureStatuses
-   * call), plus any signature the tx journal shows as unresolved.
+   * call), plus any signature the tx journal shows as unresolved: one state.json
+   * lost, and an earlier signature of a step that was re-sent since (`orphans`).
    */
-  async resolveAll(state: SimState, metaOf: (owner: TxOwner) => OwnerMeta): Promise<{ pending: number }> {
+  async resolveAll(state: SimState, metaOf: (owner: TxOwner) => OwnerMeta): Promise<{ pending: number; orphans: number }> {
     const owners: TxOwner[] = [state.market, state.funding, ...Object.values(state.users)];
     const byLabel = new Map(owners.map((o) => [o.label, o]));
     this.reconcileJournal(byLabel);
-    // A signature the tx journal saw signed but state.json lost (crash between the two writes).
+    const orphans: InFlight[] = [];
     for (const inflight of unresolvedSignatures(readJournal(this.d.txJournal.path))) {
       const [ownerLabel, ...rest] = inflight.step.split(":");
       const owner = byLabel.get(ownerLabel);
       const label = rest.join(":");
       if (owner && label && !owner.tx[label]) {
+        // Signed, but state.json lost it (crash between the two writes).
         owner.tx[label] = { status: "inflight", sig: inflight.sig, lvbh: inflight.lastValidBlockHeight.toString(), at: new Date().toISOString() };
+      } else if (!owner || !label || owner.tx[label].sig !== inflight.sig) {
+        // The step now holds another signature: an older build settled this one
+        // (dropped, failed) without a journal event and the step was sent again.
+        orphans.push(inflight);
       }
     }
     const pending = owners.flatMap((owner) =>
@@ -285,7 +291,7 @@ export class TxExecutor {
         .filter(([, r]) => r.status === "inflight" && r.sig)
         .map(([label, record]) => ({ owner, label, record })),
     );
-    if (!pending.length) return { pending: 0 };
+    if (!pending.length && !orphans.length) return { pending: 0, orphans: 0 };
     let height: bigint | null = null;
     try {
       height = await this.d.rpc.getBlockHeight({ commitment: "finalized" }).send();
@@ -303,7 +309,44 @@ export class TxExecutor {
         if (result === "pending") left += 1;
       });
     }
-    return { pending: left };
+    let orphansLeft = 0;
+    for (let i = 0; i < orphans.length; i += 256) {
+      const batch = orphans.slice(i, i + 256);
+      const { value } = await this.d.rpc
+        .getSignatureStatuses(batch.map((o) => o.sig as Signature), { searchTransactionHistory: true })
+        .send();
+      batch.forEach((o, j) => {
+        if (!this.closeOrphan(byLabel, metaOf, o, value[j] as StatusValue, height)) orphansLeft += 1;
+      });
+    }
+    return { pending: left, orphans: orphansLeft };
+  }
+
+  /**
+   * A terminal tx-journal event for an orphaned signature (its step's state
+   * record belongs to another one and is left alone). False while it could
+   * still land. One that finalized next to another landed signature of the
+   * same step is a possible double send: a finding.
+   */
+  private closeOrphan(byLabel: Map<string, TxOwner>, metaOf: (owner: TxOwner) => OwnerMeta, orphan: InFlight, status: StatusValue, height: bigint | null): boolean {
+    let outcome: "finalized" | "failed" | "dropped" | null = null;
+    if (status?.err) outcome = "failed";
+    else if (status?.confirmationStatus === "finalized") outcome = "finalized";
+    else if (!status && height !== null && height > orphan.lastValidBlockHeight) outcome = "dropped";
+    if (!outcome) return false;
+    this.d.txJournal.append({ event: "recover", step: orphan.step, sig: orphan.sig, status: outcome });
+    const [ownerLabel, ...rest] = orphan.step.split(":");
+    const owner = byLabel.get(ownerLabel);
+    const label = rest.join(":");
+    const record = owner?.tx[label];
+    if (owner && outcome === "finalized" && record?.sig && record.status === "landed") {
+      this.note(owner, metaOf(owner), label, {
+        outcome: "tx-error",
+        sig: orphan.sig,
+        err: `an earlier signature of ${label} finalized too (the step holds ${record.sig}): check for a double send`,
+      });
+    }
+    return true;
   }
 
   /** True when this owner's step already landed. */
@@ -843,6 +886,8 @@ export class SimChainOps implements ChainOps {
   }
 
   async seedFromDonor(u: UserState, label: string, snap: XferSnapshot, payer: KeyPairSigner): Promise<void> {
+    // A landed seed needs no signer: a resume without SIM_DONOR_KEYPAIR goes on to its C1 re-reads.
+    if (this.exec.landed(u, label)) return;
     if (!this.donorSigner || snap.srcOwner !== this.donorSigner.address) {
       throw new SimRetryLater(`${label}: the donor signer is not loaded (SIM_DONOR_KEYPAIR)`);
     }

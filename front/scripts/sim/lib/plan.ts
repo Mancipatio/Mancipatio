@@ -205,8 +205,8 @@ function transferLines(s: PlanSummary): string[] {
     `transfers (wave ${XFER_WAVE}, cohort X, class A, Open on devnet; direct transfer_checked between holders; no owner task):`,
     `  pair 1 ${one.hub} → ${one.peer}: S1 loan of ${XFER_UNITS} from e2e buyer3 6uNW… · P1 · S2 ${XFER_PEER_UNITS} (creates ${one.peer}'s ATA) · ${PROBES.filter((d) => d.stage === "xfer.probes").length} probes · S3 create_offer · S4 deposit 1 P2P unit · E1 E2 · S5 cancel · S6 ${XFER_PEER_UNITS} back · S7 ${XFER_UNITS} back to the donor`,
     `  pair 2 ${two.hub} → ${two.peer}: its own buy of ${XFER_UNITS} while /api/launchpad/terms answers 200, else a loan once pair 1 returned its own · S2 ${XFER_PEER_UNITS} · S6 ${XFER_PEER_UNITS} back · S7 (loan only); the own-buy route swaps S1/S7 for the buy flow (buy.prep? + buy, 1–2 signed record-purchase writes)`,
-    `  fallback: a hub the donor cannot lend to (SIM_DONOR_KEYPAIR unset, fewer than ${XFER_UNITS} units) buys ${XFER_UNITS} on sale [1]; while the terms answer 409 it waits on the whitepaper task above`,
-    `  a failure after the units are out goes straight to the return legs (S5, S6, S7), which never give up; one loan at a time, and the chain CLI's devnet lock is held while it is out`,
+    `  fallback: a hub the donor cannot lend to (no SIM_DONOR_KEYPAIR in a run that never lent, fewer than ${XFER_UNITS} units) buys ${XFER_UNITS} on sale [1]; while the terms answer 409 it waits on the whitepaper task above. Once the run lent, a command without the key makes a pair yet to borrow wait for it`,
+    `  a failure after the units are out goes straight to the return legs (S5, S6, S7), which never give up — never past an unresolved send, and an RPC or 5xx hiccup is retried first; one loan at a time, and the chain CLI's devnet lock is held while it is out`,
     `  probes (${PROBES.length}, signed with sigVerify and simulated, never sent):`,
     ...PROBES.map((d) => `    ${d.id.padEnd(3)} ${d.what} → ${describeExpect(d.expect)}`),
     "  checks after every send: C1 the balances /portfolio renders (re-read at +10 s/+20 s) · C1b a new ATA has ImmutableOwner · C2 the offer escrow (S4, S5) · C3 loan back and donor+hub+peer unchanged · C4 checkReceiverEligibility agrees · C5 commitment-aggregate unchanged · C6 the wallet policy",
@@ -248,7 +248,7 @@ export function renderPlan(s: PlanSummary): string {
     "pilot (from front/):",
     "  SIM_CMD=pilot SIM_SEND=1 CHAIN_NETWORK=devnet CHAIN_RPC_URL=<devnet RPC> CHAIN_RPS=1 npm run sim",
     "then review in the admin UI, `SIM_CMD=watch …` until the pilot users finish, `SIM_CMD=report npm run sim` (0 unexpected), then SIM_CMD=wave SIM_WAVE=1…5.",
-    `transfers: SIM_CMD=wave SIM_WAVE=${XFER_WAVE} (plus SIM_DONOR_KEYPAIR=<e2e buyer3 key> for the loan) while no other simulator command runs; \`watch\` then continues it.`,
+    `transfers: SIM_CMD=wave SIM_WAVE=${XFER_WAVE} (plus SIM_DONOR_KEYPAIR=<e2e buyer3 key> for the loan) while no other simulator command runs; \`watch\` then continues it (keep SIM_DONOR_KEYPAIR set until both pairs have borrowed: the owner queue asks for it otherwise).`,
   ];
   return lines.join("\n");
 }

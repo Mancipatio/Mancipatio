@@ -14,13 +14,22 @@ import { buyStep } from "./investor";
 import { issuerStep } from "./issuer";
 import { dossierStep } from "./kyc";
 import { traderStep } from "./trader";
-import { transferStep } from "./transfer";
+import { releaseMirrors, transferStep } from "./transfer";
 
 // transferStep handles its own failures (cohort X never strands lent units).
 const MACHINES = [setupStep, dossierStep, issuerStep, buyStep, traderStep, edgeStep, transferStep];
 
 export async function advance(ctx: SimCtx, u: UserState): Promise<void> {
   if (u.terminal) return;
+  try {
+    await step(ctx, u);
+  } finally {
+    // Cohort X: a user that stopped waiting (any machine, the own route's buy included) releases its mirrors.
+    releaseMirrors(ctx, u);
+  }
+}
+
+async function step(ctx: SimCtx, u: UserState): Promise<void> {
   try {
     for (const machine of MACHINES) if (await machine(ctx, u)) return;
     finish(u, "failed", `unknown stage ${u.stage}`);
