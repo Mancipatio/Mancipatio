@@ -1,4 +1,6 @@
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
@@ -11,6 +13,7 @@ import {
   loadHotSigner,
   readChainConfig,
   repoRoot,
+  sourceTreeDirty,
   type ChainEnv,
 } from "@/scripts/chain/lib/safety";
 import { key, tempDir, writeKeypair } from "./helpers/chain-fake";
@@ -223,5 +226,28 @@ describe("release-source guard (mainnet, C10)", () => {
     expect(() => assertReleaseSource({ network: "mainnet", root, localIdl: idl, releaseIdl: idl, dirty: [] })).not.toThrow();
     // Off mainnet it is not enforced.
     expect(() => assertReleaseSource({ network: "devnet", root, localIdl: idl, releaseIdl: null, dirty: ["x"] })).not.toThrow();
+  });
+});
+
+describe("evidence: source tree state (6.1 review)", () => {
+  it("lists uncommitted changes under the source-integrity paths only, [] when clean, null outside git", () => {
+    const repo = fs.mkdtempSync(path.join(dir, "git-"));
+    const git = (...args: string[]) => {
+      const result = spawnSync("git", ["-c", "user.name=t", "-c", "user.email=t@example.test", ...args], { cwd: repo, encoding: "utf8" });
+      expect(result.status, result.stderr).toBe(0);
+    };
+    git("init", "-q");
+    fs.mkdirSync(path.join(repo, "front", "scripts", "chain"), { recursive: true });
+    fs.writeFileSync(path.join(repo, "front", "scripts", "chain", "tool.ts"), "export {};\n");
+    fs.writeFileSync(path.join(repo, "notes.txt"), "a\n");
+    git("add", ".");
+    git("commit", "-q", "-m", "init");
+    expect(sourceTreeDirty(repo)).toEqual([]);
+    fs.writeFileSync(path.join(repo, "notes.txt"), "b\n");
+    expect(sourceTreeDirty(repo)).toEqual([]);
+    fs.writeFileSync(path.join(repo, "front", "scripts", "chain", "tool.ts"), "export const x = 1;\n");
+    expect(sourceTreeDirty(repo)).toEqual([" M front/scripts/chain/tool.ts"]);
+    const outside = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "no-git-"));
+    expect(sourceTreeDirty(outside)).toBeNull();
   });
 });

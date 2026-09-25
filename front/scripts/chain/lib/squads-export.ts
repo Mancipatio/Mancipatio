@@ -33,11 +33,9 @@ import { PROGRAM_IDS, resolveIdlSources } from "./idl-plan";
 import {
   LOADER_V3,
   MINIMUM_EXTEND_PROGRAM_BYTES,
-  PROGRAMDATA_METADATA_SIZE,
   comparePayload,
   decodeLoaderBuffer,
   decodeProgramData,
-  extendProgramCheckedInstruction,
   programDataAddress,
   setUpgradeAuthorityInstruction,
   upgradeInstruction,
@@ -57,7 +55,7 @@ import {
   pmTrim,
 } from "./program-metadata";
 import { loadRelease, releaseEvidence, type Release } from "./release";
-import { MAX_PROGRAM_DATA_LEN, loadRoleMap, type RoleMap } from "./role-map";
+import { loadRoleMap, type RoleMap } from "./role-map";
 import type { ChainRpc } from "./rpc";
 import { ChainGateError, assertReleaseSource, readLocalIdl, sha256Hex, type ProgramName } from "./safety";
 import {
@@ -68,6 +66,7 @@ import {
   inspectExternalTransaction,
   type ExternalInspection,
   splitBySize,
+  verifyParamProblems,
 } from "./squads";
 import type { LatestBlockhash } from "./tx";
 import type { Network } from "@/lib/network";
@@ -191,7 +190,9 @@ export async function planSquadsOp(input: {
         throw new ChainGateError(`${name}: buffer bytes differ from the Release .so`);
       }
       if (programData.payload.length < release.so[name].length) {
-        throw new ChainGateError(`${name}: ProgramData capacity ${programData.payload.length} B < Release .so ${release.so[name].length} B; export extend-program first`);
+        throw new ChainGateError(
+          `${name}: ProgramData capacity ${programData.payload.length} B < Release .so ${release.so[name].length} B; extend it first with solana program extend (bufferWriter pays, runbook §9.3)`,
+        );
       }
       preconditions.push(`${name}: buffer ${buffer} owned by the loader, authority = vault, bytes = Release .so (sha256 ${sha256Hex(release.so[name])})`);
       preconditions.push(`${name}: ProgramData capacity ${programData.payload.length} B ≥ ${release.so[name].length} B`);
@@ -292,22 +293,19 @@ export async function planSquadsOp(input: {
   }
 
   if (op === "extend-program") {
+    // EXTERNAL #2, closed by the 6.1 rehearsal (Agave 4.3.0, mainnet feature
+    // set): a vault transaction runs its instructions as CPIs, and the
+    // runtime lets loader-v3 ExtendProgram through CPI only as
+    // ExtendProgramChecked once `enable_extend_program_checked` is active.
+    // That feature is abandoned (ExtendProgCheckedWi11BeDe1eted…), so both
+    // forms fail with "not supported by inner instructions". The unchecked
+    // ExtendProgram needs no authority: extend directly instead.
     const name = programName(params.program);
-    const bytes = params.bytes;
-    if (typeof bytes !== "number" || !Number.isInteger(bytes) || bytes < MINIMUM_EXTEND_PROGRAM_BYTES) {
-      throw new ChainGateError(`extend-program bytes must be an integer ≥ ${MINIMUM_EXTEND_PROGRAM_BYTES} (SIMD-0431)`);
-    }
-    const programData = await uaIsVault(rpc, name, vault, preconditions);
-    const room = MAX_PROGRAM_DATA_LEN - PROGRAMDATA_METADATA_SIZE - programData.payload.length;
-    if (bytes > room) {
-      throw new ChainGateError(`extend-program bytes ${bytes} exceed the ${room} B left under the 10 MiB account limit`);
-    }
-    ixs.push(
-      await extendProgramCheckedInstruction({ program: PROGRAM_IDS[name], authority: vaultSigner, payer: vaultSigner, additionalBytes: bytes }),
+    throw new ChainGateError(
+      `A Squads vault cannot extend ${name}: loader-v3 ExtendProgram is not callable through CPI on mainnet. ` +
+        `Extend it directly (permissionless, the payer signs): solana program extend ${PROGRAM_IDS[name]} <bytes ≥ ${MINIMUM_EXTEND_PROGRAM_BYTES}> ` +
+        "--keypair <bufferWriter> --payer <bufferWriter>; it takes no priority fee, so check the Data Length before retrying (runbook §9.3)",
     );
-    postconditions.push(`${name}: ProgramData capacity ${programData.payload.length + bytes} B`);
-    postconditions.push("the vault pays the extra rent (fund it first)");
-    return { ixs, preconditions, postconditions, ordered: false };
   }
 
   if (op === "metadata-set-authority") {
@@ -442,6 +440,42 @@ export async function planSquadsOp(input: {
       ? `System transfers only into the derived verify PDA: ${external.transfers.map((t) => `${t.lamports} lamports → ${t.destination} (PDA of ${t.program})`).join("; ")}`
       : "no top-level System instruction",
   );
+  // The build arguments OtterSec's remote build will use (EXTERNAL #5): they
+  // must reproduce the Release, so they are checked against its hashes.txt.
+  const names = new Map<Address, ProgramName>(
+    (Object.entries(PROGRAM_IDS) as [ProgramName, Address][]).map(([name, id]) => [id, name]),
+  );
+  for (const v of external.verifications) {
+    const name = names.get(v.program)!;
+    if (v.kind === "close") {
+      preconditions.push(`${name}: close the verify PDA ${v.pda}`);
+      continue;
+    }
+    const problems = verifyParamProblems(v.params, {
+      libraryName: name,
+      commit: release?.commit ?? null,
+      baseImage: release?.baseImage ?? null,
+    });
+    const programDataAccount = await fetchRawAccount(rpc, await programDataAddress(v.program));
+    const programData =
+      programDataAccount && programDataAccount.owner === LOADER_V3 ? decodeProgramData(programDataAccount.data) : null;
+    if (!programData) problems.push("the program's ProgramData is missing");
+    else if (v.params.deployedSlot !== programData.slot) {
+      problems.push(`deployed_slot ${v.params.deployedSlot} is not the ProgramData's last deploy slot ${programData.slot} (export again after the upgrade)`);
+    }
+    if (problems.length) throw new ChainGateError(`${name} verify ${v.kind}: ${problems.join("; ")}`);
+    preconditions.push(
+      `${name} verify ${v.kind}: ${v.params.gitUrl} at ${v.params.commit}, build args [${v.params.args.join(" ")}], deployed_slot ${v.params.deployedSlot}, solana-verify ${v.params.version}` +
+        (release ? " (commit and base image = the Release's hashes.txt)" : " (not checked against a Release: no CHAIN_RELEASE_DIR)"),
+    );
+  }
+  if (external.droppedComputeBudget.length) {
+    preconditions.push(
+      `dropped ${external.droppedComputeBudget
+        .map((cb) => (cb.kind === "price" ? `SetComputeUnitPrice(${cb.microLamports})` : `SetComputeUnitLimit(${cb.units})`))
+        .join(", ")} of the external transaction: a no-op inside a vault transaction; the executing member sets the price`,
+    );
+  }
   postconditions.push("the verify PDA names the vault as uploader (EXTERNAL #5)");
   return { ixs: external.instructions, preconditions, postconditions, ordered: true };
 }

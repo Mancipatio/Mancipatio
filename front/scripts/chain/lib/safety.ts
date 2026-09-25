@@ -519,6 +519,20 @@ export function dirtySourcePaths(root: string): string[] {
 }
 
 /**
+ * Evidence field `sourceTreeDirty`: the uncommitted changes (git porcelain
+ * lines, repository-relative) under SOURCE_INTEGRITY_PATHS, so an evidence
+ * file shows whether `headCommit` alone describes the code that ran. `[]`
+ * when clean, `null` when git cannot tell.
+ */
+export function sourceTreeDirty(root: string): string[] | null {
+  try {
+    return dirtySourcePaths(root);
+  } catch {
+    return null;
+  }
+}
+
+/**
  * On mainnet the committed IDL must be byte-identical to the Release IDL and
  * front/idl, front/lib and front/scripts/chain must be clean. CI
  * `check:codegen` then ties the SDK to that IDL.

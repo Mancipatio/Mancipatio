@@ -43,7 +43,13 @@ export const LoaderTag = {
 export const BUFFER_METADATA_SIZE = 37;
 export const PROGRAM_SIZE = 36;
 export const PROGRAMDATA_METADATA_SIZE = 45;
-/** SIMD-0431: once active, an extend must add at least this many bytes. */
+/**
+ * SIMD-0431 (active on mainnet since slot 432864000): an ExtendProgram must add
+ * at least this many bytes (or reach the maximum size). The chain CLI never
+ * builds ExtendProgram: loader-v3 refuses it through CPI (so a Squads vault
+ * cannot extend), and the unchecked instruction needs no authority, so the
+ * operator extends with `solana program extend` (runbook §9.3).
+ */
 export const MINIMUM_EXTEND_PROGRAM_BYTES = 10_240;
 
 const addressDecoder = getAddressDecoder();
@@ -183,31 +189,6 @@ export function setBufferAuthorityInstruction(input: {
       meta(input.next, AccountRole.READONLY),
     ],
     data: tagData(LoaderTag.SetAuthority),
-  };
-}
-
-/**
- * `extend_program_checked` (tag 9): [programData w, program w, authority ws,
- * system?, payer ws?]. The crate marks the authority writable.
- */
-export async function extendProgramCheckedInstruction(input: {
-  program: Address;
-  authority: TransactionSigner;
-  payer?: TransactionSigner;
-  additionalBytes: number;
-}): Promise<Instruction> {
-  const accounts: (AccountMeta | AccountSignerMeta)[] = [
-    meta(await programDataAddress(input.program), AccountRole.WRITABLE),
-    meta(input.program, AccountRole.WRITABLE),
-    signerMeta(input.authority, true),
-  ];
-  if (input.payer) {
-    accounts.push(meta(SYSTEM_PROGRAM, AccountRole.READONLY), signerMeta(input.payer, true));
-  }
-  return {
-    programAddress: LOADER_V3,
-    accounts,
-    data: tagData(LoaderTag.ExtendProgramChecked, input.additionalBytes),
   };
 }
 

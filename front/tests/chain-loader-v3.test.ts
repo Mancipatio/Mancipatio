@@ -3,7 +3,6 @@ import { describe, expect, it } from "vitest";
 import {
   LOADER_V3,
   LoaderTag,
-  SYSTEM_PROGRAM,
   SYSVAR_CLOCK,
   SYSVAR_RENT,
   closeInstruction,
@@ -11,7 +10,6 @@ import {
   decodeLoaderBuffer,
   decodeProgramAccount,
   decodeProgramData,
-  extendProgramCheckedInstruction,
   programDataAddress,
   setBufferAuthorityInstruction,
   setUpgradeAuthorityInstruction,
@@ -25,8 +23,8 @@ const authority = createNoopSigner(key(7));
 
 // solana-loader-v3-interface 6.1.1 (program/Cargo.lock), src/instruction.rs:
 // bincode u32 LE enum tags and the account lists of upgrade(),
-// set_upgrade_authority(), set_buffer_authority(), extend_program_checked()
-// and close_any().
+// set_upgrade_authority(), set_buffer_authority() and close_any(). No
+// ExtendProgram encoder: loader-v3 refuses it through CPI (6.1 rehearsal).
 describe("loader-v3 golden bytes (6.1.1)", () => {
   it("documents the enum tags", () => {
     expect(LoaderTag).toEqual({
@@ -71,18 +69,6 @@ describe("loader-v3 golden bytes (6.1.1)", () => {
     const buffer = setBufferAuthorityInstruction({ buffer: key(8), current: authority, next: key(10) });
     expect(hex(buffer)).toBe("04000000");
     expect(metas(buffer)[0]).toEqual([key(8), AccountRole.WRITABLE]);
-  });
-
-  it("ExtendProgramChecked = 09000000 + u32 bytes, authority writable signer, optional system + payer", async () => {
-    const ix = await extendProgramCheckedInstruction({ program: HOOK, authority, payer: authority, additionalBytes: 10_240 });
-    expect(hex(ix)).toBe("0900000000280000");
-    expect(metas(ix)).toEqual([
-      [await programDataAddress(HOOK), AccountRole.WRITABLE],
-      [HOOK, AccountRole.WRITABLE],
-      [key(7), AccountRole.WRITABLE_SIGNER],
-      [SYSTEM_PROGRAM, AccountRole.READONLY],
-      [key(7), AccountRole.WRITABLE_SIGNER],
-    ]);
   });
 
   it("Close = 05000000 with [account w, recipient w, authority s, program w?]", () => {

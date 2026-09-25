@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { getAddressEncoder } from "@solana/kit";
+import { getAddressEncoder, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
 import { getAuthorityTransferEncoder } from "@/lib/generated/asset_registry";
 import { bootstrapTool } from "@/scripts/chain/lib/bootstrap-plan";
@@ -17,7 +17,14 @@ import {
 import { LOADER_V3 } from "@/scripts/chain/lib/loader-v3";
 import { PM_HEADER_LENGTH, PM_PROGRAM } from "@/scripts/chain/lib/program-metadata";
 import type { RoleMap } from "@/scripts/chain/lib/role-map";
-import { SQUADS_V4_PROGRAM } from "@/scripts/chain/lib/squads";
+import {
+  SQUADS_V4_PROGRAM,
+  decodeMultisig,
+  decodeProposal,
+  encodeMultisig,
+  encodeProposal,
+  squadsProposalPda,
+} from "@/scripts/chain/lib/squads";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
 import { CAPACITY, deps, env, root, rpcFor, sendEnv, world } from "./helpers/chain-world";
 
@@ -69,6 +76,7 @@ function clean(map: RoleMap): Inventory {
     drift: { custodyWithoutAdmin: [], rightsWithoutAdmin: [], saleAuthorityDrift: [], payoutFounderDrift: [] },
     buffers: { loader: [], pm: [], scanErrors: [] },
     squads: { ok: true, owner: SQUADS_V4_PROGRAM, vaultDerivationOk: true, decoded: null, errors: [] },
+    squadsProposals: { fromIndex: "1", toIndex: "0", open: [], errors: [] },
     lockPresent: false,
     decodeErrors: [],
   };
@@ -202,6 +210,42 @@ describe("inventory findings (§6)", () => {
   });
 });
 
+describe("Squads proposals (6.1 rehearsal: failed executions stay Approved)", () => {
+  it("an Approved proposal is a gate (cancel it); an Active one a warning; a stale Active one only evidence", async () => {
+    const { map } = await world();
+    const withOpen = (open: NonNullable<Inventory["squadsProposals"]>["open"]) => {
+      const inv = clean(map);
+      inv.squadsProposals = { fromIndex: "1", toIndex: "9", open, errors: [] };
+      return inv;
+    };
+    const approved = withOpen([{ transactionIndex: "1", proposal: key(150), status: "Approved", approvals: 2, stale: true }]);
+    expect(phases.map((phase) => bySeverity(inventoryFindings(approved, map, phase), "squads-proposal"))).toEqual([["warning"], ["blocker"], ["blocker"]]);
+    expect(inventoryFindings(approved, map, "handed-over")[0].message).toBe(
+      `Squads proposal #1 ${key(150)} is Approved (2 approvals) and can still be executed: cancel it`,
+    );
+    const active = withOpen([{ transactionIndex: "2", proposal: key(151), status: "Active", approvals: 1, stale: false }]);
+    expect(phases.map((phase) => bySeverity(inventoryFindings(active, map, phase), "squads-proposal"))).toEqual([["warning"], ["warning"], ["warning"]]);
+    const staleActive = withOpen([{ transactionIndex: "2", proposal: key(151), status: "Active", approvals: 1, stale: true }]);
+    expect(inventoryFindings(staleActive, map, "handed-over")).toEqual([]);
+    const broken = clean(map);
+    broken.squadsProposals = { fromIndex: "1", toIndex: "1", open: [], errors: ["proposal #1 x: owner is not the Squads v4 program"] };
+    expect(bySeverity(inventoryFindings(broken, map, "handed-over"), "squads-proposal")).toEqual(["warning"]);
+  });
+
+  it("decodes v4 Proposal accounts (every status) and rejects foreign data", () => {
+    for (const status of ["Draft", "Active", "Rejected", "Approved", "Executing", "Executed", "Cancelled"] as const) {
+      const value = { multisig: key(160), transactionIndex: BigInt(7), status, approved: [key(161), key(162)], rejected: [], cancelled: [key(163)] };
+      expect(decodeProposal(encodeProposal({ ...value, timestamp: BigInt(1_700_000_000) }))).toEqual(value);
+    }
+    const data = encodeProposal({ multisig: key(160), transactionIndex: BigInt(1), status: "Approved", approved: [], rejected: [], cancelled: [] });
+    expect(() => decodeProposal(Uint8Array.of(0, ...data.subarray(1)))).toThrow(/Not a Squads v4 Proposal/);
+    expect(() => decodeProposal(data.subarray(0, data.length - 2))).toThrow(/truncated/);
+    const badStatus = Uint8Array.from(data);
+    badStatus[48] = 9;
+    expect(() => decodeProposal(badStatus)).toThrow(/Unknown proposal status/);
+  });
+});
+
 describe("inventory collection on a live-shaped chain", () => {
   it("collects admins, proposals, transfers (stale flagged), buffers and the Squads decode", async () => {
     const w = await world();
@@ -246,16 +290,49 @@ describe("inventory collection on a live-shaped chain", () => {
     expect(findings.find((f) => f.code === "stale-transfer")?.severity).toBe("warning");
   });
 
+  it("lists the multisig's open proposals: Approved (also stale) and Active, not the final ones", async () => {
+    const w = await world();
+    const current = w.chain.accounts.get(w.keys.multisig)!;
+    const decoded = decodeMultisig(current.data);
+    const data = encodeMultisig({ ...decoded, transactionIndex: BigInt(5), staleTransactionIndex: BigInt(1) });
+    w.chain.set(w.keys.multisig, { ...current, data });
+    const statuses = { 1: "Approved", 2: "Executed", 3: "Cancelled", 4: "Active" } as const;
+    for (const [index, status] of Object.entries(statuses)) {
+      const pda = await squadsProposalPda(w.keys.multisig, BigInt(index));
+      const proposal = encodeProposal({ multisig: w.keys.multisig, transactionIndex: BigInt(index), status, approved: [w.keys.members[0]], rejected: [], cancelled: [] });
+      w.chain.set(pda, { owner: SQUADS_V4_PROGRAM, lamports: rent(proposal.length), data: proposal });
+    }
+    // #5 has no Proposal account (never proposed or closed): skipped.
+    const idlSources = resolveIdlSources({ env: {}, config: { network: "devnet" } as never, frontDir: path.join(root, "front") }, null);
+    const inv = await collectInventory(rpcFor(w), { map: w.map, release: null, idlSources, lockPresent: false, kycPin: null, scanBuffers: false });
+    expect(inv.squads?.ok).toBe(true);
+    expect(inv.squadsProposals).toEqual({
+      fromIndex: "1",
+      toIndex: "5",
+      errors: [],
+      open: [
+        { transactionIndex: "1", proposal: await squadsProposalPda(w.keys.multisig, BigInt(1)), status: "Approved", approvals: 1, stale: true },
+        { transactionIndex: "4", proposal: await squadsProposalPda(w.keys.multisig, BigInt(4)), status: "Active", approvals: 1, stale: false },
+      ],
+    });
+    const findings = inventoryFindings(inv, w.map, "handed-over").filter((f) => f.code === "squads-proposal");
+    expect(findings.map((f) => f.severity)).toEqual(["blocker", "warning"]);
+  });
+
   it("decodes the Squads v4 fixture account and reports its mismatch with the map", async () => {
     const w = await world();
     const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures/squads-multisig-v4.json"), "utf8"));
-    w.chain.set(w.keys.multisig, { owner: SQUADS_V4_PROGRAM, lamports: rent(200), data: new Uint8Array(Buffer.from(fixture.dataBase64, "base64")) });
+    w.chain.set(w.keys.multisig, { owner: SQUADS_V4_PROGRAM, lamports: rent(231), data: new Uint8Array(Buffer.from(fixture.dataBase64, "base64")) });
     const idlSources = resolveIdlSources({ env: {}, config: { network: "devnet" } as never, frontDir: path.join(root, "front") }, null);
-    const inv = await collectInventory(rpcFor(w), { map: w.map, release: null, idlSources, lockPresent: false, kycPin: null, scanBuffers: false });
-    expect(inv.squads?.decoded?.members.map((m) => m.permissions.join("+"))).toEqual(["initiate+vote+execute", "initiate+vote+execute", "vote"]);
+    // The real dump's members, all with every permission in the map.
+    const members = (fixture.expected.members as { key: Address }[]).map((m) => ({ key: m.key, permissions: ["initiate", "vote", "execute"] }));
+    const map = { ...w.map, squads: { ...w.map.squads, members } };
+    const inv = await collectInventory(rpcFor(w), { map, release: null, idlSources, lockPresent: false, kycPin: null, scanBuffers: false });
+    // Squads stores the members sorted by key: the vote-only member is second.
+    expect(inv.squads?.decoded?.members.map((m) => m.permissions.join("+"))).toEqual(["initiate+vote+execute", "vote", "initiate+vote+execute"]);
     expect(inv.squads?.decoded?.threshold).toBe(fixture.expected.threshold);
-    // The map gives the third member every permission: a mismatch.
-    const findings = inventoryFindings(inv, w.map, "pre-handover").filter((f) => f.code === "squads");
+    // The map gives the vote-only member every permission: a mismatch.
+    const findings = inventoryFindings(inv, map, "pre-handover").filter((f) => f.code === "squads");
     expect(findings.map((f) => f.severity)).toEqual(["blocker"]);
     expect(findings[0].message).toMatch(/permissions vote ≠ map initiate\+vote\+execute/);
   });
@@ -276,5 +353,7 @@ describe("inventory collection on a live-shaped chain", () => {
     expect(written).not.toContain("https://");
     expect(written).not.toContain(w.dir);
     expect((evidence as { rpcHost: string }).rpcHost).toBe("rpc.example.test");
+    // headCommit alone does not say whether uncommitted code ran (6.1 review): the evidence lists it.
+    expect(Array.isArray((evidence as { sourceTreeDirty: unknown }).sourceTreeDirty)).toBe(true);
   });
 });
