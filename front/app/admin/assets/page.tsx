@@ -15,6 +15,7 @@ import {
   findAssetPda,
   findIssuerPda,
   getActivateAssetInstructionAsync,
+  KybStatus,
   type Asset,
   type Issuer,
 } from "@/lib/generated/asset_registry";
@@ -35,8 +36,25 @@ import {
   type CategorySlug,
 } from "@/lib/asset-types";
 import { getPrivateAssetProfiles as getAssetProfiles, type AssetProfile } from "@/lib/asset-profiles";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
+import { assetActivationBlock, type AssetActivationBlock } from "@/lib/admin-badge-rules";
 
-type StatusFilter = "all" | "draft" | "active" | "frozen" | "wound-down";
+// "ready": drafts an admin can activate now — the Assets menu count.
+type StatusFilter = "all" | "ready" | "draft" | "active" | "frozen" | "wound-down";
+
+/** Why Activate is disabled for a draft (activate_asset.rs; the menu count skips these). */
+const ACTIVATION_BLOCK_HINT: Record<Exclude<AssetActivationBlock, "notDraft">, string> = {
+  issuerNotVerified: "The issuer's KYB is not verified yet — verify it on /admin/issuers first",
+  noShareClasses: "The asset has no share class yet — the issuer adds one before it can be activated",
+};
+
+function activationBlockOf(asset: Asset, issuer: Issuer | undefined): AssetActivationBlock | null {
+  return assetActivationBlock({
+    status: asset.status,
+    shareClassesCount: asset.shareClassesCount,
+    issuerVerified: issuer?.kybStatus === KybStatus.Verified,
+  });
+}
 
 const STATUS_TO_FILTER: Record<number, StatusFilter> = {
   0: "draft",
@@ -203,6 +221,7 @@ function AssetsOps() {
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Asset activated" });
+      notifyAdminBadges({ afterIndexer: true });
       void recordAudit({
         ix_name: "activate_asset",
         category: "assets",
@@ -264,8 +283,10 @@ function AssetsOps() {
           category,
         };
       })
-      .filter(({ asset, category }) => {
-        if (
+      .filter(({ asset, issuer, category }) => {
+        if (statusFilter === "ready") {
+          if (activationBlockOf(asset, issuer) !== null) return false;
+        } else if (
           statusFilter !== "all" &&
           STATUS_TO_FILTER[asset.status] !== statusFilter
         )
@@ -289,6 +310,15 @@ function AssetsOps() {
     statusFilter,
     categoryFilter,
   ]);
+
+  // Drafts an admin can activate now (the Assets menu count).
+  const readyCount = useMemo(
+    () =>
+      (data?.assets ?? []).filter(
+        (asset) => activationBlockOf(asset, issuerPdaMap.get(asset.issuer.toString())) === null,
+      ).length,
+    [data, issuerPdaMap],
+  );
 
   // Per-category counts for the chip badges (respecting only the search query).
   const categoryCounts = useMemo(() => {
@@ -329,7 +359,7 @@ function AssetsOps() {
           className="min-w-[280px] flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400"
         />
         <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs">
-          {(["all", "draft", "active", "frozen", "wound-down"] as const).map(
+          {(["all", "ready", "draft", "active", "frozen", "wound-down"] as const).map(
             (s) => (
               <button
                 key={s}
@@ -341,7 +371,11 @@ function AssetsOps() {
                     : "text-slate-600 hover:bg-slate-100"
                 }`}
               >
-                {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+                {s === "all"
+                  ? "All"
+                  : s === "ready"
+                    ? `Ready to activate (${readyCount})`
+                    : s.charAt(0).toUpperCase() + s.slice(1)}
               </button>
             ),
           )}
@@ -423,6 +457,11 @@ function AssetsOps() {
             <tbody className="divide-y divide-slate-100">
               {rows.map(({ asset, issuer, assetPda, profile, category }) => {
                 const title = profile?.display_name || asset.name;
+                const block = activationBlockOf(asset, issuer);
+                const blockHint =
+                  block === "issuerNotVerified" || block === "noShareClasses"
+                    ? ACTIVATION_BLOCK_HINT[block]
+                    : undefined;
                 const categoryLabel =
                   (category && assetTypeBySlug(category)?.title) ||
                   ASSET_TYPE_LABEL[asset.assetType] ||
@@ -465,12 +504,14 @@ function AssetsOps() {
                             disabled={
                               !wallet ||
                               tx.isSending ||
-                              hasAdminRecord === false
+                              hasAdminRecord === false ||
+                              blockHint !== undefined
                             }
                             title={
-                              hasAdminRecord === false
+                              blockHint ??
+                              (hasAdminRecord === false
                                 ? "activate_asset requires an on-chain AdminRecord — grant this wallet one on /admin/admins first"
-                                : undefined
+                                : undefined)
                             }
                             onClick={() =>
                               setActivateTarget({ asset, assetPda })

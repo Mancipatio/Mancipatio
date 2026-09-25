@@ -22,6 +22,8 @@ const MATRIX: Record<string, Gate> = {
   "compliance/open-wallets": "requireAdminOrKycProvider",
   "passport/list": "requireAdminOrKycProvider",
   "passport/update": "requireAdminOrKycProvider",
+  // The admin menu counts: the role picks the sources (lib/server/admin-badges.ts).
+  "admin/badges": "requireAdminOrKycProvider",
   // Unchanged: Admin only (incl. every AML read/write).
   "clients/create": "requireAdmin",
   "clients/update": "requireAdmin",
@@ -66,6 +68,17 @@ describe("route guard matrix", () => {
       expect(source).toContain("const role = await requireAdminOrKycProvider(wallet);");
       expect(source).toContain("forbidLeavingTerminal: provider");
     }
+  });
+
+  it("admin badges: a session read whose gate role narrows the counts it computes", () => {
+    const source = src("admin/badges");
+    expect(source).toContain('verifySigned(request, "admin.badges")');
+    expect(source).toContain("const role = await requireAdminOrKycProvider(wallet);");
+    expect(source).toContain("readAdminBadges({ wallet, role,");
+    expect(source).toContain('"Cache-Control": "private, no-store"');
+    expect(SESSION_READ_ACTIONS.has("admin.badges")).toBe(true);
+    // admin-list reads the review reasons for the role that passed its gate.
+    expect(src("clients/admin-list")).toContain("readClientReviewQueue(sb, network, role)");
   });
 
   it("open-wallets returns addresses only and is a session read", () => {

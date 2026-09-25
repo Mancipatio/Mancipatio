@@ -102,6 +102,10 @@ vi.mock("@/lib/supabase-server", () => ({
           filters.push([k, v]);
           return builder;
         },
+        in: (k: string, v: unknown) => {
+          filters.push([k, v]);
+          return builder;
+        },
         update: (patch: Record<string, unknown>) => {
           pendingUpdate = patch;
           return builder;
@@ -185,6 +189,26 @@ describe("passport-sync route accepts what the UI wrapper sends", () => {
     });
     expect(dossier?.filters).toEqual([["id", CLIENT_ID]]);
     expect(state.inserts.map((i) => i.table)).toContain("client_notes");
+  });
+
+  it("issued: the holder's undecided passport request is approved too (dossier-page issue clears /admin/kyc)", async () => {
+    const HOLDER = "Stake11111111111111111111111111111111111111";
+    state.clientRow = { ...state.clientRow, wallet: HOLDER };
+    const { status } = await post(passportSyncParams(CLIENT_ID, "issued", SIG, EXPIRES_AT));
+    expect(status).toBe(200);
+    const closed = state.updates.find((u) => u.table === "passport_requests");
+    expect(closed).toBeDefined();
+    expect(closed?.patch).toEqual({ status: "approved", handled_by: PROVIDER, handled_at: expect.any(String) });
+    expect(Number.isNaN(Date.parse(String(closed?.patch.handled_at)))).toBe(false);
+    // Only this wallet's undecided rows — never a decided (or another wallet's) request.
+    expect(closed?.filters).toEqual([["wallet", HOLDER], ["status", ["new", "in_review"]]]);
+  });
+
+  it("issued without a linked wallet, and revoked, leave passport requests alone", async () => {
+    expect((await post(passportSyncParams(CLIENT_ID, "issued", SIG, EXPIRES_AT))).status).toBe(200);
+    state.clientRow = { ...state.clientRow, wallet: "Stake11111111111111111111111111111111111111" };
+    expect((await post(passportSyncParams(CLIENT_ID, "revoked", SIG))).status).toBe(200);
+    expect(state.updates.filter((u) => u.table === "passport_requests")).toHaveLength(0);
   });
 
   it("issued: syncPassportToClient() signs exactly those params (the retry path replays them)", async () => {

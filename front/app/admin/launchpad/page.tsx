@@ -41,6 +41,8 @@ import { features } from "@/lib/features";
 import { syncSaleIfNeeded } from "@/lib/issuer-authority";
 import { useChainClock } from "@/lib/use-chain-clock";
 import { ManualSaleApprovals } from "@/app/admin/applications/sale-approvals";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
+import { saleExpiredOpen } from "@/lib/admin-badge-rules";
 
 type SaleLifecycle = "open" | "closing-soon" | "expired-open" | "closed";
 type StatusFilter = "all" | SaleLifecycle;
@@ -65,7 +67,8 @@ function lifecycleOf(sale: Sale): SaleLifecycle {
   if (sale.status === SaleStatus.Closed) return "closed";
   if (sale.endTs === BigInt(0)) return "open";
   const now = BigInt(Math.floor(Date.now() / 1000));
-  if (sale.endTs <= now) return "expired-open";
+  // The same rule as the Launchpad menu count (lib/admin-badge-rules.ts).
+  if (saleExpiredOpen(sale, Number(now))) return "expired-open";
   if (sale.endTs - now < CLOSING_WINDOW_SEC) return "closing-soon";
   return "open";
 }
@@ -407,6 +410,7 @@ function SaleDetail({
       });
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Sale closed" });
+      notifyAdminBadges({ afterIndexer: true });
       setConfirmClose(false);
       await onRefresh();
     } catch (err) {

@@ -33,17 +33,33 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
 import { useToast } from "@/lib/toast";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
+import { proposalAwaitsFinalize } from "@/lib/admin-badge-rules";
 
-type StatusFilter = "all" | "active" | "passed" | "rejected";
+type StatusFilter = "all" | "active" | "ended" | "passed" | "rejected";
 
 const STATUS_BADGE: Record<string, string> = {
   active: "bg-emerald-100 text-emerald-800 border-emerald-200",
+  ended: "bg-amber-100 text-amber-800 border-amber-200",
   passed: "bg-brand-100 text-brand-800 border-brand-200",
   rejected: "bg-red-100 text-red-800 border-red-200",
   pending: "bg-slate-200 text-slate-700 border-slate-300",
 };
 
-function lifecycleOf(p: Proposal): "active" | "passed" | "rejected" | "pending" {
+const FILTER_LABEL: Record<StatusFilter, string> = {
+  all: "All",
+  active: "Active",
+  ended: "Ended — finalize",
+  passed: "Passed",
+  rejected: "Rejected",
+};
+
+/**
+ * `ended`: still Active on-chain but past its end time — anyone may finalize
+ * it now (the Governance menu count, lib/admin-badge-rules.ts).
+ */
+function lifecycleOf(p: Proposal): "active" | "ended" | "passed" | "rejected" | "pending" {
+  if (proposalAwaitsFinalize(p, Math.floor(Date.now() / 1000))) return "ended";
   if (p.status === ProposalStatus.Active) return "active";
   if (p.outcome === ProposalOutcome.Passed) return "passed";
   if (p.outcome === ProposalOutcome.Rejected) return "rejected";
@@ -208,7 +224,7 @@ function GovernanceOps() {
           className="min-w-[280px] flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400"
         />
         <div className="flex gap-1 rounded-lg border border-slate-200 bg-white p-1 text-xs">
-          {(["all", "active", "passed", "rejected"] as const).map((s) => (
+          {(["all", "active", "ended", "passed", "rejected"] as const).map((s) => (
             <button
               key={s}
               type="button"
@@ -219,7 +235,7 @@ function GovernanceOps() {
                   : "text-slate-600 hover:bg-slate-100"
               }`}
             >
-              {s === "all" ? "All" : s.charAt(0).toUpperCase() + s.slice(1)}
+              {FILTER_LABEL[s]}
             </button>
           ))}
         </div>
@@ -436,6 +452,7 @@ function ProposalDetail({
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: "Proposal finalized" });
+      notifyAdminBadges({ afterIndexer: true });
       setConfirmFinalize(false);
       await onRefresh();
     } catch (err) {

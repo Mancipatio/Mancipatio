@@ -22,6 +22,7 @@
 
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { getSupabase } from "@/lib/supabase";
 
 export type PayoutCadence = "monthly" | "quarterly" | "annual";
@@ -95,6 +96,8 @@ export async function upsertPayoutSchedule(
     "payoutSchedules.upsert",
     { ...input },
   );
+  // "Mark done" advances next_due: the overdue count can change.
+  notifyAdminBadges();
   return data.id;
 }
 
@@ -109,6 +112,7 @@ export async function deletePayoutSchedule(
     "payoutSchedules.delete",
     { id },
   );
+  notifyAdminBadges();
 }
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;

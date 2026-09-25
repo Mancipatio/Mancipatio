@@ -92,6 +92,7 @@ import {
 } from "@/lib/kyc-authority";
 import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
 import { detectNetwork } from "@/lib/network";
+import { conversionWaitsForAdmin, deliveryWaitsForAdmin } from "@/lib/admin-badge-rules";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -2148,7 +2149,9 @@ function ConversionRequestsSection({
     await onVaultsChanged();
   }
 
-  const pendingCount = requests.filter((r) => r.status === "requested").length;
+  // Requests with an admin step (approve & open, confirm conversion) — the
+  // same rule as the Custody menu count (lib/admin-badge-rules.ts).
+  const actCount = requests.filter((r) => conversionWaitsForAdmin(r.status)).length;
 
   const outcomeRecovery = useCustodyOutcomeRecovery(
     "conversion",
@@ -2557,9 +2560,12 @@ function ConversionRequestsSection({
             banned on-chain), then track deposit → off-chain conversion → burn.
           </p>
         </div>
-        {pendingCount > 0 && (
-          <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
-            {pendingCount} pending
+        {actCount > 0 && (
+          <span
+            title="Requested, or deposited and waiting for the conversion to be confirmed"
+            className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800"
+          >
+            {actCount} to act
           </span>
         )}
       </div>
@@ -3432,7 +3438,9 @@ function DeliveryRequestsSection({
     await onVaultsChanged();
   }, [load, onVaultsChanged]);
 
-  const pendingCount = requests.filter((r) => r.status === "requested").length;
+  // Requests with an admin step (approve & open, mark in delivery, confirm
+  // delivery) — the same rule as the Custody menu count.
+  const actCount = requests.filter((r) => deliveryWaitsForAdmin(r.status)).length;
 
   const outcomeRecovery = useCustodyOutcomeRecovery(
     "delivery",
@@ -3849,9 +3857,12 @@ function DeliveryRequestsSection({
             investor passport.
           </p>
         </div>
-        {pendingCount > 0 && (
-          <span className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800">
-            {pendingCount} pending
+        {actCount > 0 && (
+          <span
+            title="Requested, deposited, or in delivery and waiting for the delivery to be confirmed"
+            className="shrink-0 rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-semibold text-amber-800"
+          >
+            {actCount} to act
           </span>
         )}
       </div>

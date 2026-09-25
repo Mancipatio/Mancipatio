@@ -21,6 +21,7 @@
 
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 // NOTE: 'approved' exists in the DB CHECK for parity with delivery (0020) but
 // is never produced — the flow goes requested → vault_opened directly
@@ -189,6 +190,7 @@ export async function adminUpdateConversionRequest(
       "conversion.adminUpdate",
       { id, ...patch },
     );
+    notifyAdminBadges();
     return true;
   } catch (err) {
     console.warn("[conversion] admin update failed:", err);
@@ -206,4 +208,5 @@ export async function reclaimConversionRequest(
     id,
     outcome_tx: outcomeTx,
   });
+  notifyAdminBadges();
 }

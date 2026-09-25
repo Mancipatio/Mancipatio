@@ -244,20 +244,81 @@ function unsignedPayload(session: WalletSession, action: string, params: Record<
   };
 }
 
+/** A background read found no usable wallet session and was told not to sign. */
+export class WalletSessionRequiredError extends Error {
+  constructor(message = "No wallet session for this background read") {
+    super(message);
+    this.name = "WalletSessionRequiredError";
+  }
+}
+
+/**
+ * How far signedFetch may go to authorize a request:
+ *   * `true` (the default) — today's behaviour: a session read starts the
+ *     session when there is none (one prompt) and, if the session is refused,
+ *     signs the request itself (a second prompt);
+ *   * `"session-only"` — may start the session (one prompt) but never signs
+ *     the request itself: no session afterwards, a refused start, a failing
+ *     /api/auth/session or a 401 over the session all end in
+ *     WalletSessionRequiredError;
+ *   * `false` — never prompts: only a live session is used, and a 401 over it
+ *     forgets the hint and throws WalletSessionRequiredError.
+ * The last two accept session read actions only (anything else throws before
+ * any request). Background reads (the admin menu counts) use them.
+ */
+export type SignedFetchInteractive = boolean | "session-only";
+
+async function sessionOnlyRead<T>(
+  session: WalletSession | null | undefined,
+  path: string,
+  action: string,
+  params: Record<string, unknown>,
+  mayStart: boolean,
+): Promise<T> {
+  if (!session) throw new WalletSessionRequiredError("Wallet not connected");
+  const wallet = session.account.address.toString();
+  let ready = hasSession(wallet);
+  if (!ready && mayStart && session.signMessage) {
+    try {
+      ready = await startSession(session);
+    } catch {
+      // Declined, or a wallet error: the caller decides whether to ask again.
+      ready = false;
+    }
+  }
+  if (!ready) throw new WalletSessionRequiredError();
+  const result = await postEnvelope<T>(path, { payload: unsignedPayload(session, action, params), session: true });
+  if (result.ok) return result.data as T;
+  if (result.status === 401) {
+    saveHint(null);
+    throw new WalletSessionRequiredError("The wallet session expired");
+  }
+  throw new Error(result.error);
+}
+
 /** Sign and POST to a same-origin API; mutations still need semantic idempotency.
- * Read-only actions use the wallet session and only prompt once per session. */
+ * Read-only actions use the wallet session and only prompt once per session;
+ * `opts.interactive` limits the prompts of a background read (see above). */
 export async function signedFetch<T = unknown>(
   session: WalletSession | null | undefined,
   path: string,
   action: string,
   params: Record<string, unknown> = {},
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<T> {
+  const interactive = opts.interactive ?? true;
+  if (interactive !== true && !isSessionReadAction(action)) {
+    throw new Error(`"${action}" needs a wallet signature; only session reads can run without one`);
+  }
   if (typeof window === "undefined") {
     throw new Error("Wallet requests must be signed from the app");
   }
   const destination = new URL(path, window.location.origin);
   if (destination.origin !== window.location.origin) {
     throw new Error("Signed requests must stay on the app origin");
+  }
+  if (interactive !== true) {
+    return sessionOnlyRead<T>(session, path, action, params, interactive === "session-only");
   }
   if (session && isSessionReadAction(action)) {
     const wallet = session.account.address.toString();

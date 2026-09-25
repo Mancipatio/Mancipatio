@@ -15,6 +15,7 @@
 
 import type { WalletSession } from "@solana/client";
 import { signedFetch } from "@/lib/siws-client";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 // NOTE: the legacy 'approved' status was dropped from the front — the flow
 // goes requested → vault_opened directly (approval == opening the vault).
@@ -143,6 +144,7 @@ export async function reclaimDeliveryRequest(
     id,
     outcome_tx: outcomeTx,
   });
+  notifyAdminBadges();
 }
 
 export type DeliveryAdminPatch = {
@@ -169,6 +171,7 @@ export async function adminUpdateDeliveryRequest(
       "delivery.adminUpdate",
       { id, ...patch },
     );
+    notifyAdminBadges();
     return true;
   } catch (err) {
     console.warn("[delivery] admin update failed:", err);

@@ -23,6 +23,7 @@ import {
   formatUtcAndLocal,
   localZoneLabel,
 } from "@/lib/vesting-amounts";
+import { vestingSeriesNeedsReview } from "@/lib/admin-badge-rules";
 
 const STATUS_BADGE: Record<VestingSeriesRow["status"], string> = {
   submitted: "bg-amber-100 text-amber-800 border-amber-200",
@@ -129,9 +130,8 @@ export default function AdminVestingPage() {
     }
   }
 
-  const needsReview = (r: VestingSeriesRow) =>
-    r.status === "submitted" ||
-    (r.status === "approved" && !r.approved_terms_hash && !r.series_pda);
+  // The same rule as the Vesting menu count (lib/admin-badge-rules.ts).
+  const needsReview = (r: VestingSeriesRow) => vestingSeriesNeedsReview(r);
   const queue = rows?.filter(needsReview) ?? [];
   const history = rows?.filter((r) => !needsReview(r)) ?? [];
 
