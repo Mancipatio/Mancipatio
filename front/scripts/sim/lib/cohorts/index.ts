@@ -1,5 +1,7 @@
 /**
- * One step of one user: the account setup first, then the cohort's machine.
+ * One step of one user: the owner actor first (SIM_OWNER=1: a decision about
+ * this user runs in its own slot, so its polls never land between two owner
+ * requests), then the account setup, then the cohort's machine.
  * Errors that are not HTTP statuses (a failed simulation, an unresolved
  * signature, a builder refusing the state) are journalled and retried with
  * a backoff; a SimStopError ends the whole run.
@@ -13,11 +15,13 @@ import { edgeStep } from "./edge";
 import { buyStep } from "./investor";
 import { issuerStep } from "./issuer";
 import { dossierStep } from "./kyc";
+import { ownerStep } from "./owner";
 import { traderStep } from "./trader";
 import { releaseMirrors, transferStep } from "./transfer";
 
-// transferStep handles its own failures (cohort X never strands lent units).
-const MACHINES = [setupStep, dossierStep, issuerStep, buyStep, traderStep, edgeStep, transferStep];
+// transferStep and ownerStep handle their own failures (cohort X never strands lent units;
+// the owner actor never fails a user).
+const MACHINES = [ownerStep, setupStep, dossierStep, issuerStep, buyStep, traderStep, edgeStep, transferStep];
 
 export async function advance(ctx: SimCtx, u: UserState): Promise<void> {
   if (u.terminal) return;

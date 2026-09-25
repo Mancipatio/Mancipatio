@@ -47,12 +47,14 @@ export function classifyStatus(status: number, expect: Expect): Outcome {
   return "unexpected-4xx";
 }
 
-/** Who sends a request: a simulated user or the CLI Admin during setup. */
+/** Who sends a request: a simulated user, or the CLI Admin (market setup, the owner actor). */
 export type Actor = {
   label: string;
   cohort: string;
   wave: number | null;
   signer: KeyPairSigner;
+  /** The owner actor: the user the request is about (journalled; the cookie stays keyed by `label`). */
+  target?: string;
 };
 
 export type HttpResult<T = unknown> = {
@@ -226,6 +228,7 @@ export class SimHttp {
       outcome,
       body: journalBody(text),
       err,
+      ...(actor.target ? { target: actor.target } : {}),
     });
     return { status, outcome, ms: now() - started, text, json, data: json?.data as T | undefined, headers };
   }

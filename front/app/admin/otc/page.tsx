@@ -17,7 +17,6 @@ import {
   findAssetPda,
   findDealPda,
   getCancelOtcDealInstructionAsync,
-  getCreateOtcDealInstructionAsync,
   OfferStatus,
   OtcDealStatus,
   type Asset,
@@ -43,6 +42,7 @@ import {
 } from "@/lib/otc";
 import { checkReceiverEligibility } from "@/lib/passport";
 import { detectNetwork } from "@/lib/network";
+import { createOtcDealInstruction, newDealId, resolveDealExpiry } from "@/lib/otc-deal";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
@@ -455,34 +455,6 @@ function shortAddr(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
-/**
- * Timestamp-based unique u64 (ms since epoch) for deal ids — the deal PDA is
- * seeded by (share_class, deal_id), so collisions across share classes are
- * fine and same-class collisions need two creations within one millisecond.
- */
-function newDealId(): bigint {
-  return BigInt(Date.now());
-}
-
-/** Default deal expiry: 7 days from now (unix seconds). */
-function defaultDealExpiry(): bigint {
-  return BigInt(Math.floor(Date.now() / 1000) + 7 * 24 * 60 * 60);
-}
-
-/**
- * Deal expiry for a request: its own expiry when still in the future,
- * otherwise the default window. A stale request row could carry an
- * already-past expires_at, which would create a deal that is expired the
- * moment it exists (unfundable, only refundable).
- */
-function resolveDealExpiry(reqExpiresAt: string | null): bigint {
-  const nowSec = BigInt(Math.floor(Date.now() / 1000));
-  const requested = reqExpiresAt
-    ? BigInt(Math.floor(new Date(reqExpiresAt).getTime() / 1000))
-    : defaultDealExpiry();
-  return requested > nowSec ? requested : defaultDealExpiry();
-}
-
 function OtcEscrowAdmin() {
   const client = useSolanaClient();
   const conn = useWalletConnection();
@@ -624,21 +596,14 @@ function OtcEscrowAdmin() {
         return;
       }
       const expiresAt = resolveDealExpiry(req.expires_at);
-      const ix = await getCreateOtcDealInstructionAsync({
+      // The shared builder (lib/otc-deal.ts): the simulator's owner actor
+      // opens its escrows with exactly this instruction.
+      const ix = await createOtcDealInstruction({
         authority: signer,
-        shareClass: req.share_class_pda as Address,
-        mint: req.mint as Address,
-        paymentMint: req.payment_mint as Address,
-        // Share-class mints are Token-2022 transfer-hook mints.
-        tokenProgram: TOKEN_2022_PROGRAM,
-        paymentTokenProgram: payTokenProgram,
+        request: req,
         dealId,
-        buyer: req.buyer_wallet as Address,
-        seller: req.seller_wallet as Address,
-        amount: BigInt(Math.trunc(req.amount)),
-        price: BigInt(Math.trunc(req.price)),
-        paymentMintArg: req.payment_mint as Address,
         expiresAt,
+        paymentTokenProgram: payTokenProgram,
       });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       const [dealPda] = await findDealPda({

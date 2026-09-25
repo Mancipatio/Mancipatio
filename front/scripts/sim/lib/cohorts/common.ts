@@ -17,6 +17,7 @@ import type { Actor, SimHttp } from "../http";
 import { person, type Person } from "../identity";
 import type { JournalSink } from "../journal";
 import type { SimState, Terminal, UserState } from "../state";
+import type { OwnerCtx } from "./owner";
 
 export type MarketView = {
   /** [0]: the sale for KYC'd investors; [1]: no-KYC buyers and traders. */
@@ -51,6 +52,8 @@ export type SimCtx = {
    * false while another chain tool holds it. Absent: no lock to take (tests).
    */
   chainLock?: () => boolean;
+  /** The owner actor (SIM_CMD=watch SIM_OWNER=1, cohorts/owner.ts); absent otherwise. */
+  owner?: OwnerCtx;
 };
 
 export const RETRY_MS = 60_000;

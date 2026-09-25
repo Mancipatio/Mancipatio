@@ -22,21 +22,28 @@
  * other simulator command does; `watch` then continues it with the others
  * (with SIM_DONOR_KEYPAIR until both pairs borrowed: a pair yet to borrow in a
  * run that lent waits for the key, never switching to its own buy).
+ *
+ * `watch` with SIM_OWNER=1 also runs the owner actor (cohorts/owner.ts): the
+ * CLI Admin's key is loaded, its Admin record, the super admin, the KYC
+ * provider and admin.badges are read first, and the scheduler advances the
+ * owner actor's focus user before anyone else (one owner task at a time).
  */
 import { randomBytes } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import type { KeyPairSigner } from "@solana/kit";
 import { networkLabel } from "@/lib/network";
+import { findSalePda } from "@/lib/pdas";
 import { Journal, releaseLock as releaseHeldLock, type HeldLock } from "@/scripts/chain/lib/journal";
 import { ChainAbortError, loadHotSigner, repoRoot, type ChainEnv } from "@/scripts/chain/lib/safety";
 import { SimChainOps, SimRetryLater, TxExecutor, createSimRpc, type ChainOps, type OwnerMeta } from "./chain";
 import { CLI_ADMIN, DEPLOYER, PACE, SIM_NETWORK, SITE_ORIGIN } from "./constants";
 import { advance } from "./cohorts";
 import type { MarketView, SimCtx } from "./cohorts/common";
+import { createOwnerCtx, finishOwnerActor, observeOwnerActivity, ownerFocus, ownerQueueView, renderOwnerPlan, startOwnerActor, type OwnerCtx } from "./cohorts/owner";
 import { SimHttp } from "./http";
 import { buildRoster, userSigner, type UserPlan } from "./identity";
-import { FINDING_OUTCOMES, SimJournal, readSimJournal, type JournalSink } from "./journal";
+import { FINDING_OUTCOMES, SimJournal, readSimJournal, teeJournal, type JournalSink } from "./journal";
 import { Limiter, realClock, type Clock } from "./pacing";
 import { planSummary, renderPlan } from "./plan";
 import { renderOwnerQueue, writeReport } from "./report";
@@ -80,8 +87,16 @@ export type ScheduleOptions = {
   clock: Clock;
 };
 
-/** Picks the next runnable user: not waiting, not being advanced, least recently advanced. */
-function pick(users: UserState[], busy: Set<string>, now: number, lastRun: Map<string, number>): UserState | null {
+/**
+ * Picks the next runnable user: not waiting, not being advanced, least
+ * recently advanced — except the owner actor's focus user (`urgent`), which
+ * runs first whenever no worker is advancing it, whatever its own backoff.
+ */
+function pick(users: UserState[], busy: Set<string>, now: number, lastRun: Map<string, number>, urgent: string | null = null): UserState | null {
+  if (urgent && !busy.has(urgent)) {
+    const focus = users.find((u) => u.plan.label === urgent);
+    if (focus && !focus.terminal) return focus;
+  }
   let best: UserState | null = null;
   for (const u of users) {
     if (u.terminal || busy.has(u.plan.label) || u.notBefore > now) continue;
@@ -109,7 +124,7 @@ export async function schedule(ctx: SimCtx, o: ScheduleOptions): Promise<RunResu
         await o.clock.sleep(10_000);
         continue;
       }
-      const next = pick(o.users, busy, now, lastRun);
+      const next = pick(o.users, busy, now, lastRun, ownerFocus(ctx, now));
       if (!next) {
         const active = o.users.filter((u) => !u.terminal);
         if (active.length === 0) return void (result ??= "finished");
@@ -219,7 +234,18 @@ export async function runSim(env: ChainEnv, deps: RunDeps = {}): Promise<RunResu
   const root = deps.root ?? repoRoot();
   const cfg = readSimConfig(env, { root, home: deps.home });
   if (cfg.cmd === "plan") {
-    log(renderPlan(planSummary(cfg.runId ?? readLatestRun(cfg.simRoot) ?? "preview")));
+    const runId = cfg.runId ?? readLatestRun(cfg.simRoot);
+    log(renderPlan(planSummary(runId ?? "preview")));
+    if (cfg.owner) {
+      // Read-only: the run's state.json, when there is one, marks each task open, decided or terminal.
+      let state: SimState | null = null;
+      try {
+        state = runId ? loadState(path.join(cfg.simRoot, runId)) : null;
+      } catch {
+        state = null;
+      }
+      log(renderOwnerPlan(cfg.ownerOptions, state));
+    }
     return { status: "planned" };
   }
   assertIgnoredDir(cfg.simRoot, root);
@@ -267,15 +293,23 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
     const limiter = new Limiter({ clock, isStopped: () => stop.stopReason() });
     journal = new SimJournal(runDir);
     txJournal = new Journal(path.join(runDir, "tx-journal.jsonl"));
-    const http = new SimHttp({ fetch: globalThis.fetch, limiter, journal });
+    // The owner actor counts the users' requests that can grow an admin queue (its admin.badges check).
+    let owner: OwnerCtx | undefined;
+    const httpJournal: JournalSink = cfg.owner ? teeJournal(journal, (e) => observeOwnerActivity(owner, e)) : journal;
+    const http = new SimHttp({ fetch: globalThis.fetch, limiter, journal: httpJournal });
     const { rpc, drainRpc, assertNetwork } = createSimRpc({ url: cfg.rpcUrl!, expectedGenesis: cfg.expectedGenesis, rps: cfg.rps, limiter, signal: controller.signal });
     await assertNetwork();
     state = loadState(runDir) ?? newState(runId, cfg.expectedGenesis);
     if (state.genesis !== cfg.expectedGenesis) throw new SimGateError("state.json belongs to another cluster");
     persist();
     exec = new TxExecutor({ rpc, drainRpc, txJournal, journal, limiter, persist, signal: controller.signal, timing: { pollMs: 3_000 }, now: clock.now });
-    const metaOf = (owner: TxOwner): OwnerMeta =>
-      "plan" in owner ? { cohort: (owner as UserState).plan.cohort, wave: (owner as UserState).plan.wave } : { cohort: "setup", wave: null };
+    const metaOf = (txOwner: TxOwner, label?: string): OwnerMeta => {
+      if (!("plan" in txOwner)) return { cohort: "setup", wave: null };
+      const u = txOwner as UserState;
+      // The owner actor's escrow sits on its requester but is the owner's transaction.
+      if (label?.startsWith("owner.")) return { cohort: "owner", wave: u.plan.wave, actor: "owner", target: u.plan.label };
+      return { cohort: u.plan.cohort, wave: u.plan.wave };
+    };
     const resolved = await exec.resolveAll(state, metaOf);
     if (resolved.pending) log(`resume: ${resolved.pending} signature(s) still unresolved; their steps wait`);
     if (resolved.orphans) log(`resume: ${resolved.orphans} earlier signature(s) of re-sent steps still unresolved; the chain lock is kept until they are`);
@@ -309,6 +343,8 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
       throw new SimGateError(`SIM_DONOR_KEYPAIR is required: ${loan.hub} holds a loan whose seed leg has not landed`);
     }
     const journalPath = txJournal.path;
+    // SIM_OWNER=1: the CLI Admin signs the owner actor's admin requests (never logged, its path never printed).
+    const ownerAdmin = cfg.cmd === "watch" && cfg.owner ? await loadHotSigner(cfg.adminKeypair, CLI_ADMIN, "CLI Admin") : null;
     const takeChainLock = () => (chainLock ??= acquireChainLock({ stateDir: cfg.chainStateDir, genesis: cfg.expectedGenesis, journalPath }));
     // An outstanding loan: refuse to start while chain:e2e holds the lock.
     if (transfers && loan) takeChainLock();
@@ -324,6 +360,14 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
       persist();
     }
     if (state.market.sales.length < 2) throw new SimGateError("The market setup has not run yet (SIM_CMD=pilot)");
+    if (ownerAdmin) {
+      // S16: the e2e state read now is the one this run was set up with (its class A derives the run's sale PDAs).
+      for (const [i, saleId] of state.market.saleIds.entries()) {
+        if ((await findSalePda(market.classA, BigInt(saleId))) !== state.market.sales[i]) {
+          throw new SimGateError("SIM_E2E_STATE names another class A than this run's sales: pass the e2e state.json the run was started with");
+        }
+      }
+    }
 
     const view: MarketView = {
       sales: state.market.sales,
@@ -373,7 +417,13 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
         }
       },
     };
-    const writeQueue = () => writePrivateFile(path.join(runDir, "owner-queue.txt"), renderOwnerQueue(state!));
+    if (ownerAdmin) {
+      owner = createOwnerCtx(ownerAdmin, cfg.ownerOptions);
+      owner.scope = new Set(users.map((u) => u.plan.label));
+      ctx.owner = owner;
+      await startOwnerActor(ctx, owner);
+    }
+    const writeQueue = () => writePrivateFile(path.join(runDir, "owner-queue.txt"), renderOwnerQueue(state!, [], { owner: ownerQueueView(ctx) }));
     writeQueue();
     const status = await schedule(ctx, {
       users,
@@ -385,6 +435,7 @@ async function runNetworked(cfg: SimConfig, env: ChainEnv, runId: string, runDir
       onTick: writeQueue,
       clock,
     });
+    if (owner && !limiter.stopReason && !stop.stopReason()) await finishOwnerActor(ctx, owner);
     writeQueue();
     if (status === "stopped") state.stops.push({ at: new Date().toISOString(), reason: stop.stopReason() ?? limiter.stopReason ?? "stopped" });
     const waiting = users.filter((u) => u.awaitingOwner && !u.terminal).length;

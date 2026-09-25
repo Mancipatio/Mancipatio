@@ -4,19 +4,25 @@
  * the real handlers' contracts (docs/mainnet-readiness/sim flow maps): SIWS
  * signatures are verified for real, nonces are single-use, the session
  * cookie only serves read actions, and the owner's decisions are methods the
- * test calls. Nothing here touches the network.
+ * test calls — or, for the owner actor (SIM_OWNER=1), the admin routes the
+ * real admin UI calls (tests/sim-owner.test.ts): an `admins` set gates them
+ * (403 for any other wallet), and they keep the real contracts (409 on a
+ * verdict before every document is approved, compare-and-set on application
+ * reviews, the upload's more_info → pending recompute, sha256 per upload).
+ * Nothing here touches the network.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { getPublicKeyFromAddress, getUtf8Encoder, verifySignature, type Address, type KeyPairSigner } from "@solana/kit";
+import { clientReviewReasons } from "@/lib/admin-badge-rules";
 import type { SaleDocumentTerms } from "@/lib/document-terms";
-import { OfferStatus, OtcDealStatus } from "@/lib/generated/asset_registry";
+import { OfferStatus, OtcDealStatus, findDealPda } from "@/lib/generated/asset_registry";
 import { isDefaultApprovedJurisdiction, type ReceiverEligibility } from "@/lib/passport";
 import { siwsMessage, type SiwsPayload } from "@/lib/siws-client";
 import { isSessionReadAction } from "@/lib/siws-session";
 import { TOS_VERSION } from "@/lib/tos-version";
-import { TOKEN_2022 } from "@/lib/transaction-builders";
+import { TOKEN_2022, TOKEN_CLASSIC } from "@/lib/transaction-builders";
 import { ChainRpcError } from "@/scripts/chain/lib/safety";
-import { SimRetryLater, SimTxError, type ChainOps, type DealView, type OfferView, type TokenAccountView } from "@/scripts/sim/lib/chain";
+import { SimRetryLater, SimTxError, type ChainOps, type DealView, type OfferView, type OtcDealOpen, type OwnerChainView, type TokenAccountView } from "@/scripts/sim/lib/chain";
 import { SITE_ORIGIN } from "@/scripts/sim/lib/constants";
 import type { JournalSink } from "@/scripts/sim/lib/journal";
 import type { Limiter } from "@/scripts/sim/lib/pacing";
@@ -31,19 +37,46 @@ export const DONOR = "6uNWmFjnXJqrHMSPNjmhmHLPgd4GRfJtAjjKUKwVcyB3" as Address;
 export const FAKE_MINT_A = SALES[0] as Address;
 export const FAKE_MINT_B = "EVAiScjWTEhT9fweDht22jR3VK9M6KVpeMdrVu3dkGaK" as Address;
 
-type Requirement = { id: number; doc_kind: string; status: string };
+type Requirement = { id: number; doc_kind: string; label: string; status: string; document_id: number | null; requested_by: string; requested_at: string };
 type Dossier = {
   id: string;
   wallet: string;
   kind: "kyc" | "kyb";
   token: string;
+  email: string;
   kyc_status: string;
   kyb_status: string;
+  kyc_verified_at: string | null;
+  kyc_expires_at: string | null;
+  onboarding_status: string | null;
   requirements: Requirement[];
   uploads: { kind: string; type: string; size: number; name: string }[];
+  documents: { id: number; kind: string; sha256: string; requirement_id: number | null }[];
 };
-type Application = { id: string; wallet: string; status: string; company_name: string; raise_amount: number };
-type OtcRow = { id: string; seller_wallet: string; buyer_wallet: string; status: string; deal_pda: string | null; requested_by: string };
+type Application = { id: string; wallet: string; applicant_wallet: string; status: string; company_name: string; raise_amount: number };
+type AppEvent = { application_id: string; actor: "admin" | "applicant"; action: string; reason: string | null; actor_wallet: string; created_at: string };
+type OtcRow = {
+  id: string;
+  seller_wallet: string;
+  buyer_wallet: string;
+  status: string;
+  deal_pda: string | null;
+  deal_id: number | null;
+  requested_by: string;
+  share_class_pda: string;
+  mint: string;
+  payment_mint: string;
+  amount: number;
+  price: number;
+  asset_label: string;
+  expires_at: string | null;
+  decided_by?: string;
+};
+type PassportRow = { id: string; wallet: string; status: string; created_at: string; handled_by?: string; handled_at?: string };
+type AuditRow = { ix_name: string; category: string; actor_wallet: string; reason: string; target_label: string | null; tx_signature: string | null; status: string; metadata: Record<string, unknown> };
+
+const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+const AUDIT_CATEGORIES = new Set(["platform", "admins", "issuers", "assets", "share-class", "launchpad", "custody", "otc", "governance", "rights", "other"]);
 
 const DETAIL_KEYS = new Set([
   "kind", "legal_name", "date_of_birth", "nationality", "residence_country", "address_line", "city",
@@ -68,14 +101,27 @@ export class FakeSite {
   /** Settled purchases the chain knows: signature → buyer. */
   purchases = new Map<string, { buyer: string; sale: string; amount: number }>();
   recordCalls = new Map<string, number>();
-  /** Wallets with an undecided passport request (a wallet KYC submit files one). */
-  openPassportRequests = new Set<string>();
+  /** Passport requests (a wallet KYC submit files one), as /admin/kyc lists them. */
+  passportRequests: PassportRow[] = [];
+  /** Admin wallets (an Admin record): the admin routes answer 403 to anyone else. */
+  admins = new Set<string>();
+  /** Wallets whose client profile is suspended (otc.adminScreen). */
+  suspended = new Set<string>();
+  events: AppEvent[] = [];
+  audits: AuditRow[] = [];
+  /** Failure injection: /admin/clients also counts decided dossiers (a badges route that misses decisions). */
+  badgesCountClosed = false;
   requests: { route: string; status: number }[] = [];
+  /** Every verified envelope, in order: who sent which action with which params. */
+  signedLog: { wallet: string; action: string; params: Record<string, unknown>; session: boolean }[] = [];
   /** Route → forced status (failure injection). */
   fail = new Map<string, { status: number; code?: string }>();
   /** Route → a forced status for the next `times` requests only. */
   failNext = new Map<string, { status: number; times: number }>();
+  /** Route → the next `times` requests are handled (the write applies), then answered with this status (a lost answer). */
+  failAfter = new Map<string, { status: number; times: number }>();
   private reqId = 1;
+  private docId = 1;
 
   // ── The owner's decisions ─────────────────────────────────────────────
   dossierOf(wallet: string): Dossier {
@@ -87,6 +133,8 @@ export class FakeSite {
     const d = this.dossierOf(wallet);
     for (const r of d.requirements) r.status = "approved";
     d.kyc_status = "verified";
+    d.kyc_verified_at = new Date().toISOString();
+    d.kyc_expires_at = new Date(Date.now() + 365 * 86_400_000).toISOString();
   }
   reject(wallet: string) {
     this.dossierOf(wallet).kyc_status = "rejected";
@@ -97,13 +145,22 @@ export class FakeSite {
     d.requirements.find((r) => r.doc_kind === kind)!.status = "rejected";
   }
   issuePassport(wallet: string) {
-    this.openPassportRequests.delete(wallet);
+    for (const r of this.passportRequests) if (r.wallet === wallet && (r.status === "new" || r.status === "in_review")) r.status = "approved";
+  }
+  /** The owner requests one more document by hand (the admin page's "Request more info"). */
+  requestDocument(wallet: string, kind: string, by: string) {
+    const d = this.dossierOf(wallet);
+    d.requirements.push({ id: this.reqId++, doc_kind: kind, label: kind, status: "requested", document_id: null, requested_by: by, requested_at: new Date().toISOString() });
+    d.kyc_status = "more_info";
   }
   kybVerify(wallet: string) {
     this.dossierOf(wallet).kyb_status = "verified";
   }
   review(wallet: string, status: "approved" | "rejected" | "needs_changes") {
-    this.applications.filter((a) => a.wallet === wallet).forEach((a) => (a.status = status));
+    this.applications.filter((a) => a.wallet === wallet).forEach((a) => {
+      a.status = status;
+      this.events.push({ application_id: a.id, actor: "admin", action: status, reason: "by hand", actor_wallet: "hand", created_at: new Date().toISOString() });
+    });
   }
   openDeal(id: string, dealPda: string) {
     const row = this.otc.find((r) => r.id === id)!;
@@ -132,8 +189,15 @@ export class FakeSite {
         payload = { ok: false, error: "forced", code: forced.code };
       } else {
         const result = await this.handle(route, url, init?.body ?? null, headers, extra);
-        status = result.status ?? 200;
-        payload = { ok: true, data: result.data };
+        const lost = this.failAfter.get(route);
+        if (lost && lost.times > 0) {
+          lost.times -= 1;
+          status = lost.status;
+          payload = { ok: false, error: "forced after the request was applied" };
+        } else {
+          status = result.status ?? 200;
+          payload = { ok: true, data: result.data };
+        }
       }
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
@@ -167,6 +231,7 @@ export class FakeSite {
     }
     if (this.nonces.has(payload.nonce)) throw new Refused(401, "Nonce already used or expired");
     this.nonces.add(payload.nonce);
+    this.signedLog.push({ wallet: payload.wallet, action, params: payload.params, session: body.session === true });
     void route;
     return { wallet: payload.wallet, params: payload.params };
   }
@@ -178,6 +243,13 @@ export class FakeSite {
     if (text.length > cap) throw new Refused(413, "Request is too large");
     const body = (text ? JSON.parse(text) : {}) as Record<string, unknown>;
     const signed = (action: string) => this.verifyEnvelope(route, body, headers, action);
+    const admin = async (action: string) => {
+      const verified = await signed(action);
+      if (!this.admins.has(verified.wallet)) throw new Refused(403, "Admin privileges required");
+      return verified;
+    };
+    const admin_ = await this.adminRoute(route, admin, body);
+    if (admin_) return admin_;
     switch (route) {
       case "/": return { data: "home" };
       case "/api/auth/session": {
@@ -236,8 +308,9 @@ export class FakeSite {
         if (!d || !((d.kind === "kyb" && d.kyb_status === "verified") || (d.kind === "kyc" && d.kyc_status === "verified"))) throw new Refused(403, "Verification required to apply");
         const app = params.application as { raise_amount: number; company_name: string };
         if (app.raise_amount > 3_000_000) throw new Refused(400, "raise_amount must be at most 3000000");
-        const row = { id: randomUUID(), wallet, status: "pending", company_name: app.company_name, raise_amount: app.raise_amount };
+        const row = { id: randomUUID(), wallet, applicant_wallet: wallet, status: "pending", company_name: app.company_name, raise_amount: app.raise_amount };
         this.applications.push(row);
+        this.events.push({ application_id: row.id, actor: "applicant", action: "submitted", reason: null, actor_wallet: wallet, created_at: new Date().toISOString() });
         return { data: { id: row.id } };
       }
       case "/api/applications/resubmit": {
@@ -246,6 +319,7 @@ export class FakeSite {
         if (!row) throw new Refused(404, "Application not found");
         if (row.status !== "needs_changes") throw new Refused(409, "Only an application marked needs_changes can be resubmitted");
         row.status = "pending";
+        this.events.push({ application_id: row.id, actor: "applicant", action: "resubmitted", reason: null, actor_wallet: wallet, created_at: new Date().toISOString() });
         return { data: { id: row.id } };
       }
       case "/api/issuer-profiles/upsert": {
@@ -279,16 +353,58 @@ export class FakeSite {
         if (params.seller_wallet === params.buyer_wallet) throw new Refused(400, "Buyer and seller must be different wallets");
         if (typeof params.amount !== "number" || params.amount <= 0) throw new Refused(400, "amount must be a positive integer");
         if (wallet !== params.seller_wallet && wallet !== params.buyer_wallet) throw new Refused(403, "You must be a party");
-        const row = { id: randomUUID(), seller_wallet: String(params.seller_wallet), buyer_wallet: String(params.buyer_wallet), status: "requested", deal_pda: null, requested_by: wallet };
+        const row: OtcRow = {
+          id: randomUUID(),
+          seller_wallet: String(params.seller_wallet),
+          buyer_wallet: String(params.buyer_wallet),
+          status: "requested",
+          deal_pda: null,
+          deal_id: null,
+          requested_by: wallet,
+          share_class_pda: String(params.share_class_pda),
+          mint: String(params.mint),
+          payment_mint: String(params.payment_mint),
+          amount: Number(params.amount),
+          price: Number(params.price),
+          asset_label: String(params.asset_label ?? ""),
+          expires_at: typeof params.expires_at === "string" ? params.expires_at : null,
+        };
         this.otc.push(row);
         return { data: { id: row.id } };
       }
       case "/api/otc/list": {
-        const { wallet } = await signed("otc.list");
-        return { data: this.otc.filter((r) => r.seller_wallet === wallet || r.buyer_wallet === wallet) };
+        const { wallet, params } = await signed("otc.list");
+        const scope = params.scope;
+        if (scope !== "mine" && scope !== "admin") throw new Refused(400, "Invalid scope");
+        if (scope === "admin" && !this.admins.has(wallet)) throw new Refused(403, "Admin privileges required");
+        const offset = Number(params.offset ?? 0);
+        const rows = this.otc
+          .filter((r) => scope === "admin" || r.seller_wallet === wallet || r.buyer_wallet === wallet)
+          .filter((r) => params.status === undefined || r.status === params.status);
+        return { data: rows.slice(offset, offset + 100) };
       }
-      case "/api/passport/status":
-        return { data: { open: this.openPassportRequests.has(String(body.wallet)) ? { id: 1, status: "new" } : null } };
+      case "/api/passport/status": {
+        const open = this.passportRequests.find((r) => r.wallet === String(body.wallet) && (r.status === "new" || r.status === "in_review"));
+        return { data: { open: open ? { id: open.id, status: open.status, created_at: open.created_at } : null } };
+      }
+      case "/api/audit": {
+        // Unsigned breadcrumb (lib/supabase.ts recordAudit): the route's shape checks.
+        if (typeof body.ix_name !== "string" || !body.ix_name.trim()) throw new Refused(400, "ix_name required (≤120 chars)");
+        if (!AUDIT_CATEGORIES.has(String(body.category))) throw new Refused(400, "Unknown audit category");
+        if (typeof body.actor_wallet !== "string" || !body.actor_wallet) throw new Refused(400, "actor_wallet required (≤64 chars)");
+        if (typeof body.reason !== "string") throw new Refused(400, "reason must be a string");
+        this.audits.push({
+          ix_name: body.ix_name,
+          category: String(body.category),
+          actor_wallet: body.actor_wallet,
+          reason: body.reason,
+          target_label: (body.target_label as string | null) ?? null,
+          tx_signature: (body.tx_signature as string | null) ?? null,
+          status: String(body.status ?? "success"),
+          metadata: (body.metadata as Record<string, unknown>) ?? {},
+        });
+        return { data: { id: randomUUID() } };
+      }
       default:
         throw new Refused(404, "Not found");
     }
@@ -313,13 +429,29 @@ export class FakeSite {
       wallet,
       kind,
       token: randomUUID().replace(/-/g, ""),
+      email: String(params.email ?? ""),
       kyc_status: "more_info",
       kyb_status: kind === "kyb" ? "pending" : "none",
-      requirements: kinds.map((doc_kind) => ({ id: this.reqId++, doc_kind, status: "requested" })),
+      kyc_verified_at: null,
+      kyc_expires_at: null,
+      onboarding_status: null,
+      requirements: kinds.map((doc_kind) => ({
+        id: this.reqId++,
+        doc_kind,
+        label: doc_kind,
+        status: "requested",
+        document_id: null,
+        requested_by: `system:verification-${kind}`,
+        requested_at: new Date().toISOString(),
+      })),
       uploads: [],
+      documents: [],
     };
     this.dossiers.set(wallet, d);
-    if (kind === "kyc") this.openPassportRequests.add(wallet);
+    // A KYC submit with a wallet files a passport request (verification/submit/route.ts); a KYB submit does not.
+    if (kind === "kyc" && !this.passportRequests.some((r) => r.wallet === wallet && (r.status === "new" || r.status === "in_review"))) {
+      this.passportRequests.push({ id: randomUUID(), wallet, status: "new", created_at: new Date().toISOString() });
+    }
     return { client_id: d.id, kyc_status: d.kyc_status, onboarding_path: `/onboarding/${d.id}?t=${d.token}` };
   }
 
@@ -337,14 +469,189 @@ export class FakeSite {
     const d = this.byToken(String(form.get("client_id")), form.get("token"));
     if (!UPLOAD_TYPES.has(file.type)) throw new Refused(400, "Unsupported file type — upload a PDF, PNG, JPG or DOCX");
     const reqId = form.get("requirement_id");
-    if (reqId) {
-      const r = d.requirements.find((x) => x.id === Number(reqId));
-      if (!r) throw new Refused(404, "Requirement not found for this client");
+    const r = reqId ? d.requirements.find((x) => x.id === Number(reqId)) : undefined;
+    if (reqId && !r) throw new Refused(404, "Requirement not found for this client");
+    const documentId = this.docId++;
+    const sha256 = createHash("sha256").update(Buffer.from(await file.arrayBuffer())).digest("hex");
+    d.documents.push({ id: documentId, kind: String(form.get("kind")), sha256, requirement_id: r?.id ?? null });
+    if (r) {
       r.status = "submitted";
+      r.document_id = documentId;
     }
     d.uploads.push({ kind: String(form.get("kind")), type: file.type, size: file.size, name: file.name });
-    if (d.kyc_status === "more_info" && d.requirements.every((r) => r.status !== "requested" && r.status !== "rejected")) d.kyc_status = "pending";
-    return { data: { document_id: d.uploads.length, recomputed: d.kyc_status } };
+    if (d.kyc_status === "more_info" && d.requirements.every((x) => x.status !== "requested" && x.status !== "rejected")) d.kyc_status = "pending";
+    return { data: { document_id: documentId, sha256, recomputed: d.kyc_status } };
+  }
+
+  private dossierById(id: unknown): Dossier {
+    const d = [...this.dossiers.values()].find((x) => x.id === id);
+    if (!d) throw new Refused(404, "Client not found");
+    return d;
+  }
+
+  /** client_verification_details as the admin detail returns them (the KYB row carries the KYB decision). */
+  private details(d: Dossier): { kind: string; status: string }[] {
+    return [{ kind: d.kind, status: d.kind === "kyb" ? d.kyb_status : "pending" }];
+  }
+
+  /** The admin routes the owner actor uses (null: not an admin route). Each is Admin-gated as on the site. */
+  private async adminRoute(
+    route: string,
+    admin: (action: string) => Promise<{ wallet: string; params: Record<string, unknown> }>,
+    body: Record<string, unknown>,
+  ): Promise<{ status?: number; data?: unknown } | null> {
+    void body;
+    switch (route) {
+      case "/api/admin/badges": {
+        await admin("admin.badges");
+        const data = {
+          network: "devnet",
+          checkedAt: new Date().toISOString(),
+          badges: {
+            "/admin/clients": {
+              count: [...this.dossiers.values()].filter(
+                (d) =>
+                  (this.badgesCountClosed && d.requirements.length > 0) ||
+                  clientReviewReasons({ kyc_status: d.kyc_status, requirements: d.requirements, details: this.details(d) }, { includeKyb: true }).length > 0,
+              ).length,
+            },
+            "/admin/applications": { count: this.applications.filter((a) => a.status === "pending").length },
+            "/admin/otc": { count: this.otc.filter((r) => r.status === "requested").length },
+            "/admin/kyc": { count: this.passportRequests.filter((r) => r.status === "new" || r.status === "in_review").length },
+          },
+        };
+        return { data };
+      }
+      case "/api/clients/admin-detail": {
+        const { params } = await admin("clients.adminDetail");
+        const d = this.dossierById(params.id);
+        return {
+          data: {
+            client: { id: d.id, wallet: d.wallet, email: d.email, kyc_status: d.kyc_status, kyc_verified_at: d.kyc_verified_at, kyc_expires_at: d.kyc_expires_at, onboarding_status: d.onboarding_status },
+            notes: [],
+            requirements: [...d.requirements].reverse(),
+            documents: [...d.documents].reverse(),
+            verification: this.details(d),
+          },
+        };
+      }
+      case "/api/clients/doc-url": {
+        const { params } = await admin("clients.doc-url");
+        const doc = [...this.dossiers.values()].flatMap((d) => d.documents).find((x) => x.id === params.document_id);
+        if (!doc) throw new Refused(404, "Document not found");
+        return { data: { url: `https://fake-storage.example/object/sign/client-documents/${doc.id}.bin?token=eyJhbGciOiJIUzI1NiJ9.secret-${doc.id}.sig`, expires_in: 120 } };
+      }
+      case "/api/clients/review-requirement": {
+        const { params } = await admin("clients.review-requirement");
+        if (params.status !== "approved" && params.status !== "rejected") throw new Refused(400, "status is not an allowed value");
+        const d = [...this.dossiers.values()].find((x) => x.requirements.some((r) => r.id === params.id));
+        if (!d) throw new Refused(404, "Requirement not found");
+        d.requirements.find((r) => r.id === params.id)!.status = params.status;
+        let recomputed: string | null = null;
+        if (params.status === "approved" && d.kyc_status === "more_info" && d.requirements.every((r) => r.status !== "requested" && r.status !== "rejected")) {
+          d.kyc_status = recomputed = "pending";
+        }
+        return { data: { status: params.status, recomputed } };
+      }
+      case "/api/clients/request-docs": {
+        const { wallet, params } = await admin("clients.request-docs");
+        const d = this.dossierById(params.client_id);
+        const items = params.items as { doc_kind: string; label: string }[];
+        if (!Array.isArray(items) || items.length === 0 || items.length > 20) throw new Refused(400, "items must be an array of 1–20 entries");
+        for (const item of items) {
+          d.requirements.push({ id: this.reqId++, doc_kind: item.doc_kind, label: item.label, status: "requested", document_id: null, requested_by: wallet, requested_at: new Date().toISOString() });
+        }
+        d.kyc_status = "more_info";
+        return { data: { requested: items.length, upload_link_warning: null } };
+      }
+      case "/api/clients/status": {
+        const { params } = await admin("clients.status");
+        const d = this.dossierById(params.id);
+        const status = String(params.kyc_status);
+        if (!["pending", "verified", "rejected", "suspended", "expired", "more_info"].includes(status)) throw new Refused(400, "kyc_status is not an allowed value");
+        if (status === "verified") {
+          const open = d.requirements.filter((r) => r.status === "requested" || r.status === "submitted" || r.status === "rejected");
+          if (open.length) throw new Refused(409, `Approve every uploaded document before verifying the client. Still open: ${open.map((r) => `${r.label} (${r.status})`).join(", ")}.`);
+          d.kyc_verified_at = new Date().toISOString();
+          d.kyc_expires_at = new Date(Date.now() + 365 * 86_400_000).toISOString();
+        }
+        d.kyc_status = status;
+        if (typeof params.onboarding_status === "string") d.onboarding_status = params.onboarding_status;
+        return { data: { kyc_status: status } };
+      }
+      case "/api/clients/kyb-decision": {
+        const { params } = await admin("clients.kybDecision");
+        const d = this.dossierById(params.client_id);
+        if (!["verified", "rejected", "pending"].includes(String(params.decision))) throw new Refused(400, "decision is not an allowed value");
+        if (d.kind !== "kyb") throw new Refused(404, "This client has not submitted company (KYB) details");
+        d.kyb_status = String(params.decision);
+        return { data: { status: d.kyb_status } };
+      }
+      case "/api/applications/admin-list": {
+        const { params } = await admin("applications.adminList");
+        return { data: { applications: this.applications.filter((a) => typeof params.status !== "string" || a.status === params.status) } };
+      }
+      case "/api/applications/admin-events": {
+        const { params } = await admin("applications.adminEvents");
+        if (!params.application_id) throw new Refused(400, "application_id is required");
+        return { data: { events: this.events.filter((e) => e.application_id === params.application_id).reverse() } };
+      }
+      case "/api/applications/review": {
+        const { wallet, params } = await admin("applications.review");
+        const decision = String(params.decision);
+        if (!["approved", "rejected", "needs_changes"].includes(decision)) throw new Refused(400, "decision must be approved, rejected or needs_changes");
+        const reasonText = typeof params.reason === "string" ? params.reason.trim() : "";
+        if (!reasonText || reasonText.length > 2000) throw new Refused(400, "reason must be 1–2000 characters");
+        const row = this.applications.find((a) => a.id === params.id);
+        if (!row) throw new Refused(404, "Application not found");
+        if (row.status !== "pending" && row.status !== "needs_changes") throw new Refused(409, `Application is already ${row.status}`);
+        row.status = decision;
+        this.events.push({ application_id: row.id, actor: "admin", action: decision, reason: reasonText, actor_wallet: wallet, created_at: new Date().toISOString() });
+        return { data: { id: row.id, decision, emailSent: false } };
+      }
+      case "/api/otc/admin-screen": {
+        const { params } = await admin("otc.adminScreen");
+        const row = this.otc.find((r) => r.id === params.id);
+        if (!row) throw new Refused(404, "OTC request not found");
+        const seller = this.suspended.has(row.seller_wallet) ? "suspended" : "clear";
+        const buyer = this.suspended.has(row.buyer_wallet) ? "suspended" : "clear";
+        return { data: { cleared: seller === "clear" && buyer === "clear", seller, buyer } };
+      }
+      case "/api/otc/admin-update": {
+        const { wallet, params } = await admin("otc.adminUpdate");
+        const row = this.otc.find((r) => r.id === params.id);
+        if (!row) throw new Refused(404, "OTC request not found");
+        if (params.status !== undefined && !["created", "cancelled", "completed", "expired"].includes(String(params.status))) throw new Refused(400, "status is not an allowed value");
+        if (params.deal_pda !== undefined && (typeof params.deal_pda !== "string" || !BASE58_RE.test(params.deal_pda))) throw new Refused(400, "deal_pda is not a valid address");
+        if (params.status !== undefined) row.status = String(params.status);
+        if (typeof params.deal_pda === "string") row.deal_pda = params.deal_pda;
+        if (typeof params.deal_id === "number") row.deal_id = params.deal_id;
+        if (params.decide === true) row.decided_by = wallet;
+        return { data: { id: row.id, notified: params.status === "created" } };
+      }
+      case "/api/passport/list": {
+        await admin("passport.list");
+        return { data: { requests: [...this.passportRequests].reverse() } };
+      }
+      case "/api/passport/update": {
+        const { wallet, params } = await admin("passport.update");
+        const row = this.passportRequests.find((r) => r.id === params.id);
+        if (!row) throw new Refused(404, "Passport request not found");
+        const patch = params.patch as Record<string, unknown>;
+        if (!patch || typeof patch !== "object") throw new Refused(400, "Missing patch");
+        for (const [key, value] of Object.entries(patch)) {
+          if (key === "status") {
+            if (!["new", "in_review", "approved", "rejected"].includes(String(value))) throw new Refused(400, "Unknown request status");
+            row.status = String(value);
+          } else if (key === "handled_by") row.handled_by = wallet;
+          else if (key === "handled_at") row.handled_at = String(value);
+          else throw new Refused(400, `Field "${key}" is not patchable`);
+        }
+        return { data: {} };
+      }
+      default:
+        return null;
+    }
   }
 }
 
@@ -427,6 +734,15 @@ export class FakeChainOps implements ChainOps {
   txTimes: number[] = [];
   /** The world's clock: the tx records' `at` (as TxExecutor's, on the run's clock) and txTimes. */
   now_?: () => number;
+  // ── the owner actor ──
+  /** Wallets with an Admin record (ownerView). */
+  admins = new Set<string>();
+  platformAdmin = "6AnFsuperAdminxxxxxxxxxxxxxxxxxxxxxxxxxxxxx";
+  kycAuthority: string | null = "KYCprovider1111111111111111111111111111111";
+  adminLamports = BigInt(1_000_000_000);
+  /** The payment mint's owner (inspectPaymentMint), or the refusal it throws. */
+  paymentProgram: string = TOKEN_CLASSIC;
+  paymentMintRefusal: string | null = null;
 
   constructor(private readonly site: FakeSite) {
     this.tokens.set(this.ataKey(DONOR), { owner: DONOR, amount: BigInt(5), immutableOwner: true });
@@ -584,6 +900,80 @@ export class FakeChainOps implements ChainOps {
   async passports(wallets: string[]): Promise<Map<string, boolean>> {
     this.calls.push({ op: "passports", user: "-", detail: wallets.length });
     return new Map(wallets.map((w) => [w, this.issued.has(w)]));
+  }
+
+  // ── The owner actor ────────────────────────────────────────────────────────
+
+  async paymentMintProgram(mint: Address): Promise<Address> {
+    this.calls.push({ op: "paymentMintProgram", user: "owner", detail: mint });
+    if (this.paymentMintRefusal) throw new Error(this.paymentMintRefusal);
+    return this.paymentProgram as Address;
+  }
+  async dealPda(shareClass: Address, dealId: bigint): Promise<Address> {
+    return (await findDealPda({ shareClass, dealId }))[0];
+  }
+  async otcDeals(shareClass: Address): Promise<({ pda: string } & DealView)[]> {
+    this.calls.push({ op: "otcDeals", user: "owner", detail: shareClass });
+    return [...this.deals.entries()].filter(([, d]) => d.shareClass === shareClass).map(([pda, d]) => ({ pda, ...d }));
+  }
+  /** As SimChainOps.openOtcDeal on TxExecutor.run: landed or done() is skipped; an inflight record resolves from its wire. */
+  async openOtcDeal(u: UserState, admin: KeyPairSigner, deal: OtcDealOpen): Promise<string | null> {
+    const label = "owner.otc.create";
+    const prior = u.tx[label];
+    if (prior?.status === "landed") return prior.sig;
+    const pda = await this.dealPda(deal.request.share_class_pda as Address, deal.dealId);
+    if (prior?.status === "inflight") {
+      const answer = this.inflightAnswers.get(label)?.shift();
+      if (answer === "rpc-error") throw new ChainRpcError("getSignatureStatuses", 429);
+      if (answer === "pending") throw new SimRetryLater(`${label}: an earlier signature is still unresolved`);
+      if (prior.sig && this.wires.has(prior.sig)) {
+        u.tx[label] = { ...prior, status: "landed" };
+        return prior.sig;
+      }
+      delete u.tx[label];
+    }
+    if (this.deals.has(pda)) {
+      u.tx[label] = { status: "landed", sig: null, at: this.stamp() };
+      return null;
+    }
+    const fault = this.takeFault(label);
+    if (fault === "sim-error") this.refuse(u, label);
+    if (fault === "process-death") {
+      u.tx[label] = { status: "inflight", sig: `sig-${u.plan.label}-${label}`, lvbh: "0", at: this.stamp() };
+      this.signedSteps.add(`${u.plan.label}:${label}`);
+      this.persist?.();
+    }
+    const r = deal.request;
+    const sig = await this.paced(() => this.land(u, label, { dealId: deal.dealId.toString(), pda, admin: admin.address }));
+    this.deals.set(pda, {
+      status: OtcDealStatus.Open,
+      assetDeposited: false,
+      paymentDeposited: false,
+      seller: r.seller_wallet,
+      buyer: r.buyer_wallet,
+      amount: BigInt(r.amount),
+      price: BigInt(r.price),
+      admin: admin.address,
+      paymentMint: r.payment_mint,
+      mint: r.mint,
+      shareClass: r.share_class_pda,
+      expiresAt: deal.expiresAt,
+      dealId: deal.dealId,
+    });
+    if (fault === "process-death") {
+      this.onDeath?.();
+      throw new FakeProcessDeath(label);
+    }
+    if (fault === "unresolved") {
+      // Sent and landed, but not finalized in time: the record stays inflight (TxExecutor's SimRetryLater).
+      u.tx[label] = { ...u.tx[label], status: "inflight", lvbh: "0" };
+      throw new SimRetryLater(`${label} unknown; resolved on the next pass`);
+    }
+    return sig;
+  }
+  async ownerView(admin: Address, registry: Address): Promise<OwnerChainView> {
+    this.calls.push({ op: "ownerView", user: "owner", detail: registry });
+    return { isAdmin: this.admins.has(admin), platformAdmin: this.platformAdmin, kycAuthority: this.kycAuthority, lamports: this.adminLamports };
   }
 
   // ── Cohort X ───────────────────────────────────────────────────────────────

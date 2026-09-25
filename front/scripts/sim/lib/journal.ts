@@ -5,6 +5,10 @@
  * Bodies are redacted (tokens, cookies, signatures) and capped at 2 KB before
  * they reach this module. The transaction lifecycle (signed → sent → status)
  * lives in the chain CLI's Journal (`<run>/tx-journal.jsonl`).
+ *
+ * The owner actor (SIM_OWNER=1) journals as user `owner` with the user its
+ * request is about as `target`: the line lands in `users/owner.ndjson` and in
+ * the target's own file too, so each user's file shows the decisions about it.
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -56,6 +60,8 @@ export type JournalEntry = {
   txSig?: string | null;
   err?: string;
   logMessages?: string[];
+  /** The user an owner-actor line is about (`user` is then "owner"). */
+  target?: string;
 };
 
 export interface JournalSink {
@@ -88,6 +94,7 @@ export class SimJournal implements JournalSink {
     fs.writeSync(this.fd, line);
     fs.fsyncSync(this.fd);
     fs.writeSync(this.userFd(entry.user), line);
+    if (entry.target && entry.target !== entry.user) fs.writeSync(this.userFd(entry.target), line);
     this.entries.push(full);
   }
 
@@ -96,6 +103,16 @@ export class SimJournal implements JournalSink {
     for (const fd of this.userFds.values()) fs.closeSync(fd);
     this.userFds.clear();
   }
+}
+
+/** The same sink, with `observe` told about every line after it is written (the owner actor's activity counts). */
+export function teeJournal(sink: JournalSink, observe: (entry: Omit<JournalEntry, "ts">) => void): JournalSink {
+  return {
+    append(entry) {
+      sink.append(entry);
+      observe(entry);
+    },
+  };
 }
 
 /** In-memory sink (tests, plan). */

@@ -9,6 +9,7 @@ import { BUYER_PAYMENT, PACE, PAYMENT_UNIT, SITE_ORIGIN, SOL_BUYER, SOL_ISSUER, 
 import { docTargetSize } from "./docs";
 import { XFER_WAVE, buildRoster, hasDossier, type UserPlan } from "./identity";
 import { EDGE_GROUPS } from "./cohorts/edge";
+import { morePick, requestKind } from "./cohorts/owner";
 import { PROBES, describeExpect } from "./transfers";
 
 export type Cost = { writes: number; reads: number; uploads: number; verify: number; tx: number; rpc: number; bytes: number; probes: number };
@@ -72,7 +73,9 @@ export function userCost(p: UserPlan, runId: string): Cost {
     c = add(c, { writes: 1, verify: 1, reads: 1, uploads: kinds.length, bytes: docsBytes(runId, p.n, kinds) });
     if (p.variant === "kyc-invalid-first") c = add(c, { writes: 1, verify: 1 });
     if (p.variant !== "kyc-stop-after-one") c = add(c, poll(2)); // clients.me + requirements
-    if (p.review === "more_info") c = add(c, { reads: 3, uploads: 1, bytes: docsBytes(runId, p.n, ["passport"], 1) });
+    // more_info: a passport replacement (reject-doc) or the requested extra document (request-doc).
+    const extra = morePick(p) === "request-doc" ? requestKind(p).doc_kind : "passport";
+    if (p.review === "more_info") c = add(c, { reads: 3, uploads: 1, bytes: docsBytes(runId, p.n, [extra], 1) });
   };
   const buy = () => (c = add(c, { reads: 3, writes: 1.5, tx: 1.2 }));
   const application = () => {
@@ -249,6 +252,7 @@ export function renderPlan(s: PlanSummary): string {
     "  SIM_CMD=pilot SIM_SEND=1 CHAIN_NETWORK=devnet CHAIN_RPC_URL=<devnet RPC> CHAIN_RPS=1 npm run sim",
     "then review in the admin UI, `SIM_CMD=watch …` until the pilot users finish, `SIM_CMD=report npm run sim` (0 unexpected), then SIM_CMD=wave SIM_WAVE=1…5.",
     `transfers: SIM_CMD=wave SIM_WAVE=${XFER_WAVE} (plus SIM_DONOR_KEYPAIR=<e2e buyer3 key> for the loan) while no other simulator command runs; \`watch\` then continues it (keep SIM_DONOR_KEYPAIR set until both pairs have borrowed: the owner queue asks for it otherwise).`,
+    "owner actor: SIM_CMD=watch SIM_OWNER=1 makes the owner's planned decisions (dossiers, KYB, applications, the OTC escrows, passport triage) as the CLI Admin through the admin routes the UI uses; what only the super admin or the KYC provider can sign stays in owner-queue.txt. Preview: SIM_CMD=plan SIM_OWNER=1 (first pass: SIM_OWNER_MAX=3, then SIM_CMD=report).",
   ];
   return lines.join("\n");
 }

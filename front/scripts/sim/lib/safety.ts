@@ -65,7 +65,68 @@ export type SimConfig = {
   workers: number;
   watchMaxMin: number;
   watchOnce: boolean;
+  /**
+   * SIM_OWNER=1 (design-owner-actor.md): `watch` also runs the owner actor,
+   * which makes the owner's planned admin decisions as the CLI Admin; `plan`
+   * previews them. Off (false) for every other command.
+   */
+  owner: boolean;
+  ownerOptions: OwnerOptions;
 };
+
+/** The owner actor's switches (read only with SIM_OWNER=1). */
+export type OwnerOptions = {
+  /** SIM_OWNER_MAX: final decisions the owner actor may have made in this run (persisted, across restarts). */
+  max: number | null;
+  /** SIM_OWNER_ONLY: the only users the owner actor decides for (a gated pass). */
+  only: string[] | null;
+  /** SIM_OWNER_RETRY=1: hand-backs of earlier commands are tried again. */
+  retry: boolean;
+  /** SIM_OWNER_APP_REJECT=1 (open question Q1): reject the one planned application instead of approving it. */
+  appReject: boolean;
+  /** SIM_OWNER_PASSPORT_REJECT=1 (open question Q3): reject the open passport requests of rejected KYC dossiers. */
+  passportReject: boolean;
+};
+
+const NO_OWNER: OwnerOptions = { max: null, only: null, retry: false, appReject: false, passportReject: false };
+
+function flag(env: ChainEnv, name: string): boolean {
+  const raw = value(env, name);
+  if (raw !== null && raw !== "1" && raw !== "0") throw new SimGateError(`${name} must be 1, 0 or unset`);
+  return raw === "1";
+}
+
+/** SIM_OWNER and its switches: only `watch` acts on them, only `plan` previews them. */
+function readOwnerOptions(env: ChainEnv, cmd: SimCmd): { owner: boolean; options: OwnerOptions } {
+  const switches = ["SIM_OWNER_MAX", "SIM_OWNER_ONLY", "SIM_OWNER_RETRY", "SIM_OWNER_APP_REJECT", "SIM_OWNER_PASSPORT_REJECT"];
+  if (cmd !== "watch" && cmd !== "plan") {
+    for (const name of ["SIM_OWNER", ...switches]) {
+      if (value(env, name) !== null) throw new SimGateError(`${name} is only read by SIM_CMD=watch (and plan, for the preview)`);
+    }
+    return { owner: false, options: NO_OWNER };
+  }
+  const owner = flag(env, "SIM_OWNER");
+  if (!owner) {
+    for (const name of switches) if (value(env, name) !== null) throw new SimGateError(`${name} needs SIM_OWNER=1`);
+    return { owner: false, options: NO_OWNER };
+  }
+  const max = value(env, "SIM_OWNER_MAX") === null ? null : intIn(env, "SIM_OWNER_MAX", 0, 1, 500);
+  const onlyRaw = value(env, "SIM_OWNER_ONLY");
+  const only = onlyRaw === null ? null : onlyRaw.split(",").map((s) => s.trim()).filter(Boolean);
+  if (only && (only.length === 0 || only.some((l) => !/^u\d{3}$/.test(l)))) {
+    throw new SimGateError("SIM_OWNER_ONLY must be user labels such as u029,u043");
+  }
+  return {
+    owner,
+    options: {
+      max,
+      only,
+      retry: flag(env, "SIM_OWNER_RETRY"),
+      appReject: flag(env, "SIM_OWNER_APP_REJECT"),
+      passportReject: flag(env, "SIM_OWNER_PASSPORT_REJECT"),
+    },
+  };
+}
 
 function value(env: ChainEnv, name: string): string | null {
   const raw = env[name]?.trim();
@@ -151,6 +212,7 @@ export function readSimConfig(
   if (kycRegistry !== null && !isAddress(kycRegistry)) throw new SimGateError("SIM_KYC_REGISTRY is not an address");
   const watchOnce = value(env, "SIM_WATCH_ONCE") === "1";
   const donor = value(env, "SIM_DONOR_KEYPAIR");
+  const owner = readOwnerOptions(env, cmd);
   return {
     cmd,
     wave,
@@ -173,6 +235,8 @@ export function readSimConfig(
     workers: intIn(env, "SIM_WORKERS", PACE.httpConcurrency, 1, PACE.httpConcurrency),
     watchMaxMin: intIn(env, "SIM_WATCH_MAX_MIN", 230, 1, 230),
     watchOnce,
+    owner: owner.owner,
+    ownerOptions: owner.options,
   };
 }
 
@@ -350,10 +414,17 @@ export class StopControl {
 
 const SECRET_KEYS = /token|cookie|signature|secret|session|password|authorization|private/i;
 
+/**
+ * Query parameters that carry a credential: the onboarding link's `t`, and
+ * the token / signature of a signed storage URL (clients.doc-url answers a
+ * working 2-minute link to a private KYC document).
+ */
+const SECRET_QUERY = /([?&](?:t|token|sig|signature|x-amz-signature|x-amz-credential|x-amz-security-token)=)[^&\s"]+/gi;
+
 /** Deep copy with credentials replaced; onboarding links keep their path, not their token. */
 export function redact(value: unknown, depth = 0): unknown {
   if (depth > 8) return "[depth]";
-  if (typeof value === "string") return value.replace(/([?&]t=)[^&\s"]+/g, "$1[redacted]");
+  if (typeof value === "string") return value.replace(SECRET_QUERY, "$1[redacted]");
   if (Array.isArray(value)) return value.map((v) => redact(v, depth + 1));
   if (value && typeof value === "object") {
     return Object.fromEntries(

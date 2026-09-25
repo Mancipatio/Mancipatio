@@ -8,6 +8,17 @@
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { generateKeyPairSigner, getAddressEncoder, type Address, type RpcTransport } from "@solana/kit";
+import {
+  ASSET_REGISTRY_PROGRAM_ADDRESS,
+  OtcDealStatus,
+  findAdminRecordPda,
+  findDealPda,
+  findPlatformPda,
+  getAdminEncoder,
+  getKycRegistryEncoder,
+  getOtcDealEncoder,
+  getPlatformEncoder,
+} from "@/lib/generated/asset_registry";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import { TOKEN_2022 } from "@/lib/transaction-builders";
 import { fundInstructions } from "@/scripts/chain/lib/e2e/fixtures";
@@ -224,6 +235,73 @@ describe("the tx journal agrees with state.json (the chain CLI lock rule)", () =
     expect(exec.settled(state)).toBe(true);
     expect(journal.entries.filter((e) => e.outcome === "tx-error").map((e) => [e.step, e.txSig])).toEqual([["sol.11", first]]);
     expect(journal.entries[0].err).toMatch(/finalized too .*check for a double send/);
+  });
+});
+
+describe("the owner actor's chain reads (SimChainOps)", () => {
+  const PROGRAM = ASSET_REGISTRY_PROGRAM_ADDRESS;
+  const put = (chain: FakeChain, address: Address, data: Uint8Array) => chain.accounts.set(address, { owner: PROGRAM, lamports: SOL, data: new Uint8Array(data) });
+  const market = (classA: Address) => ({ issuer: classA, asset: classA, classA, mintA: classA, paymentMint: classA, kycRegistry: null, classB: null, mintB: null, donor: null });
+
+  it("otcDeals reads only the class's OTC deals (one filtered getProgramAccounts) with every field C-O7 compares", async () => {
+    const { chain, exec } = await setup();
+    const [classA, classB, seller, buyer, admin, mint, pay] = await Promise.all(Array.from({ length: 7 }, async () => (await generateKeyPairSigner()).address));
+    const deal = (shareClass: Address, dealId: bigint) =>
+      getOtcDealEncoder().encode({
+        admin,
+        buyer,
+        seller,
+        shareClass,
+        mint,
+        paymentMint: pay,
+        assetEscrow: mint,
+        paymentEscrow: pay,
+        amount: BigInt(5),
+        price: BigInt(6_000_000),
+        assetDeposited: false,
+        paymentDeposited: false,
+        status: OtcDealStatus.Open,
+        dealId,
+        expiresAt: BigInt(1_790_259_200),
+        version: 1,
+        bump: 255,
+        assetDepositedAmount: BigInt(0),
+        paymentDepositedAmount: BigInt(0),
+      });
+    const [pdaA] = await findDealPda({ shareClass: classA, dealId: BigInt(7) });
+    const [pdaB] = await findDealPda({ shareClass: classB, dealId: BigInt(8) });
+    put(chain, pdaA, new Uint8Array(deal(classA, BigInt(7))));
+    put(chain, pdaB, new Uint8Array(deal(classB, BigInt(8))));
+    const ops = new SimChainOps(exec, market(classA));
+    const rows = await ops.otcDeals(classA);
+    expect(rows).toEqual([
+      { pda: pdaA, status: OtcDealStatus.Open, assetDeposited: false, paymentDeposited: false, seller, buyer, amount: BigInt(5), price: BigInt(6_000_000), admin, paymentMint: pay, mint, shareClass: classA, expiresAt: BigInt(1_790_259_200), dealId: BigInt(7) },
+    ]);
+    expect(await ops.dealPda(classA, BigInt(7))).toBe(pdaA);
+    expect(chain.calls.filter((m) => m === "getProgramAccounts")).toHaveLength(1);
+  });
+
+  it("journals an owner-actor transaction as user owner with the requester as target (it stays on the requester's record)", async () => {
+    const { payer, exec, journal } = await setup();
+    const to = (await generateKeyPairSigner()).address;
+    const requester: TxOwner = { label: "u049", tx: {} };
+    await exec.run(requester, { cohort: "owner", wave: 3, actor: "owner", target: "u049" }, "owner.otc.create", payer, async () => fundInstructions(payer, [{ to, lamports: BigInt(1_000_000) }]));
+    expect(requester.tx["owner.otc.create"]).toMatchObject({ status: "landed" });
+    expect(journal.entries.at(-1)).toMatchObject({ user: "owner", target: "u049", cohort: "owner", ix: "owner.otc.create", outcome: "ok" });
+  });
+
+  it("ownerView: an Admin record naming the wallet is an Admin; Platform.admin, the registry authority and the SOL are read", async () => {
+    const { chain, exec } = await setup();
+    const [admin, superAdmin, provider, registry] = await Promise.all(Array.from({ length: 4 }, async () => (await generateKeyPairSigner()).address));
+    const [platformPda] = await findPlatformPda();
+    put(chain, platformPda, new Uint8Array(getPlatformEncoder().encode({ admin: superAdmin, protocolTreasury: superAdmin, protocolFeeBps: 0, pauseFlags: 0, issuersCount: 1, version: 1, bump: 255 })));
+    put(chain, registry, new Uint8Array(getKycRegistryEncoder().encode({ authority: provider, approvedJurisdictions: new Uint8Array(128), blockedJurisdictions: new Uint8Array(128), entriesCount: 0, version: 1, bump: 255 })));
+    chain.fund(admin, SOL / BigInt(10));
+    const ops = new SimChainOps(exec, market(registry));
+    expect(await ops.ownerView(admin, registry)).toEqual({ isAdmin: false, platformAdmin: superAdmin, kycAuthority: provider, lamports: SOL / BigInt(10) });
+    const [record] = await findAdminRecordPda({ authority: admin });
+    put(chain, record, new Uint8Array(getAdminEncoder().encode({ admin, addedBy: superAdmin, bump: 255 })));
+    expect((await ops.ownerView(admin, registry)).isAdmin).toBe(true);
   });
 });
 

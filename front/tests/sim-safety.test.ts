@@ -12,6 +12,7 @@ import { acquireLock, lockPath, readLock, releaseLock } from "@/scripts/chain/li
 import { loadHotSigner } from "@/scripts/chain/lib/safety";
 import { CLI_ADMIN, DEPLOYER, E2E_PAYMENT_MINT } from "@/scripts/sim/lib/constants";
 import { userSigner } from "@/scripts/sim/lib/identity";
+import { SimJournal } from "@/scripts/sim/lib/journal";
 import { readE2eState } from "@/scripts/sim/lib/setup";
 import {
   SIM_CHAIN_TOOL,
@@ -88,6 +89,37 @@ describe("config gates", () => {
   });
 });
 
+describe("owner actor switches (SIM_OWNER)", () => {
+  const watch = { ...base, SIM_CMD: "watch" };
+
+  it("is read by watch (to act) and plan (to preview) only; off unless SIM_OWNER=1", () => {
+    expect(read(watch)).toMatchObject({ owner: false, ownerOptions: { max: null, only: null, retry: false, appReject: false, passportReject: false } });
+    expect(read({ ...watch, SIM_OWNER: "0" }).owner).toBe(false);
+    expect(read({ ...watch, SIM_OWNER: "1" }).owner).toBe(true);
+    expect(read({ SIM_CMD: "plan", SIM_OWNER: "1" }).owner).toBe(true);
+    for (const cmd of ["pilot", "report"]) {
+      expect(() => read({ ...base, SIM_CMD: cmd, SIM_OWNER: "1", ...(cmd === "report" ? { SIM_SEND: undefined, CHAIN_NETWORK: undefined, CHAIN_RPC_URL: undefined } : {}) })).toThrow(
+        /SIM_OWNER is only read by SIM_CMD=watch \(and plan, for the preview\)/,
+      );
+    }
+    expect(() => read({ ...base, SIM_CMD: "wave", SIM_WAVE: "2", SIM_OWNER: "1" })).toThrow(/only read by SIM_CMD=watch/);
+    expect(() => read({ ...base, SIM_CMD: "wave", SIM_WAVE: "2", SIM_OWNER_MAX: "3" })).toThrow(/SIM_OWNER_MAX is only read by SIM_CMD=watch/);
+    expect(() => read({ ...watch, SIM_OWNER: "yes" })).toThrow(/SIM_OWNER must be 1, 0 or unset/);
+  });
+
+  it("SIM_OWNER_MAX is 1–500 and needs SIM_OWNER=1; SIM_OWNER_ONLY names users; the open-question flags are off by default", () => {
+    expect(read({ ...watch, SIM_OWNER: "1", SIM_OWNER_MAX: "3" }).ownerOptions.max).toBe(3);
+    expect(() => read({ ...watch, SIM_OWNER: "1", SIM_OWNER_MAX: "0" })).toThrow(/SIM_OWNER_MAX must be an integer from 1 to 500/);
+    expect(() => read({ ...watch, SIM_OWNER: "1", SIM_OWNER_MAX: "501" })).toThrow(/from 1 to 500/);
+    expect(() => read({ ...watch, SIM_OWNER_MAX: "3" })).toThrow(/SIM_OWNER_MAX needs SIM_OWNER=1/);
+    expect(read({ ...watch, SIM_OWNER: "1", SIM_OWNER_ONLY: "u029, u043" }).ownerOptions.only).toEqual(["u029", "u043"]);
+    expect(() => read({ ...watch, SIM_OWNER: "1", SIM_OWNER_ONLY: "u029,alice" })).toThrow(/SIM_OWNER_ONLY must be user labels/);
+    const flags = read({ ...watch, SIM_OWNER: "1", SIM_OWNER_RETRY: "1", SIM_OWNER_APP_REJECT: "1", SIM_OWNER_PASSPORT_REJECT: "1" }).ownerOptions;
+    expect(flags).toMatchObject({ retry: true, appReject: true, passportReject: true });
+    expect(() => read({ ...watch, SIM_OWNER_APP_REJECT: "1" })).toThrow(/needs SIM_OWNER=1/);
+  });
+});
+
 describe("fetch guard", () => {
   const originalFetch = globalThis.fetch;
   afterEach(() => {
@@ -136,6 +168,18 @@ describe("files and switches", () => {
     expect(fs.statSync(file).mode & 0o777).toBe(0o600);
     expect(fs.statSync(dir).mode & 0o777).toBe(0o700);
     expect(fs.readdirSync(dir)).toEqual(["state.json"]);
+  });
+
+  it("journals an owner-actor line in users/owner.ndjson and in its target's own file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "sim-journal-"));
+    const journal = new SimJournal(dir);
+    journal.append({ wave: 1, user: "owner", cohort: "owner", target: "u029", step: "owner.clients.status", kind: "http", outcome: "ok" });
+    journal.append({ wave: 1, user: "u029", cohort: "B", step: "poll.clients.me", kind: "http", outcome: "ok" });
+    journal.close();
+    const lines = (file: string) => fs.readFileSync(path.join(dir, "users", file), "utf8").trim().split("\n").map((l) => JSON.parse(l).step);
+    expect(lines("owner.ndjson")).toEqual(["owner.clients.status"]);
+    expect(lines("u029.ndjson")).toEqual(["owner.clients.status", "poll.clients.me"]);
+    expect(fs.readFileSync(path.join(dir, "journal.ndjson"), "utf8").trim().split("\n")).toHaveLength(2);
   });
 
   it("creates user keys once (wx), 600 in a 700 keys dir, and reloads the same key", async () => {
@@ -247,6 +291,13 @@ describe("redaction", () => {
     expect(out.data.onboarding_path).toBe("/onboarding/1?t=[redacted]");
     expect(out.data.nested).toEqual([{ signature: "[redacted]", cookie: "[redacted]" }]);
     expect(out.data.tos_version).toBe("2026-07-18");
+  });
+
+  it("redacts the token of a signed document link (clients.doc-url) and of signed storage URLs", () => {
+    const body = journalBody(JSON.stringify({ ok: true, data: { url: "https://x.supabase.co/storage/v1/object/sign/client-documents/a.pdf?token=eyJhbGciOiJIUzI1NiJ9.payload.sig", expires_in: 120 } }));
+    expect(body).toContain("?token=[redacted]");
+    expect(body).not.toContain("eyJ");
+    expect(redact("https://s3.example/a?X-Amz-Credential=AKIA&X-Amz-Signature=abc&keep=1")).toBe("https://s3.example/a?X-Amz-Credential=[redacted]&X-Amz-Signature=[redacted]&keep=1");
   });
 
   it("caps journal bodies at 2 KB and redacts non-JSON text too", () => {
