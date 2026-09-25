@@ -42,6 +42,23 @@ export type Invocation = {
 export type EventState = "complete" | "truncated" | "missing" | "mismatch";
 export type AttributedInvocation = Invocation & { events: Uint8Array[]; eventState: EventState };
 
+/**
+ * Whether the answer carries everything an invocation can hide in: the status
+ * meta with its inner (CPI) instructions and, for a message that uses lookup
+ * tables, the loaded keys. Without them flattenInvocations sees only the
+ * top-level instructions (a Squads execute or any wrapper would be missed).
+ */
+export function hasInvocationMeta(tx: InvocationTx): boolean {
+  const meta = tx.meta;
+  if (!meta || typeof meta !== "object" || !Array.isArray(meta.innerInstructions)) return false;
+  const lookups = (tx.transaction?.message as { addressTableLookups?: unknown } | undefined)?.addressTableLookups;
+  if (Array.isArray(lookups) && lookups.length > 0) {
+    const loaded = meta.loadedAddresses;
+    return !!loaded && Array.isArray(loaded.writable) && Array.isArray(loaded.readonly);
+  }
+  return true;
+}
+
 /** Static keys, then loaded writable, then loaded readonly (the v0 order). */
 export function resolveAccountKeys(tx: InvocationTx): string[] {
   return [

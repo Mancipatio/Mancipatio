@@ -85,6 +85,28 @@ describe("network identity", () => {
     expect(send).toHaveBeenCalledTimes(2);
   });
 
+  it("a caller's abort signal bounds only its own wait for the shared genesis check", async () => {
+    let answer: (hash: string) => void = () => {};
+    const send = vi.fn(() => new Promise<string>((resolve) => { answer = resolve; }));
+    const rpc = { getGenesisHash: () => ({ send }) } as unknown as Rpc<GetGenesisHashApi>;
+    const verify = createNetworkVerifier(rpc, "devnet", { cacheMs: 30_000 });
+    const caller = new AbortController();
+    const bounded = verify(caller.signal);
+    const patient = verify();
+    caller.abort(new DOMException("deadline", "TimeoutError"));
+    await expect(bounded).rejects.toMatchObject({ name: "TimeoutError" });
+    // The shared check goes on for the other caller, and is cached once it passes.
+    answer(CLUSTER_GENESIS_HASHES.devnet);
+    await expect(patient).resolves.toBeUndefined();
+    expect(send).toHaveBeenCalledTimes(1);
+    await verify(AbortSignal.timeout(1_000));
+    expect(send).toHaveBeenCalledTimes(1);
+    // An already-aborted caller never starts a check.
+    const aborted = createNetworkVerifier(rpc, "devnet");
+    await expect(aborted(AbortSignal.abort())).rejects.toMatchObject({ name: "AbortError" });
+    expect(send).toHaveBeenCalledTimes(1);
+  });
+
   it("gates actual server RPC account reads before authorization data is returned", async () => {
     const methods: string[] = [];
     vi.stubGlobal(

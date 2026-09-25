@@ -96,6 +96,8 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   "onchain_event_jobs", "worker_leases", "worker_heartbeats", "alarm_incidents",
   // 0073 ledger jobs and holds
   "spv_issuance_jobs", "sale_capacity_holds",
+  // 0075 indexer freshness heartbeat
+  "indexer_heartbeat_state", "indexer_heartbeat_watermarks",
 ] as const;
 
 /** Every `network` column that defaults to public.deployment_network(). */

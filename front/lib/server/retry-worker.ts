@@ -3,6 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { detectNetwork, type Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDeploymentNetworkError } from "@/lib/server/deployment-network";
+import { runIndexerHeartbeat, type Freshness } from "@/lib/server/indexer-heartbeat";
 import { reconcileIndexerJobs } from "@/lib/server/indexer-sync";
 import { reconcilePurchases } from "@/lib/server/purchase-records";
 import { reconcileSaleCapacity } from "@/lib/server/sale-capacity";
@@ -18,6 +19,8 @@ export type RetryWorkerResult =
   | {
     status: "processed" | "partial"; network: Network;
     indexer: StageResult; purchases: StageResult; ledger: StageResult; capacity: StageResult;
+    /** The indexer freshness heartbeat (0075). Never part of `partial`. */
+    freshness: Freshness;
   };
 
 const LEASE_TTL_SECONDS = 120;
@@ -91,7 +94,19 @@ export async function runRetryWorker(limit = 10): Promise<RetryWorkerResult> {
   if (!acquired.data) return { status: "busy", network };
   let status: "processed" | "partial" = "partial";
   try {
-    const indexer = await stage(reconcileIndexerJobs, limit, STAGE_BUDGETS_MS.indexer, workDeadline);
+    // The heartbeat runs after the job loop, inside the indexer stage's budget
+    // (the later stages' deadlines are unchanged). It never throws; a decline
+    // is its own field and never makes the run partial.
+    let freshness: Freshness = { status: "skipped", reason: "INDEXER_STAGE" };
+    const indexer = await stage(async (l, deadline, signal) => {
+      const counts = await reconcileIndexerJobs(l, deadline, signal);
+      try {
+        freshness = await runIndexerHeartbeat(deadline, signal);
+      } catch {
+        freshness = { status: "declined", reason: "INTERNAL_ERROR" };
+      }
+      return counts;
+    }, limit, STAGE_BUDGETS_MS.indexer, workDeadline);
     const purchases = await stage(reconcilePurchases, limit, STAGE_BUDGETS_MS.purchases, workDeadline);
     // The €3M ledger (0073): closed sales and treasury mints the indexer and
     // the alarm worker enqueued, booked from the finalized chain.
@@ -101,7 +116,7 @@ export async function runRetryWorker(limit = 10): Promise<RetryWorkerResult> {
     const capacity = await stage(reconcileSaleCapacity, limit, STAGE_BUDGETS_MS.capacity, workDeadline);
     const failed = [indexer, purchases, ledger, capacity].some((s) => s.status === "failed");
     status = failed ? "partial" : "processed";
-    return { status, network, indexer, purchases, ledger, capacity };
+    return { status, network, indexer, purchases, ledger, capacity, freshness };
   } finally {
     // Best effort, bounded: the alarm worker watches this heartbeat.
     try {

@@ -53,6 +53,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0072_onchain_alarms.sql");
       expect(applied).toContain("0073_spv_issuance_jobs.sql");
       expect(applied).toContain("0074_ledger_contract.sql");
+      expect(applied).toContain("0075_indexer_heartbeat.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));
@@ -84,6 +85,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "worker_heartbeats",
         "alarm_incidents",
         "spv_issuances",
+        "indexer_heartbeat_state",
+        "indexer_heartbeat_watermarks",
       ]) {
         for (const role of ["anon", "authenticated"]) {
           const privileges = db.query(
@@ -135,10 +138,10 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         .toEqual([...ALL_DYNAMIC_DEFAULT_TABLES].sort());
       // Rule 2: every network table carries the guard.
       expect(db.query(GUARDED).split("\n")).toEqual(columns.map(([table]) => table));
-      // Re-applying 0070 through 0074 is a no-op that keeps the identity and the guard
+      // Re-applying 0070 through 0075 is a no-op that keeps the identity and the guard
       // (0074 after 0073: re-running 0073 recreates the function 0074 drops).
       for (const file of ["0070_deployment_identity.sql", "0071_network_guard.sql", "0072_onchain_alarms.sql",
-        "0073_spv_issuance_jobs.sql", "0074_ledger_contract.sql"])
+        "0073_spv_issuance_jobs.sql", "0074_ledger_contract.sql", "0075_indexer_heartbeat.sql"])
         db.query(readFileSync(join(MIGRATIONS_DIR, file), "utf8"));
       expect(db.query("select to_regprocedure('public.record_spv_issuance(uuid,numeric,text,text,date,text,text,boolean,boolean)') is null")).toBe("t");
       expect(db.query("select public.deployment_network()")).toBe("devnet");
@@ -184,6 +187,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(mainnet.query(GUARDED).split("\n")).toEqual(
         mainnet.query(NETWORK_COLUMNS).split("\n").map((line) => line.split("|")[0]),
       );
+      // 0075 seeds its state row with the project's own network.
+      expect(mainnet.query("select network || ':' || mode from public.indexer_heartbeat_state")).toBe("mainnet:observe");
     });
   },
 );

@@ -7,6 +7,8 @@ vi.mock("server-only", () => ({}));
 const state = vi.hoisted(() => ({
   lists: {} as Record<string, Array<{ signature: string; blockTime: number }>>,
   complete: true,
+  /** Accounts whose listing runs out of pages although `complete` is true. */
+  incomplete: [] as string[],
   txs: {} as Record<string, unknown>,
   pagesAsked: [] as number[],
   hang: false,
@@ -24,7 +26,7 @@ vi.mock("@/lib/server/sale-capacity-chain", () => ({
       // A slow RPC: answers only when the caller gives up.
       await new Promise((_resolve, reject) => signal.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
     }
-    return { signatures: state.lists[account] ?? [], complete: state.complete };
+    return { signatures: state.lists[account] ?? [], complete: state.complete && !state.incomplete.includes(account) };
   }),
   finalizedTransaction: vi.fn(async (sig: string) => state.txs[sig] ?? null),
 }));
@@ -33,7 +35,8 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => { throw new Er
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import {
-  GAP_SCAN_OVERDUE_MS, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram, runAlarmChecks, thresholdState,
+  GAP_SCAN_HOOK_PAGES, GAP_SCAN_OVERDUE_MS, GAP_SCAN_PAGES, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram,
+  runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { buildTx } from "./helpers/chain-tx";
@@ -42,8 +45,12 @@ const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 const minutesAgo = (m: number) => new Date(Date.now() - m * 60_000).toISOString();
 
 type Rpc = { fn: string; args: Record<string, unknown> };
-// broken: a table name, or "table.columns" for one select only; slow: ms a table's reads take.
-function mockSb(tables: Record<string, Record<string, unknown>[]>, broken: string[] = [], slow: Record<string, number> = {}) {
+// broken: a table name, or "table.columns" for one select only; slow: ms a table's reads take;
+// codes: the error code a broken key answers with (default 08006, a connection failure).
+function mockSb(
+  tables: Record<string, Record<string, unknown>[]>, broken: string[] = [], slow: Record<string, number> = {},
+  codes: Record<string, string> = {},
+) {
   const rpcs: Rpc[] = [];
   const sb = {
     from: (table: string) => {
@@ -54,13 +61,14 @@ function mockSb(tables: Record<string, Record<string, unknown>[]>, broken: strin
       b.select = (c: string, opts?: { count?: string }) => { cols = c; counted = !!opts?.count; return b; };
       for (const m of ["eq", "in", "lte", "gte", "order", "limit", "is", "not", "like", "neq"]) b[m] = () => b;
       const isBroken = () => broken.includes(table) || broken.includes(`${table}.${cols}`);
+      const errorCode = () => codes[table] ?? "08006";
       const later = <T>(v: () => T) => slow[table]
         ? new Promise<T>((resolve) => setTimeout(() => resolve(v()), slow[table]))
         : Promise.resolve(v());
       const result = () => isBroken()
-        ? { data: null, error: { code: "08006" } }
+        ? { data: null, error: { code: errorCode() } }
         : { data: rows, error: null, ...(counted ? { count: rows.length } : {}) };
-      const single = () => later(() => isBroken() ? { data: null, error: { code: "08006" } } : { data: rows[0] ?? null, error: null });
+      const single = () => later(() => isBroken() ? { data: null, error: { code: errorCode() } } : { data: rows[0] ?? null, error: null });
       b.maybeSingle = () => ({ abortSignal: single });
       b.abortSignal = () => Object.assign(later(result), { maybeSingle: single });
       b.then = (resolve: (v: unknown) => unknown) => later(result).then(resolve);
@@ -77,6 +85,7 @@ function mockSb(tables: Record<string, Record<string, unknown>[]>, broken: strin
 beforeEach(() => {
   state.lists = {};
   state.complete = true;
+  state.incomplete = [];
   state.txs = {};
   state.pagesAsked = [];
   state.hang = false;
@@ -92,7 +101,7 @@ describe("thresholds", () => {
 });
 
 describe("gap scan", () => {
-  it("pages the four watched addresses, re-queues missing transactions through the indexer, and reports an incomplete window", async () => {
+  it("pages the five watched addresses, re-queues missing transactions through the indexer, and reports an incomplete window", async () => {
     const missing = "4".repeat(88);
     const known = "5".repeat(88);
     state.lists[ASSET_REGISTRY_PROGRAM_ADDRESS] = [{ signature: missing, blockTime: 1_700_000_000 }, { signature: known, blockTime: 1_700_000_001 }];
@@ -100,8 +109,9 @@ describe("gap scan", () => {
     state.txs[missing] = buildTx({ signature: missing, instructions: [{ ix: { program: ASSET_REGISTRY_PROGRAM_ADDRESS, accounts: [MINT], data: new Uint8Array([1]) } }] }).tx;
     const { sb, rpcs } = mockSb({ indexer_events: [{ signature: known }] });
     const result = await gapScan(sb, "devnet", Date.now(), AbortSignal.timeout(5_000));
-    expect(result).toEqual({ missing: 1, repaired: 1, ignored: 0, complete: false });
-    expect(state.pagesAsked).toEqual([5, 5, 5, 5]);
+    expect(result).toEqual({ missing: 1, repaired: 1, ignored: 0, complete: false, hookComplete: false });
+    // Four addresses on the full budget, then the hook program ID on its own.
+    expect(state.pagesAsked).toEqual([5, 5, 5, 5, 2]);
     expect(rpcs).toHaveLength(1);
     expect(rpcs[0]).toMatchObject({ fn: "enqueue_indexer_events", args: { p_network: "devnet" } });
     const [event] = rpcs[0].args.p_events as Record<string, unknown>[];
@@ -119,8 +129,40 @@ describe("gap scan", () => {
     state.txs[hookAdmin] = buildTx({ signature: hookAdmin, instructions: [{ ix: { program: TRANSFER_HOOK_PROGRAM_ADDRESS, accounts: [MINT, blocklistAuthority], data: new Uint8Array([1]) } }] }).tx;
     const { sb, rpcs } = mockSb({ indexer_events: [] });
     const result = await gapScan(sb, "devnet", Date.now(), AbortSignal.timeout(5_000));
-    expect(result).toEqual({ missing: 1, repaired: 1, ignored: 1, complete: true });
+    expect(result).toEqual({ missing: 1, repaired: 1, ignored: 1, complete: true, hookComplete: true });
     expect(rpcs.map((r) => (r.args.p_events as { signature: string }[])[0].signature)).toEqual([hookAdmin]);
+  });
+
+  it("lists the transfer_hook program ID too: a missed hook-only transaction is re-queued (0075 requires it indexed)", async () => {
+    const hookOnly = "3".repeat(88);
+    const readOnly = "9".repeat(88);
+    state.lists[TRANSFER_HOOK_PROGRAM_ADDRESS] = [{ signature: hookOnly, blockTime: 1_700_000_000 }, { signature: readOnly, blockTime: 1_700_000_001 }];
+    state.txs[hookOnly] = buildTx({ signature: hookOnly, instructions: [{ ix: { program: TRANSFER_HOOK_PROGRAM_ADDRESS, accounts: [MINT], data: new Uint8Array([2]) } }] }).tx;
+    // Lists the hook program ID as a read-only account of another program: never delivered, ignored.
+    state.txs[readOnly] = buildTx({ signature: readOnly, instructions: [{ ix: { program: MINT, accounts: [TRANSFER_HOOK_PROGRAM_ADDRESS], data: new Uint8Array([2]) } }] }).tx;
+    const { sb, rpcs } = mockSb({ indexer_events: [] });
+    const result = await gapScan(sb, "devnet", Date.now(), AbortSignal.timeout(5_000));
+    expect(result).toEqual({ missing: 1, repaired: 1, ignored: 1, complete: true, hookComplete: true });
+    expect(rpcs.map((r) => (r.args.p_events as { signature: string }[])[0].signature)).toEqual([hookOnly]);
+  });
+
+  it("a busy hook (every hooked transfer lists its program ID) runs out of its own pages without making the scan incomplete", async () => {
+    state.incomplete = [TRANSFER_HOOK_PROGRAM_ADDRESS];
+    const { sb } = mockSb({ indexer_events: [] });
+    const result = await gapScan(sb, "devnet", Date.now(), AbortSignal.timeout(5_000));
+    expect(result).toMatchObject({ complete: true, hookComplete: false });
+    expect(GAP_SCAN_HOOK_PAGES).toBeLessThan(GAP_SCAN_PAGES);
+    expect(state.pagesAsked.at(-1)).toBe(GAP_SCAN_HOOK_PAGES);
+  });
+
+  it("a fetched transaction without its status meta counts as watched (a CPI could be hidden): missing and re-queued", async () => {
+    const noMeta = "2".repeat(88);
+    state.lists[TRANSFER_HOOK_PROGRAM_ADDRESS] = [{ signature: noMeta, blockTime: 1_700_000_000 }];
+    const t = buildTx({ signature: noMeta, instructions: [{ ix: { program: MINT, accounts: [TRANSFER_HOOK_PROGRAM_ADDRESS], data: new Uint8Array([2]) } }] }).tx;
+    state.txs[noMeta] = { ...t, meta: null };
+    const { sb, rpcs } = mockSb({ indexer_events: [] });
+    expect(await gapScan(sb, "devnet", Date.now(), AbortSignal.timeout(5_000))).toMatchObject({ missing: 1, repaired: 1, ignored: 0 });
+    expect(rpcs).toHaveLength(1);
   });
 
   it("watched programs: our two programs, the upgradeable loader on our ProgramData, loader v4 on our programs", async () => {
@@ -132,6 +174,13 @@ describe("gap scan", () => {
     expect(invokesWatchedProgram(tx("BPFLoaderUpgradeab1e11111111111111111111111", [MINT]), pd)).toBe(false);
     expect(invokesWatchedProgram(tx(LOADER_V4, [ASSET_REGISTRY_PROGRAM_ADDRESS]), pd)).toBe(true);
     expect(invokesWatchedProgram(tx(MINT, [ASSET_REGISTRY_PROGRAM_ADDRESS]), pd)).toBe(false);
+    // Without the status meta a CPI cannot be seen: watched (conservative).
+    const wrapper = tx(MINT, [ASSET_REGISTRY_PROGRAM_ADDRESS]);
+    expect(invokesWatchedProgram({ ...wrapper, meta: null }, pd)).toBe(true);
+    expect(invokesWatchedProgram({ ...wrapper, meta: { ...wrapper.meta, innerInstructions: null } }, pd)).toBe(true);
+    const lookups = { ...wrapper.transaction, message: { ...wrapper.transaction.message, addressTableLookups: [{ accountKey: MINT }] } };
+    expect(invokesWatchedProgram({ ...wrapper, transaction: lookups, meta: { ...wrapper.meta, loadedAddresses: null } }, pd)).toBe(true);
+    expect(invokesWatchedProgram({ ...wrapper, transaction: lookups }, pd)).toBe(false);
   });
 });
 
@@ -265,7 +314,7 @@ describe("runAlarmChecks", () => {
   });
 
   it("a check that cannot run is expected but not recorded (the worker then counts the stage as failed)", async () => {
-    const { sb } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }] }, ["indexer_sync_state"]);
+    const { sb } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }] }, ["indexer_sync_state.status"]);
     const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
     expect(result.expected).toBe(result.reports.length + 1);
     expect(result.reports.map((r) => r.check)).not.toContain("indexer-degraded");
@@ -277,5 +326,88 @@ describe("runAlarmChecks", () => {
     expect(rpcs).toEqual([]);
     expect(result).toMatchObject({ reports: [], gapScan: null });
     expect(result.expected).toBeGreaterThan(0);
+  });
+});
+
+describe("indexer-freshness (0075)", () => {
+  const run = async (tables: Record<string, Record<string, unknown>[]>, broken: string[] = [], codes: Record<string, string> = {}) => {
+    const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }], ...tables }, broken, {}, codes);
+    const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    const report = rpcs.find((r) => r.fn === "report_incident" && r.args.p_check === "indexer-freshness");
+    return { result, report, state: report ? `${report.args.p_state}/${report.args.p_severity}` : undefined };
+  };
+  const ready = (checkedMinutesAgo: number) => [{ status: "ready", checked_at: minutesAgo(checkedMinutesAgo), completed_at: minutesAgo(600) }];
+  const hb = (mode: string, provenMinutesAgo: number | null, reason: string | null = null) => [{
+    mode, last_attempt_at: minutesAgo(1), last_proven_at: provenMinutesAgo === null ? null : minutesAgo(provenMinutesAgo), last_reason: reason,
+    created_at: minutesAgo(24 * 60), reconcile_max_age_hours: 168,
+  }];
+
+  it("passes under 3 minutes, holds between, fails at 15 minutes without a proof; low in observe, medium in on", async () => {
+    expect((await run({ indexer_sync_state: ready(20), indexer_heartbeat_state: hb("on", 1) })).state).toBe("pass/medium");
+    expect((await run({ indexer_sync_state: ready(20), indexer_heartbeat_state: hb("on", 5) })).state).toBe("hold/medium");
+    const failed = await run({ indexer_sync_state: ready(20), indexer_heartbeat_state: hb("on", 16, "UNINDEXED_SIGNATURE") });
+    expect(failed.state).toBe("fail/medium");
+    expect(failed.report?.args).toMatchObject({ p_source: "indexer:freshness", p_category: "indexer",
+      p_evidence: { mode: "on", reason: "UNINDEXED_SIGNATURE", minutes_since_proof: 16 } });
+    expect((await run({ indexer_sync_state: ready(20), indexer_heartbeat_state: hb("observe", 16) })).state).toBe("fail/low");
+    expect((await run({ indexer_sync_state: ready(20), indexer_heartbeat_state: hb("observe", null) })).state).toBe("fail/low");
+  });
+
+  it("passes while jobs keep the mirror fresh although the heartbeat declines (busy network, PENDING_JOBS)", async () => {
+    const { state, result } = await run({ indexer_sync_state: ready(0.5), indexer_heartbeat_state: hb("on", 40, "PENDING_JOBS") });
+    expect(state).toBe("pass/medium");
+    expect(result.reports.length).toBe(result.expected);
+    // Also when the heartbeat has never proved (no last_proven_at): the job stamp alone counts.
+    expect((await run({ indexer_sync_state: ready(0.5), indexer_heartbeat_state: hb("on", null, "PENDING_JOBS") })).state).toBe("pass/medium");
+  });
+
+  it("passes when off; holds when it never ran or the indexer is not ready (indexer-degraded owns that)", async () => {
+    expect((await run({ indexer_sync_state: ready(60), indexer_heartbeat_state: hb("off", null) })).state).toBe("pass/low");
+    expect((await run({ indexer_sync_state: ready(60), indexer_heartbeat_state: [] })).state).toBe("hold/low");
+    expect((await run({ indexer_sync_state: ready(60), indexer_heartbeat_state: [{ mode: "on", last_attempt_at: null, created_at: minutesAgo(10) }] }))
+      .state).toBe("hold/medium");
+    expect((await run({ indexer_sync_state: [{ status: "degraded", checked_at: minutesAgo(60), completed_at: minutesAgo(600) }],
+      indexer_heartbeat_state: hb("on", 60) })).state).toBe("hold/medium");
+  });
+
+  it("a heartbeat that never records a run (every plan or confirm call failing) holds only for 30 minutes after its row was created", async () => {
+    const never = (createdMinutesAgo: number) => [{ mode: "on", last_attempt_at: null, last_proven_at: null, created_at: minutesAgo(createdMinutesAgo) }];
+    expect((await run({ indexer_sync_state: ready(60), indexer_heartbeat_state: never(29) })).state).toBe("hold/medium");
+    const failed = await run({ indexer_sync_state: ready(60), indexer_heartbeat_state: never(31) });
+    expect(failed.state).toBe("fail/medium");
+    expect(failed.report?.args).toMatchObject({ p_evidence: { recorded: false, minutes_since_proof: 60 } });
+    expect(String(failed.report?.args.p_summary)).toContain("has not recorded a run");
+    // Jobs keeping the mirror fresh still pass (a busy network needs no heartbeat).
+    expect((await run({ indexer_sync_state: ready(0.5), indexer_heartbeat_state: never(31) })).state).toBe("pass/medium");
+  });
+
+  it("indexer-reconcile-age (low): fails when the last full reconcile is older than reconcile_max_age_hours, never gates freshness", async () => {
+    const age = async (sync: Record<string, unknown>[], heartbeat: Record<string, unknown>[]) => {
+      const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }],
+        indexer_sync_state: sync, indexer_heartbeat_state: heartbeat });
+      await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+      const find = (check: string) => rpcs.find((r) => r.fn === "report_incident" && r.args.p_check === check);
+      const r = find("indexer-reconcile-age");
+      return { reconcile: r ? `${r.args.p_state}/${r.args.p_severity}` : undefined, args: r?.args,
+        freshness: find("indexer-freshness")?.args.p_state };
+    };
+    const synced = (hoursAgo: number | null) => [{ status: "ready", checked_at: minutesAgo(1),
+      completed_at: hoursAgo === null ? null : minutesAgo(hoursAgo * 60) }];
+    expect((await age(synced(10), hb("on", 1))).reconcile).toBe("pass/low");
+    const old = await age(synced(200), hb("on", 1));
+    expect(old).toMatchObject({ reconcile: "fail/low", freshness: "pass" });
+    expect(old.args).toMatchObject({ p_source: "indexer:reconcile-age", p_evidence: { hours_since_reconcile: 200, max_age_hours: 168 } });
+    expect((await age(synced(200), [{ ...hb("on", 1)[0], reconcile_max_age_hours: 720 }])).reconcile).toBe("pass/low");
+    expect((await age(synced(null), hb("on", 1))).reconcile).toBe("fail/low");
+    expect((await age(synced(200), hb("off", null))).reconcile).toBe("fail/low");
+  });
+
+  it("reports nothing before 0075 is applied (a missing table is not a failed check); a read error is a check that could not run", async () => {
+    const missing = await run({ indexer_sync_state: ready(1) }, ["indexer_heartbeat_state"], { indexer_heartbeat_state: "PGRST205" });
+    expect(missing.report).toBeUndefined();
+    expect(missing.result.reports.length).toBe(missing.result.expected);
+    const down = await run({ indexer_sync_state: ready(1) }, ["indexer_heartbeat_state"]);
+    expect(down.report).toBeUndefined();
+    expect(down.result.expected).toBe(down.result.reports.length + 1);
   });
 });
