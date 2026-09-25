@@ -21,13 +21,52 @@ import { ASSET, DONOR, FAKE_MINT_A, FAKE_MINT_B, FakeChainOps, FakeProcessDeath,
 const RUN = "t3st01";
 const roster = buildRoster();
 
+/**
+ * A virtual clock. The scheduler's workers run through `worker`; time moves
+ * only while every one of them is asleep on the clock, straight to the
+ * earliest wake-up, and one sleeper resumes per move (equal wake-ups in the
+ * order they slept). A step's real awaits (WebCrypto signing and verifying,
+ * PDA digests) take no simulated time and only one worker runs at a time, so
+ * a world gives the same run on any machine, however loaded. (A clock that
+ * jumps on every sleep let an idle worker spin simulated minutes ahead while
+ * the other was still inside a step, as fast as the event loop turned.)
+ */
 function fakeClock(): Clock & { t: number } {
+  const sleepers: { at: number; seq: number; wake: () => void }[] = [];
+  let workers = 0;
+  let seq = 0;
+  let queued = false;
+  const tick = () => {
+    queued = false;
+    if (sleepers.length === 0 || sleepers.length < workers) return;
+    sleepers.sort((a, b) => a.at - b.at || a.seq - b.seq);
+    const next = sleepers.shift()!;
+    clock.t = Math.max(clock.t, next.at);
+    next.wake();
+  };
+  // A macrotask later: a worker whose step only awaited promises is asleep again (or still running) by then.
+  const poke = () => {
+    if (queued) return;
+    queued = true;
+    setImmediate(tick);
+  };
   const clock = {
     t: 1_000_000,
     now: () => clock.t,
-    sleep: async (ms: number) => {
-      clock.t += ms;
-      await new Promise((resolve) => setImmediate(resolve));
+    sleep: (ms: number) =>
+      new Promise<void>((wake) => {
+        sleepers.push({ at: clock.t + ms, seq: seq++, wake });
+        poke();
+      }),
+    worker: async <T>(run: () => Promise<T>): Promise<T> => {
+      workers += 1;
+      try {
+        await clock.sleep(0); // the workers start one at a time as well
+        return await run();
+      } finally {
+        workers -= 1;
+        poke();
+      }
     },
   };
   return clock;
@@ -58,10 +97,8 @@ async function world(plans: UserPlan[], options: { pace?: boolean; persist?: boo
   const clock = fakeClock();
   const limiter = new Limiter({ clock });
   chain.journal = journal;
-  if (options.pace) {
-    chain.limiter = limiter;
-    chain.now_ = clock.now;
-  }
+  chain.now_ = clock.now;
+  if (options.pace) chain.limiter = limiter;
   const locks = { taken: 0, free: true };
   const disk = { saved: "" };
   let dead = false;
@@ -690,6 +727,25 @@ describe("transfers (cohort X, wave 6)", () => {
     // The RPC failures are information, not findings.
     expect(w.journal.entries.filter((e) => e.user === "u101" && e.step === "xfer.s2" && e.kind === "note").map((e) => e.outcome)).toEqual(["info", "info", "info", "info"]);
     expect(w.chain.balanceOf(DONOR)).toBe(BigInt(5));
+  });
+
+  it("the same run with a site that answers after real milliseconds: the simulated run does not depend on real time", async () => {
+    // A slow machine: while one worker waits in real time (here the site, in CI WebCrypto), the other must not move the clock.
+    const run = async (realMs: number) => {
+      const { w } = await xWorld();
+      w.chain.faults.set("xfer.s2", "unresolved");
+      w.chain.inflightAnswers.set("xfer.s2", ["rpc-error", "rpc-error", "rpc-error", "rpc-error"]);
+      const original = w.site.fetch;
+      (w.ctx.http as unknown as { deps: { fetch: typeof fetch } }).deps.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        await new Promise((resolve) => setTimeout(resolve, realMs));
+        return original(input, init);
+      }) as typeof fetch;
+      const status = await runUntilBlocked(w);
+      return { status, t: w.clock.t, steps: w.journal.entries.map((e) => `${e.user} ${e.step} ${e.kind} ${e.outcome} ${e.httpStatus ?? ""}`) };
+    };
+    const quick = await run(0);
+    expect(quick.status).toBe("blocked");
+    expect(await run(3)).toEqual(quick);
   });
 
   it("an RPC failure in a probe and a 502 on a wallet-policy read are retried, never unwound; a failed return-leg read is one 5xx, not two findings", async () => {

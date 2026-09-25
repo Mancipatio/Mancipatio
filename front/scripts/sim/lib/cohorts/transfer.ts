@@ -376,6 +376,9 @@ async function readAggregates(ctx: SimCtx, u: UserState, onFail: (reason: string
 
 const BUY_STAGES = new Set(["buy.send", "buy.record", "buy.aggregate"]);
 
+/** Now on the run's clock, as ISO: the windows below compare it with the executor's tx records (same clock). */
+const stamp = (ctx: SimCtx) => new Date(ctx.now()).toISOString();
+
 /** Units of simulator buys that landed since `since` (ISO); `busy`: a buy is still being sent or recorded. */
 function simulatorBuys(ctx: SimCtx, since: string): { units: number; busy: boolean } {
   let units = 0;
@@ -538,14 +541,14 @@ async function hubGate(ctx: SimCtx, u: UserState, peer: UserState): Promise<void
   }
   const supply = await ctx.chain.supply();
   // C5 needs a quiet window: a buy still being sent or recorded would move the aggregate inside it.
-  const quiet = !simulatorBuys(ctx, new Date().toISOString()).busy;
+  const quiet = !simulatorBuys(ctx, stamp(ctx)).busy;
   const aggregates = quiet ? await readAggregates(ctx, u, (reason, transient) => fail(ctx, u, reason, transient)) : undefined;
   if (aggregates === null) return;
   if (!quiet) note(ctx, u, "xfer.aggregate", "C5 skipped: a simulator buy was being sent or recorded at the gate");
   // Re-checked after the reads, with no await before the loan is set: two workers never both take one.
   const taken = loanOf(ctx);
   if (taken) return waitOn(ctx, u, ctx.state.users[taken.hub], PACE.watchIntervalMs);
-  const at = new Date().toISOString();
+  const at = stamp(ctx);
   u.data.xferSource = "donor";
   u.data.xferBase = {
     at,
@@ -607,7 +610,7 @@ async function hubStep(ctx: SimCtx, u: UserState): Promise<void> {
         const [h, q] = await ctx.chain.balances(await Promise.all([u.wallet, peer.wallet].map((w) => ctx.chain.ata(w as Address))));
         const supply = await ctx.chain.supply();
         u.data.xferBase = {
-          at: new Date().toISOString(),
+          at: stamp(ctx),
           parts: { hub: n(h).toString(), peer: n(q).toString() },
           sum: (n(h) + n(q)).toString(),
           supply: supply.supply.toString(),
