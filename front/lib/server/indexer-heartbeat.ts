@@ -12,24 +12,32 @@
 // checked_at alone, so the site keeps reading the chain.
 //
 // The evidence of one run (quiet network: 4 calls, plus the genesis check of
-// the server RPC, whose 30 s cache is cold at a 60-180 s interval):
-//   tip       getSlot('confirmed'), read first.
-//   listings  per program, getSignaturesForAddress at 'confirmed' with
-//             minContextSlot = tip − 75 (a lagging node cannot hide recent
-//             transactions), newest first, 20 then 100 rows per page, at most
-//             3 pages, down to the plan's floor; or from the plan's cursor
-//             when an earlier listing did not reach the floor. Failed rows are
-//             sent too (they move the watermark, never block it). A short
-//             page stops paging but proves nothing: the SQL requires the
-//             OLDEST row to be at or below the floor.
+// the server RPC, whose 30 s cache is cold at a 60-120 s interval). First, in
+// parallel:
+//   tip       getSlot('confirmed') (P4: is the node's tip live).
 //   sample    getMultipleAccounts at 'finalized' (minContextSlot = the
-//             floor) of the mirrored accounts the plan picked; the SQL
-//             compares them with the stored raw data, and the context slot (a
-//             finalized slot) caps the watermarks.
+//             floor) of the mirrored accounts the plan picked plus the Clock
+//             sysvar: its context slot F caps the watermarks, and the Clock
+//             (checked to be F's) gives F's block time, the time the proof
+//             covers. The SQL compares the accounts with the stored raw data.
 //   probes    at most 2 finalized getTransaction of the missing signatures
-//             the previous confirm named. One that invokes no watched program
-//             (it only lists a program ID, or loads it through a lookup table,
-//             so it cannot change a program account) is sent as exempt.
+//             the previous confirm named. One whose complete status meta
+//             shows it invokes no watched program (it only lists a program
+//             ID, or loads it through a lookup table, so it cannot change a
+//             program account) is sent as exempt; without that meta a CPI
+//             could be hidden, so it exempts nothing.
+// Then:
+//   listings  per program, getSignaturesForAddress at 'confirmed' with
+//             minContextSlot = max(F, tip − 75): every transaction confirmed
+//             before F's block time is in the listing, however far behind the
+//             answering node is (a lagging node only makes F, and so the
+//             covered time, older; the SQL declines past 60 s). Newest
+//             first, 20 then 100 rows per page, at most 3 pages, down to the
+//             plan's floor; or from the plan's cursor when an earlier listing
+//             did not reach the floor. Failed rows are sent too (they move
+//             the watermark, never block it). A short page stops paging but
+//             proves nothing: the SQL requires the OLDEST row to be at or
+//             below the floor.
 // Any RPC error or timeout records RPC_ERROR / RPC_TIMEOUT: the SQL is never
 // given a partial listing. Logs carry the reason code only: an RPC error can
 // contain the provider URL and its key.
@@ -49,6 +57,10 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 /** asset_registry first, as 0075 indexer_heartbeat_programs() (pinned by a test). */
 export const HEARTBEAT_PROGRAMS = [ASSET_REGISTRY_PROGRAM_ADDRESS, TRANSFER_HOOK_PROGRAM_ADDRESS] as const;
 
+/** The Clock sysvar, read with the sample (its 100th key at most: 0075 caps sample_size at 99). */
+export const CLOCK_SYSVAR = "SysvarC1ock11111111111111111111111111111111";
+const SYSVAR_OWNER = "Sysvar1111111111111111111111111111111111111";
+
 export const HEARTBEAT = {
   firstPage: 20, nextPage: 100, maxPages: 3, lagSlots: 75, maxProbes: 2,
   /** Below this before the stage deadline: NO_BUDGET, no DB or RPC call (plan + shortest RPC phase + confirm). */
@@ -62,13 +74,26 @@ export const HEARTBEAT = {
 export type Freshness =
   | { status: "bumped" | "would_bump" }
   | { status: "declined"; reason: string; expired?: boolean }
-  | { status: "skipped"; reason: "OFF" | "NOT_DUE" | "INDEXER_STAGE" };
+  /** NOT_INSTALLED: the plan function is not there (0075 not applied, or the schema cache not reloaded). */
+  | { status: "skipped"; reason: "OFF" | "NOT_DUE" | "INDEXER_STAGE" | "NOT_INSTALLED" };
+
+/**
+ * Declines that normal operation produces (activity, catch-up, a busy stage,
+ * a second run): logged at info. The rest (RPC, database, evidence, mirror)
+ * at error.
+ */
+const ROUTINE = new Set([
+  "PENDING_JOBS", "NO_BUDGET", "TIP_BASELINE", "TIP_TOO_SOON", "CATCHING_UP", "LISTING_INCOMPLETE",
+  "UNDECODED_SIGNATURE", "PLAN_SUPERSEDED", "PLAN_EXPIRED", "OPEN_INCIDENT", "NOT_READY", "OFF",
+]);
+/** PostgREST / Postgres: the function (or its table) does not exist. */
+const NOT_INSTALLED = new Set(["PGRST202", "42883", "42P01"]);
 
 type ClientReason = "RPC_ERROR" | "RPC_TIMEOUT" | "NO_BUDGET";
 type Row = { signature: string; slot: number; ok: boolean };
 type Listing = { program: string; before: string | null; rows: Row[] };
 type SampleAccount = { pda: string; owner: string | null; data: string | null };
-type Sample = { context_slot: number; accounts: SampleAccount[] };
+type Sample = { context_slot: number; block_time: number; accounts: SampleAccount[] };
 type Cursor = { signature: string; slot: number };
 type Plan = {
   planId: string;
@@ -128,7 +153,7 @@ export function parsePlan(data: unknown): Planned | null {
       plan.resume[program] = { signature: cursor.signature, slot: cursor.slot };
     } else return null;
   }
-  if (!Array.isArray(d.sample) || d.sample.length > 100 || !d.sample.every((p) => typeof p === "string" && ADDRESS.test(p))) return null;
+  if (!Array.isArray(d.sample) || d.sample.length > 99 || !d.sample.every((p) => typeof p === "string" && ADDRESS.test(p))) return null;
   if (!Array.isArray(d.probe) || d.probe.length > HEARTBEAT.maxProbes || !d.probe.every((s) => typeof s === "string" && SIGNATURE.test(s))) return null;
   plan.sample = d.sample as string[];
   plan.probe = d.probe as string[];
@@ -137,10 +162,11 @@ export function parsePlan(data: unknown): Planned | null {
 
 /**
  * One program's listing, newest first, from the tip (or from `resume`) down
- * to `floor`. Stops at the floor, at a short page or after maxPages; the SQL
- * decides whether it is complete. No floor: one page (nothing can be proven).
+ * to `floor`, from a node that has confirmed `minContext`. Stops at the
+ * floor, at a short page or after maxPages; the SQL decides whether it is
+ * complete. No floor: one page (nothing can be proven).
  */
-async function listProgram(program: string, floor: number | null, resume: Cursor | null, tip: number, phase: AbortSignal): Promise<Listing> {
+async function listProgram(program: string, floor: number | null, resume: Cursor | null, minContext: number, phase: AbortSignal): Promise<Listing> {
   const rpc = getServerRpc();
   const rows: Row[] = [];
   const seen = new Set<string>();
@@ -149,7 +175,7 @@ async function listProgram(program: string, floor: number | null, resume: Cursor
   for (let page = 0; page < pages; page++) {
     const limit = resume || page > 0 ? HEARTBEAT.nextPage : HEARTBEAT.firstPage;
     const answer: unknown = await rpc.getSignaturesForAddress(address(program), {
-      commitment: "confirmed", limit, minContextSlot: BigInt(Math.max(0, tip - HEARTBEAT.lagSlots)),
+      commitment: "confirmed", limit, minContextSlot: BigInt(minContext),
       ...(before ? { before: toSignature(before) } : {}),
     }).send({ abortSignal: callSignal(phase) });
     if (!Array.isArray(answer) || answer.length > limit) throw new EvidenceError();
@@ -172,37 +198,63 @@ async function listProgram(program: string, floor: number | null, resume: Cursor
   return { program, before: resume?.signature ?? null, rows };
 }
 
-/** The planned accounts at finalized, in plan order (the program account alone when none is planned, for the slot). */
+/** The base64 data of an account answer; EvidenceError when it is not one. */
+function base64Data(account: { owner?: unknown; data?: unknown }): string {
+  const data = account.data;
+  if (typeof account.owner !== "string" || !ADDRESS.test(account.owner) || !Array.isArray(data)
+      || data[1] !== "base64" || typeof data[0] !== "string" || data[0].length > 1_400_000 || !BASE64.test(data[0])) {
+    throw new EvidenceError();
+  }
+  return data[0];
+}
+
+/**
+ * The block time of the finalized bank that answered: its Clock sysvar
+ * (slot u64 at 0, unix_timestamp i64 at 32), which must be that bank's own.
+ */
+function clockTime(account: unknown, contextSlot: number): number {
+  const clock = account as { owner?: unknown; data?: unknown } | null;
+  if (!clock || clock.owner !== SYSVAR_OWNER) throw new EvidenceError();
+  const bytes = Buffer.from(base64Data(clock), "base64");
+  if (bytes.length !== 40 || slotOf(bytes.readBigUInt64LE(0)) !== contextSlot) throw new EvidenceError();
+  const time = Number(bytes.readBigInt64LE(32));
+  if (!Number.isSafeInteger(time) || time <= 0) throw new EvidenceError();
+  return time;
+}
+
+/** The planned accounts at finalized, in plan order, with the block time of that finalized slot. */
 async function readSample(pdas: string[], floor: number | null, phase: AbortSignal): Promise<Sample> {
-  const keys = pdas.length ? pdas : [ASSET_REGISTRY_PROGRAM_ADDRESS];
+  const keys = [...pdas, CLOCK_SYSVAR];
   const answer = await getServerRpc().getMultipleAccounts(keys.map((key) => address(key)), {
     encoding: "base64", commitment: "finalized", ...(floor === null ? {} : { minContextSlot: BigInt(floor) }),
   }).send({ abortSignal: callSignal(phase) });
   const a = answer as { context?: { slot?: unknown } | null; value?: unknown } | null;
   if (!a || !a.context || !Array.isArray(a.value) || a.value.length !== keys.length) throw new EvidenceError();
   const values = a.value as unknown[];
+  const contextSlot = slotOf(a.context.slot);
   const accounts = pdas.map((pda, i): SampleAccount => {
     const account = values[i] as { owner?: unknown; data?: unknown } | null;
     if (account === null) return { pda, owner: null, data: null };
-    const data = account?.data;
-    if (!account || typeof account.owner !== "string" || !ADDRESS.test(account.owner) || !Array.isArray(data)
-        || data[1] !== "base64" || typeof data[0] !== "string" || data[0].length > 1_400_000 || !BASE64.test(data[0])) {
-      throw new EvidenceError();
-    }
-    return { pda, owner: account.owner, data: data[0] };
+    if (!account || typeof account !== "object") throw new EvidenceError();
+    return { pda, owner: account.owner as string, data: base64Data(account) };
   });
-  return { context_slot: slotOf(a.context.slot), accounts };
+  return { context_slot: contextSlot, block_time: clockTime(values[pdas.length], contextSlot), accounts };
 }
 
-/** The probe candidates that invoke no watched program. A failed probe exempts nothing. */
+/**
+ * The probe candidates that provably invoke no watched program. A failed
+ * probe exempts nothing; neither does an answer without the status meta
+ * (invokesWatchedProgram counts it as watched: its CPIs cannot be seen) or
+ * one that disagrees with the listing (the row was listed as successful).
+ */
 async function probe(signatures: string[], phase: AbortSignal): Promise<string[]> {
   if (!signatures.length) return [];
   const pd = await programDataAddresses();
   const verdicts = await Promise.all(signatures.slice(0, HEARTBEAT.maxProbes).map(async (sig) => {
     try {
       const tx = (await finalizedTransaction(sig, callSignal(phase))) as InvocationTx | null;
-      // Not finalized (yet), another transaction, or a watched invocation: not exempt.
-      if (!tx || tx.transaction?.signatures?.[0] !== sig) return null;
+      // Not finalized (yet), another transaction, no meta, failed, or a watched invocation: not exempt.
+      if (!tx || tx.transaction?.signatures?.[0] !== sig || !tx.meta || tx.meta.err !== null) return null;
       return invokesWatchedProgram(tx, pd) ? null : sig;
     } catch {
       return null;
@@ -212,12 +264,16 @@ async function probe(signatures: string[], phase: AbortSignal): Promise<string[]
 }
 
 async function gather(plan: Plan, phase: AbortSignal) {
-  const tip = slotOf(await getServerRpc().getSlot({ commitment: "confirmed" }).send({ abortSignal: callSignal(phase) }));
-  const [listings, sample, exempt] = await Promise.all([
-    Promise.all(HEARTBEAT_PROGRAMS.map((program) => listProgram(program, plan.floors[program], plan.resume[program], tip, phase))),
+  const [tip, sample, exempt] = await Promise.all([
+    getServerRpc().getSlot({ commitment: "confirmed" }).send({ abortSignal: callSignal(phase) }).then(slotOf),
     readSample(plan.sample, plan.floors[ASSET_REGISTRY_PROGRAM_ADDRESS], phase),
     probe(plan.probe, phase),
   ]);
+  // After the sample: every listing reaches its finalized slot F, so the
+  // proof covers F's block time (0075 T4).
+  const minContext = Math.max(sample.context_slot, tip - HEARTBEAT.lagSlots, 0);
+  const listings = await Promise.all(HEARTBEAT_PROGRAMS.map((program) =>
+    listProgram(program, plan.floors[program], plan.resume[program], minContext, phase)));
   return { tip, listings, sample, exempt };
 }
 
@@ -256,6 +312,7 @@ async function heartbeat(deadlineMs: number, signal?: AbortSignal): Promise<Fres
   let planned: Planned | null = null;
   try {
     const { data, error } = await sb.rpc("indexer_heartbeat_plan", { p_network: network }).abortSignal(dbSignal(deadlineMs, signal));
+    if (error && NOT_INSTALLED.has(String((error as { code?: unknown }).code))) return { status: "skipped", reason: "NOT_INSTALLED" };
     if (!error) planned = parsePlan(data);
   } catch {
     planned = null;
@@ -288,9 +345,12 @@ async function heartbeat(deadlineMs: number, signal?: AbortSignal): Promise<Fres
   }
 }
 
+let warnedNotInstalled = false;
+
 /**
  * One heartbeat attempt before `deadlineMs` (the indexer stage's deadline).
- * Never throws; a decline is logged as its code only.
+ * Never throws; a decline is logged as its code only (routine ones at info),
+ * NOT_INSTALLED once per instance (a front deployed before 0075).
  */
 export async function runIndexerHeartbeat(deadlineMs: number, signal?: AbortSignal): Promise<Freshness> {
   let result: Freshness;
@@ -299,6 +359,11 @@ export async function runIndexerHeartbeat(deadlineMs: number, signal?: AbortSign
   } catch {
     result = declined("INTERNAL_ERROR");
   }
-  if (result.status === "declined") console.error(`[indexer-heartbeat] declined ${result.reason}`);
+  if (result.status === "declined") {
+    (ROUTINE.has(result.reason) ? console.info : console.error)(`[indexer-heartbeat] declined ${result.reason}`);
+  } else if (result.status === "skipped" && result.reason === "NOT_INSTALLED" && !warnedNotInstalled) {
+    warnedNotInstalled = true;
+    console.warn("[indexer-heartbeat] skipped NOT_INSTALLED (is 0075 applied?)");
+  }
   return result;
 }

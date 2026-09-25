@@ -43,7 +43,11 @@ type Rows = R[] | ((tip: number) => R[]);
 type Evidence = {
   ar?: Rows; th?: Rows; arBefore?: string | null; thBefore?: string | null; tipDelta?: number;
   finalized?: number; accounts?: unknown[]; exempt?: string[];
+  /** Seconds F's block time is behind the plan's database time (default 15, a normal finality lag). */
+  chainLag?: number;
 };
+/** The block time the last confirmWith sent. */
+let lastBlockTime = 0;
 const rows = (value: Rows | undefined, fallback: R[]) => (typeof value === "function" ? value(tip) : value ?? fallback);
 function plan(network = "devnet") {
   return json(`select public.indexer_heartbeat_plan('${network}')`);
@@ -54,7 +58,10 @@ function confirmWith(planId: string, e: Evidence = {}) {
     { program: AR, before: e.arBefore ?? null, rows: rows(e.ar, [floorRow(9_001)]) },
     { program: TH, before: e.thBefore ?? null, rows: rows(e.th, [floorRow(9_002)]) },
   ];
-  const sample = { context_slot: e.finalized ?? tip - 32, accounts: e.accounts ?? [] };
+  const planned = Number(sql(`select floor(extract(epoch from coalesce(planned_at, now())))::bigint
+    from public.indexer_heartbeat_state where network = 'devnet'`));
+  lastBlockTime = planned - (e.chainLag ?? 15);
+  const sample = { context_slot: e.finalized ?? tip - 32, block_time: lastBlockTime, accounts: e.accounts ?? [] };
   return json(`select public.confirm_indexer_quiet('devnet', '${planId}', null, ${tip}, ${q(listings)}, ${q(sample)}, ${texts(e.exempt ?? [])})`);
 }
 /** One heartbeat run: a due plan, then its evidence. */
@@ -79,8 +86,10 @@ function watermark(program = AR) {
   const out = sql(`select to_jsonb(w) from public.indexer_heartbeat_watermarks w where network = 'devnet' and program = '${program}'`);
   return out ? JSON.parse(out) as { slot: number | null; resume_signature: string | null; resume_slot: number | null } : null;
 }
-const checkedIsPlanned = () => sql(`select s.checked_at = h.planned_at from public.indexer_sync_state s
-  join public.indexer_heartbeat_state h using (network) where network = 'devnet'`);
+/** checked_at and last_proven_at are the time the evidence covers: F's block time - 5 s, never past the plan. */
+const checkedIsCovered = () => sql(`select s.checked_at = h.last_proven_at
+    and h.last_proven_at = least(h.planned_at, to_timestamp(${lastBlockTime}) - interval '5 seconds')
+  from public.indexer_sync_state s join public.indexer_heartbeat_state h using (network) where network = 'devnet'`);
 
 function reset(mode = "on") {
   sql(`truncate ${[...MIRROR, "indexer_account_versions", "indexer_closed_rows", "indexer_jobs", "indexer_events", "onchain_event_jobs",
@@ -115,9 +124,16 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
   beforeEach(() => reset());
 
   it("seeds one observe row for the deployment network; the programs are the 0047 / webhook literals", () => {
-    expect(seeded).toMatchObject({ network: "devnet", mode: "observe", interval_seconds: 120, sample_size: 100,
-      reconcile_max_age_hours: 168, plan_id: null, tip_slot: null, last_outcome: null });
+    expect(seeded).toMatchObject({ network: "devnet", mode: "observe", interval_seconds: 120, sample_size: 99,
+      reconcile_max_age_hours: 168, plan_id: null, tip_slot: null, last_outcome: null, created_at: expect.any(String) });
     expect(sql("select public.indexer_heartbeat_programs()")).toBe(`{${AR},${TH}}`);
+  });
+
+  it("caps interval_seconds at 120 (the retry job is per minute: 121-180 means 180, no slack for a missed run) and sample_size at 99 (+ the Clock)", () => {
+    for (const bad of ["interval_seconds = 150", "interval_seconds = 59", "sample_size = 100", "sample_size = -1"]) {
+      expect(() => sql(`update public.indexer_heartbeat_state set ${bad}`), bad).toThrow(/check constraint/);
+    }
+    sql("update public.indexer_heartbeat_state set interval_seconds = 120, sample_size = 99");
   });
 
   describe("plan", () => {
@@ -164,10 +180,43 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
       tick();
       const out = run();
       expect(out).toMatchObject({ outcome: "bumped", reason: null, expired: false });
-      expect(checkedIsPlanned()).toBe("t");
+      expect(checkedIsCovered()).toBe("t");
+      expect(Date.parse(out.checked_at)).toBe(Date.parse(syncRow().checked_at));
       expect(syncRow()).toMatchObject({ status: "ready", last_slot: FLOOR, completed_at: before.completed_at });
       expect(state()).toMatchObject({ last_outcome: "bumped", last_reason: null, declined_since: null });
-      expect(sql("select last_proven_at = planned_at from public.indexer_heartbeat_state")).toBe("t");
+    });
+
+    it("T4: the stamp is F's block time - 5 s (what the listings cover), never the plan's time when F is older", () => {
+      warm();
+      expect(run({ chainLag: 40 })).toMatchObject({ outcome: "bumped" });
+      expect(checkedIsCovered()).toBe("t");
+      expect(sql(`select (floor(extract(epoch from h.planned_at)) - extract(epoch from s.checked_at))::int from public.indexer_sync_state s
+        join public.indexer_heartbeat_state h using (network)`)).toBe("45");
+      // A block time up to 5 s after the plan (a clock a little fast): capped at the plan's time.
+      tick();
+      sql("update public.indexer_sync_state set checked_at = now() - interval '10 minutes'");
+      expect(run({ chainLag: -3 })).toMatchObject({ outcome: "bumped" });
+      expect(checkedIsCovered()).toBe("t");
+      expect(sql(`select s.checked_at <= h.planned_at from public.indexer_sync_state s join public.indexer_heartbeat_state h using (network)`)).toBe("t");
+    });
+
+    it("T4: a node that lags steadily passes P4 but not the clock: RPC_TIME_BEHIND past 60 s; CLOCK_SKEW past 5 s ahead", () => {
+      warm();
+      const before = syncRow().checked_at;
+      // Its tip moves at the normal rate (P4 passes); its finalized block is 90 s old.
+      expect(run({ chainLag: 90 })).toMatchObject({ outcome: "declined", reason: "RPC_TIME_BEHIND" });
+      expect(syncRow().checked_at).toBe(before);
+      expect(state()).toMatchObject({ tip_slot: tip, last_reason: "RPC_TIME_BEHIND" });
+      tick();
+      expect(run({ chainLag: -30 })).toMatchObject({ outcome: "declined", reason: "CLOCK_SKEW" });
+      expect(syncRow().checked_at).toBe(before);
+      tick();
+      expect(run({ chainLag: 59 })).toMatchObject({ outcome: "bumped" });   // planned_at is floored: 59 s + its fraction
+      expect(checkedIsCovered()).toBe("t");
+      // Observe records the same covered time as its proof.
+      sql("update public.indexer_heartbeat_state set mode = 'observe'");
+      tick();
+      expect(run({ chainLag: 61 })).toMatchObject({ reason: "RPC_TIME_BEHIND" });
     });
 
     it("P1: never revives a missing, warming, degraded or unreconciled mirror, nor one reconciled too long ago", () => {
@@ -178,7 +227,6 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
         ["update public.indexer_sync_state set status = 'degraded'", "NOT_READY"],
         ["update public.indexer_sync_state set completed_at = null", "NOT_RECONCILED"],
         ["update public.indexer_sync_state set last_slot = null", "NOT_RECONCILED"],
-        ["update public.indexer_sync_state set completed_at = now() - interval '169 hours'", "RECONCILE_TOO_OLD"],
       ] as const) {
         reset();
         warm();
@@ -187,6 +235,11 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
         expect(run(), setup).toMatchObject({ outcome: "declined", reason });
         expect(sql("select coalesce(status || ':' || checked_at, 'none') from public.indexer_sync_state"), setup).toBe(before);
       }
+      // An old reconcile is not a condition (the alarm worker's indexer-reconcile-age reports it).
+      reset();
+      warm();
+      sql("update public.indexer_sync_state set completed_at = now() - interval '2000 hours'");
+      expect(run()).toMatchObject({ outcome: "bumped", reason: null });
     });
 
     it("P2: a pending, a retrying and a leased job all decline; once the job completes the proof lands", () => {
@@ -364,7 +417,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
       const before = syncRow().checked_at;
       expect(run()).toMatchObject({ outcome: "would_bump", reason: null });
       expect(syncRow().checked_at).toBe(before);
-      expect(sql("select last_proven_at = planned_at from public.indexer_heartbeat_state")).toBe("t");
+      expect(sql(`select last_proven_at = to_timestamp(${lastBlockTime}) - interval '5 seconds' from public.indexer_heartbeat_state`)).toBe("t");
       tick();
       const p = plan();
       sql("update public.indexer_heartbeat_state set mode = 'off'");
@@ -553,7 +606,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
       const good = {
         tip: String(tip + 300),
         listings: [{ program: AR, before: null, rows: [floorRow(1)] }, { program: TH, before: null, rows: [floorRow(2)] }] as unknown[],
-        sample: { context_slot: 199_000, accounts: [] } as unknown,
+        sample: { context_slot: 199_000, block_time: Math.floor(Date.now() / 1000) - 15, accounts: [] } as unknown,
         exempt: "'{}'::text[]", reason: "null", plan: `'${p.plan_id}'`,
       };
       const call = (o: Partial<typeof good>) => {
@@ -562,7 +615,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
           v.listings === null ? "null" : q(v.listings)}, ${v.sample === null ? "null" : q(v.sample)}, ${v.exempt})`);
       };
       const withRow = (row: unknown) => [{ program: AR, before: null, rows: [row] }, good.listings[1]];
-      const withAccount = (account: unknown) => ({ context_slot: 1, accounts: [account] });
+      const withAccount = (account: unknown) => ({ context_slot: 1, block_time: 1, accounts: [account] });
       const bad: Partial<typeof good>[] = [
         { plan: "null" },
         { reason: "'SOMETHING_ELSE'" },
@@ -586,14 +639,20 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0075 indexer fres
         { listings: [{ program: AR, before: null, rows: [r(1, 5), r(2, 6)] }, good.listings[1]] },          // slots go up
         { listings: [{ program: AR, before: null, rows: [r(1, 6), r(1, 5)] }, good.listings[1]] },          // duplicate row
         { listings: [{ program: AR, before: null, rows: Array.from({ length: 301 }, (_, i) => r(i, 5_000 - i)) }, good.listings[1]] },
-        { sample: null }, { sample: { accounts: [] } }, { sample: { context_slot: null, accounts: [] } },
-        { sample: { context_slot: 1 } },
+        { sample: null }, { sample: { block_time: 1, accounts: [] } }, { sample: { context_slot: null, block_time: 1, accounts: [] } },
+        { sample: { context_slot: 1, block_time: 1 } },
+        { sample: { context_slot: 1, accounts: [] } },                                           // no block time (T4)
+        { sample: { context_slot: 1, block_time: null, accounts: [] } },
+        { sample: { context_slot: 1, block_time: "1", accounts: [] } },
+        { sample: { context_slot: 1, block_time: -1, accounts: [] } },
+        { sample: { context_slot: 1, block_time: 1.5, accounts: [] } },
+        { sample: { context_slot: 1, block_time: 1, accounts: Array.from({ length: 100 }, () => ({ pda: AR, owner: null, data: null })) } },
         { sample: withAccount({ pda: AR, owner: AR }) },                                        // missing data key
         { sample: withAccount({ pda: AR, owner: AR, data: null }) },
         { sample: withAccount({ pda: AR, owner: null, data: "AA==" }) },
         { sample: withAccount({ pda: AR, owner: AR, data: "not base64!" }) },
         { sample: withAccount({ pda: "x", owner: null, data: null }) },
-        { sample: { context_slot: 1, accounts: [{ pda: AR, owner: null, data: null }, { pda: AR, owner: null, data: null }] } },
+        { sample: { context_slot: 1, block_time: 1, accounts: [{ pda: AR, owner: null, data: null }, { pda: AR, owner: null, data: null }] } },
         { exempt: texts([sig(1), sig(2), sig(3)]) }, { exempt: texts(["bad"]) }, { exempt: "array[null]::text[]" },
       ];
       const before = state();

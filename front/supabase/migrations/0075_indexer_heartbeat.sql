@@ -29,24 +29,41 @@
 --   5. confirm_indexer_quiet(): under the indexer_sync_state row lock that
 --      finish_indexer_job (0047) and the full reconcile upsert also take, it
 --      judges that run's evidence, advances watermarks, and bumps checked_at
---      to the plan's database time ONLY when every condition holds. In mode
---      'on' it also EXPIRES freshness (checked_at moved back past the 5-minute
+--      ONLY when every condition holds, to the time the evidence covers (T
+--      below), never later than the plan's database time. In mode 'on' it
+--      also EXPIRES freshness (checked_at moved back past the 5-minute
 --      window, status untouched) when a program transaction older than about
 --      a minute is missing from indexer_events. It never writes status,
 --      last_slot or completed_at.
+--
+-- What the evidence covers. The worker reads the finalized account sample
+-- together with the Clock sysvar (one getMultipleAccounts): its context slot
+-- F and that bank's unix_timestamp. It then asks both listings with
+-- minContextSlot = greatest(F, tip - 75), so each listing holds every
+-- confirmed transaction of its program up to at least F. A transaction
+-- confirmed before F's block time is in a slot below F, so it is listed and
+-- judged by P6. T = least(planned_at, F's block time - 5 s) (the margin covers
+-- a chain clock a few seconds fast). A node that lags steadily moves the tip
+-- at the normal rate and passes P4, but its F, and so T, is as old as its
+-- lag, and T4 declines it past 60 s.
 --
 -- The proof (first failing condition = the recorded reason code):
 --   plan      the confirm answers the latest plan (PLAN_SUPERSEDED, no
 --             writes) within 30 s of it (PLAN_EXPIRED)
 --   P1        sync row exists, status 'ready', a completed reconcile with a
---             last_slot, not older than reconcile_max_age_hours (NOT_INITIALIZED,
---             NOT_READY, NOT_RECONCILED, RECONCILE_TOO_OLD)
+--             last_slot (NOT_INITIALIZED, NOT_READY, NOT_RECONCILED). Its age
+--             is not a condition: the proof extends from the watermarks; the
+--             alarm worker reports an old reconcile (indexer-reconcile-age,
+--             low, reconcile_max_age_hours).
 --   P2        no pending indexer job: pending, retrying and leased are all
 --             status 'pending' in 0047 (PENDING_JOBS)
 --   P3        no open indexer-gap / indexer-degraded incident (OPEN_INCIDENT)
 --   P4        the confirmed tip moved 1..4 slots/s (+150) since the previous
 --             observation, taken 20 s..5 min earlier (TIP_BASELINE,
 --             TIP_TOO_SOON, RPC_BEHIND, RPC_TIP_IMPLAUSIBLE, RPC_TIP_STALLED)
+--   T4        F's block time is at most 60 s before the plan (RPC_TIME_BEHIND:
+--             a lagging node, or a chain clock behind) and at most 5 s after
+--             it (CLOCK_SKEW: a chain clock ahead, or a wrong database clock)
 --   S4        no event delivered 1-10 min ago has a slot above every listed
 --             row: the RPC's signature index would be behind (RPC_INDEX_BEHIND)
 --   P5        per program, the listing reaches the floor
@@ -61,9 +78,10 @@
 --             UNDECODED_SIGNATURE, UNPROVEN_EVENT_SLOT, SLOT_MISMATCH).
 --             Failed rows are never required. A row is exempt only when this
 --             function named it a probe candidate in the previous run and the
---             worker's finalized getTransaction showed it invokes no watched
---             program (it only lists the program ID or loads it via a lookup
---             table: it cannot change a program account).
+--             worker's finalized getTransaction, with its complete status
+--             meta, showed it invokes no watched program (it only lists the
+--             program ID or loads it via a lookup table: it cannot change a
+--             program account).
 --   S1        a rotating sample of up to sample_size mirrored accounts, read
 --             at finalized, equals the stored raw data (SAMPLE_MISMATCH; the
 --             cursor stays so the same batch is checked again)
@@ -109,12 +127,16 @@ create table if not exists public.indexer_heartbeat_state (
   network text primary key default public.deployment_network()
     check (network in ('devnet', 'mainnet', 'testnet', 'localnet')),
   mode text not null default 'observe' check (mode in ('off', 'observe', 'on')),
-  interval_seconds integer not null default 120 check (interval_seconds between 60 and 180),
-  sample_size integer not null default 100 check (sample_size between 0 and 100),
+  -- At most 120: the retry job runs every minute, so 121-180 means 180, and at
+  -- 180 one missed run already outlasts the 5-minute window and P4's baseline.
+  interval_seconds integer not null default 120 check (interval_seconds between 60 and 120),
+  -- At most 99: the Clock sysvar is the 100th key of the same getMultipleAccounts.
+  sample_size integer not null default 99 check (sample_size between 0 and 99),
+  -- Not a proof condition: the alarm worker's indexer-reconcile-age threshold.
   reconcile_max_age_hours integer not null default 168 check (reconcile_max_age_hours between 1 and 2160),
   plan_id uuid,
   planned_at timestamptz,
-  sample_pdas text[] not null default '{}' check (cardinality(sample_pdas) <= 100),
+  sample_pdas text[] not null default '{}' check (cardinality(sample_pdas) <= 99),
   sample_cursor text check (sample_cursor is null or sample_cursor ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
   probe_signatures text[] not null default '{}' check (cardinality(probe_signatures) <= 2),
   tip_slot bigint check (tip_slot is null or tip_slot >= 0),
@@ -125,6 +147,9 @@ create table if not exists public.indexer_heartbeat_state (
   last_proven_at timestamptz,
   last_expired_at timestamptz,
   declined_since timestamptz,
+  -- Bounds the alarm's bootstrap hold: a heartbeat that never records a run
+  -- (every plan or confirm call failing) is alarmed 30 minutes after this.
+  created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
 alter table public.indexer_heartbeat_state enable row level security;
@@ -213,11 +238,15 @@ $$;
 -- p_client_reason (RPC_ERROR, RPC_TIMEOUT, NO_BUDGET): the worker gathered no
 -- evidence; recorded, never bumps. Otherwise the evidence of this run:
 --   p_tip_slot   getSlot('confirmed'), read after the plan
+--   p_sample     {context_slot, block_time, accounts: [{pda, owner|null, data|null}]}:
+--                getMultipleAccounts at finalized of exactly the planned
+--                sample plus the Clock sysvar, read after the plan:
+--                context_slot = F, block_time = that bank's unix_timestamp
+--                (the Clock's own slot checked against F by the worker)
 --   p_listings   [{program, before: signature|null, rows: [{signature, slot, ok}]}],
 --                one per program, getSignaturesForAddress pages in RPC order
---                (newest first; failed rows included with ok = false)
---   p_sample     {context_slot, accounts: [{pda, owner|null, data|null}]}:
---                getMultipleAccounts at finalized of exactly the planned sample
+--                (newest first; failed rows included with ok = false), asked
+--                AFTER the sample with minContextSlot = greatest(F, tip - 75)
 --   p_exempt     probe candidates that invoke no watched program
 -- Malformed evidence raises 22023 (the worker counts it as DB_ERROR).
 create or replace function public.confirm_indexer_quiet(
@@ -229,6 +258,8 @@ as $$
 declare
   settle constant bigint := 150;            -- ~60 s: watermarks stay out of the newest minute; older misses expire
   plan_ttl constant interval := interval '30 seconds';
+  max_chain_lag constant interval := interval '60 seconds';   -- T4: F's block time before the plan
+  clock_margin constant interval := interval '5 seconds';     -- T4: after the plan; and T's margin
   mirror_tables constant text[] := array['platforms', 'issuers', 'assets', 'share_classes', 'sales', 'custody_vaults',
     'offers', 'proposals', 'vote_records', 'rights_issuances', 'milestones', 'milestone_claims', 'kyc_registries', 'kyc_entries'];
   sig_re constant text := '^[1-9A-HJ-NP-Za-km-z]{64,96}$';
@@ -244,6 +275,8 @@ declare
   evidence boolean := p_client_reason is null;
   reason text;
   tip_reason text;
+  chain_time timestamptz;
+  covered_at timestamptz;
   store_tip boolean := false;
   tip_ok boolean := false;
   index_behind boolean := false;
@@ -325,10 +358,12 @@ begin
     if jsonb_typeof(p_sample) is distinct from 'object'
        or jsonb_typeof(p_sample->'context_slot') is distinct from 'number'
        or coalesce((p_sample->>'context_slot') !~ slot_re, true)
+       or jsonb_typeof(p_sample->'block_time') is distinct from 'number'
+       or coalesce((p_sample->>'block_time') !~ '^[0-9]{1,12}$', true)
        or jsonb_typeof(p_sample->'accounts') is distinct from 'array' then
       raise exception 'Invalid heartbeat evidence' using errcode = '22023';
     end if;
-    if jsonb_array_length(p_sample->'accounts') > 100
+    if jsonb_array_length(p_sample->'accounts') > 99
        or exists (select 1 from jsonb_array_elements(p_sample->'accounts') a where coalesce(
             jsonb_typeof(a) <> 'object'
             or jsonb_typeof(a->'pda') is distinct from 'string' or (a->>'pda') !~ addr_re
@@ -371,11 +406,10 @@ begin
   end if;
 
   if evidence then
-    -- P1, P2, P3.
+    -- P1, P2, P3. The reconcile's age is not a condition (indexer-reconcile-age).
     if not sync_found then reason := 'NOT_INITIALIZED';
     elsif sync.status is distinct from 'ready' then reason := 'NOT_READY';
     elsif sync.completed_at is null or sync.last_slot is null then reason := 'NOT_RECONCILED';
-    elsif sync.completed_at < now_ts - make_interval(hours => hb.reconcile_max_age_hours) then reason := 'RECONCILE_TOO_OLD';
     end if;
     if reason is null and exists (select 1 from public.indexer_jobs where network = p_network and status = 'pending') then
       reason := 'PENDING_JOBS';
@@ -403,6 +437,16 @@ begin
     end if;
     if tip_reason is not null then reason := coalesce(reason, tip_reason); end if;
     finalized := (p_sample->>'context_slot')::bigint;
+
+    -- T4: the listings reach F, so the proof covers F's block time, against
+    -- the database clock. A steadily lagging node passes P4 but not this.
+    chain_time := to_timestamp((p_sample->>'block_time')::bigint);
+    if chain_time > hb.planned_at + clock_margin then
+      reason := coalesce(reason, 'CLOCK_SKEW');
+    elsif hb.planned_at - chain_time > max_chain_lag then
+      reason := coalesce(reason, 'RPC_TIME_BEHIND');
+    end if;
+    covered_at := least(hb.planned_at, chain_time - clock_margin);
 
     -- S4: an event delivered 1-10 minutes ago above every listed row means
     -- the RPC's signature index is behind the webhook (tip listings only).
@@ -528,10 +572,11 @@ begin
     end if;
   end if;
 
-  -- P7 and the verdict. The only writes to indexer_sync_state: checked_at.
+  -- P7 and the verdict. The only writes to indexer_sync_state: checked_at,
+  -- moved up to the time the evidence covers (never past the plan's time).
   if reason is null and hb.mode = 'off' then reason := 'OFF'; end if;
   if reason is null and hb.mode = 'on' then
-    update public.indexer_sync_state set checked_at = greatest(checked_at, hb.planned_at)
+    update public.indexer_sync_state set checked_at = greatest(checked_at, covered_at)
      where network = p_network and status = 'ready' and completed_at is not null;
     outcome := 'bumped';
   elsif reason is null then
@@ -553,13 +598,13 @@ begin
     last_attempt_at = now_ts,
     last_outcome = outcome,
     last_reason = reason,
-    last_proven_at = case when reason is null then hb.planned_at else last_proven_at end,
+    last_proven_at = case when reason is null then covered_at else last_proven_at end,
     last_expired_at = case when expired then now_ts else last_expired_at end,
     declined_since = case when reason is null then null else coalesce(declined_since, now_ts) end,
     updated_at = now_ts
    where network = p_network;
   return jsonb_build_object('outcome', outcome, 'reason', reason, 'expired', expired,
-    'checked_at', case when outcome = 'bumped' then hb.planned_at end);
+    'checked_at', case when outcome = 'bumped' then covered_at end);
 end;
 $$;
 

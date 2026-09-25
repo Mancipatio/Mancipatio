@@ -25,7 +25,7 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => mocks.admin() 
 import { getBase58Decoder } from "@solana/kit";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
-import { HEARTBEAT, HEARTBEAT_PROGRAMS, parsePlan, runIndexerHeartbeat } from "@/lib/server/indexer-heartbeat";
+import { CLOCK_SYSVAR, HEARTBEAT, HEARTBEAT_PROGRAMS, parsePlan, runIndexerHeartbeat } from "@/lib/server/indexer-heartbeat";
 import { buildTx } from "./helpers/chain-tx";
 
 const AR = ASSET_REGISTRY_PROGRAM_ADDRESS as string;
@@ -38,6 +38,15 @@ type SigRow = { signature: string; slot: bigint; err: unknown; blockTime: bigint
 const row = (n: number, slot: number, err: unknown = null): SigRow =>
   ({ signature: sig(n), slot: BigInt(slot), err, blockTime: BigInt(1_700_000_000), memo: null, confirmationStatus: "confirmed" });
 type Call = [string, Record<string, unknown>, { abortSignal?: AbortSignal }];
+/** The Clock sysvar as getMultipleAccounts returns it: slot u64 at 0, unix_timestamp i64 at 32. */
+const BLOCK_TIME = 1_790_000_000;
+function clock(slot: number, time = BLOCK_TIME, owner = "Sysvar1111111111111111111111111111111111111", size = 40) {
+  const bytes = Buffer.alloc(size);
+  if (size >= 8) bytes.writeBigUInt64LE(BigInt(slot), 0);
+  if (size >= 40) bytes.writeBigInt64LE(BigInt(time), 32);
+  return { owner, data: [bytes.toString("base64"), "base64"], executable: false, lamports: BigInt(1), space: BigInt(size) };
+}
+const account = () => ({ owner: AR, data: ["AAECAw==", "base64"], executable: false, lamports: BigInt(1), space: BigInt(4) });
 
 let plan: Record<string, unknown>;
 let lists: Record<string, SigRow[][]>;
@@ -68,7 +77,7 @@ beforeEach(() => {
   });
   mocks.multiple.mockImplementation(async (keys: string[]) => ({
     context: { slot: BigInt(4_960) },
-    value: keys.map(() => ({ owner: AR, data: ["AAECAw==", "base64"], executable: false, lamports: BigInt(1), space: BigInt(4) })),
+    value: keys.map((key) => (key === CLOCK_SYSVAR ? clock(4_960) : account())),
   }));
   mocks.tx.mockResolvedValue(null);
 });
@@ -77,16 +86,17 @@ afterEach(() => { vi.restoreAllMocks(); });
 const deadline = (ms = 15_000) => Date.now() + ms;
 
 describe("a quiet run", () => {
-  it("reads the tip, both listings and the sample, and hands the evidence to confirm_indexer_quiet", async () => {
+  it("reads the tip, the sample with the Clock, then both listings, and hands the evidence to confirm_indexer_quiet", async () => {
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "bumped" });
     expect(dbCalls().map((c) => c.name)).toEqual(["indexer_heartbeat_plan", "confirm_indexer_quiet"]);
     expect(dbCalls()[0].args).toEqual({ p_network: "devnet" });
     expect(mocks.slot).toHaveBeenCalledWith({ commitment: "confirmed" }, expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
+    // minContextSlot = max(finalized 4960, tip 5000 - 75): the listings reach the sample's finalized slot.
     expect(pagesAsked()).toEqual([
-      { account: AR, commitment: "confirmed", limit: 20, minContextSlot: BigInt(4_925) },
-      { account: TH, commitment: "confirmed", limit: 20, minContextSlot: BigInt(4_925) },
+      { account: AR, commitment: "confirmed", limit: 20, minContextSlot: BigInt(4_960) },
+      { account: TH, commitment: "confirmed", limit: 20, minContextSlot: BigInt(4_960) },
     ]);
-    expect(mocks.multiple).toHaveBeenCalledWith([PDA], { encoding: "base64", commitment: "finalized", minContextSlot: BigInt(1_000) },
+    expect(mocks.multiple).toHaveBeenCalledWith([PDA, CLOCK_SYSVAR], { encoding: "base64", commitment: "finalized", minContextSlot: BigInt(1_000) },
       expect.objectContaining({ abortSignal: expect.any(AbortSignal) }));
     expect(mocks.tx).not.toHaveBeenCalled();
     expect(confirms()[0]).toEqual({
@@ -95,24 +105,41 @@ describe("a quiet run", () => {
         { program: AR, before: null, rows: [{ signature: sig(1), slot: 1_000, ok: true }] },
         { program: TH, before: null, rows: [{ signature: sig(2), slot: 990, ok: true }] },
       ],
-      p_sample: { context_slot: 4_960, accounts: [{ pda: PDA, owner: AR, data: "AAECAw==" }] },
+      p_sample: { context_slot: 4_960, block_time: BLOCK_TIME, accounts: [{ pda: PDA, owner: AR, data: "AAECAw==" }] },
       p_exempt: [],
     });
   });
 
-  it("lists both programs and reads the sample in parallel, after the tip", async () => {
+  it("reads the tip and the sample in parallel, and lists both programs (in parallel) only after the sample", async () => {
     let inFlight = 0; let peak = 0;
     const slow = async <T>(value: T) => {
       inFlight++; peak = Math.max(peak, inFlight);
       await new Promise((resolve) => setTimeout(resolve, 20));
       inFlight--; return value;
     };
+    mocks.slot.mockImplementation(async () => slow(BigInt(5_000)));
     mocks.sigs.mockImplementation(async (account: string) => slow((lists[account] ?? [[]])[0]));
     const multiple = mocks.multiple.getMockImplementation()!;
-    mocks.multiple.mockImplementation(async (keys: string[], config: unknown, opts: unknown) => slow(await multiple(keys, config, opts)));
+    let sampleDone = 0;
+    mocks.multiple.mockImplementation(async (keys: string[], config: unknown, opts: unknown) => {
+      const out = await slow(await multiple(keys, config, opts)); sampleDone = Date.now(); return out;
+    });
+    const listedAt: number[] = [];
+    const sigs = mocks.sigs.getMockImplementation()!;
+    mocks.sigs.mockImplementation(async (...args: unknown[]) => { listedAt.push(Date.now()); return (sigs as (...a: unknown[]) => unknown)(...args); });
     await runIndexerHeartbeat(deadline());
-    expect(peak).toBe(3);
+    expect(peak).toBe(2);
     expect(mocks.slot.mock.invocationCallOrder[0]).toBeLessThan(mocks.sigs.mock.invocationCallOrder[0]);
+    expect(listedAt.every((t) => t >= sampleDone)).toBe(true);
+  });
+
+  it("a finalized slot behind tip - 75 (the sample's node lags): the listings keep minContextSlot = tip - 75", async () => {
+    mocks.multiple.mockImplementation(async (keys: string[]) => ({
+      context: { slot: BigInt(4_000) }, value: keys.map((key) => (key === CLOCK_SYSVAR ? clock(4_000) : account())),
+    }));
+    await runIndexerHeartbeat(deadline());
+    expect(pagesAsked().map((p) => p.minContextSlot)).toEqual([BigInt(4_925), BigInt(4_925)]);
+    expect(confirms()[0].p_sample).toMatchObject({ context_slot: 4_000, block_time: BLOCK_TIME });
   });
 
   it("maps every verdict; the expiry flag travels with a decline", async () => {
@@ -139,8 +166,8 @@ describe("listings", () => {
     lists[AR] = [first, second];
     await runIndexerHeartbeat(deadline());
     expect(pagesAsked().filter((p) => p.account === AR)).toEqual([
-      { account: AR, commitment: "confirmed", limit: 20, minContextSlot: BigInt(4_925) },
-      { account: AR, commitment: "confirmed", limit: 100, minContextSlot: BigInt(4_925), before: first[19].signature },
+      { account: AR, commitment: "confirmed", limit: 20, minContextSlot: BigInt(4_960) },
+      { account: AR, commitment: "confirmed", limit: 100, minContextSlot: BigInt(4_960), before: first[19].signature },
     ]);
     const listing = (confirms()[0].p_listings as { program: string; rows: { signature: string; ok: boolean }[] }[])[0];
     expect(listing.rows).toHaveLength(120);
@@ -166,7 +193,7 @@ describe("listings", () => {
     lists[AR] = [[{ ...row(77, 3_000) }], [row(78, 2_999), row(79, 998)]];
     await runIndexerHeartbeat(deadline());
     expect(pagesAsked().filter((p) => p.account === AR)).toEqual([
-      { account: AR, commitment: "confirmed", limit: 100, minContextSlot: BigInt(4_925), before: cursor },
+      { account: AR, commitment: "confirmed", limit: 100, minContextSlot: BigInt(4_960), before: cursor },
     ]);
     expect((confirms()[0].p_listings as { before: string | null }[]).map((l) => l.before)).toEqual([cursor, null]);
   });
@@ -195,26 +222,33 @@ describe("listings", () => {
 });
 
 describe("the account sample", () => {
-  it("reads only the program account (for the finalized slot) when nothing is planned; a closed account is sent as null", async () => {
+  it("reads only the Clock (for the finalized slot and its time) when nothing is planned; a closed account is sent as null", async () => {
     plan.sample = [];
     await runIndexerHeartbeat(deadline());
-    expect(mocks.multiple.mock.calls[0][0]).toEqual([AR]);
-    expect(confirms()[0].p_sample).toEqual({ context_slot: 4_960, accounts: [] });
+    expect(mocks.multiple.mock.calls[0][0]).toEqual([CLOCK_SYSVAR]);
+    expect(confirms()[0].p_sample).toEqual({ context_slot: 4_960, block_time: BLOCK_TIME, accounts: [] });
     plan.sample = [PDA];
-    mocks.multiple.mockResolvedValue({ context: { slot: BigInt(4_961) }, value: [null] });
+    mocks.multiple.mockResolvedValue({ context: { slot: BigInt(4_961) }, value: [null, clock(4_961, BLOCK_TIME + 1)] });
     await runIndexerHeartbeat(deadline());
-    expect(confirms().at(-1)!.p_sample).toEqual({ context_slot: 4_961, accounts: [{ pda: PDA, owner: null, data: null }] });
+    expect(confirms().at(-1)!.p_sample).toEqual({ context_slot: 4_961, block_time: BLOCK_TIME + 1,
+      accounts: [{ pda: PDA, owner: null, data: null }] });
   });
 
   it.each([
-    ["a short answer", { context: { slot: BigInt(1) }, value: [] }],
-    ["no context", { value: [null] }],
-    ["an account without owner", { context: { slot: BigInt(1) }, value: [{ data: ["AA==", "base64"] }] }],
-    ["another encoding", { context: { slot: BigInt(1) }, value: [{ owner: AR, data: ["AA==", "base58"] }] }],
-    ["data that is not base64", { context: { slot: BigInt(1) }, value: [{ owner: AR, data: ["%%%", "base64"] }] }],
+    ["a short answer", { context: { slot: BigInt(1) }, value: [clock(1)] }],
+    ["no context", { value: [null, clock(1)] }],
+    ["an account without owner", { context: { slot: BigInt(1) }, value: [{ data: ["AA==", "base64"] }, clock(1)] }],
+    ["another encoding", { context: { slot: BigInt(1) }, value: [{ owner: AR, data: ["AA==", "base58"] }, clock(1)] }],
+    ["data that is not base64", { context: { slot: BigInt(1) }, value: [{ owner: AR, data: ["%%%", "base64"] }, clock(1)] }],
+    ["no Clock", { context: { slot: BigInt(1) }, value: [account(), null] }],
+    ["a Clock of another slot (not that bank's)", { context: { slot: BigInt(2) }, value: [account(), clock(1)] }],
+    ["a Clock not owned by the sysvar program", { context: { slot: BigInt(1) }, value: [account(), clock(1, BLOCK_TIME, AR)] }],
+    ["a Clock that is too short", { context: { slot: BigInt(1) }, value: [account(), clock(1, BLOCK_TIME, undefined, 32)] }],
+    ["a Clock with no time", { context: { slot: BigInt(1) }, value: [account(), clock(1, 0)] }],
   ])("%s is RPC_ERROR", async (_label, answer) => {
     mocks.multiple.mockResolvedValue(answer);
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "declined", reason: "RPC_ERROR" });
+    expect(mocks.sigs).not.toHaveBeenCalled();
   });
 });
 
@@ -244,6 +278,36 @@ describe("probes (a listed signature that is not in the index)", () => {
     plan.probe = [readOnly];
     await runIndexerHeartbeat(deadline());
     expect(confirms().at(-1)!.p_exempt).toEqual([]);
+  });
+
+  it("an answer without its complete status meta exempts nothing: a CPI (a multisig execute) would be invisible", async () => {
+    const [noMeta, noInner, failed, noLoaded] = [sig(50), sig(51), sig(52), sig(53)];
+    // A wrapper program whose inner instruction invokes asset_registry: only the meta shows it.
+    const wrapped = (signature: string) => buildTx({ signature, instructions: [{
+      ix: { program: PDA, accounts: [AR], data: new Uint8Array([1]) },
+      inner: [{ program: AR, accounts: [PDA], data: new Uint8Array([2]) }],
+    }] }).tx;
+    const answers: Record<string, unknown> = {
+      [noMeta]: { ...wrapped(noMeta), meta: null },
+      [noInner]: (() => { const t = wrapped(noInner); return { ...t, meta: { ...t.meta, innerInstructions: null } }; })(),
+      [failed]: buildTx({ signature: failed, err: { InstructionError: [0, "Custom"] }, instructions: [{ ix: { program: PDA, accounts: [AR], data: new Uint8Array([1]) } }] }).tx,
+      [noLoaded]: (() => {
+        const t = buildTx({ signature: noLoaded, instructions: [{ ix: { program: PDA, accounts: [AR], data: new Uint8Array([1]) } }] }).tx;
+        return { ...t, transaction: { ...t.transaction, message: { ...t.transaction.message, addressTableLookups: [{ accountKey: PDA }] } },
+          meta: { ...t.meta, loadedAddresses: undefined } };
+      })(),
+    };
+    mocks.tx.mockImplementation(async (s: string) => answers[s] ?? null);
+    for (const pair of [[noMeta, noInner], [failed, noLoaded]]) {
+      plan.probe = pair;
+      await runIndexerHeartbeat(deadline());
+      expect(confirms().at(-1)!.p_exempt, pair.join(",")).toEqual([]);
+    }
+    // The same wrapper with its meta: watched, not exempt either; without the inner call it would be.
+    plan.probe = [sig(54)];
+    mocks.tx.mockImplementation(async (s: string) => buildTx({ signature: s, instructions: [{ ix: { program: PDA, accounts: [AR], data: new Uint8Array([1]) } }] }).tx);
+    await runIndexerHeartbeat(deadline());
+    expect(confirms().at(-1)!.p_exempt).toEqual([sig(54)]);
   });
 });
 
@@ -296,12 +360,16 @@ describe("failing closed", () => {
     expect(mocks.slot).not.toHaveBeenCalled();
   });
 
-  it("off, not due, a plan error or a malformed plan: no RPC call", async () => {
+  it("off, not due, not installed, a plan error or a malformed plan: no RPC call", async () => {
     plan = { mode: "off", due: false };
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "skipped", reason: "OFF" });
     plan = { mode: "observe", due: false };
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "skipped", reason: "NOT_DUE" });
-    mocks.db.mockResolvedValueOnce({ data: null, error: { code: "PGRST202" } });
+    for (const code of ["PGRST202", "42883"]) {
+      mocks.db.mockResolvedValueOnce({ data: null, error: { code } });
+      expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "skipped", reason: "NOT_INSTALLED" });
+    }
+    mocks.db.mockResolvedValueOnce({ data: null, error: { code: "57014" } });
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "declined", reason: "DB_ERROR" });
     mocks.db.mockRejectedValueOnce(new Error("socket hang up"));
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "declined", reason: "DB_ERROR" });
@@ -315,7 +383,7 @@ describe("failing closed", () => {
       null, [], { mode: "sometimes" }, { ...plan, plan_id: "x" }, { ...plan, due: "yes" },
       { ...plan, floors: { [AR]: 1 } }, { ...plan, floors: { [AR]: -1, [TH]: 1 } }, { ...plan, floors: { [AR]: 1.5, [TH]: 1 } },
       { ...plan, resume: { [AR]: { signature: "x", slot: 1 }, [TH]: null } }, { ...plan, resume: { [AR]: null } },
-      { ...plan, sample: ["not an address"] }, { ...plan, sample: Array(101).fill(PDA) },
+      { ...plan, sample: ["not an address"] }, { ...plan, sample: Array(100).fill(PDA) },
       { ...plan, probe: [sig(1), sig(2), sig(3)] }, { ...plan, probe: ["x"] },
     ]) expect(parsePlan(bad), JSON.stringify(bad)).toBeNull();
   });
@@ -334,6 +402,32 @@ describe("failing closed", () => {
       throw new Error("down");
     });
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "declined", reason: "RPC_ERROR" });
+  });
+});
+
+describe("logging", () => {
+  it("routine declines at info, the rest at error, NOT_INSTALLED once at warn; codes only", async () => {
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const verdict = (reason: string) => mocks.db.mockImplementation(async (name: string) => name === "indexer_heartbeat_plan"
+      ? { data: plan, error: null } : { data: { outcome: "declined", reason, expired: false }, error: null });
+    for (const reason of ["PENDING_JOBS", "TIP_BASELINE", "CATCHING_UP", "PLAN_SUPERSEDED"]) {
+      verdict(reason);
+      await runIndexerHeartbeat(deadline());
+    }
+    for (const reason of ["UNINDEXED_SIGNATURE", "SAMPLE_MISMATCH", "RPC_TIME_BEHIND"]) {
+      verdict(reason);
+      await runIndexerHeartbeat(deadline());
+    }
+    expect(info.mock.calls.map((c) => c[0])).toEqual(["PENDING_JOBS", "TIP_BASELINE", "CATCHING_UP", "PLAN_SUPERSEDED"]
+      .map((r) => `[indexer-heartbeat] declined ${r}`));
+    expect(error.mock.calls.map((c) => c[0])).toEqual(["UNINDEXED_SIGNATURE", "SAMPLE_MISMATCH", "RPC_TIME_BEHIND"]
+      .map((r) => `[indexer-heartbeat] declined ${r}`));
+    mocks.db.mockResolvedValue({ data: null, error: { code: "PGRST202", message: "Could not find the function" } });
+    for (let i = 0; i < 3; i++) await runIndexerHeartbeat(deadline());
+    expect(warn.mock.calls.length).toBeLessThanOrEqual(1);
+    expect(error.mock.calls).toHaveLength(3);
   });
 });
 
