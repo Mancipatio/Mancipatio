@@ -226,6 +226,28 @@ describe("buyers", () => {
     expect(w.chain.calls.find((c) => c.op === "buy")!.detail).toMatchObject({ sale: SALES[1] });
     expect(findings(w)).toEqual([]);
   });
+
+  it("an RPC read that fails before the buy is signed is infrastructure while the step retries", async () => {
+    const w = await world([plan((p) => p.label === "u003")]);
+    const [u] = w.users;
+    w.chain.buyFaults.set("u003", 1);
+    await runFor(w, 10);
+    expect(u.terminal).toBe("done");
+    const notes = w.journal.entries.filter((e) => e.step === "buy.send" && e.kind === "note");
+    expect(notes.map((e) => e.outcome)).toEqual(["info"]);
+    expect(notes[0].err).toMatch(/RPC getAccountInfo failed/);
+    expect(findings(w)).toEqual([]);
+  });
+
+  it("the same RPC failure on the last attempt is a finding and the buyer fails", async () => {
+    const w = await world([plan((p) => p.label === "u003")]);
+    const [u] = w.users;
+    w.chain.buyFaults.set("u003", 3);
+    await runFor(w, 10);
+    expect(u.terminal).toBe("failed");
+    expect(w.journal.entries.filter((e) => e.step === "buy.send" && e.kind === "note").map((e) => e.outcome)).toEqual(["info", "info", "tx-error"]);
+    expect(findings(w).map((e) => e.outcome)).toEqual(["tx-error"]);
+  });
 });
 
 describe("traders", () => {

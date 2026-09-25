@@ -405,6 +405,8 @@ export class FakeChainOps implements ChainOps {
   probeFaults = new Map<string, number>();
   /** Label → how many times the send's done() balance read fails (a ChainRpcError) before anything is sent. */
   doneFaults = new Map<string, number>();
+  /** User → how many times buy()'s builder read fails (a ChainRpcError) before anything is signed. */
+  buyFaults = new Map<string, number>();
   /** Every wire that reached the chain, as `user:label` — a double send shows here, not only in balances. */
   sentWires: string[] = [];
   /** Signatures whose wire reached the chain: an inflight record of one resolves as landed, of another as dropped. */
@@ -494,6 +496,12 @@ export class FakeChainOps implements ChainOps {
   }
   async buy(u: UserState, _signer: KeyPairSigner, sale: Address, amount: bigint, terms: SaleDocumentTerms): Promise<string | null> {
     if (u.tx.buy?.status === "landed") return u.tx.buy.sig;
+    const faults = this.buyFaults.get(u.plan.label) ?? 0;
+    if (faults > 0) {
+      // The builder's account read fails before anything is signed, as the guarded client throws after its tries.
+      this.buyFaults.set(u.plan.label, faults - 1);
+      throw new ChainRpcError("getAccountInfo", 429);
+    }
     const sig = await this.paced(() => this.land(u, "buy", { sale, amount, terms: terms.versionId }));
     this.site.purchases.set(sig, { buyer: u.wallet, sale, amount: Number(amount) });
     // The units arrive in the buyer's ATA (cohort X's own-buy route reads them).
