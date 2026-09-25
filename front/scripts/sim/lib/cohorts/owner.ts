@@ -48,7 +48,7 @@ import type { Actor, HttpResult } from "../http";
 import { buildRoster, hasDossier, person, simLegalId, type UserPlan } from "../identity";
 import type { JournalEntry, Outcome } from "../journal";
 import { SimGateError, SimStopError, type OwnerOptions } from "../safety";
-import type { OwnerApp, OwnerDossier, OwnerOtc, OwnerRecord, SimState, UserState } from "../state";
+import { liveHandBack, type OwnerApp, type OwnerDossier, type OwnerOtc, type OwnerRecord, type OwnerTaskKind, type SimState, type UserState } from "../state";
 import { CONSISTENCY_MS, MAX_ATTEMPTS, RETRY_MS, transientStatus, type SimCtx } from "./common";
 import { DEAL_PRICE, DEAL_UNITS } from "./trader";
 
@@ -73,6 +73,18 @@ export const OWNER_ACTIONS: Readonly<Record<string, readonly string[]>> = {
   "create_otc_deal": ["open"],
   "passport.update": ["in_review", "rejected"],
 };
+
+/** Every read the actor may send (the admin pages' refresh reads); adminRead refuses anything else. */
+export const OWNER_READS: readonly string[] = [
+  "clients.adminDetail",
+  "clients.doc-url",
+  "applications.adminList",
+  "applications.adminEvents",
+  "otc.list",
+  "otc.adminScreen",
+  "passport.list",
+  "admin.badges",
+];
 
 // ── The decision table (design §3 with critique M4) ────────────────────────
 
@@ -165,7 +177,7 @@ export function taskRank(plan: UserPlan, kind: TaskKind): number {
 
 // ── The actor's context ──────────────────────────────────────────────────────
 
-export type TaskKind = "dossier" | "app" | "otc" | "passport";
+export type TaskKind = OwnerTaskKind;
 
 type Req = { id: number; doc_kind: string; label?: string | null; status: string; document_id: number | null; requested_by: string | null };
 type Detail = {
@@ -197,6 +209,8 @@ type Session = {
   expect?: Expectation;
   /** /admin/clients counted this dossier just before its verdict (C-O11). */
   countedBefore?: boolean;
+  /** C-O3: linked files that are not the simulator's own (the actor then approves nothing). */
+  badFiles?: string[];
   drops?: Partial<Record<AdminBadgeHref, number>>;
   badgesDone?: boolean;
   /** The act planned from the last fresh read. */
@@ -316,12 +330,15 @@ function guardWrite(u: UserState, action: string, value: string, allowed: boolea
 }
 
 async function adminRead<T>(ctx: SimCtx, o: OwnerCtx, u: UserState, action: string, route: string, params: Record<string, unknown>): Promise<T> {
+  if (!OWNER_READS.includes(action)) throw new OwnerGuardError(`refused to send ${action} for ${u.plan.label}: not a read the owner actor makes`);
   const r = await ctx.http.read<T>(ownerActor(o, u), { step: `owner.${action}`, route, action, params });
   expectOk(r, action);
   return r.data as T;
 }
 
 async function adminWrite<T>(ctx: SimCtx, o: OwnerCtx, u: UserState, action: string, route: string, params: Record<string, unknown>): Promise<T> {
+  // The allowlist holds here too, not only at the call sites' guardWrite.
+  if (!OWNER_ACTIONS[action]) throw new OwnerGuardError(`refused to send ${action} for ${u.plan.label}: not a write the owner actor makes`);
   const r = await ctx.http.signed<T>(ownerActor(o, u), { step: `owner.${action}`, route, action, params });
   expectOk(r, action);
   return r.data as T;
@@ -352,14 +369,39 @@ export function uploadSignature(u: UserState): string {
   return `${u.data.round ?? 0}|${reqs.join(",")}`;
 }
 
-/** The user's actionable owner task now, or null (not planned, not reached, waiting on the user, decided). */
+/**
+ * A final write that may have reached the site but is not accounted for yet
+ * (a transient answer to it, or a failed read after it): the task's re-read
+ * comes first, whatever the user's stage, and SIM_OWNER_MAX counts it.
+ */
+export function unresolvedWrite(u: UserState, phases: readonly string[] = ["open"]): TaskKind | null {
+  const r = u.data.owner;
+  const d = r?.dossier;
+  if (d && phases.includes(d.phase) && d.intent?.op === "final" && !d.finalDone) return "dossier";
+  const a = r?.app;
+  if (a && phases.includes(a.phase) && a.intent && !a.rounds.some((x) => x.at === a.intent!.at)) return "app";
+  const t = r?.otc;
+  if (t && phases.includes(t.phase) && t.intent?.op === "flip" && !t.flippedAt) return "otc";
+  return null;
+}
+
+function inLane(o: OwnerCtx, u: UserState): boolean {
+  return !(o.options.only && !o.options.only.includes(u.plan.label)) && !(o.scope && !o.scope.has(u.plan.label));
+}
+
+/**
+ * The user's actionable owner task now, or null (not planned, not reached,
+ * waiting on the user, decided, handed back). A hand-back ends that task
+ * only: the user's later tasks are still taken.
+ */
 export function currentTask(ctx: SimCtx, o: OwnerCtx, u: UserState): { kind: TaskKind; rank: number } | null {
   const plan = u.plan;
   const r = u.data.owner;
-  if (u.terminal || o.stopped || ownerDenied(plan) || r?.handedBack) return null;
-  if ((o.options.only && !o.options.only.includes(plan.label)) || (o.scope && !o.scope.has(plan.label))) return null;
+  if (u.terminal || o.stopped || ownerDenied(plan) || !inLane(o, u)) return null;
   if (r?.retryAt && r.retryAt > ctx.now()) return null;
   const task = (kind: TaskKind) => ({ kind, rank: taskRank(plan, kind) });
+  const pending = unresolvedWrite(u);
+  if (pending) return task(pending);
   switch (u.stage) {
     case "await.dossier": {
       if (!dossierVerdict(plan) || !u.data.clientId) return null;
@@ -389,7 +431,7 @@ export function currentTask(ctx: SimCtx, o: OwnerCtx, u: UserState): { kind: Tas
 /** A task the actor started and has not finished (its user must keep its normal polls). */
 function hasActorWork(u: UserState): boolean {
   const r = u.data.owner;
-  if (!r || r.handedBack) return false;
+  if (!r) return false;
   const live = (t: { phase: string; lagChecked?: boolean } | undefined) =>
     Boolean(t && (t.phase === "open" || t.phase === "await-user" || (t.phase === "decided" && !t.lagChecked)));
   return live(r.dossier) || live(r.app) || r.otc?.phase === "open";
@@ -400,17 +442,34 @@ function actorBusy(ctx: SimCtx, o: OwnerCtx): boolean {
   return Object.values(ctx.state.users).some((x) => !x.terminal && (hasActorWork(x) || currentTask(ctx, o, x) !== null));
 }
 
-/** The next task to work: the lowest rank among actionable tasks (null when none, or once SIM_OWNER_MAX is reached). */
+/**
+ * The next task to work: the lowest rank among actionable tasks (null when
+ * none). SIM_OWNER_MAX counts the decisions made and the final writes whose
+ * outcome is not known yet; once reached, only those are still resolved (a
+ * re-read, never a new decision) before the actor stops.
+ */
 function chooseFocus(ctx: SimCtx, o: OwnerCtx): string | null {
   let best: { label: string; rank: number } | null = null;
-  for (const x of Object.values(ctx.state.users)) {
+  let resolve: { label: string; rank: number } | null = null;
+  const users = Object.values(ctx.state.users);
+  for (const x of users) {
     const t = currentTask(ctx, o, x);
     if (t && (!best || t.rank < best.rank)) best = { label: x.plan.label, rank: t.rank };
+    if (t && unresolvedWrite(x) && (!resolve || t.rank < resolve.rank)) resolve = { label: x.plan.label, rank: t.rank };
   }
   if (!best) return null;
-  const made = ctx.state.owner?.decisions ?? 0;
-  if (o.options.max !== null && made >= o.options.max) {
-    stopActor(ctx, o, `SIM_OWNER_MAX=${o.options.max} reached (${made} decisions made by the owner actor in this run); every user polls as before`);
+  // A handed-back task's final write may have landed as well (after 3 transient answers): the cap counts it too.
+  const unaccounted = users.filter((x) => unresolvedWrite(x, ["open", "handed-back"])).length;
+  const decisions = ctx.state.owner?.decisions ?? 0;
+  if (o.options.max !== null && decisions + unaccounted >= o.options.max) {
+    if (resolve) return resolve.label;
+    // One is still in its backoff: its re-read comes when that ends (the others poll meanwhile).
+    if (users.some((x) => !x.terminal && inLane(o, x) && unresolvedWrite(x))) return null;
+    stopActor(
+      ctx,
+      o,
+      `SIM_OWNER_MAX=${o.options.max} reached (${decisions} decisions made by the owner actor in this run${unaccounted ? `, ${unaccounted} more possibly sent` : ""}); every user polls as before`,
+    );
     return null;
   }
   return best.label;
@@ -448,10 +507,21 @@ function taskName(kind: TaskKind, u: UserState): string {
   return `passport request of ${u.wallet} in ${SITE_ORIGIN}/admin/kyc`;
 }
 
+function taskOf(r: OwnerRecord, kind: TaskKind): { phase: string } | undefined {
+  return kind === "dossier" ? r.dossier : kind === "app" ? r.app : kind === "otc" ? r.otc : r.passport;
+}
+
+/** Transient failures of this task so far (a failure of another task never counts toward it). */
+function attemptsOf(r: OwnerRecord | undefined, kind: TaskKind): number {
+  return r && (r.attemptsFor ?? kind) === kind ? r.attempts : 0;
+}
+
 function handBack(ctx: SimCtx, o: OwnerCtx, u: UserState, kind: TaskKind, why: string): void {
   const r = record(u);
-  r.handedBack = { task: taskName(kind, u), reason: why.slice(0, 400), at: new Date(ctx.now()).toISOString(), attempts: r.attempts };
-  const sub = kind === "dossier" ? r.dossier : kind === "app" ? r.app : kind === "otc" ? r.otc : r.passport;
+  r.handedBack = { task: taskName(kind, u), reason: why.slice(0, 400), at: new Date(ctx.now()).toISOString(), attempts: attemptsOf(r, kind), kind };
+  r.attempts = 0;
+  r.retryAt = undefined;
+  const sub = taskOf(r, kind);
   if (sub) sub.phase = "handed-back";
   ownerNote(ctx, u, "handed-back", `${taskName(kind, u)}: ${why}`);
   release(ctx, o, u);
@@ -464,13 +534,29 @@ function elsewhere(ctx: SimCtx, o: OwnerCtx, u: UserState, sub: { phase: string 
   release(ctx, o, u);
 }
 
-/** A transient failure: back off (RETRY_MS × attempts) and let another task have the lane; hand back after MAX_ATTEMPTS. */
+/**
+ * A transient failure: back off (RETRY_MS × attempts) and let another task
+ * have the lane; hand back after MAX_ATTEMPTS. The user's own polls wait out
+ * the backoff too (backingOff): a write may have landed although its answer
+ * did not, so the actor's re-read comes before the user can act on it.
+ */
 function failAttempt(ctx: SimCtx, o: OwnerCtx, u: UserState, kind: TaskKind, why: string): void {
   const r = record(u);
-  r.attempts += 1;
+  r.attempts = attemptsOf(r, kind) + 1;
+  r.attemptsFor = kind;
   if (r.attempts >= MAX_ATTEMPTS) return handBack(ctx, o, u, kind, `${why} (after ${r.attempts} attempts)`);
   r.retryAt = ctx.now() + RETRY_MS * r.attempts;
   release(ctx, o, u);
+  u.notBefore = r.retryAt;
+}
+
+/** A task in its transient backoff: the user's own poll waits too (see failAttempt). */
+function backingOff(ctx: SimCtx, o: OwnerCtx, u: UserState): boolean {
+  const r = u.data.owner;
+  if (o.stopped || !r?.retryAt || r.retryAt <= ctx.now() || !inLane(o, u)) return false;
+  if (![r.dossier, r.app, r.otc, r.passport].some((t) => t?.phase === "open")) return false;
+  u.notBefore = Math.max(u.notBefore, r.retryAt);
+  return true;
 }
 
 /** Journal-only lag checks (C-O6): the user's own view shows a decision within CONSISTENCY_MS. Never claims the slot. */
@@ -523,7 +609,7 @@ function handBackUnplanned(ctx: SimCtx, o: OwnerCtx, u: UserState): boolean {
   if (o.options.only && !o.options.only.includes(u.plan.label)) return false;
   const r = record(u);
   r.app = { phase: "handed-back", rounds: [] };
-  r.handedBack = { task: taskName("app", u), reason: `not in the plan (review ${u.plan.review}): decide it by hand`, at: new Date(ctx.now()).toISOString(), attempts: 0 };
+  r.handedBack = { task: taskName("app", u), reason: `not in the plan (review ${u.plan.review}): decide it by hand`, at: new Date(ctx.now()).toISOString(), attempts: 0, kind: "app" };
   ownerNote(ctx, u, "handed-back", `${taskName("app", u)}: the plan does not approve this applicant (review ${u.plan.review})`);
   return true;
 }
@@ -538,6 +624,7 @@ export async function ownerStep(ctx: SimCtx, u: UserState): Promise<boolean> {
   if (!o || u.plan.cohort === "E" || u.plan.cohort === "X") return false;
   // A dossier the plan leaves untouched: never a request; its polls only slow down while the actor works.
   if (ownerDenied(u.plan)) return throttleManual(ctx, o, u);
+  noteVerifiedIssuer(ctx, o, u);
   lagChecks(ctx, u);
   if (handBackUnplanned(ctx, o, u)) return false;
   if (o.focus) {
@@ -545,15 +632,21 @@ export async function ownerStep(ctx: SimCtx, u: UserState): Promise<boolean> {
     if (!f || f.terminal || !currentTask(ctx, o, f)) {
       o.focus = null;
       o.session = null;
+      o.focusNotBefore = 0;
     }
   }
   const task = currentTask(ctx, o, u);
-  if (!task) return throttleManual(ctx, o, u);
+  if (!task) return backingOff(ctx, o, u) || throttleManual(ctx, o, u);
   if (!o.focus) o.focus = chooseFocus(ctx, o);
   if (o.stopped || !o.focus) return false;
   if (o.focus !== u.plan.label) {
     // Queued: its poll pauses (the actor knows when it acts); the focus user runs first.
     u.notBefore = ctx.now() + PACE.watchIntervalMs;
+    return true;
+  }
+  if (o.focusNotBefore > ctx.now()) {
+    // SimRetryLater: the focus is kept and waits (one signature-status read a minute, not one per pick).
+    u.notBefore = Math.max(u.notBefore, o.focusNotBefore);
     return true;
   }
   await work(ctx, o, u, task.kind);
@@ -569,7 +662,8 @@ async function work(ctx: SimCtx, o: OwnerCtx, u: UserState, kind: TaskKind): Pro
   } catch (error) {
     if (error instanceof SimStopError || error instanceof ChainAbortError) throw error;
     if (error instanceof SimRetryLater) {
-      o.focusNotBefore = ctx.now() + 60_000;
+      // Design §8: u.notBefore = now + 60 s, the focus is kept (ownerStep holds it until then).
+      o.focusNotBefore = u.notBefore = ctx.now() + 60_000;
       return;
     }
     if (error instanceof OwnerStop) return stopActor(ctx, o, error.message);
@@ -582,7 +676,7 @@ async function work(ctx: SimCtx, o: OwnerCtx, u: UserState, kind: TaskKind): Pro
     }
     if (!(error instanceof SimTxError)) {
       // A builder or RPC refusal; an RPC read that failed before anything was signed is infrastructure until the last attempt.
-      const transient = error instanceof ChainRpcError && record(u).attempts + 1 < MAX_ATTEMPTS;
+      const transient = error instanceof ChainRpcError && attemptsOf(u.data.owner, kind) + 1 < MAX_ATTEMPTS;
       ctx.journal.append({ wave: u.plan.wave, user: OWNER_LABEL, cohort: "owner", target: u.plan.label, step: `owner.${kind}`, kind: "note", outcome: transient ? "info" : "tx-error", err: message.slice(0, 500) });
     }
     failAttempt(ctx, o, u, kind, message.slice(0, 200));
@@ -638,6 +732,7 @@ function dossierGuards(ctx: SimCtx, u: UserState, s: Session, D: Detail): void {
     else bad.push(`#${row.id} ${row.doc_kind} (document ${doc.id}) is not the simulator's round-${mine.uploadedRound} file${[1, 2, 3].some((round) => doc.sha256 === spec(round, !reject)) ? ` (the PLEASE REJECT stamp is ${reject ? "missing" : "present"})` : ""}`);
   }
   ownerCheck(ctx, u, "C-O3", bad.length === 0, bad.length ? bad.join("; ") : "every linked document is the simulator's file");
+  s.badFiles = bad;
 }
 
 /** C-O4: the refresh read after a write shows it applied. */
@@ -699,6 +794,10 @@ function planDossier(ctx: SimCtx, o: OwnerCtx, u: UserState, r: OwnerRecord, d: 
     checkExpectation(ctx, u, s, D, o.admin.address);
   }
   const act = nextDossierAct(ctx, o, u, r, d, s, D);
+  // C-O3: a file a reviewer would refuse (a PLEASE REJECT stamp, or not the simulator's upload) is never approved automatically.
+  if (act && s.badFiles?.length && ((act.op === "review" && act.status === "approved") || (act.op === "final" && act.value === "verified"))) {
+    throw new OwnerHandBack(`C-O3: ${s.badFiles.join("; ")}: the actor approves no file it cannot vouch for; decide the dossier by hand`);
+  }
   if (act) s.next = act;
 }
 
@@ -991,6 +1090,17 @@ function addManual(ctx: SimCtx, u: UserState, kind: "passport" | "verify_issuer_
   if (i >= 0) list[i] = { kind, line, at };
   else list.push({ kind, line, at });
   ownerNote(ctx, u, "manual", line);
+}
+
+/**
+ * A company past its KYB wait (its eligibility read said company: KYB
+ * verified, by the actor or by hand, possibly before the actor started) gets
+ * its verify_issuer_kyb line once, even when the actor never reached its dossier.
+ */
+function noteVerifiedIssuer(ctx: SimCtx, o: OwnerCtx, u: UserState): void {
+  if (planKind(u.plan) !== "kyb" || ownerDenied(u.plan) || !u.data.issuerPda) return;
+  if (u.data.owner?.manual?.some((m) => m.kind === "verify_issuer_kyb")) return;
+  if (u.data.applicationId || u.stage === "app.submit" || u.stage === "await.app" || u.stage === "app.resubmit") addKybLine(ctx, o, u);
 }
 
 function addKybLine(ctx: SimCtx, o: OwnerCtx, u: UserState): void {
@@ -1480,14 +1590,19 @@ export async function startOwnerActor(ctx: SimCtx, o: OwnerCtx): Promise<void> {
   if (o.options.retry) {
     for (const u of Object.values(state.users)) {
       const r = u.data.owner;
-      if (!r?.handedBack) continue;
-      ownerNote(ctx, u, "retry", `re-armed: ${r.handedBack.task} (${r.handedBack.reason})`);
-      for (const sub of [r.dossier, r.app, r.otc, r.passport]) if (sub?.phase === "handed-back") sub.phase = "open";
+      const h = liveHandBack(u);
+      // Only a task the user still waits at (one the owner decided by hand since stays decided).
+      if (!r || !h) continue;
+      ownerNote(ctx, u, "retry", `re-armed: ${h.task} (${h.reason})`);
+      for (const sub of h.kind ? [taskOf(r, h.kind)] : [r.dossier, r.app, r.otc, r.passport]) if (sub?.phase === "handed-back") sub.phase = "open";
       r.handedBack = undefined;
       r.attempts = 0;
+      r.attemptsFor = undefined;
       r.retryAt = undefined;
     }
   }
+  // Companies whose KYB was verified before the actor reached them (by hand, or in an earlier command).
+  for (const u of Object.values(state.users)) noteVerifiedIssuer(ctx, o, u);
   const r = await ctx.http.read<BadgeRead>(ownerActor(o, null), { step: "owner.admin.badges", route: "/api/admin/badges", action: "admin.badges", params: {} });
   if (r.status === 403) throw new SimGateError(`The CLI Admin is not an Admin on devnet ${SITE_ORIGIN} (admin.badges answered 403)`);
   if (r.outcome !== "ok") throw new SimGateError(`admin.badges answered ${r.status || "no response"}: the owner actor does not start`);
@@ -1573,7 +1688,7 @@ export function renderOwnerPlan(options: OwnerOptions, state: SimState | null, r
     if (u.terminal) return u.terminal;
     const r = u.data.owner;
     const phases = [r?.dossier && `dossier ${r.dossier.phase}`, r?.app && `application ${r.app.phase}`, r?.otc && `escrow ${r.otc.phase}`, r?.passport && `passport ${r.passport.phase}`].filter(Boolean);
-    return `${u.stage}${phases.length ? ` (${phases.join(", ")})` : ""}${r?.handedBack ? " [handed back]" : ""}`;
+    return `${u.stage}${phases.length ? ` (${phases.join(", ")})` : ""}${liveHandBack(u) ? " [handed back]" : ""}`;
   };
   const lines = [
     "",

@@ -17,10 +17,11 @@
  *   what it decided; report.md gets an "Owner actor" section.
  */
 import path from "node:path";
-import type { OwnerQueueView } from "./cohorts/owner";
+import { passportTriage, type OwnerQueueView } from "./cohorts/owner";
+import { hasDossier } from "./identity";
 import { FINDING_OUTCOMES, type JournalEntry, type Outcome } from "./journal";
 import { writePrivateFile } from "./safety";
-import type { SimState, UserState } from "./state";
+import { liveHandBack, type SimState, type UserState } from "./state";
 
 function errorText(e: JournalEntry): string {
   if (e.err) return e.err;
@@ -288,18 +289,20 @@ function ownerQueueSections(state: SimState, actor: boolean): string[] {
   const manual = withRecord.flatMap((u) =>
     (u.data.owner!.manual ?? []).filter((m) => m.kind === "verify_issuer_kyb" || !u.terminal).map((m) => m.line),
   );
-  const handed = withRecord.filter((u) => u.data.owner!.handedBack && !u.terminal);
+  // A hand-back is listed while the user still waits at that task (decided by hand since: it goes).
+  const handed = withRecord.filter((u) => liveHandBack(u));
   const decided = withRecord.filter((u) => u.data.owner!.log?.length);
   const leave = users.filter((u) => u.plan.review === "leave" && u.data.clientId);
-  // Every KYC /verify submit files a passport request (gap G5): those of K and founder dossiers have no passport planned.
-  const kycNoPassport = users.filter((u) => u.data.clientId && (u.plan.cohort === "K" || u.plan.variant === "founder") && u.plan.review !== "leave").length;
   return [
     "## Needs the super admin / KYC provider wallet (CekAgg cannot sign these)",
     ...(manual.length ? manual : ["(none yet)"]),
     "",
     "## Handed back by the owner actor (decide by hand)",
     ...(handed.length
-      ? handed.map((u) => `${u.plan.label} [${u.plan.cohort}/${u.plan.variant}] ${u.data.owner!.handedBack!.task}: ${u.data.owner!.handedBack!.reason} (after ${u.data.owner!.handedBack!.attempts} attempts)`)
+      ? handed.map((u) => {
+          const h = liveHandBack(u)!;
+          return `${u.plan.label} [${u.plan.cohort}/${u.plan.variant}] ${h.task}: ${h.reason} (after ${h.attempts} attempts)`;
+        })
       : ["(none)"]),
     "",
     "## Decided by the owner actor (information)",
@@ -307,7 +310,31 @@ function ownerQueueSections(state: SimState, actor: boolean): string[] {
     "",
     "## Left untouched by design",
     ...leave.map((u) => `${u.plan.label} [${u.plan.cohort}/${u.plan.variant}] review=leave: ${u.data.clientId ? `/admin/clients/${u.data.clientId}` : ""} — leave it`),
-    `${kycNoPassport} passport requests of K / founder wallets with no passport planned: leave them (or reject them in /admin/kyc to empty the queue).`,
+    ...openPassportLines(users),
     "",
   ];
+}
+
+/**
+ * The /admin/kyc requests nobody is asked to decide: every KYC /verify submit
+ * with a wallet files one (gap G5; a KYB submit does not), whatever the plan.
+ * Left out: the buyers whose request the owner actor triages (their lines
+ * are above) and the requests it rejected (SIM_OWNER_PASSPORT_REJECT=1).
+ */
+function openPassportLines(users: UserState[]): string[] {
+  const filed = users.filter(
+    (u) =>
+      u.data.clientId &&
+      (u.plan.cohort === "E" || (hasDossier(u.plan) && !u.plan.variant.startsWith("company"))) &&
+      !passportTriage(u.plan) &&
+      !u.data.owner?.dossier?.passportDone,
+  );
+  const labels = (list: UserState[]) => list.map((u) => u.plan.label).join(" ");
+  const groups: [UserState[], string][] = [
+    [filed.filter((u) => u.plan.cohort !== "E" && u.plan.review !== "leave" && u.plan.review !== "reject"), "of K / founder wallets with no passport planned: leave them (or reject them in /admin/kyc to empty the queue)"],
+    [filed.filter((u) => u.plan.review === "reject"), "of rejected dossiers: leave them, or reject them in /admin/kyc (SIM_OWNER_PASSPORT_REJECT=1 lets the owner actor do it)"],
+    [filed.filter((u) => u.plan.review === "leave"), "of the dossiers left untouched above: leave them"],
+    [filed.filter((u) => u.plan.cohort === "E"), "of the edge dossiers below: leave them"],
+  ];
+  return groups.filter(([list]) => list.length).map(([list, what]) => `${list.length} passport request${list.length === 1 ? "" : "s"} ${what}: ${labels(list)}`);
 }

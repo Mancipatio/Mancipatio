@@ -118,6 +118,8 @@ export class FakeSite {
   fail = new Map<string, { status: number; code?: string }>();
   /** Route → a forced status for the next `times` requests only. */
   failNext = new Map<string, { status: number; times: number }>();
+  /** Route → the next `times` requests are handled (the write applies), then answered with this status (a lost answer). */
+  failAfter = new Map<string, { status: number; times: number }>();
   private reqId = 1;
   private docId = 1;
 
@@ -187,8 +189,15 @@ export class FakeSite {
         payload = { ok: false, error: "forced", code: forced.code };
       } else {
         const result = await this.handle(route, url, init?.body ?? null, headers, extra);
-        status = result.status ?? 200;
-        payload = { ok: true, data: result.data };
+        const lost = this.failAfter.get(route);
+        if (lost && lost.times > 0) {
+          lost.times -= 1;
+          status = lost.status;
+          payload = { ok: false, error: "forced after the request was applied" };
+        } else {
+          status = result.status ?? 200;
+          payload = { ok: true, data: result.data };
+        }
       }
     } catch (error) {
       if (!(error instanceof Refused)) throw error;
@@ -914,6 +923,9 @@ export class FakeChainOps implements ChainOps {
     if (prior?.status === "landed") return prior.sig;
     const pda = await this.dealPda(deal.request.share_class_pda as Address, deal.dealId);
     if (prior?.status === "inflight") {
+      const answer = this.inflightAnswers.get(label)?.shift();
+      if (answer === "rpc-error") throw new ChainRpcError("getSignatureStatuses", 429);
+      if (answer === "pending") throw new SimRetryLater(`${label}: an earlier signature is still unresolved`);
       if (prior.sig && this.wires.has(prior.sig)) {
         u.tx[label] = { ...prior, status: "landed" };
         return prior.sig;
@@ -951,6 +963,11 @@ export class FakeChainOps implements ChainOps {
     if (fault === "process-death") {
       this.onDeath?.();
       throw new FakeProcessDeath(label);
+    }
+    if (fault === "unresolved") {
+      // Sent and landed, but not finalized in time: the record stays inflight (TxExecutor's SimRetryLater).
+      u.tx[label] = { ...u.tx[label], status: "inflight", lvbh: "0" };
+      throw new SimRetryLater(`${label} unknown; resolved on the next pass`);
     }
     return sig;
   }

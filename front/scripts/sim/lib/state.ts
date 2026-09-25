@@ -82,6 +82,9 @@ export type ProbeVerdict = "passed" | "mismatch" | "unexpected-accept" | "skippe
  */
 export type OwnerPhase = "open" | "await-user" | "decided" | "elsewhere" | "handed-back";
 
+/** The owner actor's four kinds of task (one current task per user at a time). */
+export type OwnerTaskKind = "dossier" | "app" | "otc" | "passport";
+
 /** A non-idempotent write, saved before it is sent (a resume tells its own decision from a hand one). */
 export type OwnerIntent = { op: string; value?: string; reqId?: number; docId?: number | null; kind?: string; at: string };
 
@@ -150,15 +153,40 @@ export type OwnerRecord = {
   passport?: OwnerPassport;
   /** What CekAgg cannot sign (the super admin / the KYC provider): owner-queue.txt lists these. */
   manual?: { kind: "passport" | "verify_issuer_kyb"; line: string; at: string }[];
-  handedBack?: { task: string; reason: string; at: string; attempts: number };
+  /**
+   * The last task handed back (its own phase says "handed-back"; the user's
+   * other tasks go on). `kind` is absent in a record written before it existed.
+   */
+  handedBack?: { task: string; reason: string; at: string; attempts: number; kind?: OwnerTaskKind };
   /** The decisions, in order (report.md). */
   log?: string[];
   /** C-O6 on an escrow: this party saw the flip (or the lag was reported). */
   otcLagChecked?: boolean;
+  /** Transient failures of the task `attemptsFor` (another task starts again from 0). */
   attempts: number;
+  attemptsFor?: OwnerTaskKind;
   /** Epoch ms before which the task is not taken again (a transient failure's backoff). */
   retryAt?: number;
 };
+
+/** The stages in which a user still waits for the task that was handed back (dossier, application, passport). */
+const HANDED_BACK_STAGES: Record<Exclude<OwnerTaskKind, "otc">, (stage: string) => boolean> = {
+  dossier: (stage) => stage === "await.dossier" || stage.startsWith("dossier."),
+  app: (stage) => stage === "await.app" || stage.startsWith("app."),
+  passport: (stage) => stage === "await.passport",
+};
+
+/**
+ * The hand-back owner-queue.txt still shows: the user waits at that task
+ * (once the owner decided it by hand the user moves on and the line goes).
+ * An escrow hand-back stays while the user runs: it can name an open deal to
+ * cancel.
+ */
+export function liveHandBack(u: UserState): OwnerRecord["handedBack"] | undefined {
+  const h = u.data.owner?.handedBack;
+  if (!h || u.terminal) return undefined;
+  return !h.kind || h.kind === "otc" || HANDED_BACK_STAGES[h.kind](u.stage) ? h : undefined;
+}
 
 export type UserData = {
   accountId?: string;

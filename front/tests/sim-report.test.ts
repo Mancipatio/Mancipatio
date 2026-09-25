@@ -12,7 +12,7 @@ import type { JournalEntry } from "@/scripts/sim/lib/journal";
 import { planSummary, renderPlan, userCost } from "@/scripts/sim/lib/plan";
 import { largestTransferLag, loanLine, renderOwnerQueue, renderReport, groupFindings, tally } from "@/scripts/sim/lib/report";
 import { assertDevnetSite, runSim } from "@/scripts/sim/lib/runner";
-import { newState, newUserState, saveState } from "@/scripts/sim/lib/state";
+import { newState, newUserState, saveState, type UserState } from "@/scripts/sim/lib/state";
 
 const entry = (over: Partial<JournalEntry>): JournalEntry => ({ ts: "2026-09-25T10:00:00.000Z", wave: 0, user: "u001", cohort: "K", step: "x", kind: "http", outcome: "ok", ...over });
 
@@ -185,10 +185,48 @@ describe("owner queue with the owner actor (SIM_OWNER=1)", () => {
     );
     expect(text).toContain("## Decided by the owner actor (information)\nu002 [I/buyer-kyc, review=approve]: 2026-09-25T10:00:00Z passport request r-2 marked in review");
     expect(text).toContain("u037 [K/kyc] review=leave: /admin/clients/c37 — leave it");
-    expect(text).toMatch(/\d+ passport requests of K \/ founder wallets with no passport planned/);
+    expect(text).toContain("1 passport request of the dossiers left untouched above: leave them: u037");
+    expect(text).toContain("1 passport request of the edge dossiers below: leave them: u005");
     // The edge section is unchanged.
     expect(text).toContain("## Edge-cohort dossiers (opened only to test bad uploads): leave them untouched\nu005 client c-5 wallet W5");
     expect(renderOwnerQueue(state, [], { owner: view({}, "SIM_OWNER_MAX=3 reached") })).toContain("# The owner actor takes no more tasks: SIM_OWNER_MAX=3 reached");
+  });
+
+  it("accounts for every open /admin/kyc request: no passport planned, rejected, left untouched and edge dossiers, each with its users", () => {
+    const state = newState("q00002", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
+    const plans = buildRoster();
+    const add = (label: string, extra: Partial<UserState> = {}, owner?: NonNullable<UserState["data"]["owner"]>) => {
+      const p = plans.find((x) => x.label === label)!;
+      state.users[label] = { ...newUserState(p, `W-${label}`), stage: "await.dossier", ...extra, data: { clientId: `c-${label}`, ...(owner ? { owner } : {}) } };
+    };
+    add("u001", { terminal: "done" }); // K approve: verified, no passport planned
+    add("u034", { terminal: "done" }); // founder approve
+    add("u002", { stage: "await.passport" }); // buyer-kyc approve: the actor's triage (listed above)
+    add("u006", { terminal: "rejected" }, { attempts: 0, dossier: { verdict: "reject", phase: "decided", passportDone: true } }); // rejected by the actor
+    add("u007", { terminal: "rejected" }); // buyer-kyc reject: its request stays open
+    add("u015", { terminal: "rejected" }); // K reject, SIM_OWNER_PASSPORT_REJECT off
+    add("u020"); // buyer-kyc leave
+    add("u065", { terminal: "stopped" }); // stop-after-one (leave)
+    add("u004", { terminal: "done" }); // a company: a KYB submit files no request
+    add("u005", { terminal: "done" }); // edge
+    const text = renderOwnerQueue(state, [], { owner: view() });
+    expect(text).toContain("2 passport requests of K / founder wallets with no passport planned: leave them (or reject them in /admin/kyc to empty the queue): u001 u034");
+    expect(text).toContain("2 passport requests of rejected dossiers: leave them, or reject them in /admin/kyc (SIM_OWNER_PASSPORT_REJECT=1 lets the owner actor do it): u007 u015");
+    expect(text).toContain("2 passport requests of the dossiers left untouched above: leave them: u020 u065");
+    expect(text).toContain("1 passport request of the edge dossiers below: leave them: u005");
+    expect(text).not.toMatch(/passport requests?[^\n]*\bu00[246]\b/);
+  });
+
+  it("lists a hand-back only while the user still waits at that task", () => {
+    const state = newState("q00003", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
+    const plans = buildRoster();
+    const at = "2026-09-25T10:00:00.000Z";
+    const handedBack = { task: "KYC dossier https://www.manci.io/admin/clients/c2", reason: "clients.status answered 409", at, attempts: 0, kind: "dossier" as const };
+    state.users.u002 = { ...newUserState(plans[1], "W2"), awaitingOwner: true, stage: "await.dossier", data: { owner: { attempts: 0, handedBack } } };
+    expect(renderOwnerQueue(state, [], { owner: view() })).toContain("u002 [I/buyer-kyc] KYC dossier https://www.manci.io/admin/clients/c2: clients.status answered 409 (after 0 attempts)");
+    // The owner verified it by hand: the buyer waits for its passport now, the dossier hand-back is over.
+    state.users.u002.stage = "await.passport";
+    expect(renderOwnerQueue(state, [], { owner: view() })).toMatch(/## Handed back by the owner actor \(decide by hand\)\n\(none\)/);
   });
 });
 

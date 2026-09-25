@@ -5,6 +5,7 @@
 // triage, decisions made by hand, resume after a process death, forced
 // failures, the focus lane, the SIM_OWNER_MAX cap and the never-approve
 // guards. Offline.
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { Address } from "@solana/kit";
 import { OtcDealStatus } from "@/lib/generated/asset_registry";
@@ -12,6 +13,7 @@ import {
   APP_REJECT_LABEL,
   MANUAL_POLL_MS,
   OWNER_ACTIONS,
+  OWNER_READS,
   appPlan,
   dossierVerdict,
   morePick,
@@ -22,11 +24,12 @@ import {
   type OwnerCtx,
 } from "@/scripts/sim/lib/cohorts/owner";
 import { DEAL_PRICE, DEAL_UNITS } from "@/scripts/sim/lib/cohorts/trader";
+import { simDocument } from "@/scripts/sim/lib/docs";
 import type { JournalEntry } from "@/scripts/sim/lib/journal";
 import { renderOwnerQueue } from "@/scripts/sim/lib/report";
 import type { UserState } from "@/scripts/sim/lib/state";
 import { ASSET, SALES } from "./helpers/sim-fake-site";
-import { OWNER_DEFAULTS, findings, plan, reload, restartOwner, roster, runFor, runUntilBlocked, startOwner, world, type World } from "./helpers/sim-world";
+import { OWNER_DEFAULTS, RUN, findings, plan, reload, restartOwner, roster, runFor, runUntilBlocked, startOwner, world, type World } from "./helpers/sim-world";
 
 const byLabel = (label: string) => plan((p) => p.label === label);
 
@@ -46,11 +49,16 @@ const notes = (w: World, step: string) => w.journal.entries.filter((e) => e.kind
 const owner = (w: World): OwnerCtx => w.ctx.owner!;
 const rec = (u: UserState) => u.data.owner!;
 
-/** The never-approve guards over a whole run: allowed values only, nothing about users the plan leaves alone. */
+/**
+ * The never-approve guards over a whole run: every signed envelope is a
+ * sign-in, a read the admin pages make, or a listed write with an allowed
+ * value; nothing about users the plan leaves alone.
+ */
 function expectOnlyPlannedWrites(w: World): void {
   for (const x of ownerSigned(w)) {
+    if (x.action === "auth.session" || OWNER_READS.includes(x.action)) continue;
     const allowed = OWNER_ACTIONS[x.action];
-    if (!allowed) continue; // a read
+    expect(allowed, `an owner write outside OWNER_ACTIONS: ${x.action}`).toBeDefined();
     const value = String(
       x.action === "clients.review-requirement"
         ? x.params.status
@@ -132,6 +140,7 @@ describe("the decision table", () => {
       "create_otc_deal": ["open"],
       "passport.update": ["in_review", "rejected"],
     });
+    expect(OWNER_READS).toEqual(["clients.adminDetail", "clients.doc-url", "applications.adminList", "applications.adminEvents", "otc.list", "otc.adminScreen", "passport.list", "admin.badges"]);
   });
 });
 
@@ -315,6 +324,51 @@ describe("KYC and KYB dossiers", () => {
     expect(findings(w)).toEqual([]);
   });
 
+  it("C-O3: a PLEASE REJECT file on an approve dossier (u001) is never approved; the dossier is handed back, the user still waits", async () => {
+    const w = await world([byLabel("u001")], { owner: {} });
+    const [u] = w.users;
+    const stamped = createHash("sha256").update(simDocument({ runId: RUN, n: u.plan.n, kind: "passport", round: 1, reject: true }).bytes).digest("hex");
+    await blockedThenOwner(w, () => {
+      w.site.dossierOf(u.wallet).documents.find((x) => x.kind === "passport")!.sha256 = stamped;
+    });
+    await runFor(w, 30);
+    expect(ownerWrites(w, "clients.review-requirement")).toHaveLength(0);
+    expect(ownerWrites(w, "clients.status")).toHaveLength(0);
+    expect(checks(w, "C-O3").map((e) => e.outcome)).toEqual(["consistency"]);
+    expect(rec(u).handedBack).toMatchObject({ kind: "dossier", reason: expect.stringMatching(/^C-O3: .*passport .*the PLEASE REJECT stamp is present.*decide the dossier by hand/) });
+    expect(u.terminal).toBeUndefined();
+    expect(u.stage).toBe("await.dossier");
+    expect(w.site.dossierOf(u.wallet).kyc_status).toBe("pending");
+    expectOnlyPlannedWrites(w);
+  });
+
+  it("companies whose KYB was verified by hand before the actor started (u004 done, u029 at its application) still get the verify_issuer_kyb line", async () => {
+    const w = await world([byLabel("u004"), byLabel("u029")], { owner: {} });
+    const [u004, u029] = w.users;
+    const o = w.ctx.owner;
+    w.ctx.owner = undefined;
+    await runUntilBlocked(w);
+    w.site.kybVerify(u004.wallet);
+    w.site.kybVerify(u029.wallet);
+    await runFor(w, 10);
+    w.site.review(u004.wallet, "approved");
+    await runFor(w, 10);
+    expect(u004.terminal).toBe("done");
+    expect(u029.stage).toBe("await.app");
+    w.ctx.owner = o;
+    await startOwner(w);
+    for (const u of [u004, u029]) expect(rec(u).manual?.map((m) => m.kind), u.plan.label).toEqual(["verify_issuer_kyb"]);
+    await runFor(w, 60);
+    expect(u029.terminal).toBe("done");
+    expect(ownerWrites(w, "clients.kybDecision")).toHaveLength(0);
+    expect(ownerWrites(w, "applications.review").map((x) => x.params.decision)).toEqual(["approved"]);
+    expect(rec(u029).manual).toHaveLength(1);
+    const queue = renderOwnerQueue(w.state, [], { owner: ownerQueueView(w.ctx) });
+    expect(queue).toMatch(new RegExp(`issuer KYB u004 SIM Test d.o.o. 004 issuer ${u004.data.issuerPda}`));
+    expect(queue).toMatch(new RegExp(`issuer KYB u029 SIM Test d.o.o. 029 issuer ${u029.data.issuerPda}`));
+    expect(findings(w)).toEqual([]);
+  });
+
   it("leave (u037), stop-after-one (u065) and edge (u005) dossiers: not one owner request names them", async () => {
     const w = await world([byLabel("u037"), byLabel("u065"), byLabel("u005")], { owner: {} });
     await startOwner(w);
@@ -422,6 +476,28 @@ describe("OTC escrows", () => {
     expect(ownerWrites(w, "otc.adminUpdate")).toHaveLength(0);
     expect(rec(taker).handedBack?.reason).toMatch(/cancel that deal/);
     expect(checks(w, "C-O7").map((e) => e.outcome)).toEqual(["ok", "consistency"]);
+  });
+
+  it("an unresolved create_otc_deal signature: the focus waits a minute between status checks, then one deal and one flip", async () => {
+    const w = await world(roster.filter((p) => p.pair === 3), { owner: {} });
+    await startOwner(w);
+    w.chain.faults.set("owner.otc.create", "unresolved");
+    w.chain.inflightAnswers.set("owner.otc.create", ["pending", "pending"]);
+    const calls: number[] = [];
+    const open = w.chain.openOtcDeal.bind(w.chain);
+    w.chain.openOtcDeal = async (...args: Parameters<typeof open>) => {
+      calls.push(w.clock.t);
+      return open(...args);
+    };
+    expect(await runFor(w, 120)).toBe("finished");
+    // The send, two unresolved checks, the landed one: never back to back.
+    expect(calls).toHaveLength(4);
+    for (let i = 1; i < calls.length; i++) expect(calls[i] - calls[i - 1]).toBeGreaterThanOrEqual(60_000);
+    expect(w.chain.sentWires.filter((x) => x.endsWith("owner.otc.create"))).toHaveLength(1);
+    expect(w.chain.deals.size).toBe(1);
+    expect(ownerWrites(w, "otc.adminUpdate")).toHaveLength(1);
+    expect(w.users.every((u) => u.terminal === "done")).toBe(true);
+    expect(findings(w)).toEqual([]);
   });
 
   it("a process death with create_otc_deal inflight resumes into one deal and one flip", async () => {
@@ -602,6 +678,87 @@ describe("failures", () => {
     expect(notes(w, "retry")).toHaveLength(1);
   });
 
+  it("a KYB verdict applied but answered 504 (u004): the user waits for the actor's re-read, the decision is counted once and checked, nothing is re-sent", async () => {
+    const w = await world([byLabel("u004")], { owner: {} });
+    await startOwner(w);
+    const [u] = w.users;
+    w.site.failAfter.set("/api/clients/kyb-decision", { status: 504, times: 1 });
+    expect(await runFor(w, 60)).toBe("finished");
+    expect(u.terminal).toBe("done");
+    expect(ownerWrites(w, "clients.kybDecision")).toHaveLength(1);
+    expect(rec(u).dossier).toMatchObject({ phase: "decided", decision: "KYB verified", finalDone: true });
+    expect(w.state.owner?.decisions).toBe(2);
+    // Between the write and the actor's re-read the user sent nothing (its poll would have moved it on).
+    const http = w.journal.entries.filter((e) => e.kind === "http" && !e.step.endsWith(".session"));
+    const write = http.findIndex((e) => e.user === "owner" && e.action === "clients.kybDecision");
+    const reread = http.findIndex((e, i) => i > write && e.user === "owner" && e.action === "clients.adminDetail");
+    expect(reread).toBeGreaterThan(write);
+    expect(http.slice(write + 1, reread).some((e) => e.user === "u004")).toBe(false);
+    expect(checks(w, "C-O5").map((e) => e.outcome)).toEqual(["info"]);
+    expect(findings(w).map((e) => [e.route, e.httpStatus])).toEqual([["POST /api/clients/kyb-decision", 504]]);
+  });
+
+  it("a KYB rejection applied but answered 500 (u008): every document is still rejected before the company learns it", async () => {
+    const w = await world([byLabel("u008")], { owner: {} });
+    await startOwner(w);
+    const [u] = w.users;
+    w.site.failAfter.set("/api/clients/kyb-decision", { status: 500, times: 1 });
+    await runFor(w, 60);
+    expect(u.terminal).toBe("rejected");
+    expect(ownerWrites(w, "clients.kybDecision").map((x) => x.params.decision)).toEqual(["rejected"]);
+    expect(ownerWrites(w, "clients.review-requirement").map((x) => x.params.status)).toEqual(["rejected", "rejected", "rejected", "rejected"]);
+    expect(w.site.dossierOf(u.wallet).requirements.every((r) => r.status === "rejected")).toBe(true);
+    expect(rec(u).dossier).toMatchObject({ phase: "decided" });
+    expect(w.state.owner?.decisions).toBe(1);
+  });
+
+  it("an application approval applied but answered 502 (u090): one review, one round, one audit row", async () => {
+    const w = await world([byLabel("u090")], { owner: {} });
+    await startOwner(w);
+    const [u] = w.users;
+    w.site.failAfter.set("/api/applications/review", { status: 502, times: 1 });
+    await runFor(w, 60);
+    expect(u.terminal).toBe("done");
+    expect(ownerWrites(w, "applications.review")).toHaveLength(1);
+    expect(rec(u).app).toMatchObject({ phase: "decided", rounds: [{ decision: "approved" }] });
+    expect(w.site.audits.filter((a) => a.ix_name === "review_application:approved")).toHaveLength(1);
+    expect(w.state.owner?.decisions).toBe(2);
+  });
+
+  it("a hand-back ends that task only: u002's dossier handed back, verified by hand, then its passport request is still triaged", async () => {
+    const w = await world([byLabel("u002")], { owner: {} });
+    await startOwner(w);
+    const [u] = w.users;
+    w.site.failNext.set("/api/clients/status", { status: 409, times: 1 });
+    await runFor(w, 20);
+    expect(rec(u).dossier?.phase).toBe("handed-back");
+    expect(renderOwnerQueue(w.state, [], { owner: ownerQueueView(w.ctx) })).toMatch(/## Handed back by the owner actor \(decide by hand\)\nu002 /);
+    w.site.verify(u.wallet);
+    await runFor(w, 30);
+    expect(u.stage).toBe("await.passport");
+    expect(ownerWrites(w, "passport.update").map((x) => x.params.patch)).toEqual([{ status: "in_review" }]);
+    expect(rec(u).passport?.phase).toBe("in-review");
+    expect(rec(u).manual?.map((m) => m.kind)).toEqual(["passport"]);
+    const queue = renderOwnerQueue(w.state, [], { owner: ownerQueueView(w.ctx) });
+    expect(queue).toMatch(/## Handed back by the owner actor \(decide by hand\)\n\(none\)/);
+    expectOnlyPlannedWrites(w);
+  });
+
+  it("transient failures count per task: two on u004's dossier (then decided by hand) do not hand back its application at the first failure", async () => {
+    const w = await world([byLabel("u004")], { owner: {} });
+    const [u] = w.users;
+    await blockedThenOwner(w, () => {
+      w.site.kybVerify(u.wallet);
+      w.site.failNext.set("/api/clients/admin-detail", { status: 500, times: 2 });
+      w.site.failNext.set("/api/applications/admin-list", { status: 500, times: 1 });
+    });
+    await runFor(w, 60);
+    expect(notes(w, "elsewhere").map((e) => e.body)).toEqual([expect.stringMatching(/KYB is already verified/)]);
+    expect(u.terminal).toBe("done");
+    expect(rec(u).handedBack).toBeUndefined();
+    expect(ownerWrites(w, "applications.review").map((x) => x.params.decision)).toEqual(["approved"]);
+  });
+
   it("S14: a CLI Admin without an Admin record never starts; a 403 mid-run stops the actor and every user polls on", async () => {
     const w = await world([byLabel("u001")], { owner: {} });
     w.chain.admins.clear();
@@ -683,6 +840,20 @@ describe("the focus lane and the cap", () => {
     await restartOwner(w, { max: 3 });
     await runFor(w, 40);
     expect(ownerWrites(w, "clients.status")).toHaveLength(3);
+  });
+
+  it("SIM_OWNER_MAX=1 with the first verdict applied but answered 500: it counts, its re-read comes first, and no second verdict is sent", async () => {
+    const w = await world(approvers.slice(0, 2), { owner: { max: 1 } });
+    await startOwner(w);
+    w.site.failAfter.set("/api/clients/status", { status: 500, times: 1 });
+    await runFor(w, 40);
+    expect(ownerWrites(w, "clients.status")).toHaveLength(1);
+    expect(w.users.filter((u) => w.site.dossierOf(u.wallet).kyc_status === "verified")).toHaveLength(1);
+    expect(w.state.owner?.decisions).toBe(1);
+    expect(rec(w.users[0]).dossier).toMatchObject({ phase: "decided", finalDone: true });
+    expect(owner(w).stopped).toMatch(/SIM_OWNER_MAX=1 reached \(1 decisions/);
+    expect(w.users[0].terminal).toBe("done");
+    expect(w.users[1].terminal).toBeUndefined();
   });
 
   it("SIM_OWNER_ONLY: only the listed users are decided", async () => {
