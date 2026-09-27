@@ -15,14 +15,16 @@ run a mainnet step whose EXTERNAL item is still open.
 
 ## Tools
 
-All four tools live in `front/scripts/chain/` and run from `front/`:
+The tools live in `front/scripts/chain/` and run from `front/`:
 
 | Command | What it does | Sends? |
 |---|---|---|
-| `npm run chain:inventory` | Read-only inventory with findings for `CHAIN_PHASE` = `in-progress`, `pre-handover` or `handed-over` | never |
+| `npm run chain:inventory` | Read-only inventory with findings for `CHAIN_PHASE` = `in-progress`, `pre-handover` or `handed-over`; also the SBPF version of the Release and the SIMD-0500 / rent feature state (§1) | never |
 | `npm run chain:idl` | Canonical IDL: `CHAIN_IDL_MODE` = `check` (default), `send` or `prepare-export` | only with `CHAIN_SEND=1` |
 | `npm run chain:bootstrap` | One bootstrap cycle (S1–S7) as a reviewed plan | only with `CHAIN_SEND=1` |
 | `npm run chain:squads-export` | Unsigned vault transactions for the Squads Transaction Builder | never |
+| `npm run chain:handover` | Ordered plan to move live roles to new keys (§19) | never |
+| `npm run chain:emergency` | Out-of-band pause, unpause, blocklist and hook mode with a Ledger or a keypair, no front and no database (§11) | only with `CHAIN_SEND=1` |
 
 Every run writes one evidence file (`CHAIN_OUTPUT`, schema
 `mancipatio-chain-<tool>-v1`) even when it fails or is interrupted. Its
@@ -38,9 +40,10 @@ writes `<CHAIN_OUTPUT>.journal.jsonl`.
 | `CHAIN_RPC_URL` | https only (localnet may use http on a loopback host), no `user:pass@`. Never printed; evidence keeps the hostname only. Use the dedicated RPC. |
 | `CHAIN_GENESIS_HASH` | Required on localnet (`solana genesis-hash`). Elsewhere, if set, it must equal the cluster's hash. |
 | `CHAIN_OUTPUT` | Required. Must not exist. Inside the repository it must be git-ignored (for example `docs/…`); outside the repository anything goes. |
-| `CHAIN_ROLE_MAP` | Required for bootstrap and squads-export, and for IDL send/prepare-export. Its sha256 goes into the plan digest. |
+| `CHAIN_ROLE_MAP` | Required for bootstrap and squads-export, and for IDL send/prepare-export. Its sha256 goes into the plan digest. For handover it is the target (a handover target or a role map, §19). |
 | `CHAIN_RELEASE_DIR` | Required on mainnet for bootstrap, idl and squads-export. `SHA256SUMS` is verified first. |
 | `CHAIN_SEND=1`, `CHAIN_KEYPAIR`, `CHAIN_CONFIRM_PLAN` | Send mode needs all three. Without `CHAIN_SEND` every tool is a dry run. |
+| `CHAIN_SIGNER` | chain:emergency only, instead of `CHAIN_KEYPAIR`: `usb://ledger`, `usb://ledger?key=<n>` or `usb://ledger?key=<n>/<m>` (the Solana CLI's derivation paths). |
 | `CHAIN_CU_PRICE` | Micro-lamports per CU. Required when sending on mainnet; at most 2,000,000. |
 | `CHAIN_RPS` | Requests per second, default 2, at most 20. On the public devnet RPC use `1`: its `getProgramAccounts` limit fails an inventory at 2 (observed 2026-09-24). |
 | `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10. |
@@ -54,7 +57,10 @@ mandatory on mainnet), `CHAIN_IDL_RESUME_BUFFER`, `CHAIN_SNAPSHOT_DIR` (idl);
 `CHAIN_HANDOVER=1`, `CHAIN_CONFIRM_HANDOVER=<vault>`,
 `CHAIN_HANDOVER_WHILE_PAUSED=1` (bootstrap); `CHAIN_SQUADS_OP`,
 `CHAIN_SQUADS_INPUT`, `CHAIN_SQUADS_CONFIG_UNVERIFIED=1` (squads-export, off
-mainnet only).
+mainnet only); `CHAIN_SITE_ORIGIN` (handover, wording only);
+`CHAIN_EMERGENCY_OP`, `CHAIN_EMERGENCY_SIGNER`, `CHAIN_PAUSE_BITS`,
+`CHAIN_WALLET`, `CHAIN_CONFIRM_WALLET`, `CHAIN_MINT`, `CHAIN_HOOK_MODE`,
+`CHAIN_KYC_REGISTRY`, `CHAIN_EMERGENCY_IDL_UNCHECKED=1` (emergency, §11).
 
 The runners never read `.env*` files. Export the variables in the shell, for
 example from a small `set -a; . ~/mancipatio-mainnet/chain.env; set +a` file
@@ -87,8 +93,10 @@ that lives outside the repository and holds no keypair bytes.
   `chain:squads-export` run happens in a clean checkout of the tag whose
   Release is `CHAIN_RELEASE_DIR`.
 - Hot keys: the deployer (bootstrap, IDL before handover) and the
-  bufferWriter (buffers after handover). The tools refuse any other key, and
-  never load a Ledger key on mainnet.
+  bufferWriter (buffers after handover). The deployment tools refuse any
+  other key, and never load a Ledger key on mainnet. The one exception is
+  chain:emergency (§11): it signs with the role key itself (a Ledger or that
+  key's file), after checking on-chain that the key holds the role.
 
 ## 0. Preflight
 
@@ -120,6 +128,39 @@ real runner and devnet can prove stays open until these pass:
       `v0.0.0-rc.<n>` on main. The `publish` job must pass the ancestry check,
       attest and create the prerelease; then run the attestation check below
       against it (`--source-ref refs/tags/v0.0.0-rc.<n>`).
+
+### Legal gate (before S1)
+
+No mainnet transaction (not even §2) before every item below is ticked
+by the owner, with the document or decision it rests on filed outside the
+repository (`~/mancipatio-mainnet/legal/`). The chain tools cannot check
+these; the owner signs them off in the launch-day record (§0A, D0).
+
+- [ ] **Lawyer's written opinion** on the service's qualification (the
+      Serbian Law on Digital Assets, securities rules for the share classes,
+      AML/CFT obligations) and on the owner decisions it depends on: purchase
+      and OTC without KYC, KYC at conversion and delivery, clawback on Open
+      classes, the €3M ceiling.
+- [ ] **Licence** from the Securities Commission (Komisija za hartije od
+      vrednosti) for the digital-asset service the opinion names, or the
+      opinion that none is needed for the pilot scope.
+- [ ] **Legal entity** registered; the operator named in the Terms, Privacy
+      and imprint is that entity; the company wallet (§19) belongs to it.
+- [ ] **Terms and Privacy** reviewed by the lawyer for mainnet:
+      `TOS_VERSION` and `LAST_UPDATED` raised, the mainnet build's
+      `MAINNET_LEGAL_COPY_APPROVED=true` set only after that review.
+- [ ] **Data processing agreements** with every processor that sees personal
+      data: Supabase, Vercel, the RPC/webhook provider (Helius), the SMTP
+      provider, Cloudflare Turnstile, Google (sign-in); records of processing
+      and the retention schedule.
+- [ ] **AML/CFT programme**: the written KYC/KYB procedures (ops/sop-admin.md
+      is the operational part), risk assessment, compliance officer,
+      suspicious-transaction reporting channel, record keeping.
+- [ ] **Sanctions screening** decided and wired (at least the baseline the
+      8.5 package delivers) and **geoblocking** of excluded jurisdictions
+      (the KYC registry's blocked jurisdictions plus the front's geoblock).
+- [ ] **Wind-down plan** (ops/wind-down-plan.md) reviewed by the lawyer and
+      the termination clause in the Terms.
 
 ### Mainnet preflight
 
@@ -154,37 +195,95 @@ real runner and devnet can prove stays open until these pass:
       matching (finding code `squads` absent). **EXTERNAL #4** (layout) must be
       closed by the rehearsal dump.
 - [ ] **Role map** (`front/scripts/chain/role-map.example.json` shows the
-      shape): `network: mainnet`, the mainnet genesis hash,
+      shape with separate keys, `role-map.company.example.json` the company
+      wallet model of §19): `network: mainnet`, the mainnet genesis hash,
       `programDataMaxLen` = `{ "assetRegistry": 3145728, "transferHook": 786432 }`
       (D8), `deployer` and `bufferWriter` hot keys (different keys, no role, not
       Squads members, D19), `superAdmin`, `admins[]` (never the SA),
-      `blocklistAuthority`, `kyc.authority` (Ledgers),
+      `blocklistAuthority`, `kyc.authority` (Ledgers, or the company wallet),
       `kyc.registry` = the KycRegistry PDA of the deployer (D3),
-      `protocolTreasury` = the vault (D5), `protocolFeeBps: 0`,
-      `unpauseBy: "superAdmin"` (D4), `kyc.tempAdminGrant: false` unless the
-      3.1 `kycProvider` gate is missing (D17).
+      `protocolTreasury` = the vault (D5) or, acknowledged, the company wallet,
+      `protocolFeeBps: 0`, `unpauseBy: "superAdmin"` (D4),
+      `kyc.tempAdminGrant: false` unless the 3.1 `kycProvider` gate is missing
+      (D17). One key in several roles needs `acknowledgedRoleOverlaps` (§19);
+      the map is refused on mainnet without it.
 - [ ] **Dedicated RPC** and `CHAIN_CU_PRICE` decided (check recent
       prioritization fees).
+- [ ] **Cluster gates**: `chain:inventory` with `CHAIN_RELEASE_DIR` shows no
+      `sbpf-gate` blocker (SIMD-0500 against the Release's SBPF version) and
+      its `rent` line matches the budget chosen in §1.
 - [ ] **Operator front (D18)**, prepared before S1 so X1 can follow within
-      minutes:
-  - a local `next dev` on the operator machine with
-    `NEXT_PUBLIC_NETWORK=mainnet`, the dedicated RPC, the mainnet Supabase
-    project with every migration applied,
-    `NEXT_PUBLIC_KYC_REGISTRY=<kyc.registry>`, **maintenance off** (maintenance
-    refuses the signed wallet-transaction policy, so it would block X1, X2, X3
-    and S6);
-  - alternative: a password-protected Vercel preview (production build; needs
-    the legal ack and an https `NEXT_PUBLIC_SITE_URL`);
-  - each Ledger (SA, BA, KYC) connects once, signs SIWS and the ToS (the
-    `/issuer/*` TosGate) and becomes primary of its own account; none may
-    already be a secondary wallet of another account;
-  - fund each Ledger with about 0.05 SOL;
-  - **no public mainnet front until step 8.**
+      minutes. The chosen variant is §0A: the mainnet **production**
+      deployment on its real domain behind Vercel Deployment Protection
+      (All Deployments, Vercel Authentication), so it is not public until
+      Talas 7 while the schedulers reach it with the bypass header:
+  - `NEXT_PUBLIC_NETWORK=mainnet`, the dedicated RPC, the mainnet Supabase
+    project with every migration applied, `NEXT_PUBLIC_KYC_REGISTRY=<kyc.registry>`,
+    **maintenance off** (maintenance refuses the signed wallet-transaction
+    policy, so it would block X1, X2, X3 and S6; Deployment Protection, not
+    maintenance, keeps the public out);
+  - fallback if Vercel is unavailable: a local `next dev` on the operator
+    machine with the same settings;
+  - each operator key (the SA, BA and KYC Ledgers, or the company wallet)
+    connects once, signs SIWS and the ToS (the `/issuer/*` TosGate) and
+    becomes primary of its own account; none may already be a secondary
+    wallet of another account;
+  - fund the keys per the §1 operational budget;
+  - **no public mainnet front until step 8** (Talas 7, §0A D11).
 - [ ] 3.1 merged (the `kycProvider` layout gate, the D17 default; mainnet hides
       Initialize Platform and BlocklistBootstrap on `/issuer/authority` and
       `/admin/platform`) and 3.2 merged.
 - [ ] The **6.1 rehearsal** (section 12) passed and every EXTERNAL item is
       closed.
+
+## 0A. Launch day master sequence
+
+One order from nothing to the public launch. The sections it points to keep
+the details; this list decides the order and resolves where they disagreed
+(uloge-runbook-4/-5, podaci-infra-4):
+
+- §15 wants the alarm scheduler proven against the live mainnet site before
+  §2, and the retry scheduler needs the site at its origin, but §0 forbids a
+  public front before step 8, and maintenance (a database flag the operator
+  front shares) would block X1/X2/X3/S6.
+- §14 step 8 seeded the USDC FX row during the database bootstrap, §15 (D16)
+  after the program bootstrap, and `/api/health` failed without it.
+
+**Chosen variant (a): the production deployment behind Deployment
+Protection.** The mainnet Vercel project serves its real domain from D4 on,
+with Deployment Protection set to *All Deployments* with *Vercel
+Authentication* (no paid add-on; operators are members of the Vercel team and
+sign in). The public sees only Vercel's sign-in wall. pg_cron reaches
+`/api/internal/*` with the *Protection Bypass for Automation* secret, which
+the retry and alarm schedulers read from the Vault secret
+`mancipatio_vercel_bypass_mainnet` and send as `x-vercel-protection-bypass`;
+the external monitor sends the same header. Maintenance stays **off** the
+whole time. `/api/health` reports a missing FX row as a warning
+(`missing_before_first_sale`) until the first sale approval or sale exists,
+so the FX row is seeded after the bootstrap (D10), as D16 wants. Why not the
+alternatives: (b) a pre-launch mode that admits allowlisted wallets is new
+code in every gate; (c) moving the alarm gate after step 8 leaves the
+bootstrap (every authority change, the loader) unalarmed. Keep the window
+between D4 and D11 short: the domain shows a sign-in wall meanwhile.
+
+| Step | What | Who | Where |
+|---|---|---|---|
+| D0 | Legal gate ticked (§0), EXTERNAL items closed, go/no-go recorded | owner | §0, EXTERNAL |
+| D1 | Accounts: Supabase Pro with PITR (mainnet project), Vercel Pro with the mainnet project, Helius paid plan (RPC and webhook), SMTP sender, external monitor, age backup key (G10) | owner | §14 step 1 |
+| D2 | Devnet moves to `devnet.manci.io` (DNS, env, redeploy, schedulers re-installed) and keeps working | owner + operator | §18 A–C |
+| D3 | Mainnet database: 0001–0075 and later, identity, preflights, schema backup, pg_cron and http, the Vault secret `mancipatio_retry_worker_mainnet`, retention | operator | §14 mainnet steps 1–6 |
+| D4 | Mainnet Vercel project: env (§18 E list), Deployment Protection *All Deployments* + Vercel Authentication, a *Protection Bypass for Automation* secret stored in the Vault as `mancipatio_vercel_bypass_mainnet` (paste it in the Supabase Vault UI, never on a command line), `www.manci.io` and `manci.io` attached (§18 D), production READY on the release commit. Check: an anonymous `curl -I https://www.manci.io/` is refused by Vercel; with the bypass header `/api/health` answers `ok:true` (at most `paymentFx` `missing_before_first_sale`) | owner + operator | §18 D, §14 step 10 |
+| D5 | Retry scheduler installed and enabled; edge function, Helius webhook with all four addresses, signed test delivery 202; `HEALTH_TOKEN`; external monitor on `/api/health/alarms` with the bypass header | operator | §14 steps 7, 9, 10 |
+| D6 | Alarm scheduler installed, proven (test email) and enabled; `/api/health/alarms` 200 through the bypass. **The §15 gate holds** | operator | §15 Mainnet project |
+| D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
+| D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, operator keys onboarded on the protected site | owner + operator | §0 |
+| D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps on the protected site → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
+| D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings | super admin | §13, §14 step 8 |
+| D11 | **Talas 7 go-live**: Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header, announce | owner | §18 D |
+| D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
+
+The first public user can arrive only after D11. A failure at any step stops
+the sequence there; nothing before D9 touches the chain.
 
 ## 1. Roles and budget
 
@@ -197,14 +296,44 @@ real runner and devnet can prove stays open until these pass:
 | blocklistAuthority (BA) | Ledger | blocklist authority |
 | kyc.authority | compliance Ledger | KYC registry authority (no Admin record) |
 | Squads vault | multisig | both upgrade authorities, protocol treasury, IDL authority (as UA) |
+| company wallet (§19, when chosen) | Ledger of the legal entity | SA with its Admin record, KYC registry authority, BA and the protocol treasury, in place of the four rows above; never a Squads member unless acknowledged |
 
 Re-check every figure with `getMinimumBalanceForRentExemption` on the
-mainnet RPC. Mainnet rent is **5,080 lamports per byte** (plus 128 bytes of
-overhead) since SIMD-0437-2 (epoch 1033); SIMD-0437-3 to -5 (2,575, 1,322,
-696) are not active yet (feature status 2026-09-24, Agave 4.3.0), so the
-figures may still drop. A local validator keeps the old 6,960 in its genesis
-rent sysvar even with `--clone-feature-set`, so rehearsal balances overstate
-mainnet rent by about 37 %.
+mainnet RPC (`chain:inventory` prints it as its `rent` finding). Mainnet
+rent is **5,080 lamports per byte** (plus 128 bytes of overhead) since
+SIMD-0437-2 (epoch 1033); the later steps are not active yet (feature status
+2026-09-24, Agave 4.3.0), so the figures may still drop. A local validator
+keeps the old 6,960 in its genesis rent sysvar even with
+`--clone-feature-set`, so rehearsal balances overstate mainnet rent by about
+37 %.
+
+Feature gates (Agave `feature-set/src/lib.rs`: the same keys on the v4.3 and
+v4.4 branches and master, checked 2026-09-28; `chain:inventory` reads all of
+them, `chain:squads-export op=upgrade` refuses an SBPF v0–v2 Release once
+SIMD-0500 is active):
+
+| Gate | Feature ID | Effect | Status 2026-09-24 |
+|---|---|---|---|
+| SIMD-0437-1 | `4a6f7o7iTcA8hRDCrPLkSatnt5Ykxiu36wo5p1Tt12wC` | 6,333 lamports/B | active |
+| SIMD-0437-2 | `61BtM7BkDEE8Yq5fskEVAQT9mYA8qCejJWoLe5apqg81` | 5,080 lamports/B | active (slot 446256000) |
+| SIMD-0437-3 | `rntCigrTppP5JdZz7K8TyN9sMzLdAcXp8SejYpVpX6D` | 2,575 lamports/B | not scheduled |
+| SIMD-0437-4 | `rntD7invRBswCAdKtRsh1G4psKjrPdS3BKqtnA78C7N` | 1,322 lamports/B | not scheduled |
+| SIMD-0437-5 | `rntTjNZ9boq8owDxjGVFHPfWNQPDaKiM5JcjxmDGg47` | 696 lamports/B | not scheduled |
+| SIMD-0438 | `rnt8ZQpz2HYhX3DkYBDGjJS1a36mYq69oXka7JrhEdi` | back to 6,960 lamports/B | not scheduled |
+| SIMD-0500 | `B8JJXCy5amZyWG9r7EnUYLwzXSXTxG7GZ1qZ1qggo83g` | no deployment of SBPF v0–v2 | not scheduled |
+| SBPF v3 | `5cC3foj77CWun58pC51ebHFUWavHWKarWyR5UUik7dnC` | deployment and execution of SBPF v3 | active |
+
+solana.com/upgrades/reduced-rent lists `Ftxb3…`, `GsUBN…` and `mZdnR…` for
+steps 3–5: those are the Agave **v4.2** keys (with `5AqsUgSb…` for
+SIMD-0438), re-keyed in v4.3. `chain:inventory` probes them too and warns
+(`feature-superseded`) if one is ever scheduled. The page's "expected in
+Agave 4.4, November 2026" date for steps 3–5 is the only schedule published.
+
+**Owner decision: mainnet waits for the rent drop.** Still open (owner):
+which step to wait for (2,575, 1,322 or 696) and until which date; the
+operational budget below gives the deployer figure for each. If Agave 4.4
+slips past that date, re-decide between deploying at 5,080 (about 17.5 SOL
+more locked for good, with no instruction to recover it) and waiting.
 
 | Item | SOL at 5,080 |
 |---|---|
@@ -219,6 +348,29 @@ mainnet rent by about 37 %.
 The sum of every row is ≈ 35.1 SOL, an upper bound for the deployer's peak:
 **fund 40**. About 20.3 SOL stays locked. `chain:bootstrap` refuses a cycle
 the deployer cannot pay for (P0).
+
+### Operational budget per key
+
+Rent scales with lamports per byte; fees are small (5,000 lamports per
+signature plus the priority fee: 200,000 CU at the mainnet floor of
+100,000 µL/CU is 20,000 lamports, 0.00002 SOL, and 0.0004 SOL at the
+2,000,000 cap). Top up
+below the "refill below" line; the low-balance alarm planned in package 8.4
+should use the same numbers.
+
+| Key | What it pays | At 5,080 | At 2,575 | At 1,322 | At 696 | Fund | Refill below |
+|---|---|---|---|---|---|---|---|
+| deployer | ProgramData (locked), deploy buffers, IDL, bootstrap PDAs (peak) | 35.1 (20.3 locked) | 17.8 (10.3) | 9.2 (5.3) | 4.9 (2.8) | peak + 5 | — (drained after §8) |
+| bufferWriter | both upgrade buffers (≈ 14.53 / 7.36 / 3.78 / 1.99), the IDL buffer (≈ 0.24 / 0.12 / 0.06 / 0.03), `solana program extend`; the buffer rent returns as the spill after the Squads execute | 14.8 | 7.5 | 3.9 | 2.1 | right before an upgrade, then drain | — |
+| company wallet or KYC key | each passport (KycEntry 120 B): 0.00126 / 0.00064 / 0.00033 / 0.00017 SOL, so about 1.26 / 0.64 / 0.33 / 0.17 SOL per 1,000 passports; returned when a passport is closed | 1.3 per 1,000 | 0.64 | 0.33 | 0.17 | 2 | 0.5 |
+| company wallet or SA | Admin records (0.00102 at 5,080), proposal PDAs (0.00135, refunded to the acceptor), KYB, treasury and pause fees | 0.05 | 0.03 | 0.02 | 0.01 | 0.2 | 0.05 |
+| company wallet or Admins | what an Admin opens: OTC deals, custody vaults, distributions (the funder is the Admin, K16), rights issuances; each is a few thousandths of a SOL plus the tokens it moves | per operation | | | | 0.5 | 0.1 |
+| company wallet or BA | one BlockEntry per blocked wallet (73 B: 0.00102 at 5,080) | 0.00102 each | 0.00052 | 0.00027 | 0.00014 | 0.1 | 0.02 |
+| each Squads member | vault transaction and proposal accounts (a few thousandths of a SOL each; with no rent collector they are not refunded) | 0.01 per proposal | | | | 0.1 | 0.03 |
+| Squads vault | verify PDAs through the verify program (≈ 0.01), its own fees | 0.02 | | | | 0.05 | 0.01 |
+
+The company wallet holds several rows at once: fund it with the sum
+(about 3 SOL at 5,080 for the pilot) and keep the sum of the refill lines.
 
 ## 2. Deploy (hook first)
 
@@ -300,18 +452,25 @@ fully paused (0x3f).
 
 ## 5. Ledger steps (operator front)
 
-In any order:
+In any order (the plan's ACTION REQUIRED lines name the same pages; a test
+checks that each page exists and performs its action):
 
-- **X3**: the BA Ledger accepts on `/issuer/authority`, then clicks Refresh.
-- **X2**: the KYC Ledger accepts on `/admin/kyc` (needs the 3.1 kycProvider
-  gate). Temporary-grant path (D17 fallback, `kyc.tempAdminGrant: true`):
+- **X3**: the BA Ledger accepts on `/issuer/authority` (or `/account/roles`
+  → Waiting for your acceptance), then clicks Refresh.
+- **X2**: the KYC Ledger accepts on **`/account/roles`** → Waiting for your
+  acceptance → KYC provider (registry authority). Not `/admin/kyc`: until it
+  accepts, the key is neither the kycProvider nor an Admin, so the admin gate
+  refuses it. Temporary-grant path (D17 fallback, `kyc.tempAdminGrant: true`):
   cycle 1 also ran S3k, S5 waits; after X2 run cycle 2 (S3r removes the
   grant, then S5) with a new dry run and digest.
-- **X1**: the SA Ledger accepts on `/issuer/authority`, **clicks Refresh**,
-  then **S6**: PauseFlagsPanel → "Resume everything".
+- **X1**: the SA Ledger accepts on `/issuer/authority` (or `/account/roles`),
+  **clicks Refresh**, then **S6** on **`/admin/platform`**: PauseFlagsPanel →
+  "Resume everything" (the accept gave the SA its Admin record, so the admin
+  area opens).
 
 `accept_platform_admin` closes the deployer's Admin record and creates the
-SA's; no `add_admin(SA)` is ever needed.
+SA's; no `add_admin(SA)` is ever needed. With the company wallet model (§19)
+one wallet does X3, X2, X1 and S6, in that order.
 
 ## 6. Dry run again, pre-handover inventory
 
@@ -322,7 +481,8 @@ CHAIN_OUTPUT=$E/06b-inventory.json CHAIN_PHASE=pre-handover npm run chain:invent
 
 The inventory must show **0 blockers**: SA, BA and KYC equal the map with no
 pending transfer; the deployer holds nothing but the UA; `kyc.authority` holds
-no Admin record; the Squads decode matches exactly; the canonical IDL is in
+no Admin record (a warning, not a blocker, when the map acknowledges the
+overlap, §19); the Squads decode matches exactly; the canonical IDL is in
 sync with the Release and trimmed, with no extra authority; ProgramData equals
 the Release; capacity ≥ `programDataMaxLen`. Smoke-test from the operator
 front.
@@ -381,7 +541,7 @@ exists for an emergency only.
 - Other vault actions check their inputs against the role map:
   `registry-ix` targets (`add_admin` → `admins[]`, `propose_platform_admin` →
   the SA or the vault, `initialize_blocklist_authority` → the map BA,
-  `set_protocol_treasury` → the vault) need `"confirmTarget": "<same key>"`
+  `set_protocol_treasury` → the vault or the map treasury) need `"confirmTarget": "<same key>"`
   next to `instruction`/`args` for any other key; `initialize_platform` takes
   only the map treasury and fee; pause masks are integers 0–255.
   `set-upgrade-authority` to a new key needs `"confirmNewAuthority"`, and
@@ -457,7 +617,8 @@ source paths are clean (see "Safety rules").
 - **Check out the previous tag `vX`** (clean) and use its Release as
   `CHAIN_RELEASE_DIR`: the mainnet release-source guard refuses a checkout
   whose `front/idl` differs from the Release, so a rollback runs that tag's
-  CLI. Rehearse this in 6.1.
+  CLI. Rehearsed in 6.1 (second run: `review/71a`–`71e`, export from the
+  rc.1 checkout, executed through Squads, inventory 0 findings).
 - Deploy the previous Release `.so` through the same Squads flow (step 9,
   with `$R2` = the previous Release).
 - The SA normalizes pause bits first (it may clear undefined bits).
@@ -470,19 +631,241 @@ source paths are clean (see "Safety rules").
 
 ## 11. Incidents
 
-- Any Admin can pause (`set_pause_flags` sets bits); only the SA clears.
-- Bad holder: BA `add_to_blocklist`, then the clawback flow.
-- KYC: revoke the passport. Lost KYC key: create a new registry from a key
-  that never created one, re-point every KycGated mint with
-  `update_transfer_hook_config`, move the `NEXT_PUBLIC_KYC_REGISTRY` pin,
-  re-issue passports.
-- Wrong pending proposal: platform and BA proposals cannot be cancelled,
-  propose again to overwrite; a KYC proposal can be cancelled.
+### Ground rules
+
+- **First 15 minutes**, in this order: (1) is value moving right now? (2) if
+  a platform flow is being abused, **pause** (`chain:emergency` below, or
+  PauseFlagsPanel on `/admin/platform`); (3) if our front or database is the
+  problem and still ours, **maintenance on**
+  (`MANCI_ALLOW_MAINNET=1 bash front/scripts/ops/maintenance.sh mainnet on "…"`);
+  (4) open the incident record (who noticed what, when); (5) tell people
+  (below). Pausing stops platform entry flows only: exits, claims and
+  wallet-to-wallet transfers keep working (the hook never reads the pause).
+- **Contacts** live in the private on-call sheet `~/mancipatio-mainnet/on-call.md`
+  (never in this public repository), filled before D0: incident lead and
+  deputy, the company-wallet holder and deputy, every Squads member, the
+  lawyer, the data-protection contact, the Securities Commission contact,
+  and the support channels of the registrar, Vercel, Supabase, Helius and
+  the SMTP provider. It also holds the user-notice and regulator-notice
+  templates and the break-glass successor address (below).
+- **Seed backups** (uloge-runbook-7): every Ledger that holds a role (the
+  company wallet, separate role keys, each Squads member) has its recovery
+  phrase on metal in two places, with named custodians; the company wallet's
+  phrase is under dual control. A lost key without a backup is permanent for
+  the SA and the BA (below).
+- **Break-glass successor**: a second Ledger of the legal entity, set up and
+  sealed before D8, its address in the on-call sheet. When a role key is at
+  risk but still signs, the rotations below go to it within minutes
+  (`npm run chain:handover` with it as the target prints the steps).
+- **Who may pause**: any Admin; only the super admin clears. With the company
+  wallet model keep at least one more Admin record (a pause-only Ledger of
+  another person) so a lost company wallet does not also remove the pause.
+- Exercise these scenarios as a timed tabletop on devnet (6.5) and record it
+  under `docs/mainnet-readiness/`.
+
+### `chain:emergency` (out of band: no front, no database)
+
+For a pause, an unpause, the blocklist and the hook mode when the front, the
+database or SIWS is down, maintenance is on, or the front is the incident
+(uloge-runbook-6, ops-qa-8, prog-vlast-8). It reads the signer's role at
+finalized, simulates, prints a digest, and sends only with that digest:
+
+```sh
+cd front
+export CHAIN_NETWORK=mainnet CHAIN_ALLOW_MAINNET=1 CHAIN_RPC_URL="$MAINNET_RPC" CHAIN_CU_PRICE=200000
+# dry run: role check, IDL check, simulation, digest
+CHAIN_OUTPUT=$E/inc-1-plan.json CHAIN_EMERGENCY_OP=pause CHAIN_EMERGENCY_SIGNER=<Admin or SA> \
+  CHAIN_PAUSE_BITS=all npm run chain:emergency
+# send with the Ledger (approve on the device; compare the message hash it shows)
+CHAIN_OUTPUT=$E/inc-1-send.json CHAIN_EMERGENCY_OP=pause CHAIN_EMERGENCY_SIGNER=<same key> \
+  CHAIN_PAUSE_BITS=all CHAIN_SEND=1 CHAIN_CONFIRM_PLAN=<digest> \
+  CHAIN_SIGNER='usb://ledger?key=0' npm run chain:emergency
+```
+
+| `CHAIN_EMERGENCY_OP` | Inputs | Signer (checked on-chain) | Notes |
+|---|---|---|---|
+| `pause` | `CHAIN_PAUSE_BITS`: `all`, or names from `onboarding`, `primary`, `secondary`, `custody-entry`, `distributions`, `issuer-proceeds`, or an integer | any Admin or the SA | nothing to do when every bit is already set |
+| `unpause` | `CHAIN_PAUSE_BITS` (`all` also clears undefined bits) | the SA only | the program refuses anyone else |
+| `block`, `unblock` | `CHAIN_WALLET` | the BA | an off-curve wallet (an escrow PDA) needs `CHAIN_CONFIRM_WALLET=<same>`: blocking it stops exits from it |
+| `hook-mode` | `CHAIN_MINT`, `CHAIN_HOOK_MODE=open` or `kyc-gated`, `CHAIN_KYC_REGISTRY` (kyc-gated only, a live registry) | the BA | Open lets any wallet receive the class; KycGated only live passports of that registry |
+
+- **Setup, once per operator machine (before D8)**: the Solana CLI cannot
+  sign an arbitrary program instruction with a Ledger, so the tool drives the
+  Ledger Solana app through Ledger's Node packages. They are deliberately not
+  app dependencies (no native module in CI or Vercel):
+  `cd front && npm install --no-save @ledgerhq/hw-transport-node-hid @ledgerhq/hw-app-solana`
+  (re-run after every `npm ci`; `package.json` and the lock stay clean, so
+  the mainnet source guard is unaffected). Ledger has marked
+  `hw-app-solana` deprecated in favour of its Device Management Kit; it
+  still works, and moving to the kit is a follow-up. In the Solana app,
+  enable **Blind signing** (our programs are not in its parser) and compare
+  the message hash the tool prints with the device. `CHAIN_KEYPAIR=<file>`
+  signs instead when the role key is a file.
+- **Rehearse on devnet with the physical Ledger** before D8 (owner): a pause
+  and an unpause by the SA, a block and an unblock by the BA.
+- The send writes the same evidence and journal and takes the same network
+  lock as the other tools: a lock left by another run blocks it until
+  `CHAIN_RECOVER=1` resolves that lock.
+- On mainnet the live canonical IDL must define the instruction exactly as
+  `front/idl` does; run from the checkout of the live Release tag, or set
+  `CHAIN_EMERGENCY_IDL_UNCHECKED=1` (recorded in the evidence; the simulation
+  and the finalized post-check still guard the result).
+- It cannot stop wallet-to-wallet transfers (the hook does not read the
+  pause), cannot undo anything, and changes no role.
+
+### Scenarios
+
+Each scenario: what it means, the first steps (who, with what), the
+recovery, and what cannot be done. "Rotate" means propose from the current
+key and accept from the new one on `/account/roles` (`chain:handover` prints
+the ordered steps).
+
+**Company wallet compromised** (it holds SA, Admin, KYC, BA and the
+treasury, §19). The attacker can clear every pause, add Admins, set the
+treasury, decide KYB, issue and revoke passports, block and unblock any
+wallet (escrows too), switch or re-point hook modes, claw back blocked or
+revoked holders, and propose every role to itself.
+- First: while the key still signs for us, rotate SA, BA and KYC to the
+  break-glass successor and accept at once (a proposal of the attacker
+  overwrites ours, so accept before it can); maintenance on; pause (the
+  attacker can clear it: it only slows automated abuse); tell the Squads
+  members to prepare an emergency upgrade; notify (below).
+- Recovery: set the treasury back; remove the Admin records the attacker
+  added; revoke passports issued since the compromise (the index shows when);
+  unblock wallets it blocked and restore clawed-back units through the
+  issuer. If the attacker already holds the SA or the BA, the only way back
+  is a program upgrade through Squads (the upgrade authority) with a
+  recovery instruction: written, reviewed and executed under pressure, which
+  takes days. Package 8.3 adds that recovery (upgrade authority, 7-day wait,
+  the current holder can cancel); once it is deployed, start it at once.
+- Cannot: undo executed transactions; stop wallet-to-wallet transfers;
+  recover the SA or the BA without the upgrade authority.
+
+**Company wallet lost** (not compromised). Nothing moves, but nobody can
+clear the pause, grant or remove Admins, decide KYB, issue passports, block
+or unblock, switch hook modes or set the treasury. A second Admin can still
+pause.
+- First: restore it from the seed backup onto a new Ledger (the same key);
+  pause if the platform must stop meanwhile.
+- Recovery without a backup: the upgrade path above for the SA and the BA;
+  for KYC the "Lost KYC key" steps below, which also need the BA.
+- Cannot: anything the SA or the BA signs, until the key is restored or the
+  upgrade lands.
+
+**Super admin key compromised** (separate keys). The attacker clears pauses,
+adds Admins, sets the treasury, decides KYB, stages issuer recoveries and
+custody proposals. BA and KYC are unaffected.
+- First: rotate the SA to the successor if it still signs; other Admins keep
+  pausing (the attacker can clear it); maintenance on.
+- Recovery: remove the attacker's Admins, set the treasury back, cancel its
+  issuer recoveries (the issuer can cancel too) and custody proposals.
+  Lost or taken over: the upgrade path above.
+
+**An Admin key compromised or lost.**
+- First: the SA runs `remove_admin` on `/admin/admins` (with the SA in the
+  Squads vault: `chain:squads-export` `registry-ix remove_admin`); any other
+  Admin pauses if needed.
+- Recovery: its sale approvals stay valid after the removal (known limit of
+  2B): revoke each one on `/admin/applications` (`revoke_sale_approval`);
+  move its live custody vaults (`propose_custody_authority` by the SA, accept
+  by another Admin, `/admin/custody`); cancel OTC deals it opened that should
+  not settle (`/admin/otc`, any Admin). Its rights issuances cannot move
+  (K19): milestones need its Admin record.
+- Cannot: re-assign a rights issuance.
+
+**Blocklist authority compromised.** The attacker can block escrow PDAs
+(refunds and returns stop), switch KycGated classes to Open, re-point
+registries, unblock sanctioned wallets.
+- First: rotate the BA if it still signs; then undo with
+  `chain:emergency` (`unblock`, `hook-mode`) signed by the new BA.
+- Lost or taken over: no on-chain recovery today (only the proposing BA can
+  name a successor); the upgrade path above (8.3 adds the timelocked
+  recovery). The pause does not affect the hook.
+
+**KYC key compromised or lost.** Compromised: it issues passports (anyone can
+receive KycGated units) or revokes them (receivers are refused). Rotate it if
+it still signs, then revoke every passport it issued since the compromise.
+Lost: create a new registry from a key that never created one, re-point every
+KycGated mint with `update_transfer_hook_config` (the BA; `chain:emergency
+hook-mode kyc-gated` with `CHAIN_KYC_REGISTRY=<new>`), move the
+`NEXT_PUBLIC_KYC_REGISTRY` pin (a redeploy), re-issue the passports.
+
+**Issuer key compromised or lost.** The SA stages an issuer recovery
+(`/admin/issuers`, 7-day wait, the issuer can cancel); pause `issuer-proceeds`
+meanwhile; revoke its unused sale approvals. Compromised and still active:
+the issuer rotates it itself (`/issuer/rotation`).
+
+**Squads member lost or compromised.** Below the threshold a member alone
+cannot act. Replace it with a config transaction while the threshold is
+reachable, update the role map and run `chain:inventory` (finding `squads`
+absent). Cancel any Approved proposal it pushed (`squads-proposal`). If the
+threshold is no longer reachable, the programs cannot be upgraded (the
+platform keeps working); this is why no single person may hold two member
+keys.
+
+**Deployer or bufferWriter leaked.** After the handover they hold nothing:
+confirm with `chain:inventory` (`deployer-role`, `bufferwriter-role`
+absent), drain them, close their leftover buffers. Before the handover:
 - UA compromised before handover: catastrophic, so keep the window between
   step 2 and step 7 short.
+
+**Vercel down or a bad deploy.** Chain state is safe. A bad deploy: Vercel
+Instant Rollback. An outage: operators use the local operator front
+(`next dev`, §0) or `chain:emergency`; post a status notice.
+
+**Supabase down.** SIWS, sessions, every admin route, the KYC queue and the
+alarms (they run on Vercel but read the database) stop; the chain continues.
+Pause with `chain:emergency` if an exploit is suspected. After it returns:
+check the alarm heartbeat and reconcile the index (`/admin/health` →
+Reconcile); after data loss, restore from PITR (§14 Backups).
+
+**RPC provider (Helius) down.** Switch `HELIUS_MAINNET_RPC` to the backup
+provider (`SOLANA_MAINNET_RPC`) and redeploy; missed webhook deliveries are
+re-queued by the gap scan within about 20 minutes and a full reconcile covers
+the rest; meanwhile the heartbeat marks the mirror stale and the site reads
+the chain.
+
+**SMTP down.** Alarm emails fail and `/api/health/alarms` turns 503 (a failed
+notification). Use the second channel once it exists (8.4 webhook); after
+the fix re-queue the failed notifications (§15 Operations).
+
+**Personal data breach.** Contain (rotate the Supabase `sb_secret_` key and
+`SESSION_SECRET`, revoke exposed tokens, close the leaking path), keep the
+evidence, assess what data about how many people, then notify the
+supervisory authority **within 72 hours** of becoming aware (Serbia: the
+Commissioner for Information of Public Importance and Personal Data
+Protection, Art. 52 ZZPL; for EU residents the authority the lawyer names),
+tell the affected people without undue delay when the risk to them is high,
+and record it in the breach register. Who: the data-protection contact with
+the lawyer; templates in the on-call sheet.
+
+**DNS, registrar, Vercel or GitHub taken over (a drainer front).** A fake
+page on our domain asks users to sign transfers. Maintenance does not help
+(that page does not read our flag) and the pause only stops platform flows.
+- First: pause (`chain:emergency`); warn users on every channel not to sign
+  anything on manci.io until the all-clear; registrar: restore the records,
+  change the password, 2FA, registry lock; Vercel and GitHub: revoke
+  sessions, tokens and unknown members or deploy hooks, redeploy from a
+  verified commit, check the env for tampering; rotate every secret the
+  attacker could read (the Supabase key, `SESSION_SECRET`,
+  `RETRY_WORKER_SECRET`, `HEALTH_TOKEN`, SMTP, the bypass secret).
+- Then: the BA blocks the wallets receiving stolen units (the blocklist is
+  sender-side, so they cannot move them on) and an Admin claws them back.
+- Prevention (kritičar-6): DNSSEC and a CAA record on the apex, registrar 2FA
+  and registry lock, an external monitor on the DNS records, branch
+  protection on `main` (Vercel deploys it), a CSP (8.4).
+- Cannot: reverse transfers users signed; stop transfers of wallets that are
+  not blocked.
+
+**Other.**
+- Wrong pending proposal: platform and BA proposals cannot be cancelled,
+  propose again to overwrite; a KYC proposal can be cancelled.
 - Crash during a send: see below.
-- Squads member loss: rotate members through a config transaction (threshold
-  still reachable), then update the role map and re-run the inventory.
+
+**Tell people.** Users: a banner (maintenance message) and email, what is
+affected and what they should not do. The Securities Commission and the
+lawyer: per the licence conditions. Squads members: for anything that may
+need an upgrade.
 
 ### Crash recovery
 
@@ -573,9 +956,14 @@ tracked).
   the lock), resume of the journalled IDL buffer (only missing chunks
   written). An external interrupt during cycle 1 left S5 drained and
   finalized; the next dry run skipped every landed step.
+- Second run (review, 2026-09-24 12:32–12:59): the rollback from the
+  previous tag's checkout (`review/71a`–`71e`: buffers from rc.1, the export
+  made by the rc.1 checkout's CLI, executed through Squads, then inventory
+  from that checkout and from the current CLI, 0 findings).
 - Not rehearsed: the Squads web app (Transaction Builder import), a Ledger
-  on the operator front, a rollback from the previous tag's checkout (the
-  rollback used the rc.1 Release directory with the current CLI).
+  on the operator front, `chain:emergency` with a physical Ledger (the
+  Ledger path is tested against a stand-in device only), and a
+  `chain:handover` executed end to end (plan the devnet handover, §19).
 
 ## 13. App priority fee and payment tokens (Talas 4.2)
 
@@ -788,7 +1176,11 @@ ends with exactly one disabled job of that name running
 the status SQL showing the same single job and the target's origin, are the
 pass/fail gate before re-enabling. Mainnet's scheduler waits until the
 mainnet front answers at its origin, which happens only after devnet moves to
-`devnet.manci.io` (D15).
+`devnet.manci.io` (D15, §18). Until Talas 7 that front is behind Vercel
+Deployment Protection (§0A): store the project's *Protection Bypass for
+Automation* secret in the Vault as `mancipatio_vercel_bypass_<network>` and
+both schedulers send it as `x-vercel-protection-bypass` (the install refuses
+a malformed one; delete the secret after go-live).
 
 ### Devnet rollout of Talas 4.3 (PR-B)
 
@@ -911,18 +1303,23 @@ Preview first, then Production:
    empty: G5).
 4. `bash scripts/ops/backup.sh mainnet post-bootstrap` (schema only).
 5. Enable pg_cron and http; add the Vault secret
-   `mancipatio_retry_worker_mainnet`.
+   `mancipatio_retry_worker_mainnet` (and, from §0A D4, the bypass secret
+   `mancipatio_vercel_bypass_mainnet`).
 6. Retention: install, preview, enable.
-7. Retry scheduler: install disabled; enable once the mainnet front answers.
-8. `platform_raise_limits` for mainnet with FX headroom (D18); the USDC FX
-   row (kind `rate`, max age 7 days, weekly refresh); the 0008
-   integrations config for mainnet.
+7. Retry scheduler: install disabled; enable once the mainnet front answers
+   (behind Deployment Protection, with the bypass secret: §0A D5).
+8. After the program bootstrap (§0A D10, D16), the super admin on
+   `/admin/limits`: `platform_raise_limits` for mainnet with FX headroom
+   (D18) and the USDC FX row (kind `rate`, max age 7 days, weekly refresh);
+   the 0008 integrations config for mainnet. Until the first sale approval
+   `/api/health` reports the missing row as `paymentFx` warn
+   `missing_before_first_sale`, not a failure.
 9. Edge function secrets and deploy, Helius webhook, a signed test delivery
    answers 202 (G3: supabase-js 2.106.2 with `sb_secret_`).
 10. Front: `NEXT_PUBLIC_SUPABASE_ANON_KEY` = `sb_publishable_…`,
     `SUPABASE_SERVICE_ROLE_KEY` = `sb_secret_…` (the build and the server
     refuse other formats on mainnet); `HEALTH_TOKEN` and an uptime monitor on
-    `/api/health` (D19). Once the production deployment is READY on the
+    `/api/health` (D19; it sends the bypass header until Talas 7, §0A). Once the production deployment is READY on the
     intended commit, `/api/health` `ok:true` proves the database network
     check passed; with `HEALTH_TOKEN`, check `commit` and
     `checks.databaseNetwork.status` too.
@@ -1091,8 +1488,10 @@ MANCI_ALLOW_MAINNET=1` and job `mancipatio-alarms-mainnet`:
    `notify_state = 'sent'` and the email at the mainnet recipients;
 3. enable the job (`cron.alter_job(..., active := true)` on
    `mancipatio-alarms-mainnet`);
-4. `curl -s -o /dev/null -w '%{http_code}' https://<mainnet site>/api/health/alarms`
-   answers `200`, and the external monitor watches it.
+4. `curl -s -o /dev/null -w '%{http_code}' -H "x-vercel-protection-bypass: $BYPASS" https://<mainnet site>/api/health/alarms`
+   answers `200` (read `BYPASS` with `IFS= read -rs BYPASS`; without the
+   header Deployment Protection answers until Talas 7, §0A), and the external
+   monitor watches it with the same header.
 
 **Gate:** §2–§7 do not start until all four hold. FX rows
 only through the Raise limits page by the super admin after bootstrap
@@ -1453,6 +1852,202 @@ the order against the front does not matter (test networks never select
 the columns, and the admin form sends them only when an admin edits them).
 The mainnet project gets it with the rest of the chain.
 
+## 18. Domain cutover: `www.manci.io` to mainnet, devnet to `devnet.manci.io`
+
+Today `www.manci.io` serves devnet, and both devnet cron jobs call it. The
+mainnet schedulers, SIWS and the email links need the mainnet front on its
+own origin, so devnet moves first (§0A D2) and mainnet takes the domain at
+D4, still behind Deployment Protection. What depends on the origin:
+`NEXT_PUBLIC_SITE_URL` sets the SIWS allowed origin (`lib/server/siws.ts`),
+the Turnstile hostname check, the Google OAuth `redirect_uri`
+(`<origin>/api/account/google/callback`) and every link in emails; the
+session and OAuth cookies are host-only, so nothing carries over from one
+host to the other (users sign in again); `scripts/ops/targets.json`
+`siteOrigin` is the origin pg_cron calls (the scheduler installs refuse any
+other).
+
+**A. DNS (owner).** Add `devnet.manci.io` to the devnet Vercel project and
+create the CNAME record Vercel shows at the registrar; wait for the
+certificate. `manci.io` sends HSTS with `includeSubDomains`, so the new host
+must be https from the start (Vercel is).
+
+**B. Devnet project (owner).** Production scope: `NEXT_PUBLIC_SITE_URL=https://devnet.manci.io`;
+Google Cloud, the devnet OAuth client: add
+`https://devnet.manci.io/api/account/google/callback` as an authorized
+redirect URI (and the origin); Cloudflare Turnstile: add `devnet.manci.io` to
+the widget's hostnames. The devnet production build does not set
+`NEXT_PUBLIC_TURNSTILE_SITE_KEY` today (kritičar-14: the email login runs
+without the check): set both Turnstile keys now or record the decision.
+Redeploy (public variables are baked in at build time). Until step D, set
+`www.manci.io` in the devnet project to redirect to `devnet.manci.io` (Vercel
+domain redirect): SIWS now accepts only the new origin, and old links keep
+working. Check: `curl -s https://devnet.manci.io/api/health` answers
+`"ok":true` and `"network":"devnet"`, and a wallet signs in on the new host.
+
+**C. Devnet schedulers (operator).** A PR sets `devnet.siteOrigin` to
+`https://devnet.manci.io` in `front/scripts/ops/targets.json`; after it
+merges, record the jobs' active state (G6), then:
+
+```
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/retry-scheduler.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/alarm-scheduler.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/retry-scheduler-status.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/alarm-scheduler-status.sql
+```
+
+Both installs leave their job disabled; re-enable each after a clean manual
+run (§14 D, §15 D.3–D.5). Move the external monitors to
+`https://devnet.manci.io/api/health` and `/api/health/alarms`. The Helius
+devnet webhook calls the Supabase edge function, not the site: unchanged.
+
+**D. Mainnet takes the domain (owner, §0A D4).** Remove `www.manci.io` and
+`manci.io` from the devnet project and add them to the mainnet project
+(`manci.io` redirects to `www`, as today; `mancipatio.io` keeps its 308 to
+`www`). The mainnet project has Deployment Protection on *All Deployments*
+with Vercel Authentication before the domain is attached. Mainnet uses its
+own Google OAuth client (redirect URI on `www.manci.io`) and its own
+Turnstile widget. A PR records `mainnet.siteOrigin = https://www.manci.io`,
+the project ref, pooler host and backup recipient in `targets.json` and
+`SUPABASE_PROJECT_REFS` (§14 mainnet step 1). At Talas 7 (§0A D11)
+protection goes back to *Standard Protection*.
+
+**E. Mainnet environment (names only; values live in Vercel, never in the
+repository).** Package 8.4 keeps the full inventory of secrets; these are the
+ones that differ per network or domain:
+
+| Variable | Mainnet value or source |
+|---|---|
+| `NEXT_PUBLIC_NETWORK` | `mainnet` |
+| `NEXT_PUBLIC_SITE_URL` | `https://www.manci.io` |
+| `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_ROLE_KEY` | the mainnet project; `sb_publishable_…` and `sb_secret_…` only (§14 step 10) |
+| `NEXT_PUBLIC_SOLANA_RPC_URL`, `NEXT_PUBLIC_SOLANA_WS_URL`, `NEXT_PUBLIC_SOLANA_GENESIS_HASH` | the browser RPC (a key safe to expose, or a proxy) and the mainnet genesis |
+| `HELIUS_MAINNET_RPC`, `SOLANA_MAINNET_RPC` | the server RPC (the heartbeat and the priority fee need Helius) and the backup |
+| `NEXT_PUBLIC_KYC_REGISTRY` | the role map's `kyc.registry` (the KYC registry PDA of the deployer) |
+| `SESSION_SECRET`, `RETRY_WORKER_SECRET`, `HEALTH_TOKEN` | new values, never devnet's; `RETRY_WORKER_SECRET` equals the Vault secret `mancipatio_retry_worker_mainnet` |
+| `COMPLIANCE_ALERT_EMAIL`, `CONTACT_NOTIFY_EMAIL`, `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (or `RESEND_API_KEY`) | the company's mailboxes and sender |
+| `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | the mainnet OAuth client |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | the mainnet widget |
+| `MAINNET_LEGAL_COPY_APPROVED` | `true` only after the lawyer's review (§0 Legal gate) |
+| `NEXT_PUBLIC_FEATURE_*` | mainnet defaults off (`PAYOUT_AIRDROP`, `STARTUP_RAISES`); `PASSPORT_CLOSE` and `ISSUER_ROTATION` per the owner's decision |
+| `NEXT_PUBLIC_ALLOW_INDEXING` | only from Talas 7 |
+
+## 19. Company wallet model and role handover
+
+When the licence and the legal entity are in place, the entity opens **one
+company wallet** (a Ledger it owns) that takes every operational role from
+the owner's personal wallet `6AnF…`: the super admin (and its Admin record),
+the KYC registry authority, the BlocklistAuthority and the protocol treasury.
+The upgrade authority stays with the Squads vault (recommended: 2 of 3,
+people other than the company wallet's holder).
+
+**Role map.** `front/scripts/chain/role-map.company.example.json` is the
+mainnet shape. One key in several roles is accepted only with an entry in
+`acknowledgedRoleOverlaps` that names the key, its exact role set (from
+`superAdmin`, `admin`, `kyc.authority`, `blocklistAuthority`,
+`protocolTreasury`, `squads.member`) and a reason. Without it the map is
+refused on mainnet (elsewhere it warns); an acknowledgement for a key whose
+roles differ, or that no longer shares roles, is refused as stale. With it
+every tool that loads the map prints the consequences:
+
+- one lost or compromised key affects every role at once, and no second
+  signature stands in the way;
+- it can clear the pause and also block wallets and switch hook modes, and
+  there is no on-chain recovery of the SA or the BA (until 8.3, only a
+  program upgrade through Squads);
+- blocklist plus clawback with one key; KYC decisions and their enforcement
+  together; the KYC registry and the hook's registry pin together; KYB and
+  KYC together;
+- protocol fees land on an operational key.
+
+The treasury may leave the Squads vault only as such an acknowledged role
+key. An acknowledged KYC and SA overlap stands in for `allowKycAdmin`, so
+the pre-handover inventory reports `kyc-admin` as a warning. A vault that
+one approval executes (threshold 1) is a single-key upgrade authority: not
+recommended, and on mainnet it needs
+`"acknowledgedSingleKeyUpgradeAuthority": "<squads.multisig>"`; raise the
+threshold later with a Squads config transaction. The tools never move an
+upgrade authority to a plain key.
+
+Mitigations that go with the model: a second Admin record held by another
+person for pausing (§11); the break-glass successor and the seed backups
+(§11); every authority change is an on-chain alarm to the company mailbox
+(§15); split the roles again when people are available, with the same
+`chain:handover` plan.
+
+**Mainnet.** The company wallet enters through the bootstrap role map (§4–§7:
+X3, X2, X1 and S6 are all its signatures); no handover is needed.
+
+**Devnet: 6AnF… → the company wallet.** Write the target outside the
+repository (`~/mancipatio-devnet/handover-company.json`), public keys only:
+
+```json
+{
+  "schema": "mancipatio-handover-target-v1",
+  "network": "devnet",
+  "genesisHash": "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG",
+  "kycRegistry": "5MofiJNCoCRkNg1f2Yd7368WkjiNxkZZmUTaQo7xLhku",
+  "superAdmin": "<company wallet>",
+  "admins": ["<Admin records to keep, e.g. the e2e CLI key CekAgg…>"],
+  "blocklistAuthority": "<company wallet>",
+  "kycAuthority": "<company wallet>",
+  "protocolTreasury": "<company wallet>",
+  "issuerSuccessor": null,
+  "acknowledgedRoleOverlaps": [
+    {
+      "key": "<company wallet>",
+      "roles": ["superAdmin", "kyc.authority", "blocklistAuthority", "protocolTreasury"],
+      "reason": "<why one wallet holds every role>"
+    }
+  ]
+}
+```
+
+`custodySuccessor` (default: the new super admin) takes custody vaults whose
+operator leaves; `issuerSuccessor` plans issuer rotations (null: each one
+becomes a decision); `squadsVault` marks a treasury that is the vault. A role
+map v2 is accepted as the target as well.
+
+```sh
+cd front
+CHAIN_NETWORK=devnet CHAIN_RPC_URL=https://api.devnet.solana.com CHAIN_RPS=1 \
+CHAIN_ROLE_MAP=~/mancipatio-devnet/handover-company.json CHAIN_SITE_ORIGIN=https://www.manci.io \
+CHAIN_OUTPUT=../docs/mainnet-readiness/handover/01-plan.json npm run chain:handover
+```
+
+It sends nothing. It prints, and writes to `01-plan.json.md`, the ordered
+steps; each names the instruction, who signs (the current holder or the new
+key), the page and control, what must be done first and what proves it:
+
+1. **Prepare** (off-chain): the company wallet signs in on the site (SIWS,
+   the Terms) as the primary wallet of its own account, and gets about
+   0.05 SOL. Maintenance off.
+2. **Grant**: `6AnF` runs `add_admin(company)` on `/admin/admins`, so the
+   company wallet already works as an Admin while `6AnF` still holds
+   everything.
+3. **Move**, each proposed by `6AnF` and accepted by the company wallet on
+   `/account/roles`: custody vaults `6AnF` operates (`/admin/custody`), the
+   KYC registry authority (propose on `/admin/kyc`; the registry address,
+   bitmaps and passports stay, so `NEXT_PUBLIC_KYC_REGISTRY` does not
+   change), the BlocklistAuthority (`/account/roles`), then the treasury
+   (`set_protocol_treasury`, `/admin/platform`).
+4. **Super admin last**: `6AnF` proposes, the company wallet accepts; the
+   accept closes `6AnF`'s Admin record. Until here `6AnF` could repair any
+   step.
+5. **Cleanup**: the company wallet removes the Admin records the target does
+   not keep (their sale approvals stay valid: review and revoke them); then
+   re-run the plan (only the verification step remains) and
+   `chain:inventory`.
+
+Decide before step 4: issuers `6AnF` holds (rotate on `/issuer/rotation`, or
+keep `6AnF` as their issuer key; an Admin-key successor must accept before
+step 4), rights issuances `6AnF` opened (K19: publish their milestones first,
+or re-grant `6AnF` an Admin record afterwards), issuer recoveries it staged
+(stale after step 4). There is no role table in the database: roles are read
+from the chain (`lib/server/admin-gate.ts`), so nothing changes there. The
+upgrade authority (the devnet deployer) is not part of the handover. When
+package 8.3 adds the timelock for the super-admin rotation and `add_admin`,
+steps 2 and 4 wait for it: re-run the plan.
+
 ## EXTERNAL checks (open until the rehearsal proves them)
 
 Status after the 6.1 rehearsal (2026-09-24, localnet; see §12):
@@ -1486,10 +2081,19 @@ Status after the 6.1 rehearsal (2026-09-24, localnet; see §12):
    250 of the 287 features 4.3.0 knows are active, and a 4.3.0 validator with
    `--clone-feature-set` had the same activations. Watch before the deploy:
    SIMD-0500 (no deployment of SBPF v0–v2 programs) is inactive, and both
-   Release programs are SBPF v0 (ELF `e_flags` 0); once it activates, this
-   Release can neither be deployed nor used for an upgrade, and the build
-   must move to SBPF v3. SIMD-0437-3..5 (rent) are inactive too. Repeat the
-   feature check right before the mainnet deploy.
-7. Phantom and Solflare keep an app-set SetComputeUnitPrice (G2), and the
-   mainnet RPC's answer to `getPriorityFeeEstimate` (G8: `source`, 24 h of
-   samples; retune the floor if it never leaves it).
+   Release programs are SBPF v0 (ELF `e_flags` 0, `e_machine` 263); once it
+   activates, this Release can neither be deployed nor used for an upgrade,
+   and the build must move to SBPF v3 (package 8.3). SIMD-0437-3..5 (rent)
+   are inactive too. The feature check is now part of `chain:inventory`
+   (findings `sbpf`, `sbpf-gate`, `rent`, `rent-reset`, `feature-superseded`;
+   the IDs are in §1, Agave 4.4 keeps the 4.3 keys): run it with
+   `CHAIN_RELEASE_DIR` right before the mainnet deploy (§0A D8), and
+   `chain:squads-export op=upgrade` re-checks SIMD-0500 for every upgrade.
+7. **Open (owner, cheap, before D9).** Phantom and Solflare (each also with a
+   Ledger) keep an app-set SetComputeUnitPrice (G2): sign one devnet
+   transaction with each and read the price in the explorer. After D5 the
+   mainnet RPC answers `getPriorityFeeEstimate` (G8): `curl` the mainnet
+   `/api/priority-fee` (with the bypass header before Talas 7) and expect
+   `source: helius`; keep 24 h of samples and retune the floor if it never
+   leaves it (§0A D12). The design fails safe (the floor is used on any
+   oracle failure), so this is not a launch blocker.
