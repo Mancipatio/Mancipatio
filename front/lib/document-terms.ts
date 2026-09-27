@@ -10,6 +10,10 @@ export type SaleDocumentTerms = DocumentTerms & {
   asset: string;
   url: string;
   verifiedAt: string;
+  /** The Securities Commission decision reference when the whitepaper is
+   *  approved (lib/whitepaper-approval.ts sscDecisionRef); null or absent =
+   *  not approved, and the sale page says so (ZDI art. 17(3)). */
+  sscDecisionRef?: string | null;
 };
 export function documentTermsMemo(terms: DocumentTerms): Instruction {
   if (

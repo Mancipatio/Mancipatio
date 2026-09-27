@@ -86,6 +86,8 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { InfoBox, YieldSplit } from "@/components/launchpad/primitives";
 import { SkeletonCard } from "@/components/skeleton";
+import { PurchaseRiskWarning } from "@/components/legal/purchase-risk-warning";
+import { SSC_NOT_APPROVED_LABEL } from "@/lib/whitepaper-approval";
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 /** Returns the URL only when it is a safe http(s) link, otherwise null.
@@ -169,6 +171,9 @@ export default function DealPage({
   );
   const [documentError, setDocumentError] = useState<string | null>(null);
   const [acceptedTerms, setAcceptedTerms] = useState(false);
+  // The purchase risk warning (lib/legal/risk-warning.ts) must be confirmed
+  // before every purchase or commitment from this page.
+  const [acceptedRisk, setAcceptedRisk] = useState(false);
   const [vault, setVault] = useState<PayoutVault | null>(null);
   const [amount, setAmount] = useState("");
   const [committedAmount, setCommittedAmount] = useState(0);
@@ -603,6 +608,7 @@ export default function DealPage({
     purchaseRecovery.ready &&
     documentTerms?.sale === salePubkey &&
     acceptedTerms &&
+    acceptedRisk &&
     !pendingPurchase &&
     saleOpen &&
     parsed > 0 &&
@@ -835,9 +841,9 @@ export default function DealPage({
     const pendingId = toast.showPending(`Buying ${String(units)} share units…`);
     try {
       assertChainRecordStorageAvailable();
-      if (!acceptedTerms || documentTerms?.sale !== salePubkey)
+      if (!acceptedTerms || !acceptedRisk || documentTerms?.sale !== salePubkey)
         throw new Error(
-          "Read and accept the verified investment document first",
+          "Read and accept the investment document and the risk warning first",
         );
       const signer = walletSigner(conn.wallet);
       const plan = await buildDocumentedPurchase(client.runtime.rpc, {
@@ -964,9 +970,9 @@ export default function DealPage({
     if (dollars === null) return;
     setCommitBusy(true);
     try {
-      if (!acceptedTerms || documentTerms?.sale !== salePubkey)
+      if (!acceptedTerms || !acceptedRisk || documentTerms?.sale !== salePubkey)
         throw new Error(
-          "Read and accept the verified investment document first",
+          "Read and accept the investment document and the risk warning first",
         );
       await createCommitment(
         conn.wallet,
@@ -1162,13 +1168,26 @@ export default function DealPage({
             <p className="font-semibold">Investment documents</p>
             {documentTerms?.sale === salePubkey ? (
               <>
+                {/* ZDI art. 17(3): during the offering, say clearly whether
+                    the whitepaper is approved. Approval needs the recorded
+                    decision reference; anything else is "not approved".
+                    "Verified" below is the file's fingerprint only. */}
+                {documentTerms.sscDecisionRef ? (
+                  <p className="mt-2 inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
+                    Approved by the Serbian Securities Commission · {documentTerms.sscDecisionRef}
+                  </p>
+                ) : (
+                  <p className="mt-2 inline-flex rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">
+                    {SSC_NOT_APPROVED_LABEL}
+                  </p>
+                )}
                 <a
                   className="mt-2 block underline"
                   href={documentTerms.url}
                   target="_blank"
                   rel="noreferrer"
                 >
-                  Read the verified document ↗
+                  Read the document (fingerprint verified) ↗
                 </a>
                 <p className="mt-2 break-all text-xs text-mx-ink-faint">
                   SHA-256: {documentTerms.sha256}
@@ -1182,9 +1201,17 @@ export default function DealPage({
                   />
                   <span>
                     I have read and accept this document version and its stated
-                    risks and rights.
+                    risks and rights.{" "}
+                    {documentTerms.sscDecisionRef
+                      ? `Status: approved by the Serbian Securities Commission (${documentTerms.sscDecisionRef}).`
+                      : `Status: ${SSC_NOT_APPROVED_LABEL}.`}
                   </span>
                 </label>
+                <PurchaseRiskWarning
+                  className="mt-3"
+                  acknowledged={acceptedRisk}
+                  onAcknowledgedChange={setAcceptedRisk}
+                />
               </>
             ) : (
               <p className="mt-2 text-mx-ink-faint">
@@ -1605,6 +1632,8 @@ export default function DealPage({
                           ? "Amount too small"
                           : onChainOverRemaining
                             ? "Exceeds units left"
+                            : parsed > 0 && (!acceptedTerms || !acceptedRisk)
+                              ? "Accept the document and risk warning"
                             : parsed > 0
                               ? settlesOnChain
                                 ? `Buy ${Number(onChainUnits).toLocaleString()} units · ${formattedPayment}`
