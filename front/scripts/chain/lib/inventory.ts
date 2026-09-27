@@ -78,7 +78,7 @@ import {
   type SbpfInfo,
 } from "./network-gates";
 import { executableHash, loadRelease, releaseEvidence, type Release } from "./release";
-import { describeOverlap, loadRoleMap, mapKeys, roleOverlapsOf, type RoleMap } from "./role-map";
+import { DEFAULT_ADDRESS, describeOverlap, loadRoleMap, mapKeys, roleOverlapsOf, type RoleMap } from "./role-map";
 import type { ChainRpc } from "./rpc";
 import { ChainGateError, IDL_PROGRAMS, sha256Hex, type ProgramName } from "./safety";
 import { checkSquadsAccount, scanOpenProposals, type ProposalScan, type SquadsCheck } from "./squads";
@@ -525,6 +525,19 @@ export function inventoryFindings(
 
   if (!map) {
     if (inv.blocklist && inv.platform && inv.blocklist.authority === inv.platform.admin) add("warning", "ba-is-sa", "blocklist authority == super admin");
+    // Without a role map nothing is acknowledged: report the live overlaps.
+    const pinned = inv.kycPin ? inv.kycRegistries.find((r) => r.address === inv.kycPin!.address) : undefined;
+    if (inv.platform && inv.blocklist && pinned) {
+      const live = roleOverlapsOf({
+        superAdmin: inv.platform.admin,
+        admins: inv.admins.map((a) => a.admin).filter((a) => a !== inv.platform!.admin),
+        blocklistAuthority: inv.blocklist.authority,
+        kyc: { authority: pinned.authority },
+        protocolTreasury: inv.platform.protocolTreasury,
+        squads: { vault: DEFAULT_ADDRESS as Address, members: [] },
+      });
+      for (const overlap of live) add("warning", "role-overlap", `${describeOverlap(overlap, null)} (live state, no role map)`);
+    }
     return out;
   }
 

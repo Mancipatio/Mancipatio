@@ -398,7 +398,7 @@ export async function validateRoleMap(
   // D12: the upgrade authority is always the Squads vault; a vault that one
   // approval executes is a single-key upgrade authority and needs its own
   // acknowledgement, bound to this multisig (Talas 8.2).
-  const singleKeyAck = input.acknowledgedSingleKeyUpgradeAuthority;
+  const singleKeyAck = input.acknowledgedSingleKeyUpgradeAuthority ?? undefined;
   const singleKeyUa = threshold < 2;
   if (singleKeyAck !== undefined && singleKeyAck !== multisig) {
     errors.push("acknowledgedSingleKeyUpgradeAuthority must be the squads.multisig address it acknowledges");

@@ -238,6 +238,22 @@ describe("role overlaps (Talas 8.2)", () => {
     expect(inventoryFindings(clean(map), map, "handed-over").filter((f) => f.code === "role-overlap")).toEqual([]);
   });
 
+  it("without a role map the live overlaps are reported (devnet today: one key holds SA, KYC, BA and the treasury)", async () => {
+    const { map } = await world();
+    const inv = clean(map);
+    const owner = map.superAdmin;
+    inv.blocklist = { authority: owner, proposed: null };
+    inv.kycRegistries[0].authority = owner;
+    inv.platform!.protocolTreasury = owner;
+    const findings = inventoryFindings(inv, null, "in-progress");
+    expect(bySeverity(findings, "ba-is-sa")).toEqual(["warning"]);
+    const [live] = findings.filter((f) => f.code === "role-overlap");
+    expect(live.message).toMatch(/\(not acknowledged\): \S+ is superAdmin \+ kyc\.authority \+ blocklistAuthority \+ protocolTreasury.*\(live state, no role map\)$/);
+    // Without the pinned registry the KYC authority is unknown: no finding.
+    inv.kycPin = null;
+    expect(inventoryFindings(inv, null, "in-progress").filter((f) => f.code === "role-overlap")).toEqual([]);
+  });
+
   it("a treasury mismatch names the role-map treasury", async () => {
     const { map } = await world();
     const inv = clean(map);
