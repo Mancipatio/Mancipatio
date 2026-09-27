@@ -24,6 +24,7 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
+import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import {
   clientIpOf,
@@ -52,6 +53,10 @@ export async function POST(request: Request) {
       rateLimited(`passport-submit:ip:${ip}`, 10, 60_000) ||
       rateLimited(`passport-submit:wallet:${wallet}`, 3, 3_600_000)
     ) {
+      throw new SiwsError(429, "Too many applications — try again later");
+    }
+    // The same per-wallet cap across every instance (front-app-15).
+    if (await consumeSharedRateLimit(`passport-submit:wallet:${wallet}`, 3, 3_600) === "limited") {
       throw new SiwsError(429, "Too many applications — try again later");
     }
 

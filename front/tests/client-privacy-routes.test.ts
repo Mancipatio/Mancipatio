@@ -486,8 +486,10 @@ describe("KYC document view (/api/clients/doc-url)", () => {
 describe("unsigned audit breadcrumbs (/api/audit)", () => {
   it("cannot write the server-only kyc category", async () => {
     const { POST } = await import("@/app/api/audit/route");
+    // Same-origin, as a browser's recordAudit sends it (the route refuses any other Origin first).
     const res = await POST(new Request("https://manci.test/api/audit", {
       method: "POST",
+      headers: { origin: "https://manci.test" },
       body: JSON.stringify({ ix_name: "kyc_document_view", category: "kyc", actor_wallet: ADMIN, reason: "" }),
     }));
     expect(res.status).toBe(400);
