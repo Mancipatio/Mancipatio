@@ -81,6 +81,24 @@ describe("GET /api/health/alarms", () => {
     s.network = "mainnet"; s.dbNetwork = "mainnet";
     expect((await get()).status).toBe(503);
   });
+
+  it("the webhook alone is a configured channel off mainnet (stuck rows count); an unusable URL is 503", async () => {
+    vi.stubEnv("COMPLIANCE_ALERT_EMAIL", "");
+    vi.stubEnv("ALERT_WEBHOOK_URL", "https://ntfy.example/topic");
+    s.pending = 1;
+    expect((await get()).status).toBe(503);
+    s.pending = 0;
+    expect((await get()).status).toBe(200);
+    // Mainnet still requires email, whatever the webhook.
+    s.network = "mainnet"; s.dbNetwork = "mainnet";
+    expect((await get()).status).toBe(503);
+    s.network = "devnet"; s.dbNetwork = "devnet";
+    vi.stubEnv("ALERT_WEBHOOK_URL", "http://hooks.example/plain-http");
+    expect((await get()).status).toBe(503);
+    vi.stubEnv("ALERT_WEBHOOK_URL", "https://ntfy.example/topic");
+    vi.stubEnv("ALERT_WEBHOOK_MIN_SEVERITY", "loud");
+    expect((await get()).status).toBe(503);
+  });
 });
 
 describe("POST /api/compliance/list", () => {

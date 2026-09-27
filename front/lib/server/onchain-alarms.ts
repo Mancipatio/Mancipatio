@@ -25,6 +25,7 @@ import {
   ACCEPT_KYC_REGISTRY_AUTHORITY_DISCRIMINATOR,
   ACCEPT_PLATFORM_ADMIN_DISCRIMINATOR,
   ADD_ADMIN_DISCRIMINATOR,
+  APPROVE_SALE_DISCRIMINATOR,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   CANCEL_ISSUER_AUTHORITY_TRANSFER_DISCRIMINATOR,
   CANCEL_ISSUER_RECOVERY_DISCRIMINATOR,
@@ -32,8 +33,20 @@ import {
   CLAWBACK_BLOCKLISTED_HOLDER_DISCRIMINATOR,
   CLAWBACK_FROM_HOLDER_DISCRIMINATOR,
   CREATE_KYC_REGISTRY_DISCRIMINATOR,
+  CREATE_PROPOSAL_DISCRIMINATOR,
   EXECUTE_ISSUER_RECOVERY_DISCRIMINATOR,
+  LOCK_SUPPLY_DISCRIMINATOR,
   MINT_TO_TREASURY_DISCRIMINATOR,
+  OPEN_CUSTODY_VAULT_DISCRIMINATOR,
+  OPEN_VAULT_VOTE_DISCRIMINATOR,
+  PUBLISH_MILESTONE_DISCRIMINATOR,
+  RaiseType,
+  REALIZE_CUSTODY_VAULT_DISCRIMINATOR,
+  RealizeAction,
+  REVERT_CUSTODY_VAULT_DISCRIMINATOR,
+  ROUTE_YIELD_DISCRIMINATOR,
+  TRIGGER_CUSTODY_VAULT_DISCRIMINATOR,
+  VaultType,
   PROPOSE_CUSTODY_AUTHORITY_DISCRIMINATOR,
   PROPOSE_ISSUER_AUTHORITY_DISCRIMINATOR,
   PROPOSE_ISSUER_RECOVERY_DISCRIMINATOR,
@@ -49,9 +62,15 @@ import {
   UPDATE_KYC_REGISTRY_JURISDICTIONS_DISCRIMINATOR,
   VERIFY_ISSUER_KYB_DISCRIMINATOR,
   getAddAdminInstructionDataDecoder,
+  getApproveSaleInstructionDataDecoder,
   getClawbackBlocklistedHolderInstructionDataDecoder,
   getClawbackFromHolderInstructionDataDecoder,
   getCreateKycRegistryInstructionDataDecoder,
+  getCreateProposalInstructionDataDecoder,
+  getOpenCustodyVaultInstructionDataDecoder,
+  getOpenVaultVoteInstructionDataDecoder,
+  getPublishMilestoneInstructionDataDecoder,
+  getRouteYieldInstructionDataDecoder,
   getProposeCustodyAuthorityInstructionDataDecoder,
   getProposeIssuerAuthorityInstructionDataDecoder,
   getProposeIssuerRecoveryInstructionDataDecoder,
@@ -76,6 +95,7 @@ import {
 } from "@/lib/generated/transfer_hook";
 import { detectNetwork, type Network } from "@/lib/network";
 import { PAUSE_FLAGS_ALL, describePausedAreas, formatPauseFlags } from "@/lib/pause-flags";
+import { USDC } from "@/lib/payment-mints";
 import { decodeRegistryEvent, type EventValue } from "@/lib/server/onchain-events";
 import { finalizedTransaction } from "@/lib/server/sale-capacity-chain";
 import { raiseSystemAlert, type Severity } from "@/lib/server/system-alerts";
@@ -89,6 +109,14 @@ export const LOADER_V4 = "LoaderV411111111111111111111111111111111111";
 const CAP_MINT = 1;
 /** RentReclaimed.kind for a KYC entry (program constants RECLAIM_KYC). */
 const RECLAIM_KYC = 3;
+/** A vote or proposal window shorter than this is critical / high (prog-vlast-9): too short for holders to react. */
+export const SHORT_VOTING_WINDOW_SECONDS = 72 * 3_600;
+/**
+ * approve_sale at or above this max gross raise in the network's USDC (6
+ * decimals: 500,000 USDC) is high; below it medium. Any other payment mint is
+ * high (its decimals are not known here).
+ */
+export const SALE_APPROVAL_HIGH_USDC_UNITS = BigInt(500_000) * BigInt(1_000_000);
 
 export type AlarmFormat = "platform" | "minimal";
 export type OnchainAlarm = {
@@ -104,6 +132,7 @@ export type ProgramDataAddresses = { assetRegistry: string; transferHook: string
 
 type Events = Record<string, Record<string, EventValue>>;
 type Ctx = {
+  network: Network;
   args: Record<string, unknown> | null;
   account: (i: number) => string | undefined;
   events: Events;
@@ -148,6 +177,14 @@ function pauseClassify(setMask: number, clearMask: number, ev: Record<string, Ev
 }
 
 const disc = (d: Uint8Array | readonly number[]) => new Uint8Array(d);
+
+/** A signed i64/u64 argument as a number (null when absent or not an integer). */
+function int(value: unknown): number | null {
+  if (typeof value === "bigint") return Number(value);
+  return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+const enumName = (names: Record<number, string>, value: unknown) =>
+  typeof value === "number" && names[value] !== undefined ? names[value] : null;
 
 /** The instruction catalogue (design §4.1). */
 export const ALARM_INSTRUCTIONS: readonly Entry[] = [
@@ -272,6 +309,84 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
       return { source: "onchain:kyc-reclaim", severity: "low", summary: ev ? "KYC entry rent reclaimed" : "Rent reclaimed (kind unknown)",
         evidence: { kind: ev?.kind ?? null } };
     } },
+  // Admin actions that move money or tokens (prog-vlast-9). Admins are single
+  // keys: a compromised one is seen only here. Issuer- or holder-scoped, so
+  // minimal: the email never shows the summary; the evidence keeps the
+  // issuer-level parameters (never a holder's wallet or balance). Blocklist
+  // add/remove and approve/revoke_holder stay out (owner decision D6).
+  { name: "open_vault_vote", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(OPEN_VAULT_VOTE_DISCRIMINATOR),
+    decode: dec(getOpenVaultVoteInstructionDataDecoder()), accounts: { authority: 0, vault: 2, vote: 3 }, format: "minimal", fallback: "critical",
+    classify: ({ args }) => {
+      const period = int(args?.votingPeriod);
+      const short = period === null || period < SHORT_VOTING_WINDOW_SECONDS;
+      return { source: "onchain:vault-vote", severity: short ? "critical" : "high",
+        summary: short ? `Payout vault vote opened with a short voting period (${period ?? "?"} s)` : "Payout vault vote opened",
+        evidence: { voting_period_seconds: period, total_weight: args?.totalWeight ?? null, snapshot_root: args?.snapshotRoot ?? null } };
+    } },
+  { name: "route_yield", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(ROUTE_YIELD_DISCRIMINATOR),
+    decode: dec(getRouteYieldInstructionDataDecoder()), accounts: { authority: 0, vault: 2, source: 3, platform_treasury: 5, payment_mint: 6 },
+    format: "minimal", fallback: "high",
+    classify: ({ args }) => ({ source: "onchain:yield-route", severity: "high", summary: "Yield routed into a payout vault (investor root set)",
+      evidence: { amount: args?.amount ?? null, total_weight: args?.totalWeight ?? null, investor_root: args?.investorRoot ?? null } }) },
+  { name: "publish_milestone", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(PUBLISH_MILESTONE_DISCRIMINATOR),
+    decode: dec(getPublishMilestoneInstructionDataDecoder()), accounts: { authority: 0, rights_issuance: 2, milestone: 3 },
+    format: "minimal", fallback: "high",
+    classify: ({ args }) => ({ source: "onchain:milestone", severity: "high", summary: "Rights milestone published (claim root set)",
+      evidence: { index: args?.index ?? null, amount_pool: args?.amountPool ?? null, unlock_ts: args?.unlockTs ?? null,
+        merkle_root: args?.merkleRoot ?? null } }) },
+  { name: "create_proposal", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CREATE_PROPOSAL_DISCRIMINATOR),
+    decode: dec(getCreateProposalInstructionDataDecoder()), accounts: { authority: 0, share_class: 2, proposal: 3 },
+    format: "minimal", fallback: "high",
+    classify: ({ args }) => {
+      const start = int(args?.startTs);
+      const end = int(args?.endTs);
+      const window = start !== null && end !== null ? end - start : null;
+      const short = window === null || window < SHORT_VOTING_WINDOW_SECONDS;
+      return { source: "onchain:proposal", severity: short ? "high" : "medium",
+        summary: short ? `Governance proposal created with a short voting window (${window ?? "?"} s)` : "Governance proposal created",
+        evidence: { proposal_id: args?.proposalId ?? null, snapshot_slot: args?.snapshotSlot ?? null, start_ts: start, end_ts: end,
+          snapshot_root: args?.snapshotRoot ?? null } };
+    } },
+  { name: "lock_supply", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(LOCK_SUPPLY_DISCRIMINATOR),
+    decode: null, accounts: { authority: 0, share_class: 2 }, format: "minimal", fallback: "high",
+    classify: () => ({ source: "onchain:supply-lock", severity: "high", summary: "Share class supply locked (irreversible)" }) },
+  { name: "open_custody_vault", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(OPEN_CUSTODY_VAULT_DISCRIMINATOR),
+    decode: dec(getOpenCustodyVaultInstructionDataDecoder()), accounts: { authority: 0, share_class: 2, custody_vault: 4 },
+    format: "minimal", fallback: "medium",
+    // Never the beneficiary (a holder for a delivery escrow) nor its amount.
+    classify: ({ args }) => ({ source: "onchain:custody-vault", severity: "medium", summary: "Custody vault opened",
+      evidence: { vault_id: args?.vaultId ?? null, vault_type: enumName(VaultType, args?.vaultType),
+        realize_action: enumName(RealizeAction, args?.realizeAction), deadline: args?.deadline ?? null } }) },
+  { name: "trigger_custody_vault", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR),
+    decode: null, accounts: { authority: 0, custody_vault: 1 }, format: "minimal", fallback: "medium",
+    classify: () => ({ source: "onchain:custody-vault", severity: "medium", summary: "Custody vault triggered" }) },
+  { name: "realize_custody_vault", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(REALIZE_CUSTODY_VAULT_DISCRIMINATOR),
+    decode: null, accounts: { authority: 0, share_class: 1, custody_vault: 2 }, format: "minimal", fallback: "medium",
+    // Routine for conversions and deliveries (the escrow is burned, KYC-gated where the type requires it).
+    classify: () => ({ source: "onchain:custody-vault", severity: "medium", summary: "Custody vault realized (escrow burned or released)" }) },
+  { name: "revert_custody_vault", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(REVERT_CUSTODY_VAULT_DISCRIMINATOR),
+    decode: null, accounts: { payer: 0, share_class: 1, custody_vault: 2 }, format: "minimal", fallback: "high",
+    classify: ({ events }) => {
+      // The escape hatch burns the escrow; an unknown burn (no event) counts as a burn.
+      const burned = events.CustodyReverted?.burned;
+      const none = burned === "0";
+      return { source: "onchain:custody-vault", severity: none ? "low" : "high",
+        summary: none ? "Empty custody vault reverted" : "Custody vault reverted: its escrow was burned",
+        evidence: { burned: burned === undefined ? null : !none } };
+    } },
+  { name: "approve_sale", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(APPROVE_SALE_DISCRIMINATOR),
+    decode: dec(getApproveSaleInstructionDataDecoder()),
+    accounts: { authority: 0, issuer: 2, share_class: 4, payment_mint: 5, sale_approval: 7 }, format: "minimal", fallback: "high",
+    classify: ({ args, account, network }) => {
+      const raise = typeof args?.maxGrossRaise === "bigint" ? args.maxGrossRaise : null;
+      const usdc = USDC[network]?.mint;
+      const large = raise === null || !usdc || account(5) !== usdc || raise >= SALE_APPROVAL_HIGH_USDC_UNITS;
+      return { source: "onchain:sale-approval", severity: large ? "high" : "medium",
+        summary: large ? "Sale approved (large raise, or a payment mint other than USDC)" : "Sale approved",
+        evidence: { sale_id: args?.saleId ?? null, max_gross_raise: raise, min_price_per_unit: args?.minPricePerUnit ?? null,
+          max_price_per_unit: args?.maxPricePerUnit ?? null, raise_type: enumName(RaiseType, args?.raiseType),
+          expires_at: args?.expiresAt ?? null, cliff_months: args?.cliffMonths ?? null, vesting_months: args?.vestingMonths ?? null } };
+    } },
   // transfer_hook
   { name: "initialize_blocklist_authority", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(INITIALIZE_BLOCKLIST_AUTHORITY_DISCRIMINATOR),
     decode: dec(getInitializeBlocklistAuthorityInstructionDataDecoder()), accounts: { payer: 0, blocklist_authority: 1 }, format: "platform", fallback: "high",
@@ -358,7 +473,6 @@ function sanitize(value: unknown): unknown {
 export function alarmsForTransaction(
   network: Network, sig: string, tx: InvocationTx, programData: ProgramDataAddresses,
 ): { alarms: OnchainAlarm[]; ledgerJobs: LedgerJobInput[]; issues: string[] } {
-  void network;
   const alarms: OnchainAlarm[] = [];
   const ledgerJobs: LedgerJobInput[] = [];
   const issues: string[] = [];
@@ -411,7 +525,7 @@ export function alarmsForTransaction(
     }
     const { events, layoutErrors } = inv.programId === ASSET_REGISTRY_PROGRAM_ADDRESS
       ? eventsOf(inv) : { events: {}, layoutErrors: [] };
-    const ctx: Ctx = { args, account: (i) => inv.accounts[i], events };
+    const ctx: Ctx = { network, args, account: (i) => inv.accounts[i], events };
     let classified: Classified;
     if (entry.decode && !args) {
       classified = { source: entry.classify({ ...ctx, args: {} })?.source ?? "onchain:decode", severity: entry.fallback,

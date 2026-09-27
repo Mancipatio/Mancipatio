@@ -25,7 +25,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { runAlarmChecks } from "@/lib/server/alarm-checks";
 import { reconcileEventJobs, type JobCounts } from "@/lib/server/onchain-alarms";
 import { RetryWorkerError, leaseError } from "@/lib/server/retry-worker";
-import { notifyPendingAlerts, type NotifyResult } from "@/lib/server/system-alerts";
+import { notifyPendingAlerts, type ChannelOutcome, type NotifyResult } from "@/lib/server/system-alerts";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export const ALARM_DEADLINES_MS = { events: 20_000, checks: 30_000, notifyEnd: 40_000, heartbeat: 44_000, release: 47_000 } as const;
@@ -34,13 +34,18 @@ const LEASE_RPC_TIMEOUT_MS = 3_000;
 
 type Stage<T> = { status: "processed"; counts: T } | { status: "failed"; counts: T | null } | { status: "deferred"; counts: null };
 type CheckCounts = { reported: number; expected: number; failing: number; gapScan: boolean };
+type NotifyStage = {
+  status: NotifyResult["status"] | "failed"; count: number;
+  /** Per channel (email, webhook), when a digest was attempted. */
+  channels?: { email: ChannelOutcome; webhook: ChannelOutcome };
+};
 export type AlarmWorkerResult =
   | { status: "busy"; network: Network }
   | {
     status: "processed" | "partial"; network: Network;
     events: Stage<JobCounts>;
     checks: Stage<CheckCounts>;
-    notify: { status: NotifyResult["status"] | "failed"; count: number };
+    notify: NotifyStage;
   };
 
 async function run<T>(work: (deadline: number, signal: AbortSignal) => Promise<T>, deadline: number): Promise<Stage<T>> {
@@ -100,16 +105,18 @@ export async function runAlarmWorker(limit = 10): Promise<AlarmWorkerResult> {
     // Before notify: a hanging mail server can never hide that events and checks ran.
     await heartbeat(stagesOk ? "processed" : "partial", checks.counts?.gapScan ?? false, at(ALARM_DEADLINES_MS.checks + 2_000));
 
-    let notify: { status: NotifyResult["status"] | "failed"; count: number } = { status: "deferred", count: 0 };
+    let notify: NotifyStage = { status: "deferred", count: 0 };
     const notifyDeadline = at(ALARM_DEADLINES_MS.notifyEnd);
     if (notifyDeadline - Date.now() > 0) {
       try {
         const result = await notifyPendingAlerts(notifyDeadline, AbortSignal.timeout(Math.max(1, notifyDeadline - Date.now() + 500)), sb);
-        notify = { status: result.status, count: "count" in result ? result.count : 0 };
+        notify = { status: result.status, count: "count" in result ? result.count : 0,
+          ...("channels" in result && result.channels ? { channels: result.channels } : {}) };
       } catch {
         notify = { status: "failed", count: 0 };
       }
     }
+    // A failing channel (email or webhook) is "failed": partial, the heartbeat does not move.
     // Mainnet requires email (runbook §15); elsewhere an unconfigured outbox only waits.
     const notifyOk = notify.status !== "failed" && !(notify.status === "not_configured" && network === "mainnet");
     const status = stagesOk && notifyOk ? "processed" : "partial";

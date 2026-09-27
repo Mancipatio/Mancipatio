@@ -6,8 +6,10 @@
 //     databaseNetwork, on 0070's identity);
 //   - the alarm worker finished a full run within 5 minutes;
 //   - no notification is stuck: none due for 15 minutes, none that failed 3
-//     times in a row (the email path is broken) — skipped only when email is
-//     not configured on a non-mainnet network (mainnet requires it);
+//     times in a row (every channel is broken) — skipped only when neither
+//     email nor the webhook is configured on a non-mainnet network (mainnet
+//     requires email; the webhook is the second channel, ops-qa-2);
+//   - ALERT_WEBHOOK_URL, when set, is usable (https, a known min severity);
 //   - no notification gave up ('failed') on an alert that is still open or
 //     escalated: it stays 503 until someone resolves the alert or re-queues
 //     the notification (runbook §15).
@@ -18,7 +20,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork, type Network } from "@/lib/network";
 import { emailConfigured } from "@/lib/server/email";
 import { HEALTH_DB_TIMEOUT_MS, TIMEOUT, ageSeconds, bounded, checkDatabaseNetwork } from "@/lib/server/health";
-import { alertRecipients } from "@/lib/server/system-alerts";
+import { alertRecipients, alertWebhookConfig } from "@/lib/server/system-alerts";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export type AlarmHealth = { ok: boolean; network: Network; checkedAt: string; reasons: string[] };
@@ -50,8 +52,12 @@ export async function runAlarmHealth(): Promise<AlarmHealth> {
       const age = ageSeconds((beat.data as { last_ok_at?: unknown } | null)?.last_ok_at, now);
       if (age === null || age > ALARM_HEARTBEAT_MAX_AGE_SECONDS) reasons.push("alarm_heartbeat:stale");
     }
-    const configured = alertRecipients() !== null && emailConfigured();
-    if (!configured && network === "mainnet") reasons.push("email:not_configured");
+    const email = alertRecipients() !== null && emailConfigured();
+    const webhook = alertWebhookConfig();
+    // A set but unusable ALERT_WEBHOOK_URL is a channel that silently never pages.
+    if (webhook === "invalid") reasons.push("webhook:invalid");
+    const configured = email || (webhook !== null && webhook !== "invalid");
+    if (!email && network === "mainnet") reasons.push("email:not_configured");
     if (configured || network === "mainnet") {
       const overdue = new Date(now - NOTIFY_OVERDUE_SECONDS * 1000).toISOString();
       const pending = await bounded((signal) => client.from("compliance_alerts").select("id", { count: "exact", head: true })

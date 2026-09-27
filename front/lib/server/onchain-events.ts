@@ -66,6 +66,8 @@ export const EVENT_SPECS: readonly EventSpec[] = [
   { name: "TreasuryMinted", discriminator: [135, 209, 252, 211, 119, 103, 189, 6],
     fields: [["share_class", "pubkey"], ["mint", "pubkey"], ["destination", "pubkey"], ["destination_owner", "pubkey"],
       ["amount", "u64"]] },
+  { name: "CustodyReverted", discriminator: [124, 204, 74, 1, 228, 187, 191, 144],
+    fields: [["custody_vault", "pubkey"], ["mint", "pubkey"], ["burned", "u64"]] },
 ];
 
 export type EventValue = string | number | boolean;

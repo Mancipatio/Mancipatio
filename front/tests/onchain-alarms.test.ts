@@ -19,31 +19,51 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => { throw new Er
 import { getAddressEncoder, getProgramDerivedAddress, type Address } from "@solana/kit";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
+  RaiseType,
+  RealizeAction,
+  VaultType,
   getAcceptPlatformAdminInstructionDataEncoder,
+  getApproveHolderInstructionDataEncoder,
+  getApproveSaleInstructionDataEncoder,
   getClawbackBlocklistedHolderInstructionDataEncoder,
   getClawbackFromHolderInstructionDataEncoder,
+  getCreateProposalInstructionDataEncoder,
+  getLockSupplyInstructionDataEncoder,
   getMintToTreasuryInstructionDataEncoder,
+  getOpenCustodyVaultInstructionDataEncoder,
+  getOpenVaultVoteInstructionDataEncoder,
+  getPublishMilestoneInstructionDataEncoder,
+  getRealizeCustodyVaultInstructionDataEncoder,
   getReclaimRentInstructionDataEncoder,
+  getRevertCustodyVaultInstructionDataEncoder,
+  getRevokeHolderInstructionDataEncoder,
+  getRouteYieldInstructionDataEncoder,
   getSetIssuerPermissionsInstructionDataEncoder,
   getSetPauseFlagsInstructionDataEncoder,
   getSetPauseInstructionDataEncoder,
   getSetProtocolTreasuryInstructionDataEncoder,
+  getTriggerCustodyVaultInstructionDataEncoder,
   getVerifyIssuerKybInstructionDataEncoder,
 } from "@/lib/generated/asset_registry";
 import {
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   getAcceptBlocklistAuthorityInstructionDataEncoder,
+  getAddToBlocklistInstructionDataEncoder,
+  getRemoveFromBlocklistInstructionDataEncoder,
 } from "@/lib/generated/transfer_hook";
+import { USDC } from "@/lib/payment-mints";
 import {
   ALARM_INSTRUCTIONS,
   BPF_LOADER_UPGRADEABLE,
   LOADER_TAGS,
   LOADER_V4,
+  SALE_APPROVAL_HIGH_USDC_UNITS,
   alarmsForTransaction,
   processEventJob,
   programDataAddresses,
   type EventJob,
 } from "@/lib/server/onchain-alarms";
+import { SOURCE_LABELS } from "@/lib/server/system-alerts";
 import { b64, buildTx, encodeEvent, logTree, type Ix } from "./helpers/chain-tx";
 
 const R = ASSET_REGISTRY_PROGRAM_ADDRESS;
@@ -195,6 +215,85 @@ describe("instruction catalogue (design §4.1)", () => {
       const r = run([mint, mint], { inner });
       expect(r.alarms).toEqual([]);
       expect(r.ledgerJobs).toEqual([{ kind: "treasury_mint", ref: SIG, sharePda: mint.accounts[4] }]);
+    }
+  });
+});
+
+// prog-vlast-9: Admin actions that move money or tokens (owner decision D6
+// keeps blocklist add/remove and approve/revoke_holder out).
+describe("admin money and token actions", () => {
+  const root = new Uint8Array(32).fill(7);
+  const ix = (encoder: { encode: (v: never) => ArrayLike<number> }, args: unknown, n = 12, program: string = R) =>
+    ({ program, accounts: accounts(n), data: bytes(encoder, args) });
+  const DAY = 86_400;
+
+  it("open_vault_vote: a voting period under 72 h is critical, a longer one high; minimal, with the period and root", () => {
+    const vote = (votingPeriod: number) => ix(getOpenVaultVoteInstructionDataEncoder(),
+      { snapshotRoot: root, totalWeight: BigInt(1_000), votingPeriod: BigInt(votingPeriod) });
+    expect(one(run([vote(DAY)]))).toMatchObject({ source: "onchain:vault-vote", severity: "critical", format: "minimal",
+      evidence: { voting_period_seconds: DAY, total_weight: "1000", snapshot_root: "07".repeat(32) } });
+    expect(one(run([vote(7 * DAY)])).severity).toBe("high");
+    // Inside Squads (inner) too: instruction-first.
+    expect(one(run([vote(DAY)], { inner: true })).severity).toBe("critical");
+  });
+
+  it("route_yield and publish_milestone are high; create_proposal is medium unless its window is under 72 h", () => {
+    expect(one(run([ix(getRouteYieldInstructionDataEncoder(), { amount: BigInt(5_000_000), investorRoot: root, totalWeight: BigInt(9) })])))
+      .toMatchObject({ source: "onchain:yield-route", severity: "high", evidence: { amount: "5000000", investor_root: "07".repeat(32) } });
+    expect(one(run([ix(getPublishMilestoneInstructionDataEncoder(), { index: 2, merkleRoot: root, amountPool: BigInt(10), unlockTs: BigInt(0) })])))
+      .toMatchObject({ source: "onchain:milestone", severity: "high", evidence: { index: 2, amount_pool: "10" } });
+    const proposal = (window: number) => ix(getCreateProposalInstructionDataEncoder(), {
+      proposalId: BigInt(1), metadataHash: root, snapshotSlot: BigInt(5), snapshotRoot: root, startTs: BigInt(1_000), endTs: BigInt(1_000 + window) });
+    expect(one(run([proposal(7 * DAY)]))).toMatchObject({ source: "onchain:proposal", severity: "medium" });
+    expect(one(run([proposal(DAY)])).severity).toBe("high");
+  });
+
+  it("lock_supply is high; custody open, trigger and realize are medium; open never names the beneficiary", () => {
+    expect(one(run([ix(getLockSupplyInstructionDataEncoder(), {})]))).toMatchObject({ source: "onchain:supply-lock", severity: "high" });
+    const open = one(run([ix(getOpenCustodyVaultInstructionDataEncoder(), {
+      vaultId: BigInt(3), vaultType: VaultType.DeliveryEscrow, realizeAction: RealizeAction.BurnAndAttest,
+      amount: BigInt(777), deadline: BigInt(0), metadataHash: root, beneficiary: C as Address })]));
+    expect(open).toMatchObject({ source: "onchain:custody-vault", severity: "medium", format: "minimal",
+      evidence: { vault_type: "DeliveryEscrow", realize_action: "BurnAndAttest", vault_id: "3" } });
+    expect(JSON.stringify(open.evidence)).not.toContain("777");
+    expect(open.evidence).not.toHaveProperty("args");
+    expect(open.evidence).not.toHaveProperty("beneficiary");
+    expect(one(run([ix(getTriggerCustodyVaultInstructionDataEncoder(), {})])).severity).toBe("medium");
+    expect(one(run([ix(getRealizeCustodyVaultInstructionDataEncoder(), {})])).severity).toBe("medium");
+  });
+
+  it("revert_custody_vault: a burn (or no event) is high, an empty vault low", () => {
+    const revert = ix(getRevertCustodyVaultInstructionDataEncoder(), {});
+    expect(one(run([revert], { events: [[encodeEvent("CustodyReverted", { burned: 5 })]] })))
+      .toMatchObject({ source: "onchain:custody-vault", severity: "high", evidence: { burned: true } });
+    expect(one(run([revert], { events: [[encodeEvent("CustodyReverted", { burned: 0 })]] })).severity).toBe("low");
+    expect(one(run([revert], { logs: "none" }))).toMatchObject({ severity: "high", evidence: { burned: null } });
+  });
+
+  it("approve_sale: medium below 500,000 USDC, high at or above it or for another payment mint", () => {
+    const usdc = USDC.devnet!.mint;
+    const approve = (maxGrossRaise: bigint, mint: string = usdc) => {
+      const i = ix(getApproveSaleInstructionDataEncoder(), {
+        saleId: BigInt(4), maxGrossRaise, minPricePerUnit: BigInt(1), maxPricePerUnit: BigInt(2), raiseType: RaiseType.Mature,
+        expiresAt: BigInt(0), applicationHash: root, cliffMonths: 0, vestingMonths: 0 }, 9);
+      i.accounts[5] = mint;
+      return i;
+    };
+    expect(one(run([approve(SALE_APPROVAL_HIGH_USDC_UNITS - BigInt(1))])))
+      .toMatchObject({ source: "onchain:sale-approval", severity: "medium", evidence: { raise_type: "Mature", sale_id: "4" } });
+    expect(one(run([approve(SALE_APPROVAL_HIGH_USDC_UNITS)])).severity).toBe("high");
+    expect(one(run([approve(BigInt(1), A)])).severity).toBe("high");
+  });
+
+  it("blocklist add/remove and approve/revoke_holder raise nothing (D6); every new source has a fixed label", () => {
+    const H = TRANSFER_HOOK_PROGRAM_ADDRESS;
+    expect(run([ix(getAddToBlocklistInstructionDataEncoder(), { wallet: B as Address }, 6, H)]).alarms).toEqual([]);
+    expect(run([ix(getRemoveFromBlocklistInstructionDataEncoder(), { wallet: B as Address }, 6, H)]).alarms).toEqual([]);
+    expect(run([ix(getApproveHolderInstructionDataEncoder(), { holder: B as Address, jurisdiction: 688, accreditationLevel: 0,
+      expiry: BigInt(0), providerId: 0, externalRefHash: root })]).alarms).toEqual([]);
+    expect(run([ix(getRevokeHolderInstructionDataEncoder(), { holder: B as Address })]).alarms).toEqual([]);
+    for (const source of ["vault-vote", "yield-route", "milestone", "proposal", "supply-lock", "custody-vault", "sale-approval"]) {
+      expect(SOURCE_LABELS[`onchain:${source}`], source).toMatchObject({ format: "minimal" });
     }
   });
 });

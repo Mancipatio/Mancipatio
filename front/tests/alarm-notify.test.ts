@@ -25,7 +25,9 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => { throw new Er
 
 import nodemailer from "nodemailer";
 import { sendEmail } from "@/lib/server/email";
-import { DIGEST_LIMIT, alertDigest, alertRecipients, notifyPendingAlerts, type DigestRow } from "@/lib/server/system-alerts";
+import {
+  DIGEST_LIMIT, alertDigest, alertRecipients, alertWebhookConfig, alertWebhookPayload, notifyPendingAlerts, type DigestRow,
+} from "@/lib/server/system-alerts";
 
 const SIG = "5".repeat(88);
 const WALLET = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
@@ -115,7 +117,8 @@ describe("notifyPendingAlerts", () => {
   it("sends one digest of at most 25 rows, never reading evidence, and marks them sent", async () => {
     const box = outbox(Array.from({ length: 30 }, () => row()));
     const result = await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);
-    expect(result).toEqual({ status: "sent", count: DIGEST_LIMIT });
+    // The result names each channel's outcome (the webhook is the second channel, unset here).
+    expect(result).toEqual({ status: "sent", count: DIGEST_LIMIT, channels: { email: "sent", webhook: "not_configured" } });
     expect(box.selected()).not.toContain("evidence");
     expect(smtp.sent).toHaveLength(1);
     expect((smtp.sent[0] as { to: string[] }).to).toEqual(["office@mancipatio.io"]);
@@ -164,5 +167,118 @@ describe("sendEmail timeoutMs", () => {
     smtp.mode = "ok";
     await sendEmail({ to: "a@x.io", subject: "s", html: "h" });
     expect(vi.mocked(nodemailer.createTransport).mock.calls.at(-1)![0]).toMatchObject({ connectionTimeout: 10_000, socketTimeout: 15_000 });
+  });
+});
+
+// ops-qa-2: the second channel. A generic JSON webhook, parallel to email;
+// one channel failing or hanging never stops the other.
+describe("alert webhook", () => {
+  type Call = { url: string; init: RequestInit & { headers: Record<string, string> } };
+  let calls: Call[] = [];
+  let answer: "ok" | "500" | "hang" | "throw" = "ok";
+  beforeEach(() => {
+    calls = [];
+    answer = "ok";
+    vi.stubEnv("ALERT_WEBHOOK_URL", "https://ntfy.example/manci-alerts?tpl=yes");
+    vi.stubEnv("ALERT_WEBHOOK_TOKEN", "tk_secret");
+    vi.stubGlobal("fetch", vi.fn((url: string, init: Call["init"]) => {
+      calls.push({ url, init });
+      if (answer === "hang") {
+        return new Promise((_resolve, reject) => init.signal?.addEventListener("abort", () => reject(new Error("aborted"))));
+      }
+      if (answer === "throw") return Promise.reject(new Error("ECONNREFUSED hooks.example"));
+      return Promise.resolve(new Response("ok", { status: answer === "500" ? 500 : 200 }));
+    }));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("config: https only (http for localhost), a known min severity, no whitespace in the token", () => {
+    expect(alertWebhookConfig({})).toBeNull();
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/X" }))
+      .toEqual({ url: "https://hooks.slack.com/services/T/B/X", token: null, minSeverity: "high" });
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "http://localhost:8080/hook", ALERT_WEBHOOK_MIN_SEVERITY: "Critical" }))
+      .toMatchObject({ minSeverity: "critical" });
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "http://hooks.example/x" })).toBe("invalid");
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "not a url" })).toBe("invalid");
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "https://h.example", ALERT_WEBHOOK_MIN_SEVERITY: "low" })).toBe("invalid");
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "https://h.example", ALERT_WEBHOOK_TOKEN: "a b" })).toBe("invalid");
+  });
+
+  it("payload: text for Slack/ntfy, severity and priority of the worst row, and the email's privacy rules", () => {
+    const payload = alertWebhookPayload([
+      row({ severity: "critical", source: "onchain:treasury", summary: "Protocol treasury set to X" }),
+      row({ source: "onchain:clawback", severity: "high", summary: `Clawback of ${WALLET} amount 5000` }),
+    ], "mainnet", "https://www.manci.io");
+    expect(payload).toMatchObject({ title: "[Manci mainnet] 1 critical, 1 high", severity: "critical", priority: 5,
+      network: "mainnet", count: 2, review_url: "https://www.manci.io/admin/compliance" });
+    expect(payload.text).toContain("CRITICAL — Protocol treasury changed — 2026-09-24 10:00:00 UTC: Protocol treasury set to X");
+    expect(payload.text).toContain("HIGH — Holder clawback");
+    expect(payload.alerts[0].tx_url).toBe(`https://explorer.solana.com/tx/${SIG}`);
+    // Minimal rows: label and time only, never the summary or the transaction.
+    expect(payload.alerts[1]).not.toHaveProperty("summary");
+    expect(payload.alerts[1]).not.toHaveProperty("tx_url");
+    expect(JSON.stringify(payload)).not.toContain(WALLET);
+    expect(JSON.stringify(payload)).not.toContain("5000");
+  });
+
+  it("both channels: the webhook gets high and critical rows (with the bearer token), email gets all; all sent", async () => {
+    const box = outbox([row({ severity: "critical", id: "c1" }), row({ severity: "medium", id: "m1" })]);
+    const result = await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);
+    expect(result).toEqual({ status: "sent", count: 2, channels: { email: "sent", webhook: "sent" } });
+    expect(smtp.sent).toHaveLength(1);
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://ntfy.example/manci-alerts?tpl=yes");
+    expect(calls[0].init.headers).toMatchObject({ "Content-Type": "application/json", Authorization: "Bearer tk_secret" });
+    const body = JSON.parse(String(calls[0].init.body));
+    expect(body.alerts.map((a: { id: string }) => a.id)).toEqual(["c1"]);
+    expect(box.finishes).toEqual([expect.objectContaining({
+      p_sent: true, p_rows: [{ id: "c1", severity: "critical" }, { id: "m1", severity: "medium" }],
+    })]);
+  });
+
+  it("email down, webhook up: high rows are delivered (sent), medium rows back off; the run is failed", async () => {
+    smtp.mode = "fail";
+    const box = outbox([row({ severity: "high", id: "h1" }), row({ severity: "medium", id: "m1" })]);
+    const result = await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);
+    expect(result).toMatchObject({ status: "failed", error: "SEND_FAILED", channels: { email: "failed", webhook: "sent" } });
+    expect(box.finishes).toEqual([
+      expect.objectContaining({ p_sent: true, p_rows: [{ id: "h1", severity: "high" }] }),
+      expect.objectContaining({ p_sent: false, p_error: "SEND_FAILED", p_rows: [{ id: "m1", severity: "medium" }] }),
+    ]);
+  });
+
+  it("a hanging webhook never holds up email: every row is sent by email, the run is failed (WEBHOOK_TIMEOUT)", async () => {
+    answer = "hang";
+    const box = outbox([row({ severity: "critical" })]);
+    const started = Date.now();
+    const result = await notifyPendingAlerts(Date.now() + 4_600, undefined, box.sb);
+    expect(Date.now() - started).toBeLessThan(4_600);
+    expect(result).toMatchObject({ status: "failed", error: "WEBHOOK_TIMEOUT", channels: { email: "sent", webhook: "timeout" } });
+    expect(box.finishes).toEqual([expect.objectContaining({ p_sent: true })]);
+  }, 10_000);
+
+  it("a webhook error (HTTP 500 or refused) is WEBHOOK_FAILED and never logs the URL or the token", async () => {
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    for (const mode of ["500", "throw"] as const) {
+      answer = mode;
+      const box = outbox([row({ severity: "critical" })]);
+      expect(await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb))
+        .toMatchObject({ status: "failed", error: "WEBHOOK_FAILED", channels: { webhook: "failed" } });
+    }
+    const logged = errors.mock.calls.flat().join(" ");
+    expect(logged).not.toContain("ntfy.example");
+    expect(logged).not.toContain("tk_secret");
+    errors.mockRestore();
+  });
+
+  it("webhook only (no email): it takes every row the outbox sends; neither channel: NOT_CONFIGURED", async () => {
+    vi.stubEnv("COMPLIANCE_ALERT_EMAIL", "");
+    const box = outbox([row({ severity: "medium", id: "m1" })]);
+    expect(await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb))
+      .toEqual({ status: "sent", count: 1, channels: { email: "not_configured", webhook: "sent" } });
+    expect(JSON.parse(String(calls[0].init.body)).alerts).toHaveLength(1);
+    expect(smtp.sent).toHaveLength(0);
+    vi.stubEnv("ALERT_WEBHOOK_URL", "");
+    expect(await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb)).toEqual({ status: "not_configured" });
   });
 });
