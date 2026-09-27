@@ -1470,6 +1470,12 @@ never emailed; high and critical notifications never give up.
 | `COMPLIANCE_ALERT_EMAIL` | Vercel (server) | Comma-separated, at most 5. **Devnet: `office@mancipatio.io`** (owner decision). Required on mainnet: without it `/api/health/alarms` answers 503 and alarm runs are `partial`. |
 | `RETRY_WORKER_SECRET` | Vercel + Vault | Reused by the alarm worker (D8); the Vault secret stays `mancipatio_retry_worker_<network>`. |
 | `NEXT_PUBLIC_SITE_URL`, `SMTP_*`, `EMAIL_FROM` | Vercel | Reused: the digest links `<site>/admin/compliance`. |
+| `ALERT_WEBHOOK_URL` (+ `ALERT_WEBHOOK_TOKEN`, `ALERT_WEBHOOK_MIN_SEVERITY`) | Vercel (server) | The second channel (8.4): one JSON POST per digest, in parallel with the email; high and critical by default. Slack/Mattermost read `text`; ntfy: `https://ntfy.sh/<topic>?tpl=yes&t={{.title}}&m={{.text}}`; a relay reads `severity`/`alerts[]`. Required by a mainnet build. A failing channel makes the run partial (`/api/health/alarms` 503). |
+| `ALARM_BALANCE_WATCH` | Vercel (server) | `label:address[:minSol]`, comma-separated: `sol-balance:<address>` (high) below the threshold (default 0.1 SOL). List every key that signs in an emergency. |
+| `ALARM_SQUADS_CONFIG` | Vercel (server) | The role map's `squads` object (JSON): `squads-config` (critical) on any drift of members, threshold, time lock or config authority; `squads-proposals` while a proposal is open (Approved critical, Active high). |
+
+The complete list per network, with what a mainnet build requires:
+`ops/env-vars.md`; secrets, owners and rotation: `ops/secrets.md`.
 
 Helius (D22): the webhook of each project must list **both program IDs and
 both ProgramData PDAs** (loader `SetAuthority` and `Close` do not reference
