@@ -56,6 +56,9 @@ vi.mock("@/lib/server/kyc-gate", async (importOriginal) => ({
   requireVerifiedApplicant: vi.fn(async () => ({ kind: "company" })),
   refuseSuspendedClient: vi.fn(async () => ({ clientId: null })),
 }));
+// The mainnet Terms-acceptance gate has its own suite
+// (tests/tos-server-gate.test.ts); here it must not mask the feature flags.
+vi.mock("@/lib/server/tos-gate", () => ({ requireAcceptedTos: vi.fn(async () => {}) }));
 vi.mock("@/lib/server/raise-limits", () => ({
   getRaiseCapacity: vi.fn(async () => ({})),
   assertWithinCapacity: vi.fn(),

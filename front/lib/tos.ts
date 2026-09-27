@@ -14,17 +14,30 @@
 // enumeration) and the WRITE through the signed /api/tos/accept route.
 
 import { TOS_VERSION } from "@/lib/clients";
+import { detectNetwork, type Network } from "@/lib/network";
 
 // Re-export so gate consumers do not need to reach into lib/clients.ts.
 export { TOS_VERSION };
 
 /**
+ * Whether <TosGate /> fails CLOSED on `network`. On mainnet (real money) an
+ * unknown acceptance status, an acceptance that could not be recorded and a
+ * wallet that cannot sign messages all keep the gate up — no "continue
+ * without accepting". Test networks keep failing open (availability over
+ * enforcement), as before. The server-side counterpart is
+ * lib/server/tos-gate.ts.
+ */
+export function tosGateFailsClosed(network: Network = detectNetwork()): boolean {
+  return network === "mainnet";
+}
+
+/**
  * Tri-state check result:
  *  - "accepted"      — a tos_acceptances row exists for (wallet, TOS_VERSION)
  *  - "not_accepted"  — the query succeeded and found nothing → gate blocks
- *  - "unknown"       — Supabase unconfigured/unreachable → gate ALLOWS (fail
- *                      open, logged) per spec: availability over enforcement
- *                      for a client-side interstitial.
+ *  - "unknown"       — Supabase unconfigured/unreachable → on test networks
+ *                      the gate ALLOWS (fail open, logged): availability over
+ *                      enforcement; on mainnet it blocks (tosGateFailsClosed).
  */
 export type TosCheckResult = "accepted" | "not_accepted" | "unknown";
 

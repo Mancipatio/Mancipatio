@@ -35,6 +35,8 @@ const state = vi.hoisted(() => ({
   /** otc_requests rows keyed by id (admin-screen reads one). */
   otcRequests: {} as Record<string, { id: string; seller_wallet: string; buyer_wallet: string }>,
   admins: [] as string[],
+  /** Wallets with a tos_acceptances row (lib/server/tos-gate.ts). */
+  tosAccepted: [] as string[],
   inserts: [] as Array<{ table: string; row: Record<string, unknown> }>,
   rpcCalls: [] as Array<{ fn: string; args: Record<string, unknown> }>,
 }));
@@ -60,6 +62,10 @@ vi.mock("@/lib/supabase-server", () => ({
       const filters: Record<string, unknown> = {};
       let insertRow: Record<string, unknown> | null = null;
       const list = () => {
+        if (table === "tos_acceptances") {
+          const accepted = typeof filters.wallet === "string" && state.tosAccepted.includes(filters.wallet);
+          return { data: accepted ? [{ id: "tos-1" }] : [], error: null };
+        }
         if (table !== "clients") return { data: [], error: null };
         if (typeof filters.wallet === "string") {
           return { data: state.clients[filters.wallet] ?? [], error: null };
@@ -186,6 +192,7 @@ beforeEach(() => {
   state.membershipError = false;
   state.otcRequests = {};
   state.admins = [];
+  state.tosAccepted = [];
   state.inserts = [];
   state.rpcCalls = [];
   warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -557,5 +564,36 @@ describe("conversion and delivery still require a live KYC verification", () => 
         row: expect.objectContaining({ holder_wallet: WALLET, client_id: "client-7" }),
       }),
     ]);
+  });
+});
+
+// ── Terms acceptance (lib/server/tos-gate.ts) ───────────────────────────────
+// Enforced on mainnet; TOS_SERVER_GATE=enforce rehearses it on devnet, which
+// is how these routes are exercised here (the harness runs on devnet).
+
+describe("sales and trading routes require the Terms when the server gate is on", () => {
+  const routes: Array<[string, (request: Request) => Promise<Response>, () => Record<string, unknown>]> = [
+    ["launchpad commit", commitRoute, commitParams],
+    ["OTC create", otcCreateRoute, () => otcParams()],
+    ["resell create", resellCreateRoute, resellParams],
+  ];
+
+  it.each(routes)("%s refuses (409) a wallet without an acceptance, before writing", async (_label, route, params) => {
+    vi.stubEnv("TOS_SERVER_GATE", "enforce");
+    const res = await call(route, params());
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/Accept the current Terms of Service/);
+    expect(state.inserts).toHaveLength(0);
+    expect(state.rpcCalls).toHaveLength(0);
+  });
+
+  it.each(routes)("%s accepts a wallet that accepted the Terms", async (_label, route, params) => {
+    vi.stubEnv("TOS_SERVER_GATE", "enforce");
+    state.tosAccepted = [WALLET];
+    expect((await call(route, params())).status).toBe(200);
+  });
+
+  it.each(routes)("%s is unchanged on devnet without the switch", async (_label, route, params) => {
+    expect((await call(route, params())).status).toBe(200);
   });
 });

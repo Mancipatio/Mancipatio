@@ -15,6 +15,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
+import { requireAcceptedTos } from "@/lib/server/tos-gate";
 import {
   getToken2022Balance,
   verifyShareClassMint,
@@ -89,6 +90,10 @@ export async function POST(request: Request) {
       );
     }
     await verifyShareClassMint(shareClassPda, mint);
+    // Mainnet: the listing wallet must have accepted the Terms in force —
+    // checked last, right before the write (lib/server/tos-gate.ts; a no-op
+    // on test networks).
+    await requireAcceptedTos(sb, wallet, "posting a resell listing");
 
     const { data, error } = await sb
       .from("resell_listings")
