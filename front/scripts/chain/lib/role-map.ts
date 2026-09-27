@@ -183,6 +183,45 @@ function parseOverlapAcks(value: unknown, errors: string[]): RoleOverlapAck[] {
   return out;
 }
 
+/**
+ * Checks `acknowledgedRoleOverlaps` against the overlaps a role layout has
+ * (shared by the role map and the chain:handover target): every
+ * acknowledgement must name a shared key with its exact role set; an overlap
+ * without one is an error on mainnet and a warning elsewhere; an acknowledged
+ * one adds the loud warning with its consequences. Returns the parsed
+ * acknowledgements and the keys they cover.
+ */
+export function checkRoleOverlaps(input: {
+  overlaps: RoleOverlap[];
+  acknowledgements: unknown;
+  mainnet: boolean;
+  errors: string[];
+  warnings: string[];
+}): { acks: RoleOverlapAck[]; acknowledged: Set<string> } {
+  const { overlaps, mainnet, errors, warnings } = input;
+  const acks = parseOverlapAcks(input.acknowledgements, errors);
+  const ackByKey = new Map<string, RoleOverlapAck>(acks.map((ack) => [ack.key, ack]));
+  const acknowledged = new Set<string>();
+  acks.forEach((ack, i) => {
+    const overlap = overlaps.find((o) => o.key === ack.key);
+    if (!overlap) errors.push(`acknowledgedRoleOverlaps[${i}]: ${ack.key} holds fewer than two operational roles (stale acknowledgement)`);
+    else if (overlap.roles.join() !== ack.roles.join()) {
+      errors.push(`acknowledgedRoleOverlaps[${i}]: ${ack.key} holds ${overlap.roles.join(" + ")}, not ${ack.roles.join(" + ")}`);
+    } else acknowledged.add(ack.key);
+  });
+  for (const overlap of overlaps) {
+    const ack = ackByKey.get(overlap.key);
+    if (acknowledged.has(overlap.key)) warnings.push(describeOverlap(overlap, ack!.reason));
+    else if (!ack) {
+      const pair = overlap.roles.length === 2 ? `${overlap.roles[1]} == ${overlap.roles[0]}` : overlap.roles.join(" + ");
+      const text = `${pair} (one key holds ${overlap.roles.length} roles; acknowledge it in acknowledgedRoleOverlaps)`;
+      if (mainnet) errors.push(`role overlap not acknowledged: ${text}`);
+      else warnings.push(text);
+    }
+  }
+  return { acks, acknowledged };
+}
+
 export type RoleMapContext = {
   network: Network;
   genesis: string;
@@ -384,27 +423,8 @@ export async function validateRoleMap(
   // Role overlaps (Talas 8.2): one key may hold several operational roles
   // only when `acknowledgedRoleOverlaps` names that key with its exact role
   // set. On mainnet an unacknowledged overlap is an error; elsewhere a warning.
-  const acks = parseOverlapAcks(input.acknowledgedRoleOverlaps, errors);
   const overlaps = roleOverlapsOf({ superAdmin, admins, blocklistAuthority, kyc: { authority: kycAuthority }, protocolTreasury, squads: { vault, members } });
-  const ackByKey = new Map<string, RoleOverlapAck>(acks.map((ack) => [ack.key, ack]));
-  const acknowledged = new Set<string>();
-  acks.forEach((ack, i) => {
-    const overlap = overlaps.find((o) => o.key === ack.key);
-    if (!overlap) errors.push(`acknowledgedRoleOverlaps[${i}]: ${ack.key} holds fewer than two operational roles (stale acknowledgement)`);
-    else if (overlap.roles.join() !== ack.roles.join()) {
-      errors.push(`acknowledgedRoleOverlaps[${i}]: ${ack.key} holds ${overlap.roles.join(" + ")}, not ${ack.roles.join(" + ")}`);
-    } else acknowledged.add(ack.key);
-  });
-  for (const overlap of overlaps) {
-    const ack = ackByKey.get(overlap.key);
-    if (acknowledged.has(overlap.key)) warnings.push(describeOverlap(overlap, ack!.reason));
-    else if (!ack) {
-      const pair = overlap.roles.length === 2 ? `${overlap.roles[1]} == ${overlap.roles[0]}` : overlap.roles.join(" + ");
-      const text = `${pair} (one key holds ${overlap.roles.length} roles; acknowledge it in acknowledgedRoleOverlaps)`;
-      if (mainnet) errors.push(`role overlap not acknowledged: ${text}`);
-      else warnings.push(text);
-    }
-  }
+  const { acks, acknowledged } = checkRoleOverlaps({ overlaps, acknowledgements: input.acknowledgedRoleOverlaps, mainnet, errors, warnings });
   const kycAdminAcknowledged = overlaps.some(
     (o) => acknowledged.has(o.key) && o.roles.includes("kyc.authority") && (o.roles.includes("admin") || o.roles.includes("superAdmin")),
   );

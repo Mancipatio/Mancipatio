@@ -17,6 +17,8 @@
     "chain:idl": "vitest run --config scripts/chain/idl.config.ts --reporter=verbose",
     "chain:squads-export": "vitest run --config scripts/chain/squads-export.config.ts --reporter=verbose",
     "chain:e2e": "vitest run --config scripts/chain/e2e.config.ts --reporter=verbose",
+    "chain:handover": "vitest run --config scripts/chain/handover.config.ts --reporter=verbose",
+    "chain:emergency": "vitest run --config scripts/chain/emergency.config.ts --reporter=verbose",
     "sim": "vitest run --config scripts/sim/sim.config.ts --reporter=verbose"
   },
   "dependencies": {

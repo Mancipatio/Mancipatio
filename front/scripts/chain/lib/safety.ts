@@ -64,7 +64,7 @@ export class ChainRpcError extends Error {
   }
 }
 
-export type ChainTool = "bootstrap" | "idl" | "inventory" | "squads-export" | "e2e";
+export type ChainTool = "bootstrap" | "idl" | "inventory" | "squads-export" | "e2e" | "handover" | "emergency";
 
 /** The text a runner may print or store for `error`. */
 export function publicErrorMessage(
@@ -152,6 +152,8 @@ export const DEFAULT_DEADLINE_MIN: Record<ChainTool, number> = {
   idl: 120,
   "squads-export": 10,
   e2e: 230,
+  handover: 20,
+  emergency: 15,
 };
 /** The runner's own vitest timeout is 4 h; the internal deadline stays below it. */
 export const MAX_DEADLINE_MIN = 230;
@@ -180,6 +182,8 @@ export type ChainConfig = {
   releaseDir: string | null;
   send: boolean;
   keypairPath: string | null;
+  /** chain:emergency only: a Ledger signer URL (`usb://ledger?key=N`) instead of CHAIN_KEYPAIR. */
+  signerUrl: string | null;
   confirmPlan: string | null;
   cuPrice: bigint | null;
   rps: number;
@@ -315,29 +319,43 @@ export function readChainConfig(
   assertOutputPath(output, root, "CHAIN_OUTPUT");
 
   const roleMapPath = nonEmpty(env, "CHAIN_ROLE_MAP");
-  if ((tool === "bootstrap" || tool === "squads-export") && !roleMapPath) {
+  if ((tool === "bootstrap" || tool === "squads-export" || tool === "handover") && !roleMapPath) {
     throw new ChainGateError(`CHAIN_ROLE_MAP is required for ${tool}`);
   }
   const releaseDir = nonEmpty(env, "CHAIN_RELEASE_DIR");
-  if (network === "mainnet" && tool !== "inventory" && !releaseDir) {
+  // The read-only tools, and the out-of-band emergency tool (it checks the
+  // live canonical IDL of the instruction it sends instead), need no Release.
+  const releaseOptional = tool === "inventory" || tool === "handover" || tool === "emergency";
+  if (network === "mainnet" && !releaseOptional && !releaseDir) {
     throw new ChainGateError(`CHAIN_RELEASE_DIR is required for a mainnet ${tool} run`);
   }
 
   const send = flag(env, "CHAIN_SEND");
   const recover = flag(env, "CHAIN_RECOVER");
-  if (send && (tool === "inventory" || tool === "squads-export")) {
+  if (send && (tool === "inventory" || tool === "squads-export" || tool === "handover")) {
     throw new ChainGateError(`${tool} never sends; unset CHAIN_SEND`);
   }
   if (send && recover) throw new ChainGateError("CHAIN_SEND and CHAIN_RECOVER are exclusive");
   const keypairPath = nonEmpty(env, "CHAIN_KEYPAIR");
+  const signerUrl = nonEmpty(env, "CHAIN_SIGNER");
   const confirmPlan = nonEmpty(env, "CHAIN_CONFIRM_PLAN");
-  if (send && (!keypairPath || !confirmPlan)) {
+  if (signerUrl !== null) {
+    if (tool !== "emergency") throw new ChainGateError("CHAIN_SIGNER (a Ledger) is read by chain:emergency only");
+    ledgerDerivationPath(signerUrl);
+    if (keypairPath) throw new ChainGateError("Set one signer: CHAIN_KEYPAIR or CHAIN_SIGNER, not both");
+  }
+  if (tool === "emergency") {
+    if (send && ((!keypairPath && !signerUrl) || !confirmPlan)) {
+      throw new ChainGateError("Send mode needs CHAIN_SEND=1, CHAIN_CONFIRM_PLAN and one signer: CHAIN_KEYPAIR or CHAIN_SIGNER");
+    }
+  } else if (send && (!keypairPath || !confirmPlan)) {
     throw new ChainGateError("Send mode needs CHAIN_SEND=1, CHAIN_KEYPAIR and CHAIN_CONFIRM_PLAN");
   }
   if (!send && keypairPath) {
     // A keypair without send mode is never loaded; refuse the ambiguity.
     throw new ChainGateError("CHAIN_KEYPAIR is only read in send mode");
   }
+  if (!send && signerUrl) throw new ChainGateError("CHAIN_SIGNER is only read in send mode");
 
   const cuRaw = nonEmpty(env, "CHAIN_CU_PRICE");
   let cuPrice: bigint | null = null;
@@ -383,6 +401,7 @@ export function readChainConfig(
     releaseDir: releaseDir ? path.resolve(releaseDir) : null,
     send,
     keypairPath: keypairPath ? path.resolve(keypairPath) : null,
+    signerUrl,
     confirmPlan,
     cuPrice,
     rps,
@@ -391,6 +410,20 @@ export function readChainConfig(
     recover,
     stateDir,
   };
+}
+
+/**
+ * The hardened derivation path of a Solana CLI Ledger URL: `usb://ledger`
+ * (44'/501'), `usb://ledger?key=N` (44'/501'/N') or `usb://ledger?key=N/M`
+ * (44'/501'/N'/M'). The device picks the first Ledger found.
+ */
+export function ledgerDerivationPath(value: string): string {
+  const match = /^usb:\/\/ledger(?:\?key=(\d{1,9})(?:\/(\d{1,9}))?)?$/.exec(value);
+  if (!match) {
+    throw new ChainGateError("CHAIN_SIGNER must be usb://ledger, usb://ledger?key=<account> or usb://ledger?key=<account>/<change>");
+  }
+  const indexes = [match[1], match[2]].filter((part): part is string => part !== undefined);
+  return ["44'", "501'", ...indexes.map((part) => `${Number(part)}'`)].join("/");
 }
 
 // ── Output-path guard ────────────────────────────────────────────────────────
