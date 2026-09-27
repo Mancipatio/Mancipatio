@@ -38,14 +38,15 @@ function platform(db: LocalPostgres, network: Net) {
     create type extensions.http_header as(field varchar,value varchar);
     create type extensions.http_request as(method text,uri varchar,headers extensions.http_header[],content_type varchar,content varchar);
     create type extensions.http_response as(status integer,content_type varchar,headers extensions.http_header[],content varchar);
-    create table extensions.mock_response(status integer,body text,failure text,last_options jsonb,last_uri text);
+    create table extensions.mock_response(status integer,body text,failure text,last_options jsonb,last_uri text,last_headers text);
     create table extensions.curl_options(name text,value text);
     create function extensions.http_reset_curlopt() returns boolean language plpgsql as $$ begin delete from extensions.curl_options;return true;end;$$;
     create function extensions.http_set_curlopt(n text,v text) returns boolean language plpgsql as $$ begin insert into extensions.curl_options values(n,v);return true;end;$$;
     create function extensions.http(r extensions.http_request) returns extensions.http_response language plpgsql as $$ declare m record;begin
       if r.method<>'POST' or r.content_type<>'application/json' or r.content<>'{}'
         or (r.headers[1]).field<>'Authorization' or (r.headers[1]).value<>'Bearer '||repeat('x',64) then raise exception 'Unexpected request';end if;
-      update extensions.mock_response set last_options=(select jsonb_object_agg(name,value) from extensions.curl_options),last_uri=r.uri;
+      update extensions.mock_response set last_options=(select jsonb_object_agg(name,value) from extensions.curl_options),last_uri=r.uri,
+        last_headers=(select string_agg(h.field||'='||h.value,'|' order by h.n) from unnest(r.headers) with ordinality as h(field,value,n));
       select * into m from extensions.mock_response;
       if m.failure='timeout' then raise exception 'PRIVATE_EXCEPTION' using errcode='57014';end if;
       if m.failure='transport' then raise exception 'PRIVATE_EXCEPTION';end if;
@@ -98,6 +99,26 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1").each(["devnet", "m
       expect(() => db.query(`set role ${role};select * from mancipatio_ops.retry_http_runs`)).toThrow(/permission denied/);
       expect(() => db.query(`set role ${role};select * from mancipatio_ops.retry_worker_config`)).toThrow(/permission denied/);
       expect(() => db.query(`set role ${role};select mancipatio_ops.invoke_retry_worker()`)).toThrow(/permission denied/);
+    });
+
+    it("sends x-vercel-protection-bypass only with a well-formed Vault secret (Talas 8.2); the install refuses a malformed one", () => {
+      const headers = () => db.query("select last_headers from extensions.mock_response");
+      expect(run()).toMatchObject({ ok: true });
+      expect(headers()).toBe(`Authorization=Bearer ${"x".repeat(64)}`);
+      try {
+        db.query(`insert into vault.secrets values('mancipatio_vercel_bypass_${network}',repeat('b',32))`);
+        db.query("truncate mancipatio_ops.retry_http_runs");
+        expect(run()).toMatchObject({ ok: true, outcome: "complete" });
+        expect(headers()).toBe(`Authorization=Bearer ${"x".repeat(64)}|x-vercel-protection-bypass=${"b".repeat(32)}`);
+        expect(JSON.stringify(db.query("select row_to_json(r) from mancipatio_ops.retry_http_runs r"))).not.toContain("bbbb");
+        db.query(`update vault.secrets set decrypted_secret='not a token' where name='mancipatio_vercel_bypass_${network}'`);
+        db.query("truncate mancipatio_ops.retry_http_runs");
+        run();
+        expect(headers()).toBe(`Authorization=Bearer ${"x".repeat(64)}`);
+        expect(() => install(db, network, ORIGINS[network])).toThrow(/optional Vercel protection bypass secret/);
+      } finally {
+        db.query(`delete from vault.secrets where name='mancipatio_vercel_bypass_${network}'`);
+      }
     });
 
     it("rejects a successful HTTP response bound to the other network", () => {

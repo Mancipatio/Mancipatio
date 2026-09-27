@@ -43,12 +43,12 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("alarm scheduler S
         create type extensions.http_header as(field varchar,value varchar);
         create type extensions.http_request as(method text,uri varchar,headers extensions.http_header[],content_type varchar,content varchar);
         create type extensions.http_response as(status integer,content_type varchar,headers extensions.http_header[],content varchar);
-        create table extensions.mock_response(status integer,body text,last_uri text);
+        create table extensions.mock_response(status integer,body text,last_uri text,last_headers text);
         create function extensions.http_reset_curlopt() returns boolean language sql as 'select true';
         create function extensions.http_set_curlopt(n text,v text) returns boolean language sql as 'select true';
         create function extensions.http(r extensions.http_request) returns extensions.http_response language plpgsql as $$ declare m record;begin
           if (r.headers[1]).value<>'Bearer '||repeat('x',64) then raise exception 'Unexpected request';end if;
-          update extensions.mock_response set last_uri=r.uri;
+          update extensions.mock_response set last_uri=r.uri,last_headers=(select string_agg(h.field||'='||h.value,'|' order by h.n) from unnest(r.headers) with ordinality as h(field,value,n));
           select * into m from extensions.mock_response;
           return (m.status,'application/json',array[]::extensions.http_header[],m.body)::extensions.http_response;
         end;$$;`);
@@ -83,6 +83,21 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("alarm scheduler S
     expect(run()).toMatchObject({ ok: false, outcome: "invalid_response", worker_state: null, events_complete: null });
     db.query(`update extensions.mock_response set status=503, body='${reply("devnet", "partial")}'`);
     expect(run()).toMatchObject({ ok: false, outcome: "http_error", worker_state: "partial" });
+  });
+
+  it("sends the optional x-vercel-protection-bypass header from the shared Vault secret (Talas 8.2)", () => {
+    const headers = () => db.query("select last_headers from extensions.mock_response");
+    run();
+    expect(headers()).toBe(`Authorization=Bearer ${"x".repeat(64)}`);
+    try {
+      db.query("insert into vault.secrets values('mancipatio_vercel_bypass_devnet',repeat('c',40))");
+      expect(run()).toMatchObject({ ok: true, outcome: "complete" });
+      expect(headers()).toBe(`Authorization=Bearer ${"x".repeat(64)}|x-vercel-protection-bypass=${"c".repeat(40)}`);
+      db.query("update vault.secrets set decrypted_secret='short' where name='mancipatio_vercel_bypass_devnet'");
+      expect(() => db.query(ASSERT + "\n" + ALARMS, vars("devnet", ORIGIN))).toThrow(/optional Vercel protection bypass secret/);
+    } finally {
+      db.query("delete from vault.secrets where name='mancipatio_vercel_bypass_devnet'");
+    }
   });
 
   it("is private to its operator; the status SQL reads it", () => {
