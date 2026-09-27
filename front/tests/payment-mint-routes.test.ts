@@ -55,6 +55,9 @@ vi.mock("@/app/api/sale-approvals/_lib", async (importOriginal) => ({
   accountExists: vi.fn(async () => false),
   applicantWallets: vi.fn(async () => []),
   subjectSpvId: vi.fn(async () => null),
+  // The mainnet offering clearance (SSC-approved whitepaper or recorded
+  // exemption) has its own suite, tests/offering-clearance.test.ts.
+  requireMainnetOfferingClearance: vi.fn(async () => {}),
 }));
 vi.mock("@/lib/supabase-server", () => ({
   getSupabaseAdmin: () => ({

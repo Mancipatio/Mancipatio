@@ -36,6 +36,7 @@ import {
   accountExists,
   applicantWallets,
   assertAllowedPaymentMint,
+  requireMainnetOfferingClearance,
   subjectSpvId,
   paymentMintInfo,
   saleAndApprovalPdas,
@@ -120,6 +121,11 @@ export async function POST(request: Request) {
     assertAllowedPaymentMint(network, paymentMint);
     const { decimals } = await paymentMintInfo(paymentMint, network);
     const spvId = await subjectSpvId(sb, chain.asset, chain.issuer);
+    // Mainnet: the offering must be cleared before it can be approved — an
+    // SSC-approved whitepaper with its decision reference, or a recorded
+    // offering exemption (lib/whitepaper-approval.ts; lansiranje-2). Test
+    // networks skip the read entirely (unchanged behaviour).
+    if (network === "mainnet") await requireMainnetOfferingClearance(sb, chain.asset);
 
     const terms: SaleApprovalTerms = {
       shareClass, saleId, issuer: chain.issuer, paymentMint, maxGrossRaise: maxGross,

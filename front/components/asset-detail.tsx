@@ -743,6 +743,10 @@ function WhitepaperCard({
   const [spvs, setSpvs] = useState<SpvRow[]>([]);
   const [sscRef, setSscRef] = useState("");
   const [sscFile, setSscFile] = useState<File | null>(null);
+  // Offering exemption (0076; admin only, super admin to record): lets a
+  // mainnet sale run without an SSC-approved whitepaper.
+  const [exemptionRef, setExemptionRef] = useState("");
+  const [exemptionReason, setExemptionReason] = useState("");
   const [saving, setSaving] = useState(false);
   // Reset the file inputs after a successful save.
   const [fileInputKey, setFileInputKey] = useState(0);
@@ -754,6 +758,8 @@ function WhitepaperCard({
     setStatus(profile?.whitepaper_status ?? "none");
     setSpvId(profile?.spv_id ?? "");
     setSscRef(profile?.ssc_decision_ref ?? "");
+    setExemptionRef(profile?.offering_exemption_ref ?? "");
+    setExemptionReason(profile?.offering_exemption_reason ?? "");
   }, [profile]);
 
   useEffect(() => {
@@ -836,6 +842,17 @@ function WhitepaperCard({
       };
       if (isAdmin) {
         row.ssc_decision_ref = sscRef.trim() || null;
+        // Sent only when changed: the server stamps who recorded it and when,
+        // and recording one needs the super admin.
+        const ref = exemptionRef.trim();
+        const reason = exemptionReason.trim();
+        if (
+          ref !== (profile?.offering_exemption_ref ?? "") ||
+          reason !== (profile?.offering_exemption_reason ?? "")
+        ) {
+          row.offering_exemption_ref = ref || null;
+          row.offering_exemption_reason = reason || null;
+        }
       }
 
       if (file) {
@@ -1104,6 +1121,42 @@ function WhitepaperCard({
               </label>
             </>
           )}
+        {isAdmin && (
+          <>
+            <label className="block">
+              <span className={labelSpan}>
+                Offering exemption: counsel&apos;s reference
+              </span>
+              <input
+                value={exemptionRef}
+                onChange={(e) => setExemptionRef(e.target.value)}
+                placeholder="Legal opinion no. …"
+                className={inputClass}
+              />
+              <span className="mt-1 block text-[11px] text-slate-400">
+                On mainnet a sale needs an SSC-approved whitepaper or this
+                recorded exemption. Recording one needs the super admin; clear
+                both fields to remove it. Never shown publicly.
+                {profile?.offering_exemption_recorded_at &&
+                  ` Recorded ${new Date(profile.offering_exemption_recorded_at).toLocaleString("en-US")}${
+                    profile.offering_exemption_recorded_by
+                      ? ` by ${profile.offering_exemption_recorded_by.slice(0, 4)}…${profile.offering_exemption_recorded_by.slice(-4)}`
+                      : ""
+                  }.`}
+              </span>
+            </label>
+            <label className="block">
+              <span className={labelSpan}>Offering exemption: reason</span>
+              <textarea
+                value={exemptionReason}
+                onChange={(e) => setExemptionReason(e.target.value)}
+                rows={2}
+                placeholder="Why this offering needs no approved whitepaper (as counsel states it)"
+                className={inputClass}
+              />
+            </label>
+          </>
+        )}
         <label className="block">
           <span className={labelSpan}>SPV</span>
           {isAdmin ? (
