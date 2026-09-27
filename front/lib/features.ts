@@ -4,10 +4,13 @@
 // function below.
 //
 // Every flag is ON for devnet / testnet / localnet. On mainnet a flag is ON
-// only when its NEXT_PUBLIC_FEATURE_* variable is exactly "true" — an unset,
-// empty or misspelled value keeps the feature off. `issuerRotation` also has
-// a kill switch for every network: NEXT_PUBLIC_FEATURE_ISSUER_ROTATION=false
-// turns it off on devnet / testnet / localnet too (the 2C-2 rollback step). The variables are
+// only when its NEXT_PUBLIC_FEATURE_* variable reads as on — true, 1, yes or
+// on, any case, surrounding spaces ignored — so an unset, empty or misspelled
+// value keeps the feature off (and a production build refuses a value that is
+// neither on nor off: next.config.ts assertBuildFeatureFlags). `issuerRotation`
+// also has a kill switch for every network: NEXT_PUBLIC_FEATURE_ISSUER_ROTATION
+// set to false (0, no, off) turns it off on devnet / testnet / localnet too
+// (the 2C-2 rollback step). The variables are
 // NEXT_PUBLIC_ so the client bundle sees the same answer the server enforces;
 // they are inlined at build time, so flipping one needs a rebuild.
 
@@ -45,13 +48,21 @@ export const FEATURE_LABELS: Record<FeatureName, string> = {
   passportClose: "Revoked passport closes",
 };
 
-function mainnetOptIn(value: string | undefined): boolean {
-  return value?.trim() === "true";
+/** true / false for the accepted spellings (next.config.ts FEATURE_FLAG_VALUES), null otherwise. */
+export function parseFeatureFlag(value: string | undefined): boolean | null {
+  const v = value?.trim().toLowerCase();
+  if (v === "true" || v === "1" || v === "yes" || v === "on") return true;
+  if (v === "false" || v === "0" || v === "no" || v === "off") return false;
+  return null;
 }
 
-/** Off only when the variable is exactly "false" (the non-mainnet kill switch). */
+function mainnetOptIn(value: string | undefined): boolean {
+  return parseFeatureFlag(value) === true;
+}
+
+/** Off only when the variable reads as off (the non-mainnet kill switch). */
 function killSwitchOff(value: string | undefined): boolean {
-  return value?.trim() === "false";
+  return parseFeatureFlag(value) === false;
 }
 
 export function features(network: Network = detectNetwork()): Features {

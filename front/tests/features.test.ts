@@ -1,9 +1,12 @@
 // Network-scoped feature flags (lib/features.ts): every flag is on off
-// mainnet (issuerRotation unless its kill switch is exactly "false"); on
-// mainnet a flag is on only with its NEXT_PUBLIC_FEATURE_* set to exactly
-// "true".
+// mainnet (issuerRotation unless its kill switch reads as off); on mainnet a
+// flag is on only with its NEXT_PUBLIC_FEATURE_* reading as on. Since 8.4
+// (front-app-8) "on" is true/1/yes/on and "off" false/0/no/off, any case:
+// the old exact-"true" rule silently kept `TRUE` off (the issuer recovery
+// panel with it); next.config.ts refuses any other value at build time.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { featureDisabledMessage, features } from "@/lib/features";
+import { FEATURE_FLAG_VALUES } from "@/next.config";
+import { featureDisabledMessage, features, parseFeatureFlag } from "@/lib/features";
 
 afterEach(() => vi.unstubAllEnvs());
 
@@ -20,11 +23,13 @@ describe("features()", () => {
   );
 
   it.each(["devnet", "testnet", "localnet"] as const)(
-    "turns issuer rotation off on %s only for the exact kill-switch value \"false\"",
+    "turns issuer rotation off on %s only for a kill-switch value that reads as off",
     (network) => {
-      vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", " false ");
-      expect(features(network).issuerRotation).toBe(false);
-      for (const value of ["", "true", "FALSE", "0", "off", "no"]) {
+      for (const value of [" false ", "FALSE", "0", "off", "no"]) {
+        vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", value);
+        expect(features(network).issuerRotation, value).toBe(false);
+      }
+      for (const value of ["", "true", "falsy"]) {
         vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", value);
         expect(features(network).issuerRotation, value).toBe(true);
       }
@@ -39,7 +44,7 @@ describe("features()", () => {
     expect(features("mainnet")).toEqual({ payoutAirdrop: false, startupRaises: false, issuerRotation: false, passportClose: false });
   });
 
-  it("enables a mainnet flag only for the exact value \"true\"", () => {
+  it("enables a mainnet flag only for a value that reads as on", () => {
     vi.stubEnv("NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP", "true");
     vi.stubEnv("NEXT_PUBLIC_FEATURE_STARTUP_RAISES", "");
     vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", "");
@@ -60,18 +65,24 @@ describe("features()", () => {
     expect(features("mainnet")).toEqual({ payoutAirdrop: false, startupRaises: false, issuerRotation: false, passportClose: true });
     vi.stubEnv("NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE", "");
 
-    for (const value of ["TRUE", "True", "1", "yes", "on", "truthy"]) {
+    for (const [value, on] of [["TRUE", true], ["True", true], [" 1 ", true], ["yes", true], ["On", true],
+      ["truthy", false], ["false", false], ["off", false]] as const) {
       vi.stubEnv("NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP", value);
       vi.stubEnv("NEXT_PUBLIC_FEATURE_STARTUP_RAISES", value);
       vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", value);
       vi.stubEnv("NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE", value);
       expect(features("mainnet"), value).toEqual({
-        payoutAirdrop: false,
-        startupRaises: false,
-        issuerRotation: false,
-        passportClose: false,
+        payoutAirdrop: on,
+        startupRaises: on,
+        issuerRotation: on,
+        passportClose: on,
       });
     }
+  });
+
+  it("reads exactly the spellings the build guard accepts (next.config.ts FEATURE_FLAG_VALUES)", () => {
+    for (const value of FEATURE_FLAG_VALUES) expect(parseFeatureFlag(value.toUpperCase()), value).not.toBeNull();
+    for (const value of ["", undefined, "ture", "enabled", "2"]) expect(parseFeatureFlag(value), String(value)).toBeNull();
   });
 
   it("defaults to the build's network (NEXT_PUBLIC_NETWORK)", () => {

@@ -64,7 +64,15 @@ describe("security headers", async () => {
     }
   });
 
-  it("does not ship a Content-Security-Policy yet", () => {
-    for (const rule of rules) for (const { key } of rule.headers) expect(key.toLowerCase()).not.toMatch(/content-security-policy/);
+  // front-app-6 (8.4): the CSP ships report-only first; enforcement is a later,
+  // separate step (ops/env-vars.md, "Content-Security-Policy").
+  it("ships the Content-Security-Policy report-only on every path, and no enforcing CSP yet", () => {
+    for (const rule of rules) for (const { key } of rule.headers) expect(key.toLowerCase()).not.toBe("content-security-policy");
+    for (const path of ["/", "/marketplace", "/login", "/admin/kyc", "/api/health"]) {
+      const headers = headersFor(rules, path);
+      expect(headers["content-security-policy-report-only"], path).toMatch(/^default-src 'self'; /);
+      expect(headers["content-security-policy-report-only"], path).toContain("report-uri /api/csp-report");
+      expect(headers["reporting-endpoints"], path).toBe('csp="/api/csp-report"');
+    }
   });
 });

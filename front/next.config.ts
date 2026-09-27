@@ -289,9 +289,226 @@ export function assertBuildKycRegistry(
   if (onVercel) warn(`NEXT_PUBLIC_KYC_REGISTRY ${why}`);
 }
 
-// Site-wide browser hardening. No Content-Security-Policy yet: it needs the
-// wallet, RPC and Supabase origins per network and a nonce for Next's inline
-// scripts, and ships separately (report-only first).
+// ── Mainnet readiness guards (8.4: RPC, operations, feature flags) ─────────
+
+const PUBLIC_CLUSTER_HOSTS = ["api.mainnet-beta.solana.com", "api.devnet.solana.com", "api.testnet.solana.com"];
+
+function parsedUrl(value: string | undefined): URL | null {
+  try {
+    return value?.trim() ? new URL(value.trim()) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The browser reads the chain directly (getProgramAccounts, account and
+ * signature reads, subscriptions), and falls back to it whenever the indexer
+ * is stale. Without NEXT_PUBLIC_SOLANA_RPC_URL a mainnet build would point
+ * every browser at the public api.mainnet-beta endpoint (lib/network.ts),
+ * whose per-IP limits and blocked methods would break the site under load
+ * (front-app-5, podaci-infra-2). So a MAINNET production build requires:
+ *   - NEXT_PUBLIC_SOLANA_RPC_URL (https) and NEXT_PUBLIC_SOLANA_WS_URL (wss),
+ *     neither a public cluster endpoint. Both are inlined into the browser
+ *     bundle: use a browser key restricted to the site's origin (Helius
+ *     "allowed domains" or a secure RPC URL), never the server key;
+ *   - HELIUS_MAINNET_RPC or SOLANA_MAINNET_RPC (https, not public): the
+ *     server resolver (lib/server/rpc.ts) already fails closed without it at
+ *     runtime; the build says so first.
+ * An RPC URL carrying an api-key parameter only warns: it must be the
+ * domain-restricted browser key.
+ */
+export function assertBuildRpc(
+  phase: string,
+  env: Record<string, string | undefined> = process.env,
+  warn: (message: string) => void = console.warn,
+): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  if ((env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() ?? "") !== "mainnet") return;
+  const check = (name: string, protocol: string, value: string | undefined) => {
+    const url = parsedUrl(value);
+    if (!url) {
+      throw new Error(`Refusing a mainnet build: ${name} is not set. Set the paid RPC provider's ${protocol}// endpoint ` +
+        "(ops/env-vars.md) — without it the site would fall back to the public api.mainnet-beta endpoint.");
+    }
+    if (url.protocol !== protocol || PUBLIC_CLUSTER_HOSTS.includes(url.hostname.toLowerCase())) {
+      throw new Error(`Refusing a mainnet build: ${name} must be a ${protocol}// URL of a paid RPC provider, not ${url.protocol}//${url.hostname}.`);
+    }
+    return url;
+  };
+  const browser = check("NEXT_PUBLIC_SOLANA_RPC_URL", "https:", env.NEXT_PUBLIC_SOLANA_RPC_URL);
+  check("NEXT_PUBLIC_SOLANA_WS_URL", "wss:", env.NEXT_PUBLIC_SOLANA_WS_URL);
+  const server = env.HELIUS_MAINNET_RPC?.trim() ? "HELIUS_MAINNET_RPC" : "SOLANA_MAINNET_RPC";
+  check(server, "https:", env[server]);
+  if (/api[-_]?key=/i.test(browser.search)) {
+    warn("NEXT_PUBLIC_SOLANA_RPC_URL carries an api-key and is inlined into the browser bundle: it must be a key " +
+      "restricted to this site's origin, never the server key (HELIUS_MAINNET_RPC).");
+  }
+}
+
+/**
+ * What a mainnet deployment needs to be operated (front-app-8, front-app-12,
+ * ops-qa-2, ops-qa-9, ops-qa-18), by name. Each one silently degrades when
+ * missing, so a MAINNET production build requires all of them unless
+ * MAINNET_OPS_WAIVERS names it (comma-separated; an unknown name fails, so a
+ * typo cannot waive anything). A waiver is a conscious, logged decision.
+ */
+export const MAINNET_OPS_REQUIREMENTS: Readonly<Record<string, { why: string; ok: (env: Record<string, string | undefined>) => boolean }>> = {
+  // Server errors go to Sentry only with an https EU (*.de.sentry.io) DSN (lib/request-error-report.ts).
+  sentry: {
+    why: "SENTRY_DSN must be the https DSN of an EU-region Sentry project (*.de.sentry.io): without it server errors are only in short-lived logs",
+    ok: (env) => {
+      const url = parsedUrl(env.SENTRY_DSN);
+      return !!url && url.protocol === "https:" && !!url.username && /\.de\.sentry\.io$/i.test(url.hostname);
+    },
+  },
+  // /api/health details (commit, failing check) need a bearer of at least 32 characters (lib/server/health.ts).
+  "health-token": {
+    why: "HEALTH_TOKEN must be at least 32 characters without whitespace: the uptime monitor cannot see which check fails without it",
+    ok: (env) => {
+      const token = env.HEALTH_TOKEN?.trim() ?? "";
+      return token.length >= 32 && !/\s/.test(token);
+    },
+  },
+  // Email sign-in and the contact form have no bot protection without both keys (lib/server/turnstile.ts).
+  turnstile: {
+    why: "TURNSTILE_SECRET_KEY and NEXT_PUBLIC_TURNSTILE_SITE_KEY must both be set: email sign-in and the contact form are otherwise unprotected",
+    ok: (env) => Boolean(env.TURNSTILE_SECRET_KEY?.trim() && env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim()),
+  },
+  // The second alert channel (lib/server/system-alerts.ts): email alone is one mailbox on one server.
+  "alert-webhook": {
+    why: "ALERT_WEBHOOK_URL must be an https URL: alerts would otherwise reach one mailbox only",
+    ok: (env) => parsedUrl(env.ALERT_WEBHOOK_URL)?.protocol === "https:",
+  },
+  // Wallet and account sessions are HMAC-signed with it (lib/server/siws-session.ts).
+  "session-secret": {
+    why: "SESSION_SECRET must be at least 32 characters, new for mainnet (never the devnet value)",
+    ok: (env) => (env.SESSION_SECRET?.trim().length ?? 0) >= 32,
+  },
+  // Emails, alert links and the account origin are built from it (lib/server/account-origin.ts).
+  "site-url": {
+    why: "NEXT_PUBLIC_SITE_URL must be the https origin of the mainnet site",
+    ok: (env) => {
+      const url = parsedUrl(env.NEXT_PUBLIC_SITE_URL);
+      return !!url && url.protocol === "https:" && url.pathname === "/" && !url.search && !url.hash;
+    },
+  },
+};
+
+export function assertBuildMainnetOps(
+  phase: string,
+  env: Record<string, string | undefined> = process.env,
+  warn: (message: string) => void = console.warn,
+): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  if ((env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() ?? "") !== "mainnet") return;
+  const waivers = (env.MAINNET_OPS_WAIVERS ?? "").split(",").map((w) => w.trim().toLowerCase()).filter(Boolean);
+  const unknown = waivers.filter((w) => !(w in MAINNET_OPS_REQUIREMENTS));
+  if (unknown.length) {
+    throw new Error(`MAINNET_OPS_WAIVERS names unknown requirement(s): ${unknown.join(", ")}. ` +
+      `Known: ${Object.keys(MAINNET_OPS_REQUIREMENTS).join(", ")}.`);
+  }
+  const missing = Object.entries(MAINNET_OPS_REQUIREMENTS).filter(([name, r]) => !waivers.includes(name) && !r.ok(env));
+  if (missing.length) {
+    throw new Error("Refusing a mainnet build: " + missing.map(([name, r]) => `[${name}] ${r.why}`).join("; ") +
+      ". Set them (ops/env-vars.md), or waive one knowingly with MAINNET_OPS_WAIVERS=<name>.");
+  }
+  if (waivers.length) warn(`Mainnet build with waived operations requirement(s): ${waivers.join(", ")} (MAINNET_OPS_WAIVERS).`);
+}
+
+/** The values lib/features.ts reads as on or off (case-insensitive); anything else is a typo. */
+export const FEATURE_FLAG_VALUES = ["true", "false", "1", "0", "yes", "no", "on", "off"];
+export const FEATURE_FLAG_NAMES = [
+  "NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP", "NEXT_PUBLIC_FEATURE_STARTUP_RAISES",
+  "NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", "NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE",
+];
+
+/**
+ * A NEXT_PUBLIC_FEATURE_* value lib/features.ts cannot read (front-app-8):
+ * "ture" would silently keep a mainnet feature off (or, as a kill switch,
+ * on). Any production build fails on one.
+ */
+export function assertBuildFeatureFlags(phase: string, env: Record<string, string | undefined> = process.env): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  for (const name of FEATURE_FLAG_NAMES) {
+    const value = env[name]?.trim().toLowerCase();
+    if (value && !FEATURE_FLAG_VALUES.includes(value)) {
+      throw new Error(`${name}="${env[name]}" is not a flag value. Use one of: ${FEATURE_FLAG_VALUES.join(", ")} (or leave it unset).`);
+    }
+  }
+}
+
+// ── Content-Security-Policy (report-only) ──────────────────────────────────
+
+/** Where browsers send CSP violation reports (app/api/csp-report/route.ts). */
+export const CSP_REPORT_PATH = "/api/csp-report";
+
+const PUBLIC_CLUSTER_ORIGINS: Record<string, [string, string]> = {
+  mainnet: ["https://api.mainnet-beta.solana.com", "wss://api.mainnet-beta.solana.com"],
+  devnet: ["https://api.devnet.solana.com", "wss://api.devnet.solana.com"],
+  testnet: ["https://api.testnet.solana.com", "wss://api.testnet.solana.com"],
+  localnet: ["http://127.0.0.1:8899", "ws://127.0.0.1:8900"],
+};
+
+/**
+ * The Content-Security-Policy, sent as Content-Security-Policy-Report-Only
+ * (front-app-6): browsers report what it would block and block nothing yet.
+ * Origins come from the build's env (inlined like the rest of NEXT_PUBLIC_*):
+ * the Supabase project (https + wss), the browser RPC (HTTP + WebSocket, or
+ * the network's public endpoints when unset), Cloudflare Turnstile (script +
+ * frame), Google sign-in (a top-level redirect: form-action only), and the
+ * Vercel toolbar on Preview deployments. Wallet extensions inject through
+ * their own content scripts, which a page CSP does not govern.
+ * script-src keeps 'unsafe-inline' while report-only: Next's inline bootstrap
+ * scripts need a per-request nonce, which ships with enforcement (the path is
+ * in ops/env-vars.md, "Content-Security-Policy").
+ */
+export function contentSecurityPolicy(env: Record<string, string | undefined> = process.env, dev = false): string {
+  const network = env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() || "devnet";
+  const origin = (value: string | undefined) => {
+    const url = parsedUrl(value);
+    return url ? `${url.protocol}//${url.host}` : null;
+  };
+  const connect = new Set<string>(["'self'", "https://challenges.cloudflare.com"]);
+  const supabase = origin(env.NEXT_PUBLIC_SUPABASE_URL);
+  if (supabase) {
+    connect.add(supabase);
+    connect.add(supabase.replace(/^https:/, "wss:"));
+  }
+  const rpc = origin(env.NEXT_PUBLIC_SOLANA_RPC_URL);
+  const ws = origin(env.NEXT_PUBLIC_SOLANA_WS_URL);
+  const [publicRpc, publicWs] = PUBLIC_CLUSTER_ORIGINS[network] ?? PUBLIC_CLUSTER_ORIGINS.devnet;
+  connect.add(rpc ?? publicRpc);
+  connect.add(ws ?? (rpc ? rpc.replace(/^https:/, "wss:").replace(/^http:/, "ws:") : publicWs));
+  const preview = env.VERCEL_ENV === "preview";
+  const script = ["'self'", "'unsafe-inline'", "https://challenges.cloudflare.com", ...(dev ? ["'unsafe-eval'"] : [])];
+  const frame = ["https://challenges.cloudflare.com"];
+  if (preview) {
+    script.push("https://vercel.live");
+    frame.push("https://vercel.live");
+    connect.add("https://vercel.live");
+    connect.add("wss://ws-us3.pusher.com");
+  }
+  return [
+    "default-src 'self'",
+    `script-src ${script.join(" ")}`,
+    "style-src 'self' 'unsafe-inline'",
+    "img-src 'self' data: blob: https:",
+    "font-src 'self' data:",
+    `connect-src ${[...connect].join(" ")}`,
+    `frame-src ${frame.join(" ")}`,
+    "worker-src 'self' blob:",
+    "object-src 'none'",
+    "base-uri 'self'",
+    "form-action 'self' https://accounts.google.com",
+    "frame-ancestors 'none'",
+    `report-uri ${CSP_REPORT_PATH}`,
+    "report-to csp",
+  ].join("; ");
+}
+
+// Site-wide browser hardening. The Content-Security-Policy is report-only
+// for now (contentSecurityPolicy above).
 const SECURITY_HEADERS = [
   { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
   { key: "X-Content-Type-Options", value: "nosniff" },
@@ -333,8 +550,13 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1"],
   poweredByHeader: false,
   async headers() {
+    // Report-only: violations are reported to CSP_REPORT_PATH, nothing is blocked.
+    const csp = [
+      { key: "Content-Security-Policy-Report-Only", value: contentSecurityPolicy(process.env, process.env.NODE_ENV === "development") },
+      { key: "Reporting-Endpoints", value: `csp="${CSP_REPORT_PATH}"` },
+    ];
     return [
-      { source: "/:path*", headers: SECURITY_HEADERS },
+      { source: "/:path*", headers: [...SECURITY_HEADERS, ...csp] },
       // Later rules win for the same key: these keep no-referrer.
       ...SENSITIVE_SOURCES.map((source) => ({
         source,
@@ -373,5 +595,9 @@ export default function config(phase: string): NextConfig {
   assertBuildTurnstile(phase);
   assertBuildKycRegistry(phase);
   assertBuildMainnetLegal(phase);
+  // 8.4: mainnet RPC, operations and feature-flag guards.
+  assertBuildRpc(phase);
+  assertBuildMainnetOps(phase);
+  assertBuildFeatureFlags(phase);
   return nextConfig;
 }
