@@ -150,6 +150,106 @@ describe("role map v2 validation", () => {
     expect(JSON.stringify(example)).not.toMatch(/\[\s*\d+\s*,\s*\d+\s*,\s*\d+/);
   });
 
+  it("the committed company-wallet example validates on mainnet, with a loud acknowledged-overlap warning", async () => {
+    const example = JSON.parse(fs.readFileSync(path.resolve(__dirname, "../scripts/chain/role-map.company.example.json"), "utf8"));
+    const { map: parsed, warnings } = await validateRoleMap(example, mainnet);
+    expect(parsed.superAdmin).toBe(parsed.blocklistAuthority);
+    expect(parsed.kyc.authority).toBe(parsed.superAdmin);
+    expect(parsed.protocolTreasury).toBe(parsed.superAdmin);
+    expect(parsed.allowKycAdmin).toBe(true);
+    expect(parsed.acknowledgedSingleKeyUpgradeAuthority).toBe(false);
+    expect(parsed.kyc.registry).toBe(await getRegistryPda(parsed.deployer));
+    const text = warnings.join("\n");
+    expect(text).toMatch(/ROLE OVERLAP \(acknowledged\): \S+ is superAdmin \+ kyc\.authority \+ blocklistAuthority \+ protocolTreasury/);
+    expect(text).toMatch(/no second signature/);
+    expect(text).toMatch(/claw back/);
+    expect(text).toMatch(/no on-chain recovery/);
+    expect(text).toMatch(/reason: "Licensed operator/);
+    expect(JSON.stringify(example)).not.toMatch(/\[\s*\d+\s*,\s*\d+\s*,\s*\d+/);
+  });
+
+  it("refuses an unacknowledged role overlap on mainnet; elsewhere it only warns", async () => {
+    const { json } = await map({}, "mainnet");
+    expect(await rejects({ ...json, blocklistAuthority: json.superAdmin }, mainnet)).toMatch(
+      /role overlap not acknowledged: blocklistAuthority == superAdmin/,
+    );
+    const dev = (await map()).json;
+    const { warnings } = await validateRoleMap({ ...dev, blocklistAuthority: dev.superAdmin }, devnet);
+    expect(warnings.join(" ")).toMatch(/acknowledge it in acknowledgedRoleOverlaps/);
+  });
+
+  it("an acknowledgement names the key's exact role set and a reason, and cannot go stale", async () => {
+    const { keys, json } = await map({}, "mainnet");
+    const sa = keys.superAdmin;
+    const overlap = { ...json, blocklistAuthority: sa, kyc: { ...(json.kyc as object), authority: sa } };
+    const ack = (roles: string[], reason: unknown = "one company wallet", key: string = sa) => ({ key, roles, reason });
+    await expect(
+      validateRoleMap({ ...overlap, acknowledgedRoleOverlaps: [ack(["superAdmin", "kyc.authority", "blocklistAuthority"])] }, mainnet),
+    ).resolves.toBeTruthy();
+    // Order does not matter; a missing role does.
+    await expect(
+      validateRoleMap({ ...overlap, acknowledgedRoleOverlaps: [ack(["blocklistAuthority", "superAdmin", "kyc.authority"])] }, mainnet),
+    ).resolves.toBeTruthy();
+    expect(await rejects({ ...overlap, acknowledgedRoleOverlaps: [ack(["superAdmin", "blocklistAuthority"])] }, mainnet)).toMatch(
+      /holds superAdmin \+ kyc\.authority \+ blocklistAuthority, not superAdmin \+ blocklistAuthority/,
+    );
+    expect(await rejects({ ...json, acknowledgedRoleOverlaps: [ack(["superAdmin", "blocklistAuthority"])] }, mainnet)).toMatch(
+      /stale acknowledgement/,
+    );
+    const roles = ["superAdmin", "kyc.authority", "blocklistAuthority"];
+    expect(await rejects({ ...overlap, acknowledgedRoleOverlaps: [ack(roles, "  ")] }, mainnet)).toMatch(/reason must say why/);
+    expect(await rejects({ ...overlap, acknowledgedRoleOverlaps: [ack([...roles, "owner"])] }, mainnet)).toMatch(/at least two distinct roles/);
+    expect(await rejects({ ...overlap, acknowledgedRoleOverlaps: [ack(roles), ack(roles)] }, mainnet)).toMatch(/lists a key twice/);
+    expect(await rejects({ ...overlap, acknowledgedRoleOverlaps: "all" }, mainnet)).toMatch(/must be an array/);
+  });
+
+  it("the treasury leaves the vault only as an acknowledged role key, never a hot key", async () => {
+    const { keys, json } = await map();
+    expect(await rejects({ ...json, protocolTreasury: keys.superAdmin })).toMatch(/protocolTreasury must be the Squads vault \(D5\), or a role key/);
+    expect(await rejects({ ...json, protocolTreasury: key(98) })).toMatch(/protocolTreasury must be the Squads vault/);
+    const acked = {
+      ...json,
+      protocolTreasury: keys.superAdmin,
+      acknowledgedRoleOverlaps: [{ key: keys.superAdmin, roles: ["superAdmin", "protocolTreasury"], reason: "fees to the company" }],
+    };
+    const { map: parsed, warnings } = await validateRoleMap(acked, devnet);
+    expect(parsed.protocolTreasury).toBe(keys.superAdmin);
+    expect(warnings.join(" ")).toMatch(/protocol fees land on an operational key/);
+    expect(await rejects({ ...json, protocolTreasury: keys.deployer })).toMatch(/deployer must hold no final role \(it is protocolTreasury\)/);
+    expect(await rejects({ ...json, protocolTreasury: keys.multisig })).toMatch(/must not be the Squads multisig account/);
+  });
+
+  it("an operational key that is also a Squads member is an overlap", async () => {
+    const { keys, json } = await map({}, "mainnet");
+    const squads = json.squads as { members: { key: string; permissions: string[] }[] };
+    const withSa = { ...json, squads: { ...squads, members: [...squads.members, { key: keys.superAdmin, permissions: ["vote"] }] } };
+    expect(await rejects(withSa, mainnet)).toMatch(/role overlap not acknowledged: squads\.member == superAdmin/);
+    const acked = { ...withSa, acknowledgedRoleOverlaps: [{ key: keys.superAdmin, roles: ["superAdmin", "squads.member"], reason: "one director" }] };
+    const { warnings } = await validateRoleMap(acked, mainnet);
+    expect(warnings.join(" ")).toMatch(/also approves upgrades/);
+  });
+
+  it("a single-key upgrade authority (1-of-N vault) needs its own acknowledgement bound to the multisig", async () => {
+    const { keys, json } = await map({}, "mainnet");
+    const squads = json.squads as Record<string, unknown>;
+    const single = { ...json, squads: { ...squads, threshold: 1 } };
+    expect(await rejects(single, mainnet)).toMatch(/at least 2 on mainnet \(D12\), or acknowledge a single-key upgrade authority/);
+    const { map: parsed, warnings } = await validateRoleMap({ ...single, acknowledgedSingleKeyUpgradeAuthority: keys.multisig }, mainnet);
+    expect(parsed.acknowledgedSingleKeyUpgradeAuthority).toBe(true);
+    expect(warnings.join(" ")).toMatch(/SINGLE-KEY UPGRADE AUTHORITY \(acknowledged\).*one key can replace the program code/);
+    expect(await rejects({ ...single, acknowledgedSingleKeyUpgradeAuthority: keys.vault }, mainnet)).toMatch(/must be the squads\.multisig address/);
+    expect(await rejects({ ...json, acknowledgedSingleKeyUpgradeAuthority: keys.multisig }, mainnet)).toMatch(/is stale: squads\.threshold is at least 2/);
+  });
+
+  it("an acknowledged KYC + SA overlap stands in for allowKycAdmin", async () => {
+    const { keys, json } = await map();
+    const kycIsSa = { ...json, superAdmin: keys.kycAuthority };
+    expect(await rejects(kycIsSa)).toMatch(/kyc.authority must not be the superAdmin/);
+    const acked = { ...kycIsSa, acknowledgedRoleOverlaps: [{ key: keys.kycAuthority, roles: ["superAdmin", "kyc.authority"], reason: "company" }] };
+    const { map: parsed } = await validateRoleMap(acked, devnet);
+    expect(parsed.allowKycAdmin).toBe(true);
+  });
+
   it("rejects unrepresentable or empty jurisdiction sets", async () => {
     const { json } = await map();
     expect(await rejects({ ...json, kyc: { ...(json.kyc as object), approvedJurisdictions: [] } })).toMatch(/freeze every KycGated receiver/);

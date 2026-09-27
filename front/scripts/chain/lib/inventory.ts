@@ -20,11 +20,13 @@ import {
   ISSUER_DISCRIMINATOR,
   ISSUER_RECOVERY_DISCRIMINATOR,
   KYC_REGISTRY_DISCRIMINATOR,
+  KybStatus,
   PAYOUT_VAULT_DISCRIMINATOR,
   PLATFORM_DISCRIMINATOR,
   RIGHTS_ISSUANCE_DISCRIMINATOR,
   SALE_DISCRIMINATOR,
   SHARE_CLASS_DISCRIMINATOR,
+  VaultState,
   findAcceptPlatformAdminTransferPda,
   findPlatformPda,
   getAdminDecoder,
@@ -68,8 +70,15 @@ import {
   programDataAddress,
 } from "./loader-v3";
 import { PM_BUFFER_AUTHORITY_OFFSET, PM_PROGRAM } from "./program-metadata";
+import {
+  networkGateFindings,
+  probeNetworkGates,
+  releaseSbpf,
+  type NetworkGates,
+  type SbpfInfo,
+} from "./network-gates";
 import { executableHash, loadRelease, releaseEvidence, type Release } from "./release";
-import { loadRoleMap, mapKeys, type RoleMap } from "./role-map";
+import { describeOverlap, loadRoleMap, mapKeys, roleOverlapsOf, type RoleMap } from "./role-map";
 import type { ChainRpc } from "./rpc";
 import { ChainGateError, IDL_PROGRAMS, sha256Hex, type ProgramName } from "./safety";
 import { checkSquadsAccount, scanOpenProposals, type ProposalScan, type SquadsCheck } from "./squads";
@@ -143,6 +152,18 @@ export type Inventory = {
   squadsProposals: ProposalScan | null;
   lockPresent: boolean;
   decodeErrors: string[];
+  /** Who holds each custody vault, rights issuance and issuer (chain:handover, K10/K19). */
+  holdings?: Holdings;
+  /** SIMD-0500 and rent feature state, and the lamports per byte (Talas 8.2). */
+  gates?: NetworkGates;
+  /** SBPF version of each Release .so (when a Release is given). */
+  sbpf?: SbpfInfo[];
+};
+
+export type Holdings = {
+  custodyVaults: { address: Address; authority: Address; state: string }[];
+  rightsIssuances: { address: Address; authority: Address }[];
+  issuers: { address: Address; authority: Address; kybStatus: string }[];
 };
 
 type Decoder<T> = { decode: (bytes: Uint8Array) => T };
@@ -328,6 +349,11 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
     return issuer ? issuerAuthority.get(issuer) ?? null : null;
   };
   const saleIssuer = new Map<string, Address | null>(sales.map((s) => [s.address, classIssuer(s.value.shareClass)]));
+  const holdings: Holdings = {
+    custodyVaults: custody.map((c) => ({ address: c.address, authority: c.value.authority, state: VaultState[c.value.state] ?? String(c.value.state) })),
+    rightsIssuances: rights.map((r) => ({ address: r.address, authority: r.value.authority })),
+    issuers: issuers.map((i) => ({ address: i.address, authority: i.value.authority, kybStatus: KybStatus[i.value.kybStatus] ?? String(i.value.kybStatus) })),
+  };
   const drift: Inventory["drift"] = {
     custodyWithoutAdmin: custody
       .filter((c) => !adminSet.has(c.value.authority))
@@ -400,6 +426,10 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
     squadsProposals = await scanOpenProposals(map.squads.multisig, squads.decoded, (addresses) => fetchRawAccounts(rpc, addresses));
   }
 
+  // 11. Cluster gates (SIMD-0500, rent) and the Release's SBPF version.
+  const gates = await probeNetworkGates(rpc);
+  const sbpf = release ? releaseSbpf(release.so) : undefined;
+
   return {
     programs,
     idl,
@@ -424,6 +454,9 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
     squadsProposals,
     lockPresent: input.lockPresent,
     decodeErrors,
+    holdings,
+    gates,
+    ...(sbpf ? { sbpf } : {}),
   };
 }
 
@@ -488,6 +521,7 @@ export function inventoryFindings(
   for (const r of inv.drift.saleAuthorityDrift) add("warning", "k14-sale", `sale ${r.sale}: authority ${r.authority} ≠ issuer authority ${r.issuerAuthority ?? "unknown"}`);
   for (const r of inv.drift.payoutFounderDrift) add("warning", "k14-payout", `payout vault ${r.payoutVault}: founder ${r.founder} ≠ issuer authority ${r.issuerAuthority ?? "unknown"}`);
   for (const b of [...inv.buffers.loader, ...inv.buffers.pm]) add("warning", "buffer", `leftover buffer ${b.address} held by ${b.holder}`);
+  if (inv.gates) for (const f of networkGateFindings(inv.gates, inv.sbpf ?? null)) add(f.severity, f.code, f.message);
 
   if (!map) {
     if (inv.blocklist && inv.platform && inv.blocklist.authority === inv.platform.admin) add("warning", "ba-is-sa", "blocklist authority == super admin");
@@ -541,7 +575,9 @@ export function inventoryFindings(
   }
   if (inv.platform) {
     if (inv.platform.admin !== map.superAdmin) gate("sa", `platform admin ${inv.platform.admin} is not the map superAdmin`);
-    if (inv.platform.protocolTreasury !== map.protocolTreasury) gate("treasury", `protocol treasury ${inv.platform.protocolTreasury} is not the vault`);
+    if (inv.platform.protocolTreasury !== map.protocolTreasury) {
+      gate("treasury", `protocol treasury ${inv.platform.protocolTreasury} is not the role-map treasury ${map.protocolTreasury}`);
+    }
     if (inv.platform.protocolFeeBps !== map.protocolFeeBps) add("blocker", "fee", `protocol fee ${inv.platform.protocolFeeBps} bps ≠ map ${map.protocolFeeBps} (no setter)`);
     if (inv.platform.proposed && !known.has(inv.platform.proposed)) add("blocker", "foreign-proposal", `platform admin proposal to ${inv.platform.proposed}, not in the map`);
     if (inv.platform.proposed && atHandover) add("blocker", "pending-platform", "a platform admin proposal is still pending");
@@ -552,6 +588,10 @@ export function inventoryFindings(
     if (inv.blocklist.proposed && atHandover) add("blocker", "pending-ba", "a blocklist authority proposal is still pending");
   }
   if (map.blocklistAuthority === map.superAdmin) add("warning", "ba-is-sa", "blocklist authority == super admin");
+  // Talas 8.2: every key the map gives several roles, with what that means.
+  // The role map refuses an unacknowledged overlap on mainnet.
+  const acks = new Map<string, string>(map.acknowledgedRoleOverlaps.map((ack) => [ack.key, ack.reason]));
+  for (const overlap of roleOverlapsOf(map)) add("warning", "role-overlap", describeOverlap(overlap, acks.get(overlap.key) ?? null));
   const pin = inv.kycRegistries.find((r) => r.address === map.kyc.registry);
   if (!pin) gate("kyc-registry", `KYC registry ${map.kyc.registry} does not exist`);
   else {

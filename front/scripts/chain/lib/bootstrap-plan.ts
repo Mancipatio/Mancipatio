@@ -290,7 +290,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
   const SA = map.superAdmin;
   const BA = map.blocklistAuthority;
   const K = map.kyc.authority;
-  const V = map.squads.vault;
+  const T = map.protocolTreasury;
   const registry = map.kyc.registry!;
   const d = signers.deployer;
   const saSigner = SA === D ? d : signers.rehearsal.superAdmin ?? null;
@@ -303,7 +303,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
   const defs: StepDef[] = [
     {
       id: "S1",
-      title: `initialize_platform(treasury ${V}, fee ${map.protocolFeeBps} bps)`,
+      title: `initialize_platform(treasury ${T}, fee ${map.protocolFeeBps} bps)`,
       applies: true,
       signerRole: "deployer",
       signer: d,
@@ -319,24 +319,24 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
         await buildInitializePlatformInstruction(rpc, {
           admin: signer,
           upgradeAuthority: signer,
-          protocolTreasury: V,
+          protocolTreasury: T,
           protocolFeeBps: map.protocolFeeBps,
         }),
       ],
       apply: (p) => {
-        p.platform = { admin: D, protocolTreasury: V, protocolFeeBps: map.protocolFeeBps, pauseFlags: PAUSE_FLAGS_ALL };
+        p.platform = { admin: D, protocolTreasury: T, protocolFeeBps: map.protocolFeeBps, pauseFlags: PAUSE_FLAGS_ALL };
         p.adminRecords[D] = true;
       },
-      postCheck: (s) => s.platform?.admin === D && s.platform.protocolTreasury === V && s.platform.protocolFeeBps === map.protocolFeeBps,
+      postCheck: (s) => s.platform?.admin === D && s.platform.protocolTreasury === T && s.platform.protocolFeeBps === map.protocolFeeBps,
       rentSizes: [getPlatformSize(), getAdminSize()],
     },
     {
       id: "S1b",
-      title: `set_protocol_treasury(${V})`,
+      title: `set_protocol_treasury(${T})`,
       applies: true,
       signerRole: "deployer",
       signer: d,
-      skip: (p) => (!p.platform ? "S1 sets the vault as treasury" : p.platform.protocolTreasury === V ? "treasury is the vault" : null),
+      skip: (p) => (!p.platform ? "S1 sets the map treasury" : p.platform.protocolTreasury === T ? "treasury is the map treasury" : null),
       preconditions: (p) => {
         const treasury = p.platform?.protocolTreasury;
         return [
@@ -344,12 +344,12 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
           pre(`platform.treasury=${treasury}`, (s) => s.platform?.protocolTreasury === treasury),
         ];
       },
-      external: { id: "S1b", role: "superAdmin", key: SA, page: "/admin/platform", action: `set the protocol treasury to the vault ${V}` },
-      build: async (_p, signer) => [await getSetProtocolTreasuryInstructionAsync({ superAdmin: signer, newTreasury: V })],
+      external: { id: "S1b", role: "superAdmin", key: SA, page: "/admin/platform", action: `set the protocol treasury to ${T} (Protocol treasury → Rotate treasury)` },
+      build: async (_p, signer) => [await getSetProtocolTreasuryInstructionAsync({ superAdmin: signer, newTreasury: T })],
       apply: (p) => {
-        p.platform!.protocolTreasury = V;
+        p.platform!.protocolTreasury = T;
       },
-      postCheck: (s) => s.platform?.protocolTreasury === V,
+      postCheck: (s) => s.platform?.protocolTreasury === T,
     },
     {
       id: "S2",
@@ -403,7 +403,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
         signer: d,
         skip: (p) => (p.adminRecords[admin] ? "Admin record exists" : null),
         preconditions: () => [pre(`platform.admin=${D}`, (s) => s.platform?.admin === D), pre(`admin(${admin}):absent`, (s) => !s.adminRecords[admin])],
-        external: { id: `S3:${admin}`, role: "superAdmin", key: SA, page: "/admin/platform", action: `add Admin ${admin}` },
+        external: { id: `S3:${admin}`, role: "superAdmin", key: SA, page: "/admin/admins", action: `grant Admin to ${admin}` },
         build: async (_p, signer) => [await getAddAdminInstructionAsync({ superAdmin: signer, newAdmin: admin })],
         apply: (p) => {
           p.adminRecords[admin] = true;
@@ -518,7 +518,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signer: signers.rehearsal.blocklistAuthority ?? null,
       skip: (p) => (p.blocklist?.authority === BA ? "BA accepted" : null),
       preconditions: () => [pre(`blocklist.proposed=${BA}`, (s) => s.blocklist?.proposed === BA)],
-      external: { id: "X3", role: "blocklistAuthority", key: BA, page: "/issuer/authority", action: "accept the blocklist authority, then click Refresh" },
+      external: { id: "X3", role: "blocklistAuthority", key: BA, page: "/issuer/authority", action: "accept the blocklist authority (or under Waiting for your acceptance on /account/roles), then click Refresh" },
       build: async (_p, signer) => [await getAcceptBlocklistAuthorityInstructionAsync({ newAuthority: signer })],
       apply: (p) => {
         p.blocklist = { authority: BA, proposed: null };
@@ -563,10 +563,12 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
         id: "X2",
         role: "kyc.authority",
         key: K,
-        page: "/admin/kyc",
+        // Outside the admin gate: the proposed key is not the kycProvider (or an
+        // Admin) until it accepts, so /admin/kyc would refuse it (3.1 K5/K6).
+        page: "/account/roles",
         action: map.kyc.tempAdminGrant
-          ? "accept the KYC registry authority (temporary Admin grant)"
-          : "accept the KYC registry authority (needs the 3.1 kycProvider layout gate)",
+          ? "accept the KYC provider (registry authority) under Waiting for your acceptance (temporary Admin grant path)"
+          : "accept the KYC provider (registry authority) under Waiting for your acceptance",
       },
       build: async (_p, signer) => [await buildAcceptKycAuthority({ newAuthoritySigner: signer, registry })],
       apply: (p) => {
@@ -628,7 +630,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signer: deployerIsSa ? null : signers.rehearsal.superAdmin ?? null,
       skip: (p) => (p.platform?.admin === SA ? "SA accepted" : null),
       preconditions: () => [pre(`platform.proposed=${SA}`, (s) => s.platformProposed === SA)],
-      external: { id: "X1", role: "superAdmin", key: SA, page: "/issuer/authority", action: "accept the platform admin, then click Refresh" },
+      external: { id: "X1", role: "superAdmin", key: SA, page: "/issuer/authority", action: "accept the platform admin (or under Waiting for your acceptance on /account/roles), then click Refresh" },
       build: async (p, signer) => [
         await getAcceptPlatformAdminInstructionAsync({
           newAdmin: signer,
@@ -657,7 +659,9 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
           pre(`platform.pauseFlags=${formatPauseFlags(flags)}`, (s) => s.platform?.pauseFlags === flags),
         ];
       },
-      external: { id: "S6", role: "superAdmin", key: SA, page: "/issuer/authority", action: 'clear every pause bit in the PauseFlagsPanel ("Resume everything")' },
+      // The PauseFlagsPanel lives on /admin/platform (3.1); accept_platform_admin
+      // gave the SA its Admin record, so the admin gate lets it in.
+      external: { id: "S6", role: "superAdmin", key: SA, page: "/admin/platform", action: 'clear every pause bit in the PauseFlagsPanel ("Resume everything")' },
       build: async (p, signer) => [
         await getSetPauseFlagsInstructionAsync({
           authority: signer,
@@ -672,6 +676,18 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
     },
   ];
   return defs;
+}
+
+/**
+ * Every operator-front action a bootstrap of `map` can ask for (its page and
+ * wording), whatever the chain state: the runbook and the page test read it.
+ */
+export function bootstrapExternalActions(map: RoleMap): ExternalAction[] {
+  const signers: BootstrapSigners = { deployer: createNoopSigner(map.deployer), rehearsal: {} };
+  // The rpc is only used by the builders, which this never calls.
+  return stepDefinitions(map, signers, undefined as unknown as ChainRpc)
+    .filter((def) => def.applies && def.external)
+    .map((def) => def.external!);
 }
 
 /** Plans the current cycle (design §4.3). Pure apart from the S1/S2 UA read. */

@@ -54,6 +54,7 @@ import {
   pmSetData,
   pmTrim,
 } from "./program-metadata";
+import { SBPF_DEPLOY_GATE, probeNetworkGates, sbpfUpgradeProblem, sbpfVersionOf } from "./network-gates";
 import { loadRelease, releaseEvidence, type Release } from "./release";
 import { loadRoleMap, type RoleMap } from "./role-map";
 import type { ChainRpc } from "./rpc";
@@ -179,6 +180,14 @@ export async function planSquadsOp(input: {
     ];
     const chosen = requested.filter(([, value]) => value !== undefined && value !== null);
     if (!chosen.length) throw new ChainGateError("op=upgrade needs buffers.transferHook and/or buffers.assetRegistry");
+    // SIMD-0500 (release-lanac-7): once active, the loader refuses SBPF v0-v2.
+    const gates = await probeNetworkGates(rpc);
+    for (const [name] of chosen) {
+      const info = sbpfVersionOf(name, release.so[name]);
+      const problem = sbpfUpgradeProblem(gates, info);
+      if (problem) throw new ChainGateError(problem);
+      preconditions.push(`${name}: Release .so SBPF ${info.version === null ? "unknown" : `v${info.version}`}; SIMD-0500 ${gates.features.find((f) => f.id === SBPF_DEPLOY_GATE.id)?.state}`);
+    }
     for (const [name, raw] of chosen) {
       const buffer = addressInput(raw, `buffers.${name}`);
       const programData = await uaIsVault(rpc, name, vault, preconditions);
@@ -410,9 +419,12 @@ export async function planSquadsOp(input: {
         break;
       }
       case "set_protocol_treasury": {
-        const newTreasury = mapTarget(args.newTreasury, "args.newTreasury", map, [vault], confirm);
+        // The vault (D5) or the role-map treasury (an acknowledged role key, Talas 8.2).
+        const allowed = [...new Set([vault, map.protocolTreasury])];
+        const newTreasury = mapTarget(args.newTreasury, "args.newTreasury", map, allowed, confirm);
         ixs.push(await getSetProtocolTreasuryInstructionAsync({ superAdmin: vaultSigner, newTreasury }));
-        preconditions.push(`new treasury ${newTreasury}${newTreasury === vault ? " = the vault (D5)" : " (confirmed)"}`);
+        const label = newTreasury === vault ? " = the vault (D5)" : newTreasury === map.protocolTreasury ? " = the role-map treasury" : " (confirmed)";
+        preconditions.push(`new treasury ${newTreasury}${label}`);
         break;
       }
     }
