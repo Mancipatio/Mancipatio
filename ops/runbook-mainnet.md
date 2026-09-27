@@ -139,6 +139,12 @@ real runner and devnet can prove stays open until these pass:
       workflow of the repository, on any branch, could produce a passing
       attestation.
 - [ ] **security.txt** decided before the rc tag (D16).
+- [ ] **Operator, licence and legal texts** (§17): the mainnet operator
+      record, the licence (or counsel's written waiver), counsel's Terms,
+      Privacy Policy, acceptance-dialog summary and risk warning are in
+      `front/lib/legal/`, and
+      `npx vitest run tests/legal-slots.test.ts --silent=false` reports them
+      complete. A mainnet build is refused until then.
 - [ ] **Program keypairs** backed up offline (two copies, not on the operator
       machine's synced folders).
 - [ ] **Squads** multisig created with the D12 parameters: threshold ≥ 2,
@@ -1359,6 +1365,69 @@ of `observe`.
 `mode = 'observe'` stops the bumps and expiries at once; `mode = 'off'` also
 stops the RPC calls. A front revert leaves the tables inert. Nothing else
 depends on 0075.
+
+## 17. Operator, licence and legal texts (gap 2026-09-28, package 8.1)
+
+The public site names its operator, licence and legal texts from committed,
+typed slots; a mainnet build (`next.config.ts` `assertBuildMainnetLegal`)
+refuses to start while any slot is incomplete and lists what is missing.
+Devnet, testnet and localnet keep the pilot's texts and are never checked.
+
+| Slot | File | Filled by |
+|---|---|---|
+| Operator: registered and short name, registered office, MB, PIB, register, governing law, forum for disputes, legal / privacy / security / DPO addresses | `front/lib/legal/operator.ts` (`OPERATORS.mainnet`) | owner (company data), counsel (law and forum) |
+| Licence: authority, decision number and date, licensed services, register entry | same record, `licence` | owner, from the decision |
+| Mainnet Terms, Privacy Policy, acceptance-dialog summary | `front/lib/legal/mainnet-copy.ts` | counsel |
+| Purchase risk warning (ZDI art. 15(2)) | `front/lib/legal/risk-warning.ts` (`status: "counsel"` once approved) | counsel |
+| External audit | `front/lib/legal/audit.ts` (`SECURITY_AUDIT`) | owner, when the report exists |
+
+When the company and the licence arrive:
+
+1. Fill `OPERATORS.mainnet` (no secrets: everything there is public in the
+   business register and on the licence). Leave `pilotNotice` null. The
+   security address must stay equal to `public/.well-known/security.txt` and
+   the programs' embedded security.txt (a test checks the first).
+2. Paste counsel's texts into `mainnet-copy.ts` as `LegalDocument`s; they do
+   not repeat the operator, the governing law or the contacts, which the
+   pages render from the operator record. `MAINNET_TERMS.version` is the
+   Terms version every mainnet wallet accepts (`TOS_VERSION`); a later
+   material change needs a new version. The devnet version stays
+   `DEVNET_TOS_VERSION` (`front/lib/tos-version.ts`).
+3. `npx vitest run tests/legal-slots.test.ts --silent=false` until the
+   "mainnet legal slots" report says complete, then review the rendered
+   `/legal/terms`, `/legal/privacy`, `/legal/company`, the footer and a sale
+   page with counsel on a mainnet preview, and only then set
+   `MAINNET_LEGAL_COPY_APPROVED=true` in the mainnet Vercel project.
+
+Build-time variables (mainnet Vercel project only, never `NEXT_PUBLIC_`):
+
+- `MAINNET_LEGAL_COPY_APPROVED=true`: a person's assertion that counsel
+  reviewed the pages as rendered.
+- `MAINNET_LICENSE_NOT_REQUIRED=true`: **only** on counsel's written opinion
+  that the services offered on mainnet need no licence. Keep the signed
+  opinion on file and record its reference in MAINNET-PLAN.md. It is refused
+  together with a recorded licence (contradictory).
+
+Server variable (runtime): `TOS_SERVER_GATE=enforce` makes a TEST network
+require a recorded Terms acceptance on `/api/launchpad/commit`,
+`/api/otc/create` and `/api/resell/create` (409 without, 503 when it cannot
+be checked), to rehearse mainnet, where it is always on. The client dialog
+fails closed on mainnet regardless. Binding the Terms version into the
+purchase memo is a separate, later change.
+
+Whitepaper gate (lansiranje-2): on mainnet a sale approval
+(`/api/sale-approvals/reserve`) and the sale's purchase document
+(`/api/launchpad/terms`, `/api/launchpad/commit`) require either an
+SSC-approved whitepaper with its decision reference, or an **offering
+exemption** recorded by the super admin (Admin → asset → Whitepaper &
+disclosure: counsel's reference and the reason; the server stamps who and
+when and writes an `offering_exemption_record` audit event). The exemption
+columns come from migration `0076_offering_exemption.sql` (expand-only).
+Devnet rollout: `bash scripts/ops/backup.sh devnet pre-0076`, then
+`MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0076_offering_exemption.sql`;
+the order against the front does not matter (test networks never select
+the columns, and the admin form sends them only when an admin edits them).
+The mainnet project gets it with the rest of the chain.
 
 ## EXTERNAL checks (open until the rehearsal proves them)
 
