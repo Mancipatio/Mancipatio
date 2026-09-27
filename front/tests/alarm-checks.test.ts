@@ -39,6 +39,7 @@ import {
   runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
+import { USDC } from "@/lib/payment-mints";
 import { buildTx } from "./helpers/chain-tx";
 
 const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -227,6 +228,33 @@ describe("runAlarmChecks", () => {
     await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
     expect(reported(rpcs)[`fx-missing:${MINT}`]).toBe("pass/high");
     expect(reported(rpcs)["capacity-holds"]).toBe("pass/high");
+  });
+
+  it("fx-expiring: the default mint and mints in use warn 2 days (at most half the max age) before the max age", async () => {
+    const usdc = USDC.devnet!.mint;
+    const check = async (fx: Record<string, unknown>[], extra: Record<string, Record<string, unknown>[]> = {}) => {
+      const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }], fx_rates: fx, ...extra });
+      const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+      expect(result.reports.length).toBe(result.expected);
+      return { by: reported(rpcs), rpcs };
+    };
+    const rate = (mint: string, daysAgo: number, maxAge = "7 days") => ({ payment_mint: mint, kind: "rate", as_of: minutesAgo(daysAgo * 24 * 60), max_age: maxAge });
+    // Day 5.5 of 7: inside the 2-day window, although no sale uses the mint.
+    const { by, rpcs } = await check([rate(usdc, 5.5)]);
+    expect(by[`fx-expiring:${usdc}`]).toBe("fail/medium");
+    expect(rpcs.find((r) => r.args.p_check === `fx-expiring:${usdc}`)?.args).toMatchObject({ p_source: "fx:expiring", p_category: "fx",
+      p_evidence: { payment_mint: usdc, hours_left: 36 } });
+    expect((await check([rate(usdc, 4.9)])).by[`fx-expiring:${usdc}`]).toBe("pass/medium");
+    // A 1-day max age warns in its last 12 hours only; an eur_peg row never expires.
+    expect((await check([rate(usdc, 0.4, "1 day")])).by[`fx-expiring:${usdc}`]).toBe("pass/medium");
+    expect((await check([rate(usdc, 0.6, "1 day")])).by[`fx-expiring:${usdc}`]).toBe("fail/medium");
+    expect((await check([{ ...rate(usdc, 30), kind: "eur_peg" }])).by[`fx-expiring:${usdc}`]).toBeUndefined();
+    // A mint in use (an open sale) is tracked too; past the max age it keeps failing.
+    const inUse = await check([rate(MINT, 8)], { sales: [{ payment_mint: MINT }] });
+    expect(inUse.by).toMatchObject({ [`fx-expiring:${MINT}`]: "fail/medium", [`fx-stale:${MINT}`]: "fail/medium" });
+    // An open incident of a mint neither in use nor the default clears.
+    const gone = await check([rate(MINT, 6)], { alarm_incidents: [{ check_key: `fx-expiring:${MINT}` }] });
+    expect(gone.by[`fx-expiring:${MINT}`]).toBe("pass/medium");
   });
 
   it("runs the gap scan when due and reports indexer-gap and gap-scan-incomplete", async () => {

@@ -63,14 +63,26 @@
 // heartbeat keeps proving from its watermarks; a reconcile also catches what
 // a transaction-level proof cannot (an account a job never wrote).
 // Before 0075 is applied neither reports anything.
+//
+// fx-expiring:<mint> (medium, front-app-14 / lansiranje-15): a "rate" row of
+// a mint in use, or of the network's default payment mint (on mainnet a
+// stale one fails /api/health), is within FX expiry warning of its max age
+// (the smaller of FX_EXPIRY_WARN_MS and half the max age: day 5 of the
+// mainnet 7-day rate), or past it. The rate is refreshed by hand on
+// /admin/limits, so the reminder comes before sales stop.
+//
+// The operational watches (lib/server/ops-watch.ts): SOL balances of the
+// operational keys and the Squads multisig, when configured.
 
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import { detectNetwork, type Network } from "@/lib/network";
+import { defaultPaymentMint } from "@/lib/payment-mints";
 import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, type QueueTable } from "@/lib/server/health";
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
+import { opsWatchReports } from "@/lib/server/ops-watch";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
 import { flattenInvocations, hasInvocationMeta, resolveAccountKeys, type InvocationTx } from "@/lib/server/tx-invocations";
@@ -96,6 +108,8 @@ const FRESHNESS_CLEAR_SECONDS = 3 * 60;
 /** A heartbeat row younger than this that has not recorded a run holds (bootstrap). */
 const FRESHNESS_BOOTSTRAP_SECONDS = 30 * 60;
 const RECONCILE_MAX_AGE_HOURS_DEFAULT = 168;
+/** fx-expiring warns this long before a rate's max age (capped at half the max age). */
+export const FX_EXPIRY_WARN_MS = 2 * 24 * 3_600_000;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export type CheckReport = { check: string; state: IncidentState; severity: Severity };
@@ -291,6 +305,34 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
     const max = intervalSeconds(r.max_age);
     return max === null || now - Date.parse(r.as_of) >= max * 1000;
   };
+  // fx-expiring: the mints in use plus the network's default payment mint.
+  const expiryTracked = new Set(inUse);
+  const defaultMint = defaultPaymentMint(network);
+  if (defaultMint) expiryTracked.add(defaultMint);
+  /** Milliseconds left before the row's max age; null for an eur_peg or unreadable row. */
+  const left = (r: FxRow) => {
+    const max = intervalSeconds(r.max_age);
+    const asOf = Date.parse(r.as_of);
+    if (r.kind !== "rate" || max === null || !Number.isFinite(asOf)) return null;
+    return { ms: asOf + max * 1000 - now, window: Math.min(FX_EXPIRY_WARN_MS, (max * 1000) / 2) };
+  };
+  const expiring = (r: FxRow) => {
+    const l = left(r);
+    return l !== null && l.ms <= l.window;
+  };
+  for (const mint of expiryTracked) {
+    const row = rates.get(mint);
+    const l = row ? left(row) : null;
+    if (!row || !l) continue;
+    const hours = Math.max(0, Math.floor(l.ms / 3_600_000));
+    reports.push({ check: `fx-expiring:${mint}`, state: l.ms <= l.window ? "fail" : "pass", severity: "medium", category: "fx",
+      source: "fx:expiring",
+      summary: l.ms <= 0
+        ? `The EUR rate of ${mint} is past its max age: refresh it on /admin/limits`
+        : `The EUR rate of ${mint} reaches its max age in ${hours} hour(s): refresh it on /admin/limits`,
+      evidence: { payment_mint: mint, as_of: row.as_of, hours_left: l.ms <= 0 ? 0 : hours } });
+    reported.add(`fx-expiring:${mint}`);
+  }
   for (const mint of inUse) {
     const row = rates.get(mint);
     if (row) {
@@ -311,12 +353,15 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
   if (!openIncidents.error) {
     for (const { check_key } of (openIncidents.data ?? []) as { check_key: string }[]) {
       const [kind, mint] = check_key.split(":");
-      if (reported.has(check_key) || !mint || (kind !== "fx-stale" && kind !== "fx-missing")) continue;
+      if (reported.has(check_key) || !mint || (kind !== "fx-stale" && kind !== "fx-missing" && kind !== "fx-expiring")) continue;
       const row = rates.get(mint);
-      const gone = kind === "fx-missing" ? !!row || !missing.has(mint) : !row || !stale(row) || !inUse.has(mint);
+      const gone = kind === "fx-missing" ? !!row || !missing.has(mint)
+        : kind === "fx-expiring" ? !row || !expiring(row) || !expiryTracked.has(mint)
+          : !row || !stale(row) || !inUse.has(mint);
       if (gone) {
         reports.push({ check: check_key, state: "pass", severity: kind === "fx-missing" ? "high" : "medium", category: "fx",
-          source: kind === "fx-missing" ? "fx:missing" : "fx:stale", summary: `${kind} ${mint} recovered`, evidence: { payment_mint: mint } });
+          source: kind === "fx-missing" ? "fx:missing" : kind === "fx-expiring" ? "fx:expiring" : "fx:stale",
+          summary: `${kind} ${mint} recovered`, evidence: { payment_mint: mint } });
       }
     }
   }
@@ -515,6 +560,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => retryHeartbeat(sb, network, now, signal));
   await collect(() => fxAndHolds(sb, network, now, signal));
   await collect(() => indexerFreshness(sb, network, now, signal));
+  await collect(() => opsWatchReports(sb, network, signal));
   await record(cheap);
 
   // 2. The gap scan, in what is left minus the reserve for its own incidents.
