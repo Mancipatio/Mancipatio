@@ -1,4 +1,5 @@
 import {
+  Body,
   Button,
   ButtonRow,
   Card,
@@ -7,8 +8,15 @@ import {
   MX_ROUTES,
   PageHeader,
   Section,
+  TextLink,
 } from "@/components/mx";
+import { OperatorContactDetails } from "@/components/legal/operator-details";
+import { operatorFor, operatorSentence } from "@/lib/legal/operator";
+import { detectNetwork } from "@/lib/network";
 import { ContactForm } from "./contact-form";
+
+/** This build's operator (lib/legal/operator.ts). */
+const OPERATOR = operatorFor(detectNetwork());
 
 export const metadata = {
   title: "Contact · Custom tokenization · Manci",
@@ -67,6 +75,19 @@ export default function ContactPage() {
             />
           ))}
         </Grid>
+      </Section>
+
+      <Section>
+        <H2>Company and legal contacts</H2>
+        {operatorSentence(OPERATOR) && (
+          <Body className="mt-4">{operatorSentence(OPERATOR)}</Body>
+        )}
+        <div className="mt-6">
+          <OperatorContactDetails operator={OPERATOR} />
+        </div>
+        <p className="mt-6">
+          <TextLink href={MX_ROUTES.company}>Company and licence →</TextLink>
+        </p>
       </Section>
     </>
   );

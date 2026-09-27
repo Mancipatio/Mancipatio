@@ -33,6 +33,8 @@ export const MX_ROUTES = {
   faq: "/faq",
   terms: "/legal/terms",
   privacy: "/legal/privacy",
+  /** The operator's registration details and licence (lib/legal/operator.ts). */
+  company: "/legal/company",
 } as const;
 
 /** Href of a single instrument fact-sheet page. */
@@ -99,6 +101,7 @@ export const MX_FOOTER_COLUMNS: { title: string; links: MxNavItem[] }[] = [
       { label: "FAQ", href: MX_ROUTES.faq },
       { label: "Terms", href: MX_ROUTES.terms },
       { label: "Privacy", href: MX_ROUTES.privacy },
+      { label: "Company & licence", href: MX_ROUTES.company },
     ],
   },
 ];
@@ -114,8 +117,8 @@ export function mxStageLabel(network: Network): string {
 export const MX_NETWORK_STAGE_LABEL = mxStageLabel(detectNetwork());
 
 /** FROZEN legal copy — do not use in new UI (use MX_NETWORK_STAGE_LABEL).
- *  The Terms of Service renders this badge inside its "Devnet pilot" card,
- *  whose operative text says the release runs on Solana devnet. Legal wording
- *  is counsel's to change, so this literal stays put until the mainnet terms
- *  land; a mainnet build is refused until then (next.config.ts). */
+ *  The devnet Terms of Service (legal/terms/devnet-terms.tsx) renders this
+ *  badge inside its "Devnet pilot" card, whose operative text says the
+ *  release runs on Solana devnet. Mainnet renders counsel's terms instead
+ *  (lib/legal/mainnet-copy.ts), which never show it. */
 export const MX_STAGE_LABEL = "Solana devnet · v0.1";

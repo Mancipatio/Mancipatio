@@ -1,21 +1,31 @@
 import type { NextConfig } from "next";
+// The one runtime import: the operator and legal slots, by relative path.
+// lib/legal/* is directive-free and imports nothing but its siblings, so
+// Next's next.config.ts loader (SWC with its require hook) compiles it like
+// this file; no package and no `@/` alias is loaded here.
+import {
+  MAINNET_LEGAL_SLOTS,
+  MAINNET_LICENSE_WAIVER,
+  mainnetLegalProblems,
+  type MainnetLegalSlots,
+} from "./lib/legal/readiness";
 
 // `next build`'s phase (next/constants PHASE_PRODUCTION_BUILD). Spelled out
-// rather than imported so this file stays free of runtime imports under both
-// of Next's next.config.ts loaders (native Node TS and the SWC fallback).
+// rather than imported so this file loads no package at config time.
 const PHASE_PRODUCTION_BUILD = "phase-production-build";
 
 const NETWORKS = ["mainnet", "devnet", "testnet", "localnet"];
 
 /**
- * The Terms of Service and the Privacy Policy (app/(marketing)/legal/terms,
- * app/(marketing)/legal/privacy) still carry the devnet-pilot wording: "The
- * current release runs on Solana devnet. No real assets are tokenized…", "No
- * real assets or fiat are ever transferred", "before mainnet launch". That is
- * binding text, it is counsel's to rewrite (not this codebase's), and it would
- * be false on a mainnet deployment. So a mainnet build refuses to ship it until
- * someone sets MAINNET_LEGAL_COPY_APPROVED=true, which asserts that counsel's
- * mainnet terms and privacy copy has landed. Build-time only (not
+ * The devnet Terms of Service and Privacy Policy
+ * (app/(marketing)/legal/{terms,privacy}/devnet-*.tsx) carry the devnet-pilot
+ * wording ("The current release runs on Solana devnet. No real assets are
+ * tokenized…"). A mainnet build renders counsel's mainnet texts from
+ * lib/legal/mainnet-copy.ts instead, and assertBuildMainnetLegal refuses it
+ * while those slots, the operator record or the licence are incomplete. On
+ * top of that a mainnet build needs MAINNET_LEGAL_COPY_APPROVED=true: a
+ * person's assertion that counsel reviewed the pages as rendered (Terms,
+ * Privacy, /legal/company, the risk warning). Build-time only (not
  * NEXT_PUBLIC_): nothing at runtime reads it.
  */
 const MAINNET_LEGAL_ACK = "MAINNET_LEGAL_COPY_APPROVED";
@@ -62,6 +72,30 @@ export function assertBuildNetwork(
         `legal copy, then set ${MAINNET_LEGAL_ACK}=true for this build.`,
     );
   }
+}
+
+/**
+ * A MAINNET production build also needs the operator and legal slots complete
+ * (lib/legal/readiness.ts): the operator record with its registration details,
+ * governing law and forum; the licence, or MAINNET_LICENSE_NOT_REQUIRED=true
+ * on counsel's written opinion; counsel's mainnet Terms, Privacy Policy and
+ * acceptance-dialog summary with no devnet wording; and counsel's purchase
+ * risk warning. The error lists every missing item. Other networks, `next
+ * dev` and tests are unaffected.
+ */
+export function assertBuildMainnetLegal(
+  phase: string,
+  env: Record<string, string | undefined> = process.env,
+  slots: MainnetLegalSlots = MAINNET_LEGAL_SLOTS,
+): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  if (env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() !== "mainnet") return;
+  const problems = mainnetLegalProblems(env, slots);
+  if (problems.length === 0) return;
+  throw new Error(
+    `Refusing a mainnet build: the operator and legal slots are not complete (lib/legal/, ${MAINNET_LICENSE_WAIVER}):\n` +
+      problems.map((problem) => `  - ${problem}`).join("\n"),
+  );
 }
 
 /**
@@ -307,5 +341,6 @@ export default function config(phase: string): NextConfig {
   assertBuildSupabase(phase);
   assertBuildTurnstile(phase);
   assertBuildKycRegistry(phase);
+  assertBuildMainnetLegal(phase);
   return nextConfig;
 }
