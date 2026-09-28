@@ -12,7 +12,9 @@
  * proves the step landed. The order never leaves a role without a holder:
  * grant the new Admin first, move the KYC, blocklist, custody and treasury
  * roles while the current super admin still holds everything, rotate the
- * super admin last, then clean up with the new super admin.
+ * super admin last (the accept always closes the outgoing key's Admin record,
+ * so a target that keeps that key as an Admin re-grants it at once), then
+ * clean up with the new super admin.
  *
  * Roles live only on the chain (lib/server/admin-gate.ts reads the Platform
  * and the Admin records; there is no role table in the database), so the
@@ -28,7 +30,9 @@ import {
   DEFAULT_ADDRESS,
   ROLE_MAP_SCHEMA,
   checkRoleOverlaps,
+  overlapAckRequired,
   roleOverlapsOf,
+  secondAdminWarning,
   validateRoleMap,
   type RoleMapContext,
   type RoleOverlapAck,
@@ -119,7 +123,25 @@ export async function validateHandoverTarget(input: unknown, ctx: RoleMapContext
     protocolTreasury,
     squads: { vault: squadsVault ?? (DEFAULT_ADDRESS as Address), members: [] },
   });
-  const { acks } = checkRoleOverlaps({ overlaps, acknowledgements: input.acknowledgedRoleOverlaps, mainnet: ctx.network === "mainnet", errors, warnings });
+  const { acks, acknowledged } = checkRoleOverlaps({
+    overlaps,
+    acknowledgements: input.acknowledgedRoleOverlaps,
+    required: overlapAckRequired(ctx.network),
+    errors,
+    warnings,
+  });
+  const noSecondAdmin = secondAdminWarning(overlaps, superAdmin, admins);
+  if (noSecondAdmin) warnings.push(noSecondAdmin);
+  // The role map rules for the vault and the treasury (D5), so a target file
+  // cannot plan what the role map would refuse.
+  if (squadsVault && blocklistAuthority === squadsVault) errors.push("blocklistAuthority must not be the Squads vault");
+  if (squadsVault && kycAuthority === squadsVault) errors.push("kycAuthority must not be the Squads vault");
+  const treasuryIsRoleKey = overlaps.some((o) => acknowledged.has(o.key) && o.roles.includes("protocolTreasury"));
+  if (protocolTreasury !== squadsVault && !treasuryIsRoleKey) {
+    const text = `protocolTreasury ${protocolTreasury} is neither the squadsVault nor a role key acknowledged in acknowledgedRoleOverlaps (a mistyped or foreign address would receive every protocol fee)`;
+    if (ctx.network === "mainnet") errors.push(text);
+    else warnings.push(text);
+  }
   if (errors.length) throw new ChainGateError(`Handover target rejected: ${errors.join("; ")}`);
   return {
     target: {
@@ -210,6 +232,8 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
   const outgoing = [...holders].filter((key) => !targetKeys.has(key)) as Address[];
   const saRotates = current.superAdmin !== target.superAdmin;
   const SA = current.superAdmin;
+  /** The outgoing SA stays an Admin in the target (its record is re-granted after the accept). */
+  const keepsOldSa = saRotates && target.admins.includes(SA);
 
   // Prepare: every key that will accept or sign must be able to use the front.
   const newKeys = [
@@ -447,7 +471,7 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
   // Rights issuances cannot move (K19): publish_milestone needs its creator's Admin record.
   for (const issuance of holdings.rightsIssuances.filter((r) => outgoingSet.has(r.authority))) {
     decisions.push(
-      `Rights issuance ${issuance.address} was opened by the outgoing key ${issuance.authority} and has no rotation (K19): publish its outstanding milestones before that key loses its Admin record, or keep an Admin record for it (the new super admin re-grants it with add_admin) until the issuance is finished.`,
+      `Rights issuance ${issuance.address} was opened by the outgoing key ${issuance.authority} and has no rotation (K19): publish its outstanding milestones before that key loses its Admin record, or keep that key in the target's admins until the issuance is finished (for the outgoing super admin the plan then re-grants its record right after accept_platform_admin).`,
     );
   }
   // Pending issuer recoveries staged by the current SA go stale when it rotates (K10).
@@ -458,6 +482,18 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
   }
   for (const transfer of inv.authorityTransfers.filter((t) => saRotates && t.kind === "custody" && !t.stale && t.proposedBy === SA && t.newAuthority !== custodySuccessor)) {
     decisions.push(`Custody proposal ${transfer.address} (to ${transfer.newAuthority}) goes stale when the super admin rotates: accept it first or re-propose it afterwards.`);
+  }
+
+  if (keepsOldSa) {
+    const gap = [
+      ...holdings.custodyVaults.filter((v) => v.authority === SA && LIVE_VAULT_STATES.has(v.state)).map((v) => `custody vault ${v.address}`),
+      ...holdings.rightsIssuances.filter((r) => r.authority === SA).map((r) => `rights issuance ${r.address}`),
+    ];
+    if (gap.length) {
+      decisions.push(
+        `${SA} stays an Admin in the target, but accept_platform_admin closes its Admin record until the new super admin re-grants it (the add_admin step right after the accept): ${gap.join(", ")} cannot be operated in between. Run the two steps back to back, or move the custody vaults first (propose/accept custody authority to another Admin).`,
+      );
+    }
   }
 
   // Super admin last: the current SA keeps every repair tool until here.
@@ -477,21 +513,44 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
       });
       superAdmin.push(proposeId);
     }
-    superAdmin.push(
-      add({
-        phase: "super-admin",
-        title: `accept_platform_admin (${target.superAdmin})`,
-        instruction: "accept_platform_admin",
-        signer: { role: "superAdmin (new)", key: target.superAdmin, side: "new" },
-        where: "/account/roles → Waiting for your acceptance → Super Admin (read the checklist in the dialog), or /issuer/authority",
-        requires: proposeId ? [proposeId] : [...beforeMove, ...move],
-        check: `Platform.admin == ${target.superAdmin}; the Admin record of ${SA} is closed`,
-        notes: [
-          `Closes the Admin record of ${SA} and keeps (or creates) the new key's. From here only ${target.superAdmin} clears pause bits, grants and removes Admins, decides KYB and sets the treasury.`,
-          "If the deployed program has the Talas 8.3 timelock for super-admin rotation, the accept waits for it: re-run this plan.",
-        ],
-      }),
-    );
+    const acceptId = add({
+      phase: "super-admin",
+      title: `accept_platform_admin (${target.superAdmin})`,
+      instruction: "accept_platform_admin",
+      signer: { role: "superAdmin (new)", key: target.superAdmin, side: "new" },
+      where: "/account/roles → Waiting for your acceptance → Super Admin (read the checklist in the dialog), or /issuer/authority",
+      requires: proposeId ? [proposeId] : [...beforeMove, ...move],
+      check: `Platform.admin == ${target.superAdmin}; the Admin record of ${SA} is closed`,
+      notes: [
+        `Closes the Admin record of ${SA} and keeps (or creates) the new key's. From here only ${target.superAdmin} clears pause bits, grants and removes Admins, decides KYB and sets the treasury.`,
+        "If the deployed program has the Talas 8.3 timelock for super-admin rotation, the accept waits for it: re-run this plan.",
+      ],
+    });
+    superAdmin.push(acceptId);
+    // The accept always closes the outgoing SA's Admin record; a target that
+    // keeps that key as an Admin gets the record back from the new SA at once.
+    if (keepsOldSa) {
+      const vaults = holdings.custodyVaults.filter((v) => v.authority === SA && LIVE_VAULT_STATES.has(v.state)).map((v) => v.address);
+      const issuances = holdings.rightsIssuances.filter((r) => r.authority === SA).map((r) => r.address);
+      const issuers = holdings.issuers.filter((i) => i.authority === SA).map((i) => i.address);
+      superAdmin.push(
+        add({
+          phase: "super-admin",
+          title: `add_admin(${SA})`,
+          instruction: "add_admin",
+          signer: { role: "superAdmin (new)", key: target.superAdmin, side: "new" },
+          where: "/admin/admins → Grant (Super Admin only)",
+          requires: [acceptId],
+          check: `Admin record ["admin", ${SA}] exists again (chain:inventory admins)`,
+          notes: [
+            `accept_platform_admin closed the Admin record of ${SA}, which the target keeps as an Admin: grant it again right after the accept. Until this lands ${SA} cannot pause or act as an Admin.`,
+            ...(vaults.length ? [`Until then the custody vaults it operates cannot be triggered, realized or returned (K10): ${vaults.join(", ")}.`] : []),
+            ...(issuances.length ? [`Until then publish_milestone is refused for the rights issuances it opened (K19): ${issuances.join(", ")}.`] : []),
+            ...(issuers.length ? [`Until then its issuer actions that rest on its Admin record fail for: ${issuers.join(", ")}.`] : []),
+          ],
+        }),
+      );
+    }
   }
 
   // Cleanup: the new super admin removes Admin records the target does not keep.

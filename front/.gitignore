@@ -2,6 +2,8 @@
 
 # dependencies
 /node_modules
+# the operator's pinned Ledger install for chain:emergency (never committed)
+/scripts/chain/ledger/node_modules
 /.pnp
 .pnp.*
 .yarn/*

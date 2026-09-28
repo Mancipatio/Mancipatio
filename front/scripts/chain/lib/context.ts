@@ -59,6 +59,8 @@ export type ToolDeps = {
   signal?: AbortSignal;
   /** chain:emergency with CHAIN_SIGNER: opens the Ledger (tests inject a device). */
   ledger?: LedgerOpener;
+  /** The mainnet source guard's `git status` (tests inject the tree state). */
+  sourceDirty?: (root: string) => string[];
 };
 
 export type ToolContext = {

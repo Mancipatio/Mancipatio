@@ -1,5 +1,5 @@
 {
-  "$comment": "Mainnet example of the company-wallet model (Talas 8.2) with placeholder public keys (fill-pattern addresses nobody holds). One company wallet holds the Super Admin (and its Admin record), the KYC registry authority, the BlocklistAuthority and the protocol treasury; acknowledgedRoleOverlaps names that key with its exact role set and a reason, without which the map is refused on mainnet. The upgrade authority stays with the Squads vault (2 of 3, the company wallet is not a member). A 1-of-N vault needs \"acknowledgedSingleKeyUpgradeAuthority\": \"<squads.multisig>\" as well. Replace every key before use: kyc.registry = KycRegistry PDA(deployer); squads.vault = PDA([multisig, multisig, vault, 0], SQDS4). No secrets ever go in a role map. See ops/runbook-mainnet.md, Company wallet model.",
+  "$comment": "Mainnet example of the company-wallet model (Talas 8.2) with placeholder public keys (fill-pattern addresses nobody holds). One company wallet holds the Super Admin (and its Admin record), the KYC registry authority, the BlocklistAuthority and the protocol treasury; acknowledgedRoleOverlaps names that key with its exact role set and a reason, without which the map is refused on mainnet. admins[] holds one more Admin record, a Ledger of another fully trusted person, so a lost company wallet does not also remove the pause; the program has no pause-only role, so that key has every Admin power (approve sales, clawback, custody, OTC): without it every tool warns NO SECOND ADMIN. The upgrade authority stays with the Squads vault (2 of 3, the company wallet is not a member). A 1-of-N vault needs \"acknowledgedSingleKeyUpgradeAuthority\": \"<squads.multisig>\" as well. Replace every key before use: kyc.registry = KycRegistry PDA(deployer); squads.vault = PDA([multisig, multisig, vault, 0], SQDS4). No secrets ever go in a role map. See ops/runbook-mainnet.md, Company wallet model.",
   "schema": "mancipatio-role-map-v2",
   "network": "mainnet",
   "genesisHash": "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
@@ -14,7 +14,7 @@
   "deployer": "Bswb3UyeD1pUTaGiE6WvqwFpJZsQSEY1xhJePCDTHdvp",
   "bufferWriter": "BwrtBnSeoK7hbfXDfPqr8p2aYj5c7JDqX6yJSaG42yFX",
   "superAdmin": "C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE",
-  "admins": [],
+  "admins": ["CMNf3bEiM6u4SD2GHBoMt4fA1gLp9gLksYyEnrXeWyBm"],
   "blocklistAuthority": "C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE",
   "kyc": {
     "authority": "C1nBL5ufPcQvjkmj6hAmRgoLntHonMuf5WdxVxJenJaE",

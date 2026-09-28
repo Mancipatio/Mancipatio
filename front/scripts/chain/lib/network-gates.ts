@@ -137,8 +137,20 @@ export type GateFinding = { severity: "blocker" | "warning" | "info"; code: stri
 const featureText = (f: FeatureStatus) =>
   `${f.simd} ${f.state === "active" ? `active since slot ${f.activatedAt}` : f.state === "pending" ? "pending (activates at an epoch boundary)" : f.state}`;
 
+export type GateFindingOptions = {
+  /**
+   * Nothing writes program code from here on (a pre-handover or handed-over
+   * inventory): SIMD-0500 refuses only a new deploy or upgrade, never the
+   * execution of a program already deployed, and S7 (SetAuthority) writes no
+   * code. The upgrade itself stays refused by `sbpfUpgradeProblem`.
+   */
+  noCodeWrite?: boolean;
+  /** Programs whose live ProgramData already equals the Release .so. */
+  live?: ReadonlySet<ProgramName>;
+};
+
 /** Findings for the gates and, with a Release, its SBPF versions. */
-export function networkGateFindings(gates: NetworkGates, sbpf: SbpfInfo[] | null): GateFinding[] {
+export function networkGateFindings(gates: NetworkGates, sbpf: SbpfInfo[] | null, options: GateFindingOptions = {}): GateFinding[] {
   const out: GateFinding[] = [];
   const deployGate = gates.features.find((f) => f.id === SBPF_DEPLOY_GATE.id)!;
   if (sbpf) {
@@ -148,7 +160,14 @@ export function networkGateFindings(gates: NetworkGates, sbpf: SbpfInfo[] | null
       }
       const old = info.version === null || info.version < 3;
       const described = info.version === null ? "unknown" : `v${info.version}`;
-      if (old && deployGate.state === "active") {
+      const deployed = options.noCodeWrite === true || options.live?.has(info.program) === true;
+      if (old && deployGate.state === "active" && deployed) {
+        out.push({
+          severity: "warning",
+          code: "sbpf-gate",
+          message: `${info.program}: the Release .so is SBPF ${described} and ${featureText(deployGate)}: the deployed program keeps running, but this Release can no longer be deployed or used for an upgrade (build SBPF v3 before the next upgrade)`,
+        });
+      } else if (old && deployGate.state === "active") {
         out.push({
           severity: "blocker",
           code: "sbpf-gate",

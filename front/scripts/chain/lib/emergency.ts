@@ -16,8 +16,11 @@
  * (`usb://ledger?key=N`, see ./ledger.ts). The send re-probes, simulates the
  * signed transaction with signature verification, journals it, sends it and
  * checks the result at finalized, through the same pipeline as the other tools.
- * On mainnet the live canonical IDL must define the instruction exactly as
- * front/idl does (or CHAIN_EMERGENCY_IDL_UNCHECKED=1, recorded).
+ * On mainnet the guarded source (SOURCE_INTEGRITY_PATHS: front/lib builds the
+ * instruction, front/scripts/chain signs it) must be clean, as for every other
+ * sending tool (or CHAIN_EMERGENCY_DIRTY_OK=1, recorded), and the live
+ * canonical IDL must define the instruction exactly as front/idl does (or
+ * CHAIN_EMERGENCY_IDL_UNCHECKED=1, recorded).
  */
 import {
   createNoopSigner,
@@ -64,7 +67,9 @@ import type { ChainRpc } from "./rpc";
 import {
   ChainGateError,
   ChainPlanError,
+  SOURCE_INTEGRITY_PATHS,
   canonicalJson,
+  dirtySourcePaths,
   ledgerDerivationPath,
   loadHotSigner,
   readLocalIdl,
@@ -397,6 +402,20 @@ export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
   ctx.phase = "inputs";
   const req = readEmergencyRequest(ctx.env);
   evidence.request = req;
+  // The mainnet source guard of the other sending tools: the IDL check below
+  // covers one instruction definition, not the code that builds and signs it.
+  if (config.network === "mainnet") {
+    const dirty = (ctx.deps.sourceDirty ?? dirtySourcePaths)(ctx.root);
+    if (dirty.length) {
+      if (ctx.env.CHAIN_EMERGENCY_DIRTY_OK?.trim() !== "1") {
+        throw new ChainGateError(
+          `The working tree has uncommitted changes under ${SOURCE_INTEGRITY_PATHS.join(", ")} (${dirty.length} paths): run from a clean checkout of the live Release tag, or set CHAIN_EMERGENCY_DIRTY_OK=1 (recorded)`,
+        );
+      }
+      evidence.sourceDirtyOverride = dirty;
+      ctx.log(`warning: CHAIN_EMERGENCY_DIRTY_OK=1: the guarded source has ${dirty.length} uncommitted paths (recorded in the evidence)`);
+    }
+  }
 
   ctx.phase = "probe";
   const state = await probeEmergencyState(ctx.rpc, req);

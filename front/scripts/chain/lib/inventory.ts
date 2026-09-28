@@ -521,7 +521,12 @@ export function inventoryFindings(
   for (const r of inv.drift.saleAuthorityDrift) add("warning", "k14-sale", `sale ${r.sale}: authority ${r.authority} ≠ issuer authority ${r.issuerAuthority ?? "unknown"}`);
   for (const r of inv.drift.payoutFounderDrift) add("warning", "k14-payout", `payout vault ${r.payoutVault}: founder ${r.founder} ≠ issuer authority ${r.issuerAuthority ?? "unknown"}`);
   for (const b of [...inv.buffers.loader, ...inv.buffers.pm]) add("warning", "buffer", `leftover buffer ${b.address} held by ${b.holder}`);
-  if (inv.gates) for (const f of networkGateFindings(inv.gates, inv.sbpf ?? null)) add(f.severity, f.code, f.message);
+  if (inv.gates) {
+    // SIMD-0500 blocks only where code is still written: a deploy in progress
+    // of a Release that is not live yet. S7 and later phases write no code.
+    const live = new Set(inv.programs.filter((p) => p.release?.equal).map((p) => p.name));
+    for (const f of networkGateFindings(inv.gates, inv.sbpf ?? null, { noCodeWrite: phase !== "in-progress", live })) add(f.severity, f.code, f.message);
+  }
 
   if (!map) {
     if (inv.blocklist && inv.platform && inv.blocklist.authority === inv.platform.admin) add("warning", "ba-is-sa", "blocklist authority == super admin");
@@ -602,7 +607,7 @@ export function inventoryFindings(
   }
   if (map.blocklistAuthority === map.superAdmin) add("warning", "ba-is-sa", "blocklist authority == super admin");
   // Talas 8.2: every key the map gives several roles, with what that means.
-  // The role map refuses an unacknowledged overlap on mainnet.
+  // The role map refuses an unacknowledged overlap except on localnet.
   const acks = new Map<string, string>(map.acknowledgedRoleOverlaps.map((ack) => [ack.key, ack.reason]));
   for (const overlap of roleOverlapsOf(map)) add("warning", "role-overlap", describeOverlap(overlap, acks.get(overlap.key) ?? null));
   const pin = inv.kycRegistries.find((r) => r.address === map.kyc.registry);

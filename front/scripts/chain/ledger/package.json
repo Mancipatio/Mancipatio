@@ -1,0 +1,14 @@
+{
+  "name": "mancipatio-chain-ledger",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Pinned Ledger packages for chain:emergency; installed only on the operator machine with npm ci --ignore-scripts (ops/runbook-mainnet.md, chain:emergency).",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@ledgerhq/hw-app-solana": "7.11.0",
+    "@ledgerhq/hw-transport-node-hid-noevents": "6.36.0"
+  },
+  "overrides": {
+    "node-hid": "3.4.0"
+  }
+}

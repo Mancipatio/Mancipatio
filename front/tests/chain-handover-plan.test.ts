@@ -199,6 +199,51 @@ describe("handover target (Talas 8.2)", () => {
     expect(await reject({ ...json, network: "mainnet", genesisHash: CLUSTER_GENESIS_HASHES.mainnet, acknowledgedRoleOverlaps: [] }, mainnet)).toMatch(
       /role overlap not acknowledged/,
     );
+    // The devnet handover is the rehearsal of that acknowledgement: refused too.
+    expect(await reject({ ...json, acknowledgedRoleOverlaps: [] })).toMatch(/role overlap not acknowledged/);
+  });
+
+  it("applies the role map rules for the vault and the treasury: an unknown treasury is refused on mainnet", async () => {
+    const w = await world();
+    const { C, json } = await companyTarget(w, key(230));
+    const onMainnet = { ...json, network: "mainnet", genesisHash: CLUSTER_GENESIS_HASHES.mainnet };
+    const reject = async (value: unknown, ctx: RoleMapContext): Promise<string> => {
+      try {
+        await validateHandoverTarget(value, ctx);
+      } catch (error) {
+        return (error as Error).message;
+      }
+      throw new Error("expected the target to be rejected");
+    };
+    // A treasury that holds no other role and is not the vault: a typo or a foreign key.
+    const unknownTreasury = {
+      ...onMainnet,
+      protocolTreasury: key(260),
+      acknowledgedRoleOverlaps: [{ key: C, roles: ["superAdmin", "kyc.authority", "blocklistAuthority"], reason: "company wallet (test)" }],
+    };
+    expect(await reject(unknownTreasury, mainnet)).toMatch(/protocolTreasury \S+ is neither the squadsVault nor a role key/);
+    const { warnings } = await validateHandoverTarget({ ...unknownTreasury, network: "devnet", genesisHash: CLUSTER_GENESIS_HASHES.devnet }, devnet);
+    expect(warnings.join(" ")).toMatch(/is neither the squadsVault nor a role key/);
+    // The vault as the treasury is fine; as the BA or the KYC authority it is not.
+    const vault = key(261);
+    await expect(validateHandoverTarget({ ...unknownTreasury, protocolTreasury: vault, squadsVault: vault }, mainnet)).resolves.toBeTruthy();
+    const vaultBa = {
+      ...onMainnet,
+      squadsVault: vault,
+      protocolTreasury: vault,
+      blocklistAuthority: vault,
+      acknowledgedRoleOverlaps: [{ key: C, roles: ["superAdmin", "kyc.authority"], reason: "company wallet (test)" }],
+    };
+    expect(await reject(vaultBa, mainnet)).toMatch(/blocklistAuthority must not be the Squads vault/);
+  });
+
+  it("warns when the company wallet model keeps no second Admin record (nobody could pause after a loss)", async () => {
+    const w = await world();
+    const { json } = await companyTarget(w, key(230), { admins: [] });
+    const { warnings } = await validateHandoverTarget(json, devnet);
+    expect(warnings.join(" ")).toMatch(/NO SECOND ADMIN: .* no pause-only role/);
+    const kept = await validateHandoverTarget((await companyTarget(w, key(230))).json, devnet);
+    expect(kept.warnings.join(" ")).not.toMatch(/NO SECOND ADMIN/);
   });
 
   it("accepts a role map v2 as the target", async () => {
@@ -264,6 +309,42 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     expect(decisions).toMatch(/Issuer recovery .* goes stale/);
     expect(plan.outgoing).toEqual(expect.arrayContaining([P, A1, A2]));
     expect(plan.warnings.join(" ")).toMatch(/superAdmin \+ kyc\.authority \+ blocklistAuthority \+ protocolTreasury/);
+  });
+
+  it("an outgoing super admin the target keeps as an Admin gets its record back right after the accept", async () => {
+    const w = await world();
+    const { P, A1, A2, E, registry, vault } = await devnetLike(w);
+    const { C, json } = await companyTarget(w, registry, { admins: [P, E] });
+    const { target } = await validateHandoverTarget(json, devnet);
+    const plan = planHandover(await inventoryOf(w, registry), target);
+    expect(titles(plan)).toEqual([
+      "Onboard",
+      "Fund",
+      "add_admin",
+      "propose_kyc_registry_authority",
+      "accept_kyc_registry_authority",
+      "propose_blocklist_authority",
+      "accept_blocklist_authority",
+      "set_protocol_treasury",
+      "propose_platform_admin",
+      "accept_platform_admin",
+      "add_admin",
+      "remove_admin",
+      "remove_admin",
+      "Verify",
+    ]);
+    const accept = plan.steps.find((s) => s.instruction === "accept_platform_admin")!;
+    const regrant = plan.steps.find((s) => s.title === `add_admin(${P})`)!;
+    expect(regrant).toMatchObject({ phase: "super-admin", signer: { key: C, side: "new" }, requires: [accept.id], where: expect.stringMatching(/^\/admin\/admins/) });
+    expect(plan.steps.indexOf(regrant)).toBe(plan.steps.indexOf(accept) + 1);
+    // Its custody vault and rights issuance are without an Admin in between: noted and decided.
+    expect(regrant.notes.join(" ")).toMatch(new RegExp(`custody vaults it operates .*${vault}`));
+    expect(regrant.notes.join(" ")).toMatch(/publish_milestone is refused/);
+    expect(plan.decisions.join(" ")).toMatch(new RegExp(`${P} stays an Admin in the target.*custody vault ${vault}`));
+    // P is not outgoing; the removals and the verify step come after the re-grant.
+    expect(plan.outgoing).not.toContain(P);
+    expect(plan.outgoing).toEqual(expect.arrayContaining([A1, A2]));
+    for (const step of plan.steps.filter((s) => s.phase === "cleanup")) expect(step.requires).toContain(regrant.id);
   });
 
   it("an issuer successor that is an Admin key must be accepted before the super admin rotation", async () => {

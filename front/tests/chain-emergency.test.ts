@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { createKeyPairSignerFromBytes, getAddressEncoder, signBytes, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
@@ -21,10 +22,10 @@ import {
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import { runTool } from "@/scripts/chain/lib/context";
 import { compareIdlInstruction, emergencyTool, parsePauseBits, probeEmergencyState, readEmergencyRequest } from "@/scripts/chain/lib/emergency";
-import { messageHash, openNodeHidLedger, type LedgerDevice } from "@/scripts/chain/lib/ledger";
+import { LEDGER_DIR, LEDGER_PACKAGES, messageHash, nodeHidLedgerOpener, type LedgerDevice } from "@/scripts/chain/lib/ledger";
 import type { ChainEnv } from "@/scripts/chain/lib/safety";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
-import { deps, env, localIdl, rpcFor, seedIdl, world, type World } from "./helpers/chain-world";
+import { deps, env, localIdl, root, rpcFor, seedIdl, world, type World } from "./helpers/chain-world";
 
 /** A bootstrapped chain: SA, one more Admin (the kycAuthority test key), the BA. */
 async function seeded(pauseFlags = 0) {
@@ -252,10 +253,66 @@ describe("chain:emergency building blocks", () => {
     expect(compareIdlInstruction(probe(local), "no_such_instruction")).toBe("unreadable");
   });
 
-  it("names the missing optional Ledger packages instead of failing obscurely", async () => {
-    const installed = fs.existsSync(path.resolve(__dirname, "../node_modules/@ledgerhq/hw-transport-node-hid"));
-    if (installed) return; // an operator machine: opening would talk to USB
-    await expect(openNodeHidLedger()).rejects.toThrow(/npm install --no-save @ledgerhq\/hw-transport-node-hid @ledgerhq\/hw-app-solana/);
+  it("pins the Ledger packages: exact versions, an integrity for every tarball, the public registry only", () => {
+    const manifest = JSON.parse(fs.readFileSync(path.join(LEDGER_DIR, "package.json"), "utf8"));
+    expect(manifest.private).toBe(true);
+    expect(Object.keys(manifest.dependencies).sort()).toEqual([...LEDGER_PACKAGES].sort());
+    for (const version of Object.values<string>(manifest.dependencies)) expect(version).toMatch(/^\d+\.\d+\.\d+$/);
+    const lock = JSON.parse(fs.readFileSync(path.join(LEDGER_DIR, "package-lock.json"), "utf8"));
+    const entries = Object.entries<{ version: string; resolved: string; integrity: string }>(lock.packages).filter(([name]) => name);
+    expect(entries.length).toBeGreaterThan(2);
+    for (const [, entry] of entries) {
+      expect(entry.resolved).toMatch(/^https:\/\/registry\.npmjs\.org\//);
+      expect(entry.integrity).toMatch(/^sha512-/);
+    }
+    for (const name of LEDGER_PACKAGES) expect(lock.packages[`node_modules/${name}`].version).toBe(manifest.dependencies[name]);
+    // node-hid 3 carries its prebuilt binaries in the tarball (npm ci --ignore-scripts).
+    expect(lock.packages["node_modules/node-hid"].version).toMatch(/^3\./);
+    // The operator's install stays out of git (and so out of the source guard's porcelain).
+    expect(fs.readFileSync(path.resolve(__dirname, "../.gitignore"), "utf8")).toMatch(/^\/scripts\/chain\/ledger\/node_modules$/m);
+  });
+
+  it("loads only the pinned install: a missing or different version is named, the pinned one is driven", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ledger-pin-"));
+    await expect(nodeHidLedgerOpener(dir)()).rejects.toThrow(/package lock is missing/);
+    fs.copyFileSync(path.join(LEDGER_DIR, "package.json"), path.join(dir, "package.json"));
+    fs.copyFileSync(path.join(LEDGER_DIR, "package-lock.json"), path.join(dir, "package-lock.json"));
+    await expect(nodeHidLedgerOpener(dir)()).rejects.toThrow(/is not installed; on the operator machine run: cd front\/scripts\/chain\/ledger && npm ci --ignore-scripts/);
+    const lock = JSON.parse(fs.readFileSync(path.join(dir, "package-lock.json"), "utf8"));
+    // Fake CommonJS builds of both packages (exports.default, as Ledger ships them).
+    const fake = (name: string, version: string, body: string) => {
+      const pkg = path.join(dir, "node_modules", name);
+      fs.mkdirSync(pkg, { recursive: true });
+      fs.writeFileSync(path.join(pkg, "package.json"), JSON.stringify({ name, version, main: "index.js" }));
+      fs.writeFileSync(path.join(pkg, "index.js"), `"use strict";\nObject.defineProperty(exports, "__esModule", { value: true });\n${body}`);
+    };
+    const pinned = (name: string) => lock.packages[`node_modules/${name}`].version as string;
+    fake(
+      LEDGER_PACKAGES[0],
+      pinned(LEDGER_PACKAGES[0]),
+      `exports.default = class { static async open(d) { globalThis.__ledgerCalls.push("open:" + d); return { close: async () => globalThis.__ledgerCalls.push("close") }; } };`,
+    );
+    fake(
+      LEDGER_PACKAGES[1],
+      "0.0.1",
+      `exports.default = class { constructor(t) { this.t = t; } async getAddress(p) { globalThis.__ledgerCalls.push("address:" + p); return { address: Buffer.alloc(32, 7) }; } async signTransaction(p, m) { globalThis.__ledgerCalls.push("sign:" + p + ":" + m.length); return { signature: Buffer.alloc(64, 9) }; } };`,
+    );
+    await expect(nodeHidLedgerOpener(dir)()).rejects.toThrow(/@ledgerhq\/hw-app-solana 0\.0\.1 is installed but the lock pins/);
+    fs.writeFileSync(
+      path.join(dir, "node_modules", LEDGER_PACKAGES[1], "package.json"),
+      JSON.stringify({ name: LEDGER_PACKAGES[1], version: pinned(LEDGER_PACKAGES[1]), main: "index.js" }),
+    );
+    const calls: string[] = [];
+    (globalThis as { __ledgerCalls?: string[] }).__ledgerCalls = calls;
+    try {
+      const device = await nodeHidLedgerOpener(dir)();
+      expect(await device.getPublicKey("44'/501'/0'")).toEqual(new Uint8Array(32).fill(7));
+      expect(await device.signMessage("44'/501'/0'", new Uint8Array(5))).toEqual(new Uint8Array(64).fill(9));
+      await device.close();
+    } finally {
+      delete (globalThis as { __ledgerCalls?: string[] }).__ledgerCalls;
+    }
+    expect(calls).toEqual(["open:", "address:44'/501'/0'", "sign:44'/501'/0':5", "close"]);
   });
 });
 
@@ -275,7 +332,8 @@ describe("chain:emergency on mainnet", () => {
   it("needs the live canonical IDL to define the instruction as front/idl does (or a recorded override)", async () => {
     const w = await mainnetWorld();
     const op = { CHAIN_EMERGENCY_OP: "pause", CHAIN_EMERGENCY_SIGNER: w.keys.superAdmin as Address, CHAIN_PAUSE_BITS: "all" };
-    const opts = { ...deps(w), home: w.dir };
+    // A clean guarded source tree (the developer's checkout may not be).
+    const opts = { ...deps(w), home: w.dir, sourceDirty: () => [] };
     const refused = await runTool("emergency", mainnetEnv(w, op), emergencyTool, opts);
     expect(refused.error).toMatch(/cannot confirm set_pause_flags .*CHAIN_EMERGENCY_IDL_UNCHECKED=1/);
     const unchecked = await runTool("emergency", mainnetEnv(w, { ...op, CHAIN_EMERGENCY_IDL_UNCHECKED: "1" }), emergencyTool, opts);
@@ -295,5 +353,30 @@ describe("chain:emergency on mainnet", () => {
         opts,
       ),
     ).rejects.toThrow(/CHAIN_CU_PRICE is required/);
+  });
+
+  it("refuses a dirty guarded source tree like the other sending tools (or a recorded override)", async () => {
+    const w = await mainnetWorld();
+    await seedIdl(w, REGISTRY, localIdl("asset_registry"));
+    const op = { CHAIN_EMERGENCY_OP: "pause", CHAIN_EMERGENCY_SIGNER: w.keys.superAdmin as Address, CHAIN_PAUSE_BITS: "all" };
+    const dirty = [" M front/lib/generated/transfer_hook/instructions/addToBlocklist.ts", "?? front/scripts/chain/lib/debug.ts"];
+    const roots: string[] = [];
+    const opts = { ...deps(w), home: w.dir, sourceDirty: (root: string) => (roots.push(root), dirty) };
+    const refused = await runTool("emergency", mainnetEnv(w, op), emergencyTool, opts);
+    expect(refused.error).toMatch(/uncommitted changes under front\/idl, front\/lib, front\/scripts\/chain.* \(2 paths\).*CHAIN_EMERGENCY_DIRTY_OK=1/);
+    expect(refused.planDigest).toBeUndefined();
+    expect(w.chain.calls).not.toContain("simulateTransaction");
+    expect(roots).toEqual([root]);
+    const lines: string[] = [];
+    const override = await runTool("emergency", mainnetEnv(w, { ...op, CHAIN_EMERGENCY_DIRTY_OK: "1" }), emergencyTool, { ...opts, log: (line: string) => lines.push(line) });
+    expect(override.error ?? null).toBeNull();
+    expect(override.sourceDirtyOverride).toEqual(dirty);
+    expect(lines.join("\n")).toMatch(/warning: CHAIN_EMERGENCY_DIRTY_OK=1: the guarded source has 2 uncommitted paths/);
+    // Off mainnet the tree is only recorded (sourceTreeDirty), never checked here.
+    const d = await seeded();
+    const devnet = await runTool("emergency", env(d, { ...op, CHAIN_EMERGENCY_SIGNER: d.keys.superAdmin }), emergencyTool, { ...deps(d), sourceDirty: opts.sourceDirty });
+    expect(devnet.error ?? null).toBeNull();
+    expect(devnet.sourceDirtyOverride).toBeUndefined();
+    expect(roots).toHaveLength(2);
   });
 });

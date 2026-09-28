@@ -184,21 +184,29 @@ function parseOverlapAcks(value: unknown, errors: string[]): RoleOverlapAck[] {
 }
 
 /**
+ * Whether an unacknowledged overlap is an error: on every network but
+ * localnet, whose rehearsal and e2e fixtures give one key every role. The
+ * devnet handover is the first real use, so it proves the acknowledgement
+ * mainnet will require.
+ */
+export const overlapAckRequired = (network: Network) => network !== "localnet";
+
+/**
  * Checks `acknowledgedRoleOverlaps` against the overlaps a role layout has
  * (shared by the role map and the chain:handover target): every
  * acknowledgement must name a shared key with its exact role set; an overlap
- * without one is an error on mainnet and a warning elsewhere; an acknowledged
- * one adds the loud warning with its consequences. Returns the parsed
- * acknowledgements and the keys they cover.
+ * without one is an error when `required` (overlapAckRequired) and a warning
+ * otherwise; an acknowledged one adds the loud warning with its consequences.
+ * Returns the parsed acknowledgements and the keys they cover.
  */
 export function checkRoleOverlaps(input: {
   overlaps: RoleOverlap[];
   acknowledgements: unknown;
-  mainnet: boolean;
+  required: boolean;
   errors: string[];
   warnings: string[];
 }): { acks: RoleOverlapAck[]; acknowledged: Set<string> } {
-  const { overlaps, mainnet, errors, warnings } = input;
+  const { overlaps, required, errors, warnings } = input;
   const acks = parseOverlapAcks(input.acknowledgements, errors);
   const ackByKey = new Map<string, RoleOverlapAck>(acks.map((ack) => [ack.key, ack]));
   const acknowledged = new Set<string>();
@@ -215,11 +223,22 @@ export function checkRoleOverlaps(input: {
     else if (!ack) {
       const pair = overlap.roles.length === 2 ? `${overlap.roles[1]} == ${overlap.roles[0]}` : overlap.roles.join(" + ");
       const text = `${pair} (one key holds ${overlap.roles.length} roles; acknowledge it in acknowledgedRoleOverlaps)`;
-      if (mainnet) errors.push(`role overlap not acknowledged: ${text}`);
+      if (required) errors.push(`role overlap not acknowledged: ${text}`);
       else warnings.push(text);
     }
   }
   return { acks, acknowledged };
+}
+
+/**
+ * The company-wallet model with no other Admin record (Talas 8.2): a lost
+ * super admin key then leaves nobody who can pause. A second Admin is not a
+ * pause-only role: its record carries every Admin power.
+ */
+export function secondAdminWarning(overlaps: RoleOverlap[], superAdmin: Address, admins: Address[]): string | null {
+  const shared = overlaps.find((o) => o.key === superAdmin);
+  if (!shared || admins.some((admin) => admin !== superAdmin)) return null;
+  return `NO SECOND ADMIN: ${superAdmin} is ${shared.roles.join(" + ")} and no other key has an Admin record, so if that key is lost nobody can pause. Add an Admin record for a Ledger of another fully trusted person: the program has no pause-only role, so that key can also approve sales, claw back, open custody and OTC flows alone (watch it with the authority alarms)`;
 }
 
 export type RoleMapContext = {
@@ -422,9 +441,17 @@ export async function validateRoleMap(
 
   // Role overlaps (Talas 8.2): one key may hold several operational roles
   // only when `acknowledgedRoleOverlaps` names that key with its exact role
-  // set. On mainnet an unacknowledged overlap is an error; elsewhere a warning.
+  // set. An unacknowledged overlap is an error, except on localnet (a warning).
   const overlaps = roleOverlapsOf({ superAdmin, admins, blocklistAuthority, kyc: { authority: kycAuthority }, protocolTreasury, squads: { vault, members } });
-  const { acks, acknowledged } = checkRoleOverlaps({ overlaps, acknowledgements: input.acknowledgedRoleOverlaps, mainnet, errors, warnings });
+  const { acks, acknowledged } = checkRoleOverlaps({
+    overlaps,
+    acknowledgements: input.acknowledgedRoleOverlaps,
+    required: overlapAckRequired(ctx.network),
+    errors,
+    warnings,
+  });
+  const noSecondAdmin = secondAdminWarning(overlaps, superAdmin, admins);
+  if (noSecondAdmin) warnings.push(noSecondAdmin);
   const kycAdminAcknowledged = overlaps.some(
     (o) => acknowledged.has(o.key) && o.roles.includes("kyc.authority") && (o.roles.includes("admin") || o.roles.includes("superAdmin")),
   );

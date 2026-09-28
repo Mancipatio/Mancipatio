@@ -304,6 +304,34 @@ describe("cluster gates: SIMD-0500 and rent (release-lanac-6, -7)", () => {
     expect(sbpfUpgradeProblem(gates({ [SBPF_DEPLOY_GATE.id]: "pending" }), v0[0])).toBeNull();
   });
 
+  it("SIMD-0500 active blocks only a deploy still to come: S7 and handed-over see a warning (the live v0 program keeps running)", async () => {
+    const { map } = await world();
+    const v0 = [sbpfVersionOf("asset_registry", elf(0)), sbpfVersionOf("transfer_hook", elf(0))];
+    const withRelease = (equal: boolean) => {
+      const inv = clean(map);
+      inv.gates = gates({ [SBPF_DEPLOY_GATE.id]: "active" });
+      inv.sbpf = v0;
+      for (const p of inv.programs) p.release = { equal, length: 3, headroom: 1_000_000, verifyHash: null };
+      return inv;
+    };
+    // The Release is live: no phase blocks on it (S7 runs the pre-handover phase).
+    expect(phases.map((phase) => bySeverity(inventoryFindings(withRelease(true), map, phase), "sbpf-gate"))).toEqual([
+      ["warning", "warning"],
+      ["warning", "warning"],
+      ["warning", "warning"],
+    ]);
+    const live = inventoryFindings(withRelease(true), map, "pre-handover").find((f) => f.code === "sbpf-gate")!;
+    expect(live.message).toMatch(/the deployed program keeps running, but this Release can no longer be deployed or used for an upgrade/);
+    // Not live yet: the deploy still to come is refused while in progress; at
+    // handover the release-bytes gate is what blocks, not SIMD-0500.
+    const notLive = withRelease(false);
+    expect(bySeverity(inventoryFindings(notLive, map, "in-progress"), "sbpf-gate")).toEqual(["blocker", "blocker"]);
+    expect(bySeverity(inventoryFindings(notLive, map, "pre-handover"), "sbpf-gate")).toEqual(["warning", "warning"]);
+    expect(bySeverity(inventoryFindings(notLive, map, "pre-handover"), "release-bytes")).toEqual(["blocker", "blocker"]);
+    // The upgrade refusal (chain:squads-export op=upgrade) is unchanged.
+    expect(sbpfUpgradeProblem(gates({ [SBPF_DEPLOY_GATE.id]: "active" }), v0[0])).toMatch(/the loader refuses it/);
+  });
+
   it("rent: the current lamports per byte and SIMD-0437-3..5 / SIMD-0438; a reset or a superseded key warns", () => {
     const rent = networkGateFindings(gates(), null).find((f) => f.code === "rent")!;
     expect(rent.severity).toBe("info");

@@ -26,14 +26,22 @@ async function rejects(json: unknown, ctx: RoleMapContext = devnet): Promise<str
   throw new Error("expected the role map to be rejected");
 }
 
+/** The same map on localnet, where an unacknowledged overlap only warns (Talas 8.2 review). */
+function onLocalnet(json: Record<string, unknown>): [Record<string, unknown>, RoleMapContext] {
+  return [{ ...json, network: "localnet" }, { network: "localnet", genesis: json.genesisHash as string }];
+}
+
 describe("role map v2 validation", () => {
   it("kyc.authority may not get an Admin record (in admins, or as the SA) unless allowKycAdmin", async () => {
     const { keys, json } = await map();
     expect(await rejects({ ...json, admins: [...keys.admins, keys.kycAuthority] })).toMatch(/kyc.authority must not be in admins/);
     const kycIsSa = { ...json, superAdmin: keys.kycAuthority };
     expect(await rejects(kycIsSa)).toMatch(/kyc.authority must not be the superAdmin/);
-    await expect(validateRoleMap({ ...kycIsSa, allowKycAdmin: true }, devnet)).resolves.toBeTruthy();
-    await expect(validateRoleMap({ ...json, admins: [...keys.admins, keys.kycAuthority], allowKycAdmin: true }, devnet)).resolves.toBeTruthy();
+    // allowKycAdmin lifts that rule; the shared key still needs its overlap
+    // acknowledged off localnet (Talas 8.2), so the flag is checked on localnet.
+    await expect(validateRoleMap(...onLocalnet({ ...kycIsSa, allowKycAdmin: true }))).resolves.toBeTruthy();
+    await expect(validateRoleMap(...onLocalnet({ ...json, admins: [...keys.admins, keys.kycAuthority], allowKycAdmin: true }))).resolves.toBeTruthy();
+    expect(await rejects({ ...kycIsSa, allowKycAdmin: true })).toMatch(/role overlap not acknowledged: kyc\.authority == superAdmin/);
   });
 
 
@@ -112,8 +120,10 @@ describe("role map v2 validation", () => {
     expect(await rejects({ ...json, kyc: { ...(json.kyc as object), authority: keys.multisig } })).toMatch(/kyc.authority must not be the Squads/);
     expect(await rejects({ ...json, superAdmin: keys.vault })).toMatch(/superAdmin must not be the Squads vault/);
     await expect(validateRoleMap({ ...json, superAdmin: keys.vault, k4Fallback: true }, devnet)).resolves.toBeTruthy();
-    const same = await validateRoleMap({ ...json, blocklistAuthority: keys.superAdmin }, devnet);
+    // BA == SA: a warning on localnet, refused elsewhere without an acknowledgement.
+    const same = await validateRoleMap(...onLocalnet({ ...json, blocklistAuthority: keys.superAdmin }));
     expect(same.warnings.join(" ")).toMatch(/blocklistAuthority == superAdmin/);
+    expect(await rejects({ ...json, blocklistAuthority: keys.superAdmin })).toMatch(/role overlap not acknowledged: blocklistAuthority == superAdmin/);
   });
 
   it("never lists the SA in admins[] (accept_platform_admin creates its record)", async () => {
@@ -165,17 +175,37 @@ describe("role map v2 validation", () => {
     expect(text).toMatch(/claw back/);
     expect(text).toMatch(/no on-chain recovery/);
     expect(text).toMatch(/reason: "Licensed operator/);
+    // It keeps a second Admin record (another person's Ledger) for the pause.
+    expect(parsed.admins).toHaveLength(1);
+    expect(parsed.admins[0]).not.toBe(parsed.superAdmin);
+    expect(text).not.toMatch(/NO SECOND ADMIN/);
     expect(JSON.stringify(example)).not.toMatch(/\[\s*\d+\s*,\s*\d+\s*,\s*\d+/);
   });
 
-  it("refuses an unacknowledged role overlap on mainnet; elsewhere it only warns", async () => {
+  it("refuses an unacknowledged role overlap on mainnet and devnet; only localnet warns", async () => {
     const { json } = await map({}, "mainnet");
     expect(await rejects({ ...json, blocklistAuthority: json.superAdmin }, mainnet)).toMatch(
       /role overlap not acknowledged: blocklistAuthority == superAdmin/,
     );
     const dev = (await map()).json;
-    const { warnings } = await validateRoleMap({ ...dev, blocklistAuthority: dev.superAdmin }, devnet);
+    expect(await rejects({ ...dev, blocklistAuthority: dev.superAdmin })).toMatch(/role overlap not acknowledged: blocklistAuthority == superAdmin/);
+    const { warnings } = await validateRoleMap(...onLocalnet({ ...dev, blocklistAuthority: dev.superAdmin }));
     expect(warnings.join(" ")).toMatch(/acknowledge it in acknowledgedRoleOverlaps/);
+  });
+
+  it("the company wallet model without a second Admin record warns that nobody could pause after a loss", async () => {
+    const { keys, json } = await map({}, "mainnet");
+    const sa = keys.superAdmin;
+    const company = {
+      ...json,
+      admins: [],
+      blocklistAuthority: sa,
+      acknowledgedRoleOverlaps: [{ key: sa, roles: ["superAdmin", "blocklistAuthority"], reason: "one company wallet" }],
+    };
+    const alone = await validateRoleMap(company, mainnet);
+    expect(alone.warnings.join("\n")).toMatch(/NO SECOND ADMIN: \S+ is superAdmin \+ blocklistAuthority .* no pause-only role/);
+    const second = await validateRoleMap({ ...company, admins: [keys.admins[0]] }, mainnet);
+    expect(second.warnings.join("\n")).not.toMatch(/NO SECOND ADMIN/);
   });
 
   it("an acknowledgement names the key's exact role set and a reason, and cannot go stale", async () => {
