@@ -5,7 +5,8 @@ import { parseCustodyVaultId, requireCustodyRequestAmount } from "@/lib/custody-
 
 import { useCustodyOutcomeRecovery } from "@/lib/use-custody-outcome-recovery";
 import { CustodyAuthorityTransfer } from "@/components/custody-authority-transfer";
-import { DELIVERY_ESCROW_MAX_DEADLINE_SECONDS } from "@/lib/deadline-bounds";
+// DeliveryEscrow deadline: 24 h..365 d out (6148), checked before signing.
+import { deliveryDeadlineError } from "@/lib/deadline-bounds";
 import { custodyAuthorityRecord } from "@/lib/custody-authority";
 import {
   REALIZE_ACTION_LABEL,
@@ -4157,19 +4158,6 @@ function toDatetimeLocalValue(d: Date): string {
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** Deadline is mandatory for DeliveryEscrow and must be at least 24h out. */
-function deliveryDeadlineError(value: string): string | null {
-  if (!value.trim()) return "Deadline is required";
-  const t = new Date(value).getTime();
-  if (Number.isNaN(t)) return "Not a valid date";
-  if (t < Date.now() + DAY_MS)
-    return "Deadline must be at least 24 hours from now";
-  // v1: at most 365 days out (DeliveryDeadlineOutOfRange 6148).
-  if (t > Date.now() + DELIVERY_ESCROW_MAX_DEADLINE_SECONDS * 1000)
-    return "Deadline must be at most 365 days from now";
-  return null;
-}
 
 function ApproveDeliveryModal({
   req,

@@ -40,6 +40,24 @@ export function passportStatus(
   if (expiry <= nowSec) return "grace";
   return "eligible";
 }
+/**
+ * While a passport sits in the 30-day grace after its expiry: why the
+ * passport-path clawback stays closed and the chain time it opens (the
+ * program refuses it with 6079 until then). Null outside the grace.
+ */
+export function clawbackGraceNotice(
+  entry: { revoked: boolean; expiry: bigint | number } | null,
+  nowSec: number,
+): { opensAt: number; message: string } | null {
+  if (passportStatus(entry, nowSec) !== "grace" || !entry) return null;
+  const opensAt = Number(entry.expiry) + KYC_EXPIRY_CLAWBACK_GRACE_SECONDS;
+  const when = `${new Date(opensAt * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return {
+    opensAt,
+    message: `The passport expired, but the holder has a 30-day grace to renew it: the passport-path clawback opens on ${when}. Renewing the passport closes it again; blocklisting the wallet opens the blocklist path now.`,
+  };
+}
+
 export type ClawbackPath = "blocklist" | "kyc";
 
 export type ClawbackPathInput = {

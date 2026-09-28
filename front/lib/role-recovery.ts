@@ -40,6 +40,7 @@ import {
 import type { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
 import { findProgramDataPda } from "@/lib/pdas";
+import { proposalWindowState, type ProposalWindowState } from "@/lib/proposal-window";
 
 type Rpc = Parameters<typeof fetchMintTokenProgram>[0];
 export type RecoveryKind = "platform" | "blocklist";
@@ -176,4 +177,47 @@ export async function buildExecuteRoleRecovery(rpc: Rpc, kind: RecoveryKind, sig
     proposer: state.recovery.proposedBy,
     programData: await findProgramDataPda(TRANSFER_HOOK_PROGRAM_ADDRESS),
   });
+}
+
+export type RoleRecoveryNotice = {
+  title: string;
+  /** The key the recovery hands the role to. */
+  newKey: Address;
+  window: ProposalWindowState;
+  /** Shown to everyone: the role cannot rotate while this is pending. */
+  blocked: string;
+  /** Who may cancel, in words. */
+  cancelers: string;
+  /** Whether the connected wallet may cancel it (current holder or proposer). */
+  canCancel: boolean;
+  /** Whether the connected wallet is the recovered key (it executes at /account/roles). */
+  isNewKey: boolean;
+};
+
+/**
+ * What /account/roles shows about a pending recovery (pure). The window is
+ * the recovery's own [eta, expiresAt): 7 days, never waived by the bootstrap
+ * window. A cancel is refused in the `incident` build for anyone but the
+ * proposer; the program decides.
+ */
+export function describeRoleRecovery(
+  state: RoleRecoveryState | null,
+  wallet: Address | null,
+  nowSec: number,
+): RoleRecoveryNotice | null {
+  if (!state?.recovery) return null;
+  const r = state.recovery;
+  const role = state.kind === "platform" ? "Super Admin" : "blocklist authority";
+  const newKey = newKeyOf(r);
+  return {
+    title: `Recovery of the ${role} key pending`,
+    newKey,
+    window: proposalWindowState(r, nowSec),
+    blocked: state.stale
+      ? `This recovery was proposed against an earlier ${role} and can no longer be executed; until it is cancelled, the ${role} role cannot be rotated.`
+      : `While this recovery is pending, the ${role} role cannot be rotated (no new proposal, no accept). Cancel the recovery first, or let the recovered key execute it.`,
+    cancelers: `The current ${role} (${state.current}) or the upgrade authority that proposed it (${r.proposedBy}) can cancel it; the upgrade authority acts through the CLI / Squads export. In the incident build only the proposer can.`,
+    canCancel: wallet !== null && (wallet === state.current || wallet === r.proposedBy),
+    isNewKey: wallet !== null && wallet === newKey,
+  };
 }

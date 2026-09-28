@@ -38,7 +38,7 @@ const PILLARS: Array<{ title: string; body: string }> = [
   },
   {
     title: "Permanent delegate",
-    body: "Each share-class mint carries a Token-2022 permanent delegate: the share class's own program address, not a person. Two admin instructions use it, and only to move a holder's units into a quarantine vault of the same class whose every exit burns them: on a KYC-gated class, a holder whose passport was revoked or has expired; on any class, Open or KYC-gated, a wallet on the sanctions blocklist. The blocklist has its own on-chain authority (the Blocklist Authority), separate from the Manci admin role: it adds the wallet, then a Manci admin signs the clawback. Neither instruction can target the platform's own escrows or send units to a wallet.",
+    body: "Each share-class mint carries a Token-2022 permanent delegate: the share class's own program address, not a person. Two admin instructions use it, and only to move a holder's units into a quarantine vault of the same class whose every exit burns them: on a KYC-gated class, a holder whose passport was revoked, or expired at least 30 days ago; on any class, Open or KYC-gated, a wallet on the sanctions blocklist. The blocklist has its own on-chain authority (the Blocklist Authority), separate from the Manci admin role: it adds the wallet, then a Manci admin signs the clawback. Neither instruction can target the platform's own escrows or send units to a wallet.",
   },
   {
     title: "Program-mediated custody",
@@ -50,7 +50,19 @@ const PILLARS: Array<{ title: string; body: string }> = [
   },
   {
     title: "Role-gated authority",
-    body: "Privileged actions check current on-chain authority. Issuer Mint, Metadata and Conversion permissions can be scoped to one issuer; the blocklist has a separate authority. Platform and blocklist replacement require the new wallet to accept. Program upgrade authority is separate.",
+    body: "Privileged actions check current on-chain authority. Issuer Mint, Metadata and Conversion permissions can be scoped to one issuer; the blocklist has a separate authority, which can also switch a share class between Open and KYC-gated transfer checks. Every role replacement requires the new wallet to accept, within 14 days. Program upgrade authority is separate.",
+  },
+  {
+    title: "Issuer proceeds freeze",
+    body: "Any Manci admin can freeze the proceeds of one issuer: its primary sales, sale withdrawals and payouts to the issuer stop. Only the Super Admin can lift the freeze. Investor exits — refunds, investor yield and claims — keep working, and the freeze does not reach units the issuer’s own wallet already holds.",
+  },
+  {
+    title: "Timelocked role changes",
+    body: "Adding a Manci admin and replacing the Super Admin take effect only after a 48-hour waiting period, and must then be executed within 14 days; until then the change can be cancelled. Pausing and removing an admin are immediate.",
+  },
+  {
+    title: "Key recovery",
+    body: "If the Super Admin or Blocklist Authority key is lost, the program upgrade authority can propose a recovery to a new key, executable after 7 days. While it is pending the role cannot be rotated, and the current key holder can cancel it.",
   },
 ];
 
@@ -124,7 +136,7 @@ export default function SecurityPage() {
         <Bullets
           className="mt-4"
           items={[
-            "On a KYC-gated class, when the holder’s investor passport was revoked or has expired.",
+            "On a KYC-gated class, when the holder’s investor passport was revoked, or expired at least 30 days ago: the 30-day grace lets the holder renew it first.",
             "On any class, Open or KYC-gated, when the holder’s wallet is on the sanctions blocklist. The Blocklist Authority, a separate on-chain role, adds the wallet; a Manci admin then signs the clawback. The program does not require the two roles to be held by different keys.",
           ]}
         />

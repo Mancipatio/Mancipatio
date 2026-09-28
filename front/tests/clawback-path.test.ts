@@ -11,6 +11,7 @@ import {
   sameKeyHoldsBothRoles,
   sameKeyWarning,
   KYC_EXPIRY_CLAWBACK_GRACE_SECONDS,
+  clawbackGraceNotice,
   passportStatus,
   type PassportStatus,
 } from "@/lib/clawback-path";
@@ -237,5 +238,19 @@ describe("clawback tx-error hints", () => {
   it("6087 covers a blocked escrow, whose own exits are refused too", () => {
     expect(hint(6087)).toMatch(/remove it from the blocklist first/);
     expect(hint(6087)).toMatch(/block the recipient wallet instead/);
+  });
+});
+
+describe("clawbackGraceNotice (30-day grace after a passport expiry)", () => {
+  const expiry = 1_700_000_000;
+  const GRACE = KYC_EXPIRY_CLAWBACK_GRACE_SECONDS;
+  it("names the opening date only inside the grace", () => {
+    const n = clawbackGraceNotice({ revoked: false, expiry: BigInt(expiry) }, expiry + 1);
+    expect(n?.opensAt).toBe(expiry + GRACE);
+    expect(n?.message).toContain("2023-12-14 22:13 UTC");
+    expect(clawbackGraceNotice({ revoked: false, expiry: BigInt(expiry) }, expiry - 1)).toBeNull();
+    expect(clawbackGraceNotice({ revoked: false, expiry: BigInt(expiry) }, expiry + GRACE)).toBeNull();
+    expect(clawbackGraceNotice({ revoked: true, expiry: BigInt(expiry) }, expiry + 1)).toBeNull();
+    expect(clawbackGraceNotice(null, expiry + 1)).toBeNull();
   });
 });

@@ -23,13 +23,15 @@ import { operatorFor, operatorSentence } from "@/lib/legal/operator";
  * legal team"), so it does not replace anything: every operative clause below
  * is the existing text, carried over word for word. Only the presentation
  * changed. Legal wording is not edited here — with one exception: the second
- * paragraph of clause 8 (2C-4, permanent-delegate clawback) is a factual
- * disclosure of on-chain behaviour added by engineering. Its wording, and
+ * and third paragraphs of clause 8 (2C-4, permanent-delegate clawback; the
+ * v1.0.0-rc controls: issuer proceeds freeze, 48-hour timelock, key recovery
+ * by the upgrade authority, class-mode switching) are factual disclosures of
+ * on-chain behaviour added by engineering. Their wording, and
  * whether it needs re-acceptance (a DEVNET_TOS_VERSION bump), are for the
  * lawyer; the version is deliberately unchanged. The "Operator" card and the
  * contact address come from the operator record (lib/legal/operator.ts).
  */
-const LAST_UPDATED = "2026-09-23";
+const LAST_UPDATED = "2026-09-28";
 
 export function DevnetTerms() {
   const operator = operatorFor("devnet");
@@ -152,13 +154,27 @@ export function DevnetTerms() {
             Every share-class token has a program-controlled permanent
             delegate. It allows tokens to be moved without the holder&apos;s
             signature only (a) on a KYC-gated class, when the holder&apos;s
-            verification was revoked or has expired, or (b) on any class, when
+            verification was revoked, or expired at least 30 days earlier (the
+            holder has 30 days to renew it first), or (b) on any class, when
             the holder&apos;s wallet is on the platform&apos;s sanctions
             blocklist, which is kept by the Blocklist Authority, an on-chain
             role separate from the Manci admin role. In both
             cases a Manci admin must sign, and the tokens can only be moved into
             a quarantine vault from which they can only be burned. The platform
             has no on-chain way to return them.
+          </Body>
+          <Body className="mt-4">
+            The programs also let the platform act on an issuer or a role
+            without your signature: any Manci admin can freeze the proceeds of
+            one issuer (its sales, withdrawals and payouts to the issuer stop,
+            while investor refunds and claims continue) and only the Super
+            Admin can lift the freeze; adding an admin or replacing the Super
+            Admin takes effect only after a 48-hour waiting period, during
+            which it can be cancelled; the program upgrade authority can
+            recover a lost Super Admin or Blocklist Authority key to a new key
+            after a 7-day waiting period; and the Blocklist Authority can
+            switch a share class between open transfers and KYC-gated
+            transfers.
           </Body>
         </Clause>
 

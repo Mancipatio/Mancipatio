@@ -31,8 +31,80 @@ export function saleEndError(
   return null;
 }
 
-/** `create_otc_deal`'s expiry, clamped into (now, now + 90 days]. */
+/**
+ * Kept clear of a bound the program judges on ITS clock whenever the front
+ * picks the value itself (a clamp, a default) or the value sits right at the
+ * edge: the chain clock can run tens of seconds behind the browser's, and the
+ * transaction lands after the signature. Ten minutes covers both, so a value
+ * the page accepts is not one the program must refuse.
+ */
+export const CHAIN_CLOCK_MARGIN_SECONDS = 600;
+
+/**
+ * `create_otc_deal`'s expiry, clamped into (now, now + 90 days − margin]: a
+ * clamp at exactly now + 90 days would be refused (6149) whenever the chain
+ * clock lags the browser's.
+ */
 export function clampDealExpiry(expiresAt: bigint, nowSec: bigint): bigint {
-  const latest = nowSec + BigInt(OTC_DEAL_MAX_TTL_SECONDS);
+  const latest = nowSec + BigInt(OTC_DEAL_MAX_TTL_SECONDS - CHAIN_CLOCK_MARGIN_SECONDS);
   return expiresAt > latest ? latest : expiresAt;
+}
+
+/**
+ * Why `create_otc_deal` would refuse this expiry (DealExpiryOutOfRange 6149:
+ * `now < expires_at ≤ now + 90 days`), or null. Checked right before the
+ * admin signs.
+ */
+export function dealExpiryError(
+  expiresAt: bigint,
+  nowSec: bigint = BigInt(Math.floor(Date.now() / 1000)),
+): string | null {
+  if (expiresAt <= nowSec) return "The deal expiry must be in the future.";
+  if (expiresAt > nowSec + BigInt(OTC_DEAL_MAX_TTL_SECONDS))
+    return "An OTC deal can run for at most 90 days: choose an earlier expiry.";
+  return null;
+}
+
+/**
+ * Why a DeliveryEscrow deadline (a `datetime-local` value) would be refused
+ * (DeliveryDeadlineOutOfRange 6148: `now + 24 h ≤ deadline ≤ now + 365 d`),
+ * or null. Both bounds keep the clock margin, since the program's `now` is
+ * the chain's at landing time.
+ */
+export function deliveryDeadlineError(value: string, nowMs: number = Date.now()): string | null {
+  if (!value.trim()) return "Deadline is required";
+  const t = new Date(value).getTime();
+  if (Number.isNaN(t)) return "Not a valid date";
+  const margin = CHAIN_CLOCK_MARGIN_SECONDS * 1000;
+  if (t < nowMs + DELIVERY_ESCROW_MIN_DEADLINE_SECONDS * 1000 + margin)
+    return "Deadline must be at least 24 hours from now";
+  if (t > nowMs + DELIVERY_ESCROW_MAX_DEADLINE_SECONDS * 1000 - margin)
+    return "Deadline must be at most 365 days from now";
+  return null;
+}
+
+/**
+ * Why `approve_holder` would refuse this passport expiry (`expiry > now`,
+ * InvalidExpiry; `expiry ≤ now + 2 years`, KycExpiryTooFar 6146), or null.
+ */
+export function kycExpiryError(expirySec: bigint, nowSec: bigint): string | null {
+  if (expirySec <= nowSec) return "The passport expiry must be in the future.";
+  if (expirySec > nowSec + BigInt(MAX_KYC_VALIDITY_SECONDS))
+    return "A passport can be valid for at most 2 years from today.";
+  return null;
+}
+
+/**
+ * The on-chain passport expiry for a verified client: the stored off-chain
+ * verdict expiry while it is in the future, else the policy window, capped
+ * at 2 years minus the clock margin (6146).
+ */
+export function passportExpirySeconds(
+  storedExpiryIso: string | null | undefined,
+  nowSec: number,
+  policyDays: number,
+): number {
+  const stored = storedExpiryIso ? Math.floor(new Date(storedExpiryIso).getTime() / 1000) : 0;
+  const wanted = Number.isFinite(stored) && stored > nowSec ? stored : nowSec + policyDays * 86_400;
+  return Math.min(wanted, nowSec + MAX_KYC_VALIDITY_SECONDS - CHAIN_CLOCK_MARGIN_SECONDS);
 }

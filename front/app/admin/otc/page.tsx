@@ -45,6 +45,7 @@ import { checkReceiverEligibility } from "@/lib/passport";
 import { detectNetwork } from "@/lib/network";
 import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { createOtcDealInstruction, newDealId, resolveDealExpiry } from "@/lib/otc-deal";
+import { dealExpiryError } from "@/lib/deadline-bounds";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
@@ -677,6 +678,13 @@ function OtcEscrowAdmin() {
         return;
       }
       const expiresAt = resolveDealExpiry(req.expires_at);
+      // v1: `now < expires_at <= now + 90 days` (6149), refused before signing.
+      const expiryError = dealExpiryError(expiresAt);
+      if (expiryError) {
+        toast.dismiss(pendingId);
+        toast.showError("Cannot open this deal", expiryError);
+        return;
+      }
       // The shared builder (lib/otc-deal.ts): the simulator's owner actor
       // opens its escrows with exactly this instruction.
       const ix = await createOtcDealInstruction({

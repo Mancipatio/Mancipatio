@@ -44,7 +44,57 @@ describe("resolveDealExpiry (create_otc_deal, 6149)", () => {
     const nowMs = 1_700_000_000_000;
     const nowSec = BigInt(nowMs / 1000);
     const far = new Date(nowMs + 200 * 86_400_000).toISOString();
-    expect(resolveDealExpiry(far, nowMs)).toBe(nowSec + BigInt(BOUNDS.OTC_DEAL_MAX_TTL_SECONDS));
+    // Intentional (front v1 admin UI): the clamp keeps the chain-clock margin
+    // below the program's cap, so a lagging chain clock cannot refuse it (6149).
+    expect(resolveDealExpiry(far, nowMs)).toBe(
+      nowSec + BigInt(BOUNDS.OTC_DEAL_MAX_TTL_SECONDS - BOUNDS.CHAIN_CLOCK_MARGIN_SECONDS),
+    );
     expect(BOUNDS.clampDealExpiry(nowSec + BigInt(5), nowSec)).toBe(nowSec + BigInt(5));
+  });
+});
+
+describe("pre-sign checks of the v1 admin forms", () => {
+  const nowSec = BigInt(1_700_000_000);
+  const nowMs = 1_700_000_000_000;
+  const DAY = 86_400;
+
+  it("dealExpiryError: (now, now + 90 d]", () => {
+    expect(BOUNDS.dealExpiryError(nowSec, nowSec)).toMatch(/future/);
+    expect(BOUNDS.dealExpiryError(nowSec + BigInt(1), nowSec)).toBeNull();
+    expect(BOUNDS.dealExpiryError(nowSec + BigInt(BOUNDS.OTC_DEAL_MAX_TTL_SECONDS), nowSec)).toBeNull();
+    expect(BOUNDS.dealExpiryError(nowSec + BigInt(BOUNDS.OTC_DEAL_MAX_TTL_SECONDS + 1), nowSec)).toMatch(/90 days/);
+    // The clamp always lands inside the accepted range.
+    const clamped = BOUNDS.clampDealExpiry(nowSec + BigInt(400 * DAY), nowSec);
+    expect(BOUNDS.dealExpiryError(clamped, nowSec)).toBeNull();
+  });
+
+  it("deliveryDeadlineError: 24 h..365 d with the chain-clock margin", () => {
+    const at = (secs: number) => new Date(nowMs + secs * 1000).toISOString();
+    const margin = BOUNDS.CHAIN_CLOCK_MARGIN_SECONDS;
+    expect(BOUNDS.deliveryDeadlineError("", nowMs)).toMatch(/required/);
+    expect(BOUNDS.deliveryDeadlineError("not a date", nowMs)).toMatch(/valid/);
+    expect(BOUNDS.deliveryDeadlineError(at(DAY), nowMs)).toMatch(/24 hours/);
+    expect(BOUNDS.deliveryDeadlineError(at(DAY + margin), nowMs)).toBeNull();
+    expect(BOUNDS.deliveryDeadlineError(at(30 * DAY), nowMs)).toBeNull();
+    expect(BOUNDS.deliveryDeadlineError(at(365 * DAY - margin), nowMs)).toBeNull();
+    expect(BOUNDS.deliveryDeadlineError(at(365 * DAY), nowMs)).toMatch(/365 days/);
+  });
+
+  it("kycExpiryError: (now, now + 2 y]", () => {
+    expect(BOUNDS.kycExpiryError(nowSec, nowSec)).toMatch(/future/);
+    expect(BOUNDS.kycExpiryError(nowSec + BigInt(BOUNDS.MAX_KYC_VALIDITY_SECONDS), nowSec)).toBeNull();
+    expect(BOUNDS.kycExpiryError(nowSec + BigInt(BOUNDS.MAX_KYC_VALIDITY_SECONDS + 1), nowSec)).toMatch(/2 years/);
+  });
+
+  it("passportExpirySeconds: stored future expiry, else the policy window, capped under 2 y", () => {
+    const now = Number(nowSec);
+    const cap = now + BOUNDS.MAX_KYC_VALIDITY_SECONDS - BOUNDS.CHAIN_CLOCK_MARGIN_SECONDS;
+    const iso = (secs: number) => new Date(secs * 1000).toISOString();
+    expect(BOUNDS.passportExpirySeconds(iso(now + 100 * DAY), now, 365)).toBe(now + 100 * DAY);
+    expect(BOUNDS.passportExpirySeconds(iso(now - DAY), now, 365)).toBe(now + 365 * DAY);
+    expect(BOUNDS.passportExpirySeconds(null, now, 365)).toBe(now + 365 * DAY);
+    expect(BOUNDS.passportExpirySeconds("garbage", now, 365)).toBe(now + 365 * DAY);
+    expect(BOUNDS.passportExpirySeconds(iso(now + 1000 * DAY), now, 365)).toBe(cap);
+    expect(BOUNDS.kycExpiryError(BigInt(BOUNDS.passportExpirySeconds(null, now, 5000)), nowSec)).toBeNull();
   });
 });

@@ -1,5 +1,7 @@
 "use client";
 
+import Link from "next/link";
+
 import { WalletRequired } from "@/components/wallet-required";
 
 import { type Address } from "@solana/kit";
@@ -218,7 +220,8 @@ export default function AdminsPage() {
         issuance and custody. A grant waits 48 hours (waived while the
         bootstrap window is open): the proposed wallet then takes the role
         itself within 14 days, and any admin or the program upgrade authority
-        can cancel it meanwhile. A revoke is immediate. The blocklist is
+        can cancel it meanwhile (the upgrade authority through the CLI /
+        Squads export). A revoke is immediate. The blocklist is
         changed only by the blocklist authority, a separate key.
       </p>
 
@@ -279,6 +282,17 @@ export default function AdminsPage() {
                       <p className="mt-0.5 text-xs text-slate-500">
                         {describeProposalWindow(proposalWindowState(p, now))}
                       </p>
+                      {!p.stale && (
+                        <p className="mt-1 max-w-xl text-xs text-slate-600">
+                          The grant is executed by the proposed wallet itself (it signs{" "}
+                          <span className="font-mono">add_admin</span>): send its holder{" "}
+                          <Link href="/account/roles" className="font-medium text-brand-700 underline">
+                            /account/roles
+                          </Link>{" "}
+                          — they connect THAT wallet and press Accept under Pending roles once the
+                          waiting period ends, before it expires.
+                        </p>
+                      )}
                       {p.stale && (
                         <p className="mt-0.5 text-xs text-amber-800">
                           Proposed by an earlier Super Admin ({p.proposedBy.slice(0, 6)}…): it can no
