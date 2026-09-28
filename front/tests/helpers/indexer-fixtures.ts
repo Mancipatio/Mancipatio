@@ -1,5 +1,6 @@
 import { address, type Encoder } from "@solana/kit";
 import * as a from "@/lib/generated/asset_registry";
+import * as h from "@/lib/generated/transfer_hook";
 const key = address("11111111111111111111111111111111");
 const hash = new Uint8Array(32).fill(7);
 const bits = new Uint8Array(128).fill(1);
@@ -30,5 +31,24 @@ export function indexerFixtures() {
     fixture("milestone_claims", a.getMilestoneClaimEncoder(), { bump: 255, milestone: key, claimer: key, amount: BigInt(12) }),
     fixture("kyc_registries", a.getKycRegistryEncoder(), { ...base, authority: key, approvedJurisdictions: bits, blockedJurisdictions: new Uint8Array(128), entriesCount: BigInt(4) }, KYC_REGISTRY_FIXTURE_ADDRESS),
     fixture("kyc_entries", a.getKycEntryEncoder(), { ...base, registry: key, holder: key, status: 1, jurisdiction: 688, accreditationLevel: 2, expiry: BigInt(100), providerId: 1, externalRefHash: hash }),
+  ];
+}
+
+const other = address("SysvarC1ock11111111111111111111111111111111");
+const third = address("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin");
+/**
+ * v1.0.0-rc (8.3) role-state accounts (lib/server/indexer-accounts.ts
+ * ROLE_STATE_ENTITIES), in that order: generated encoders, distinct non-zero
+ * timestamps (proposed 1000, eta 2000, expiry 3000).
+ */
+export function roleStateFixtures() {
+  const window = { proposedAt: BigInt(1_000), eta: BigInt(2_000), expiresAt: BigInt(3_000) };
+  return [
+    fixture("issuer_freezes", a.getIssuerFreezeEncoder(), { ...base, issuer: key, frozenBy: other, frozenAt: BigInt(1_234), reasonHash: hash }),
+    fixture("pending_admins", a.getPendingAdminEncoder(), { ...base, newAdmin: third, proposedBy: other, ...window }),
+    fixture("authority_proposals", a.getAuthorityProposalEncoder(), { ...base, target: key, kind: 0, currentAuthority: other, newAuthority: third, proposedBy: other, ...window }),
+    fixture("platform_recoveries", a.getPlatformRecoveryEncoder(), { ...base, platform: key, currentAdmin: other, newAdmin: third, proposedBy: key, ...window }),
+    fixture("blocklist_authority_proposals", h.getBlocklistAuthorityProposalEncoder(), { bump: 254, currentAuthority: other, newAuthority: third, proposedAt: window.proposedAt, expiresAt: window.expiresAt }),
+    fixture("blocklist_recoveries", h.getBlocklistRecoveryEncoder(), { bump: 253, currentAuthority: other, newAuthority: third, proposedBy: key, ...window }),
   ];
 }

@@ -11,7 +11,7 @@ import { TRANSFER_HOOK_PROGRAM } from "@/lib/pdas";
 import { pauseStatus } from "@/lib/pause-flags";
 import { getSupabase } from "@/lib/supabase";
 import { detectNetwork, rpcUrl as networkRpcUrl } from "@/lib/network";
-import { runReconcile, runIndexerRetry, type ReconcileReport } from "@/lib/indexer";
+import { runReconcile, runIndexerRetry, type ReconcileLegacyAccount, type ReconcileReport } from "@/lib/indexer";
 import { RequireRole } from "@/components/require-role";
 import { SkeletonCard } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
@@ -407,12 +407,14 @@ function ReconcileCard() {
   const toast = useToast();
   const [busy, setBusy] = useState(false);
   const [report, setReport] = useState<ReconcileReport | null>(null);
+  const [legacy, setLegacy] = useState<ReconcileLegacyAccount[]>([]);
 
   async function run() {
     setBusy(true);
     try {
-      const { report: r } = await runReconcile(conn.wallet);
+      const { report: r, legacy: old } = await runReconcile(conn.wallet);
       setReport(r);
+      setLegacy(old ?? []);
       const drift = Object.values(r).reduce(
         (n, t) => n + t.deleted + t.missing,
         0,
@@ -453,9 +455,11 @@ function ReconcileCard() {
             Indexer reconcile
           </p>
           <p className="mt-1 text-[11px] text-slate-500">
-            Rebuild all 14 mirror types from a complete finalized snapshot and
-            prune closed accounts. Retry processes up to 10 queued webhook jobs;
-            unresolved jobs stay durable for the next attempt.
+            Rebuild all 20 mirror types (14 market tables and, since 0079, the
+            6 pending role changes and proceeds freezes) from a complete
+            finalized snapshot and prune closed accounts. Retry processes up to
+            10 queued webhook jobs; unresolved jobs stay durable for the next
+            attempt.
           </p>
         </div>
         <button
@@ -471,6 +475,13 @@ function ReconcileCard() {
           Retry queued jobs
         </button>
       </div>
+      {report && legacy.length > 0 && (
+        <p className="mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+          {legacy.length} rc.x authority-transfer account{legacy.length === 1 ? "" : "s"} still on chain (
+          {legacy.map((l) => `${l.type} ${l.address}`).join(", ")}). The v1 programs can neither read nor close
+          {legacy.length === 1 ? " it" : " them"}: they are not mirrored, and chain:inventory blocks an upgrade while any exists.
+        </p>
+      )}
       {report && (
         <table className="mt-4 w-full text-sm">
           <thead className="border-b border-slate-100 text-left text-xs uppercase tracking-wider text-slate-500">

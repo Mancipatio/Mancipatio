@@ -108,6 +108,7 @@ import {
 } from "./network-gates";
 import { executableHash, loadRelease, releaseEvidence, type Release } from "./release";
 import { DEFAULT_ADDRESS, describeOverlap, loadRoleMap, mapKeys, roleOverlapsOf, type RoleMap } from "./role-map";
+import { LEGACY_AUTHORITY_TRANSFER, LEGACY_BLOCKLIST_AUTHORITY_TRANSFER } from "@/lib/legacy-accounts";
 import type { ChainRpc } from "./rpc";
 import { ChainGateError, IDL_PROGRAMS, sha256Hex, type ProgramName } from "./safety";
 import { checkSquadsAccount, scanOpenProposals, type ProposalScan, type SquadsCheck } from "./squads";
@@ -154,16 +155,10 @@ export type TransferRow = {
 /**
  * rc.x `AuthorityTransfer` (137 B, registry) and `BlocklistAuthorityTransfer`
  * (73 B, hook): the v1 program neither reads nor closes them. Their layouts
- * left the IDL, so they are matched by their pinned discriminator and size.
+ * left the IDL, so they are matched by their pinned discriminator and size
+ * (one definition, shared with the indexer: lib/legacy-accounts.ts).
  */
-export const LEGACY_AUTHORITY_TRANSFER = {
-  discriminator: Uint8Array.from([43, 243, 199, 71, 139, 255, 231, 113]),
-  size: 137,
-} as const;
-export const LEGACY_BLOCKLIST_AUTHORITY_TRANSFER = {
-  discriminator: Uint8Array.from([171, 162, 208, 78, 168, 214, 135, 50]),
-  size: 73,
-} as const;
+export { LEGACY_AUTHORITY_TRANSFER, LEGACY_BLOCKLIST_AUTHORITY_TRANSFER };
 
 export type RecoveryRow = {
   address: Address;

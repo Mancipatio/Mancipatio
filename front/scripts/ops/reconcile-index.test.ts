@@ -137,6 +137,8 @@ it("completely reconciles the explicitly selected index", async () => {
       readiness: state.data.status,
       readiness_slot: String(state.data.last_slot),
       report: result.report,
+      // v1.0.0-rc: rc.x authority transfers still on chain (never mirrored).
+      legacy: result.legacy,
       elapsed_ms: Date.now() - started,
     };
     mkdirSync(path.dirname(path.resolve(output)), { recursive: true });

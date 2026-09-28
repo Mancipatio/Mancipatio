@@ -11,6 +11,7 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { invalidateRoles } from "@/lib/role-store";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { startFinalityPoll } from "@/lib/finality-poll";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
@@ -152,9 +153,11 @@ export function AuthorityRotation({
       });
       setConfirm(null);
       setNext("");
-      // The platform / blocklist authority (or its proposal) changed.
+      // The platform / blocklist authority (or its proposal) changed; the
+      // menu counts pending rotations (0079 mirror).
       invalidateRoles();
       void refresh();
+      notifyAdminBadges({ afterIndexer: true });
     } catch (error) {
       const detail = explainSendError(error);
       toast.showError("Authority change not completed", detail);

@@ -30,6 +30,7 @@ import { ACCOUNT_ROLES_PATH } from "@/components/require-role";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { recordAudit } from "@/lib/supabase";
 import { invalidateRoles } from "@/lib/role-store";
+import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { useRole } from "@/lib/auth";
 import { explainSendError } from "@/lib/tx-error";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
@@ -109,6 +110,8 @@ export default function AdminsPage() {
       setConfirmGrant(false);
       setGrantAddr("");
       void loadPending();
+      // The menu counts grants in their review window (0079 mirror).
+      notifyAdminBadges({ afterIndexer: true });
     } catch (err) {
       toast.dismiss(pendingId);
       const explained = explainSendError(err);
@@ -144,6 +147,7 @@ export default function AdminsPage() {
       });
       setConfirmCancel(null);
       void loadPending();
+      notifyAdminBadges({ afterIndexer: true });
     } catch (err) {
       const explained = explainSendError(err);
       toast.showError("Failed to cancel the grant", explained);

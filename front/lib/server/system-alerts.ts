@@ -69,6 +69,13 @@ export const SOURCE_LABELS: Record<string, { label: string; format: "platform" |
   "onchain:supply-lock": { label: "Share class supply locked", format: "minimal" },
   "onchain:custody-vault": { label: "Custody vault action", format: "minimal" },
   "onchain:sale-approval": { label: "Sale approved", format: "minimal" },
+  // v1.0.0-rc (8.3)
+  "onchain:admin-grant": { label: "Admin grant proposed or cancelled (48 h timelock)", format: "platform" },
+  "onchain:platform-recovery": { label: "Super admin recovery by the upgrade authority", format: "platform" },
+  "onchain:blocklist-recovery": { label: "Blocklist authority recovery by the upgrade authority", format: "platform" },
+  "onchain:issuer-freeze": { label: "Issuer proceeds frozen or unfrozen", format: "minimal" },
+  "onchain:role-change-pending": { label: "Role change pending (timelock running)", format: "platform" },
+  "onchain:payout-modules": { label: "Payout modules switched on (mainnet)", format: "platform" },
   "indexer:queue-lag": { label: "Indexer queue is lagging", format: "platform" },
   "indexer:degraded": { label: "Indexer is degraded", format: "platform" },
   "indexer:gap": { label: "Transactions missing from the index", format: "platform" },

@@ -14,6 +14,7 @@
 //     timestamp per queue — never rows, ids or PII.
 
 import type { Network } from "@/lib/network";
+import { proposalWindowState } from "@/lib/proposal-window";
 import { AssetStatus } from "@/lib/generated/asset_registry/types/assetStatus";
 import { ProposalStatus } from "@/lib/generated/asset_registry/types/proposalStatus";
 import { SaleStatus } from "@/lib/generated/asset_registry/types/saleStatus";
@@ -34,7 +35,9 @@ export const ADMIN_BADGE_HREFS = [
   "/admin/inquiries",
   "/admin/kyc",
   "/admin/compliance",
+  "/admin/admins",
   "/admin/payouts",
+  "/admin/platform",
 ] as const;
 
 export type AdminBadgeHref = (typeof ADMIN_BADGE_HREFS)[number];
@@ -64,7 +67,13 @@ export type BadgePart =
   | "noShareClasses"
   // Launchpad
   | "yours"
-  | "issuers";
+  | "issuers"
+  // Admins and Platform (v1.0.0-rc timelocked role changes)
+  | "timelock"
+  | "stale"
+  | "awaitingKey"
+  | "rotation"
+  | "recovery";
 
 export type AdminBadge = {
   /** Rows waiting for the caller; null = could not be counted now (never shown as 0). */
@@ -219,4 +228,92 @@ export function vestingSeriesNeedsReview(row: {
     row.status === "submitted" ||
     (row.status === "approved" && !row.approved_terms_hash && !row.series_pda)
   );
+}
+
+// ── Admins and Platform (v1.0.0-rc, 0079 mirror) ────────────────────────────
+// A staged role change exists so that someone can veto it before it runs:
+// while it is inside its timelock the veto is the admins' step (the Super
+// Admin, any Admin, or the upgrade authority cancels). Once executable it
+// waits on the NEW key (named, not counted); once expired nobody can run it.
+// The windows are the program's (lib/proposal-window.ts); the bootstrap
+// window (pause bit 7) waives the Admin-grant and Super-Admin-rotation
+// timelocks, never the expiry.
+
+/** A mirrored staged change; the timestamps are unix seconds (numbers or strings). */
+export type StagedChangeRow = {
+  proposed_at: number | string;
+  eta?: number | string | null;
+  expires_at: number | string;
+  proposed_by?: string | null;
+  current_authority?: string | null;
+};
+
+type PlatformContext = { superAdmin: string | null; pauseFlags: number | null; nowSec: number };
+
+function windowOf(row: StagedChangeRow, ctx: PlatformContext, bootstrapWaived: boolean) {
+  const proposedAt = Number(row.proposed_at);
+  return proposalWindowState(
+    { proposedAt, eta: row.eta === undefined || row.eta === null ? proposedAt : Number(row.eta), expiresAt: Number(row.expires_at) },
+    ctx.nowSec,
+    { pauseFlags: ctx.pauseFlags, bootstrapWaived },
+  );
+}
+
+/**
+ * /admin/admins: staged Admin grants (`PendingAdmin`) inside their 48 h
+ * review window (`timelock`), and live grants proposed by an earlier Super
+ * Admin (`stale`: add_admin refuses them, cancel them — K1.10). Grants past
+ * their timelock wait on the new admin's signature (`awaitingKey`, aside).
+ */
+export function adminGrantBadge(rows: readonly StagedChangeRow[], ctx: PlatformContext): AdminBadge {
+  const tally = { timelock: 0, stale: 0, awaitingKey: 0 };
+  for (const row of rows) {
+    const state = windowOf(row, ctx, true);
+    if (state.kind === "expired") continue;
+    if (ctx.superAdmin !== null && row.proposed_by && row.proposed_by !== ctx.superAdmin) tally.stale += 1;
+    else if (state.kind === "waiting") tally.timelock += 1;
+    else tally.awaitingKey += 1;
+  }
+  return {
+    count: tally.timelock + tally.stale,
+    parts: { timelock: tally.timelock, stale: tally.stale },
+    aside: { awaitingKey: tally.awaitingKey },
+  };
+}
+
+/**
+ * /admin/platform: a Super Admin rotation (`AuthorityProposal` kind 0) inside
+ * its 48 h window (`rotation`), and every live upgrade-authority recovery of
+ * the Super Admin or the blocklist authority (`recovery`: the holder cancels
+ * it until it runs). Executable rotations, and blocklist-authority rotations
+ * (no timelock), wait on the new key (`awaitingKey`, aside). A rotation whose
+ * current authority is no longer the Super Admin is dead and not counted.
+ */
+export function platformChangeBadge(
+  input: {
+    rotations: readonly StagedChangeRow[];
+    recoveries: readonly StagedChangeRow[];
+    blocklistRotations: readonly StagedChangeRow[];
+  },
+  ctx: PlatformContext,
+): AdminBadge {
+  const tally = { rotation: 0, recovery: 0, awaitingKey: 0 };
+  for (const row of input.rotations) {
+    const state = windowOf(row, ctx, true);
+    if (state.kind === "expired") continue;
+    if (ctx.superAdmin !== null && row.current_authority && row.current_authority !== ctx.superAdmin) continue;
+    if (state.kind === "waiting") tally.rotation += 1;
+    else tally.awaitingKey += 1;
+  }
+  for (const row of input.recoveries) {
+    if (windowOf(row, ctx, false).kind !== "expired") tally.recovery += 1;
+  }
+  for (const row of input.blocklistRotations) {
+    if (windowOf(row, ctx, false).kind !== "expired") tally.awaitingKey += 1;
+  }
+  return {
+    count: tally.rotation + tally.recovery,
+    parts: { rotation: tally.rotation, recovery: tally.recovery },
+    aside: { awaitingKey: tally.awaitingKey },
+  };
 }

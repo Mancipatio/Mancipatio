@@ -15,6 +15,7 @@ const idlType = (t: IdlType): FieldType => {
   if (typeof t === "string") return t as FieldType;
   if (t.defined) return t.defined.name as FieldType;
   if (t.array && t.array[0] === "u8" && t.array[1] === 128) return "bytes128";
+  if (t.array && t.array[0] === "u8" && t.array[1] === 32) return "bytes32";
   throw new Error(`Unexpected IDL type ${JSON.stringify(t)}`);
 };
 
@@ -33,6 +34,31 @@ describe("asset_registry event decoders", () => {
     expect(idl.types.find((t) => t.name === "ClawbackReason")!.type.variants).toEqual([{ name: "Revoked" }, { name: "Expired" }]);
     expect(idl.types.find((t) => t.name === "IssuerAuthorityChangeKind")!.type.variants)
       .toEqual([{ name: "Rotation" }, { name: "TimelockedRecovery" }, { name: "RegistrationRecovery" }]);
+    expect(idl.types.find((t) => t.name === "PlatformAdminChangeKind")!.type.variants)
+      .toEqual([{ name: "Rotation" }, { name: "Recovery" }]);
+  });
+
+  // v1.0.0-rc (8.3): the ten new events are all decoded.
+  it("decodes the ten v1.0.0-rc events, the reason hash as hex and the change kind by name", () => {
+    const v1 = ["IssuerProceedsFrozen", "IssuerProceedsUnfrozen", "AdminProposed", "AdminProposalCancelled", "AdminAdded",
+      "AuthorityProposalCreated", "AuthorityProposalCancelled", "PlatformAdminChanged", "PlatformRecoveryProposed", "PlatformRecoveryCancelled"];
+    for (const name of v1) {
+      expect(EVENT_SPECS.map((s) => s.name), name).toContain(name);
+      expect(decodeRegistryEvent(encodeEvent(name, {})), name).toMatchObject({ name, data: expect.any(Object) });
+    }
+    const reason = new Uint8Array(32).fill(0xab);
+    expect(decodeRegistryEvent(encodeEvent("IssuerProceedsFrozen", { frozen_by: OTHER, frozen_at: 1_700_000_000, reason_hash: reason })))
+      .toEqual({ name: "IssuerProceedsFrozen", data: { issuer: KEY, frozen_by: OTHER, frozen_at: "1700000000", reason_hash: "ab".repeat(32) } });
+    expect(decodeRegistryEvent(encodeEvent("AdminProposed", { new_admin: OTHER, eta: 172_800, expires_at: 1_382_400, bootstrap_open: true })))
+      .toMatchObject({ data: { new_admin: OTHER, eta: "172800", expires_at: "1382400", bootstrap_open: true } });
+    expect(decodeRegistryEvent(encodeEvent("AuthorityProposalCreated", { kind: 1, new_authority: OTHER })))
+      .toMatchObject({ data: { kind: 1, new_authority: OTHER } });
+    expect(decodeRegistryEvent(encodeEvent("PlatformAdminChanged", { kind: 0 }))).toMatchObject({ data: { kind: "rotation" } });
+    expect(decodeRegistryEvent(encodeEvent("PlatformAdminChanged", { kind: 1, new_admin: OTHER })))
+      .toMatchObject({ data: { kind: "recovery", new_admin: OTHER } });
+    const bad = encodeEvent("PlatformAdminChanged", {});
+    bad[8 + 64] = 2;
+    expect(decodeRegistryEvent(bad)).toEqual({ name: "PlatformAdminChanged", error: "LAYOUT" });
   });
 
   it("decodes values and pubkeys at the exact length", () => {

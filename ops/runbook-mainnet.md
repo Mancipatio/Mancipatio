@@ -1273,6 +1273,23 @@ check with `select id, file_size_limit, allowed_mime_types from
 storage.buckets where id = 'client-documents';` (15728640 and the four
 types). The mainnet project gets it with the rest of the chain.
 
+### Role-state mirror (0079, package 8.3)
+
+`0079_indexer_role_state.sql` adds the indexer mirror of the v1.0.0-rc role
+state: `issuer_freezes`, `pending_admins`, `authority_proposals`,
+`platform_recoveries`, `blocklist_authority_proposals` and
+`blocklist_recoveries` (service role only; the admin menu badges of Admins
+and Platform and the `role-change-pending` incident read them), and extends
+`apply_indexer_snapshot` to write them (for the 14 existing tables the body is
+0047's). Expand-only, but apply it BEFORE the v1.0.0-rc front: without it
+that front's indexer jobs for these accounts stay pending (indexer degraded).
+Devnet: `bash scripts/ops/backup.sh devnet pre-0079`, then
+`MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0079_indexer_role_state.sql`,
+then a full reconcile (`/admin/health` → Run reconcile) to fill the tables;
+its result also lists any rc.x `AuthorityTransfer` / `BlocklistAuthorityTransfer`
+left on chain (never mirrored). Rollback: re-apply 0047's
+`apply_indexer_snapshot` and drop the six tables (only with the previous front).
+
 ### Backups (D14, D17)
 
 - Devnet: `backup.sh devnet <label>` writes a full and a schema-only dump
@@ -1762,6 +1779,10 @@ counsel decides whether the pilot needs them.
 | `fx:expiring` (`fx-expiring:<mint>`, medium) | Refresh the EUR rate on the Raise limits page (`/admin/limits`) before its max age: past it `fx:stale` follows and the sales that need the rate stop (on mainnet `/api/health` fails for the default mint). |
 | `worker:alert-channel` (`alert-channel-email` or `alert-channel-webhook`, high) | That channel failed a digest; the other one delivered this alert. Fix the channel (SMTP or Resend; `ALERT_WEBHOOK_*`: §11 "SMTP down"), send a test alert, re-queue what gave up (Operations); it clears after three digests it delivers. |
 | `worker:ops-watch-config` | `ALARM_BALANCE_WATCH` or `ALARM_SQUADS_CONFIG` does not parse: correct it and redeploy (no balance or Squads watch until then). |
+| v1.0.0-rc role changes, all critical: `onchain:admin-grant` (propose / cancel an Admin grant), `onchain:admin-record` (`add_admin`, the new key executes it), `onchain:platform-admin` (Super Admin rotation propose / accept / cancel), `onchain:platform-recovery` and `onchain:blocklist-recovery` (the upgrade authority's recoveries: propose / cancel / execute), `onchain:blocklist-authority` (rotation propose / accept / cancel) | Compare with the signer matrix and the change you planned (§19). Unexpected proposal: cancel it inside its window (Admin grant and Super Admin rotation: the Super Admin, any Admin or the upgrade authority; Super Admin recovery: the Super Admin or the upgrade authority; blocklist recovery or rotation: the blocklist authority, or the upgrade authority for a recovery), then treat the proposer's key as compromised, §11. Unexpected execute or accept: incident, §11. |
+| `onchain:role-change-pending` (`role-change-pending`, high) | The "timelock running" incident: a staged Admin grant, Super Admin rotation or upgrade-authority recovery is live (the evidence counts each kind and names the next eta). Expected: nothing to do, it clears once each one is executed, cancelled or expired. Otherwise as the row above. |
+| `onchain:issuer-freeze` (critical) | A freeze: confirm it with the Admin who froze (the reason's SHA-256 is in the evidence and on `/admin/issuers`; the text is in the audit log); follow the freeze SOP (O-9). An unfreeze: only the Super Admin can; confirm the decision. |
+| `onchain:payout-modules` (`payout-modules`, critical, mainnet) and `onchain:pause` "Payout modules switched ON" | Bit 0x40 must stay set on mainnet (D2). Unexpected: set it again (`set_pause_flags(0x40, 0)`, any Admin) and treat the Super Admin key as compromised, §11. |
 | Admin actions that move money or tokens: `onchain:vault-vote`, `onchain:yield-route`, `onchain:milestone`, `onchain:proposal`, `onchain:supply-lock`, `onchain:custody-vault`, `onchain:sale-approval` | Compare with the signer matrix and the admin decision behind it (the request or approval on the admin pages). A short voting window (critical or high) is checked with the issuer. Unexpected: that Admin key is compromised, §11 ("An Admin key compromised or lost"). |
 
 ### Operations

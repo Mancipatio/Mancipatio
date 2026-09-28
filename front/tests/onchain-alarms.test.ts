@@ -23,15 +23,25 @@ import {
   RealizeAction,
   VaultType,
   getAcceptPlatformAdminInstructionDataEncoder,
+  getAddAdminInstructionDataEncoder,
   getApproveHolderInstructionDataEncoder,
   getApproveSaleInstructionDataEncoder,
+  getCancelAdminProposalInstructionDataEncoder,
+  getCancelCustodyAuthorityTransferInstructionDataEncoder,
+  getCancelPlatformAdminTransferInstructionDataEncoder,
+  getCancelPlatformRecoveryInstructionDataEncoder,
   getClawbackBlocklistedHolderInstructionDataEncoder,
   getClawbackFromHolderInstructionDataEncoder,
   getCreateProposalInstructionDataEncoder,
+  getExecutePlatformRecoveryInstructionDataEncoder,
+  getFreezeIssuerProceedsInstructionDataEncoder,
   getLockSupplyInstructionDataEncoder,
   getMintToTreasuryInstructionDataEncoder,
   getOpenCustodyVaultInstructionDataEncoder,
   getOpenVaultVoteInstructionDataEncoder,
+  getProposeAdminInstructionDataEncoder,
+  getProposePlatformAdminInstructionDataEncoder,
+  getProposePlatformRecoveryInstructionDataEncoder,
   getPublishMilestoneInstructionDataEncoder,
   getRealizeCustodyVaultInstructionDataEncoder,
   getReclaimRentInstructionDataEncoder,
@@ -43,12 +53,18 @@ import {
   getSetPauseInstructionDataEncoder,
   getSetProtocolTreasuryInstructionDataEncoder,
   getTriggerCustodyVaultInstructionDataEncoder,
+  getUnfreezeIssuerProceedsInstructionDataEncoder,
   getVerifyIssuerKybInstructionDataEncoder,
 } from "@/lib/generated/asset_registry";
 import {
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   getAcceptBlocklistAuthorityInstructionDataEncoder,
   getAddToBlocklistInstructionDataEncoder,
+  getCancelBlocklistAuthorityTransferInstructionDataEncoder,
+  getCancelBlocklistRecoveryInstructionDataEncoder,
+  getExecuteBlocklistRecoveryInstructionDataEncoder,
+  getProposeBlocklistAuthorityInstructionDataEncoder,
+  getProposeBlocklistRecoveryInstructionDataEncoder,
   getRemoveFromBlocklistInstructionDataEncoder,
 } from "@/lib/generated/transfer_hook";
 import { USDC } from "@/lib/payment-mints";
@@ -399,5 +415,111 @@ describe("processEventJob", () => {
     const m = mockSb();
     expect(await processEventJob(job(), signal(), Date.now() + 5_000, m.sb)).toBe("invalid");
     expect(update(m.calls)).toMatchObject({ last_error: "SIGNATURE_MISMATCH" });
+  });
+});
+
+// ── v1.0.0-rc (8.3): timelocked role changes, recoveries, the proceeds freeze ──
+
+describe("v1.0.0-rc role changes (D1, D3, D4)", () => {
+  const H = TRANSFER_HOOK_PROGRAM_ADDRESS;
+  const ix = (encoder: { encode: (v: never) => ArrayLike<number> }, args: unknown, n = 10, program: string = R) =>
+    ({ program, accounts: accounts(n), data: bytes(encoder, args) });
+  const critical: [string, Ix][] = [
+    ["propose_admin", ix(getProposeAdminInstructionDataEncoder(), { newAdmin: C as Address })],
+    ["add_admin", ix(getAddAdminInstructionDataEncoder(), { newAdmin: C as Address })],
+    ["cancel_admin_proposal", ix(getCancelAdminProposalInstructionDataEncoder(), {})],
+    ["propose_platform_admin", ix(getProposePlatformAdminInstructionDataEncoder(), { newAdmin: C as Address })],
+    ["accept_platform_admin", ix(getAcceptPlatformAdminInstructionDataEncoder(), {})],
+    ["cancel_platform_admin_transfer", ix(getCancelPlatformAdminTransferInstructionDataEncoder(), {})],
+    ["freeze_issuer_proceeds", ix(getFreezeIssuerProceedsInstructionDataEncoder(), { reasonHash: new Uint8Array(32).fill(9) })],
+    ["unfreeze_issuer_proceeds", ix(getUnfreezeIssuerProceedsInstructionDataEncoder(), {})],
+    ["propose_platform_recovery", ix(getProposePlatformRecoveryInstructionDataEncoder(), { newAdmin: C as Address })],
+    ["cancel_platform_recovery", ix(getCancelPlatformRecoveryInstructionDataEncoder(), {})],
+    ["execute_platform_recovery", ix(getExecutePlatformRecoveryInstructionDataEncoder(), {})],
+    ["propose_blocklist_authority", ix(getProposeBlocklistAuthorityInstructionDataEncoder(), { newAuthority: C as Address }, 4, H)],
+    ["accept_blocklist_authority", ix(getAcceptBlocklistAuthorityInstructionDataEncoder(), {}, 4, H)],
+    ["cancel_blocklist_authority_transfer", ix(getCancelBlocklistAuthorityTransferInstructionDataEncoder(), {}, 3, H)],
+    ["propose_blocklist_recovery", ix(getProposeBlocklistRecoveryInstructionDataEncoder(), { newAuthority: C as Address }, 6, H)],
+    ["cancel_blocklist_recovery", ix(getCancelBlocklistRecoveryInstructionDataEncoder(), {}, 4, H)],
+    ["execute_blocklist_recovery", ix(getExecuteBlocklistRecoveryInstructionDataEncoder(), {}, 7, H)],
+  ];
+
+  it("every step is critical, top-level or inside Squads, with or without logs", () => {
+    for (const [name, i] of critical) {
+      for (const opts of [{}, { inner: true }, { logs: "none" as const }]) {
+        const alarm = one(run([i], opts));
+        expect(alarm.severity, `${name} ${JSON.stringify(opts)}`).toBe("critical");
+        expect(alarm.evidence.instruction, name).toBe(name);
+      }
+    }
+  });
+
+  it("each new source has a fixed label in the entry's format", () => {
+    for (const [name, i] of critical) {
+      const alarm = one(run([i]));
+      expect(SOURCE_LABELS[alarm.source], name).toMatchObject({ format: alarm.format });
+    }
+    expect(ALARM_INSTRUCTIONS.find((e) => e.name === "freeze_issuer_proceeds")?.format).toBe("minimal");
+  });
+
+  it("propose_admin names the window from AdminProposed, or the open bootstrap window", () => {
+    const i = critical[0][1];
+    const eta = 1_700_172_800;
+    const ev = encodeEvent("AdminProposed", { new_admin: C, eta, expires_at: eta + 1_209_600, bootstrap_open: false });
+    expect(one(run([i], { events: [[ev]] }))).toMatchObject({ source: "onchain:admin-grant", format: "platform",
+      summary: expect.stringContaining("executable from 2023-11-16 22:13 UTC until 2023-11-30 22:13 UTC"),
+      evidence: { new_admin: C, eta: String(eta), bootstrap_open: false, args: { newAdmin: C } } });
+    const boot = encodeEvent("AdminProposed", { new_admin: C, eta, expires_at: eta + 1, bootstrap_open: true });
+    expect(one(run([i], { events: [[boot]] })).summary).toMatch(/bootstrap window open/);
+    // No event: still critical, window unknown.
+    expect(one(run([i], { logs: "none" }))).toMatchObject({ severity: "critical", evidence: { eta: null, bootstrap_open: null } });
+  });
+
+  it("add_admin is the executor (new admin signs), evidence from AdminAdded; the cancels name who cancelled", () => {
+    const added = one(run([critical[1][1]], { events: [[encodeEvent("AdminAdded", { admin: C, added_by: B, proposed_at: 5 })]] }));
+    expect(added).toMatchObject({ source: "onchain:admin-record", evidence: { admin: C, added_by: B, proposed_at: "5",
+      accounts: { new_admin: A, pending_admin: C, proposer: A, admin_record: B } } });
+    const cancelled = one(run([critical[2][1]], { events: [[encodeEvent("AdminProposalCancelled", { new_admin: C, proposed_by: A, cancelled_by: B })]] }));
+    expect(cancelled).toMatchObject({ source: "onchain:admin-grant", summary: `Admin grant for ${C} cancelled by ${A}` });
+    const rotation = one(run([critical[5][1]], { events: [[encodeEvent("AuthorityProposalCancelled", { kind: 0, cancelled_new_authority: C })]] }));
+    expect(rotation).toMatchObject({ source: "onchain:platform-admin", evidence: { cancelled_new_authority: C } });
+  });
+
+  it("recovery: the proposal names who replaces whom and when; the execute names the old admin", () => {
+    const ev = encodeEvent("PlatformRecoveryProposed", { current_admin: B, new_admin: C, eta: 1_700_604_800, expires_at: 1_701_814_400 });
+    expect(one(run([critical[8][1]], { events: [[ev]] }))).toMatchObject({ source: "onchain:platform-recovery",
+      summary: expect.stringMatching(new RegExp(`${C} replaces ${B} \\(executable from .+ UTC until .+ UTC\\) unless`)),
+      evidence: { current_admin: B, new_admin: C } });
+    const changed = encodeEvent("PlatformAdminChanged", { old_admin: B, new_admin: A, kind: 1 });
+    expect(one(run([critical[10][1]], { events: [[changed]] }))).toMatchObject({ evidence: { old_admin: B, kind: "recovery" } });
+    expect(one(run([critical[14][1]]))).toMatchObject({ source: "onchain:blocklist-recovery", evidence: { args: { newAuthority: C } } });
+  });
+
+  it("freeze and unfreeze are minimal: the reason's hash and who froze, never the raw arguments", () => {
+    const frozen = encodeEvent("IssuerProceedsFrozen", { issuer: B, frozen_by: A, frozen_at: 7, reason_hash: new Uint8Array(32).fill(9) });
+    const alarm = one(run([critical[6][1]], { events: [[frozen]] }));
+    expect(alarm).toMatchObject({ source: "onchain:issuer-freeze", format: "minimal",
+      evidence: { frozen_by: A, frozen_at: "7", reason_hash: "09".repeat(32), accounts: { issuer: A, issuer_freeze: B } } });
+    expect(alarm.evidence).not.toHaveProperty("args");
+    // No event: the hash from the arguments, the signer as the freezer.
+    expect(one(run([critical[6][1]], { logs: "none" })).evidence).toMatchObject({ reason_hash: "09".repeat(32), frozen_by: A });
+    expect(one(run([critical[7][1]]))).toMatchObject({ source: "onchain:issuer-freeze", format: "minimal", severity: "critical" });
+  });
+
+  it("set_pause_flags: switching the payout modules (0x40) on or off is critical; a set that leaves 0x40 alone is judged by its other bits", () => {
+    expect(one(run([pauseFlags(0, 0x40)]))).toMatchObject({ severity: "critical", summary: expect.stringMatching(/Payout modules switched ON/) });
+    expect(one(run([pauseFlags(0, 0x40)], { events: [[encodeEvent("PauseFlagsChanged", { old: 0x00, new: 0x00 })]] })).severity).toBe("low");
+    expect(one(run([pauseFlags(0x40, 0)]))).toMatchObject({ severity: "critical", summary: expect.stringMatching(/switched off/) });
+    // Mainnet keeps 0x40 set: an admin pausing primary issuance with 0x40 in the mask changes only 0x02.
+    const primary = one(run([pauseFlags(0x42, 0)], { events: [[encodeEvent("PauseFlagsChanged", { old: 0x40, new: 0x42 })]] }));
+    expect(primary).toMatchObject({ severity: "high", summary: expect.stringMatching(/^Pause flags set/) });
+    // The full pause stays "Pause flags set", critical.
+    expect(one(run([pauseFlags(0x7f, 0)], { events: [[encodeEvent("PauseFlagsChanged", { old: 0x40, new: 0x7f })]] })))
+      .toMatchObject({ severity: "critical", summary: expect.stringMatching(/^Pause flags set/) });
+  });
+
+  it("a custody rotation cancel is high", () => {
+    const cancel = ix(getCancelCustodyAuthorityTransferInstructionDataEncoder(), {}, 6);
+    expect(one(run([cancel]))).toMatchObject({ source: "onchain:custody-authority", severity: "high" });
   });
 });

@@ -341,7 +341,7 @@ describe("admin badges: authorization", () => {
     expect(state.calls).toHaveLength(0);
   });
 
-  it("an admin gets exactly the 13 queues, in menu order", async () => {
+  it("an admin gets exactly the 15 queues, in menu order", async () => {
     const { POST } = await load();
     const { body } = await call(POST);
     expect(Object.keys(body.data.badges)).toEqual([...ADMIN_BADGE_HREFS]);
@@ -715,5 +715,66 @@ describe("clients/admin-list: the 'Needs review' tab uses the badge's reader", (
     expect(body.data.review_available).toBe(false);
     expect(body.data.clients.length).toBeGreaterThan(0);
     expect(body.data.clients[0]).not.toHaveProperty("review_reasons");
+  });
+});
+
+// ── v1.0.0-rc: Admins and Platform over the role-state mirror (0079) ─────────
+
+describe("admin badges: staged role changes (0079)", () => {
+  const ROLE_TABLES = ["pending_admins", "authority_proposals", "platform_recoveries", "blocklist_recoveries", "blocklist_authority_proposals"];
+  function stage() {
+    const now = Math.floor(Date.now() / 1000);
+    state.tables.platforms = [{ network: "devnet", admin: ADMIN, pause_flags: 0x40 }, { network: "mainnet", admin: ISSUER, pause_flags: 0x40 }];
+    state.tables.pending_admins = [
+      { network: "devnet", proposed_by: ADMIN, proposed_at: now - 60, eta: now + 172_740, expires_at: now + 1_382_340 }, // review window
+      { network: "devnet", proposed_by: ADMIN, proposed_at: now - 200_000, eta: now - 27_200, expires_at: now + 1_000_000 }, // awaits the key
+      { network: "devnet", proposed_by: ISSUER, proposed_at: now - 60, eta: now + 100, expires_at: now + 1_000 }, // earlier Super Admin
+      { network: "mainnet", proposed_by: ISSUER, proposed_at: now - 60, eta: now + 100, expires_at: now + 1_000 },
+    ];
+    state.tables.authority_proposals = [
+      { network: "devnet", kind: 0, current_authority: ADMIN, proposed_at: now - 60, eta: now + 100, expires_at: now + 1_000 },
+      { network: "devnet", kind: 1, current_authority: ADMIN, proposed_at: now - 60, eta: now - 60, expires_at: now + 1_000 }, // custody: not this page
+    ];
+    state.tables.platform_recoveries = [{ network: "devnet", proposed_at: now - 60, eta: now + 604_740, expires_at: now + 1_814_340 }];
+    state.tables.blocklist_recoveries = [];
+    state.tables.blocklist_authority_proposals = [{ network: "devnet", proposed_at: now - 60, expires_at: now + 1_000 }];
+  }
+
+  it("Admins counts grants in their review window and stale ones; Platform the SA rotation in its window and the live recovery", async () => {
+    stage();
+    const { POST } = await load();
+    const { body } = await call(POST);
+    expect(body.data.badges["/admin/admins"]).toEqual({ count: 2, parts: { timelock: 1, stale: 1 }, aside: { awaitingKey: 1 } });
+    expect(body.data.badges["/admin/platform"]).toEqual({ count: 2, parts: { rotation: 1, recovery: 1 }, aside: { awaitingKey: 1 } });
+    for (const { table, ops } of state.calls.filter((c) => ROLE_TABLES.includes(c.table) || c.table === "platforms")) {
+      expect(ops, table).toContainEqual(["eq", "network", "devnet"]);
+    }
+    expect(state.calls.find((c) => c.table === "authority_proposals")!.ops).toContainEqual(["eq", "kind", 0]);
+  });
+
+  it("nothing staged: both zero; the indexer behind: both null without reading the mirror", async () => {
+    const { POST } = await load();
+    const { body } = await call(POST);
+    expect(body.data.badges["/admin/admins"]).toMatchObject({ count: 0 });
+    expect(body.data.badges["/admin/platform"]).toMatchObject({ count: 0 });
+    stage();
+    state.tables.indexer_sync_state[0].status = "warming";
+    state.calls = [];
+    const { POST: again } = await load();
+    const behind = (await call(again)).body.data.badges;
+    expect(behind["/admin/admins"]).toEqual({ count: null, reason: "indexer" });
+    expect(behind["/admin/platform"]).toEqual({ count: null, reason: "indexer" });
+    for (const table of [...ROLE_TABLES, "platforms"]) expect(tablesQueried().has(table)).toBe(false);
+  });
+
+  it("the KYC provider never reads the role-state mirror", async () => {
+    stage();
+    state.signer = PROVIDER;
+    mocks.gate.mockResolvedValue("kycProvider");
+    const { POST } = await load();
+    const { body } = await call(POST);
+    expect(body.data.badges).not.toHaveProperty("/admin/admins");
+    expect(body.data.badges).not.toHaveProperty("/admin/platform");
+    for (const table of [...ROLE_TABLES, "platforms"]) expect(tablesQueried().has(table)).toBe(false);
   });
 });
