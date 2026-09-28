@@ -1,6 +1,6 @@
 // The smoke's test object: every test gets a mock chain on the build's RPC
 // endpoints, a Supabase stand-in, the API stand-ins of support/api-mocks.ts,
-// and a guard that fails the test on an uncaught page error, a console error
+// a Turnstile stand-in, and a guard that fails the test on an uncaught page error, a console error
 // or a request to any host but the server under test (such a request is
 // refused, so nothing leaves the machine).
 import { test as base, expect, type Page, type TestInfo } from "@playwright/test";
@@ -15,6 +15,17 @@ export const ENV = env[NETWORK] as Record<string, string>;
 export const ENDPOINTS = { rpc: ENV.NEXT_PUBLIC_SOLANA_RPC_URL, ws: ENV.NEXT_PUBLIC_SOLANA_WS_URL };
 const GENESIS_HASH = NETWORK === "mainnet" ? CLUSTER_GENESIS_HASHES.mainnet : ENV.NEXT_PUBLIC_SOLANA_GENESIS_HASH;
 const SERVER = "http://127.0.0.1:3310";
+
+// Cloudflare Turnstile (components/turnstile-widget.tsx) on a build with a
+// site key (the mainnet placeholders): a stand-in for its explicit-render API
+// that renders nothing and never produces a token.
+const TURNSTILE_SCRIPT = /^https:\/\/challenges\.cloudflare\.com\/turnstile\/v0\/api\.js(\?.*)?$/;
+const TURNSTILE_STUB = `window.turnstile = {
+  render: function () { return "ui-smoke-turnstile"; },
+  reset: function () {},
+  remove: function () {},
+  getResponse: function () { return undefined; },
+};`;
 
 export class PageGuard {
   readonly pageErrors: string[] = [];
@@ -94,7 +105,11 @@ export const test = base.extend<Fixtures>({
       void [chain, supabase];
       const mockedHosts = new Set([new URL(ENDPOINTS.rpc).host, new URL(ENDPOINTS.ws).host]);
       if (ENV.NEXT_PUBLIC_SUPABASE_URL) mockedHosts.add(new URL(ENV.NEXT_PUBLIC_SUPABASE_URL).host);
-      const mocked = (url: URL) => mockedHosts.has(url.host) || url.hostname.endsWith(".supabase.co");
+      const mocked = (url: URL) =>
+        mockedHosts.has(url.host) || url.hostname.endsWith(".supabase.co") || TURNSTILE_SCRIPT.test(url.href);
+      await page.route(TURNSTILE_SCRIPT, (route) =>
+        route.fulfill({ status: 200, contentType: "text/javascript", body: TURNSTILE_STUB }),
+      );
       // Page routes (the mocks) come first; whatever reaches this context
       // route is going somewhere else and is refused.
       await page.context().route((url) => url.origin !== SERVER, (route) => route.abort("blockedbyclient"));
