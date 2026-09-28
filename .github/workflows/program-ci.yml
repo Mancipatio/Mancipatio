@@ -99,10 +99,22 @@ jobs:
       # `--arch v3` with v1.52/v1.53. cargo-build-sbf 4.2.0 links v3 with
       # `-z defs`, so an unresolved symbol already fails here; the ELF gate
       # below proves it independently on the artifact.
+      # The version check is repeated HERE because this step resolves
+      # `cargo build-sbf` through the PATH the runner rebuilt from
+      # GITHUB_PATH, not through the PATH the install script exported for
+      # its own asserts; the Agave 4.2.2 tarball bundles cargo-build-sbf
+      # 4.1.0 / platform-tools v1.54, which would also emit a v3 ELF.
       - name: Build both SBF programs (SBPF v3)
         shell: bash
         run: |
           set -o pipefail
+          cbs_version="$(cargo build-sbf --version)"
+          echo "$cbs_version ($(command -v cargo-build-sbf))"
+          if ! grep -qx "cargo-build-sbf 4.2.0" <<<"$cbs_version" ||
+            ! grep -qx "platform-tools v1.56" <<<"$cbs_version"; then
+            echo "::error::the build would use $(command -v cargo-build-sbf), not cargo-build-sbf 4.2.0 / platform-tools v1.56"
+            exit 1
+          fi
           mkdir -p target
           cargo build-sbf --workspace --arch v3 --tools-version v1.56 -- --locked 2>&1 | tee target/build-sbf.log
 

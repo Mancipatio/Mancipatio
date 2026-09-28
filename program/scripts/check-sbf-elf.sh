@@ -17,6 +17,14 @@
 #      inside .text, and a syscall (src = 0) is the murmur3 hash of a
 #      syscall the runtime knows (the cargo-build-sbf 4.2.0 SYSCALLS list).
 #      An unresolved or sentinel target fails;
+#   3a. every syscall is in the reviewed set PINNED for that program (by
+#      file name). The v3 verifier does not look at syscall hashes at deploy
+#      (solana-sbpf 0.21 `ebpf::CALL_IMM => {}`), so a syscall that is
+#      unregistered or feature-gated on the cluster would deploy and fail
+#      only when its path runs. A dependency bump that starts calling a new
+#      one (e.g. sol_get_sysvar through solana-get-sysvar) fails here until
+#      the pin is changed in review, after checking the syscall is active on
+#      the target cluster. A file name without a pin fails;
 #   4. it carries exactly one `=======BEGIN SECURITY.TXT V1=======` marker.
 #      The SBF targets are `target_arch = "sbf"`, so solana-security-txt's
 #      `link_section = ".security.txt"` (gated on "bpf") never applies: the
@@ -33,6 +41,7 @@ if [[ $# -lt 1 ]]; then
 fi
 
 exec python3 - "$@" <<'PY'
+import os
 import struct
 import sys
 
@@ -92,11 +101,36 @@ def murmur3_32(data: bytes, seed: int = 0) -> int:
 
 
 KNOWN = {murmur3_32(name.encode()) for name in SYSCALLS}
+NAMES = {murmur3_32(name.encode()): name for name in SYSCALLS}
 assert murmur3_32(b"sol_log_") == 0x207559BD, "murmur3 self-test"
+
+# The syscalls each release program calls, pinned from the reviewed v3
+# build of the rc.1 logic (2026-09-28; the rc.1 v0 Release imports the same
+# names). Add one only in review, never to make CI pass.
+PINNED = {
+    "asset_registry": {
+        "abort", "sol_create_program_address", "sol_get_clock_sysvar",
+        "sol_get_rent_sysvar", "sol_invoke_signed_rust", "sol_log_",
+        "sol_log_data", "sol_log_pubkey", "sol_memcmp_", "sol_memcpy_",
+        "sol_memmove_", "sol_memset_", "sol_panic_", "sol_sha256",
+        "sol_try_find_program_address",
+    },
+    "transfer_hook": {
+        "abort", "sol_create_program_address", "sol_get_clock_sysvar",
+        "sol_get_rent_sysvar", "sol_invoke_signed_rust", "sol_log_",
+        "sol_log_pubkey", "sol_memcmp_", "sol_memcpy_", "sol_memmove_",
+        "sol_memset_", "sol_panic_", "sol_try_find_program_address",
+    },
+}
+assert all(PINNED[p] <= set(SYSCALLS) for p in PINNED), "pin names a syscall cargo-build-sbf does not know"
 
 
 def check(path: str) -> list:
     problems = []
+    program = os.path.basename(path)[: -len(".so")] if path.endswith(".so") else os.path.basename(path)
+    pinned = PINNED.get(program)
+    if pinned is None:
+        problems.append(f"no pinned syscall set for {program!r} (known: {', '.join(sorted(PINNED))})")
     data = open(path, "rb").read()
     if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
         return ["not an ELF64 little-endian file"]
@@ -143,8 +177,11 @@ def check(path: str) -> list:
                 if not 0 <= target < count:
                     problems.append(f".text[{idx}]: internal call to {target} outside .text")
             elif src == 0:
-                if (imm & 0xFFFFFFFF) not in KNOWN:
-                    problems.append(f".text[{idx}]: unknown syscall hash {imm & 0xFFFFFFFF:#010x}")
+                key = imm & 0xFFFFFFFF
+                if key not in KNOWN:
+                    problems.append(f".text[{idx}]: unknown syscall hash {key:#010x}")
+                elif pinned is not None and NAMES[key] not in pinned:
+                    problems.append(f".text[{idx}]: syscall {NAMES[key]} is not pinned for {program}")
             else:
                 problems.append(f".text[{idx}]: call with src {src}")
             if len(problems) > 20:
@@ -163,6 +200,6 @@ for path in sys.argv[1:]:
         for p in problems:
             print(f"::error::{path}: {p}")
     else:
-        print(f"{path}: SBPF v3 (e_flags 3, EM_BPF), no dynamic symbols, calls resolved, security.txt x1")
+        print(f"{path}: SBPF v3 (e_flags 3, EM_BPF), no dynamic symbols, calls resolved, syscalls within the pin, security.txt x1")
 sys.exit(1 if failed else 0)
 PY

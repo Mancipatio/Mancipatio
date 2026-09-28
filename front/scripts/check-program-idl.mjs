@@ -64,6 +64,7 @@ if (workingTree) {
     "Cargo.lock",
     "Anchor.toml",
     "rust-toolchain.toml",
+    ".cargo",
   ]);
 }
 if (run("anchor", ["--version"]) !== `anchor-cli ${toolchain.anchorVersion}`) {
