@@ -62,6 +62,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `HEALTH_TOKEN` | Secret | ≥ 32, no whitespace (guard `health-token`) | recommended | `/api/health` never shows details | `lib/server/health.ts` |
 | `SENTRY_DSN` | Secret-ish (project key) | `https://<key>@<org>.ingest.de.sentry.io/<project id>` of an EU project: the guard `sentry` applies the runtime parser's rules | recommended | Server errors only in Vercel logs | `lib/request-error-report.ts` |
 | `TOS_SERVER_GATE` | Server, runtime | leave unset: mainnet always enforces the Terms acceptance on the signed buy and sell routes | `enforce` only to rehearse the mainnet behaviour | No server check off mainnet (the client-side dialog only) | `lib/server/tos-gate.ts` |
+| `GEOBLOCK_COUNTRIES` | Server, build + runtime | **counsel's list** (guard): ISO 3166 codes `KP,IR,CU,SY,UA-43,…`, or `none` written down on purpose; see "Geoblocking" | optional (unset blocks nothing) | Mainnet build refused; at runtime mainnet transactional routes answer 451 | `lib/geoblock.ts`, `proxy.ts` |
 | `SANCTIONS_SCREENING` | Server, runtime | leave unset: mainnet always refuses the screened routes (commit, purchase record, OTC request, resell listing, passport, verification) while the OFAC SDN list is older than 3 days, empty or unreadable (503) | `enforce` only to rehearse that on devnet | Off mainnet an unusable list is only logged; a hit is refused on every network | `lib/server/sanctions.ts` |
 | `MAINNET_LEGAL_COPY_APPROVED` | Build | `true` only after counsel reviewed the rendered mainnet pages (guard; runbook §17) | — | Mainnet build refused | `next.config.ts` |
 | `MAINNET_LICENSE_NOT_REQUIRED` | Build | `true` **only** on counsel's written opinion that no licence is needed, while `OPERATORS.mainnet.licence` is null; refused together with a recorded licence (guard; runbook §17) | — | Mainnet build refused while no licence is recorded | `lib/legal/readiness.ts` |
@@ -123,6 +124,34 @@ keep their own flags; admin payout records (`/api/payouts/create`) are not
 gated. The switches are the platform's scope; the program's pause bits are
 the on-chain one (runbook: which bits the pilot keeps set), and
 `lib/pause-gate.ts` reads those before a wallet signs.
+
+### Geoblocking
+
+Which countries the platform does not serve is **counsel's decision**
+(pravo-compliance-6); the code only enforces it. `GEOBLOCK_COUNTRIES` holds
+comma-separated ISO 3166-1 alpha-2 codes, plus `CC-REGION` codes (ISO
+3166-2 subdivision, best effort: matched only when Vercel reports the
+region, e.g. `UA-43` Crimea, `UA-40` Sevastopol, `UA-14` Donetsk, `UA-09`
+Luhansk). A mainnet build refuses to start without it; `none` is accepted
+only as a written decision that nothing is blocked. Any production build
+refuses a malformed value.
+
+`proxy.ts` reads Vercel's `x-vercel-ip-country` (and
+`x-vercel-ip-country-region`) on:
+- the transactional API routes (`lib/geoblock.ts` `GEOBLOCKED_API_ROUTES`:
+  commit, purchase record, the buyer's pre-buy screen, OTC request, resell
+  listing, passport application, verification, raise applications,
+  conversion and delivery requests, vesting-series requests, Terms
+  acceptance): a listed country answers **451**, and on mainnet so does a
+  request without the country header (fail closed);
+- the app pages (`/marketplace`, `/portfolio`, `/issuer`, `/verify`,
+  `/onboarding`, `/apply`): a listed country sees `/not-available` instead;
+  a page without the header is served.
+Exits (cancels, refunds, claims), reads, the marketing and legal pages, the
+admin console and the internal worker routes are not geoblocked. Off
+mainnet an unset list blocks nothing. IP geolocation is one line (VPNs pass
+it): the Terms' eligibility clause and the wallet sanctions screen are the
+others. Changing the list needs a redeploy of the same build settings.
 
 ## Supabase
 
