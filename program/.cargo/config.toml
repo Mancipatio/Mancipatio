@@ -1,0 +1,13 @@
+# Resolver policy for a future re-resolution of Cargo.lock (`cargo update`,
+# a new dependency). The host toolchain is pinned to 1.89.0
+# (rust-toolchain.toml) and no workspace member declares a rust-version, so
+# with `fallback` cargo prefers dependency versions whose declared
+# rust-version that rustc meets instead of breaking the lockfile.
+# The agave crates declare no rust-version, so this does not hold them back:
+# the dev-dependencies cap them instead (litesvm 0.15.2 with
+# agave-feature-set / solana-program-runtime ~4.1.2, programs/*/Cargo.toml),
+# because the agave 4.2+ trains need a newer rustc than 1.89 (LiteSVM 0.16
+# requires agave ^4.2.1). CI builds with `--locked`, so this file changes no
+# build, only how the lock would be re-resolved.
+[resolver]
+incompatible-rust-versions = "fallback"

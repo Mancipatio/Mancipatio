@@ -147,16 +147,84 @@ fn load<T: AccountDeserialize>(svm: &LiteSVM, pda: &Pubkey, label: &str) -> T {
 
 #[test]
 fn happy_path_registry_lifecycle() {
+    run_happy_path(LiteSVM::new());
+}
+
+/// Design 8.3 §11.6 parity smoke: the same happy path (both programs, hook
+/// Execute on every share transfer) on exactly the feature gates mainnet had
+/// active on 2026-09-28, SBPF v3 included (`solana feature status -um`,
+/// agave 4.3.0). `LiteSVM::new()` runs its own mainnet snapshot of
+/// 2026-07-29; this pins the one taken for the v1 release.
+///
+/// The VM is BUILT around the pinned set: in litesvm 0.15.2
+/// `with_feature_set` only swaps the set and the reserved keys, while the
+/// builtins and the program-runtime environment (loader / verifier config,
+/// SBPF versions, feature-gated syscall registry) are made by `with_builtins`
+/// and the rent sysvar by `with_sysvars`. Calling `with_feature_set` after
+/// `new()` would leave the embedded snapshot's environment in place (the
+/// programs would be loaded and run by it), so the same order as
+/// `LiteSVM::new()` is spelled out here with the pinned set.
+#[test]
+fn happy_path_on_mainnet_features_2026_09_28() {
+    let pinned = support::mainnet_feature_set_2026_09_28();
+    let embedded = LiteSVM::mainnet_feature_set();
+    let only_pinned: Vec<Pubkey> = pinned
+        .active()
+        .keys()
+        .filter(|id| !embedded.is_active(id))
+        .copied()
+        .collect();
+    let only_embedded: Vec<Pubkey> = embedded
+        .active()
+        .keys()
+        .filter(|id| !pinned.is_active(id))
+        .copied()
+        .collect();
+    assert!(
+        !only_pinned.is_empty() || !only_embedded.is_empty(),
+        "the pinned set equals litesvm's embedded snapshot: this test adds nothing"
+    );
+    let svm = LiteSVM::default()
+        .with_feature_set(pinned.clone())
+        .with_builtins()
+        .with_lamports(1_000_000_000_000_000)
+        .with_sysvars()
+        .with_feature_accounts()
+        .with_default_programs()
+        .with_sigverify(true)
+        .with_blockhash_check(true);
+    // The VM carries exactly the pinned set: a feature account for every
+    // pinned gate (at its activation slot) and none for a gate only the
+    // embedded snapshot has (litesvm exposes no feature-set getter here).
+    for (id, slot) in pinned.active() {
+        let account = svm
+            .get_account(id)
+            .unwrap_or_else(|| panic!("{id}: feature account"));
+        // Feature { activated_at: Option<u64> } — bincode: tag 1 + slot LE.
+        assert_eq!(account.data[0], 1, "{id}: activated");
+        assert_eq!(&account.data[1..9], &slot.to_le_bytes(), "{id}: slot");
+    }
+    for id in &only_embedded {
+        assert!(svm.get_account(id).is_none(), "{id}: no feature account");
+    }
+    eprintln!(
+        "parity: {} features only in the 2026-09-28 set, {} only in litesvm's snapshot",
+        only_pinned.len(),
+        only_embedded.len()
+    );
+    run_happy_path(svm);
+}
+
+fn run_happy_path(mut svm: LiteSVM) {
     let program_id = asset_registry::id();
 
-    let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../target/deploy/asset_registry.so");
+    let bytes = support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so"));
     svm.add_program(program_id, bytes).unwrap();
     // transfer_hook must be loaded too — Token-2022 CPIs into it on every
     // share-token transfer (step 18+).
     svm.add_program(
         transfer_hook::id(),
-        include_bytes!("../../../target/deploy/transfer_hook.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so")),
     )
     .unwrap();
 
@@ -448,7 +516,11 @@ fn happy_path_registry_lifecycle() {
     // initialize_share_class_mint. Since CPI 2 (meta-list creation) is atomic
     // with the mint init, a raw create_account would permanently block this
     // share class — the hook must create over the pre-funded account.
-    svm.airdrop(&extra_metas_pda, 1).unwrap();
+    // The smallest balance a system account can hold on a current cluster
+    // (and in LiteSVM >= 0.15): a 1-lamport transfer into a new account now
+    // fails with InsufficientFundsForRent, so the grief lands rent-exempt.
+    let grief = svm.minimum_balance_for_rent_exemption(0);
+    svm.airdrop(&extra_metas_pda, grief).unwrap();
     send(
         &mut svm,
         &payer,
@@ -1681,7 +1753,7 @@ fn boot_kyc() -> (LiteSVM, Pubkey, Keypair) {
     let program_id = asset_registry::id();
     svm.add_program(
         program_id,
-        include_bytes!("../../../target/deploy/asset_registry.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so")),
     )
     .unwrap();
     let authority = Keypair::new();

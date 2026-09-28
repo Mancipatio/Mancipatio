@@ -105,14 +105,14 @@ fn boot() -> (LiteSVM, Ctx) {
     let mut svm = LiteSVM::new();
     svm.add_program(
         program_id,
-        include_bytes!("../../../target/deploy/asset_registry.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so")),
     )
     .unwrap();
     // transfer_hook must be loaded too — initialize_share_class_mint CPIs into
     // it to auto-create the per-mint hook config + meta list.
     svm.add_program(
         transfer_hook::id(),
-        include_bytes!("../../../target/deploy/transfer_hook.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so")),
     )
     .unwrap();
 

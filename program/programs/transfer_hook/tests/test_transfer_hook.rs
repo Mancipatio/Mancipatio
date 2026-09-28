@@ -129,7 +129,7 @@ fn transfer_hook_config_and_blocklist() {
     let program_id = transfer_hook::id();
 
     let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../target/deploy/transfer_hook.so");
+    let bytes = support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so"));
     svm.add_program(program_id, bytes).unwrap();
 
     let payer = Keypair::new();
@@ -252,7 +252,7 @@ fn execute_blocks_blocklisted_sender() {
     let program_id = transfer_hook::id();
 
     let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../target/deploy/transfer_hook.so");
+    let bytes = support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so"));
     svm.add_program(program_id, bytes).unwrap();
 
     let payer = Keypair::new();
@@ -542,7 +542,7 @@ fn token_owner_marker(svm: &LiteSVM, token: &Pubkey) -> Pubkey {
 fn kyc_gated_fixture(registry: Pubkey) -> (LiteSVM, Keypair, Pubkey, Pubkey, Pubkey, Pubkey) {
     let program_id = transfer_hook::id();
     let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../target/deploy/transfer_hook.so");
+    let bytes = support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so"));
     svm.add_program(program_id, bytes).unwrap();
 
     let payer = Keypair::new();
@@ -1475,7 +1475,7 @@ fn open_mode_passes_without_kyc() {
     // idx 6, so Execute runs only the sender-blocklist check.
     let program_id = transfer_hook::id();
     let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../target/deploy/transfer_hook.so");
+    let bytes = support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so"));
     svm.add_program(program_id, bytes).unwrap();
 
     let payer = Keypair::new();
@@ -1592,7 +1592,7 @@ const ERR_META_LIST_NOT_INITIALIZED: u32 = 6010;
 fn base_fixture() -> (LiteSVM, Keypair, Pubkey) {
     let program_id = transfer_hook::id();
     let mut svm = LiteSVM::new();
-    let bytes = include_bytes!("../../../target/deploy/transfer_hook.so");
+    let bytes = support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so"));
     svm.add_program(program_id, bytes).unwrap();
 
     let payer = Keypair::new();
@@ -2132,7 +2132,11 @@ fn init_meta_list_on_prefunded_pda_succeeds() {
     // so anyone can land lamports on it before initialization. A raw
     // `create_account` would fail with AccountAlreadyInUse forever —
     // initialization must tolerate the pre-funded account.
-    svm.airdrop(&extra_metas_pda, 1).unwrap();
+    // The smallest balance a system account can hold on a current cluster
+    // (and in LiteSVM >= 0.15): a 1-lamport transfer into a new account now
+    // fails with InsufficientFundsForRent, so the grief lands rent-exempt.
+    let grief = svm.minimum_balance_for_rent_exemption(0);
+    svm.airdrop(&extra_metas_pda, grief).unwrap();
 
     send(
         &mut svm,
@@ -2954,7 +2958,7 @@ fn quarantine_fixture(gated: bool) -> QuarantineFixture {
     let mut svm = LiteSVM::new();
     svm.add_program(
         program_id,
-        include_bytes!("../../../target/deploy/transfer_hook.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so")),
     )
     .unwrap();
     let payer = Keypair::new();

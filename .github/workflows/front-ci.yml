@@ -181,9 +181,11 @@ jobs:
           workspaces: program
           cache-targets: false
 
+      # The IDL build needs Anchor and the host compiler only (no SBF build,
+      # so no cargo-build-sbf 4.2.0 compile; design 8.3 §11.1.6).
       - name: Install pinned Anchor / Agave tooling
         working-directory: program
-        run: bash scripts/install-ci-toolchain.sh
+        run: bash scripts/install-ci-toolchain.sh --idl-only
 
       - name: Install frontend dependencies
         run: npm ci

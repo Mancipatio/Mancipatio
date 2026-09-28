@@ -105,12 +105,12 @@ fn load_programs() -> LiteSVM {
     let mut svm = LiteSVM::new();
     svm.add_program(
         asset_registry::ID,
-        include_bytes!("../../../target/deploy/asset_registry.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so")),
     )
     .unwrap();
     svm.add_program(
         transfer_hook::ID,
-        include_bytes!("../../../target/deploy/transfer_hook.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so")),
     )
     .unwrap();
     svm
@@ -879,30 +879,47 @@ fn every_defined_bit_is_distinct() {
     assert_eq!(all, PAUSE_FLAGS_ALL);
 }
 
+/// release-lanac-8 / design 8.3 §10: every release `.so` carries exactly
+/// one security.txt, and it parses to the published contact data. SBF targets
+/// never get the macro's `.security.txt` section (it is gated on
+/// `target_arch = "bpf"`), so the parse runs over the whole ELF.
 #[test]
 fn both_programs_embed_security_txt() {
+    use solana_security_txt::{find_and_parse, Contact};
     const MARKER: &[u8] = b"=======BEGIN SECURITY.TXT V1=======\0";
     for (name, so) in [
         (
             "asset_registry",
-            &include_bytes!("../../../target/deploy/asset_registry.so")[..],
+            support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so")),
         ),
         (
             "transfer_hook",
-            &include_bytes!("../../../target/deploy/transfer_hook.so")[..],
+            support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so")),
         ),
     ] {
-        let at = so
-            .windows(MARKER.len())
-            .position(|w| w == MARKER)
-            .unwrap_or_else(|| panic!("{name}.so carries no security.txt"));
-        let body = &so[at..(at + 1024).min(so.len())];
-        let text = String::from_utf8_lossy(body);
-        assert!(text.contains("security@mancipatio.io"), "{name}: contact");
+        let markers = so.windows(MARKER.len()).filter(|w| *w == MARKER).count();
+        assert_eq!(markers, 1, "{name}.so: exactly one security.txt");
+        let txt = find_and_parse(so).unwrap_or_else(|e| panic!("{name}.so: {e}"));
+        assert_eq!(txt.name, format!("Manci {name}"), "{name}: name");
+        assert_eq!(txt.project_url, "https://www.manci.io", "{name}: url");
         assert!(
-            text.contains("https://www.manci.io/security"),
+            matches!(&txt.contacts[..], [Contact::Email(e)] if e == "security@mancipatio.io"),
+            "{name}: contacts"
+        );
+        assert_eq!(
+            txt.policy, "https://www.manci.io/security",
             "{name}: policy"
         );
-        assert!(text.contains(&format!("Manci {name}")), "{name}: name");
+        assert_eq!(txt.preferred_languages, ["en"], "{name}: languages");
+        assert_eq!(
+            txt.source_code.as_deref(),
+            Some("https://github.com/Mancipatio/Mancipatio"),
+            "{name}: source_code"
+        );
+        assert!(txt.source_release.is_none(), "{name}: no source_release");
+        assert!(txt.source_revision.is_none(), "{name}: no source_revision");
+        assert!(txt.encryption.is_none() && txt.expiry.is_none(), "{name}");
+        // Absent: the parser splits "" into one empty entry.
+        assert_eq!(txt.auditors, [""], "{name}: auditors");
     }
 }

@@ -133,12 +133,12 @@ fn boot(holder_units: u64) -> (LiteSVM, Ctx) {
     let mut svm = LiteSVM::new();
     svm.add_program(
         program_id,
-        include_bytes!("../../../target/deploy/asset_registry.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so")),
     )
     .unwrap();
     svm.add_program(
         hook_id,
-        include_bytes!("../../../target/deploy/transfer_hook.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/transfer_hook.so")),
     )
     .unwrap();
 

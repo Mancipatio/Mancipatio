@@ -154,7 +154,7 @@ fn boot() -> World {
     let mut svm = LiteSVM::new();
     svm.add_program(
         asset_registry::ID,
-        include_bytes!("../../../target/deploy/asset_registry.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so")),
     )
     .unwrap();
     let fees = funded(&mut svm);
