@@ -317,7 +317,7 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, operator keys onboarded on the protected site | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps on the protected site → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
-| D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list") | super admin | §8, §13, §14 step 8, §15 |
+| D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
 | D11 | **Talas 7 go-live**: Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
@@ -2305,34 +2305,49 @@ devnet webhook enhanced, type ANY, with the 4 addresses (§15). Run from
 `front/`. Every check below is read-only:
 
 ```
-MANCI_TARGET=devnet bash scripts/db.sh -v sig=<signature> -f scripts/ops/indexer-drill-status.sql
+MANCI_TARGET=devnet bash scripts/db.sh -Atq -v sig=<signature> -f scripts/ops/indexer-drill-status.sql
 ```
 
-It prints `events|jobs|alarm_jobs|alerts` for that transaction, then one
-row each for the event (`delivery`: `webhook` or `gap-scan`), the indexer
-job, the alarm job, the sync state, the heartbeat, the last gap scan and
-the indexer incidents.
+With `-Atq` (unaligned, tuples only, quiet) it prints exactly the lines
+this section quotes: first `events|jobs|alarm_jobs|alerts` for that
+transaction, then one row each for the event (`delivery`: `webhook` or
+`gap-scan`), the indexer job, the alarm job, the sync state, the heartbeat,
+the last gap scan and the indexer incidents, each starting with its name
+and in the column order of `scripts/ops/indexer-drill-status.sql` (CI runs
+it the same way, after `assert-target.sql`). Without `-Atq` psql prints
+aligned tables with headers instead.
 
 **D1. Redelivery.** Make one devnet transaction that invokes asset_registry
 (a KYB step on `/admin/issuers` is enough); call its signature S1. Within
-about a minute the status shows `1|1|1|n`, `delivery` `webhook`, the
-indexer job `complete` with `attempts` 1. Deliver S1 again: in the Helius
-dashboard (Webhooks → the devnet webhook → logs) resend that delivery, or
-replay its logged request body (a JSON array, saved as `d1-s1.json`)
-yourself, reading the webhook's authentication header without echoing it:
+about two minutes the status shows `1|1|1|n`, `delivery` `webhook` and the
+indexer job `complete`. Record `n` and the job's `attempts`, A. A is
+usually 1; it is 2 when the retry run took the job before S1's slot was
+finalized (about 13 s after it: the job reads at `finalized` with
+`minContextSlot` = the event's slot, so that run leaves it `pending` and a
+run a minute or two later completes it). One pending attempt before finality
+is normal, the same path the offline case 4 proves. Deliver S1 again: in the
+Helius dashboard (Webhooks → the devnet webhook → logs) resend that
+delivery, or replay its logged request body (a JSON array, saved as
+`d1-s1.json`) yourself, reading the webhook's authentication header without
+echoing it:
 
 ```
 REF=$(node scripts/ops/target.mjs devnet | cut -d'|' -f2)
 printf 'Helius auth header: '; IFS= read -rs HELIUS_AUTH; echo
-for i in 1 2; do curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+for i in 1 2; do printf 'Authorization: %s\n' "$HELIUS_AUTH" | curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
   "https://$REF.supabase.co/functions/v1/helius-webhook" \
-  -H "Authorization: $HELIUS_AUTH" -H 'Content-Type: application/json' --data @d1-s1.json; done
+  -H @- -H 'Content-Type: application/json' --data @d1-s1.json; done
 unset HELIUS_AUTH
 ```
 
+The header reaches curl on its standard input (`-H @-`, curl 7.55 or later;
+`printf` is a shell builtin), so the secret is never a process argument that
+`ps` or process accounting would show, the same rule as D4/D6: never on a
+command line.
+
 Expected: `202` each time; the status still `1|1|1|n` with the same `n`,
-the job still `complete` with `attempts` 1 (nothing reopened, the mirror not
-written again), `sync` `ready`. Anything else is a failed drill.
+the job still `complete` with the same `attempts` A (nothing reopened, the
+mirror not written again), `sync` `ready`. Anything else is a failed drill.
 
 **D2. Lost delivery.** Break the webhook's delivery: Helius dashboard →
 edit the devnet webhook → Authentication Header: append `-drill` → re-select
@@ -2379,20 +2394,64 @@ Expected: the summary's `readiness` `ready` at `context_slot`, `legacy`
 is an account those paths missed: investigate before mainnet).
 `elapsed_ms` is the duration: with today's ~40 devnet accounts, a few
 seconds. The offline benchmark (`RUN_LOCAL_POSTGRES_TESTS=1
-POSTGRES_BIN=<PostgreSQL 17 bin/> npm run ops:reconcile-bench`, 28.9.:
-about 0.52 ms per program account plus about 4.5 s fixed, with a 20 ms
+POSTGRES_BIN=<PostgreSQL 17 bin/> npm run ops:reconcile-bench`, 28.9.,
+the slower of the cold and the warm run at each size; a routine reconcile
+over an existing mirror is warm, and was the slower one at 20 000 and
+50 000 accounts: about 0.54 ms per program account plus about 4.4 s fixed, with a 20 ms
 database round trip, 1 s per provider scan and 20 MB/s) puts the 45 s
-route budget at about 78 000 program accounts, and the single registry
-scan under 2 s at 50 000 (the per-call bound is 12 s). Rule: on mainnet,
+route budget at about 75 000 program accounts, and the single registry
+scan under 2 s at 50 000 (the per-call bound is 12 s). Its decoding and
+database time were measured on a laptop's CPU and a local PostgreSQL, not
+on a Vercel function or the Supabase instance, so the figure is an
+estimate; D3's `elapsed_ms` is the measurement. Rule: on mainnet,
 once `elapsed_ms` passes 20 s or the summed `onchain` counts pass 30 000,
 plan the reconcile's split into resumable per-table runs before the next
 growth step; decoding and the snapshot writes dominate, so splitting only
 the scan would not help.
 
-Mainnet (after the webhook exists, before §2): D1 and D3 only, with
-`MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1`, `MANCIPATIO_RECONCILE=mainnet`
-and `MANCIPATIO_RECONCILE_ENV_FILE` (no `.env.local` default); D2 is a
-devnet drill.
+**Mainnet: D1 and D3 again, after D10 and before D11 (§0A).** Not
+earlier: before §2 (D9) the programs do not exist and nothing before D9
+touches the chain, so there is no asset_registry transaction to redeliver,
+and a reconcile of an undeployed program is trivially `ready` with an
+`elapsed_ms` that measures nothing. After D10 the mirror holds the
+bootstrap's real accounts, and the site is still behind Deployment
+Protection, so a failed drill stops the sequence before the first public
+user. No transaction is made for the drill (a mainnet KYB step would be
+real issuer state): D1 redelivers S1 (`initialize_platform`, §4 cycle 1; its
+signature is the step `S1` line of `$E/04b-bootstrap-send.json.journal.jsonl`),
+whose indexer job completed on Day D. Record `n` and A first, then resend
+S1's delivery from the Helius dashboard (the mainnet webhook's logs), or
+replay its logged body with the mainnet webhook's own authentication header
+(the mainnet project's receiver checks its own secret, never the devnet
+one):
+
+```
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -Atq -v sig=<S1> -f scripts/ops/indexer-drill-status.sql
+REF=$(MANCI_ALLOW_MAINNET=1 node scripts/ops/target.mjs mainnet | cut -d'|' -f2)
+printf 'Helius mainnet auth header: '; IFS= read -rs HELIUS_AUTH; echo
+for i in 1 2; do printf 'Authorization: %s\n' "$HELIUS_AUTH" | curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  "https://$REF.supabase.co/functions/v1/helius-webhook" \
+  -H @- -H 'Content-Type: application/json' --data @d1-s1.json; done
+unset HELIUS_AUTH
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -Atq -v sig=<S1> -f scripts/ops/indexer-drill-status.sql
+```
+
+Expected as in D1: `202` each time, the same `n` and A, `sync` `ready`.
+Then D3, with the mainnet env file named explicitly (there is no
+`.env.local` default on mainnet):
+
+```
+MANCI_ALLOW_MAINNET=1 MANCIPATIO_RECONCILE=mainnet \
+MANCIPATIO_RECONCILE_PROJECT=$(MANCI_ALLOW_MAINNET=1 node scripts/ops/target.mjs mainnet | cut -d'|' -f2) \
+MANCIPATIO_RECONCILE_ENV_FILE=<mainnet env file> \
+MANCIPATIO_RECONCILE_OUTPUT=../docs/mainnet-readiness/drill-6.4/reconcile-mainnet.json \
+  npx vitest run --config scripts/ops/reconcile-index.config.ts
+```
+
+Expected: `readiness` `ready`, `legacy` `[]`, and `missing`, `rebuilt` and
+`deleted` 0 in every table (the bootstrap's jobs already wrote every
+account; a non-zero value is an account they missed: investigate before
+D11). D2 is a devnet drill only.
 
 ### Rollback
 

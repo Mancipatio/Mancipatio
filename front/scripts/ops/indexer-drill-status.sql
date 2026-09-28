@@ -1,13 +1,16 @@
 -- Read-only: one transaction's way through the indexer and the alarms, for
 -- the 6.4 drill (runbook §16 "6.4 drill"):
---   MANCI_TARGET=<t> bash scripts/db.sh -v sig=<signature> -f scripts/ops/indexer-drill-status.sql
+--   MANCI_TARGET=<t> bash scripts/db.sh -Atq -v sig=<signature> -f scripts/ops/indexer-drill-status.sql
+-- (-Atq: one `|`-separated line per row, no headers or command tags: the
+-- form the runbook quotes and tests/indexer-resilience.postgres.test.ts
+-- checks).
 -- After any number of deliveries of the same transaction, `events`, `jobs`
 -- and `alarm_jobs` are 1 each; `delivery` (and the alarm job's `source`)
 -- tells a webhook delivery from a gap-scan repair. No payload, wallet list
 -- or RPC text is printed.
 \if :{?sig}
 \else
-  \echo 'Usage: MANCI_TARGET=<t> bash scripts/db.sh -v sig=<transaction signature> -f scripts/ops/indexer-drill-status.sql'
+  \echo 'Usage: MANCI_TARGET=<t> bash scripts/db.sh -Atq -v sig=<transaction signature> -f scripts/ops/indexer-drill-status.sql'
   \quit
 \endif
 begin read only;

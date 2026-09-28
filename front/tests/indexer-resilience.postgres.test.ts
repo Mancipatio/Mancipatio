@@ -20,7 +20,6 @@
 //      slot leaves the job pending, and the retry completes it.
 //
 // Nothing here reaches a network: the RPC and the database are local.
-import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { getBase58Decoder } from "@solana/kit";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -45,7 +44,7 @@ import { buildTx } from "./helpers/chain-tx";
 import { IndexerChain } from "./helpers/indexer-chain";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
 import { LocalPostgres } from "./helpers/local-postgres";
-import { applyMigrations, SUPABASE_PLATFORM_SQL } from "./helpers/migrations";
+import { applyMigrations, SUPABASE_PLATFORM_SQL, TEST_PROJECT_REFS } from "./helpers/migrations";
 import { pgSupabase } from "./helpers/pg-supabase";
 
 const db = new LocalPostgres();
@@ -77,9 +76,21 @@ const mirrored = (table: string, pda: string) =>
   sql(`select coalesce((select to_jsonb(t) - 'raw' - 'updated_at' - 'created_at' from public.${table} t where network = 'devnet' and pda = '${pda}')::text, '')`);
 const deposited = (pda = fixture("offers").pda) => sql(`select deposited || '@' || last_slot from public.offers where network = 'devnet' and pda = '${pda}'`);
 const count = (table: string, where = "true") => Number(sql(`select count(*) from public.${table} where ${where}`));
-/** The operator's read-only drill query (scripts/ops/indexer-drill-status.sql), as db.sh runs it. */
-const drill = (signature: string) =>
-  db.query(readFileSync(join(process.cwd(), "scripts/ops/indexer-drill-status.sql"), "utf8"), { sig: signature }).split("\n");
+/**
+ * The operator's read-only drill query as `db.sh -Atq -v sig=… -f
+ * scripts/ops/indexer-drill-status.sql` runs it (runbook §16): assert-target.sql
+ * first in the same psql session with db.sh's target variables, then the file;
+ * LocalPostgres passes the same -X, ON_ERROR_STOP and -Atq. The lines are what
+ * the operator reads.
+ */
+function drill(signature?: string) {
+  const run = db.psql(["-f", join(process.cwd(), "scripts/ops/assert-target.sql"), "-f", join(process.cwd(), "scripts/ops/indexer-drill-status.sql")], {
+    target_network: "devnet", target_ref: TEST_PROJECT_REFS.devnet, target_origin: "https://devnet.manci.io", bootstrap: "0",
+    ...(signature === undefined ? {} : { sig: signature }),
+  });
+  if (run.error || run.status !== 0 || run.stderr) throw new Error(`drill failed: ${run.error?.message ?? run.stderr}`);
+  return run.stdout.trimEnd().split("\n");
+}
 
 /** A Helius enhanced-webhook event touching `accounts` (the receiver keeps only public keys). */
 const heliusEvent = (signature: string, slot: number, accounts: string[]) => ({
@@ -144,6 +155,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
   }, 120_000);
   afterAll(() => db.close());
   beforeEach(() => reset());
+  // Each case starts some 70-90 psql processes (one per statement): about 1-2 s
+  // locally, so 30 s each leaves room on a CI runner shared with the other
+  // PostgreSQL suites (vitest's default is 5 s).
 
   it("1. a redelivered transaction is one event, one job, one alarm job and one mirror write", async () => {
     const P = fixture("offers").pda;
@@ -174,7 +188,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
     // What the operator sees for it (runbook §16 "6.4 drill"): one of each, a webhook delivery.
     expect(drill(S1).slice(0, 4)).toEqual(["1|1|1|0", expect.stringMatching(/^event\|UNKNOWN\|webhook\|990\|t\|/),
       expect.stringMatching(/^indexer_job\|complete\|1\|f\|/), expect.stringMatching(/^alarm_job\|webhook\|pending\|0\|/)]);
-    expect(db.query(readFileSync(join(process.cwd(), "scripts/ops/indexer-drill-status.sql"), "utf8"))).toMatch(/^Usage: /);
+    expect(drill()).toEqual([expect.stringMatching(/^Usage: MANCI_TARGET=<t> bash scripts\/db\.sh -Atq /)]);
 
     // A batch mixing the old transaction with a new one adds only the new one.
     const S2 = sig(2);
@@ -185,7 +199,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
     expect(count("onchain_event_jobs")).toBe(2);
     expect(await reconcileIndexerJobs(10, deadline())).toMatchObject({ complete: 1, pending: 0 });
     expect(deposited(P)).toBe("3@1020");
-  });
+  }, 30_000);
 
   it("2. a lost delivery: the heartbeat declines UNINDEXED_SIGNATURE, the gap scan enqueues it, the job repairs the mirror, the heartbeat proves again", async () => {
     const P = fixture("offers").pda;
@@ -227,7 +241,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
       expect.stringMatching(/^indexer_job\|complete\|1\|f\|/)]);
     expect(drill(S3)).toContainEqual(expect.stringMatching(/^heartbeat\|on\|bumped\|\|/));
     expect(sql(`select checked_at > '${checkedBefore}'::timestamptz from public.indexer_sync_state where network = 'devnet'`)).toBe("t");
-  });
+  }, 30_000);
 
   it("3. events missed past the retry window: the full reconcile refreshes, rebuilds and deletes to the chain's state", async () => {
     const P = fixture("offers").pda;
@@ -257,7 +271,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
       const onChain = Buffer.from(h.chain.accounts.get(f.pda)!.data).toString("base64");
       expect(sql(`select raw->>'base64' from public.${f.table} where pda = '${f.pda}'`), f.table).toBe(onChain);
     }
-  });
+  }, 30_000);
 
   it("4. out of order: an older snapshot never overwrites a newer row or a closure; a node behind the event retries", async () => {
     const P = fixture("offers").pda;
@@ -309,7 +323,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
     expect(await reconcileIndexerJobs(1, deadline())).toMatchObject({ complete: 1 });
     expect(deposited(P)).toBe("6@1530");
     expect(sql("select status from public.indexer_sync_state where network = 'devnet'")).toBe("ready");
-  });
+  }, 30_000);
 
   it("the Edge adapter's enqueue refuses another network's batch (0071): the receiver answers 503 and Helius retries", async () => {
     const status = await handleIndexerWebhook(new Request("https://edge.test/", {
@@ -324,6 +338,6 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
     });
     expect(status.status).toBe(503);
     expect(count("indexer_events")).toBe(0);
-  });
+  }, 30_000);
 });
 

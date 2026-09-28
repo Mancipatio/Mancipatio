@@ -144,14 +144,23 @@ beforeAll(async () => {
   h.sb = pg.client;
 }, 180_000);
 /**
- * A straight line through the smallest and the largest cold run: the
+ * A straight line through the smallest and the largest size, each at the
+ * slower of its cold and warm run (a routine reconcile over an existing
+ * mirror is warm, and that was the slower one on the larger sizes): the
  * projected cost per account, and the size at which the projection reaches
- * the 45 s budget (null with fewer than two sizes).
+ * the 45 s budget (null with fewer than two sizes). node_ms and db_server_ms
+ * come from the machine that runs the benchmark, not a Vercel function or
+ * the Supabase instance: an estimate, which the live runner's elapsed_ms
+ * checks.
  */
 function capacity() {
-  const cold = results.filter((r) => r.run === "cold") as { accounts: number; projected_ms: number }[];
-  if (cold.length < 2) return null;
-  const [a, b] = [cold[0], cold[cold.length - 1]];
+  const slowest = new Map<number, number>();
+  for (const r of results as { accounts: number; projected_ms: number }[]) {
+    slowest.set(r.accounts, Math.max(slowest.get(r.accounts) ?? 0, r.projected_ms));
+  }
+  const sizes = [...slowest].map(([accounts, projected_ms]) => ({ accounts, projected_ms })).sort((x, y) => x.accounts - y.accounts);
+  if (sizes.length < 2) return null;
+  const [a, b] = [sizes[0], sizes[sizes.length - 1]];
   const slope = (b.projected_ms - a.projected_ms) / (b.accounts - a.accounts);
   const intercept = a.projected_ms - slope * a.accounts;
   return { per_account_ms: Number(slope.toFixed(3)), fixed_ms: Math.round(intercept),
