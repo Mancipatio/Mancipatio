@@ -38,7 +38,7 @@ vi.mock("@/lib/server/email", () => ({
     h.emails.push(input);
     return { sent: true };
   }),
-  escapeHtml: (s: string) => s,
+  escapeHtml: (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;"),
 }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => db.ref!.client }));
 vi.mock("@/lib/server/rpc", () => ({
@@ -65,6 +65,7 @@ import {
   getOtcDealEncoder,
   OtcDealStatus,
 } from "@/lib/generated/asset_registry";
+import { USDC } from "@/lib/payment-mints";
 import { POST as passportUpdate } from "@/app/api/passport/update/route";
 import { POST as otcAdminUpdate } from "@/app/api/otc/admin-update/route";
 import { POST as kybDecision } from "@/app/api/clients/kyb-decision/route";
@@ -172,6 +173,19 @@ describe("G2: otc.adminUpdate created only for this request's Open deal at final
       decided_by: ADMIN,
     });
     expect(db.ref!.rows("notifications")).toHaveLength(2);
+  });
+
+  it("tells the parties the price in the payment token's units, never raw base units", async () => {
+    const usdc = USDC.devnet!.mint;
+    request().payment_mint = usdc;
+    request().asset_label = "Fixture <b>A</b>";
+    db.ref!.rows("clients").push({ id: CLIENT_ID, network: "devnet", wallet: BUYER, email: "buyer@example.com" });
+    h.accounts.set(dealPda, { owner: ASSET_REGISTRY_PROGRAM_ADDRESS, data: encode({ paymentMint: usdc }) });
+    expect((await flip()).status).toBe(200);
+    const body = String(db.ref!.rows("notifications")[0].body);
+    expect(body).toContain("(10 units for 25 test USDC in total)");
+    expect(body).not.toContain("25000000");
+    expect(h.emails[0].html).toContain("Fixture &lt;b&gt;A&lt;/b&gt;");
   });
 
   it("a retried flip of the same deal is a no-op", async () => {
@@ -305,6 +319,37 @@ describe("G6 (and G4): a document reject asks the client for a replacement", () 
       expect(client().kyc_status, status).toBe(status);
       expect(h.emails, status).toHaveLength(0);
     }
+  });
+
+  it("a KYC-verified dossier with a pending KYB is emailed for a refused company document, and stays verified", async () => {
+    client().kyc_status = "verified";
+    db.ref!.rows("client_verification_details").push({ client_id: CLIENT_ID, kind: "kyb", status: "pending" });
+    db.ref!.rows("kyc_requirements")[0].label = "Certificate of incorporation / registry extract";
+    const res = await call(reviewRequirement, { id: 7, status: "rejected", reason: "Older than 3 months." });
+    expect(res.body.data).toMatchObject({ recomputed: null, notified: true, not_notified: null });
+    expect(client().kyc_status).toBe("verified");
+    expect(h.emails).toHaveLength(1);
+    expect(h.emails[0].html).toContain("Certificate of incorporation / registry extract");
+    // A decided KYB is not a review in progress any more.
+    db.ref!.rows("client_verification_details")[0].status = "verified";
+    h.emails.length = 0;
+    const decided = await call(reviewRequirement, { id: 7, status: "rejected" });
+    expect(decided.body.data).toMatchObject({ notified: false, not_notified: "no_review_in_progress" });
+    expect(h.emails).toHaveLength(0);
+  });
+
+  it("the timeline note and the answer say whether the client was really asked", async () => {
+    client().kyc_status = "verified";
+    const decided = await call(reviewRequirement, { id: 7, status: "rejected" });
+    expect(decided.body.data).toMatchObject({ notified: false, not_notified: "no_review_in_progress" });
+    client().kyc_status = "pending";
+    client().email = null;
+    const noAddress = await call(reviewRequirement, { id: 7, status: "rejected" });
+    expect(noAddress.body.data).toMatchObject({ notified: false, not_notified: "no_email_on_file" });
+    expect(db.ref!.rows("client_notes").map((n) => n.body)).toEqual([
+      'Document "Proof of address" rejected — no review is in progress, so the client was not emailed.',
+      'Document "Proof of address" rejected — no email address is on file, so the client was not asked; contact them.',
+    ]);
   });
 
   it("an approval sends nothing, and a reason longer than 2000 characters is refused", async () => {

@@ -458,13 +458,19 @@ function ClientDetail({ id }: { id: string }) {
   // reason; a pending dossier moves to more_info on the server).
   async function rejectReq(reqId: number, reason: string) {
     if (!wallet) return;
-    const { ok, recomputed, notified } = await reviewRequirement(conn.wallet, reqId, "rejected", reason);
+    const { ok, recomputed, notified, notNotified } = await reviewRequirement(conn.wallet, reqId, "rejected", reason);
     if (ok) {
       toast.show({
         kind: "success",
         title: "Document rejected",
         description: [
-          notified ? "The client was emailed and asked for a replacement." : "No email was sent (no address on file, or the email failed) — contact the client.",
+          notified
+            ? "The client was emailed and asked for a replacement."
+            : notNotified === "no_review_in_progress"
+              ? "No email was sent: this dossier has no KYC or KYB review in progress. Contact the client if a new document is needed."
+              : notNotified === "no_email_on_file"
+                ? "No email was sent: there is no address on file. Contact the client."
+                : "No email was sent: the email failed. Contact the client.",
           recomputed === "more_info" ? "The dossier moved to more info." : null,
         ].filter(Boolean).join(" "),
       });

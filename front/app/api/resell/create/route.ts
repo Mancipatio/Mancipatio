@@ -24,9 +24,9 @@ import {
 } from "@/lib/server/token-holdings";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { resellAskCurrencies } from "@/lib/payment-price";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-const CURRENCIES = new Set(["USDC", "USDT", "SOL", "EUR"]);
 
 export async function POST(request: Request) {
   try {
@@ -75,7 +75,9 @@ export async function POST(request: Request) {
     if (askPrice !== null && (!Number.isFinite(askPrice) || askPrice <= 0)) {
       throw new SiwsError(400, "ask_price must be a positive number");
     }
-    if (!CURRENCIES.has(askCurrency)) {
+    // Mainnet: only an allowed payment token (USDC today), the unit the
+    // request and the escrow are priced in (lib/payment-price.ts).
+    if (!resellAskCurrencies(detectNetwork()).includes(askCurrency)) {
       throw new SiwsError(400, "ask_currency is not supported");
     }
     if (note.length > 1000) {

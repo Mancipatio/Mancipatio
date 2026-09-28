@@ -27,6 +27,34 @@ export function paymentMintOptions(network: Network): PaymentMintOption[] {
   return usdc ? [{ mint: usdc.mint, label: usdc.label }] : [];
 }
 
+/** The currencies a resell listing may ask in off mainnet (a free label; the request is priced in the payment token). */
+const RESELL_TEST_CURRENCIES = ["USDC", "USDT", "SOL", "EUR"] as const;
+
+/**
+ * The currencies a resell listing may ask in on `network`: on mainnet only
+ * the allowed payment tokens (USDC today), so an ask is in the unit the
+ * request and the escrow are priced in (lansiranje-16); elsewhere the test
+ * labels as before. api/resell/create enforces the same list.
+ */
+export function resellAskCurrencies(network: Network): readonly string[] {
+  if (network === "mainnet") return [...new Set(paymentMintOptions(network).map((o) => o.label))];
+  return RESELL_TEST_CURRENCIES;
+}
+
+/**
+ * The line a request form shows under its price for the listing's ask: the
+ * ask, and, when the ask is not in a payment token of this network, that
+ * the request is priced in the token picked below (no conversion is made).
+ */
+export function resellAskNote(askPrice: number | null, askCurrency: string, network: Network): string | null {
+  if (askPrice === null) return null;
+  const tokens = paymentMintOptions(network).map((o) => o.label);
+  const inToken = tokens.includes(askCurrency) || tokens.some((label) => label.endsWith(` ${askCurrency}`));
+  return inToken
+    ? `Listing asks ${askPrice} ${askCurrency}.`
+    : `Listing asks ${askPrice} ${askCurrency}, which is not the payment token: this request is priced in the token below, with no conversion.`;
+}
+
 /** Whether a form may take a mint that is not in the list (never on mainnet). */
 export function allowsOtherPaymentMint(network: Network): boolean {
   return network !== "mainnet";

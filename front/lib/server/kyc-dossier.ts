@@ -34,6 +34,12 @@ export const STANDARD_COMPANY_REQUIREMENTS = [
   { doc_kind: "proof_of_address", label: "Company proof of address" },
 ] as const;
 
+/**
+ * The display name a fresh dossier starts with, per role; api/verification/
+ * submit replaces it with the verified name (PLACEHOLDER_NAME_RE there).
+ */
+const ROLE_PLACEHOLDER = { investor: "Investor", issuer: "Issuer", officer: "Founder" } as const;
+
 export type ClientLite = {
   id: string;
   created_at: string;
@@ -83,7 +89,13 @@ export async function ensureClientDossier(
   sb: SupabaseClient,
   ownerOrWallet: string | DossierOwner,
   jurisdiction: number,
-  role: "investor" | "issuer" = "investor",
+  /**
+   * The role the dossier must carry. `officer` is a founder's own KYC
+   * (/verify?next=/apply): the issuer's side, never an investor passport
+   * request (sim gap G5; api/account/wallets/attach files one only for an
+   * investor role).
+   */
+  role: "investor" | "issuer" | "officer" = "investor",
   source = "passport-request",
   /** Issue an upload link even for a KYC-verified dossier (KYB documents). */
   forceToken = false,
@@ -129,7 +141,7 @@ export async function ensureClientDossier(
       network: detectNetworkServer(),
       type: role,
       types: [role],
-      display_name: wallet ? `${role === "issuer" ? "Issuer" : "Investor"} ${wallet.slice(0, 6)}…${wallet.slice(-4)}` : `${role === "issuer" ? "Issuer" : "Investor"} (account)`,
+      display_name: wallet ? `${ROLE_PLACEHOLDER[role]} ${wallet.slice(0, 6)}…${wallet.slice(-4)}` : `${ROLE_PLACEHOLDER[role]} (account)`,
       jurisdiction: jurisdictionStr,
       source,
       wallet,

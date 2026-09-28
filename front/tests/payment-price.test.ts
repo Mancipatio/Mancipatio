@@ -10,6 +10,8 @@ import {
   knownPaymentToken,
   parsePaymentPrice,
   paymentMintOptions,
+  resellAskCurrencies,
+  resellAskNote,
 } from "@/lib/payment-price";
 
 describe("the payment token comes from the allowed list", () => {
@@ -63,5 +65,21 @@ describe("prices in human units", () => {
     expect(formatPaymentForDisplay(BigInt(1_500_000), "So11111111111111111111111111111111111111112", "devnet")).toBe("1 500 000 base units");
     // Mainnet's USDC is not devnet's.
     expect(knownPaymentToken("devnet", USDC.mainnet!.mint)).toBeNull();
+  });
+});
+
+describe("a resell listing asks in the payment token on mainnet (lansiranje-16)", () => {
+  it("mainnet: USDC only; elsewhere the test labels", () => {
+    expect(resellAskCurrencies("mainnet")).toEqual(["USDC"]);
+    expect(resellAskCurrencies("devnet")).toEqual(["USDC", "USDT", "SOL", "EUR"]);
+  });
+
+  it("a request form says when the ask is not in the payment token (no conversion)", () => {
+    expect(resellAskNote(null, "USDC", "mainnet")).toBeNull();
+    expect(resellAskNote(10, "USDC", "mainnet")).toBe("Listing asks 10 USDC.");
+    expect(resellAskNote(10, "USDC", "devnet")).toBe("Listing asks 10 USDC.");
+    expect(resellAskNote(10, "SOL", "devnet")).toBe(
+      "Listing asks 10 SOL, which is not the payment token: this request is priced in the token below, with no conversion.",
+    );
   });
 });

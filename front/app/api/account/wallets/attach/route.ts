@@ -22,8 +22,11 @@ export async function POST(request: Request) {
     if (accountId(params.account_id) !== session.a) throw new SiwsError(403, "You are signed in to a different account.");
     const network = detectNetwork();
     await attachAccountWallet(session.a, network, wallet);
-    // An account that already went through identity verification asks for
-    // the on-chain passport of the new wallet (issued from /admin/kyc).
+    // An account that already went through identity verification AS AN
+    // INVESTOR asks for the on-chain passport of the new wallet (issued from
+    // /admin/kyc). A founder's KYC dossier carries the officer role, not the
+    // investor one (api/verification/submit, sim gap G5): the wallet a
+    // founder adds to sign the sale files no passport request.
     const sb = getSupabaseAdmin();
     const { data: dossier } = await sb.from("clients").select("id,jurisdiction,kyc_status,type,types")
       .eq("account_id", session.a).eq("network", network).maybeSingle();

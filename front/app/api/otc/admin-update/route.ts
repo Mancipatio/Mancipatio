@@ -26,6 +26,8 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { archiveOtcDeal } from "@/lib/server/otc-archive";
 import { readOpenDealForRequest, type OtcRequestTerms } from "@/lib/server/otc-deal-check";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { detectNetwork } from "@/lib/network";
+import { formatPaymentForDisplay } from "@/lib/payment-price";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const STATUSES = new Set(["created", "cancelled", "completed", "expired"]);
@@ -218,9 +220,12 @@ async function notifyDealCreated(
   const label =
     row.asset_label || `${row.mint.slice(0, 6)}…${row.mint.slice(-4)}`;
   const subject = "Your OTC escrow deal is ready";
+  // The price in the payment token's own units ("12.5 USDC", lansiranje-16),
+  // never raw base units ("12500000 payment units" read as 12.5 million).
+  const price = formatPaymentForDisplay(BigInt(row.price), row.payment_mint, detectNetwork());
   const body =
-    `The escrow contract for ${label} (${row.amount} units for ${row.price} ` +
-    `payment units) is live on-chain` +
+    `The escrow contract for ${label} (${row.amount} ${row.amount === 1 ? "unit" : "units"} for ${price} in total) ` +
+    `is live on-chain` +
     (dealPda ? ` at ${dealPda}` : "") +
     `. Open Portfolio → Deals on Manci to deposit your leg — the swap ` +
     `settles automatically once both legs are funded.`;
@@ -242,8 +247,9 @@ async function notifyDealCreated(
       const res = await sendEmail({
         to: email,
         subject,
+        // The label is the requester's own text: escaped like every value in the HTML.
         html:
-          `<p>${body}</p>` +
+          `<p>${escapeHtml(body)}</p>` +
           `<p><a href="${escapeHtml(new URL("/portfolio/deals", process.env.NEXT_PUBLIC_SITE_URL || "https://www.manci.io").toString())}">Open your deals</a></p>`,
       });
       emailSent = res.sent;

@@ -14,7 +14,8 @@
 //
 // `approved` is refused (409) unless the wallet holds a live on-chain
 // KycEntry at finalized (sim gap G1, lib/server/passport-state.ts
-// passportFinality): the route waits up to 30 s for a just-confirmed
+// passportFinality): the route gives a passport its own RPC does not see
+// yet a few seconds of grace, waits up to 30 s for a just-confirmed
 // approve_holder to finalize, and fails closed (503) when the chain cannot
 // be read.
 
@@ -106,7 +107,7 @@ export async function POST(request: Request) {
       if (finality === "none") {
         throw new SiwsError(
           409,
-          "This wallet has no live on-chain passport, so the request cannot be marked approved. Issue the passport first (approve_holder); nothing was changed.",
+          "This wallet has no live on-chain passport visible yet, so the request cannot be marked approved; nothing was changed. If you just issued it, retry the sync in a few seconds (the network may still be catching up); otherwise issue the passport first (approve_holder).",
         );
       }
       if (finality === "not-finalized") {

@@ -7,6 +7,10 @@
 // KYC also files the passport request the /admin/kyc queue works from,
 // except a founder's (`purpose: "founder"`, sent by /verify?next=/apply):
 // raising needs a verified dossier, not an investor passport (sim gap G5).
+// The purpose is kept as the dossier's role: a founder's KYC gives it the
+// `officer` role (the issuer's side), an investor's the `investor` role, so
+// a wallet the account adds later files a passport request only for an
+// investor (api/account/wallets/attach).
 // Verification itself stays a compliance decision in the admin console.
 
 import { NextResponse } from "next/server";
@@ -24,6 +28,8 @@ import {
 } from "@/lib/server/kyc-dossier";
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+/** The auto-generated dossier names (lib/server/kyc-dossier.ts ROLE_PLACEHOLDER): "Investor 7xGL…hjjs", "Founder (account)". */
+const PLACEHOLDER_NAME_RE = /^(Investor|Issuer|Founder) (\S+…\S+|\(account\))$/;
 const PHONE_RE = /^\+?[0-9 ()-]{5,32}$/;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DETAIL_KEYS = [
@@ -78,8 +84,9 @@ export async function POST(request: Request) {
     if (kind !== "kyc" && kind !== "kyb") throw new SiwsError(400, "kind must be kyc or kyb");
     // Why the individual verifies (sim gap G5). A founder's KYC (/apply) is
     // for raising and needs no investor passport; everything else (convert,
-    // delivery, KYC-gated classes) does. Not stored: a founder who later
-    // wants a passport verifies from the portfolio card, which files it.
+    // delivery, KYC-gated classes) does. Kept as the dossier's role (header):
+    // a founder who later wants a passport verifies from the portfolio card,
+    // which adds the investor role and files it.
     const purpose = params.purpose ?? "investor";
     if (purpose !== "investor" && purpose !== "founder") throw new SiwsError(400, "purpose must be investor or founder");
     const ip = clientIpOf(request);
@@ -143,8 +150,9 @@ export async function POST(request: Request) {
     const owner = actor.kind === "account"
       ? { accountId: actor.accountId, wallet: null }
       : { accountId: await accountIdForWallet(sb, actor.wallet), wallet: actor.wallet };
+    const role = isKyb ? "issuer" : purpose === "founder" ? "officer" : "investor";
     const { client, token, created, linkUnusable } = await ensureClientDossier(
-      sb, owner, jurisdiction, isKyb ? "issuer" : "investor", isKyb ? "verification-kyb" : "verification-kyc", isKyb,
+      sb, owner, jurisdiction, role, isKyb ? "verification-kyb" : "verification-kyc", isKyb,
     );
 
     const { error: detailsErr } = await sb.from("client_verification_details").upsert({
@@ -164,8 +172,8 @@ export async function POST(request: Request) {
     if (isKyb) patch.company_name = details.company_name;
     const { data: current } = await sb.from("clients").select("display_name").eq("id", client.id).maybeSingle();
     const name = (current?.display_name as string | null) ?? "";
-    // Replace only the auto-generated placeholder ("Investor 7xGL…hjjs").
-    if (!name || /^(Investor|Issuer) \S+…\S+$/.test(name)) patch.display_name = isKyb ? details.company_name : details.legal_name;
+    // Replace only the auto-generated placeholder ("Investor 7xGL…hjjs", "Founder (account)").
+    if (!name || PLACEHOLDER_NAME_RE.test(name)) patch.display_name = isKyb ? details.company_name : details.legal_name;
     if (Object.keys(patch).length > 0) {
       const { error: patchErr } = await sb.from("clients").update(patch).eq("id", client.id);
       if (patchErr) console.warn("[api/verification/submit] dossier patch failed:", patchErr.code);

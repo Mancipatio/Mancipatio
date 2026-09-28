@@ -68,6 +68,13 @@ describe("/api/verification/submit purpose (G5)", () => {
     expect(filedPassportRequest()).toBe(false);
   });
 
+  it("keeps the purpose as the dossier's role: officer for a founder, investor otherwise", async () => {
+    await call({ ...kyc, purpose: "founder" });
+    expect(m.ensureDossier.mock.calls[0][3]).toBe("officer");
+    await call({ ...kyc, purpose: "investor" });
+    expect(m.ensureDossier.mock.calls[1][3]).toBe("investor");
+  });
+
   it("an investor's KYC (the default, or explicit) still files one", async () => {
     expect((await call({ ...kyc, purpose: "investor" })).status).toBe(200);
     expect(filedPassportRequest()).toBe(true);

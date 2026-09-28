@@ -25,7 +25,7 @@ import {
 } from "@/lib/otc";
 import { useToast } from "@/lib/toast";
 import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
-import { formatPaymentForDisplay } from "@/lib/payment-price";
+import { formatPaymentForDisplay, resellAskNote } from "@/lib/payment-price";
 import {
   PaymentMintPicker,
   PaymentPriceField,
@@ -660,7 +660,7 @@ function RequestOtcModal({
                 </label>
                 <PaymentPriceField
                   form={payment}
-                  note={post.ask_price !== null ? `Listing asks ${post.ask_price} ${post.ask_currency}.` : null}
+                  note={resellAskNote(post.ask_price, post.ask_currency, detectNetwork())}
                 />
               </div>
               {priceBase !== null && !priceOk && (

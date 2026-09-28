@@ -845,19 +845,35 @@ export async function reviewRequirement(
   status: "approved" | "rejected",
   /** Rejections only: why, emailed to the client with the replacement request. */
   reason?: string,
-): Promise<{ ok: boolean; recomputed: ClientKycStatus | null; notified: boolean }> {
+): Promise<{
+  ok: boolean;
+  recomputed: ClientKycStatus | null;
+  notified: boolean;
+  /** Why no email went out (rejections only): the dossier had no review in progress, no address, or the send failed. */
+  notNotified: "no_review_in_progress" | "no_email_on_file" | "email_failed" | null;
+}> {
   try {
-    const data = await signedFetch<{ status: string; recomputed: ClientKycStatus | null; notified?: boolean }>(
+    const data = await signedFetch<{
+      status: string;
+      recomputed: ClientKycStatus | null;
+      notified?: boolean;
+      not_notified?: "no_review_in_progress" | "no_email_on_file" | "email_failed" | null;
+    }>(
       session,
       "/api/clients/review-requirement",
       "clients.review-requirement",
       status === "rejected" && reason?.trim() ? { id, status, reason: reason.trim() } : { id, status },
     );
     notifyAdminBadges();
-    return { ok: true, recomputed: data?.recomputed ?? null, notified: data?.notified === true };
+    return {
+      ok: true,
+      recomputed: data?.recomputed ?? null,
+      notified: data?.notified === true,
+      notNotified: data?.not_notified ?? null,
+    };
   } catch (err) {
     console.warn("[kyc_req] review failed:", err);
-    return { ok: false, recomputed: null, notified: false };
+    return { ok: false, recomputed: null, notified: false, notNotified: null };
   }
 }
 

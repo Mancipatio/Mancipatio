@@ -1,7 +1,8 @@
 // lib/server/passport-state.ts passportFinality (sim gap G1): a passport
 // request is marked approved only for a live KycEntry at finalized. "none"
-// is answered at once from the confirmed view; a confirmed-only passport is
-// polled at finalized until the timeout; RPC failures throw.
+// is answered from the confirmed view after a short bounded grace (the
+// server's RPC may lag the browser's); a confirmed-only passport is polled at
+// finalized until the timeout; RPC failures throw.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
@@ -9,6 +10,9 @@ vi.mock("server-only", () => ({}));
 const mocks = vi.hoisted(() => ({
   registries: [] as Array<{ address: string }>,
   confirmed: {} as Record<string, { exists: boolean; programAddress?: string; data?: { status: number; expiry: bigint } }>,
+  /** Confirmed reads before the entry shows up at confirmed (a lagging server RPC). */
+  confirmedAfter: 0,
+  confirmedReads: 0,
   finalized: {} as Record<string, { exists: boolean; programAddress?: string; data?: { status: number; expiry: bigint } }>,
   /** Finalized reads before the entry shows up at finalized. */
   finalizedAfter: 0,
@@ -35,6 +39,8 @@ vi.mock("@/lib/generated/asset_registry", async (importOriginal) => {
         if (mocks.finalizedReads <= mocks.finalizedAfter) return { exists: false };
         return mocks.finalized[pda] ?? { exists: false };
       }
+      mocks.confirmedReads += 1;
+      if (mocks.confirmedReads <= mocks.confirmedAfter) return { exists: false };
       return mocks.confirmed[pda] ?? { exists: false };
     }),
   };
@@ -58,6 +64,8 @@ beforeEach(() => {
   mocks.finalized = {};
   mocks.finalizedAfter = 0;
   mocks.finalizedReads = 0;
+  mocks.confirmedAfter = 0;
+  mocks.confirmedReads = 0;
   mocks.fail = false;
 });
 
@@ -70,6 +78,25 @@ describe("passportFinality", () => {
     expect(await passportFinality(WALLET, noWait)).toBe("none");
     mocks.confirmed[`RegA:${WALLET}`] = entry(KycStatus.Revoked, NOW + 60);
     expect(await passportFinality(WALLET, noWait)).toBe("none");
+  });
+
+  it("gives a passport the server's RPC does not see yet a short, bounded grace before none", async () => {
+    mocks.confirmed[`RegA:${WALLET}`] = entry(KycStatus.Approved, NOW + 60);
+    mocks.finalized[`RegA:${WALLET}`] = entry(KycStatus.Approved, NOW + 60);
+    mocks.confirmedAfter = 2; // the server's RPC is two reads behind the browser's
+    const sleep = vi.fn(async () => {});
+    expect(await passportFinality(WALLET, { ...noWait, sleep })).toBe("finalized");
+    expect(mocks.confirmedReads).toBe(3);
+    // Nothing was issued: none after exactly noneAttempts reads, 1 s apart by default.
+    mocks.confirmed = {};
+    mocks.confirmedReads = 0;
+    mocks.confirmedAfter = 0;
+    mocks.finalizedReads = 0;
+    const waits: number[] = [];
+    expect(await passportFinality(WALLET, { nowSec: NOW, sleep: async (ms) => { waits.push(ms); } })).toBe("none");
+    expect(mocks.confirmedReads).toBe(5);
+    expect(waits).toEqual([1_000, 1_000, 1_000, 1_000]);
+    expect(mocks.finalizedReads).toBe(0);
   });
 
   it("waits for a just-confirmed passport to be finalized", async () => {

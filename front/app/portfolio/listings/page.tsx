@@ -29,6 +29,7 @@ import {
 } from "@/lib/resell";
 import { createOtcRequest } from "@/lib/otc";
 import { detectNetwork } from "@/lib/network";
+import { resellAskCurrencies, resellAskNote } from "@/lib/payment-price";
 import {
   PaymentMintPicker,
   PaymentPriceField,
@@ -52,8 +53,6 @@ const CLASS_TYPE = [
   "Rev-share tier",
   "Royalty tier",
 ];
-
-const CURRENCIES = ["USDC", "USDT", "SOL", "EUR"];
 
 const STATUS_BADGE: Record<ResellStatus, string> = {
   active: "border-emerald-200 bg-emerald-50 text-emerald-700",
@@ -563,7 +562,7 @@ function PostListingModal({
                 className="mt-1 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
                 disabled={saving}
               >
-                {CURRENCIES.map((c) => (
+                {resellAskCurrencies(detectNetwork()).map((c) => (
                   <option key={c} value={c}>
                     {c}
                   </option>
@@ -842,7 +841,7 @@ function SellerOtcRequestModal({
             </label>
             <PaymentPriceField
               form={payment}
-              note={listing.ask_price !== null ? `Listing asks ${listing.ask_price} ${listing.ask_currency}.` : null}
+              note={resellAskNote(listing.ask_price, listing.ask_currency, detectNetwork())}
             />
           </div>
           <PaymentMintPicker form={payment} />
