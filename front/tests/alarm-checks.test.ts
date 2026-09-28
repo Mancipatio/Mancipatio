@@ -1,7 +1,7 @@
 // Talas 4.4b: the alarm worker's checks (design §3e/§4.2) and the gap scan.
 // The hysteresis itself (report_incident) runs for real in
 // onchain-alarms.postgres.test.ts; here Supabase and RPC are mocked.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 const state = vi.hoisted(() => ({
@@ -244,6 +244,11 @@ describe("runAlarmChecks", () => {
   });
 
   it("fx-expiring: the default mint and mints in use warn 2 days (at most half the max age) before the max age", async () => {
+    // The rows are dated from Date.now() and the checks read it again: frozen,
+    // so `hours_left` (floored) cannot drop a unit when a millisecond passes in
+    // between. Only Date is faked; timers (AbortSignal.timeout) stay real.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    onTestFinished(() => { vi.useRealTimers(); });
     const usdc = USDC.devnet!.mint;
     const check = async (fx: Record<string, unknown>[], extra: Record<string, Record<string, unknown>[]> = {}) => {
       const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }], fx_rates: fx, ...extra });
