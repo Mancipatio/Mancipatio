@@ -13,7 +13,7 @@ vi.mock("@/lib/generated/asset_registry", async (original) => ({
   ...(await original<typeof import("@/lib/generated/asset_registry")>()),
   fetchMaybeCustodyVault: mocks.vault,
   fetchMaybePlatform: mocks.platform,
-  fetchMaybeAuthorityTransfer: mocks.transfer,
+  fetchMaybeAuthorityProposal: mocks.transfer,
   fetchMaybeAdmin: mocks.admin,
 }));
 import {

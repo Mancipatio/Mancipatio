@@ -1,25 +1,46 @@
+// Super Admin and blocklist-authority rotation (propose / accept / cancel),
+// v1.0.0-rc (8.3). Both are staged proposals with an expiry:
+//
+// * Platform: `AuthorityProposal` at ["authority_proposal", platform]. The
+//   proposed key accepts inside [eta, expiresAt): eta = proposal + 48 h, waived
+//   while the one-way bootstrap window is open; the window is 14 days. The
+//   Super Admin, any live Admin or the program upgrade authority may cancel.
+//   An accept is refused while a `PlatformRecovery` is pending (6155).
+// * Blocklist: `BlocklistAuthorityProposal` at ["blocklist_authority_proposal"],
+//   no timelock, acceptable for 14 days; only the live BA cancels. An accept
+//   is refused while a `BlocklistRecovery` is pending (hook 6020).
+//
+// Every PDA comes from the generated clients.
 import { address, type Address, type TransactionSigner } from "@solana/kit";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   fetchMaybePlatform,
+  fetchMaybePlatformRecovery,
   findPlatformPda,
   findAcceptPlatformAdminTransferPda,
-  fetchMaybeAuthorityTransfer,
+  findAcceptPlatformAdminRecoveryPda,
+  fetchMaybeAuthorityProposal,
   getProposePlatformAdminInstructionAsync,
   getAcceptPlatformAdminInstructionAsync,
+  getCancelPlatformAdminTransferInstructionAsync,
   findAdminRecordPda,
 } from "@/lib/generated/asset_registry";
 import {
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   fetchMaybeBlocklistAuthority,
+  fetchMaybeBlocklistRecovery,
   findBlocklistAuthorityPda,
+  findRecoveryPda as findBlocklistRecoveryPda,
   findTransferPda,
-  fetchMaybeBlocklistAuthorityTransfer,
+  fetchMaybeBlocklistAuthorityProposal,
   getProposeBlocklistAuthorityInstructionAsync,
   getAcceptBlocklistAuthorityInstructionAsync,
+  getCancelBlocklistAuthorityTransferInstructionAsync,
 } from "@/lib/generated/transfer_hook";
 import type { fetchMintTokenProgram } from "@/lib/transaction-builders";
 import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
+import { PLATFORM_BOOTSTRAP_OPEN } from "@/lib/pause-flags";
+import { findProgramDataPda } from "@/lib/pdas";
 export type OperationalAuthorityKind = "platform" | "blocklist";
 type Rpc = Parameters<typeof fetchMintTokenProgram>[0];
 export type OperationalAuthorityState = {
@@ -27,7 +48,26 @@ export type OperationalAuthorityState = {
   current: Address;
   proposed: Address | null;
   proposal: Address;
+  /** The staged proposal's payer (its rent returns here on cancel), or null. */
+  proposedBy: Address | null;
+  /**
+   * When the staged proposal can first be accepted (unix s; the platform's
+   * 48 h are waived while the bootstrap window is open), and when it stops
+   * being acceptable. Null without a proposal.
+   */
+  eta: bigint | null;
+  expiresAt: bigint | null;
+  /**
+   * A recovery by the program upgrade authority is pending against the live
+   * authority: an accept is refused until it is cancelled or executed.
+   */
+  recoveryPending: boolean;
 };
+
+/** Accept refused while a recovery is pending (registry 6155 / hook 6020). */
+export const RECOVERY_PENDING_BLOCKER =
+  "A recovery of this role by the program upgrade authority is pending. Cancel the recovery first (or let it be executed); until then the proposal cannot be accepted.";
+
 export async function loadOperationalAuthority(
   rpc: Rpc,
   kind: OperationalAuthorityKind,
@@ -40,12 +80,18 @@ export async function loadOperationalAuthority(
     const [target] = await findPlatformPda(),
       [proposal] = await findAcceptPlatformAdminTransferPda({
         platform: target,
+      }),
+      [recoveryPda] = await findAcceptPlatformAdminRecoveryPda({
+        platform: target,
       });
     const current = await fetchMaybePlatform(rpc, target, options);
     if (!current.exists) return null;
     if (current.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS)
       throw new Error("Unexpected platform owner");
-    const transfer = await fetchMaybeAuthorityTransfer(rpc, proposal, options);
+    const [transfer, recovery] = await Promise.all([
+      fetchMaybeAuthorityProposal(rpc, proposal, options),
+      fetchMaybePlatformRecovery(rpc, recoveryPda, options),
+    ]);
     if (
       transfer.exists &&
       (transfer.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS ||
@@ -53,24 +99,38 @@ export async function loadOperationalAuthority(
         transfer.data.currentAuthority !== current.data.admin)
     )
       throw new Error("The platform authority proposal is stale or invalid");
+    const bootstrapOpen =
+      ((current.data.pauseFlags ?? 0) & PLATFORM_BOOTSTRAP_OPEN) !== 0;
     return {
       target,
       current: current.data.admin,
       proposal,
       proposed: transfer.exists ? transfer.data.newAuthority : null,
+      proposedBy: transfer.exists ? transfer.data.proposedBy : null,
+      eta: transfer.exists
+        ? bootstrapOpen
+          ? transfer.data.proposedAt
+          : transfer.data.eta
+        : null,
+      expiresAt: transfer.exists ? transfer.data.expiresAt : null,
+      recoveryPending:
+        recovery.exists &&
+        recovery.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS &&
+        recovery.data.platform === target &&
+        recovery.data.currentAdmin === current.data.admin,
     };
   }
   const [target] = await findBlocklistAuthorityPda(),
-    [proposal] = await findTransferPda();
+    [proposal] = await findTransferPda(),
+    [recoveryPda] = await findBlocklistRecoveryPda();
   const current = await fetchMaybeBlocklistAuthority(rpc, target, options);
   if (!current.exists) return null;
   if (current.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS)
     throw new Error("Unexpected blocklist authority owner");
-  const transfer = await fetchMaybeBlocklistAuthorityTransfer(
-    rpc,
-    proposal,
-    options,
-  );
+  const [transfer, recovery] = await Promise.all([
+    fetchMaybeBlocklistAuthorityProposal(rpc, proposal, options),
+    fetchMaybeBlocklistRecovery(rpc, recoveryPda, options),
+  ]);
   if (
     transfer.exists &&
     (transfer.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS ||
@@ -82,6 +142,14 @@ export async function loadOperationalAuthority(
     current: current.data.authority,
     proposal,
     proposed: transfer.exists ? transfer.data.newAuthority : null,
+    // The BA proposal's rent returns to the live authority on cancel.
+    proposedBy: transfer.exists ? current.data.authority : null,
+    eta: transfer.exists ? transfer.data.proposedAt : null,
+    expiresAt: transfer.exists ? transfer.data.expiresAt : null,
+    recoveryPending:
+      recovery.exists &&
+      recovery.programAddress === TRANSFER_HOOK_PROGRAM_ADDRESS &&
+      recovery.data.currentAuthority === current.data.authority,
   };
 }
 /**
@@ -158,6 +226,7 @@ export async function buildAcceptOperationalAuthority(
     throw new Error(
       `Connect the proposed new authority wallet to accept this change (${PROPOSAL_NOT_FINALIZED_HINT})`,
     );
+  if (state.recoveryPending) throw new Error(RECOVERY_PENDING_BLOCKER);
   if (kind === "blocklist")
     return getAcceptBlocklistAuthorityInstructionAsync({
       newAuthority: signer,
@@ -172,5 +241,37 @@ export async function buildAcceptOperationalAuthority(
     platform: state.target,
     transfer: state.proposal,
     oldAdminRecord,
+  });
+}
+
+/**
+ * Withdraws a staged rotation (live, stale or expired). Platform: the Super
+ * Admin, any live Admin or the program upgrade authority signs (the program
+ * checks which; the rent returns to the proposer). Blocklist: only the live
+ * blocklist authority.
+ */
+export async function buildCancelOperationalAuthority(
+  rpc: Rpc,
+  kind: OperationalAuthorityKind,
+  signer: TransactionSigner,
+) {
+  const state = await loadOperationalAuthority(rpc, kind);
+  if (!state?.proposed || !state.proposedBy)
+    throw new Error("No authority proposal is staged");
+  if (kind === "blocklist") {
+    if (state.current !== signer.address)
+      throw new Error(`Connect the blocklist authority (current: ${state.current}) to cancel its proposal`);
+    return getCancelBlocklistAuthorityTransferInstructionAsync({
+      authority: signer,
+      blocklistAuthority: state.target,
+      transfer: state.proposal,
+    });
+  }
+  return getCancelPlatformAdminTransferInstructionAsync({
+    canceller: signer,
+    platform: state.target,
+    transfer: state.proposal,
+    proposer: state.proposedBy,
+    programData: await findProgramDataPda(ASSET_REGISTRY_PROGRAM_ADDRESS),
   });
 }

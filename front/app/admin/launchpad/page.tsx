@@ -11,8 +11,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
   findIssuerPda,
-  getCloseSaleInstruction,
-  findPlatformPda,
   getOpenSaleInstructionAsync,
   fetchMaybeSaleApproval,
   findSaleApprovalPda,
@@ -22,6 +20,8 @@ import {
   type Sale,
   type SaleApproval,
 } from "@/lib/generated/asset_registry";
+import { buildCloseSaleInstruction } from "@/lib/proceeds-exits";
+import { saleEndError } from "@/lib/deadline-bounds";
 import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
@@ -393,16 +393,14 @@ function SaleDetail({
           mint: sale.paymentMint,
           tokenProgram: paymentTokenProgram,
         });
-      // Emergency-pause gate (read-only) — the last named account.
-      const [platform] = await findPlatformPda();
-      const closeIx = getCloseSaleInstruction({
-        platform,
+      // The pause gate, the issuer's proceeds freeze and both parties'
+      // blocklist entries (lib/proceeds-exits).
+      const closeIx = await buildCloseSaleInstruction(client.runtime.rpc, {
         authority: signer,
-        sale: salePda,
-        proceeds: sale.proceeds,
-        paymentMint: sale.paymentMint,
+        sale: { address: salePda, shareClass: sale.shareClass, proceeds: sale.proceeds, paymentMint: sale.paymentMint },
         destination: destAta,
-        paymentTokenProgram: paymentTokenProgram,
+        destinationOwner: wallet,
+        paymentTokenProgram,
       });
       const sig = await tx.send({
         instructions: [...syncIxs, createDestAtaIx, closeIx],
@@ -671,6 +669,13 @@ function OpenSaleModal({
       const endTsBig = endTs.trim()
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
+      // v1: every sale ends, at most 365 days out (SaleDurationInvalid 6145).
+      const endError = saleEndError(BigInt(0), endTsBig);
+      if (endError) {
+        toast.dismiss(pendingId);
+        toast.showError("Sale end date", endError);
+        return;
+      }
       const signer = walletSigner(conn.wallet);
       // The payment mint comes from the approval (classic SPL or Token-2022).
       const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(

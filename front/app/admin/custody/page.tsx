@@ -5,6 +5,7 @@ import { parseCustodyVaultId, requireCustodyRequestAmount } from "@/lib/custody-
 
 import { useCustodyOutcomeRecovery } from "@/lib/use-custody-outcome-recovery";
 import { CustodyAuthorityTransfer } from "@/components/custody-authority-transfer";
+import { DELIVERY_ESCROW_MAX_DEADLINE_SECONDS } from "@/lib/deadline-bounds";
 import { custodyAuthorityRecord } from "@/lib/custody-authority";
 import {
   REALIZE_ACTION_LABEL,
@@ -4164,6 +4165,9 @@ function deliveryDeadlineError(value: string): string | null {
   if (Number.isNaN(t)) return "Not a valid date";
   if (t < Date.now() + DAY_MS)
     return "Deadline must be at least 24 hours from now";
+  // v1: at most 365 days out (DeliveryDeadlineOutOfRange 6148).
+  if (t > Date.now() + DELIVERY_ESCROW_MAX_DEADLINE_SECONDS * 1000)
+    return "Deadline must be at most 365 days from now";
   return null;
 }
 

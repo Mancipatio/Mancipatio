@@ -7,7 +7,9 @@
 // signing a transaction that must fail, and show what a change does:
 //
 // * regular rotation: the current authority proposes, the new key accepts
-//   (`AuthorityTransfer` at ["authority_transfer", issuer]);
+//   within 14 days (`AuthorityProposal` at ["authority_proposal", issuer]);
+//   a blocklisted issuer key can neither propose nor be rotated away from
+//   (both take the hook's ["blocked", issuer.authority], 6144);
 // * recovery of a LOST key: the super admin proposes, the new key executes
 //   inside [eta, expiresAt) (eta = proposal + 7 days, window 14 days); the
 //   current authority or the super admin cancels; it goes stale when the
@@ -18,9 +20,7 @@
 import {
   fetchEncodedAccount,
   getAddressDecoder,
-  getAddressEncoder,
   getBase58Decoder,
-  getProgramDerivedAddress,
   isAddress,
   type Address,
   type Base58EncodedBytes,
@@ -31,17 +31,18 @@ import type { SolanaClient } from "@solana/client";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   fetchMaybeAdmin,
-  fetchMaybeAuthorityTransfer,
+  fetchMaybeAuthorityProposal,
   fetchMaybeIssuer,
   fetchMaybeIssuerRecovery,
+  findAcceptIssuerAuthorityTransferPda,
   findAdminRecordPda,
   findAssetPda,
   findPlatformPda,
   findRecoveryPda,
   getAcceptIssuerAuthorityInstruction,
   getAssetDiscriminatorBytes,
-  getAuthorityTransferDecoder,
-  getAuthorityTransferDiscriminatorBytes,
+  getAuthorityProposalDecoder,
+  getAuthorityProposalDiscriminatorBytes,
   getCancelIssuerAuthorityTransferInstruction,
   getCancelIssuerRecoveryInstruction,
   getExecuteIssuerRecoveryInstruction,
@@ -54,11 +55,11 @@ import {
   getSyncPayoutFounderInstruction,
   getSyncSaleAuthorityInstruction,
   SaleStatus,
-  type AuthorityTransfer,
+  type AuthorityProposal,
   type IssuerRecovery,
 } from "@/lib/generated/asset_registry";
 import type { NetworkData } from "@/lib/enumerate";
-import { findSalePda, findShareClassPda } from "@/lib/pdas";
+import { findBlockEntryPda, findSalePda, findShareClassPda } from "@/lib/pdas";
 import { findIssuerPermissionsAddress } from "@/lib/issuer-permissions";
 import { DEFAULT_ADDRESS } from "@/lib/protocol-treasury";
 import {
@@ -78,7 +79,7 @@ export const ISSUER_RECOVERY_DELAY_SECONDS = 604_800;
 /** Mirrors the program's `ISSUER_RECOVERY_EXECUTION_WINDOW` (14 days after eta). */
 export const ISSUER_RECOVERY_WINDOW_SECONDS = 1_209_600;
 /**
- * `new_authority` sits at byte 72 of BOTH `AuthorityTransfer` and
+ * `new_authority` sits at byte 72 of BOTH `AuthorityProposal` and
  * `IssuerRecovery` (8-byte discriminator + two 32-byte keys), so one memcmp
  * finds every rotation or recovery staged for a wallet.
  */
@@ -127,6 +128,8 @@ export type PendingIssuerTransfer = {
   currentAuthority: string;
   newAuthority: string;
   proposedBy: string;
+  /** Unix s: acceptable strictly before it (14 days after the proposal). */
+  expiresAt?: number;
 };
 
 export type IssuerTransferState =
@@ -513,25 +516,22 @@ export async function waitForIndexedAuthority(
 const ADDRESS_DECODER = getAddressDecoder();
 const read = { commitment: "confirmed" as const };
 
+/** The issuer's ["authority_proposal", issuer] (generated helper). */
 export async function findIssuerTransferPda(issuer: Address): Promise<Address> {
-  return (
-    await getProgramDerivedAddress({
-      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-      seeds: [new TextEncoder().encode("authority_transfer"), getAddressEncoder().encode(issuer)],
-    })
-  )[0];
+  return (await findAcceptIssuerAuthorityTransferPda({ issuer }))[0];
 }
 
 export async function findIssuerRecoveryPda(issuer: Address): Promise<Address> {
   return (await findRecoveryPda({ issuer }))[0];
 }
 
-export function toPendingIssuerTransfer(t: AuthorityTransfer): PendingIssuerTransfer {
+export function toPendingIssuerTransfer(t: AuthorityProposal): PendingIssuerTransfer {
   return {
     target: t.target.toString(),
     currentAuthority: t.currentAuthority.toString(),
     newAuthority: t.newAuthority.toString(),
     proposedBy: t.proposedBy.toString(),
+    expiresAt: Number(t.expiresAt),
   };
 }
 
@@ -578,7 +578,7 @@ export async function fetchPendingIssuerTransfer(
   rpc: Rpc,
   issuer: Address,
 ): Promise<PendingIssuerTransfer | null> {
-  const maybe = await fetchMaybeAuthorityTransfer(rpc, await findIssuerTransferPda(issuer), read);
+  const maybe = await fetchMaybeAuthorityProposal(rpc, await findIssuerTransferPda(issuer), read);
   return maybe.exists && maybe.data.target === issuer ? toPendingIssuerTransfer(maybe.data) : null;
 }
 
@@ -648,12 +648,12 @@ export type PendingForWallet = {
 };
 
 /**
- * Everything staged for `wallet` to accept or execute. `AuthorityTransfer`
- * is shared by platform, custody and KYC-registry rotations, so a transfer is
+ * Everything staged for `wallet` to accept or execute. `AuthorityProposal`
+ * is shared by platform, custody and KYC-registry rotations, so a proposal is
  * kept only when its target is an Issuer account of this program.
  */
 export async function findPendingForWallet(rpc: Rpc, wallet: Address): Promise<PendingForWallet> {
-  const transferDisc = getAuthorityTransferDiscriminatorBytes();
+  const transferDisc = getAuthorityProposalDiscriminatorBytes();
   const recoveryDisc = getIssuerRecoveryDiscriminatorBytes();
   const [transfers, recoveries] = await Promise.all([
     scan(rpc, transferDisc, wallet),
@@ -663,7 +663,7 @@ export async function findPendingForWallet(rpc: Rpc, wallet: Address): Promise<P
   const issuerDisc = getIssuerDiscriminatorBytes();
   for (const t of transfers) {
     if (t.owner !== ASSET_REGISTRY_PROGRAM_ADDRESS || !hasPrefix(t.bytes, transferDisc)) continue;
-    const transfer = getAuthorityTransferDecoder().decode(t.bytes);
+    const transfer = getAuthorityProposalDecoder().decode(t.bytes);
     if (transfer.newAuthority !== wallet) continue;
     const target = await fetchEncodedAccount(rpc as unknown as Parameters<typeof fetchEncodedAccount>[0], transfer.target, read);
     if (!target.exists || target.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS || !hasPrefix(target.data, issuerDisc)) continue;
@@ -731,32 +731,43 @@ export async function syncVaultIfNeeded(
 
 // ── Builders ─────────────────────────────────────────────────────────────────
 
-/** `propose_issuer_authority`: the CURRENT authority stages `newAuthority`. */
+/**
+ * `propose_issuer_authority`: the CURRENT authority stages `newAuthority`.
+ * It passes its own hook ["blocked", authority]: a blocklisted issuer key
+ * cannot stage a rotation (6144).
+ */
 export async function buildProposeIssuerAuthority(p: {
   authoritySigner: TransactionSigner;
   issuer: Address;
   newAuthority: Address;
 }) {
+  const [transfer, authorityBlockEntry] = await Promise.all([
+    findIssuerTransferPda(p.issuer),
+    findBlockEntryPda(p.authoritySigner.address),
+  ]);
   return getProposeIssuerAuthorityInstruction({
     authority: p.authoritySigner,
     issuer: p.issuer,
-    transfer: await findIssuerTransferPda(p.issuer),
+    transfer,
     newAuthority: p.newAuthority,
+    authorityBlockEntry,
   });
 }
 
 /**
- * `accept_issuer_authority`, signed by the PROPOSED key. `currentAuthority`
- * is the live `issuer.authority`: it seeds the grant that is closed and the
- * outgoing Admin PDA; the new grant and Admin PDA are seeded by the signer.
- * A pending recovery (its PDA is always passed) is retired on-chain.
+ * `accept_issuer_authority`, signed by the PROPOSED key within 14 days.
+ * `currentAuthority` is the live `issuer.authority`: it seeds the grant that
+ * is closed, the outgoing Admin PDA and the outgoing key's hook blocklist
+ * entry (a blocklisted key cannot be rotated away from, 6144); the new grant
+ * and Admin PDA are seeded by the signer. A pending recovery (its PDA is
+ * always passed) is retired on-chain.
  */
 export async function buildAcceptIssuerAuthority(p: {
   newAuthoritySigner: TransactionSigner;
   issuer: Address;
   currentAuthority: Address;
 }) {
-  const [transfer, oldPermissions, newPermissions, [oldAdminRecord], [newAdminRecord], recovery] =
+  const [transfer, oldPermissions, newPermissions, [oldAdminRecord], [newAdminRecord], recovery, authorityBlockEntry] =
     await Promise.all([
       findIssuerTransferPda(p.issuer),
       findIssuerPermissionsAddress(p.issuer, p.currentAuthority),
@@ -764,6 +775,7 @@ export async function buildAcceptIssuerAuthority(p: {
       findAdminRecordPda({ authority: p.currentAuthority }),
       findAdminRecordPda({ authority: p.newAuthoritySigner.address }),
       findIssuerRecoveryPda(p.issuer),
+      findBlockEntryPda(p.currentAuthority),
     ]);
   return getAcceptIssuerAuthorityInstruction({
     newAuthority: p.newAuthoritySigner,
@@ -774,6 +786,7 @@ export async function buildAcceptIssuerAuthority(p: {
     oldAdminRecord,
     newAdminRecord,
     recovery,
+    authorityBlockEntry,
   });
 }
 

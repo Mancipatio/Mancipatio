@@ -92,7 +92,9 @@ describe("chain:emergency inputs", () => {
   it("parses the op, the signer and each op's arguments", () => {
     const base = { CHAIN_EMERGENCY_SIGNER: key(1) };
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "primary,secondary" })).toEqual({ op: "pause", signer: key(1), mask: 0x06 });
-    expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "all" })).toMatchObject({ mask: 0x3f });
+    // v1.0.0-rc: `all` pauses every pause bit, the payout modules (0x40) included.
+    expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "all" })).toMatchObject({ mask: 0x7f });
+    expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "unpause", CHAIN_PAUSE_BITS: "payout-modules" })).toMatchObject({ mask: 0x40 });
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "unpause", CHAIN_PAUSE_BITS: "all" })).toMatchObject({ mask: "all" });
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "block", CHAIN_WALLET: key(2) })).toMatchObject({ wallet: key(2), confirmWallet: null });
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "kyc-gated", CHAIN_KYC_REGISTRY: key(4) })).toMatchObject({
@@ -103,7 +105,9 @@ describe("chain:emergency inputs", () => {
     const refuse = (value: ChainEnv, pattern: RegExp) => expect(() => readEmergencyRequest({ ...base, ...value })).toThrow(pattern);
     refuse({ CHAIN_EMERGENCY_OP: "drain" }, /CHAIN_EMERGENCY_OP must be one of/);
     refuse({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "everything" }, /unknown area "everything"/);
-    refuse({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "0x40" }, /only defined bits/);
+    refuse({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "0x80" }, /only defined bits/);
+    // The payout modules clear only on their own (the program's 6154).
+    refuse({ CHAIN_EMERGENCY_OP: "unpause", CHAIN_PAUSE_BITS: "primary,payout-modules" }, /cleared only on its own/);
     refuse({ CHAIN_EMERGENCY_OP: "pause" }, /CHAIN_PAUSE_BITS is required/);
     refuse({ CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "open", CHAIN_KYC_REGISTRY: key(4) }, /must be unset for open/);
     refuse({ CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "kyc-gated" }, /CHAIN_KYC_REGISTRY must be a valid address/);
@@ -138,7 +142,7 @@ describe("chain:emergency pause (ops-qa-8)", () => {
     expect(again.noop).toMatch(/already set/);
   });
 
-  it("only the super admin clears; `all` also clears undefined bits", async () => {
+  it("only the super admin clears; `all` clears every emergency area and the bootstrap marker, never the payout modules", async () => {
     const w = await seeded(0xff);
     const byAdmin = await dry(w, { CHAIN_EMERGENCY_OP: "unpause", CHAIN_EMERGENCY_SIGNER: w.keys.kycAuthority, CHAIN_PAUSE_BITS: "all" });
     expect(byAdmin.error).toMatch(/Only the super admin clears pause bits/);
@@ -147,6 +151,10 @@ describe("chain:emergency pause (ops-qa-8)", () => {
     const op = { CHAIN_EMERGENCY_OP: "unpause", CHAIN_EMERGENCY_SIGNER: w.keys.superAdmin, CHAIN_PAUSE_BITS: "all" };
     const sent = await send(w, op, { CHAIN_KEYPAIR: w.pairs.superAdmin.path });
     expect(sent.error ?? null).toBeNull();
+    expect(await platformFlags(w)).toBe(0x40);
+    // Off mainnet the super admin may switch the payout modules on, alone.
+    const payout = await send(w, { ...op, CHAIN_PAUSE_BITS: "payout-modules" }, { CHAIN_KEYPAIR: w.pairs.superAdmin.path });
+    expect(payout.error ?? null).toBeNull();
     expect(await platformFlags(w)).toBe(0);
   });
 
@@ -156,7 +164,7 @@ describe("chain:emergency pause (ops-qa-8)", () => {
     const calls: string[] = [];
     const sent = await send(w, op, { CHAIN_SIGNER: "usb://ledger?key=0" }, { ledger: fakeLedger(w.pairs.superAdmin.path, calls) });
     expect(sent.error ?? null).toBeNull();
-    expect(await platformFlags(w)).toBe(0x3f);
+    expect(await platformFlags(w)).toBe(0x7f);
     expect(calls[0]).toBe("address 44'/501'/0'");
     expect(calls[1]).toMatch(/^sign 44'\/501'\/0' [1-9A-HJ-NP-Za-km-z]{32,44}$/);
     expect(calls.at(-1)).toBe("close");

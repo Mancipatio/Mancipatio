@@ -8,6 +8,8 @@ const mocks = vi.hoisted(() => ({
   transfer: vi.fn(),
   hook: vi.fn(),
   hookTransfer: vi.fn(),
+  recovery: vi.fn(),
+  hookRecovery: vi.fn(),
 }));
 vi.mock("@/lib/generated/asset_registry", async (importOriginal) => ({
   ...(await importOriginal<object>()),
@@ -15,12 +17,14 @@ vi.mock("@/lib/generated/asset_registry", async (importOriginal) => ({
   fetchMaybeIssuer: mocks.issuer,
   fetchMaybeAdmin: mocks.admin,
   fetchMaybeIssuerPermissions: mocks.permission,
-  fetchMaybeAuthorityTransfer: mocks.transfer,
+  fetchMaybeAuthorityProposal: mocks.transfer,
+  fetchMaybePlatformRecovery: mocks.recovery,
 }));
 vi.mock("@/lib/generated/transfer_hook", async (importOriginal) => ({
   ...(await importOriginal<object>()),
   fetchMaybeBlocklistAuthority: mocks.hook,
-  fetchMaybeBlocklistAuthorityTransfer: mocks.hookTransfer,
+  fetchMaybeBlocklistAuthorityProposal: mocks.hookTransfer,
+  fetchMaybeBlocklistRecovery: mocks.hookRecovery,
 }));
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
@@ -31,11 +35,20 @@ import {
 import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
 import {
   PROPOSAL_NOT_FINALIZED_HINT,
+  RECOVERY_PENDING_BLOCKER,
   assertBlocklistAuthority,
   buildAcceptOperationalAuthority,
+  buildCancelOperationalAuthority,
   buildProposeOperationalAuthority,
   loadOperationalAuthority,
 } from "@/lib/operational-authority";
+import {
+  parseCancelPlatformAdminTransferInstruction,
+  parseAcceptPlatformAdminInstruction,
+  findAcceptPlatformAdminRecoveryPda,
+} from "@/lib/generated/asset_registry";
+import { parseCancelBlocklistAuthorityTransferInstruction } from "@/lib/generated/transfer_hook";
+import { findProgramDataPda } from "@/lib/pdas";
 import {
   findIssuerPermissionsAddress,
   loadIssuerPermission,
@@ -63,6 +76,8 @@ beforeEach(() => {
     account({ authority: current }, TRANSFER_HOOK_PROGRAM_ADDRESS),
   );
   mocks.hookTransfer.mockResolvedValue({ exists: false });
+  mocks.recovery.mockResolvedValue({ exists: false });
+  mocks.hookRecovery.mockResolvedValue({ exists: false });
 });
 describe("live operational authority builders", () => {
   it.each(["platform", "blocklist"] as const)(
@@ -159,6 +174,55 @@ describe("live operational authority builders", () => {
     );
   });
 });
+// v1.0.0-rc (8.3): proposals carry a window, a pending recovery by the
+// upgrade authority refuses the accept, and both rotations can be cancelled.
+describe("v1 proposal windows, recoveries and cancels", () => {
+  const proposal = { currentAuthority: current, newAuthority: next, proposedBy: current, proposedAt: BigInt(10), eta: BigInt(172_810), expiresAt: BigInt(1_382_410) };
+
+  it("reports the window: the bootstrap window waives the platform eta; the BA proposal has none", async () => {
+    const [target] = await findPlatformPda();
+    mocks.transfer.mockResolvedValue(account({ target, ...proposal }));
+    expect(await loadOperationalAuthority(rpc, "platform")).toMatchObject({ proposed: next, proposedBy: current, eta: BigInt(172_810), expiresAt: BigInt(1_382_410), recoveryPending: false });
+    mocks.platform.mockResolvedValue(account({ admin: current, pauseFlags: 0xff }));
+    expect((await loadOperationalAuthority(rpc, "platform"))?.eta).toBe(BigInt(10));
+    mocks.hookTransfer.mockResolvedValue(account({ currentAuthority: current, newAuthority: next, proposedAt: BigInt(5), expiresAt: BigInt(99) }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+    expect(await loadOperationalAuthority(rpc, "blocklist")).toMatchObject({ eta: BigInt(5), expiresAt: BigInt(99), proposedBy: current });
+  });
+
+  it.each(["platform", "blocklist"] as const)("a pending recovery against the live %s refuses the accept before signing", async (kind) => {
+    const [target] = await findPlatformPda();
+    mocks.transfer.mockResolvedValue(account({ target, ...proposal }));
+    mocks.hookTransfer.mockResolvedValue(account({ currentAuthority: current, newAuthority: next }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+    if (kind === "platform") mocks.recovery.mockResolvedValue(account({ platform: target, currentAdmin: current, newAdmin: issuer }));
+    else mocks.hookRecovery.mockResolvedValue(account({ currentAuthority: current, newAuthority: issuer }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+    await expect(buildAcceptOperationalAuthority(rpc, kind, createNoopSigner(next))).rejects.toThrow(RECOVERY_PENDING_BLOCKER);
+    // A recovery against a former holder is not live.
+    if (kind === "platform") mocks.recovery.mockResolvedValue(account({ platform: target, currentAdmin: issuer, newAdmin: issuer }));
+    else mocks.hookRecovery.mockResolvedValue(account({ currentAuthority: issuer, newAuthority: issuer }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+    await expect(buildAcceptOperationalAuthority(rpc, kind, createNoopSigner(next))).resolves.toBeDefined();
+  });
+
+  it("the platform accept names the recovery PDA; the cancels name the proposer and ProgramData", async () => {
+    const [target] = await findPlatformPda();
+    mocks.transfer.mockResolvedValue(account({ target, ...proposal }));
+    const accept = await buildAcceptOperationalAuthority(rpc, "platform", createNoopSigner(next));
+    expect(parseAcceptPlatformAdminInstruction(accept as never).accounts.recovery.address).toBe((await findAcceptPlatformAdminRecoveryPda({ platform: target }))[0]);
+    // Any Admin (the program checks the veto) cancels; the rent returns to the proposer.
+    const cancel = await buildCancelOperationalAuthority(rpc, "platform", createNoopSigner(issuer));
+    const parsed = parseCancelPlatformAdminTransferInstruction(cancel as never);
+    expect(parsed.accounts.canceller.address).toBe(issuer);
+    expect(parsed.accounts.proposer.address).toBe(current);
+    expect(parsed.accounts.programData.address).toBe(await findProgramDataPda());
+    // The BA cancels its own proposal only.
+    mocks.hookTransfer.mockResolvedValue(account({ currentAuthority: current, newAuthority: next }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+    const ba = await buildCancelOperationalAuthority(rpc, "blocklist", createNoopSigner(current));
+    expect(parseCancelBlocklistAuthorityTransferInstruction(ba as never).accounts.authority.address).toBe(current);
+    await expect(buildCancelOperationalAuthority(rpc, "blocklist", createNoopSigner(next))).rejects.toThrow(/Connect the blocklist authority/);
+    mocks.transfer.mockResolvedValue({ exists: false });
+    await expect(buildCancelOperationalAuthority(rpc, "platform", createNoopSigner(current))).rejects.toThrow(/No authority proposal/);
+  });
+});
+
 // Talas 3.1 K7/K8: blocklist and hook-mode builders re-check the live,
 // finalized blocklist authority before building.
 describe("assertBlocklistAuthority", () => {

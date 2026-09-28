@@ -265,6 +265,8 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     expect(titles(plan)).toEqual([
       "Onboard",
       "Fund",
+      // v1 (D3): the SA proposes the grant, the new key executes it 48 h later.
+      "propose_admin",
       "add_admin",
       "propose_custody_authority",
       "accept_custody_authority",
@@ -280,8 +282,10 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
       "Verify",
     ]);
     const by = (instruction: string) => plan.steps.filter((s) => s.instruction === instruction);
-    // Who signs: the current holder proposes, the company wallet accepts.
-    expect(by("add_admin")[0]).toMatchObject({ title: `add_admin(${C})`, signer: { key: P, side: "current" }, where: expect.stringMatching(/^\/admin\/admins/) });
+    // Who signs: the current holder proposes, the company wallet accepts
+    // (its own Admin grant included, on /account/roles).
+    expect(by("propose_admin")[0]).toMatchObject({ title: `propose_admin(${C})`, signer: { key: P, side: "current" }, where: expect.stringMatching(/^\/admin\/admins/) });
+    expect(by("add_admin")[0]).toMatchObject({ title: `add_admin(${C})`, signer: { key: C, side: "new" }, requires: [by("propose_admin")[0].id], where: expect.stringMatching(/^\/account\/roles/) });
     expect(by("propose_custody_authority")[0].title).toContain(vault);
     expect(by("propose_kyc_registry_authority")[0]).toMatchObject({ signer: { key: P, side: "current" }, where: expect.stringMatching(/^\/admin\/kyc/) });
     for (const accept of ["accept_custody_authority", "accept_kyc_registry_authority", "accept_blocklist_authority", "accept_platform_admin"]) {
@@ -320,6 +324,7 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     expect(titles(plan)).toEqual([
       "Onboard",
       "Fund",
+      "propose_admin",
       "add_admin",
       "propose_kyc_registry_authority",
       "accept_kyc_registry_authority",
@@ -328,18 +333,23 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
       "set_protocol_treasury",
       "propose_platform_admin",
       "accept_platform_admin",
+      "propose_admin",
       "add_admin",
       "remove_admin",
       "remove_admin",
       "Verify",
     ]);
     const accept = plan.steps.find((s) => s.instruction === "accept_platform_admin")!;
+    // v1: the new SA re-proposes P right after the accept; P executes its own grant.
+    const repropose = plan.steps.find((s) => s.title === `propose_admin(${P})`)!;
     const regrant = plan.steps.find((s) => s.title === `add_admin(${P})`)!;
-    expect(regrant).toMatchObject({ phase: "super-admin", signer: { key: C, side: "new" }, requires: [accept.id], where: expect.stringMatching(/^\/admin\/admins/) });
-    expect(plan.steps.indexOf(regrant)).toBe(plan.steps.indexOf(accept) + 1);
+    expect(repropose).toMatchObject({ phase: "super-admin", signer: { key: C, side: "new" }, requires: [accept.id], where: expect.stringMatching(/^\/admin\/admins/) });
+    expect(regrant).toMatchObject({ phase: "super-admin", signer: { key: P }, requires: [repropose.id], where: expect.stringMatching(/^\/account\/roles/) });
+    expect(plan.steps.indexOf(repropose)).toBe(plan.steps.indexOf(accept) + 1);
+    expect(plan.steps.indexOf(regrant)).toBe(plan.steps.indexOf(accept) + 2);
     // Its custody vault and rights issuance are without an Admin in between: noted and decided.
-    expect(regrant.notes.join(" ")).toMatch(new RegExp(`custody vaults it operates .*${vault}`));
-    expect(regrant.notes.join(" ")).toMatch(/publish_milestone is refused/);
+    expect(repropose.notes.join(" ")).toMatch(new RegExp(`custody vaults it operates .*${vault}`));
+    expect(repropose.notes.join(" ")).toMatch(/publish_milestone is refused/);
     expect(plan.decisions.join(" ")).toMatch(new RegExp(`${P} stays an Admin in the target.*custody vault ${vault}`));
     // P is not outgoing; the removals and the verify step come after the re-grant.
     expect(plan.outgoing).not.toContain(P);
@@ -403,7 +413,8 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     const evidence = await runTool("handover", env(w, { CHAIN_ROLE_MAP: file }), handoverTool, deps(w, lines));
     expect(evidence.error ?? null).toBeNull();
     expect(evidence.status).toBe("awaiting");
-    expect(lines.join("\n")).toMatch(/H3 +grant +current +\S+ +add_admin\(/);
+    expect(lines.join("\n")).toMatch(/H3 +grant +current +\S+ +propose_admin\(/);
+    expect(lines.join("\n")).toMatch(/H4 +grant +new +\S+ +add_admin\(/);
     const markdown = fs.readFileSync(path.join(w.dir, String(evidence.planFile)), "utf8");
     expect(markdown).toMatch(/^# Role handover plan \(devnet\)/);
     expect(markdown).toMatch(/- \[ \] \*\*H\d+ \(super-admin\)\*\* accept_platform_admin/);

@@ -16,13 +16,12 @@ import {
 import { type Address } from "@solana/kit";
 import { findAssociatedTokenPda as findClassicAtaPda } from "@solana-program/token";
 import {
-  getClaimVestedInstruction,
-  getPushVestedInstruction,
   VestingDeliveryMode,
   VestingSeriesStatus,
   VestingTimingMode,
 } from "@/lib/generated/asset_registry";
 import { hookTransferMetas, mintHasManciHook } from "@/lib/hook-metas";
+import { buildVestingReleaseInstruction } from "@/lib/vesting-release";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
@@ -187,27 +186,19 @@ export default function PortfolioVestingPage() {
         mint,
         tokenProgram: program,
       });
-      const baseIx = push
-        ? getPushVestedInstruction({
-            payer: signer,
-            series: position.account.series,
-            position: position.pda,
-            tokenMint: mint,
-            escrow: series.escrow,
-            recipientTokenAccount: ata,
-            tokenProgram: program,
-            positionIndex: position.account.index,
-          })
-        : getClaimVestedInstruction({
-            recipient: signer,
-            series: position.account.series,
-            position: position.pda,
-            tokenMint: mint,
-            escrow: series.escrow,
-            recipientTokenAccount: ata,
-            tokenProgram: program,
-            positionIndex: position.account.index,
-          });
+      // The recipient's blocklist entry sits before the hook tail (lib/vesting-release).
+      const baseIx = await buildVestingReleaseInstruction({
+        mode: push ? "push" : "claim",
+        signer,
+        series: position.account.series,
+        position: position.pda,
+        positionIndex: position.account.index,
+        recipient: position.account.wallet,
+        tokenMint: mint,
+        escrow: series.escrow,
+        recipientTokenAccount: ata,
+        tokenProgram: program,
+      });
       const metas = (await mintHasManciHook(client.runtime.rpc, mint))
         ? await hookTransferMetas(client.runtime.rpc, mint, {
             sourceTokenAccount: series.escrow,

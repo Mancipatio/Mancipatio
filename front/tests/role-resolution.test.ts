@@ -11,11 +11,11 @@ import {
   findKycRegistryPda,
   findPlatformPda,
   getAdminEncoder,
-  getAuthorityTransferEncoder,
+  getAuthorityProposalEncoder,
   getKycRegistryDiscriminatorBytes,
   getKycRegistryEncoder,
   getPlatformEncoder,
-  type AuthorityTransfer,
+  type AuthorityProposal,
   type KycRegistry,
 } from "@/lib/generated/asset_registry";
 import {
@@ -23,9 +23,9 @@ import {
   findBlocklistAuthorityPda,
   findTransferPda as findBlocklistTransferPda,
   getBlocklistAuthorityEncoder,
-  getBlocklistAuthorityTransferEncoder,
+  getBlocklistAuthorityProposalEncoder,
 } from "@/lib/generated/transfer_hook";
-import { findAuthorityTransferPda } from "@/lib/pdas";
+import { findAuthorityProposalPda } from "@/lib/pdas";
 import { findKycRegistryTransferPda } from "@/lib/passport";
 import {
   ADMIN_ROUTE_ACCESS,
@@ -52,12 +52,12 @@ const b64 = getBase64Decoder();
 
 // ── Account bytes ────────────────────────────────────────────────────────────
 
-const platformBytes = (admin: Address) =>
+const platformBytes = (admin: Address, pauseFlags = 0) =>
   getPlatformEncoder().encode({
     admin,
     protocolTreasury: TREASURY,
     protocolFeeBps: 50,
-    pauseFlags: 0,
+    pauseFlags,
     issuersCount: 0,
     version: 1,
     bump: 255,
@@ -66,10 +66,15 @@ const adminBytes = (admin: Address) =>
   getAdminEncoder().encode({ admin, addedBy: OTHER, bump: 254 });
 const baBytes = (authority: Address) =>
   getBlocklistAuthorityEncoder().encode({ authority, bump: 253 });
+/** A v1 proposal window: proposed at 100, executable from ETA, until EXPIRES. */
+const PROPOSED_AT = BigInt(100);
+const ETA = BigInt(172_900);
+const EXPIRES = BigInt(1_382_500);
 const blocklistTransferBytes = (currentAuthority: Address, newAuthority: Address) =>
-  getBlocklistAuthorityTransferEncoder().encode({ currentAuthority, newAuthority, bump: 252 });
-const transferBytes = (t: Omit<AuthorityTransfer, "discriminator">) =>
-  getAuthorityTransferEncoder().encode(t);
+  getBlocklistAuthorityProposalEncoder().encode({ currentAuthority, newAuthority, proposedAt: PROPOSED_AT, expiresAt: EXPIRES, bump: 252 });
+type ProposalFields = Omit<AuthorityProposal, "discriminator" | "proposedAt" | "eta" | "expiresAt" | "kind" | "version">;
+const transferBytes = (t: ProposalFields) =>
+  getAuthorityProposalEncoder().encode({ ...t, proposedAt: PROPOSED_AT, eta: ETA, expiresAt: EXPIRES, kind: 3, version: 1 });
 const registryBytes = (authority: Address) =>
   getKycRegistryEncoder().encode({
     authority,
@@ -128,7 +133,7 @@ async function pdas() {
   const [platformTransfer] = await findAcceptPlatformAdminTransferPda({ platform });
   const [blocklistTransfer] = await findBlocklistTransferPda();
   const [registry] = await findKycRegistryPda({ authority: OTHER });
-  const registryTransfer = await findAuthorityTransferPda(registry);
+  const registryTransfer = await findAuthorityProposalPda(registry);
   return { platform, admin, ba, platformTransfer, blocklistTransfer, registry, registryTransfer };
 }
 
@@ -218,14 +223,24 @@ describe("deriveRoles", () => {
     }
   });
 
-  it("platform pending: live only when current = proposed_by = Platform.admin", () => {
-    const transfer = (over: Partial<AuthorityTransfer>) =>
-      owned({ target: PLATFORM_PDA, currentAuthority: OTHER, newAuthority: WALLET, proposedBy: OTHER, ...over } as AuthorityTransfer);
+  const window = { eta: ETA, expiresAt: EXPIRES };
+  const proposalOf = (over: Partial<AuthorityProposal>) =>
+    ({ proposedAt: PROPOSED_AT, eta: ETA, expiresAt: EXPIRES, ...over }) as AuthorityProposal;
+
+  it("platform pending: live only when current = proposed_by = Platform.admin, with its window", () => {
+    const transfer = (over: Partial<AuthorityProposal>) =>
+      owned(proposalOf({ target: PLATFORM_PDA, currentAuthority: OTHER, newAuthority: WALLET, proposedBy: OTHER, ...over }));
     const live = deriveRoles(WALLET, snapshot({ platformTransfer: transfer({}) }));
-    expect(live.pending).toEqual([{ kind: "platform", target: PLATFORM_PDA, currentAuthority: OTHER }]);
+    expect(live.pending).toEqual([{ kind: "platform", target: PLATFORM_PDA, currentAuthority: OTHER, ...window }]);
     expect(deriveRoles(OTHER, snapshot({ platformTransfer: transfer({}) })).outgoing).toEqual([
-      { kind: "platform", target: PLATFORM_PDA, newAuthority: WALLET, live: true },
+      { kind: "platform", target: PLATFORM_PDA, newAuthority: WALLET, live: true, ...window },
     ]);
+    // v1: the bootstrap window (Platform bit 7) waives the 48 h: acceptable from the proposal.
+    const bootstrap = snapshot({
+      platform: owned({ admin: OTHER, pauseFlags: 0xff } as never, ASSET_REGISTRY_PROGRAM_ADDRESS, PLATFORM_PDA),
+      platformTransfer: transfer({}),
+    });
+    expect(deriveRoles(WALLET, bootstrap).pending[0]).toMatchObject({ eta: PROPOSED_AT, expiresAt: EXPIRES });
     // Stale: proposed by a former admin, or aimed at another target.
     expect(deriveRoles(WALLET, snapshot({ platformTransfer: transfer({ proposedBy: THIRD }) })).pending).toEqual([]);
     expect(deriveRoles(WALLET, snapshot({ platformTransfer: transfer({ currentAuthority: THIRD }) })).pending).toEqual([]);
@@ -237,28 +252,33 @@ describe("deriveRoles", () => {
 
   it("blocklist pending: live only when current_authority is the live BA", () => {
     const t = (current: Address) =>
-      owned({ currentAuthority: current, newAuthority: WALLET } as never, TRANSFER_HOOK_PROGRAM_ADDRESS);
+      owned(
+        { currentAuthority: current, newAuthority: WALLET, proposedAt: PROPOSED_AT, expiresAt: EXPIRES } as never,
+        TRANSFER_HOOK_PROGRAM_ADDRESS,
+      );
+    // No timelock on a BA rotation: acceptable from the proposal to its expiry.
+    const baWindow = { eta: PROPOSED_AT, expiresAt: EXPIRES };
     expect(deriveRoles(WALLET, snapshot({ blocklistTransfer: t(OTHER) })).pending).toEqual([
-      { kind: "blocklist", target: BA_PDA, currentAuthority: OTHER },
+      { kind: "blocklist", target: BA_PDA, currentAuthority: OTHER, ...baWindow },
     ]);
     expect(deriveRoles(WALLET, snapshot({ blocklistTransfer: t(THIRD) })).pending).toEqual([]);
     expect(deriveRoles(OTHER, snapshot({ blocklistTransfer: t(OTHER) })).outgoing).toEqual([
-      { kind: "blocklist", target: BA_PDA, newAuthority: WALLET, live: true },
+      { kind: "blocklist", target: BA_PDA, newAuthority: WALLET, live: true, ...baWindow },
     ]);
   });
 
   it("KYC pending: the accept check of kyc-registry-rotation", () => {
-    const t = (over: Partial<AuthorityTransfer>) =>
-      owned({ target: REGISTRY, currentAuthority: THIRD, newAuthority: WALLET, proposedBy: THIRD, ...over } as AuthorityTransfer);
+    const t = (over: Partial<AuthorityProposal>) =>
+      owned(proposalOf({ target: REGISTRY, currentAuthority: THIRD, newAuthority: WALLET, proposedBy: THIRD, ...over }));
     const base = { kycRegistry: registry(THIRD) };
     expect(deriveRoles(WALLET, snapshot({ ...base, kycTransfer: t({}) })).pending).toEqual([
-      { kind: "kyc", target: REGISTRY, currentAuthority: THIRD },
+      { kind: "kyc", target: REGISTRY, currentAuthority: THIRD, ...window },
     ]);
     // Stale (the authority moved since): no pending; the proposer sees it as not live.
     const stale = snapshot({ ...base, kycTransfer: t({ currentAuthority: OTHER, proposedBy: OTHER }) });
     expect(deriveRoles(WALLET, stale).pending).toEqual([]);
     expect(deriveRoles(THIRD, stale).outgoing).toEqual([
-      { kind: "kyc", target: REGISTRY, newAuthority: WALLET, live: false },
+      { kind: "kyc", target: REGISTRY, newAuthority: WALLET, live: false, ...window },
     ]);
     // Another registry's transfer.
     expect(deriveRoles(WALLET, snapshot({ ...base, kycTransfer: t({ target: PLATFORM_PDA }) })).pending).toEqual([]);
@@ -406,18 +426,18 @@ describe("readRoleSnapshot", () => {
     const flags = deriveRoles(WALLET, s);
     expect(flags).toMatchObject({ isAdmin: true, isSuperAdmin: false, isKycProvider: true, isBlocklistAuthority: true });
     expect(flags.outgoing).toEqual([
-      { kind: "blocklist", target: p.ba, newAuthority: THIRD, live: true },
-      { kind: "kyc", target: p.registry, newAuthority: THIRD, live: true },
+      { kind: "blocklist", target: p.ba, newAuthority: THIRD, live: true, eta: PROPOSED_AT, expiresAt: EXPIRES },
+      { kind: "kyc", target: p.registry, newAuthority: THIRD, live: true, eta: ETA, expiresAt: EXPIRES },
     ]);
     // The proposed wallet sees both as pending in the same single read.
     const target = deriveRoles(THIRD, s);
     expect(target.pending.map((r) => r.kind)).toEqual(["blocklist", "kyc"]);
   });
 
-  it("the transfer PDA helper is shared with lib/passport and matches the platform seed", async () => {
+  it("the proposal PDA helper is shared with lib/passport and matches the platform seed", async () => {
     const p = await pdas();
     expect(await findKycRegistryTransferPda(p.registry)).toBe(p.registryTransfer);
-    expect(await findAuthorityTransferPda(p.platform)).toBe(p.platformTransfer);
+    expect(await findAuthorityProposalPda(p.platform)).toBe(p.platformTransfer);
   });
 
   it("decodes only after owner, discriminator and length checks", async () => {

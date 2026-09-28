@@ -30,8 +30,6 @@ import {
   fetchMaybeRightsIssuance,
   findAssetPda,
   getCastVaultVoteInstructionAsync,
-  getClaimFounderYieldInstruction,
-  findPlatformPda,
   getClaimInvestorYieldInstruction,
   getClaimMilestoneInstruction,
   getClaimRefundInstruction,
@@ -47,6 +45,7 @@ import {
   type VaultVote,
   type VestingMilestone,
 } from "@/lib/generated/asset_registry";
+import { buildClaimFounderYieldInstruction } from "@/lib/proceeds-exits";
 import {
   findVaultPda,
 } from "@/lib/generated/asset_registry/pdas";
@@ -765,13 +764,13 @@ function VaultCard({
         mint: vault.paymentMint,
         tokenProgram: payTokenProgram,
       });
-      // Emergency-pause gate (read-only) — the last named account.
-      const [platform] = await findPlatformPda();
-      const ix = getClaimFounderYieldInstruction({
-        platform,
+      // The pause gate, the issuer's proceeds freeze and the founder's
+      // blocklist entry (lib/proceeds-exits).
+      const ix = await buildClaimFounderYieldInstruction(client.runtime.rpc, {
         founder: signer,
         vault: vaultPda,
         escrow: vault.escrow,
+        shareClass: vault.shareClass,
         paymentMint: vault.paymentMint,
         founderAccount: founderAta,
         paymentTokenProgram: payTokenProgram,

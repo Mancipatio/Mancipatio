@@ -5,7 +5,8 @@
 //               live transfer-hook BlockEntry (added by the Blocklist
 //               Authority) and an Admin signs. Open OR KYC-gated mints.
 //   kyc       — clawback_from_holder: KYC-gated mint, the holder's passport
-//               is revoked or has expired (KYC provider + Admin).
+//               is revoked, or expired at least 30 days ago (v1.0.0-rc: the
+//               grace lets a holder renew first; KYC provider + Admin).
 //
 // A blocked holder always takes the blocklist path, even when the passport
 // path would also apply: its authorisation (two separate keys) is the
@@ -13,7 +14,32 @@
 
 import type { Address } from "@solana/kit";
 
-export type PassportStatus = "revoked" | "expired" | "eligible" | "missing";
+/**
+ * "expired": past its expiry by the 30-day grace, so the passport path
+ * applies; "grace": expired, but inside the grace (the program refuses the
+ * passport path with 6079 until it ends).
+ */
+export type PassportStatus = "revoked" | "expired" | "grace" | "eligible" | "missing";
+
+/** Mirrors the program's `KYC_EXPIRY_CLAWBACK_GRACE_SECS` (30 days). */
+export const KYC_EXPIRY_CLAWBACK_GRACE_SECONDS = 2_592_000;
+
+/**
+ * A passport's clawback status exactly as `clawback_from_holder` judges it:
+ * Revoked, or `expiry + 30 days <= now` (chain time; the program's own clock
+ * decides, this only keeps a transaction that must fail from being signed).
+ */
+export function passportStatus(
+  entry: { revoked: boolean; expiry: bigint | number } | null,
+  nowSec: number,
+): PassportStatus {
+  if (!entry) return "missing";
+  if (entry.revoked) return "revoked";
+  const expiry = Number(entry.expiry);
+  if (expiry + KYC_EXPIRY_CLAWBACK_GRACE_SECONDS <= nowSec) return "expired";
+  if (expiry <= nowSec) return "grace";
+  return "eligible";
+}
 export type ClawbackPath = "blocklist" | "kyc";
 
 export type ClawbackPathInput = {

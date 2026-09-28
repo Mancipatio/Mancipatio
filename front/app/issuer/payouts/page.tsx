@@ -18,12 +18,11 @@ import {
   findAssetPda,
   findIssuerPda,
   getPostUpdateInstruction,
-  getReleasePayoutInstruction,
-  findPlatformPda,
   PayoutVaultState,
   type Sale,
   type ShareClass,
 } from "@/lib/generated/asset_registry";
+import { buildReleasePayoutInstruction } from "@/lib/proceeds-exits";
 import {
   DISTRIBUTION_STATUS_BADGE,
   DISTRIBUTION_STATUS_LABEL,
@@ -656,14 +655,16 @@ function VaultDetail({
           mint: v.paymentMint,
           tokenProgram,
         });
-      // Emergency-pause gate (read-only) — the last named account.
-      const [platform] = await findPlatformPda();
-      const ix = getReleasePayoutInstruction({
-        platform,
+      // The pause gate, the issuer's proceeds freeze and the founder's
+      // blocklist entry (lib/proceeds-exits). The founder is this wallet:
+      // a stale snapshot is synced to it in front of the release.
+      const ix = await buildReleasePayoutInstruction(client.runtime.rpc, {
         vault: vaultPda,
         escrow,
+        shareClass: v.shareClass,
         paymentMint: v.paymentMint,
         founderAccount,
+        founder: wallet,
         paymentTokenProgram: tokenProgram,
       });
       const sig = await tx.send({

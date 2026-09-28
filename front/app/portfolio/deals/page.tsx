@@ -9,29 +9,27 @@ import {
   useSolanaClient,
   useWalletConnection,
 } from "@solana/react-hooks";
-import {
-  findAssociatedTokenPda,
-  getCreateAssociatedTokenIdempotentInstructionAsync,
-} from "@solana-program/token-2022";
+import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
-  getDepositOtcPaymentInstructionAsync,
-  getExpireOtcDealInstructionAsync,
   OtcDealStatus,
   type Asset,
 } from "@/lib/generated/asset_registry";
 import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
-import { hookTransferMetas } from "@/lib/hook-metas";
-import { buildDepositOtcAssetInstructions } from "@/lib/otc-transactions";
+import {
+  EXPIRE_BLOCKED_PARTY_HINT,
+  buildDepositOtcAssetInstructions,
+  buildDepositOtcPaymentInstructions,
+  buildExpireOtcDealInstructions,
+} from "@/lib/otc-transactions";
 import { findShareClassPda } from "@/lib/pdas";
 import {
   detectTokenProgram,
   listOtcRequestsByWallet,
   loadOtcDeals,
   withArchivedOtcDeals,
-  TOKEN_2022_PROGRAM,
   type LoadedOtcDeal,
   type OtcRequest,
 } from "@/lib/otc";
@@ -40,7 +38,7 @@ import { detectNetwork } from "@/lib/network";
 import { moduleEnabled } from "@/lib/features";
 import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
-import { explainSendError } from "@/lib/tx-error";
+import { PARTY_BLOCKLISTED_HINT, explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { PurchaseRiskWarning } from "@/components/legal/purchase-risk-warning";
@@ -261,68 +259,16 @@ export default function MyDealsPage() {
         detectNetwork(),
         { commitment: "finalized", abortSignal: AbortSignal.timeout(10_000) },
       );
-      const [buyerPaymentAta] = await findAssociatedTokenPda({
-        owner: wallet,
-        tokenProgram: payTokenProgram,
-        mint: deal.paymentMint,
-      });
-      // Settlement destination accounts — required by the Rust account
-      // structs even when this deposit doesn't settle; create idempotently.
-      const [buyerShareAta] = await findAssociatedTokenPda({
-        owner: wallet,
-        tokenProgram: TOKEN_2022_PROGRAM,
-        mint: deal.mint,
-      });
-      const [sellerPaymentAta] = await findAssociatedTokenPda({
-        owner: deal.seller,
-        tokenProgram: payTokenProgram,
-        mint: deal.paymentMint,
-      });
-      const createBuyerShareAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: wallet,
-          mint: deal.mint,
-          tokenProgram: TOKEN_2022_PROGRAM,
-        });
-      const createSellerPaymentAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: deal.seller,
-          mint: deal.paymentMint,
-          tokenProgram: payTokenProgram,
-        });
-      // escrowMarker (["escrow_marker", deal PDA]) is auto-derived by the
-      // async builder — closed on-chain when this deposit settles the deal.
-      const baseIx = await getDepositOtcPaymentInstructionAsync({
+      // Both settlement destinations, both parties' blocklist entries and the
+      // settle leg's hook tail: lib/otc-transactions (also measured there).
+      const instructions = await buildDepositOtcPaymentInstructions(client.runtime.rpc, {
         buyer: signer,
-        deal: pda,
-        mint: deal.mint,
-        paymentMint: deal.paymentMint,
-        buyerPaymentAccount: buyerPaymentAta,
-        paymentEscrow: deal.paymentEscrow,
-        assetEscrow: deal.assetEscrow,
-        buyerShareAccount: buyerShareAta,
-        sellerPaymentAccount: sellerPaymentAta,
-        shareTokenProgram: TOKEN_2022_PROGRAM,
+        dealPda: pda,
+        deal,
         paymentTokenProgram: payTokenProgram,
       });
-      const depositIx = {
-        ...baseIx,
-        accounts: [
-          ...baseIx.accounts,
-          // Settle leg: asset escrow (deal PDA) → buyer (this wallet).
-          ...(await hookTransferMetas(client.runtime.rpc, deal.mint, {
-            sourceTokenAccount: deal.assetEscrow,
-            destTokenAccount: buyerShareAta,
-            transferAuthority: pda,
-            sourceOwner: pda,
-            destOwner: wallet,
-          })),
-        ],
-      };
       const sig = await tx.send({
-        instructions: [createBuyerShareAtaIx, createSellerPaymentAtaIx, depositIx],
+        instructions,
         feePayer: signer,
       });
       toast.dismiss(pendingId);
@@ -347,61 +293,14 @@ export default function MyDealsPage() {
     try {
       const signer = walletSigner(conn.wallet);
       const payTokenProgram = await payTokenProgramFor(row);
-      const [sellerShareAta] = await findAssociatedTokenPda({
-        owner: deal.seller,
-        tokenProgram: TOKEN_2022_PROGRAM,
-        mint: deal.mint,
-      });
-      const [buyerPaymentAta] = await findAssociatedTokenPda({
-        owner: deal.buyer,
-        tokenProgram: payTokenProgram,
-        mint: deal.paymentMint,
-      });
-      const createSellerShareAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: deal.seller,
-          mint: deal.mint,
-          tokenProgram: TOKEN_2022_PROGRAM,
-        });
-      const createBuyerPaymentAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: deal.buyer,
-          mint: deal.paymentMint,
-          tokenProgram: payTokenProgram,
-        });
-      // escrowMarker (["escrow_marker", deal PDA]) is auto-derived by the
-      // async builder — closed on-chain by this terminal path.
-      const baseIx = await getExpireOtcDealInstructionAsync({
+      const instructions = await buildExpireOtcDealInstructions(client.runtime.rpc, {
         payer: signer,
-        deal: pda,
-        mint: deal.mint,
-        assetEscrow: deal.assetEscrow,
-        sellerShareAccount: sellerShareAta,
-        paymentMint: deal.paymentMint,
-        paymentEscrow: deal.paymentEscrow,
-        buyerPaymentAccount: buyerPaymentAta,
-        shareTokenProgram: TOKEN_2022_PROGRAM,
+        dealPda: pda,
+        deal,
         paymentTokenProgram: payTokenProgram,
       });
-      // remaining_accounts: the refund leg's hook tail (source authority =
-      // deal PDA) — used only if the asset leg is refunded.
-      const expireIx = {
-        ...baseIx,
-        accounts: [
-          ...baseIx.accounts,
-          ...(await hookTransferMetas(client.runtime.rpc, deal.mint, {
-            sourceTokenAccount: deal.assetEscrow,
-            destTokenAccount: sellerShareAta,
-            transferAuthority: pda,
-            sourceOwner: pda,
-            destOwner: deal.seller,
-          })),
-        ],
-      };
       const sig = await tx.send({
-        instructions: [createSellerShareAtaIx, createBuyerPaymentAtaIx, expireIx],
+        instructions,
         feePayer: signer,
       });
       toast.dismiss(pendingId);
@@ -409,7 +308,12 @@ export default function MyDealsPage() {
       void refresh();
     } catch (err) {
       toast.dismiss(pendingId);
-      toast.showError("Failed to refund deal", explainSendError(err));
+      const detail = explainSendError(err);
+      // 6144: a deposited leg belongs to a blocked party; only an Admin cancel refunds it.
+      toast.showError(
+        "Failed to refund deal",
+        detail === PARTY_BLOCKLISTED_HINT ? EXPIRE_BLOCKED_PARTY_HINT : detail,
+      );
       console.error("[expire_otc_deal]", err);
     }
   }

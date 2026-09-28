@@ -1,6 +1,7 @@
 "use client";
 
 import { WALLET_CONNECT_LABEL, WALLET_CONNECT_DESCRIPTION } from "@/lib/wallet-copy";
+import { MAX_KYC_VALIDITY_SECONDS } from "@/lib/deadline-bounds";
 
 import { WalletRequired } from "@/components/wallet-required";
 
@@ -917,10 +918,13 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
       const storedExpirySec = linked.kyc_expires_at
         ? Math.floor(new Date(linked.kyc_expires_at).getTime() / 1000)
         : 0;
-      const expirySec =
+      // v1: approve_holder refuses an expiry more than 2 years out (6146).
+      const expirySec = Math.min(
         storedExpirySec > nowSec
           ? storedExpirySec
-          : nowSec + KYC_VALIDITY_DAYS * 24 * 3600;
+          : nowSec + KYC_VALIDITY_DAYS * 24 * 3600,
+        nowSec + MAX_KYC_VALIDITY_SECONDS,
+      );
       const expiry = BigInt(expirySec);
       const expiresAtIso = new Date(expirySec * 1000).toISOString();
       // The external ref binds the passport to the off-chain dossier (client

@@ -3,8 +3,10 @@
  * bootstrap plan (design-6.3 §C) instead of hand-written instructions. The
  * role map lives in memory (and in state.json, so every cycle and every
  * resumed run plans against the same map); the Super Admin, the
- * BlocklistAuthority and the KYC authority are local rehearsal signers, so
- * their accept steps (X1–X3) are ordinary steps here.
+ * BlocklistAuthority, the KYC authority and the Admin are local rehearsal
+ * signers, so their accept steps (X1–X3, and the Admin's own add_admin, A3)
+ * are ordinary steps here. The platform ends with the emergency areas
+ * resumed and the payout modules (0x40) still off, as on mainnet.
  */
 import type { Address, KeyPairSigner } from "@solana/kit";
 import { findKycRegistryPda } from "@/lib/generated/asset_registry";
@@ -15,6 +17,7 @@ import {
 } from "../../bootstrap-plan";
 import type { Journal } from "../../journal";
 import { validateRoleMap, type RoleMap } from "../../role-map";
+import { isBootstrapOpen } from "@/lib/pause-flags";
 import { ChainPlanError, toJson } from "../../safety";
 import { squadsVaultPda } from "../../squads";
 import { executePlan, type StepRecord } from "../../tx";
@@ -97,7 +100,8 @@ async function roleMap(w: World, genesis: string): Promise<RoleMap> {
 
 function bootstrapDone(state: BootstrapState, map: RoleMap): string | null {
   if (state.platform?.admin !== map.superAdmin) return "platform admin is not the Super Admin";
-  if (state.platform.pauseFlags !== 0) return "the platform is still paused";
+  if ((state.platform.pauseFlags & map.unpauseMask) !== 0) return "the platform is still paused";
+  if (isBootstrapOpen(state.platform.pauseFlags)) return "the bootstrap window is still open";
   if (state.blocklist?.authority !== map.blocklistAuthority) return "the BlocklistAuthority is not BA";
   if (state.registry?.authority !== map.kyc.authority) return "the KYC registry authority is not K";
   for (const admin of map.admins) if (!state.adminRecords[admin]) return `admin ${admin} has no Admin record`;
@@ -105,17 +109,17 @@ function bootstrapDone(state: BootstrapState, map: RoleMap): string | null {
 }
 
 export async function runGroup0(w: World, input: { genesis: string; journal: Journal; cuPrice: bigint | null }): Promise<void> {
-  const { funder, superAdmin, blocklistAuthority, kycAuthority } = w.roles;
+  const { funder, superAdmin, blocklistAuthority, kycAuthority, admin } = w.roles;
   if (!superAdmin || !blocklistAuthority || !kycAuthority) throw new ChainPlanError("G0 needs the localnet role keys");
 
   await w.runner.step("0.1", async () => {
     const targets = (
-      await Promise.all([superAdmin, blocklistAuthority, kycAuthority].map((k) => topUp(w.rpc, k.address, ROLE_SOL)))
+      await Promise.all([superAdmin, blocklistAuthority, kycAuthority, admin].map((k) => topUp(w.rpc, k.address, ROLE_SOL)))
     ).filter((t) => t !== null);
     return { payer: funder, ixs: fundInstructions(funder, targets) };
   }, {
     done: async () =>
-      (await Promise.all([superAdmin, blocklistAuthority, kycAuthority].map((k) => topUp(w.rpc, k.address, ROLE_SOL / BigInt(2))))).every(
+      (await Promise.all([superAdmin, blocklistAuthority, kycAuthority, admin].map((k) => topUp(w.rpc, k.address, ROLE_SOL / BigInt(2))))).every(
         (t) => t === null,
       ),
   });
@@ -128,7 +132,7 @@ export async function runGroup0(w: World, input: { genesis: string; journal: Jou
   w.runner.setEntity("kycRegistry", map.kyc.registry!);
   const signers = {
     deployer: funder as KeyPairSigner,
-    rehearsal: { superAdmin, blocklistAuthority, kycAuthority },
+    rehearsal: { superAdmin, blocklistAuthority, kycAuthority, admin },
   };
   const rent = async (size: number) => w.rpc.getMinimumBalanceForRentExemption(BigInt(size), { commitment: "finalized" }).send();
   const records: StepRecord[] = [];

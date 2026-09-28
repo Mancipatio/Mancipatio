@@ -18,24 +18,30 @@ import {
   findAdminRecordPda,
   findPlatformPda,
   getAdminEncoder,
-  getAuthorityTransferEncoder,
+  getAuthorityProposalEncoder,
   getCustodyVaultEncoder,
   getIssuerEncoder,
   getIssuerRecoveryEncoder,
   getKycRegistryEncoder,
+  getPendingAdminEncoder,
   getPlatformEncoder,
+  getPlatformRecoveryEncoder,
+  findAcceptPlatformAdminRecoveryPda,
+  findPendingAdminPda,
   parseAcceptKycRegistryAuthorityInstruction,
+  parseAddAdminInstruction,
   parseCancelKycRegistryAuthorityTransferInstruction,
-  type AuthorityTransfer,
+  type AuthorityProposal,
 } from "@/lib/generated/asset_registry";
 import {
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   findBlocklistAuthorityPda,
   findTransferPda as findBlocklistTransferPda,
   getBlocklistAuthorityEncoder,
-  getBlocklistAuthorityTransferEncoder,
+  getBlocklistAuthorityProposalEncoder,
 } from "@/lib/generated/transfer_hook";
-import { findAuthorityTransferPda } from "@/lib/pdas";
+import { findAuthorityProposalPda } from "@/lib/pdas";
+import { RECOVERY_PENDING_BLOCKER } from "@/lib/operational-authority";
 import { findIssuerRecoveryPda } from "@/lib/issuer-authority";
 import { CUSTODY_STALE_PROPOSAL } from "@/lib/custody-authority";
 import {
@@ -68,20 +74,34 @@ type Stored = { owner: Address; data: Uint8Array };
 const b64 = getBase64Decoder();
 const b58 = getBase58Encoder();
 
-const platformBytes = (admin: Address) =>
+const platformBytes = (admin: Address, pauseFlags = 0) =>
   getPlatformEncoder().encode({
     admin,
     protocolTreasury: TREASURY,
     protocolFeeBps: 0,
-    pauseFlags: 0,
+    pauseFlags,
     issuersCount: 2,
     version: 1,
     bump: 255,
   }) as Uint8Array;
 const adminBytes = (admin: Address) =>
   getAdminEncoder().encode({ admin, addedBy: SUPER, bump: 254 }) as Uint8Array;
-const transferBytes = (t: Omit<AuthorityTransfer, "discriminator">) =>
-  getAuthorityTransferEncoder().encode(t) as Uint8Array;
+/**
+ * A v1 `AuthorityProposal`, proposed at chain time 0: executable from `eta`
+ * (0 unless given: no timelock) until 1000. The tests read the chain at 25.
+ */
+type ProposalFields = Omit<AuthorityProposal, "discriminator" | "proposedAt" | "eta" | "expiresAt" | "kind" | "version">;
+const transferBytes = (t: ProposalFields, window: { eta?: number; expiresAt?: number } = {}) =>
+  getAuthorityProposalEncoder().encode({
+    ...t,
+    proposedAt: 0,
+    eta: window.eta ?? 0,
+    expiresAt: window.expiresAt ?? 1000,
+    kind: 0,
+    version: 1,
+  }) as Uint8Array;
+const baProposalBytes = (currentAuthority: Address, newAuthority: Address, expiresAt = 1000) =>
+  getBlocklistAuthorityProposalEncoder().encode({ currentAuthority, newAuthority, proposedAt: 0, expiresAt, bump: 2 }) as Uint8Array;
 const registryBytes = (authority: Address) =>
   getKycRegistryEncoder().encode({
     authority,
@@ -206,26 +226,22 @@ async function world(over: { walletIsAdmin?: boolean; issuerKeyIsAdmin?: boolean
   put(ba, TRANSFER_HOOK_PROGRAM_ADDRESS, getBlocklistAuthorityEncoder().encode({ authority: BA_KEY, bump: 253 }) as Uint8Array);
   // Platform, blocklist and pinned-registry proposals (the single reads).
   put(platformTransfer, R, transferBytes({ target: platform, currentAuthority: SUPER, newAuthority: WALLET, proposedBy: SUPER, bump: 1 }));
-  put(
-    blocklistTransfer,
-    TRANSFER_HOOK_PROGRAM_ADDRESS,
-    getBlocklistAuthorityTransferEncoder().encode({ currentAuthority: BA_KEY, newAuthority: WALLET, bump: 2 }) as Uint8Array,
-  );
+  put(blocklistTransfer, TRANSFER_HOOK_PROGRAM_ADDRESS, baProposalBytes(BA_KEY, WALLET));
   put(PIN, R, registryBytes(KYC_KEY));
-  put(await findAuthorityTransferPda(PIN), R, transferBytes({ target: PIN, currentAuthority: KYC_KEY, newAuthority: WALLET, proposedBy: KYC_KEY, bump: 3 }));
+  put(await findAuthorityProposalPda(PIN), R, transferBytes({ target: PIN, currentAuthority: KYC_KEY, newAuthority: WALLET, proposedBy: KYC_KEY, bump: 3 }));
   // A registry that is not the platform's.
   put(OTHER_REGISTRY, R, registryBytes(KYC_KEY));
   put(
-    await findAuthorityTransferPda(OTHER_REGISTRY),
+    await findAuthorityProposalPda(OTHER_REGISTRY),
     R,
     transferBytes({ target: OTHER_REGISTRY, currentAuthority: KYC_KEY, newAuthority: WALLET, proposedBy: KYC_KEY, bump: 4 }),
   );
   // Custody: live proposal by the Super Admin.
   put(VAULT, R, vaultBytes(OPERATOR));
-  put(await findAuthorityTransferPda(VAULT), R, transferBytes({ target: VAULT, currentAuthority: OPERATOR, newAuthority: WALLET, proposedBy: SUPER, bump: 5 }));
+  put(await findAuthorityProposalPda(VAULT), R, transferBytes({ target: VAULT, currentAuthority: OPERATOR, newAuthority: WALLET, proposedBy: SUPER, bump: 5 }));
   // Issuer rotation staged to this wallet.
   put(ISSUER, R, issuerBytes(ISSUER_KEY, KybStatus.Verified));
-  put(await findAuthorityTransferPda(ISSUER), R, transferBytes({ target: ISSUER, currentAuthority: ISSUER_KEY, newAuthority: WALLET, proposedBy: ISSUER_KEY, bump: 6 }));
+  put(await findAuthorityProposalPda(ISSUER), R, transferBytes({ target: ISSUER, currentAuthority: ISSUER_KEY, newAuthority: WALLET, proposedBy: ISSUER_KEY, bump: 6 }));
   // Issuer recovery to this wallet (executable at chain time 25).
   put(ISSUER_2, R, issuerBytes(ISSUER_KEY, KybStatus.Pending));
   put(await findIssuerRecoveryPda(ISSUER_2), R, recoveryBytes(ISSUER_2, ISSUER_KEY, SUPER));
@@ -308,16 +324,16 @@ describe("findPendingRolesForWallet", () => {
     const liar = address("SysvarEpochSchedu1e111111111111111111111111");
     const forged = transferBytes({ target: ISSUER, currentAuthority: ISSUER_KEY, newAuthority: WALLET, proposedBy: ISSUER_KEY, bump: 9 });
     // Only these fakes stage anything for the issuer: drop the real one.
-    w.accounts.delete(await findAuthorityTransferPda(ISSUER));
+    w.accounts.delete(await findAuthorityProposalPda(ISSUER));
     const wrongDisc = forged.slice();
     wrongDisc[0] ^= 0xff;
     const { rows } = await findPendingRolesForWallet(
       mockRpc(w.accounts, {
         extraGpa: [
-          // Right bytes, wrong address: not ["authority_transfer", target].
+          // Right bytes, wrong address: not ["authority_proposal", target].
           { pubkey: liar, stored: { owner: R, data: forged } },
           // Right address, foreign owner.
-          { pubkey: await findAuthorityTransferPda(ISSUER), stored: { owner: FOREIGN, data: forged } },
+          { pubkey: await findAuthorityProposalPda(ISSUER), stored: { owner: FOREIGN, data: forged } },
         ],
       }),
       WALLET,
@@ -326,7 +342,7 @@ describe("findPendingRolesForWallet", () => {
     expect(rows.some((r) => r.kind === "issuer")).toBe(false);
     // A wrong discriminator never matches the scan filter, and a transfer
     // whose target is a foreign-owned account is not a role either.
-    w.put(await findAuthorityTransferPda(ISSUER), R, wrongDisc);
+    w.put(await findAuthorityProposalPda(ISSUER), R, wrongDisc);
     w.put(ISSUER, FOREIGN, issuerBytes(ISSUER_KEY));
     const again = await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts);
     expect(again.rows.some((r) => r.target === ISSUER)).toBe(false);
@@ -334,7 +350,7 @@ describe("findPendingRolesForWallet", () => {
 
   it("reports a stale or blocked custody proposal instead of offering Accept", async () => {
     const w = await world();
-    const transferPda = await findAuthorityTransferPda(VAULT);
+    const transferPda = await findAuthorityProposalPda(VAULT);
     // Proposed by a former Super Admin: stale.
     w.put(transferPda, R, transferBytes({ target: VAULT, currentAuthority: OPERATOR, newAuthority: WALLET, proposedBy: TREASURY, bump: 5 }));
     let custody = (await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts)).rows.find((r) => r.kind === "custody")!;
@@ -391,12 +407,90 @@ describe("findPendingRolesForWallet", () => {
     expect(waiting.blocked).toMatch(/Waiting period/);
   });
 
-  it("does not read the chain clock when no recovery is staged", async () => {
+  it("reads the chain clock once, and only when something is staged (v1: every proposal has a window)", async () => {
     const w = await world();
-    w.accounts.delete(await findIssuerRecoveryPda(ISSUER_2));
     const chainNow = vi.fn(async () => 25);
     await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, { ...opts, chainNow });
-    expect(chainNow).not.toHaveBeenCalled();
+    expect(chainNow).toHaveBeenCalledTimes(1);
+    const empty = new Map<string, Stored>();
+    const [platform] = await findPlatformPda();
+    empty.set(platform, { owner: R, data: platformBytes(SUPER) });
+    const idle = vi.fn(async () => 25);
+    const { rows } = await findPendingRolesForWallet(mockRpc(empty), WALLET, { ...opts, chainNow: idle });
+    expect(rows).toEqual([]);
+    expect(idle).not.toHaveBeenCalled();
+  });
+
+  it("v1 windows: a proposal waits for its eta (the bootstrap window waives the Super Admin's), expires, and never counts expired", async () => {
+    const w = await world();
+    // A Super Admin rotation proposed at 0 with the 48 h eta.
+    w.put(w.platformTransfer, R, transferBytes({ target: w.platform, currentAuthority: SUPER, newAuthority: WALLET, proposedBy: SUPER, bump: 1 }, { eta: 172_800, expiresAt: 1_382_400 }));
+    let platform = (await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts)).rows.find((r) => r.kind === "platform")!;
+    expect(platform.window?.kind).toBe("waiting");
+    expect(platform.blocked).toMatch(/^Waiting period/);
+    expect(platform.counted).toBe(true);
+    // While the bootstrap window is open the same proposal is acceptable at once.
+    w.put(w.platform, R, platformBytes(SUPER, 0xff));
+    platform = (await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts)).rows.find((r) => r.kind === "platform")!;
+    expect(platform.window?.kind).toBe("open");
+    expect(platform.blocked).toBeNull();
+    // Past its expiry (chain time 2_000_000): blocked and not counted.
+    const late = await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, { ...opts, chainNow: async () => 2_000_000 });
+    for (const row of late.rows.filter((r) => r.kind !== "issuerRecovery")) {
+      expect(row.window?.kind, row.kind).toBe("expired");
+      expect(row.counted, row.kind).toBe(false);
+      // A row with no other blocker says why (the issuer row keeps its Admin-key rule).
+      if (row.kind !== "issuer") expect(row.blocked, row.kind).toMatch(/^Expired/);
+    }
+  });
+
+  it("a pending recovery by the upgrade authority blocks the Super Admin accept (6155) and offers its own Execute", async () => {
+    const w = await world();
+    const [recovery] = await findAcceptPlatformAdminRecoveryPda({ platform: w.platform });
+    w.put(
+      recovery,
+      R,
+      getPlatformRecoveryEncoder().encode({
+        platform: w.platform,
+        currentAdmin: SUPER,
+        newAdmin: WALLET,
+        proposedBy: FOREIGN,
+        proposedAt: 0,
+        eta: 10,
+        expiresAt: 1000,
+        version: 1,
+        bump: 247,
+      }) as Uint8Array,
+    );
+    const { rows } = await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts);
+    expect(rows.find((r) => r.kind === "platform")!.blocked).toBe(RECOVERY_PENDING_BLOCKER);
+    const execute = rows.find((r) => r.kind === "platformRecovery")!;
+    expect(execute).toMatchObject({ target: w.platform, currentAuthority: SUPER, proposedBy: FOREIGN, counted: true, blocked: null });
+    expect(kinds(rows).slice(0, 2)).toEqual([`platform:${w.platform}`, `platformRecovery:${w.platform}`]);
+  });
+
+  it("an Admin grant staged for the wallet is its own row; add_admin is signed by the wallet", async () => {
+    const w = await world({ walletIsAdmin: false });
+    const [pending] = await findPendingAdminPda({ newAdmin: WALLET });
+    const grant = (proposedBy: Address) =>
+      getPendingAdminEncoder().encode({ newAdmin: WALLET, proposedBy, proposedAt: 0, eta: 172_800, expiresAt: 1_382_400, version: 1, bump: 246 }) as Uint8Array;
+    w.put(pending, R, grant(SUPER));
+    let row = (await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts)).rows.find((r) => r.kind === "admin")!;
+    expect(row).toMatchObject({ target: pending, proposedBy: SUPER, counted: true });
+    expect(row.blocked).toMatch(/^Waiting period/);
+    // In bootstrap the grant executes at once; the builder re-reads at finalized.
+    w.put(w.platform, R, platformBytes(SUPER, 0xff));
+    row = (await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts)).rows.find((r) => r.kind === "admin")!;
+    expect(row.blocked).toBeNull();
+    const ix = await buildAcceptPendingRole(mockRpc(w.accounts), row, createNoopSigner(WALLET));
+    const parsed = parseAddAdminInstruction(ix as never);
+    expect(parsed.accounts.newAdmin.address).toBe(WALLET);
+    expect(parsed.accounts.proposer.address).toBe(SUPER);
+    // Proposed by an earlier Super Admin: stale, never executable.
+    w.put(pending, R, grant(TREASURY));
+    row = (await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts)).rows.find((r) => r.kind === "admin")!;
+    expect(row.blocked).toMatch(/earlier Super Admin/);
+    expect(row.counted).toBe(false);
   });
 
   it("keeps the single-read proposals when the scans fail", async () => {
@@ -410,11 +504,7 @@ describe("findPendingRolesForWallet", () => {
   it("drops a platform proposal that is no longer live and a blocklist proposal of a former authority", async () => {
     const w = await world();
     w.put(w.platform, R, platformBytes(TREASURY)); // the Super Admin changed
-    w.put(
-      w.blocklistTransfer,
-      TRANSFER_HOOK_PROGRAM_ADDRESS,
-      getBlocklistAuthorityTransferEncoder().encode({ currentAuthority: TREASURY, newAuthority: WALLET, bump: 2 }) as Uint8Array,
-    );
+    w.put(w.blocklistTransfer, TRANSFER_HOOK_PROGRAM_ADDRESS, baProposalBytes(TREASURY, WALLET));
     const { rows } = await findPendingRolesForWallet(mockRpc(w.accounts), WALLET, opts);
     expect(rows.some((r) => r.kind === "platform" || r.kind === "blocklist")).toBe(false);
   });
@@ -428,7 +518,7 @@ describe("findPendingRolesForWallet", () => {
       bytes[1] = i;
       const target = (await import("@solana/kit")).getAddressDecoder().decode(bytes);
       extraGpa.push({
-        pubkey: await findAuthorityTransferPda(target),
+        pubkey: await findAuthorityProposalPda(target),
         stored: { owner: R, data: transferBytes({ target, currentAuthority: TREASURY, newAuthority: WALLET, proposedBy: TREASURY, bump: 1 }) },
       });
     }

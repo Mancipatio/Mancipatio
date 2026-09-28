@@ -61,7 +61,6 @@ import {
   findPlatformPda,
   getCancelOfferInstructionAsync,
   getCreateOfferInstructionAsync,
-  getDepositOtcPaymentInstructionAsync,
   getDepositToOfferEscrowInstruction,
   getExpireOfferInstructionAsync,
   getOtcDealDecoder,
@@ -72,7 +71,11 @@ import {
 import { toBytes32 } from "@/lib/format";
 import { hookTransferMetas } from "@/lib/hook-metas";
 import { createOtcDealInstruction, type OtcDealRequestFields } from "@/lib/otc-deal";
-import { buildDepositOtcAssetInstructions, buildTakeOfferInstructions } from "@/lib/otc-transactions";
+import {
+  buildDepositOtcAssetInstructions,
+  buildDepositOtcPaymentInstructions,
+  buildTakeOfferInstructions,
+} from "@/lib/otc-transactions";
 import { checkReceiverEligibility, getEntryPda, type ReceiverEligibility } from "@/lib/passport";
 import { findOfferPda } from "@/lib/pdas";
 import { buildDocumentedPurchase } from "@/lib/purchase-builder";
@@ -936,35 +939,10 @@ export class SimChainOps implements ChainOps {
       signer,
       async () => {
         const deal = (await fetchOtcDeal(this.rpc, dealPda, FIN)).data;
-        const payProgram = await fetchPlainPaymentMintTokenProgram(this.rpc, deal.paymentMint, FIN);
-        const wallet = signer.address;
-        const [buyerPaymentAta] = await findAssociatedTokenPda({ owner: wallet, tokenProgram: payProgram, mint: deal.paymentMint });
-        const [buyerShareAta] = await findAssociatedTokenPda({ owner: wallet, tokenProgram: TOKEN_2022, mint: deal.mint });
-        const [sellerPaymentAta] = await findAssociatedTokenPda({ owner: deal.seller, tokenProgram: payProgram, mint: deal.paymentMint });
-        // As /portfolio/deals: both settlement destinations exist first.
-        const createBuyerShare = await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: signer, owner: wallet, mint: deal.mint, tokenProgram: TOKEN_2022 });
-        const createSellerPayment = await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: signer, owner: deal.seller, mint: deal.paymentMint, tokenProgram: payProgram });
-        const base = await getDepositOtcPaymentInstructionAsync({
-          buyer: signer,
-          deal: dealPda,
-          mint: deal.mint,
-          paymentMint: deal.paymentMint,
-          buyerPaymentAccount: buyerPaymentAta,
-          paymentEscrow: deal.paymentEscrow,
-          assetEscrow: deal.assetEscrow,
-          buyerShareAccount: buyerShareAta,
-          sellerPaymentAccount: sellerPaymentAta,
-          shareTokenProgram: TOKEN_2022,
-          paymentTokenProgram: payProgram,
-        });
-        const tail = await hookTransferMetas(this.rpc, deal.mint, {
-          sourceTokenAccount: deal.assetEscrow,
-          destTokenAccount: buyerShareAta,
-          transferAuthority: dealPda,
-          sourceOwner: dealPda,
-          destOwner: wallet,
-        });
-        return [createBuyerShare, createSellerPayment, { ...base, accounts: [...base.accounts, ...tail] }];
+        const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(this.rpc, deal.paymentMint, FIN);
+        // As /portfolio/deals (lib/otc-transactions): both settlement
+        // destinations first, both parties' blocklist entries, the settle tail.
+        return buildDepositOtcPaymentInstructions(this.rpc, { buyer: signer, dealPda, deal, paymentTokenProgram });
       },
       { done: async () => Boolean((await this.deal(dealPda))?.paymentDeposited) || (await this.deal(dealPda))?.status === OtcDealStatus.Completed },
     );

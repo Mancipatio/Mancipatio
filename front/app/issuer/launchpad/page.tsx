@@ -28,9 +28,6 @@ import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
   findIssuerPda,
-  getCloseSaleInstruction,
-  findPlatformPda,
-  getOpenPayoutVaultInstructionAsync,
   getOpenSaleInstructionAsync,
   RaiseType,
   SaleStatus,
@@ -38,6 +35,8 @@ import {
   type Sale,
   type ShareClass,
 } from "@/lib/generated/asset_registry";
+import { buildCloseSaleInstruction, buildOpenPayoutVaultInstruction } from "@/lib/proceeds-exits";
+import { saleEndError } from "@/lib/deadline-bounds";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
@@ -241,11 +240,9 @@ function LaunchpadInner() {
         // releases on a vesting schedule (open_payout_vault: sale.status==Open
         // && raise_type==Startup → vault init, sale → Closed). The founder draws
         // tranches later from /issuer/payouts.
-        const openVaultIx = await getOpenPayoutVaultInstructionAsync({
+        const openVaultIx = await buildOpenPayoutVaultInstruction(client.runtime.rpc, {
           authority: signer,
-          sale: salePda,
-          proceeds: s.proceeds,
-          paymentMint: s.paymentMint,
+          sale: { address: salePda, shareClass: s.shareClass, proceeds: s.proceeds, paymentMint: s.paymentMint },
           paymentTokenProgram,
           metadataHash: new Uint8Array(32),
         });
@@ -274,15 +271,13 @@ function LaunchpadInner() {
           mint: s.paymentMint,
           tokenProgram: paymentTokenProgram,
         });
-      // Emergency-pause gate (read-only) — the last named account.
-      const [platform] = await findPlatformPda();
-      const closeIx = getCloseSaleInstruction({
-        platform,
+      // The pause gate, the issuer's proceeds freeze and both parties'
+      // blocklist entries (lib/proceeds-exits).
+      const closeIx = await buildCloseSaleInstruction(client.runtime.rpc, {
         authority: signer,
-        sale: salePda,
-        proceeds: s.proceeds,
-        paymentMint: s.paymentMint,
+        sale: { address: salePda, shareClass: s.shareClass, proceeds: s.proceeds, paymentMint: s.paymentMint },
         destination: destAta,
+        destinationOwner: wallet,
         paymentTokenProgram,
       });
       const sig = await tx.send({
@@ -738,6 +733,9 @@ function OpenSaleModal({
       const endTsBig = endTs.trim()
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
+      // v1: every sale ends, at most 365 days out (SaleDurationInvalid 6145).
+      const endError = saleEndError(BigInt(0), endTsBig);
+      if (endError) throw new Error(endError);
       const signer = walletSigner(conn.wallet);
       // The payment mint comes from the approval (classic SPL or Token-2022).
       const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(client.runtime.rpc, approval.paymentMint);

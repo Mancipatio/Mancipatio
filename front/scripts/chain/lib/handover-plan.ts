@@ -16,6 +16,11 @@
  * so a target that keeps that key as an Admin re-grants it at once), then
  * clean up with the new super admin.
  *
+ * v1.0.0-rc (D3): an Admin grant is two steps — the super admin proposes
+ * (`propose_admin`), the NEW key executes `add_admin` itself after 48 hours
+ * and within 14 days — and a super admin rotation is acceptable only 48 hours
+ * after its proposal. Any Admin or the upgrade authority can cancel either.
+ *
  * Roles live only on the chain (lib/server/admin-gate.ts reads the Platform
  * and the Admin records; there is no role table in the database), so the
  * off-chain steps are onboarding, funding and documents.
@@ -272,21 +277,34 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
     );
   }
 
-  // Grant: Admin records the target needs, while the current SA still signs.
+  // Grant: Admin records the target needs, while the current SA still signs
+  // the proposals. The new key executes its own grant 48 h later.
   const grant: string[] = [];
-  const grantAdmin = (key: Address, why: string) =>
+  const grantAdmin = (key: Address, why: string) => {
+    const proposeId = add({
+      phase: "grant",
+      title: `propose_admin(${key})`,
+      instruction: "propose_admin",
+      signer: { role: "superAdmin (current)", key: SA, side: "current" },
+      where: "/admin/admins → Propose admin role (Super Admin only)",
+      requires: prepare,
+      check: `PendingAdmin ["pending_admin", ${key}] exists (chain:inventory pendingAdmins)`,
+      notes: [why],
+    });
     grant.push(
+      proposeId,
       add({
         phase: "grant",
         title: `add_admin(${key})`,
         instruction: "add_admin",
-        signer: { role: "superAdmin (current)", key: SA, side: "current" },
-        where: "/admin/admins → Grant (Super Admin only)",
-        requires: prepare,
+        signer: { role: "new Admin", key, side: "new" },
+        where: "/account/roles → Waiting for your acceptance → Admin (48 hours after the proposal, within 14 days)",
+        requires: [proposeId],
         check: `Admin record ["admin", ${key}] exists (chain:inventory admins)`,
-        notes: [why],
+        notes: ["The new key signs and pays its Admin record. It must execute while the proposing super admin still holds the platform: a rotation first makes the proposal stale."],
       }),
     );
+  };
   if (saRotates && !adminKeys.has(target.superAdmin)) {
     grantAdmin(
       target.superAdmin,
@@ -396,7 +414,7 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
         where: "/account/roles → Your operational authorities → Change blocklist authority → Propose replacement (also on /admin/platform)",
         requires: beforeMove,
         check: `BlocklistAuthorityTransfer names ${target.blocklistAuthority}`,
-        notes: inv.blocklist.proposed ? [`This overwrites the pending proposal to ${inv.blocklist.proposed} (blocklist proposals cannot be cancelled).`] : [],
+        notes: inv.blocklist.proposed ? [`This overwrites the pending proposal to ${inv.blocklist.proposed} (the blocklist authority can also cancel it).`] : [],
       });
     }
     move.push(
@@ -491,7 +509,7 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
     ];
     if (gap.length) {
       decisions.push(
-        `${SA} stays an Admin in the target, but accept_platform_admin closes its Admin record until the new super admin re-grants it (the add_admin step right after the accept): ${gap.join(", ")} cannot be operated in between. Run the two steps back to back, or move the custody vaults first (propose/accept custody authority to another Admin).`,
+        `${SA} stays an Admin in the target, but accept_platform_admin closes its Admin record until the new super admin re-grants it (propose_admin right after the accept, add_admin 48 hours later): ${gap.join(", ")} cannot be operated in between. Move the custody vaults first (propose/accept custody authority to another Admin) to avoid the gap.`,
       );
     }
   }
@@ -509,7 +527,9 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
         where: "/account/roles → Your operational authorities → Change Super Admin → Propose replacement (also on /admin/platform)",
         requires: [...beforeMove, ...move],
         check: `platform admin proposal names ${target.superAdmin}`,
-        notes: inv.platform.proposed ? [`This overwrites the pending proposal to ${inv.platform.proposed} (platform proposals cannot be cancelled).`] : [],
+        notes: inv.platform.proposed
+          ? [`This overwrites the pending proposal to ${inv.platform.proposed} and restarts its 48-hour wait (any Admin or the upgrade authority can also cancel it).`]
+          : [],
       });
       superAdmin.push(proposeId);
     }
@@ -523,7 +543,7 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
       check: `Platform.admin == ${target.superAdmin}; the Admin record of ${SA} is closed`,
       notes: [
         `Closes the Admin record of ${SA} and keeps (or creates) the new key's. From here only ${target.superAdmin} clears pause bits, grants and removes Admins, decides KYB and sets the treasury.`,
-        "If the deployed program has the Talas 8.3 timelock for super-admin rotation, the accept waits for it: re-run this plan.",
+        "v1.0.0-rc: acceptable 48 hours after the proposal (at once only while the bootstrap window is open) and within 14 days; refused while a recovery by the upgrade authority is pending.",
       ],
     });
     superAdmin.push(acceptId);
@@ -533,21 +553,32 @@ export function planHandover(inv: Inventory, target: HandoverTarget, options: { 
       const vaults = holdings.custodyVaults.filter((v) => v.authority === SA && LIVE_VAULT_STATES.has(v.state)).map((v) => v.address);
       const issuances = holdings.rightsIssuances.filter((r) => r.authority === SA).map((r) => r.address);
       const issuers = holdings.issuers.filter((i) => i.authority === SA).map((i) => i.address);
+      const reproposeId = add({
+        phase: "super-admin",
+        title: `propose_admin(${SA})`,
+        instruction: "propose_admin",
+        signer: { role: "superAdmin (new)", key: target.superAdmin, side: "new" },
+        where: "/admin/admins → Propose admin role (Super Admin only)",
+        requires: [acceptId],
+        check: `PendingAdmin ["pending_admin", ${SA}] exists`,
+        notes: [
+          `accept_platform_admin closed the Admin record of ${SA}, which the target keeps as an Admin: propose it again right after the accept. Until its add_admin lands (48 hours later) ${SA} cannot pause or act as an Admin.`,
+          ...(vaults.length ? [`Until then the custody vaults it operates cannot be triggered, realized or returned (K10): ${vaults.join(", ")}.`] : []),
+          ...(issuances.length ? [`Until then publish_milestone is refused for the rights issuances it opened (K19): ${issuances.join(", ")}.`] : []),
+          ...(issuers.length ? [`Until then its issuer actions that rest on its Admin record fail for: ${issuers.join(", ")}.`] : []),
+        ],
+      });
       superAdmin.push(
+        reproposeId,
         add({
           phase: "super-admin",
           title: `add_admin(${SA})`,
           instruction: "add_admin",
-          signer: { role: "superAdmin (new)", key: target.superAdmin, side: "new" },
-          where: "/admin/admins → Grant (Super Admin only)",
-          requires: [acceptId],
+          signer: { role: "outgoing superAdmin (kept as Admin)", key: SA, side: "current" },
+          where: "/account/roles → Waiting for your acceptance → Admin (48 hours after the proposal, within 14 days)",
+          requires: [reproposeId],
           check: `Admin record ["admin", ${SA}] exists again (chain:inventory admins)`,
-          notes: [
-            `accept_platform_admin closed the Admin record of ${SA}, which the target keeps as an Admin: grant it again right after the accept. Until this lands ${SA} cannot pause or act as an Admin.`,
-            ...(vaults.length ? [`Until then the custody vaults it operates cannot be triggered, realized or returned (K10): ${vaults.join(", ")}.`] : []),
-            ...(issuances.length ? [`Until then publish_milestone is refused for the rights issuances it opened (K19): ${issuances.join(", ")}.`] : []),
-            ...(issuers.length ? [`Until then its issuer actions that rest on its Admin record fail for: ${issuers.join(", ")}.`] : []),
-          ],
+          notes: ["The kept key signs its own grant."],
         }),
       );
     }

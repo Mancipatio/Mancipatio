@@ -5,6 +5,12 @@
  * (bootstrap, loader SetAuthority, System transfer/createAccount and the
  * Program Metadata instructions) with the program's own checks, so simulation
  * and send behave like a small validator.
+ *
+ * v1.0.0-rc (8.3): a fresh Platform is 0xFF (bit 7 = the one-way bootstrap
+ * window); proposals are `AuthorityProposal` / `BlocklistAuthorityProposal`
+ * with a window on `FakeChain.now`; an Admin grant is propose_admin plus an
+ * add_admin signed by the new key; set_pause_flags follows the program's
+ * mask rules (0x7F settable, 0x40 cleared alone, any clear closes bit 7).
  */
 import { generateKeyPairSync } from "node:crypto";
 import fs from "node:fs";
@@ -31,9 +37,11 @@ import {
   findAdminRecordPda,
   getAdminDecoder,
   getAdminEncoder,
-  getAuthorityTransferDecoder,
-  getAuthorityTransferEncoder,
+  getAuthorityProposalDecoder,
+  getAuthorityProposalEncoder,
   getKycRegistryDecoder,
+  getPendingAdminDecoder,
+  getPendingAdminEncoder,
   getKycRegistryEncoder,
   getPlatformDecoder,
   getPlatformEncoder,
@@ -47,8 +55,8 @@ import {
   getBlockEntryEncoder,
   getBlocklistAuthorityDecoder,
   getBlocklistAuthorityEncoder,
-  getBlocklistAuthorityTransferDecoder,
-  getBlocklistAuthorityTransferEncoder,
+  getBlocklistAuthorityProposalDecoder,
+  getBlocklistAuthorityProposalEncoder,
   getTransferHookConfigDecoder,
   getTransferHookConfigEncoder,
   parseTransferHookInstruction,
@@ -87,8 +95,15 @@ export function rent(size: number): bigint {
   return BigInt((size + 128) * 6960);
 }
 
+/** The program's timelock constants (constants.rs, transfer_hook lib.rs). */
+export const ADMIN_TIMELOCK = 172_800;
+export const PROPOSAL_WINDOW = 1_209_600;
+const PLATFORM_BOOTSTRAP_OPEN = 0x80;
+
 export class FakeChain {
   genesis: string = CLUSTER_GENESIS_HASHES.devnet;
+  /** The Clock sysvar's unix_timestamp every instruction sees (seconds). */
+  now = 1_900_000_000;
   accounts = new Map<string, FakeAccount>();
   calls: string[] = [];
   blockHeight = BigInt(1000);
@@ -507,6 +522,28 @@ export class FakeChain {
       if (s.get(address)?.data.length) fail("already in use", 0);
       s.set(address, { owner: REGISTRY, lamports: rent(bytes.length), data: bytes });
     };
+    const now = BigInt(this.now);
+    /** `require_window(now, effective_eta, expires_at)`: 6150 / 6151. */
+    const requireWindow = (proposedAt: bigint, eta: bigint, expiresAt: bigint, bootstrapWaived: boolean) => {
+      const effective = bootstrapWaived && (platformOf().pauseFlags & PLATFORM_BOOTSTRAP_OPEN) !== 0 ? proposedAt : eta;
+      if (now < effective) fail("TimelockActive", 6150);
+      if (now >= expiresAt) fail("ProposalExpired", 6151);
+    };
+    const proposal = (target: string, current: Address, proposed: Address, proposer: Address, timelock: number, kind: number) =>
+      new Uint8Array(
+        getAuthorityProposalEncoder().encode({
+          target: target as Address,
+          currentAuthority: current,
+          newAuthority: proposed,
+          proposedBy: proposer,
+          proposedAt: now,
+          eta: now + BigInt(timelock),
+          expiresAt: now + BigInt(timelock + PROPOSAL_WINDOW),
+          kind,
+          version: 1,
+          bump: 255,
+        }),
+      );
     switch (parsed.instructionType) {
       case AssetRegistryInstruction.InitializePlatform: {
         signed(at("admin"));
@@ -521,7 +558,7 @@ export class FakeChain {
               admin: at("admin") as Address,
               protocolTreasury: args.protocolTreasury as Address,
               protocolFeeBps: args.protocolFeeBps as number,
-              pauseFlags: 0x3f,
+              pauseFlags: 0xff,
               issuersCount: 0,
               version: 2,
               bump: 255,
@@ -538,10 +575,45 @@ export class FakeChain {
         writePlatform({ ...platform, protocolTreasury: args.newTreasury as Address });
         return;
       }
-      case AssetRegistryInstruction.AddAdmin: {
+      case AssetRegistryInstruction.ProposeAdmin: {
         signed(at("superAdmin"));
         if (platformOf().admin !== at("superAdmin")) fail("Unauthorized");
-        create(at("adminRecord"), new Uint8Array(getAdminEncoder().encode({ admin: args.newAdmin as Address, addedBy: at("superAdmin") as Address, bump: 255 })));
+        if (s.get(at("newAdminRecord"))?.data.length) fail("InvalidProposedAuthority", 6112);
+        s.set(at("pendingAdmin"), {
+          owner: REGISTRY,
+          lamports: rent(98),
+          data: new Uint8Array(
+            getPendingAdminEncoder().encode({
+              newAdmin: args.newAdmin as Address,
+              proposedBy: at("superAdmin") as Address,
+              proposedAt: now,
+              eta: now + BigInt(ADMIN_TIMELOCK),
+              expiresAt: now + BigInt(ADMIN_TIMELOCK + PROPOSAL_WINDOW),
+              version: 1,
+              bump: 255,
+            }),
+          ),
+        });
+        return;
+      }
+      case AssetRegistryInstruction.AddAdmin: {
+        // The executor: the NEW admin signs inside the window (bootstrap waives the 48 h).
+        signed(at("newAdmin"));
+        if (args.newAdmin !== at("newAdmin")) fail("InvalidAdminProposal", 6152);
+        const pending = getPendingAdminDecoder().decode((s.get(at("pendingAdmin")) ?? fail("missing", 3012)).data);
+        if (pending.proposedBy !== platformOf().admin || pending.proposedBy !== at("proposer")) fail("InvalidAdminProposal", 6152);
+        requireWindow(pending.proposedAt, pending.eta, pending.expiresAt, true);
+        create(at("adminRecord"), new Uint8Array(getAdminEncoder().encode({ admin: at("newAdmin") as Address, addedBy: pending.proposedBy, bump: 255 })));
+        s.delete(at("pendingAdmin"));
+        return;
+      }
+      case AssetRegistryInstruction.CancelAdminProposal: {
+        signed(at("canceller"));
+        const record = s.get(at("cancellerAdminRecord"));
+        const isAdmin = record ? getAdminDecoder().decode(record.data).admin === at("canceller") : false;
+        if (platformOf().admin !== at("canceller") && !isAdmin) fail("Unauthorized");
+        if (!s.get(at("pendingAdmin"))) fail("missing", 3012);
+        s.delete(at("pendingAdmin"));
         return;
       }
       case AssetRegistryInstruction.RemoveAdmin: {
@@ -593,16 +665,8 @@ export class FakeChain {
         if (registry.authority !== at("authority")) fail("Unauthorized");
         s.set(at("transfer"), {
           owner: REGISTRY,
-          lamports: rent(137),
-          data: new Uint8Array(
-            getAuthorityTransferEncoder().encode({
-              target: at("kycRegistry") as Address,
-              currentAuthority: registry.authority,
-              newAuthority: args.newAuthority as Address,
-              proposedBy: at("authority") as Address,
-              bump: 255,
-            }),
-          ),
+          lamports: rent(163),
+          data: proposal(at("kycRegistry"), registry.authority, args.newAuthority as Address, at("authority") as Address, 0, 3),
         });
         return;
       }
@@ -616,8 +680,9 @@ export class FakeChain {
         signed(at("newAuthority"));
         const registryAccount = s.get(at("kycRegistry")) ?? fail("missing", 3012);
         const registry = getKycRegistryDecoder().decode(registryAccount.data);
-        const transfer = getAuthorityTransferDecoder().decode((s.get(at("transfer")) ?? fail("missing", 3012)).data);
+        const transfer = getAuthorityProposalDecoder().decode((s.get(at("transfer")) ?? fail("missing", 3012)).data);
         if (transfer.newAuthority !== at("newAuthority") || transfer.currentAuthority !== registry.authority) fail("InvalidAuthorityTransfer");
+        if (now >= transfer.expiresAt) fail("ProposalExpired", 6151);
         registryAccount.data = new Uint8Array(getKycRegistryEncoder().encode({ ...registry, authority: at("newAuthority") as Address }));
         s.delete(at("transfer"));
         return;
@@ -628,24 +693,18 @@ export class FakeChain {
         if (platform.admin !== at("authority")) fail("Unauthorized");
         s.set(at("transfer"), {
           owner: REGISTRY,
-          lamports: rent(137),
-          data: new Uint8Array(
-            getAuthorityTransferEncoder().encode({
-              target: at("platform") as Address,
-              currentAuthority: platform.admin,
-              newAuthority: args.newAdmin as Address,
-              proposedBy: at("authority") as Address,
-              bump: 255,
-            }),
-          ),
+          lamports: rent(163),
+          data: proposal(at("platform"), platform.admin, args.newAdmin as Address, at("authority") as Address, ADMIN_TIMELOCK, 0),
         });
         return;
       }
       case AssetRegistryInstruction.AcceptPlatformAdmin: {
         signed(at("newAdmin"));
         const platform = platformOf();
-        const transfer = getAuthorityTransferDecoder().decode((s.get(at("transfer")) ?? fail("missing", 3012)).data);
+        const transfer = getAuthorityProposalDecoder().decode((s.get(at("transfer")) ?? fail("missing", 3012)).data);
         if (transfer.newAuthority !== at("newAdmin") || transfer.currentAuthority !== platform.admin) fail("InvalidAuthorityTransfer");
+        requireWindow(transfer.proposedAt, transfer.eta, transfer.expiresAt, true);
+        if (s.get(at("recovery"))?.data.length) fail("PlatformRecoveryPending", 6155);
         s.delete(at("oldAdminRecord"));
         s.set(at("newAdminRecord"), {
           owner: REGISTRY,
@@ -666,8 +725,12 @@ export class FakeChain {
           const record = s.get(at("adminRecord"));
           if (!record || getAdminDecoder().decode(record.data).admin !== at("authority")) fail("Unauthorized");
         }
+        if ((setMask & ~0x7f) !== 0 || (setMask & clearMask) !== 0) fail("InvalidPauseFlags", 6118);
         if (clearMask && platform.admin !== at("authority")) fail("PauseClearNotAllowed");
-        writePlatform({ ...platform, pauseFlags: (platform.pauseFlags | setMask) & ~clearMask & 0xff });
+        if ((clearMask & 0x40) !== 0 && clearMask !== 0x40) fail("PayoutModulesClearNotExplicit", 6154);
+        let flags = (platform.pauseFlags | setMask) & ~clearMask & 0xff;
+        if (clearMask) flags &= ~PLATFORM_BOOTSTRAP_OPEN;
+        writePlatform({ ...platform, pauseFlags: flags });
         return;
       }
       default:
@@ -699,11 +762,18 @@ export class FakeChain {
         signed(at("authority"));
         const ba = getBlocklistAuthorityDecoder().decode((s.get(at("blocklistAuthority")) ?? fail("missing", 3012)).data);
         if (ba.authority !== at("authority")) fail("Unauthorized");
+        const now = BigInt(this.now);
         s.set(at("transfer"), {
           owner: HOOK,
-          lamports: rent(73),
+          lamports: rent(89),
           data: new Uint8Array(
-            getBlocklistAuthorityTransferEncoder().encode({ currentAuthority: ba.authority, newAuthority: args.newAuthority as Address, bump: 255 }),
+            getBlocklistAuthorityProposalEncoder().encode({
+              currentAuthority: ba.authority,
+              newAuthority: args.newAuthority as Address,
+              proposedAt: now,
+              expiresAt: now + BigInt(PROPOSAL_WINDOW),
+              bump: 255,
+            }),
           ),
         });
         return;
@@ -712,8 +782,10 @@ export class FakeChain {
         signed(at("newAuthority"));
         const account = s.get(at("blocklistAuthority")) ?? fail("missing", 3012);
         const ba = getBlocklistAuthorityDecoder().decode(account.data);
-        const transfer = getBlocklistAuthorityTransferDecoder().decode((s.get(at("transfer")) ?? fail("missing", 3012)).data);
+        const transfer = getBlocklistAuthorityProposalDecoder().decode((s.get(at("transfer")) ?? fail("missing", 3012)).data);
         if (transfer.newAuthority !== at("newAuthority") || transfer.currentAuthority !== ba.authority) fail("InvalidAuthorityTransfer");
+        if (BigInt(this.now) >= transfer.expiresAt) fail("ProposalExpired", 6017);
+        if (s.get(at("recovery"))?.data.length) fail("RecoveryPending", 6020);
         account.data = new Uint8Array(getBlocklistAuthorityEncoder().encode({ ...ba, authority: at("newAuthority") as Address }));
         s.delete(at("transfer"));
         return;

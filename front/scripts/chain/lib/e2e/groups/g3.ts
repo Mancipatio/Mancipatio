@@ -21,15 +21,18 @@ import {
   getCancelOtcDealInstructionAsync,
   getCreateOfferInstructionAsync,
   getCreateOtcDealInstructionAsync,
-  getDepositOtcPaymentInstructionAsync,
   getDepositToOfferEscrowInstructionAsync,
   getExpireOfferInstructionAsync,
 } from "@/lib/generated/asset_registry";
 import { hookTransferMetas } from "@/lib/hook-metas";
-import { buildDepositOtcAssetInstructions, buildTakeOfferInstructions } from "@/lib/otc-transactions";
+import {
+  buildDepositOtcAssetInstructions,
+  buildDepositOtcPaymentInstructions,
+  buildTakeOfferInstructions,
+} from "@/lib/otc-transactions";
 import { findOfferPda } from "@/lib/pdas";
 import { TOKEN_2022, TOKEN_CLASSIC } from "@/lib/transaction-builders";
-import { waitForChainTime } from "../clock";
+import { chainNow, waitForChainTime } from "../clock";
 import { entity } from "../state";
 import { accountExists, expiringDeadline, type World } from "../world";
 import { UNIT_PRICE } from "./g1";
@@ -115,6 +118,9 @@ async function dealStatus(w: World, deal: Address): Promise<OtcDealStatus | null
   return account.exists ? account.data.status : null;
 }
 
+/** The e2e deals' lifetime: long enough for the group, inside the 90-day cap. */
+const DEAL_TTL_S = BigInt(7 * 86_400);
+
 async function createDealIxs(w: World, dealId: number, seller: Address, buyer: Address, amount: bigint, price: bigint) {
   const paymentMint = entity(w.runner.state, "paymentMint") as Address;
   return [
@@ -131,41 +137,21 @@ async function createDealIxs(w: World, dealId: number, seller: Address, buyer: A
       amount,
       price,
       paymentMintArg: paymentMint,
-      expiresAt: BigInt(0),
+      // v1: every deal expires, at most 90 days out (DealExpiryOutOfRange).
+      expiresAt: (await chainNow(w.rpc)) + DEAL_TTL_S,
     }),
   ];
 }
 
-/** deposit_otc_payment as /portfolio/deals builds it (settle leg: asset escrow → buyer). */
+/** deposit_otc_payment as /portfolio/deals builds it (lib/otc-transactions; settle leg: asset escrow → buyer). */
 async function depositPaymentIxs(w: World, buyer: KeyPairSigner, deal: Address) {
   const d = (await fetchOtcDeal(w.rpc, deal, { commitment: "finalized" })).data;
-  const buyerShare = await shareAta(buyer.address, d.mint);
-  const sellerPayment = await paymentAtaOf(d.seller, d.paymentMint);
-  const base = await getDepositOtcPaymentInstructionAsync({
+  return buildDepositOtcPaymentInstructions(w.rpc, {
     buyer,
-    deal,
-    mint: d.mint,
-    paymentMint: d.paymentMint,
-    buyerPaymentAccount: await paymentAtaOf(buyer.address, d.paymentMint),
-    paymentEscrow: d.paymentEscrow,
-    assetEscrow: d.assetEscrow,
-    buyerShareAccount: buyerShare,
-    sellerPaymentAccount: sellerPayment,
-    shareTokenProgram: TOKEN_2022,
+    dealPda: deal,
+    deal: d,
     paymentTokenProgram: TOKEN_CLASSIC,
   });
-  const tail = await hookTransferMetas(w.rpc, d.mint, {
-    sourceTokenAccount: d.assetEscrow,
-    destTokenAccount: buyerShare,
-    transferAuthority: deal,
-    sourceOwner: deal,
-    destOwner: buyer.address,
-  });
-  return [
-    await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: buyer, owner: buyer.address, mint: d.mint, tokenProgram: TOKEN_2022 }),
-    await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: buyer, owner: d.seller, mint: d.paymentMint, tokenProgram: TOKEN_CLASSIC }),
-    withTail(base, tail),
-  ];
 }
 
 export async function runGroup3(w: World): Promise<"completed"> {

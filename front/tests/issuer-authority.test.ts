@@ -2,6 +2,7 @@
 // (program 2C-2): the pure helpers, the builders' account lists, the GPA
 // filters, the sync selection and bundling, and the transaction-error hints.
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { findBlockEntryPda } from "@/lib/pdas";
 import {
   address,
   generateKeyPairSigner,
@@ -24,8 +25,8 @@ import {
   ASSET_REGISTRY_ERROR__NOT_FOUNDER,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   getAdminEncoder,
-  getAuthorityTransferDiscriminatorBytes,
-  getAuthorityTransferEncoder,
+  getAuthorityProposalDiscriminatorBytes,
+  getAuthorityProposalEncoder,
   getIssuerDiscriminatorBytes,
   getIssuerRecoveryDiscriminatorBytes,
   getIssuerRecoveryEncoder,
@@ -232,18 +233,21 @@ describe("builders", () => {
       (await findAdminRecordPda({ authority: signer.address }))[0],
       await findIssuerRecoveryPda(ISSUER),
       "11111111111111111111111111111111",
+      // v1: the OUTGOING key's hook blocklist entry (a blocked key cannot be rotated away from, 6144).
+      await findBlockEntryPda(A),
     ]);
   });
 
-  it("propose / cancel use the issuer-seeded transfer PDA", async () => {
+  it("propose / cancel use the issuer-seeded proposal PDA; propose names the proposer's blocklist entry", async () => {
     const signer = await generateKeyPairSigner();
     const [transfer] = await getProgramDerivedAddress({
       programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-      seeds: [new TextEncoder().encode("authority_transfer"), getAddressEncoder().encode(ISSUER)],
+      seeds: [new TextEncoder().encode("authority_proposal"), getAddressEncoder().encode(ISSUER)],
     });
     expect(await findIssuerTransferPda(ISSUER)).toBe(transfer);
     const propose = await buildProposeIssuerAuthority({ authoritySigner: signer, issuer: ISSUER, newAuthority: B });
     expect(propose.accounts.map((a) => a.address).slice(0, 3)).toEqual([signer.address, ISSUER, transfer]);
+    expect(propose.accounts.at(-1)?.address).toBe(await findBlockEntryPda(signer.address));
     const cancel = await buildCancelIssuerAuthorityTransfer({ authoritySigner: signer, issuer: ISSUER });
     expect(cancel.accounts.map((a) => a.address)).toEqual([signer.address, ISSUER, transfer]);
   });
@@ -472,11 +476,16 @@ describe("chain readers", () => {
       version: 1,
       bump: 255,
     });
-    const transfer = getAuthorityTransferEncoder().encode({
+    const transfer = getAuthorityProposalEncoder().encode({
       target: ISSUER,
       currentAuthority: A,
       newAuthority: B,
       proposedBy: A,
+      proposedAt: BigInt(1),
+      eta: BigInt(1),
+      expiresAt: BigInt(1_209_601),
+      kind: 2,
+      version: 1,
       bump: 255,
     });
     const b = getAddressEncoder().encode(B);
@@ -489,20 +498,21 @@ describe("chain readers", () => {
     const platformTarget = await randomAddress();
     const recoveryPda = await findIssuerRecoveryPda(ISSUER);
     const encode64 = (bytes: ArrayLike<number>) => btoa(String.fromCharCode(...Array.from(bytes)));
-    const issuerTransfer = getAuthorityTransferEncoder().encode({
-      target: ISSUER,
-      currentAuthority: A,
-      newAuthority: B,
-      proposedBy: A,
-      bump: 255,
-    });
-    const platformTransfer = getAuthorityTransferEncoder().encode({
-      target: platformTarget,
-      currentAuthority: A,
-      newAuthority: B,
-      proposedBy: A,
-      bump: 255,
-    });
+    const proposal = (target: Address) =>
+      getAuthorityProposalEncoder().encode({
+        target,
+        currentAuthority: A,
+        newAuthority: B,
+        proposedBy: A,
+        proposedAt: BigInt(10),
+        eta: BigInt(10),
+        expiresAt: BigInt(1_209_610),
+        kind: 2,
+        version: 1,
+        bump: 255,
+      });
+    const issuerTransfer = proposal(ISSUER);
+    const platformTransfer = proposal(platformTarget);
     const recovery = getIssuerRecoveryEncoder().encode({
       issuer: ISSUER,
       currentAuthority: A,
@@ -515,7 +525,7 @@ describe("chain readers", () => {
       bump: 255,
     });
     const owner = ASSET_REGISTRY_PROGRAM_ADDRESS;
-    const transferDisc = getBase58Decoder().decode(getAuthorityTransferDiscriminatorBytes());
+    const transferDisc = getBase58Decoder().decode(getAuthorityProposalDiscriminatorBytes());
     const calls: unknown[] = [];
     const rpc = {
       getProgramAccounts: (_program: string, config: { filters: { memcmp: { bytes: string } }[] }) => ({
@@ -538,7 +548,7 @@ describe("chain readers", () => {
     const found = await findPendingForWallet(rpc as never, B);
     expect(calls).toHaveLength(2);
     expect(found.transfers).toEqual([
-      { issuer: ISSUER, transfer: { target: ISSUER, currentAuthority: A, newAuthority: B, proposedBy: A } },
+      { issuer: ISSUER, transfer: { target: ISSUER, currentAuthority: A, newAuthority: B, proposedBy: A, expiresAt: 1_209_610 } },
     ]);
     expect(found.recoveries).toEqual([
       {

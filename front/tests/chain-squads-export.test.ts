@@ -287,12 +287,20 @@ describe("chain:squads-export ops", () => {
   it("registry-ix: only the allowlist, built with the vault as signer", async () => {
     const w = await handedOver();
     expect((await exportOp(w, "registry-ix", { instruction: "close_sale", args: {} })).error).toMatch(/registry-ix instruction must be one of/);
-    const ok = await exportOp(w, "registry-ix", { instruction: "add_admin", args: { newAdmin: w.keys.admins[0] } });
+    // v1.0.0-rc (D3): the vault proposes the grant; the admin key executes add_admin itself.
+    const ok = await exportOp(w, "registry-ix", { instruction: "propose_admin", args: { newAdmin: w.keys.admins[0] } });
     expect(ok.error ?? null).toBeNull();
     const ix = (ok.export as Exported).transactions[0].instructions[0];
     expect(ix.program).toBe(REGISTRY);
     expect(ix.accounts.filter((a) => a.signer).map((a) => a.address)).toEqual([w.keys.vault]);
     expect((ok.export as Exported).header.preconditions.join("\n")).toMatch(/is in role-map admins/);
+    // add_admin is signed by the new key: through Squads only for the vault itself.
+    expect((await exportOp(w, "registry-ix", { instruction: "add_admin", args: { newAdmin: w.keys.admins[0] } })).error).toMatch(/signed by the new Admin key itself/);
+    expect((await exportOp(w, "registry-ix", { instruction: "add_admin", args: {} })).error).toMatch(/no Admin grant is staged for the vault/);
+    // The upgrade authority's veto and recovery: nothing to cancel on a fresh chain.
+    expect((await exportOp(w, "registry-ix", { instruction: "cancel_platform_admin_transfer", args: {} })).error).toMatch(/no super admin rotation is staged/);
+    expect((await exportOp(w, "hook-ix", { instruction: "cancel_blocklist_recovery", args: {} })).error).toMatch(/no blocklist authority recovery is pending/);
+    expect((await exportOp(w, "hook-ix", { instruction: "add_to_blocklist", args: {} })).error).toMatch(/hook-ix instruction must be one of/);
   });
 
   it("registry-ix: arguments are checked against the role map (targets, treasury, fee, masks)", async () => {
@@ -300,10 +308,10 @@ describe("chain:squads-export ops", () => {
     const run = (instruction: string, args: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
       exportOp(w, "registry-ix", { instruction, args, ...extra });
     // Targets outside the map need an explicit confirmTarget; hot keys never.
-    expect((await run("add_admin", { newAdmin: key(80) })).error).toMatch(/not the role-map key .*confirmTarget/);
-    expect((await run("add_admin", { newAdmin: key(80) }, { confirmTarget: key(80) })).error ?? null).toBeNull();
-    expect((await run("add_admin", { newAdmin: w.keys.deployer }, { confirmTarget: w.keys.deployer })).error).toMatch(/hot key/);
-    expect((await run("add_admin", { newAdmin: w.keys.kycAuthority }, { confirmTarget: w.keys.kycAuthority })).error).toMatch(/allowKycAdmin/);
+    expect((await run("propose_admin", { newAdmin: key(80) })).error).toMatch(/not the role-map key .*confirmTarget/);
+    expect((await run("propose_admin", { newAdmin: key(80) }, { confirmTarget: key(80) })).error ?? null).toBeNull();
+    expect((await run("propose_admin", { newAdmin: w.keys.deployer }, { confirmTarget: w.keys.deployer })).error).toMatch(/hot key/);
+    expect((await run("propose_admin", { newAdmin: w.keys.kycAuthority }, { confirmTarget: w.keys.kycAuthority })).error).toMatch(/allowKycAdmin/);
     expect((await run("propose_platform_admin", { newAdmin: key(88) })).error).toMatch(/not the role-map key/);
     expect((await run("propose_platform_admin", { newAdmin: w.keys.superAdmin })).error ?? null).toBeNull();
     expect((await run("initialize_blocklist_authority", { authority: key(87) })).error).toMatch(/not the role-map key/);
@@ -324,6 +332,10 @@ describe("chain:squads-export ops", () => {
     const resume = await run("set_pause_flags", { clearMask: 0x3f });
     expect(resume.error ?? null).toBeNull();
     expect((resume.export as Exported).header.preconditions.join("\n")).toMatch(/pause set 0x00 .*clear 0x3f \(Onboarding/);
+    // v1.0.0-rc: bit 7 is never set, and 0x40 clears only on its own (6154).
+    expect((await run("set_pause_flags", { setMask: 0x80 })).error).toMatch(/setMask may hold only the pause bits 0x7f/);
+    expect((await run("set_pause_flags", { clearMask: 0x7f })).error).toMatch(/clear only in a call of their own/);
+    expect((await run("set_pause_flags", { clearMask: 0x40 })).error ?? null).toBeNull();
   });
 
   it("set-upgrade-authority and metadata-set-authority: hot keys refused, a new key must be confirmed", async () => {

@@ -30,7 +30,7 @@ import {
   vestingTransactionBytes,
   VESTING_TRANSACTION_LIMIT,
 } from "@/lib/vesting-creation";
-import { findSalePda } from "@/lib/pdas";
+import { findBlockEntryPda, findIssuerFreezePda, findSalePda } from "@/lib/pdas";
 type Rpc = Parameters<typeof kycReceiverMetas>[0];
 /** The acceptance memo stays in the same atomic transaction as the payment and mint. */
 export async function buildDocumentedPurchase(
@@ -98,8 +98,15 @@ export async function buildDocumentedPurchase(
       tokenProgram: paymentProgram,
     }),
   ]);
-  // Emergency-pause gate (read-only): the last named account, before the tail.
-  const [platform] = await findPlatformPda();
+  // Emergency-pause gate (read-only), then the v1 gates: the buyer's hook
+  // blocklist entry and the issuer's proceeds freeze (both must be unset:
+  // 6144 / 6143). The payment account is the buyer's own ATA: the program
+  // refuses a payment account the buyer does not own (6001).
+  const [[platform], buyerBlockEntry, issuerFreeze] = await Promise.all([
+    findPlatformPda(),
+    findBlockEntryPda(buyer.address),
+    findIssuerFreezePda(asset.data.issuer),
+  ]);
   const base = getBuyInstruction({
     buyer,
     sale: salePda,
@@ -114,6 +121,8 @@ export async function buildDocumentedPurchase(
     asset: share.data.asset,
     issuer: asset.data.issuer,
     platform,
+    buyerBlockEntry,
+    issuerFreeze,
     amount,
   });
   const tail = await kycReceiverMetas(rpc, sale.mint, buyer.address);

@@ -3,7 +3,7 @@ vi.mock("server-only", () => ({}));
 import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
 import {
-  getAuthorityTransferEncoder,
+  getAuthorityProposalEncoder,
   getCustodyVaultDecoder,
   getCustodyVaultEncoder,
   getIssuerDecoder,
@@ -79,8 +79,9 @@ describe("issuer authority rotation (2C-2)", () => {
       issuer: key, currentAuthority: key, newAuthority: other, proposedBy: key,
       proposedAt: BigInt(1), eta: BigInt(2), expiresAt: BigInt(3), version: 1, bump: 255,
     }));
-    const transfer = new Uint8Array(getAuthorityTransferEncoder().encode({
-      target: key, currentAuthority: key, newAuthority: other, proposedBy: key, bump: 255,
+    const transfer = new Uint8Array(getAuthorityProposalEncoder().encode({
+      target: key, currentAuthority: key, newAuthority: other, proposedBy: key,
+      proposedAt: BigInt(1), eta: BigInt(1), expiresAt: BigInt(2), kind: 2, version: 1, bump: 255,
     }));
     expect(await decodeIndexerAccount(String(key), INDEXER_PROGRAM, recovery)).toBeNull();
     expect(await decodeIndexerAccount(String(key), INDEXER_PROGRAM, transfer)).toBeNull();

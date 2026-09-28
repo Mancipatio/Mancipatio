@@ -10,6 +10,7 @@
 
 import type { Address, Instruction, TransactionSigner } from "@solana/kit";
 import { getCreateOtcDealInstructionAsync } from "@/lib/generated/asset_registry";
+import { clampDealExpiry } from "@/lib/deadline-bounds";
 
 /** Share-class mints are Token-2022 transfer-hook mints. */
 export const OTC_SHARE_TOKEN_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -32,8 +33,8 @@ export function defaultDealExpiry(nowMs: number = Date.now()): bigint {
 }
 
 /**
- * Deal expiry for a request: its own expiry when still in the future,
- * otherwise the default window. A stale request row could carry an
+ * Deal expiry for a request: its own expiry when still in the future (at
+ * most 90 days out, the program's cap), otherwise the default window. A stale request row could carry an
  * already-past expires_at, which would create a deal that is expired the
  * moment it exists (unfundable, only refundable).
  */
@@ -42,7 +43,8 @@ export function resolveDealExpiry(reqExpiresAt: string | null, nowMs: number = D
   const requested = reqExpiresAt
     ? BigInt(Math.floor(new Date(reqExpiresAt).getTime() / 1000))
     : defaultDealExpiry(nowMs);
-  return requested > nowSec ? requested : defaultDealExpiry(nowMs);
+  // v1: at most 90 days out (DealExpiryOutOfRange 6149).
+  return clampDealExpiry(requested > nowSec ? requested : defaultDealExpiry(nowMs), nowSec);
 }
 
 /** The request-row fields the escrow is opened from (an otc_requests row). */

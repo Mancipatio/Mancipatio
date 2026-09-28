@@ -58,7 +58,13 @@ import {
   getTransferHookConfigDecoder,
   getUpdateTransferHookConfigInstructionAsync,
 } from "@/lib/generated/transfer_hook";
-import { PAUSE_FLAGS_ALL, describePausedAreas, formatPauseFlags, unknownPauseBits } from "@/lib/pause-flags";
+import {
+  PAUSE_FLAGS_ALL,
+  PAUSE_PAYOUT_MODULES,
+  RESUME_EVERYTHING_MASK,
+  describePausedAreas,
+  formatPauseFlags,
+} from "@/lib/pause-flags";
 import { fetchRawAccounts, hasDiscriminator } from "./accounts";
 import type { ToolContext, ToolStatus } from "./context";
 import { idlProbeEvidence, probeIdl, type IdlProbe } from "./idl-plan";
@@ -97,6 +103,8 @@ export const PAUSE_BIT_NAMES: Record<string, number> = {
   "custody-entry": 0x08,
   distributions: 0x10,
   "issuer-proceeds": 0x20,
+  /** D2: stays set on mainnet; clears only on its own (never with `all`). */
+  "payout-modules": PAUSE_PAYOUT_MODULES,
 };
 
 export type EmergencyRequest =
@@ -142,7 +150,14 @@ export function readEmergencyRequest(env: ToolContext["env"]): EmergencyRequest 
     if (mask & ~PAUSE_FLAGS_ALL) throw new ChainGateError(`pause sets only defined bits (${formatPauseFlags(PAUSE_FLAGS_ALL)})`);
     return { op, signer, mask };
   }
-  if (op === "unpause") return { op, signer, mask: parsePauseBits(env.CHAIN_PAUSE_BITS, true) };
+  if (op === "unpause") {
+    const mask = parsePauseBits(env.CHAIN_PAUSE_BITS, true);
+    // The program clears the payout modules only in a call of its own (6154).
+    if (mask !== "all" && (mask & PAUSE_PAYOUT_MODULES) !== 0 && mask !== PAUSE_PAYOUT_MODULES) {
+      throw new ChainGateError("CHAIN_PAUSE_BITS: payout-modules (0x40) is cleared only on its own; unpause it in a separate call");
+    }
+    return { op, signer, mask };
+  }
   if (op === "block" || op === "unblock") {
     const confirm = env.CHAIN_CONFIRM_WALLET?.trim();
     return { op, signer, wallet: address(env, "CHAIN_WALLET"), confirmWallet: confirm && isAddress(confirm) ? confirm : null };
@@ -279,7 +294,12 @@ export async function planEmergency(req: EmergencyRequest, state: EmergencyState
     }
     const isSa = (s: EmergencyState) => s.platform?.admin === S;
     if (!isSa(state)) throw new ChainPlanError(`Only the super admin clears pause bits; ${S} is not the super admin (${state.platform.admin})`);
-    const mask = req.mask === "all" ? PAUSE_FLAGS_ALL | unknownPauseBits(flags) : req.mask;
+    // `all`: every emergency area (and the bootstrap marker, which any clear
+    // closes anyway), never the payout modules.
+    const mask = req.mask === "all" ? RESUME_EVERYTHING_MASK : req.mask;
+    if (req.mask === "all" && (flags & PAUSE_PAYOUT_MODULES) !== 0) {
+      notes.push("The payout modules (0x40) stay off; they are cleared only on their own (CHAIN_PAUSE_BITS=payout-modules), never on mainnet (D2).");
+    }
     const done = (s: EmergencyState) => Boolean(s.platform && (s.platform.pauseFlags & mask) === 0);
     const summary = `clear ${formatPauseFlags(mask)} (${describePausedAreas(mask) || "undefined bits"}); now ${formatPauseFlags(flags)}`;
     const plan: EmergencyPlan = { step: null, role: "super admin", program: "asset_registry", instruction: "set_pause_flags", summary, noop: null, notes };

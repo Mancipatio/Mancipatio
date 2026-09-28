@@ -8,7 +8,7 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { fetchMaybePlatform, findPlatformPda } from "@/lib/generated/asset_registry";
 import { SaleStatus } from "@/lib/generated/asset_registry";
 import { Skeleton } from "@/components/skeleton";
-import { describePausedAreas, PAUSE_EXITS_OPEN } from "@/lib/pause-flags";
+import { describePausedAreas, EMERGENCY_PAUSE_BITS, PAUSE_EXITS_OPEN } from "@/lib/pause-flags";
 
 type AlertLevel = "critical" | "warning" | "info";
 
@@ -181,7 +181,9 @@ function computeAlerts(args: {
     return alerts;
   }
 
-  const pausedAreas = platformPaused ? describePausedAreas(platformPaused) : "";
+  // The emergency areas only: the payout modules (0x40) stay off on mainnet
+  // by decision (D2), which is no emergency.
+  const pausedAreas = platformPaused ? describePausedAreas(platformPaused & EMERGENCY_PAUSE_BITS) : "";
   if (pausedAreas) {
     alerts.push({
       level: "critical",

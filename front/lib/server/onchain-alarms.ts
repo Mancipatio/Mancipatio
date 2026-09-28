@@ -99,7 +99,7 @@ import {
   getProposeBlocklistAuthorityInstructionDataDecoder,
 } from "@/lib/generated/transfer_hook";
 import { detectNetwork, type Network } from "@/lib/network";
-import { PAUSE_FLAGS_ALL, describePausedAreas, formatPauseFlags } from "@/lib/pause-flags";
+import { EMERGENCY_PAUSE_BITS, PLATFORM_BOOTSTRAP_OPEN, describePausedAreas, formatPauseFlags } from "@/lib/pause-flags";
 import { USDC } from "@/lib/payment-mints";
 import { decodeRegistryEvent, type EventValue } from "@/lib/server/onchain-events";
 import { screenTransactionParties } from "@/lib/server/onchain-screening";
@@ -174,11 +174,18 @@ function pauseClassify(setMask: number, clearMask: number, ev: Record<string, Ev
   const now = typeof ev?.new === "number" ? ev.new : null;
   const noop = old !== null && now !== null && old === now;
   const change = old !== null && now !== null ? ` (${formatPauseFlags(old)} → ${formatPauseFlags(now)}: ${pauseLabel(now)})` : "";
+  // v1.0.0-rc: closing the one-way bootstrap window on its own unpauses nothing.
+  if (clearMask === PLATFORM_BOOTSTRAP_OPEN) {
+    return { source: "onchain:pause", severity: noop ? "low" : "high", summary: `Bootstrap window closed${change}` };
+  }
   if (clearMask !== 0) {
     return { source: "onchain:pause", severity: noop ? "low" : "critical", summary: `Pause flags cleared (unpause)${change}` };
   }
   if (setMask !== 0) {
-    const full = setMask === PAUSE_FLAGS_ALL || now === PAUSE_FLAGS_ALL;
+    // "Full": every emergency area paused (the payout modules bit 0x40 stays
+    // set on mainnet anyway, and bit 7 is not a pause).
+    const all = (flags: number | null) => flags !== null && (flags & EMERGENCY_PAUSE_BITS) === EMERGENCY_PAUSE_BITS;
+    const full = all(setMask) || all(now);
     return { source: "onchain:pause", severity: noop ? "low" : full ? "critical" : "high", summary: `Pause flags set${change}` };
   }
   return { source: "onchain:pause", severity: "low", summary: `Pause flags unchanged${change}` };
@@ -221,7 +228,8 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
     classify: ({ account }) => ({ source: "onchain:platform-admin", severity: "critical",
       summary: `Super admin transfer accepted by ${account(0)}` }) },
   { name: "add_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(ADD_ADMIN_DISCRIMINATOR),
-    decode: dec(getAddAdminInstructionDataDecoder()), accounts: { super_admin: 0, admin_record: 2 }, format: "platform", fallback: "high",
+    // v1.0.0-rc: the executor, signed by the NEW admin (the grant was proposed 48 h earlier).
+    decode: dec(getAddAdminInstructionDataDecoder()), accounts: { new_admin: 0, admin_record: 4 }, format: "platform", fallback: "high",
     classify: ({ args }) => ({ source: "onchain:admin-record", severity: "high", summary: `Admin added: ${String(args?.newAdmin)}`,
       evidence: { admin: args?.newAdmin } }) },
   { name: "remove_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(REMOVE_ADMIN_DISCRIMINATOR),

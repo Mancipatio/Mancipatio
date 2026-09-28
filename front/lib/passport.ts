@@ -26,11 +26,12 @@ import {
   getReclaimRentInstruction,
   getCreateKycRegistryInstructionAsync,
   getUpdateKycRegistryJurisdictionsInstruction,
-  fetchMaybeAuthorityTransfer,
+  fetchMaybeAuthorityProposal,
   fetchMaybeKycEntry,
+  findAcceptKycRegistryAuthorityTransferPda,
   fetchMaybeKycRegistry,
   KycStatus,
-  type AuthorityTransfer,
+  type AuthorityProposal,
   type KycEntry,
   type KycRegistry,
 } from "@/lib/generated/asset_registry";
@@ -42,7 +43,6 @@ import {
 import { signedFetch } from "@/lib/siws-client";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { countryName } from "@/lib/countries";
-import { findAuthorityTransferPda } from "@/lib/pdas";
 import {
   JURISDICTION_BITMAP_BYTES,
   bitmapHasCode,
@@ -166,19 +166,22 @@ export async function buildClosePassport(params: BuildRevokePassportParams) {
 // ── Registry authority rotation + jurisdictions (2C-1) ──────────────────────
 
 /**
- * The registry's staged authority transfer: ["authority_transfer", registry].
- * The derivation lives in lib/pdas (`findAuthorityTransferPda`, shared by
- * every authority-transfer target); this name stays for existing callers.
+ * The registry's staged authority proposal: ["authority_proposal", registry]
+ * (v1.0.0-rc `AuthorityProposal`, acceptable for 14 days). Derived by the
+ * generated helper; the name stays for existing callers.
  */
-export const findKycRegistryTransferPda = findAuthorityTransferPda;
+export async function findKycRegistryTransferPda(registry: Address): Promise<Address> {
+  const [pda] = await findAcceptKycRegistryAuthorityTransferPda({ kycRegistry: registry });
+  return pda;
+}
 
-/** The pending registry authority transfer, or null when none is staged. */
+/** The pending registry authority proposal, or null when none is staged. */
 export async function fetchPendingKycAuthorityTransfer(
-  rpc: Parameters<typeof fetchMaybeAuthorityTransfer>[0],
+  rpc: Parameters<typeof fetchMaybeAuthorityProposal>[0],
   registry: Address,
-): Promise<AuthorityTransfer | null> {
+): Promise<AuthorityProposal | null> {
   const pda = await findKycRegistryTransferPda(registry);
-  const maybe = await fetchMaybeAuthorityTransfer(rpc, pda, { commitment: "confirmed" });
+  const maybe = await fetchMaybeAuthorityProposal(rpc, pda, { commitment: "confirmed" });
   return maybe.exists && maybe.data.target === registry ? maybe.data : null;
 }
 

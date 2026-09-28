@@ -20,9 +20,18 @@ import {
   loadOperationalAuthority,
   buildProposeOperationalAuthority,
   buildAcceptOperationalAuthority,
+  buildCancelOperationalAuthority,
+  RECOVERY_PENDING_BLOCKER,
   type OperationalAuthorityKind,
   type OperationalAuthorityState,
 } from "@/lib/operational-authority";
+import { useRole } from "@/lib/auth";
+import { useChainClock } from "@/lib/use-chain-clock";
+import {
+  describeProposalWindow,
+  proposalWindowBlocker,
+  proposalWindowState,
+} from "@/lib/proposal-window";
 export function AuthorityRotation({
   kind,
   initialNext,
@@ -48,8 +57,24 @@ export function AuthorityRotation({
   const [state, setState] = useState<OperationalAuthorityState | null>(null),
     [error, setError] = useState<string | null>(null),
     [next, setNext] = useState(initialNext ?? ""),
-    [confirm, setConfirm] = useState<"propose" | "accept" | null>(null),
+    [confirm, setConfirm] = useState<"propose" | "accept" | "cancel" | null>(null),
     [gaveUp, setGaveUp] = useState(false);
+  const role = useRole(),
+    now = useChainClock();
+  const proposalWindow =
+    state?.eta != null && state.expiresAt != null
+      ? proposalWindowState({ proposedAt: state.eta, eta: state.eta, expiresAt: state.expiresAt }, now)
+      : null;
+  // Platform: the Super Admin, any Admin or the upgrade authority may cancel
+  // (the program decides); blocklist: only the live authority.
+  const canCancel =
+    !!state?.proposed &&
+    (kind === "platform" ? role.isAdmin || wallet === state.current : wallet === state.current);
+  const acceptBlocker = state?.recoveryPending
+    ? RECOVERY_PENDING_BLOCKER
+    : proposalWindow
+      ? proposalWindowBlocker(proposalWindow)
+      : null;
   /** Resolves true once the finalized authority exists. */
   const refresh = useCallback(async (): Promise<boolean> => {
     try {
@@ -82,7 +107,12 @@ export function AuthorityRotation({
     const metadata: Record<string, unknown> = {
       kind,
       current: state?.current ?? null,
-      new_authority: action === "propose" ? target : conn.wallet.account.address.toString(),
+      new_authority:
+        action === "propose"
+          ? target
+          : action === "cancel"
+            ? (state?.proposed ?? null)
+            : conn.wallet.account.address.toString(),
     };
     try {
       const signer = walletSigner(conn.wallet);
@@ -94,17 +124,21 @@ export function AuthorityRotation({
               signer,
               next.trim(),
             )
-          : await buildAcceptOperationalAuthority(
-              client.runtime.rpc,
-              kind,
-              signer,
-            );
+          : confirm === "cancel"
+            ? await buildCancelOperationalAuthority(client.runtime.rpc, kind, signer)
+            : await buildAcceptOperationalAuthority(
+                client.runtime.rpc,
+                kind,
+                signer,
+              );
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.showTx(sig, {
         title:
           action === "propose"
             ? "Authority proposal submitted"
-            : "Authority acceptance submitted",
+            : action === "cancel"
+              ? "Authority proposal cancelled"
+              : "Authority acceptance submitted",
       });
       void recordAudit({
         ix_name: ixName,
@@ -141,8 +175,11 @@ export function AuthorityRotation({
       <h2 className="text-base font-semibold text-slate-900">Change {label}</h2>
       <p className="mt-2 text-xs text-slate-600">
         The current authority proposes a replacement. The replacement wallet
-        accepts in a separate transaction. Program upgrade authority is
-        unchanged.
+        accepts in a separate transaction
+        {kind === "platform"
+          ? " once the 48-hour waiting period has passed (waived while the bootstrap window is open), within 14 days"
+          : " within 14 days"}
+        . Program upgrade authority is unchanged.
       </p>
       {error ? (
         <p className="mt-2 text-xs text-amber-800">{error}</p>
@@ -155,6 +192,12 @@ export function AuthorityRotation({
             <p className="mt-1 break-all font-mono text-xs text-brand-800">
               Proposed: {state.proposed}
             </p>
+          )}
+          {state.proposed && proposalWindow && (
+            <p className="mt-1 text-xs text-slate-500">{describeProposalWindow(proposalWindow)}</p>
+          )}
+          {state.recoveryPending && (
+            <p className="mt-1 text-xs text-amber-800">{RECOVERY_PENDING_BLOCKER}</p>
           )}
           {wallet === state.current && initialNext && next.trim() === initialNext && (
             <p className="mt-3 text-xs text-brand-800">
@@ -191,13 +234,28 @@ export function AuthorityRotation({
             </div>
           )}
           {wallet === state.proposed && (
+            <>
+              <button
+                type="button"
+                disabled={tx.isSending || acceptBlocker !== null}
+                onClick={() => setConfirm("accept")}
+                className="mt-3 rounded-lg bg-brand-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
+              >
+                Accept authority
+              </button>
+              {acceptBlocker && !state.recoveryPending && (
+                <p className="mt-1 text-xs text-amber-800">{acceptBlocker}</p>
+              )}
+            </>
+          )}
+          {canCancel && (
             <button
               type="button"
               disabled={tx.isSending}
-              onClick={() => setConfirm("accept")}
-              className="mt-3 rounded-lg bg-brand-700 px-3 py-2 text-xs font-semibold text-white"
+              onClick={() => setConfirm("cancel")}
+              className="mt-3 ml-2 rounded-lg border border-slate-300 px-3 py-2 text-xs font-semibold text-slate-700 disabled:opacity-50"
             >
-              Accept authority
+              Cancel proposal
             </button>
           )}
           {state.proposed && wallet !== state.proposed && (
@@ -207,8 +265,9 @@ export function AuthorityRotation({
                 {ACCOUNT_ROLES_PATH}
               </Link>{" "}
               once the proposal is finalized. That page needs no Admin role.
-              There is no cancel instruction: to withdraw a proposal, replace
-              it.
+              {kind === "platform"
+                ? " The Super Admin, any Admin or the program upgrade authority can cancel it; the current authority can also replace it."
+                : " The blocklist authority can cancel or replace it."}
             </p>
           )}
         </>
@@ -236,7 +295,9 @@ export function AuthorityRotation({
         title={
           confirm === "accept"
             ? `Accept ${label} responsibility?`
-            : `Propose a new ${label}?`
+            : confirm === "cancel"
+              ? `Cancel the ${label} proposal?`
+              : `Propose a new ${label}?`
         }
         description={
           confirm === "accept" ? (
@@ -251,13 +312,21 @@ export function AuthorityRotation({
             ) : (
               "The connected wallet becomes blocklist authority. Only the new wallet can manage the blocklist and the transfer-hook mode after acceptance."
             )
+          ) : confirm === "cancel" ? (
+            `The proposal to ${state?.proposed ?? ""} is withdrawn; its rent returns to the proposer. The current authority stays in place.`
           ) : (
-            `Propose ${next.trim()}. The current authority remains active until that wallet accepts.`
+            kind === "platform"
+              ? `Propose ${next.trim()}. It can accept after 48 hours (at once while the bootstrap window is open), within 14 days. The current authority remains active until then; any Admin or the upgrade authority can cancel it.`
+              : `Propose ${next.trim()}. It can accept within 14 days. The current authority remains active until then.`
           )
         }
         kind="warning"
         confirmLabel={
-          confirm === "accept" ? "Accept authority" : "Create proposal"
+          confirm === "accept"
+            ? "Accept authority"
+            : confirm === "cancel"
+              ? "Cancel proposal"
+              : "Create proposal"
         }
         requireReason={false}
         busy={tx.isSending}
@@ -276,14 +345,23 @@ export function initKey(successor: string | null | undefined): string {
   return successor === undefined ? "" : `init:${successor ?? ""}`;
 }
 
-const AUDIT_IX: Record<OperationalAuthorityKind, Record<"propose" | "accept", string>> = {
-  platform: { propose: "propose_platform_admin", accept: "accept_platform_admin" },
-  blocklist: { propose: "propose_blocklist_authority", accept: "accept_blocklist_authority" },
+const AUDIT_IX: Record<OperationalAuthorityKind, Record<"propose" | "accept" | "cancel", string>> = {
+  platform: {
+    propose: "propose_platform_admin",
+    accept: "accept_platform_admin",
+    cancel: "cancel_platform_admin_transfer",
+  },
+  blocklist: {
+    propose: "propose_blocklist_authority",
+    accept: "accept_blocklist_authority",
+    cancel: "cancel_blocklist_authority_transfer",
+  },
 };
 
-const AUDIT_REASON: Record<"propose" | "accept", string> = {
+const AUDIT_REASON: Record<"propose" | "accept" | "cancel", string> = {
   propose: "Operational authority successor proposed",
   accept: "Operational authority accepted by the proposed wallet",
+  cancel: "Operational authority proposal cancelled",
 };
 
 /**
