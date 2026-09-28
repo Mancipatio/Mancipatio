@@ -1,11 +1,13 @@
 # Markdown files and the top-level docs/ directories are not tracked.
 # The docs/ rules are anchored so application routes such as front/app/docs
-# stay tracked. The exceptions are the operator documents in ops/: the
+# stay tracked. The exceptions are the root README (the entry point for
+# auditors and researchers) and the operator documents in ops/: the
 # mainnet runbook, which the chain CLI (front/scripts/chain) and the Release
 # workflow refer to by path, the procedures it points to, and the env and
 # secrets inventories the build guards (front/next.config.ts) refer to (names
 # only, never values).
 *.md
+!/README.md
 !/ops/runbook-mainnet.md
 !/ops/sop-admin.md
 !/ops/wind-down-plan.md
