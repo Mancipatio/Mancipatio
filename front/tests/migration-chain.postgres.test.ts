@@ -55,6 +55,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0074_ledger_contract.sql");
       expect(applied).toContain("0075_indexer_heartbeat.sql");
       expect(applied).toContain("0076_offering_exemption.sql");
+      expect(applied).toContain("0077_client_documents_bucket_limits.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));
@@ -64,6 +65,14 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
           "select count(*) from information_schema.tables where table_schema='public'",
         ),
       ).not.toBe("0");
+    });
+    it("caps every private document bucket in size and MIME type, matching the upload routes (0031, 0048, 0077)", () => {
+      const docs = "{application/pdf,image/png,image/jpeg,application/vnd.openxmlformats-officedocument.wordprocessingml.document}";
+      expect(db.query("select id||'|'||file_size_limit||'|'||allowed_mime_types::text from storage.buckets " +
+        "where id in ('client-documents','document-uploads') order by id").split("\n")).toEqual([
+        `client-documents|15728640|${docs}`,
+        `document-uploads|26214400|${docs}`,
+      ]);
     });
     it("keeps sensitive tables unreadable to browser roles after the entire chain", () => {
       for (const table of [

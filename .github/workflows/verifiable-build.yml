@@ -10,8 +10,11 @@
 # `--mount-path program` to verify-from-repo.
 #
 # Base image is PINNED to the agave release the workspace targets (matches the
-# local `solana-cli 3.1.13` toolchain). Bump it together with the toolchain —
-# a different image produces a different (still valid) hash.
+# local `solana-cli 3.1.13` toolchain), by tag and by digest (BASE_IMAGE_DIGEST
+# is checked before and after the builds). Bump both together with the
+# toolchain — a different image produces a different (still valid) hash.
+# Every action is pinned to a commit SHA (the comment names its tag): this
+# job holds id-token for the attestations.
 #
 # Triggers:
 # - a `v<digit>…` tag push: build, IDL drift check, then a GitHub Release
@@ -46,6 +49,14 @@ on:
 
 env:
   BASE_IMAGE: solanafoundation/solana-verifiable-build:3.1.13
+  # The image behind BASE_IMAGE, pinned (release-lanac-11). BASE_IMAGE keeps
+  # the tag form on purpose: it is recorded in hashes.txt and must equal the
+  # --base-image of the on-chain verify (scripts/chain/lib/squads.ts), so the
+  # build input is unchanged. The digest check makes a moved tag fail the
+  # build instead of silently changing the bytes. Docker Hub: the tag was
+  # last pushed 2026-05-04, before the first Release, so every artifact so
+  # far was built from this image. Bump both together with the toolchain.
+  BASE_IMAGE_DIGEST: sha256:1a0ea3dd15017e57e9b17d67267e7d2d7ab4f083499f3f29c847ddd54f01db31
 
 defaults:
   run:
@@ -57,13 +68,13 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@b4f984c1e7daae8e175614de3e73a8411a20333c # 1.89.0 branch (toolchain 1.89.0)
 
       # Release (tag) builds never restore a cache: the artifact comes from a
       # clean toolchain install only.
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: github.ref_type != 'tag'
         with:
           workspaces: program
@@ -72,11 +83,29 @@ jobs:
       - name: Install solana-verify
         run: cargo install solana-verify --version 0.5.1 --locked
 
+      - name: Pull the base image and check its digest
+        run: |
+          docker pull "$BASE_IMAGE"
+          digests="$(docker image inspect --format '{{join .RepoDigests " "}}' "$BASE_IMAGE")"
+          echo "RepoDigests: $digests"
+          case " $digests " in
+            *"@${BASE_IMAGE_DIGEST} "*) echo "base image is $BASE_IMAGE_DIGEST" ;;
+            *) echo "::error::$BASE_IMAGE is not $BASE_IMAGE_DIGEST (the tag moved): review the new image before bumping"; exit 1 ;;
+          esac
+
       - name: Verifiable build — asset_registry
         run: solana-verify build --library-name asset_registry -b "$BASE_IMAGE"
 
       - name: Verifiable build — transfer_hook
         run: solana-verify build --library-name transfer_hook -b "$BASE_IMAGE"
+
+      # The builds used whatever the tag names locally: still the pinned image?
+      - name: Check the base image digest after the builds
+        run: |
+          case " $(docker image inspect --format '{{join .RepoDigests " "}}' "$BASE_IMAGE") " in
+            *"@${BASE_IMAGE_DIGEST} "*) echo "base image is still $BASE_IMAGE_DIGEST" ;;
+            *) echo "::error::$BASE_IMAGE changed during the build"; exit 1 ;;
+          esac
 
       # The Docker build leaves target/ owned by root, so host cargo writes its
       # own build products elsewhere. The tests still include_bytes! the release
@@ -93,6 +122,7 @@ jobs:
         run: |
           {
             echo "base image: $BASE_IMAGE"
+            echo "base image digest: $BASE_IMAGE_DIGEST"
             echo "commit: $GITHUB_SHA"
             echo -n "asset_registry: "
             solana-verify get-executable-hash target/deploy/asset_registry.so
@@ -100,7 +130,7 @@ jobs:
             solana-verify get-executable-hash target/deploy/transfer_hook.so
           } | tee hashes.txt
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: verifiable-programs-${{ github.sha }}
           path: |
@@ -121,17 +151,17 @@ jobs:
       run:
         working-directory: front
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22.23.2
           cache: npm
           cache-dependency-path: front/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@b4f984c1e7daae8e175614de3e73a8411a20333c # 1.89.0 branch (toolchain 1.89.0)
 
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         if: github.ref_type != 'tag'
         with:
           workspaces: program
@@ -164,11 +194,11 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           persist-credentials: false
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: verifiable-programs-${{ github.sha }}
           path: art
@@ -186,7 +216,7 @@ jobs:
 
       # A tag push hands the bundle to `publish`; a manual dry release keeps
       # it as release-dry-<sha> (never published).
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ github.event_name == 'push' && format('release-bundle-{0}', github.sha) || format('release-dry-{0}', github.sha) }}
           path: dist
@@ -207,7 +237,7 @@ jobs:
       run:
         working-directory: .
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -216,7 +246,7 @@ jobs:
       - name: Tagged commit is on main
         run: git merge-base --is-ancestor "$GITHUB_SHA" origin/main
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: release-bundle-${{ github.sha }}
           path: dist
@@ -225,7 +255,7 @@ jobs:
         run: (cd dist && sha256sum --check SHA256SUMS)
 
       - name: Build provenance
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/*
 

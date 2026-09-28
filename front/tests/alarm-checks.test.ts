@@ -12,6 +12,8 @@ const state = vi.hoisted(() => ({
   txs: {} as Record<string, unknown>,
   pagesAsked: [] as number[],
   hang: false,
+  /** The operational watches' chain reads hang (a degraded RPC). */
+  opsHang: false,
 }));
 vi.mock("@/lib/network", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@/lib/network")>()),
@@ -31,6 +33,15 @@ vi.mock("@/lib/server/sale-capacity-chain", () => ({
   finalizedTransaction: vi.fn(async (sig: string) => state.txs[sig] ?? null),
 }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => { throw new Error("not in tests"); } }));
+vi.mock("@/lib/server/ops-watch", async (importOriginal) => {
+  const real = await importOriginal<typeof import("@/lib/server/ops-watch")>();
+  return {
+    ...real,
+    opsWatchReports: vi.fn((...args: Parameters<typeof real.opsWatchReports>) => state.opsHang
+      ? new Promise<never>((_resolve, reject) => args[2].addEventListener("abort", () => reject(new Error("aborted")), { once: true }))
+      : real.opsWatchReports(...args)),
+  };
+});
 
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
@@ -39,6 +50,7 @@ import {
   runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
+import { USDC } from "@/lib/payment-mints";
 import { buildTx } from "./helpers/chain-tx";
 
 const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -89,6 +101,7 @@ beforeEach(() => {
   state.txs = {};
   state.pagesAsked = [];
   state.hang = false;
+  state.opsHang = false;
 });
 
 describe("thresholds", () => {
@@ -229,6 +242,38 @@ describe("runAlarmChecks", () => {
     expect(reported(rpcs)["capacity-holds"]).toBe("pass/high");
   });
 
+  it("fx-expiring: the default mint and mints in use warn 2 days (at most half the max age) before the max age", async () => {
+    const usdc = USDC.devnet!.mint;
+    const check = async (fx: Record<string, unknown>[], extra: Record<string, Record<string, unknown>[]> = {}) => {
+      const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }], fx_rates: fx, ...extra });
+      const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+      expect(result.reports.length).toBe(result.expected);
+      return { by: reported(rpcs), rpcs };
+    };
+    const rate = (mint: string, daysAgo: number, maxAge = "7 days") => ({ payment_mint: mint, kind: "rate", as_of: minutesAgo(daysAgo * 24 * 60), max_age: maxAge });
+    // Day 5.5 of 7: inside the 2-day window, although no sale uses the mint.
+    const { by, rpcs } = await check([rate(usdc, 5.5)]);
+    expect(by[`fx-expiring:${usdc}`]).toBe("fail/medium");
+    expect(rpcs.find((r) => r.args.p_check === `fx-expiring:${usdc}`)?.args).toMatchObject({ p_source: "fx:expiring", p_category: "fx",
+      p_evidence: { payment_mint: usdc, hours_left: 36 } });
+    expect((await check([rate(usdc, 4.9)])).by[`fx-expiring:${usdc}`]).toBe("pass/medium");
+    // A 1-day max age warns in its last 12 hours only; an eur_peg row never expires.
+    expect((await check([rate(usdc, 0.4, "1 day")])).by[`fx-expiring:${usdc}`]).toBe("pass/medium");
+    expect((await check([rate(usdc, 0.6, "1 day")])).by[`fx-expiring:${usdc}`]).toBe("fail/medium");
+    expect((await check([{ ...rate(usdc, 30), kind: "eur_peg" }])).by[`fx-expiring:${usdc}`]).toBeUndefined();
+    // A mint in use (an open sale) is tracked too.
+    const inUse = await check([rate(MINT, 6)], { sales: [{ payment_mint: MINT }] });
+    expect(inUse.by).toMatchObject({ [`fx-expiring:${MINT}`]: "fail/medium", [`fx-stale:${MINT}`]: "pass/medium" });
+    // Past the max age it is fx-stale's alone (one condition, one alert); an old
+    // rate of the default mint no sale uses does not open a lasting alert either.
+    const expired = await check([rate(MINT, 8)], { sales: [{ payment_mint: MINT }] });
+    expect(expired.by).toMatchObject({ [`fx-expiring:${MINT}`]: "pass/medium", [`fx-stale:${MINT}`]: "fail/medium" });
+    expect((await check([rate(usdc, 90)])).by[`fx-expiring:${usdc}`]).toBe("pass/medium");
+    // An open incident of a mint neither in use nor the default clears.
+    const gone = await check([rate(MINT, 6)], { alarm_incidents: [{ check_key: `fx-expiring:${MINT}` }] });
+    expect(gone.by[`fx-expiring:${MINT}`]).toBe("pass/medium");
+  });
+
   it("runs the gap scan when due and reports indexer-gap and gap-scan-incomplete", async () => {
     state.complete = false;
     const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(6) }] });
@@ -310,6 +355,23 @@ describe("runAlarmChecks", () => {
     expect(reported(rpcs)["indexer-gap"]).toBeUndefined();
     expect(result.gapScan).toMatchObject({ ran: true, cutShort: true, complete: false });
     expect(result.reports.length).toBe(result.expected);
+    expect(Date.now()).toBeLessThan(deadline);
+  });
+
+  it("a hanging chain read of the operational watches costs neither the cheap incidents nor the gap scan", async () => {
+    state.opsHang = true;
+    const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(6) }] });
+    const started = Date.now();
+    const deadline = started + GAP_SCAN_RESERVE_MS + 1_000;
+    const result = await runAlarmChecks(sb, deadline, AbortSignal.timeout(GAP_SCAN_RESERVE_MS + 1_000));
+    const by = reported(rpcs);
+    for (const check of ["indexer-queue", "event-queue", "indexer-degraded", "worker-retry", "capacity-holds", "gap-scan-overdue"]) {
+      expect(by[check], check).toBeDefined();
+    }
+    expect(result.gapScan).toMatchObject({ ran: true, cutShort: false });
+    expect(by["gap-scan-incomplete"]).toBe("pass/medium");
+    // The watches ran out of their budget (the checks deadline minus their reserve): one check that could not run.
+    expect(result.expected).toBe(result.reports.length + 1);
     expect(Date.now()).toBeLessThan(deadline);
   });
 

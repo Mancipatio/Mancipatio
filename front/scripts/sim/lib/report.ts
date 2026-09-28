@@ -191,7 +191,7 @@ export const OWNER_GAPS = [
   "G4: a per-document reject leaves the dossier status as it is, so a client can re-upload between the per-document rejects and the final reject (the owner actor holds the user's slot and sends the verdict first).",
   "G5: every KYC /verify submit files a passport request, also for users no passport is meant for; they sit in the /admin/kyc badge (app/api/verification/submit/route.ts).",
   "G6: a per-document reject neither moves the dossier to more_info nor emails the client (review-requirement sends nothing): a real client is never told a document was refused; the simulator only notices because it polls the requirements.",
-  "G7: /api/audit is unsigned; every row is actor_verified=false by design (app/api/audit/route.ts), the owner actor's breadcrumbs included.",
+  "G7: /api/audit is unsigned; a row is actor_verified=false unless a wallet session cookie for the same wallet came with it (app/api/audit/route.ts), the owner actor's breadcrumbs included.",
   "KYB vs dossier status: a KYB-verified company dossier keeps kyc_status pending and counts as a final review on /admin/clients for good (C-O5, reported as info until open question Q2 is decided).",
 ];
 

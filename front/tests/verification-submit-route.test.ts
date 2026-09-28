@@ -13,7 +13,7 @@ vi.mock("@/lib/server/siws", async (orig) => ({
 }));
 vi.mock("@/lib/server/bounded-request", () => ({ boundedRequest: async (r: Request) => r }));
 vi.mock("@/app/api/clients/_helpers", () => ({
-  clientIpOf: () => "1.1.1.1", rateLimited: () => false, insertNote: vi.fn(), DEGRADED_TTL_MESSAGE: "degraded",
+  clientIpOf: () => "1.1.1.1", ipRateLimitKey: (ip: string) => ip, rateLimited: () => false, insertNote: vi.fn(), DEGRADED_TTL_MESSAGE: "degraded",
 }));
 vi.mock("@/lib/server/kyc-dossier", () => ({
   ensureClientDossier: m.ensureDossier, ensureStandardRequirements: m.ensureReqs, requestMissingDocuments: m.missingDocs,
@@ -34,6 +34,8 @@ function chain(table: string) {
   return c;
 }
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ from: chain }) }));
+const shared = vi.hoisted(() => ({ limit: vi.fn<(key: string, limit: number, windowSeconds: number) => Promise<string>>(async () => "ok") }));
+vi.mock("@/lib/server/shared-rate-limit", () => ({ consumeSharedRateLimit: shared.limit }));
 
 import { POST } from "@/app/api/verification/submit/route";
 
@@ -92,6 +94,25 @@ describe("/api/verification/submit", () => {
   ])("rejects %s before touching the dossier", async (_label, params) => {
     const { status } = await call(params as Record<string, unknown>);
     expect(status).toBe(400);
+    expect(m.ensureDossier).not.toHaveBeenCalled();
+  });
+
+  it("the per-owner cap is shared by every instance (front-app-15): 429 before touching the dossier", async () => {
+    shared.limit.mockResolvedValueOnce("limited");
+    const { status } = await call(kyc);
+    expect(status).toBe(429);
+    expect(shared.limit).toHaveBeenLastCalledWith("verification:owner:7xGLjBL7VWYNmBZxmPBv9YJSQd8FywuRyAnGoC9mhjjs", 6, 3_600);
+    expect(m.ensureDossier).not.toHaveBeenCalled();
+    // A limiter the database cannot answer falls back to the per-instance cap.
+    shared.limit.mockResolvedValueOnce("unavailable");
+    expect((await call(kyc)).status).toBe(200);
+  });
+
+  it("owners cost little to make: a per-IP cap is shared by every instance too", async () => {
+    shared.limit.mockResolvedValueOnce("ok").mockResolvedValueOnce("limited");
+    const { status } = await call(kyc);
+    expect(status).toBe(429);
+    expect(shared.limit).toHaveBeenLastCalledWith("verification:ip:1.1.1.1", 20, 3_600);
     expect(m.ensureDossier).not.toHaveBeenCalled();
   });
 });

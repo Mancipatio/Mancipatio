@@ -8,7 +8,7 @@
 // "mainnet legal slots report" prints what a mainnet build refuses today:
 // run `npx vitest run tests/legal-slots.test.ts --silent=false` after filling
 // a slot.
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
@@ -346,5 +346,34 @@ describe("program security and risk wording", () => {
     expect(text).toMatch(/lose part or all/);
     expect(PURCHASE_RISK_WARNING.points).toContain(NO_INVESTOR_PROTECTION);
     expect(NO_INVESTOR_PROTECTION).toMatch(/deposit insurance.*investor protection/);
+  });
+});
+
+describe("no CI fixture in the committed tree (scripts/ci/mainnet-build.sh, review 8.4 #8)", () => {
+  // mainnet-build.sh writes an invented operator ("CI Fixture d.o.o.") into
+  // lib/legal/ and a placeholder Supabase ref into next.config.ts, and
+  // restores them on exit. A run killed where no trap fires leaves them in
+  // place; the fixture passes every mainnet build guard by design, so once
+  // counsel's slots are committed nothing else would notice a leftover.
+  const MARKERS = ["CI FIXTURE (scripts/ci/mainnet-build.sh)", "CI Fixture", "cimainnetplaceholder"];
+
+  it("no lib/legal/*.ts file and not next.config.ts holds the fixture", () => {
+    const files = [
+      ...readdirSync(join(process.cwd(), "lib/legal")).filter((f) => f.endsWith(".ts")).map((f) => `lib/legal/${f}`),
+      "next.config.ts",
+    ];
+    expect(files).toContain("lib/legal/operator.ts");
+    for (const file of files) {
+      const source = readFileSync(join(process.cwd(), file), "utf8");
+      for (const marker of MARKERS) expect(source.includes(marker), `${file} contains "${marker}"`).toBe(false);
+    }
+  });
+
+  it("the script refuses to start on the same markers it writes", () => {
+    const script = readFileSync(join(process.cwd(), "scripts/ci/mainnet-build.sh"), "utf8");
+    expect(script).toContain('FIXTURE_MARKER="CI FIXTURE (scripts/ci/mainnet-build.sh)"');
+    expect(script).toContain('PLACEHOLDER_REF="cimainnetplaceholder"');
+    expect(script).toContain('const HEADER = "// ── CI FIXTURE (scripts/ci/mainnet-build.sh):');
+    expect(script).toContain('legalName: "CI Fixture d.o.o. Beograd"');
   });
 });

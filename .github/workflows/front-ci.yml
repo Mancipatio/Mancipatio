@@ -1,9 +1,14 @@
 # Front CI — typecheck, lint, unit tests, a production build (plus a Deno
-# type-check of the Supabase edge function) and program IDL/SDK drift for
-# front/. The build runs without deployment secrets (only the
-# public network name is set), so a merge that would break the Vercel build is
-# caught here first. The drift job also watches program/ because the client
-# SDK in front/lib/generated is derived from the program source.
+# type-check of the Supabase edge function), the mainnet variant of the
+# build with placeholder values, a dependency audit and program IDL/SDK drift
+# for front/. The builds run without deployment secrets, so a merge that
+# would break the Vercel build is caught here first. The drift job also
+# watches program/ because the client SDK in front/lib/generated is derived
+# from the program source.
+#
+# Every action is pinned to a commit SHA (release-lanac-11, ops-qa-11; the
+# comment names the tag it was resolved from). Dependabot proposes the bumps
+# (.github/dependabot.yml).
 name: Front CI
 
 on:
@@ -19,12 +24,17 @@ on:
       - "front/**"
       - "program/**"
       - ".github/workflows/front-ci.yml"
+  # Weekly, so a newly published advisory against an unchanged lockfile is
+  # seen. Only the audit job runs on the schedule.
+  schedule:
+    - cron: "17 6 * * 1"
 
 permissions:
   contents: read
 
 concurrency:
-  group: front-ci-${{ github.ref }}
+  # The weekly scheduled audit never cancels (or is cancelled by) a push run.
+  group: front-ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 defaults:
@@ -34,12 +44,13 @@ defaults:
 jobs:
   check:
     name: tsc + eslint + vitest
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22.23.2
           cache: npm
@@ -54,15 +65,20 @@ jobs:
       - name: Lint
         run: npx eslint .
 
-      - name: Install local PostgreSQL integration tooling
+      # PostgreSQL 17, the major version of the Supabase projects (devnet
+      # `show server_version` 17.6, supabase/config.toml major_version 17;
+      # podaci-infra-5). Ubuntu 24.04 ships 16 only: PGDG's apt repository.
+      - name: Install local PostgreSQL 17 integration tooling
         run: |
           sudo apt-get update
-          sudo apt-get install -y postgresql-16
+          sudo apt-get install -y postgresql-common
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y postgresql-17
 
       - name: Unit tests and isolated PostgreSQL regressions
         env:
           RUN_LOCAL_POSTGRES_TESTS: '1'
-          POSTGRES_BIN: /usr/lib/postgresql/16/bin
+          POSTGRES_BIN: /usr/lib/postgresql/17/bin
         run: npm run test
 
       - name: Check generated SDK against committed IDL
@@ -70,15 +86,16 @@ jobs:
 
   build:
     name: next build (no secrets)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
       NEXT_TELEMETRY_DISABLED: '1'
       NEXT_PUBLIC_NETWORK: devnet
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22.23.2
           cache: npm
@@ -95,22 +112,71 @@ jobs:
       - name: Type-check the helius-webhook edge function (Deno)
         run: npm run check:edge
 
-  program-drift:
-    name: Program IDL + SDK drift
+  # front-app-18: the mainnet guards refuse without their settings, pass with
+  # placeholders (and an invented fixture of the lib/legal/ slots, written into
+  # the runner's checkout only), and the mainnet branches compile. No secret
+  # is involved.
+  build-mainnet:
+    name: next build (mainnet, placeholder env)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 35
+    timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22.23.2
           cache: npm
           cache-dependency-path: front/package-lock.json
 
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - name: Install dependencies
+        run: npm ci
 
-      - uses: Swatinem/rust-cache@v2
+      - name: Mainnet guards and build
+        run: bash scripts/ci/mainnet-build.sh
+
+  # front-app-16 / ops-qa-14: no HIGH (or critical) advisory in the production
+  # dependency tree, nor in the chain:emergency Ledger packages. Dev-only
+  # advisories are left to Dependabot.
+  audit:
+    name: npm audit (production, high)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.23.2
+
+      - name: Audit the production dependencies (lockfile)
+        run: npm audit --omit=dev --audit-level=high
+
+      # The pinned Ledger packages chain:emergency signs with, on the operator
+      # machine (npm ci --ignore-scripts): a lockfile of its own, no dev
+      # dependencies.
+      - name: Audit the chain:emergency Ledger packages (lockfile)
+        working-directory: front/scripts/chain/ledger
+        run: npm audit --audit-level=high
+
+  program-drift:
+    name: Program IDL + SDK drift
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@b4f984c1e7daae8e175614de3e73a8411a20333c # 1.89.0 branch (toolchain 1.89.0)
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           workspaces: program
           cache-targets: false

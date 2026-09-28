@@ -1,0 +1,41 @@
+# Dependabot (front-app-16, ops-qa-11, release-lanac-12).
+#
+# npm (front/, and front/scripts/chain/ledger/: the pinned Ledger packages
+# chain:emergency signs with, a lockfile of its own) and cargo (program/):
+# security updates only. A version-update limit of 0 keeps routine bumps
+# out, while Dependabot security updates still open a PR for every advisory
+# that has a fix. Requires, in the repository
+# settings (Code security): Dependency graph, Dependabot alerts and Dependabot
+# security updates switched on. The program's crates are pinned on purpose
+# (verifiable build, audited toolchain): a security PR there is reviewed like
+# any program change and rebuilt before a Release.
+#
+# GitHub Actions: weekly version updates, grouped into one PR. The workflows
+# pin every action to a commit SHA with the tag in a comment; Dependabot
+# moves the SHA and the comment together.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directories:
+      - /front
+      - /front/scripts/chain/ledger
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: cargo
+    directory: /program
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 0
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      actions:
+        patterns: ["*"]

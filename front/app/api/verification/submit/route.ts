@@ -11,9 +11,10 @@ import { NextResponse } from "next/server";
 import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { readActor } from "@/lib/server/account-auth";
 import { boundedRequest } from "@/lib/server/bounded-request";
+import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
-import { clientIpOf, DEGRADED_TTL_MESSAGE, insertNote, rateLimited } from "../../clients/_helpers";
+import { clientIpOf, DEGRADED_TTL_MESSAGE, insertNote, ipRateLimitKey, rateLimited } from "../../clients/_helpers";
 import {
   accountIdForWallet, ensureClientDossier, ensureStandardRequirements, requestMissingDocuments,
   STANDARD_COMPANY_REQUIREMENTS, STANDARD_INVESTOR_REQUIREMENTS,
@@ -73,6 +74,13 @@ export async function POST(request: Request) {
     if (kind !== "kyc" && kind !== "kyb") throw new SiwsError(400, "kind must be kyc or kyb");
     const ip = clientIpOf(request);
     if (rateLimited(`verification:ip:${ip}`, 10, 60_000) || rateLimited(`verification:owner:${actorKey}`, 6, 3_600_000)) {
+      throw new SiwsError(429, "Too many submissions — try again later");
+    }
+    // The same per-owner cap across every instance (front-app-15), and, as a
+    // wallet or an email account costs little to make, a per-IP one (room for
+    // an office behind one NAT).
+    if (await consumeSharedRateLimit(`verification:owner:${actorKey}`, 6, 3_600) === "limited"
+      || await consumeSharedRateLimit(`verification:ip:${ipRateLimitKey(ip)}`, 20, 3_600) === "limited") {
       throw new SiwsError(429, "Too many submissions — try again later");
     }
 
