@@ -21,8 +21,6 @@ const DECISIONS = new Set(["approved", "needs_changes", "rejected"]);
 
 export async function POST(request: Request) {
   try {
-    // Pilot scope (lib/features.ts): an entry route of the vesting module.
-    requireModule("vesting");
     const { wallet, params } = await verifySigned(
       request,
       "vesting-series.admin-review",
@@ -40,6 +38,10 @@ export async function POST(request: Request) {
         "decision must be approved, needs_changes or rejected",
       );
     }
+    // Pilot scope (lib/features.ts): approving is the vesting module's entry;
+    // sending back and rejecting stay open (a pending request still gets its
+    // answer), like every exit.
+    if (decision === "approved") requireModule("vesting");
     if (decision !== "approved" && reason.length === 0) {
       throw new SiwsError(
         400,

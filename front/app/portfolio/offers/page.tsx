@@ -54,6 +54,7 @@ import {
 } from "@/components/payment-price-fields";
 import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
+import { moduleEnabled } from "@/lib/features";
 import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 
@@ -84,6 +85,10 @@ export default function MyOffersPage() {
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  // Pilot scope (lib/features.ts): with secondary trading off, new offers,
+  // funding and taking are hidden (the send path refuses them too, before
+  // the wallet: lib/pause-gate.ts MODULE_FLOWS); cancel and reclaim stay.
+  const tradingOn = moduleEnabled("secondaryTrading");
   const [confirmCancel, setConfirmCancel] = useState<Offer | null>(null);
   const [fundTarget, setFundTarget] = useState<Offer | null>(null);
   const [myShareClasses, setMyShareClasses] = useState<ShareClassRef[]>([]);
@@ -389,19 +394,21 @@ export default function MyOffersPage() {
             settlement.
           </p>
         </div>
-        <button
-          type="button"
-          disabled={myShareClasses.length === 0}
-          onClick={() => setShowCreate(true)}
-          title={
-            myShareClasses.length === 0
-              ? "You need to hold at least one Manci share-class token before posting an offer."
-              : undefined
-          }
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-        >
-          + Create offer
-        </button>
+        {tradingOn && (
+          <button
+            type="button"
+            disabled={myShareClasses.length === 0}
+            onClick={() => setShowCreate(true)}
+            title={
+              myShareClasses.length === 0
+                ? "You need to hold at least one Manci share-class token before posting an offer."
+                : undefined
+            }
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+          >
+            + Create offer
+          </button>
+        )}
       </div>
 
       {failed ? (
@@ -414,6 +421,7 @@ export default function MyOffersPage() {
         <Empty
           onClick={() => setShowCreate(true)}
           canCreate={myShareClasses.length > 0}
+          tradingOn={tradingOn}
         />
       ) : (
         <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
@@ -517,7 +525,7 @@ export default function MyOffersPage() {
                       )}
                       {!closed && o.status === OfferStatus.Open && (
                         <>
-                          {offerPda && (
+                          {tradingOn && offerPda && (
                             <Link
                               href={`/marketplace/otc/${offerPda}`}
                               className="text-slate-600 underline-offset-2 hover:underline"
@@ -525,19 +533,21 @@ export default function MyOffersPage() {
                               Take →
                             </Link>
                           )}
-                          <button
-                            type="button"
-                            disabled={tx.isSending || fullyFunded}
-                            onClick={() => setFundTarget(o)}
-                            title={
-                              fullyFunded
-                                ? "The escrow already holds the full offer amount."
-                                : undefined
-                            }
-                            className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
-                          >
-                            Fund escrow
-                          </button>
+                          {tradingOn && (
+                            <button
+                              type="button"
+                              disabled={tx.isSending || fullyFunded}
+                              onClick={() => setFundTarget(o)}
+                              title={
+                                fullyFunded
+                                  ? "The escrow already holds the full offer amount."
+                                  : undefined
+                              }
+                              className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                            >
+                              Fund escrow
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={tx.isSending}
@@ -557,7 +567,7 @@ export default function MyOffersPage() {
         </div>
       )}
 
-      {showCreate && (
+      {showCreate && tradingOn && (
         <CreateOfferModal
           myShareClasses={myShareClasses}
           onClose={() => setShowCreate(false)}
@@ -568,7 +578,7 @@ export default function MyOffersPage() {
         />
       )}
 
-      {fundTarget && (
+      {fundTarget && tradingOn && (
         <FundEscrowModal
           offer={fundTarget}
           busy={tx.isSending}
@@ -910,16 +920,19 @@ function CreateOfferModal({
 function Empty({
   onClick,
   canCreate,
+  tradingOn,
 }: {
   onClick: () => void;
   canCreate: boolean;
+  /** Secondary trading switched on (lib/features.ts): otherwise no call to action. */
+  tradingOn: boolean;
 }) {
   return (
     <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
         You haven&apos;t posted any OTC offers yet.
       </p>
-      {canCreate ? (
+      {!tradingOn ? null : canCreate ? (
         <button
           type="button"
           onClick={onClick}

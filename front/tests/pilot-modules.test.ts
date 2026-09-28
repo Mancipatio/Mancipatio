@@ -12,11 +12,13 @@ vi.mock("@/lib/server/siws", async (importOriginal) => {
   const real = await importOriginal<typeof import("@/lib/server/siws")>();
   return { ...real, verifySigned: vi.fn(async () => { throw new real.SiwsError(401, "signature checked"); }) };
 });
+vi.mock("@/lib/server/admin-gate", () => ({ requireAdmin: vi.fn(async () => {}) }));
 const db = vi.hoisted(() => ({ touched: [] as string[] }));
 vi.mock("@/lib/supabase-server", () => ({
   getSupabaseAdmin: () => ({ from: (table: string) => { db.touched.push(table); throw new Error("no database in this test"); } }),
 }));
 
+import { verifySigned } from "@/lib/server/siws";
 import { assertBuildFeatureFlags, FEATURE_FLAG_NAMES } from "@/next.config";
 import { features, moduleDisabledMessage, PILOT_MODULE_ENV, PILOT_MODULES, pilotModules } from "@/lib/features";
 import { moduleNoticeText, moduleRouteState, navHrefVisible } from "@/lib/pilot-scope";
@@ -97,6 +99,13 @@ describe("lib/pilot-scope.ts (menu, tabs and page notices)", () => {
     expect(moduleNoticeText(state, "mainnet")).toBe("Rights-Token issuances: not available in the pilot on Solana mainnet.");
   });
 
+  it("the distributions and rights pages are in the map; /issuer/vesting does not swallow /issuer/vesting-series", () => {
+    expect(moduleRouteState("/admin/payouts", "mainnet")).toMatchObject({ disabled: true, route: { modules: ["distributions"], mode: "notice" } });
+    expect(moduleRouteState("/admin/payouts/abc", "mainnet")?.route.prefix).toBe("/admin/payouts");
+    expect(moduleRouteState("/issuer/vesting", "mainnet")).toMatchObject({ route: { modules: ["rights"] } });
+    expect(moduleRouteState("/issuer/vesting-series", "mainnet")).toMatchObject({ route: { modules: ["vesting"] } });
+  });
+
   it("devnet: nothing is hidden unless switched off", () => {
     expect(navHrefVisible("/marketplace/otc", "devnet")).toBe(true);
     expect(moduleRouteState("/marketplace/otc", "devnet")).toMatchObject({ disabled: false, off: [] });
@@ -110,7 +119,6 @@ const ROUTES: Array<[string, string, () => Promise<{ POST: (r: Request) => Promi
   ["otc/admin-screen", "secondaryTrading", () => import("@/app/api/otc/admin-screen/route")],
   ["vesting-series/create", "vesting", () => import("@/app/api/vesting-series/create/route")],
   ["vesting-series/prepare-creation", "vesting", () => import("@/app/api/vesting-series/prepare-creation/route")],
-  ["vesting-series/admin-review", "vesting", () => import("@/app/api/vesting-series/admin-review/route")],
   ["vesting/create", "rights", () => import("@/app/api/vesting/create/route")],
   ["distribution-plans/prepare", "distributions", () => import("@/app/api/distribution-plans/prepare/route")],
   ["distribution-plans/bind", "distributions", () => import("@/app/api/distribution-plans/bind/route")],
@@ -138,5 +146,47 @@ describe("entry routes of a switched-off module answer 403 before any work", () 
     clearModuleEnv();
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
     expect((await post()).status).toBe(401);
+  });
+});
+
+describe("entry decisions behind the signature", () => {
+  const signed = (params: Record<string, unknown>) =>
+    vi.mocked(verifySigned).mockResolvedValueOnce({ wallet: "7xGLjBL7VWYNmBZxmPBv9YJSQd8FywuRyAnGoC9mhjjs", params } as never);
+  const post = async (load: () => Promise<{ POST: (r: Request) => Promise<Response> }>) => {
+    const { POST } = await load();
+    const res = await POST(new Request("https://manci.test/api/x", { method: "POST", body: "{}" }));
+    return { status: res.status, body: (await res.json()) as { error?: string } };
+  };
+
+  it("vesting-series/admin-review: approving is the entry; sending back and rejecting stay open", async () => {
+    const load = () => import("@/app/api/vesting-series/admin-review/route");
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    db.touched.length = 0;
+    signed({ id: "s1", decision: "approved" });
+    const refused = await post(load);
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe(moduleDisabledMessage("vesting", "mainnet"));
+    expect(db.touched).toEqual([]);
+    for (const decision of ["needs_changes", "rejected"]) {
+      db.touched.length = 0;
+      signed({ id: "s1", decision, reason: "Fix the cliff." });
+      expect((await post(load)).status, decision).not.toBe(403);
+      expect(db.touched, decision).toContain("vesting_series");
+    }
+  });
+
+  it("otc/create: a switched-off module answers 403 before the screen or any database read", async () => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    db.touched.length = 0;
+    signed({
+      share_class_pda: "Pc4auCy8Fnwxs7EcFwBGKqV3SudxCKEEDLHbEHujBpK", mint: "3n1mQ6zsrVpQyzFCkr9qFVGgU3qHiHQeAvGtaVJk9oNr",
+      asset_label: "Test", seller_wallet: "7xGLjBL7VWYNmBZxmPBv9YJSQd8FywuRyAnGoC9mhjjs",
+      buyer_wallet: "8sHgqRqBEXaSkhcyzXtY3vBSfGqBbTeR2SkVFDcxrfd9", amount: 10, price: 1_000_000,
+      payment_mint: "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    });
+    const refused = await post(() => import("@/app/api/otc/create/route"));
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toBe(moduleDisabledMessage("secondaryTrading", "mainnet"));
+    expect(db.touched).toEqual([]);
   });
 });

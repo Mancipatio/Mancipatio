@@ -49,12 +49,7 @@ export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "otc.create");
 
-    // Compliance screen, not a KYC gate: no client profile or KYC is needed
-    // to request an escrow; only suspended dossiers are refused (both
-    // parties — see header). The counterparty check runs after the party
-    // validation below.
     const sb = getSupabaseAdmin();
-    await refuseSuspendedClient(sb, wallet, "requesting an OTC escrow");
 
     const shareClassPda =
       typeof params.share_class_pda === "string" ? params.share_class_pda : "";
@@ -113,9 +108,15 @@ export async function POST(request: Request) {
     const network = detectNetwork();
     assertAllowedPaymentMint(network, paymentMint);
     // Pilot scope (lib/features.ts): secondary trading is a module switch,
-    // checked once the request itself is valid and before any chain read
-    // or write.
+    // checked once the request itself is valid and before any database,
+    // screening or chain work (a switched-off module answers 403, never the
+    // sanctions screen's 503 or an alert).
     requireModule("secondaryTrading");
+
+    // Compliance screen, not a KYC gate: no client profile or KYC is needed
+    // to request an escrow; only suspended dossiers are refused (both
+    // parties — see header), and since 8.5 a wallet on a sanctions list.
+    await refuseSuspendedClient(sb, wallet, "requesting an OTC escrow");
 
     // The other party of a platform-mediated deal gets the same suspension
     // screen. Generic copy: the requester is not told the counterparty's

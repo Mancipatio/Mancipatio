@@ -9,7 +9,10 @@
 //   - "notice": the page also carries exits of existing positions (cancel an
 //     offer, withdraw a listing, claim, reclaim a custody deposit). With its
 //     module off, the page stays and the notice says new requests are not
-//     available; the entry routes behind it answer 403 anyway.
+//     available; the page hides its entry buttons (moduleEnabled), the entry
+//     routes behind it answer 403, and an on-chain entry without a route (an
+//     OTC offer, a proposal, an issuance) is refused before the wallet opens
+//     (lib/pause-gate.ts MODULE_FLOWS).
 // A route listing several modules is off only when all of them are off
 // (e.g. "Rights & claims" shows Rights-Token and distribution claims).
 
@@ -22,7 +25,7 @@ export type ModuleRoute = {
   mode: "gate" | "notice";
 };
 
-/** Most specific prefix first is not needed: prefixes do not nest. */
+/** Most specific prefix first is not needed: prefixes do not nest ("/issuer/vesting" does not match "/issuer/vesting-series"). */
 export const MODULE_ROUTES: readonly ModuleRoute[] = [
   { prefix: "/marketplace/otc", modules: ["secondaryTrading"], mode: "gate" },
   { prefix: "/markets/resell", modules: ["secondaryTrading"], mode: "gate" },
@@ -36,11 +39,15 @@ export const MODULE_ROUTES: readonly ModuleRoute[] = [
   { prefix: "/portfolio/conversion", modules: ["custodyConversion"], mode: "notice" },
   { prefix: "/portfolio/delivery", modules: ["custodyDelivery"], mode: "notice" },
   { prefix: "/issuer/vesting-series", modules: ["vesting"], mode: "notice" },
+  // The Rights builder's vesting schedules (api/vesting/create is a rights entry).
+  { prefix: "/issuer/vesting", modules: ["rights"], mode: "notice" },
   { prefix: "/admin/otc", modules: ["secondaryTrading"], mode: "notice" },
   { prefix: "/admin/resell", modules: ["secondaryTrading"], mode: "notice" },
   { prefix: "/admin/governance", modules: ["governance"], mode: "notice" },
   { prefix: "/admin/vesting", modules: ["vesting"], mode: "notice" },
   { prefix: "/admin/rights", modules: ["rights"], mode: "notice" },
+  // Push distributions, payout schedules and yield routing.
+  { prefix: "/admin/payouts", modules: ["distributions"], mode: "notice" },
   { prefix: "/admin/custody", modules: ["custodyConversion", "custodyDelivery"], mode: "notice" },
 ];
 

@@ -37,6 +37,7 @@ import {
 } from "@/lib/otc";
 import { walletSigner } from "@/lib/wallet-signer";
 import { detectNetwork } from "@/lib/network";
+import { moduleEnabled } from "@/lib/features";
 import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
@@ -87,6 +88,10 @@ export default function MyDealsPage() {
   >(new Map());
   // "now" captured at load time (render must stay pure) — expiry checks.
   const [nowMs, setNowMs] = useState(0);
+  // Pilot scope (lib/features.ts): with secondary trading off, funding a
+  // deal is not offered (the send path refuses it too, before the wallet:
+  // lib/pause-gate.ts MODULE_FLOWS); expiring and refunds stay.
+  const tradingOn = moduleEnabled("secondaryTrading");
   // Funds-moving actions go through a confirm dialog (SCOPE 1.6).
   const [confirmAction, setConfirmAction] = useState<{
     kind: "asset" | "payment" | "expire";
@@ -598,7 +603,7 @@ export default function MyDealsPage() {
                             )}
                           </td>
                           <td className="px-4 py-3 text-right text-xs">
-                            {isOpen && !expired && !isBuyer && !deal.assetDeposited && (
+                            {tradingOn && isOpen && !expired && !isBuyer && !deal.assetDeposited && (
                               <button
                                 type="button"
                                 disabled={tx.isSending}
@@ -610,7 +615,7 @@ export default function MyDealsPage() {
                                 Deposit asset
                               </button>
                             )}
-                            {isOpen && !expired && isBuyer && !deal.paymentDeposited && (
+                            {tradingOn && isOpen && !expired && isBuyer && !deal.paymentDeposited && (
                               <>
                                 <button
                                   type="button"

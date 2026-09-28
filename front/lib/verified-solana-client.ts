@@ -13,7 +13,7 @@ import { assertSiteWritable } from "@/lib/maintenance";
 import { priceForRequest } from "@/lib/priority-fee";
 import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 import { clearWalletChange } from "@/lib/wallet-changes";
-import { assertInstructionsNotPaused } from "@/lib/pause-gate";
+import { assertInstructionsInScope, assertInstructionsNotPaused } from "@/lib/pause-gate";
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
@@ -26,7 +26,10 @@ import { assertInstructionsNotPaused } from "@/lib/pause-gate";
  * paused; the server's refusal of the policy check backs it up. The
  * program's emergency pause is read the same way (lib/pause-gate.ts, a few
  * seconds old at most, fail-open): an instruction a set bit holds back is
- * refused with a readable PausedFlowError before the wallet opens.
+ * refused with a readable PausedFlowError before the wallet opens, and an
+ * entry of a switched-off pilot-scope module (lib/features.ts) with a
+ * ModuleDisabledFlowError (no chain read; its entries have no server route
+ * that could refuse them).
  * This is the one place a wallet send gets its priority fee: prepare and
  * prepareAndSend set `computeUnitPrice` from lib/priority-fee (clamped to the
  * network's cap) before any wallet prompt, and `@solana/client` prepends the
@@ -150,6 +153,7 @@ export function withVerifiedTransactions(
       await assertSiteWritable();
       await assertNetwork(context);
       checkAuthority(input, context);
+      assertInstructionsInScope(input.instructions, network);
       await assertInstructionsNotPaused(context.rpc, input.instructions);
       context.assertCurrent();
       const request = await withFee(input, context);
@@ -186,7 +190,8 @@ export function withVerifiedTransactions(
       const context = capture();
       await assertNetwork(context);
       checkAuthority(input, context);
-      // The emergency pause, read before any wallet prompt (lib/pause-gate.ts).
+      // The pilot scope and the emergency pause, before any wallet prompt (lib/pause-gate.ts).
+      assertInstructionsInScope(input.instructions, network);
       await assertInstructionsNotPaused(context.rpc, input.instructions);
       context.assertCurrent();
       // The fee is settled before the policy check's wallet prompt.

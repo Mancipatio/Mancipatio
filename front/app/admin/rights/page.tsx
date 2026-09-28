@@ -37,6 +37,7 @@ import {
 } from "@/lib/pdas";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonTable } from "@/components/skeleton";
+import { moduleEnabled } from "@/lib/features";
 import { RequireRole } from "@/components/require-role";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
@@ -98,6 +99,10 @@ function RightsOps() {
   const [query, setQuery] = useState("");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
+  // Pilot scope (lib/features.ts): with Rights-Token issuances off, no new
+  // issuance is offered (and the send path refuses one before the wallet,
+  // lib/pause-gate.ts MODULE_FLOWS); milestones and claims of existing ones stay.
+  const rightsOn = moduleEnabled("rights");
 
   const refresh = useCallback(async () => {
     try {
@@ -184,13 +189,15 @@ function RightsOps() {
           placeholder="Search by asset, issuance ID…"
           className="min-w-[280px] flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400"
         />
-        <button
-          type="button"
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          + New issuance
-        </button>
+        {rightsOn && (
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            + New issuance
+          </button>
+        )}
       </div>
 
       {data === null ? (
@@ -202,7 +209,7 @@ function RightsOps() {
               ? "No Rights Token issuances yet."
               : "No issuances match the current filter."}
           </p>
-          {data.rightsIssuances.length === 0 && (
+          {data.rightsIssuances.length === 0 && rightsOn && (
             <button
               type="button"
               onClick={() => setShowCreate(true)}
@@ -278,7 +285,7 @@ function RightsOps() {
         />
       )}
 
-      {showCreate && data && (
+      {showCreate && data && rightsOn && (
         <CreateIssuanceModal
           data={data}
           onClose={() => setShowCreate(false)}

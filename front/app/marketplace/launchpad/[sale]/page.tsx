@@ -571,7 +571,10 @@ export default function DealPage({
     settlesOnChain && onChainUnits > BigInt(0) && onChainUnits > remainingUnits;
   // A paused on-chain buy is refused here, before the form is submitted, in
   // the program's words; the send path checks again before the wallet opens.
-  const buyPaused = settlesOnChain ? pausedFlowFor(pauseFlags, AssetRegistryInstruction.Buy) : null;
+  // The raise type is the fact a conditional check of the program reads.
+  const buyPaused = settlesOnChain
+    ? pausedFlowFor(pauseFlags, AssetRegistryInstruction.Buy, { raiseType: saleData.raiseType })
+    : null;
   const canCommit =
     !buyPaused &&
     !!walletAddress &&

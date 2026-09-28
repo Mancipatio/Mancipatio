@@ -118,9 +118,14 @@ export type PilotModules = {
   governance: boolean;
   /** Issuer vesting series (/issuer/vesting-series, /admin/vesting). */
   vesting: boolean;
-  /** Rights-Token issuances and their milestone builder (/admin/rights). */
+  /** Rights-Token issuances, their milestone builder (/admin/rights) and vesting schedules (/issuer/vesting). */
   rights: boolean;
-  /** Distributions to holders: payouts, distribution plans, yield routing. */
+  /**
+   * Distributions to holders: distribution plans (push distributions on
+   * /admin/payouts), payout schedules and yield routing (route_yield). The
+   * Startup payout vault itself (vault votes, snapshots, tranche releases)
+   * belongs to `startupRaises` (features()).
+   */
   distributions: boolean;
   /** Converting units into company equity (custody entry). */
   custodyConversion: boolean;

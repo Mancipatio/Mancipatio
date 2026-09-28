@@ -1,33 +1,48 @@
-// lib/pause-gate.ts: the emergency pause is read BEFORE a wallet signs.
-// PAUSE_BIT_FLOWS is the one map of pause bits to instructions; it must equal
-// the program's own checks (`platform.is_paused(PAUSE_X)` per instruction
-// file) for every bit the front defines. A bit the front does not define yet
-// (8.3 adds 0x40 and 0x80) is 8.3's front part: add the constant to
-// lib/pause-flags.ts and its entry to PAUSE_BIT_FLOWS.
+// lib/pause-gate.ts: the emergency pause and the pilot scope are read BEFORE
+// a wallet signs. PAUSE_BIT_FLOWS is the one map of pause bits to
+// instructions; it must equal the program's own checks
+// (`platform.is_paused(MASK)` per instruction file, MASK one constant or
+// several ORed) for every bit the front defines, conditional exactly where
+// the program's check is (`x || !platform.is_paused(..)`). A bit the front
+// does not define yet (8.3 adds 0x40) is 8.3's front part: add the constant
+// to lib/pause-flags.ts and one entry per check to PAUSE_BIT_FLOWS (with
+// `when` for a conditional one). MODULE_FLOWS maps each pilot-scope module
+// to the on-chain entries it owns.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   AssetRegistryInstruction,
   BUY_DISCRIMINATOR,
   CANCEL_OFFER_DISCRIMINATOR,
+  CREATE_OFFER_DISCRIMINATOR,
+  CREATE_PROPOSAL_DISCRIMINATOR,
   TAKE_OFFER_DISCRIMINATOR,
   getOpenCustodyVaultInstructionDataEncoder,
+  RaiseType,
   RealizeAction,
   VaultType,
 } from "@/lib/generated/asset_registry";
+import { PILOT_MODULE_ENV, PILOT_MODULES, moduleDisabledMessage } from "@/lib/features";
 import * as PAUSE from "@/lib/pause-flags";
 import {
+  assertInstructionsInScope,
   assertInstructionsNotPaused,
   clearPauseFlagsCache,
+  heldBit,
+  MODULE_FLOWS,
+  ModuleDisabledFlowError,
+  outOfScopeInstruction,
   PAUSE_BIT_FLOWS,
   PAUSE_FLAGS_TTL_MS,
-  pauseBitFor,
+  pauseFlowsFor,
+  pauseMaskFor,
   pausedFlowFor,
   pausedInstruction,
   PausedFlowError,
   readPauseFlags,
+  type PauseFlow,
 } from "@/lib/pause-gate";
 import { explainSendError } from "@/lib/tx-error";
 
@@ -37,16 +52,37 @@ const FRONT_BITS: Record<string, number> = Object.fromEntries(
   Object.entries(PAUSE).filter(([name, value]) => /^PAUSE_[A-Z_]+$/.test(name) && name !== "PAUSE_FLAGS_ALL" && typeof value === "number"),
 ) as Record<string, number>;
 
-/** instruction (PascalCase) → the PAUSE_* constants its handler checks. */
-function programChecks(): Map<string, string[]> {
-  const out = new Map<string, string[]>();
-  for (const file of readdirSync(INSTRUCTIONS_DIR).filter((f) => f.endsWith(".rs") && f !== "mod.rs")) {
-    const source = readFileSync(join(INSTRUCTIONS_DIR, file), "utf8");
-    const names = [...source.matchAll(/is_paused\((PAUSE_[A-Z_]+)\)/g)].map((m) => m[1]);
-    if (names.length) out.set(pascal(file.replace(/\.rs$/, "")), [...new Set(names)]);
+type Check = { constant: string; conditional: boolean };
+
+/**
+ * The pause checks of one instruction file: every constant of every
+ * `is_paused(A | B)` mask, and whether the check is conditional (anything
+ * but the plain `constraint = !platform.is_paused(..)` account constraint).
+ */
+function parseChecks(source: string): Check[] {
+  const out: Check[] = [];
+  for (const m of source.matchAll(/is_paused\(([^)]*)\)/g)) {
+    const before = source.slice(Math.max(0, m.index - 80), m.index);
+    const conditional = !/constraint\s*=\s*!\s*platform\s*\.\s*$/.test(before);
+    for (const constant of m[1].split("|").map((c) => c.trim())) {
+      expect(constant, `a pause constant in "${m[0]}"`).toMatch(/^PAUSE_[A-Z_]+$/);
+      if (!out.some((c) => c.constant === constant && c.conditional === conditional)) out.push({ constant, conditional });
+    }
   }
   return out;
 }
+
+/** instruction (PascalCase) → the pause checks its handler makes. */
+function programChecks(): Map<string, Check[]> {
+  const out = new Map<string, Check[]>();
+  for (const file of readdirSync(INSTRUCTIONS_DIR).filter((f) => f.endsWith(".rs") && f !== "mod.rs")) {
+    const checks = parseChecks(readFileSync(join(INSTRUCTIONS_DIR, file), "utf8"));
+    if (checks.length) out.set(pascal(file.replace(/\.rs$/, "")), checks);
+  }
+  return out;
+}
+
+const constantOf = (bit: number) => Object.entries(FRONT_BITS).find(([, value]) => value === bit)?.[0];
 
 const ix = (discriminator: Uint8Array, programAddress: string = ASSET_REGISTRY_PROGRAM_ADDRESS) => ({
   programAddress,
@@ -56,34 +92,88 @@ const ix = (discriminator: Uint8Array, programAddress: string = ASSET_REGISTRY_P
 beforeEach(() => clearPauseFlagsCache());
 
 describe("PAUSE_BIT_FLOWS equals the program's checks", () => {
-  it("every instruction the program pauses under a bit the front defines is mapped to that bit", () => {
+  it("every check the program makes under a bit the front defines is mapped, conditional exactly where the program's is", () => {
     const checks = programChecks();
     expect(checks.size).toBeGreaterThan(15);
-    for (const [name, constants] of checks) {
-      const known = constants.filter((c) => c in FRONT_BITS);
-      if (known.length === 0) continue; // a bit the front does not define yet
-      expect(known, name).toHaveLength(1);
-      const instruction = AssetRegistryInstruction[name as keyof typeof AssetRegistryInstruction];
-      expect(instruction, `${name} is an instruction of the generated client`).toBeDefined();
-      expect(pauseBitFor(instruction), name).toBe(FRONT_BITS[known[0]]);
+    for (const [name, list] of checks) {
+      for (const { constant, conditional } of list) {
+        if (!(constant in FRONT_BITS)) continue; // a bit the front does not define yet
+        const instruction = AssetRegistryInstruction[name as keyof typeof AssetRegistryInstruction];
+        expect(instruction, `${name} is an instruction of the generated client`).toBeDefined();
+        const flows = pauseFlowsFor(instruction).filter((f) => f.bit === FRONT_BITS[constant]);
+        expect(flows, `${name} under ${constant}`).toHaveLength(1);
+        expect(flows[0].when !== undefined, `${name} under ${constant} is conditional`).toBe(conditional);
+      }
     }
   });
 
   it("every mapped instruction is really paused by the program under that bit", () => {
     const checks = programChecks();
     for (const { bit, instructions } of PAUSE_BIT_FLOWS) {
-      const constant = Object.entries(FRONT_BITS).find(([, value]) => value === bit)?.[0];
+      const constant = constantOf(bit);
+      expect(constant, `bit ${bit} is a constant of lib/pause-flags.ts`).toBeDefined();
       for (const instruction of instructions) {
         const name = AssetRegistryInstruction[instruction];
-        expect(checks.get(name), name).toContain(constant);
+        expect(checks.get(name)?.map((c) => c.constant), name).toContain(constant);
       }
     }
   });
 
-  it("covers every defined bit, and no instruction twice", () => {
-    expect(PAUSE_BIT_FLOWS.map((f) => f.bit).sort()).toEqual(PAUSE.PAUSE_FLAGS.map((f) => f.bit).sort());
-    const all = PAUSE_BIT_FLOWS.flatMap((f) => f.instructions);
-    expect(new Set(all).size).toBe(all.length);
+  it("covers every defined bit, and no instruction twice under one bit", () => {
+    expect(new Set(PAUSE_BIT_FLOWS.map((f) => f.bit))).toEqual(new Set(PAUSE.PAUSE_FLAGS.map((f) => f.bit)));
+    const pairs = PAUSE_BIT_FLOWS.flatMap((f) => f.instructions.map((i) => `${f.bit}:${i}`));
+    expect(new Set(pairs).size).toBe(pairs.length);
+  });
+
+  it("reads the program's other forms: a combined mask and a check that depends on an account (8.3)", () => {
+    expect(parseChecks("constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS | PAUSE_PAYOUT_MODULES) @ RegistryError::PlatformPaused,")).toEqual([
+      { constant: "PAUSE_DISTRIBUTIONS", conditional: false },
+      { constant: "PAUSE_PAYOUT_MODULES", conditional: false },
+    ]);
+    expect(parseChecks(
+      "constraint = !platform.is_paused(PAUSE_PRIMARY) @ RegistryError::PlatformPaused,\n" +
+      "ctx.accounts.sale.raise_type != crate::state::RaiseType::Startup\n    || !ctx.accounts.platform.is_paused(PAUSE_PAYOUT_MODULES),",
+    )).toEqual([
+      { constant: "PAUSE_PRIMARY", conditional: false },
+      { constant: "PAUSE_PAYOUT_MODULES", conditional: true },
+    ]);
+  });
+});
+
+describe("the mask model (several bits per instruction, conditional checks)", () => {
+  // 8.3's shapes, on a flow list of their own: RouteYield under two bits, and
+  // Buy under 0x40 only for a Startup sale (a field of the Sale account).
+  const PAYOUT = 0x40;
+  const flows: PauseFlow[] = [
+    { bit: PAUSE.PAUSE_DISTRIBUTIONS, instructions: [AssetRegistryInstruction.RouteYield] },
+    { bit: PAYOUT, instructions: [AssetRegistryInstruction.RouteYield] },
+    { bit: PAUSE.PAUSE_PRIMARY, instructions: [AssetRegistryInstruction.Buy] },
+    {
+      bit: PAYOUT,
+      instructions: [AssetRegistryInstruction.Buy],
+      when: ({ facts }) => (facts.raiseType === undefined ? null : facts.raiseType === RaiseType.Startup),
+    },
+  ];
+  const held = (flags: number, instruction: AssetRegistryInstruction, raiseType?: RaiseType) =>
+    heldBit(flags, instruction, { data: null, facts: raiseType === undefined ? {} : { raiseType } }, flows);
+
+  it("an instruction under two bits is held by either", () => {
+    expect(held(PAUSE.PAUSE_DISTRIBUTIONS, AssetRegistryInstruction.RouteYield)).toBe(PAUSE.PAUSE_DISTRIBUTIONS);
+    expect(held(PAYOUT, AssetRegistryInstruction.RouteYield)).toBe(PAYOUT);
+    expect(held(PAUSE.PAUSE_PRIMARY, AssetRegistryInstruction.RouteYield)).toBeNull();
+  });
+
+  it("a conditional check holds back only when it can tell, and fails open otherwise", () => {
+    expect(held(PAYOUT, AssetRegistryInstruction.Buy)).toBeNull();
+    expect(held(PAYOUT, AssetRegistryInstruction.Buy, RaiseType.Mature)).toBeNull();
+    expect(held(PAYOUT, AssetRegistryInstruction.Buy, RaiseType.Startup)).toBe(PAYOUT);
+    expect(held(PAUSE.PAUSE_PRIMARY | PAYOUT, AssetRegistryInstruction.Buy)).toBe(PAUSE.PAUSE_PRIMARY);
+  });
+
+  it("pauseMaskFor ORs every bit that can stop an instruction", () => {
+    expect(pauseMaskFor(AssetRegistryInstruction.Buy)).toBe(PAUSE.PAUSE_PRIMARY);
+    expect(pauseMaskFor(AssetRegistryInstruction.OpenCustodyVault)).toBe(PAUSE.PAUSE_CUSTODY_ENTRY);
+    expect(pauseMaskFor(AssetRegistryInstruction.CancelOffer)).toBe(0);
   });
 });
 
@@ -167,5 +257,58 @@ describe("the cached read and the gate", () => {
     expect(pausedFlowFor(0, AssetRegistryInstruction.Buy)).toBeNull();
     expect(pausedFlowFor(PAUSE.PAUSE_PRIMARY, AssetRegistryInstruction.Buy)).toMatch(/^Primary issuance is paused/);
     expect(pausedFlowFor(PAUSE.PAUSE_FLAGS_ALL, AssetRegistryInstruction.ClaimRefund)).toBeNull();
+  });
+});
+
+describe("the pilot scope before the wallet (MODULE_FLOWS)", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const clearModules = () => { for (const name of Object.values(PILOT_MODULE_ENV)) vi.stubEnv(name, ""); };
+  const openVault = (vaultType: VaultType, realizeAction: RealizeAction = RealizeAction.BurnAndAttest) => ({
+    programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+    data: new Uint8Array(getOpenCustodyVaultInstructionDataEncoder().encode({
+      vaultId: BigInt(1), vaultType, realizeAction, amount: BigInt(1), deadline: BigInt(0),
+      metadataHash: new Uint8Array(32), beneficiary: "11111111111111111111111111111111" as never,
+    })),
+  });
+
+  it("maps every module, and no exit", () => {
+    expect(new Set(MODULE_FLOWS.map((f) => f.module))).toEqual(new Set(PILOT_MODULES));
+    for (const { instructions } of MODULE_FLOWS) {
+      for (const instruction of instructions) {
+        expect(AssetRegistryInstruction[instruction]).not.toMatch(/^(Cancel|Expire|Claim|Withdraw|Return|Reclaim|Revert|Close|Finalize)/);
+      }
+    }
+  });
+
+  it("mainnet by default: an on-chain OTC offer or a proposal is refused before the wallet; exits and primary buys pass", () => {
+    clearModules();
+    const err = (() => { try { assertInstructionsInScope([ix(CREATE_OFFER_DISCRIMINATOR)], "mainnet"); } catch (e) { return e; } })();
+    expect(err).toBeInstanceOf(ModuleDisabledFlowError);
+    expect((err as Error).message).toBe(`${moduleDisabledMessage("secondaryTrading", "mainnet")} Nothing was sent to your wallet.`);
+    expect(explainSendError(new Error("send failed", { cause: err }))).toBe((err as Error).message);
+    expect(outOfScopeInstruction([ix(TAKE_OFFER_DISCRIMINATOR)], "mainnet")?.module).toBe("secondaryTrading");
+    expect(outOfScopeInstruction([ix(CREATE_PROPOSAL_DISCRIMINATOR)], "mainnet")?.module).toBe("governance");
+    expect(outOfScopeInstruction([ix(CANCEL_OFFER_DISCRIMINATOR)], "mainnet")).toBeNull();
+    expect(outOfScopeInstruction([ix(BUY_DISCRIMINATOR)], "mainnet")).toBeNull();
+    expect(outOfScopeInstruction([ix(CREATE_OFFER_DISCRIMINATOR, "11111111111111111111111111111111")], "mainnet")).toBeNull();
+  });
+
+  it("a switched-on module passes; devnet is on unless switched off", () => {
+    clearModules();
+    vi.stubEnv(PILOT_MODULE_ENV.secondaryTrading, "true");
+    expect(() => assertInstructionsInScope([ix(CREATE_OFFER_DISCRIMINATOR)], "mainnet")).not.toThrow();
+    clearModules();
+    expect(() => assertInstructionsInScope([ix(CREATE_OFFER_DISCRIMINATOR)], "devnet")).not.toThrow();
+    vi.stubEnv(PILOT_MODULE_ENV.secondaryTrading, "off");
+    expect(() => assertInstructionsInScope([ix(CREATE_OFFER_DISCRIMINATOR)], "devnet")).toThrow(ModuleDisabledFlowError);
+  });
+
+  it("custody vaults by type: conversion and delivery are modules, the clawback quarantine vault is not", () => {
+    clearModules();
+    expect(outOfScopeInstruction([openVault(VaultType.ConversionPending)], "mainnet")?.module).toBe("custodyConversion");
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "mainnet")?.module).toBe("custodyDelivery");
+    expect(outOfScopeInstruction([openVault(VaultType.RedemptionQueue)], "mainnet")).toBeNull();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyDelivery, "true");
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "mainnet")).toBeNull();
   });
 });
