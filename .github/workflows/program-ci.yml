@@ -36,6 +36,15 @@ jobs:
   # yanked crates) against the Cargo.lock the verifiable build uses. Warnings
   # (unmaintained, unsound) are printed, not fatal; a vulnerability fails.
   # cargo-audit itself is installed at a pinned version with its own lockfile.
+  # Baseline 2026-09-28 (cargo-audit 0.22.2, 1271 advisories, 399 crates):
+  # 0 vulnerabilities, so no --ignore; 7 warnings, all transitive through the
+  # Solana/Anchor/LiteSVM stack: unmaintained ansi_term (RUSTSEC-2021-0139,
+  # litesvm), bincode 1.3 (RUSTSEC-2025-0141), derivative (RUSTSEC-2024-0388)
+  # and paste (RUSTSEC-2024-0436) via solana-bn254/poseidon, libsecp256k1 0.6
+  # (RUSTSEC-2025-0161, agave-syscalls); unsound anyhow Error::downcast_mut
+  # (RUSTSEC-2026-0190, anchor build-time crates) and rand 0.7 with a custom
+  # logger (RUSTSEC-2026-0097). An ignore added later names its advisory and
+  # why here, never a blanket flag.
   audit:
     name: cargo audit (RustSec)
     runs-on: ubuntu-24.04

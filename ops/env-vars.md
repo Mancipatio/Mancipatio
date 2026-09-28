@@ -18,15 +18,15 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 
 | Variable | Kind | Mainnet | Devnet | When unset | Read by |
 |---|---|---|---|---|---|
-| `NEXT_PUBLIC_NETWORK` | Public, build | `mainnet` (guard) | `devnet` | Vercel builds refuse; locally sniffed from the RPC URL, else devnet | `lib/network.ts` |
+| `NEXT_PUBLIC_NETWORK` | Public, build | `mainnet` (guard) | `devnet` | Vercel builds refuse; any production build refuses when the RPC URL names mainnet; locally sniffed from the RPC URL, else devnet | `lib/network.ts` |
 | `NEXT_PUBLIC_SITE_URL` | Public, build | https origin of the site (guard `site-url`) | `https://www.manci.io` | Email sign-in, account emails and links answer 503 in production | `lib/server/account-origin.ts`, alert links |
 | `NEXT_PUBLIC_SUPABASE_URL` | Public, build | `https://<mainnet ref>.supabase.co` (guard; ref recorded in `SUPABASE_PROJECT_REFS` and `scripts/ops/targets.json`) | devnet project | No database | `lib/supabase*.ts` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public, build | `sb_publishable_…` (guard) | publishable key | No browser database reads | `lib/supabase.ts` |
 | `NEXT_PUBLIC_KYC_REGISTRY` | Public, build | platform KYC registry address (guard) | registry address | Mainnet and Vercel production refuse; else scan fallback | `lib/kyc-registry-pin.ts` |
-| `NEXT_PUBLIC_SOLANA_RPC_URL` | Public, build | https URL of the paid provider, a **browser key restricted to the site's origin** (guard) | optional | Public cluster endpoint (mainnet: api.mainnet-beta, unusable under load) | `lib/network.ts` |
-| `NEXT_PUBLIC_SOLANA_WS_URL` | Public, build | wss URL of the same provider (guard) | optional | Derived from the RPC URL | `lib/network.ts` |
+| `NEXT_PUBLIC_SOLANA_RPC_URL` | Public, build | https URL of the paid provider, a **browser key restricted to the site's origin** (guard; refused when it carries the server URL's key, path token or user info, or is the server's endpoint) | optional | Public cluster endpoint (mainnet: api.mainnet-beta, unusable under load) | `lib/network.ts` |
+| `NEXT_PUBLIC_SOLANA_WS_URL` | Public, build | wss URL of the same provider, with the browser key (guard; the same server-key check) | optional | Derived from the RPC URL | `lib/network.ts` |
 | `NEXT_PUBLIC_SOLANA_GENESIS_HASH` | Public, build | leave unset | leave unset | Built-in cluster hashes (a conflicting value is refused); localnet requires it | `lib/network-identity.ts` |
-| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Public, build | Turnstile widget of the mainnet domain (guard `turnstile`) | recommended | No bot check on email sign-in and the contact form | `lib/turnstile.ts` |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Public, build | Turnstile widget of the mainnet domain, never a Cloudflare test key (guard `turnstile`) | recommended | No bot check on email sign-in and the contact form | `lib/turnstile.ts` |
 | `NEXT_PUBLIC_ALLOW_INDEXING` | Public, build | `true` to be indexed (Vercel production only) | unset | `noindex` | `lib/indexing.ts` |
 | `NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
@@ -41,18 +41,19 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `ALERT_WEBHOOK_URL` | Secret (the URL is the credential) | https (guard `alert-webhook`) | recommended | Email is the only alert channel | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_TOKEN` | Secret | optional (bearer for ntfy or a relay) | optional | No Authorization header | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_MIN_SEVERITY` | Public | `high` (default) | default | `high`; without email the webhook takes every row | `lib/server/system-alerts.ts` |
-| `ALARM_BALANCE_WATCH` | Public (keys) | recommended: every key that signs in an emergency | optional | No balance alarm | `lib/server/ops-watch.ts` |
+| `ALERT_WEBHOOK_FORMAT` | Public | `json` (ntfy, a relay) or `text` (Slack, Mattermost, Google Chat: `{"text": …}` only) | default | `json` | `lib/server/system-alerts.ts` |
+| `ALARM_BALANCE_WATCH` | Public (keys) | recommended: every key that signs in an emergency (one company wallet may be listed under each of its roles) | optional | No balance alarm | `lib/server/ops-watch.ts` |
 | `ALARM_SQUADS_CONFIG` | Public | recommended: the role map's `squads` object | — | No Squads watch | `lib/server/ops-watch.ts` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` | Public config | required (email) | set | Resend fallback, else no email | `lib/server/email.ts` |
 | `SMTP_PASS` | Secret | required, its own mailbox or password for mainnet | set | as above | `lib/server/email.ts` |
 | `EMAIL_FROM` | Public | required | set | No email | `lib/server/email.ts` |
 | `RESEND_API_KEY` | Secret | optional (fallback transport) | optional | SMTP only | `lib/server/email.ts` |
 | `CONTACT_NOTIFY_EMAIL` | Public | recommended | set | Contact submissions are stored, not mailed | `app/api/inquiries/create` |
-| `TURNSTILE_SECRET_KEY` | Secret | required with the site key (guard `turnstile`) | recommended | Tokens not checked | `lib/server/turnstile.ts` |
+| `TURNSTILE_SECRET_KEY` | Secret | required with the site key, never a Cloudflare test key (guard `turnstile`; the server answers 503 with one in production) | recommended | Tokens not checked | `lib/server/turnstile.ts` |
 | `GOOGLE_CLIENT_ID` | Public | a **separate** OAuth client with the mainnet redirect URIs | set | Google sign-in off | `lib/server/account-google.ts` |
 | `GOOGLE_CLIENT_SECRET` | Secret | of that client | set | Google sign-in off | `lib/server/account-google.ts` |
 | `HEALTH_TOKEN` | Secret | ≥ 32, no whitespace (guard `health-token`) | recommended | `/api/health` never shows details | `lib/server/health.ts` |
-| `SENTRY_DSN` | Secret-ish (project key) | https DSN of an EU (`*.de.sentry.io`) project (guard `sentry`) | recommended | Server errors only in Vercel logs | `lib/request-error-report.ts` |
+| `SENTRY_DSN` | Secret-ish (project key) | `https://<key>@<org>.ingest.de.sentry.io/<project id>` of an EU project: the guard `sentry` applies the runtime parser's rules | recommended | Server errors only in Vercel logs | `lib/request-error-report.ts` |
 | `MAINNET_LEGAL_COPY_APPROVED` | Build | `true` once counsel's mainnet copy is merged (guard) | — | Mainnet build refused | `next.config.ts` |
 | `MAINNET_OPS_WAIVERS` | Build | empty; see below | — | Every operations guard applies | `next.config.ts` |
 | `VERCEL`, `VERCEL_ENV`, `VERCEL_GIT_COMMIT_SHA`, `NODE_ENV` | Platform | set by Vercel | set by Vercel | — | build guards, `/api/health` commit |

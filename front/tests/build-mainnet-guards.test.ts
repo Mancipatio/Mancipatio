@@ -11,9 +11,14 @@ import {
   MAINNET_OPS_REQUIREMENTS,
   assertBuildFeatureFlags,
   assertBuildMainnetOps,
+  assertBuildNetwork,
   assertBuildRpc,
+  buildNetwork,
   contentSecurityPolicy,
+  isTurnstileTestKey,
+  sentryDsnUsable,
 } from "@/next.config";
+import { parseSentryDsn } from "@/lib/request-error-report";
 import { summarizeCspReport } from "@/lib/server/csp-report";
 import { POST as cspReport } from "@/app/api/csp-report/route";
 
@@ -33,8 +38,9 @@ const OPS = {
   HELIUS_MAINNET_RPC: "https://mainnet.helius-rpc.com/?api-key=server-key",
   SENTRY_DSN: "https://abc123@o1.ingest.de.sentry.io/42",
   HEALTH_TOKEN: "h".repeat(32),
-  TURNSTILE_SECRET_KEY: "1x0000000000000000000000000000000AA",
-  NEXT_PUBLIC_TURNSTILE_SITE_KEY: "1x00000000000000000000AA",
+  // Not Cloudflare's test keys: the guard refuses those (the server would answer 503).
+  TURNSTILE_SECRET_KEY: "0x4AAAAAAA-placeholder-secret",
+  NEXT_PUBLIC_TURNSTILE_SITE_KEY: "0x4AAAAAAA-placeholder-site",
   ALERT_WEBHOOK_URL: "https://alerts.example/hook",
   SESSION_SECRET: "s".repeat(48),
   NEXT_PUBLIC_SITE_URL: "https://www.manci.io",
@@ -58,6 +64,42 @@ describe("assertBuildRpc", () => {
     ];
     for (const [over, error] of cases) expect(() => assertBuildRpc(BUILD, { ...OPS, ...over }, warn), JSON.stringify(over)).toThrow(error);
     expect(() => assertBuildRpc(BUILD, { ...OPS, HELIUS_MAINNET_RPC: "", SOLANA_MAINNET_RPC: "https://rpc.other.example" }, warn)).not.toThrow();
+  });
+
+  it("refuses a browser RPC or WebSocket URL that carries the server's credential or is the server's endpoint", () => {
+    const serverUrl = OPS.HELIUS_MAINNET_RPC;
+    const cases: Record<string, string | undefined>[] = [
+      // The one Helius URL pasted into both.
+      { NEXT_PUBLIC_SOLANA_RPC_URL: serverUrl },
+      // The server key under the browser's own host or parameter spelling.
+      { NEXT_PUBLIC_SOLANA_RPC_URL: "https://browser.rpc.example/?apiKey=server-key" },
+      { NEXT_PUBLIC_SOLANA_WS_URL: "wss://mainnet.helius-rpc.com/?api-key=server-key" },
+      // A secure URL (the token is the path or the host) shared with SOLANA_MAINNET_RPC.
+      { SOLANA_MAINNET_RPC: "https://x.quiknode.example/0123456789abcdef0123/", NEXT_PUBLIC_SOLANA_RPC_URL: "https://x.quiknode.example/0123456789abcdef0123" },
+      { HELIUS_MAINNET_RPC: "https://acme-fast-mainnet.helius-rpc.com", NEXT_PUBLIC_SOLANA_WS_URL: "wss://acme-fast-mainnet.helius-rpc.com" },
+    ];
+    for (const over of cases) {
+      expect(() => assertBuildRpc(BUILD, { ...OPS, ...over }, vi.fn()), JSON.stringify(over)).toThrow(/carries the server RPC credential/);
+    }
+    // The WebSocket URL's api-key warns like the HTTP one.
+    const warn = vi.fn();
+    assertBuildRpc(BUILD, OPS, warn);
+    expect(warn).toHaveBeenCalledWith(expect.stringMatching(/^NEXT_PUBLIC_SOLANA_WS_URL carries an api-key/));
+  });
+
+  it("guards a build that will run as mainnet without NEXT_PUBLIC_NETWORK (the network sniffed from the RPC URL)", () => {
+    const sniffed = { ...OPS, NEXT_PUBLIC_NETWORK: undefined, NEXT_PUBLIC_SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=browser-key" };
+    expect(buildNetwork(sniffed)).toBe("mainnet");
+    expect(buildNetwork({ NEXT_PUBLIC_SOLANA_RPC_URL: "https://devnet.helius-rpc.com" })).toBe("devnet");
+    expect(buildNetwork({})).toBe("devnet");
+    // assertBuildNetwork (8.1) refuses it before any 8.4 guard runs.
+    expect(() => assertBuildNetwork(BUILD, sniffed)).toThrow(/would run as mainnet .* without NEXT_PUBLIC_NETWORK/);
+    expect(() => assertBuildNetwork(BUILD, { ...OPS, MAINNET_LEGAL_COPY_APPROVED: "true" })).not.toThrow();
+    expect(() => assertBuildNetwork(BUILD, { NEXT_PUBLIC_SOLANA_RPC_URL: "https://api.devnet.solana.com" })).not.toThrow();
+    expect(() => assertBuildNetwork(DEV, sniffed)).not.toThrow();
+    // The RPC and operations guards apply to it as well.
+    expect(() => assertBuildRpc(BUILD, { ...sniffed, NEXT_PUBLIC_SOLANA_WS_URL: undefined }, vi.fn())).toThrow(/NEXT_PUBLIC_SOLANA_WS_URL is not set/);
+    expect(() => assertBuildMainnetOps(BUILD, { ...sniffed, SENTRY_DSN: "" })).toThrow(/\[sentry\]/);
   });
 
   it("leaves other networks, dev and the production server alone", () => {
@@ -91,6 +133,27 @@ describe("assertBuildMainnetOps", () => {
     expect(warn).toHaveBeenCalledWith(expect.stringMatching(/waived .*sentry, health-token/));
     expect(() => assertBuildMainnetOps(BUILD, { ...env, MAINNET_OPS_WAIVERS: "sentry" }, warn)).toThrow(/\[health-token\]/);
     expect(() => assertBuildMainnetOps(BUILD, { ...OPS, MAINNET_OPS_WAIVERS: "sentyr" }, warn)).toThrow(/unknown requirement\(s\): sentyr/);
+  });
+
+  it("sentry: exactly the DSNs the runtime accepts (parseSentryDsn)", () => {
+    const dsns = [
+      OPS.SENTRY_DSN, "https://abc123@o1.ingest.de.sentry.io/prefix/42", " https://k@o9.ingest.de.sentry.io/7 ",
+      "https://key@o1.ingest.de.sentry.io/", "https://key@o1.ingest.de.sentry.io/abc", "https://@o1.ingest.de.sentry.io/42",
+      "https://bad-key!@o1.ingest.de.sentry.io/42", "http://abc@o1.ingest.de.sentry.io/42", "https://abc@o1.ingest.us.sentry.io/42",
+      "https://abc@o1.ingest.de.sentry.io.evil.example/42", "not a url", "", undefined,
+    ];
+    for (const dsn of dsns) expect(sentryDsnUsable(dsn), String(dsn)).toBe(parseSentryDsn(dsn) !== null);
+    expect(() => assertBuildMainnetOps(BUILD, { ...OPS, SENTRY_DSN: "https://key@o1.ingest.de.sentry.io/" })).toThrow(/\[sentry\]/);
+  });
+
+  it("turnstile: Cloudflare's test keys do not satisfy the guard", () => {
+    for (const key of ["1x00000000000000000000AA", "2x00000000000000000000AB", "1x00000000000000000000BB", "3x00000000000000000000FF",
+      "1x0000000000000000000000000000000AA", "2x0000000000000000000000000000000AA", "3x0000000000000000000000000000000AA"]) {
+      expect(isTurnstileTestKey(key), key).toBe(true);
+    }
+    expect(isTurnstileTestKey("0x4AAAAAAABkMYinukE8nzY")).toBe(false);
+    expect(() => assertBuildMainnetOps(BUILD, { ...OPS, TURNSTILE_SECRET_KEY: "1x0000000000000000000000000000000AA" })).toThrow(/\[turnstile\]/);
+    expect(() => assertBuildMainnetOps(BUILD, { ...OPS, NEXT_PUBLIC_TURNSTILE_SITE_KEY: "1x00000000000000000000AA" })).toThrow(/\[turnstile\]/);
   });
 
   it("checks mainnet production builds only", () => {

@@ -293,6 +293,23 @@ export function assertBuildKycRegistry(
 
 const PUBLIC_CLUSTER_HOSTS = ["api.mainnet-beta.solana.com", "api.devnet.solana.com", "api.testnet.solana.com"];
 
+/**
+ * The credential-bearing parts of an RPC URL: the values of query parameters
+ * named like a key or token (Helius `api-key`), user info, and long path
+ * segments (a "secure URL" token such as QuickNode's).
+ */
+function rpcCredentials(url: URL): string[] {
+  const out: string[] = [];
+  for (const [name, value] of url.searchParams) if (/key|token|secret|auth/i.test(name) && value) out.push(value);
+  for (const segment of url.pathname.split("/")) if (segment.length >= 16) out.push(segment);
+  if (url.username) out.push(url.username);
+  if (url.password) out.push(url.password);
+  return out;
+}
+
+/** host + path + query, whatever the scheme (https and wss of one endpoint compare equal). */
+const endpointOf = (url: URL) => `${url.host.toLowerCase()}${url.pathname.replace(/\/+$/, "")}${url.search}`;
+
 function parsedUrl(value: string | undefined): URL | null {
   try {
     return value?.trim() ? new URL(value.trim()) : null;
@@ -314,8 +331,14 @@ function parsedUrl(value: string | undefined): URL | null {
  *     "allowed domains" or a secure RPC URL), never the server key;
  *   - HELIUS_MAINNET_RPC or SOLANA_MAINNET_RPC (https, not public): the
  *     server resolver (lib/server/rpc.ts) already fails closed without it at
- *     runtime; the build says so first.
- * An RPC URL carrying an api-key parameter only warns: it must be the
+ *     runtime; the build says so first;
+ *   - neither browser URL may carry a server URL's credential (the api-key
+ *     value, a path token, user info) or be the same endpoint (host, path and
+ *     query): Helius hands out one URL, and pasting it into both would ship
+ *     the unrestricted server key in the public bundle, where anyone can
+ *     spend its credits and rate limit until the server's fail-closed RPC
+ *     stops authorizing.
+ * A browser URL carrying an api-key parameter still warns: it must be the
  * domain-restricted browser key.
  */
 export function assertBuildRpc(
@@ -324,7 +347,7 @@ export function assertBuildRpc(
   warn: (message: string) => void = console.warn,
 ): void {
   if (phase !== PHASE_PRODUCTION_BUILD) return;
-  if ((env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() ?? "") !== "mainnet") return;
+  if (buildNetwork(env) !== "mainnet") return;
   const check = (name: string, protocol: string, value: string | undefined) => {
     const url = parsedUrl(value);
     if (!url) {
@@ -337,14 +360,49 @@ export function assertBuildRpc(
     return url;
   };
   const browser = check("NEXT_PUBLIC_SOLANA_RPC_URL", "https:", env.NEXT_PUBLIC_SOLANA_RPC_URL);
-  check("NEXT_PUBLIC_SOLANA_WS_URL", "wss:", env.NEXT_PUBLIC_SOLANA_WS_URL);
+  const ws = check("NEXT_PUBLIC_SOLANA_WS_URL", "wss:", env.NEXT_PUBLIC_SOLANA_WS_URL);
   const server = env.HELIUS_MAINNET_RPC?.trim() ? "HELIUS_MAINNET_RPC" : "SOLANA_MAINNET_RPC";
   check(server, "https:", env[server]);
-  if (/api[-_]?key=/i.test(browser.search)) {
-    warn("NEXT_PUBLIC_SOLANA_RPC_URL carries an api-key and is inlined into the browser bundle: it must be a key " +
-      "restricted to this site's origin, never the server key (HELIUS_MAINNET_RPC).");
+  // Every server URL that is set (the resolver falls back from one to the other).
+  const servers = ["HELIUS_MAINNET_RPC", "SOLANA_MAINNET_RPC"]
+    .map((name) => ({ name, url: parsedUrl(env[name]) })).filter((s): s is { name: string; url: URL } => s.url !== null);
+  for (const [name, url] of [["NEXT_PUBLIC_SOLANA_RPC_URL", browser], ["NEXT_PUBLIC_SOLANA_WS_URL", ws]] as const) {
+    const exposed = new Set(rpcCredentials(url));
+    for (const s of servers) {
+      if (endpointOf(url) === endpointOf(s.url) || rpcCredentials(s.url).some((c) => exposed.has(c))) {
+        throw new Error(`Refusing a mainnet build: ${name} carries the server RPC credential (${s.name}). It is inlined into ` +
+          "the public bundle: use a separate browser key restricted to this site's origin (ops/env-vars.md).");
+      }
+    }
+    if (/api[-_]?key=/i.test(url.search)) {
+      warn(`${name} carries an api-key and is inlined into the browser bundle: it must be a key ` +
+        "restricted to this site's origin, never the server key (HELIUS_MAINNET_RPC).");
+    }
   }
 }
+
+/**
+ * lib/request-error-report.ts parseSentryDsn's rules, spelled out (no runtime
+ * imports here; tests/build-mainnet-guards.test.ts runs both over the same
+ * DSNs): https, a public key of 1–64 letters and digits, a numeric project id
+ * as the last path segment, an EU-region (*.de.sentry.io) host. A DSN the
+ * runtime would drop must not satisfy the guard.
+ */
+export function sentryDsnUsable(value: string | undefined): boolean {
+  const url = parsedUrl(value);
+  if (!url) return false;
+  const project = url.pathname.split("/").filter(Boolean).pop();
+  return url.protocol === "https:" && /^[A-Za-z0-9]{1,64}$/.test(url.username) && !!project && /^\d{1,20}$/.test(project)
+    && /\.de\.sentry\.io$/i.test(url.hostname);
+}
+
+/**
+ * Cloudflare's published Turnstile test keys (site keys 1x…AA, 2x…AB,
+ * 1x/2x…BB, 3x…FF; secrets 1x/2x/3x…AA): they pass the build but the server
+ * refuses a test secret in production (lib/server/turnstile.ts: 503 on every
+ * email sign-in and contact submission).
+ */
+export const isTurnstileTestKey = (value: string | undefined) => /^[0-9]x0+[A-F]{2}$/i.test(value?.trim() ?? "");
 
 /**
  * What a mainnet deployment needs to be operated (front-app-8, front-app-12,
@@ -356,11 +414,9 @@ export function assertBuildRpc(
 export const MAINNET_OPS_REQUIREMENTS: Readonly<Record<string, { why: string; ok: (env: Record<string, string | undefined>) => boolean }>> = {
   // Server errors go to Sentry only with an https EU (*.de.sentry.io) DSN (lib/request-error-report.ts).
   sentry: {
-    why: "SENTRY_DSN must be the https DSN of an EU-region Sentry project (*.de.sentry.io): without it server errors are only in short-lived logs",
-    ok: (env) => {
-      const url = parsedUrl(env.SENTRY_DSN);
-      return !!url && url.protocol === "https:" && !!url.username && /\.de\.sentry\.io$/i.test(url.hostname);
-    },
+    why: "SENTRY_DSN must be the https DSN of an EU-region Sentry project (https://<key>@<org>.ingest.de.sentry.io/<project id>): " +
+      "without it server errors are only in short-lived logs",
+    ok: (env) => sentryDsnUsable(env.SENTRY_DSN),
   },
   // /api/health details (commit, failing check) need a bearer of at least 32 characters (lib/server/health.ts).
   "health-token": {
@@ -372,8 +428,10 @@ export const MAINNET_OPS_REQUIREMENTS: Readonly<Record<string, { why: string; ok
   },
   // Email sign-in and the contact form have no bot protection without both keys (lib/server/turnstile.ts).
   turnstile: {
-    why: "TURNSTILE_SECRET_KEY and NEXT_PUBLIC_TURNSTILE_SITE_KEY must both be set: email sign-in and the contact form are otherwise unprotected",
-    ok: (env) => Boolean(env.TURNSTILE_SECRET_KEY?.trim() && env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim()),
+    why: "TURNSTILE_SECRET_KEY and NEXT_PUBLIC_TURNSTILE_SITE_KEY must both be set, and neither may be a Cloudflare test key: " +
+      "email sign-in and the contact form are otherwise unprotected (or, with a test secret, refused in production)",
+    ok: (env) => Boolean(env.TURNSTILE_SECRET_KEY?.trim() && env.NEXT_PUBLIC_TURNSTILE_SITE_KEY?.trim())
+      && !isTurnstileTestKey(env.TURNSTILE_SECRET_KEY) && !isTurnstileTestKey(env.NEXT_PUBLIC_TURNSTILE_SITE_KEY),
   },
   // The second alert channel (lib/server/system-alerts.ts): email alone is one mailbox on one server.
   "alert-webhook": {
@@ -401,7 +459,7 @@ export function assertBuildMainnetOps(
   warn: (message: string) => void = console.warn,
 ): void {
   if (phase !== PHASE_PRODUCTION_BUILD) return;
-  if ((env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() ?? "") !== "mainnet") return;
+  if (buildNetwork(env) !== "mainnet") return;
   const waivers = (env.MAINNET_OPS_WAIVERS ?? "").split(",").map((w) => w.trim().toLowerCase()).filter(Boolean);
   const unknown = waivers.filter((w) => !(w in MAINNET_OPS_REQUIREMENTS));
   if (unknown.length) {
@@ -595,7 +653,9 @@ export default function config(phase: string): NextConfig {
   assertBuildTurnstile(phase);
   assertBuildKycRegistry(phase);
   assertBuildMainnetLegal(phase);
-  // 8.4: mainnet RPC, operations and feature-flag guards.
+  // 8.4: mainnet RPC, operations and feature-flag guards. A build that would
+  // run as mainnet without NEXT_PUBLIC_NETWORK is already refused by
+  // assertBuildNetwork, and these guards key on buildNetwork() as well.
   assertBuildRpc(phase);
   assertBuildMainnetOps(phase);
   assertBuildFeatureFlags(phase);
