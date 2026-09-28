@@ -289,7 +289,7 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, operator keys onboarded on the protected site | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps on the protected site → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
-| D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings | super admin | §13, §14 step 8 |
+| D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list") | super admin | §8, §13, §14 step 8, §15 |
 | D11 | **Talas 7 go-live**: Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
@@ -479,14 +479,10 @@ checks that each page exists and performs its action):
   **clicks Refresh**, then **S6** on **`/admin/platform`**: PauseFlagsPanel →
   "Resume everything" (the accept gave the SA its Admin record, so the admin
   area opens).
-  **Pilot scope (8.5):** for the closed pilot, resume per area instead and
-  keep *Trading through Manci* (0x04), *Custody entry* (0x08) and
-  *Distributions* (0x10) paused (flags 0x1c) for as long as their module
-  switches are off (`ops/env-vars.md`, "Pilot scope"): the program then
-  refuses those flows too, and the front says so before any wallet opens
-  (`front/lib/pause-gate.ts`). Governance, vesting-series creation and
-  payout-vault opening read no pause bit today; only the module switches
-  hide them (8.3 adds bits for part of that).
+  S6 clears **every** bit, as the tool plans it (`chain:bootstrap` checks
+  `pauseFlags = 0` after S6, and S7 is planned only then; do not use
+  `CHAIN_HANDOVER_WHILE_PAUSED`, which is for an emergency). The pilot's
+  pause mask is set **after** the handover (§8, "Pilot pause mask").
 
 `accept_platform_admin` closes the deployer's Admin record and creates the
 SA's; no `add_admin(SA)` is ever needed. With the company wallet model (§19)
@@ -556,6 +552,19 @@ exists for an emergency only.
   its ProgramData and System, so an extra account cannot turn into a transfer
   destination. The preconditions list each program, its PDA and each
   transfer: check them before approving. Import, approve, execute.
+- **Pilot pause mask (8.5).** For the closed pilot, pause *Trading through
+  Manci* (0x04), *Custody entry* (0x08) and *Distributions* (0x10), flags
+  **0x1c**, on **`/admin/platform`** → PauseFlagsPanel, one "Pause" per area
+  (any Admin may SET bits; only the Super Admin clears them), for as long as
+  their module switches are off (`ops/env-vars.md`, "Pilot scope"). The
+  program then refuses those flows too, and the front says so before any
+  wallet opens (`front/lib/pause-gate.ts`). Governance, vesting-series
+  creation and custody-vault types read no pause bit of their own; the
+  module switches hide them and the wallet path refuses them before the
+  wallet opens (`MODULE_FLOWS` in the same file); 8.3 adds 0x40 for the
+  payout modules. After an incident's "Resume everything", set the mask
+  again. Check: `/admin/platform` shows exactly those three areas paused
+  (`0x1c`) **before the first sale opens** (D10).
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
 - Drain the deployer to the treasury or cold storage.
 - Other vault actions check their inputs against the role map:
@@ -1678,16 +1687,35 @@ and its daily job running **before the first sale opens**:
    enable `mancipatio-sanctions-<network>` (`cron.alter_job(..., active := true)`);
 3. `/admin/compliance` → "Wallet screening lists" shows `fresh`. "Refresh
    now" runs the same job by hand. The alarm worker's `sanctions-list`
-   incident (high on mainnet) pages when the list goes older than 3 days.
+   incident pages in two steps on mainnet: **medium** as soon as the last
+   refresh attempt failed or the list is older than 36 hours (the routes
+   still work: fix the job or the parser now), **high** when it is older
+   than 3 days, empty or unreadable (the routes refuse from then on).
 
 **A hit** opens one critical alert per wallet (emailed through the alarm
 outbox) and the request is refused; an open alert also blocks passport
 issuance. The alert's "Prepare the blocklist entry" link opens
 `/admin/blocklist` with the wallet filled in: the BlocklistAuthority reviews
-and signs `add_to_blocklist` (nothing is sent automatically). A hit on
-`launchpad/record-purchase` means the buy already landed (an Open class
-mints without the hook; the alert carries the transaction): blocklist, then
-claw back per the clawback procedure. What the baseline does not do: EU and
+and signs `add_to_blocklist` (nothing is sent automatically). The buy
+itself cannot be refused off-chain (an Open class mints without the hook,
+and the program has no buyer blocklist check), so the buyer is screened
+after the fact in two places, and a hit there means the buy **already
+landed** (the alert carries the transaction): blocklist, then claw back per
+the clawback procedure:
+- `launchpad/record-purchase` (route `launchpad/record-purchase`): the
+  record is written anyway (it must match the chain) and the hit is
+  reported; it never answers 403 or 503;
+- the alarm worker (route `on-chain buy (indexer)`, role `onchain-signer`):
+  it screens the signer of every finalized `buy`, `create_offer` and
+  `take_offer` the indexer delivers, **also for a wallet that calls the
+  program with its own script** and never touches the site. With the list
+  unusable on mainnet the job stays pending (`SANCTIONS_UNAVAILABLE`) and
+  is screened once the list is fresh again.
+The sale page's pre-check (`compliance/screen-wallet`) stops a listed buyer
+who uses the UI before the wallet opens; that is the only screen that
+prevents rather than detects. A wallet on the OFAC list that is not yet on
+the on-chain blocklist passes the program also after 8.3, so the
+after-the-fact screen stays. What the baseline does not do: EU and
 UN lists, batch rescreening of existing holders, risk scoring; those need a
 provider (Chainalysis, TRM, …) plugged into `SANCTIONS_PROVIDERS`, and
 counsel decides whether the pilot needs them.
