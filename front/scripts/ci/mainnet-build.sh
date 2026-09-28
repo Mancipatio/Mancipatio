@@ -36,6 +36,12 @@
 #     committed slots stay as they are (null until counsel delivers), and
 #     tests/legal-slots.test.ts checks those. The fixture avoids the words the
 #     guard treats as drafts (placeholder, TODO, TBD, devnet, ...).
+# A run killed where no trap fires (SIGKILL, OOM) leaves the fixture in those
+# files: the next run then refuses to start (it would back the fixture up as
+# the original and put it back on exit), and tests/legal-slots.test.ts fails
+# on a committed leftover. Outside CI, the full build in step 2 leaves a
+# mainnet .next/ that names the fixture company: restore() deletes .next/
+# once step 2 has started, so `next start` cannot serve it.
 # A guard added later needs its placeholder here (PLACEHOLDERS, or the
 # fixture) and, ideally, its own refusal case.
 set -euo pipefail
@@ -43,22 +49,37 @@ set -euo pipefail
 [ -f next.config.ts ] || { echo "Run from front/" >&2; exit 2; }
 export NEXT_TELEMETRY_DISABLED=1
 
+EDITED=(next.config.ts lib/legal/operator.ts lib/legal/mainnet-copy.ts lib/legal/risk-warning.ts)
+# The fixture's marker (HEADER in legal-fixture.cjs) and the placeholder
+# Supabase ref: neither may be in a file before this script edits it.
+FIXTURE_MARKER="CI FIXTURE (scripts/ci/mainnet-build.sh)"
+PLACEHOLDER_REF="cimainnetplaceholder"
+leftover="$(grep -lF -e "$FIXTURE_MARKER" -e "$PLACEHOLDER_REF" "${EDITED[@]}" || true)"
+if [ -n "$leftover" ]; then
+  echo "::error::a CI fixture from an earlier run is still in: $(tr '\n' ' ' <<<"$leftover")- restore those files (git checkout -- <file>) and run again" >&2
+  exit 2
+fi
+
 WORK="$(mktemp -d)"
 LOG="$WORK/build.log"
-EDITED=(next.config.ts lib/legal/operator.ts lib/legal/mainnet-copy.ts lib/legal/risk-warning.ts)
 for file in "${EDITED[@]}"; do
   mkdir -p "$WORK/orig/$(dirname "$file")"
   cp "$file" "$WORK/orig/$file"
 done
+FULL_BUILD=0
 restore() {
   for file in "${EDITED[@]}"; do cp "$WORK/orig/$file" "$file"; done
   rm -rf "$WORK"
+  if [ "$FULL_BUILD" = 1 ] && [ -z "${CI:-}" ]; then
+    rm -rf .next
+    echo "removed .next/ (a mainnet build of the CI fixture); run next build again before next start"
+  fi
 }
 trap restore EXIT
 trap 'exit 130' INT TERM
 
 RECORDED_REF="$(node -p "require('./scripts/ops/targets.json').mainnet.projectRef ?? ''")"
-REF="${RECORDED_REF:-cimainnetplaceholder}"
+REF="${RECORDED_REF:-$PLACEHOLDER_REF}"
 
 PLACEHOLDERS=(
   NEXT_PUBLIC_NETWORK=mainnet
@@ -90,6 +111,7 @@ const path = require("node:path");
 const [orig, variant] = process.argv.slice(2);
 const VARIANTS = ["licence", "no-licence", "incomplete-operator", "devnet-copy", "draft-warning"];
 if (!VARIANTS.includes(variant)) throw new Error(`unknown legal fixture variant: ${variant}`);
+// Contains FIXTURE_MARKER (the script refuses to start on a file that holds it).
 const HEADER = "// ── CI FIXTURE (scripts/ci/mainnet-build.sh): this checkout only, restored on exit ──";
 const json = (value) => JSON.stringify(value, null, 2);
 const append = (file, code) =>
@@ -228,4 +250,5 @@ expect_refusal "\[turnstile\]" "${PLACEHOLDERS[@]}" TURNSTILE_SECRET_KEY=1x00000
 expect_refusal "is not a flag value" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_ISSUER_ROTATION=ture
 
 echo "== 2. the guards pass and the mainnet variant compiles"
+FULL_BUILD=1
 env "${PLACEHOLDERS[@]}" npx next build

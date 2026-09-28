@@ -137,7 +137,8 @@ jobs:
         run: bash scripts/ci/mainnet-build.sh
 
   # front-app-16 / ops-qa-14: no HIGH (or critical) advisory in the production
-  # dependency tree. Dev-only advisories are left to Dependabot.
+  # dependency tree, nor in the chain:emergency Ledger packages. Dev-only
+  # advisories are left to Dependabot.
   audit:
     name: npm audit (production, high)
     runs-on: ubuntu-24.04
@@ -151,6 +152,13 @@ jobs:
 
       - name: Audit the production dependencies (lockfile)
         run: npm audit --omit=dev --audit-level=high
+
+      # The pinned Ledger packages chain:emergency signs with, on the operator
+      # machine (npm ci --ignore-scripts): a lockfile of its own, no dev
+      # dependencies.
+      - name: Audit the chain:emergency Ledger packages (lockfile)
+        working-directory: front/scripts/chain/ledger
+        run: npm audit --audit-level=high
 
   program-drift:
     name: Program IDL + SDK drift

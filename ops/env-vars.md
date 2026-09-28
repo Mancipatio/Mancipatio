@@ -42,7 +42,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `ALERT_WEBHOOK_TOKEN` | Secret | optional (bearer for ntfy or a relay) | optional | No Authorization header | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_MIN_SEVERITY` | Public | `high` (default) | default | `high`; without email the webhook takes every row | `lib/server/system-alerts.ts` |
 | `ALERT_WEBHOOK_FORMAT` | Public | `json` (ntfy, a relay) or `text` (Slack, Mattermost, Google Chat: `{"text": …}` only) | default | `json` | `lib/server/system-alerts.ts` |
-| `ALARM_BALANCE_WATCH` | Public (keys) | recommended: every key that signs in an emergency (one company wallet may be listed under each of its roles) | optional | No balance alarm | `lib/server/ops-watch.ts` |
+| `ALARM_BALANCE_WATCH` | Public (keys) | recommended: every key that signs in an emergency, `minSol` from the "Refill below" column of runbook §1 (one company wallet may be listed under each of its roles; the watch takes the highest threshold, not the sum, so give it the sum of its refill lines) | optional | No balance alarm | `lib/server/ops-watch.ts` |
 | `ALARM_SQUADS_CONFIG` | Public | recommended: the role map's `squads` object | — | No Squads watch | `lib/server/ops-watch.ts` |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER` | Public config | required (email) | set | Resend fallback, else no email | `lib/server/email.ts` |
 | `SMTP_PASS` | Secret | required, its own mailbox or password for mainnet | set | as above | `lib/server/email.ts` |
@@ -54,6 +54,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `GOOGLE_CLIENT_SECRET` | Secret | of that client | set | Google sign-in off | `lib/server/account-google.ts` |
 | `HEALTH_TOKEN` | Secret | ≥ 32, no whitespace (guard `health-token`) | recommended | `/api/health` never shows details | `lib/server/health.ts` |
 | `SENTRY_DSN` | Secret-ish (project key) | `https://<key>@<org>.ingest.de.sentry.io/<project id>` of an EU project: the guard `sentry` applies the runtime parser's rules | recommended | Server errors only in Vercel logs | `lib/request-error-report.ts` |
+| `TOS_SERVER_GATE` | Server, runtime | leave unset: mainnet always enforces the Terms acceptance on the signed buy and sell routes | `enforce` only to rehearse the mainnet behaviour | No server check off mainnet (the client-side dialog only) | `lib/server/tos-gate.ts` |
 | `MAINNET_LEGAL_COPY_APPROVED` | Build | `true` only after counsel reviewed the rendered mainnet pages (guard; runbook §17) | — | Mainnet build refused | `next.config.ts` |
 | `MAINNET_LICENSE_NOT_REQUIRED` | Build | `true` **only** on counsel's written opinion that no licence is needed, while `OPERATORS.mainnet.licence` is null; refused together with a recorded licence (guard; runbook §17) | — | Mainnet build refused while no licence is recorded | `lib/legal/readiness.ts` |
 | `MAINNET_OPS_WAIVERS` | Build | empty; see below | — | Every operations guard applies | `next.config.ts` |
@@ -93,12 +94,15 @@ explicitly on or off.
 | `INDEXER_NETWORK` | Edge function secrets | Public | `mainnet` (a wrong one is refused by the 0071 guard) |
 | `SUPABASE_URL` | Provided by Supabase | Public | — |
 | `mancipatio_retry_worker_<network>` | Vault (`scripts/ops/*-scheduler.sql`) | Secret | equal to Vercel `RETRY_WORKER_SECRET` |
+| `mancipatio_vercel_bypass_<network>` | Vault (`scripts/ops/*-scheduler.sql`, read on every call, sent as `x-vercel-protection-bypass`) | Secret | the Vercel *Protection Bypass for Automation* secret while the deployment is behind Deployment Protection (runbook §0A D4); deleted at D11 (`ops/secrets.md`) |
 
 ## Operator machine (scripts)
 
 `scripts/db.sh`, `scripts/ops/*` and the chain CLI read `MANCI_TARGET`,
 `MANCI_ALLOW_MAINNET`, `MANCI_DB_BOOTSTRAP`, `MANCI_PGPASSFILE`,
-`MANCI_PG_BIN`, `MANCIPATIO_RETRY_SECRET_FILE`, `MAINTENANCE_OPERATOR` and
+`MANCI_PG_BIN`, `MANCIPATIO_RETRY_SECRET_FILE`, `MANCIPATIO_VERCEL_BYPASS_FILE`
+(the deployment smoke through Deployment Protection, runbook §0A D6),
+`MAINTENANCE_OPERATOR` and
 the credential files under `~/.mancipatio/` (runbook §14 "Credential files").
 None of them is a deployment variable.
 

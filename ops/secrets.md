@@ -36,6 +36,7 @@ holder of each (in the private operations notes, not here).
 | `HEALTH_TOKEN` | Vercel + the uptime monitor | Operator | Yearly | Monitor details until updated in both | New, ≥ 32 |
 | `SENTRY_DSN` | Vercel (server) | Operator | When the project changes | Error reports | A mainnet project (EU region) |
 | `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_TOKEN` | Vercel (server) | Operator | On staff change, or a leak | The second alert channel: while it fails, the `alert-channel-webhook` incident is emailed (alarm health stays green unless email fails too); send a test alert after rotating | A mainnet channel or topic |
+| Vercel *Protection Bypass for Automation* secret (`x-vercel-protection-bypass`) | Vercel (the project's Deployment Protection) + Vault `mancipatio_vercel_bypass_<network>` + the external monitor's header + the operator's `MANCIPATIO_VERCEL_BYPASS_FILE` (mode 600) | Operator | Exists only while the deployment is behind Deployment Protection (launch day, runbook §0A D4); at D11 delete it in Vercel and in the Vault (or rotate it) and drop the monitor's header | The schedulers read the Vault copy on every call: while Vault and Vercel differ, Deployment Protection refuses every pg_cron call (retry and alarm workers stop, `/api/health/alarms` goes red within 5 minutes) and the monitor until its header matches. Rotate in one window: Vercel, the Vault, the monitor, the file | New for the mainnet project; 32–128 letters, digits, `_` or `-` (the scheduler installs refuse anything else) |
 
 ## Operator credentials
 

@@ -283,9 +283,9 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D1 | Accounts: Supabase Pro with PITR (mainnet project), Vercel Pro with the mainnet project, Helius paid plan (RPC and webhook), SMTP sender, external monitor, age backup key (G10) | owner | §14 step 1 |
 | D2 | Devnet moves to `devnet.manci.io` (DNS, env, redeploy, schedulers re-installed) and keeps working | owner + operator | §18 A–C |
 | D3 | Mainnet database: 0001–0075 and later, identity, preflights, schema backup, pg_cron and http, the Vault secret `mancipatio_retry_worker_mainnet`, retention | operator | §14 mainnet steps 1–6 |
-| D4 | Mainnet Vercel project: env (§18 E list), Deployment Protection *All Deployments* + Vercel Authentication, a *Protection Bypass for Automation* secret stored in the Vault as `mancipatio_vercel_bypass_mainnet` (paste it in the Supabase Vault UI, never on a command line), `www.manci.io` and `manci.io` attached (§18 D), production READY on the release commit. Check: an anonymous `curl -I https://www.manci.io/` is refused by Vercel; with the bypass header `/api/health` answers `ok:true` (at most `paymentFx` `missing_before_first_sale`) | owner + operator | §18 D, §14 step 10 |
+| D4 | Mainnet Vercel project: env (§18 E list; every variable and build guard in `ops/env-vars.md`, a mainnet build refuses without `SENTRY_DSN`, `ALERT_WEBHOOK_URL`, `HEALTH_TOKEN`, the Turnstile keys, `SESSION_SECRET` and `NEXT_PUBLIC_SITE_URL`), Deployment Protection *All Deployments* + Vercel Authentication, a *Protection Bypass for Automation* secret stored in the Vault as `mancipatio_vercel_bypass_mainnet` (paste it in the Supabase Vault UI, never on a command line), `www.manci.io` and `manci.io` attached (§18 D), production READY on the release commit. Check: an anonymous `curl -I https://www.manci.io/` is refused by Vercel; with the bypass header `/api/health` answers `ok:true` (at most `paymentFx` `missing_before_first_sale`) | owner + operator | §18 D, §14 step 10 |
 | D5 | Retry scheduler installed and enabled; edge function, Helius webhook with all four addresses, signed test delivery 202; `HEALTH_TOKEN`; external monitor on `/api/health/alarms` with the bypass header | operator | §14 steps 7, 9, 10 |
-| D6 | Alarm scheduler installed, proven (test email) and enabled; `/api/health/alarms` 200 through the bypass. **The §15 gate holds**. Then the deployment smoke (§14 step 11) through the bypass: `MANCIPATIO_VERCEL_BYPASS_FILE=<file with the line VERCEL_AUTOMATION_BYPASS_SECRET=…>` (a file, never the value on a command line) | operator | §15 Mainnet project, §14 step 11 |
+| D6 | Alarm scheduler installed, proven (a `high` test alert delivered by email AND by the webhook, §15 Mainnet project step 2) and enabled; `/api/health/alarms` 200 through the bypass. **The §15 gate holds**. Then the deployment smoke (§14 step 11) through the bypass: `MANCIPATIO_VERCEL_BYPASS_FILE=<file with the line VERCEL_AUTOMATION_BYPASS_SECRET=…>` (a file, never the value on a command line) | operator | §15 Mainnet project, §14 step 11 |
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, operator keys onboarded on the protected site | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps on the protected site → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
@@ -366,8 +366,8 @@ Rent scales with lamports per byte; fees are small (5,000 lamports per
 signature plus the priority fee: 200,000 CU at the mainnet floor of
 100,000 µL/CU is 20,000 lamports, 0.00002 SOL, and 0.0004 SOL at the
 2,000,000 cap). Top up
-below the "refill below" line; the low-balance alarm planned in package 8.4
-should use the same numbers.
+below the "refill below" line; the low-balance alarm takes the same numbers
+as its thresholds (`ALARM_BALANCE_WATCH`, §15 Configuration).
 
 | Key | What it pays | At 5,080 | At 2,575 | At 1,322 | At 696 | Fund | Refill below |
 |---|---|---|---|---|---|---|---|
@@ -381,7 +381,8 @@ should use the same numbers.
 | Squads vault | verify PDAs through the verify program (≈ 0.01), its own fees | 0.02 | | | | 0.05 | 0.01 |
 
 The company wallet holds several rows at once: fund it with the sum
-(about 3 SOL at 5,080 for the pilot) and keep the sum of the refill lines.
+(about 3 SOL at 5,080 for the pilot) and keep the sum of the refill lines
+(0.5 + 0.05 + 0.1 + 0.02 = 0.67 SOL; its `ALARM_BALANCE_WATCH` threshold).
 
 ## 2. Deploy (hook first)
 
@@ -929,11 +930,23 @@ the chain.
 - Cannot: receive webhooks until the provider is back (the gap scan and the
   reconcile fill the mirror afterwards).
 
-**SMTP down.** Alarm emails fail and `/api/health/alarms` turns 503 (a failed
-notification). Use the second channel once it exists (8.4 webhook); after
-the fix re-queue the failed notifications (§15 Operations).
-- Cannot: deliver any alarm until then (there is no second channel yet):
-  watch `/admin/health` by hand.
+**SMTP down.** Alarm emails fail; the webhook (the second channel, §15
+Configuration) keeps delivering. The first sign is the `alert-channel-email`
+incident (high, "Alert channel failing"), which arrives through the webhook.
+High and critical alerts keep arriving there, and `/api/health/alarms` stays
+200 while the webhook delivers them: do not wait for a 503. Medium alerts go
+to the webhook only with `ALERT_WEBHOOK_MIN_SEVERITY=medium` (default
+`high`): otherwise they have no channel, stay pending and turn
+`/api/health/alarms` 503 after three failed attempts. Set it to `medium` for
+the outage (Vercel env and a redeploy), or read `/admin/compliance` by hand.
+A 503 while no medium alert is pending means the webhook fails too (every
+channel is down) or another check failed (§15 What runs). Fix the transport
+(`SMTP_*`, or `RESEND_API_KEY` as the fallback), redeploy, then re-queue the
+notifications that gave up (§15 Operations) and send a test alert; the
+incident clears after three digests email delivers.
+- Cannot: email anyone until the transport is back (sign-in links and
+  account emails fail too); page anyone at all if the webhook fails as well:
+  then watch `/admin/compliance` and `/admin/health` by hand.
 
 **Personal data breach.** Contain (rotate the Supabase `sb_secret_` key and
 `SESSION_SECRET`, revoke exposed tokens, close the leaking path), keep the
@@ -962,7 +975,8 @@ page on our domain asks users to sign transfers. Maintenance does not help
   sender-side, so they cannot move them on) and an Admin claws them back.
 - Prevention (kritičar-6): DNSSEC and a CAA record on the apex, registrar 2FA
   and registry lock, an external monitor on the DNS records, branch
-  protection on `main` (Vercel deploys it), a CSP (8.4).
+  protection on `main` (Vercel deploys it), a CSP (report-only in 8.4, so it
+  blocks nothing yet; enforcement per `ops/env-vars.md` "Content-Security-Policy").
 - Cannot: reverse transfers users signed; stop transfers of wallets that are
   not blocked.
 
@@ -1483,8 +1497,8 @@ never emailed; high and critical notifications never give up.
 | `COMPLIANCE_ALERT_EMAIL` | Vercel (server) | Comma-separated, at most 5. **Devnet: `office@mancipatio.io`** (owner decision). Required on mainnet: without it `/api/health/alarms` answers 503 and alarm runs are `partial`. |
 | `RETRY_WORKER_SECRET` | Vercel + Vault | Reused by the alarm worker (D8); the Vault secret stays `mancipatio_retry_worker_<network>`. |
 | `NEXT_PUBLIC_SITE_URL`, `SMTP_*`, `EMAIL_FROM` | Vercel | Reused: the digest links `<site>/admin/compliance`. |
-| `ALERT_WEBHOOK_URL` (+ `ALERT_WEBHOOK_TOKEN`, `ALERT_WEBHOOK_MIN_SEVERITY`, `ALERT_WEBHOOK_FORMAT`) | Vercel (server) | The second channel (8.4): one POST per digest, in parallel with the email; high and critical by default. `ALERT_WEBHOOK_FORMAT=json` (default): ntfy `https://ntfy.sh/<topic>?tpl=yes&t={{.title}}&m={{.text}}&p={{.priority}}`, or a relay reading `severity`/`alerts[]`. `ALERT_WEBHOOK_FORMAT=text` sends only `{"text": …}`: Slack, Mattermost and Google Chat incoming webhooks. Required by a mainnet build. A channel that fails while the other delivers does NOT turn `/api/health/alarms` red (nothing gets stuck): it opens its own incident, `alert-channel-webhook` or `alert-channel-email` (high, "Alert channel failing"), which the other channel delivers; it clears after three digests the channel delivers again. Only when every channel fails do rows stay pending and health answer 503 (`notify_pending:stuck`). Send a test alert after every change of the URL, token or format. |
-| `ALARM_BALANCE_WATCH` | Vercel (server) | `label:address[:minSol]`, comma-separated: `sol-balance:<address>` (high) below the threshold (default 0.1 SOL). List every key that signs in an emergency. One company wallet in several roles may be listed under each label (`super-admin:<W>,admin:<W>,kyc:<W>`): one watch, every label, the highest threshold. |
+| `ALERT_WEBHOOK_URL` (+ `ALERT_WEBHOOK_TOKEN`, `ALERT_WEBHOOK_MIN_SEVERITY`, `ALERT_WEBHOOK_FORMAT`) | Vercel (server) | The second channel (8.4): one POST per digest, in parallel with the email; high and critical by default. `ALERT_WEBHOOK_FORMAT=json` (default): ntfy `https://ntfy.sh/<topic>?tpl=yes&t={{.title}}&m={{.text}}&p={{.priority}}`, or a relay reading `severity`/`alerts[]`. `ALERT_WEBHOOK_FORMAT=text` sends only `{"text": …}`: Slack, Mattermost and Google Chat incoming webhooks. Required by a mainnet build. A channel that fails while the other delivers does NOT turn `/api/health/alarms` red (nothing the other channel carries gets stuck): it opens its own incident, `alert-channel-webhook` or `alert-channel-email` (high, "Alert channel failing"), which the other channel delivers; it clears after three digests the channel delivers again. Only when every channel fails do rows stay pending and health answer 503 (`notify_pending:stuck`); with email down, that includes the medium rows below `ALERT_WEBHOOK_MIN_SEVERITY` (§11 "SMTP down"). Send a test alert after every change of the URL, token or format. |
+| `ALARM_BALANCE_WATCH` | Vercel (server) | `label:address[:minSol]`, comma-separated: `sol-balance:<address>` (high) below the threshold (default 0.1 SOL). List every key that signs in an emergency. Set each `minSol` from the "Refill below" column of §1 (Operational budget per key). One company wallet in several roles may be listed under each label (`super-admin:<W>,admin:<W>,kyc:<W>`): one watch, every label, the HIGHEST threshold, not the sum. So give such a wallet the sum of its roles' refill lines as its threshold, e.g. `company:<W>:0.67` (or `super-admin:<W>:0.67,admin:<W>,kyc:<W>`): each role's own line (0.5 at most) or the 0.1 default fires only below the §1 refill level. |
 | `ALARM_SQUADS_CONFIG` | Vercel (server) | The role map's `squads` object (JSON): `squads-config` (critical) on any drift of members, threshold, time lock or config authority; `squads-proposal:<proposal>` for EACH open proposal (Approved/Executing critical, Draft/Active high), so a second proposal pages even while the first is open or acknowledged. Reads the newest 100 transaction indexes and 100 older ones per minute in rotation. |
 
 The complete list per network, with what a mainnet build requires:
@@ -1616,8 +1630,12 @@ MANCI_ALLOW_MAINNET=1` and job `mancipatio-alarms-mainnet`:
 1. install `alarm-scheduler.sql`, run `select mancipatio_ops.invoke_alarm_worker()`
    once, and check `alarm-scheduler-status.sql` (the run `complete`, a fresh
    `alarms` `last_ok_at`);
-2. raise a `test:` alert (D.4), run `invoke_alarm_worker()` again, and confirm
-   `notify_state = 'sent'` and the email at the mainnet recipients;
+2. raise a `test:` alert as in D.4 but with severity `'high'` (the webhook
+   takes high and critical only, `ALERT_WEBHOOK_MIN_SEVERITY`), run
+   `invoke_alarm_worker()` again, and confirm `notify_state = 'sent'`, the
+   email at the mainnet recipients AND the message on the webhook's channel
+   or topic; no `alert-channel-email` or `alert-channel-webhook` incident is
+   open on `/admin/compliance` (either one means that channel failed);
 3. enable the job (`cron.alter_job(..., active := true)` on
    `mancipatio-alarms-mainnet`);
 4. `curl -s -o /dev/null -w '%{http_code}' -H "x-vercel-protection-bypass: $BYPASS" https://<mainnet site>/api/health/alarms`
@@ -1643,6 +1661,13 @@ before saving it.
 | `fx:missing`, `fx:stale`, `ledger:capacity-holds` | Add or refresh the EUR rate on the Raise limits page; the jobs unblock and revalue by themselves. |
 | `worker:retry-heartbeat`, `indexer:*` | `retry-scheduler-status.sql`, Vercel function logs, Helius delivery log. |
 | `indexer:gap-scan-overdue` | The alarm run has no time left for the gap scan: look at the `onchain_event_jobs` backlog (`worker:event-queue`) and database latency in the Vercel logs; `worker_heartbeats.last_gap_scan_at` for `alarms` moves again once a scan starts. |
+| `onchain:low-balance` (`sol-balance:<address>`, high) | Top the key up to its "Fund" line (§1 Operational budget per key) from the company's funds; it clears once the balance stays at or above 1.25 × its threshold. A balance that dropped without an operation you know of: compare with the signer matrix, unexpected = compromised key, §11. |
+| `onchain:squads-config` (`squads-config:<multisig>`, critical) | Members, threshold, time lock or config authority differ from `ALARM_SQUADS_CONFIG` (the role map). A change you approved: update the role map and `ALARM_SQUADS_CONFIG`, redeploy. Unexpected: incident (§11), tell the Squads members, pause if the upgrade authority may be lost. |
+| `onchain:squads-proposal` (`squads-proposal:<proposal>`, Approved/Executing or unreadable critical, Draft/Active high) | Compare with the proposal you expected (§9: the upgrade's buffer, hash and the members who approve). Expected: nothing to do, it clears once the proposal is final (executed, rejected or cancelled) or stale. Unexpected: incident (§11); members reject it and do not execute. |
+| `fx:expiring` (`fx-expiring:<mint>`, medium) | Refresh the EUR rate on the Raise limits page (`/admin/limits`) before its max age: past it `fx:stale` follows and the sales that need the rate stop (on mainnet `/api/health` fails for the default mint). |
+| `worker:alert-channel` (`alert-channel-email` or `alert-channel-webhook`, high) | That channel failed a digest; the other one delivered this alert. Fix the channel (SMTP or Resend; `ALERT_WEBHOOK_*`: §11 "SMTP down"), send a test alert, re-queue what gave up (Operations); it clears after three digests it delivers. |
+| `worker:ops-watch-config` | `ALARM_BALANCE_WATCH` or `ALARM_SQUADS_CONFIG` does not parse: correct it and redeploy (no balance or Squads watch until then). |
+| Admin actions that move money or tokens: `onchain:vault-vote`, `onchain:yield-route`, `onchain:milestone`, `onchain:proposal`, `onchain:supply-lock`, `onchain:custody-vault`, `onchain:sale-approval` | Compare with the signer matrix and the admin decision behind it (the request or approval on the admin pages). A short voting window (critical or high) is checked with the issuer. Unexpected: that Admin key is compromised, §11 ("An Admin key compromised or lost"). |
 
 ### Operations
 
@@ -2049,8 +2074,11 @@ the project ref, pooler host and backup recipient in `targets.json` and
 protection goes back to *Standard Protection*.
 
 **E. Mainnet environment (names only; values live in Vercel, never in the
-repository).** Package 8.4 keeps the full inventory of secrets; these are the
-ones that differ per network or domain:
+repository).** The complete list, with what each mainnet build guard
+requires and what happens when a variable is unset, is
+`ops/env-vars.md`; owners and rotation of every secret are in
+`ops/secrets.md`. These are the ones that differ per network or
+domain, or that a mainnet build refuses without:
 
 | Variable | Mainnet value or source |
 |---|---|
@@ -2064,7 +2092,13 @@ ones that differ per network or domain:
 | `COMPLIANCE_ALERT_EMAIL`, `CONTACT_NOTIFY_EMAIL`, `EMAIL_FROM`, `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASS` (or `RESEND_API_KEY`) | the company's mailboxes and sender |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | the mainnet OAuth client |
 | `NEXT_PUBLIC_TURNSTILE_SITE_KEY`, `TURNSTILE_SECRET_KEY` | the mainnet widget |
+| `SENTRY_DSN` | the https DSN of an EU-region Sentry project for mainnet (build guard `sentry`) |
+| `ALERT_WEBHOOK_URL` (+ `ALERT_WEBHOOK_TOKEN`, `ALERT_WEBHOOK_FORMAT`, `ALERT_WEBHOOK_MIN_SEVERITY`) | the second alert channel, an https URL of a mainnet channel or topic (build guard `alert-webhook`; §15 Configuration) |
+| `ALARM_BALANCE_WATCH` | every key that signs in an emergency, with the §1 "Refill below" thresholds (§15 Configuration) |
+| `ALARM_SQUADS_CONFIG` | the role map's `squads` object (§15 Configuration) |
 | `MAINNET_LEGAL_COPY_APPROVED` | `true` only after the lawyer's review (§0 Legal gate) |
+| `MAINNET_LICENSE_NOT_REQUIRED` | unset; `true` only on counsel's written opinion that no licence is needed, while no licence is recorded (§17) |
+| `MAINNET_OPS_WAIVERS` | empty (every operations guard applies; `ops/env-vars.md` "Mainnet operations guards and waivers") |
 | `NEXT_PUBLIC_FEATURE_*` | mainnet defaults off (`PAYOUT_AIRDROP`, `STARTUP_RAISES`); `PASSPORT_CLOSE` and `ISSUER_ROTATION` per the owner's decision |
 | `NEXT_PUBLIC_ALLOW_INDEXING` | only from Talas 7 |
 

@@ -20,13 +20,15 @@
 // (finish_alert_notifications).
 //
 // So one dead channel is NOT visible on /api/health/alarms: the other
-// channel delivers the rows (nothing gets stuck), and the alarm worker's
-// heartbeat moved before notify. Each channel's outcome is therefore an
-// incident of its own (alert-channel-email, alert-channel-webhook: high,
-// reportAlertChannels): a failing channel opens it, and the OTHER channel
-// delivers that alert in the next digest; it clears after three digests the
-// channel delivered. Only when every channel fails do rows stay pending, and
-// /api/health/alarms goes red (notify_pending:stuck).
+// channel delivers the rows it carries (none of those gets stuck), and the
+// alarm worker's heartbeat moved before notify. Each channel's outcome is
+// therefore an incident of its own (alert-channel-email,
+// alert-channel-webhook: high, reportAlertChannels): a failing channel opens
+// it, and the OTHER channel delivers that alert in the next digest; it
+// clears after three digests the channel delivered. Only when every channel
+// that carries a row fails does it stay pending, and /api/health/alarms goes
+// red (notify_pending:stuck): all rows when both fail, and with email dead
+// the rows below ALERT_WEBHOOK_MIN_SEVERITY (the webhook never carries them).
 //
 // Delivery is at-least-once: a send that timed out may still have gone
 // through, and its rows are sent again in the next digest.
