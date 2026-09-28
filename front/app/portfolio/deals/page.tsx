@@ -41,6 +41,7 @@ import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { PurchaseRiskWarning } from "@/components/legal/purchase-risk-warning";
 import { useToast } from "@/lib/toast";
 
 const DEAL_STATUS_LABEL = ["Open", "Completed", "Expired", "Cancelled"];
@@ -678,13 +679,20 @@ export default function MyDealsPage() {
             confirmAction.kind === "expire" ? "Refund" : "Deposit"
           }
           description={
-            <p>
-              {confirmAction.kind === "asset"
-                ? `Deposit ${String(confirmAction.row.deal.amount)} share units of deal #${String(confirmAction.row.deal.dealId)} into escrow. Once both legs are funded the swap settles atomically.`
-                : confirmAction.kind === "payment"
-                  ? `Deposit ${String(confirmAction.row.deal.price)} payment units into deal #${String(confirmAction.row.deal.dealId)}. Once both legs are funded the swap settles atomically.`
-                  : `Trigger the expiry of deal #${String(confirmAction.row.deal.dealId)} and refund whichever leg was deposited to its depositor.`}
-            </p>
+            <>
+              <p>
+                {confirmAction.kind === "asset"
+                  ? `Deposit ${String(confirmAction.row.deal.amount)} share units of deal #${String(confirmAction.row.deal.dealId)} into escrow. Once both legs are funded the swap settles atomically.`
+                  : confirmAction.kind === "payment"
+                    ? `Deposit ${String(confirmAction.row.deal.price)} payment units into deal #${String(confirmAction.row.deal.dealId)}. Once both legs are funded the swap settles atomically.`
+                    : `Trigger the expiry of deal #${String(confirmAction.row.deal.dealId)} and refund whichever leg was deposited to its depositor.`}
+              </p>
+              {/* The buyer pays here: the purchase risk warning is shown
+                  before the deposit (lib/legal/risk-warning.ts). */}
+              {confirmAction.kind === "payment" && (
+                <PurchaseRiskWarning className="mt-3" />
+              )}
+            </>
           }
           busy={tx.isSending}
         />

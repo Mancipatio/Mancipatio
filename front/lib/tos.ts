@@ -14,17 +14,51 @@
 // enumeration) and the WRITE through the signed /api/tos/accept route.
 
 import { TOS_VERSION } from "@/lib/clients";
+import { detectNetwork, type Network } from "@/lib/network";
 
 // Re-export so gate consumers do not need to reach into lib/clients.ts.
 export { TOS_VERSION };
 
 /**
+ * Whether <TosGate /> fails CLOSED on `network`. On mainnet (real money) an
+ * unknown acceptance status, an acceptance that could not be recorded and a
+ * wallet that cannot sign messages all keep the gate up — no "continue
+ * without accepting". Test networks keep failing open (availability over
+ * enforcement), as before. The server-side counterpart is
+ * lib/server/tos-gate.ts.
+ */
+export function tosGateFailsClosed(network: Network = detectNetwork()): boolean {
+  return network === "mainnet";
+}
+
+/** App-shell sections that never show the gate (admin routes are exempt by
+ *  design; documentation, onboarding, the issuer application and the account
+ *  pages have their own flows). */
+const TOS_GATE_EXEMPT_SECTIONS = new Set(["documentation", "admin", "onboarding", "application", "account"]);
+
+/**
+ * Whether the app shell (components/app-shell.tsx) mounts <TosGate /> on
+ * (`section`, `path`). The public /markets/* pages are for browsing and stay
+ * without it — EXCEPT the resell board (/markets/resell), whose "Request OTC
+ * escrow" is a signed write (/api/otc/create) that the server refuses on
+ * mainnet without a recorded acceptance (lib/server/tos-gate.ts). Without the
+ * gate there the buyer would get that refusal with no way to accept. The
+ * board is also one of the marketplace tabs, which all carry the gate; on
+ * test networks it fails open there like everywhere else.
+ */
+export function tosGateMounted(section: string, path: string): boolean {
+  if (TOS_GATE_EXEMPT_SECTIONS.has(section)) return false;
+  if (path === "/markets/resell" || path.startsWith("/markets/resell/")) return true;
+  return !path.startsWith("/markets/");
+}
+
+/**
  * Tri-state check result:
  *  - "accepted"      — a tos_acceptances row exists for (wallet, TOS_VERSION)
  *  - "not_accepted"  — the query succeeded and found nothing → gate blocks
- *  - "unknown"       — Supabase unconfigured/unreachable → gate ALLOWS (fail
- *                      open, logged) per spec: availability over enforcement
- *                      for a client-side interstitial.
+ *  - "unknown"       — Supabase unconfigured/unreachable → on test networks
+ *                      the gate ALLOWS (fail open, logged): availability over
+ *                      enforcement; on mainnet it blocks (tosGateFailsClosed).
  */
 export type TosCheckResult = "accepted" | "not_accepted" | "unknown";
 

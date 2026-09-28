@@ -9,6 +9,8 @@ import { TosGate } from "@/components/tos-gate";
 import { IconHome, IconLayers, IconRocket, IconRepeat, IconWallet, IconLock, IconCoins, IconGavel, IconBox, IconBuilding, IconFile, IconArrowUpRight, IconUsers } from "@/components/icons";
 import { detectNetwork, networkLabel } from "@/lib/network";
 import { features } from "@/lib/features";
+import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
+import { tosGateMounted } from "@/lib/tos";
 
 const primary = [
   { href: "/", label: "Overview", icon: IconHome },
@@ -104,6 +106,9 @@ export function AppShell({ children, section = "overview" }: {
   }, [menuOpen]);
   const tabs = section === "portfolio" ? portfolioTabs : section === "issuer" ? issuerTabs : section === "marketplace" ? marketTabs : null;
   const network = detectNetwork();
+  // The operator, its registration details and licence (lib/legal/operator.ts);
+  // null on the devnet pilot, which has no operating company yet.
+  const operatorLine = operatorFooterLine(operatorFor(network), new Date().getFullYear());
   // Existing holder and issuer pages own their main landmark.
   const Content = section === "portfolio" || section === "issuer" ? "div" : "main";
   const navItems = (items: typeof primary) => items.map(({ href, label, icon: Icon }) => (
@@ -144,9 +149,9 @@ export function AppShell({ children, section = "overview" }: {
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
           {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{children}</div> : children}
         </Content>
-        <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/contact">Support ↗</Link></div></footer>
+        <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/company">Company &amp; licence</Link><Link href="/contact">Support ↗</Link></div>{operatorLine && <p className="app-footer-operator">{operatorLine}</p>}</footer>
       </div>
-      {!["documentation", "admin", "onboarding", "application", "account"].includes(section) && !path.startsWith("/markets/") && <TosGate />}
+      {tosGateMounted(section, path) && <TosGate />}
     </div>
   );
 }

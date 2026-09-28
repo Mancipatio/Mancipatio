@@ -20,6 +20,9 @@ import { daysLeft, progressPct } from "@/lib/launch-math";
 import { fmtMoney } from "@/lib/format";
 import { formatPaymentTotal } from "@/lib/commitment-totals";
 import { Badge, EmptyState, Grid, PageHeader, Section } from "@/components/mx";
+import { listAssetProfiles } from "@/lib/asset-profiles";
+import { SSC_NOT_APPROVED_LABEL, sscApprovalRef } from "@/lib/whitepaper-approval";
+import { detectNetwork } from "@/lib/network";
 
 // ── derived card shape ─────────────────────────────────────────────────────
 type DealCard = {
@@ -41,6 +44,9 @@ type DealCard = {
   dLeft: number;
   logoLetter: string;
   logoGradient: string | null;
+  /** Securities Commission decision reference when the asset's whitepaper is
+   *  approved; null = not approved (or unknown), labeled as such. */
+  sscDecisionRef: string | null;
 };
 
 export default function PublicLaunchpadPage() {
@@ -92,6 +98,34 @@ export default function PublicLaunchpadPage() {
         matched.map((l) => commitmentAggregate(l.sale_pubkey)),
       );
 
+      // 6. Whitepaper approval per sale (ZDI art. 17(3): the offering says
+      //    whether its whitepaper is approved). Sale → share class (by mint)
+      //    → asset → published profile. If the profiles cannot be read, every
+      //    card keeps the "not approved" label: approval is never shown
+      //    without its recorded decision reference.
+      const assetBySale = new Map<string, string>();
+      for (const listing of matched) {
+        const sale = saleByPda.get(listing.sale_pubkey)!;
+        const shareClass = network.shareClasses.find(
+          (sc) => sc.mint.toString() === sale.mint.toString(),
+        );
+        if (shareClass) {
+          assetBySale.set(listing.sale_pubkey, shareClass.asset.toString());
+        }
+      }
+      const decisionByAsset = new Map<string, string>();
+      try {
+        const profiles = await listAssetProfiles({
+          pdas: Array.from(new Set(assetBySale.values())),
+        });
+        for (const profile of profiles) {
+          const ref = sscApprovalRef(profile, detectNetwork());
+          if (ref) decisionByAsset.set(profile.asset_pda, ref);
+        }
+      } catch {
+        // Unknown approval → labeled "not approved" (see above).
+      }
+
       // 5. Derive card data
       const now = Math.floor(Date.now() / 1000);
       const derived: DealCard[] = matched.map(
@@ -139,6 +173,9 @@ export default function PublicLaunchpadPage() {
             dLeft,
             logoLetter,
             logoGradient,
+            sscDecisionRef:
+              decisionByAsset.get(assetBySale.get(listing.sale_pubkey) ?? "") ??
+              null,
           };
         },
       );
@@ -275,6 +312,7 @@ function DealCard({ card }: { card: DealCard }) {
     dLeft,
     logoLetter,
     logoGradient,
+    sscDecisionRef: decisionRef,
   } = card;
 
   const pct = isStartup ? progressPct(raised, target) : soldPercent;
@@ -321,6 +359,20 @@ function DealCard({ card }: { card: DealCard }) {
           </div>
         </div>
       </div>
+
+      {/* Whitepaper approval (ZDI art. 17(3)) */}
+      <p
+        title={decisionRef ?? undefined}
+        className={`mb-3 inline-flex self-start rounded-[3px] border px-2 py-0.5 text-[11px] font-medium ${
+          decisionRef
+            ? "border-emerald-200 bg-emerald-50 text-emerald-700"
+            : "border-amber-200 bg-amber-50 text-amber-800"
+        }`}
+      >
+        {decisionRef
+          ? "Approved by the Serbian Securities Commission"
+          : SSC_NOT_APPROVED_LABEL}
+      </p>
 
       {/* One-liner */}
       {oneLiner && (

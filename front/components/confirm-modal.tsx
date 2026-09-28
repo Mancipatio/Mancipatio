@@ -33,6 +33,9 @@ export type ConfirmModalProps = {
   reasonPlaceholder?: string;
   reasonMinLength?: number;
   busy?: boolean;
+  /** Keeps the confirm button disabled, e.g. until a required checkbox in
+   *  `description` is ticked. */
+  confirmDisabled?: boolean;
 };
 
 export function ConfirmModal(props: ConfirmModalProps) {
@@ -52,6 +55,7 @@ function ConfirmModalInner({
   reasonPlaceholder = "Why are you doing this? (visible in audit log)",
   reasonMinLength = 4,
   busy = false,
+  confirmDisabled = false,
 }: ConfirmModalProps) {
   const [reason, setReason] = useState("");
 
@@ -124,7 +128,7 @@ function ConfirmModalInner({
           <button
             type="button"
             onClick={() => void onConfirm(reason.trim())}
-            disabled={busy || !reasonOk}
+            disabled={busy || !reasonOk || confirmDisabled}
             className={`rounded-md px-3 py-1.5 text-sm font-medium disabled:opacity-50 ${styles.button}`}
           >
             {busy ? "Working…" : confirmLabel}

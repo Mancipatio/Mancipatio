@@ -54,6 +54,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0073_spv_issuance_jobs.sql");
       expect(applied).toContain("0074_ledger_contract.sql");
       expect(applied).toContain("0075_indexer_heartbeat.sql");
+      expect(applied).toContain("0076_offering_exemption.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));

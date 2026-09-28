@@ -9,6 +9,9 @@ import {
   TextLink,
 } from "@/components/mx";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { securityReviewStatement } from "@/lib/legal/audit";
+import { SecurityAuditReportLink } from "@/components/legal/security-review";
+import { NO_INVESTOR_PROTECTION } from "@/lib/legal/risk-warning";
 
 /**
  * "What can go wrong" — prototype `#page-risks`.
@@ -18,7 +21,10 @@ import { detectNetwork, isTestNetwork } from "@/lib/network";
  * statement below is one the site already makes elsewhere (the investor page's
  * "Before you join", the issuance flow, the fungible-asset redemption rule,
  * the devnet stage) — nothing here is a new product claim, and no risk is
- * hedged with a reassurance.
+ * hedged with a reassurance. The program-security sentence follows
+ * lib/legal/audit.ts (no external audit is claimed before one exists), and
+ * the investor-protection sentence is the purchase risk warning's
+ * (lib/legal/risk-warning.ts).
  */
 export const metadata: Metadata = {
   title: "Risk disclosure — Manci",
@@ -125,10 +131,9 @@ export default function RisksPage() {
             : `The platform runs on Solana ${network} at v0.1, and the product can change.`}
         </Body>
         <Body className="mt-3.5">
-          Software can contain defects. Both on-chain programs went through a
-          systematic security review before they were deployed — that reduces
-          the risk of a contract-level failure, it does not remove it.
+          Software can contain defects. {securityReviewStatement()}
         </Body>
+        <SecurityAuditReportLink className="mt-3.5" />
       </Section>
 
       <Section>
@@ -137,6 +142,7 @@ export default function RisksPage() {
           Tokenized instruments carry risk, including total loss of the amount
           committed. Do not commit money you cannot afford to lose entirely.
         </Body>
+        <Body className="mt-3.5">{NO_INVESTOR_PROTECTION}</Body>
         <p className="mt-5">
           <TextLink href={MX_ROUTES.instruments}>
             What each instrument actually carries →

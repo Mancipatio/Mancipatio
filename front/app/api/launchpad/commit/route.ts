@@ -29,6 +29,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
+import { requireAcceptedTos } from "@/lib/server/tos-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { publishedSaleDocument } from "@/lib/server/sale-document";
@@ -80,6 +81,10 @@ export async function POST(request: Request) {
     if(!accepted || accepted.versionId !== terms.versionId || accepted.sha256 !== terms.sha256) throw new SiwsError(409,"Investment document changed or was not accepted. Review the current verified version before committing");
     const acceptance=await signedCopy.json();
     if(JSON.stringify(acceptance).length > 16_000) throw new SiwsError(400,"Commitment acceptance payload too large");
+    // Mainnet: the signing wallet must have accepted the Terms in force —
+    // checked last, right before the write (lib/server/tos-gate.ts; a no-op
+    // on test networks).
+    await requireAcceptedTos(sb, wallet, "committing to a raise");
 
     const { data, error } = await sb.rpc("record_soft_commitment", {
       p_network: detectNetwork(),p_sale: salePubkey,p_wallet: wallet,p_amount: amount,

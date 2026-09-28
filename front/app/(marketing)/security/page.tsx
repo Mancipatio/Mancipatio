@@ -9,6 +9,12 @@ import {
   PageHeader,
   Section,
 } from "@/components/mx";
+import { operatorFor } from "@/lib/legal/operator";
+import { detectNetwork } from "@/lib/network";
+
+/** The operator's security contact (lib/legal/operator.ts). It must match the
+ *  programs' embedded security.txt and public/.well-known/security.txt. */
+const SECURITY_CONTACT = operatorFor(detectNetwork()).contacts.security;
 
 export const metadata: Metadata = {
   title: "Security & compliance — Manci",
@@ -28,7 +34,7 @@ const PILLARS: Array<{ title: string; body: string }> = [
   },
   {
     title: "Verification at conversion and delivery",
-    body: "Identity verification (KYC) is required when a token becomes something off-chain: converting it into shares of the company, or redeeming it for a physical good. The platform checks a live, verified client profile before it accepts either request. Commitments, OTC escrow requests and resell listings need no verification, but still refuse a client profile that compliance has suspended.",
+    body: "Identity verification (KYC) is required when a token becomes something off-chain: converting it into shares of the company, or redeeming it for a physical good. The platform checks a live, verified client profile before it accepts either request, and the program checks the holder's investor passport again on-chain before the delivery escrow is realized. Commitments, OTC escrow requests and resell listings need no verification, but still refuse a client profile that compliance has suspended.",
   },
   {
     title: "Permanent delegate",
@@ -76,12 +82,17 @@ export default function SecurityPage() {
           Buying and trading tokens does not require identity verification:
           primary sales, OTC offers and resell listings of an Open class need
           none. Verification (KYC) is required when you convert tokens into
-          shares of the company or take delivery of a physical good. The
-          platform checks it before it accepts a conversion or delivery
-          request; it is not an on-chain check. The platform can switch a
-          class to KYC-gated, for example at the issuer&apos;s request; buying
-          or receiving that class then requires an approved investor passport,
-          because every transfer checks the receiving wallet.
+          shares of the company or take delivery of a physical good. It is
+          checked twice: the platform checks your verified client profile
+          before it accepts a conversion or delivery request, and the program
+          checks it on-chain when the custody escrow holding your tokens is
+          realized — your investor passport must be approved, unexpired and
+          from a permitted jurisdiction. If that check fails, the escrow can
+          return the deposited tokens to you instead; the return itself needs
+          no verification. The platform can switch a class to KYC-gated, for
+          example at the issuer&apos;s request; buying or receiving that class
+          then requires an approved investor passport, because every transfer
+          checks the receiving wallet.
         </Body>
       </Section>
 
@@ -151,10 +162,17 @@ export default function SecurityPage() {
       <Section>
         <H2>Reporting a vulnerability</H2>
         <Body className="mt-4">
-          If you find a security issue in the Manci programs or app, email{" "}
-          <a className="mx-link" href="mailto:security@mancipatio.io">
-            security@mancipatio.io
-          </a>
+          If you find a security issue in the Manci programs or app,{" "}
+          {SECURITY_CONTACT ? (
+            <>
+              email{" "}
+              <a className="mx-link" href={`mailto:${SECURITY_CONTACT}`}>
+                {SECURITY_CONTACT}
+              </a>
+            </>
+          ) : (
+            "use the contact form"
+          )}
           . Describe the issue, the affected program, page or instruction, and
           the steps to reproduce it. Test only on devnet or with your own
           accounts and assets, never with other people&apos;s funds or data,

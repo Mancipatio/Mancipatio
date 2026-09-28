@@ -50,6 +50,15 @@ export type AssetProfile = {
   ssc_decision_doc_sha256: string | null;
   ssc_decision_version_id?: string | null;
 
+  // Offering exemption (migration 0076, admin-only, never public): on mainnet
+  // a sale whose whitepaper is not SSC-approved needs one recorded
+  // (lib/whitepaper-approval.ts offeringClearance). Optional: rows read before
+  // 0076 is applied do not carry the columns.
+  offering_exemption_ref?: string | null;
+  offering_exemption_reason?: string | null;
+  offering_exemption_recorded_by?: string | null;
+  offering_exemption_recorded_at?: string | null;
+
   // category-specific (all optional — only the active category's columns are set)
   pre_money_valuation: number | null;
   share_price: number | null;

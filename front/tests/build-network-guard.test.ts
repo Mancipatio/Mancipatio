@@ -12,10 +12,12 @@ import config, {
   assertBuildNetwork,
   assertBuildSupabase,
   assertBuildTurnstile,
+  buildNetwork,
   isBase58Address,
   SUPABASE_PROJECT_REFS,
 } from "@/next.config";
 import { parseKycRegistryPin } from "@/lib/kyc-registry-pin";
+import { detectNetwork } from "@/lib/network";
 
 const BUILD = "phase-production-build";
 const DEV = "phase-development-server";
@@ -89,6 +91,43 @@ describe("assertBuildNetwork", () => {
     }
     expect(() => assertBuildNetwork(DEV, { NEXT_PUBLIC_NETWORK: "mainnet" })).not.toThrow();
     expect(() => assertBuildNetwork(SERVER, { NEXT_PUBLIC_NETWORK: "mainnet" })).not.toThrow();
+  });
+
+  it("refuses any build that would run as mainnet from the RPC URL alone (review 8.1 #7)", () => {
+    // Off Vercel too: detectNetwork() would answer "mainnet" at runtime, but
+    // every mainnet check keys on NEXT_PUBLIC_NETWORK=mainnet.
+    for (const rpc of ["https://mainnet.helius-rpc.com/?api-key=x", "https://api.mainnet-beta.solana.com"]) {
+      expect(() => assertBuildNetwork(BUILD, { NEXT_PUBLIC_SOLANA_RPC_URL: rpc }), rpc).toThrow(
+        /would run as mainnet .* without NEXT_PUBLIC_NETWORK=mainnet/,
+      );
+      expect(() =>
+        assertBuildNetwork(BUILD, { NEXT_PUBLIC_SOLANA_RPC_URL: rpc, MAINNET_LEGAL_COPY_APPROVED: "true" }),
+      ).toThrow(/NEXT_PUBLIC_NETWORK=mainnet/);
+      expect(() => assertBuildNetwork(DEV, { NEXT_PUBLIC_SOLANA_RPC_URL: rpc })).not.toThrow();
+    }
+    // A devnet or local RPC URL without the variable stays a local devnet build.
+    for (const rpc of ["https://api.devnet.solana.com", "https://devnet.helius-rpc.com/?api-key=x", "http://127.0.0.1:8899"]) {
+      expect(() => assertBuildNetwork(BUILD, { NEXT_PUBLIC_SOLANA_RPC_URL: rpc }), rpc).not.toThrow();
+    }
+  });
+
+  it("buildNetwork applies lib/network.ts detectNetwork()'s rule", () => {
+    const samples: Array<Record<string, string>> = [
+      {},
+      { NEXT_PUBLIC_NETWORK: "mainnet" },
+      { NEXT_PUBLIC_NETWORK: " Devnet " },
+      { NEXT_PUBLIC_NETWORK: "localnet", NEXT_PUBLIC_SOLANA_RPC_URL: "https://mainnet.helius-rpc.com" },
+      { NEXT_PUBLIC_SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=x" },
+      { NEXT_PUBLIC_SOLANA_RPC_URL: "https://api.testnet.solana.com" },
+      { NEXT_PUBLIC_SOLANA_RPC_URL: "https://devnet.helius-rpc.com" },
+      { NEXT_PUBLIC_SOLANA_RPC_URL: "http://localhost:8899" },
+      { NEXT_PUBLIC_SOLANA_RPC_URL: "https://rpc.example.com" },
+    ];
+    for (const env of samples) {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", env.NEXT_PUBLIC_NETWORK ?? "");
+      vi.stubEnv("NEXT_PUBLIC_SOLANA_RPC_URL", env.NEXT_PUBLIC_SOLANA_RPC_URL ?? "");
+      expect(buildNetwork(env), JSON.stringify(env)).toBe(detectNetwork());
+    }
   });
 
   it("leaves local builds, dev and the production server alone", () => {

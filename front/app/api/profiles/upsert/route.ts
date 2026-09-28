@@ -12,13 +12,23 @@
 //     ssc_decision_* evidence fields are settable ONLY via requireAdmin;
 //   - setting whitepaper_status = "ssc_approved" REQUIRES a decision
 //     reference (in this patch or already stored on the row).
+//   - MAINNET: an SSC approval clears the offering for sale
+//     (lib/whitepaper-approval.ts offeringClearance), so recording or changing
+//     one (status, reference, decision document, or a new whitepaper file
+//     under an approval) needs the SUPER admin and the verified decision
+//     document (ssc_decision_version_id) — the bar the offering exemption
+//     has. Withdrawing an approval stays open to any admin.
+//   - the offering exemption (offering_exemption_ref / _reason, 0076) is
+//     admin-only too, and recording one needs the SUPER admin; the server
+//     stamps offering_exemption_recorded_by / _at and writes an audit event.
 //
 // Client wrapper: upsertAssetProfile() in lib/asset-profiles.ts
 // (action "profiles.upsert"). Fail closed on any RPC failure (503).
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
-import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireAdmin, requireSuperAdmin } from "@/lib/server/admin-gate";
+import { actorSourceOf, writeServerAudit } from "@/lib/server/audit";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { requireDocumentVersion } from "@/lib/server/document-versions";
@@ -42,8 +52,60 @@ const SSC_FIELDS = new Set([
 ]);
 const SSC_STATUS_VALUES = new Set(["ssc_approval_pending", "ssc_approved"]);
 
+/** Nullish and blank compare equal: an unchanged field re-sent by the form. */
+function sameValue(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown) => (v === undefined || v === "" ? null : v);
+  return norm(a) === norm(b);
+}
+
+/**
+ * Whether the patch records or changes an SSC approval: the row ends up
+ * ssc_approved and the status, a decision field or the whitepaper file
+ * differs from what is stored. Re-saving an approved profile unchanged (the
+ * admin form re-sends the reference) is not a change.
+ */
+function changesSscApproval(
+  existing: Record<string, unknown> | null,
+  cleaned: Record<string, unknown>,
+  effectiveStatus: unknown,
+  changedFile: boolean,
+): boolean {
+  if (effectiveStatus !== "ssc_approved") return false;
+  if (existing?.whitepaper_status !== "ssc_approved" || changedFile) return true;
+  return [...SSC_FIELDS].some((key) => key in cleaned && !sameValue(cleaned[key], existing?.[key]));
+}
+
+/**
+ * The offering exemption (migration 0076): counsel's reference and the reason
+ * a mainnet sale may run without an SSC-approved whitepaper
+ * (lib/whitepaper-approval.ts offeringClearance). Recording one is a SUPER
+ * ADMIN decision; any admin may clear it (the stricter direction). Both are
+ * set together or cleared together, and the server stamps who and when.
+ */
+const EXEMPTION_FIELDS = new Set(["offering_exemption_ref", "offering_exemption_reason"]);
+
 /** Server-controlled fields — silently stripped from any patch. */
-const STRIPPED_FIELDS = new Set(["network", "created_at", "updated_at", "whitepaper_version_id", "ssc_decision_version_id", "whitepaper_published_at"]);
+const STRIPPED_FIELDS = new Set([
+  "network", "created_at", "updated_at", "whitepaper_version_id", "ssc_decision_version_id", "whitepaper_published_at",
+  "offering_exemption_recorded_by", "offering_exemption_recorded_at",
+]);
+
+/** Validates an exemption patch: both fields strings (set) or both null (clear). */
+function exemptionPatch(cleaned: Record<string, unknown>): { ref: string; reason: string } | null {
+  const ref = cleaned.offering_exemption_ref;
+  const reason = cleaned.offering_exemption_reason;
+  if ((ref === null || ref === undefined || ref === "") && (reason === null || reason === undefined || reason === "")) {
+    return null;
+  }
+  if (typeof ref !== "string" || typeof reason !== "string") {
+    throw new SiwsError(400, "An offering exemption needs both counsel's reference and the reason");
+  }
+  const r = ref.trim();
+  const why = reason.trim();
+  if (r.length < 3 || r.length > 200) throw new SiwsError(400, "offering_exemption_ref must be 3-200 characters");
+  if (why.length < 10 || why.length > 1000) throw new SiwsError(400, "offering_exemption_reason must be 10-1000 characters");
+  return { ref: r, reason: why };
+}
 
 const MAX_PROFILE_JSON = 50_000;
 
@@ -66,7 +128,7 @@ async function isAdminWallet(wallet: string): Promise<boolean> {
 
 export async function POST(request: Request) {
   try {
-    const { wallet, params } = await verifySigned(request, "profiles.upsert");
+    const { wallet, params, via } = await verifySigned(request, "profiles.upsert");
 
     if (!isPlainObject(params.profile)) {
       throw new SiwsError(400, "Missing profile");
@@ -130,12 +192,16 @@ export async function POST(request: Request) {
     const touchesSsc =
       Object.keys(cleaned).some((k) => SSC_FIELDS.has(k)) ||
       (whitepaperStatus !== undefined && SSC_STATUS_VALUES.has(whitepaperStatus));
+    const touchesExemption = Object.keys(cleaned).some((k) => EXEMPTION_FIELDS.has(k));
     if (!admin) {
       if (touchesSsc) {
         throw new SiwsError(
           403,
           "SSC approval fields can only be set by a platform admin",
         );
+      }
+      if (touchesExemption) {
+        throw new SiwsError(403, "An offering exemption can only be recorded by the platform");
       }
       await requireProfileOwner(wallet,assetPda,"asset");
       // SPV assignment is a Manci-team operation (SPVs are incorporated
@@ -146,6 +212,19 @@ export async function POST(request: Request) {
       if ("spv_id" in cleaned) {
         delete cleaned.spv_id;
       }
+    }
+
+    // Offering exemption (admin path only; the issuer path was refused above).
+    // Only a patch that names the fields touches the 0076 columns, so a
+    // deployment whose database predates 0076 keeps saving every other field.
+    let exemption: { ref: string; reason: string } | null = null;
+    if (touchesExemption) {
+      exemption = exemptionPatch(cleaned);
+      if (exemption) await requireSuperAdmin(wallet);
+      cleaned.offering_exemption_ref = exemption?.ref ?? null;
+      cleaned.offering_exemption_reason = exemption?.reason ?? null;
+      cleaned.offering_exemption_recorded_by = exemption ? wallet : null;
+      cleaned.offering_exemption_recorded_at = exemption ? new Date().toISOString() : null;
     }
 
     const sb = getSupabaseAdmin();
@@ -179,6 +258,21 @@ export async function POST(request: Request) {
       } else throw new SiwsError(400,"SSC document must belong to this asset");
     }
 
+    // Mainnet: recording or changing an SSC approval is a super-admin
+    // decision backed by the verified decision document (see header).
+    if (detectNetwork() === "mainnet" && changesSscApproval(existing, cleaned, effective.whitepaper_status, changedFile)) {
+      await requireSuperAdmin(wallet);
+      const decisionVersion = "ssc_decision_version_id" in cleaned
+        ? cleaned.ssc_decision_version_id
+        : existing?.ssc_decision_version_id;
+      if (!decisionVersion) {
+        throw new SiwsError(
+          409,
+          "On mainnet an SSC approval needs the verified decision document: upload it with the decision reference",
+        );
+      }
+    }
+
     // ssc_approved requires decision evidence — from this patch or the row.
     if (cleaned.whitepaper_status === "ssc_approved") {
       let ref =
@@ -208,6 +302,27 @@ export async function POST(request: Request) {
     if (error) {
       console.error("[api/profiles/upsert] upsert failed:", error.message);
       throw new SiwsError(500, "Profile write failed");
+    }
+
+    // The row itself records who set the exemption and when; the audit event
+    // is best effort on top (the write above already happened).
+    if (touchesExemption) {
+      try {
+        await writeServerAudit(sb, {
+          ix_name: exemption ? "offering_exemption_record" : "offering_exemption_clear",
+          category: "assets",
+          actor_wallet: wallet,
+          actor_source: actorSourceOf(via),
+          reason: exemption ? exemption.reason : "Offering exemption cleared",
+          target_label: assetPda,
+          metadata: { network: detectNetwork(), offering_exemption_ref: exemption?.ref ?? null },
+        });
+      } catch (auditErr) {
+        console.warn(
+          "[api/profiles/upsert] exemption audit event not written:",
+          auditErr instanceof Error ? auditErr.message : String(auditErr),
+        );
+      }
     }
 
     return NextResponse.json({ ok: true, data: { asset_pda: assetPda } });

@@ -13,6 +13,13 @@ import {
   TextLink,
 } from "@/components/mx";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { securityReviewFact } from "@/lib/legal/audit";
+import { SecurityAuditReportLink } from "@/components/legal/security-review";
+import {
+  hasOperatorEntity,
+  operatorFor,
+  type Operator,
+} from "@/lib/legal/operator";
 
 /**
  * "About" — prototype `#page-about`.
@@ -35,15 +42,33 @@ export const metadata: Metadata = {
 };
 
 const NETWORK = detectNetwork();
+const OPERATOR = operatorFor(NETWORK);
+
+/** Who operates this network: the registered entity and its licence, or the
+ *  pilot's plain statement that there is none yet (lib/legal/operator.ts). */
+function operatorFacts(operator: Operator): string[] {
+  if (!hasOperatorEntity(operator)) {
+    return ["Pilot stage: no operating company designated yet"];
+  }
+  const facts = [`Operated by ${operator.legalName?.trim()}`];
+  if (operator.licence) {
+    facts.push(
+      `Licence: ${operator.licence.authority}, decision ${operator.licence.decisionNumber}`,
+    );
+  }
+  return facts;
+}
 
 /** Short, checkable statements only — the dark band's whole value. The stage
- *  lines follow the build's network (NEXT_PUBLIC_NETWORK). */
+ *  lines follow the build's network (NEXT_PUBLIC_NETWORK); the security line
+ *  follows lib/legal/audit.ts (no external audit is claimed before one exists). */
 const WHERE_THINGS_STAND = [
   isTestNetwork(NETWORK)
     ? `${MX_NETWORK_STAGE_LABEL} — nothing is issued live yet`
     : MX_NETWORK_STAGE_LABEL,
+  ...operatorFacts(OPERATOR),
   `Two on-chain programs, deployed on Solana ${NETWORK}`,
-  "Both went through a systematic security review before deploy",
+  securityReviewFact(),
   "Asset registry, Token-2022 mints and program-owned custody",
   "Launchpad, OTC settlement, governance and vesting shipped",
   "Issuer applications are open and read by a person",
@@ -101,6 +126,10 @@ export default function AboutPage() {
         <Eyebrow>The honest line</Eyebrow>
         <H2 className="mb-7">Where things stand</H2>
         <Facts items={WHERE_THINGS_STAND} />
+        <SecurityAuditReportLink className="mt-7" />
+        <p className="mt-7">
+          <TextLink href={MX_ROUTES.company}>Company and licence →</TextLink>
+        </p>
       </Section>
 
       <Section>
