@@ -5,7 +5,8 @@
 // getTransaction and getSlot. The tests move `slot` and the accounts
 // themselves; `lagging` answers the next getMultipleAccounts calls from an
 // older view (a node behind the others), and `calls` records every method
-// with its options (the benchmark counts calls and response bytes).
+// with its options and the approximate JSON size of its answer (the
+// benchmark counts calls and response bytes).
 import { getBase58Encoder } from "@solana/kit";
 
 export type ChainAccount = { owner: string; data: Uint8Array };
@@ -15,6 +16,8 @@ type Filter = { memcmp?: { offset: bigint; bytes: string; encoding: string }; da
 
 export const CLOCK_SYSVAR = "SysvarC1ock11111111111111111111111111111111";
 const SYSVAR_OWNER = "Sysvar1111111111111111111111111111111111111";
+/** The JSON envelope of one account in an answer (pubkey, owner, lamports, space, flags), beside its base64 data. */
+const ENVELOPE_BYTES = 190;
 
 const encoded = (account: ChainAccount) => ({
   owner: account.owner, data: [Buffer.from(account.data).toString("base64"), "base64"] as const,
@@ -89,7 +92,7 @@ export class IndexerChain {
           return account ? encoded(account) : null;
         });
         return { context: { slot: BigInt(slot) }, value };
-      }, (v) => v.value.reduce((n, a) => n + (a ? a.data[0].length : 0), 0))),
+      }, (v) => v.value.reduce((n, a) => n + ENVELOPE_BYTES + (a ? a.data[0].length : 0), 0))),
       getProgramAccounts: (program: string, opts?: { filters?: Filter[] }) => send(() => this.answer("getProgramAccounts", [program, opts], () => {
         const filters = opts?.filters ?? [];
         const value = [...this.accounts.entries()]
@@ -105,7 +108,7 @@ export class IndexerChain {
           }))
           .map(([pubkey, a]) => ({ pubkey, account: encoded(a) }));
         return { context: { slot: BigInt(this.slot) }, value };
-      }, (v) => v.value.reduce((n, a) => n + a.account.data[0].length, 0))),
+      }, (v) => v.value.reduce((n, a) => n + ENVELOPE_BYTES + a.account.data[0].length, 0))),
       getSignaturesForAddress: (target: string, opts?: { limit?: number; before?: string }) => send(() => this.answer("getSignaturesForAddress", [target, opts], () => {
         const rows = this.signatures.get(String(target)) ?? [];
         const from = opts?.before ? rows.findIndex((r) => r.signature === String(opts.before)) + 1 : 0;

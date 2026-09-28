@@ -15,8 +15,12 @@
 import type { LocalPostgres } from "./local-postgres";
 
 type Result = { data: unknown; error: { code: string; message: string } | null; count?: number | null };
-/** How many statements ran, and how long the database took in total (for the benchmark). */
-export type PgStats = { calls: number; ms: number; byName: Record<string, { calls: number; ms: number }> };
+/**
+ * How many statements ran; `ms` is the server's time (psql \timing), `wallMs`
+ * the client's, including the psql process each call starts (the benchmark
+ * subtracts it: a deployment keeps its connections).
+ */
+export type PgStats = { calls: number; ms: number; wallMs: number; byName: Record<string, { calls: number; ms: number }> };
 
 const literal = (value: string) => `'${value.replaceAll("'", "''")}'`;
 const ident = (name: string) => {
@@ -45,12 +49,18 @@ function parseError(error: unknown) {
 
 export function pgSupabase(db: LocalPostgres, options: { role?: string } = {}) {
   const role = options.role ?? "service_role";
-  const stats: PgStats = { calls: 0, ms: 0, byName: {} };
+  const stats: PgStats = { calls: 0, ms: 0, wallMs: 0, byName: {} };
   const signatures = new Map<string, Promise<{ set: boolean; args: Map<string, string> }>>();
 
   /** One statement; `ms` is the server's time (psql \timing), not the psql process start. */
   async function run(name: string, sql: string): Promise<string> {
-    const out = await db.queryAsync(`\\set VERBOSITY verbose\n\\timing on\nset role ${role};\n${sql}`);
+    const started = performance.now();
+    let out: string;
+    try {
+      out = await db.queryAsync(`\\set VERBOSITY verbose\n\\timing on\nset role ${role};\n${sql}`);
+    } finally {
+      stats.wallMs += performance.now() - started;
+    }
     let ms = 0;
     const kept: string[] = [];
     for (const line of out.split("\n")) {
