@@ -14,6 +14,9 @@
 
 # testing
 /coverage
+# Playwright UI smoke output (ui-smoke/, playwright.config.ts)
+/ui-smoke/.results/
+/ui-smoke/.report/
 
 # next.js
 /.next/

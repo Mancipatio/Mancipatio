@@ -19,7 +19,9 @@
     "chain:e2e": "vitest run --config scripts/chain/e2e.config.ts --reporter=verbose",
     "chain:handover": "vitest run --config scripts/chain/handover.config.ts --reporter=verbose",
     "chain:emergency": "vitest run --config scripts/chain/emergency.config.ts --reporter=verbose",
-    "sim": "vitest run --config scripts/sim/sim.config.ts --reporter=verbose"
+    "sim": "vitest run --config scripts/sim/sim.config.ts --reporter=verbose",
+    "ui-smoke:build": "node ui-smoke/build.mjs",
+    "ui-smoke": "playwright test"
   },
   "dependencies": {
     "@solana-program/token-2022": "^0.7.0",
@@ -37,6 +39,7 @@
   "devDependencies": {
     "@codama/nodes-from-anchor": "^1.4.1",
     "@codama/renderers-js": "^1.7.0",
+    "@playwright/test": "1.63.0",
     "@solana-program/system": "^0.10.0",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
