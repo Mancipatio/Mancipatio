@@ -467,6 +467,7 @@ export async function planSquadsOp(input: {
       libraryName: name,
       commit: release?.commit ?? null,
       baseImage: release?.baseImage ?? null,
+      arch: release?.arch ?? null,
     });
     const programDataAccount = await fetchRawAccount(rpc, await programDataAddress(v.program));
     const programData =
@@ -478,7 +479,9 @@ export async function planSquadsOp(input: {
     if (problems.length) throw new ChainGateError(`${name} verify ${v.kind}: ${problems.join("; ")}`);
     preconditions.push(
       `${name} verify ${v.kind}: ${v.params.gitUrl} at ${v.params.commit}, build args [${v.params.args.join(" ")}], deployed_slot ${v.params.deployedSlot}, solana-verify ${v.params.version}` +
-        (release ? " (commit and base image = the Release's hashes.txt)" : " (not checked against a Release: no CHAIN_RELEASE_DIR)"),
+        (release
+          ? ` (commit, base image and --arch ${release.arch} = the Release's hashes.txt)`
+          : " (not checked against a Release: no CHAIN_RELEASE_DIR)"),
     );
   }
   if (external.droppedComputeBudget.length) {

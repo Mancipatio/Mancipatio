@@ -36,6 +36,8 @@ describe("loadRelease", () => {
     expect(release.layout).toBe("flat");
     expect(release.commit).toBe("a".repeat(40));
     expect(release.baseImage).toBe("solanafoundation/solana-verifiable-build:3.1.13");
+    // No `arch:` line (the rc.1 shape): solana-verify's default v0.
+    expect(release.arch).toBe("v0");
     expect(release.sha256Sums.files).toEqual([...RELEASE_FILES].sort());
     expect(release.idl).not.toBeNull();
     // The fixture's hashes.txt holds sha256(.so), which equals the executable
@@ -94,6 +96,30 @@ describe("loadRelease", () => {
     refuse(() => loadRelease(badHashes, { requireSums: true }), /hashes.txt is invalid: commit missing/);
     const badIdl = releaseDir({ transfer_hook: new Uint8Array(Buffer.from("{not json")) });
     refuse(() => loadRelease(badIdl, { requireSums: true }), /transfer_hook.json is not valid JSON/);
+    const badArch = releaseDir({}, {}, { arch: "v9" });
+    refuse(() => loadRelease(badArch, { requireSums: true }), /hashes.txt is invalid: arch "v9" is not v0..v3/);
+  });
+
+  it("the hashes.txt arch is the SBPF version the .so files were built for (it becomes the verify --arch)", () => {
+    /** A 64-byte ELF64 LE EM_SBPF header with the given e_flags. */
+    const elf = (eFlags: number) => {
+      const out = new Uint8Array(64);
+      out.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+      new DataView(out.buffer).setUint16(0x12, 263, true);
+      new DataView(out.buffer).setUint32(0x30, eFlags, true);
+      return out;
+    };
+    const v3 = loadRelease(releaseDir({}, { asset_registry: elf(3), transfer_hook: elf(3) }, { arch: "v3" }), { requireSums: true });
+    expect(v3.arch).toBe("v3");
+    expect(loadRelease(releaseDir({}, { asset_registry: elf(0), transfer_hook: elf(0) }), { requireSums: true }).arch).toBe("v0");
+    refuse(
+      () => loadRelease(releaseDir({}, { transfer_hook: elf(3) }), { requireSums: true }),
+      /hashes.txt says arch v0 \(no arch line\), but transfer_hook.so is SBPF v3 \(e_flags 3\)/,
+    );
+    refuse(
+      () => loadRelease(releaseDir({}, { asset_registry: elf(0) }, { arch: "v3" }), { requireSums: true }),
+      /hashes.txt says arch v3, but asset_registry.so is SBPF v0 \(e_flags 0\)/,
+    );
   });
 });
 
@@ -249,6 +275,7 @@ describe("verifiable-build.yml shell steps, executed locally", () => {
     expect(release.layout).toBe("flat");
     expect(release.commit).toBe(commit);
     expect(release.baseImage).toBe(baseImage);
+    expect(release.arch).toBe("v3");
     expect(release.sha256Sums.files).toEqual([...RELEASE_FILES].sort());
     expect(release.verifyHashMatches).toEqual({ asset_registry: true, transfer_hook: true });
     expect(release.verifyHashes.asset_registry).not.toBe(sha256Hex(so.asset_registry));

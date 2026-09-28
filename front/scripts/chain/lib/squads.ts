@@ -581,11 +581,14 @@ const VERIFY_ARCHES = new Set(["v0", "v1", "v2", "v3"]);
  * without `--base-image` it infers an image from Cargo.lock, which for this
  * workspace is not the Release's image (solana-program-error 3.0.1 ⇒ the
  * 3.0.1 image, while the Release is built with 3.1.13), so the hash would not
- * reproduce. Only the flags the Release build uses are accepted.
+ * reproduce. Likewise `--arch`: without it solana-verify builds v0, while a
+ * Release from v0.0.0-rc.2 on is SBPF v3 (hashes.txt `arch: v3`). Only the
+ * flags the Release build uses are accepted. `expected.arch` null means there
+ * is no Release to compare with (any v0..v3 is accepted).
  */
 export function verifyParamProblems(
   params: VerifyParams,
-  expected: { libraryName: string; commit: string | null; baseImage: string | null },
+  expected: { libraryName: string; commit: string | null; baseImage: string | null; arch: string | null },
 ): string[] {
   const problems: string[] = [];
   const values = new Map<string, string>();
@@ -617,6 +620,11 @@ export function verifyParamProblems(
   }
   const arch = values.get("--arch");
   if (arch !== undefined && !VERIFY_ARCHES.has(arch)) problems.push(`--arch ${arch} is not v0..v3`);
+  else if (expected.arch && (arch ?? "v0") !== expected.arch) {
+    problems.push(
+      `--arch is ${arch ?? "missing (solana-verify builds v0)"}, not the Release's ${expected.arch} (the remote build would not reproduce the hash)`,
+    );
+  }
   if (!/^[0-9a-f]{40}$/.test(params.commit)) problems.push(`commit ${JSON.stringify(params.commit)} is not a full 40-hex commit`);
   else if (expected.commit && params.commit !== expected.commit) {
     problems.push(`commit ${params.commit} is not the Release commit ${expected.commit}`);

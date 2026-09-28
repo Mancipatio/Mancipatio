@@ -155,10 +155,15 @@ export function localIdl(name: "asset_registry" | "transfer_hook"): Uint8Array {
   return new Uint8Array(fs.readFileSync(path.join(root, "front", "idl", `${name}.json`)));
 }
 
-/** A flat GitHub-Release-shaped directory (the CI release job layout). */
+/**
+ * A flat GitHub-Release-shaped directory (the CI release job layout).
+ * `options.arch` adds the `arch:` line verifiable-build writes since
+ * v0.0.0-rc.2 (absent = the rc.1 shape, solana-verify's default v0).
+ */
 export function releaseDir(
   overrides: Partial<Record<"asset_registry" | "transfer_hook", Uint8Array>> = {},
   soOverrides: Partial<Record<"asset_registry" | "transfer_hook", Uint8Array>> = {},
+  options: { arch?: string } = {},
 ) {
   const dir = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "release-"));
   const so = { asset_registry: new Uint8Array([1, 2, 3]), transfer_hook: new Uint8Array([4, 5, 6]), ...soOverrides };
@@ -169,7 +174,7 @@ export function releaseDir(
   }
   fs.writeFileSync(
     path.join(dir, "hashes.txt"),
-    `base image: solanafoundation/solana-verifiable-build:3.1.13\ncommit: ${"a".repeat(40)}\nasset_registry: ${sha256Hex(so.asset_registry)}\ntransfer_hook: ${sha256Hex(so.transfer_hook)}\n`,
+    `base image: solanafoundation/solana-verifiable-build:3.1.13\n${options.arch ? `arch: ${options.arch}\n` : ""}commit: ${"a".repeat(40)}\nasset_registry: ${sha256Hex(so.asset_registry)}\ntransfer_hook: ${sha256Hex(so.transfer_hook)}\n`,
   );
   fs.writeFileSync(
     path.join(dir, "sbf-sha256.txt"),

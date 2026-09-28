@@ -1,6 +1,7 @@
 // Provenance of the candidate binaries the rollout inventory compares against.
 // A verifiable-build artifact directory carries `hashes.txt` (source commit,
-// base image, solana-verify hashes) and `sbf-sha256.txt` (sha256 of each .so).
+// base image, SBPF arch, solana-verify hashes) and `sbf-sha256.txt` (sha256 of
+// each .so).
 // The git HEAD of the checkout that contains the directory says nothing about
 // which commit produced the binaries, so the inventory records these instead.
 import fs from 'node:fs';
@@ -10,8 +11,14 @@ import { createHash } from 'node:crypto';
 const sha = value => createHash('sha256').update(value).digest('hex');
 const COMMIT = /^[0-9a-f]{40}$/;
 const HASH = /^[0-9a-f]{64}$/;
+const ARCH = /^v[0-3]$/;
 
-/** Parses `hashes.txt` (`key: value` lines). Unknown keys are ignored. */
+/**
+ * Parses `hashes.txt` (`key: value` lines). Unknown keys are ignored.
+ * `arch` is the `solana-verify build --arch` of the Release (`arch: v3` since
+ * v0.0.0-rc.2); null when the line is absent, i.e. solana-verify's default v0
+ * (the rc.1 Release and older).
+ */
 export function parseHashesTxt(text, programs) {
   const fields = new Map();
   for (const line of text.split(/\r?\n/)) {
@@ -21,6 +28,8 @@ export function parseHashesTxt(text, programs) {
   const errors = [];
   const commit = fields.get('commit') ?? null;
   if (!commit || !COMMIT.test(commit)) errors.push('commit missing or not a 40-hex sha');
+  const arch = fields.get('arch') ?? null;
+  if (arch !== null && !ARCH.test(arch)) errors.push(`arch ${JSON.stringify(arch)} is not v0..v3`);
   /** @type {Record<string, string | null>} */
   const verify_hashes = {};
   for (const name of programs) {
@@ -32,6 +41,7 @@ export function parseHashesTxt(text, programs) {
     file_sha256: sha(text),
     commit: commit && COMMIT.test(commit) ? commit : null,
     base_image: fields.get('base image') ?? null,
+    arch: arch !== null && ARCH.test(arch) ? arch : null,
     verify_hashes,
     errors,
   };

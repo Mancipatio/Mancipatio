@@ -215,6 +215,18 @@ these; the owner signs them off in the launch-day record (§0A, D0).
       the map is refused on mainnet without it.
 - [ ] **Dedicated RPC** and `CHAIN_CU_PRICE` decided (check recent
       prioritization fees).
+- [ ] **Operator CLI ≥ 4.0 for an SBPF v3 Release** (v0.0.0-rc.2 on; its
+      hashes.txt says `arch: v3`): `solana --version` prints
+      `solana-cli 4.2.x` (the train of the verifiable-build image) on the
+      machine that runs `write-buffer`, `deploy --buffer`, `upgrade` and
+      `extend` (§2, §9). Agave 3.1.13 refuses the final v3 ELF before any
+      RPC call ("ELF error: Failed to parse ELF file: invalid file header"):
+      that fails closed but stops the run. Unpack the Agave v4.2.2 release
+      tarball for the operator's platform outside the repository, check its
+      sha256 (`solana-release-aarch64-apple-darwin.tar.bz2`:
+      `580bb4bcdb439756645a83d856964a8d7b700512356ada819ad89a40bd76bca4`),
+      and run its `solana` by path or first on `PATH` for these steps only,
+      as in §12. `solana-verify` stays 0.5.1.
 - [ ] **Cluster gates**: `chain:inventory` with `CHAIN_RELEASE_DIR` shows no
       `sbpf-gate` blocker (SIMD-0500 against the Release's SBPF version) and
       its `rent` line matches the budget chosen in §1. The gate blocks only a
@@ -394,6 +406,7 @@ leak).
 R=~/mancipatio-mainnet/release-vX
 K=~/mancipatio-mainnet/keys           # deployer.json, program keypairs, buffer keypairs
 E=~/mancipatio-mainnet/evidence       # one new CHAIN_OUTPUT per run (never overwritten)
+solana --version   # an SBPF v3 Release (hashes.txt `arch: v3`) needs solana-cli 4.x (§0)
 solana-keygen new --no-bip39-passphrase --silent -o "$K/buffer-transfer_hook.json"
 solana program write-buffer "$R/transfer_hook.so" \
   --buffer "$K/buffer-transfer_hook.json" --keypair "$K/deployer.json" \
@@ -527,11 +540,20 @@ exists for an emergency only.
   solana-verify export-pda-tx https://github.com/Mancipatio/Mancipatio \
     --program-id <program id> --uploader <vault> --commit-hash <tag commit> \
     --library-name <asset_registry|transfer_hook> --mount-path program \
+    --base-image "$(sed -n 's/^base image: //p' "$R/hashes.txt")" \
+    --arch "$(sed -n 's/^arch: //p' "$R/hashes.txt")" \
     --encoding base58 --url "$MAINNET_RPC" > "$E/08-export-pda-<program>.txt"
   # the base58 transaction is the last line of that file
   CHAIN_OUTPUT=$E/08-verify-pda.json CHAIN_SQUADS_OP=wrap-external \
     CHAIN_SQUADS_INPUT=<file with {"transactionBase58": "…"}> npm run chain:squads-export
   ```
+  `--base-image` and `--arch` are stored in the PDA and OtterSec's rebuild
+  uses exactly them: they must be the Release's hashes.txt `base image:` and
+  `arch:` (`v3` from v0.0.0-rc.2 on; without `--arch`, solana-verify builds
+  v0 and the hash does not reproduce). The export refuses a verify
+  instruction whose `--base-image`, `--arch` (absent = v0) or commit differ
+  from the Release in `CHAIN_RELEASE_DIR`; `sed` prints nothing for an
+  rc.1-shaped hashes.txt without an `arch:` line, so drop the flag there.
   `export-pda-tx` answered at once in the rehearsal (no Docker build, no
   clone left behind) and adds a
   `SetComputeUnitPrice(100000)` unless `--compute-unit-price 0`; the export
@@ -592,6 +614,7 @@ source paths are clean (see "Safety rules").
    keypairs outside the repository (D7; `--silent`, so no seed phrase reaches
    a log), and hands them to the vault:
    ```sh
+   solana --version   # an SBPF v3 Release (hashes.txt `arch: v3`) needs solana-cli 4.x (§0)
    for p in transfer_hook asset_registry; do
      solana-keygen new --no-bip39-passphrase --silent -o "$K/upgrade-buffer-$p.json"
      solana program write-buffer "$R2/$p.so" \

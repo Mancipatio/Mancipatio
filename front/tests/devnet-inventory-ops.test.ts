@@ -135,6 +135,12 @@ describe("candidate artifact provenance", () => {
     expect(hashes.commit).toBeNull();
     expect(hashes.verify_hashes).toEqual({ asset_registry: null, transfer_hook: null });
     expect(hashes.errors).toHaveLength(3);
+    // `arch:` (verifiable-build since v0.0.0-rc.2): absent = null (solana-verify's v0).
+    expect(parseHashesTxt(HASHES_2D, PROGRAMS).arch).toBeNull();
+    expect(parseHashesTxt(`${HASHES_2D}arch: v3\n`, PROGRAMS)).toMatchObject({ arch: "v3", errors: [] });
+    const badArch = parseHashesTxt(`${HASHES_2D}arch: x86\n`, PROGRAMS);
+    expect(badArch.arch).toBeNull();
+    expect(badArch.errors).toEqual(['arch "x86" is not v0..v3']);
     expect(parseSbfSha256Txt("", PROGRAMS).errors).toHaveLength(2);
   });
 
