@@ -37,6 +37,8 @@ import {
 } from "@/lib/otc";
 import { walletSigner } from "@/lib/wallet-signer";
 import { detectNetwork } from "@/lib/network";
+import { moduleEnabled } from "@/lib/features";
+import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
@@ -86,6 +88,10 @@ export default function MyDealsPage() {
   >(new Map());
   // "now" captured at load time (render must stay pure) — expiry checks.
   const [nowMs, setNowMs] = useState(0);
+  // Pilot scope (lib/features.ts): with secondary trading off, funding a
+  // deal is not offered (the send path refuses it too, before the wallet:
+  // lib/pause-gate.ts MODULE_FLOWS); expiring and refunds stay.
+  const tradingOn = moduleEnabled("secondaryTrading");
   // Funds-moving actions go through a confirm dialog (SCOPE 1.6).
   const [confirmAction, setConfirmAction] = useState<{
     kind: "asset" | "payment" | "expire";
@@ -242,7 +248,7 @@ export default function MyDealsPage() {
     if (!wallet || !conn.wallet) return;
     const { pda, deal } = row;
     const pendingId = toast.showPending(
-      `Depositing ${String(deal.price)} payment units…`,
+      `Depositing ${formatPaymentForDisplay(deal.price, deal.paymentMint.toString(), detectNetwork())}…`,
     );
     try {
       const signer = walletSigner(conn.wallet);
@@ -455,7 +461,7 @@ export default function MyDealsPage() {
                           : "you are the seller"}
                       </p>
                       <p className="mt-0.5 font-mono text-[11px] text-slate-500">
-                        {String(r.amount)} units for {String(r.price)} · with{" "}
+                        {String(r.amount)} units for {formatPaymentForDisplay(BigInt(r.price), r.payment_mint, detectNetwork())} · with{" "}
                         {shortAddr(
                           r.buyer_wallet === wallet.toString()
                             ? r.seller_wallet
@@ -522,7 +528,7 @@ export default function MyDealsPage() {
                         : !info || info.balance === null
                           ? "You have no payment-token account for this mint. Create one and fund it before depositing."
                           : info.balance < deal.price
-                            ? `Your payment balance (${String(info.balance)}) is below the price (${String(deal.price)}).`
+                            ? `Your payment balance (${formatPaymentForDisplay(info.balance, deal.paymentMint.toString(), detectNetwork())}) is below the price (${formatPaymentForDisplay(deal.price, deal.paymentMint.toString(), detectNetwork())}).`
                             : null;
                       return (
                         <tr key={pda.toString()} className="text-slate-700">
@@ -543,7 +549,7 @@ export default function MyDealsPage() {
                           <td className="px-4 py-3 text-right font-mono text-xs">
                             <p>{String(deal.amount)} units</p>
                             <p className="mt-0.5 text-slate-500">
-                              {String(deal.price)} payment
+                              {formatPaymentForDisplay(deal.price, deal.paymentMint.toString(), detectNetwork())}
                             </p>
                           </td>
                           {/* Ledgered amounts, not just the flags: the refund
@@ -597,7 +603,7 @@ export default function MyDealsPage() {
                             )}
                           </td>
                           <td className="px-4 py-3 text-right text-xs">
-                            {isOpen && !expired && !isBuyer && !deal.assetDeposited && (
+                            {tradingOn && isOpen && !expired && !isBuyer && !deal.assetDeposited && (
                               <button
                                 type="button"
                                 disabled={tx.isSending}
@@ -609,7 +615,7 @@ export default function MyDealsPage() {
                                 Deposit asset
                               </button>
                             )}
-                            {isOpen && !expired && isBuyer && !deal.paymentDeposited && (
+                            {tradingOn && isOpen && !expired && isBuyer && !deal.paymentDeposited && (
                               <>
                                 <button
                                   type="button"
@@ -684,7 +690,7 @@ export default function MyDealsPage() {
                 {confirmAction.kind === "asset"
                   ? `Deposit ${String(confirmAction.row.deal.amount)} share units of deal #${String(confirmAction.row.deal.dealId)} into escrow. Once both legs are funded the swap settles atomically.`
                   : confirmAction.kind === "payment"
-                    ? `Deposit ${String(confirmAction.row.deal.price)} payment units into deal #${String(confirmAction.row.deal.dealId)}. Once both legs are funded the swap settles atomically.`
+                    ? `Deposit ${formatPaymentForDisplay(confirmAction.row.deal.price, confirmAction.row.deal.paymentMint.toString(), detectNetwork())} (${String(confirmAction.row.deal.price)} base units) for ${String(confirmAction.row.deal.amount)} share units into deal #${String(confirmAction.row.deal.dealId)}. Once both legs are funded the swap settles atomically.`
                     : `Trigger the expiry of deal #${String(confirmAction.row.deal.dealId)} and refund whichever leg was deposited to its depositor.`}
               </p>
               {/* The buyer pays here: the purchase risk warning is shown

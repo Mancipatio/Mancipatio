@@ -54,6 +54,82 @@ export async function walletHasLivePassport(
   return false;
 }
 
+/** The wallet's KycEntry PDAs (one per registry) that are live at `commitment`. */
+async function liveEntryPdas(
+  rpc: ReturnType<typeof getServerRpc>,
+  entryPdas: Address[],
+  nowSec: number,
+  commitment: "confirmed" | "finalized",
+): Promise<Address[]> {
+  const live: Address[] = [];
+  for (const entryPda of entryPdas) {
+    const entry = await fetchMaybeKycEntry(rpc, entryPda, {
+      commitment,
+      abortSignal: AbortSignal.timeout(12_000),
+    });
+    if (!entry.exists) continue;
+    if (entry.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new Error("Unexpected KYC entry owner");
+    if (entry.data.status === KycStatus.Approved && Number(entry.data.expiry) > nowSec) live.push(entryPda);
+  }
+  return live;
+}
+
+/**
+ * Is `wallet`'s live passport FINALIZED (sim gap G1: a passport request may
+ * be marked approved only for a passport that exists)? The /admin/kyc issue
+ * flow marks the request approved right after its approve_holder CONFIRMED
+ * on the BROWSER's RPC, ~15 s before that block is finalized, so this waits
+ * for finality rather than refusing every normal issue:
+ *   - "none": no live entry at confirmed, after `noneAttempts` reads
+ *     `noneIntervalMs` apart (default 5 × 1 s): the server's RPC may be a
+ *     slot or two behind the browser's, so a passport issued a moment ago
+ *     gets that grace before the route says nothing was issued;
+ *   - "finalized": a live entry is visible at finalized;
+ *   - "not-finalized": live at confirmed, still not at finalized after
+ *     `timeoutMs` (the caller asks to retry).
+ * THROWS on any RPC or decode failure, like walletHasLivePassport.
+ */
+export async function passportFinality(
+  wallet: string,
+  opts: {
+    nowSec?: number;
+    timeoutMs?: number;
+    intervalMs?: number;
+    noneAttempts?: number;
+    noneIntervalMs?: number;
+    sleep?: (ms: number) => Promise<void>;
+  } = {},
+): Promise<"none" | "finalized" | "not-finalized"> {
+  if (!BASE58_RE.test(wallet)) throw new Error("Not a wallet address");
+  const nowSec = opts.nowSec ?? Math.floor(Date.now() / 1000);
+  const timeoutMs = opts.timeoutMs ?? 30_000;
+  const intervalMs = opts.intervalMs ?? 3_000;
+  const noneAttempts = Math.max(1, opts.noneAttempts ?? 5);
+  const noneIntervalMs = opts.noneIntervalMs ?? 1_000;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const rpc = getServerRpc();
+  await createNetworkVerifier(rpc, detectNetwork())();
+  const registries = await listKycRegistries(rpc);
+  const pdas: Address[] = [];
+  for (const record of registries) {
+    const [entryPda] = await findKycEntryPda({ kycRegistry: record.address, holder: wallet as Address });
+    pdas.push(entryPda);
+  }
+  let confirmed: Address[] = [];
+  for (let attempt = 1; attempt <= noneAttempts; attempt++) {
+    confirmed = await liveEntryPdas(rpc, pdas, nowSec, "confirmed");
+    if (confirmed.length > 0 || attempt === noneAttempts) break;
+    await sleep(noneIntervalMs);
+  }
+  if (confirmed.length === 0) return "none";
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if ((await liveEntryPdas(rpc, confirmed, nowSec, "finalized")).length > 0) return "finalized";
+    if (Date.now() + intervalMs > deadline) return "not-finalized";
+    await sleep(intervalMs);
+  }
+}
+
 /**
  * Refuse (409) while `wallet` holds a live passport; 503 when the chain could
  * not be consulted. A dossier without a wallet has no passport to check.

@@ -10,6 +10,7 @@ import { detectNetwork } from "@/lib/network";
 // client sees them in their issuer console).
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { requireSupportedVestingMint } from "@/lib/server/vesting-mint-gate";
@@ -37,6 +38,10 @@ export async function POST(request: Request) {
         "decision must be approved, needs_changes or rejected",
       );
     }
+    // Pilot scope (lib/features.ts): approving is the vesting module's entry;
+    // sending back and rejecting stay open (a pending request still gets its
+    // answer), like every exit.
+    if (decision === "approved") requireModule("vesting");
     if (decision !== "approved" && reason.length === 0) {
       throw new SiwsError(
         400,

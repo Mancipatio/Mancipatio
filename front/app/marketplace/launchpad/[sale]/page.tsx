@@ -16,6 +16,7 @@ import {
 } from "@solana/react-hooks";
 import { type Address } from "@solana/kit";
 import {
+  AssetRegistryInstruction,
   RaiseType,
   SaleStatus,
   fetchMaybeKycRegistry,
@@ -31,13 +32,7 @@ import {
   RestrictionMode,
 } from "@/lib/generated/transfer_hook";
 import { loadSalePaymentDecimals } from "@/lib/transaction-builders";
-import {
-  bitmapHasCode,
-  fetchPassport,
-  isPassportExpired,
-  KycStatus,
-} from "@/lib/passport";
-import { countryName } from "@/lib/countries";
+import { buyerPassportVerdict, fetchPassport } from "@/lib/passport";
 import {
   buildDocumentedPurchase,
   waitForPurchasePreparation,
@@ -48,6 +43,9 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findSalePda } from "@/lib/pdas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
+import { pausedFlowFor } from "@/lib/pause-gate";
+import { screenOwnWallet } from "@/lib/compliance";
+import { usePauseFlags } from "@/lib/use-pause-flags";
 import {
   getListing,
   listUpdates,
@@ -130,6 +128,8 @@ export default function DealPage({
   const tx = useSendTransaction();
   const walletAddress = conn.wallet?.account.address?.toString() ?? "";
   const toast = useToast();
+  // The emergency pause, read before the user starts (lib/pause-gate.ts).
+  const pauseFlags = usePauseFlags();
 
   const [sale, setSale] = useState<Sale | null | "not_found">(null);
   const [listing, setListing] = useState<LaunchListing | null>(null);
@@ -386,48 +386,14 @@ export default function DealPage({
           fetchMaybeKycRegistry(client.runtime.rpc, registry),
         ]);
         if (!cancelled) {
-          const nowSec = Math.floor(Date.now() / 1000);
-          // Chain semantics: valid only while expiry > now, so expiry == 0 is
-          // ALWAYS expired — never "no expiry" (isPassportExpired).
-          const expired = entry
-            ? isPassportExpired(entry.expiry, nowSec)
-            : true;
-          const jurisdictionOk =
-            entry && maybeRegistry.exists
-              ? bitmapHasCode(
-                  maybeRegistry.data.approvedJurisdictions,
-                  entry.jurisdiction,
-                ) &&
-                !bitmapHasCode(
-                  maybeRegistry.data.blockedJurisdictions,
-                  entry.jurisdiction,
-                )
-              : // Registry unreadable → cannot mirror the bitmap check.
-                // Fail CLOSED: this client-side gate is the only live
-                // protection until the new program build is deployed.
-                false;
-          const eligible =
-            entry !== null &&
-            entry.status === KycStatus.Approved &&
-            !expired &&
-            jurisdictionOk;
-          let reason = "";
-          if (!entry) {
-            reason =
-              "Your wallet does not have an investor passport on this registry.";
-          } else if (entry.status === KycStatus.Pending) {
-            reason =
-              "Your passport is pending review. Check back once it is approved.";
-          } else if (entry.status === KycStatus.Revoked) {
-            reason = "Your investor passport has been revoked.";
-          } else if (entry.status === KycStatus.Expired || expired) {
-            reason = "Your investor passport has expired. Please reapply.";
-          } else if (!maybeRegistry.exists) {
-            reason =
-              "Could not read this sale's KYC registry — please try again.";
-          } else if (!jurisdictionOk) {
-            reason = `Your passport's jurisdiction (${countryName(String(entry.jurisdiction).padStart(3, "0"))}) is not approved for this sale.`;
-          }
+          // Chain semantics (expiry 0 is always expired; an unreadable
+          // registry fails CLOSED): lib/passport.ts buyerPassportVerdict,
+          // unit-tested in tests/kyc-gated-buyer.test.ts.
+          const { eligible, reason } = buyerPassportVerdict(
+            entry,
+            maybeRegistry,
+            Math.floor(Date.now() / 1000),
+          );
           setEligibility({ gated: true, eligible, reason });
           setEligibilityChecked(true);
         }
@@ -603,7 +569,14 @@ export default function DealPage({
     onChainUnits <= BigInt(0);
   const onChainOverRemaining =
     settlesOnChain && onChainUnits > BigInt(0) && onChainUnits > remainingUnits;
+  // A paused on-chain buy is refused here, before the form is submitted, in
+  // the program's words; the send path checks again before the wallet opens.
+  // The raise type is the fact a conditional check of the program reads.
+  const buyPaused = settlesOnChain
+    ? pausedFlowFor(pauseFlags, AssetRegistryInstruction.Buy, { raiseType: saleData.raiseType })
+    : null;
   const canCommit =
+    !buyPaused &&
     !!walletAddress &&
     purchaseRecovery.ready &&
     documentTerms?.sale === salePubkey &&
@@ -845,6 +818,10 @@ export default function DealPage({
         throw new Error(
           "Read and accept the investment document and the risk warning first",
         );
+      // Sanctions screen of the buyer BEFORE the buy (8.5): an Open-class buy
+      // mints without the transfer hook, so this is the last point where a
+      // listed wallet is stopped before it pays. Throws with the reason.
+      await screenOwnWallet(conn.wallet);
       const signer = walletSigner(conn.wallet);
       const plan = await buildDocumentedPurchase(client.runtime.rpc, {
         buyer: signer,
@@ -1597,6 +1574,11 @@ export default function DealPage({
               </div>
             )}
 
+            {buyPaused && (
+              <p role="status" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                {buyPaused}
+              </p>
+            )}
             {/* Commit / Buy button */}
             {!walletAddress ? (
               <WalletRequired />

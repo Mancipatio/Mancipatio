@@ -12,7 +12,7 @@ import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState, useSyncExternalStore } from "react";
 import {
   findAssetPda,
   findDealPda,
@@ -35,6 +35,7 @@ import {
   listOtcRequests,
   loadOtcDeals,
   archiveOtcDealRecord,
+  waitForFinalizedDeal,
   withArchivedOtcDeals,
   TOKEN_2022_PROGRAM,
   type LoadedOtcDeal,
@@ -42,6 +43,7 @@ import {
 } from "@/lib/otc";
 import { checkReceiverEligibility } from "@/lib/passport";
 import { detectNetwork } from "@/lib/network";
+import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { createOtcDealInstruction, newDealId, resolveDealExpiry } from "@/lib/otc-deal";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { recordAudit } from "@/lib/supabase";
@@ -52,6 +54,13 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
+import {
+  parseUnsyncedDeals,
+  pendingUnsyncedDeal,
+  serializeUnsyncedDeals,
+  type UnsyncedDeal,
+  type UnsyncedDealMap,
+} from "./unsynced-deals";
 
 const STATUS_LABEL = ["Open", "Filled", "Cancelled", "Expired"];
 const STATUS_BADGE: Record<number, string> = {
@@ -285,7 +294,7 @@ function OtcOversight() {
                       {String(offer.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-slate-700">
-                      {String(offer.price)}
+                      {formatPaymentForDisplay(offer.price, offer.paymentMint.toString(), detectNetwork())}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">
                       {offer.maker.toString().slice(0, 6)}…
@@ -386,13 +395,13 @@ function OfferDetail({
 
       <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
         <Field label="Amount (share units)" value={String(offer.amount)} />
-        <Field label="Price (payment units)" value={String(offer.price)} />
+        <Field label="Price" value={`${formatPaymentForDisplay(offer.price, offer.paymentMint.toString(), detectNetwork())} (${String(offer.price)} base units)`} />
         <Field label="Status" value={STATUS_LABEL[offer.status] ?? "?"} />
         <Field
           label="Unit price"
           value={
             offer.amount > BigInt(0)
-              ? `${Number(offer.price) / Number(offer.amount)}`
+              ? formatPaymentForDisplay(offer.price / offer.amount, offer.paymentMint.toString(), detectNetwork())
               : "—"
           }
         />
@@ -455,6 +464,54 @@ function shortAddr(a: string): string {
   return `${a.slice(0, 6)}…${a.slice(-4)}`;
 }
 
+// Escrows opened on-chain whose request flip did not land (./unsynced-
+// deals.ts: keyed by request id, dropped when stale). Per network, and kept
+// in localStorage so a reload does not offer "Create contract" again for a
+// request that already has a deal. A tiny external store, as /admin/kyc's
+// unsynced passports: the raw JSON is the snapshot, the server snapshot is
+// null, and it falls back to memory when storage is unavailable.
+const UNSYNCED_DEALS_KEY = `mancipatio.admin.otc.unsynced-deals.${detectNetwork()}`;
+let unsyncedDealsRaw: string | null | undefined; // undefined = not read yet
+const unsyncedDealsListeners = new Set<() => void>();
+
+function readUnsyncedDealsSnapshot(): string | null {
+  if (unsyncedDealsRaw === undefined) {
+    try {
+      unsyncedDealsRaw = window.localStorage.getItem(UNSYNCED_DEALS_KEY);
+    } catch {
+      unsyncedDealsRaw = null;
+    }
+  }
+  return unsyncedDealsRaw;
+}
+
+function subscribeUnsyncedDeals(listener: () => void): () => void {
+  unsyncedDealsListeners.add(listener);
+  const onStorage = (e: StorageEvent) => {
+    if (e.key === UNSYNCED_DEALS_KEY) {
+      unsyncedDealsRaw = e.newValue;
+      listener();
+    }
+  };
+  window.addEventListener("storage", onStorage);
+  return () => {
+    unsyncedDealsListeners.delete(listener);
+    window.removeEventListener("storage", onStorage);
+  };
+}
+
+function writeUnsyncedDeals(map: UnsyncedDealMap): void {
+  const raw = serializeUnsyncedDeals(map);
+  unsyncedDealsRaw = raw;
+  try {
+    if (raw === null) window.localStorage.removeItem(UNSYNCED_DEALS_KEY);
+    else window.localStorage.setItem(UNSYNCED_DEALS_KEY, raw);
+  } catch {
+    // Best-effort persistence; the in-memory snapshot still guards this session.
+  }
+  unsyncedDealsListeners.forEach((l) => l());
+}
+
 function OtcEscrowAdmin() {
   const client = useSolanaClient();
   const conn = useWalletConnection();
@@ -474,6 +531,27 @@ function OtcEscrowAdmin() {
     null,
   );
   const [rejectReq, setRejectReq] = useState<OtcRequest | null>(null);
+  const [retrying, setRetrying] = useState<string | null>(null);
+  const unsyncedSnapshot = useSyncExternalStore(
+    subscribeUnsyncedDeals,
+    readUnsyncedDealsSnapshot,
+    () => null,
+  );
+  const unsyncedDeals = useMemo(() => parseUnsyncedDeals(unsyncedSnapshot), [unsyncedSnapshot]);
+  const setUnsyncedDeals = useCallback(
+    (update: (prev: UnsyncedDealMap) => UnsyncedDealMap) =>
+      writeUnsyncedDeals(update(parseUnsyncedDeals(readUnsyncedDealsSnapshot()))),
+    [],
+  );
+  // true: the deal is listed Open; false: listed and not Open; null: not listed.
+  const dealIsOpen = useCallback(
+    (pda: string): boolean | null => {
+      const row = deals?.find((d) => d.pda.toString() === pda);
+      return row ? !row.closed && row.deal.status === OtcDealStatus.Open : null;
+    },
+    [deals],
+  );
+  const pendingFlip = (req: OtcRequest) => pendingUnsyncedDeal(unsyncedDeals, req, dealIsOpen);
 
   const refresh = useCallback(async () => {
     if (!conn.wallet) { setRequests([]); return; }
@@ -540,7 +618,7 @@ function OtcEscrowAdmin() {
    */
   async function createContract(req: OtcRequest) {
     if (!wallet || !conn.wallet) return;
-    const pendingId = toast.showPending(
+    let pendingId = toast.showPending(
       `Creating escrow for ${req.asset_label || "share class"}…`,
     );
     try {
@@ -562,14 +640,17 @@ function OtcEscrowAdmin() {
       // throw lands in the catch below and no escrow is opened.
       const screen = await adminScreenOtcRequest(conn.wallet, req.id);
       if (!screen.cleared) {
+        const sanctioned = screen.seller === "sanctioned" || screen.buyer === "sanctioned";
         const parties = [
-          screen.seller === "suspended" ? "seller" : null,
-          screen.buyer === "suspended" ? "buyer" : null,
+          screen.seller !== "clear" ? "seller" : null,
+          screen.buyer !== "clear" ? "buyer" : null,
         ].filter(Boolean).join(" and ");
         toast.dismiss(pendingId);
         toast.showError(
-          "A party is suspended",
-          `The ${parties}'s client profile is suspended by compliance. Decline this request instead of opening an escrow.`,
+          sanctioned ? "A party is on a sanctions list" : "A party is suspended",
+          sanctioned
+            ? `The ${parties}'s wallet matched a sanctions list; a compliance alert was raised (/admin/compliance). Decline this request instead of opening an escrow.`
+            : `The ${parties}'s client profile is suspended by compliance. Decline this request instead of opening an escrow.`,
         );
         return;
       }
@@ -610,21 +691,32 @@ function OtcEscrowAdmin() {
         shareClass: req.share_class_pda as Address,
         dealId,
       });
+      // The deal exists from here on: remember it BEFORE anything else can
+      // fail, so this request offers "Retry flip" and never a second
+      // "Create contract" (which would open a SECOND deal).
+      const unsynced: UnsyncedDeal = {
+        dealPda: dealPda.toString(),
+        dealId: dealId.toString(),
+        sig,
+        expiresAt: new Date(Number(expiresAt) * 1000).toISOString(),
+      };
+      setUnsyncedDeals((prev) => new Map(prev).set(req.id, unsynced));
+      // The route reads the deal at finalized before it flips the request
+      // (G2): wait for finality here, with unsigned reads, so the one signed
+      // flip below does not arrive early.
+      toast.dismiss(pendingId);
+      pendingId = toast.showPending("Escrow created — waiting for finality before notifying the parties…");
+      const finalized = await waitForFinalizedDeal(rpc, dealPda);
       // Signed + admin-gated route; decided_by/at are stamped server-side and
-      // the server notifies both parties (email when known + in-app rows). If
-      // this fails the on-chain deal already exists — surface it loudly so the
-      // operator retries the row flip/notification rather than clicking "Create
-      // contract" again (which would mint a SECOND deal).
-      const flipped = await adminUpdateOtcRequest(conn.wallet, req.id, {
-        status: "created",
-        deal_pda: dealPda.toString(),
-        deal_id: Number(dealId),
-        decide: true,
-      });
+      // the server notifies both parties (email when known + in-app rows).
+      // Not finalized yet, or a failed flip: the request keeps "Retry flip".
+      const flipped = finalized && (await flipRequest(req.id, unsynced));
       if (!flipped) {
         toast.showError(
           "Deal created, but the request wasn't updated",
-          `The on-chain deal ${dealPda.toString().slice(0, 8)}… exists, but the request row and party notifications did not update. Do NOT click "Create contract" again — contact support to reconcile.`,
+          `The on-chain deal ${dealPda.toString().slice(0, 8)}… exists, but ${
+            finalized ? "the request row and party notifications did not update" : "it was not finalized within a minute"
+          }. Use "Retry flip" on this request; do NOT create another contract.`,
         );
       }
       void recordAudit({
@@ -649,6 +741,49 @@ function OtcEscrowAdmin() {
       toast.dismiss(pendingId);
       toast.showError("Failed to create deal", explainSendError(err));
       console.error("[create_otc_deal]", err);
+    }
+  }
+
+  /**
+   * The signed flip of a request to `created` for its known deal; the
+   * pending entry is dropped once it lands. The route refuses (409) a deal
+   * not visible at finalized yet, and treats a repeat as a no-op.
+   */
+  async function flipRequest(requestId: string, deal: UnsyncedDeal): Promise<boolean> {
+    if (!conn.wallet) return false;
+    const ok = await adminUpdateOtcRequest(conn.wallet, requestId, {
+      status: "created",
+      deal_pda: deal.dealPda,
+      deal_id: Number(deal.dealId),
+      decide: true,
+    });
+    if (ok) {
+      setUnsyncedDeals((prev) => {
+        const next = new Map(prev);
+        next.delete(requestId);
+        return next;
+      });
+    }
+    return ok;
+  }
+
+  /** "Retry flip": the same { created, deal_pda } for the deal this request already has. Never touches the chain. */
+  async function retryFlip(req: OtcRequest) {
+    const pending = pendingFlip(req);
+    if (!pending) return;
+    setRetrying(req.id);
+    try {
+      if (await flipRequest(req.id, pending)) {
+        toast.show({ kind: "success", title: "Request marked created; the parties were notified" });
+        void refresh();
+      } else {
+        toast.showError(
+          "Flip still failing",
+          `The deal ${pending.dealPda.slice(0, 8)}… is not visible at finalized yet, or the request could not be updated. Retry in a moment; do NOT create another contract.`,
+        );
+      }
+    } finally {
+      setRetrying(null);
     }
   }
 
@@ -901,7 +1036,7 @@ function OtcEscrowAdmin() {
                       {String(r.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {String(r.price)}
+                      {formatPaymentForDisplay(BigInt(r.price), r.payment_mint, detectNetwork())}
                     </td>
                     <td
                       className="px-4 py-3 font-mono text-xs text-slate-500"
@@ -911,17 +1046,32 @@ function OtcEscrowAdmin() {
                     </td>
                     <td className="px-4 py-3 text-right">
                       <div className="flex items-center justify-end gap-2">
+                        {pendingFlip(r) ? (
+                          <button
+                            type="button"
+                            disabled={retrying === r.id || !wallet}
+                            onClick={() => void retryFlip(r)}
+                            title={`The deal ${pendingFlip(r)!.dealPda} is already on-chain; this resends the request's flip to created.`}
+                            className="rounded-md border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+                          >
+                            {retrying === r.id ? "Retrying flip…" : "Retry flip"}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={tx.isSending || !wallet}
+                            onClick={() => void createContract(r)}
+                            className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+                          >
+                            Create contract
+                          </button>
+                        )}
                         <button
                           type="button"
-                          disabled={tx.isSending || !wallet}
-                          onClick={() => void createContract(r)}
-                          className="rounded-md bg-slate-900 px-3 py-1.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-                        >
-                          Create contract
-                        </button>
-                        <button
-                          type="button"
-                          disabled={tx.isSending || !wallet}
+                          // Declining a request whose escrow is already
+                          // on-chain would leave that deal unexplained:
+                          // cancel the deal below first, or retry the flip.
+                          disabled={tx.isSending || !wallet || pendingFlip(r) !== null}
                           onClick={() => setRejectReq(r)}
                           className="rounded-md border border-red-300 px-3 py-1.5 text-xs font-medium text-red-700 hover:bg-red-50 disabled:opacity-50"
                         >
@@ -1001,7 +1151,7 @@ function OtcEscrowAdmin() {
                       {String(deal.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {String(deal.price)}
+                      {formatPaymentForDisplay(deal.price, deal.paymentMint.toString(), detectNetwork())}
                     </td>
                     {/* Ledgered amounts, not just the flags: cancel / expire
                         refund at most these numbers to each depositor (the

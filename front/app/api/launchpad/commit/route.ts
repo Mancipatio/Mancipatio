@@ -12,8 +12,10 @@
 // refuseSuspendedClient: a wallet whose dossier compliance has SUSPENDED
 // (sanctions / fraud / investigation — only compliance can lift it) is still
 // refused — "no KYC for buying" must not mean "compliance decisions are
-// ignored for buying". A rejected KYC application is not a sanction and is
-// not refused (see lib/server/kyc-gate.ts). A KycGated class keeps its
+// ignored for buying". Since 8.5 the same screen checks the wallet against
+// the sanctions lists (lib/server/sanctions.ts; fail closed on mainnet). A
+// rejected KYC application is not a sanction and is not refused (see
+// lib/server/kyc-gate.ts). A KycGated class keeps its
 // passport requirement on-chain (the buy/settlement legs re-check the
 // receiver).
 //

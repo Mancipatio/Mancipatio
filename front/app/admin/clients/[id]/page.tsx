@@ -181,6 +181,8 @@ function ClientDetail({ id }: { id: string }) {
   const [confirm, setConfirm] = useState<
     null | "approve" | "reject" | "suspend"
   >(null);
+  // The requirement whose document is being rejected (reason modal).
+  const [rejectingReq, setRejectingReq] = useState<number | null>(null);
 
   // On-chain passport state
   // Render-stable "now" for the expiry hint (same pattern as /portfolio).
@@ -452,11 +454,27 @@ function ClientDetail({ id }: { id: string }) {
     }
   }
 
-  async function rejectReq(reqId: number) {
+  // G6: a document reject asks the client for a replacement (email with the
+  // reason; a pending dossier moves to more_info on the server).
+  async function rejectReq(reqId: number, reason: string) {
     if (!wallet) return;
-    const { ok } = await reviewRequirement(conn.wallet, reqId, "rejected");
+    const { ok, recomputed, notified, notNotified } = await reviewRequirement(conn.wallet, reqId, "rejected", reason);
     if (ok) {
-      toast.show({ kind: "success", title: "Requirement rejected" });
+      toast.show({
+        kind: "success",
+        title: "Document rejected",
+        description: [
+          notified
+            ? "The client was emailed and asked for a replacement."
+            : notNotified === "no_review_in_progress"
+              ? "No email was sent: this dossier has no KYC or KYB review in progress. Contact the client if a new document is needed."
+              : notNotified === "no_email_on_file"
+                ? "No email was sent: there is no address on file. Contact the client."
+                : "No email was sent: the email failed. Contact the client.",
+          recomputed === "more_info" ? "The dossier moved to more info." : null,
+        ].filter(Boolean).join(" "),
+      });
+      setRejectingReq(null);
       await refresh();
     } else {
       toast.showError("Failed", "Could not update requirement");
@@ -1593,7 +1611,7 @@ function ClientDetail({ id }: { id: string }) {
                         </button>
                         <button
                           type="button"
-                          onClick={() => void rejectReq(req.id)}
+                          onClick={() => setRejectingReq(req.id)}
                           className="rounded-md border border-red-300 bg-red-50 px-3 py-1 text-xs font-medium text-red-800 hover:bg-red-100"
                         >
                           Reject
@@ -1778,6 +1796,23 @@ function ClientDetail({ id }: { id: string }) {
           </ul>
         )}
       </section>
+
+      <ConfirmModal
+        open={rejectingReq !== null}
+        onClose={() => setRejectingReq(null)}
+        onConfirm={(reason) => (rejectingReq !== null ? rejectReq(rejectingReq, reason) : undefined)}
+        title="Reject document"
+        kind="warning"
+        confirmLabel="Reject and ask for a replacement"
+        reasonPlaceholder="What is wrong with the document? (emailed to the client)"
+        description={
+          <p>
+            The client is emailed this reason and asked to upload a
+            replacement; a dossier in review moves to more info. To refuse the
+            whole application, reject the dossier instead.
+          </p>
+        }
+      />
 
       {/* Approve / Reject / Suspend modals */}
       <ConfirmModal

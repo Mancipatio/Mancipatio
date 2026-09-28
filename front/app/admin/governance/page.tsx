@@ -31,6 +31,7 @@ import { merkleProof, merkleRoot, snapshotLeaf } from "@/lib/merkle";
 import { findProposalPda, findShareClassPda } from "@/lib/pdas";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonTable } from "@/components/skeleton";
+import { moduleEnabled } from "@/lib/features";
 import { RequireRole } from "@/components/require-role";
 import { useToast } from "@/lib/toast";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
@@ -114,6 +115,10 @@ function GovernanceOps() {
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [proposals, setProposals] = useState<Proposal[]>([]);
+  // Pilot scope (lib/features.ts): governance has no pause bit, so with the
+  // module off the entries are hidden here and refused before the wallet
+  // (lib/pause-gate.ts MODULE_FLOWS); finalizing stays.
+  const governanceOn = moduleEnabled("governance");
 
   const refresh = useCallback(async () => {
     try {
@@ -239,13 +244,15 @@ function GovernanceOps() {
             </button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          + Create proposal
-        </button>
+        {governanceOn && (
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            + Create proposal
+          </button>
+        )}
       </div>
 
       <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-2.5 text-xs text-amber-900">
@@ -262,7 +269,7 @@ function GovernanceOps() {
               ? "No proposals created yet."
               : "No proposals match the current filter."}
           </p>
-          {proposals.length === 0 && (
+          {proposals.length === 0 && governanceOn && (
             <button
               type="button"
               onClick={() => setShowCreate(true)}
@@ -353,7 +360,7 @@ function GovernanceOps() {
         />
       )}
 
-      {showCreate && data && (
+      {showCreate && data && governanceOn && (
         <CreateProposalModal
           data={data}
           onClose={() => setShowCreate(false)}
@@ -384,6 +391,7 @@ function ProposalDetail({
   const wallet = conn.wallet?.account.address;
   const [snapshot, setSnapshot] = useState("");
   const [confirmFinalize, setConfirmFinalize] = useState(false);
+  const governanceOn = moduleEnabled("governance");
   const [proposalPda, setProposalPda] = useState<Address | null>(null);
 
   useEffect(() => {
@@ -576,7 +584,7 @@ function ProposalDetail({
           <div className="flex flex-wrap gap-2">
             <button
               type="button"
-              disabled={tx.isSending || !snapshot.trim()}
+              disabled={tx.isSending || !snapshot.trim() || !governanceOn}
               onClick={() => void castVote(VoteChoice.For)}
               className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
             >
@@ -584,7 +592,7 @@ function ProposalDetail({
             </button>
             <button
               type="button"
-              disabled={tx.isSending || !snapshot.trim()}
+              disabled={tx.isSending || !snapshot.trim() || !governanceOn}
               onClick={() => void castVote(VoteChoice.Against)}
               className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-900 hover:bg-red-100 disabled:opacity-50"
             >
@@ -592,7 +600,7 @@ function ProposalDetail({
             </button>
             <button
               type="button"
-              disabled={tx.isSending || !snapshot.trim()}
+              disabled={tx.isSending || !snapshot.trim() || !governanceOn}
               onClick={() => void castVote(VoteChoice.Abstain)}
               className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50"
             >

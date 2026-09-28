@@ -10,27 +10,46 @@
 //
 // Archive (2D): `{ archive: true, deal_pda }` stores a terminal deal's bytes
 // in indexer_closed_rows before the admin reclaims its rent.
+//
+// Sim gap G2: the status moves only along STATUS_TRANSITIONS, as a
+// compare-and-set on the status that was read; `created` requires the
+// deal_pda of an Open on-chain deal at finalized whose terms are the
+// request's (lib/server/otc-deal-check.ts), and deal_id / expires_at are
+// taken from that deal. The admin page waits for finality before flipping.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireModule } from "@/lib/server/feature-gate";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { archiveOtcDeal } from "@/lib/server/otc-archive";
+import { readOpenDealForRequest, type OtcRequestTerms } from "@/lib/server/otc-deal-check";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { detectNetwork } from "@/lib/network";
+import { formatPaymentForDisplay } from "@/lib/payment-price";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const STATUSES = new Set(["created", "cancelled", "completed", "expired"]);
 
-type OtcRow = {
+/**
+ * The lifecycle (G2): a request is decided once. `requested` becomes
+ * `created` (the escrow opened), `cancelled` (declined) or `expired`; a
+ * `created` request ends `cancelled`, `completed` or `expired`. Terminal
+ * rows never move again, so a declined request cannot be flipped back.
+ */
+const STATUS_TRANSITIONS: Record<string, readonly string[]> = {
+  requested: ["created", "cancelled", "expired"],
+  created: ["cancelled", "completed", "expired"],
+};
+
+type OtcRow = OtcRequestTerms & {
   id: string;
   status: string;
-  seller_wallet: string;
-  buyer_wallet: string;
   asset_label: string;
-  mint: string;
   amount: number;
   price: number;
+  deal_pda: string | null;
 };
 
 export async function POST(request: Request) {
@@ -109,29 +128,74 @@ export async function POST(request: Request) {
     if (Object.keys(patch).length === 0) {
       throw new SiwsError(400, "Nothing to update");
     }
+    // The deal coordinates are recorded only with the `created` flip, from
+    // the chain (G2): never rewritten on their own.
+    if ((patch.deal_pda !== undefined || patch.deal_id !== undefined) && patch.status !== "created") {
+      throw new SiwsError(400, "deal_pda and deal_id are recorded only with status created");
+    }
 
     const sb = getSupabaseAdmin();
     const { data: before, error: loadErr } = await sb
       .from("otc_requests")
-      .select("id, status, seller_wallet, buyer_wallet, asset_label, mint, amount, price")
+      .select("id, status, share_class_pda, seller_wallet, buyer_wallet, asset_label, mint, amount, price, payment_mint, deal_pda")
       .eq("id", id)
       .maybeSingle();
     if (loadErr) throw new SiwsError(500, "Request lookup failed");
     if (!before) throw new SiwsError(404, "OTC request not found");
+    const row = before as OtcRow;
 
-    const { error } = await sb.from("otc_requests").update(patch).eq("id", id);
+    if (patch.status !== undefined && patch.status !== row.status) {
+      const allowed = STATUS_TRANSITIONS[row.status] ?? [];
+      if (!allowed.includes(patch.status as string)) {
+        throw new SiwsError(409, `An OTC request that is ${row.status} cannot become ${String(patch.status)}`);
+      }
+    }
+    if (patch.status === "created") {
+      // Pilot scope: opening an escrow is an entry of secondary trading;
+      // declining, cancelling and archiving stay open.
+      requireModule("secondaryTrading");
+      if (row.status === "created") {
+        // A retried flip of the same deal is a no-op; another deal is refused.
+        if (patch.deal_pda === row.deal_pda) {
+          return NextResponse.json({ ok: true, data: { id, notified: false } });
+        }
+        throw new SiwsError(409, "This OTC request already has an on-chain deal");
+      }
+      if (typeof patch.deal_pda !== "string") {
+        throw new SiwsError(400, "deal_pda is required to mark a request created");
+      }
+      // G2: the deal must be this request's, Open, at finalized.
+      const deal = await readOpenDealForRequest(patch.deal_pda, row);
+      if (patch.deal_id !== undefined && BigInt(patch.deal_id as number) !== deal.dealId) {
+        throw new SiwsError(400, "deal_id does not match the on-chain deal");
+      }
+      patch.deal_id = Number(deal.dealId);
+      patch.expires_at = deal.expiresAt > BigInt(0) ? new Date(Number(deal.expiresAt) * 1000).toISOString() : null;
+    }
+
+    // Compare-and-set on the status read above: a request decided in the
+    // meantime (e.g. declined by another admin) is never flipped back.
+    const { data: updated, error } = await sb
+      .from("otc_requests")
+      .update(patch)
+      .eq("id", id)
+      .eq("status", row.status)
+      .select("id");
     if (error) {
       console.error("[api/otc/admin-update] update failed:", error.message);
       throw new SiwsError(500, "Could not update the OTC request");
     }
+    if (!Array.isArray(updated) || updated.length === 0) {
+      throw new SiwsError(409, "The OTC request changed while updating — reload and retry");
+    }
 
     // Deal-created notification hook — best-effort, never fails the route.
     let notified = false;
-    if (patch.status === "created" && before.status !== "created") {
+    if (patch.status === "created" && row.status !== "created") {
       try {
         await notifyDealCreated(
           sb,
-          before as OtcRow,
+          row,
           typeof patch.deal_pda === "string" ? patch.deal_pda : null,
           wallet,
         );
@@ -156,9 +220,12 @@ async function notifyDealCreated(
   const label =
     row.asset_label || `${row.mint.slice(0, 6)}…${row.mint.slice(-4)}`;
   const subject = "Your OTC escrow deal is ready";
+  // The price in the payment token's own units ("12.5 USDC", lansiranje-16),
+  // never raw base units ("12500000 payment units" read as 12.5 million).
+  const price = formatPaymentForDisplay(BigInt(row.price), row.payment_mint, detectNetwork());
   const body =
-    `The escrow contract for ${label} (${row.amount} units for ${row.price} ` +
-    `payment units) is live on-chain` +
+    `The escrow contract for ${label} (${row.amount} ${row.amount === 1 ? "unit" : "units"} for ${price} in total) ` +
+    `is live on-chain` +
     (dealPda ? ` at ${dealPda}` : "") +
     `. Open Portfolio → Deals on Manci to deposit your leg — the swap ` +
     `settles automatically once both legs are funded.`;
@@ -180,8 +247,9 @@ async function notifyDealCreated(
       const res = await sendEmail({
         to: email,
         subject,
+        // The label is the requester's own text: escaped like every value in the HTML.
         html:
-          `<p>${body}</p>` +
+          `<p>${escapeHtml(body)}</p>` +
           `<p><a href="${escapeHtml(new URL("/portfolio/deals", process.env.NEXT_PUBLIC_SITE_URL || "https://www.manci.io").toString())}">Open your deals</a></p>`,
       });
       emailSent = res.sent;

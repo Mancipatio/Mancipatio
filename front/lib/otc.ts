@@ -135,10 +135,10 @@ export type OtcAdminPatch = {
 };
 
 export type OtcPartyScreen = {
-  /** True only when neither party's client profile is suspended. */
+  /** True only when neither party is suspended nor on a sanctions list (8.5). */
   cleared: boolean;
-  seller: "clear" | "suspended";
-  buyer: "clear" | "suspended";
+  seller: "clear" | "suspended" | "sanctioned";
+  buyer: "clear" | "suspended" | "sanctioned";
 };
 
 /**
@@ -179,6 +179,33 @@ export async function adminUpdateOtcRequest(
     console.warn("[otc] admin update failed:", err);
     return false;
   }
+}
+
+/**
+ * Waits until the just-created deal is visible at finalized — the commitment
+ * /api/otc/admin-update reads before it flips a request to `created` (G2).
+ * Unsigned reads only (no wallet prompt): `attempts` × `intervalMs`, one
+ * minute by default. True once the account exists at finalized.
+ */
+export async function waitForFinalizedDeal(
+  rpc: SolanaClient["runtime"]["rpc"],
+  dealPda: Address,
+  opts: { attempts?: number; intervalMs?: number } = {},
+): Promise<boolean> {
+  const attempts = opts.attempts ?? 20;
+  const intervalMs = opts.intervalMs ?? 3_000;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const info = await rpc
+        .getAccountInfo(dealPda, { commitment: "finalized", encoding: "base64" })
+        .send({ abortSignal: AbortSignal.timeout(10_000) });
+      if (info.value) return true;
+    } catch {
+      // A failed read counts as "not yet".
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
 }
 
 /**

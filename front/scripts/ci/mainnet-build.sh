@@ -8,7 +8,8 @@
 # A mainnet build is guarded by next.config.ts: MAINNET_LEGAL_COPY_APPROVED,
 # the mainnet Supabase project and publishable key, the KYC registry pin, the
 # operator and legal slots (8.1, lib/legal/readiness.ts), the RPC and the
-# operations requirements, the feature-flag spellings (8.4). This proves both
+# operations requirements, the feature-flag spellings (8.4), counsel's
+# geoblock list (8.5, GEOBLOCK_COUNTRIES). This proves both
 # sides:
 #   1. the guards REFUSE: a bare mainnet build, and the placeholder set with
 #      one setting missing per guard (each fails while loading the config,
@@ -97,6 +98,9 @@ PLACEHOLDERS=(
   ALERT_WEBHOOK_URL=https://alerts.mainnet-ci.invalid/hook
   SESSION_SECRET=ci-placeholder-session-secret-not-a-secret-0000
   NEXT_PUBLIC_SITE_URL=https://mainnet-ci.invalid
+  # 8.5: counsel's geoblock list. ISO 3166 user-assigned codes (AA, ZZ, QM):
+  # well-formed and no real country's.
+  GEOBLOCK_COUNTRIES=AA,ZZ,QM-01
 )
 # The licence waiver (MAINNET_LICENSE_NOT_REQUIRED) is not a placeholder: the
 # fixture's licence and the waiver are exclusive, so each case sets it.
@@ -248,6 +252,14 @@ expect_refusal "\[sentry\]" "${PLACEHOLDERS[@]}" SENTRY_DSN=https://ciplaceholde
 expect_refusal "\[turnstile\]" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_TURNSTILE_SITE_KEY= TURNSTILE_SECRET_KEY=
 expect_refusal "\[turnstile\]" "${PLACEHOLDERS[@]}" TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
 expect_refusal "is not a flag value" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_ISSUER_ROTATION=ture
+# 8.5: the pilot-scope module switches share the flag guard; the geoblock
+# list must be set on mainnet (a list, or "none" on purpose) and well formed.
+expect_refusal "is not a flag value" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=enabled
+expect_refusal "GEOBLOCK_COUNTRIES is not set" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=
+expect_refusal "is not an ISO 3166 country" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=Iran
+# A well-formed code that is no country blocks nothing: refused, with the fix.
+expect_refusal "did you mean GB" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=KP,IR,UK
+expect_config_pass "GEOBLOCK_COUNTRIES=none, written down" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=none
 
 echo "== 2. the guards pass and the mainnet variant compiles"
 FULL_BUILD=1

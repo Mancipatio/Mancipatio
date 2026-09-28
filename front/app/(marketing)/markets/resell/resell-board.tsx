@@ -25,9 +25,13 @@ import {
 } from "@/lib/otc";
 import { useToast } from "@/lib/toast";
 import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
-import { defaultPaymentMint } from "@/lib/payment-mints";
-import { paymentAmountHint, usePaymentMintCheck } from "@/lib/use-payment-mint";
-import { PaymentMintStatus } from "@/components/payment-mint-status";
+import { formatPaymentForDisplay, resellAskNote } from "@/lib/payment-price";
+import {
+  PaymentMintPicker,
+  PaymentPriceField,
+  TradeConfirmation,
+  usePaymentPriceForm,
+} from "@/components/payment-price-fields";
 
 type Row = {
   offer: Offer;
@@ -277,10 +281,11 @@ export function ResellBoard() {
             </thead>
             <tbody className="divide-y divide-slate-100">
               {rows.map((r) => {
-                const unit =
+                // Human units for the network's USDC, exact base units otherwise.
+                const unitPrice =
                   r.offer.amount > BigInt(0)
-                    ? Number(r.offer.price) / Number(r.offer.amount)
-                    : 0;
+                    ? formatPaymentForDisplay(r.offer.price / r.offer.amount, r.offer.paymentMint.toString(), detectNetwork())
+                    : "—";
                 const slug = slugForEnum(r.asset?.assetType);
                 const typeRecord = ASSET_TYPES.find((t) => t.slug === slug);
                 return (
@@ -303,10 +308,10 @@ export function ResellBoard() {
                       {String(r.offer.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono tabular-nums text-slate-700">
-                      {String(r.offer.price)}
+                      {formatPaymentForDisplay(r.offer.price, r.offer.paymentMint.toString(), detectNetwork())}
                     </td>
                     <td className="px-4 py-3 text-right font-mono tabular-nums text-slate-500">
-                      {unit > 0 ? unit.toFixed(4) : "—"}
+                      {unitPrice}
                     </td>
                     <td className="px-4 py-3 font-mono text-[11px] text-slate-500">
                       {r.offer.maker.toString().slice(0, 6)}…
@@ -505,10 +510,11 @@ function HolderPostCard({
 
 /**
  * Small modal to request an OTC escrow for a holder post (business-doc §9):
- * the buyer confirms amount + price and picks the payment mint; the platform
+ * the buyer confirms amount + price and picks the payment token; the platform
  * then creates the on-chain escrow deal from the request queue.
- * Amount/price are integer base units (share units / payment-token units),
- * same convention as the offers UI.
+ * Share units are whole units (decimals 0); the price is typed in the payment
+ * token's units and sent as base units (components/payment-price-fields.tsx),
+ * after a review step that shows both.
  */
 function RequestOtcModal({
   post,
@@ -526,24 +532,25 @@ function RequestOtcModal({
   const toast = useToast();
   const network = detectNetwork();
   const [amount, setAmount] = useState(String(post.amount));
-  // Do NOT prefill from the listing's ask_price: that is a HUMAN-denominated
-  // figure (e.g. "1500 USDC") while this field is integer payment-mint BASE
-  // units. Prefilling 1500 would settle 1500 base units = 0.0015 USDC. Leave it
-  // empty and show the ask as a reference below the field.
-  const [price, setPrice] = useState("");
-  const [paymentMint, setPaymentMint] = useState(() => defaultPaymentMint(network) ?? "");
+  // The price is typed in the payment token's own units (lansiranje-16):
+  // "1500" means 1 500 USDC, converted exactly with the decimals read from
+  // chain. The token comes from the network's allowed list (mainnet: USDC).
+  // Base units stay internal (the request payload and the confirmation's
+  // last line). The listing's ask is shown as a reference, not prefilled.
+  const payment = usePaymentPriceForm(client.runtime.rpc, network);
   const [busy, setBusy] = useState(false);
-  // Convenience check of the entry rule; /api/otc/create re-checks it.
-  const mintCheck = usePaymentMintCheck(client.runtime.rpc, network, paymentMint);
-  const priceHint = paymentAmountHint(price, mintCheck);
+  const [reviewing, setReviewing] = useState(false);
 
   const amountOk = /^[1-9]\d*$/.test(amount.trim());
-  const priceOk = /^[1-9]\d*$/.test(price.trim());
-  const mintOk = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(paymentMint.trim());
-  const valid = amountOk && priceOk && mintOk && mintCheck.status !== "error";
+  const priceBase = payment.priceBase;
+  const paymentMint = payment.check.status === "ok" ? payment.check.mint : null;
+  // The request carries JSON numbers: the price must stay a safe integer.
+  const priceOk = priceBase !== null && priceBase <= BigInt(Number.MAX_SAFE_INTEGER);
+  const valid = amountOk && priceOk && paymentMint !== null;
 
   async function submit() {
-    if (!valid || busy) return;
+    if (!valid || busy || priceBase === null || paymentMint === null) return;
+    const price = Number(priceBase);
     setBusy(true);
     let id: string;
     try {
@@ -555,8 +562,8 @@ function RequestOtcModal({
         seller_wallet: post.seller_wallet,
         buyer_wallet: buyerWallet,
         amount: Number(amount.trim()),
-        price: Number(price.trim()),
-        payment_mint: paymentMint.trim(),
+        price,
+        payment_mint: paymentMint,
       });
     } catch (err) {
       setBusy(false);
@@ -586,8 +593,8 @@ function RequestOtcModal({
       seller_wallet: post.seller_wallet,
       buyer_wallet: buyerWallet,
       amount: Number(amount.trim()),
-      price: Number(price.trim()),
-      payment_mint: paymentMint.trim(),
+      price,
+      payment_mint: paymentMint,
       requested_by: buyerWallet,
       status: "requested",
       deal_pda: null,
@@ -622,80 +629,62 @@ function RequestOtcModal({
           </p>
         </div>
         <div className="space-y-4 px-5 py-4">
-          <div className="grid gap-3 sm:grid-cols-2">
-            <label className="block">
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Amount (share units)
-              </span>
-              <input
-                value={amount}
-                inputMode="numeric"
-                onChange={(e) => setAmount(e.target.value)}
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
+          {reviewing && valid && priceBase !== null && payment.decimals !== null ? (
+            <>
+              <p className="text-sm text-slate-700">
+                Check the request before you sign it. You deposit the total
+                into escrow once the platform opens the deal.
+              </p>
+              <TradeConfirmation
+                units={BigInt(amount.trim())}
+                priceBase={priceBase}
+                decimals={payment.decimals}
+                label={payment.label}
+                role="buyer"
               />
-            </label>
-            <label className="block">
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Total price (payment units)
-              </span>
-              <input
-                value={price}
-                inputMode="numeric"
-                onChange={(e) => setPrice(e.target.value)}
-                placeholder="e.g. 1000000"
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-              />
-              {post.ask_price !== null && (
-                <span className="mt-1 block text-[11px] text-amber-700">
-                  Listing asks {post.ask_price} {post.ask_currency}. Enter this
-                  in the payment mint&apos;s base units (e.g. ×10⁶ for USDC/USDT),
-                  not the plain number.
-                </span>
+            </>
+          ) : (
+            <>
+              <PaymentMintPicker form={payment} />
+              <div className="grid gap-3 sm:grid-cols-2">
+                <label className="block">
+                  <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
+                    Amount (share units)
+                  </span>
+                  <input
+                    value={amount}
+                    inputMode="numeric"
+                    onChange={(e) => setAmount(e.target.value)}
+                    className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
+                  />
+                </label>
+                <PaymentPriceField
+                  form={payment}
+                  note={resellAskNote(post.ask_price, post.ask_currency, detectNetwork())}
+                />
+              </div>
+              {priceBase !== null && !priceOk && (
+                <p className="text-xs text-red-700" role="alert">That price is too large for a request.</p>
               )}
-              {priceHint && (
-                <span className="mt-1 block text-[11px] text-slate-500">{priceHint}</span>
-              )}
-            </label>
-          </div>
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Payment mint
-            </span>
-            <input
-              value={paymentMint}
-              onChange={(e) => setPaymentMint(e.target.value)}
-              placeholder="USDC mint address"
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs focus:border-slate-400 focus:outline-none"
-            />
-            <PaymentMintStatus check={mintCheck} />
-            <span className="mt-1 block text-[11px] text-slate-400">
-              The token you will pay in (plain SPL or Token-2022, without a
-              transfer hook). You deposit the price into escrow once the
-              platform opens the deal.
-            </span>
-          </label>
-          {!mintOk && paymentMint.trim().length > 0 && (
-            <p className="text-xs text-amber-600">
-              That doesn&apos;t look like a valid mint address.
-            </p>
+            </>
           )}
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={reviewing ? () => setReviewing(false) : onClose}
             disabled={busy}
             className="rounded-md px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200 disabled:opacity-50"
           >
-            Cancel
+            {reviewing ? "Back" : "Cancel"}
           </button>
           <button
             type="button"
-            onClick={() => void submit()}
+            onClick={() => (reviewing ? void submit() : setReviewing(true))}
             disabled={!valid || busy}
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
-            {busy ? "Submitting…" : "Submit request"}
+            {busy ? "Submitting…" : reviewing ? "Confirm and sign request" : "Review request"}
           </button>
         </div>
       </div>

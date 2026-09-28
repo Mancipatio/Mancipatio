@@ -1,6 +1,8 @@
 import { Suspense } from "react";
 import { Body, Button, ButtonRow, H2, PageHeader, Section, TextLink } from "@/components/mx";
 import { SkeletonTable } from "@/components/skeleton";
+import { PilotModuleNotice } from "@/components/pilot-module-notice";
+import { moduleRouteState } from "@/lib/pilot-scope";
 import { ResellBoard } from "./resell-board";
 
 export const metadata = {
@@ -9,6 +11,14 @@ export const metadata = {
 };
 
 export default function ResellPage() {
+  // Pilot scope: the resell board belongs to secondary trading.
+  const moduleState = moduleRouteState("/markets/resell");
+  if (moduleState?.disabled) {
+    return <>
+      <PageHeader eyebrow="Secondary market" title="Resell board" lede="Holder listings and OTC offers." />
+      <Section><PilotModuleNotice state={moduleState} gate /></Section>
+    </>;
+  }
   return <>
     <PageHeader eyebrow="Secondary market" title="Resell board"
       lede="Browse holder listings, review their terms and open the corresponding asset or OTC offer.">

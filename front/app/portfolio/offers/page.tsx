@@ -46,12 +46,17 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { SkeletonTable } from "@/components/skeleton";
-import { PaymentMintStatus } from "@/components/payment-mint-status";
+import {
+  PaymentMintPicker,
+  PaymentPriceField,
+  TradeConfirmation,
+  usePaymentPriceForm,
+} from "@/components/payment-price-fields";
 import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
-import { defaultPaymentMint } from "@/lib/payment-mints";
+import { moduleEnabled } from "@/lib/features";
+import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
-import { paymentAmountHint, usePaymentMintCheck } from "@/lib/use-payment-mint";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -80,6 +85,10 @@ export default function MyOffersPage() {
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
+  // Pilot scope (lib/features.ts): with secondary trading off, new offers,
+  // funding and taking are hidden (the send path refuses them too, before
+  // the wallet: lib/pause-gate.ts MODULE_FLOWS); cancel and reclaim stay.
+  const tradingOn = moduleEnabled("secondaryTrading");
   const [confirmCancel, setConfirmCancel] = useState<Offer | null>(null);
   const [fundTarget, setFundTarget] = useState<Offer | null>(null);
   const [myShareClasses, setMyShareClasses] = useState<ShareClassRef[]>([]);
@@ -385,19 +394,21 @@ export default function MyOffersPage() {
             settlement.
           </p>
         </div>
-        <button
-          type="button"
-          disabled={myShareClasses.length === 0}
-          onClick={() => setShowCreate(true)}
-          title={
-            myShareClasses.length === 0
-              ? "You need to hold at least one Manci share-class token before posting an offer."
-              : undefined
-          }
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-        >
-          + Create offer
-        </button>
+        {tradingOn && (
+          <button
+            type="button"
+            disabled={myShareClasses.length === 0}
+            onClick={() => setShowCreate(true)}
+            title={
+              myShareClasses.length === 0
+                ? "You need to hold at least one Manci share-class token before posting an offer."
+                : undefined
+            }
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
+          >
+            + Create offer
+          </button>
+        )}
       </div>
 
       {failed ? (
@@ -410,6 +421,7 @@ export default function MyOffersPage() {
         <Empty
           onClick={() => setShowCreate(true)}
           canCreate={myShareClasses.length > 0}
+          tradingOn={tradingOn}
         />
       ) : (
         <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
@@ -474,7 +486,7 @@ export default function MyOffersPage() {
                       </span>
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {String(o.price)}
+                      {formatPaymentForDisplay(o.price, o.paymentMint.toString(), detectNetwork())}
                     </td>
                     <td className="px-4 py-3">
                       <span
@@ -513,7 +525,7 @@ export default function MyOffersPage() {
                       )}
                       {!closed && o.status === OfferStatus.Open && (
                         <>
-                          {offerPda && (
+                          {tradingOn && offerPda && (
                             <Link
                               href={`/marketplace/otc/${offerPda}`}
                               className="text-slate-600 underline-offset-2 hover:underline"
@@ -521,19 +533,21 @@ export default function MyOffersPage() {
                               Take →
                             </Link>
                           )}
-                          <button
-                            type="button"
-                            disabled={tx.isSending || fullyFunded}
-                            onClick={() => setFundTarget(o)}
-                            title={
-                              fullyFunded
-                                ? "The escrow already holds the full offer amount."
-                                : undefined
-                            }
-                            className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
-                          >
-                            Fund escrow
-                          </button>
+                          {tradingOn && (
+                            <button
+                              type="button"
+                              disabled={tx.isSending || fullyFunded}
+                              onClick={() => setFundTarget(o)}
+                              title={
+                                fullyFunded
+                                  ? "The escrow already holds the full offer amount."
+                                  : undefined
+                              }
+                              className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                            >
+                              Fund escrow
+                            </button>
+                          )}
                           <button
                             type="button"
                             disabled={tx.isSending}
@@ -553,7 +567,7 @@ export default function MyOffersPage() {
         </div>
       )}
 
-      {showCreate && (
+      {showCreate && tradingOn && (
         <CreateOfferModal
           myShareClasses={myShareClasses}
           onClose={() => setShowCreate(false)}
@@ -564,7 +578,7 @@ export default function MyOffersPage() {
         />
       )}
 
-      {fundTarget && (
+      {fundTarget && tradingOn && (
         <FundEscrowModal
           offer={fundTarget}
           busy={tx.isSending}
@@ -720,24 +734,25 @@ function CreateOfferModal({
   );
   const [offerId, setOfferId] = useState(randomAccountId);
   const [amount, setAmount] = useState("");
-  const [price, setPrice] = useState("");
-  const [paymentMint, setPaymentMint] = useState(
-    () => defaultPaymentMint(network) ?? "",
-  );
+  // The price in the payment token's units, from the allowed list
+  // (lansiranje-16); base units only in the instruction and the review.
+  const payment = usePaymentPriceForm(client.runtime.rpc, network);
+  const paymentMint = payment.check.status === "ok" ? payment.check.mint : null;
+  const priceBase = payment.priceBase;
+  const [reviewing, setReviewing] = useState(false);
   const [expiryDate, setExpiryDate] = useState("");
-  const mintCheck = usePaymentMintCheck(client.runtime.rpc, network, paymentMint);
-  const priceHint = paymentAmountHint(price, mintCheck);
 
   const selectedRef = myShareClasses.find((r) => r.pda === selectedScPda);
+  const ready = !!selectedRef && /^[1-9]\d*$/.test(amount.trim()) && priceBase !== null && paymentMint !== null;
 
   async function create() {
     if (
       !wallet ||
       !conn.wallet ||
       !selectedRef ||
-      !amount.trim() ||
-      !price.trim() ||
-      !paymentMint.trim()
+      !ready ||
+      priceBase === null ||
+      paymentMint === null
     )
       return;
     const pendingId = toast.showPending(`Creating offer #${offerId}…`);
@@ -747,7 +762,7 @@ function CreateOfferModal({
       // on mainnet, the allowlist) before the offer names it on-chain.
       await inspectPaymentMint(
         client.runtime.rpc,
-        paymentMint.trim() as Address,
+        paymentMint,
         network,
         { commitment: "confirmed", abortSignal: AbortSignal.timeout(10_000) },
       );
@@ -755,11 +770,11 @@ function CreateOfferModal({
         maker: signer,
         shareClass: selectedRef.pda as Address,
         mint: selectedRef.mint as Address,
-        paymentMint: paymentMint.trim() as Address,
+        paymentMint,
         tokenProgram: TOKEN_2022_ADDRESS,
         offerId: BigInt(offerId || "0"),
         amount: BigInt(amount),
-        price: BigInt(price),
+        price: priceBase,
         expiresAt: expiryDate.trim()
           ? BigInt(Math.floor(new Date(expiryDate).getTime() / 1000))
           : BigInt(0),
@@ -839,34 +854,10 @@ function CreateOfferModal({
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
             </label>
-            <label className="block">
-              <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Total price (payment units)
-              </span>
-              <input
-                value={price}
-                inputMode="numeric"
-                onChange={(e) => setPrice(e.target.value.replace(/\D/g, ""))}
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-              />
-              {priceHint && (
-                <span className="mt-1 block text-[11px] text-slate-500">{priceHint}</span>
-              )}
-            </label>
+            <PaymentPriceField form={payment} />
           </div>
 
-          <label className="block">
-            <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              Payment mint
-            </span>
-            <input
-              value={paymentMint}
-              onChange={(e) => setPaymentMint(e.target.value)}
-              placeholder="USDC mint address"
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm font-mono text-xs focus:border-slate-400 focus:outline-none"
-            />
-            <PaymentMintStatus check={mintCheck} />
-          </label>
+          <PaymentMintPicker form={payment} />
 
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
@@ -889,30 +880,36 @@ function CreateOfferModal({
             move your share units into the escrow account. Without funding the
             offer can&apos;t be taken.
           </p>
+
+          {reviewing && ready && priceBase !== null && payment.decimals !== null && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-slate-800">Check the offer before you sign it:</p>
+              <TradeConfirmation
+                units={BigInt(amount.trim())}
+                priceBase={priceBase}
+                decimals={payment.decimals}
+                label={payment.label}
+                role="seller"
+              />
+            </div>
+          )}
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={reviewing ? () => setReviewing(false) : onClose}
             disabled={tx.isSending}
             className="rounded-md px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200 disabled:opacity-50"
           >
-            Cancel
+            {reviewing ? "Back" : "Cancel"}
           </button>
           <button
             type="button"
-            onClick={() => void create()}
-            disabled={
-              tx.isSending ||
-              !selectedRef ||
-              !amount.trim() ||
-              !price.trim() ||
-              !paymentMint.trim() ||
-              mintCheck.status === "error"
-            }
+            onClick={() => (reviewing ? void create() : setReviewing(true))}
+            disabled={tx.isSending || !ready}
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
-            {tx.isSending ? "Sending…" : "Create offer"}
+            {tx.isSending ? "Sending…" : reviewing ? "Confirm and sign" : "Review offer"}
           </button>
         </div>
       </div>
@@ -923,16 +920,19 @@ function CreateOfferModal({
 function Empty({
   onClick,
   canCreate,
+  tradingOn,
 }: {
   onClick: () => void;
   canCreate: boolean;
+  /** Secondary trading switched on (lib/features.ts): otherwise no call to action. */
+  tradingOn: boolean;
 }) {
   return (
     <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
         You haven&apos;t posted any OTC offers yet.
       </p>
-      {canCreate ? (
+      {!tradingOn ? null : canCreate ? (
         <button
           type="button"
           onClick={onClick}

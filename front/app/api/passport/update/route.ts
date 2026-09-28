@@ -11,13 +11,24 @@
 // (best-effort; the approval email is sent by /api/clients/passport-sync once
 // the on-chain passport actually exists). Client wrapper:
 // updatePassportRequest() in lib/passport.ts (action "passport.update").
+//
+// `approved` is refused (409) unless the wallet holds a live on-chain
+// KycEntry at finalized (sim gap G1, lib/server/passport-state.ts
+// passportFinality): the route gives a passport its own RPC does not see
+// yet a few seconds of grace, waits up to 30 s for a just-confirmed
+// approve_holder to finalize, and fails closed (503) when the chain cannot
+// be read.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
+import { passportFinality } from "@/lib/server/passport-state";
 import { insertNote, isTerminalKycStatus } from "../../clients/_helpers";
+
+// `approved` waits (bounded) for the passport's block to be finalized.
+export const maxDuration = 60;
 
 const UUID_RE =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -80,6 +91,32 @@ export async function POST(request: Request) {
       .maybeSingle();
     if (readErr) throw new SiwsError(500, "Database read failed");
     if (!reqRow) throw new SiwsError(404, "Passport request not found");
+
+    // G1 (sim review): `approved` means "the passport exists". Only a live
+    // on-chain KycEntry at finalized makes it true; a request is otherwise
+    // left undecided, so /api/passport/status keeps telling the investor the
+    // passport is still pending instead of releasing them without one.
+    if (patch.status === "approved") {
+      let finality: Awaited<ReturnType<typeof passportFinality>>;
+      try {
+        finality = await passportFinality((reqRow as { wallet: string }).wallet);
+      } catch (err) {
+        console.error("[api/passport/update] on-chain passport check failed:", err instanceof Error ? err.message : String(err));
+        throw new SiwsError(503, "Could not check the on-chain passport — nothing was changed; try again");
+      }
+      if (finality === "none") {
+        throw new SiwsError(
+          409,
+          "This wallet has no live on-chain passport visible yet, so the request cannot be marked approved; nothing was changed. If you just issued it, retry the sync in a few seconds (the network may still be catching up); otherwise issue the passport first (approve_holder).",
+        );
+      }
+      if (finality === "not-finalized") {
+        throw new SiwsError(
+          409,
+          "The passport is on-chain but not finalized yet — retry in a few seconds; nothing was changed.",
+        );
+      }
+    }
 
     const { error } = await sb
       .from("passport_requests")

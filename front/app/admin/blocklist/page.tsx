@@ -83,6 +83,15 @@ function BlocklistOps() {
     void refresh();
   }, [refresh]);
 
+  // A sanctions screening hit links here with ?wallet=<address>
+  // (/admin/compliance, 8.5): the entry is prepared, never sent — the
+  // BlocklistAuthority reviews it and signs below.
+  useEffect(() => {
+    const proposed = new URLSearchParams(window.location.search).get("wallet")?.trim() ?? "";
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (isAddress(proposed)) setNewWallet(proposed);
+  }, []);
+
   const target = newWallet.trim();
   const targetValid = isAddress(target);
   const alreadyBlocked =

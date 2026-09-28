@@ -97,6 +97,8 @@ export function VerificationForm() {
       ? ["legal_name", "date_of_birth", "nationality", "residence_country", "address_line", "city", "postal_code", "phone", "email"]
       : ["legal_name", "residence_country", "address_line", "city", "postal_code", "phone", "email", "company_name", "company_reg_number", "company_country", "company_address", "company_website", "representative_role"];
     const params: Record<string, unknown> = { kind };
+    // A founder verifying to raise (/apply) needs no investor passport (G5).
+    if (kind === "kyc" && safeNext?.startsWith("/apply")) params.purpose = "founder";
     for (const key of keys) {
       const value = fields[key].trim();
       if (!value) continue;

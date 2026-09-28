@@ -9,6 +9,10 @@
 // ids or counts. The full AML table stays behind the admin-only
 // /api/compliance/list.
 //
+// Since 8.5 the asked wallets are also screened against the sanctions lists
+// (lib/server/sanctions.ts): a listed wallet gets its compliance alert and
+// is answered as open. Fail closed on mainnet (503).
+//
 // Client wrapper: listWalletsWithOpenAlerts() in lib/compliance.ts.
 
 import { NextResponse } from "next/server";
@@ -17,6 +21,7 @@ import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdminOrKycProvider } from "@/lib/server/kyc-provider-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { raiseSanctionsHit, screenWallets } from "@/lib/server/sanctions";
 
 /** Most wallets one request may ask about (the client wrapper chunks). */
 const MAX_OPEN_WALLETS_QUERY = 200;
@@ -45,6 +50,14 @@ export async function POST(request: Request) {
     ];
 
     const sb = getSupabaseAdmin();
+    // Passport issuance screens the wallets against the sanctions lists too
+    // (8.5): a listed wallet gets its compliance alert now, and is answered
+    // as having one. On mainnet an unavailable list refuses (503), which the
+    // issue flow already treats as "could not be re-checked — retry".
+    const { hits } = await screenWallets(sb, wallets);
+    for (const [hit, matches] of hits) {
+      await raiseSanctionsHit(sb, hit, matches, { route: "passport issuance (/admin/kyc)", role: "passport-issue" });
+    }
     const { data, error } = await sb
       .from("compliance_alerts")
       .select("wallet")
@@ -58,11 +71,13 @@ export async function POST(request: Request) {
 
     const asked = new Set<string>(wallets);
     const open = [
-      ...new Set(
-        (data ?? [])
+      ...new Set([
+        ...(data ?? [])
           .map((row) => (row as { wallet?: unknown }).wallet)
           .filter((w): w is string => typeof w === "string" && asked.has(w)),
-      ),
+        // A hit whose alert could not be written still blocks.
+        ...[...hits.keys()].filter((w) => asked.has(w)),
+      ]),
     ];
     return NextResponse.json(
       { ok: true, data: { wallets: open } },

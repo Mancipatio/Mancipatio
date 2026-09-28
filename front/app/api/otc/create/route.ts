@@ -15,8 +15,10 @@
 // Compliance screen kept (refuseSuspendedClient): the platform mediates this
 // deal (an admin opens the escrow), so it refuses a request when EITHER
 // party's dossier has been SUSPENDED by compliance — a sanctions / fraud /
-// investigation decision, not missing KYC. The counterparty refusal is
-// generic and does not name the status. The screen is repeated right before
+// investigation decision, not missing KYC — and, since 8.5, when either
+// wallet is on a sanctions list (lib/server/sanctions.ts: 403 and a
+// compliance alert; 503 on mainnet while the list is stale). The
+// counterparty refusal is generic and does not name the status. The screen is repeated right before
 // the escrow is opened (/api/otc/admin-screen, called by the admin OTC page),
 // because a party can be suspended while the request waits in the queue.
 //
@@ -28,6 +30,7 @@
 // fail closed (503) on RPC trouble, as in /api/resell/create.
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { requireAcceptedTos } from "@/lib/server/tos-gate";
@@ -46,12 +49,7 @@ export async function POST(request: Request) {
   try {
     const { wallet, params } = await verifySigned(request, "otc.create");
 
-    // Compliance screen, not a KYC gate: no client profile or KYC is needed
-    // to request an escrow; only suspended dossiers are refused (both
-    // parties — see header). The counterparty check runs after the party
-    // validation below.
     const sb = getSupabaseAdmin();
-    await refuseSuspendedClient(sb, wallet, "requesting an OTC escrow");
 
     const shareClassPda =
       typeof params.share_class_pda === "string" ? params.share_class_pda : "";
@@ -109,13 +107,23 @@ export async function POST(request: Request) {
     // checks below (Talas 4.2 §3.3).
     const network = detectNetwork();
     assertAllowedPaymentMint(network, paymentMint);
+    // Pilot scope (lib/features.ts): secondary trading is a module switch,
+    // checked once the request itself is valid and before any database,
+    // screening or chain work (a switched-off module answers 403, never the
+    // sanctions screen's 503 or an alert).
+    requireModule("secondaryTrading");
+
+    // Compliance screen, not a KYC gate: no client profile or KYC is needed
+    // to request an escrow; only suspended dossiers are refused (both
+    // parties — see header), and since 8.5 a wallet on a sanctions list.
+    await refuseSuspendedClient(sb, wallet, "requesting an OTC escrow");
 
     // The other party of a platform-mediated deal gets the same suspension
     // screen. Generic copy: the requester is not told the counterparty's
     // compliance status.
     const counterparty = wallet === sellerWallet ? buyerWallet : sellerWallet;
     try {
-      await refuseSuspendedClient(sb, counterparty, "trading");
+      await refuseSuspendedClient(sb, counterparty, "trading", "counterparty");
     } catch (err) {
       if (err instanceof SiwsError && err.status === 403) {
         throw new SiwsError(

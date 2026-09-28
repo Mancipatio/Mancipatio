@@ -1,14 +1,17 @@
 import type { NextConfig } from "next";
-// The one runtime import: the operator and legal slots, by relative path.
-// lib/legal/* is directive-free and imports nothing but its siblings, so
-// Next's next.config.ts loader (SWC with its require hook) compiles it like
-// this file; no package and no `@/` alias is loaded here.
+// The runtime imports: the operator and legal slots, and (8.5) the geoblock
+// list's parser, by relative path. lib/legal/* is directive-free and imports
+// nothing but its siblings, lib/geoblock.ts only lib/countries.ts (which
+// imports nothing), so Next's next.config.ts loader (SWC with its require
+// hook) compiles them like this file; no package and no `@/` alias is
+// loaded here.
 import {
   MAINNET_LEGAL_SLOTS,
   MAINNET_LICENSE_WAIVER,
   mainnetLegalProblems,
   type MainnetLegalSlots,
 } from "./lib/legal/readiness";
+import { GEOBLOCK_ENV, parseGeoblockList } from "./lib/geoblock";
 
 // `next build`'s phase (next/constants PHASE_PRODUCTION_BUILD). Spelled out
 // rather than imported so this file loads no package at config time.
@@ -479,6 +482,12 @@ export const FEATURE_FLAG_VALUES = ["true", "false", "1", "0", "yes", "no", "on"
 export const FEATURE_FLAG_NAMES = [
   "NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP", "NEXT_PUBLIC_FEATURE_STARTUP_RAISES",
   "NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", "NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE",
+  // 8.5: the pilot-scope module switches (lib/features.ts PILOT_MODULE_ENV;
+  // tests/pilot-modules.test.ts keeps the two lists equal).
+  "NEXT_PUBLIC_FEATURE_SECONDARY_TRADING", "NEXT_PUBLIC_FEATURE_GOVERNANCE",
+  "NEXT_PUBLIC_FEATURE_VESTING", "NEXT_PUBLIC_FEATURE_RIGHTS",
+  "NEXT_PUBLIC_FEATURE_DISTRIBUTIONS", "NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION",
+  "NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY",
 ];
 
 /**
@@ -493,6 +502,29 @@ export function assertBuildFeatureFlags(phase: string, env: Record<string, strin
     if (value && !FEATURE_FLAG_VALUES.includes(value)) {
       throw new Error(`${name}="${env[name]}" is not a flag value. Use one of: ${FEATURE_FLAG_VALUES.join(", ")} (or leave it unset).`);
     }
+  }
+}
+
+/**
+ * Geoblocking (8.5, lib/geoblock.ts, proxy.ts): the countries the platform
+ * does not serve are counsel's decision, so a MAINNET production build
+ * refuses without GEOBLOCK_COUNTRIES — a list of ISO 3166 codes, or `none`
+ * written down on purpose. Any production build refuses a malformed list
+ * and a code that is no country (a typo, or "UK" for GB, would silently
+ * block nothing).
+ */
+export function assertBuildGeoblock(phase: string, env: Record<string, string | undefined> = process.env): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  const config = parseGeoblockList(env[GEOBLOCK_ENV]);
+  if (!config.ok) {
+    throw new Error(`${GEOBLOCK_ENV}: ${config.error}. Use comma-separated ISO 3166 codes (KP,IR,UA-43) or "none".`);
+  }
+  if (buildNetwork(env) === "mainnet" && !config.set) {
+    throw new Error(
+      `Refusing a mainnet build: ${GEOBLOCK_ENV} is not set. Set it to the countries counsel excludes ` +
+        '(comma-separated ISO 3166 codes, e.g. "KP,IR,CU,SY,UA-43,UA-40"), or to "none" when counsel ' +
+        "decided to block none (ops/env-vars.md, Geoblocking).",
+    );
   }
 }
 
@@ -659,5 +691,7 @@ export default function config(phase: string): NextConfig {
   assertBuildRpc(phase);
   assertBuildMainnetOps(phase);
   assertBuildFeatureFlags(phase);
+  // 8.5: counsel's geoblock list (or an explicit "none") on mainnet.
+  assertBuildGeoblock(phase);
   return nextConfig;
 }

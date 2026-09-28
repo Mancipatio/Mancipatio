@@ -15,6 +15,7 @@
 // actually hold the requested amount.
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import {
   getToken2022Balance,
@@ -28,6 +29,8 @@ const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the custodyConversion module.
+    requireModule("custodyConversion");
     const { wallet, params } = await verifySigned(request, "conversion.create");
 
     // Server-side KYC gate — converting tokens into company equity is one of

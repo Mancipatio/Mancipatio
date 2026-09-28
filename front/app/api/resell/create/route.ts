@@ -9,10 +9,12 @@
 // require identity verification — only conversion into company equity and
 // physical delivery do. The listing wallet is screened by
 // refuseSuspendedClient only: a dossier compliance has SUSPENDED (sanctions /
-// fraud / investigation) is still refused. Whether the eventual buyer
+// fraud / investigation) is still refused, and since 8.5 a wallet on a
+// sanctions list (lib/server/sanctions.ts). Whether the eventual buyer
 // may receive a KycGated class is enforced on-chain at settlement.
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { requireAcceptedTos } from "@/lib/server/tos-gate";
@@ -22,12 +24,14 @@ import {
 } from "@/lib/server/token-holdings";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { resellAskCurrencies } from "@/lib/payment-price";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
-const CURRENCIES = new Set(["USDC", "USDT", "SOL", "EUR"]);
 
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the secondaryTrading module.
+    requireModule("secondaryTrading");
     const { wallet, params } = await verifySigned(request, "resell.create");
 
     // Compliance screen, not a KYC gate: no client profile or KYC is needed
@@ -71,7 +75,9 @@ export async function POST(request: Request) {
     if (askPrice !== null && (!Number.isFinite(askPrice) || askPrice <= 0)) {
       throw new SiwsError(400, "ask_price must be a positive number");
     }
-    if (!CURRENCIES.has(askCurrency)) {
+    // Mainnet: only an allowed payment token (USDC today), the unit the
+    // request and the escrow are priced in (lib/payment-price.ts).
+    if (!resellAskCurrencies(detectNetwork()).includes(askCurrency)) {
       throw new SiwsError(400, "ask_currency is not supported");
     }
     if (note.length > 1000) {

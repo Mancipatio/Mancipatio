@@ -13,6 +13,7 @@ import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL } from "@/lib/format";
 import { assetHref, withAssetAddresses } from "@/lib/asset-links";
 import type { Asset } from "@/lib/generated/asset_registry";
 import { SkeletonTable } from "@/components/skeleton";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import {
   Badge,
   Card,
@@ -259,16 +260,20 @@ export default function MarketplacePage() {
               title="Primary sales"
               body="Buy share-class units directly from issuers on the launchpad."
             />
-            <Card
-              href="/marketplace/otc"
-              title="OTC offers"
-              body="Buy from existing token holders through hook-aware OTC offers."
-            />
-            <Card
-              href="/marketplace/governance"
-              title="Governance"
-              body="Track active proposals and read snapshot-based outcomes."
-            />
+            {navHrefVisible("/marketplace/otc") && (
+              <Card
+                href="/marketplace/otc"
+                title="OTC offers"
+                body="Buy from existing token holders through hook-aware OTC offers."
+              />
+            )}
+            {navHrefVisible("/marketplace/governance") && (
+              <Card
+                href="/marketplace/governance"
+                title="Governance"
+                body="Track active proposals and read snapshot-based outcomes."
+              />
+            )}
           </Grid>
         </div>
       </Section>

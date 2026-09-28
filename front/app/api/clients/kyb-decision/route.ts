@@ -2,12 +2,24 @@
 // verification (KYB) submitted from /verify. Signed + requireAdmin. The KYB
 // decision is separate from the dossier's individual KYC status and is what
 // the /apply gate (requireVerifiedCompany) checks.
+//
+// Documents first, then the decision (sim gap G3, the same rule as
+// /api/clients/status): `verified` answers 409 while any requested document
+// of the dossier is still requested, submitted-but-unreviewed or rejected.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { assertUuid, fetchClientOr404, insertNote, oneOf, optString } from "../_helpers";
+import {
+  assertUuid,
+  documentsFirstMessage,
+  fetchClientOr404,
+  insertNote,
+  oneOf,
+  optString,
+  unapprovedRequirements,
+} from "../_helpers";
 
 const DECISIONS = ["verified", "rejected", "pending"] as const;
 
@@ -21,6 +33,10 @@ export async function POST(request: Request) {
 
     const sb = getSupabaseAdmin();
     await fetchClientOr404(sb, clientId);
+    if (decision === "verified") {
+      const open = await unapprovedRequirements(sb, clientId);
+      if (open.length) throw new SiwsError(409, documentsFirstMessage(open));
+    }
     const reviewed = decision === "pending"
       ? { reviewed_at: null, reviewed_by: null }
       : { reviewed_at: new Date().toISOString(), reviewed_by: wallet };
