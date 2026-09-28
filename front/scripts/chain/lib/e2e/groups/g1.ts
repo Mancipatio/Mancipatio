@@ -125,6 +125,8 @@ export async function openSaleIxs(
     total: bigint;
     startTs: bigint;
     endTs: bigint;
+    /** The Admin that approved the sale (default: the run's Admin). */
+    approvedBy?: Address;
   },
 ) {
   const issuer = entity(w.runner.state, "issuer") as Address;
@@ -141,7 +143,7 @@ export async function openSaleIxs(
       mint,
       paymentMint,
       paymentTokenProgram: TOKEN_CLASSIC,
-      approvedBy: w.roles.admin.address,
+      approvedBy: input.approvedBy ?? w.roles.admin.address,
       saleId: BigInt(input.saleId),
       pricePerUnit: input.price,
       totalForSale: input.total,

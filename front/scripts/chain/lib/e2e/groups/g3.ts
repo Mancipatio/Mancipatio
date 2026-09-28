@@ -66,7 +66,7 @@ async function paymentAtaOf(owner: Address, mint: Address): Promise<Address> {
 }
 
 /** create_offer + deposit_to_offer_escrow in one transaction (maker → escrow leg). */
-async function createAndFundOffer(w: World, maker: KeyPairSigner, offerId: number, amount: bigint, price: bigint, expiresAt: bigint) {
+export async function createAndFundOffer(w: World, maker: KeyPairSigner, offerId: number, amount: bigint, price: bigint, expiresAt: bigint) {
   const shareClass = entity(w.runner.state, "classA") as Address;
   const mint = entity(w.runner.state, "mintA") as Address;
   const paymentMint = entity(w.runner.state, "paymentMint") as Address;
@@ -104,7 +104,7 @@ async function createAndFundOffer(w: World, maker: KeyPairSigner, offerId: numbe
 }
 
 /** The escrow → maker leg shared by cancel_offer and expire_offer. */
-async function offerReturnTail(w: World, offer: Address) {
+export async function offerReturnTail(w: World, offer: Address) {
   const data = (await fetchOffer(w.rpc, offer, { commitment: "finalized" })).data;
   const makerShare = await shareAta(data.maker, data.mint);
   const tail = await hookTransferMetas(w.rpc, data.mint, {
@@ -117,17 +117,17 @@ async function offerReturnTail(w: World, offer: Address) {
   return { data, makerShare, tail };
 }
 
-async function takeIxs(w: World, taker: KeyPairSigner, offer: Address) {
+export async function takeIxs(w: World, taker: KeyPairSigner, offer: Address) {
   const data = (await fetchOffer(w.rpc, offer, { commitment: "finalized" })).data;
   return buildTakeOfferInstructions(w.rpc, { taker, offerPda: offer, offer: data, paymentTokenProgram: TOKEN_CLASSIC });
 }
 
-async function offerStatus(w: World, offer: Address): Promise<OfferStatus | null> {
+export async function offerStatus(w: World, offer: Address): Promise<OfferStatus | null> {
   const account = await fetchMaybeOffer(w.rpc, offer, { commitment: "finalized" });
   return account.exists ? account.data.status : null;
 }
 
-async function dealStatus(w: World, deal: Address): Promise<OtcDealStatus | null> {
+export async function dealStatus(w: World, deal: Address): Promise<OtcDealStatus | null> {
   const account = await fetchMaybeOtcDeal(w.rpc, deal, { commitment: "finalized" });
   return account.exists ? account.data.status : null;
 }
@@ -135,7 +135,7 @@ async function dealStatus(w: World, deal: Address): Promise<OtcDealStatus | null
 /** The e2e deals' lifetime: long enough for the group, inside the 90-day cap. */
 const DEAL_TTL_S = BigInt(7 * 86_400);
 
-async function createDealIxs(w: World, dealId: number, seller: Address, buyer: Address, amount: bigint, price: bigint, expiresAt?: bigint) {
+export async function createDealIxs(w: World, dealId: number, seller: Address, buyer: Address, amount: bigint, price: bigint, expiresAt?: bigint) {
   const paymentMint = entity(w.runner.state, "paymentMint") as Address;
   return [
     await getCreateOtcDealInstructionAsync({
@@ -158,7 +158,7 @@ async function createDealIxs(w: World, dealId: number, seller: Address, buyer: A
 }
 
 /** cancel_otc_deal by the Admin (as /admin/otc builds it): both deposited legs return. */
-async function cancelDealIxs(w: World, deal: Address) {
+export async function cancelDealIxs(w: World, deal: Address) {
   const { admin } = w.roles;
   const d = (await fetchOtcDeal(w.rpc, deal, { commitment: "finalized" })).data;
   const sellerShare = await shareAta(d.seller, d.mint);
@@ -190,7 +190,7 @@ async function cancelDealIxs(w: World, deal: Address) {
 }
 
 /** deposit_otc_payment as /portfolio/deals builds it (lib/otc-transactions; settle leg: asset escrow → buyer). */
-async function depositPaymentIxs(w: World, buyer: KeyPairSigner, deal: Address) {
+export async function depositPaymentIxs(w: World, buyer: KeyPairSigner, deal: Address) {
   const d = (await fetchOtcDeal(w.rpc, deal, { commitment: "finalized" })).data;
   return buildDepositOtcPaymentInstructions(w.rpc, {
     buyer,
