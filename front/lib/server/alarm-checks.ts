@@ -293,12 +293,16 @@ async function retryHeartbeat(sb: SupabaseClient, network: Network, now: number,
  * screen only warns and the check holds (nothing opens). Null when the state
  * cannot be read (a check that could not run).
  */
-async function sanctionsList(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report | null> {
+export async function sanctionsListReport(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report | null> {
   const { data, error } = await sb.from("sanctions_list_state")
     .select("refreshed_at,address_count,last_status,last_error,published_on,last_attempt_at")
     .eq("source", OFAC_SDN_SOURCE).abortSignal(dbSignal(signal)).maybeSingle();
-  if (error) return null;
-  const row = (data ?? null) as {
+  // Before 0078 is applied the table does not exist: that is "never loaded"
+  // (fail on mainnet, hold elsewhere), not a check that could not run, so a
+  // front deployed ahead of the migration does not turn every alarm run partial.
+  const missing = error && ["42P01", "PGRST205"].includes((error as { code?: string }).code ?? "");
+  if (error && !missing) return null;
+  const row = (missing ? null : data ?? null) as {
     refreshed_at: string | null; address_count: number | null; last_status: string | null; last_error: string | null;
     published_on: string | null; last_attempt_at: string | null;
   } | null;
@@ -613,7 +617,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => retryHeartbeat(sb, network, now, signal));
   await collect(() => fxAndHolds(sb, network, now, signal));
   await collect(() => indexerFreshness(sb, network, now, signal));
-  await collect(() => sanctionsList(sb, network, now, signal));
+  await collect(() => sanctionsListReport(sb, network, now, signal));
   await record(cheap);
 
   // 2. The operational watches (chain reads), in parallel with the gap scan,

@@ -15,6 +15,8 @@ export type MemorySupabase = {
   failWrites: Set<string>;
   /** Tables whose reads fail. */
   failReads: Set<string>;
+  /** The error code a failing read answers with (default XX000), e.g. 42P01 for a missing table. */
+  readErrorCodes: Record<string, string>;
   /** Runs right before an update is applied (race simulation). */
   beforeUpdate: ((table: string) => void) | null;
   client: { from: (table: string) => unknown; rpc: (name: string, args?: Record<string, unknown>) => unknown };
@@ -29,6 +31,7 @@ export function memorySupabase(): MemorySupabase {
     rpcs: {},
     failWrites: new Set(),
     failReads: new Set(),
+    readErrorCodes: {},
     beforeUpdate: null,
     client: { from: (table: string) => from(table), rpc: (name: string, args: Record<string, unknown> = {}) => rpc(name, args) },
     rows: (table) => (db.tables[table] ??= []),
@@ -37,6 +40,7 @@ export function memorySupabase(): MemorySupabase {
       db.rpcs = {};
       db.failWrites.clear();
       db.failReads.clear();
+      db.readErrorCodes = {};
       db.beforeUpdate = null;
     },
   };
@@ -67,7 +71,9 @@ export function memorySupabase(): MemorySupabase {
     let head = false;
     const run = async (single: boolean) => {
       if (op !== "select" && db.failWrites.has(table)) return { data: null, error: { message: "write failed", code: "XX000" } };
-      if (op === "select" && db.failReads.has(table)) return { data: null, error: { message: "read failed", code: "XX000" } };
+      if (op === "select" && db.failReads.has(table)) {
+        return { data: null, error: { message: "read failed", code: db.readErrorCodes[table] ?? "XX000" } };
+      }
       if (op === "insert" || op === "upsert") {
         const rows = (Array.isArray(payload) ? payload : [payload ?? {}]).map((r) => ({ id: r.id ?? `row-${nextId++}`, ...r }));
         db.rows(table).push(...rows);
