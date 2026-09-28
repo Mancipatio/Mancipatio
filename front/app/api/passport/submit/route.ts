@@ -12,8 +12,10 @@
 // onboarding magic-link so the applicant can upload documents through the
 // existing /onboarding/{id} flow immediately. The response carries that path.
 //
-// Protections: per-IP + per-wallet rate limits (best-effort in-memory — see
-// _helpers.rateLimited), dedupe (409 while a new/in_review request exists),
+// Protections: per-IP + per-wallet rate limits (in-memory bursts — see
+// _helpers.rateLimited — and hourly caps shared by every instance, per wallet
+// and per IP: lib/server/shared-rate-limit.ts), dedupe (409 while a
+// new/in_review request exists),
 // and jurisdiction is REQUIRED + validated against the platform's default
 // approved set (DEFAULT_APPROVED_JURISDICTIONS).
 //
@@ -30,12 +32,15 @@ import {
   clientIpOf,
   DEGRADED_TTL_MESSAGE,
   insertNote,
+  ipRateLimitKey,
   rateLimited,
 } from "../../clients/_helpers";
 import { ensureClientDossier, ensureStandardRequirements, STANDARD_INVESTOR_REQUIREMENTS } from "@/lib/server/kyc-dossier";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const NOTE_MAX = 500;
+/** Applications per IP per hour across every instance: room for an office behind one NAT. */
+const SHARED_IP_LIMIT_PER_HOUR = 20;
 
 
 export async function POST(request: Request) {
@@ -55,8 +60,10 @@ export async function POST(request: Request) {
     ) {
       throw new SiwsError(429, "Too many applications — try again later");
     }
-    // The same per-wallet cap across every instance (front-app-15).
-    if (await consumeSharedRateLimit(`passport-submit:wallet:${wallet}`, 3, 3_600) === "limited") {
+    // The same per-wallet cap across every instance (front-app-15), and, as
+    // wallets cost nothing to make, a per-IP one across every instance too.
+    if (await consumeSharedRateLimit(`passport-submit:wallet:${wallet}`, 3, 3_600) === "limited"
+      || await consumeSharedRateLimit(`passport-submit:ip:${ipRateLimitKey(ip)}`, SHARED_IP_LIMIT_PER_HOUR, 3_600) === "limited") {
       throw new SiwsError(429, "Too many applications — try again later");
     }
 

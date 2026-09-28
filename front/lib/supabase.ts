@@ -58,32 +58,40 @@ export type AuditInput = {
   metadata?: Record<string, unknown>;
 };
 
+/** Waits before each retry of a rate-limited (429) audit write; a breadcrumb is never dropped on the first 429. */
+export const AUDIT_RETRY_DELAYS_MS = [2_000, 10_000];
+
 /**
  * Fire-and-forget audit log write.
  *
  * Never throws — admin actions must not break if the backend is unreachable.
- * Returns the new row's id, or null on failure.
+ * Returns the new row's id, or null on failure. A 429 (the shared audit
+ * limit, app/api/audit/route.ts) is retried after each of `retryDelaysMs`
+ * before the row is given up and logged.
  *
  * Internals: POSTs to /api/audit, which inserts server-side via the service
  * role (stamping metadata.server_received_at) — the anon-key write path to
  * audit_events is gone. The exported signature is unchanged.
  */
-export async function recordAudit(input: AuditInput): Promise<string | null> {
+export async function recordAudit(input: AuditInput, retryDelaysMs: readonly number[] = AUDIT_RETRY_DELAYS_MS): Promise<string | null> {
   try {
-    const res = await fetch("/api/audit", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        ix_name: input.ix_name,
-        category: input.category,
-        actor_wallet: input.actor_wallet,
-        target_label: input.target_label ?? null,
-        tx_signature: input.tx_signature ?? null,
-        reason: input.reason,
-        status: input.status ?? "success",
-        metadata: input.metadata ?? {},
-      }),
+    const body = JSON.stringify({
+      ix_name: input.ix_name,
+      category: input.category,
+      actor_wallet: input.actor_wallet,
+      target_label: input.target_label ?? null,
+      tx_signature: input.tx_signature ?? null,
+      reason: input.reason,
+      status: input.status ?? "success",
+      metadata: input.metadata ?? {},
     });
+    const post = () => fetch("/api/audit", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    let res = await post();
+    for (const delay of retryDelaysMs) {
+      if (res.status !== 429) break;
+      await new Promise((resolve) => setTimeout(resolve, delay));
+      res = await post();
+    }
     type Envelope = { ok?: boolean; data?: { id?: string | null }; error?: string };
     let json: Envelope | null = null;
     try {

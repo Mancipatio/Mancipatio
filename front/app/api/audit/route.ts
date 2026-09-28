@@ -27,8 +27,13 @@
 //   1. the Origin header must be this deployment's own origin (a browser on
 //      another site cannot write here; recordAudit is a same-origin fetch);
 //   2. the body is capped at AUDIT_BODY_LIMIT bytes (413);
-//   3. a per-instance burst cap per IP, then a limit per IP shared by every
-//      instance (lib/server/shared-rate-limit.ts, 429).
+//   3. a per-instance burst cap per IP, then a limit shared by every instance
+//      (lib/server/shared-rate-limit.ts, 429): per verified wallet for a row
+//      a wallet session vouches for, else per IP. So admins behind one office
+//      NAT, each with a session, never share one budget; unverified rows
+//      share the IP's, which is sized for several people (the SQL caps a
+//      window at 100 hits, so the window is one minute). recordAudit retries
+//      a 429 with backoff rather than dropping the row.
 // A wallet session cookie (lib/siws-session.ts: one signature, bound to
 // wallet + network + origin) for the same wallet as actor_wallet upgrades the
 // row to actor_verified=true / actor_source="siws-session". A session is not
@@ -51,9 +56,9 @@ const AUDIT_BODY_LIMIT = 32 * 1024;
 /** Per instance, per IP: a burst. */
 const AUDIT_BURST_LIMIT = 20;
 const AUDIT_BURST_WINDOW_MS = 10_000;
-/** Shared by every instance, per IP: well above a person's admin session. */
+/** Shared by every instance, per verified wallet or else per IP: well above a busy office's admin work. */
 const AUDIT_SHARED_LIMIT = 100;
-const AUDIT_SHARED_WINDOW_SECONDS = 600;
+const AUDIT_SHARED_WINDOW_SECONDS = 60;
 
 const CATEGORIES = new Set([
   "platform",
@@ -96,9 +101,6 @@ export async function POST(request: Request) {
     const bounded = await boundedRequest(request, AUDIT_BODY_LIMIT);
     const ipKey = ipRateLimitKey(clientIpOf(request));
     if (rateLimited(`audit:${ipKey}`, AUDIT_BURST_LIMIT, AUDIT_BURST_WINDOW_MS)) {
-      throw new SiwsError(429, "Too many audit events — slow down");
-    }
-    if (await consumeSharedRateLimit(`audit:ip:${ipKey}`, AUDIT_SHARED_LIMIT, AUDIT_SHARED_WINDOW_SECONDS) === "limited") {
       throw new SiwsError(429, "Too many audit events — slow down");
     }
     let body: unknown;
@@ -168,6 +170,11 @@ export async function POST(request: Request) {
     const network = detectNetwork();
     const session = readSessionToken(sessionCookieFrom(request));
     const verified = session !== null && session.w === actorWallet && session.n === network && session.o === origin;
+    // A self-asserted wallet could be rotated at will: only a verified one gets its own budget.
+    const sharedKey = verified ? `audit:wallet:${actorWallet}` : `audit:ip:${ipKey}`;
+    if (await consumeSharedRateLimit(sharedKey, AUDIT_SHARED_LIMIT, AUDIT_SHARED_WINDOW_SECONDS) === "limited") {
+      throw new SiwsError(429, "Too many audit events — slow down");
+    }
     metadata = {
       ...metadata,
       server_received_at: new Date().toISOString(),

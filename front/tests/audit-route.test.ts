@@ -1,7 +1,8 @@
 // front-app-15: POST /api/audit is bounded — same origin only, a body cap, a
-// per-instance burst cap and a per-IP limit shared by every instance
-// (consume_account_rate_limit, 0052) — and a wallet session for the same
-// wallet verifies the row. Supabase is mocked.
+// per-instance burst cap and a limit shared by every instance
+// (consume_account_rate_limit, 0052), per verified wallet or else per IP —
+// and a wallet session for the same wallet verifies the row. recordAudit
+// retries a 429. Supabase is mocked.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
@@ -27,7 +28,9 @@ vi.mock("@/lib/supabase-server", () => ({
   }),
 }));
 
+import { createHash } from "node:crypto";
 import { POST } from "@/app/api/audit/route";
+import { recordAudit } from "@/lib/supabase";
 import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
 import { issueSessionToken } from "@/lib/server/siws-session";
 import { SESSION_COOKIE } from "@/lib/siws-session";
@@ -59,7 +62,7 @@ describe("POST /api/audit guards", () => {
   it("writes an unverified row from the site's own origin, through the shared limiter", async () => {
     const res = await post();
     expect(res.status).toBe(200);
-    expect(db.rpcs).toEqual([{ fn: "consume_account_rate_limit", args: expect.objectContaining({ p_limit: 100, p_window_seconds: 600 }) }]);
+    expect(db.rpcs).toEqual([{ fn: "consume_account_rate_limit", args: expect.objectContaining({ p_limit: 100, p_window_seconds: 60 }) }]);
     expect(String(db.rpcs[0].args.p_key_hash)).toMatch(/^[0-9a-f]{64}$/);
     expect(db.inserts[0].metadata).toMatchObject({ actor_verified: false, actor_source: "client-unsigned" });
   });
@@ -88,6 +91,20 @@ describe("POST /api/audit guards", () => {
     expect(statuses[20]).toBe(429);
   });
 
+  it("the shared budget is per verified wallet (admins behind one NAT do not share it), else per IP", async () => {
+    const hash = (key: string) => createHash("sha256").update(`shared:${key}`).digest("hex");
+    const office = "198.51.100.20";
+    await post({ ip: office });
+    expect(db.rpcs.at(-1)!.args.p_key_hash).toBe(hash(`audit:ip:${office}`));
+    const mine = issueSessionToken(WALLET, "devnet", SITE)!.token;
+    await post({ ip: office, cookie: `${SESSION_COOKIE}=${mine}` });
+    expect(db.rpcs.at(-1)!.args.p_key_hash).toBe(hash(`audit:wallet:${WALLET}`));
+    // A wallet named in the body without its session cannot claim a budget of its own.
+    const other = issueSessionToken("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin", "devnet", SITE)!.token;
+    await post({ ip: office, cookie: `${SESSION_COOKIE}=${other}` });
+    expect(db.rpcs.at(-1)!.args.p_key_hash).toBe(hash(`audit:ip:${office}`));
+  });
+
   it("a limiter the database cannot answer does not drop the breadcrumb (the per-instance cap still applies)", async () => {
     db.limit = "down";
     expect((await post()).status).toBe(200);
@@ -104,6 +121,27 @@ describe("POST /api/audit guards", () => {
     const elsewhere = issueSessionToken(WALLET, "devnet", "https://other.manci.test")!.token;
     await post({ cookie: `${SESSION_COOKIE}=${elsewhere}` });
     expect(db.inserts.at(-1)!.metadata).toMatchObject({ actor_verified: false });
+  });
+});
+
+describe("recordAudit", () => {
+  it("retries a 429 after each delay, then gives up with a warning; other failures are not retried", async () => {
+    const statuses = [429, 429, 200];
+    const fetchMock = vi.fn(async () => {
+      const status = statuses.shift() ?? 500;
+      return new Response(JSON.stringify(status === 200 ? { ok: true, data: { id: "row-9" } } : { ok: false, error: "Too many" }), { status });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const input = { ix_name: "open_sale", category: "launchpad" as const, actor_wallet: WALLET, reason: "" };
+    expect(await recordAudit(input, [1, 1])).toBe("row-9");
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+    statuses.push(429, 429, 429);
+    expect(await recordAudit(input, [1, 1])).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(6);
+    statuses.push(400);
+    expect(await recordAudit(input, [1, 1])).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(7);
+    vi.unstubAllGlobals();
   });
 });
 
