@@ -7,9 +7,11 @@
 // The default build is a localnet build with placeholder settings
 // (ui-smoke/env.json). UI_SMOKE_NETWORK=mainnet runs the suite against the
 // mainnet build instead: tests tagged @localnet-only are skipped there, the
-// ones tagged @mainnet-only run only there.
+// ones tagged @mainnet-only run only there. The server is started by
+// ui-smoke/serve.mjs, which refuses a .next/ that is not that placeholder
+// build and runs `next start` with the placeholders only (no shell variable,
+// no .env* file).
 import { defineConfig, devices } from "@playwright/test";
-import env from "./ui-smoke/env.json";
 
 export const UI_SMOKE_PORT = 3310;
 const network = process.env.UI_SMOKE_NETWORK === "mainnet" ? "mainnet" : "localnet";
@@ -38,9 +40,8 @@ export default defineConfig({
   },
   projects: [{ name: `chromium-${network}`, use: { ...devices["Desktop Chrome"] } }],
   webServer: {
-    command: `npx next start -H 127.0.0.1 -p ${UI_SMOKE_PORT}`,
+    command: `node ui-smoke/serve.mjs ${network} ${UI_SMOKE_PORT}`,
     url: `http://127.0.0.1:${UI_SMOKE_PORT}/robots.txt`,
-    env: { ...(env[network] as Record<string, string>) },
     reuseExistingServer: false,
     timeout: 60_000,
     stdout: "ignore",

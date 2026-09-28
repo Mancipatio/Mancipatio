@@ -103,11 +103,13 @@ test("a connected wallet without a role gets Access denied on the admin pages", 
   await expect(page.getByText("This page requires the Admin role.")).toBeVisible();
   await expect(page.getByText("Connected as: Public")).toBeVisible();
   await expect(page.locator(".app-admin-layout")).toHaveCount(0);
+  // A refused page never asks the wallet to sign. The wallet's record lives in
+  // the page, so each page is checked before the next navigation.
+  expect(await signedMessages(page)).toHaveLength(0);
 
   // The KYC pages name their other role.
   await page.goto("/admin/kyc");
   await expect(page.getByText("Access denied")).toBeVisible();
   await expect(page.getByText(/This page requires one of these roles:/)).toBeVisible();
-  // A refused page never asks the wallet to sign.
   expect(await signedMessages(page)).toHaveLength(0);
 });
