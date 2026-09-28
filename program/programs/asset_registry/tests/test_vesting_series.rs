@@ -100,7 +100,7 @@ fn boot_with_operator() -> (LiteSVM, Pubkey, Keypair) {
     let mut svm = LiteSVM::new();
     svm.add_program(
         program_id,
-        include_bytes!("../../../target/deploy/asset_registry.so"),
+        support::assert_sbpf_v3(include_bytes!("../../../target/deploy/asset_registry.so")),
     )
     .unwrap();
     let operator = Keypair::new();

@@ -9,10 +9,13 @@
 # live in the program/ subdirectory of this monorepo, so pass
 # `--mount-path program` to verify-from-repo.
 #
-# Base image is PINNED to the agave release the workspace targets (matches the
-# local `solana-cli 3.1.13` toolchain), by tag and by digest (BASE_IMAGE_DIGEST
-# is checked before and after the builds). Bump both together with the
-# toolchain — a different image produces a different (still valid) hash.
+# Base image is PINNED to the release train the workspace targets, by tag and
+# by digest (BASE_IMAGE_DIGEST is checked before and after the builds): 4.2.2
+# carries cargo-build-sbf 4.2.0 + platform-tools v1.56 (asserted below), the
+# pair program-ci and scripts/build-sbf.sh use for SBPF v3. Bump both together
+# with the toolchain — a different image produces a different (still valid)
+# hash. `solana-verify verify-from-repo` must be given the same
+# `--arch v3 -b <image>`.
 # Every action is pinned to a commit SHA (the comment names its tag): this
 # job holds id-token for the attestations.
 #
@@ -48,15 +51,16 @@ on:
     tags: ["v[0-9]*"]
 
 env:
-  BASE_IMAGE: solanafoundation/solana-verifiable-build:3.1.13
+  BASE_IMAGE: solanafoundation/solana-verifiable-build:4.2.2
   # The image behind BASE_IMAGE, pinned (release-lanac-11). BASE_IMAGE keeps
   # the tag form on purpose: it is recorded in hashes.txt and must equal the
   # --base-image of the on-chain verify (scripts/chain/lib/squads.ts), so the
   # build input is unchanged. The digest check makes a moved tag fail the
-  # build instead of silently changing the bytes. Docker Hub: the tag was
-  # last pushed 2026-05-04, before the first Release, so every artifact so
-  # far was built from this image. Bump both together with the toolchain.
-  BASE_IMAGE_DIGEST: sha256:1a0ea3dd15017e57e9b17d67267e7d2d7ab4f083499f3f29c847ddd54f01db31
+  # build instead of silently changing the bytes. Docker Hub: 4.2.2 is a
+  # single-arch (amd64) image whose only push was 2026-09-21. The rc.1
+  # Release (SBPF v0) was built from 3.1.13 @ sha256:1a0ea3dd…. Bump both
+  # together with the toolchain.
+  BASE_IMAGE_DIGEST: sha256:16053d845922e798ab1852d3fe222faf5a23eeb1db3a13d30b70d6b6e82184ae
 
 defaults:
   run:
@@ -93,11 +97,19 @@ jobs:
             *) echo "::error::$BASE_IMAGE is not $BASE_IMAGE_DIGEST (the tag moved): review the new image before bumping"; exit 1 ;;
           esac
 
+      # The image's own tools build the release: they must be the pinned pair.
+      - name: Base image carries cargo-build-sbf 4.2.0 / platform-tools v1.56
+        run: |
+          version="$(docker run --rm --entrypoint /bin/bash "$BASE_IMAGE" -c 'cargo build-sbf --version')"
+          echo "$version"
+          grep -qx "cargo-build-sbf 4.2.0" <<<"$version"
+          grep -qx "platform-tools v1.56" <<<"$version"
+
       - name: Verifiable build — asset_registry
-        run: solana-verify build --library-name asset_registry -b "$BASE_IMAGE"
+        run: solana-verify build --library-name asset_registry --arch v3 -b "$BASE_IMAGE"
 
       - name: Verifiable build — transfer_hook
-        run: solana-verify build --library-name transfer_hook -b "$BASE_IMAGE"
+        run: solana-verify build --library-name transfer_hook --arch v3 -b "$BASE_IMAGE"
 
       # The builds used whatever the tag names locally: still the pinned image?
       - name: Check the base image digest after the builds
@@ -106,6 +118,15 @@ jobs:
             *"@${BASE_IMAGE_DIGEST} "*) echo "base image is still $BASE_IMAGE_DIGEST" ;;
             *) echo "::error::$BASE_IMAGE changed during the build"; exit 1 ;;
           esac
+
+      # Before any test: the release bytes are SBPF v3 with no dynamic
+      # symbol, every call resolved and one security.txt (design 8.3 §11.3).
+      - name: SBPF v3 ELF + symbol + security.txt gate
+        run: bash scripts/check-sbf-elf.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
+
+      # ... and the gate still rejects patched copies of these exact bytes.
+      - name: ELF gate negative control
+        run: bash scripts/check-sbf-elf-selftest.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
 
       # The Docker build leaves target/ owned by root, so host cargo writes its
       # own build products elsewhere. The tests still include_bytes! the release
@@ -118,11 +139,15 @@ jobs:
           cargo test --workspace --locked --no-fail-fast
           sha256sum --check sbf-sha256.txt
 
+      # `arch: v3`: the on-chain verify (solana-verify verify-from-repo, the
+      # OtterSec PDA) must pass `--arch v3 -b <base image>`; the default v0
+      # does not reproduce these hashes.
       - name: Executable hashes
         run: |
           {
             echo "base image: $BASE_IMAGE"
             echo "base image digest: $BASE_IMAGE_DIGEST"
+            echo "arch: v3"
             echo "commit: $GITHUB_SHA"
             echo -n "asset_registry: "
             solana-verify get-executable-hash target/deploy/asset_registry.so
@@ -167,9 +192,10 @@ jobs:
           workspaces: program
           cache-targets: false
 
+      # The IDL build needs Anchor and the host compiler only (no SBF build).
       - name: Install pinned Anchor / Agave tooling
         working-directory: program
-        run: bash scripts/install-ci-toolchain.sh
+        run: bash scripts/install-ci-toolchain.sh --idl-only
 
       - name: Install frontend dependencies
         run: npm ci
@@ -211,6 +237,7 @@ jobs:
           cp art/target/deploy/*.so art/hashes.txt art/sbf-sha256.txt dist/
           cp front/idl/asset_registry.json front/idl/transfer_hook.json dist/
           grep -qx "commit: $GITHUB_SHA" dist/hashes.txt
+          grep -qx "arch: v3" dist/hashes.txt
           (cd dist && sha256sum -- *.so *.json hashes.txt sbf-sha256.txt > SHA256SUMS)
           cat dist/SHA256SUMS
 

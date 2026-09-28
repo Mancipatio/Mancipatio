@@ -15,6 +15,7 @@ import {
   parseHashesTxt,
   parseSbfSha256Txt,
 } from "@/scripts/ops/artifact-provenance.mjs";
+import { sbpfVersionOf } from "./network-gates";
 import { ChainGateError, IDL_PROGRAMS, sha256Hex, type ProgramName } from "./safety";
 
 export type ReleaseLayout = "flat" | "target-deploy";
@@ -25,6 +26,13 @@ export type Release = {
   idl: Record<ProgramName, Uint8Array> | null;
   commit: string | null;
   baseImage: string | null;
+  /**
+   * The `solana-verify build --arch` of the Release: hashes.txt `arch:`
+   * (v0.0.0-rc.2 on: "v3"), or "v0" when the line is absent (solana-verify's
+   * default; the rc.1 Release). A verify PDA must carry the same `--arch`, or
+   * OtterSec's rebuild does not reproduce the hash.
+   */
+  arch: string;
   verifyHashes: Record<string, string | null>;
   verifyHashMatches: Record<ProgramName, boolean | null>;
   sbfSha256: Record<string, string>;
@@ -103,6 +111,17 @@ export function loadRelease(dir: string, options: { requireSums: boolean }): Rel
   const hashesText = Buffer.from(readRequired(path.join(dir, "hashes.txt"), "hashes.txt")).toString("utf8");
   const hashes = parseHashesTxt(hashesText, [...IDL_PROGRAMS]);
   if (hashes.errors.length) throw new ChainGateError(`The Release hashes.txt is invalid: ${hashes.errors.join("; ")}`);
+  const arch = hashes.arch ?? "v0";
+  // The recorded arch must be the one the .so files were built for (ELF
+  // e_flags), since it becomes the verify PDA's --arch.
+  for (const name of IDL_PROGRAMS) {
+    const info = sbpfVersionOf(name, so[name]);
+    if (info.version !== null && `v${info.version}` !== arch) {
+      throw new ChainGateError(
+        `The Release hashes.txt says arch ${arch}${hashes.arch ? "" : " (no arch line)"}, but ${name}.so is SBPF v${info.version} (e_flags ${info.eFlags})`,
+      );
+    }
+  }
   const sbfText = Buffer.from(readRequired(path.join(dir, "sbf-sha256.txt"), "sbf-sha256.txt")).toString("utf8");
   const sbf = parseSbfSha256Txt(sbfText, [...IDL_PROGRAMS]);
   if (sbf.errors.length) throw new ChainGateError(`The Release sbf-sha256.txt is invalid: ${sbf.errors.join("; ")}`);
@@ -137,6 +156,7 @@ export function loadRelease(dir: string, options: { requireSums: boolean }): Rel
     idl,
     commit: hashes.commit,
     baseImage: hashes.base_image,
+    arch,
     verifyHashes: hashes.verify_hashes,
     verifyHashMatches,
     sbfSha256: sbf.sha256,
@@ -168,6 +188,7 @@ export function releaseEvidence(release: Release | null) {
     layout: release.layout,
     commit: release.commit,
     baseImage: release.baseImage,
+    arch: release.arch,
     verifyHashes: release.verifyHashes,
     verifyHashMatches: release.verifyHashMatches,
     soSha256: Object.fromEntries(IDL_PROGRAMS.map((name) => [name, sha256Hex(release.so[name])])),

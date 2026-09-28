@@ -246,7 +246,7 @@ describe("chain:squads-export ops", () => {
     new DataView(v3.buffer).setUint16(0x12, 263, true);
     new DataView(v3.buffer).setUint32(0x30, 3, true);
     loaderBuffer(w, key(77), w.keys.vault, v3);
-    const ok = await exportOp(w, "upgrade", { buffers: { transferHook: key(77) } }, { CHAIN_RELEASE_DIR: releaseDir({}, { transfer_hook: v3 }) });
+    const ok = await exportOp(w, "upgrade", { buffers: { transferHook: key(77) } }, { CHAIN_RELEASE_DIR: releaseDir({}, { transfer_hook: v3 }, { arch: "v3" }) });
     expect(ok.error ?? null).toBeNull();
     expect((ok.export as Exported).header.preconditions.join("\n")).toMatch(/transfer_hook: Release .so SBPF v3; SIMD-0500 active/);
   });
@@ -491,7 +491,7 @@ describe("chain:squads-export ops", () => {
       },
     });
     // Without --base-image the remote build infers another image: refused.
-    const expected = { libraryName: "asset_registry", commit: "e5c4d1ae1e204803d2752b7f2f8ed92bce379237", baseImage: BASE_IMAGE };
+    const expected = { libraryName: "asset_registry", commit: "e5c4d1ae1e204803d2752b7f2f8ed92bce379237", baseImage: BASE_IMAGE, arch: "v0" };
     if (decoded.kind === "close") throw new Error("unreachable");
     expect(verifyParamProblems(decoded.params, expected)).toEqual([
       "--base-image is missing (the remote build would infer another image from Cargo.lock)",
@@ -508,11 +508,25 @@ describe("chain:squads-export ops", () => {
     expect(() => decodeVerifyInstructionData(data.subarray(0, data.length - 1))).toThrow(/truncated/);
   });
 
-  it("verify build arguments must reproduce the Release: mount path, library, base image, commit", () => {
-    const expected = { libraryName: "transfer_hook", commit: "b".repeat(40), baseImage: BASE_IMAGE };
+  it("verify build arguments must reproduce the Release: mount path, library, base image, arch, commit", () => {
+    const expected = { libraryName: "transfer_hook", commit: "b".repeat(40), baseImage: BASE_IMAGE, arch: "v0" };
     const ok = verifyParams("transfer_hook", { commit: "b".repeat(40) });
     expect(verifyParamProblems(ok, expected)).toEqual([]);
-    expect(verifyParamProblems({ ...ok, args: [...ok.args, "--arch", "v3"] }, expected)).toEqual([]);
+    // A v0 Release (no `arch:` line, the rc.1 shape): no --arch or --arch v0.
+    expect(verifyParamProblems({ ...ok, args: [...ok.args, "--arch", "v0"] }, expected)).toEqual([]);
+    expect(verifyParamProblems({ ...ok, args: [...ok.args, "--arch", "v3"] }, expected)).toEqual([
+      "--arch is v3, not the Release's v0 (the remote build would not reproduce the hash)",
+    ]);
+    // An SBPF v3 Release (hashes.txt `arch: v3`, v0.0.0-rc.2 on): --arch v3 is required.
+    const v3 = { ...expected, arch: "v3" };
+    expect(verifyParamProblems({ ...ok, args: [...ok.args, "--arch", "v3"] }, v3)).toEqual([]);
+    expect(verifyParamProblems({ ...ok, args: ["--arch", "v3", ...ok.args] }, v3)).toEqual([]);
+    expect(verifyParamProblems(ok, v3)).toEqual([
+      "--arch is missing (solana-verify builds v0), not the Release's v3 (the remote build would not reproduce the hash)",
+    ]);
+    expect(verifyParamProblems({ ...ok, args: [...ok.args, "--arch", "v2"] }, v3)).toEqual([
+      "--arch is v2, not the Release's v3 (the remote build would not reproduce the hash)",
+    ]);
     const problems = (args: string[], overrides: Partial<VerifyParams> = {}) => verifyParamProblems({ ...ok, args, ...overrides }, expected);
     expect(problems(["--mount-path", "program", "--library-name", "asset_registry", "--base-image", BASE_IMAGE])).toEqual([
       "--library-name is asset_registry, not transfer_hook",
@@ -531,9 +545,11 @@ describe("chain:squads-export ops", () => {
     ]);
     expect(problems(ok.args, { commit: "c".repeat(40) })).toEqual([`commit ${"c".repeat(40)} is not the Release commit ${"b".repeat(40)}`]);
     expect(problems(ok.args, { commit: "HEAD" })).toEqual(['commit "HEAD" is not a full 40-hex commit']);
-    // Without a Release, the base image must still be pinned.
-    expect(verifyParamProblems(ok, { libraryName: "transfer_hook", commit: null, baseImage: null })).toEqual([]);
-    expect(verifyParamProblems({ ...ok, args: ok.args.slice(0, 4) }, { libraryName: "transfer_hook", commit: null, baseImage: null })).toEqual([
+    // Without a Release, the base image must still be pinned; any v0..v3 arch passes.
+    const noRelease = { libraryName: "transfer_hook", commit: null, baseImage: null, arch: null };
+    expect(verifyParamProblems(ok, noRelease)).toEqual([]);
+    expect(verifyParamProblems({ ...ok, args: [...ok.args, "--arch", "v3"] }, noRelease)).toEqual([]);
+    expect(verifyParamProblems({ ...ok, args: ok.args.slice(0, 4) }, noRelease)).toEqual([
       "--base-image is missing (the remote build would infer another image from Cargo.lock)",
     ]);
   });
@@ -581,7 +597,18 @@ describe("chain:squads-export ops", () => {
     const ok = await wrap(verifyIx(verifyParams("transfer_hook")));
     expect(ok.error ?? null).toBeNull();
     expect((ok.export as Exported).header.preconditions.join("\n")).toContain(
-      `transfer_hook verify initialize: https://github.com/Mancipatio/Mancipatio at ${"a".repeat(40)}, build args [--mount-path program --library-name transfer_hook --base-image ${BASE_IMAGE}], deployed_slot 4000, solana-verify 0.5.1 (commit and base image = the Release's hashes.txt)`,
+      `transfer_hook verify initialize: https://github.com/Mancipatio/Mancipatio at ${"a".repeat(40)}, build args [--mount-path program --library-name transfer_hook --base-image ${BASE_IMAGE}], deployed_slot 4000, solana-verify 0.5.1 (commit, base image and --arch v0 = the Release's hashes.txt)`,
+    );
+    // An SBPF v3 Release (`arch: v3`): the export-pda-tx args must carry --arch v3.
+    const releaseV3 = releaseDir({}, {}, { arch: "v3" });
+    const wrapV3 = (ix: Instruction) => exportOp(w, "wrap-external", { transactionBase58: external(ix) }, { CHAIN_RELEASE_DIR: releaseV3 });
+    const noArch = await wrapV3(verifyIx(verifyParams("transfer_hook")));
+    expect(noArch.status).toBe("failed");
+    expect(noArch.error).toMatch(/transfer_hook verify initialize: --arch is missing \(solana-verify builds v0\), not the Release's v3/);
+    const withArch = await wrapV3(verifyIx(verifyParams("transfer_hook", { args: [...verifyParams("transfer_hook").args, "--arch", "v3"] })));
+    expect(withArch.error ?? null).toBeNull();
+    expect((withArch.export as Exported).header.preconditions.join("\n")).toContain(
+      `build args [--mount-path program --library-name transfer_hook --base-image ${BASE_IMAGE} --arch v3], deployed_slot 4000, solana-verify 0.5.1 (commit, base image and --arch v3 = the Release's hashes.txt)`,
     );
     const noRelease = await wrap(verifyIx(verifyParams("transfer_hook")), false);
     expect((noRelease.export as Exported).header.preconditions.join("\n")).toContain("(not checked against a Release: no CHAIN_RELEASE_DIR)");

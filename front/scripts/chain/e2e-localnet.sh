@@ -77,6 +77,20 @@ case "${1:-}" in
     fi
     (cd "$RELEASE" && printf '%s\n' "$sums" | shasum -a 256 -c -) >/dev/null \
       || { echo "the Release .so files do not match SHA256SUMS"; exit 1; }
+    # SBPF v3 Releases (v0.0.0-rc.2 on, e_flags 3; design 8.3 §11.5): an
+    # Agave 3.x validator cannot load the final v3 ELF, so require >= 4.0.
+    for so in asset_registry transfer_hook; do
+      if [ "$(od -An -t u4 -j 48 -N 4 "$RELEASE/$so.so" | tr -d ' ')" = 3 ]; then
+        version="$(solana-test-validator --version)"
+        major="$(printf '%s\n' "$version" | sed -nE 's/^solana-test-validator ([0-9]+)\..*/\1/p')"
+        if [ -z "$major" ] || [ "$major" -lt 4 ]; then
+          echo "$so.so is SBPF v3: needs solana-test-validator >= 4.0, found: $version"
+          echo "setup: agave-install init 4.2.2 (or sh -c \"\$(curl -sSfL https://release.anza.xyz/v4.2.2/install)\")"
+          exit 1
+        fi
+        break
+      fi
+    done
     mkdir -p "$SCRATCH" "$E2E_DIR/keys"
     chmod 700 "$SCRATCH" "$E2E_DIR/keys"
     assert_ignored

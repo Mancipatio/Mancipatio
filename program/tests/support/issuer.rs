@@ -120,12 +120,12 @@ impl World {
         let mut svm = LiteSVM::new();
         svm.add_program(
             asset_registry::ID,
-            include_bytes!("../../target/deploy/asset_registry.so"),
+            super::support::assert_sbpf_v3(include_bytes!("../../target/deploy/asset_registry.so")),
         )
         .unwrap();
         svm.add_program(
             transfer_hook::id(),
-            include_bytes!("../../target/deploy/transfer_hook.so"),
+            super::support::assert_sbpf_v3(include_bytes!("../../target/deploy/transfer_hook.so")),
         )
         .unwrap();
         let fees = Keypair::new();

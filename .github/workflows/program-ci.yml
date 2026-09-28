@@ -36,14 +36,15 @@ jobs:
   # yanked crates) against the Cargo.lock the verifiable build uses. Warnings
   # (unmaintained, unsound) are printed, not fatal; a vulnerability fails.
   # cargo-audit itself is installed at a pinned version with its own lockfile.
-  # Baseline 2026-09-28 (cargo-audit 0.22.2, 1271 advisories, 399 crates):
-  # 0 vulnerabilities, so no --ignore; 7 warnings, all transitive through the
-  # Solana/Anchor/LiteSVM stack: unmaintained ansi_term (RUSTSEC-2021-0139,
-  # litesvm), bincode 1.3 (RUSTSEC-2025-0141), derivative (RUSTSEC-2024-0388)
-  # and paste (RUSTSEC-2024-0436) via solana-bn254/poseidon, libsecp256k1 0.6
-  # (RUSTSEC-2025-0161, agave-syscalls); unsound anyhow Error::downcast_mut
-  # (RUSTSEC-2026-0190, anchor build-time crates) and rand 0.7 with a custom
-  # logger (RUSTSEC-2026-0097). An ignore added later names its advisory and
+  # Baseline 2026-09-28 after LiteSVM 0.15.2 (cargo-audit 0.22.2, 1271
+  # advisories, 414 crates): 0 vulnerabilities, so no --ignore; 6 warnings,
+  # all transitive through the Solana/Anchor/LiteSVM stack: unmaintained
+  # ansi_term (RUSTSEC-2021-0139, litesvm), bincode 1.3 (RUSTSEC-2025-0141),
+  # derivative (RUSTSEC-2024-0388) and paste (RUSTSEC-2024-0436) via
+  # solana-bn254/poseidon, libsecp256k1 0.7 (RUSTSEC-2025-0161,
+  # solana-syscalls 4.1 under litesvm); unsound anyhow Error::downcast_mut (RUSTSEC-2026-0190,
+  # anchor build-time crates). (LiteSVM 0.10 also pulled rand 0.7,
+  # RUSTSEC-2026-0097: gone.) An ignore added later names its advisory and
   # why here, never a blanket flag.
   audit:
     name: cargo audit (RustSec)
@@ -80,17 +81,64 @@ jobs:
           # Reuse downloaded Cargo dependencies, never a prior deploy artifact.
           cache-targets: false
 
-      - name: Install pinned Anchor / Agave tooling
+      # cargo-build-sbf 4.x has no release binaries: install-ci-toolchain.sh
+      # builds it from crates.io (--locked) into this directory, so cache it
+      # by version. Only the tool is cached, never a program artifact.
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/mancipatio-solana-toolchain/cbs
+          key: cargo-build-sbf-4.2.0-rust-1.95.0-${{ runner.os }}-${{ runner.arch }}
+
+      - name: Install pinned Anchor / Agave / cargo-build-sbf tooling
         run: bash scripts/install-ci-toolchain.sh
 
       - name: Format check
         run: cargo fmt --all --check
 
-      - name: Build both SBF programs from this checkout
-        run: cargo build-sbf --workspace --tools-version v1.52 -- --locked
+      # SBPF v3 (design 8.3 §11.2): platform-tools v1.56 only — never
+      # `--arch v3` with v1.52/v1.53. cargo-build-sbf 4.2.0 links v3 with
+      # `-z defs`, so an unresolved symbol already fails here; the ELF gate
+      # below proves it independently on the artifact.
+      # The version check is repeated HERE because this step resolves
+      # `cargo build-sbf` through the PATH the runner rebuilt from
+      # GITHUB_PATH, not through the PATH the install script exported for
+      # its own asserts; the Agave 4.2.2 tarball bundles cargo-build-sbf
+      # 4.1.0 / platform-tools v1.54, which would also emit a v3 ELF.
+      - name: Build both SBF programs (SBPF v3)
+        shell: bash
+        run: |
+          set -o pipefail
+          cbs_version="$(cargo build-sbf --version)"
+          echo "$cbs_version ($(command -v cargo-build-sbf))"
+          if ! grep -qx "cargo-build-sbf 4.2.0" <<<"$cbs_version" ||
+            ! grep -qx "platform-tools v1.56" <<<"$cbs_version"; then
+            echo "::error::the build would use $(command -v cargo-build-sbf), not cargo-build-sbf 4.2.0 / platform-tools v1.56"
+            exit 1
+          fi
+          mkdir -p target
+          cargo build-sbf --workspace --arch v3 --tools-version v1.56 -- --locked 2>&1 | tee target/build-sbf.log
+
+      - name: No stack-frame overflow
+        run: |
+          test -s target/build-sbf.log
+          if grep -E "Stack offset of [0-9]+ exceeded|exceeded max offset" target/build-sbf.log; then
+            echo "::error::a function exceeds the SBF stack frame: Box the offending accounts"
+            exit 1
+          fi
+
+      - name: SBPF v3 ELF + symbol + security.txt gate
+        run: bash scripts/check-sbf-elf.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
+
+      # The gate replaces cargo-build-sbf's skipped check_undefined_symbols:
+      # it must PASS the real artifacts and FAIL patched copies of them (v0
+      # e_flags, an unknown syscall hash, a call outside .text, 0 or 2
+      # security.txt markers), or a parser bug could wave everything through.
+      - name: ELF gate negative control
+        run: bash scripts/check-sbf-elf-selftest.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
 
       # ProgramData capacity of the deployed asset_registry: an upgrade larger
-      # than this needs `solana program extend` first. Devnet capacity is
+      # than this needs `solana program extend` first. SBPF v3 shrank the
+      # rc.1 logic from 2,469,512 B (v0) to 2,044,248 B. Devnet capacity is
       # 2,537,208 B: 2,471,672 (2C-2) + the 65,536 B extend of the 2C-4
       # rollout. Evidence, `solana program show FJs1EM1N… -u devnet` at
       # 2026-09-23T22:09Z (slot 503104632), saved as
@@ -113,8 +161,8 @@ jobs:
           fi
 
       # ProgramData capacity of the deployed transfer_hook (devnet `solana
-      # program show` before 2A: 392,712 B; no hook extend since). 2C-4 is the
-      # first hook upgrade since 2C-1 — keep it inside, or extend first.
+      # program show` before 2A: 392,712 B; no hook extend since). SBPF v3
+      # shrank the rc.1 hook from 390,152 B (v0) to 338,560 B.
       - name: transfer_hook size budget
         env:
           TRANSFER_HOOK_CAPACITY: "392712"
@@ -153,6 +201,7 @@ jobs:
             solana --version
             cargo build-sbf --version
             anchor --version
+            bash scripts/check-sbf-elf.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
             sha256sum target/deploy/asset_registry.so target/deploy/transfer_hook.so target/idl/asset_registry.json target/idl/transfer_hook.json
             wc -c target/deploy/asset_registry.so target/deploy/transfer_hook.so
           } > target/tested-artifacts.txt

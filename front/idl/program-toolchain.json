@@ -1,6 +1,8 @@
 {
   "anchorVersion": "1.0.0",
   "rustVersion": "1.89.0",
-  "agaveVersion": "3.1.13",
-  "platformToolsVersion": "v1.52"
+  "agaveVersion": "4.2.2",
+  "platformToolsVersion": "v1.56",
+  "cargoBuildSbfVersion": "4.2.0",
+  "sbpfArch": "v3"
 }
