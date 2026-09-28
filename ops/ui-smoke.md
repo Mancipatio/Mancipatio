@@ -3,11 +3,12 @@
 A browser smoke of the front (ops-qa-5, plan 6.5): a **production build**
 (`next build` + `next start` on `127.0.0.1:3310`) opened in Chromium, with
 the chain, the database and the wallet replaced by deterministic stand-ins.
-Nothing leaves the machine: a request to any host but the server under test
-is refused and fails the test. Code: `front/ui-smoke/`, config:
-`front/playwright.config.ts`. CI: `.github/workflows/front-ci.yml`, jobs
-`ui-smoke` (localnet build) and `build-mainnet` (the same suite over the
-mainnet build).
+The browser reaches nothing but the server under test: any other request,
+HTTP(S) or WebSocket, is refused and fails the test; the server itself holds
+placeholder settings only (no real credential, no `.env*` file). Code:
+`front/ui-smoke/`, config: `front/playwright.config.ts`. CI:
+`.github/workflows/front-ci.yml`, jobs `ui-smoke` (localnet build) and
+`build-mainnet` (the same suite over the mainnet build).
 
 ## What it checks
 
@@ -16,7 +17,8 @@ mainnet build).
 | `pages.spec.ts` | Every page of the app router (`front/app/**/page.tsx`, read from disk) without a wallet: HTTP 200, a visible navigation and heading (or the wallet gate, or a pilot "not available" notice), no error boundary, no uncaught error, no console error. Every `/admin` page shows the wallet gate and none of the console. On the mainnet build no page says "devnet" (one allowed mention: the disclosure policy on `/security`). |
 | `wallet.spec.ts` | With the mock wallet: a super admin opens `/admin` and signs exactly one SIWS `auth.session` message for this origin and network (verified against the test key); the admin menu counts then ride on the session. A wallet without a role gets "Access denied" on admin-only and KYC pages and is never asked to sign. |
 | `sale.spec.ts` | One Mature sale on the mock chain: the `PAUSE_PRIMARY` bit shows the pause message before a buy, an `IssuerFreeze` record shows the proceeds-freeze notice, neither shows otherwise. Geoblock (localnet only): a listed country gets `/not-available` in place of the sale, another country the sale, and `/api/launchpad/commit` answers 451 `GEOBLOCKED`. |
-| `bundle.spec.ts` | The build carries none of the smoke's code (mock wallet, test key). |
+| `bundle.spec.ts` | The build carries none of the smoke's code (mock wallet, test key): the whole `.next/` but its cache, server chunks included. |
+| `guard.spec.ts` | The guard itself: a fetch and a WebSocket to another host are refused and reported. |
 
 Not covered: sending transactions (the mock wallet only signs messages), the
 real server routes that need the database (`/api/auth/session` and the reads
@@ -30,7 +32,7 @@ From `front/`, port 3310 free:
 npm ci
 npx playwright install chromium          # once per Playwright version
 npm run ui-smoke:build                   # localnet build, placeholder settings
-npm run ui-smoke                         # starts next start on :3310 itself
+npm run ui-smoke                         # starts next start on :3310 itself (ui-smoke/serve.mjs)
 ```
 
 The mainnet variant (the build carries CI fixture legal text, so delete it
@@ -56,9 +58,23 @@ One spec or test: `npm run ui-smoke -- ui-smoke/sale.spec.ts`,
   build can point at a host that does not exist. The browser RPC, PubSub and
   Supabase hosts are reserved `.invalid` names; the server RPC is
   `127.0.0.1:18400`, where nothing listens; the server has no Supabase
-  service key. `npm run ui-smoke:build` drops the shell's `NEXT_PUBLIC_*`,
-  Supabase, RPC and session variables; the placeholders are process
-  environment, which wins over any `.env*` file Next would read.
+  service key.
+- **Environment**: the placeholders are the app's whole environment, locally
+  as in CI. `ui-smoke/build.mjs` (`next build`) and `ui-smoke/serve.mjs`
+  (`next start`, the Playwright web server) pass on from the shell only what
+  node needs (`PATH`, `HOME`, temp and locale variables, `CI`,
+  `NODE_OPTIONS`), and set `__NEXT_PROCESSED_ENV`, which keeps Next from
+  reading any `.env*` file: a placeholder in the process environment only
+  wins over the keys it names, and Next would fill every other key from
+  `front/.env.local` (feature flags, the Turnstile site key, the Supabase
+  service key, the Sentry DSN, ...). Both first run Next's own env loader
+  with that environment and refuse to start if it would still load a
+  variable from a `.env*` file (`ui-smoke/hermetic-env.mjs`).
+  `scripts/ci/mainnet-build.sh` sets `__NEXT_PROCESSED_ENV` too.
+- **Build under test**: `serve.mjs` refuses a `.next/` that is not the
+  placeholder build of the network under test (its client chunks must name
+  the browser RPC endpoint of `env.json`), so a regular build made from
+  `.env.local` is never served to the smoke.
 - **Chain**: `support/mock-chain.ts` answers JSON-RPC from in-memory
   accounts that `support/chain-fixtures.ts` encodes with the generated SDK
   (the program's own layouts). An RPC method it does not know fails the test.
@@ -69,7 +85,12 @@ One spec or test: `npm run ui-smoke -- ui-smoke/sale.spec.ts`,
   "Failed to load resource" line for it expected.
 - **Wallet**: `support/mock-wallet.ts` registers a Wallet Standard wallet
   before the app loads and signs in the browser (WebCrypto Ed25519) with a
-  test keypair derived from a fixed label. It lives in `ui-smoke/` only.
+  test keypair derived from a fixed label. It lives in `ui-smoke/` only;
+  ESLint refuses an import of `ui-smoke/` from `app/`, `components/` or
+  `lib/`.
+- **Other hosts**: the guard (`support/test.ts`) refuses every request the
+  mocks do not answer that is not for the server under test, HTTP(S) and
+  WebSocket alike, and fails the test with its URL.
 - **Third parties**: Cloudflare Turnstile (mainnet placeholders carry a site
   key) gets a stub script that renders nothing.
 

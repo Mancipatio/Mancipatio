@@ -49,6 +49,10 @@ set -euo pipefail
 
 [ -f next.config.ts ] || { echo "Run from front/" >&2; exit 2; }
 export NEXT_TELEMETRY_DISABLED=1
+# Next's env loader reads no .env* file with this set: a local run (the UI
+# smoke's mainnet build, ops/ui-smoke.md) sees only the placeholders below,
+# as CI does, and none of a developer's front/.env.local.
+export __NEXT_PROCESSED_ENV=true
 
 EDITED=(next.config.ts lib/legal/operator.ts lib/legal/mainnet-copy.ts lib/legal/risk-warning.ts)
 # The fixture's marker (HEADER in legal-fixture.cjs) and the placeholder

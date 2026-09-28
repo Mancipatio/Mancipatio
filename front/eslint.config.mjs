@@ -20,6 +20,18 @@ const eslintConfig = defineConfig([
     "ui-smoke/.results/**",
     "ui-smoke/.report/**",
   ]),
+  // The UI smoke's mock wallet, test key and fixtures stay out of the app:
+  // nothing the build compiles may import ui-smoke/ (ui-smoke/bundle.spec.ts
+  // checks the build output as well).
+  {
+    files: ["app/**", "components/**", "lib/**", "proxy.ts", "instrumentation.ts", "next.config.ts"],
+    rules: {
+      "no-restricted-imports": [
+        "error",
+        { patterns: [{ regex: "(^|/)ui-smoke(/|$)", message: "ui-smoke/ is test code: the app must not import it." }] },
+      ],
+    },
+  },
 ]);
 
 export default eslintConfig;

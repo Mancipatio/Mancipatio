@@ -172,8 +172,11 @@ jobs:
           path: |
             front/ui-smoke/.report
             front/ui-smoke/.results
+          # Both directories start with a dot: upload-artifact >= 4.4 leaves
+          # hidden files and directories out unless told otherwise.
+          include-hidden-files: true
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   # ops-qa-5 (plan 6.5): the Playwright UI smoke (front/ui-smoke/,
   # ops/ui-smoke.md) over a production build with placeholder settings: a
@@ -232,8 +235,11 @@ jobs:
           path: |
             front/ui-smoke/.report
             front/ui-smoke/.results
+          # Both directories start with a dot: upload-artifact >= 4.4 leaves
+          # hidden files and directories out unless told otherwise.
+          include-hidden-files: true
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn
 
   # front-app-16 / ops-qa-14: no HIGH (or critical) advisory in the production
   # dependency tree, nor in the chain:emergency Ledger packages. Dev-only

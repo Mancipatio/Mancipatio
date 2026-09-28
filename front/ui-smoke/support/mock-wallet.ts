@@ -118,7 +118,8 @@ export async function installMockWallet(page: Page, wallet: TestWallet) {
   } satisfies InstallArgs);
 }
 
-/** The messages the browser wallet signed so far, in order. */
+/** The messages the browser wallet signed so far, in order, on the current
+ *  document: the record lives in the page, so a navigation starts a new one. */
 export async function signedMessages(page: Page): Promise<{ message: Uint8Array; signature: Uint8Array }[]> {
   const raw = await page.evaluate(
     () => (window as unknown as { __uiSmokeWallet?: { signed: { message: number[]; signature: number[] }[] } }).__uiSmokeWallet?.signed ?? [],
