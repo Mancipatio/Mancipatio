@@ -2265,6 +2265,113 @@ MANCI_ALLOW_MAINNET=1`) after `HELIUS_MAINNET_RPC` and the webhook are
 configured, with step 5 against the mainnet endpoint and at least 24 hours
 of `observe`.
 
+### 6.4 drill: redelivery, lost delivery, full reconcile (devnet)
+
+What it proves on the live stack (gap 2026-09-28 podaci-infra-9,
+ops-qa-12): a redelivered transaction changes nothing, a lost one comes back
+through the gap scan and alarms, the heartbeat stops advertising the mirror
+while it is missing, and how long a full reconcile takes. The same four
+cases, plus snapshots applied out of order, run offline in CI on the
+migration chain (`tests/indexer-resilience.postgres.test.ts`); the
+reconcile's cost per account comes from `npm run ops:reconcile-bench`
+(below). Evidence goes to `docs/mainnet-readiness/drill-6.4/`.
+
+Preconditions: the devnet heartbeat in `on` (status script above), the
+retry and alarm schedulers active (`retry-scheduler-status.sql`,
+`alarm-scheduler-status.sql`), no pending `indexer_jobs`, and the Helius
+devnet webhook enhanced, type ANY, with the 4 addresses (§15). Run from
+`front/`. Every check below is read-only:
+
+```
+MANCI_TARGET=devnet bash scripts/db.sh -v sig=<signature> -f scripts/ops/indexer-drill-status.sql
+```
+
+It prints `events|jobs|alarm_jobs|alerts` for that transaction, then one
+row each for the event (`delivery`: `webhook` or `gap-scan`), the indexer
+job, the alarm job, the sync state, the heartbeat, the last gap scan and
+the indexer incidents.
+
+**D1. Redelivery.** Make one devnet transaction that invokes asset_registry
+(a KYB step on `/admin/issuers` is enough); call its signature S1. Within
+about a minute the status shows `1|1|1|n`, `delivery` `webhook`, the
+indexer job `complete` with `attempts` 1. Deliver S1 again: in the Helius
+dashboard (Webhooks → the devnet webhook → logs) resend that delivery, or
+replay its logged request body (a JSON array, saved as `d1-s1.json`)
+yourself, reading the webhook's authentication header without echoing it:
+
+```
+REF=$(node scripts/ops/target.mjs devnet | cut -d'|' -f2)
+printf 'Helius auth header: '; IFS= read -rs HELIUS_AUTH; echo
+for i in 1 2; do curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  "https://$REF.supabase.co/functions/v1/helius-webhook" \
+  -H "Authorization: $HELIUS_AUTH" -H 'Content-Type: application/json' --data @d1-s1.json; done
+unset HELIUS_AUTH
+```
+
+Expected: `202` each time; the status still `1|1|1|n` with the same `n`,
+the job still `complete` with `attempts` 1 (nothing reopened, the mirror not
+written again), `sync` `ready`. Anything else is a failed drill.
+
+**D2. Lost delivery.** Break the webhook's delivery: Helius dashboard →
+edit the devnet webhook → Authentication Header: append `-drill` → re-select
+transaction type ANY (the edit form shows it empty) → save. Do not
+screenshot that form (it shows the header in clear). Note the time T0 and
+make one devnet transaction as in D1 (S2). Expected, by the clock:
+
+- T0 + 2–4 min: `heartbeat` `last_reason` `UNINDEXED_SIGNATURE`,
+  `last_expired_at` set, `sync` `checked_age_seconds` over 300 (the site
+  reads the chain; the Issuers / Assets / Launchpad / Governance badges go
+  muted). The status for S2 is `0|0|0|0`.
+- T0 + 5–10 min (the first gap scan whose window, 20 to 5 minutes back,
+  holds S2): `1|1|1|n` with `delivery` `gap-scan` and the alarm job's
+  `source` `gap-scan`; incident `indexer-gap` open (`last_fail_at` set) and
+  an `indexer:gap` alert (high, emailed: "1 finalized program
+  transaction(s) were missing from the index (1 re-queued)").
+- One or two minutes later: the indexer job `complete`, the heartbeat
+  `bumped` again, `sync` fresh.
+- About 15–20 min after the repair: `indexer-gap` `cleared_at` set (three
+  passing scans and 5 minutes).
+
+At T0 + 25 min restore the header (edit → the original value → ANY →
+save). In the Helius logs, record every attempt of S2's delivery (count,
+times, status codes): that is Helius's retry window (G9, §14). A retry that
+arrives after the restore answers `202` and leaves S2 at `1|1|1|n` (D1
+again). Resolve the drill's `indexer:gap` alert in `/admin/compliance` as
+planned.
+
+**D3. Full reconcile, timed.** The operator runner (read-only on the chain:
+it allows only `getGenesisHash` and `getProgramAccounts`; it writes the
+devnet mirror like `/admin/health` → Reconcile) with the devnet keys of
+`.env.local`:
+
+```
+MANCIPATIO_RECONCILE=devnet \
+MANCIPATIO_RECONCILE_PROJECT=$(node scripts/ops/target.mjs devnet | cut -d'|' -f2) \
+MANCIPATIO_RECONCILE_OUTPUT=../docs/mainnet-readiness/drill-6.4/reconcile-devnet.json \
+  npx vitest run --config scripts/ops/reconcile-index.config.ts
+```
+
+Expected: the summary's `readiness` `ready` at `context_slot`, `legacy`
+`[]`, and after D1–D2 every table with `missing` 0, `rebuilt` 0 and
+`deleted` 0 (the jobs and the gap scan already caught up; a non-zero value
+is an account those paths missed: investigate before mainnet).
+`elapsed_ms` is the duration: with today's ~40 devnet accounts, a few
+seconds. The offline benchmark (`RUN_LOCAL_POSTGRES_TESTS=1
+POSTGRES_BIN=<PostgreSQL 17 bin/> npm run ops:reconcile-bench`, 28.9.:
+about 0.52 ms per program account plus about 4.5 s fixed, with a 20 ms
+database round trip, 1 s per provider scan and 20 MB/s) puts the 45 s
+route budget at about 78 000 program accounts, and the single registry
+scan under 2 s at 50 000 (the per-call bound is 12 s). Rule: on mainnet,
+once `elapsed_ms` passes 20 s or the summed `onchain` counts pass 30 000,
+plan the reconcile's split into resumable per-table runs before the next
+growth step; decoding and the snapshot writes dominate, so splitting only
+the scan would not help.
+
+Mainnet (after the webhook exists, before §2): D1 and D3 only, with
+`MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1`, `MANCIPATIO_RECONCILE=mainnet`
+and `MANCIPATIO_RECONCILE_ENV_FILE` (no `.env.local` default); D2 is a
+devnet drill.
+
 ### Rollback
 
 `mode = 'observe'` stops the bumps and expiries at once; `mode = 'off'` also

@@ -20,6 +20,8 @@
 //      slot leaves the job pending, and the retry completes it.
 //
 // Nothing here reaches a network: the RPC and the database are local.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { getBase58Decoder } from "@solana/kit";
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -75,6 +77,9 @@ const mirrored = (table: string, pda: string) =>
   sql(`select coalesce((select to_jsonb(t) - 'raw' - 'updated_at' - 'created_at' from public.${table} t where network = 'devnet' and pda = '${pda}')::text, '')`);
 const deposited = (pda = fixture("offers").pda) => sql(`select deposited || '@' || last_slot from public.offers where network = 'devnet' and pda = '${pda}'`);
 const count = (table: string, where = "true") => Number(sql(`select count(*) from public.${table} where ${where}`));
+/** The operator's read-only drill query (scripts/ops/indexer-drill-status.sql), as db.sh runs it. */
+const drill = (signature: string) =>
+  db.query(readFileSync(join(process.cwd(), "scripts/ops/indexer-drill-status.sql"), "utf8"), { sig: signature }).split("\n");
 
 /** A Helius enhanced-webhook event touching `accounts` (the receiver keeps only public keys). */
 const heliusEvent = (signature: string, slot: number, accounts: string[]) => ({
@@ -166,6 +171,10 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
     expect(h.chain.calls.filter((c) => c.method === "getMultipleAccounts")).toHaveLength(snapshots);
     expect(deposited(P)).toBe("8@1000");
     expect(count("onchain_event_jobs")).toBe(1);
+    // What the operator sees for it (runbook §16 "6.4 drill"): one of each, a webhook delivery.
+    expect(drill(S1).slice(0, 4)).toEqual(["1|1|1|0", expect.stringMatching(/^event\|UNKNOWN\|webhook\|990\|t\|/),
+      expect.stringMatching(/^indexer_job\|complete\|1\|f\|/), expect.stringMatching(/^alarm_job\|webhook\|pending\|0\|/)]);
+    expect(db.query(readFileSync(join(process.cwd(), "scripts/ops/indexer-drill-status.sql"), "utf8"))).toMatch(/^Usage: /);
 
     // A batch mixing the old transaction with a new one adds only the new one.
     const S2 = sig(2);
@@ -214,6 +223,9 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("6.4 indexer resil
     h.chain.slot = 1_400;
     expect(await runIndexerHeartbeat(deadline())).toEqual({ status: "bumped" });
     expect(sql("select last_outcome || ':' || coalesce(last_reason, '-') from public.indexer_heartbeat_state")).toBe("bumped:-");
+    expect(drill(S3).slice(0, 3)).toEqual(["1|1|1|0", expect.stringMatching(/^event\|GAP_SCAN\|gap-scan\|1100\|t\|/),
+      expect.stringMatching(/^indexer_job\|complete\|1\|f\|/)]);
+    expect(drill(S3)).toContainEqual(expect.stringMatching(/^heartbeat\|on\|bumped\|\|/));
     expect(sql(`select checked_at > '${checkedBefore}'::timestamptz from public.indexer_sync_state where network = 'devnet'`)).toBe("t");
   });
 
