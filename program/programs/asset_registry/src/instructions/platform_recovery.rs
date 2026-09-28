@@ -15,11 +15,16 @@
 //!   authority. Installs the key exactly as `accept_platform_admin` does and
 //!   retires a pending super-admin rotation.
 //!
+//! While it is pending, `accept_platform_admin` refuses
+//! (`PlatformRecoveryPending`): the super admin cannot rotate away from it.
+//!
 //! Threat model: this protects a LOST key. A COMPROMISED super admin can
 //! cancel it; the answer to that is the `incident` build (never a release
 //! artifact): the same code with a zero delay, where only the proposer may
-//! cancel. The upgrade authority can replace the program anyway, so neither
-//! adds trust.
+//! cancel, and where the refused accept keeps the compromised key from
+//! rotating to a second key of its own between the propose and the execute.
+//! The upgrade authority can replace the program anyway, so neither adds
+//! trust.
 
 use anchor_lang::prelude::*;
 

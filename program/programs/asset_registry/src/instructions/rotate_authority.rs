@@ -4,8 +4,12 @@
 //! * Platform (D3): the super admin proposes; the proposed key accepts inside
 //!   `[proposed_at + 48 h, eta + 14 d)` (the 48 h are waived while the one-way
 //!   bootstrap window is open); the super admin, any live Admin or the
-//!   program upgrade authority may cancel. Accepting retires a pending
-//!   `PlatformRecovery`, so an A -> B -> A round trip cannot revive it.
+//!   program upgrade authority may cancel. The accept is REFUSED while a
+//!   `PlatformRecovery` is pending against the current super admin
+//!   (`PlatformRecoveryPending`): a COMPROMISED super admin, which cannot
+//!   cancel a recovery in the `incident` build, must not be able to defeat
+//!   it by rotating to a second key of its own (propose + accept in one
+//!   transaction while bootstrap is open, or a matured pre-staged proposal).
 //! * Custody vault: the super admin proposes a key that holds an Admin
 //!   record; it accepts within 14 days; the super admin, or the current vault
 //!   authority while it still holds a live Admin record, may cancel (an
@@ -24,8 +28,8 @@ use crate::{
         VaultState,
     },
     util::{
-        effective_eta, ensure, install_platform_admin, is_active_admin, is_veto_holder,
-        require_window, retire_pending_proposal,
+        effective_eta, ensure, install_platform_admin, is_active_admin, is_live_pending,
+        is_veto_holder, require_window,
     },
 };
 use anchor_lang::prelude::*;
@@ -140,10 +144,12 @@ pub struct AcceptPlatformAdmin<'info> {
         seeds = [ADMIN_SEED, new_admin.key().as_ref()], bump)]
     pub new_admin_record: Account<'info, Admin>,
     pub system_program: Program<'info, System>,
-    /// A pending upgrade-authority recovery, retired here when present (it
-    /// may not exist), so an A -> B -> A round trip cannot revive it.
-    /// CHECK: address pinned by seeds; `util::retire_pending_proposal` checks the rest.
-    #[account(mut, seeds = [PLATFORM_RECOVERY_SEED, platform.key().as_ref()], bump)]
+    /// A pending upgrade-authority recovery (it may not exist); a live one
+    /// refuses the accept. A recovery is always against the live super admin
+    /// (it moves only by this accept, which it blocks, or by the execute,
+    /// which closes it), so an A -> B -> A round trip cannot revive one.
+    /// CHECK: address pinned by seeds; `util::is_live_pending` checks the rest.
+    #[account(seeds = [PLATFORM_RECOVERY_SEED, platform.key().as_ref()], bump)]
     pub recovery: UncheckedAccount<'info>,
 }
 
@@ -156,14 +162,15 @@ pub fn handle_accept_platform_admin(ctx: Context<AcceptPlatformAdmin>) -> Result
         effective_eta(&ctx.accounts.platform, transfer.proposed_at, transfer.eta),
         transfer.expires_at,
     )?;
-    let platform_key = ctx.accounts.platform.key();
-    if retire_pending_proposal(
-        &ctx.accounts.recovery.to_account_info(),
-        &platform_key,
-        PlatformRecovery::DISCRIMINATOR,
-    )? {
-        msg!("Pending super-admin recovery retired");
-    }
+    ensure(
+        !is_live_pending(
+            &ctx.accounts.recovery.to_account_info(),
+            &ctx.accounts.platform.key(),
+            PlatformRecovery::DISCRIMINATOR,
+            &ctx.accounts.platform.admin,
+        )?,
+        RegistryError::PlatformRecoveryPending,
+    )?;
     let new_admin = ctx.accounts.new_admin.key();
     let old_admin = install_platform_admin(
         &mut ctx.accounts.platform,

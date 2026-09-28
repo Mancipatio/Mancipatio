@@ -1187,6 +1187,61 @@ fn clawback_of_an_expired_holder_waits_thirty_days_after_the_expiry() {
     assert_eq!(token_balance(&svm, &escrow_pda), 10);
 }
 
+/// Review 8.3 findings 4/11: a LEGACY entry (rc.x `approve_holder` had no
+/// 2-year cap) with an expiry near `i64::MAX` stays clawable once Revoked:
+/// the Revoked status short-circuits and the grace end saturates, so neither
+/// path fails with `Overflow`. Approved, it is simply still eligible (6079).
+#[test]
+fn clawback_of_a_revoked_legacy_entry_with_a_huge_expiry_is_immediate() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer_pk = ctx.buyer.pubkey();
+    approve_kyc(&mut svm, &ctx, &buyer_pk);
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer_pk, &buyer_pk, &buyer_pk),
+        )],
+        "buy",
+    );
+    // Fabricate the legacy expiry (KycEntry.expiry is the i64 at byte 76).
+    let entry = kyc_entry_of(&ctx, &buyer_pk);
+    let mut account = svm.get_account(&entry).unwrap();
+    account.data[76..84].copy_from_slice(&i64::MAX.to_le_bytes());
+    svm.set_account(entry, account).unwrap();
+    let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 1);
+    let payer_pk = ctx.payer.pubkey();
+    let clawback = clawback_ix(
+        &ctx,
+        &payer_pk,
+        &buyer_pk,
+        &ctx.buyer_share_ata,
+        &custody_pda,
+        &escrow_pda,
+        0,
+    );
+    let err = try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&clawback))
+        .expect_err("an approved legacy entry");
+    assert!(
+        err.contains("Custom(6079)") && err.contains("ClawbackHolderStillEligible"),
+        "approved, i64::MAX expiry: {err}"
+    );
+    revoke_kyc(&mut svm, &ctx, &buyer_pk);
+    let revoked = svm.get_account(&entry).unwrap();
+    assert_eq!(
+        &revoked.data[76..84],
+        &i64::MAX.to_le_bytes(),
+        "revoke keeps the expiry"
+    );
+    let logs = v1::send(&mut svm, &[&ctx.payer], &[clawback]).expect("revoked: immediate");
+    let seized = kyc::events::<asset_registry::HolderClawback>(&logs);
+    assert_eq!(seized[0].reason, asset_registry::ClawbackReason::Revoked);
+    assert_eq!(token_balance(&svm, &escrow_pda), 10);
+}
+
 #[test]
 fn clawback_rejected_for_approved_holder() {
     let (mut svm, ctx) = boot(true);
@@ -1698,6 +1753,128 @@ fn claim_milestone_binds_claimer_token_account() {
         "claim_milestone (own account)",
     );
     assert_eq!(token_balance(&svm, &mallory_ata), 40);
+    assert_eq!(token_balance(&svm, &rights_escrow), 60);
+}
+
+/// prog-novac-10 (review 8.3 finding 13): `claim_milestone` before the
+/// unlock (6032), with an amount or proof outside the snapshot (6030), and
+/// above the milestone pool (6033) — in that order of checks — and a second
+/// claim of the same milestone by the same claimer (the claim record exists:
+/// Custom(0)). Nothing leaves the escrow on any of them.
+#[test]
+fn claim_milestone_refuses_a_locked_milestone_a_bad_proof_and_an_exceeded_pool() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let claimer = Keypair::new();
+    svm.airdrop(&claimer.pubkey(), 10_000_000_000).unwrap();
+    let claimer_pk = claimer.pubkey();
+    approve_kyc(&mut svm, &ctx, &claimer_pk);
+    let claimer_ata = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &claimer_pk);
+    let (create_ix, rights_pda, rights_escrow) = create_rights_issuance_ix(&ctx, 31);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[create_ix],
+        "create_rights_issuance",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[mint_to_escrow_ix(&ctx, &rights_escrow, &rights_pda, 100)],
+        "fund rights escrow",
+    );
+    // Milestones 0 (pool 30 < the claimer's 40, unlocked) and 1 (pool 40,
+    // unlocks at 5_000); both roots are the single leaf (claimer, 40).
+    let publish = |index: u16, pool: u64, unlock_ts: i64| {
+        let milestone = Pubkey::find_program_address(
+            &[
+                asset_registry::RT_MILESTONE_SEED,
+                rights_pda.as_ref(),
+                &index.to_le_bytes(),
+            ],
+            &ctx.program_id,
+        )
+        .0;
+        let ix = Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::PublishMilestone {
+                index,
+                merkle_root: util::snapshot_leaf(&claimer_pk, 40),
+                amount_pool: pool,
+                unlock_ts,
+            }
+            .data(),
+            acc::PublishMilestone {
+                authority: ctx.payer.pubkey(),
+                admin_record: ctx.admin_pda,
+                rights_issuance: rights_pda,
+                milestone,
+                system_program: system_program::ID,
+                platform: pause::platform_pda(),
+            }
+            .to_account_metas(None),
+        );
+        (ix, milestone)
+    };
+    let (p0, small_pool) = publish(0, 30, 0);
+    let (p1, locked) = publish(1, 40, 5_000);
+    send(&mut svm, &[&ctx.payer], &[p0, p1], "publish milestones");
+    let claim = |milestone: &Pubkey, amount: u64| {
+        claim_milestone_ix(
+            &ctx,
+            &claimer_pk,
+            &rights_pda,
+            &rights_escrow,
+            milestone,
+            &claimer_ata,
+            &claimer_pk,
+            amount,
+        )
+    };
+    let expect = |svm: &mut LiteSVM, ix: Instruction, code: u32, name: &str| {
+        let err = try_send(svm, &[&claimer], &[ix]).expect_err(name);
+        assert!(
+            err.contains(&format!("Custom({code})"))
+                && err.contains(&format!("Error Code: {name}.")),
+            "expected {name} ({code}), got {err}"
+        );
+        assert_eq!(
+            token_balance(svm, &rights_escrow),
+            100,
+            "{name}: escrow untouched"
+        );
+    };
+    expect(&mut svm, claim(&locked, 40), 6032, "MilestoneLocked");
+    expect(&mut svm, claim(&small_pool, 41), 6030, "InvalidMerkleProof");
+    let mut bad_proof = claim(&small_pool, 40);
+    bad_proof.data = ixd::ClaimMilestone {
+        amount: 40,
+        proof: vec![[3u8; 32]],
+    }
+    .data();
+    expect(&mut svm, bad_proof, 6030, "InvalidMerkleProof");
+    expect(
+        &mut svm,
+        claim(&small_pool, 40),
+        6033,
+        "MilestonePoolExceeded",
+    );
+
+    // Unlocked: milestone 1 pays once; the second claim hits the claim record.
+    warp_to(&mut svm, 5_000);
+    send(
+        &mut svm,
+        &[&claimer],
+        &[claim(&locked, 40)],
+        "claim at the unlock",
+    );
+    assert_eq!(token_balance(&svm, &claimer_ata), 40);
+    svm.expire_blockhash();
+    let err = try_send(&mut svm, &[&claimer], &[claim(&locked, 40)]).expect_err("second claim");
+    assert!(
+        err.contains("Custom(0)") && err.contains("already in use"),
+        "a second claim of the same milestone: {err}"
+    );
     assert_eq!(token_balance(&svm, &rights_escrow), 60);
 }
 
@@ -4409,6 +4586,153 @@ fn hooked_vesting_deposits_without_pda_kyc_and_screens_both_delivery_modes() {
             "screened final recipient receives vested property",
         );
         assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 4);
+    }
+}
+
+/// §14.2.6 (review 8.3 findings 20 / 28): `clawback_blocklisted_holder` of a
+/// blocked holder who ALSO has a vesting position seizes the wallet balance
+/// only; the units in the vesting escrow stay untouched (the escrow is not
+/// the holder's account), claim / push to the blocked wallet fail 6144, and
+/// after the unblock the vesting units deliver.
+#[test]
+fn blocklist_clawback_leaves_a_blocked_holders_vesting_escrow_alone_until_unblock() {
+    for delivery in [
+        asset_registry::VestingDeliveryMode::Claim,
+        asset_registry::VestingDeliveryMode::Push,
+    ] {
+        let (mut svm, ctx) = boot(true);
+        warp_to(&mut svm, 500);
+        let treasury = create_ata(&mut svm, &ctx.payer, &ctx.mint_pda, &ctx.payer.pubkey());
+        for _ in 0..4 {
+            send(
+                &mut svm,
+                &[&ctx.payer],
+                &[treasury_ix(&ctx, treasury, ctx.admin_pda)],
+                "client's allocated units",
+            );
+        }
+        let buyer_pk = ctx.buyer.pubkey();
+        approve_kyc(&mut svm, &ctx, &buyer_pk);
+        send(
+            &mut svm,
+            &[&ctx.buyer],
+            &[buy_ix(
+                &ctx,
+                10,
+                kyc_hook_metas(&ctx, &buyer_pk, &buyer_pk, &buyer_pk),
+            )],
+            "the holder's own units",
+        );
+        let (series, escrow, position) = share_vesting(&mut svm, &ctx, 2106, delivery, buyer_pk);
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[share_vesting_deposit(
+                &ctx,
+                series,
+                escrow,
+                ctx.payer.pubkey(),
+                treasury,
+                4,
+            )],
+            "fund the holder's vesting position",
+        );
+        block_holder(&mut svm, &ctx, buyer_pk);
+
+        // The clawback seizes the wallet balance, never the vesting escrow.
+        let (vault, quarantine) = open_redemption_vault(&mut svm, &ctx, 2106);
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[blocklist_clawback_ix(
+                &ctx,
+                &ctx.payer.pubkey(),
+                &buyer_pk,
+                &ctx.buyer_share_ata,
+                &vault,
+                &quarantine,
+                0,
+                true,
+            )],
+            "clawback of a blocked holder with a vesting position",
+        );
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 0, "wallet swept");
+        assert_eq!(token_balance(&svm, &quarantine), 10);
+        assert_eq!(token_balance(&svm, &escrow), 4, "vesting escrow untouched");
+
+        // Vested, but the recipient is blocked: no delivery.
+        warp_to(&mut svm, 1_000);
+        let release = |svm: &LiteSVM| {
+            let mut metas = if delivery == asset_registry::VestingDeliveryMode::Claim {
+                acc::ClaimVested {
+                    recipient: buyer_pk,
+                    series,
+                    position,
+                    token_mint: ctx.mint_pda,
+                    escrow,
+                    recipient_token_account: ctx.buyer_share_ata,
+                    token_program: TOKEN_2022,
+                    recipient_block_entry: v1::block_entry(&v1::token_owner(
+                        svm,
+                        &ctx.buyer_share_ata,
+                    )),
+                }
+                .to_account_metas(None)
+            } else {
+                acc::PushVested {
+                    payer: buyer_pk,
+                    series,
+                    position,
+                    token_mint: ctx.mint_pda,
+                    escrow,
+                    recipient_token_account: ctx.buyer_share_ata,
+                    token_program: TOKEN_2022,
+                    recipient_block_entry: v1::block_entry(&v1::token_owner(
+                        svm,
+                        &ctx.buyer_share_ata,
+                    )),
+                }
+                .to_account_metas(None)
+            };
+            metas.extend(kyc_hook_metas(&ctx, &series, &series, &buyer_pk));
+            let data = if delivery == asset_registry::VestingDeliveryMode::Claim {
+                ixd::ClaimVested { position_index: 0 }.data()
+            } else {
+                ixd::PushVested { position_index: 0 }.data()
+            };
+            Instruction::new_with_bytes(ctx.program_id, &data, metas)
+        };
+        let ix = release(&svm);
+        let err = try_send(&mut svm, &[&ctx.buyer], &[ix]).unwrap_err();
+        assert!(
+            err.contains("Custom(6144)") && err.contains("PartyBlocklisted"),
+            "{delivery:?} to a blocked recipient: {err}"
+        );
+        assert_eq!(token_balance(&svm, &escrow), 4);
+
+        // Unblocked: the vesting units deliver.
+        let singleton =
+            Pubkey::find_program_address(&[transfer_hook::BLOCKLIST_AUTHORITY_SEED], &ctx.hook_id)
+                .0;
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[Instruction::new_with_bytes(
+                ctx.hook_id,
+                &transfer_hook::instruction::RemoveFromBlocklist { wallet: buyer_pk }.data(),
+                transfer_hook::accounts::RemoveFromBlocklist {
+                    authority: ctx.payer.pubkey(),
+                    blocklist_authority: singleton,
+                    block_entry: block_entry_of(&ctx, &buyer_pk),
+                }
+                .to_account_metas(None),
+            )],
+            "unblock",
+        );
+        let ix = release(&svm);
+        send(&mut svm, &[&ctx.buyer], &[ix], "delivery after unblock");
+        assert_eq!(token_balance(&svm, &ctx.buyer_share_ata), 4, "{delivery:?}");
+        assert_eq!(token_balance(&svm, &escrow), 0);
     }
 }
 

@@ -1459,7 +1459,8 @@ pub struct PendingAdmin {
 ///
 /// ⚠ Layout (pinned by a test): platform 8, current_admin 40, new_admin 72,
 /// proposed_by 104, proposed_at 136, eta 144, expires_at 152, version 160,
-/// bump 161; 162 B. `util::retire_pending_proposal` zeroes bytes 40..72.
+/// bump 161; 162 B. While `current_admin` (40..72) is the super admin it is
+/// live, and `accept_platform_admin` refuses (`util::is_live_pending`).
 #[account]
 #[derive(InitSpace)]
 pub struct PlatformRecovery {
@@ -2039,6 +2040,7 @@ mod tests {
         assert_eq!(code(E::InvalidAdminProposal), 6152);
         assert_eq!(code(E::InvalidPlatformRecovery), 6153);
         assert_eq!(code(E::PayoutModulesClearNotExplicit), 6154);
+        assert_eq!(code(E::PlatformRecoveryPending), 6155);
         // Reused codes the v1 paths rely on.
         assert_eq!(code(E::PlatformPaused), 6000);
         assert_eq!(code(E::Unauthorized), 6001);

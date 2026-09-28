@@ -645,3 +645,169 @@ fn a_compromised_super_admin_cannot_seat_an_admin_past_the_upgrade_authority() {
     );
     assert!(gone(&t.svm, &admin_pda(&attacker.pubkey())));
 }
+
+// ── Review 8.3 findings 15b / 21 ────────────────────────────────────────────
+
+/// A re-proposal overwrites the PendingAdmin and restarts the 48 h clock; an
+/// `init_if_needed` that kept the old eta would let the super admin stretch
+/// the execution window without a fresh notice.
+#[test]
+fn a_grant_re_proposal_restarts_the_48_hour_clock() {
+    let mut t = boot(true);
+    let x = funded(&mut t.svm);
+    let t0 = now(&t.svm);
+    send(
+        &mut t.svm,
+        &[&t.sa],
+        &[propose_admin_ix(&t.sa.pubkey(), &x.pubkey())],
+    )
+    .unwrap();
+    let t1 = t0 + ADMIN_TIMELOCK_SECS - 3_600; // T0 + 47 h
+    warp_to(&mut t.svm, t1);
+    send(
+        &mut t.svm,
+        &[&t.sa],
+        &[propose_admin_ix(&t.sa.pubkey(), &x.pubkey())],
+    )
+    .expect("re-propose");
+    let pending: PendingAdmin = load(&t.svm, &pending_admin(&x.pubkey()));
+    assert_eq!(
+        (pending.proposed_at, pending.eta, pending.expires_at),
+        (
+            t1,
+            t1 + ADMIN_TIMELOCK_SECS,
+            t1 + ADMIN_TIMELOCK_SECS + PROPOSAL_WINDOW_SECS
+        )
+    );
+    warp_to(&mut t.svm, t0 + ADMIN_TIMELOCK_SECS);
+    assert_code(
+        send(
+            &mut t.svm,
+            &[&x],
+            &[add_admin_ix(&x.pubkey(), &t.sa.pubkey())],
+        ),
+        ERR_TIMELOCK_ACTIVE,
+        "at the first proposal's eta",
+    );
+    warp_to(&mut t.svm, t1 + ADMIN_TIMELOCK_SECS);
+    send(
+        &mut t.svm,
+        &[&x],
+        &[add_admin_ix(&x.pubkey(), &t.sa.pubkey())],
+    )
+    .expect("at the re-proposal's eta");
+    assert_eq!(
+        load::<Admin>(&t.svm, &admin_pda(&x.pubkey())).admin,
+        x.pubkey()
+    );
+}
+
+/// An Admin removed with `remove_admin` loses its veto at once: it can
+/// cancel neither an admin grant nor a super-admin rotation.
+#[test]
+fn a_removed_admin_cannot_cancel_a_grant_or_a_rotation() {
+    let mut t = boot(true);
+    let d = funded(&mut t.svm);
+    grant_admin(&mut t.svm, &t.sa, &d).unwrap();
+    send(
+        &mut t.svm,
+        &[&t.sa],
+        &[remove_admin_ix(&t.sa.pubkey(), &d.pubkey())],
+    )
+    .expect("remove_admin");
+    let x = funded(&mut t.svm);
+    let y = funded(&mut t.svm);
+    send(
+        &mut t.svm,
+        &[&t.sa],
+        &[
+            propose_admin_ix(&t.sa.pubkey(), &x.pubkey()),
+            propose_platform_admin_ix(&t.sa.pubkey(), &y.pubkey()),
+        ],
+    )
+    .unwrap();
+    assert_code(
+        send(
+            &mut t.svm,
+            &[&d],
+            &[cancel_admin_proposal_ix(
+                &d.pubkey(),
+                &x.pubkey(),
+                &t.sa.pubkey(),
+            )],
+        ),
+        ERR_UNAUTHORIZED,
+        "a removed Admin cancels a grant",
+    );
+    assert_code(
+        send(
+            &mut t.svm,
+            &[&d],
+            &[cancel_platform_admin_transfer_ix(
+                &d.pubkey(),
+                &t.sa.pubkey(),
+                &program_data(&asset_registry::ID),
+            )],
+        ),
+        ERR_UNAUTHORIZED,
+        "a removed Admin cancels a rotation",
+    );
+    assert!(!gone(&t.svm, &pending_admin(&x.pubkey())));
+    assert!(!gone(&t.svm, &authority_proposal(&platform_pda())));
+}
+
+/// Finding 15b: the upgrade-authority veto is bound to THIS program's
+/// ProgramData. The upgrade authority of any other program (here a ProgramData
+/// the attacker controls) cannot veto a grant or a super-admin rotation.
+#[test]
+fn another_programs_upgrade_authority_cannot_veto() {
+    let mut t = boot(true);
+    let attacker = funded(&mut t.svm);
+    let mut foreign = t
+        .svm
+        .get_account(&program_data(&asset_registry::ID))
+        .unwrap();
+    foreign.data[13..45].copy_from_slice(attacker.pubkey().as_ref());
+    let foreign_pd = Pubkey::new_unique();
+    t.svm.set_account(foreign_pd, foreign).unwrap();
+    let x = funded(&mut t.svm);
+    let y = funded(&mut t.svm);
+    send(
+        &mut t.svm,
+        &[&t.sa],
+        &[
+            propose_admin_ix(&t.sa.pubkey(), &x.pubkey()),
+            propose_platform_admin_ix(&t.sa.pubkey(), &y.pubkey()),
+        ],
+    )
+    .unwrap();
+    assert_code(
+        send(
+            &mut t.svm,
+            &[&attacker],
+            &[cancel_platform_admin_transfer_ix(
+                &attacker.pubkey(),
+                &t.sa.pubkey(),
+                &foreign_pd,
+            )],
+        ),
+        ERR_UNAUTHORIZED,
+        "a foreign ProgramData vetoes a rotation",
+    );
+    assert_code(
+        send(
+            &mut t.svm,
+            &[&attacker],
+            &[cancel_admin_proposal_ix_with(
+                &attacker.pubkey(),
+                &x.pubkey(),
+                &t.sa.pubkey(),
+                &foreign_pd,
+            )],
+        ),
+        ERR_UNAUTHORIZED,
+        "a foreign ProgramData vetoes a grant",
+    );
+    assert!(!gone(&t.svm, &authority_proposal(&platform_pda())));
+    assert!(!gone(&t.svm, &pending_admin(&x.pubkey())));
+}

@@ -801,6 +801,7 @@ pub fn propose_issuer_authority_ix_with(
             issuer: *issuer,
             transfer,
             system_program: system_program::ID,
+            authority_block_entry: block_entry_pda(authority),
         }
         .to_account_metas(None),
     )
@@ -834,6 +835,7 @@ pub fn accept_issuer_authority_ix_with(
             new_admin_record: admin_pda(new_authority),
             recovery: recovery_pda(issuer),
             system_program: system_program::ID,
+            authority_block_entry: block_entry_pda(current),
         }
         .to_account_metas(None),
     )

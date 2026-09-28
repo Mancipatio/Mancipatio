@@ -28,7 +28,7 @@ use {
             instruction::{AccountMeta, Instruction},
             system_program,
         },
-        AccountDeserialize, InstructionData, ToAccountMetas,
+        AccountDeserialize, AccountSerialize, InstructionData, ToAccountMetas,
     },
     asset_registry::{
         accounts as acc, instruction as ixd, AssetType, CustodyVault, JurisdictionRules, Offer,
@@ -2939,6 +2939,163 @@ fn take_offer_refuses_a_blocked_taker_or_maker_while_cancel_and_expire_stay_open
         "anyone expires a blocked maker's offer",
     );
     assert_eq!(token_balance(&svm, &ctx.holder_share_ata), before + 20);
+}
+
+/// O-8 (review 8.3 finding 17): the taker pays from its OWN payment account.
+/// Here another wallet even approved the taker as delegate of its account,
+/// so without `taker_payment_account.owner == taker` the payment leg would
+/// succeed from someone else's funds (and skip that owner's blocklist check).
+#[test]
+fn take_offer_refuses_a_payment_account_the_taker_does_not_own() {
+    let (mut svm, ctx) = boot(100);
+    warp_to(&mut svm, 1_000);
+    let taker = new_taker(&mut svm, &ctx);
+    // Another wallet with a funded payment account of the same mint.
+    let other_wallet = funded_wallet(&mut svm);
+    let other_payment = create_ata(
+        &mut svm,
+        &ctx.payer,
+        &ctx.payment_mint,
+        &other_wallet.pubkey(),
+    );
+    let fund = token_ix::mint_to(
+        &TOKEN_2022,
+        &ctx.payment_mint,
+        &other_payment,
+        &ctx.payer.pubkey(),
+        &[],
+        100_000_000,
+    )
+    .unwrap();
+    send(&mut svm, &[&ctx.payer], &[fund], "fund the other wallet");
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[create_offer_ix(&ctx, 1, 10, 5_000_000, 2_000)],
+        "create_offer",
+    );
+    deposit_to_offer_escrow(&mut svm, &ctx, 1, 10);
+    let approve = token_ix::approve(
+        &TOKEN_2022,
+        &other_payment,
+        &taker.wallet.pubkey(),
+        &other_wallet.pubkey(),
+        &[],
+        100_000_000,
+    )
+    .unwrap();
+    send(
+        &mut svm,
+        &[&other_wallet],
+        &[approve],
+        "the other wallet delegates to the taker",
+    );
+    let before = (
+        token_balance(&svm, &other_payment),
+        token_balance(&svm, &taker.payment),
+        token_balance(&svm, &taker.share),
+    );
+    let foreign = take_offer_ix(
+        &ctx,
+        1,
+        &taker.wallet.pubkey(),
+        &taker.share,
+        &other_payment,
+        &taker.maker_payment,
+    );
+    let err = try_send(&mut svm, &[&taker.wallet], &[foreign]).unwrap_err();
+    assert!(
+        err.contains("Custom(6001)") && err.contains("Unauthorized"),
+        "somebody else's payment account: {err}"
+    );
+    assert_eq!(
+        (
+            token_balance(&svm, &other_payment),
+            token_balance(&svm, &taker.payment),
+            token_balance(&svm, &taker.share),
+        ),
+        before,
+        "nothing moved"
+    );
+    send(
+        &mut svm,
+        &[&taker.wallet],
+        &[take_ix(&ctx, 1, &taker)],
+        "the taker's own account",
+    );
+    assert_eq!(token_balance(&svm, &taker.share), before.2 + 10);
+}
+
+/// Review 8.3 finding 18: a LEGACY (rc.x) DeliveryEscrow with deadline 0 —
+/// v1 cannot create one, devnet holds some — never opens the permissionless
+/// return (`vault.deadline > 0`), however far the clock runs; its authority
+/// still returns it.
+#[test]
+fn a_legacy_deadline_zero_delivery_escrow_stays_authority_return_only() {
+    let (mut svm, ctx) = boot(30);
+    warp_to(&mut svm, 1_000);
+    let vault_id = 1u64;
+    let (custody_pda, escrow_pda) = custody_pdas(&ctx, vault_id);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            vault_id,
+            VaultType::DeliveryEscrow,
+            20,
+            DE_SOON,
+            ctx.holder.pubkey(),
+        )],
+        "open delivery vault",
+    );
+    fund_vault_escrow(&mut svm, &ctx, &escrow_pda, 20);
+    // Fabricate the legacy shape: deadline 0.
+    let mut account = svm.get_account(&custody_pda).unwrap();
+    let mut vault = CustodyVault::try_deserialize(&mut account.data.as_slice()).unwrap();
+    vault.deadline = 0;
+    let mut data = Vec::new();
+    vault.try_serialize(&mut data).unwrap();
+    account.data[..data.len()].copy_from_slice(&data);
+    svm.set_account(custody_pda, account).unwrap();
+    assert_eq!(load::<CustodyVault>(&svm, &custody_pda).deadline, 0);
+
+    let stranger = Keypair::new();
+    svm.airdrop(&stranger.pubkey(), 100_000_000_000).unwrap();
+    for at in [DE_SOON, DE_LONG, 10 * DE_LONG] {
+        warp_to(&mut svm, at);
+        let err = try_send(
+            &mut svm,
+            &[&stranger],
+            &[return_vault_ix(
+                &ctx,
+                &stranger.pubkey(),
+                vault_id,
+                &ctx.holder_share_ata,
+            )],
+        )
+        .expect_err("a stranger returns a legacy deadline-0 vault");
+        assert!(
+            err.contains("ReturnNotAllowed"),
+            "at {at}: expected ReturnNotAllowed, got {err}"
+        );
+    }
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[return_vault_ix(
+            &ctx,
+            &ctx.payer.pubkey(),
+            vault_id,
+            &ctx.holder_share_ata,
+        )],
+        "the authority returns it",
+    );
+    assert_eq!(
+        load::<CustodyVault>(&svm, &custody_pda).state,
+        VaultState::Returned
+    );
+    assert_eq!(token_balance(&svm, &ctx.holder_share_ata), 30);
 }
 
 /// kritičar-4 (§8.2, §14.3.2): a DeliveryEscrow deadline lies in

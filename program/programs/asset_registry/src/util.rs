@@ -418,6 +418,28 @@ pub fn retire_pending_proposal(
     Ok(true)
 }
 
+/// `true` iff `record` is a registry-owned pending proposal of type
+/// `discriminator` for `target` (bytes 8..40) that is still bound to
+/// `holder` (its `current_*` field, bytes 40..72): a retired (zeroed) or
+/// missing record is not live. A foreign record at the pinned address is
+/// refused (`Unauthorized`), as in `retire_pending_proposal`.
+pub fn is_live_pending(
+    record: &AccountInfo,
+    target: &Pubkey,
+    discriminator: &[u8],
+    holder: &Pubkey,
+) -> Result<bool> {
+    if record.data_is_empty() || record.owner != &crate::ID {
+        return Ok(false);
+    }
+    let data = record.try_borrow_data()?;
+    require!(
+        data.len() >= 72 && data[..8] == *discriminator && data[8..40] == target.to_bytes(),
+        RegistryError::Unauthorized
+    );
+    Ok(data[40..72] == holder.to_bytes())
+}
+
 /// Reads the parent key stored in the first field (byte 8) of a registry
 /// account without deserializing the rest, after checking its address, owner
 /// and discriminator. `ShareClass.asset` and `Asset.issuer` sit there.

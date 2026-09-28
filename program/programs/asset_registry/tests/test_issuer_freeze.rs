@@ -361,6 +361,28 @@ fn blocked_payees_are_refused_on_every_proceeds_exit_and_the_freeze_is_checked_f
         ERR_BLOCKED,
         "blocked sale authority",
     );
+    // The signing authority alone is checked too: a blocked A cannot route
+    // the proceeds to a clean third party's account (finding 16).
+    let clean = p.w.funded();
+    let clean_dest = ata(&mut p.w, &p.m.payment_mint, &clean.pubkey());
+    assert!(
+        p.w.svm
+            .get_account(&block_entry_pda(&clean.pubkey()))
+            .is_none(),
+        "the destination owner is not blocked"
+    );
+    p.w.expect_code(
+        &[&a],
+        &[close_sale_ix(
+            &p.w,
+            &a.pubkey(),
+            &p.mature,
+            &p.m,
+            &clean_dest,
+        )],
+        ERR_BLOCKED,
+        "blocked sale authority, clean destination owner",
+    );
 
     // Frozen AND blocked: the freeze answers first.
     let super_admin = p.w.admin.insecure_clone();
@@ -471,5 +493,148 @@ fn a_blocked_buyer_cannot_buy_and_the_payment_account_is_the_buyers_own() {
         &[buy_ix(&fx, &foreign_pay, &s, 1, extra)],
         6001,
         "somebody else's payment account",
+    );
+}
+
+// ── Review 8.3 findings 15a / 21: the D1 chain and the unfreeze rent ────────
+
+/// Every proceeds exit binds `share_class` to the sale / vault and `asset` to
+/// that share class, so a frozen issuer's proceeds cannot be released by
+/// passing ANOTHER, unfrozen issuer's chain (and its unset freeze PDA).
+#[test]
+fn the_d1_chain_cannot_be_swapped_to_an_unfrozen_issuer() {
+    let mut p = proceeds();
+    let (_b, fx_b, _m_b, _sale_b) = second_issuer(&mut p.w);
+    let super_admin = p.w.admin.insecure_clone();
+    p.w.try_freeze(&super_admin, &p.fx.issuer)
+        .expect("freeze A");
+    let a = k(&p.a);
+    let fees = k(&p.w.fees);
+    let exits: Vec<(&str, Keypair, Instruction)> = vec![
+        (
+            "close_sale",
+            k(&a),
+            close_sale_ix(&p.w, &a.pubkey(), &p.mature, &p.m, &p.a_dest),
+        ),
+        (
+            "open_payout_vault",
+            k(&a),
+            open_payout_vault_ix(&p.w, &a.pubkey(), &p.startup, &p.m),
+        ),
+        (
+            "release_payout",
+            fees,
+            release_ix(&p.w, &p.vault, &p.m, &p.a_dest),
+        ),
+        (
+            "claim_founder_yield",
+            k(&a),
+            claim_founder_yield_ix(&p.w, &a.pubkey(), &p.vault, &p.m, &p.a_dest),
+        ),
+    ];
+    let a_freeze = issuer_freeze_pda(&p.fx.issuer);
+    let b_freeze = issuer_freeze_pda(&fx_b.issuer);
+    for (label, signer, ix) in exits {
+        // (1) B's whole chain: the share-class binding answers.
+        let whole = swap(
+            swap(
+                swap(ix.clone(), &p.fx.share_class, &fx_b.share_class),
+                &p.fx.asset,
+                &fx_b.asset,
+            ),
+            &a_freeze,
+            &b_freeze,
+        );
+        p.w.expect_code(&[&signer], &[whole], 6001, &format!("{label}: B's chain"));
+        // (2) A's share class, B's asset and freeze PDA: the asset binding.
+        let asset_only = swap(
+            swap(ix.clone(), &p.fx.asset, &fx_b.asset),
+            &a_freeze,
+            &b_freeze,
+        );
+        p.w.expect_code(
+            &[&signer],
+            &[asset_only],
+            6001,
+            &format!("{label}: B's asset and freeze PDA"),
+        );
+        // The honest chain is still frozen.
+        p.w.expect_code(&[&signer], &[ix], ERR_FROZEN, label);
+    }
+}
+
+/// The unfreeze rent can only go to the freezer (`address = frozen_by`).
+#[test]
+fn the_unfreeze_rent_goes_only_to_the_freezer() {
+    let mut w = World::boot();
+    let a = w.funded();
+    let fx = w.issuer_with_asset(&a, legal_id(1));
+    let admin = w.funded();
+    w.grant_admin(&admin);
+    w.try_freeze(&admin, &fx.issuer).expect("freeze");
+    let super_admin = w.admin.insecure_clone();
+    let stranger = w.funded();
+    w.expect_code(
+        &[&super_admin],
+        &[unfreeze_issuer_ix(
+            &super_admin.pubkey(),
+            &fx.issuer,
+            &stranger.pubkey(),
+        )],
+        6001,
+        "the rent to a third party",
+    );
+    assert!(!w.is_closed(&issuer_freeze_pda(&fx.issuer)), "still frozen");
+    w.send(
+        &[&super_admin],
+        &[unfreeze_issuer_ix(
+            &super_admin.pubkey(),
+            &fx.issuer,
+            &admin.pubkey(),
+        )],
+        "unfreeze to the freezer",
+    );
+}
+
+// ── Review 8.3 finding 2: a blocked issuer key cannot rotate to a clean one ─
+
+/// Otherwise W1 (blocked) proposes W2, W2 accepts, anyone syncs, and W2 pulls
+/// the proceeds: the payee BlockEntry on the exits would be bypassed.
+#[test]
+fn a_blocked_issuer_authority_can_neither_propose_nor_hand_over_a_rotation() {
+    let mut p = proceeds();
+    let a = k(&p.a);
+    let w2 = p.w.funded();
+    let issuer = p.fx.issuer;
+    let propose = propose_issuer_authority_ix(&a.pubkey(), &issuer, &w2.pubkey());
+    let accept = accept_issuer_authority_ix(&w2.pubkey(), &issuer, &a.pubkey());
+
+    p.w.block(&a.pubkey());
+    p.w.expect_code(
+        &[&a],
+        std::slice::from_ref(&propose),
+        ERR_BLOCKED,
+        "a blocked authority proposes",
+    );
+    // Proposed while clean, blocked before the accept.
+    p.w.unblock(&a.pubkey());
+    p.w.send(&[&a], std::slice::from_ref(&propose), "propose");
+    p.w.block(&a.pubkey());
+    p.w.expect_code(
+        &[&w2],
+        std::slice::from_ref(&accept),
+        ERR_BLOCKED,
+        "the accept of a blocked authority's rotation",
+    );
+    assert_eq!(
+        p.w.load::<asset_registry::Issuer>(&issuer).authority,
+        a.pubkey()
+    );
+    // Unblocked: the rotation goes through.
+    p.w.unblock(&a.pubkey());
+    p.w.send(&[&w2], &[accept], "accept after unblock");
+    assert_eq!(
+        p.w.load::<asset_registry::Issuer>(&issuer).authority,
+        w2.pubkey()
     );
 }

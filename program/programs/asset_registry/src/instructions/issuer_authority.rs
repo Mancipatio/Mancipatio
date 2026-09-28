@@ -59,6 +59,13 @@
 //!
 //! None of these reads the pause flags: rotation and recovery are security
 //! exits, and a sync moves no funds (the payout exits stay gated).
+//!
+//! prog-novac-4: a blocklisted authority can neither propose nor hand over a
+//! regular rotation (`PartyBlocklisted` on the current key's BlockEntry in
+//! both). Otherwise a BA block of the issuer wallet W1 would be bypassed in
+//! three transactions: W1 proposes W2, W2 accepts, anyone syncs, and W2 runs
+//! `close_sale` / `release_payout` / `claim_founder_yield` to itself. The
+//! super-admin recovery (7 days) stays available for a blocked key.
 
 use anchor_lang::prelude::*;
 
@@ -86,6 +93,19 @@ pub struct ProposeIssuerAuthority<'info> {
         seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump)]
     pub transfer: Box<Account<'info, AuthorityProposal>>,
     pub system_program: Program<'info, System>,
+    /// prog-novac-4: a blocklisted issuer authority cannot stage a rotation
+    /// (a new, unblocked key would otherwise reach the proceeds exits after
+    /// `sync_sale_authority` / `sync_payout_founder`).
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, issuer.authority.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&authority_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub authority_block_entry: UncheckedAccount<'info>,
 }
 
 /// The current issuer authority stages a new authority. A re-proposal
@@ -152,6 +172,19 @@ pub struct AcceptIssuerAuthority<'info> {
     #[account(mut, seeds = [ISSUER_RECOVERY_SEED, issuer.key().as_ref()], bump)]
     pub recovery: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// prog-novac-4: the OUTGOING authority is not blocklisted (it may have
+    /// been blocked after the proposal). A super-admin issuer recovery stays
+    /// the path off a blocked key.
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, issuer.authority.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&authority_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub authority_block_entry: UncheckedAccount<'info>,
 }
 
 /// The proposed authority accepts. Only `Issuer.authority` changes (legal ID,

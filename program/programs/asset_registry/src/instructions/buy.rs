@@ -130,6 +130,14 @@ pub fn handle_buy(ctx: Context<Buy>, amount: u64) -> Result<()> {
 
     crate::util::require_immutable_owner(&ctx.accounts.buyer_share_account.to_account_info())?;
 
+    // D2: `PAUSE_PAYOUT_MODULES` also brakes an ALREADY open Startup sale
+    // (devnet legacy, or after a deliberate super-admin clear of 0x40): no
+    // new investor money flows toward the payout vault while it is set.
+    crate::util::ensure(
+        ctx.accounts.sale.raise_type != crate::state::RaiseType::Startup
+            || !ctx.accounts.platform.is_paused(PAUSE_PAYOUT_MODULES),
+        RegistryError::PlatformPaused,
+    )?;
     require!(amount > 0, RegistryError::InvalidSaleParams);
     require!(
         !ctx.accounts.share_class.supply_locked || ctx.accounts.share_class.mintable_post_launch,

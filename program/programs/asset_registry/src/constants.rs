@@ -170,9 +170,10 @@ pub const PAUSE_DISTRIBUTIONS: u8 = 1 << 4;
 /// `claim_founder_yield`).
 pub const PAUSE_ISSUER_PROCEEDS: u8 = 1 << 5;
 /// The payout / Merkle modules (D2, off on mainnet): Startup raises
-/// (`open_sale` with `RaiseType::Startup`), `route_yield`,
-/// `create_rights_issuance` and `publish_milestone`. Their exits (vault
-/// lifecycle, refunds and claims) stay open. Clearing it must be a
+/// (`open_sale` with `RaiseType::Startup`, and `buy` into an already open
+/// Startup sale), `route_yield`, `create_rights_issuance` and
+/// `publish_milestone`. Their exits and continuations (`open_payout_vault`,
+/// vault lifecycle, refunds and claims) stay open. Clearing it must be a
 /// `set_pause_flags` call of its own (`PayoutModulesClearNotExplicit`).
 pub const PAUSE_PAYOUT_MODULES: u8 = 1 << 6;
 /// Every defined pause bit (0x7F).

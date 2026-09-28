@@ -30,6 +30,7 @@ const ERR_INVALID_AUTHORITY_TRANSFER: u32 = 6015;
 const ERR_PROPOSAL_EXPIRED: u32 = 6017;
 const ERR_TIMELOCK_ACTIVE: u32 = 6018;
 const ERR_INVALID_RECOVERY: u32 = 6019;
+const ERR_RECOVERY_PENDING: u32 = 6020;
 const ERR_ACCOUNT_NOT_INITIALIZED: u32 = 3012;
 
 fn pda(seeds: &[&[u8]]) -> Pubkey {
@@ -297,6 +298,7 @@ fn v1_hook_error_codes_are_appended() {
     assert_eq!(c(E::ProposalExpired), 6017);
     assert_eq!(c(E::TimelockActive), 6018);
     assert_eq!(c(E::InvalidRecovery), 6019);
+    assert_eq!(c(E::RecoveryPending), 6020);
 }
 
 // ── §14.8.1-2: rotation expiry, cancel, the legacy account ──────────────────
@@ -524,8 +526,13 @@ fn a_recovery_expires_and_is_bound_to_the_signer_the_ba_and_the_upgrade_authorit
     );
 }
 
+/// §14.8.4 (revised by the 8.3 review, findings 1/8/23): a rotation is
+/// REFUSED while a recovery is pending against the live authority. Retiring
+/// it instead let a compromised BA defeat the incident build's recovery (which
+/// it cannot cancel) by rotating to a second key of its own in one
+/// transaction; the legitimate holder cancels first.
 #[test]
-fn a_rotation_retires_a_pending_recovery_so_a_round_trip_cannot_revive_it() {
+fn a_live_recovery_blocks_a_rotation_until_it_is_cancelled() {
     let mut t = boot();
     let b = funded(&mut t.svm);
     let c = funded(&mut t.svm);
@@ -535,25 +542,64 @@ fn a_rotation_retires_a_pending_recovery_so_a_round_trip_cannot_revive_it() {
         &[propose_recovery_ix(&t.ua.pubkey(), &c.pubkey(), &hook_pd())],
     )
     .unwrap();
-    // BA -> B -> BA.
+    // A pre-staged rotation, and propose + accept in one transaction: both refused.
     send(
         &mut t.svm,
         &[&t.ba],
         &[propose_ix(&t.ba.pubkey(), &b.pubkey())],
     )
     .unwrap();
-    send(&mut t.svm, &[&b], &[accept_ix(&b.pubkey())]).unwrap();
+    code(
+        send(&mut t.svm, &[&b], &[accept_ix(&b.pubkey())]),
+        ERR_RECOVERY_PENDING,
+        "a staged rotation while a recovery is pending",
+    );
+    code(
+        send(
+            &mut t.svm,
+            &[&t.ba, &b],
+            &[
+                propose_ix(&t.ba.pubkey(), &b.pubkey()),
+                accept_ix(&b.pubkey()),
+            ],
+        ),
+        ERR_RECOVERY_PENDING,
+        "propose + accept in one transaction",
+    );
+    assert_eq!(authority(&t.svm), t.ba.pubkey());
     assert_eq!(
         load::<BlocklistRecovery>(&t.svm, &recovery_pda()).current_authority,
-        Pubkey::default()
+        t.ba.pubkey(),
+        "the recovery stays live"
     );
+    // The BA (the key was not lost) cancels the recovery; then it rotates.
     send(
         &mut t.svm,
-        &[&b],
-        &[propose_ix(&b.pubkey(), &t.ba.pubkey())],
+        &[&t.ba],
+        &[cancel_recovery_ix(&t.ba.pubkey(), &t.ua.pubkey())],
+    )
+    .expect("the BA cancels the recovery");
+    send(&mut t.svm, &[&b], &[accept_ix(&b.pubkey())]).expect("then the rotation");
+    assert_eq!(authority(&t.svm), b.pubkey());
+}
+
+/// The execute constraint `current_authority == blocklist_authority.authority`
+/// (no instruction can produce such a record any more: fabricated), and a
+/// record that is not live does not block a rotation.
+#[test]
+fn a_recovery_against_another_authority_neither_executes_nor_blocks() {
+    let mut t = boot();
+    let b = funded(&mut t.svm);
+    let c = funded(&mut t.svm);
+    send(
+        &mut t.svm,
+        &[&t.ua],
+        &[propose_recovery_ix(&t.ua.pubkey(), &c.pubkey(), &hook_pd())],
     )
     .unwrap();
-    send(&mut t.svm, &[&t.ba], &[accept_ix(&t.ba.pubkey())]).unwrap();
+    let mut stale = t.svm.get_account(&recovery_pda()).unwrap();
+    stale.data[8..40].copy_from_slice(b.pubkey().as_ref());
+    t.svm.set_account(recovery_pda(), stale).unwrap();
     warp_to(&mut t.svm, T0 + RECOVERY_DELAY_SECS);
     code(
         send(
@@ -562,8 +608,152 @@ fn a_rotation_retires_a_pending_recovery_so_a_round_trip_cannot_revive_it() {
             &[execute_recovery_ix(&c.pubkey(), &t.ua.pubkey(), &hook_pd())],
         ),
         ERR_INVALID_RECOVERY,
-        "a retired recovery after a round trip",
+        "a recovery against another authority",
     );
+    send(
+        &mut t.svm,
+        &[&t.ba, &b],
+        &[
+            propose_ix(&t.ba.pubkey(), &b.pubkey()),
+            accept_ix(&b.pubkey()),
+        ],
+    )
+    .expect("a recovery that is not live does not block");
+    assert_eq!(authority(&t.svm), b.pubkey());
+}
+
+/// §14.8.3 + finding 15: another program's ProgramData, even one whose
+/// upgrade authority is the signer, cannot stand in for the hook's.
+#[test]
+fn a_foreign_programdata_cannot_propose_a_recovery() {
+    let mut t = boot();
+    let attacker = funded(&mut t.svm);
+    let c = funded(&mut t.svm);
+    let mut foreign = t.svm.get_account(&hook_pd()).unwrap();
+    foreign.data[13..45].copy_from_slice(attacker.pubkey().as_ref());
+    let foreign_pd = Pubkey::new_unique();
+    t.svm.set_account(foreign_pd, foreign).unwrap();
+    code(
+        send(
+            &mut t.svm,
+            &[&attacker],
+            &[propose_recovery_ix(
+                &attacker.pubkey(),
+                &c.pubkey(),
+                &foreign_pd,
+            )],
+        ),
+        ERR_UNAUTHORIZED,
+        "a ProgramData not bound to the hook, upgrade authority = the attacker",
+    );
+    assert!(gone(&t.svm, &recovery_pda()));
+}
+
+/// Finding 21: a re-proposal overwrites the record and restarts BOTH clocks
+/// (an `init_if_needed` that kept the old eta would let the proposer stretch
+/// the execution window without a fresh 7-day notice).
+#[test]
+fn a_recovery_re_proposal_restarts_the_clock() {
+    let mut t = boot();
+    let c = funded(&mut t.svm);
+    let d = funded(&mut t.svm);
+    send(
+        &mut t.svm,
+        &[&t.ua],
+        &[propose_recovery_ix(&t.ua.pubkey(), &c.pubkey(), &hook_pd())],
+    )
+    .unwrap();
+    let t1 = T0 + RECOVERY_DELAY_SECS - 3_600;
+    warp_to(&mut t.svm, t1);
+    send(
+        &mut t.svm,
+        &[&t.ua],
+        &[propose_recovery_ix(&t.ua.pubkey(), &d.pubkey(), &hook_pd())],
+    )
+    .unwrap();
+    let rec: BlocklistRecovery = load(&t.svm, &recovery_pda());
+    assert_eq!(
+        (rec.new_authority, rec.proposed_at, rec.eta, rec.expires_at),
+        (
+            d.pubkey(),
+            t1,
+            t1 + RECOVERY_DELAY_SECS,
+            t1 + RECOVERY_DELAY_SECS + PROPOSAL_WINDOW_SECS
+        )
+    );
+    // The first proposal's eta has passed, the re-proposal's has not.
+    warp_to(&mut t.svm, T0 + RECOVERY_DELAY_SECS);
+    code(
+        send(
+            &mut t.svm,
+            &[&d],
+            &[execute_recovery_ix(&d.pubkey(), &t.ua.pubkey(), &hook_pd())],
+        ),
+        ERR_TIMELOCK_ACTIVE,
+        "at the old eta",
+    );
+    code(
+        send(
+            &mut t.svm,
+            &[&c],
+            &[execute_recovery_ix(&c.pubkey(), &t.ua.pubkey(), &hook_pd())],
+        ),
+        ERR_INVALID_RECOVERY,
+        "the overwritten key",
+    );
+    warp_to(&mut t.svm, t1 + RECOVERY_DELAY_SECS);
+    send(
+        &mut t.svm,
+        &[&d],
+        &[execute_recovery_ix(&d.pubkey(), &t.ua.pubkey(), &hook_pd())],
+    )
+    .expect("at the new eta");
+    assert_eq!(authority(&t.svm), d.pubkey());
+}
+
+/// The Squads v4 `vault_transaction_create` a member sends to stage `inner`
+/// (one instruction, the vault as its only signer); the same byte model as
+/// the registry's `test_platform_recovery.rs` guard.
+fn squads_create_tx_len(inner: &Instruction) -> usize {
+    let mut keys: Vec<Pubkey> = Vec::new();
+    for meta in &inner.accounts {
+        if !keys.contains(&meta.pubkey) {
+            keys.push(meta.pubkey);
+        }
+    }
+    if !keys.contains(&inner.program_id) {
+        keys.push(inner.program_id);
+    }
+    let message =
+        3 + 1 + 32 * keys.len() + 1 + (1 + 1 + inner.accounts.len() + 2 + inner.data.len()) + 1;
+    let data = 8 + 1 + 1 + 4 + message + 1;
+    let outer_keys = 5;
+    1 + 64 + 3 + 1 + 32 * outer_keys + 32 + 1 + (1 + 1 + 4 + 2 + data)
+}
+
+/// Finding 28 (§14.7.6 for the hook): every recovery step fits a Squads
+/// vault transaction, with the vault as the upgrade authority, the recovered
+/// BA or both.
+#[test]
+fn every_hook_recovery_step_fits_a_squads_vault_transaction() {
+    let vault = Pubkey::new_unique();
+    let propose = propose_recovery_ix(&vault, &Pubkey::new_unique(), &hook_pd());
+    assert_eq!(propose.accounts.len(), 6, "propose: 6 metas");
+    assert_eq!(propose.data.len(), 40, "propose data: discriminator + key");
+    let cancel = cancel_recovery_ix(&vault, &vault);
+    assert_eq!(cancel.accounts.len(), 4, "UA cancel: 4 metas");
+    let execute = execute_recovery_ix(&vault, &Pubkey::new_unique(), &hook_pd());
+    assert_eq!(execute.accounts.len(), 7, "execute: 7 metas");
+    let rotate_cancel = cancel_ix(&vault);
+    for (label, ix) in [
+        ("propose", &propose),
+        ("cancel", &cancel),
+        ("execute", &execute),
+        ("cancel rotation", &rotate_cancel),
+    ] {
+        let len = squads_create_tx_len(ix);
+        assert!(len <= 1_232, "{label}: vault_transaction_create is {len} B");
+    }
 }
 
 #[test]

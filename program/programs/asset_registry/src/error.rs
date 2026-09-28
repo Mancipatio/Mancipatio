@@ -323,4 +323,6 @@ pub enum RegistryError {
     InvalidPlatformRecovery,
     #[msg("PAUSE_PAYOUT_MODULES may only be cleared on its own (clear_mask == 0x40)")]
     PayoutModulesClearNotExplicit,
+    #[msg("A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation")]
+    PlatformRecoveryPending,
 }

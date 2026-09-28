@@ -24,6 +24,7 @@ use {
 const ERR_UNAUTHORIZED: u32 = 6001;
 const ERR_INVALID_PROPOSED_AUTHORITY: u32 = 6112;
 const ERR_INVALID_AUTHORITY_TRANSFER: u32 = 6113;
+const ERR_PLATFORM_RECOVERY_PENDING: u32 = 6155;
 
 fn load<D: AccountDeserialize>(svm: &LiteSVM, key: &Pubkey) -> D {
     let account = svm.get_account(key).expect("account");
@@ -253,7 +254,9 @@ fn execute_is_bound_to_the_signer_the_live_super_admin_and_the_live_upgrade_auth
     );
     set_upgrade_authority(&mut svm, &asset_registry::ID, Some(ua.pubkey()));
 
-    // The super admin rotated A -> B: stale (the accept retired it too).
+    // The super admin cannot rotate away from a live recovery: the accept is
+    // refused (findings 1/8/23: otherwise a compromised super admin defeats
+    // the incident build's recovery by rotating to a second key of its own).
     let b = funded(&mut svm);
     send(
         &mut svm,
@@ -263,29 +266,49 @@ fn execute_is_bound_to_the_signer_the_live_super_admin_and_the_live_upgrade_auth
     .unwrap();
     let t1 = now(&svm);
     warp_to(&mut svm, t1 + SUPER_ADMIN_ROTATION_TIMELOCK_SECS);
+    assert_code(
+        send(
+            &mut svm,
+            &[&b],
+            &[accept_platform_admin_ix(&b.pubkey(), &sa.pubkey())],
+        ),
+        ERR_PLATFORM_RECOVERY_PENDING,
+        "a rotation while a recovery is pending",
+    );
+    assert_eq!(
+        load::<PlatformRecovery>(&svm, &platform_recovery()).current_admin,
+        sa.pubkey(),
+        "the recovery stays live"
+    );
+    assert_eq!(load::<Platform>(&svm, &platform_pda()).admin, sa.pubkey());
+
+    // A recovery bound to another super admin (fabricated: no instruction can
+    // produce one any more) is refused by the execute constraint ...
+    let live = svm.get_account(&platform_recovery()).unwrap();
+    let mut stale = live.clone();
+    stale.data[40..72].copy_from_slice(b.pubkey().as_ref());
+    svm.set_account(platform_recovery(), stale).unwrap();
+    assert_code(
+        send(
+            &mut svm,
+            &[&c],
+            &[execute_ix(&c.pubkey(), &sa.pubkey(), &ua.pubkey())],
+        ),
+        ERR_INVALID_PLATFORM_RECOVERY,
+        "a recovery against another super admin",
+    );
+    // ... and does not block a rotation (it is not live).
     let logs = send(
         &mut svm,
         &[&b],
         &[accept_platform_admin_ix(&b.pubkey(), &sa.pubkey())],
     )
-    .unwrap();
-    assert!(logs
-        .iter()
-        .any(|l| l.contains("super-admin recovery retired")));
+    .expect("a stale recovery does not block the rotation");
     assert_eq!(
-        load::<PlatformRecovery>(&svm, &platform_recovery()).current_admin,
-        Pubkey::default()
+        events::<PlatformAdminChanged>(&logs)[0].kind,
+        PlatformAdminChangeKind::Rotation
     );
-    assert_code(
-        send(
-            &mut svm,
-            &[&c],
-            &[execute_ix(&c.pubkey(), &b.pubkey(), &ua.pubkey())],
-        ),
-        ERR_INVALID_PLATFORM_RECOVERY,
-        "the super admin rotated",
-    );
-    // … and back B -> A: the retired recovery never revives.
+    // Back B -> A: a recovery against B would never execute against A.
     send(
         &mut svm,
         &[&b],
@@ -294,21 +317,77 @@ fn execute_is_bound_to_the_signer_the_live_super_admin_and_the_live_upgrade_auth
     .unwrap();
     let t2 = now(&svm);
     warp_to(&mut svm, t2 + SUPER_ADMIN_ROTATION_TIMELOCK_SECS);
-    send(
-        &mut svm,
-        &[&sa],
-        &[accept_platform_admin_ix(&sa.pubkey(), &b.pubkey())],
-    )
-    .unwrap();
     assert_code(
         send(
             &mut svm,
-            &[&c],
-            &[execute_ix(&c.pubkey(), &sa.pubkey(), &ua.pubkey())],
+            &[&sa],
+            &[accept_platform_admin_ix(&sa.pubkey(), &b.pubkey())],
         ),
-        ERR_INVALID_PLATFORM_RECOVERY,
-        "A -> B -> A",
+        ERR_PLATFORM_RECOVERY_PENDING,
+        "the fabricated recovery is live against B",
     );
+}
+
+/// The holder of a key that was not lost cancels the recovery, then rotates.
+#[test]
+fn a_live_recovery_blocks_the_rotation_until_the_super_admin_cancels_it() {
+    let (mut svm, sa, ua) = boot_platform(true);
+    let c = funded(&mut svm);
+    let b = funded(&mut svm);
+    propose(&mut svm, &ua, &c.pubkey());
+    send(
+        &mut svm,
+        &[&sa],
+        &[propose_platform_admin_ix(&sa.pubkey(), &b.pubkey())],
+    )
+    .unwrap();
+    warp_to(&mut svm, T0 + SUPER_ADMIN_ROTATION_TIMELOCK_SECS);
+    assert_code(
+        send(
+            &mut svm,
+            &[&b],
+            &[accept_platform_admin_ix(&b.pubkey(), &sa.pubkey())],
+        ),
+        ERR_PLATFORM_RECOVERY_PENDING,
+        "a rotation while a recovery is pending",
+    );
+    send(
+        &mut svm,
+        &[&sa],
+        &[cancel_platform_recovery_ix(&sa.pubkey(), &ua.pubkey())],
+    )
+    .expect("the super admin cancels the recovery");
+    send(
+        &mut svm,
+        &[&b],
+        &[accept_platform_admin_ix(&b.pubkey(), &sa.pubkey())],
+    )
+    .expect("then the rotation goes through");
+    assert_eq!(load::<Platform>(&svm, &platform_pda()).admin, b.pubkey());
+}
+
+/// While the bootstrap window is open the super admin could otherwise
+/// propose + accept in ONE transaction; a live recovery refuses that too.
+#[test]
+fn a_live_recovery_blocks_a_bootstrap_rotation_in_one_transaction() {
+    let (mut svm, sa, ua) = boot_platform(false);
+    assert!(bootstrap_open(&svm));
+    let c = funded(&mut svm);
+    let b = funded(&mut svm);
+    propose(&mut svm, &ua, &c.pubkey());
+    assert_code(
+        send(
+            &mut svm,
+            &[&sa, &b],
+            &[
+                propose_platform_admin_ix(&sa.pubkey(), &b.pubkey()),
+                accept_platform_admin_ix(&b.pubkey(), &sa.pubkey()),
+            ],
+        ),
+        ERR_PLATFORM_RECOVERY_PENDING,
+        "propose + accept in one bootstrap transaction",
+    );
+    assert_eq!(load::<Platform>(&svm, &platform_pda()).admin, sa.pubkey());
 }
 
 // ── §14.7.4 ──────────────────────────────────────────────────────────────────
@@ -475,4 +554,53 @@ fn every_recovery_step_fits_a_squads_vault_transaction() {
         let len = squads_create_tx_len(ix);
         assert!(len <= 1_232, "{label}: vault_transaction_create is {len} B");
     }
+}
+
+/// Finding 21: a re-proposal overwrites the recovery and restarts BOTH clocks.
+#[test]
+fn a_recovery_re_proposal_restarts_the_seven_day_clock() {
+    let (mut svm, sa, ua) = boot_platform(true);
+    let c = funded(&mut svm);
+    let d = funded(&mut svm);
+    propose(&mut svm, &ua, &c.pubkey());
+    let t1 = T0 + PLATFORM_RECOVERY_DELAY_SECS - 3_600;
+    warp_to(&mut svm, t1);
+    propose(&mut svm, &ua, &d.pubkey());
+    let rec: PlatformRecovery = load(&svm, &platform_recovery());
+    assert_eq!(
+        (rec.new_admin, rec.proposed_at, rec.eta, rec.expires_at),
+        (
+            d.pubkey(),
+            t1,
+            t1 + PLATFORM_RECOVERY_DELAY_SECS,
+            t1 + PLATFORM_RECOVERY_DELAY_SECS + PROPOSAL_WINDOW_SECS
+        )
+    );
+    warp_to(&mut svm, T0 + PLATFORM_RECOVERY_DELAY_SECS);
+    assert_code(
+        send(
+            &mut svm,
+            &[&d],
+            &[execute_ix(&d.pubkey(), &sa.pubkey(), &ua.pubkey())],
+        ),
+        ERR_TIMELOCK_ACTIVE,
+        "at the first proposal's eta",
+    );
+    assert_code(
+        send(
+            &mut svm,
+            &[&c],
+            &[execute_ix(&c.pubkey(), &sa.pubkey(), &ua.pubkey())],
+        ),
+        ERR_INVALID_PLATFORM_RECOVERY,
+        "the overwritten key",
+    );
+    warp_to(&mut svm, t1 + PLATFORM_RECOVERY_DELAY_SECS);
+    send(
+        &mut svm,
+        &[&d],
+        &[execute_ix(&d.pubkey(), &sa.pubkey(), &ua.pubkey())],
+    )
+    .expect("at the re-proposal's eta");
+    assert_eq!(load::<Platform>(&svm, &platform_pda()).admin, d.pubkey());
 }

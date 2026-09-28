@@ -396,17 +396,27 @@ pub mod transfer_hook {
     }
 
     /// The proposed key takes the BlocklistAuthority (before the proposal
-    /// expires). A pending recovery is retired, so an A -> B -> A round trip
-    /// cannot revive it.
+    /// expires). REFUSED while a recovery is pending (`RecoveryPending`): it
+    /// is cancelled first (`cancel_blocklist_recovery`: the current authority
+    /// or the proposing upgrade authority), or it executes.
+    /// A retire here would let a COMPROMISED authority defeat the `incident`
+    /// build's recovery, which it cannot cancel, by rotating to a second key
+    /// of its own in one transaction (propose + accept) before the execute.
+    /// A recovery is always against the live authority (it can only move by
+    /// this accept, which it blocks, or by the execute, which closes it), so
+    /// no A -> B -> A round trip can revive one either.
     pub fn accept_blocklist_authority(ctx: Context<AcceptBlocklistAuthority>) -> Result<()> {
         require!(
             Clock::get()?.unix_timestamp < ctx.accounts.transfer.expires_at,
             HookError::ProposalExpired
         );
-        retire_pending(
-            &ctx.accounts.recovery.to_account_info(),
-            BlocklistRecovery::DISCRIMINATOR,
-        )?;
+        require!(
+            !is_live_recovery(
+                &ctx.accounts.recovery.to_account_info(),
+                &ctx.accounts.blocklist_authority.authority,
+            ),
+            HookError::RecoveryPending
+        );
         ctx.accounts.blocklist_authority.authority = ctx.accounts.new_authority.key();
         msg!(
             "Blocklist operational authority rotated — {}",
@@ -1114,9 +1124,9 @@ pub struct AcceptBlocklistAuthority<'info> {
     #[account(mut, close = new_authority, seeds = [BLOCKLIST_AUTHORITY_PROPOSAL_SEED], bump = transfer.bump,
         constraint = transfer.current_authority == blocklist_authority.authority && transfer.new_authority == new_authority.key() @ HookError::InvalidAuthorityTransfer)]
     pub transfer: Account<'info, BlocklistAuthorityProposal>,
-    /// A pending recovery, always retired here when present (it may not exist).
-    /// CHECK: address pinned by the seeds; `retire_pending` checks the rest.
-    #[account(mut, seeds = [BLOCKLIST_RECOVERY_SEED], bump)]
+    /// A pending recovery (it may not exist); a live one refuses the accept.
+    /// CHECK: address pinned by the seeds; `is_live_recovery` checks the rest.
+    #[account(seeds = [BLOCKLIST_RECOVERY_SEED], bump)]
     pub recovery: UncheckedAccount<'info>,
 }
 
@@ -1199,11 +1209,28 @@ pub struct ExecuteBlocklistRecovery<'info> {
     pub transfer: UncheckedAccount<'info>,
 }
 
-/// Retires a pending `BlocklistAuthorityProposal` / `BlocklistRecovery` when
-/// the BlocklistAuthority moves by the OTHER path: its `current_authority`
-/// (bytes 8..40 in both) becomes the default key, which the live authority
-/// can never equal, so an A -> B -> A round trip cannot revive it. Cancel
-/// still returns the rent. A missing or foreign account is a no-op.
+/// `true` iff `record` is a hook-owned `BlocklistRecovery` proposed against
+/// `authority` (its `current_authority`, bytes 8..40). A missing, foreign or
+/// retired account is not live.
+fn is_live_recovery(record: &AccountInfo, authority: &Pubkey) -> bool {
+    if record.owner != &crate::ID {
+        return false;
+    }
+    match record.try_borrow_data() {
+        Ok(data) => {
+            data.len() >= 40
+                && data[..8] == *BlocklistRecovery::DISCRIMINATOR
+                && data[8..40] == authority.to_bytes()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Retires a pending `BlocklistAuthorityProposal` when the BlocklistAuthority
+/// moves by a recovery: its `current_authority` (bytes 8..40) becomes the
+/// default key, which the live authority can never equal, so an A -> B -> A
+/// round trip cannot revive it. Cancel still returns the rent. A missing or
+/// foreign account is a no-op.
 fn retire_pending(record: &AccountInfo, discriminator: &[u8]) -> Result<()> {
     if record.owner != &crate::ID || record.data_is_empty() {
         return Ok(());
@@ -1494,4 +1521,6 @@ pub enum HookError {
     TimelockActive,
     #[msg("Recovery does not match the current blocklist authority, the executing key or the current upgrade authority")]
     InvalidRecovery,
+    #[msg("A recovery of the blocklist authority is pending; it must be cancelled or executed before a rotation")]
+    RecoveryPending,
 }
