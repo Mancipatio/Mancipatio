@@ -213,6 +213,7 @@ comment on table public.compliance_alerts is
   'AML / sanctions alerts reviewed in /admin/compliance: manual findings, system alarms (0072) and, since 0078, '
   'wallet screening hits against the OFAC SDN list (raise_sanctions_hit). A wallet is screened when it commits, '
   'records a purchase, requests an OTC escrow, lists for resale, applies for or is issued a passport, or submits '
-  'verification; the list is refreshed daily. Holders are not rescreened in batch yet.';
+  'verification, and (alarm worker) when the indexer sees it sign an on-chain buy, OTC offer or take; the list is '
+  'refreshed daily. Holders are not rescreened in batch yet.';
 
 commit;

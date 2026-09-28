@@ -21,9 +21,17 @@
 //     devnet. The alarm worker reports a stale list as an incident
 //     (sanctions-list, lib/server/alarm-checks.ts).
 // The on-chain buy of an Open class cannot be stopped from here (a primary
-// sale mints without the transfer hook): the route that records the
-// purchase screens it and raises the alert, and compliance then blocklists
-// and claws back (runbook). An on-chain check is program work (8.3).
+// sale mints without the transfer hook). Three lines catch it after the
+// fact, none of them depending on the buyer's client: the sale page's
+// pre-check (/api/compliance/screen-wallet) for a buyer who uses the UI; the
+// purchase record, which records the buy and reports a hit
+// (reportSanctionsHits: never a refusal, the buy already landed); and the
+// alarm worker, which screens the signer of every finalized buy, offer and
+// take the indexer sees (lib/server/onchain-screening.ts, also for a script
+// that never touches the site). Compliance then blocklists and claws back
+// (runbook). A wallet on the OFAC list but not yet on the on-chain
+// blocklist passes the program even after 8.3, so the after-the-fact
+// screen stays.
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -264,41 +272,66 @@ export async function screenWallets(
   return { hits, unavailable };
 }
 
+export type HitContext = {
+  route: string;
+  role: ScreenedWallet["role"] | "passport-issue" | "onchain-signer";
+  txSignature?: string | null;
+  /** The transaction already landed (report-only screens): nothing was refused. */
+  landed?: boolean;
+};
+
 /** Opens (or finds) the compliance alert of one hit. Never throws. */
 export async function raiseSanctionsHit(
   sb: SupabaseClient,
   wallet: string,
   matches: readonly SanctionsMatch[],
-  context: { route: string; role: ScreenedWallet["role"] | "passport-issue"; txSignature?: string | null },
+  context: HitContext,
+  network: Network = detectNetwork(),
+): Promise<void> {
+  try {
+    await recordSanctionsHit(sb, wallet, matches, context, network);
+  } catch (err) {
+    console.error("[sanctions] the compliance alert was not raised:", err instanceof Error ? err.message : String(err));
+  }
+}
+
+/**
+ * Opens (or finds) the compliance alert of one hit; THROWS when it could not
+ * be written (a queue that retries needs to know: the alarm worker's
+ * on-chain screen).
+ */
+export async function recordSanctionsHit(
+  sb: SupabaseClient,
+  wallet: string,
+  matches: readonly SanctionsMatch[],
+  context: HitContext,
   network: Network = detectNetwork(),
 ): Promise<void> {
   const first = matches[0];
   const hitList = [...new Set(matches.map((m) => m.hitList))].join("; ").slice(0, 200) || "Sanctions list";
   const summary = `Sanctions screening hit (${hitList}) on ${context.route}: wallet ${wallet.slice(0, 4)}…${wallet.slice(-4)}. ` +
-    "Refused; review in /admin/compliance and prepare the blocklist entry.";
-  try {
-    const { error } = await sb.rpc("raise_sanctions_hit", {
-      p_network: network,
-      p_wallet: wallet,
-      p_source: first?.source ?? "sanctions",
-      p_hit_list: hitList,
-      p_summary: summary.slice(0, 500),
-      p_tx_signature: context.txSignature ?? null,
-      p_evidence: {
-        screening: "wallet-address",
-        route: context.route,
-        role: context.role,
-        tx_signature: context.txSignature ?? null,
-        matches: matches.map((m) => ({
-          provider: m.provider, list: m.hitList, currency: m.currency ?? null,
-          entry_uid: m.entryUid ?? null, entry_name: m.entryName ?? null, programs: m.programs ?? [],
-        })),
-      },
-    });
-    if (error) console.error("[sanctions] the compliance alert was not raised:", error.code ?? error.message);
-  } catch (err) {
-    console.error("[sanctions] the compliance alert was not raised:", err instanceof Error ? err.message : String(err));
-  }
+    (context.landed
+      ? "The transaction already landed: review in /admin/compliance, blocklist, then claw back (runbook)."
+      : "Refused; review in /admin/compliance and prepare the blocklist entry.");
+  const { error } = await sb.rpc("raise_sanctions_hit", {
+    p_network: network,
+    p_wallet: wallet,
+    p_source: first?.source ?? "sanctions",
+    p_hit_list: hitList,
+    p_summary: summary.slice(0, 500),
+    p_tx_signature: context.txSignature ?? null,
+    p_evidence: {
+      screening: "wallet-address",
+      route: context.route,
+      role: context.role,
+      tx_signature: context.txSignature ?? null,
+      matches: matches.map((m) => ({
+        provider: m.provider, list: m.hitList, currency: m.currency ?? null,
+        entry_uid: m.entryUid ?? null, entry_name: m.entryName ?? null, programs: m.programs ?? [],
+      })),
+    },
+  });
+  if (error) throw new Error(`raise_sanctions_hit failed (${error.code ?? "no code"})`);
 }
 
 /**
@@ -319,6 +352,40 @@ export async function requireSanctionsClear(sb: SupabaseClient, input: Screening
     await raiseSanctionsHit(sb, wallet, matches, { route: input.route, role, txSignature: input.txSignature }, network);
   }
   throw new SiwsError(403, selfHit ? SCREENING_SELF_HIT : SCREENING_COUNTERPARTY_HIT);
+}
+
+/**
+ * Report-only screening of something that ALREADY happened (a buy that
+ * landed on-chain): the alert of every hit is raised (with the
+ * transaction), nothing is refused. `retryLater` is true when a provider
+ * could not answer where the screen fails closed (mainnet): the caller must
+ * screen again later (the alarm worker's job retries; the purchase record
+ * leaves it to that job). `strict` makes a failed alert write throw
+ * (recordSanctionsHit) instead of only logging it.
+ */
+export async function reportSanctionsHits(
+  sb: SupabaseClient,
+  input: { route: string; wallets: readonly { wallet: string; role: HitContext["role"] }[]; txSignature?: string | null },
+  opts: { strict?: boolean } = {},
+): Promise<{ hits: string[]; retryLater: boolean }> {
+  const network = detectNetwork();
+  let result: ScreeningResult;
+  try {
+    result = await screenWallets(sb, input.wallets.map((w) => w.wallet), { network });
+  } catch (err) {
+    if (err instanceof SiwsError && err.status === 503) return { hits: [], retryLater: true };
+    throw err;
+  }
+  const raised = new Set<string>();
+  for (const { wallet, role } of input.wallets) {
+    const matches = result.hits.get(wallet);
+    if (!matches || raised.has(wallet)) continue;
+    raised.add(wallet);
+    const context: HitContext = { route: input.route, role, txSignature: input.txSignature, landed: true };
+    if (opts.strict) await recordSanctionsHit(sb, wallet, matches, context, network);
+    else await raiseSanctionsHit(sb, wallet, matches, context, network);
+  }
+  return { hits: [...raised], retryLater: false };
 }
 
 /** Every provider's state, for /admin/compliance and the alarm check. */

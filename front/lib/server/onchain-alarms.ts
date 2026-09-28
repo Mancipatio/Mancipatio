@@ -11,6 +11,11 @@
 // the onchain_event_jobs queue: a finalized getTransaction, the alarms and
 // ledger jobs written FIRST, the job completed after; an exhausted deadline
 // stays pending and is never written as a verdict; job rows hold fixed codes.
+// The same job screens the signers of the entries the platform does not
+// mediate (a buy, an OTC offer or take) against the sanctions lists
+// (lib/server/onchain-screening.ts, 8.5): a hit is a compliance alert with
+// the transaction; a list that cannot answer on mainnet keeps the job
+// pending (SANCTIONS_UNAVAILABLE) until it can.
 
 import "server-only";
 import {
@@ -97,6 +102,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { PAUSE_FLAGS_ALL, describePausedAreas, formatPauseFlags } from "@/lib/pause-flags";
 import { USDC } from "@/lib/payment-mints";
 import { decodeRegistryEvent, type EventValue } from "@/lib/server/onchain-events";
+import { screenTransactionParties } from "@/lib/server/onchain-screening";
 import { finalizedTransaction } from "@/lib/server/sale-capacity-chain";
 import { raiseSystemAlert, type Severity } from "@/lib/server/system-alerts";
 import { transactionInvocations, type AttributedInvocation, type InvocationTx } from "@/lib/server/tx-invocations";
@@ -656,8 +662,19 @@ export async function processEventJob(
     return retry("DB_UNAVAILABLE", backoff(job.attempts));
   }
   if (signal.aborted || Date.now() >= deadlineMs) return "pending";
+  // The signers of unmediated entries, screened after the fact (idempotent:
+  // one open alert per wallet). A list that cannot answer on mainnet keeps
+  // the job pending; a failed alert write retries like any effect above.
+  let screened: { hits: number } | "retry";
+  try {
+    screened = await screenTransactionParties(sb, job.signature, tx);
+  } catch {
+    return retry("DB_UNAVAILABLE", backoff(job.attempts));
+  }
+  if (screened === "retry") return retry("SANCTIONS_UNAVAILABLE", backoff(job.attempts));
+  if (signal.aborted || Date.now() >= deadlineMs) return "pending";
   await writeJob(sb, job, {
-    status: "complete", alerts: result.alarms.length, attempts: job.attempts + 1,
+    status: "complete", alerts: result.alarms.length + screened.hits, attempts: job.attempts + 1,
     last_error: result.issues.length ? result.issues[0] : null,
   }, signal);
   return "complete";

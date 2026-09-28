@@ -267,6 +267,37 @@ describe("runSanctionsRefresh", () => {
     expect(failures).toEqual([{ p_source: OFAC_SDN_SOURCE, p_error: code }]);
   });
 
+  it("caps a body without a content-length while it streams (TOO_LARGE, the rest never read)", async () => {
+    let pulls = 0;
+    let cancelled = false;
+    const endless = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        pulls += 1;
+        controller.enqueue(new Uint8Array(1024));
+      },
+      cancel() {
+        cancelled = true;
+      },
+    });
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const result = await runSanctionsRefresh({
+      sb: db.ref!.client as never,
+      fetchImpl: (async () => new Response(endless, { status: 200 })) as never,
+      maxBytes: 8 * 1024,
+    });
+    error.mockRestore();
+    expect(result).toMatchObject({ status: "failed", error: "TOO_LARGE" });
+    expect(pulls).toBeLessThan(20);
+    expect(cancelled).toBe(true);
+    expect(failures).toEqual([{ p_source: OFAC_SDN_SOURCE, p_error: "TOO_LARGE" }]);
+    // Under the cap, a chunked body is read whole.
+    const ok = await runSanctionsRefresh({
+      sb: db.ref!.client as never,
+      fetchImpl: (async () => new Response(new Blob([FIXTURE]).stream(), { status: 200 })) as never,
+    });
+    expect(ok).toMatchObject({ status: "processed", addresses: 3 });
+  });
+
   it("the scheduler's route needs the worker credential", async () => {
     const post = (authorization?: string) =>
       internalRefresh(new Request("https://manci.test/api/internal/sanctions", { method: "POST", headers: authorization ? { authorization } : {} }));

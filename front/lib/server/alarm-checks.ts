@@ -58,9 +58,13 @@
 // heartbeat that has not recorded a run (after that a heartbeat whose every
 // plan or confirm call fails is judged by the age like any other); low
 // severity in observe mode (never emailed), medium in on.
-// sanctions-list (0078, 8.5): the OFAC SDN list the screened routes trust is
-// older than 3 days or not loaded; high and failing on mainnet (the routes
-// refuse), holding (nothing opens) elsewhere.
+// sanctions-list (0078, 8.5): the OFAC SDN list the screened routes trust.
+// Unusable (older than 3 days, empty, never loaded): high and failing on
+// mainnet (the routes refuse). Before that, an early warning while the
+// routes still work: the last refresh attempt failed, or the list is older
+// than 36 hours (the daily job missed a run, or is disabled): medium and
+// failing on mainnet, so ops hears of it a day or more before the routes
+// stop. Elsewhere both hold (nothing opens).
 // indexer-reconcile-age (0075, low): the last full reconcile is older than
 // reconcile_max_age_hours (default 168). Not a freshness condition: the
 // heartbeat keeps proving from its watermarks; a reconcile also catches what
@@ -95,7 +99,7 @@ import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, ty
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
-import { listProblem } from "@/lib/server/sanctions";
+import { listProblem, SANCTIONS_MAX_LIST_AGE_MS } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
 import { flattenInvocations, hasInvocationMeta, resolveAccountKeys, type InvocationTx } from "@/lib/server/tx-invocations";
@@ -286,12 +290,17 @@ async function retryHeartbeat(sb: SupabaseClient, network: Network, now: number,
     evidence: { last_ok_seconds: Number.isFinite(age) ? Math.round(age) : null } };
 }
 
+/** The age after which a list still in use is an early warning (a daily job that missed a run). */
+export const SANCTIONS_WARN_LIST_AGE_MS = 36 * 3_600_000;
+
 /**
  * sanctions-list (8.5): the screening list the routes trust must be younger
  * than 3 days and not empty (lib/server/sanctions.ts). On mainnet the routes
- * refuse without it, so a stale list is a high incident; elsewhere the
- * screen only warns and the check holds (nothing opens). Null when the state
- * cannot be read (a check that could not run).
+ * refuse without it, so an unusable list is a high incident; a failed last
+ * refresh or a list older than 36 hours is a medium one first (the routes
+ * still work: time to fix the job). Elsewhere the screen only warns and the
+ * check holds (nothing opens). Null when the state cannot be read (a check
+ * that could not run).
  */
 export async function sanctionsListReport(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report | null> {
   const { data, error } = await sb.from("sanctions_list_state")
@@ -307,19 +316,29 @@ export async function sanctionsListReport(sb: SupabaseClient, network: Network, 
     published_on: string | null; last_attempt_at: string | null;
   } | null;
   const problem = listProblem(row ? { ...row } : null, row?.address_count ?? 0, now);
-  const ageHours = row?.refreshed_at ? Math.round((now - Date.parse(row.refreshed_at)) / 3_600_000) : null;
+  const ageMs = row?.refreshed_at ? now - Date.parse(row.refreshed_at) : null;
+  const ageHours = ageMs !== null && Number.isFinite(ageMs) ? Math.round(ageMs / 3_600_000) : null;
+  // The early warning: still usable, but the refresh is failing or late.
+  const lastFailed = row?.last_status === "failed";
+  const late = ageMs !== null && ageMs > SANCTIONS_WARN_LIST_AGE_MS;
+  const warning = !problem && (lastFailed || late);
+  const hoursLeft = ageMs !== null ? Math.max(0, Math.round((SANCTIONS_MAX_LIST_AGE_MS - ageMs) / 3_600_000)) : null;
+  const mainnet = network === "mainnet";
   return {
     check: "sanctions-list",
-    state: !problem ? "pass" : network === "mainnet" ? "fail" : "hold",
-    severity: network === "mainnet" ? "high" : "low",
+    state: !problem && !warning ? "pass" : mainnet ? "fail" : "hold",
+    severity: !mainnet ? "low" : warning ? "medium" : "high",
     category: "worker", source: "worker:sanctions-list",
-    summary: !problem
-      ? "The sanctions screening list is current"
-      : problem === "LIST_STALE"
+    summary: problem
+      ? problem === "LIST_STALE"
         ? `The sanctions screening list was last refreshed ${ageHours} hours ago: screened routes refuse on mainnet`
-        : "The sanctions screening list is not loaded: screened routes refuse on mainnet",
+        : "The sanctions screening list is not loaded: screened routes refuse on mainnet"
+      : warning
+        ? `The sanctions screening list ${lastFailed ? `did not refresh (last attempt failed: ${row?.last_error ?? "no code"})` : `was last refreshed ${ageHours} hours ago`}: screened routes refuse on mainnet in about ${hoursLeft} hours`
+        : "The sanctions screening list is current",
     evidence: {
-      problem, published_on: row?.published_on ?? null, age_hours: ageHours, address_count: row?.address_count ?? null,
+      problem, warning: warning ? (lastFailed ? "LAST_REFRESH_FAILED" : "LIST_LATE") : null,
+      published_on: row?.published_on ?? null, age_hours: ageHours, address_count: row?.address_count ?? null,
       last_status: row?.last_status ?? null, last_error: row?.last_error ?? null,
     },
   };

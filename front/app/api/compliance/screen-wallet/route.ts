@@ -9,8 +9,11 @@
 // answers only about the caller's own wallet, and its one write is the
 // compliance alert of a hit, deduplicated per wallet). 200 when clear; 403
 // on a hit (the alert is raised); 503 on mainnet while the list is unusable
-// (lib/server/sanctions.ts). The program remains the only on-chain control;
-// a wallet that skips the UI is caught at the purchase record.
+// (lib/server/sanctions.ts). This covers a buy made through the UI only. The
+// program remains the only on-chain control; a wallet that skips the UI (its
+// own script, no purchase record) is caught after the fact by the alarm
+// worker, which screens the signer of every finalized buy the indexer sees
+// (lib/server/onchain-screening.ts).
 //
 // Client wrapper: screenOwnWallet() in lib/compliance.ts.
 
