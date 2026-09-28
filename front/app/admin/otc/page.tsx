@@ -35,6 +35,7 @@ import {
   listOtcRequests,
   loadOtcDeals,
   archiveOtcDealRecord,
+  waitForFinalizedDeal,
   withArchivedOtcDeals,
   TOKEN_2022_PROGRAM,
   type LoadedOtcDeal,
@@ -540,7 +541,7 @@ function OtcEscrowAdmin() {
    */
   async function createContract(req: OtcRequest) {
     if (!wallet || !conn.wallet) return;
-    const pendingId = toast.showPending(
+    let pendingId = toast.showPending(
       `Creating escrow for ${req.asset_label || "share class"}…`,
     );
     try {
@@ -610,6 +611,12 @@ function OtcEscrowAdmin() {
         shareClass: req.share_class_pda as Address,
         dealId,
       });
+      // The route reads the deal at finalized before it flips the request
+      // (G2): wait for finality here, with unsigned reads, so the one signed
+      // flip below does not arrive early.
+      toast.dismiss(pendingId);
+      pendingId = toast.showPending("Escrow created — waiting for finality before notifying the parties…");
+      await waitForFinalizedDeal(rpc, dealPda);
       // Signed + admin-gated route; decided_by/at are stamped server-side and
       // the server notifies both parties (email when known + in-app rows). If
       // this fails the on-chain deal already exists — surface it loudly so the

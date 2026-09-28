@@ -182,6 +182,33 @@ export async function adminUpdateOtcRequest(
 }
 
 /**
+ * Waits until the just-created deal is visible at finalized — the commitment
+ * /api/otc/admin-update reads before it flips a request to `created` (G2).
+ * Unsigned reads only (no wallet prompt): `attempts` × `intervalMs`, one
+ * minute by default. True once the account exists at finalized.
+ */
+export async function waitForFinalizedDeal(
+  rpc: SolanaClient["runtime"]["rpc"],
+  dealPda: Address,
+  opts: { attempts?: number; intervalMs?: number } = {},
+): Promise<boolean> {
+  const attempts = opts.attempts ?? 20;
+  const intervalMs = opts.intervalMs ?? 3_000;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      const info = await rpc
+        .getAccountInfo(dealPda, { commitment: "finalized", encoding: "base64" })
+        .send({ abortSignal: AbortSignal.timeout(10_000) });
+      if (info.value) return true;
+    } catch {
+      // A failed read counts as "not yet".
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+  return false;
+}
+
+/**
  * 2D: archive a terminal deal's on-chain record (deal.admin only; the server
  * re-reads it at finalized) BEFORE its rent is reclaimed, and close any linked
  * request. Throws on failure: never reclaim a deal whose history did not land.

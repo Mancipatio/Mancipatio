@@ -4,7 +4,9 @@
 // Stores the submitted details (client_verification_details, service role
 // only), links or provisions the wallet's dossier, requests the matching
 // document checklist and returns the /onboarding upload link. An individual
-// KYC also files the passport request the /admin/kyc queue works from.
+// KYC also files the passport request the /admin/kyc queue works from,
+// except a founder's (`purpose: "founder"`, sent by /verify?next=/apply):
+// raising needs a verified dossier, not an investor passport (sim gap G5).
 // Verification itself stays a compliance decision in the admin console.
 
 import { NextResponse } from "next/server";
@@ -68,10 +70,17 @@ export async function POST(request: Request) {
     const wallet = actor.kind === "wallet" ? actor.wallet : null;
     const actorKey = wallet ?? `account:${actor.kind === "account" ? actor.accountId : ""}`;
     for (const key of Object.keys(params)) {
+      if (key === "purpose") continue;
       if (!(DETAIL_KEYS as readonly string[]).includes(key)) throw new SiwsError(400, `Unknown field: ${key}`);
     }
     const kind = params.kind;
     if (kind !== "kyc" && kind !== "kyb") throw new SiwsError(400, "kind must be kyc or kyb");
+    // Why the individual verifies (sim gap G5). A founder's KYC (/apply) is
+    // for raising and needs no investor passport; everything else (convert,
+    // delivery, KYC-gated classes) does. Not stored: a founder who later
+    // wants a passport verifies from the portfolio card, which files it.
+    const purpose = params.purpose ?? "investor";
+    if (purpose !== "investor" && purpose !== "founder") throw new SiwsError(400, "purpose must be investor or founder");
     const ip = clientIpOf(request);
     if (rateLimited(`verification:ip:${ip}`, 10, 60_000) || rateLimited(`verification:owner:${actorKey}`, 6, 3_600_000)) {
       throw new SiwsError(429, "Too many submissions — try again later");
@@ -164,7 +173,7 @@ export async function POST(request: Request) {
         "Requested with your identity (KYC) verification.", "system:verification-kyc");
     }
 
-    if (!isKyb && wallet) {
+    if (!isKyb && wallet && purpose === "investor") {
       // One undecided passport request per wallet feeds the /admin/kyc queue.
       // A wallet-less account gets its request when it adds a wallet.
       const { data: open } = await sb.from("passport_requests").select("id")

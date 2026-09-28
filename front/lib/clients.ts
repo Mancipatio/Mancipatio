@@ -843,19 +843,21 @@ export async function reviewRequirement(
   session: WalletSession | null | undefined,
   id: number,
   status: "approved" | "rejected",
-): Promise<{ ok: boolean; recomputed: ClientKycStatus | null }> {
+  /** Rejections only: why, emailed to the client with the replacement request. */
+  reason?: string,
+): Promise<{ ok: boolean; recomputed: ClientKycStatus | null; notified: boolean }> {
   try {
-    const data = await signedFetch<{ status: string; recomputed: ClientKycStatus | null }>(
+    const data = await signedFetch<{ status: string; recomputed: ClientKycStatus | null; notified?: boolean }>(
       session,
       "/api/clients/review-requirement",
       "clients.review-requirement",
-      { id, status },
+      status === "rejected" && reason?.trim() ? { id, status, reason: reason.trim() } : { id, status },
     );
     notifyAdminBadges();
-    return { ok: true, recomputed: data?.recomputed ?? null };
+    return { ok: true, recomputed: data?.recomputed ?? null, notified: data?.notified === true };
   } catch (err) {
     console.warn("[kyc_req] review failed:", err);
-    return { ok: false, recomputed: null };
+    return { ok: false, recomputed: null, notified: false };
   }
 }
 
