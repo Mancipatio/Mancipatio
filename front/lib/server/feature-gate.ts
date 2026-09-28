@@ -1,10 +1,18 @@
 // SERVER-ONLY — the API half of lib/features.ts. The UI hides a feature that
 // is off on this network; the routes behind it call requireFeature() so a
-// hand-crafted signed request cannot reach it either.
+// hand-crafted signed request cannot reach it either. Pilot-scope modules
+// (lib/features.ts pilotModules) work the same way through requireModule().
 
 import "server-only";
 
-import { featureDisabledMessage, features, type FeatureName } from "@/lib/features";
+import {
+  featureDisabledMessage,
+  features,
+  moduleDisabledMessage,
+  moduleEnabled,
+  type FeatureName,
+  type PilotModule,
+} from "@/lib/features";
 import { RaiseType } from "@/lib/generated/asset_registry";
 import { SiwsError } from "@/lib/server/siws";
 
@@ -12,6 +20,17 @@ import { SiwsError } from "@/lib/server/siws";
 export function requireFeature(name: FeatureName): void {
   if (!features()[name]) {
     throw new SiwsError(403, featureDisabledMessage(name));
+  }
+}
+
+/**
+ * Throws a 403 SiwsError when the pilot-scope module is switched off. Called
+ * by the module's ENTRY routes only (new requests, listings, deals, plans);
+ * exits of existing positions stay open.
+ */
+export function requireModule(name: PilotModule): void {
+  if (!moduleEnabled(name)) {
+    throw new SiwsError(403, moduleDisabledMessage(name));
   }
 }
 

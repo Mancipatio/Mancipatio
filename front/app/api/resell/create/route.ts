@@ -13,6 +13,7 @@
 // may receive a KycGated class is enforced on-chain at settlement.
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { requireAcceptedTos } from "@/lib/server/tos-gate";
@@ -28,6 +29,8 @@ const CURRENCIES = new Set(["USDC", "USDT", "SOL", "EUR"]);
 
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the secondaryTrading module.
+    requireModule("secondaryTrading");
     const { wallet, params } = await verifySigned(request, "resell.create");
 
     // Compliance screen, not a KYC gate: no client profile or KYC is needed

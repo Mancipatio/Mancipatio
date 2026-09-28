@@ -224,6 +224,15 @@ describe("G2: otc.adminUpdate created only for this request's Open deal at final
     expect((await call(otcAdminUpdate, { id: REQUEST_ID, deal_pda: dealPda })).status).toBe(400);
   });
 
+  it("pilot scope: with secondary trading off (mainnet default) no escrow is marked open; declining still works", async () => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    const refused = await flip();
+    expect(refused.status).toBe(403);
+    expect(refused.body.error).toMatch(/not available in the pilot/);
+    expect(request().status).toBe("requested");
+    expect((await call(otcAdminUpdate, { id: REQUEST_ID, status: "cancelled", decide: true })).status).toBe(200);
+  });
+
   it("the write is a compare-and-set: a decision landing in between wins", async () => {
     db.ref!.beforeUpdate = (table) => {
       if (table === "otc_requests") request().status = "cancelled";

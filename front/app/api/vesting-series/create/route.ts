@@ -5,6 +5,7 @@
 // the on-chain series.
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { requireVerifiedClient } from "@/lib/server/kyc-gate";
@@ -15,6 +16,8 @@ import { validateSeriesForm } from "../_lib";
 
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the vesting module.
+    requireModule("vesting");
     const { wallet, params } = await verifySigned(
       request,
       "vesting-series.create",

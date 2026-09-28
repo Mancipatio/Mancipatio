@@ -32,6 +32,13 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE` | Public, build | `false` until the lawyer signs off D13 | ignored (on) | Off on mainnet | `lib/features.ts` |
+| `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | pilot: leave unset (off); see "Pilot scope" | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_RIGHTS` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
+| `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | `sb_secret_…` of the mainnet project (runtime refuses anything else) | secret key | Server database access fails | `lib/supabase-server.ts` |
 | `SESSION_SECRET` | Secret | ≥ 32 characters, new for mainnet (guard `session-secret`) | set | Wallet and account sessions off (every read signs) | `lib/server/siws-session.ts`, account sessions |
 | `RETRY_WORKER_SECRET` | Secret | ≥ 32, new; the same value as Vault `mancipatio_retry_worker_mainnet` | set | Retry and alarm workers refuse every call | `lib/server/retry-worker.ts` |
@@ -84,6 +91,37 @@ build. On mainnet a flag is off unless it reads as on. Decisions for the
 owner before the mainnet build: `ISSUER_ROTATION=true` (recommended),
 `PASSPORT_CLOSE=false` until D13, `STARTUP_RAISES` and `PAYOUT_AIRDROP`
 explicitly on or off.
+
+### Pilot scope (module switches)
+
+The mainnet pilot is closed and narrow: primary sales of one issuer's
+Mature class in USDC. Every other product module has a switch
+(`lib/features.ts` `pilotModules`, same spellings and build guard as the
+flags above). **On mainnet a module is off unless its variable reads as
+on; on devnet, testnet and localnet it is on unless it reads as off**
+(`=false` rehearses the pilot scope on devnet).
+
+| Module | Variable | Entry routes that answer 403 when off | Pages |
+|---|---|---|---|
+| Secondary trading (OTC deals, offers, resell board) | `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | `/api/otc/create`, `/api/otc/admin-screen`, `/api/otc/admin-update` (status `created`), `/api/resell/create` | `/marketplace/otc`, `/markets/resell` (notice only); `/portfolio/offers`, `/deals`, `/listings`, `/admin/otc`, `/admin/resell` (notice above the page) |
+| Governance | `NEXT_PUBLIC_FEATURE_GOVERNANCE` | none (on-chain only) | `/marketplace/governance`, `/portfolio/governance` (notice only); `/admin/governance` |
+| Vesting series | `NEXT_PUBLIC_FEATURE_VESTING` | `/api/vesting-series/create`, `/prepare-creation`, `/admin-review` | `/portfolio/vesting`, `/issuer/vesting-series`, `/admin/vesting` |
+| Rights-Token issuances | `NEXT_PUBLIC_FEATURE_RIGHTS` | `/api/vesting/create` (the rights builder) | `/portfolio/rights` (with distributions), `/admin/rights` |
+| Distributions | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | `/api/distribution-plans/prepare`, `/bind` | `/portfolio/rights` (with rights) |
+| Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `/portfolio/conversion`, `/admin/custody` (with delivery) |
+| Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | `/portfolio/delivery`, `/admin/custody` (with conversion) |
+
+Off means: the entry routes answer 403 with "…: not available in the pilot
+on Solana mainnet." before any work, the navigation, section tabs and
+marketplace cards hide the module, and its pages carry that notice
+(`lib/pilot-scope.ts`, rendered by `AppShell`). Exits of existing positions
+stay open everywhere (cancels, withdrawals, deal declines and archives,
+claims, refunds, custody returns), like the program's emergency pause.
+Payout airdrops (`PAYOUT_AIRDROP`) and Startup raises (`STARTUP_RAISES`)
+keep their own flags; admin payout records (`/api/payouts/create`) are not
+gated. The switches are the platform's scope; the program's pause bits are
+the on-chain one (runbook: which bits the pilot keeps set), and
+`lib/pause-gate.ts` reads those before a wallet signs.
 
 ## Supabase
 

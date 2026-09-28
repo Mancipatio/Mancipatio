@@ -10,6 +10,7 @@ import { detectNetwork } from "@/lib/network";
 // client sees them in their issuer console).
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { requireSupportedVestingMint } from "@/lib/server/vesting-mint-gate";
@@ -20,6 +21,8 @@ const DECISIONS = new Set(["approved", "needs_changes", "rejected"]);
 
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the vesting module.
+    requireModule("vesting");
     const { wallet, params } = await verifySigned(
       request,
       "vesting-series.admin-review",

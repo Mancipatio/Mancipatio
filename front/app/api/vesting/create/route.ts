@@ -12,6 +12,7 @@
 // (action "vesting.create").
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
@@ -47,6 +48,8 @@ function optDate(v: unknown, name: string): string | null {
 
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the rights module.
+    requireModule("rights");
     const { wallet, params } = await verifySigned(request, "vesting.create");
     await requireAdmin(wallet);
 

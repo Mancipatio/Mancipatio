@@ -1,5 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { address } from "@solana/kit";
 import {
   findSeriesPda,
@@ -19,6 +20,8 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 /** SIWS binds the request id AND the reviewed terms hash before any wallet transaction. */
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the vesting module.
+    requireModule("vesting");
     const { wallet, params } = await verifySigned(
       request,
       "vesting-series.prepare-creation",

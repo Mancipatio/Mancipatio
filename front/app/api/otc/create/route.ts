@@ -28,6 +28,7 @@
 // fail closed (503) on RPC trouble, as in /api/resell/create.
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { requireAcceptedTos } from "@/lib/server/tos-gate";
@@ -109,6 +110,10 @@ export async function POST(request: Request) {
     // checks below (Talas 4.2 §3.3).
     const network = detectNetwork();
     assertAllowedPaymentMint(network, paymentMint);
+    // Pilot scope (lib/features.ts): secondary trading is a module switch,
+    // checked once the request itself is valid and before any chain read
+    // or write.
+    requireModule("secondaryTrading");
 
     // The other party of a platform-mediated deal gets the same suspension
     // screen. Generic copy: the requester is not told the counterparty's

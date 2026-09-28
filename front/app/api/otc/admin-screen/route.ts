@@ -16,6 +16,7 @@
 // Fails closed: a lookup error is a 500, never "cleared".
 
 import { NextResponse } from "next/server";
+import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { clientIsSuspended } from "@/lib/server/kyc-gate";
@@ -26,6 +27,8 @@ type PartyScreen = "clear" | "suspended";
 
 export async function POST(request: Request) {
   try {
+    // Pilot scope (lib/features.ts): an entry route of the secondaryTrading module.
+    requireModule("secondaryTrading");
     const { wallet, params } = await verifySigned(request, "otc.adminScreen");
     await requireAdmin(wallet);
 

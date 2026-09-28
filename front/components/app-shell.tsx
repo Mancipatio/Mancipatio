@@ -11,6 +11,8 @@ import { detectNetwork, networkLabel } from "@/lib/network";
 import { features } from "@/lib/features";
 import { operatorFor, operatorFooterLine } from "@/lib/legal/operator";
 import { tosGateMounted } from "@/lib/tos";
+import { moduleRouteState, navHrefVisible } from "@/lib/pilot-scope";
+import { PilotModuleNotice } from "@/components/pilot-module-notice";
 
 const primary = [
   { href: "/", label: "Overview", icon: IconHome },
@@ -104,14 +106,22 @@ export function AppShell({ children, section = "overview" }: {
     document.body.style.overflow = "hidden";
     return () => { document.removeEventListener("keydown", onKey); desktop.removeEventListener("change", onViewportChange); document.body.style.overflow = originalOverflow; };
   }, [menuOpen]);
-  const tabs = section === "portfolio" ? portfolioTabs : section === "issuer" ? issuerTabs : section === "marketplace" ? marketTabs : null;
+  // Pilot scope (lib/pilot-scope.ts): tabs and menu entries of switched-off
+  // modules are hidden; a module page gets its notice, or only the notice.
+  const allTabs = section === "portfolio" ? portfolioTabs : section === "issuer" ? issuerTabs : section === "marketplace" ? marketTabs : null;
+  const tabs = allTabs?.filter(([href]) => navHrefVisible(href)) ?? null;
   const network = detectNetwork();
+  const moduleState = moduleRouteState(path, network);
+  const gated = moduleState?.disabled === true && moduleState.route.mode === "gate";
+  const page = moduleState && moduleState.off.length > 0
+    ? <><PilotModuleNotice state={moduleState} gate={gated} />{gated ? null : children}</>
+    : children;
   // The operator, its registration details and licence (lib/legal/operator.ts);
   // null on the devnet pilot, which has no operating company yet.
   const operatorLine = operatorFooterLine(operatorFor(network), new Date().getFullYear());
   // Existing holder and issuer pages own their main landmark.
   const Content = section === "portfolio" || section === "issuer" ? "div" : "main";
-  const navItems = (items: typeof primary) => items.map(({ href, label, icon: Icon }) => (
+  const navItems = (items: typeof primary) => items.filter(({ href }) => navHrefVisible(href, network)).map(({ href, label, icon: Icon }) => (
     <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined}
       className={`app-nav-link ${activePath(path, href) ? "is-active" : ""}`}>
       <Icon className="h-[18px] w-[18px]" /><span>{label}</span>
@@ -147,7 +157,7 @@ export function AppShell({ children, section = "overview" }: {
         {path !== "/" && <div className="app-floating-account"><AccountMenu /></div>}
         {tabs && <nav className="app-section-tabs" aria-label={`${section} pages`}>{tabs.map(([href, label]) => <Link key={href} href={href} aria-current={activePath(path, href) ? "page" : undefined} className={activePath(path, href) ? "is-active" : ""}>{label}</Link>)}</nav>}
         <Content id="app-content" tabIndex={-1} className={`app-content app-content--${section}`}>
-          {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{children}</div> : children}
+          {section === "marketplace" || section === "application" ? <div data-mx className="app-market-content">{page}</div> : page}
         </Content>
         <footer className="app-footer"><span>Manci <span className="app-footer-dot">·</span> Real-world assets on Solana</span><div><Link href="/risks">Risks</Link><Link href="/legal/terms">Terms</Link><Link href="/legal/company">Company &amp; licence</Link><Link href="/contact">Support ↗</Link></div>{operatorLine && <p className="app-footer-operator">{operatorLine}</p>}</footer>
       </div>

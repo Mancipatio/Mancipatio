@@ -20,6 +20,7 @@
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
+import { requireModule } from "@/lib/server/feature-gate";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { archiveOtcDeal } from "@/lib/server/otc-archive";
@@ -148,6 +149,9 @@ export async function POST(request: Request) {
       }
     }
     if (patch.status === "created") {
+      // Pilot scope: opening an escrow is an entry of secondary trading;
+      // declining, cancelling and archiving stay open.
+      requireModule("secondaryTrading");
       if (row.status === "created") {
         // A retried flip of the same deal is a no-op; another deal is refused.
         if (patch.deal_pda === row.deal_pda) {
