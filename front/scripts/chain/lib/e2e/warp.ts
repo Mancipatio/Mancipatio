@@ -7,22 +7,27 @@
  * runs (its RPC port must be CHAIN_RPC_URL's); anything else gets no warp and
  * the time-bound steps are recorded as not run.
  *
- * The Clock sysvar across a warp (Agave 4.2.2, measured on this validator,
- * so the loop measures instead of predicting):
+ * The Clock sysvar across a warp (Agave 4.2.2, measured on this validator):
  *
- * - a warp INSIDE the current epoch jumps the clock (about 0.4 s per slot
- *   the first time, about 0.19 s per slot once the clock runs ahead of the
- *   wall clock), and the clock then usually STOPS: the next votes carry
- *   wall-clock time, far behind it, until its drift floor catches up (hours
- *   for a day's jump);
+ * - a restart re-anchors the epoch's start timestamp to the clock it resumes
+ *   with, while the epoch's first slot stays; a warp to slot S of an epoch
+ *   ≥ 1 then lands at about `clock + 0.1875 s × (S − epoch's first slot)`
+ *   (0.187–0.188 in every run). So the jump depends on how far S is from
+ *   the epoch's START, not from the current slot: late in an epoch even the
+ *   smallest warp moves the clock by weeks (a 48 h grant then expires);
  * - a warp to an epoch past the leader-schedule epoch has no stakes to
- *   estimate a time from: the clock keeps its value, which becomes the new
- *   epoch's start, and it runs again from there (a "reset", no jump).
+ *   estimate a time from: the clock keeps its value and moves again from
+ *   there (a "reset", no jump);
+ * - in epoch 0 of a fresh ledger a warp follows the votes instead (about
+ *   0.4 s per slot from the last vote) and the clock then stops, the next
+ *   votes carrying wall-clock time far behind it.
  *
- * So one move is: while short and moving, a jump inside the epoch sized
- * from the rate the last jump showed; once there (or stopped), a reset.
- * Done means the target is reached AND the clock moves (the groups wait
- * short gaps out in real time). The clock never goes back.
+ * So a move is a reset (unless the clock moves and its epoch has barely
+ * started), then one jump from the fresh epoch's start sized at the rate
+ * jumps have shown, repeated until the target is reached with the clock
+ * moving (the groups wait short gaps out in real time). The clock never
+ * goes back; a remaining shortfall takes another reset and jump, an
+ * overshoot stays within the rate's spread.
  */
 import { spawn } from "node:child_process";
 import path from "node:path";
@@ -44,8 +49,10 @@ const RESET_EPOCHS = BigInt(3);
 const MAX_WARPS = 12;
 /** Clock seconds per slot, in micro-units (bigint arithmetic). */
 const MICRO = BigInt(1_000_000);
-/** The first jump's assumed rate: the lower one measured, so a first guess overshoots at most about 2×. */
-export const DEFAULT_RATE_MICRO = BigInt(190_000);
+/** Clock seconds per slot from the epoch's first slot, measured on Agave 4.2.2 (updated by every jump). */
+export const DEFAULT_RATE_MICRO = BigInt(187_500);
+/** A jump starts only this close to its epoch's first slot (a reset brings it there). */
+const FRESH_EPOCH_SLOTS = BigInt(50_000);
 const MIN_RATE_MICRO = BigInt(50_000);
 /** How long the loop watches the clock to see whether it moves. */
 const MOVING_PROBE_MS = 12_000;
@@ -70,35 +77,39 @@ export function decodeClock(data: Uint8Array): ClockState {
 
 export type WarpPlan = { kind: "done" } | { kind: "jump"; slot: bigint } | { kind: "reset"; slot: bigint };
 
+/** The first slot of `epoch` (no warmup). */
+export function firstSlotOf(schedule: EpochSchedule, epoch: bigint): bigint {
+  return schedule.firstNormalSlot + (epoch - schedule.firstNormalEpoch) * schedule.slotsPerEpoch;
+}
+
 /**
  * The next warp towards `target` (pure; see the header): done once the clock
- * is there and moving; a reset when it has stopped (or the epoch has no room
- * left); else a jump of (target + margin − now) / rate slots, at most to the
- * epoch's end (a longer move takes several rounds).
+ * is there and moving; a reset when it has stopped, in epoch 0, or when its
+ * epoch is no longer fresh; else a jump to the slot of the fresh epoch
+ * whose clock is (target + margin) at `rateMicro` per slot from the epoch's
+ * first slot, at most to the epoch's end.
  */
 export function planWarp(input: { clock: ClockState; moving: boolean; schedule: EpochSchedule; target: bigint; rateMicro: bigint }): WarpPlan {
   const { clock, schedule } = input;
   if (schedule.warmup && clock.slot < schedule.firstNormalSlot) {
     throw new ChainPlanError("A warp needs a validator without warmup epochs (e2e-localnet.sh genesis)");
   }
-  const length = schedule.slotsPerEpoch;
-  const first = schedule.firstNormalSlot + (clock.epoch - schedule.firstNormalEpoch) * length;
-  const reset: WarpPlan = { kind: "reset", slot: first + RESET_EPOCHS * length };
+  const first = firstSlotOf(schedule, clock.epoch);
+  const reset: WarpPlan = { kind: "reset", slot: first + RESET_EPOCHS * schedule.slotsPerEpoch };
   if (!input.moving) return reset;
   if (clock.unixTimestamp >= input.target) return { kind: "done" };
+  if (clock.epoch === BigInt(0) || clock.slot - first > FRESH_EPOCH_SLOTS) return reset;
   const rate = input.rateMicro > MIN_RATE_MICRO ? input.rateMicro : MIN_RATE_MICRO;
-  const jump = clock.slot + ceilDiv((input.target + WARP_MARGIN_S - clock.unixTimestamp) * MICRO, rate);
+  const jump = first + ceilDiv((input.target + WARP_MARGIN_S - clock.unixTimestamp) * MICRO, rate);
   const slot = jump > clock.slot + SLOT_GUARD ? jump : clock.slot + SLOT_GUARD;
-  const last = first + length - SLOT_GUARD;
-  if (slot < last) return { kind: "jump", slot };
-  // Too far for this epoch: as far as it goes (the next rounds reset and go on), or a reset at its end.
-  return last > clock.slot + SLOT_GUARD ? { kind: "jump", slot: last } : reset;
+  const last = first + schedule.slotsPerEpoch - SLOT_GUARD;
+  return { kind: "jump", slot: slot < last ? slot : last };
 }
 
-/** The rate a jump showed (micro-seconds of clock per slot), or null when it moved nothing. */
-export function observedRate(before: ClockState, after: ClockState): bigint | null {
-  if (after.slot <= before.slot || after.unixTimestamp <= before.unixTimestamp) return null;
-  return ((after.unixTimestamp - before.unixTimestamp) * MICRO) / (after.slot - before.slot);
+/** The rate a jump showed from its epoch's first slot (micro-seconds of clock per slot), or null. */
+export function observedRate(before: ClockState, after: ClockState, firstSlot: bigint): bigint | null {
+  if (after.slot <= firstSlot || after.unixTimestamp <= before.unixTimestamp) return null;
+  return ((after.unixTimestamp - before.unixTimestamp) * MICRO) / (after.slot - firstSlot);
 }
 
 const EPOCH_SCHEDULE_SYSVAR = "SysvarEpochSchedu1e111111111111111111111111" as Address;
@@ -227,7 +238,7 @@ export function localnetWarp(input: {
       input.log(
         plan.kind === "jump"
           ? `warp   ${label}: ${target - clock.unixTimestamp} s of chain time short; jumping to slot ${plan.slot}`
-          : `warp   ${label}: ${moving ? "the jump does not fit this epoch" : "the clock stopped"}; resetting it at slot ${plan.slot}`,
+          : `warp   ${label}: ${moving ? "a fresh epoch first" : "the clock stopped"}; resetting it at slot ${plan.slot}`,
       );
       const result = await runScript(script, ["warp", plan.slot.toString()], input.frontDir, input.env, input.signal);
       if (result.status !== 0) {
@@ -235,7 +246,7 @@ export function localnetWarp(input: {
       }
       input.log(`warp   ${tail(result.stdout, 1)}`);
       if (plan.kind === "jump") {
-        const rate = observedRate(clock, await readClock("finalized"));
+        const rate = observedRate(clock, await readClock("finalized"), firstSlotOf(schedule, clock.epoch));
         if (rate !== null) rateMicro = rate;
       }
     }

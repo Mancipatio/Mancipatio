@@ -158,50 +158,53 @@ describe("localnet warp", () => {
   const flat = { slotsPerEpoch: L, warmup: false, firstNormalEpoch: BigInt(0), firstNormalSlot: BigInt(0) };
   const GENESIS = BigInt(1_790_000_000);
 
-  it("jumps inside the epoch by (target + margin − now) / rate slots while the clock moves", () => {
-    const clock = { slot: BigInt(4_000), epoch: BigInt(0), epochStartTimestamp: GENESIS, unixTimestamp: GENESIS + BigInt(1_600) };
-    const target = clock.unixTimestamp + BigInt(90_000);
-    const plan = planWarp({ clock, moving: true, schedule: flat, target, rateMicro: DEFAULT_RATE_MICRO });
-    // 90,300 s at 0.19 s per slot.
-    expect(plan).toEqual({ kind: "jump", slot: BigInt(4_000) + BigInt(475_264) });
-    // A reached target is done; a near one still moves the slot guard (2,000 slots) past the current slot.
-    expect(planWarp({ clock, moving: true, schedule: flat, target: clock.unixTimestamp - BigInt(299), rateMicro: DEFAULT_RATE_MICRO })).toEqual({
-      kind: "done",
-    });
-    expect(planWarp({ clock, moving: true, schedule: flat, target: clock.unixTimestamp + BigInt(1), rateMicro: BigInt(400_000) })).toEqual({
-      kind: "jump",
-      slot: BigInt(6_000),
+  it("resets first: in epoch 0, when the clock stopped, or when its epoch is no longer fresh", () => {
+    const reset = { kind: "reset", slot: BigInt(3) * L };
+    // A fresh ledger in epoch 0 (the clock follows the votes there).
+    const epoch0 = { slot: BigInt(4_000), epoch: BigInt(0), epochStartTimestamp: GENESIS, unixTimestamp: GENESIS + BigInt(1_600) };
+    expect(planWarp({ clock: epoch0, moving: true, schedule: flat, target: epoch0.unixTimestamp + BigInt(90_000), rateMicro: DEFAULT_RATE_MICRO })).toEqual(reset);
+    // Stopped after a jump: a reset, whether or not the target is reached.
+    const stopped = { slot: BigInt(310_000), epoch: BigInt(0), epochStartTimestamp: GENESIS, unixTimestamp: GENESIS + BigInt(120_000) };
+    expect(planWarp({ clock: stopped, moving: false, schedule: flat, target: GENESIS + BigInt(90_000), rateMicro: DEFAULT_RATE_MICRO })).toEqual(reset);
+    expect(planWarp({ clock: stopped, moving: false, schedule: flat, target: GENESIS + BigInt(500_000), rateMicro: DEFAULT_RATE_MICRO })).toEqual(reset);
+    // 14M slots into epoch 6: even the smallest warp there would move the clock by weeks.
+    const late = { slot: BigInt(134_190_798), epoch: BigInt(6), epochStartTimestamp: GENESIS, unixTimestamp: GENESIS + BigInt(9_000_000) };
+    expect(planWarp({ clock: late, moving: true, schedule: flat, target: late.unixTimestamp + BigInt(604_800), rateMicro: DEFAULT_RATE_MICRO })).toEqual({
+      kind: "reset",
+      slot: BigInt(9) * L,
     });
   });
 
-  it("resets a stopped clock with a warp to the epoch after next; a jump goes at most to the epoch's end; done only when there and moving", () => {
-    const stopped = { slot: BigInt(310_000), epoch: BigInt(0), epochStartTimestamp: GENESIS, unixTimestamp: GENESIS + BigInt(120_000) };
-    const reset = { kind: "reset", slot: BigInt(3) * L };
-    expect(planWarp({ clock: stopped, moving: false, schedule: flat, target: GENESIS + BigInt(90_000), rateMicro: DEFAULT_RATE_MICRO })).toEqual(reset);
-    expect(planWarp({ clock: stopped, moving: false, schedule: flat, target: GENESIS + BigInt(500_000), rateMicro: DEFAULT_RATE_MICRO })).toEqual(reset);
-    expect(planWarp({ clock: stopped, moving: true, schedule: flat, target: GENESIS + BigInt(90_000), rateMicro: DEFAULT_RATE_MICRO })).toEqual({ kind: "done" });
-    // 60 days at 0.19 s per slot (27.3M slots) do not fit in a 20M-slot epoch: as far as it goes.
-    const fresh = { slot: BigInt(3) * L + BigInt(500), epoch: BigInt(3), epochStartTimestamp: stopped.unixTimestamp, unixTimestamp: stopped.unixTimestamp + BigInt(90) };
+  it("jumps from a fresh epoch's first slot by (target + margin − now) / rate slots; done only when there and moving", () => {
+    const fresh = { slot: BigInt(3) * L + BigInt(450), epoch: BigInt(3), epochStartTimestamp: GENESIS, unixTimestamp: GENESIS + BigInt(100_000) };
+    // 7 days + the margin at 0.1875 s per slot: 3,227,200 slots from the epoch's first slot.
+    expect(planWarp({ clock: fresh, moving: true, schedule: flat, target: fresh.unixTimestamp + BigInt(604_800), rateMicro: DEFAULT_RATE_MICRO })).toEqual({
+      kind: "jump",
+      slot: BigInt(3) * L + BigInt(3_227_200),
+    });
+    // A near target still clears the slot guard; a far one stops at the epoch's end.
+    expect(planWarp({ clock: fresh, moving: true, schedule: flat, target: fresh.unixTimestamp + BigInt(1), rateMicro: DEFAULT_RATE_MICRO })).toEqual({
+      kind: "jump",
+      slot: fresh.slot + BigInt(2_000),
+    });
     expect(planWarp({ clock: fresh, moving: true, schedule: flat, target: fresh.unixTimestamp + BigInt(60 * 86_400), rateMicro: DEFAULT_RATE_MICRO })).toEqual({
       kind: "jump",
       slot: BigInt(4) * L - BigInt(2_000),
     });
-    // With no room left in the epoch: a reset.
-    const late = { ...fresh, slot: BigInt(4) * L - BigInt(3_000) };
-    expect(planWarp({ clock: late, moving: true, schedule: flat, target: fresh.unixTimestamp + BigInt(86_400), rateMicro: DEFAULT_RATE_MICRO })).toEqual({
+    expect(planWarp({ clock: fresh, moving: true, schedule: flat, target: fresh.unixTimestamp - BigInt(1), rateMicro: DEFAULT_RATE_MICRO })).toEqual({ kind: "done" });
+    expect(planWarp({ clock: fresh, moving: false, schedule: flat, target: fresh.unixTimestamp - BigInt(1), rateMicro: DEFAULT_RATE_MICRO })).toEqual({
       kind: "reset",
       slot: BigInt(6) * L,
     });
-    // At the rate a first jump showed (0.4 s per slot) they fit.
-    expect(planWarp({ clock: fresh, moving: true, schedule: flat, target: fresh.unixTimestamp + BigInt(60 * 86_400), rateMicro: BigInt(400_000) }).kind).toBe("jump");
   });
 
-  it("learns the rate a jump showed", () => {
-    const before = { slot: BigInt(60_000_534), epoch: BigInt(3), epochStartTimestamp: BigInt(0), unixTimestamp: BigInt(1_790_742_348) };
-    const after = { ...before, slot: BigInt(62_017_334), unixTimestamp: BigInt(1_791_126_495) };
-    expect(observedRate(before, after)).toBe(BigInt(190_473));
-    expect(observedRate(before, { ...after, unixTimestamp: before.unixTimestamp })).toBeNull();
-    expect(observedRate(before, before)).toBeNull();
+  it("learns the rate a jump showed from its epoch's first slot", () => {
+    // The G8 jump of the first full run: 2,780,825 s over 14,830,996 slots from slot 120M.
+    const before = { slot: BigInt(134_190_798), epoch: BigInt(6), epochStartTimestamp: BigInt(0), unixTimestamp: BigInt(1_800_361_269) };
+    const after = { ...before, slot: BigInt(134_830_996), unixTimestamp: BigInt(1_803_142_094) };
+    expect(observedRate(before, after, BigInt(120_000_000))).toBe(BigInt(187_500));
+    expect(observedRate(before, { ...after, unixTimestamp: before.unixTimestamp }, BigInt(120_000_000))).toBeNull();
+    expect(observedRate(before, after, after.slot)).toBeNull();
   });
 
   it("decodes the Clock and EpochSchedule sysvars; a warmup schedule is refused", () => {
