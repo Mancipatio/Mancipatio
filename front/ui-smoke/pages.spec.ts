@@ -15,12 +15,22 @@ const NO_H1: Record<string, string> = {
   "/login/email": "We could not sign you in.",
 };
 
+/** Where a mainnet page may say "devnet" on purpose (stripped before the check). */
+const DEVNET_MENTIONS: Record<string, RegExp> = {
+  // The disclosure policy asks researchers to test on devnet.
+  "/security": /Test only on devnet or with your own/g,
+};
+
+/** A module the build switches off (pilot scope, lib/features.ts) replaces
+ *  its page with a notice instead of a heading. */
+const MODULE_OFF = /not available in the pilot on Solana|not enabled on Solana mainnet/;
+
 const walletGate = (page: Page) => page.locator("section.wallet-access-card");
 
 async function settle(page: Page, route: SmokeRoute) {
   const ready = NO_H1[route.pattern]
     ? page.getByRole("heading", { name: NO_H1[route.pattern] })
-    : page.locator("h1:visible, section.wallet-access-card").first();
+    : page.locator("h1:visible, section.wallet-access-card").or(page.getByText(MODULE_OFF)).first();
   await expect(ready).toBeVisible();
   // Let the page's own effects run (chain reads, API reads) so an error they
   // cause lands inside this test.
@@ -49,7 +59,8 @@ for (const route of ROUTES) {
     }
 
     if (NETWORK === "mainnet") {
-      expect(await page.locator("body").innerText(), "devnet wording on a mainnet page").not.toMatch(/devnet/i);
+      const text = (await page.locator("body").innerText()).replace(DEVNET_MENTIONS[route.pattern] ?? /$^/, "");
+      expect(text, "devnet wording on a mainnet page").not.toMatch(/devnet/i);
     }
   });
 }
