@@ -32,6 +32,7 @@ import {
   KycStatus,
   type AuthorityTransfer,
   type KycEntry,
+  type KycRegistry,
 } from "@/lib/generated/asset_registry";
 import {
   fetchMaybeTransferHookConfig,
@@ -334,6 +335,47 @@ export function isPassportExpired(
   nowSec: number,
 ): boolean {
   return Number(expiry) <= nowSec;
+}
+
+// ── The buyer's verdict on a KycGated sale page ──────────────────────────────
+
+export type BuyerPassportVerdict = { eligible: boolean; reason: string };
+
+/**
+ * What the launchpad sale page shows a buyer of a KycGated class (lansiranje-7):
+ * the same three checks as the program's `receiver_kyc_outcome` (Approved,
+ * expiry > now — expiry 0 is always expired — and the jurisdiction bit
+ * approved and not blocked), worded for the buyer. Without a passport the buy
+ * is refused before any wallet prompt; an unreadable registry fails CLOSED.
+ * Pure: the page reads the entry and the registry, this decides.
+ */
+export function buyerPassportVerdict(
+  entry: Pick<KycEntry, "status" | "expiry" | "jurisdiction"> | null,
+  registry: { exists: true; data: Pick<KycRegistry, "approvedJurisdictions" | "blockedJurisdictions"> } | { exists: false },
+  nowSec: number,
+): BuyerPassportVerdict {
+  const expired = entry ? isPassportExpired(entry.expiry, nowSec) : true;
+  const jurisdictionOk =
+    entry && registry.exists
+      ? bitmapHasCode(registry.data.approvedJurisdictions, entry.jurisdiction) &&
+        !bitmapHasCode(registry.data.blockedJurisdictions, entry.jurisdiction)
+      : false;
+  const eligible = entry !== null && entry.status === KycStatus.Approved && !expired && jurisdictionOk;
+  let reason = "";
+  if (!entry) {
+    reason = "Your wallet does not have an investor passport on this registry.";
+  } else if (entry.status === KycStatus.Pending) {
+    reason = "Your passport is pending review. Check back once it is approved.";
+  } else if (entry.status === KycStatus.Revoked) {
+    reason = "Your investor passport has been revoked.";
+  } else if (entry.status === KycStatus.Expired || expired) {
+    reason = "Your investor passport has expired. Please reapply.";
+  } else if (!registry.exists) {
+    reason = "Could not read this sale's KYC registry — please try again.";
+  } else if (!jurisdictionOk) {
+    reason = `Your passport's jurisdiction (${countryName(String(entry.jurisdiction).padStart(3, "0"))}) is not approved for this sale.`;
+  }
+  return { eligible, reason };
 }
 
 // ── Receiver-eligibility pre-check ────────────────────────────────────────────

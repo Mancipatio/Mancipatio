@@ -32,13 +32,7 @@ import {
   RestrictionMode,
 } from "@/lib/generated/transfer_hook";
 import { loadSalePaymentDecimals } from "@/lib/transaction-builders";
-import {
-  bitmapHasCode,
-  fetchPassport,
-  isPassportExpired,
-  KycStatus,
-} from "@/lib/passport";
-import { countryName } from "@/lib/countries";
+import { buyerPassportVerdict, fetchPassport } from "@/lib/passport";
 import {
   buildDocumentedPurchase,
   waitForPurchasePreparation,
@@ -392,48 +386,14 @@ export default function DealPage({
           fetchMaybeKycRegistry(client.runtime.rpc, registry),
         ]);
         if (!cancelled) {
-          const nowSec = Math.floor(Date.now() / 1000);
-          // Chain semantics: valid only while expiry > now, so expiry == 0 is
-          // ALWAYS expired — never "no expiry" (isPassportExpired).
-          const expired = entry
-            ? isPassportExpired(entry.expiry, nowSec)
-            : true;
-          const jurisdictionOk =
-            entry && maybeRegistry.exists
-              ? bitmapHasCode(
-                  maybeRegistry.data.approvedJurisdictions,
-                  entry.jurisdiction,
-                ) &&
-                !bitmapHasCode(
-                  maybeRegistry.data.blockedJurisdictions,
-                  entry.jurisdiction,
-                )
-              : // Registry unreadable → cannot mirror the bitmap check.
-                // Fail CLOSED: this client-side gate is the only live
-                // protection until the new program build is deployed.
-                false;
-          const eligible =
-            entry !== null &&
-            entry.status === KycStatus.Approved &&
-            !expired &&
-            jurisdictionOk;
-          let reason = "";
-          if (!entry) {
-            reason =
-              "Your wallet does not have an investor passport on this registry.";
-          } else if (entry.status === KycStatus.Pending) {
-            reason =
-              "Your passport is pending review. Check back once it is approved.";
-          } else if (entry.status === KycStatus.Revoked) {
-            reason = "Your investor passport has been revoked.";
-          } else if (entry.status === KycStatus.Expired || expired) {
-            reason = "Your investor passport has expired. Please reapply.";
-          } else if (!maybeRegistry.exists) {
-            reason =
-              "Could not read this sale's KYC registry — please try again.";
-          } else if (!jurisdictionOk) {
-            reason = `Your passport's jurisdiction (${countryName(String(entry.jurisdiction).padStart(3, "0"))}) is not approved for this sale.`;
-          }
+          // Chain semantics (expiry 0 is always expired; an unreadable
+          // registry fails CLOSED): lib/passport.ts buyerPassportVerdict,
+          // unit-tested in tests/kyc-gated-buyer.test.ts.
+          const { eligible, reason } = buyerPassportVerdict(
+            entry,
+            maybeRegistry,
+            Math.floor(Date.now() / 1000),
+          );
           setEligibility({ gated: true, eligible, reason });
           setEligibilityChecked(true);
         }
