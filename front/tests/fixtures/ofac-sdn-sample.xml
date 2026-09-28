@@ -1,0 +1,108 @@
+<?xml version="1.0" standalone="yes"?>
+<sdnList xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns="https://sanctionslistservice.ofac.treas.gov/api/PublicationPreview/exports/XML">
+  <publshInformation>
+    <Publish_Date>09/23/2026</Publish_Date>
+    <Record_Count>4</Record_Count>
+  </publshInformation>
+  <sdnEntry>
+    <uid>36</uid>
+    <lastName>FIXTURE AIRLINES</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>CUBA</program>
+    </programList>
+    <akaList>
+      <aka>
+        <uid>12</uid>
+        <type>a.k.a.</type>
+        <category>strong</category>
+        <lastName>FIXTURE-AERO</lastName>
+      </aka>
+    </akaList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>90001</uid>
+    <firstName>Fixture</firstName>
+    <lastName>PERSON ONE</lastName>
+    <sdnType>Individual</sdnType>
+    <programList>
+      <program>CYBER2</program>
+      <program>ILLICIT-DRUGS-EO14059</program>
+    </programList>
+    <idList>
+      <id>
+        <uid>190001</uid>
+        <idType>Passport</idType>
+        <idNumber>X0000001</idNumber>
+      </id>
+      <id>
+        <uid>190002</uid>
+        <idType>Digital Currency Address - SOL</idType>
+        <idNumber>6t3xLqAFPZoE4mzWzxabrKxK8cGoHxAmaCj3MigJpWh5</idNumber>
+      </id>
+      <id>
+        <uid>190003</uid>
+        <idType>Digital Currency Address - XBT</idType>
+        <idNumber>37fKFZQGMqdBkjSUub1jCDWGgSHwv9VxfZ</idNumber>
+      </id>
+      <id>
+        <uid>190004</uid>
+        <idType>Digital Currency Address - ETH</idType>
+        <idNumber>0xc103b7dc095c904b92081eef0c1640081ec01c10</idNumber>
+      </id>
+      <id>
+        <uid>190005</uid>
+        <idType>Digital Currency Address - SOL</idType>
+        <idNumber>not-a-solana-address</idNumber>
+      </id>
+    </idList>
+    <akaList>
+      <aka>
+        <uid>90002</uid>
+        <type>a.k.a.</type>
+        <category>weak</category>
+        <lastName>ALIAS SHOULD NOT BE THE NAME</lastName>
+      </aka>
+    </akaList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>90010</uid>
+    <lastName>FIXTURE EXCHANGE &amp; CO. LTD</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>RUSSIA-EO14024</program>
+    </programList>
+    <idList>
+      <id>
+        <uid>190010</uid>
+        <idType>Digital Currency Address - USDC</idType>
+        <idNumber>8yY7nAbZip1FPakFXDh5sTsxhXnxKdSMo4D8Zybf6GbQ</idNumber>
+      </id>
+      <id>
+        <uid>190011</uid>
+        <idType>Digital Currency Address - TRX</idType>
+        <idNumber>TCu5onCzXuqxjvVzdB2tR4FLuF66d4yRqf</idNumber>
+      </id>
+      <id>
+        <uid>190012</uid>
+        <idType>Digital Currency Address - SOL</idType>
+        <idNumber> B52HDW2t44DGiPVz3UoZtbFsakcKeSUH8CQaQpKeoxWZ </idNumber>
+      </id>
+    </idList>
+  </sdnEntry>
+  <sdnEntry>
+    <uid>90020</uid>
+    <lastName>FIXTURE DUPLICATE HOLDER</lastName>
+    <sdnType>Entity</sdnType>
+    <programList>
+      <program>SDGT</program>
+    </programList>
+    <idList>
+      <id>
+        <uid>190020</uid>
+        <idType>Digital Currency Address - SOL</idType>
+        <idNumber>6t3xLqAFPZoE4mzWzxabrKxK8cGoHxAmaCj3MigJpWh5</idNumber>
+      </id>
+    </idList>
+  </sdnEntry>
+</sdnList>

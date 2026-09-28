@@ -15,8 +15,10 @@
 // Compliance screen kept (refuseSuspendedClient): the platform mediates this
 // deal (an admin opens the escrow), so it refuses a request when EITHER
 // party's dossier has been SUSPENDED by compliance — a sanctions / fraud /
-// investigation decision, not missing KYC. The counterparty refusal is
-// generic and does not name the status. The screen is repeated right before
+// investigation decision, not missing KYC — and, since 8.5, when either
+// wallet is on a sanctions list (lib/server/sanctions.ts: 403 and a
+// compliance alert; 503 on mainnet while the list is stale). The
+// counterparty refusal is generic and does not name the status. The screen is repeated right before
 // the escrow is opened (/api/otc/admin-screen, called by the admin OTC page),
 // because a party can be suspended while the request waits in the queue.
 //
@@ -120,7 +122,7 @@ export async function POST(request: Request) {
     // compliance status.
     const counterparty = wallet === sellerWallet ? buyerWallet : sellerWallet;
     try {
-      await refuseSuspendedClient(sb, counterparty, "trading");
+      await refuseSuspendedClient(sb, counterparty, "trading", "counterparty");
     } catch (err) {
       if (err instanceof SiwsError && err.status === 403) {
         throw new SiwsError(

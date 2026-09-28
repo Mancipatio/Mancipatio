@@ -14,6 +14,7 @@ import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { readActor } from "@/lib/server/account-auth";
 import { boundedRequest } from "@/lib/server/bounded-request";
 import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
+import { requireSanctionsClear } from "@/lib/server/sanctions";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { clientIpOf, DEGRADED_TTL_MESSAGE, insertNote, ipRateLimitKey, rateLimited } from "../../clients/_helpers";
@@ -131,6 +132,11 @@ export async function POST(request: Request) {
     };
 
     const sb = getSupabaseAdmin();
+    // Sanctions screen of the signing wallet (8.5, lib/server/sanctions.ts):
+    // 403 and a compliance alert on a hit, fail closed on mainnet. An email
+    // or Google account without a wallet has no address to screen here; its
+    // wallet is screened wherever it later transacts.
+    if (wallet) await requireSanctionsClear(sb, { route: "verification/submit", wallets: [{ wallet, role: "self" }] });
     // The on-chain passport jurisdiction is the residence (KYC) or the
     // company's country (KYB); both must be in the approved set.
     const jurisdiction = isKyb ? details.company_country! : residence;

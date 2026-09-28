@@ -10,12 +10,17 @@ import { SkeletonTable } from "@/components/skeleton";
 import {
   ALERT_CATEGORIES,
   createAlert,
+  getSanctionsStatus,
+  isScreeningHit,
   listAlertsPage,
+  refreshSanctionsList,
   resolveAlert,
   type AlertCategoryFilter,
   type AlertSeverity,
   type AlertStatus,
   type ComplianceAlert,
+  type SanctionsListStatus,
+  type SanctionsStatus,
 } from "@/lib/compliance";
 import { listClients, type ClientRow } from "@/lib/clients";
 import { useToast } from "@/lib/toast";
@@ -76,9 +81,11 @@ export default function CompliancePage() {
           AML & sanctions alerts
         </h1>
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
-          Daily screening results, manually tagged events and SAR-relevant
-          activity. Resolve each alert with a written reason — it lands in the
-          audit timeline of the linked client.
+          Wallet screening hits against the OFAC SDN list (checked when a
+          wallet commits, buys, trades, lists, applies for or is issued a
+          passport, or verifies; the list is refreshed daily), manually tagged
+          events and system alarms. Resolve each alert with a written reason —
+          it lands in the audit timeline of the linked client.
         </p>
       </div>
       <RequireRole role="admin">
@@ -172,6 +179,8 @@ function ComplianceOps() {
 
   return (
     <div className="mt-8 space-y-6">
+      <SanctionsListPanel />
+
       {/* KPI tiles */}
       <section className="grid gap-3 sm:grid-cols-3">
         <Kpi
@@ -304,8 +313,8 @@ function ComplianceOps() {
               : "No alerts in this view."}
           </p>
           <p className="mt-1 text-xs text-slate-400">
-            Use &quot;+ Tag activity&quot; to record a manual finding. Daily
-            sanctions screening cron will fill this in production.
+            Use &quot;+ Tag activity&quot; to record a manual finding. Wallet
+            screening hits (OFAC SDN) appear here on their own.
           </p>
         </div>
       ) : (
@@ -478,9 +487,10 @@ function ComplianceOps() {
       )}
 
       <p className="text-xs text-slate-400">
-        SAR (Suspicious Activity Report) export and sanctions-list update
-        tracking arrive once we wire a screening provider. CSV export above
-        gives you the raw rows for now.
+        The baseline screen is the OFAC SDN list only (no EU/UN lists, no
+        batch rescreening of holders, no risk scoring); a paid provider plugs
+        into the same screen. SAR (Suspicious Activity Report) export arrives
+        with it. CSV export above gives you the raw rows for now.
       </p>
     </div>
   );
@@ -584,6 +594,132 @@ function AlertDetail({
             Open client record →
           </Link>
         </p>
+      )}
+
+      {isScreeningHit(alert) && alert.wallet && (
+        <div className="mt-4 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-900" data-blocklist-proposal>
+          <p className="text-[11px] font-semibold uppercase tracking-wider text-red-700">
+            Proposed next step: on-chain blocklist
+          </p>
+          <p className="mt-1">
+            The request was refused. To stop this wallet from moving any Manci
+            token, the BlocklistAuthority adds it to the on-chain blocklist
+            (add_to_blocklist). Nothing is sent from this page: the link below
+            opens the blocklist page with the wallet filled in, where the
+            BlocklistAuthority reviews and signs. Then, if the wallet already
+            holds units, follow the clawback procedure in the runbook.
+          </p>
+          <p className="mt-2">
+            <Link
+              href={`/admin/blocklist?wallet=${encodeURIComponent(alert.wallet)}`}
+              className="font-medium text-red-800 underline-offset-2 hover:underline"
+            >
+              Prepare the blocklist entry for {alert.wallet.slice(0, 6)}…{alert.wallet.slice(-4)} →
+            </Link>
+          </p>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * The sanctions screening lists (8.5, lib/server/sanctions.ts): the loaded
+ * publication, when it was refreshed, whether the screened routes refuse
+ * while it is unusable, and a manual refresh (the daily job's own run).
+ */
+function SanctionsListPanel() {
+  const conn = useWalletConnection();
+  const toast = useToast();
+  const [status, setStatus] = useState<SanctionsStatus | null | undefined>(undefined);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!conn.wallet) return;
+    try {
+      setStatus(await getSanctionsStatus(conn.wallet));
+    } catch {
+      setStatus(null);
+    }
+  }, [conn.wallet]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
+
+  async function refreshNow() {
+    if (!conn.wallet) return;
+    setBusy(true);
+    try {
+      const outcome = await refreshSanctionsList(conn.wallet);
+      if (outcome.status === "processed") {
+        toast.show({
+          kind: "success",
+          title: "Sanctions list refreshed",
+          description: `OFAC SDN of ${outcome.publishedOn}: ${outcome.addresses} Solana address(es).`,
+        });
+      } else {
+        toast.showError("Refresh failed", `The previous list stays in force (${outcome.error}).`);
+      }
+      await load();
+    } catch (err) {
+      toast.showError("Refresh failed", err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  const TONE: Record<SanctionsListStatus["state"], string> = {
+    fresh: "border-emerald-200 bg-emerald-50 text-emerald-800",
+    stale: "border-red-200 bg-red-50 text-red-800",
+    empty: "border-red-200 bg-red-50 text-red-800",
+    "never-loaded": "border-red-200 bg-red-50 text-red-800",
+    unreadable: "border-red-200 bg-red-50 text-red-800",
+  };
+
+  return (
+    <section className="rounded-xl border border-slate-200 bg-white p-4 shadow-card" data-sanctions-lists>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Wallet screening lists</p>
+          <p className="mt-1 text-[13px] text-slate-600">
+            {status
+              ? status.enforcement === "fail-closed"
+                ? `Screened routes refuse while a list is older than ${status.maxAgeHours} hours or empty (Solana ${status.network}).`
+                : `Solana ${status.network}: an unusable list is only logged; hits are still refused.`
+              : "Checked on every commit, purchase record, OTC request, resell listing, passport and verification."}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void refreshNow()}
+          disabled={busy || !conn.wallet}
+          className="rounded-lg border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-50 disabled:opacity-50"
+        >
+          {busy ? "Refreshing…" : "Refresh now"}
+        </button>
+      </div>
+      {status === undefined ? (
+        <p className="mt-3 text-xs text-slate-400">Loading…</p>
+      ) : status === null ? (
+        <p className="mt-3 text-xs text-red-700">The list state could not be read.</p>
+      ) : (
+        <ul className="mt-3 space-y-2 text-sm">
+          {status.lists.map((l) => (
+            <li key={l.provider} className="flex flex-wrap items-center gap-2">
+              <span className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${TONE[l.state]}`}>
+                {l.state}
+              </span>
+              <span className="font-medium text-slate-800">{l.source === "ofac-sdn" ? "OFAC SDN" : l.source}</span>
+              <span className="text-xs text-slate-500">
+                published {l.publishedOn ?? "—"} · refreshed {l.refreshedAt ? new Date(l.refreshedAt).toLocaleString() : "never"} ·{" "}
+                {l.addressCount ?? 0} Solana address(es)
+                {l.lastStatus === "failed" && l.lastError ? ` · last attempt failed (${l.lastError})` : ""}
+              </span>
+            </li>
+          ))}
+        </ul>
       )}
     </section>
   );

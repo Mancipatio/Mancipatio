@@ -34,6 +34,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "compliance.list",
   // Which of N wallets have an unresolved alert — addresses only (issue gate).
   "compliance.openWallets",
+  // The sanctions lists' freshness: dates, counts and codes (8.5).
+  "compliance.sanctionsStatus",
   "conversion.adminList",
   "conversion.listMine",
   "delivery.adminList",

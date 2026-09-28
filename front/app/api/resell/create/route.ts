@@ -9,7 +9,8 @@
 // require identity verification — only conversion into company equity and
 // physical delivery do. The listing wallet is screened by
 // refuseSuspendedClient only: a dossier compliance has SUSPENDED (sanctions /
-// fraud / investigation) is still refused. Whether the eventual buyer
+// fraud / investigation) is still refused, and since 8.5 a wallet on a
+// sanctions list (lib/server/sanctions.ts). Whether the eventual buyer
 // may receive a KycGated class is enforced on-chain at settlement.
 
 import { NextResponse } from "next/server";

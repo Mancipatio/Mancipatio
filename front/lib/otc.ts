@@ -135,10 +135,10 @@ export type OtcAdminPatch = {
 };
 
 export type OtcPartyScreen = {
-  /** True only when neither party's client profile is suspended. */
+  /** True only when neither party is suspended nor on a sanctions list (8.5). */
   cleared: boolean;
-  seller: "clear" | "suspended";
-  buyer: "clear" | "suspended";
+  seller: "clear" | "suspended" | "sanctioned";
+  buyer: "clear" | "suspended" | "sanctioned";
 };
 
 /**

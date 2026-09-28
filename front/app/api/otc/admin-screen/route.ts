@@ -20,10 +20,11 @@ import { requireModule } from "@/lib/server/feature-gate";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { clientIsSuspended } from "@/lib/server/kyc-gate";
+import { raiseSanctionsHit, screenWallets } from "@/lib/server/sanctions";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 
-type PartyScreen = "clear" | "suspended";
+type PartyScreen = "clear" | "suspended" | "sanctioned";
 
 export async function POST(request: Request) {
   try {
@@ -54,13 +55,21 @@ export async function POST(request: Request) {
       clientIsSuspended(sb, row.seller_wallet as string),
       clientIsSuspended(sb, row.buyer_wallet as string),
     ]);
-    const seller: PartyScreen = sellerSuspended ? "suspended" : "clear";
-    const buyer: PartyScreen = buyerSuspended ? "suspended" : "clear";
+    // 8.5: both parties against the sanctions lists too, right before the
+    // escrow opens (fail closed on mainnet; a hit raises its alert).
+    const { hits } = await screenWallets(sb, [row.seller_wallet as string, row.buyer_wallet as string]);
+    for (const [hit, matches] of hits) {
+      await raiseSanctionsHit(sb, hit, matches, { route: "otc escrow opening (/admin/otc)", role: "counterparty" });
+    }
+    const party = (address: string, suspended: boolean): PartyScreen =>
+      hits.has(address) ? "sanctioned" : suspended ? "suspended" : "clear";
+    const seller = party(row.seller_wallet as string, sellerSuspended);
+    const buyer = party(row.buyer_wallet as string, buyerSuspended);
 
     return NextResponse.json(
       {
         ok: true,
-        data: { cleared: !sellerSuspended && !buyerSuspended, seller, buyer },
+        data: { cleared: seller === "clear" && buyer === "clear", seller, buyer },
       },
       { headers: { "Cache-Control": "private, no-store" } },
     );

@@ -145,3 +145,44 @@ export async function resolveAlert(
   });
   notifyAdminBadges();
 }
+
+// ── Sanctions screening lists (8.5) ─────────────────────────────────────────
+
+export type SanctionsListStatus = {
+  provider: string;
+  source: string;
+  state: "fresh" | "stale" | "empty" | "never-loaded" | "unreadable";
+  publishedOn: string | null;
+  refreshedAt: string | null;
+  addressCount: number | null;
+  lastAttemptAt: string | null;
+  lastStatus: string | null;
+  lastError: string | null;
+};
+
+export type SanctionsStatus = {
+  network: string;
+  /** "fail-closed": screened routes refuse while a list is unusable (mainnet). */
+  enforcement: "fail-closed" | "warn";
+  maxAgeHours: number;
+  lists: SanctionsListStatus[];
+};
+
+/** Every screening list's state (Admin; a session read). Throws on failure. */
+export async function getSanctionsStatus(session: WalletSession | null | undefined): Promise<SanctionsStatus> {
+  return signedFetch<SanctionsStatus>(session, "/api/compliance/sanctions-status", "compliance.sanctionsStatus", {});
+}
+
+export type SanctionsRefreshOutcome =
+  | { status: "processed"; publishedOn: string; addresses: number; removed: number; skipped: number }
+  | { status: "failed"; error: string };
+
+/** Runs the OFAC SDN refresh now (Admin, signed). Throws when the request fails. */
+export async function refreshSanctionsList(session: WalletSession | null | undefined): Promise<SanctionsRefreshOutcome> {
+  return signedFetch<SanctionsRefreshOutcome>(session, "/api/compliance/sanctions-refresh", "compliance.sanctionsRefresh", {});
+}
+
+/** A compliance alert raised by the wallet screen (lib/server/sanctions.ts). */
+export function isScreeningHit(alert: Pick<ComplianceAlert, "evidence" | "wallet">): boolean {
+  return !!alert.wallet && (alert.evidence as { screening?: unknown } | null)?.screening === "wallet-address";
+}

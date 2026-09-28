@@ -1656,6 +1656,42 @@ only through the Raise limits page by the super admin after bootstrap
 (D16); check the EURC mint address against Circle's published address
 before saving it.
 
+### Sanctions list (8.5, migration 0078)
+
+The screened routes (commit, purchase record, OTC request and escrow
+opening, resell listing, passport application and issuance, verification)
+check the wallet against the OFAC SDN list's Solana addresses
+(`front/lib/server/sanctions.ts`). On mainnet they refuse (503) while the
+list is older than 3 days, empty or unreadable, so the list must be loaded
+and its daily job running **before the first sale opens**:
+
+1. apply `0078_sanctions_screening.sql` (expand-only);
+2. install and prove the job (after the retry scheduler, like the alarms):
+   ```
+   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/sanctions-scheduler.sql
+   MANCI_TARGET=<t> bash scripts/db.sh -c "select mancipatio_ops.invoke_sanctions_refresh()"
+   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/sanctions-scheduler-status.sql
+   ```
+   Pass: the run is `complete` with `refresh_state processed`, and
+   `sanctions_list_state` shows today's `refreshed_at`, the Treasury's
+   `published_on` and a non-zero `address_count` (4 on 2026-09-23). Then
+   enable `mancipatio-sanctions-<network>` (`cron.alter_job(..., active := true)`);
+3. `/admin/compliance` → "Wallet screening lists" shows `fresh`. "Refresh
+   now" runs the same job by hand. The alarm worker's `sanctions-list`
+   incident (high on mainnet) pages when the list goes older than 3 days.
+
+**A hit** opens one critical alert per wallet (emailed through the alarm
+outbox) and the request is refused; an open alert also blocks passport
+issuance. The alert's "Prepare the blocklist entry" link opens
+`/admin/blocklist` with the wallet filled in: the BlocklistAuthority reviews
+and signs `add_to_blocklist` (nothing is sent automatically). A hit on
+`launchpad/record-purchase` means the buy already landed (an Open class
+mints without the hook; the alert carries the transaction): blocklist, then
+claw back per the clawback procedure. What the baseline does not do: EU and
+UN lists, batch rescreening of existing holders, risk scoring; those need a
+provider (Chainalysis, TRM, …) plugged into `SANCTIONS_PROVIDERS`, and
+counsel decides whether the pilot needs them.
+
 ### Responses
 
 | Alert | First response |

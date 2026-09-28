@@ -27,6 +27,7 @@ import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { sendEmail, escapeHtml } from "@/lib/server/email";
 import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
+import { requireSanctionsClear } from "@/lib/server/sanctions";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import {
   clientIpOf,
@@ -98,6 +99,11 @@ export async function POST(request: Request) {
     }
 
     const sb = getSupabaseAdmin();
+
+    // Sanctions screen (8.5, lib/server/sanctions.ts): a listed wallet is
+    // never given a passport; the hit raises a compliance alert (which also
+    // blocks issuance in /admin/kyc). Fail closed on mainnet.
+    await requireSanctionsClear(sb, { route: "passport/submit", wallets: [{ wallet, role: "self" }] });
 
     // Dedupe: one undecided application per wallet.
     const { data: dupe, error: dupeErr } = await sb

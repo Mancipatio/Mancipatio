@@ -39,6 +39,7 @@ import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { SiwsError } from "@/lib/server/siws";
 import { detectNetwork } from "@/lib/network";
+import { requireSanctionsClear, type ScreenedWallet } from "@/lib/server/sanctions";
 
 export type ClientKycLookup = {
   hasClient: boolean;
@@ -283,10 +284,15 @@ export async function refuseSuspendedClient(
   sb: SupabaseClient,
   wallet: string,
   context: string,
+  role: ScreenedWallet["role"] = "self",
 ): Promise<{ clientId: string | null }> {
   const row = await fetchClientRow(sb, wallet);
   const message = suspendedClientMessage(row?.kyc_status ?? null, context);
   if (message) throw new SiwsError(403, message);
+  // 8.5: the same screen also checks the wallet against the sanctions lists
+  // (lib/server/sanctions.ts): a hit refuses (403) and raises a compliance
+  // alert; on mainnet an unavailable list refuses too (503, fail closed).
+  await requireSanctionsClear(sb, { route: context, wallets: [{ wallet, role }] });
   return { clientId: row?.id ?? null };
 }
 

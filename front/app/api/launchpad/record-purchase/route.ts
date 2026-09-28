@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { transactionSignature } from "@/lib/server/chain-evidence";
 import { enqueuePurchase, processPurchaseJob } from "@/lib/server/purchase-records";
+import { requireSanctionsClear } from "@/lib/server/sanctions";
+import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { BASE58_RE } from "../_lib";
 export const maxDuration = 60;
 
@@ -16,6 +18,16 @@ export async function POST(request: Request) {
     if (instruction !== undefined && (typeof instruction !== "number" || !Number.isInteger(instruction) || instruction < 0 || instruction > 255)) {
       throw new SiwsError(400, "Invalid instruction index");
     }
+    // Sanctions screen (8.5): an Open-class buy mints without the transfer
+    // hook, so the program cannot refuse a listed buyer; this is where the
+    // platform learns of one. A hit raises the compliance alert WITH the
+    // transaction (blocklist + clawback per runbook) and refuses the record
+    // (403); on mainnet a stale list refuses too (503, retried later).
+    await requireSanctionsClear(getSupabaseAdmin(), {
+      route: "launchpad/record-purchase",
+      wallets: [{ wallet, role: "self" }],
+      txSignature: signature,
+    });
     // Records an already authorized chain buy even if KYC expired afterwards.
     // No new spending permission is granted. Client amount is never trusted.
     const job = await enqueuePurchase(wallet, sale, signature, instruction as number | undefined);

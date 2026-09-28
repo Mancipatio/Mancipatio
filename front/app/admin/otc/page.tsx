@@ -564,14 +564,17 @@ function OtcEscrowAdmin() {
       // throw lands in the catch below and no escrow is opened.
       const screen = await adminScreenOtcRequest(conn.wallet, req.id);
       if (!screen.cleared) {
+        const sanctioned = screen.seller === "sanctioned" || screen.buyer === "sanctioned";
         const parties = [
-          screen.seller === "suspended" ? "seller" : null,
-          screen.buyer === "suspended" ? "buyer" : null,
+          screen.seller !== "clear" ? "seller" : null,
+          screen.buyer !== "clear" ? "buyer" : null,
         ].filter(Boolean).join(" and ");
         toast.dismiss(pendingId);
         toast.showError(
-          "A party is suspended",
-          `The ${parties}'s client profile is suspended by compliance. Decline this request instead of opening an escrow.`,
+          sanctioned ? "A party is on a sanctions list" : "A party is suspended",
+          sanctioned
+            ? `The ${parties}'s wallet matched a sanctions list; a compliance alert was raised (/admin/compliance). Decline this request instead of opening an escrow.`
+            : `The ${parties}'s client profile is suspended by compliance. Decline this request instead of opening an escrow.`,
         );
         return;
       }

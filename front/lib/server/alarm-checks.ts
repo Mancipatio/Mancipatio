@@ -58,6 +58,9 @@
 // heartbeat that has not recorded a run (after that a heartbeat whose every
 // plan or confirm call fails is judged by the age like any other); low
 // severity in observe mode (never emailed), medium in on.
+// sanctions-list (0078, 8.5): the OFAC SDN list the screened routes trust is
+// older than 3 days or not loaded; high and failing on mainnet (the routes
+// refuse), holding (nothing opens) elsewhere.
 // indexer-reconcile-age (0075, low): the last full reconcile is older than
 // reconcile_max_age_hours (default 168). Not a freshness condition: the
 // heartbeat keeps proving from its watermarks; a reconcile also catches what
@@ -91,6 +94,8 @@ import { defaultPaymentMint } from "@/lib/payment-mints";
 import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, type QueueTable } from "@/lib/server/health";
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
+import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
+import { listProblem } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
 import { flattenInvocations, hasInvocationMeta, resolveAccountKeys, type InvocationTx } from "@/lib/server/tx-invocations";
@@ -279,6 +284,41 @@ async function retryHeartbeat(sb: SupabaseClient, network: Network, now: number,
     category: "worker", source: "worker:retry-heartbeat",
     summary: at ? `The retry worker last completed a run ${Math.round(age / 60)} minutes ago` : "The retry worker has not completed a run",
     evidence: { last_ok_seconds: Number.isFinite(age) ? Math.round(age) : null } };
+}
+
+/**
+ * sanctions-list (8.5): the screening list the routes trust must be younger
+ * than 3 days and not empty (lib/server/sanctions.ts). On mainnet the routes
+ * refuse without it, so a stale list is a high incident; elsewhere the
+ * screen only warns and the check holds (nothing opens). Null when the state
+ * cannot be read (a check that could not run).
+ */
+async function sanctionsList(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report | null> {
+  const { data, error } = await sb.from("sanctions_list_state")
+    .select("refreshed_at,address_count,last_status,last_error,published_on,last_attempt_at")
+    .eq("source", OFAC_SDN_SOURCE).abortSignal(dbSignal(signal)).maybeSingle();
+  if (error) return null;
+  const row = (data ?? null) as {
+    refreshed_at: string | null; address_count: number | null; last_status: string | null; last_error: string | null;
+    published_on: string | null; last_attempt_at: string | null;
+  } | null;
+  const problem = listProblem(row ? { ...row } : null, row?.address_count ?? 0, now);
+  const ageHours = row?.refreshed_at ? Math.round((now - Date.parse(row.refreshed_at)) / 3_600_000) : null;
+  return {
+    check: "sanctions-list",
+    state: !problem ? "pass" : network === "mainnet" ? "fail" : "hold",
+    severity: network === "mainnet" ? "high" : "low",
+    category: "worker", source: "worker:sanctions-list",
+    summary: !problem
+      ? "The sanctions screening list is current"
+      : problem === "LIST_STALE"
+        ? `The sanctions screening list was last refreshed ${ageHours} hours ago: screened routes refuse on mainnet`
+        : "The sanctions screening list is not loaded: screened routes refuse on mainnet",
+    evidence: {
+      problem, published_on: row?.published_on ?? null, age_hours: ageHours, address_count: row?.address_count ?? null,
+      last_status: row?.last_status ?? null, last_error: row?.last_error ?? null,
+    },
+  };
 }
 
 type Hold = { subject: string; ref: string; code: string; payment_mint: string | null; created_at: string };
@@ -573,6 +613,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => retryHeartbeat(sb, network, now, signal));
   await collect(() => fxAndHolds(sb, network, now, signal));
   await collect(() => indexerFreshness(sb, network, now, signal));
+  await collect(() => sanctionsList(sb, network, now, signal));
   await record(cheap);
 
   // 2. The operational watches (chain reads), in parallel with the gap scan,
