@@ -151,6 +151,14 @@ jobs:
             echo "::error::an incident-build function exceeds the SBF stack frame"
             exit 1
           fi
+          # cmp -s returns 2 for a missing file: a missing artifact must not
+          # pass the equality guard below as "differs".
+          for lib in asset_registry transfer_hook; do
+            if [[ ! -s "target/deploy-incident/$lib.so" ]]; then
+              echo "::error::$lib: target/deploy-incident/$lib.so was not written"
+              exit 1
+            fi
+          done
           if cmp -s target/deploy/asset_registry.so target/deploy-incident/asset_registry.so ||
             cmp -s target/deploy/transfer_hook.so target/deploy-incident/transfer_hook.so; then
             echo "::error::an incident artifact equals its release artifact: --features incident did not apply"

@@ -344,4 +344,67 @@ describe("verifiable-build.yml shell steps, executed locally", () => {
     fs.appendFileSync(path.join(tampered.ws, "dist", "asset_registry.json"), " ");
     expect(sh(stepRun("Re-check the bundle"), tampered.ws, tampered.env).status).not.toBe(0);
   });
+
+  /**
+   * The incident step, run against shims that reproduce where the real tools
+   * write: `docker run … pwd` prints the image's workdir, and `solana-verify
+   * build --library-name <lib>` runs cargo-build-sbf in
+   * <workdir>/programs/<lib>/ (solana-verify 0.5.1 `docker exec -w`), which
+   * joins a RELATIVE --sbf-out-dir to that directory (cargo-build-sbf 4.2.0)
+   * and maps the container workdir to program/ (the mount).
+   */
+  function incidentWorkspace() {
+    const ws = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "runner-incident-"));
+    const bin = path.join(ws, ".bin");
+    fs.mkdirSync(bin);
+    const program = path.join(ws, "program");
+    const workdir = "/build";
+    fs.writeFileSync(path.join(bin, "docker"), `#!/bin/bash\nif [[ "$1" == run && "$*" == *pwd* ]]; then echo ${workdir}; exit 0; fi\nexit 3\n`);
+    fs.writeFileSync(
+      path.join(bin, "solana-verify"),
+      `#!${process.execPath}\n` +
+        `const fs = require("fs"), path = require("path");\n` +
+        `const args = process.argv.slice(2);\n` +
+        `if (args[0] !== "build") process.exit(2);\n` +
+        `const lib = args[args.indexOf("--library-name") + 1];\n` +
+        `const extra = (args.find((a) => a.startsWith("--cargo-build-sbf-args=")) || "").slice(23).split(/\\s+/).filter(Boolean);\n` +
+        `const at = extra.indexOf("--sbf-out-dir");\n` +
+        `if (at < 0 || !extra.includes("incident")) process.exit(4);\n` +
+        `const out = extra[at + 1];\n` +
+        `const cwd = path.join(${JSON.stringify(program)}, "programs", lib);\n` +
+        `const host = path.isAbsolute(out) ? (out.startsWith(${JSON.stringify(workdir + "/")}) ? path.join(${JSON.stringify(program)}, out.slice(${workdir.length + 1})) : null) : path.join(cwd, out);\n` +
+        `if (!host) process.exit(5);\n` +
+        `fs.mkdirSync(host, { recursive: true });\n` +
+        `fs.writeFileSync(path.join(host, lib + ".so"), Buffer.from([7, 7, lib.length]));\n`,
+    );
+    fs.chmodSync(path.join(bin, "docker"), 0o755);
+    fs.chmodSync(path.join(bin, "solana-verify"), 0o755);
+    fs.mkdirSync(path.join(program, "target", "deploy"), { recursive: true });
+    for (const name of ["asset_registry", "transfer_hook"]) {
+      fs.mkdirSync(path.join(program, "programs", name), { recursive: true });
+      fs.writeFileSync(path.join(program, "target", "deploy", `${name}.so`), new Uint8Array([1, name.length]));
+    }
+    return { program, env: { PATH: `${bin}:${process.env.PATH}`, BASE_IMAGE: baseImage, RUNNER_TEMP: ws } };
+  }
+
+  it.skipIf(!hasTools)("the incident step writes to program/target/deploy-incident, and refuses when an artifact is missing", () => {
+    const step = stepRun("Verifiable build — incident artifacts");
+    const ok = incidentWorkspace();
+    const run = sh(step, ok.program, ok.env);
+    expect(run.stderr).toBe("");
+    expect(run.status).toBe(0);
+    for (const name of ["asset_registry", "transfer_hook"]) {
+      expect(fs.existsSync(path.join(ok.program, "target", "deploy-incident", `${name}.so`))).toBe(true);
+      expect(fs.existsSync(path.join(ok.program, "programs", name, "target"))).toBe(false);
+    }
+    // The pre-fix form (a relative --sbf-out-dir) lands the .so under
+    // programs/<lib>/target: the step must fail instead of passing silently.
+    const relative = step.replace("--sbf-out-dir $workdir/target/deploy-incident", "--sbf-out-dir target/deploy-incident");
+    expect(relative).not.toBe(step);
+    const stale = incidentWorkspace();
+    const refused = sh(relative, stale.program, stale.env);
+    expect(refused.status).not.toBe(0);
+    expect(refused.stdout).toContain("target/deploy-incident/asset_registry.so was not written");
+    expect(fs.existsSync(path.join(stale.program, "programs", "asset_registry", "target", "deploy-incident", "asset_registry.so"))).toBe(true);
+  });
 });

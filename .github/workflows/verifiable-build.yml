@@ -123,15 +123,45 @@ jobs:
       # digest window below); cargo-build-sbf writes them to
       # target/deploy-incident, so the release bytes in target/deploy are
       # untouched (checked).
+      #
+      # --sbf-out-dir is ABSOLUTE (the container's mount point of program/):
+      # with --library-name, solana-verify 0.5.1 runs cargo build-sbf with
+      # `docker exec -w <workdir>/programs/<lib>/`, and cargo-build-sbf 4.2.0
+      # joins a relative --sbf-out-dir to that directory, so a relative
+      # `target/deploy-incident` would land in programs/<lib>/target/.
+      # solana-verify prints the hash of target/deploy/<lib>.so after each
+      # build: in this step that is the RELEASE artifact, not the incident one
+      # (the incident hashes are printed below and in hashes.txt).
       - name: Verifiable build — incident artifacts
         run: |
           set -euo pipefail
           sha256sum target/deploy/asset_registry.so target/deploy/transfer_hook.so > "$RUNNER_TEMP/release-before-incident.txt"
+          workdir="$(docker run --rm "$BASE_IMAGE" pwd)"
+          case "$workdir" in
+            /*) ;;
+            *) echo "::error::the base image's working directory '$workdir' is not absolute"; exit 1 ;;
+          esac
+          if [[ "$workdir" =~ [[:space:]] ]]; then
+            echo "::error::the base image's working directory '$workdir' contains whitespace (--cargo-build-sbf-args is split on whitespace)"
+            exit 1
+          fi
+          rm -rf target/deploy-incident
           for lib in asset_registry transfer_hook; do
             solana-verify build --library-name "$lib" --arch v3 -b "$BASE_IMAGE" \
-              --cargo-build-sbf-args="--features incident --sbf-out-dir target/deploy-incident"
+              --cargo-build-sbf-args="--features incident --sbf-out-dir $workdir/target/deploy-incident"
           done
           sha256sum --check "$RUNNER_TEMP/release-before-incident.txt"
+          # A missing artifact must fail here: cmp -s returns 2 for a missing
+          # file, which the equality guard below would read as "differs".
+          for lib in asset_registry transfer_hook; do
+            if [[ ! -s "target/deploy-incident/$lib.so" ]]; then
+              echo "::error::$lib: target/deploy-incident/$lib.so was not written (check --sbf-out-dir)"
+              ls -la target/deploy-incident programs/*/target 2>/dev/null || true
+              exit 1
+            fi
+          done
+          echo "incident artifacts (sha256):"
+          sha256sum target/deploy-incident/asset_registry.so target/deploy-incident/transfer_hook.so
           for lib in asset_registry transfer_hook; do
             if cmp -s "target/deploy/$lib.so" "target/deploy-incident/$lib.so"; then
               echo "::error::$lib: the incident artifact equals the release artifact (--features incident did not apply)"
