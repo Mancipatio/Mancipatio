@@ -322,3 +322,314 @@ pub fn unpause_everything(svm: &mut LiteSVM, super_admin: &Keypair) -> Result<()
     assert_eq!(pause_byte(svm), 0, "fully unpaused");
     Ok(())
 }
+
+/// Writes the hook `BlockEntry` of `wallet` exactly as `add_to_blocklist`
+/// leaves it (hook-owned, discriminator, wallet, added_by, bump): the state
+/// the registry's party checks read. For suites without a BlocklistAuthority;
+/// `issuer::World::block` runs the real hook instruction.
+pub fn fabricate_block_entry(svm: &mut LiteSVM, wallet: &Pubkey) {
+    let mut data = asset_registry::HOOK_BLOCK_ENTRY_DISCRIMINATOR.to_vec();
+    data.extend_from_slice(wallet.as_ref());
+    data.extend_from_slice(Pubkey::new_unique().as_ref());
+    data.push(255);
+    assert_eq!(data.len(), asset_registry::HOOK_BLOCK_ENTRY_LEN);
+    // Any live account as the template: every field is overwritten.
+    let mut account = svm.get_account(&platform_pda()).expect("Platform");
+    account.lamports = svm.minimum_balance_for_rent_exemption(data.len());
+    account.data = data;
+    account.owner = transfer_hook::ID;
+    account.executable = false;
+    svm.set_account(block_entry(wallet), account).unwrap();
+}
+
+/// The state `remove_from_blocklist` leaves: no account (closed).
+pub fn clear_block_entry(svm: &mut LiteSVM, wallet: &Pubkey) {
+    let mut account = svm.get_account(&platform_pda()).expect("Platform");
+    account.lamports = 0;
+    account.data = vec![];
+    account.owner = system_program::ID;
+    account.executable = false;
+    svm.set_account(block_entry(wallet), account).unwrap();
+}
+
+/// `freeze_issuer_proceeds` signed by `authority` (an Admin or the super admin).
+pub fn freeze_issuer_ix(authority: &Pubkey, issuer: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::FreezeIssuerProceeds {
+            reason_hash: [5u8; 32],
+        }
+        .data(),
+        acc::FreezeIssuerProceeds {
+            authority: *authority,
+            admin_record: admin_pda(authority),
+            platform: platform_pda(),
+            issuer: *issuer,
+            issuer_freeze: issuer_freeze(issuer),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// The v1 test clock start.
+pub const T0: i64 = 1_000_000;
+
+pub fn funded(svm: &mut LiteSVM) -> Keypair {
+    let k = Keypair::new();
+    svm.airdrop(&k.pubkey(), 100_000_000_000).unwrap();
+    k
+}
+
+/// Both programs at clock `T0` and a Platform whose super admin (`sa`) and
+/// program upgrade authority (`ua`, also the hook's) are different keys;
+/// `unpause` runs the first unpause (closing the bootstrap window).
+/// Returns `(svm, sa, ua)`. The including test declares `mod support`.
+pub fn boot_platform(unpause: bool) -> (LiteSVM, Keypair, Keypair) {
+    let mut svm = LiteSVM::new();
+    svm.add_program(
+        asset_registry::ID,
+        super::support::assert_sbpf_v3(include_bytes!("../../target/deploy/asset_registry.so")),
+    )
+    .unwrap();
+    svm.add_program(
+        transfer_hook::ID,
+        super::support::assert_sbpf_v3(include_bytes!("../../target/deploy/transfer_hook.so")),
+    )
+    .unwrap();
+    warp_to(&mut svm, T0);
+    let sa = funded(&mut svm);
+    let ua = funded(&mut svm);
+    set_upgrade_authority(&mut svm, &asset_registry::ID, Some(ua.pubkey()));
+    set_upgrade_authority(&mut svm, &transfer_hook::ID, Some(ua.pubkey()));
+    let init = Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::InitializePlatform {
+            protocol_treasury: Pubkey::new_unique(),
+            protocol_fee_bps: 250,
+        }
+        .data(),
+        acc::InitializePlatform {
+            admin: sa.pubkey(),
+            platform: platform_pda(),
+            super_admin_record: admin_pda(&sa.pubkey()),
+            system_program: system_program::ID,
+            upgrade_authority: ua.pubkey(),
+            program: asset_registry::ID,
+            program_data: program_data(&asset_registry::ID),
+        }
+        .to_account_metas(None),
+    );
+    send(&mut svm, &[&sa, &ua], &[init]).expect("initialize_platform");
+    assert_eq!(pause_byte(&svm), 0xFF);
+    if unpause {
+        unpause_everything(&mut svm, &sa).unwrap();
+    }
+    (svm, sa, ua)
+}
+
+// ── Super-admin rotation (D3) and recovery (D4) builders ────────────────────
+
+pub fn propose_platform_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::ProposePlatformAdmin {
+            new_admin: *new_admin,
+        }
+        .data(),
+        acc::ProposePlatformAdmin {
+            authority: *super_admin,
+            platform: platform_pda(),
+            transfer: authority_proposal(&platform_pda()),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn accept_platform_admin_ix(new_admin: &Pubkey, current: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::AcceptPlatformAdmin {}.data(),
+        acc::AcceptPlatformAdmin {
+            new_admin: *new_admin,
+            platform: platform_pda(),
+            transfer: authority_proposal(&platform_pda()),
+            old_admin_record: admin_pda(current),
+            new_admin_record: admin_pda(new_admin),
+            system_program: system_program::ID,
+            recovery: platform_recovery(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn cancel_platform_admin_transfer_ix(
+    canceller: &Pubkey,
+    proposer: &Pubkey,
+    program_data: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::CancelPlatformAdminTransfer {}.data(),
+        acc::CancelPlatformAdminTransfer {
+            canceller: *canceller,
+            canceller_admin_record: admin_pda(canceller),
+            platform: platform_pda(),
+            transfer: authority_proposal(&platform_pda()),
+            proposer: *proposer,
+            program: asset_registry::ID,
+            program_data: *program_data,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn propose_platform_recovery_ix(
+    upgrade_authority: &Pubkey,
+    new_admin: &Pubkey,
+    program_data: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::ProposePlatformRecovery {
+            new_admin: *new_admin,
+        }
+        .data(),
+        acc::ProposePlatformRecovery {
+            upgrade_authority: *upgrade_authority,
+            platform: platform_pda(),
+            recovery: platform_recovery(),
+            program: asset_registry::ID,
+            program_data: *program_data,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn cancel_platform_recovery_ix(canceller: &Pubkey, proposer: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::CancelPlatformRecovery {}.data(),
+        acc::CancelPlatformRecovery {
+            canceller: *canceller,
+            platform: platform_pda(),
+            recovery: platform_recovery(),
+            proposer: *proposer,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn execute_platform_recovery_ix(
+    new_admin: &Pubkey,
+    current: &Pubkey,
+    proposer: &Pubkey,
+    program_data: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::ExecutePlatformRecovery {}.data(),
+        acc::ExecutePlatformRecovery {
+            new_admin: *new_admin,
+            platform: platform_pda(),
+            recovery: platform_recovery(),
+            proposer: *proposer,
+            program: asset_registry::ID,
+            program_data: *program_data,
+            old_admin_record: admin_pda(current),
+            new_admin_record: admin_pda(new_admin),
+            transfer: authority_proposal(&platform_pda()),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn remove_admin_ix(super_admin: &Pubkey, admin: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::RemoveAdmin { admin: *admin }.data(),
+        acc::RemoveAdmin {
+            super_admin: *super_admin,
+            platform: platform_pda(),
+            admin_record: admin_pda(admin),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn set_pause_flags_ix(authority: &Pubkey, set_mask: u8, clear_mask: u8) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::SetPauseFlags {
+            set_mask,
+            clear_mask,
+        }
+        .data(),
+        acc::SetPauseFlags {
+            authority: *authority,
+            admin_record: admin_pda(authority),
+            platform: platform_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn set_pause_ix(super_admin: &Pubkey, paused: bool) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::SetPause { paused }.data(),
+        acc::SetPause {
+            admin: *super_admin,
+            platform: platform_pda(),
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// Sets the ProgramData upgrade authority of `program` (LiteSVM loads
+/// programs with none).
+pub fn set_upgrade_authority(svm: &mut LiteSVM, program: &Pubkey, authority: Option<Pubkey>) {
+    let address = program_data(program);
+    let mut account = svm.get_account(&address).expect("loaded ProgramData");
+    account.data[12] = u8::from(authority.is_some());
+    account.data[13..45].fill(0);
+    if let Some(authority) = authority {
+        account.data[13..45].copy_from_slice(authority.as_ref());
+    }
+    svm.set_account(address, account)
+        .expect("set upgrade authority");
+}
+
+pub fn now(svm: &LiteSVM) -> i64 {
+    svm.get_sysvar::<Clock>().unix_timestamp
+}
+
+pub fn warp_to(svm: &mut LiteSVM, unix_ts: i64) {
+    let mut clock: Clock = svm.get_sysvar();
+    clock.unix_timestamp = unix_ts;
+    svm.set_sysvar(&clock);
+}
+
+/// Every Anchor event of type `E` in `logs`.
+pub fn events<E: anchor_lang::AnchorDeserialize + anchor_lang::Discriminator>(
+    logs: &[String],
+) -> Vec<E> {
+    use anchor_lang::__private::base64::{engine::general_purpose::STANDARD, Engine as _};
+    logs.iter()
+        .filter_map(|line| line.strip_prefix("Program data: "))
+        .filter_map(|b64| STANDARD.decode(b64).ok())
+        .filter(|data| data.starts_with(E::DISCRIMINATOR))
+        .map(|data| E::try_from_slice(&data[E::DISCRIMINATOR.len()..]).expect("event"))
+        .collect()
+}
+
+pub fn assert_code(result: Result<Vec<String>, String>, code: u32, what: &str) {
+    let err = result.expect_err(what);
+    assert!(
+        err.contains(&format!("Custom({code})")),
+        "{what}: expected {code}, got {err}"
+    );
+}

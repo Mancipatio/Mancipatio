@@ -232,6 +232,86 @@ impl World {
         result.unwrap_or_else(|e| panic!("[add_admin] tx failed: {e}"));
     }
 
+    /// Initializes the hook's BlocklistAuthority to the super admin (the
+    /// super admin is made the hook's upgrade authority for it).
+    pub fn init_blocklist_authority(&mut self) {
+        let admin = self.admin.insecure_clone();
+        super::support::set_upgrade_authority(
+            &mut self.svm,
+            &transfer_hook::ID,
+            Some(admin.pubkey()),
+        );
+        self.send(
+            &[&admin],
+            &[Instruction::new_with_bytes(
+                transfer_hook::ID,
+                &transfer_hook::instruction::InitializeBlocklistAuthority {
+                    authority: admin.pubkey(),
+                }
+                .data(),
+                transfer_hook::accounts::InitializeBlocklistAuthority {
+                    payer: admin.pubkey(),
+                    upgrade_authority: admin.pubkey(),
+                    program: transfer_hook::ID,
+                    program_data: super::support::program_data(&transfer_hook::ID),
+                    blocklist_authority: blocklist_authority_pda(),
+                    system_program: system_program::ID,
+                }
+                .to_account_metas(None),
+            )],
+            "initialize_blocklist_authority",
+        );
+    }
+
+    /// `add_to_blocklist(wallet)` by the BlocklistAuthority (the super admin).
+    pub fn block(&mut self, wallet: &Pubkey) {
+        let admin = self.admin.insecure_clone();
+        self.send(
+            &[&admin],
+            &[Instruction::new_with_bytes(
+                transfer_hook::ID,
+                &transfer_hook::instruction::AddToBlocklist { wallet: *wallet }.data(),
+                transfer_hook::accounts::AddToBlocklist {
+                    authority: admin.pubkey(),
+                    blocklist_authority: blocklist_authority_pda(),
+                    block_entry: block_entry_pda(wallet),
+                    system_program: system_program::ID,
+                }
+                .to_account_metas(None),
+            )],
+            "add_to_blocklist",
+        );
+    }
+
+    /// `remove_from_blocklist(wallet)` by the BlocklistAuthority.
+    pub fn unblock(&mut self, wallet: &Pubkey) {
+        let admin = self.admin.insecure_clone();
+        self.send(
+            &[&admin],
+            &[Instruction::new_with_bytes(
+                transfer_hook::ID,
+                &transfer_hook::instruction::RemoveFromBlocklist { wallet: *wallet }.data(),
+                transfer_hook::accounts::RemoveFromBlocklist {
+                    authority: admin.pubkey(),
+                    blocklist_authority: blocklist_authority_pda(),
+                    block_entry: block_entry_pda(wallet),
+                }
+                .to_account_metas(None),
+            )],
+            "remove_from_blocklist",
+        );
+    }
+
+    /// `freeze_issuer_proceeds` signed by `authority`.
+    pub fn try_freeze(
+        &mut self,
+        authority: &Keypair,
+        issuer: &Pubkey,
+    ) -> Result<Vec<String>, String> {
+        let ix = freeze_issuer_ix(&authority.pubkey(), issuer, [5u8; 32]);
+        self.try_send(&[authority], &[ix])
+    }
+
     /// `(asset, issuer)` of a share class.
     pub fn chain(&self, share_class: &Pubkey) -> (Pubkey, Pubkey) {
         let asset = self.load::<asset_registry::ShareClass>(share_class).asset;
@@ -939,4 +1019,46 @@ pub fn platform_recovery_pda() -> Pubkey {
         asset_registry::PLATFORM_RECOVERY_SEED,
         platform_pda().as_ref(),
     ])
+}
+
+pub fn blocklist_authority_pda() -> Pubkey {
+    Pubkey::find_program_address(
+        &[transfer_hook::BLOCKLIST_AUTHORITY_SEED],
+        &transfer_hook::ID,
+    )
+    .0
+}
+
+pub fn freeze_issuer_ix(authority: &Pubkey, issuer: &Pubkey, reason_hash: [u8; 32]) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::FreezeIssuerProceeds { reason_hash }.data(),
+        acc::FreezeIssuerProceeds {
+            authority: *authority,
+            admin_record: admin_pda(authority),
+            platform: platform_pda(),
+            issuer: *issuer,
+            issuer_freeze: issuer_freeze_pda(issuer),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn unfreeze_issuer_ix(
+    super_admin: &Pubkey,
+    issuer: &Pubkey,
+    frozen_by: &Pubkey,
+) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::UnfreezeIssuerProceeds {}.data(),
+        acc::UnfreezeIssuerProceeds {
+            super_admin: *super_admin,
+            platform: platform_pda(),
+            issuer_freeze: issuer_freeze_pda(issuer),
+            frozen_by: *frozen_by,
+        }
+        .to_account_metas(None),
+    )
 }

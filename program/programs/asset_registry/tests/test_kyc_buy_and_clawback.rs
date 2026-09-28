@@ -1134,6 +1134,59 @@ fn clawback_from_revoked_holder_sweeps_balance() {
     );
 }
 
+/// prog-vlast-7 (design 8.3 §8.2, §14.3.5): a merely EXPIRED passport gets
+/// 30 days to renew before its units can be seized (a revocation stays
+/// immediate — `clawback_from_revoked_holder_sweeps_balance`).
+#[test]
+fn clawback_of_an_expired_holder_waits_thirty_days_after_the_expiry() {
+    let (mut svm, ctx) = boot(true);
+    warp_to(&mut svm, 1_000);
+    let buyer_pk = ctx.buyer.pubkey();
+    approve_kyc(&mut svm, &ctx, &buyer_pk);
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[buy_ix(
+            &ctx,
+            10,
+            kyc_hook_metas(&ctx, &buyer_pk, &buyer_pk, &buyer_pk),
+        )],
+        "buy",
+    );
+    // Re-approve with a short expiry T = 5_000.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[approve_kyc_ix(&ctx, &buyer_pk, 5_000)],
+        "short passport",
+    );
+    let (custody_pda, escrow_pda) = open_redemption_vault(&mut svm, &ctx, 1);
+    let payer_pk = ctx.payer.pubkey();
+    let clawback = clawback_ix(
+        &ctx,
+        &payer_pk,
+        &buyer_pk,
+        &ctx.buyer_share_ata,
+        &custody_pda,
+        &escrow_pda,
+        0,
+    );
+    let grace = asset_registry::KYC_EXPIRY_CLAWBACK_GRACE_SECS;
+    warp_to(&mut svm, 5_000 + grace - 1);
+    let err = try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&clawback))
+        .expect_err("inside the 30-day grace");
+    assert!(
+        err.contains("Custom(6079)") && err.contains("ClawbackHolderStillEligible"),
+        "got: {err}"
+    );
+    warp_to(&mut svm, 5_000 + grace);
+    let logs = v1::send(&mut svm, &[&ctx.payer], &[clawback]).expect("grace over");
+    let seized = kyc::events::<asset_registry::HolderClawback>(&logs);
+    assert_eq!(seized.len(), 1);
+    assert_eq!(seized[0].reason, asset_registry::ClawbackReason::Expired);
+    assert_eq!(token_balance(&svm, &escrow_pda), 10);
+}
+
 #[test]
 fn clawback_rejected_for_approved_holder() {
     let (mut svm, ctx) = boot(true);
@@ -3778,6 +3831,141 @@ fn revoked_custody_operator_can_be_rotated_without_blocking_deadline_refund() {
     );
 }
 
+/// prog-vlast-11 (design 8.3 §6, §14.6.1): a custody rotation expires 14 days
+/// after the proposal; the super admin, or the CURRENT vault authority while
+/// it still holds a live Admin record, cancels it; nobody else does.
+#[test]
+fn custody_rotation_expires_and_only_the_super_admin_or_a_live_admin_holder_cancels() {
+    let (mut svm, ctx) = boot(false);
+    warp_to(&mut svm, 1_000);
+    let op1 = Keypair::new();
+    let op2 = Keypair::new();
+    for op in [&op1, &op2] {
+        svm.airdrop(&op.pubkey(), 100_000_000_000).unwrap();
+        v1::grant_admin(&mut svm, &ctx.payer, op).expect("operator");
+    }
+    // op1 opens (and so holds) a burn-only vault.
+    let (mut open, vault, _) = open_vault_ix(
+        &ctx,
+        4_242,
+        VaultType::RedemptionQueue,
+        RealizeAction::BurnAndAttest,
+        Pubkey::default(),
+        0,
+    );
+    open.accounts[0].pubkey = op1.pubkey();
+    open.accounts[1].pubkey = admin_address(op1.pubkey());
+    send(&mut svm, &[&op1], &[open], "op1 opens a vault");
+    let transfer = authority_transfer_address(vault);
+    let propose = Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::ProposeCustodyAuthority {
+            new_authority: op2.pubkey(),
+        }
+        .data(),
+        acc::ProposeCustodyAuthority {
+            super_admin: ctx.payer.pubkey(),
+            platform: platform_address(),
+            custody_vault: vault,
+            new_admin_record: admin_address(op2.pubkey()),
+            transfer,
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    );
+    let accept = Instruction::new_with_bytes(
+        ctx.program_id,
+        &ixd::AcceptCustodyAuthority {}.data(),
+        acc::AcceptCustodyAuthority {
+            new_authority: op2.pubkey(),
+            platform: platform_address(),
+            custody_vault: vault,
+            new_admin_record: admin_address(op2.pubkey()),
+            transfer,
+        }
+        .to_account_metas(None),
+    );
+    let cancel = |canceller: Pubkey| {
+        Instruction::new_with_bytes(
+            ctx.program_id,
+            &ixd::CancelCustodyAuthorityTransfer {}.data(),
+            acc::CancelCustodyAuthorityTransfer {
+                canceller,
+                canceller_admin_record: admin_address(canceller),
+                platform: platform_address(),
+                custody_vault: vault,
+                transfer,
+                proposer: ctx.payer.pubkey(),
+            }
+            .to_account_metas(None),
+        )
+    };
+    let t = |svm: &LiteSVM| svm.get_sysvar::<solana_clock::Clock>().unix_timestamp;
+
+    // Expiry: acceptable strictly before proposed_at + 14 days.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        std::slice::from_ref(&propose),
+        "propose",
+    );
+    let t0 = t(&svm);
+    warp_to(&mut svm, t0 + asset_registry::PROPOSAL_WINDOW_SECS);
+    assert_custom_error(
+        &try_send(&mut svm, &[&op2], std::slice::from_ref(&accept)).unwrap_err(),
+        6151,
+    );
+    // The current authority (a live Admin) cancels even an expired one.
+    send(&mut svm, &[&op1], &[cancel(op1.pubkey())], "op1 cancels");
+    assert!(svm.get_account(&transfer).is_none_or(|a| a.data.is_empty()));
+    assert_custom_error(
+        &try_send(&mut svm, &[&op2], std::slice::from_ref(&accept)).unwrap_err(),
+        3012,
+    );
+    // The super admin cancels.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        std::slice::from_ref(&propose),
+        "re-propose",
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[cancel(ctx.payer.pubkey())],
+        "SA cancels",
+    );
+    // A random key, and the vault authority once its Admin role is gone.
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        std::slice::from_ref(&propose),
+        "re-propose",
+    );
+    let stranger = Keypair::new();
+    svm.airdrop(&stranger.pubkey(), 1_000_000_000).unwrap();
+    assert_custom_error(
+        &try_send(&mut svm, &[&stranger], &[cancel(stranger.pubkey())]).unwrap_err(),
+        6001,
+    );
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[v1::remove_admin_ix(&ctx.payer.pubkey(), &op1.pubkey())],
+        "remove op1",
+    );
+    assert_custom_error(
+        &try_send(&mut svm, &[&op1], &[cancel(op1.pubkey())]).unwrap_err(),
+        6001,
+    );
+    // Inside the window the proposed Admin accepts.
+    send(&mut svm, &[&op2], &[accept], "op2 accepts");
+    assert_eq!(
+        load::<asset_registry::CustodyVault>(&svm, &vault).authority,
+        op2.pubkey()
+    );
+}
+
 #[test]
 fn empty_asset_cannot_activate_and_scoped_issuer_initializes_mint_without_global_approval_power() {
     let (mut svm, ctx) = boot(false);
@@ -4453,16 +4641,18 @@ fn active_vesting_surplus_never_borrows_reserved_own_deposits_as_a_kyc_refund_al
     );
     let mut withdraw = share_vesting_withdraw(&ctx, series, escrow, treasury);
     withdraw.data = ixd::WithdrawVestingSurplus {}.data();
-    assert!(try_send(&mut svm, &[&ctx.payer], &[withdraw.clone()])
-        .unwrap_err()
-        .contains("VestingNothingToWithdraw"));
+    assert!(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&withdraw))
+            .unwrap_err()
+            .contains("VestingNothingToWithdraw")
+    );
     assert_eq!(token_balance(&svm, &escrow), 5);
     assert_eq!(token_balance(&svm, &treasury), 0);
     approve_kyc(&mut svm, &ctx, &ctx.payer.pubkey());
     send(
         &mut svm,
         &[&ctx.payer],
-        &[withdraw.clone()],
+        std::slice::from_ref(&withdraw),
         "eligible authority receives only donated excess",
     );
     assert_eq!(token_balance(&svm, &escrow), 4);
@@ -5071,6 +5261,12 @@ fn distribution_pause_gates_rights_entries_but_not_milestone_claims() {
         try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&create_ix)),
         "create_rights_issuance under DISTRIBUTIONS",
     );
+    // D2: the payout / Merkle modules bit alone closes it too.
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_PAYOUT_MODULES);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&create_ix)),
+        "create_rights_issuance under PAYOUT_MODULES",
+    );
     pause::pause_only(
         &mut svm,
         &ctx.payer,
@@ -5108,6 +5304,11 @@ fn distribution_pause_gates_rights_entries_but_not_milestone_claims() {
     pause::assert_paused(
         try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&publish_ix)),
         "publish_milestone under DISTRIBUTIONS",
+    );
+    pause::pause_only(&mut svm, &ctx.payer, asset_registry::PAUSE_PAYOUT_MODULES);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&publish_ix)),
+        "publish_milestone under PAYOUT_MODULES",
     );
     pause::pause_only(
         &mut svm,
@@ -5277,8 +5478,8 @@ fn send_with_logs(
 /// Decodes every `BlocklistClawback` event from `Program data:` log lines.
 fn blocklist_clawback_events(logs: &[String]) -> Vec<asset_registry::BlocklistClawback> {
     use anchor_lang::{
-        __private::base64::{engine::general_purpose::STANDARD, Engine as _},
         AnchorDeserialize, Discriminator,
+        __private::base64::{engine::general_purpose::STANDARD, Engine as _},
     };
     let disc = asset_registry::BlocklistClawback::DISCRIMINATOR;
     logs.iter()

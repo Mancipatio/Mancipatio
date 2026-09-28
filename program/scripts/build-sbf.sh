@@ -35,7 +35,16 @@ if ! grep -qx "cargo-build-sbf $CARGO_BUILD_SBF_VERSION" <<<"$version" ||
 fi
 
 cd "$program_dir"
+# `--incident` builds the incident artifacts (design 8.3 §7.4: zero recovery
+# delay, proposer-only cancel) into target/deploy-incident. They are never a
+# release or devnet artifact; test_incident_build.rs loads them.
+out_dir=target/deploy
+if [[ "${1:-}" == "--incident" ]]; then
+  shift
+  out_dir=target/deploy-incident
+  set -- --features incident --sbf-out-dir "$out_dir" "$@"
+fi
 "$cbs" --manifest-path "$program_dir/Cargo.toml" --workspace \
   --arch v3 --tools-version "$PLATFORM_TOOLS_VERSION" "$@" -- --locked
 bash "$program_dir/scripts/check-sbf-elf.sh" \
-  target/deploy/asset_registry.so target/deploy/transfer_hook.so
+  "$out_dir/asset_registry.so" "$out_dir/transfer_hook.so"

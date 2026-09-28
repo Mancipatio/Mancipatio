@@ -1250,3 +1250,131 @@ fn close_sale_closes_the_proceeds_and_the_sale_stays_the_reuse_guard() {
         "Unauthorized",
     );
 }
+
+// ── v1.0.0-rc (design 8.3): mandatory sale end, payout-modules pause ────────
+
+/// prog-novac-15 (§8.2, §14.3.3): `end_ts` is required (6145), after
+/// `start_ts` (6022) and at most 365 days after max(start_ts, now) (6145).
+#[test]
+fn a_sale_must_end_within_365_days_of_its_start_or_of_now() {
+    let (mut svm, env) = boot();
+    let mut clock = svm.get_sysvar::<solana_clock::Clock>();
+    clock.unix_timestamp = 50_000;
+    svm.set_sysvar(&clock);
+    let now = 50_000;
+    let max = asset_registry::MAX_SALE_DURATION_SECS;
+    let t = terms(&svm);
+    for id in [1u64, 2] {
+        approve(&mut svm, &env, &env.payer, id, t).unwrap();
+    }
+    let open = |id: u64, start_ts: i64, end_ts: i64| {
+        let mut ix = open_sale_ix(&env, &OpenArgs::new(&env, id, 10, 100, &env.payer));
+        ix.data = ixd::OpenSale {
+            sale_id: id,
+            price_per_unit: 10,
+            total_for_sale: 100,
+            start_ts,
+            end_ts,
+            raise_type: RaiseType::Mature,
+            cliff_months: 0,
+            vesting_months: 0,
+        }
+        .data();
+        ix
+    };
+    for (what, start, end, code, name) in [
+        ("no end", now, 0, 6145, "SaleDurationInvalid"),
+        (
+            "end before start",
+            now + 10,
+            now + 10,
+            6022,
+            "InvalidSaleParams",
+        ),
+        (
+            "a day too long",
+            now + 10,
+            now + 10 + max + 1,
+            6145,
+            "SaleDurationInvalid",
+        ),
+        (
+            "from now, a day too long",
+            now - 1_000,
+            now + max + 1,
+            6145,
+            "SaleDurationInvalid",
+        ),
+    ] {
+        let err = try_send(&mut svm, &[&env.payer], &[open(1, start, end)]);
+        assert_error(err, code, name);
+        let _ = what;
+    }
+    try_send(
+        &mut svm,
+        &[&env.payer],
+        &[open(1, now + 10, now + 10 + max)],
+    )
+    .expect("exactly 365 days after the start");
+    // A start in the past: the 365 days run from now.
+    try_send(&mut svm, &[&env.payer], &[open(2, now - 1_000, now + max)])
+        .expect("365 days after now");
+}
+
+/// D2 (§4.2, §14.3.3): `PAUSE_PAYOUT_MODULES` stops a Startup raise (the
+/// payout-vault module) and nothing else of `open_sale`.
+#[test]
+fn the_payout_modules_bit_stops_startup_raises_but_not_mature_ones() {
+    let (mut svm, env) = boot();
+    let startup = Terms::covering(&svm, 10, 100, RaiseType::Startup).with_schedule(6, 24);
+    approve(&mut svm, &env, &env.payer, 1, startup).unwrap();
+    let mature = terms(&svm);
+    approve(&mut svm, &env, &env.payer, 2, mature).unwrap();
+    pause::set_pause_flags(
+        &mut svm,
+        &env.admin2,
+        asset_registry::PAUSE_PAYOUT_MODULES,
+        0,
+    )
+    .expect("any Admin sets it");
+    let now = svm.get_sysvar::<solana_clock::Clock>().unix_timestamp;
+    let mut ix = open_sale_ix(
+        &env,
+        &OpenArgs {
+            raise_type: RaiseType::Startup,
+            ..OpenArgs::new(&env, 1, 10, 100, &env.payer)
+        },
+    );
+    ix.data = ixd::OpenSale {
+        sale_id: 1,
+        price_per_unit: 10,
+        total_for_sale: 100,
+        start_ts: 0,
+        end_ts: now + asset_registry::MAX_SALE_DURATION_SECS,
+        raise_type: RaiseType::Startup,
+        cliff_months: 6,
+        vesting_months: 24,
+    }
+    .data();
+    pause::assert_paused(
+        try_send(&mut svm, &[&env.payer], std::slice::from_ref(&ix)),
+        "a Startup raise under PAUSE_PAYOUT_MODULES",
+    );
+    try_send(
+        &mut svm,
+        &[&env.payer],
+        &[open_sale_ix(
+            &env,
+            &OpenArgs::new(&env, 2, 10, 100, &env.payer),
+        )],
+    )
+    .expect("a Mature raise is untouched");
+    pause::set_pause_flags(
+        &mut svm,
+        &env.payer,
+        0,
+        asset_registry::PAUSE_PAYOUT_MODULES,
+    )
+    .expect("the super admin clears it on its own");
+    try_send(&mut svm, &[&env.payer], &[ix]).expect("the Startup raise opens");
+}

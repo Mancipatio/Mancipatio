@@ -629,6 +629,60 @@ fn admins_set_bits_that_combine_and_only_the_super_admin_clears() {
     pause::unpause_all(&mut ctx.svm, &ctx.payer);
 }
 
+/// D2 / K1.2 (design 8.3 §4.2, §14.4.1-3): the payout-modules bit (0x40) is
+/// set by any Admin, cleared only by the super admin and only in a call of
+/// its own (6154), so "resume everything" can never switch the modules on.
+#[test]
+fn the_payout_modules_bit_clears_only_on_its_own_and_never_by_an_admin() {
+    let mut ctx = boot();
+    assert_eq!(
+        pause::pause_flags(&ctx.svm),
+        0xFF,
+        "init: every bit + bootstrap"
+    );
+    pause::set_pause_flags(&mut ctx.svm, &ctx.admin, PAUSE_PAYOUT_MODULES, 0)
+        .expect("an Admin sets 0x40 (idempotent)");
+    expect_code(
+        pause::set_pause_flags(&mut ctx.svm, &ctx.admin, 0, PAUSE_PAYOUT_MODULES),
+        6119,
+        "an Admin clears 0x40",
+    );
+    for mask in [0x7Fu8, 0xFF, 0x41, 0xC0] {
+        expect_code(
+            pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, mask),
+            6154,
+            &format!("clear {mask:#04x}"),
+        );
+    }
+    assert_eq!(pause::pause_flags(&ctx.svm), 0xFF, "nothing changed");
+    // Everything else (bit 7 included) in one call: the bootstrap closes.
+    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0xBF).expect("clear 0xBF");
+    assert_eq!(pause::pause_flags(&ctx.svm), 0x40);
+    assert!(!load_platform(&ctx.svm).bootstrap_open());
+    // The modules bit alone.
+    let logs = try_send_logs(
+        &mut ctx.svm,
+        &[&ctx.payer],
+        &[pause::set_pause_flags_ix(
+            &ctx.payer.pubkey(),
+            0,
+            PAUSE_PAYOUT_MODULES,
+        )],
+    )
+    .expect("clear 0x40 alone");
+    assert_eq!(pause::pause_flags(&ctx.svm), 0);
+    let changed = events::<PauseFlagsChanged>(&logs);
+    assert_eq!((changed[0].old, changed[0].new), (0x40, 0x00));
+    // `set_pause` touches bit 0 only and needs no special call.
+    send(
+        &mut ctx.svm,
+        &[&ctx.payer],
+        &[set_pause_ix(&ctx.payer.pubkey(), true)],
+        "set_pause(true)",
+    );
+    assert_eq!(pause::pause_flags(&ctx.svm), 0x01);
+}
+
 #[test]
 fn set_pause_bool_touches_only_the_onboarding_bit() {
     let mut ctx = boot();
@@ -751,7 +805,11 @@ fn legacy_pause_bytes_keep_their_meaning_and_rollback_is_reachable() {
     )
     .0;
     pause::assert_paused(
-        try_send(&mut ctx.svm, &[&second_issuer], &[second.clone()]),
+        try_send(
+            &mut ctx.svm,
+            &[&second_issuer],
+            std::slice::from_ref(&second),
+        ),
         "legacy byte 1 pauses onboarding",
     );
     send(

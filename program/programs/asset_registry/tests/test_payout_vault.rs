@@ -2479,3 +2479,414 @@ fn freeze_vote_and_refund_stay_open_under_full_pause() {
     exit_via_return_capital(&mut svm, &ctx, &vault, &escrow, 120, v0.total_amount);
     assert_eq!(pause::pause_flags(&svm), asset_registry::PAUSE_FLAGS_ALL);
 }
+
+// ── v1.0.0-rc (design 8.3): payout negatives with exact codes (prog-novac-10),
+// the vote minimum and the payout-modules bit ─────────────────────────────
+
+fn assert_code(result: Result<(), String>, code: u32, what: &str) {
+    let err = result.expect_err(what);
+    assert!(
+        err.contains(&format!("Custom({code})")),
+        "{what}: expected {code}, got {err}"
+    );
+}
+
+/// `cast_vault_vote` by any `voter` (the suite's own helpers vote as the buyer).
+fn cast_as(
+    svm: &mut LiteSVM,
+    ctx: &SaleCtx,
+    vault: &Pubkey,
+    vote: &Pubkey,
+    voter: &Keypair,
+    weight: u64,
+    proof: Vec<[u8; 32]>,
+    choice: VaultVoteChoice,
+) -> Result<(), String> {
+    let record = Pubkey::find_program_address(
+        &[
+            asset_registry::VAULT_VOTE_RECORD_SEED,
+            vote.as_ref(),
+            voter.pubkey().as_ref(),
+        ],
+        &asset_registry::ID,
+    )
+    .0;
+    try_send(
+        svm,
+        &[&ctx.payer, voter],
+        &[Instruction::new_with_bytes(
+            asset_registry::ID,
+            &ixd::CastVaultVote {
+                weight,
+                proof,
+                choice,
+            }
+            .data(),
+            acc::CastVaultVote {
+                vault: *vault,
+                voter: voter.pubkey(),
+                vote: *vote,
+                record,
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        )],
+    )
+}
+
+/// A frozen Startup vault (12 tranches, 120 units bought by the buyer).
+fn frozen_vault(svm: &mut LiteSVM) -> (SaleCtx, Pubkey, Pubkey) {
+    let ctx = setup_sale(svm, RaiseType::Startup, 0, 12);
+    buy_units(svm, &ctx, 120);
+    let (vault, escrow) = open_payout_vault(svm, &ctx, [7u8; 32]);
+    let v: PayoutVault = load(svm, &vault);
+    warp_to(svm, v.start_ts + 2 * 2_592_000 + 1);
+    send_freeze(svm, &ctx, &vault);
+    (ctx, vault, escrow)
+}
+
+/// D2 (§4.2, §14.3.6): a vault vote runs at least 7 days (6147); a zero
+/// weight or period stays 6046; one pending round at a time (6107); an
+/// Active vault has no vote (6040).
+#[test]
+fn a_vault_vote_runs_at_least_seven_days() {
+    let (mut svm, _) = boot();
+    let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 12);
+    buy_units(&mut svm, &ctx, 120);
+    let (vault, _) = open_payout_vault(&mut svm, &ctx, [7u8; 32]);
+    let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 120);
+    assert_code(
+        try_open_vote(&mut svm, &ctx, &vault, root, 120, 604_800),
+        6040,
+        "an Active vault",
+    );
+    let v: PayoutVault = load(&svm, &vault);
+    warp_to(&mut svm, v.start_ts + 2 * 2_592_000 + 1);
+    send_freeze(&mut svm, &ctx, &vault);
+    for (weight, period, code, what) in [
+        (120u64, 604_799i64, 6147, "one second short of 7 days"),
+        (120, 1, 6147, "an Admin root with a 1 s period"),
+        (120, 0, 6046, "a zero period"),
+        (0, 604_800, 6046, "a zero weight"),
+    ] {
+        assert_code(
+            try_open_vote(&mut svm, &ctx, &vault, root, weight, period),
+            code,
+            what,
+        );
+    }
+    let vote = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
+    let state: VaultVote = load(&svm, &vote);
+    assert_eq!(state.end_ts - state.start_ts, 604_800);
+    assert_code(
+        try_open_vote(&mut svm, &ctx, &vault, root, 120, 604_800),
+        6107,
+        "a second pending round",
+    );
+}
+
+/// prog-novac-10 (§14.9): the vote and refund lifecycle refuses with exact
+/// codes; a malicious root cannot finalize before its 7 days (notice only).
+#[test]
+fn vote_and_refund_negatives_carry_exact_codes() {
+    let (mut svm, _) = boot();
+    let (ctx, vault, escrow) = frozen_vault(&mut svm);
+    let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 120);
+    assert_code(
+        try_claim_refund(
+            &mut svm,
+            &ctx,
+            &vault,
+            &escrow,
+            &ctx.buyer_payment_ata,
+            120,
+            vec![],
+        ),
+        3012,
+        "no vote yet: no refund",
+    );
+    let vote = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
+    let v: VaultVote = load(&svm, &vote);
+    assert_code(
+        try_cast(
+            &mut svm,
+            &ctx,
+            &vault,
+            &vote,
+            119,
+            vec![],
+            VaultVoteChoice::ReturnCapital,
+        ),
+        6030,
+        "a weight outside the snapshot",
+    );
+    send_cast(
+        &mut svm,
+        &ctx,
+        &vault,
+        &vote,
+        120,
+        vec![],
+        VaultVoteChoice::ReturnCapital,
+    );
+    assert_code(
+        try_cast(
+            &mut svm,
+            &ctx,
+            &vault,
+            &vote,
+            120,
+            vec![],
+            VaultVoteChoice::Extend,
+        ),
+        0,
+        "a second vote (record in use)",
+    );
+    warp_to(&mut svm, v.start_ts + 604_799);
+    assert_code(
+        try_finalize(&mut svm, &ctx, &vault, &vote),
+        6041,
+        "finalize inside the 7 days",
+    );
+    assert_code(
+        try_claim_refund(
+            &mut svm,
+            &ctx,
+            &vault,
+            &escrow,
+            &ctx.buyer_payment_ata,
+            120,
+            vec![],
+        ),
+        6045,
+        "refund before the vault is Cancelled",
+    );
+    warp_to(&mut svm, v.end_ts + 1);
+    let late = Keypair::new();
+    svm.airdrop(&late.pubkey(), 1_000_000_000).unwrap();
+    assert_code(
+        cast_as(
+            &mut svm,
+            &ctx,
+            &vault,
+            &vote,
+            &late,
+            1,
+            vec![],
+            VaultVoteChoice::Extend,
+        ),
+        6029,
+        "a vote after the window",
+    );
+    send_finalize(&mut svm, &ctx, &vault, &vote);
+    assert_eq!(
+        load::<PayoutVault>(&svm, &vault).state,
+        PayoutVaultState::Cancelled
+    );
+    assert_code(
+        try_claim_refund(
+            &mut svm,
+            &ctx,
+            &vault,
+            &escrow,
+            &ctx.buyer_payment_ata,
+            121,
+            vec![],
+        ),
+        6030,
+        "a refund proof outside the snapshot",
+    );
+    send_claim_refund(
+        &mut svm,
+        &ctx,
+        &vault,
+        &escrow,
+        &ctx.buyer_payment_ata,
+        120,
+        vec![],
+    );
+    assert_code(
+        try_claim_refund(
+            &mut svm,
+            &ctx,
+            &vault,
+            &escrow,
+            &ctx.buyer_payment_ata,
+            120,
+            vec![],
+        ),
+        6044,
+        "a second refund",
+    );
+}
+
+/// §14.9 corrected last row: with an HONEST root and the 7-day period the
+/// investors vote, and the ReturnCapital majority is decided by weights.
+#[test]
+fn an_honest_root_lets_the_weighted_majority_return_the_capital() {
+    let (mut svm, _) = boot();
+    let (ctx, vault, escrow) = frozen_vault(&mut svm);
+    let other = Keypair::new();
+    svm.airdrop(&other.pubkey(), 1_000_000_000).unwrap();
+    // Snapshot: buyer 70, other 50 (total 120).
+    let leaf_buyer = util::snapshot_leaf(&ctx.buyer.pubkey(), 70);
+    let leaf_other = util::snapshot_leaf(&other.pubkey(), 50);
+    let root = util::merkle_parent(leaf_buyer, leaf_other);
+    let vote = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
+    cast_as(
+        &mut svm,
+        &ctx,
+        &vault,
+        &vote,
+        &other,
+        50,
+        vec![leaf_buyer],
+        VaultVoteChoice::Extend,
+    )
+    .expect("minority votes Extend");
+    send_cast(
+        &mut svm,
+        &ctx,
+        &vault,
+        &vote,
+        70,
+        vec![leaf_other],
+        VaultVoteChoice::ReturnCapital,
+    );
+    let v: VaultVote = load(&svm, &vote);
+    assert_eq!((v.return_weight, v.extend_weight), (70, 50));
+    warp_to(&mut svm, v.end_ts + 1);
+    send_finalize(&mut svm, &ctx, &vault, &vote);
+    let pv: PayoutVault = load(&svm, &vault);
+    assert_eq!(pv.state, PayoutVaultState::Cancelled);
+    let before = token_balance(&svm, &ctx.buyer_payment_ata);
+    send_claim_refund(
+        &mut svm,
+        &ctx,
+        &vault,
+        &escrow,
+        &ctx.buyer_payment_ata,
+        70,
+        vec![leaf_other],
+    );
+    let refunded = token_balance(&svm, &ctx.buyer_payment_ata) - before;
+    assert_eq!(refunded, pv.total_amount * 70 / 120, "pro rata by weight");
+}
+
+/// prog-novac-10 (§14.9): release / founder-yield negatives with exact codes.
+#[test]
+fn release_and_founder_yield_negatives_carry_exact_codes() {
+    let (mut svm, _) = boot();
+    let ctx = setup_sale(&mut svm, RaiseType::Startup, 1, 12);
+    buy_units(&mut svm, &ctx, 120);
+    let (vault, escrow) = open_payout_vault(&mut svm, &ctx, [7u8; 32]);
+    assert_code(
+        try_send_release(&mut svm, &ctx, &vault, &escrow, &ctx.founder_payment_ata),
+        6037,
+        "the first tranche is not due (1-month cliff)",
+    );
+    let v: PayoutVault = load(&svm, &vault);
+    warp_to(&mut svm, v.start_ts);
+    assert_code(
+        try_send_release(&mut svm, &ctx, &vault, &escrow, &ctx.founder_payment_ata),
+        6038,
+        "no update posted for the period",
+    );
+    assert_code(
+        try_send_claim_founder_yield(&mut svm, &ctx, &vault, &escrow, &ctx.founder_payment_ata),
+        6047,
+        "no founder yield routed",
+    );
+    // A token account of someone else as the founder's.
+    assert_code(
+        try_send_release(&mut svm, &ctx, &vault, &escrow, &ctx.buyer_payment_ata),
+        6043,
+        "a destination not owned by the founder",
+    );
+    // Frozen: releases stop (6036).
+    warp_to(&mut svm, v.start_ts + 2 * 2_592_000 + 1);
+    send_freeze(&mut svm, &ctx, &vault);
+    assert_code(
+        try_send_release(&mut svm, &ctx, &vault, &escrow, &ctx.founder_payment_ata),
+        6036,
+        "a Frozen vault",
+    );
+}
+
+/// D2 (§4.2, §14.4.4): `PAUSE_PAYOUT_MODULES` closes `route_yield`; the vault
+/// continuations (open, post update) and exits (release) stay open.
+#[test]
+fn the_payout_modules_bit_closes_route_yield_and_leaves_the_vault_paths_open() {
+    let (mut svm, _) = boot();
+    let ctx = setup_sale(&mut svm, RaiseType::Startup, 0, 3);
+    let payer = ctx.payer.insecure_clone();
+    buy_units(&mut svm, &ctx, 90);
+    pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_PAYOUT_MODULES);
+    let (vault, escrow) = open_payout_vault(&mut svm, &ctx, [7u8; 32]);
+    let v0: PayoutVault = load(&svm, &vault);
+    warp_to(&mut svm, v0.start_ts + 1);
+    send_post_update(&mut svm, &ctx, &vault);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[release_ix(&ctx, &vault, &escrow)],
+        "release",
+    );
+    mint_to(
+        &mut svm,
+        &ctx.payer,
+        &ctx.payment_mint,
+        &ctx.founder_payment_ata,
+        600,
+    );
+    let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 90);
+    let route = route_yield_ix(&ctx, &vault, &escrow, 300, root, 90, &ctx.platform_ata);
+    pause::assert_paused(
+        try_send(&mut svm, &[&ctx.payer], std::slice::from_ref(&route)),
+        "route_yield under PAYOUT_MODULES",
+    );
+    pause::unpause_all(&mut svm, &payer);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[route],
+        "route_yield once enabled",
+    );
+}
+
+/// §14.1.10: an investor exit is never frozen — a Cancelled vault of a
+/// frozen issuer still refunds.
+#[test]
+fn a_frozen_issuers_cancelled_vault_still_refunds() {
+    let (mut svm, _) = boot();
+    let (ctx, vault, escrow) = frozen_vault(&mut svm);
+    let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 120);
+    let vote = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
+    send_cast(
+        &mut svm,
+        &ctx,
+        &vault,
+        &vote,
+        120,
+        vec![],
+        VaultVoteChoice::ReturnCapital,
+    );
+    let v: VaultVote = load(&svm, &vote);
+    warp_to(&mut svm, v.end_ts + 1);
+    send_finalize(&mut svm, &ctx, &vault, &vote);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[v1::freeze_issuer_ix(&ctx.payer.pubkey(), &ctx.issuer)],
+        "freeze the issuer",
+    );
+    send_claim_refund(
+        &mut svm,
+        &ctx,
+        &vault,
+        &escrow,
+        &ctx.buyer_payment_ata,
+        120,
+        vec![],
+    );
+}

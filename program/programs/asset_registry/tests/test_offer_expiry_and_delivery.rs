@@ -2886,3 +2886,112 @@ fn closed_account_tag_differs_from_every_account_discriminator() {
     }
     assert_eq!(&asset_registry::CLOSED_ACCOUNT_TAG, b"CLOSED__");
 }
+
+// ── v1.0.0-rc (design 8.3): blocked parties, the DeliveryEscrow deadline ────
+
+/// prog-novac-4 (§8.1, §14.2.2): `take_offer` refuses a blocked taker, and a
+/// maker blocked after the deposit; `cancel_offer` and `expire_offer` still
+/// return the units to a blocked maker (the hook then freezes them there).
+#[test]
+fn take_offer_refuses_a_blocked_taker_or_maker_while_cancel_and_expire_stay_open() {
+    let (mut svm, ctx) = boot(100);
+    warp_to(&mut svm, 1_000);
+    let taker = new_taker(&mut svm, &ctx);
+    let stranger = funded_wallet(&mut svm);
+    for id in 1..=2u64 {
+        send(
+            &mut svm,
+            &[&ctx.holder],
+            &[create_offer_ix(&ctx, id, 10, 5_000_000, 2_000)],
+            "create_offer",
+        );
+        deposit_to_offer_escrow(&mut svm, &ctx, id, 10);
+    }
+    let blocked = |err: String, what: &str| {
+        assert!(
+            err.contains("Custom(6144)") && err.contains("PartyBlocklisted"),
+            "{what}: {err}"
+        );
+    };
+    v1::fabricate_block_entry(&mut svm, &taker.wallet.pubkey());
+    blocked(
+        try_send(&mut svm, &[&taker.wallet], &[take_ix(&ctx, 1, &taker)]).unwrap_err(),
+        "blocked taker",
+    );
+    v1::clear_block_entry(&mut svm, &taker.wallet.pubkey());
+    v1::fabricate_block_entry(&mut svm, &ctx.holder.pubkey());
+    blocked(
+        try_send(&mut svm, &[&taker.wallet], &[take_ix(&ctx, 1, &taker)]).unwrap_err(),
+        "maker blocked after the deposit",
+    );
+    let before = token_balance(&svm, &ctx.holder_share_ata);
+    send(
+        &mut svm,
+        &[&ctx.holder],
+        &[cancel_offer_ix(&ctx, 1)],
+        "a blocked maker cancels",
+    );
+    warp_to(&mut svm, 3_000);
+    send(
+        &mut svm,
+        &[&stranger],
+        &[expire_offer_ix(&ctx, &stranger.pubkey(), 2)],
+        "anyone expires a blocked maker's offer",
+    );
+    assert_eq!(token_balance(&svm, &ctx.holder_share_ata), before + 20);
+}
+
+/// kritičar-4 (§8.2, §14.3.2): a DeliveryEscrow deadline lies in
+/// [now + 24 h, now + 365 d]; the burn-only quarantine keeps deadline 0 and
+/// has no return path at all.
+#[test]
+fn a_delivery_escrow_deadline_is_between_24_hours_and_365_days_and_the_quarantine_has_none() {
+    let (mut svm, ctx) = boot(10);
+    warp_to(&mut svm, 1_000);
+    let open = |id: u64, deadline: i64| {
+        open_vault_ix(
+            &ctx,
+            id,
+            VaultType::DeliveryEscrow,
+            1,
+            deadline,
+            ctx.holder.pubkey(),
+        )
+    };
+    for (id, deadline) in [(1u64, DE_SOON - 1), (2, DE_LONG + 1), (3, 0)] {
+        let err = try_send(&mut svm, &[&ctx.payer], &[open(id, deadline)]).unwrap_err();
+        assert!(err.contains("Custom(6148)"), "deadline {deadline}: {err}");
+    }
+    let err = try_send(&mut svm, &[&ctx.payer], &[open(4, -1)]).unwrap_err();
+    assert!(err.contains("Custom(6067)"), "a negative deadline: {err}");
+    send(&mut svm, &[&ctx.payer], &[open(5, DE_SOON)], "now + 24 h");
+    send(&mut svm, &[&ctx.payer], &[open(6, DE_LONG)], "now + 365 d");
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            7,
+            VaultType::RedemptionQueue,
+            0,
+            0,
+            Pubkey::default(),
+        )],
+        "quarantine with deadline 0",
+    );
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[return_vault_ix(
+            &ctx,
+            &ctx.payer.pubkey(),
+            7,
+            &ctx.holder_share_ata,
+        )],
+    )
+    .unwrap_err();
+    assert!(
+        err.contains("Custom(6015)"),
+        "no return from a quarantine: {err}"
+    );
+}

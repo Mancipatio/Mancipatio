@@ -1760,3 +1760,52 @@ fn vesting_push_delivery_stays_open_under_full_pause() {
     assert_eq!(token_balance(&svm, &ctx.r0_ata), 25);
     assert_eq!(token_balance(&svm, &ctx.r1_ata), 75);
 }
+
+/// prog-novac-4 / K1.6 (design 8.3 §8.1, §14.2.6): neither `claim_vested`
+/// nor the permissionless `push_vested` delivers to a wallet on the hook
+/// blocklist; the units stay in the vesting escrow and deliver once the
+/// wallet is unblocked.
+#[test]
+fn vesting_never_delivers_to_a_blocked_recipient_and_delivers_after_unblock() {
+    for delivery in [VestingDeliveryMode::Claim, VestingDeliveryMode::Push] {
+        let (mut svm, _pid) = boot();
+        let seed = if delivery == VestingDeliveryMode::Claim {
+            71
+        } else {
+            72
+        };
+        let ctx = setup_series(
+            &mut svm,
+            VestingTimingMode::Auto,
+            delivery,
+            0,
+            false,
+            false,
+            0,
+            seed,
+        );
+        deposit(&mut svm, &ctx, 400);
+        warp_to(&mut svm, 1500);
+        let crank = Keypair::new();
+        svm.airdrop(&crank.pubkey(), 1_000_000_000).unwrap();
+        let release = |svm: &mut LiteSVM| match delivery {
+            VestingDeliveryMode::Claim => claim(svm, &ctx, &ctx.r0, 0),
+            VestingDeliveryMode::Push => push(svm, &ctx, &crank, 0),
+        };
+        v1::fabricate_block_entry(&mut svm, &ctx.r0.pubkey());
+        let err = release(&mut svm).expect_err("blocked recipient");
+        assert!(
+            err.contains("Custom(6144)") && err.contains("PartyBlocklisted"),
+            "{delivery:?}: {err}"
+        );
+        assert_eq!(token_balance(&svm, &ctx.r0_ata), 0);
+        assert_eq!(
+            token_balance(&svm, &ctx.escrow),
+            400,
+            "units stay in escrow"
+        );
+        v1::clear_block_entry(&mut svm, &ctx.r0.pubkey());
+        release(&mut svm).expect("after unblock");
+        assert_eq!(token_balance(&svm, &ctx.r0_ata), 25, "{delivery:?}");
+    }
+}
