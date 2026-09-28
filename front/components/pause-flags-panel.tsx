@@ -30,6 +30,7 @@ import {
 } from "@/lib/pause-flags";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
+import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { useToast } from "@/lib/toast";
 
 type Pending = {
@@ -100,6 +101,8 @@ export function PauseFlagsPanel({
       });
       const result = await tx.send({ instructions: [ix], feePayer: signer });
       const sig = typeof result === "string" ? result : "";
+      // The pre-sign pause gate (lib/pause-gate.ts) re-reads on the next send.
+      clearPauseFlagsCache();
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: pending.title });
       const title = pending.title;

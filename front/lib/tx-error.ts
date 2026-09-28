@@ -55,6 +55,7 @@ import {
 import { features } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { MaintenanceModeError } from "@/lib/maintenance";
+import { PausedFlowError } from "@/lib/pause-gate";
 import { takeWalletChange } from "@/lib/wallet-changes";
 
 // Pull a human-readable cause out of a @solana/react-hooks send() error.
@@ -414,6 +415,8 @@ export function explainSendError(err: unknown): string {
   // Maintenance refusals are already worded for users; SDK hooks may wrap them.
   for (let cursor: unknown = err, depth = 0; cursor instanceof Error && depth < 6; cursor = cursor.cause, depth++) {
     if (cursor instanceof MaintenanceModeError) return cursor.message;
+    // The emergency pause read before the wallet opened (lib/pause-gate.ts).
+    if (cursor instanceof PausedFlowError) return cursor.message;
   }
 
   // Common case: a wallet-side rejection.

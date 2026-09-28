@@ -13,6 +13,7 @@ import { assertSiteWritable } from "@/lib/maintenance";
 import { priceForRequest } from "@/lib/priority-fee";
 import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 import { clearWalletChange } from "@/lib/wallet-changes";
+import { assertInstructionsNotPaused } from "@/lib/pause-gate";
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
@@ -22,7 +23,10 @@ import { clearWalletChange } from "@/lib/wallet-changes";
  * does not use this default-primary flow; linked profiles confer no roles.
  * Maintenance mode is read (at most a few seconds old) before preparing and
  * before any wallet prompt, so no transaction is offered while the site is
- * paused; the server's refusal of the policy check backs it up.
+ * paused; the server's refusal of the policy check backs it up. The
+ * program's emergency pause is read the same way (lib/pause-gate.ts, a few
+ * seconds old at most, fail-open): an instruction a set bit holds back is
+ * refused with a readable PausedFlowError before the wallet opens.
  * This is the one place a wallet send gets its priority fee: prepare and
  * prepareAndSend set `computeUnitPrice` from lib/priority-fee (clamped to the
  * network's cap) before any wallet prompt, and `@solana/client` prepends the
@@ -146,6 +150,8 @@ export function withVerifiedTransactions(
       await assertSiteWritable();
       await assertNetwork(context);
       checkAuthority(input, context);
+      await assertInstructionsNotPaused(context.rpc, input.instructions);
+      context.assertCurrent();
       const request = await withFee(input, context);
       // Preparation does not prompt for a message signature. The server policy
       // is read only when sign/send/toWire is explicitly requested.
@@ -180,6 +186,9 @@ export function withVerifiedTransactions(
       const context = capture();
       await assertNetwork(context);
       checkAuthority(input, context);
+      // The emergency pause, read before any wallet prompt (lib/pause-gate.ts).
+      await assertInstructionsNotPaused(context.rpc, input.instructions);
+      context.assertCurrent();
       // The fee is settled before the policy check's wallet prompt.
       const request = withLeadingComputeUnitLimit(await withFee(input, context));
       await authorize(context);

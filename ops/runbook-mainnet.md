@@ -479,6 +479,14 @@ checks that each page exists and performs its action):
   **clicks Refresh**, then **S6** on **`/admin/platform`**: PauseFlagsPanel →
   "Resume everything" (the accept gave the SA its Admin record, so the admin
   area opens).
+  **Pilot scope (8.5):** for the closed pilot, resume per area instead and
+  keep *Trading through Manci* (0x04), *Custody entry* (0x08) and
+  *Distributions* (0x10) paused (flags 0x1c) for as long as their module
+  switches are off (`ops/env-vars.md`, "Pilot scope"): the program then
+  refuses those flows too, and the front says so before any wallet opens
+  (`front/lib/pause-gate.ts`). Governance, vesting-series creation and
+  payout-vault opening read no pause bit today; only the module switches
+  hide them (8.3 adds bits for part of that).
 
 `accept_platform_admin` closes the deployer's Admin record and creates the
 SA's; no `add_admin(SA)` is ever needed. With the company wallet model (§19)

@@ -16,6 +16,7 @@ import {
 } from "@solana/react-hooks";
 import { type Address } from "@solana/kit";
 import {
+  AssetRegistryInstruction,
   RaiseType,
   SaleStatus,
   fetchMaybeKycRegistry,
@@ -48,6 +49,8 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findSalePda } from "@/lib/pdas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
+import { pausedFlowFor } from "@/lib/pause-gate";
+import { usePauseFlags } from "@/lib/use-pause-flags";
 import {
   getListing,
   listUpdates,
@@ -130,6 +133,8 @@ export default function DealPage({
   const tx = useSendTransaction();
   const walletAddress = conn.wallet?.account.address?.toString() ?? "";
   const toast = useToast();
+  // The emergency pause, read before the user starts (lib/pause-gate.ts).
+  const pauseFlags = usePauseFlags();
 
   const [sale, setSale] = useState<Sale | null | "not_found">(null);
   const [listing, setListing] = useState<LaunchListing | null>(null);
@@ -603,7 +608,11 @@ export default function DealPage({
     onChainUnits <= BigInt(0);
   const onChainOverRemaining =
     settlesOnChain && onChainUnits > BigInt(0) && onChainUnits > remainingUnits;
+  // A paused on-chain buy is refused here, before the form is submitted, in
+  // the program's words; the send path checks again before the wallet opens.
+  const buyPaused = settlesOnChain ? pausedFlowFor(pauseFlags, AssetRegistryInstruction.Buy) : null;
   const canCommit =
+    !buyPaused &&
     !!walletAddress &&
     purchaseRecovery.ready &&
     documentTerms?.sale === salePubkey &&
@@ -1597,6 +1606,11 @@ export default function DealPage({
               </div>
             )}
 
+            {buyPaused && (
+              <p role="status" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+                {buyPaused}
+              </p>
+            )}
             {/* Commit / Buy button */}
             {!walletAddress ? (
               <WalletRequired />
