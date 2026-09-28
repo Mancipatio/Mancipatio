@@ -610,6 +610,41 @@ describe("partial progress and stops", () => {
     expect(state.platformProposed).toBe(w.keys.superAdmin);
   });
 
+  it("proposals retired by an executed recovery (current_authority = default) are no proposal: the probe passes and S4b / S5 propose over them", async () => {
+    // execute_platform_recovery / execute_blocklist_recovery zero the pending
+    // proposal's current_authority and leave the account in place.
+    const retired = "11111111111111111111111111111111" as Address;
+    const w = await world();
+    await seedPlatform(w, { admin: w.keys.deployer });
+    await seedBlocklist(w, w.keys.deployer, key(97));
+    const [transferBa] = await findTransferPda();
+    w.chain.set(transferBa, {
+      owner: HOOK,
+      lamports: rent(89),
+      data: new Uint8Array(
+        getBlocklistAuthorityProposalEncoder().encode({
+          currentAuthority: retired,
+          newAuthority: key(97),
+          proposedAt: w.chain.now,
+          expiresAt: w.chain.now + 1_209_600,
+          bump: 255,
+        }),
+      ),
+    });
+    const [platform] = await findPlatformPda();
+    const [transfer] = await findAcceptPlatformAdminTransferPda({ platform });
+    w.chain.set(transfer, { owner: REGISTRY, lamports: rent(163), data: proposalBytes(platform, retired, key(95), 0) });
+    const state = await probeBootstrapState(rpcFor(w), w.map);
+    expect(state.platformProposed).toBeNull();
+    expect(state.blocklist?.proposed).toBeNull();
+    expect(state.platformWindow).toBeNull();
+    expect(state.blocklistWindow).toBeNull();
+    const admin = w.keys.admins[0];
+    const p = await plan(w, { deployer: createNoopSigner(w.keys.deployer), rehearsal: { admin: createNoopSigner(admin) } });
+    expect(p.stops).toEqual([]);
+    expect(ids(p)).toEqual(expect.arrayContaining(["S4b", "S5"]));
+  });
+
   it("stops when the deployer balance cannot pay for the cycle", async () => {
     const w = await world();
     w.chain.get(w.keys.deployer)!.lamports = BigInt(10_000);
@@ -710,5 +745,46 @@ describe("company wallet for every operational role (Talas 8.2)", () => {
     expect(findings.filter((f) => f.severity === "blocker")).toEqual([]);
     expect(findings.find((f) => f.code === "role-overlap")?.message).toMatch(/\(acknowledged\).*clawback/);
     expect(findings.find((f) => f.code === "kyc-admin")?.severity).toBe("warning");
+  }, REHEARSAL_TIMEOUT_MS);
+
+  it("the pilot mask (unpauseMask 35, role-map.company.example.json): S6 leaves 0x5c, S7 hands over with 0 blockers and no CHAIN_HANDOVER_WHILE_PAUSED", async () => {
+    const w = await world();
+    const company = w.keys.superAdmin;
+    const json = JSON.parse(fs.readFileSync(w.mapFile, "utf8"));
+    Object.assign(json, {
+      admins: [],
+      blocklistAuthority: company,
+      kyc: { ...json.kyc, authority: company },
+      protocolTreasury: company,
+      acknowledgedRoleOverlaps: [
+        {
+          key: company,
+          roles: ["superAdmin", "kyc.authority", "blocklistAuthority", "protocolTreasury"],
+          reason: "Company wallet holds every operational role (test)",
+        },
+      ],
+      unpauseMask: 35,
+    });
+    fs.writeFileSync(w.mapFile, JSON.stringify(json));
+    w.map = (await validateRoleMap(json, { network: "devnet", genesis: CLUSTER_GENESIS_HASHES.devnet })).map;
+    expect(w.map.unpauseMask).toBe(0x23);
+    const idlDry = await runTool("idl", env(w, { CHAIN_IDL_MODE: "send" }), idlTool, deps(w));
+    expect((await runTool("idl", sendEnv(w, idlDry.planDigest as string, { CHAIN_IDL_MODE: "send" }), idlTool, deps(w))).status).toBe("completed");
+    const pair = w.pairs.superAdmin.path;
+    const cycle = await sendRun(w, { CHAIN_REHEARSAL_SIGNERS: `superAdmin=${pair},blocklistAuthority=${pair},kycAuthority=${pair}` });
+    expect(cycle.error ?? null).toBeNull();
+    const state = await probeBootstrapState(rpcFor(w), w.map);
+    // Trading, custody entry and distributions stay paused (0x1c), 0x40 off.
+    expect(state.platform?.pauseFlags).toBe(0x5c);
+
+    const s7 = await sendRun(w, { CHAIN_HANDOVER: "1", CHAIN_CONFIRM_HANDOVER: w.keys.vault });
+    expect(s7.error ?? null).toBeNull();
+    expect((s7.handoverInventory as { blockers: string[] }).blockers).toEqual([]);
+    const after = await probeBootstrapState(rpcFor(w), w.map);
+    expect(Object.values(after.ua)).toEqual([w.keys.vault, w.keys.vault]);
+    const inventory = await runTool("inventory", env(w, { CHAIN_PHASE: "handed-over" }), inventoryTool, deps(w));
+    const findings = inventory.findings as { severity: string; code: string; message: string }[];
+    expect(findings.filter((f) => f.severity === "blocker")).toEqual([]);
+    expect(findings.find((f) => f.code === "pilot-paused")?.severity).toBe("info");
   }, REHEARSAL_TIMEOUT_MS);
 });

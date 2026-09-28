@@ -76,6 +76,8 @@ export const SOURCE_LABELS: Record<string, { label: string; format: "platform" |
   "onchain:issuer-freeze": { label: "Issuer proceeds frozen or unfrozen", format: "minimal" },
   "onchain:role-change-pending": { label: "Role change pending (timelock running)", format: "platform" },
   "onchain:payout-modules": { label: "Payout modules switched on (mainnet)", format: "platform" },
+  "onchain:bootstrap-open": { label: "Bootstrap window open on a live platform (timelocks waived)", format: "platform" },
+  "onchain:frozen-issuer-activity": { label: "Frozen issuer's wallet active on chain", format: "minimal" },
   "indexer:queue-lag": { label: "Indexer queue is lagging", format: "platform" },
   "indexer:degraded": { label: "Indexer is degraded", format: "platform" },
   "indexer:gap": { label: "Transactions missing from the index", format: "platform" },

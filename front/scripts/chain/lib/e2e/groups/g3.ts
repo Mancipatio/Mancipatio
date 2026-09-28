@@ -5,6 +5,14 @@
  * deposit is refused, seller + buyer deposits settle, a payment-only deal is
  * cancelled with a refund. Instruction shapes mirror the app pages (hook tail
  * per transfer leg); the offer that must expire is created first.
+ *
+ * Localnet adds the v1.0.0-rc party blocklist and deadlines: a deal expiring
+ * in about a minute with the buyer's payment deposited (3.7a/b), the buyer
+ * then blocked (3.8a); a blocked taker is refused (3.8c, 6144); after the
+ * expiry the permissionless expire (the app's buildExpireOtcDealInstructions)
+ * refuses to refund the blocked buyer (3.7c, 6144, O-11) and the Admin's
+ * cancel_otc_deal refunds it (3.7d); then the block is lifted (3.8d). A deal
+ * expiring past 90 days is refused (3.9, 6149).
  */
 import type { Address, Instruction, KeyPairSigner } from "@solana/kit";
 import { findAssociatedTokenPda, getCreateAssociatedTokenIdempotentInstructionAsync } from "@solana-program/token-2022";
@@ -28,9 +36,13 @@ import { hookTransferMetas } from "@/lib/hook-metas";
 import {
   buildDepositOtcAssetInstructions,
   buildDepositOtcPaymentInstructions,
+  buildExpireOtcDealInstructions,
   buildTakeOfferInstructions,
 } from "@/lib/otc-transactions";
-import { findOfferPda } from "@/lib/pdas";
+import { findBlockEntryPda, findOfferPda } from "@/lib/pdas";
+import { getAddToBlocklistInstructionAsync, getRemoveFromBlocklistInstructionAsync } from "@/lib/generated/transfer_hook";
+import { OTC_DEAL_MAX_TTL_SECONDS } from "@/lib/deadline-bounds";
+import { ChainPlanError } from "../../safety";
 import { TOKEN_2022, TOKEN_CLASSIC } from "@/lib/transaction-builders";
 import { chainNow, waitForChainTime } from "../clock";
 import { entity } from "../state";
@@ -38,6 +50,8 @@ import { accountExists, expiringDeadline, type World } from "../world";
 import { UNIT_PRICE } from "./g1";
 
 const EXPIRING_OFFER_S = BigInt(75);
+/** Deal #3 must still take the buyer's deposit (3.7b) right after it is created. */
+const EXPIRING_DEAL_S = BigInt(90);
 
 function withTail(ix: Instruction, tail: { address: Address; role: number }[]): Instruction {
   return { ...ix, accounts: [...(ix.accounts ?? []), ...tail] } as Instruction;
@@ -121,7 +135,7 @@ async function dealStatus(w: World, deal: Address): Promise<OtcDealStatus | null
 /** The e2e deals' lifetime: long enough for the group, inside the 90-day cap. */
 const DEAL_TTL_S = BigInt(7 * 86_400);
 
-async function createDealIxs(w: World, dealId: number, seller: Address, buyer: Address, amount: bigint, price: bigint) {
+async function createDealIxs(w: World, dealId: number, seller: Address, buyer: Address, amount: bigint, price: bigint, expiresAt?: bigint) {
   const paymentMint = entity(w.runner.state, "paymentMint") as Address;
   return [
     await getCreateOtcDealInstructionAsync({
@@ -138,8 +152,40 @@ async function createDealIxs(w: World, dealId: number, seller: Address, buyer: A
       price,
       paymentMintArg: paymentMint,
       // v1: every deal expires, at most 90 days out (DealExpiryOutOfRange).
-      expiresAt: (await chainNow(w.rpc)) + DEAL_TTL_S,
+      expiresAt: expiresAt ?? (await chainNow(w.rpc)) + DEAL_TTL_S,
     }),
+  ];
+}
+
+/** cancel_otc_deal by the Admin (as /admin/otc builds it): both deposited legs return. */
+async function cancelDealIxs(w: World, deal: Address) {
+  const { admin } = w.roles;
+  const d = (await fetchOtcDeal(w.rpc, deal, { commitment: "finalized" })).data;
+  const sellerShare = await shareAta(d.seller, d.mint);
+  const buyerPayment = await paymentAtaOf(d.buyer, d.paymentMint);
+  const base = await getCancelOtcDealInstructionAsync({
+    authority: admin,
+    deal,
+    mint: d.mint,
+    assetEscrow: d.assetEscrow,
+    sellerShareAccount: sellerShare,
+    paymentMint: d.paymentMint,
+    paymentEscrow: d.paymentEscrow,
+    buyerPaymentAccount: buyerPayment,
+    shareTokenProgram: TOKEN_2022,
+    paymentTokenProgram: TOKEN_CLASSIC,
+  });
+  const tail = await hookTransferMetas(w.rpc, d.mint, {
+    sourceTokenAccount: d.assetEscrow,
+    destTokenAccount: sellerShare,
+    transferAuthority: deal,
+    sourceOwner: deal,
+    destOwner: d.seller,
+  });
+  return [
+    await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: admin, owner: d.seller, mint: d.mint, tokenProgram: TOKEN_2022 }),
+    await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: admin, owner: d.buyer, mint: d.paymentMint, tokenProgram: TOKEN_CLASSIC }),
+    withTail(base, tail),
   ];
 }
 
@@ -175,6 +221,36 @@ export async function runGroup3(w: World): Promise<"completed"> {
     { done: () => accountExists(w.rpc, offer3) },
   );
   const offer3Expiry = BigInt(entity(w.runner.state, "offer3ExpiresAt"));
+
+  // 3.7a/b (localnet) right away: deal #3 expires while the rest runs, with
+  // the buyer's payment in its escrow.
+  const [deal3] = await findDealPda({ shareClass, dealId: BigInt(3) });
+  const blocking = w.runner.applies("3.7a");
+  let deal3Expiry = BigInt(0);
+  if (blocking) {
+    await w.runner.step(
+      "3.7a",
+      async () => {
+        const expiresAt = await expiringDeadline(w, {
+          key: "deal3ExpiresAt",
+          step: "3.7a",
+          seconds: EXPIRING_DEAL_S,
+          exists: () => accountExists(w.rpc, deal3),
+        });
+        return { payer: admin, ixs: await createDealIxs(w, 3, b1.address, b2.address, BigInt(1), UNIT_PRICE, expiresAt) };
+      },
+      { done: () => accountExists(w.rpc, deal3) },
+    );
+    deal3Expiry = BigInt(entity(w.runner.state, "deal3ExpiresAt"));
+    await w.runner.step("3.7b", async () => ({ payer: b2, ixs: await depositPaymentIxs(w, b2, deal3) }), {
+      done: async () => {
+        const account = await fetchMaybeOtcDeal(w.rpc, deal3, { commitment: "finalized" });
+        return !account.exists || account.data.paymentDepositedAmount > BigInt(0) || account.data.status !== OtcDealStatus.Open;
+      },
+      notRun: async () =>
+        (await chainNow(w.rpc)) + BigInt(10) < deal3Expiry ? null : `deal #3 expired at ${deal3Expiry} before the deposit could be shown`,
+    });
+  }
 
   const offer1 = await findOfferPda(shareClass, BigInt(1));
   await w.runner.step(
@@ -263,47 +339,75 @@ export async function runGroup3(w: World): Promise<"completed"> {
       return !account.exists || account.data.paymentDepositedAmount > BigInt(0) || account.data.status !== OtcDealStatus.Open;
     },
   });
-  await w.runner.step(
-    "3.6c",
-    async () => {
-      const d = (await fetchOtcDeal(w.rpc, deal2, { commitment: "finalized" })).data;
-      const sellerShare = await shareAta(d.seller, d.mint);
-      const buyerPayment = await paymentAtaOf(d.buyer, d.paymentMint);
-      const base = await getCancelOtcDealInstructionAsync({
-        authority: admin,
-        deal: deal2,
-        mint: d.mint,
-        assetEscrow: d.assetEscrow,
-        sellerShareAccount: sellerShare,
-        paymentMint: d.paymentMint,
-        paymentEscrow: d.paymentEscrow,
-        buyerPaymentAccount: buyerPayment,
-        shareTokenProgram: TOKEN_2022,
-        paymentTokenProgram: TOKEN_CLASSIC,
-      });
-      const tail = await hookTransferMetas(w.rpc, d.mint, {
-        sourceTokenAccount: d.assetEscrow,
-        destTokenAccount: sellerShare,
-        transferAuthority: deal2,
-        sourceOwner: deal2,
-        destOwner: d.seller,
-      });
-      return {
-        payer: admin,
-        ixs: [
-          await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: admin, owner: d.seller, mint: d.mint, tokenProgram: TOKEN_2022 }),
-          await getCreateAssociatedTokenIdempotentInstructionAsync({ payer: admin, owner: d.buyer, mint: d.paymentMint, tokenProgram: TOKEN_CLASSIC }),
-          withTail(base, tail),
-        ],
-      };
+  await w.runner.step("3.6c", async () => ({ payer: admin, ixs: await cancelDealIxs(w, deal2) }), {
+    done: async () => {
+      const status = await dealStatus(w, deal2);
+      return status === null || status === OtcDealStatus.Cancelled;
     },
-    {
+  });
+
+  // 3.9: every deal expires at most 90 days out (6149), whatever the network.
+  await w.runner.step("3.9", async () => ({
+    payer: admin,
+    ixs: await createDealIxs(w, 9, b1.address, b2.address, BigInt(1), UNIT_PRICE, (await chainNow(w.rpc)) + BigInt(OTC_DEAL_MAX_TTL_SECONDS) + BigInt(86_400)),
+  }));
+
+  if (blocking) {
+    const ba = w.roles.blocklistAuthority;
+    if (!ba) throw new ChainPlanError("3.8 needs the localnet blocklist authority key");
+    const b2Entry = await findBlockEntryPda(b2.address);
+    const b2Blocked = () => accountExists(w.rpc, b2Entry);
+    // 3.8a: B2 (deal #3's buyer, the taker below) is blocked after its deposit.
+    await w.runner.step("3.8a", async () => ({ payer: ba, ixs: [await getAddToBlocklistInstructionAsync({ authority: ba, wallet: b2.address })] }), {
+      done: async () => (await b2Blocked()) || w.runner.passed("3.8d"),
+    });
+    const offer4 = await findOfferPda(shareClass, BigInt(4));
+    await w.runner.step(
+      "3.8b",
+      async () => ({ payer: b1, ixs: (await createAndFundOffer(w, b1, 4, BigInt(1), UNIT_PRICE, BigInt(0))).ixs }),
+      { done: () => accountExists(w.rpc, offer4) },
+    );
+    await w.runner.step("3.8c", async () => ({ payer: b2, ixs: await takeIxs(w, b2, offer4) }), {
+      notRun: async () => ((await b2Blocked()) ? null : "B2 is no longer blocked (3.8d ran)"),
+    });
+    // After deal #3's expiry: the permissionless expire must not refund the
+    // blocked buyer (O-11); the Admin's cancel does.
+    await waitForChainTime({ rpc: w.rpc, target: deal3Expiry + BigInt(2), sleep: w.sleep, signal: w.signal, log: w.log, label: "deal #3 expiry" });
+    const deal3Open = async () => (await dealStatus(w, deal3)) === OtcDealStatus.Open;
+    await w.runner.step(
+      "3.7c",
+      async () => {
+        const d = (await fetchOtcDeal(w.rpc, deal3, { commitment: "finalized" })).data;
+        return { payer: b3, ixs: await buildExpireOtcDealInstructions(w.rpc, { payer: b3, dealPda: deal3, deal: d, paymentTokenProgram: TOKEN_CLASSIC }) };
+      },
+      { notRun: async () => ((await deal3Open()) && (await b2Blocked()) ? null : "deal #3 is no longer open with its buyer blocked") },
+    );
+    await w.runner.step("3.7d", async () => ({ payer: admin, ixs: await cancelDealIxs(w, deal3) }), {
       done: async () => {
-        const status = await dealStatus(w, deal2);
+        const status = await dealStatus(w, deal3);
         return status === null || status === OtcDealStatus.Cancelled;
       },
-    },
-  );
+    });
+    await w.runner.step("3.8d", async () => ({ payer: ba, ixs: [await getRemoveFromBlocklistInstructionAsync({ authority: ba, wallet: b2.address })] }), {
+      done: async () => !(await b2Blocked()),
+    });
+    await w.runner.step(
+      "3.8e",
+      async () => {
+        const { data, makerShare, tail } = await offerReturnTail(w, offer4);
+        const cancel = await getCancelOfferInstructionAsync({
+          maker: b1,
+          offer: offer4,
+          mint: data.mint,
+          escrow: data.escrow,
+          makerShareAccount: makerShare,
+          shareTokenProgram: TOKEN_2022,
+        });
+        return { payer: b1, ixs: [withTail(cancel, tail)] };
+      },
+      { done: async () => (await offerStatus(w, offer4)) === OfferStatus.Cancelled },
+    );
+  }
 
   // 3.4b/c after offer #3 expired.
   await waitForChainTime({ rpc: w.rpc, target: offer3Expiry + BigInt(2), sleep: w.sleep, signal: w.signal, log: w.log, label: "offer #3 expiry" });

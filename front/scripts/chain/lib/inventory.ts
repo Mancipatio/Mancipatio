@@ -80,6 +80,7 @@ import {
   EMERGENCY_PAUSE_BITS,
   PAUSE_FLAGS_ALL,
   PAUSE_PAYOUT_MODULES,
+  describePausedAreas,
   formatPauseFlags,
   isBootstrapOpen,
   unknownPauseBits,
@@ -706,10 +707,20 @@ export function inventoryFindings(
   if (inv.platform) {
     const flags = inv.platform.pauseFlags;
     // Only the emergency areas count as "paused": the payout modules (0x40)
-    // stay off for good on mainnet, and bit 7 is the bootstrap marker.
-    if ((flags & EMERGENCY_PAUSE_BITS) !== 0) {
-      if (atHandover && !options.handoverWhilePaused) add("blocker", "paused", `pause flags ${inv.platform.pauseFlagsHex} at handover`);
-      else add("info", "paused", `pause flags ${inv.platform.pauseFlagsHex}`);
+    // stay off for good on mainnet, and bit 7 is the bootstrap marker. With a
+    // role map, only the areas S6 opens (`map.unpauseMask`) must be clear at
+    // handover: the pilot keeps the others paused on purpose (0x1c with the
+    // company example's 0x23), before and after S7 — an info, not a blocker.
+    const mustOpen = map ? map.unpauseMask & EMERGENCY_PAUSE_BITS : EMERGENCY_PAUSE_BITS;
+    const held = flags & mustOpen;
+    const pilot = flags & EMERGENCY_PAUSE_BITS & ~mustOpen;
+    if (held !== 0) {
+      const which = map ? ` (${formatPauseFlags(held)} of the unpauseMask ${formatPauseFlags(mustOpen)})` : "";
+      if (atHandover && !options.handoverWhilePaused) add("blocker", "paused", `pause flags ${inv.platform.pauseFlagsHex}${which} at handover`);
+      else add("info", "paused", `pause flags ${inv.platform.pauseFlagsHex}${which}`);
+    }
+    if (pilot !== 0) {
+      add("info", "pilot-paused", `areas outside the role map's unpauseMask stay paused (${formatPauseFlags(pilot)}: ${describePausedAreas(pilot)})`);
     }
     if (network === "mainnet" && (flags & PAUSE_PAYOUT_MODULES) === 0) {
       add("blocker", "payout-modules", `pause bit 0x40 (payout / Merkle modules) is clear on mainnet (${inv.platform.pauseFlagsHex}); D2 keeps it set`);

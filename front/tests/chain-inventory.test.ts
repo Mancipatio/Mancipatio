@@ -288,6 +288,24 @@ describe("inventory findings (§6)", () => {
     paused.platform!.pauseFlagsHex = "0x3f";
     expect(bySeverity(inventoryFindings(paused, map, "pre-handover"), "paused")).toEqual(["blocker"]);
     expect(bySeverity(inventoryFindings(paused, map, "pre-handover", { handoverWhilePaused: true }), "paused")).toEqual(["info"]);
+    // The company pilot (unpauseMask 0x23): S6 leaves 0x1c paused on purpose
+    // and 0x40 stays set, so the Platform reads 0x5c at handover and after it.
+    // Only the mask's areas block; the pilot areas are an info.
+    const pilotMap = { ...map, unpauseMask: 0x23 };
+    const pilot = clean(pilotMap);
+    pilot.platform!.pauseFlags = 0x5c;
+    pilot.platform!.pauseFlagsHex = "0x5c";
+    for (const phase of ["pre-handover", "handed-over"] as const) {
+      const findings = inventoryFindings(pilot, pilotMap, phase);
+      expect(bySeverity(findings, "paused")).toEqual([]);
+      expect(bySeverity(findings, "pilot-paused")).toEqual(["info"]);
+      expect(findings.filter((f) => f.severity === "blocker")).toEqual([]);
+    }
+    // An area of the mask still paused (primary issuance, 0x02) blocks.
+    const notOpened = clean(pilotMap);
+    notOpened.platform!.pauseFlags = 0x5e;
+    notOpened.platform!.pauseFlagsHex = "0x5e";
+    expect(bySeverity(inventoryFindings(notOpened, pilotMap, "pre-handover"), "paused")).toEqual(["blocker"]);
     const idl = clean(map);
     idl.idl[0] = probe("asset_registry", { status: "update" });
     idl.idl[1] = probe("transfer_hook", { trimmed: false, extraAuthority: key(160) });

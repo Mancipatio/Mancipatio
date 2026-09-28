@@ -45,6 +45,7 @@ import {
   getPublishMilestoneInstructionDataEncoder,
   getRealizeCustodyVaultInstructionDataEncoder,
   getReclaimRentInstructionDataEncoder,
+  getRemoveAdminInstructionDataEncoder,
   getRevertCustodyVaultInstructionDataEncoder,
   getRevokeHolderInstructionDataEncoder,
   getRouteYieldInstructionDataEncoder,
@@ -442,6 +443,8 @@ describe("v1.0.0-rc role changes (D1, D3, D4)", () => {
     ["propose_blocklist_recovery", ix(getProposeBlocklistRecoveryInstructionDataEncoder(), { newAuthority: C as Address }, 6, H)],
     ["cancel_blocklist_recovery", ix(getCancelBlocklistRecoveryInstructionDataEncoder(), {}, 4, H)],
     ["execute_blocklist_recovery", ix(getExecuteBlocklistRecoveryInstructionDataEncoder(), {}, 7, H)],
+    // K1.1c: instant, and it strips the veto of the Admin it removes.
+    ["remove_admin", ix(getRemoveAdminInstructionDataEncoder(), { admin: C as Address }, 4)],
   ];
 
   it("every step is critical, top-level or inside Squads, with or without logs", () => {
@@ -516,6 +519,13 @@ describe("v1.0.0-rc role changes (D1, D3, D4)", () => {
     // The full pause stays "Pause flags set", critical.
     expect(one(run([pauseFlags(0x7f, 0)], { events: [[encodeEvent("PauseFlagsChanged", { old: 0x40, new: 0x7f })]] })))
       .toMatchObject({ severity: "critical", summary: expect.stringMatching(/^Pause flags set/) });
+  });
+
+  it("remove_admin is critical with the removed key, and critical when its arguments cannot be decoded", () => {
+    const removed = critical.find(([name]) => name === "remove_admin")![1];
+    expect(one(run([removed]))).toMatchObject({ source: "onchain:admin-record", severity: "critical", summary: `Admin removed: ${C}`, evidence: { admin: C } });
+    const truncated = { ...removed, data: removed.data.slice(0, 10) };
+    expect(one(run([truncated]))).toMatchObject({ severity: "critical", summary: "remove_admin: arguments could not be decoded" });
   });
 
   it("a custody rotation cancel is high", () => {

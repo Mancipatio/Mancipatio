@@ -618,6 +618,17 @@ export async function planSquadsOp(input: {
         if ((clearMask & PAUSE_PAYOUT_MODULES) !== 0 && clearMask !== PAUSE_PAYOUT_MODULES) {
           throw new ChainGateError("set_pause_flags: the payout modules (0x40) clear only in a call of their own");
         }
+        // D2: on mainnet the payout modules stay off; switching them on is an
+        // owner decision after a vote of at least 7 days (the UI refuses it on
+        // mainnet). The export needs that decision typed out: the multisig.
+        if ((clearMask & PAUSE_PAYOUT_MODULES) !== 0 && map.network === "mainnet") {
+          if (params.confirmPayoutModules !== map.squads.multisig) {
+            throw new ChainGateError(
+              `set_pause_flags: clearing the payout modules (0x40) on mainnet switches on Startup raises, yield routing, Rights-Token issuances and milestones (D2: an owner decision after a vote of at least 7 days); with that decision recorded, add "confirmPayoutModules": "${map.squads.multisig}" (the multisig)`,
+            );
+          }
+          preconditions.push(`D2 owner decision: the payout modules (0x40) are switched ON on mainnet (confirmPayoutModules = the multisig ${map.squads.multisig})`);
+        }
         ixs.push(await getSetPauseFlagsInstructionAsync({ authority: vaultSigner, setMask, clearMask }));
         preconditions.push(
           `pause set ${formatPauseFlags(setMask)} (${describePausedAreas(setMask) || "no defined area"}), clear ${formatPauseFlags(clearMask)} (${describePausedAreas(clearMask) || "no defined area"})`,

@@ -47,10 +47,11 @@ import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import {
   GAP_SCAN_HOOK_PAGES, GAP_SCAN_OVERDUE_MS, GAP_SCAN_PAGES, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram,
-  payoutModulesReport, roleChangesReport, runAlarmChecks, thresholdState,
+  bootstrapOpenReport, payoutModulesReport, roleChangesReport, runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { USDC } from "@/lib/payment-mints";
+import { SOURCE_LABELS } from "@/lib/server/system-alerts";
 import { buildTx } from "./helpers/chain-tx";
 
 const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -521,6 +522,25 @@ describe("role-change-pending and payout-modules", () => {
     const { sb, rpcs } = mockSb(heartbeats);
     await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
     expect(incident(rpcs, "payout-modules")).toMatchObject({ p_state: "pass", p_severity: "critical" });
+  });
+
+  it("bootstrap-open: on mainnet bit 0x80 next to a clear emergency area fails (critical); the bootstrap itself passes", async () => {
+    const report = async (platforms: Record<string, unknown>[], network: "mainnet" | "devnet" = "mainnet", broken: string[] = []) =>
+      bootstrapOpenReport(mockSb({ platforms }, broken).sb, network, AbortSignal.timeout(5_000));
+    // After an rc.x rollback that unpaused: bit 7 still set, areas clear.
+    expect(await report([{ pause_flags: 0x80 | 0x40 }])).toMatchObject({ state: "fail", severity: "critical", source: "onchain:bootstrap-open", evidence: { pause_flags: 0xc0 } });
+    expect(await report([{ pause_flags: 0x80 | 0x40 | 0x1c }])).toMatchObject({ state: "fail" });
+    // The bootstrap (0xff: every area paused) and a closed window pass.
+    expect(await report([{ pause_flags: 0xff }])).toMatchObject({ state: "pass", summary: expect.stringMatching(/bootstrap/) });
+    expect(await report([{ pause_flags: 0x5c }])).toMatchObject({ state: "pass", summary: "The bootstrap window is closed" });
+    expect(await report([])).toMatchObject({ state: "hold" });
+    expect(await report([{ pause_flags: 0xc0 }], "devnet")).toMatchObject({ state: "pass" });
+    expect(await report([{ pause_flags: 0xc0 }], "mainnet", ["platforms"])).toBeNull();
+    expect(SOURCE_LABELS["onchain:bootstrap-open"]).toMatchObject({ format: "platform" });
+    // Recorded with the other cheap checks (devnet here).
+    const { sb, rpcs } = mockSb(heartbeats);
+    await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(rpcs, "bootstrap-open")).toMatchObject({ p_state: "pass", p_severity: "critical" });
   });
 
   it("roleChangesReport reads only this network's rows", async () => {

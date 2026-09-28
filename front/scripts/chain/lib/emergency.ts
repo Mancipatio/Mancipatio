@@ -191,6 +191,26 @@ export function readEmergencyRequest(env: ToolContext["env"]): EmergencyRequest 
   return { op, signer, mint: address(env, "CHAIN_MINT"), mode, registry };
 }
 
+/**
+ * D2: on mainnet the payout / Merkle modules (0x40) stay off; switching them
+ * on is an owner decision after a vote of at least 7 days, never an incident
+ * step (the /admin/platform panel refuses it on mainnet as well). An unpause
+ * that clears 0x40 on mainnet therefore needs the explicit override
+ * CHAIN_ENABLE_PAYOUT_MODULES=<the signing super admin, typed out>, which the
+ * evidence records. Returns whether the override was used.
+ */
+export function assertPayoutModulesClearAllowed(req: EmergencyRequest, network: string, env: ToolContext["env"]): boolean {
+  if (req.op !== "unpause" || req.mask === "all" || (req.mask & PAUSE_PAYOUT_MODULES) === 0) return false;
+  if (network !== "mainnet") return false;
+  const confirm = env.CHAIN_ENABLE_PAYOUT_MODULES?.trim();
+  if (confirm !== req.signer) {
+    throw new ChainGateError(
+      "CHAIN_PAUSE_BITS: clearing payout-modules (0x40) on mainnet switches on Startup raises, yield routing, Rights-Token issuances and milestones (D2: an owner decision after a vote of at least 7 days, never an emergency step). With that decision recorded, set CHAIN_ENABLE_PAYOUT_MODULES=<the signing super admin> (recorded)",
+    );
+  }
+  return true;
+}
+
 // ── State ────────────────────────────────────────────────────────────────────
 
 export type EmergencyState = {
@@ -336,7 +356,7 @@ export async function planEmergency(req: EmergencyRequest, state: EmergencyState
     // closes anyway), never the payout modules.
     const mask = req.mask === "all" ? RESUME_EVERYTHING_MASK : req.mask;
     if (req.mask === "all" && (flags & PAUSE_PAYOUT_MODULES) !== 0) {
-      notes.push("The payout modules (0x40) stay off; they are cleared only on their own (CHAIN_PAUSE_BITS=payout-modules), never on mainnet (D2).");
+      notes.push("The payout modules (0x40) stay off; they are cleared only on their own (CHAIN_PAUSE_BITS=payout-modules), and on mainnet only with CHAIN_ENABLE_PAYOUT_MODULES (D2).");
     }
     const done = (s: EmergencyState) => Boolean(s.platform && (s.platform.pauseFlags & mask) === 0);
     const summary = `clear ${formatPauseFlags(mask)} (${describePausedAreas(mask) || "undefined bits"}); now ${formatPauseFlags(flags)}`;
@@ -491,6 +511,10 @@ export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
   ctx.phase = "inputs";
   const req = readEmergencyRequest(ctx.env);
   evidence.request = req;
+  if (assertPayoutModulesClearAllowed(req, config.network, ctx.env)) {
+    evidence.payoutModulesOverride = req.signer;
+    ctx.log("warning: CHAIN_ENABLE_PAYOUT_MODULES: the payout modules (0x40) are cleared on mainnet (D2 owner decision; recorded in the evidence)");
+  }
   // The mainnet source guard of the other sending tools: the IDL check below
   // covers one instruction definition, not the code that builds and signs it.
   if (config.network === "mainnet") {

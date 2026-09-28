@@ -70,9 +70,10 @@ import {
   verifyParamProblems,
   type VerifyParams,
 } from "@/scripts/chain/lib/squads";
-import { assertSquadsVerified, squadsExportTool } from "@/scripts/chain/lib/squads-export";
+import { assertSquadsVerified, planSquadsOp, squadsExportTool } from "@/scripts/chain/lib/squads-export";
+import type { RoleMap } from "@/scripts/chain/lib/role-map";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
-import { deps, env, releaseDir, seedIdl, world, type World } from "./helpers/chain-world";
+import { deps, env, releaseDir, rpcFor, seedIdl, world, type World } from "./helpers/chain-world";
 
 const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures/squads-multisig-v4.json"), "utf8"));
 const blockhash = { blockhash: "11111111111111111111111111111111" as never, lastValidBlockHeight: BigInt(100) };
@@ -356,6 +357,21 @@ describe("chain:squads-export ops", () => {
     expect((await run("set_pause_flags", { setMask: 0x80 })).error).toMatch(/setMask may hold only the pause bits 0x7f/);
     expect((await run("set_pause_flags", { clearMask: 0x7f })).error).toMatch(/clear only in a call of their own/);
     expect((await run("set_pause_flags", { clearMask: 0x40 })).error ?? null).toBeNull();
+  });
+
+  it("D2: on mainnet a clear of the payout modules (0x40) needs confirmPayoutModules = the multisig; other clears and devnet are unchanged", async () => {
+    const w = await handedOver();
+    const mainnet: RoleMap = { ...w.map, network: "mainnet" };
+    const plan = (params: Record<string, unknown>, map: RoleMap = mainnet) =>
+      planSquadsOp({ op: "registry-ix", params: params as never, rpc: rpcFor(w), map, release: null, idlSources: null });
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 } })).rejects.toThrow(/D2: an owner decision .*confirmPayoutModules/);
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 }, confirmPayoutModules: w.keys.vault })).rejects.toThrow(/confirmPayoutModules/);
+    const confirmed = await plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 }, confirmPayoutModules: mainnet.squads.multisig });
+    expect(confirmed.preconditions.join("\n")).toMatch(/D2 owner decision: the payout modules \(0x40\) are switched ON on mainnet/);
+    // Other areas, and a SET of 0x40, need nothing.
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x23 } })).resolves.toBeDefined();
+    await expect(plan({ instruction: "set_pause_flags", args: { setMask: 0x40 } })).resolves.toBeDefined();
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 } }, w.map)).resolves.toBeDefined();
   });
 
   it("set-upgrade-authority and metadata-set-authority: hot keys refused, a new key must be confirmed", async () => {

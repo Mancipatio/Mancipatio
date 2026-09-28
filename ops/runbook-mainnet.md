@@ -541,7 +541,10 @@ each page exists and performs its action). In this order:
   clears the payout modules (0x40) with anything else: the program refuses
   a clear mask that mixes 0x40 with other bits (6154), and 0x40 stays set
   on mainnet (D2). `chain:bootstrap` checks `pauseFlags & unpauseMask = 0`
-  after S6, and plans S7 only then.
+  after S6, and plans S7 only then. The areas outside `unpauseMask` (0x1c in
+  the company example) stay paused through S7 and after it: the inventory
+  reports them as `pilot-paused` (info), never as a blocker, so the handover
+  needs no `CHAIN_HANDOVER_WHILE_PAUSED` (the Platform reads **0x5c**).
 
 `accept_platform_admin` closes the deployer's Admin record and creates the
 SA's; no grant for the SA is ever needed. With the company wallet model (§19)
@@ -559,7 +562,8 @@ The inventory must show **0 blockers**: SA, BA and KYC equal the map with no
 pending transfer; no staged Admin grant (`pending-admin`), no super admin or
 blocklist recovery (`pending-recovery`), no rc.x transfer account
 (`legacy-transfer`); bit 7 closed (`bootstrap-open`) and 0x40 set
-(`payout-modules`); the deployer holds nothing but the UA; the vault S7
+(`payout-modules`); every area of `unpauseMask` clear (`paused`; the pilot
+areas outside it are the info `pilot-paused`); the deployer holds nothing but the UA; the vault S7
 installs holds no role (`sa-is-ua`, `ba-is-ua`, `admin-is-ua`);
 `kyc.authority` holds no Admin record (a warning, not a blocker, when the map
 acknowledges the overlap, §19); the Squads decode matches exactly; the
@@ -580,7 +584,9 @@ CHAIN_OUTPUT=$E/07c-inventory.json CHAIN_PHASE=handed-over npm run chain:invento
 S7 runs its own live `pre-handover` inventory first and refuses on any
 blocker. It sets both upgrade authorities to the vault in one transaction
 (loader SetAuthority, the vault does not sign). `CHAIN_HANDOVER_WHILE_PAUSED=1`
-exists for an emergency only.
+exists for an emergency only (an area of `unpauseMask` still paused); the
+pilot areas outside the mask never need it. 07c keeps reporting them as
+`pilot-paused` (info) for as long as the pilot runs.
 
 ## 8. After handover
 
@@ -869,7 +875,7 @@ CHAIN_OUTPUT=$E/inc-1-send.json CHAIN_EMERGENCY_OP=pause CHAIN_EMERGENCY_SIGNER=
 | `CHAIN_EMERGENCY_OP` | Inputs | Signer (checked on-chain) | Notes |
 |---|---|---|---|
 | `pause` | `CHAIN_PAUSE_BITS`: `all` (0x7f), or names from `onboarding`, `primary`, `secondary`, `custody-entry`, `distributions`, `issuer-proceeds`, `payout-modules`, or an integer | any Admin or the SA | nothing to do when every bit is already set |
-| `unpause` | `CHAIN_PAUSE_BITS` (`all` = the six emergency areas and bit 7, never the payout modules; `payout-modules` only on its own, never on mainnet) | the SA only | the program refuses anyone else, and a clear mask mixing 0x40 with other bits (6154) |
+| `unpause` | `CHAIN_PAUSE_BITS` (`all` = the six emergency areas and bit 7, never the payout modules; `payout-modules` only on its own, and on mainnet only with `CHAIN_ENABLE_PAYOUT_MODULES=<the signing SA>`, the recorded D2 owner decision after a vote of at least 7 days, never an incident step) | the SA only | the program refuses anyone else, and a clear mask mixing 0x40 with other bits (6154); the tool refuses a mainnet clear of 0x40 without the override, and `chain:squads-export` `registry-ix set_pause_flags` without `"confirmPayoutModules": "<multisig>"` |
 | `block`, `unblock` | `CHAIN_WALLET` | the BA | an off-curve wallet (an escrow PDA) needs `CHAIN_CONFIRM_WALLET=<same>`: blocking it stops exits from it |
 | `hook-mode` | `CHAIN_MINT`, `CHAIN_HOOK_MODE=open` or `kyc-gated`, `CHAIN_KYC_REGISTRY` (kyc-gated only, a live registry) | the BA | Open lets any wallet receive the class; KycGated only live passports of that registry |
 | `freeze-issuer` | `CHAIN_ISSUER` (the Issuer PDA), `CHAIN_FREEZE_REASON_SHA256` (sha256 of the trimmed case-file reason, as `/admin/issuers` hashes it: `printf %s "<reason>" \| shasum -a 256`) | any Admin or the SA | D1: stops that issuer's sales and proceeds exits (6143); a second freeze is a no-op; only the SA lifts it, never this tool (§11 "Issuer proceeds freeze") |
@@ -966,9 +972,16 @@ itself (48 hours, cancellable by the upgrade authority).
   4. The successor executes both on `/account/roles` at once
      (`execute_platform_recovery`, hook `execute_blocklist_recovery`).
   5. Restore the release build at once: `CHAIN_SQUADS_OP=upgrade` with the
-     release `.so` buffers (no `artifact`). `chain:inventory` with
-     `CHAIN_RELEASE_DIR` must not show `incident-bytes` (a blocker and a
-     critical alarm while the incident build is live).
+     release `.so` buffers (no `artifact`). **Mandatory check before the
+     incident is closed:** `CHAIN_RELEASE_DIR=$R CHAIN_PHASE=handed-over
+     npm run chain:inventory` shows no `incident-bytes` (the evidence file
+     goes into the incident record). Nothing else watches for it: the
+     upgrade raised one critical `onchain:program-upgrade` alarm (for the
+     incident deploy, and one for the restore), no alarm stays open while the
+     incident build is live, and `incident-bytes` is a blocker of this manual
+     inventory only (with `CHAIN_RELEASE_DIR`). An incident closed without
+     this step can leave the zero-delay recovery and the proposer-only cancel
+     live.
   6. The new super admin reviews every change made during the compromise:
      Admin records (remove the attacker's), the treasury, sale approvals,
      KYB decisions, issuer freezes, pause bits (set 0x40 and the pilot mask
@@ -1193,10 +1206,15 @@ request, a KYB failure found late):
   PDA> CHAIN_FREEZE_REASON_SHA256=<sha256 of the trimmed reason text>`.
   It refuses that issuer's `open_sale`, `buy`, `close_sale`,
   `open_payout_vault`, `release_payout` and `claim_founder_yield` (6143);
-  investors' refunds and claims stay open. There is no on-chain refund:
-  the money stays in the proceeds or payout escrow until the super admin
-  unfreezes it or a program upgrade (disclosed in the Terms and on
-  `/security`).
+  the exits of what the issuer does not receive stay open (offer cancels,
+  OTC expiries and Admin cancels, custody returns, investor yield and
+  claims). There is no on-chain refund of sale payments: the money buyers
+  paid stays in the proceeds or payout escrow until the super admin
+  unfreezes it or a program upgrade (disclosed in the Terms, on `/security`
+  and on `/risks`). An OTC deal whose party is blocked cannot expire; an
+  Admin cancels it (`cancel_otc_deal`) to return the deposits (O-11). The
+  issuer, launchpad, payout and rights pages show "Proceeds frozen" and
+  refuse these actions before any wallet opens.
 - The freeze does not stop the issuer wallet's own secondary sales (offers,
   OTC) or P2P transfers (O-9). If that matters, the BA blocks the issuer's
   authority wallet(s) (`chain:emergency block`), with its consequences:
@@ -1205,10 +1223,15 @@ request, a KYB failure found late):
   (`clawback_blocklisted_holder`, irreversible through the quarantine);
   and an unfreeze does **not** unblock it (`remove_from_blocklist`
   separately). The freeze and the unfreeze raise the critical
-  `onchain:issuer-freeze` alarm; an alarm on the frozen issuer wallet's own
-  activity (offers, deals, transfers; design 8.3 §3.2) is not built yet:
-  watch that wallet on the explorer meanwhile. Units moved away before the
-  freeze stay out of reach.
+  `onchain:issuer-freeze` alarm. While the freeze lasts, every trade or
+  transfer by the frozen issuer's authority wallet raises the high
+  `onchain:frozen-issuer-activity` alarm (design 8.3 §5, O-9): it signs an
+  offer, a take, an OTC deposit or a unit transfer, its offer is taken, an
+  OTC deal names it or a buyer settles its deal, or it owns the source of a
+  hooked transfer. On that alarm decide at once whether the BA blocks the
+  wallet (above). The alarm needs the 0079 mirror (`issuer_freezes`) and the
+  alarm worker; it is a go-live condition for O-9. Units moved away before
+  the freeze, or before the block, stay out of reach.
 - Unfreeze: the super admin only, on `/admin/issuers` (or
   `chain:squads-export registry-ix unfreeze_issuer_proceeds` when the vault
   is the super admin); the rent returns to the freezer.
@@ -1981,9 +2004,11 @@ counsel decides whether the pilot needs them.
 | `fx:expiring` (`fx-expiring:<mint>`, medium) | Refresh the EUR rate on the Raise limits page (`/admin/limits`) before its max age: past it `fx:stale` follows and the sales that need the rate stop (on mainnet `/api/health` fails for the default mint). |
 | `worker:alert-channel` (`alert-channel-email` or `alert-channel-webhook`, high) | That channel failed a digest; the other one delivered this alert. Fix the channel (SMTP or Resend; `ALERT_WEBHOOK_*`: §11 "SMTP down"), send a test alert, re-queue what gave up (Operations); it clears after three digests it delivers. |
 | `worker:ops-watch-config` | `ALARM_BALANCE_WATCH` or `ALARM_SQUADS_CONFIG` does not parse: correct it and redeploy (no balance or Squads watch until then). |
-| v1.0.0-rc role changes, all critical: `onchain:admin-grant` (propose / cancel an Admin grant), `onchain:admin-record` (`add_admin`, the new key executes it), `onchain:platform-admin` (Super Admin rotation propose / accept / cancel), `onchain:platform-recovery` and `onchain:blocklist-recovery` (the upgrade authority's recoveries: propose / cancel / execute), `onchain:blocklist-authority` (rotation propose / accept / cancel) | Compare with the signer matrix and the change you planned (§19). Unexpected proposal: cancel it inside its window (Admin grant and Super Admin rotation: the Super Admin, any Admin or the upgrade authority; Super Admin recovery: the Super Admin or the upgrade authority; blocklist recovery or rotation: the blocklist authority, or the upgrade authority for a recovery), then treat the proposer's key as compromised, §11. Unexpected execute or accept: incident, §11. |
+| v1.0.0-rc role changes, all critical: `onchain:admin-grant` (propose / cancel an Admin grant), `onchain:admin-record` (`add_admin`, the new key executes it; `remove_admin`, instant: a Super Admin removing Admins also removes their veto, K1.1c), `onchain:platform-admin` (Super Admin rotation propose / accept / cancel), `onchain:platform-recovery` and `onchain:blocklist-recovery` (the upgrade authority's recoveries: propose / cancel / execute), `onchain:blocklist-authority` (rotation propose / accept / cancel) | Compare with the signer matrix and the change you planned (§19). Unexpected proposal: cancel it inside its window (Admin grant and Super Admin rotation: the Super Admin, any Admin or the upgrade authority; Super Admin recovery: the Super Admin or the upgrade authority; blocklist recovery or rotation: the blocklist authority, or the upgrade authority for a recovery), then treat the proposer's key as compromised, §11. Unexpected execute or accept: incident, §11. |
 | `onchain:role-change-pending` (`role-change-pending`, high) | The "timelock running" incident: a staged Admin grant, Super Admin rotation or upgrade-authority recovery is live (the evidence counts each kind and names the next eta). Expected: nothing to do, it clears once each one is executed, cancelled or expired. Otherwise as the row above. |
 | `onchain:issuer-freeze` (critical) | A freeze: confirm it with the Admin who froze (the reason's SHA-256 is in the evidence and on `/admin/issuers`; the text is in the audit log); follow the freeze SOP (O-9). An unfreeze: only the Super Admin can; confirm the decision. |
+| `onchain:frozen-issuer-activity` (high) | A frozen issuer's authority wallet traded or moved units (the evidence names the issuer, its role and the instructions). Check the transaction and decide at once whether the BA blocks the wallet (§11 "Issuer proceeds freeze", O-9); record the decision in the freeze's case file. |
+| `onchain:bootstrap-open` (`bootstrap-open`, critical, mainnet) | Bit 0x80 is open while an emergency area is clear: add_admin and the Super Admin rotation run without their 48 hours (typically a rollback to rc.x that unpaused, §10). The SA closes it at once on `/admin/platform` ("Close bootstrap window", `set_pause_flags(0, 0x80)`); then review every Admin grant and rotation since the rollback (§11). The half of the rule that needs the deployer key (bit 7 still open once the final SA holds the platform) is checked by `chain:inventory` only. |
 | `onchain:payout-modules` (`payout-modules`, critical, mainnet) and `onchain:pause` "Payout modules switched ON" | Bit 0x40 must stay set on mainnet (D2). Unexpected: set it again (`set_pause_flags(0x40, 0)`, any Admin) and treat the Super Admin key as compromised, §11. |
 | Admin actions that move money or tokens: `onchain:vault-vote`, `onchain:yield-route`, `onchain:milestone`, `onchain:proposal`, `onchain:supply-lock`, `onchain:custody-vault`, `onchain:sale-approval` | Compare with the signer matrix and the admin decision behind it (the request or approval on the admin pages). A short voting window (critical or high) is checked with the issuer. Unexpected: that Admin key is compromised, §11 ("An Admin key compromised or lost"). |
 

@@ -221,7 +221,10 @@ function windowBlocker(p: BootstrapState, window: ProposalWindow | null, bootstr
 function publicWrap<T>(fn: () => Promise<T>): Promise<T> {
   return fn().catch((error: unknown) => {
     const message = (error as Error)?.message ?? "";
-    if (/proposal is stale or invalid|Unexpected (platform|blocklist authority) owner/.test(message)) {
+    // A stale proposal (retired by an executed recovery) is reported, not
+    // thrown (lib/operational-authority.ts): the plan treats it as none, and
+    // the next propose overwrites it. Only a foreign one is fatal.
+    if (/authority proposal is invalid|Unexpected (platform|blocklist authority) owner/.test(message)) {
       throw new ChainPlanError(message);
     }
     throw error;
@@ -314,18 +317,21 @@ export async function probeBootstrapState(rpc: ChainRpc, map: RoleMap): Promise<
       registryWindow = { proposedAt: value.proposedAt, eta: value.eta, expiresAt: value.expiresAt };
     }
   }
-  // The raw windows of the SA and BA proposals (loadOperationalAuthority
-  // already refused a stale or foreign one).
+  // The raw windows of the live SA and BA proposals (loadOperationalAuthority
+  // already refused a foreign one; a stale one — retired by a recovery — is
+  // no proposal for the plan: S5 / S4b propose over it).
+  const platformProposed = platformAuthority && !platformAuthority.stale ? platformAuthority.proposed : null;
+  const blocklistProposed = blocklistAuthority && !blocklistAuthority.stale ? blocklistAuthority.proposed : null;
   let platformWindow: ProposalWindow | null = null;
   const platformTransfer = accounts.get(platformTransferPda);
-  if (platformAuthority?.proposed && platformTransfer && hasDiscriminator(platformTransfer.data, AUTHORITY_PROPOSAL_DISCRIMINATOR)) {
+  if (platformProposed && platformTransfer && hasDiscriminator(platformTransfer.data, AUTHORITY_PROPOSAL_DISCRIMINATOR)) {
     const value = getAuthorityProposalDecoder().decode(platformTransfer.data);
     platformWindow = { proposedAt: value.proposedAt, eta: value.eta, expiresAt: value.expiresAt };
   }
   let blocklistWindow: ProposalWindow | null = null;
   const blocklistTransfer = accounts.get(blocklistTransferPda);
   if (
-    blocklistAuthority?.proposed &&
+    blocklistProposed &&
     blocklistTransfer &&
     blocklistTransfer.owner === TRANSFER_HOOK_PROGRAM_ADDRESS &&
     hasDiscriminator(blocklistTransfer.data, BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR)
@@ -339,8 +345,8 @@ export async function probeBootstrapState(rpc: ChainRpc, map: RoleMap): Promise<
     deployed,
     ua,
     platform,
-    platformProposed: platformAuthority?.proposed ?? null,
-    blocklist: blocklistAuthority ? { authority: blocklistAuthority.current, proposed: blocklistAuthority.proposed } : null,
+    platformProposed,
+    blocklist: blocklistAuthority ? { authority: blocklistAuthority.current, proposed: blocklistProposed } : null,
     adminRecords,
     pendingAdmins,
     registry: registryState,

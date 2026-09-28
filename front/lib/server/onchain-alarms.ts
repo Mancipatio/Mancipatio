@@ -15,7 +15,9 @@
 // mediate (a buy, an OTC offer or take) against the sanctions lists
 // (lib/server/onchain-screening.ts, 8.5): a hit is a compliance alert with
 // the transaction; a list that cannot answer on mainnet keeps the job
-// pending (SANCTIONS_UNAVAILABLE) until it can.
+// pending (SANCTIONS_UNAVAILABLE) until it can. A trade or transfer is also
+// matched against the authority wallets of frozen issuers
+// (lib/server/frozen-issuer-activity.ts, D1 / O-9): a hit is a high alert.
 
 import "server-only";
 import {
@@ -126,6 +128,12 @@ import {
 import { USDC } from "@/lib/payment-mints";
 import { decodeRegistryEvent, type EventValue } from "@/lib/server/onchain-events";
 import { screenTransactionParties } from "@/lib/server/onchain-screening";
+import {
+  frozenIssuerActivity,
+  frozenIssuerAlerts,
+  isTradeOrTransfer,
+  loadFrozenIssuerWallets,
+} from "@/lib/server/frozen-issuer-activity";
 import { finalizedTransaction } from "@/lib/server/sale-capacity-chain";
 import { raiseSystemAlert, type Severity } from "@/lib/server/system-alerts";
 import { transactionInvocations, type AttributedInvocation, type InvocationTx } from "@/lib/server/tx-invocations";
@@ -361,9 +369,11 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
       return { source: "onchain:issuer-freeze", severity: "critical", summary: "Issuer proceeds unfrozen by the Super Admin",
         evidence: { issuer: ev?.issuer ?? null, frozen_at: ev?.frozen_at ?? null } };
     } },
+  // K1.1c: instant, so a compromised Super Admin can strip every Admin (and
+  // with it their veto of its 48 h changes) at once: critical, like add_admin.
   { name: "remove_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(REMOVE_ADMIN_DISCRIMINATOR),
-    decode: dec(getRemoveAdminInstructionDataDecoder()), accounts: { super_admin: 0, admin_record: 2 }, format: "platform", fallback: "high",
-    classify: ({ args }) => ({ source: "onchain:admin-record", severity: "high", summary: `Admin removed: ${String(args?.admin)}`,
+    decode: dec(getRemoveAdminInstructionDataDecoder()), accounts: { super_admin: 0, admin_record: 2 }, format: "platform", fallback: "critical",
+    classify: ({ args }) => ({ source: "onchain:admin-record", severity: "critical", summary: `Admin removed: ${String(args?.admin)}`,
       evidence: { admin: args?.admin } }) },
   { name: "propose_custody_authority", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(PROPOSE_CUSTODY_AUTHORITY_DISCRIMINATOR),
     decode: dec(getProposeCustodyAuthorityInstructionDataDecoder()), accounts: { super_admin: 0, custody_vault: 2 }, format: "platform", fallback: "medium",
@@ -827,6 +837,27 @@ export async function processEventJob(
     return retry("DB_UNAVAILABLE", backoff(job.attempts));
   }
   if (signal.aborted || Date.now() >= deadlineMs) return "pending";
+  // A trade or transfer by a FROZEN issuer's authority wallet (D1, O-9: the
+  // program does not stop its own secondary sales): high, so the Blocklist
+  // Authority can act before the units are gone. Only trades and transfers
+  // read the freeze mirror; a mirror that cannot be read retries the job.
+  let frozenAlerts = 0;
+  if (isTradeOrTransfer(tx)) {
+    try {
+      const frozen = await loadFrozenIssuerWallets(sb, job.network as Network, databaseSignal(signal));
+      for (const alert of frozenIssuerAlerts(job.signature, frozenIssuerActivity(tx, frozen))) {
+        if (signal.aborted || Date.now() >= deadlineMs) return "pending";
+        await raiseSystemAlert(sb, {
+          network: job.network as Network, dedupKey: alert.dedupKey, category: "onchain", source: alert.source,
+          severity: alert.severity, summary: alert.summary, evidence: alert.evidence, txSignature: job.signature, notify: true,
+        }, signal);
+        frozenAlerts++;
+      }
+    } catch {
+      return retry("DB_UNAVAILABLE", backoff(job.attempts));
+    }
+  }
+  if (signal.aborted || Date.now() >= deadlineMs) return "pending";
   // The signers of unmediated entries, screened after the fact (idempotent:
   // one open alert per wallet). A list that cannot answer on mainnet keeps
   // the job pending; a failed alert write retries like any effect above.
@@ -839,7 +870,7 @@ export async function processEventJob(
   if (screened === "retry") return retry("SANCTIONS_UNAVAILABLE", backoff(job.attempts));
   if (signal.aborted || Date.now() >= deadlineMs) return "pending";
   await writeJob(sb, job, {
-    status: "complete", alerts: result.alarms.length + screened.hits, attempts: job.attempts + 1,
+    status: "complete", alerts: result.alarms.length + frozenAlerts + screened.hits, attempts: job.attempts + 1,
     last_error: result.issues.length ? result.issues[0] : null,
   }, signal);
   return "complete";

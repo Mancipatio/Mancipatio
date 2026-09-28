@@ -26,7 +26,7 @@ import {
 } from "@/lib/generated/transfer_hook";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import { runTool } from "@/scripts/chain/lib/context";
-import { compareIdlInstruction, emergencyTool, parsePauseBits, probeEmergencyState, readEmergencyRequest } from "@/scripts/chain/lib/emergency";
+import { assertPayoutModulesClearAllowed, compareIdlInstruction, emergencyTool, parsePauseBits, probeEmergencyState, readEmergencyRequest } from "@/scripts/chain/lib/emergency";
 import { LEDGER_DIR, LEDGER_PACKAGES, messageHash, nodeHidLedgerOpener, type LedgerDevice } from "@/scripts/chain/lib/ledger";
 import type { ChainEnv } from "@/scripts/chain/lib/safety";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
@@ -117,6 +117,22 @@ describe("chain:emergency inputs", () => {
     refuse({ CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "open", CHAIN_KYC_REGISTRY: key(4) }, /must be unset for open/);
     refuse({ CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "kyc-gated" }, /CHAIN_KYC_REGISTRY must be a valid address/);
     expect(() => readEmergencyRequest({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "all" })).toThrow(/CHAIN_EMERGENCY_SIGNER/);
+  });
+
+  it("D2: clearing the payout modules (0x40) on mainnet needs CHAIN_ENABLE_PAYOUT_MODULES=<the signer>; elsewhere and for other bits nothing changes", () => {
+    const base = { CHAIN_EMERGENCY_SIGNER: key(1), CHAIN_EMERGENCY_OP: "unpause" };
+    const payout = readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "payout-modules" });
+    const numeric = readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "64" });
+    for (const req of [payout, numeric]) {
+      expect(() => assertPayoutModulesClearAllowed(req, "mainnet", {})).toThrow(/D2: an owner decision .*CHAIN_ENABLE_PAYOUT_MODULES/);
+      expect(() => assertPayoutModulesClearAllowed(req, "mainnet", { CHAIN_ENABLE_PAYOUT_MODULES: key(2) })).toThrow(/CHAIN_ENABLE_PAYOUT_MODULES/);
+      expect(assertPayoutModulesClearAllowed(req, "mainnet", { CHAIN_ENABLE_PAYOUT_MODULES: key(1) })).toBe(true);
+      expect(assertPayoutModulesClearAllowed(req, "devnet", {})).toBe(false);
+    }
+    // `all` never touches 0x40; other areas are not gated.
+    expect(assertPayoutModulesClearAllowed(readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "all" }), "mainnet", {})).toBe(false);
+    expect(assertPayoutModulesClearAllowed(readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "primary" }), "mainnet", {})).toBe(false);
+    expect(assertPayoutModulesClearAllowed(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "payout-modules" }), "mainnet", {})).toBe(false);
   });
 });
 

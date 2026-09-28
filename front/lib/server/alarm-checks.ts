@@ -70,7 +70,13 @@
 // while the mirror holds a live staged Admin grant, Super Admin rotation or
 // upgrade-authority recovery (v1.0.0-rc D3/D4). payout-modules (critical,
 // mainnet): the mirrored Platform must keep bit 0x40 set (D2). Before 0079
-// role-change-pending reports nothing.
+// role-change-pending reports nothing. bootstrap-open (critical, mainnet):
+// the one-way bootstrap window (bit 0x80) is open while an emergency area is
+// clear — a live platform on which add_admin and the Super Admin rotation
+// skip their 48 h (an rc.x rollback that unpaused and came back to v1). The
+// half of chain:inventory's rule that needs the deployer key (the Super
+// Admin is no longer the deployer) stays in chain:inventory: the server does
+// not know that key.
 // indexer-reconcile-age (0075, low): the last full reconcile is older than
 // reconcile_max_age_hours (default 168). Not a freshness condition: the
 // heartbeat keeps proving from its watermarks; a reconcile also catches what
@@ -105,7 +111,7 @@ import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, ty
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
-import { PAUSE_PAYOUT_MODULES } from "@/lib/pause-flags";
+import { EMERGENCY_PAUSE_BITS, PAUSE_PAYOUT_MODULES, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags } from "@/lib/pause-flags";
 import { listProblem, SANCTIONS_MAX_LIST_AGE_MS } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
@@ -426,6 +432,39 @@ export async function payoutModulesReport(sb: SupabaseClient, network: Network, 
     evidence: { pause_flags: flags } };
 }
 
+/**
+ * bootstrap-open (D3, critical, mainnet only): bit 0x80 (the one-way
+ * bootstrap window, which waives the 48 h of add_admin and of the Super
+ * Admin rotation) must be closed on a live platform. v1 closes it with the
+ * first clear of any pause bit, so bit 7 next to a clear emergency area means
+ * an rc.x build unpaused (a rollback, runbook §10) and the platform came back
+ * to v1 with the timelocks silently off. Fail while the mirror shows that;
+ * pass while bit 7 is closed, or open with every emergency area paused (the
+ * bootstrap itself). Hold while no Platform is mirrored; null when the mirror
+ * cannot be read. The deployer half of chain:inventory's `bootstrap-open`
+ * (bit 7 still open once the final Super Admin holds the platform) needs the
+ * deployer key, which the server does not have: the inventory keeps it.
+ */
+export async function bootstrapOpenReport(sb: SupabaseClient, network: Network, signal: AbortSignal): Promise<Report | null> {
+  const base = { check: "bootstrap-open", severity: "critical" as const, category: "onchain" as const, source: "onchain:bootstrap-open" };
+  if (network !== "mainnet") return { ...base, state: "pass", summary: "The bootstrap window is watched on mainnet only" };
+  const { data, error } = await sb.from("platforms").select("pause_flags").eq("network", network)
+    .abortSignal(dbSignal(signal)).maybeSingle();
+  if (error) return null;
+  const flags = (data as { pause_flags?: number | null } | null)?.pause_flags;
+  if (typeof flags !== "number") return { ...base, state: "hold", summary: "No Platform is mirrored yet" };
+  const open = (flags & PLATFORM_BOOTSTRAP_OPEN) !== 0;
+  const unpaused = (flags & EMERGENCY_PAUSE_BITS) !== EMERGENCY_PAUSE_BITS;
+  if (open && unpaused) {
+    return { ...base, state: "fail",
+      summary: `The bootstrap window (bit 0x80) is open on a live platform (${formatPauseFlags(flags)}): add_admin and the Super Admin rotation skip their 48-hour timelock. The Super Admin closes it with set_pause_flags(0, 0x80) (/admin/platform, "Close bootstrap window")`,
+      evidence: { pause_flags: flags } };
+  }
+  return { ...base, state: "pass",
+    summary: open ? "The bootstrap window is open while every emergency area is paused (bootstrap)" : "The bootstrap window is closed",
+    evidence: { pause_flags: flags } };
+}
+
 type Hold = { subject: string; ref: string; code: string; payment_mint: string | null; created_at: string };
 type FxRow = { payment_mint: string; kind: string; as_of: string; max_age: string };
 
@@ -721,6 +760,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => sanctionsListReport(sb, network, now, signal));
   await collect(() => roleChangesReport(sb, network, now, signal));
   await collect(() => payoutModulesReport(sb, network, signal));
+  await collect(() => bootstrapOpenReport(sb, network, signal));
   await record(cheap);
 
   // 2. The operational watches (chain reads), in parallel with the gap scan,
