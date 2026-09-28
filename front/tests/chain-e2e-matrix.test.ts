@@ -56,6 +56,23 @@ describe("e2e matrix", () => {
     expect(stepSpec("1.3").networks).toEqual(["devnet", "localnet"]);
   });
 
+  it("v1.0.0-rc negative cases run on localnet: a blocked buyer (6144), frozen proceeds (6143), a sale beyond 365 days (6145)", () => {
+    const expected = (id: string) => {
+      const spec = stepSpec(id);
+      expect(spec.networks, id).toEqual(["localnet"]);
+      return spec.expect.ok ? "ok" : `${spec.expect.code} ${spec.expect.name}`;
+    };
+    expect(["1.13a", "1.13b", "1.13c"].map(expected)).toEqual(["ok", "6144 PartyBlocklisted", "ok"]);
+    expect(["1.14a", "1.14b", "1.14c"].map(expected)).toEqual(["ok", "6143 IssuerProceedsFrozen", "ok"]);
+    expect(expected("2.2b")).toBe("6145 SaleDurationInvalid");
+    // Each block and freeze is undone inside group 1, before groups 2 and 3 buy and sell again.
+    const ids = stepsFor("localnet", [1]).map((s) => s.id);
+    expect(ids.slice(-6)).toEqual(["1.13a", "1.13b", "1.13c", "1.14a", "1.14b", "1.14c"]);
+    // The duration refusal needs approval #2 unconsumed: it precedes 2.4a.
+    const g2 = stepsFor("localnet", [2]).map((s) => s.id);
+    expect(g2.indexOf("2.2b")).toBeLessThan(g2.indexOf("2.4a"));
+  });
+
   it("filters by network and group", () => {
     const devnet = stepsFor("devnet", [1, 2, 3]);
     expect(devnet.some((s) => s.id === "1.11")).toBe(false);

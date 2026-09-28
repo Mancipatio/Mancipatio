@@ -177,6 +177,8 @@ describe("role map v2 validation", () => {
     expect(parsed.protocolTreasury).toBe(parsed.superAdmin);
     expect(parsed.allowKycAdmin).toBe(true);
     expect(parsed.acknowledgedSingleKeyUpgradeAuthority).toBe(false);
+    // v1.0.0-rc: the first unpause opens only the pilot areas (0x23); 0x1c and 0x40 stay set.
+    expect(parsed.unpauseMask).toBe(0x23);
     expect(parsed.kyc.registry).toBe(await getRegistryPda(parsed.deployer));
     const text = warnings.join("\n");
     expect(text).toMatch(/ROLE OVERLAP \(acknowledged\): \S+ is superAdmin \+ kyc\.authority \+ blocklistAuthority \+ protocolTreasury/);

@@ -9,6 +9,15 @@
  *
  * CHAIN_SQUADS_OP selects one allowlisted operation; CHAIN_SQUADS_INPUT is the
  * path of its JSON input (the idl-update input is the prepare-export spec).
+ *
+ * v1.0.0-rc (design 8.3 §7): the vault signs as the super admin, as an Admin,
+ * as the program upgrade authority (the veto: cancel a staged Admin grant or
+ * super admin rotation; the D4 recoveries: propose / cancel, and execute when
+ * the recovered key is the vault itself), and `upgrade` can install the
+ * Release's incident build (`"artifact": "incident"` with `"confirmIncident":
+ * true`) for a compromised super admin or blocklist authority, then the
+ * release build again. Every export goes through the Squads inner-message
+ * size guard (splitBySize); the v1 role ops each fit one vault transaction.
  */
 import fs from "node:fs";
 import { createNoopSigner, isAddress, type Address, type Instruction } from "@solana/kit";
@@ -157,6 +166,10 @@ function addressInput(value: unknown, label: string): Address {
   return value as Address;
 }
 
+/** The vault as an operational role holder (review finding 6, O-10). */
+const VAULT_ROLE_NOTE =
+  "the vault is the upgrade authority: as the super admin it would veto and recover itself, so chain:inventory blocks it (sa-is-ua) until the role moves on to a separate key; plan that rotation right after";
+
 /** The hot keys never receive an authority (D19). */
 function refuseHotKey(target: Address, map: RoleMap, label: string) {
   if (target === map.deployer || target === map.bufferWriter) {
@@ -215,6 +228,19 @@ export async function planSquadsOp(input: {
 
   if (op === "upgrade") {
     if (!release) throw new ChainGateError("op=upgrade needs CHAIN_RELEASE_DIR");
+    // The incident build (design 8.3 §7.4, O-12): zero recovery delay and a
+    // proposer-only cancel, deployed only while a compromised SA or BA is
+    // recovered (runbook §11), then replaced by the release build again.
+    const artifact = params.artifact ?? "release";
+    if (artifact !== "release" && artifact !== "incident") throw new ChainGateError('op=upgrade artifact must be "release" or "incident"');
+    if (artifact === "incident") {
+      if (!release.incident) throw new ChainGateError("op=upgrade artifact=incident: this Release carries no incident build (v1.0.0-rc on)");
+      if (params.confirmIncident !== true) {
+        throw new ChainGateError("op=upgrade artifact=incident needs confirmIncident: true (the incident build is deployed only to recover a compromised super admin or blocklist authority, runbook §11)");
+      }
+    }
+    const artifactSo = (name: ProgramName) => (artifact === "incident" ? release.incident!.so[name] : release.so[name]);
+    const label = artifact === "incident" ? "Release incident .so" : "Release .so";
     const buffers = (params.buffers ?? {}) as Json;
     const requested: [ProgramName, unknown][] = [
       ["transfer_hook", buffers.transferHook],
@@ -225,10 +251,10 @@ export async function planSquadsOp(input: {
     // SIMD-0500 (release-lanac-7): once active, the loader refuses SBPF v0-v2.
     const gates = await probeNetworkGates(rpc);
     for (const [name] of chosen) {
-      const info = sbpfVersionOf(name, release.so[name]);
+      const info = sbpfVersionOf(name, artifactSo(name));
       const problem = sbpfUpgradeProblem(gates, info);
       if (problem) throw new ChainGateError(problem);
-      preconditions.push(`${name}: Release .so SBPF ${info.version === null ? "unknown" : `v${info.version}`}; SIMD-0500 ${gates.features.find((f) => f.id === SBPF_DEPLOY_GATE.id)?.state}`);
+      preconditions.push(`${name}: ${label} SBPF ${info.version === null ? "unknown" : `v${info.version}`}; SIMD-0500 ${gates.features.find((f) => f.id === SBPF_DEPLOY_GATE.id)?.state}`);
     }
     for (const [name, raw] of chosen) {
       const buffer = addressInput(raw, `buffers.${name}`);
@@ -237,18 +263,30 @@ export async function planSquadsOp(input: {
       const decoded = account && account.owner === LOADER_V3 ? decodeLoaderBuffer(account.data) : null;
       if (!decoded) throw new ChainGateError(`${name}: buffer ${buffer} is not a loader-v3 buffer`);
       if (decoded.authority !== vault) throw new ChainGateError(`${name}: buffer authority is ${decoded.authority ?? "none"}, not the vault`);
-      if (!comparePayload(decoded.payload, release.so[name]).equal) {
-        throw new ChainGateError(`${name}: buffer bytes differ from the Release .so`);
+      if (!comparePayload(decoded.payload, artifactSo(name)).equal) {
+        throw new ChainGateError(`${name}: buffer bytes differ from the ${label}`);
       }
-      if (programData.payload.length < release.so[name].length) {
+      if (programData.payload.length < artifactSo(name).length) {
         throw new ChainGateError(
-          `${name}: ProgramData capacity ${programData.payload.length} B < Release .so ${release.so[name].length} B; extend it first with solana program extend (bufferWriter pays, runbook §9.3)`,
+          `${name}: ProgramData capacity ${programData.payload.length} B < ${label} ${artifactSo(name).length} B; extend it first with solana program extend (bufferWriter pays, runbook §9.3)`,
         );
       }
-      preconditions.push(`${name}: buffer ${buffer} owned by the loader, authority = vault, bytes = Release .so (sha256 ${sha256Hex(release.so[name])})`);
-      preconditions.push(`${name}: ProgramData capacity ${programData.payload.length} B ≥ ${release.so[name].length} B`);
+      preconditions.push(`${name}: buffer ${buffer} owned by the loader, authority = vault, bytes = ${label} (sha256 ${sha256Hex(artifactSo(name))})`);
+      preconditions.push(`${name}: ProgramData capacity ${programData.payload.length} B ≥ ${artifactSo(name).length} B`);
       ixs.push(await upgradeInstruction({ program: PROGRAM_IDS[name], buffer, spill: map.bufferWriter, authority: vaultSigner }));
-      postconditions.push(`${name}: ProgramData equals the Release .so (chain:inventory with CHAIN_RELEASE_DIR)`);
+      postconditions.push(
+        artifact === "incident"
+          ? `${name}: ProgramData equals the Release incident .so (chain:inventory reports incident-bytes, a blocker, until the release .so is back)`
+          : `${name}: ProgramData equals the Release .so (chain:inventory with CHAIN_RELEASE_DIR)`,
+      );
+    }
+    if (artifact === "incident") {
+      preconditions.push(
+        "INCIDENT BUILD: zero recovery delay and only the upgrade authority cancels a recovery (design 8.3 §7.4); verified by its hashes.txt `-incident:` hash only, never through a verify PDA",
+      );
+      postconditions.push(
+        "next: propose_*_recovery and its execute by the new key (registry-ix / hook-ix), then this op again with the release build (artifact release) at once",
+      );
     }
     postconditions.push("buffer rent goes to the spill account (bufferWriter)");
     return { ixs, preconditions, postconditions, ordered: true };
@@ -425,6 +463,8 @@ export async function planSquadsOp(input: {
         const newAdmin = mapTarget(args.newAdmin, "args.newAdmin", map, [map.superAdmin, vault], confirm);
         ixs.push(await getProposePlatformAdminInstructionAsync({ authority: vaultSigner, newAdmin }));
         preconditions.push(`proposed platform admin ${newAdmin}${newAdmin === map.superAdmin ? " = role-map superAdmin" : newAdmin === vault ? " = the vault" : " (confirmed)"}`);
+        postconditions.push(`${newAdmin} accepts 48 hours after the proposal (at once while the bootstrap window is open), within 14 days; the super admin, any Admin or the upgrade authority can cancel it meanwhile`);
+        if (newAdmin === vault) postconditions.push(VAULT_ROLE_NOTE);
         break;
       }
       case "accept_platform_admin": {
@@ -437,6 +477,9 @@ export async function planSquadsOp(input: {
         // Step 1 of a grant (D3): the vault as super admin stages it; the new
         // key executes add_admin itself after 48 h (at once in bootstrap).
         const newAdmin = mapTarget(args.newAdmin, "args.newAdmin", map, map.admins, confirm);
+        if (newAdmin === vault || newAdmin === map.squads.multisig) {
+          throw new ChainGateError("args.newAdmin is the Squads vault, the upgrade authority: an Admin record for it (Admin == UA) removes its independent veto (review finding 6); refused");
+        }
         if (newAdmin === map.kyc.authority && !map.allowKycAdmin) {
           throw new ChainGateError("args.newAdmin is kyc.authority; an Admin record for it needs allowKycAdmin in the role map");
         }
@@ -457,6 +500,7 @@ export async function planSquadsOp(input: {
         if (!pending.exists || pending.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS) throw new ChainGateError("add_admin: no Admin grant is staged for the vault");
         ixs.push(await getAddAdminInstructionAsync({ newAdmin: vaultSigner, pendingAdmin: pendingPda, proposer: pending.data.proposedBy, newAdminArg: vault }));
         preconditions.push(`the vault executes its Admin grant proposed by ${pending.data.proposedBy} (executable ${pending.data.eta}–${pending.data.expiresAt})`);
+        postconditions.push("an Admin record of the upgrade authority is a chain:inventory blocker (admin-is-ua): prefer cancel_admin_proposal; if executed, remove it again");
         break;
       }
       case "cancel_admin_proposal": {
@@ -502,6 +546,8 @@ export async function planSquadsOp(input: {
           }),
         );
         preconditions.push(`recover the super admin to ${newAdmin}${newAdmin === map.superAdmin ? " = role-map superAdmin" : newAdmin === vault ? " = the vault" : " (confirmed)"}; executable after 7 days`);
+        postconditions.push("the new key executes execute_platform_recovery 7 days after the proposal, within 14 days (the current super admin or the upgrade authority can cancel it meanwhile)");
+        if (newAdmin === vault) postconditions.push(VAULT_ROLE_NOTE);
         break;
       }
       case "cancel_platform_recovery":

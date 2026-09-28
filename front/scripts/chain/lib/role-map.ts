@@ -471,6 +471,11 @@ export async function validateRoleMap(
   const unpauseBy = input.unpauseBy === undefined ? "superAdmin" : input.unpauseBy;
   if (unpauseBy !== "superAdmin" && unpauseBy !== "deployer") errors.push('unpauseBy must be "superAdmin" or "deployer"');
   if (mainnet && unpauseBy !== "superAdmin") errors.push("unpauseBy must be superAdmin on mainnet (D4)");
+  // v1.0.0-rc (§5.4, K1.3): the first unpause closes the bootstrap window, so
+  // it follows X1; after X1 only the super admin clears a pause bit.
+  if (unpauseBy === "deployer" && input.deployer !== input.superAdmin) {
+    errors.push("unpauseBy deployer needs deployer == superAdmin: the first unpause follows X1 (it closes the bootstrap window), and after X1 only the super admin clears pause bits");
+  }
   const unpauseMask = input.unpauseMask === undefined ? EMERGENCY_PAUSE_BITS : input.unpauseMask;
   if (typeof unpauseMask !== "number" || !Number.isInteger(unpauseMask) || unpauseMask <= 0 || (unpauseMask & ~EMERGENCY_PAUSE_BITS) !== 0) {
     errors.push(`unpauseMask must be a non-empty subset of the emergency pause bits ${formatPauseFlags(EMERGENCY_PAUSE_BITS)} (never 0x40 or 0x80)`);
@@ -513,6 +518,13 @@ export async function validateRoleMap(
     errors.push("kyc.authority must not be the superAdmin (its Admin record blocks the handover unless allowKycAdmin)");
   }
   if (squadsKeys.has(superAdmin) && !k4Fallback) errors.push("superAdmin must not be the Squads vault or multisig (unless k4Fallback)");
+  // The vault is the upgrade authority: an Admin record for it, or the SA
+  // role, removes the upgrade authority's independent veto and recovery
+  // (design 8.3 O-10; review finding 6). chain:inventory blocks them live.
+  if (admins.some((admin) => squadsKeys.has(admin))) errors.push("admins must not list the Squads vault or multisig (it is the upgrade authority: Admin == UA)");
+  if (squadsKeys.has(superAdmin) && k4Fallback) {
+    warnings.push("superAdmin is the Squads vault (k4Fallback): the vault is also the upgrade authority, so chain:inventory blocks the handover (sa-is-ua) until the super admin rotates to a Ledger");
+  }
   if (squadsKeys.has(protocolTreasury) && protocolTreasury !== vault) errors.push("protocolTreasury must not be the Squads multisig account (use the vault)");
 
   // KYC registry pin (D3).

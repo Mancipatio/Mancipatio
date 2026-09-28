@@ -3,9 +3,11 @@ import path from "node:path";
 import { createNoopSigner, isSignerRole, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
 import {
+  findAcceptPlatformAdminRecoveryPda,
   findAcceptPlatformAdminTransferPda,
   findAdminRecordPda,
   findPlatformPda,
+  getPlatformRecoveryEncoder,
   getAcceptPlatformAdminInstructionAsync,
   getAddAdminInstructionAsync,
   getAdminEncoder,
@@ -162,6 +164,7 @@ describe("bootstrap plan on an empty chain (C1)", () => {
     expect(lines.join("\n")).toMatch(/deferred: depends on/);
     expect(lines.join("\n")).toMatch(new RegExp(`NEXT_PUBLIC_KYC_REGISTRY=${w.map.kyc.registry}`));
     expect(lines.join("\n")).toMatch(/ACTION REQUIRED X3/);
+    expect(lines.join("\n")).toMatch(/^bootstrap window: opens at S1 \(a fresh Platform is 0xff\)/m);
     expect(w.chain.calls).not.toContain("sendTransaction");
   });
 });
@@ -462,6 +465,92 @@ describe("partial progress and stops", () => {
     await seedPlatform(closed, { admin: closed.keys.deployer, pauseFlags: 0x7f });
     await seedBlocklist(closed, closed.keys.deployer);
     expect((await plan(closed)).notes.join()).toMatch(/bootstrap window is closed: each add_admin waits 48 hours/);
+  });
+
+  it("a closed bootstrap window: add_admin waits 48 hours after its proposal (the plan shows when), an expired grant is proposed again", async () => {
+    const w = await world();
+    await seedPlatform(w, { admin: w.keys.deployer, pauseFlags: 0x7f });
+    await seedBlocklist(w, w.keys.deployer);
+    const admin = w.keys.admins[0];
+    const withAdmin = { deployer: createNoopSigner(w.keys.deployer), rehearsal: { admin: createNoopSigner(admin) } };
+    const first = await plan(w, withAdmin);
+    expect(ids(first)).toContain(`S3:${admin}`);
+    expect(ids(first)).not.toContain(`A3:${admin}`);
+    expect(first.blocked.find((b) => b.id === `A3:${admin}`)?.reason).toMatch(
+      new RegExp(`^timelock \\(48 hours after S3:${admin}; the bootstrap window is closed\\): Executable from .* \\(in 2d 0h 00m\\), until `),
+    );
+    // S5 waits for the grant's execution, X1 for S5.
+    expect(first.blocked.find((b) => b.id === "S5")?.reason).toBe(`waits for A3:${admin}`);
+    const lines: string[] = [];
+    const sent = await sendRun(w, { CHAIN_REHEARSAL_SIGNERS: `admin=${w.pairs.admin.path}` }, lines);
+    expect(sent.error ?? null).toBeNull();
+    expect(lines.join("\n")).toMatch(/^bootstrap window: closed \(0x7f, chain time .*\): add_admin runs 48 hours after its propose_admin/m);
+    // 48 hours later (chain time) the grant executes.
+    w.chain.now += 172_800;
+    const later = await plan(w, withAdmin);
+    expect(ids(later)).toContain(`A3:${admin}`);
+    expect(later.skipped.find((s) => s.id === `S3:${admin}`)?.reason).toBe("Admin grant already proposed");
+    // Past its 14-day window it is proposed again instead of failing with 6151.
+    w.chain.now += 1_209_600;
+    const expired = await plan(w, withAdmin);
+    expect(ids(expired)).toContain(`S3:${admin}`);
+    expect(expired.blocked.find((b) => b.id === `A3:${admin}`)?.reason).toMatch(/^timelock .*\(in 2d 0h 00m\)/);
+  });
+
+  it("X1 waits for the rotation's 48 hours once the window is closed, and a pending super admin recovery refuses it", async () => {
+    const w = await world();
+    await seedPlatform(w, { admin: w.keys.deployer, pauseFlags: 0x7f });
+    await seedBlocklist(w, w.keys.deployer);
+    const [record] = await findAdminRecordPda({ authority: w.keys.admins[0] });
+    w.chain.set(record, { owner: REGISTRY, lamports: rent(81), data: new Uint8Array(getAdminEncoder().encode({ admin: w.keys.admins[0], addedBy: w.keys.deployer, bump: 255 })) });
+    await seedRegistry(w, w.keys.kycAuthority);
+    const [ba] = await findBlocklistAuthorityPda();
+    w.chain.set(ba, { owner: HOOK, lamports: rent(41), data: new Uint8Array(getBlocklistAuthorityEncoder().encode({ authority: w.keys.blocklistAuthority, bump: 255 })) });
+    const sa = { deployer: createNoopSigner(w.keys.deployer), rehearsal: { superAdmin: createNoopSigner(w.keys.superAdmin) } };
+    const cycle = await plan(w, sa);
+    expect(ids(cycle)).toEqual(["S5"]);
+    expect(cycle.blocked.find((b) => b.id === "X1")?.reason).toMatch(/^timelock \(48 hours after S5; the bootstrap window is closed\): Executable from .*\(in 2d 0h 00m\)/);
+    // Nothing after X1 may run before it: S5c and S6 wait.
+    expect(cycle.blocked.map((b) => b.id)).toEqual(expect.arrayContaining(["X1", "S6"]));
+    await sendRun(w);
+    w.chain.now += 172_800;
+    expect(ids(await plan(w, sa))).toEqual(["X1", "S6"]);
+    // A recovery by the upgrade authority is pending: the accept is refused (6155).
+    const [platform] = await findPlatformPda();
+    const [recovery] = await findAcceptPlatformAdminRecoveryPda({ platform });
+    const now = BigInt(w.chain.now);
+    w.chain.set(recovery, {
+      owner: REGISTRY,
+      lamports: rent(162),
+      data: new Uint8Array(
+        getPlatformRecoveryEncoder().encode({ platform, currentAdmin: w.keys.deployer, newAdmin: key(90), proposedBy: w.keys.deployer, proposedAt: now, eta: now + BigInt(604_800), expiresAt: now + BigInt(604_800 + 1_209_600), version: 1, bump: 255 }),
+      ),
+    });
+    const refused = await plan(w, sa);
+    expect(ids(refused)).toEqual([]);
+    expect(refused.blocked.find((b) => b.id === "X1")?.reason).toMatch(/super admin recovery .* pending: accept_platform_admin is refused \(6155\)/);
+  });
+
+  it("the first unpause waits for every role step (design 8.3 §5.4): S6 is not planned before the BA and KYC accepts", async () => {
+    const w = await world();
+    const signers = { deployer: createNoopSigner(w.keys.deployer), rehearsal: { superAdmin: createNoopSigner(w.keys.superAdmin), admin: createNoopSigner(w.keys.admins[0]) } };
+    const p = await plan(w, signers);
+    // Grants, S5, X1 and the explicit close run inside the bootstrap window …
+    expect(ids(p)).toEqual(["S1", "S2", "S2b", `S3:${w.keys.admins[0]}`, `A3:${w.keys.admins[0]}`, "S4", "S4b", "S5", "X1", "S5c"]);
+    // … but the unpause waits for X3 and X2 (on the operator front).
+    expect(p.awaiting.map((a) => a.id)).toEqual(["X3", "X2"]);
+    expect(p.blocked.find((b) => b.id === "S6")?.reason).toBe("waits for X3, X2");
+  });
+
+  it("v1 role-map rules: the deployer unpauses only as the super admin; the vault (upgrade authority) holds no Admin record", async () => {
+    const w = await world();
+    const json = JSON.parse(fs.readFileSync(w.mapFile, "utf8"));
+    const devnet = { network: "devnet" as const, genesis: CLUSTER_GENESIS_HASHES.devnet };
+    await expect(validateRoleMap({ ...json, unpauseBy: "deployer" }, devnet)).rejects.toThrow(/unpauseBy deployer needs deployer == superAdmin/);
+    await expect(validateRoleMap({ ...json, unpauseBy: "deployer", superAdmin: json.deployer }, devnet)).resolves.toBeTruthy();
+    await expect(validateRoleMap({ ...json, admins: [...json.admins, w.keys.vault] }, devnet)).rejects.toThrow(/admins must not list the Squads vault or multisig \(it is the upgrade authority: Admin == UA\)/);
+    const k4 = await validateRoleMap({ ...json, superAdmin: w.keys.vault, k4Fallback: true }, devnet);
+    expect(k4.warnings.join(" ")).toMatch(/chain:inventory blocks the handover \(sa-is-ua\)/);
   });
 
   it("stops on a fee the map does not have (no setter)", async () => {

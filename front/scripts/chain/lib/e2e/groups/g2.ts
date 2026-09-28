@@ -2,7 +2,8 @@
  * G2: a sale is bound by its SaleApproval (design-6.3 §A G2): the gross and
  * the price range cap open_sale, a sold-out sale refuses the next unit, an
  * expired approval cannot open a sale, a non-Admin cannot approve, and a sale
- * that has not started refuses purchases. The approval that must expire is
+ * that has not started refuses purchases. Localnet adds the v1.0.0-rc bound
+ * on a sale's length (2.2b: at most 365 days, 6145). The approval that must expire is
  * created first so the wait overlaps the other steps.
  */
 import type { Address } from "@solana/kit";
@@ -86,6 +87,18 @@ export async function runGroup2(w: World): Promise<"completed"> {
       ixs: await openSaleIxs(w, { classKey: "classA", saleId: 2, price: UNIT_PRICE * BigInt(2), total: BigInt(2), startTs: now, endTs: saleEnd(w, now) }),
     }),
     { notRun: approval2Live },
+  );
+  // 2.2b: the duration is checked before the approval's terms; a consumed
+  // approval (sale #2 open) can no longer show it.
+  await w.runner.step(
+    "2.2b",
+    async () => ({
+      payer: issuer,
+      ixs: await openSaleIxs(w, { classKey: "classA", saleId: 2, price: UNIT_PRICE, total: SALE2_TOTAL, startTs: now, endTs: now + BigInt(366) * ONE_DAY }),
+    }),
+    {
+      notRun: async () => ((await saleExists(w, "classA", 2)) ? "sale #2 is open (2.4a consumed approval #2); the duration refusal can no longer be shown" : null),
+    },
   );
   await w.runner.step(
     "2.4a",

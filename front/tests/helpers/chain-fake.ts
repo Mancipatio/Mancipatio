@@ -39,6 +39,7 @@ import {
   getAdminEncoder,
   getAuthorityProposalDecoder,
   getAuthorityProposalEncoder,
+  getIssuerFreezeEncoder,
   getKycRegistryDecoder,
   getPendingAdminDecoder,
   getPendingAdminEncoder,
@@ -99,6 +100,7 @@ export function rent(size: number): bigint {
 export const ADMIN_TIMELOCK = 172_800;
 export const PROPOSAL_WINDOW = 1_209_600;
 const PLATFORM_BOOTSTRAP_OPEN = 0x80;
+const CLOCK_SYSVAR = "SysvarC1ock11111111111111111111111111111111";
 
 export class FakeChain {
   genesis: string = CLUSTER_GENESIS_HASHES.devnet;
@@ -134,7 +136,12 @@ export class FakeChain {
   }
 
   get(address: string): FakeAccount | undefined {
-    return this.accounts.get(address);
+    const account = this.accounts.get(address);
+    if (account || address !== CLOCK_SYSVAR) return account;
+    // The Clock sysvar at `now` (unix_timestamp at offset 32), unless a test set one.
+    const data = new Uint8Array(40);
+    new DataView(data.buffer).setBigInt64(32, BigInt(this.now), true);
+    return { owner: "Sysvar1111111111111111111111111111111111111" as Address, lamports: BigInt(1), data };
   }
 
   // ── Transport ──────────────────────────────────────────────────────────────
@@ -614,6 +621,29 @@ export class FakeChain {
         if (platformOf().admin !== at("canceller") && !isAdmin) fail("Unauthorized");
         if (!s.get(at("pendingAdmin"))) fail("missing", 3012);
         s.delete(at("pendingAdmin"));
+        return;
+      }
+      case AssetRegistryInstruction.FreezeIssuerProceeds: {
+        // D1: any live Admin or the super admin; a second freeze is refused (in use).
+        signed(at("authority"));
+        const record = s.get(at("adminRecord"));
+        const isAdmin = record ? getAdminDecoder().decode(record.data).admin === at("authority") : false;
+        if (platformOf().admin !== at("authority") && !isAdmin) fail("Unauthorized", 6001);
+        const issuer = s.get(at("issuer")) ?? fail("issuer missing", 3012);
+        if (issuer.owner !== REGISTRY) fail("issuer owner", 3007);
+        create(
+          at("issuerFreeze"),
+          new Uint8Array(
+            getIssuerFreezeEncoder().encode({
+              issuer: at("issuer") as Address,
+              frozenBy: at("authority") as Address,
+              frozenAt: now,
+              reasonHash: args.reasonHash as Uint8Array,
+              version: 1,
+              bump: 255,
+            }),
+          ),
+        );
         return;
       }
       case AssetRegistryInstruction.RemoveAdmin: {

@@ -26,15 +26,35 @@ import {
   setComputeUnitLimitInstruction,
   setComputeUnitPriceInstruction,
 } from "@/lib/compute-budget";
+import {
+  findAcceptPlatformAdminRecoveryPda,
+  findAcceptPlatformAdminTransferPda,
+  findIssuerFreezePda,
+  findPendingAdminPda,
+  findPlatformPda,
+  getAuthorityProposalEncoder,
+  getIssuerFreezeEncoder,
+  getPendingAdminEncoder,
+  getPlatformEncoder,
+  getPlatformRecoveryEncoder,
+} from "@/lib/generated/asset_registry";
+import {
+  findBlocklistAuthorityPda,
+  findRecoveryPda as findBlocklistRecoveryPda,
+  getBlocklistAuthorityEncoder,
+  getBlocklistRecoveryEncoder,
+} from "@/lib/generated/transfer_hook";
 import { runTool } from "@/scripts/chain/lib/context";
+import { executableHash } from "@/scripts/chain/lib/release";
 import { LOADER_V3, programDataAddress } from "@/scripts/chain/lib/loader-v3";
 import { FEATURE_PROGRAM, SBPF_DEPLOY_GATE } from "@/scripts/chain/lib/network-gates";
 import { pmWrite } from "@/scripts/chain/lib/program-metadata";
-import { type ChainEnv } from "@/scripts/chain/lib/safety";
+import { sha256Hex, type ChainEnv } from "@/scripts/chain/lib/safety";
 import {
   MAX_EXTERNAL_TRANSFER_LAMPORTS,
   MULTISIG_DISCRIMINATOR,
   OTTERSEC_VERIFY_PROGRAM,
+  SQUADS_INNER_MESSAGE_BUDGET,
   SQUADS_V4_PROGRAM,
   assertOnlyVaultSigner,
   OTTER_VERIFY_IX,
@@ -665,5 +685,132 @@ describe("chain:squads-export ops", () => {
     await exportOp(w, "set-upgrade-authority", { programs: ["transfer_hook"], newAuthority: null, confirmImmutable: true });
     expect(w.chain.calls).not.toContain("sendTransaction");
     expect(w.chain.calls).not.toContain("simulateTransaction");
+  });
+});
+
+describe("chain:squads-export v1.0.0-rc role ops (design 8.3 §7, K2.11)", () => {
+  /** A handed-over chain whose Platform (SA = the map SA) and BlocklistAuthority exist. */
+  async function live() {
+    const w = await handedOver();
+    const [platform] = await findPlatformPda();
+    w.chain.set(platform, {
+      owner: REGISTRY,
+      lamports: rent(94),
+      data: new Uint8Array(getPlatformEncoder().encode({ admin: w.keys.superAdmin, protocolTreasury: w.keys.vault, protocolFeeBps: 0, pauseFlags: 0x40, issuersCount: 0, version: 2, bump: 255 })),
+    });
+    const [ba] = await findBlocklistAuthorityPda();
+    w.chain.set(ba, { owner: HOOK, lamports: rent(41), data: new Uint8Array(getBlocklistAuthorityEncoder().encode({ authority: w.keys.blocklistAuthority, bump: 255 })) });
+    return { w, platform, now: BigInt(w.chain.now) };
+  }
+  const WINDOW = BigInt(1_209_600);
+  /** One vault transaction inside the Squads inner budget, signed by the vault alone; its account count. */
+  function single(evidence: Record<string, unknown>, vault: string) {
+    expect(evidence.error ?? null).toBeNull();
+    const exported = evidence.export as Exported;
+    expect(exported.transactions).toHaveLength(1);
+    const [tx] = exported.transactions;
+    expect(tx.messageBytes).toBeLessThanOrEqual(SQUADS_INNER_MESSAGE_BUDGET);
+    expect(tx.instructions).toHaveLength(1);
+    expect(tx.instructions[0].accounts.filter((a) => a.signer).map((a) => a.address)).toEqual([vault]);
+    return { accounts: tx.instructions[0].accounts.length, exported };
+  }
+
+  it("the upgrade authority's veto and D4 recoveries, the grant, the freeze: each one vault transaction within the size guard", async () => {
+    const { w, platform, now } = await live();
+    const vault = w.keys.vault;
+    const run = (instruction: string, args: Record<string, unknown> = {}, op = "registry-ix") => exportOp(w, op, { instruction, args });
+
+    // D4 registry: propose (6 accounts, the vault as the upgrade authority).
+    const propose = single(await run("propose_platform_recovery", { newAdmin: w.keys.superAdmin }), vault);
+    expect(propose.accounts).toBe(6);
+    expect(propose.exported.header.postconditions.join(" ")).toMatch(/7 days after the proposal/);
+    // Recovered to the vault itself: cancel (4) and execute (10, K2.11) through Squads.
+    const [recovery] = await findAcceptPlatformAdminRecoveryPda({ platform });
+    w.chain.set(recovery, {
+      owner: REGISTRY,
+      lamports: rent(162),
+      data: new Uint8Array(
+        getPlatformRecoveryEncoder().encode({ platform, currentAdmin: w.keys.superAdmin, newAdmin: vault, proposedBy: vault, proposedAt: now, eta: now + BigInt(604_800), expiresAt: now + BigInt(604_800) + WINDOW, version: 1, bump: 255 }),
+      ),
+    });
+    expect(single(await run("cancel_platform_recovery"), vault).accounts).toBe(4);
+    const execute = single(await run("execute_platform_recovery"), vault);
+    expect(execute.accounts).toBe(10);
+    expect(execute.exported.header.preconditions.join(" ")).toMatch(/the vault becomes the super admin/);
+    // The veto: cancel a staged grant and a staged rotation (7 accounts each).
+    const [pending] = await findPendingAdminPda({ newAdmin: key(81) });
+    w.chain.set(pending, {
+      owner: REGISTRY,
+      lamports: rent(98),
+      data: new Uint8Array(getPendingAdminEncoder().encode({ newAdmin: key(81), proposedBy: w.keys.superAdmin, proposedAt: now, eta: now + BigInt(172_800), expiresAt: now + BigInt(172_800) + WINDOW, version: 1, bump: 255 })),
+    });
+    expect(single(await run("cancel_admin_proposal", { newAdmin: key(81) }), vault).accounts).toBe(7);
+    const [transfer] = await findAcceptPlatformAdminTransferPda({ platform });
+    w.chain.set(transfer, {
+      owner: REGISTRY,
+      lamports: rent(163),
+      data: new Uint8Array(
+        getAuthorityProposalEncoder().encode({ target: platform, currentAuthority: w.keys.superAdmin, newAuthority: key(82), proposedBy: w.keys.superAdmin, proposedAt: now, eta: now + BigInt(172_800), expiresAt: now + BigInt(172_800) + WINDOW, kind: 0, version: 1, bump: 255 }),
+      ),
+    });
+    expect(single(await run("cancel_platform_admin_transfer"), vault).accounts).toBe(7);
+    // Freeze and unfreeze (the vault as an Admin / as the super admin in the k4 layout).
+    const reasonHash = "ab".repeat(32);
+    expect(single(await run("freeze_issuer_proceeds", { issuer: key(83), reasonHash }), vault).accounts).toBe(6);
+    expect((await run("freeze_issuer_proceeds", { issuer: key(83), reasonHash: "nope" })).error).toMatch(/64-hex sha256/);
+    const [freeze] = await findIssuerFreezePda({ issuer: key(83) });
+    w.chain.set(freeze, {
+      owner: REGISTRY,
+      lamports: rent(114),
+      data: new Uint8Array(getIssuerFreezeEncoder().encode({ issuer: key(83), frozenBy: key(84), frozenAt: now, reasonHash: new Uint8Array(32), version: 1, bump: 255 })),
+    });
+    const unfreeze = single(await run("unfreeze_issuer_proceeds", { issuer: key(83) }), vault);
+    expect(unfreeze.accounts).toBe(4);
+    expect(unfreeze.exported.transactions[0].instructions[0].accounts.map((a) => a.address)).toContain(key(84));
+    // D4 hook: propose (6), and for the vault as the new BA cancel (4) and execute (7).
+    expect(single(await run("propose_blocklist_recovery", { newAuthority: w.keys.blocklistAuthority }, "hook-ix"), vault).accounts).toBe(6);
+    const [hookRecovery] = await findBlocklistRecoveryPda();
+    w.chain.set(hookRecovery, {
+      owner: HOOK,
+      lamports: rent(129),
+      data: new Uint8Array(
+        getBlocklistRecoveryEncoder().encode({ currentAuthority: w.keys.blocklistAuthority, newAuthority: vault, proposedBy: vault, proposedAt: now, eta: now + BigInt(604_800), expiresAt: now + BigInt(604_800) + WINDOW, bump: 255 }),
+      ),
+    });
+    expect(single(await run("cancel_blocklist_recovery", {}, "hook-ix"), vault).accounts).toBe(4);
+    expect(single(await run("execute_blocklist_recovery", {}, "hook-ix"), vault).accounts).toBe(7);
+    // The vault is the upgrade authority: never an Admin (review finding 6); as the SA only with a warning.
+    expect((await exportOp(w, "registry-ix", { instruction: "propose_admin", args: { newAdmin: vault }, confirmTarget: vault })).error).toMatch(/Admin == UA/);
+    const toVault = single(await run("propose_platform_admin", { newAdmin: vault }), vault);
+    expect(toVault.exported.header.postconditions.join(" ")).toMatch(/chain:inventory blocks it \(sa-is-ua\)/);
+  });
+
+  it("upgrade to the Release's incident build: only with confirmIncident, bytes checked against the incident .so; then back to the release build", async () => {
+    const w = await handedOver();
+    const release = releaseDir();
+    const incident = { asset_registry: new Uint8Array([1, 2, 9]), transfer_hook: new Uint8Array([4, 5, 9]) };
+    for (const name of ["asset_registry", "transfer_hook"] as const) {
+      fs.writeFileSync(path.join(release, `${name}-incident.so`), incident[name]);
+      fs.appendFileSync(path.join(release, "sbf-sha256.txt"), `${sha256Hex(incident[name])}  target/deploy-incident/${name}.so\n`);
+      fs.appendFileSync(path.join(release, "hashes.txt"), `${name}-incident: ${executableHash(incident[name])}\n`);
+    }
+    const files = fs.readdirSync(release).filter((f) => f !== "SHA256SUMS").sort();
+    fs.writeFileSync(path.join(release, "SHA256SUMS"), files.map((f) => `${sha256Hex(fs.readFileSync(path.join(release, f)))}  ${f}`).join("\n") + "\n");
+    loaderBuffer(w, key(90), w.keys.vault, incident.transfer_hook);
+    const env = { CHAIN_RELEASE_DIR: release };
+    expect((await exportOp(w, "upgrade", { artifact: "incident", buffers: { transferHook: key(90) } }, env)).error).toMatch(/needs confirmIncident: true/);
+    // A release-build buffer is not the incident build.
+    loaderBuffer(w, key(91), w.keys.vault, new Uint8Array([4, 5, 6]));
+    expect((await exportOp(w, "upgrade", { artifact: "incident", confirmIncident: true, buffers: { transferHook: key(91) } }, env)).error).toMatch(/buffer bytes differ from the Release incident .so/);
+    const ok = await exportOp(w, "upgrade", { artifact: "incident", confirmIncident: true, buffers: { transferHook: key(90) } }, env);
+    expect(ok.error ?? null).toBeNull();
+    const header = (ok.export as Exported).header;
+    expect(header.preconditions.join("\n")).toMatch(/INCIDENT BUILD: zero recovery delay/);
+    expect(header.postconditions.join("\n")).toMatch(/then this op again with the release build/);
+    // An rc.x Release has no incident build.
+    expect((await exportOp(w, "upgrade", { artifact: "incident", confirmIncident: true, buffers: { transferHook: key(90) } }, { CHAIN_RELEASE_DIR: releaseDir() })).error).toMatch(/carries no incident build/);
+    expect((await exportOp(w, "upgrade", { artifact: "debug", buffers: { transferHook: key(90) } }, env)).error).toMatch(/artifact must be "release" or "incident"/);
+    // The restore: the release build, as for any upgrade.
+    expect((await exportOp(w, "upgrade", { buffers: { transferHook: key(91) } }, env)).error ?? null).toBeNull();
   });
 });

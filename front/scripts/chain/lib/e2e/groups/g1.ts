@@ -2,7 +2,10 @@
  * G1: issuer → KYB → asset → two classes → mints → sale approval → sale →
  * a purchase without KYC on the Open class (design-6.3 §A G1). Localnet adds
  * the non-Admin issuer's refused treasury mint (1.11) and the KycGated class:
- * a purchase without a passport is refused, with one it lands (1.12).
+ * a purchase without a passport is refused, with one it lands (1.12); then
+ * the v1.0.0-rc gates: a blocklisted buyer is refused (1.13, 6144) and so is
+ * a buy while the issuer's proceeds are frozen (1.14, 6143), each undone
+ * right after (unblock, unfreeze) so the later groups run on a clean issuer.
  *
  * Devnet checkpoint C1: verify_issuer_kyb needs the Super Admin, the user's
  * wallet. The runner prints what to click and polls the Issuer account.
@@ -39,10 +42,14 @@ import {
   RestrictionMode,
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   fetchMaybeTransferHookConfig,
+  findBlockEntryPda,
   findConfigPda,
   findExtraAccountMetaListPda,
+  getAddToBlocklistInstructionAsync,
+  getRemoveFromBlocklistInstructionAsync,
   getUpdateTransferHookConfigInstructionAsync,
 } from "@/lib/generated/transfer_hook";
+import { buildFreezeIssuerProceeds, buildUnfreezeIssuerProceeds, loadIssuerFreeze } from "@/lib/issuer-freeze";
 import { findIssuerPermissionsAddress, ISSUER_CAPABILITIES, resolveIssuerPermission } from "@/lib/issuer-permissions";
 import { buildIssuePassport, getEntryPda } from "@/lib/passport";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
@@ -543,7 +550,39 @@ export async function runGroup1(w: World): Promise<"completed" | "awaiting"> {
   await w.runner.step("1.12f", async () => ({ payer: b2, ixs: await buyIxs(w, b2, "classB", 4, BigInt(3)) }), {
     done: () => saleSold(w, "classB", 4, BigInt(3)),
   });
+
+  // 1.13: a blocklisted payer (prog-novac-4): the registry refuses the buy
+  // before any transfer (the hook itself checks only the sender).
+  const [b4Entry] = await findBlockEntryPda({ wallet: b4.address });
+  await w.runner.step(
+    "1.13a",
+    async () => ({ payer: ba, ixs: [await getAddToBlocklistInstructionAsync({ authority: ba, wallet: b4.address })] }),
+    { done: () => accountExists(w.rpc, b4Entry) },
+  );
+  await w.runner.step("1.13b", async () => ({ payer: b4, ixs: await buyIxs(w, b4, "classA", 1, BigInt(1)) }));
+  await w.runner.step(
+    "1.13c",
+    async () => ({ payer: ba, ixs: [await getRemoveFromBlocklistInstructionAsync({ authority: ba, wallet: b4.address })] }),
+    { done: async () => !(await accountExists(w.rpc, b4Entry)) },
+  );
+
+  // 1.14: an Admin freezes the issuer's proceeds (D1, the app's builder):
+  // buy (O-4) is refused; only the Super Admin lifts it.
+  const frozen = async () => (await loadIssuerFreeze(w.rpc, issuer)) !== null;
+  await w.runner.step(
+    "1.14a",
+    async () => ({
+      payer: admin,
+      ixs: [(await buildFreezeIssuerProceeds(w.rpc, admin, issuer, `manci-e2e:${w.runId}: freeze drill`)).instruction],
+    }),
+    { done: frozen },
+  );
+  await w.runner.step("1.14b", async () => ({ payer: b1, ixs: await buyIxs(w, b1, "classA", 1, BigInt(1)) }));
+  await w.runner.step(
+    "1.14c",
+    async () => ({ payer: superAdmin!, ixs: [await buildUnfreezeIssuerProceeds(w.rpc, superAdmin!, issuer)] }),
+    { done: async () => !(await frozen()) },
+  );
   void b3;
-  void b4;
   return "completed";
 }

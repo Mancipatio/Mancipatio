@@ -10,9 +10,12 @@
  * of silently expecting a stale number.
  */
 import {
+  ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN,
   ASSET_REGISTRY_ERROR__OFFER_EXPIRED,
+  ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED,
   ASSET_REGISTRY_ERROR__RECEIVER_NOT_APPROVED,
   ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED,
+  ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID,
   ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE,
   ASSET_REGISTRY_ERROR__SALE_NOT_STARTED,
   ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL,
@@ -89,6 +92,19 @@ export const E2E_STEPS: readonly StepSpec[] = [
   },
   { id: "1.12e", group: 1, title: "approve_holder(B2) on R0", networks: LOCAL, signer: "kycAuthority", expect: ok },
   { id: "1.12f", group: 1, title: "buy on the KycGated class with a passport (B2)", networks: LOCAL, signer: "buyer2", expect: ok },
+  // v1.0.0-rc (8.3): a blocked payer (prog-novac-4) and a frozen issuer (D1).
+  { id: "1.13a", group: 1, title: "add_to_blocklist(B4) by the BA", networks: LOCAL, signer: "blocklistAuthority", expect: ok },
+  {
+    id: "1.13b", group: 1, title: "buy on sale #1 by the blocked buyer B4", networks: LOCAL, signer: "buyer4",
+    expect: fails(ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED, "PartyBlocklisted"),
+  },
+  { id: "1.13c", group: 1, title: "remove_from_blocklist(B4) by the BA", networks: LOCAL, signer: "blocklistAuthority", expect: ok },
+  { id: "1.14a", group: 1, title: "freeze_issuer_proceeds(e2e issuer) by the Admin", networks: LOCAL, signer: "admin", expect: ok },
+  {
+    id: "1.14b", group: 1, title: "buy on sale #1 while its issuer's proceeds are frozen (B1)", networks: LOCAL, signer: "buyer1",
+    expect: fails(ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN, "IssuerProceedsFrozen"),
+  },
+  { id: "1.14c", group: 1, title: "unfreeze_issuer_proceeds by the Super Admin", networks: LOCAL, signer: "superAdmin", expect: ok },
 
   // G2: a sale beyond its approval.
   { id: "2.1", group: 2, title: "approve_sale #2 (max gross G, price [p, p])", networks: BOTH, signer: "admin", expect: ok },
@@ -99,6 +115,11 @@ export const E2E_STEPS: readonly StepSpec[] = [
   {
     id: "2.3", group: 2, title: "open_sale #2 with a price above the approved maximum", networks: BOTH, signer: "issuer",
     expect: fails(ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL, "SalePriceOutsideApproval"),
+  },
+  {
+    // v1.0.0-rc (8.3 §8.2): every sale ends within 365 days of max(start, now).
+    id: "2.2b", group: 2, title: "open_sale #2 ending 366 days after its start", networks: LOCAL, signer: "issuer",
+    expect: fails(ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID, "SaleDurationInvalid"),
   },
   { id: "2.4a", group: 2, title: "open_sale #2 at exactly the approved gross", networks: BOTH, signer: "issuer", expect: ok },
   { id: "2.4b", group: 2, title: "buy the whole sale #2 (B3)", networks: BOTH, signer: "buyer3", expect: ok },

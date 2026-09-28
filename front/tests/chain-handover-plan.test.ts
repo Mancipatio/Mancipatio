@@ -7,9 +7,15 @@ import {
   RealizeAction,
   VaultState,
   VaultType,
+  findAcceptPlatformAdminRecoveryPda,
+  findAcceptPlatformAdminTransferPda,
   findAdminRecordPda,
+  findPendingAdminPda,
   findPlatformPda,
   getAdminEncoder,
+  getAuthorityProposalEncoder,
+  getPendingAdminEncoder,
+  getPlatformRecoveryEncoder,
   getCustodyVaultEncoder,
   getIssuerEncoder,
   getIssuerRecoveryEncoder,
@@ -255,27 +261,30 @@ describe("handover target (Talas 8.2)", () => {
 });
 
 describe("handover plan: personal wallet → company wallet on devnet", () => {
-  it("grants first, moves KYC / BA / custody / treasury, rotates the super admin last, then cleans up", async () => {
+  it("proposes every timelocked change at T, moves the instant roles, executes grants and the SA accept at T+48h, then cleans up", async () => {
     const w = await world();
     const { P, A1, A2, E, registry, vault, issuer } = await devnetLike(w);
     const { C, json } = await companyTarget(w, registry);
     const { target } = await validateHandoverTarget(json, devnet);
     const plan = planHandover(await inventoryOf(w, registry), target, { site: "https://www.manci.io" });
 
+    // v1.0.0-rc (D3): both timelocked proposals (the grant and the SA
+    // rotation) go out at T so their 48 hours run in parallel; the instant
+    // roles move meanwhile; at T+48h the new key executes its grant, takes the
+    // custody vault (which needs its Admin record) and accepts the SA last.
     expect(titles(plan)).toEqual([
       "Onboard",
       "Fund",
-      // v1 (D3): the SA proposes the grant, the new key executes it 48 h later.
       "propose_admin",
-      "add_admin",
-      "propose_custody_authority",
-      "accept_custody_authority",
+      "propose_platform_admin",
       "propose_kyc_registry_authority",
       "accept_kyc_registry_authority",
       "propose_blocklist_authority",
       "accept_blocklist_authority",
       "set_protocol_treasury",
-      "propose_platform_admin",
+      "add_admin",
+      "propose_custody_authority",
+      "accept_custody_authority",
       "accept_platform_admin",
       "remove_admin",
       "remove_admin",
@@ -292,12 +301,32 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
       expect(by(accept)[0]).toMatchObject({ signer: { key: C, side: "new" }, where: expect.stringMatching(/^\/account\/roles/) });
     }
     expect(by("set_protocol_treasury")[0]).toMatchObject({ signer: { key: P }, where: expect.stringMatching(/^\/admin\/platform/) });
-    // The super admin rotates only after every move, and cleanup after it.
+    // The super admin accepts only after every move and every grant, and cleanup after it.
     const index = (id: string) => plan.steps.findIndex((s) => s.id === id);
     const accept = by("accept_platform_admin")[0];
     const propose = by("propose_platform_admin")[0];
-    expect(propose.requires).toEqual(expect.arrayContaining(plan.steps.filter((s) => s.phase === "move").map((s) => s.id)));
-    expect(accept.requires).toEqual([propose.id]);
+    expect(propose.requires).toEqual(plan.steps.filter((s) => s.phase === "prepare").map((s) => s.id));
+    expect(accept.requires).toEqual(
+      expect.arrayContaining([propose.id, by("add_admin")[0].id, ...plan.steps.filter((s) => s.phase === "move").map((s) => s.id)]),
+    );
+    // The timeline: proposals and instant moves at T, grant, custody and accept at T+48h.
+    const offsets = Object.fromEntries(plan.steps.filter((s) => s.instruction).map((s) => [s.title.replace(/\(.*$/, "").replace(/ .*$/, ""), s.offsetHours]));
+    expect(offsets).toMatchObject({
+      propose_admin: 0,
+      propose_platform_admin: 0,
+      accept_kyc_registry_authority: 0,
+      accept_blocklist_authority: 0,
+      set_protocol_treasury: 0,
+      add_admin: 48,
+      propose_custody_authority: 48,
+      accept_custody_authority: 48,
+      accept_platform_admin: 48,
+      remove_admin: 48,
+    });
+    expect(by("add_admin")[0].when).toBe(`T+48h: 48 hours after ${by("propose_admin")[0].id} lands, within 14 days of that`);
+    expect(accept.when).toBe(`T+48h: 48 hours after ${propose.id} lands, within 14 days of that`);
+    expect(by("propose_custody_authority")[0].requires).toEqual([by("add_admin")[0].id]);
+    expect(plan.warnings.join(" ")).toMatch(/Timeline: the proposals go out at T; .* about 48 hours/);
     for (const step of by("remove_admin")) {
       expect(step.signer).toMatchObject({ key: C, side: "new" });
       expect(step.requires).toContain(accept.id);
@@ -325,13 +354,13 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
       "Onboard",
       "Fund",
       "propose_admin",
-      "add_admin",
+      "propose_platform_admin",
       "propose_kyc_registry_authority",
       "accept_kyc_registry_authority",
       "propose_blocklist_authority",
       "accept_blocklist_authority",
       "set_protocol_treasury",
-      "propose_platform_admin",
+      "add_admin",
       "accept_platform_admin",
       "propose_admin",
       "add_admin",
@@ -347,6 +376,8 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     expect(regrant).toMatchObject({ phase: "super-admin", signer: { key: P }, requires: [repropose.id], where: expect.stringMatching(/^\/account\/roles/) });
     expect(plan.steps.indexOf(repropose)).toBe(plan.steps.indexOf(accept) + 1);
     expect(plan.steps.indexOf(regrant)).toBe(plan.steps.indexOf(accept) + 2);
+    // Its own grant waits another 48 hours after the re-proposal: T+96h.
+    expect([accept.offsetHours, repropose.offsetHours, regrant.offsetHours]).toEqual([48, 48, 96]);
     // Its custody vault and rights issuance are without an Admin in between: noted and decided.
     expect(repropose.notes.join(" ")).toMatch(new RegExp(`custody vaults it operates .*${vault}`));
     expect(repropose.notes.join(" ")).toMatch(/publish_milestone is refused/);
@@ -366,8 +397,8 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     const acceptIssuer = plan.steps.find((s) => s.instruction === "accept_issuer_authority")!;
     expect(acceptIssuer.title).toContain(issuer);
     expect(acceptIssuer.notes.join(" ")).toMatch(/BEFORE the super admin rotation/);
-    const proposeSa = plan.steps.find((s) => s.instruction === "propose_platform_admin")!;
-    expect(proposeSa.requires).toContain(acceptIssuer.id);
+    const acceptSa = plan.steps.find((s) => s.instruction === "accept_platform_admin")!;
+    expect(acceptSa.requires).toContain(acceptIssuer.id);
     expect(plan.decisions.join(" ")).not.toContain(issuer);
   });
 
@@ -403,6 +434,82 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     expect(() => planHandover(bare, target)).toThrow(/bootstrap it first/);
   });
 
+  it("proposals already on chain: chain windows, an expired grant proposed again, stale grants cancelled, a pending recovery decided first", async () => {
+    const w = await world();
+    const { P, E, registry } = await devnetLike(w);
+    const [kept, earlierSa, stranger] = [key(204), key(206), key(205)];
+    const { C, json } = await companyTarget(w, registry, { admins: [E, kept] });
+    const { target } = await validateHandoverTarget(json, devnet);
+    const now = BigInt(w.chain.now);
+    const HOUR = BigInt(3_600);
+    const TIMELOCK = BigInt(172_800);
+    const WINDOW = BigInt(1_209_600);
+    const [platform] = await findPlatformPda();
+    // The SA rotation to C went out an hour ago: acceptable in 47 hours.
+    const [transfer] = await findAcceptPlatformAdminTransferPda({ platform });
+    const at = now - HOUR;
+    w.chain.set(transfer, {
+      owner: REGISTRY,
+      lamports: rent(163),
+      data: new Uint8Array(
+        getAuthorityProposalEncoder().encode({ target: platform, currentAuthority: P, newAuthority: C, proposedBy: P, proposedAt: at, eta: at + TIMELOCK, expiresAt: at + TIMELOCK + WINDOW, kind: 0, version: 1, bump: 255 }),
+      ),
+    });
+    const grant = async (newAdmin: Address, proposedBy: Address, proposedAt: bigint) =>
+      w.chain.set((await findPendingAdminPda({ newAdmin }))[0], {
+        owner: REGISTRY,
+        lamports: rent(98),
+        data: new Uint8Array(
+          getPendingAdminEncoder().encode({ newAdmin, proposedBy, proposedAt, eta: proposedAt + TIMELOCK, expiresAt: proposedAt + TIMELOCK + WINDOW, version: 1, bump: 255 }),
+        ),
+      });
+    await grant(C, P, now - BigInt(20 * 86_400)); // expired
+    await grant(kept, P, now - HOUR); // live, 47 h to go
+    await grant(stranger, earlierSa, now - HOUR); // an earlier super admin's (K1.10)
+    // A super admin recovery by the upgrade authority is pending.
+    const [recovery] = await findAcceptPlatformAdminRecoveryPda({ platform });
+    w.chain.set(recovery, {
+      owner: REGISTRY,
+      lamports: rent(162),
+      data: new Uint8Array(
+        getPlatformRecoveryEncoder().encode({ platform, currentAdmin: P, newAdmin: key(207), proposedBy: w.keys.deployer, proposedAt: now, eta: now + BigInt(604_800), expiresAt: now + BigInt(604_800) + WINDOW, version: 1, bump: 255 }),
+      ),
+    });
+    const plan = planHandover(await inventoryOf(w, registry), target, { now });
+    const find = (title: string) => plan.steps.find((s) => s.title === title);
+    // The rotation on chain is not proposed again; its accept waits for the chain window.
+    expect(plan.steps.some((s) => s.instruction === "propose_platform_admin")).toBe(false);
+    const accept = plan.steps.find((s) => s.instruction === "accept_platform_admin")!;
+    expect(accept.when).toMatch(/^on chain: Executable from .* \(in 1d 23h 00m\), until /);
+    // C's expired grant is proposed again (48 h from now); the kept key's live grant runs in its chain window.
+    expect(plan.steps.filter((s) => s.instruction === "propose_admin").map((s) => s.title)).toEqual([`propose_admin(${C})`]);
+    expect(find(`propose_admin(${C})`)!.notes.join(" ")).toMatch(/expired .*proposes it again/);
+    expect(find(`add_admin(${C})`)!.offsetHours).toBe(48);
+    expect(find(`add_admin(${kept})`)).toMatchObject({ offsetHours: 47, when: expect.stringMatching(/^on chain: Executable from .* \(in 1d 23h 00m\)/) });
+    expect(accept.offsetHours).toBe(48);
+    // The earlier super admin's grant is withdrawn in the cleanup.
+    expect(find(`cancel_admin_proposal(${stranger})`)).toMatchObject({ phase: "cleanup", signer: { key: C } });
+    expect(find(`cancel_admin_proposal(${stranger})`)!.notes.join(" ")).toMatch(/earlier super admin.*K1\.10/);
+    // The recovery refuses the accept until it ends.
+    expect(plan.decisions.join(" ")).toMatch(/super admin recovery to \S+ by the upgrade authority is pending .*refused \(6155\)/);
+  });
+
+  it("a target that gives the vault (the upgrade authority) an operational role is refused (review finding 6)", async () => {
+    const w = await world();
+    const { json } = await companyTarget(w, key(230));
+    const vault = key(262);
+    const reject = async (value: unknown): Promise<string> => {
+      try {
+        await validateHandoverTarget(value, devnet);
+      } catch (error) {
+        return (error as Error).message;
+      }
+      throw new Error("expected the target to be rejected");
+    };
+    expect(await reject({ ...json, squadsVault: vault, superAdmin: vault, acknowledgedRoleOverlaps: [] })).toMatch(/superAdmin must not be the Squads vault \(it is the upgrade authority: SA == UA\)/);
+    expect(await reject({ ...json, squadsVault: vault, admins: [vault] })).toMatch(/admins must not list the Squads vault/);
+  });
+
   it("the runner prints and writes the plan, and never simulates or sends", async () => {
     const w = await world();
     const { registry } = await devnetLike(w);
@@ -414,10 +521,13 @@ describe("handover plan: personal wallet → company wallet on devnet", () => {
     expect(evidence.error ?? null).toBeNull();
     expect(evidence.status).toBe("awaiting");
     expect(lines.join("\n")).toMatch(/H3 +grant +current +\S+ +propose_admin\(/);
-    expect(lines.join("\n")).toMatch(/H4 +grant +new +\S+ +add_admin\(/);
+    expect(lines.join("\n")).toMatch(/H4 +super-admin +current +\S+ +propose_platform_admin\(/);
+    expect(lines.join("\n")).toMatch(/H\d+ +grant +new +\S+ +add_admin\(\S+\)\n +when: +T\+48h: 48 hours after H3 lands/);
     const markdown = fs.readFileSync(path.join(w.dir, String(evidence.planFile)), "utf8");
     expect(markdown).toMatch(/^# Role handover plan \(devnet\)/);
     expect(markdown).toMatch(/- \[ \] \*\*H\d+ \(super-admin\)\*\* accept_platform_admin/);
+    expect(markdown).toMatch(/  - when: T\+48h: 48 hours after H4 lands/);
+    expect(evidence.chainTime).toBe(String(w.chain.now));
     expect(w.chain.calls).not.toContain("sendTransaction");
     expect(w.chain.calls).not.toContain("simulateTransaction");
     await expect(

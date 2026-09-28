@@ -11,7 +11,10 @@
  * issuer proceeds freezes, the bootstrap marker (pause bit 7), the payout
  * modules bit (0x40, set for good on mainnet), incident bytes on chain, and
  * rc.x `AuthorityTransfer` (137 B) / `BlocklistAuthorityTransfer` (73 B)
- * accounts the v1 program can no longer read or close.
+ * accounts the v1 program can no longer read or close, and the upgrade
+ * authority holding an operational role (SA == UA, BA == UA, an Admin record
+ * of the UA; review finding 6, O-10): its veto and D4 recovery need it to be
+ * a separate key, so each is a blocker.
  *
  * `F/scripts/ops/devnet-rollout-inventory.mjs` is unchanged; this tool is
  * the mainnet-capable, role-map-aware inventory.
@@ -615,6 +618,43 @@ export type FindingOptions = {
   network?: string;
 };
 
+/**
+ * Review finding 6 (rejected in the program, enforced here) and O-10: the
+ * program upgrade authority must hold no operational role. It is the only
+ * veto that survives a compromised super admin (cancel of a grant or a
+ * rotation) and the only recovery of a lost SA or BA (D4); as the SA, the BA
+ * or an Admin it would veto and recover itself. Checked against the live
+ * upgrade authorities and, before the handover, against the vault S7 installs.
+ * The bootstrap deployer holds SA, BA and an Admin record by design until the
+ * handover: its own findings (deployer-role) cover it.
+ */
+function uaOverlapFindings(
+  inv: Inventory,
+  map: RoleMap | null,
+  phase: InventoryPhase,
+  add: (severity: Severity, code: string, message: string) => void,
+) {
+  const holders = new Map<string, string[]>();
+  for (const p of inv.programs) {
+    if (!p.upgradeAuthority || p.upgradeAuthority === map?.deployer) continue;
+    holders.set(p.upgradeAuthority, [...(holders.get(p.upgradeAuthority) ?? []), `the ${p.name} upgrade authority`]);
+  }
+  const future = map && phase !== "handed-over" && !holders.has(map.squads.vault);
+  if (future) holders.set(map.squads.vault, ["the Squads vault (the upgrade authority after S7)"]);
+  const adminKeys = new Set<string>(inv.admins.map((a) => a.admin));
+  for (const [key, what] of holders) {
+    const live = !(future && key === map!.squads.vault);
+    // Live: always a blocker (without a role map it may still be the
+    // bootstrap deployer while in progress). The future vault: from the
+    // pre-handover phase on.
+    const severity: Severity = live ? (map || phase !== "in-progress" ? "blocker" : "warning") : phase === "in-progress" ? "warning" : "blocker";
+    const label = what.join(" and ");
+    if (inv.platform?.admin === key) add(severity, "sa-is-ua", `the super admin ${key} is ${label}: the upgrade authority's veto and recovery (D4) would be its own; rotate the super admin to a separate key`);
+    if (inv.blocklist?.authority === key) add(severity, "ba-is-ua", `the blocklist authority ${key} is ${label}: rotate it to a separate key`);
+    if (adminKeys.has(key)) add(severity, "admin-is-ua", `${label} ${key} holds an Admin record: remove it (remove_admin), the upgrade authority holds no operational role`);
+  }
+}
+
 /** Custody states in which a vault still moves units. */
 const LIVE_CUSTODY = new Set<VaultState>([VaultState.Active, VaultState.Triggered]);
 
@@ -676,8 +716,12 @@ export function inventoryFindings(
     }
     // Bit 7 must be closed once the final super admin holds the platform (X1).
     const x1Done = map ? inv.platform.admin === map.superAdmin : false;
+    // A v1 program closes bit 7 with the first clear; bit 7 next to a clear
+    // emergency area means an rc.x build unpaused (a rollback): the timelocks
+    // would be waived on a live platform.
+    const unpaused = (flags & EMERGENCY_PAUSE_BITS) !== EMERGENCY_PAUSE_BITS;
     if (isBootstrapOpen(flags)) {
-      if (atHandover || x1Done) add("blocker", "bootstrap-open", `the bootstrap window (bit 7) is still open (${inv.platform.pauseFlagsHex}): the super admin closes it with set_pause_flags(0, 0x80)`);
+      if (atHandover || x1Done || unpaused) add("blocker", "bootstrap-open", `the bootstrap window (bit 7) is still open (${inv.platform.pauseFlagsHex}${unpaused ? ", with areas unpaused" : ""}): the super admin closes it with set_pause_flags(0, 0x80)`);
       else add("info", "bootstrap-open", "the bootstrap window (bit 7) is open: Admin grants and the super admin rotation skip their 48 h");
     }
     // K1.3: the deployer never lifts a pause (the first unpause is the final SA's).
@@ -688,6 +732,13 @@ export function inventoryFindings(
   for (const p of inv.programs) {
     if (p.incident) add("blocker", "incident-bytes", `${p.name}: the live program is the Release's incident build; restore the release .so once the incident is closed`);
   }
+  // Every mainnet Release from v0.0.0-rc.2 on is SBPF v3 (design 8.3 §11).
+  if (network === "mainnet") {
+    for (const info of inv.sbpf ?? []) {
+      if (info.version !== 3) add("blocker", "release-sbpf", `${info.program}: the Release .so is ${info.version === null ? "not an SBPF ELF" : `SBPF v${info.version} (e_flags ${info.eFlags})`}; a mainnet Release must be SBPF v3 (e_flags 3)`);
+    }
+  }
+  uaOverlapFindings(inv, map, phase, add);
   for (const legacy of inv.legacyTransfers ?? []) {
     add("blocker", "legacy-transfer", `${legacy.program}: rc.x authority transfer ${legacy.address} (${legacy.size} B) is still on chain; the v1 program cannot close it (cancel it on rc.x before the upgrade)`);
   }

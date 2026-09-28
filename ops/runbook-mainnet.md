@@ -22,9 +22,9 @@ The tools live in `front/scripts/chain/` and run from `front/`:
 | `npm run chain:inventory` | Read-only inventory with findings for `CHAIN_PHASE` = `in-progress`, `pre-handover` or `handed-over`; also the SBPF version of the Release and the SIMD-0500 / rent feature state (§1) | never |
 | `npm run chain:idl` | Canonical IDL: `CHAIN_IDL_MODE` = `check` (default), `send` or `prepare-export` | only with `CHAIN_SEND=1` |
 | `npm run chain:bootstrap` | One bootstrap cycle (S1–S7) as a reviewed plan | only with `CHAIN_SEND=1` |
-| `npm run chain:squads-export` | Unsigned vault transactions for the Squads Transaction Builder | never |
-| `npm run chain:handover` | Ordered plan to move live roles to new keys (§19) | never |
-| `npm run chain:emergency` | Out-of-band pause, unpause, blocklist and hook mode with a Ledger or a keypair, no front and no database (§11) | only with `CHAIN_SEND=1` |
+| `npm run chain:squads-export` | Unsigned vault transactions for the Squads Transaction Builder (also the upgrade authority's veto and recoveries, and the incident build, §11) | never |
+| `npm run chain:handover` | Ordered plan to move live roles to new keys, with each step's timelock (§19) | never |
+| `npm run chain:emergency` | Out-of-band pause, unpause, blocklist, hook mode and an issuer proceeds freeze with a Ledger or a keypair, no front and no database (§11) | only with `CHAIN_SEND=1` |
 
 Every run writes one evidence file (`CHAIN_OUTPUT`, schema
 `mancipatio-chain-<tool>-v1`) even when it fails or is interrupted. Its
@@ -60,7 +60,8 @@ mandatory on mainnet), `CHAIN_IDL_RESUME_BUFFER`, `CHAIN_SNAPSHOT_DIR` (idl);
 mainnet only); `CHAIN_SITE_ORIGIN` (handover, wording only);
 `CHAIN_EMERGENCY_OP`, `CHAIN_EMERGENCY_SIGNER`, `CHAIN_PAUSE_BITS`,
 `CHAIN_WALLET`, `CHAIN_CONFIRM_WALLET`, `CHAIN_MINT`, `CHAIN_HOOK_MODE`,
-`CHAIN_KYC_REGISTRY`, `CHAIN_EMERGENCY_IDL_UNCHECKED=1` (emergency, §11).
+`CHAIN_KYC_REGISTRY`, `CHAIN_ISSUER`, `CHAIN_FREEZE_REASON_SHA256`,
+`CHAIN_EMERGENCY_IDL_UNCHECKED=1` (emergency, §11).
 
 The runners never read `.env*` files. Export the variables in the shell, for
 example from a small `set -a; . ~/mancipatio-mainnet/chain.env; set +a` file
@@ -210,9 +211,24 @@ these; the owner signs them off in the launch-day record (§0A, D0).
       `kyc.registry` = the KycRegistry PDA of the deployer (D3),
       `protocolTreasury` = the vault (D5) or, acknowledged, the company wallet,
       `protocolFeeBps: 0`, `unpauseBy: "superAdmin"` (D4),
+      `unpauseMask` = the areas the pilot opens (35 = 0x23: onboarding,
+      primary issuance, issuer proceeds; the company example), never 0x40,
       `kyc.tempAdminGrant: false` unless the 3.1 `kycProvider` gate is missing
       (D17). One key in several roles needs `acknowledgedRoleOverlaps` (§19);
-      the map is refused on mainnet without it.
+      the map is refused on mainnet without it. The upgrade authority (the
+      vault) holds no operational role (design 8.3 O-10, review finding 6):
+      the map refuses the vault in `admins[]`, and `chain:inventory` blocks a
+      live super admin, blocklist authority or Admin record that is an
+      upgrade authority (`sa-is-ua`, `ba-is-ua`, `admin-is-ua`; before S7
+      against the vault S7 installs). No company-wallet key is a Squads
+      member either (the §19 residuals).
+- [ ] **A v1.0.0-rc (or later) Release, SBPF v3**: the mainnet Platform is
+      initialized only by a v1 build (a fresh v1 Platform is 0xFF: every
+      pause bit plus the bootstrap marker, bit 7). An rc.x build leaves 0x40
+      clear, which `chain:inventory` blocks on mainnet (`payout-modules`), as
+      it blocks a Release `.so` that is not SBPF v3 (`release-sbpf`). The
+      Release also carries the incident build (`*-incident.so`, §11); it is
+      never deployed outside an incident.
 - [ ] **Dedicated RPC** and `CHAIN_CU_PRICE` decided (check recent
       prioritization fees).
 - [ ] **Operator CLI ≥ 4.0 for an SBPF v3 Release** (v0.0.0-rc.2 on; its
@@ -319,7 +335,7 @@ the sequence there; nothing before D9 touches the chain.
 | blocklistAuthority (BA) | Ledger | blocklist authority |
 | kyc.authority | compliance Ledger | KYC registry authority (no Admin record) |
 | Squads vault | multisig | both upgrade authorities, protocol treasury, IDL authority (as UA) |
-| company wallet (§19, when chosen) | Ledger of the legal entity | SA with its Admin record, KYC registry authority, BA and the protocol treasury, in place of the four rows above; never a Squads member unless acknowledged |
+| company wallet (§19, when chosen) | Ledger of the legal entity | SA with its Admin record, KYC registry authority, BA and the protocol treasury, in place of the four rows above; never the upgrade authority, and never a Squads member (O-10) |
 
 Re-check every figure with `getMinimumBalanceForRentExemption` on the
 mainnet RPC (`chain:inventory` prints it as its `rent` finding). Mainnet
@@ -457,6 +473,20 @@ authority is set (D6: the vault, as UA, runs IDL changes through Squads).
 
 ## 4. Bootstrap cycle 1
 
+**The bootstrap window (v1.0.0-rc, design 8.3 §5.4).** `initialize_platform`
+writes `pause_flags = 0xFF`: every pause bit (0x7F) plus bit 7, the one-way
+bootstrap marker. While bit 7 is set the 48-hour timelocks of `add_admin` and
+`accept_platform_admin` are waived at execution (propose and execute may
+follow each other at once); the 14-day expiry is not. Any clear of a pause
+bit (`set_pause_flags` with a nonzero clear mask, `set_pause(false)`) closes
+bit 7 for good, and nothing can set it again. So the order is mandatory:
+every role step (the Admin grants S3/A3, X3, X2, S5/X1, S3r) lands first,
+then the final super admin closes the window explicitly (**S5c**,
+`set_pause_flags(0, 0x80)`), then it unpauses (**S6**, `map.unpauseMask`
+only, never 0x40). The deployer never unpauses on mainnet. Every plan prints
+a `bootstrap window:` line with the chain time, and a step that waits for a
+timelock shows `timelock (48 hours after …): Executable from … (in …), until …`.
+
 ```sh
 CHAIN_OUTPUT=$E/04a-bootstrap-plan.json npm run chain:bootstrap
 ```
@@ -464,42 +494,59 @@ CHAIN_OUTPUT=$E/04a-bootstrap-plan.json npm run chain:bootstrap
 Review the printed plan: every step, its preconditions, the signer (always the
 deployer), which steps were simulated now and which are deferred ("depends on
 S1"), the ACTION REQUIRED list and `NEXT_PUBLIC_KYC_REGISTRY=<address>` (already
-pinned on the operator front). Default cycle 1 is S1, S2, S2b, S3 (each admin),
-S4, (S4c), S4b, S5, all in one digest. Then send:
+pinned on the operator front). Default cycle 1 is S1, S2, S2b, S3 (one
+`propose_admin` per `admins[]` key), S4, (S4c), S4b, all in one digest; S5
+waits until every Admin grant is executed (A3). Then send:
 
 ```sh
 CHAIN_OUTPUT=$E/04b-bootstrap-send.json CHAIN_SEND=1 CHAIN_KEYPAIR="$K/deployer.json" \
   CHAIN_CONFIRM_PLAN=<digest> CHAIN_CU_PRICE="$CU_PRICE" npm run chain:bootstrap
 ```
 
-It ends with `status: awaiting` and the Ledger actions. A fresh Platform starts
-fully paused (0x3f).
+It ends with `status: awaiting` and the Ledger actions. The Platform is 0xFF
+(fully paused, bootstrap window open).
 
 ## 5. Ledger steps (operator front)
 
-In any order (the plan's ACTION REQUIRED lines name the same pages; a test
-checks that each page exists and performs its action):
+The plan's ACTION REQUIRED lines name the same pages (a test checks that
+each page exists and performs its action). In this order:
 
+- **A3** (each `admins[]` key): the Admin's own Ledger takes the role on
+  `/account/roles` → Waiting for your acceptance → Admin (`add_admin` is
+  signed by the NEW admin key since v1.0.0-rc; it pays its Admin record).
+  At once while the bootstrap window is open; after a closed window, 48
+  hours after S3 and within 14 days (re-run the plan: it shows when).
 - **X3**: the BA Ledger accepts on `/issuer/authority` (or `/account/roles`
   → Waiting for your acceptance), then clicks Refresh.
 - **X2**: the KYC Ledger accepts on **`/account/roles`** → Waiting for your
   acceptance → KYC provider (registry authority). Not `/admin/kyc`: until it
   accepts, the key is neither the kycProvider nor an Admin, so the admin gate
   refuses it. Temporary-grant path (D17 fallback, `kyc.tempAdminGrant: true`):
-  cycle 1 also ran S3k, S5 waits; after X2 run cycle 2 (S3r removes the
-  grant, then S5) with a new dry run and digest.
-- **X1**: the SA Ledger accepts on `/issuer/authority` (or `/account/roles`),
-  **clicks Refresh**, then **S6** on **`/admin/platform`**: PauseFlagsPanel →
-  "Resume everything" (the accept gave the SA its Admin record, so the admin
-  area opens).
-  S6 clears **every** bit, as the tool plans it (`chain:bootstrap` checks
-  `pauseFlags = 0` after S6, and S7 is planned only then; do not use
-  `CHAIN_HANDOVER_WHILE_PAUSED`, which is for an emergency). The pilot's
-  pause mask is set **after** the handover (§8, "Pilot pause mask").
+  cycle 1 also ran S3k (its A3k is the KYC key's own `add_admin`); after X2
+  the next cycle removes the grant (S3r, or S3r.cancel when A3k never ran).
+- **Cycle 2** (deployer): a new dry run and digest, then send: **S5**
+  proposes the super admin (inside the window: acceptable at once).
+- **X1**: the SA Ledger accepts on `/issuer/authority` (or `/account/roles`)
+  and **clicks Refresh**. Every A3 must have landed before it: the accept
+  makes the deployer's staged grants stale (6152). It is refused while a
+  recovery by the upgrade authority is pending (6155).
+- **S5c**: the SA closes the bootstrap window on **`/admin/platform`** →
+  PauseFlagsPanel → "Close bootstrap window" (`set_pause_flags(0, 0x80)`).
+  From here every Admin grant and every super admin rotation waits 48 hours.
+- **S6**: the SA clears exactly the pilot's areas, `map.unpauseMask` (0x23
+  in the company example: Onboarding, Primary issuance, Issuer proceeds),
+  one area at a time in the PauseFlagsPanel. Not "Resume everything": it
+  clears all six emergency areas (and bit 7), which would open the areas
+  the pilot keeps closed (then set 0x1c again, §8). No tool or button ever
+  clears the payout modules (0x40) with anything else: the program refuses
+  a clear mask that mixes 0x40 with other bits (6154), and 0x40 stays set
+  on mainnet (D2). `chain:bootstrap` checks `pauseFlags & unpauseMask = 0`
+  after S6, and plans S7 only then.
 
 `accept_platform_admin` closes the deployer's Admin record and creates the
-SA's; no `add_admin(SA)` is ever needed. With the company wallet model (§19)
-one wallet does X3, X2, X1 and S6, in that order.
+SA's; no grant for the SA is ever needed. With the company wallet model (§19)
+one wallet does X3, X2, X1, S5c and S6, in that order (its Admin record comes
+from X1; `admins[]` holds the second Admin, whose Ledger does A3).
 
 ## 6. Dry run again, pre-handover inventory
 
@@ -509,12 +556,16 @@ CHAIN_OUTPUT=$E/06b-inventory.json CHAIN_PHASE=pre-handover npm run chain:invent
 ```
 
 The inventory must show **0 blockers**: SA, BA and KYC equal the map with no
-pending transfer; the deployer holds nothing but the UA; `kyc.authority` holds
-no Admin record (a warning, not a blocker, when the map acknowledges the
-overlap, §19); the Squads decode matches exactly; the canonical IDL is in
-sync with the Release and trimmed, with no extra authority; ProgramData equals
-the Release; capacity ≥ `programDataMaxLen`. Smoke-test from the operator
-front.
+pending transfer; no staged Admin grant (`pending-admin`), no super admin or
+blocklist recovery (`pending-recovery`), no rc.x transfer account
+(`legacy-transfer`); bit 7 closed (`bootstrap-open`) and 0x40 set
+(`payout-modules`); the deployer holds nothing but the UA; the vault S7
+installs holds no role (`sa-is-ua`, `ba-is-ua`, `admin-is-ua`);
+`kyc.authority` holds no Admin record (a warning, not a blocker, when the map
+acknowledges the overlap, §19); the Squads decode matches exactly; the
+canonical IDL is in sync with the Release and trimmed, with no extra
+authority; ProgramData equals the Release (not its incident build); capacity
+≥ `programDataMaxLen`. Smoke-test from the operator front.
 
 ## 7. Handover (S7)
 
@@ -574,27 +625,40 @@ exists for an emergency only.
   its ProgramData and System, so an extra account cannot turn into a transfer
   destination. The preconditions list each program, its PDA and each
   transfer: check them before approving. Import, approve, execute.
-- **Pilot pause mask (8.5).** For the closed pilot, pause *Trading through
-  Manci* (0x04), *Custody entry* (0x08) and *Distributions* (0x10), flags
-  **0x1c**, on **`/admin/platform`** → PauseFlagsPanel, one "Pause" per area
-  (any Admin may SET bits; only the Super Admin clears them), for as long as
-  their module switches are off (`ops/env-vars.md`, "Pilot scope"). The
-  program then refuses those flows too, and the front says so before any
-  wallet opens (`front/lib/pause-gate.ts`). Governance, vesting-series
-  creation and custody-vault types read no pause bit of their own; the
-  module switches hide them and the wallet path refuses them before the
-  wallet opens (`MODULE_FLOWS` in the same file); 8.3 adds 0x40 for the
-  payout modules. After an incident's "Resume everything", set the mask
-  again. Check: `/admin/platform` shows exactly those three areas paused
-  (`0x1c`) **before the first sale opens** (D10).
+- **Pilot pause mask (8.5).** For the closed pilot, *Trading through
+  Manci* (0x04), *Custody entry* (0x08) and *Distributions* (0x10) stay
+  paused, flags **0x1c**, for as long as their module switches are off
+  (`ops/env-vars.md`, "Pilot scope"), and the payout modules (0x40) stay
+  off for good on mainnet (D2). With `unpauseMask: 35` (0x23) S6 already
+  left them set: the Platform reads **0x5c**. Otherwise set them on
+  **`/admin/platform`** → PauseFlagsPanel, one "Pause" per area (any Admin
+  may SET bits; only the Super Admin clears them). The program refuses those
+  flows, and the front says so before any wallet opens
+  (`front/lib/pause-gate.ts`). Governance, vesting-series creation and
+  custody-vault types read no pause bit of their own; the module switches
+  hide them and the wallet path refuses them before the wallet opens
+  (`MODULE_FLOWS` in the same file). After an incident's "Resume
+  everything" (which never clears 0x40), set 0x1c again. Check:
+  `/admin/platform` shows exactly those three areas and the payout modules
+  paused (`0x5c`) **before the first sale opens** (D10).
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
 - Drain the deployer to the treasury or cold storage.
 - Other vault actions check their inputs against the role map:
-  `registry-ix` targets (`add_admin` → `admins[]`, `propose_platform_admin` →
-  the SA or the vault, `initialize_blocklist_authority` → the map BA,
-  `set_protocol_treasury` → the vault or the map treasury) need `"confirmTarget": "<same key>"`
+  `registry-ix` targets (`propose_admin` → `admins[]`, never the vault;
+  `propose_platform_admin` and `propose_platform_recovery` → the SA or the
+  vault, `initialize_blocklist_authority` → the map BA,
+  `set_protocol_treasury` → the vault or the map treasury; hook-ix
+  `propose_blocklist_recovery` → the map BA) need `"confirmTarget": "<same key>"`
   next to `instruction`/`args` for any other key; `initialize_platform` takes
-  only the map treasury and fee; pause masks are integers 0–255.
+  only the map treasury and fee; pause masks are integers 0–255, a set mask
+  holds only 0x7f and a clear mask holds 0x40 only on its own (6154).
+  `add_admin` is signed by the new Admin key, so through Squads only when
+  the vault itself was proposed, which `propose_admin` refuses (Admin == UA).
+  The vault as the super admin (k4 fallback, or a recovery to the vault) is
+  an inventory blocker (`sa-is-ua`): rotate it on to a Ledger right after.
+  Every v1 role op exports as one vault transaction inside the Squads inner
+  budget (the size guard; `execute_platform_recovery`, the largest, has 10
+  accounts).
   `set-upgrade-authority` to a new key needs `"confirmNewAuthority"`, and
   `metadata-set-authority` needs it for a key other than `metadataAuthority`.
   The deployer and bufferWriter are always refused as targets.
@@ -674,6 +738,18 @@ source paths are clean (see "Safety rules").
 - Deploy the previous Release `.so` through the same Squads flow (step 9,
   with `$R2` = the previous Release).
 - The SA normalizes pause bits first (it may clear undefined bits).
+- **From v1.0.0-rc back to an rc.x build** (design 8.3, devnet plan
+  "Rollback (Phase B)"): rc.x ignores the issuer freezes, the party
+  blocklist checks, the deadline bounds, the timelocks and bit 0x40, so
+  before the Squads upgrade the SA sets *Primary issuance* (0x02) and
+  *Distributions* (0x10) (Startup raises and the payout / Merkle modules
+  reopen under rc.x otherwise), plus *Issuer proceeds* (0x20) while any
+  `IssuerFreeze` is live (rc.x lifts every freeze silently), and closes the
+  bootstrap window if bit 7 is still set (`set_pause_flags(0, 0x80)`).
+  Under rc.x `add_admin` is instant again. The v1 PDAs (IssuerFreeze,
+  PendingAdmin, AuthorityProposal, the recoveries) are invisible to rc.x and
+  come back into force after a return to v1; `chain:inventory` then blocks
+  bit 7 while any pause bit is clear.
 - State-layout changes are not rollback-safe: fix forward.
 - IDL: `CHAIN_IDL_MODE=prepare-export` with `CHAIN_IDL_SOURCE=release` from
   that same checkout, then `idl-update` (step 9.6). The pre-snapshot
@@ -721,8 +797,11 @@ source paths are clean (see "Safety rules").
   it cannot rotate a role (follow-up: add propose/accept of the SA, BA and
   KYC authority to `chain:emergency`, same digest and Ledger path). If a role
   key is compromised while the front or the database is down, the rotation
-  waits for them; meanwhile the attacker can propose and accept the role to
-  itself, after which only the upgrade path below remains.
+  waits for them; meanwhile the attacker can propose and accept the BA or
+  KYC role to itself (no timelock), after which only the recovery below
+  remains. The upgrade authority's veto, its recoveries and the incident
+  build go through `chain:squads-export` and need no front; only the
+  successor's execute is on `/account/roles`.
 - **Who may pause**: any Admin; only the super admin clears. The program has
   **no pause-only role**: an Admin record carries every Admin power
   (`set_pause_flags` set, `approve_sale`, `revoke_sale_approval`,
@@ -733,8 +812,38 @@ source paths are clean (see "Safety rules").
   each alone, without a second signature. With the company wallet model
   keep one more Admin record so a lost company wallet does not also remove
   the pause, but give it only to a fully trusted person of the legal entity
-  and watch it with the authority alarms (§15). A pause-only role is a
-  program item for package 8.3.
+  and watch it with the authority alarms (§15). Package 8.3 did not add a
+  pause-only role (not in v1).
+- **Timelocks and the upgrade authority (v1.0.0-rc, design 8.3 §5–§7).**
+  - An Admin grant (`propose_admin`, then `add_admin` signed by the new key)
+    and a super admin rotation (`propose_platform_admin`, then
+    `accept_platform_admin`) wait **48 hours** and expire 14 days after that.
+    The super admin, any Admin **and the upgrade authority** (the Squads
+    vault: `chain:squads-export` `registry-ix cancel_admin_proposal` /
+    `cancel_platform_admin_transfer`) can cancel them. `remove_admin`, every
+    pause and the freeze stay instant. Each proposal raises a critical alarm
+    (§15): an unexpected one is cancelled inside its window.
+  - A **lost** super admin or blocklist authority: the upgrade authority
+    proposes the successor (`registry-ix propose_platform_recovery`,
+    `hook-ix propose_blocklist_recovery`); the successor executes 7 days
+    later, within 14 days, on `/account/roles`. The current holder or the
+    upgrade authority can cancel it. While it is pending the role cannot be
+    rotated (6155 / hook 6020), so a compromised holder cannot slip away.
+  - A **compromised** super admin or blocklist authority can cancel that
+    recovery. The terminal answer is the Release's **incident build**
+    (zero delay, only the upgrade authority cancels): the playbook under
+    "Company wallet compromised".
+  - The KYC authority has no on-chain recovery: a lost KYC key is replaced
+    (the four steps under "KYC key compromised or lost").
+  - After any super admin change, cancel the Admin grants staged in earlier
+    tenures: `chain:inventory` lists them as stale `pending-admin`, and a
+    return of that key to the role would revive them (K1.10).
+  - With one company wallet for SA, Admin, KYC and BA (§19) the upgrade
+    authority is the only veto and the only recovery (O-10): the vault is a
+    Squads multisig with at least two people, none of whose keys is the
+    company wallet, and `chain:inventory` blocks the upgrade authority as SA,
+    BA or Admin (`sa-is-ua`, `ba-is-ua`, `admin-is-ua`). The 30-day clawback
+    grace protects nobody then: the same key revokes and claws back.
 - Exercise these scenarios as a timed tabletop on devnet (6.5) and record it
   under `docs/mainnet-readiness/`.
 
@@ -759,10 +868,11 @@ CHAIN_OUTPUT=$E/inc-1-send.json CHAIN_EMERGENCY_OP=pause CHAIN_EMERGENCY_SIGNER=
 
 | `CHAIN_EMERGENCY_OP` | Inputs | Signer (checked on-chain) | Notes |
 |---|---|---|---|
-| `pause` | `CHAIN_PAUSE_BITS`: `all`, or names from `onboarding`, `primary`, `secondary`, `custody-entry`, `distributions`, `issuer-proceeds`, or an integer | any Admin or the SA | nothing to do when every bit is already set |
-| `unpause` | `CHAIN_PAUSE_BITS` (`all` also clears undefined bits) | the SA only | the program refuses anyone else |
+| `pause` | `CHAIN_PAUSE_BITS`: `all` (0x7f), or names from `onboarding`, `primary`, `secondary`, `custody-entry`, `distributions`, `issuer-proceeds`, `payout-modules`, or an integer | any Admin or the SA | nothing to do when every bit is already set |
+| `unpause` | `CHAIN_PAUSE_BITS` (`all` = the six emergency areas and bit 7, never the payout modules; `payout-modules` only on its own, never on mainnet) | the SA only | the program refuses anyone else, and a clear mask mixing 0x40 with other bits (6154) |
 | `block`, `unblock` | `CHAIN_WALLET` | the BA | an off-curve wallet (an escrow PDA) needs `CHAIN_CONFIRM_WALLET=<same>`: blocking it stops exits from it |
 | `hook-mode` | `CHAIN_MINT`, `CHAIN_HOOK_MODE=open` or `kyc-gated`, `CHAIN_KYC_REGISTRY` (kyc-gated only, a live registry) | the BA | Open lets any wallet receive the class; KycGated only live passports of that registry |
+| `freeze-issuer` | `CHAIN_ISSUER` (the Issuer PDA), `CHAIN_FREEZE_REASON_SHA256` (sha256 of the trimmed case-file reason, as `/admin/issuers` hashes it: `printf %s "<reason>" \| shasum -a 256`) | any Admin or the SA | D1: stops that issuer's sales and proceeds exits (6143); a second freeze is a no-op; only the SA lifts it, never this tool (§11 "Issuer proceeds freeze") |
 
 - **Setup, once per operator machine (before D8)**: the Solana CLI cannot
   sign an arbitrary program instruction with a Ledger, so the tool drives the
@@ -816,54 +926,91 @@ key and accept from the new one on `/account/roles` (`chain:handover` prints
 the ordered steps).
 
 **Company wallet compromised** (it holds SA, Admin, KYC, BA and the
-treasury, §19). The attacker can clear every pause, add Admins, set the
-treasury, decide KYB, issue and revoke passports, block and unblock any
-wallet (escrows too), switch or re-point hook modes, claw back blocked or
-revoked holders, and propose every role to itself.
-- First: while the key still signs for us, rotate SA, BA and KYC to the
-  break-glass successor and accept at once (a proposal of the attacker
-  overwrites ours, so accept before it can). This runs on the operator front
-  (SIWS, Supabase, Vercel or the local `next dev`) with the successor
-  already onboarded (ground rules); if the front or the database is down it
-  cannot run. Maintenance on only after the accepts (maintenance refuses the
-  front's wallet transactions, the rotations too); pause with
-  `chain:emergency` (the attacker can clear it: it only slows automated
-  abuse); tell the Squads members to prepare an emergency upgrade; notify
-  (below).
-- Recovery: set the treasury back; remove the Admin records the attacker
-  added; revoke passports issued since the compromise (the index shows when);
-  unblock wallets it blocked and restore clawed-back units through the
-  issuer. If the attacker already holds the SA or the BA, the only way back
-  is a program upgrade through Squads (the upgrade authority) with a
-  recovery instruction: written, reviewed and executed under pressure, which
-  takes days. Package 8.3 adds that recovery (upgrade authority, 7-day wait,
-  the current holder can cancel); once it is deployed, start it at once.
+treasury, §19). The attacker can clear every pause (0x40 only in a call of
+its own, a critical alarm), remove every Admin, set the treasury, decide KYB,
+freeze and unfreeze issuers, issue and revoke passports, block and unblock
+any wallet (escrows too), switch or re-point hook modes, claw back blocked or
+revoked holders, cancel every recovery, rotate the BA and the KYC authority
+to itself at once, and propose Admin grants and the super admin rotation to
+itself (48 hours, cancellable by the upgrade authority).
+- First (minutes): the Squads members cancel every Admin grant and super
+  admin rotation the attacker stages (`chain:squads-export` `registry-ix
+  cancel_admin_proposal {"newAdmin": …}` / `cancel_platform_admin_transfer`;
+  the critical alarms name them) and keep watching; the second Admin pauses
+  with `chain:emergency` (the attacker can clear it: it only slows automated
+  abuse); if the key still signs for us, rotate the BA and the KYC authority
+  to the break-glass successor and accept at once (no timelock; operator
+  front, the successor already onboarded). The super admin cannot be moved
+  that way (48 hours, and the attacker is the SA and cancels): it goes
+  through the incident build. Maintenance on only after the accepts; tell
+  the Squads members; notify (below).
+- **Incident build** (design 8.3 §7.4; every vault step through Squads,
+  the successor's steps on `/account/roles`):
+  1. Cancel what is staged: every `PendingAdmin` and platform
+     `AuthorityProposal` (`registry-ix cancel_admin_proposal` /
+     `cancel_platform_admin_transfer`); `chain:inventory` shows none left.
+  2. The bufferWriter writes the live Release's `asset_registry-incident.so`
+     and `transfer_hook-incident.so` into buffers and hands them to the vault
+     (§9 step 2, same commands with the `-incident.so` files); then
+     `CHAIN_SQUADS_OP=upgrade` with
+     `{"artifact": "incident", "confirmIncident": true, "buffers": {…}}`
+     (the export checks the bytes against the Release's incident build and
+     its sbf-sha256.txt; hook before registry). Verified by the Release's
+     `-incident:` hashes only, never through a verify PDA.
+  3. `registry-ix propose_platform_recovery {"newAdmin": "<successor>"}` and,
+     for the BA, `hook-ix propose_blocklist_recovery {"newAuthority":
+     "<successor>"}` (a successor outside the role map needs
+     `"confirmTarget"`); they may be separate transactions: the compromised
+     key cannot cancel them in the incident build, and while they are
+     pending it cannot rotate the role away (6155 / 6020).
+  4. The successor executes both on `/account/roles` at once
+     (`execute_platform_recovery`, hook `execute_blocklist_recovery`).
+  5. Restore the release build at once: `CHAIN_SQUADS_OP=upgrade` with the
+     release `.so` buffers (no `artifact`). `chain:inventory` with
+     `CHAIN_RELEASE_DIR` must not show `incident-bytes` (a blocker and a
+     critical alarm while the incident build is live).
+  6. The new super admin reviews every change made during the compromise:
+     Admin records (remove the attacker's), the treasury, sale approvals,
+     KYB decisions, issuer freezes, pause bits (set 0x40 and the pilot mask
+     again); revoke passports issued since the compromise; unblock wallets
+     the attacker blocked and restore clawed-back units through the issuer;
+     cancel leftover proposals; rotate the KYC registry (or replace it,
+     below).
+  Cost: two upgrades (about 14 SOL of buffer rent each, returned) plus the
+  Squads quorum's reaction time; rehearse it on localnet (8.7).
 - Cannot: undo executed transactions; stop wallet-to-wallet transfers;
-  recover the SA or the BA without the upgrade authority; rotate anything
-  while the front or the database is down (`chain:emergency` has no
-  rotation yet).
+  recover the KYC registry on-chain; recover anything if the upgrade
+  authority were the company wallet too (never allowed, O-10).
 
 **Company wallet lost** (not compromised). Nothing moves, but nobody can
 clear the pause, grant or remove Admins, decide KYB, issue passports, block
 or unblock, switch hook modes or set the treasury. A second Admin record
-(ground rules), if the role map kept one, can still pause.
+(ground rules), if the role map kept one, can still pause and freeze.
 - First: restore it from the seed backup onto a new Ledger (the same key);
   pause if the platform must stop meanwhile.
-- Recovery without a backup: the upgrade path above for the SA and the BA;
-  for KYC the "KYC key lost" steps below, which also need the BA.
-- Cannot: anything the SA or the BA signs, until the key is restored or the
-  upgrade lands; pause at all, if no other Admin record exists.
+- Recovery without a backup (D4, no incident build needed): the upgrade
+  authority proposes the successor for the SA (`registry-ix
+  propose_platform_recovery`) and the BA (`hook-ix
+  propose_blocklist_recovery`); 7 days later, within 14 days, the successor
+  executes both on `/account/roles`. Only the upgrade authority can cancel
+  them (the lost key does not sign). Then the KYC registry: the "KYC key
+  lost" steps below (step 2 needs the new BA).
+- Cannot: anything the SA, the BA or the KYC key signs during those 7 days;
+  pause at all, if no other Admin record exists.
 
 **Super admin key compromised** (separate keys). The attacker clears pauses,
 adds Admins, sets the treasury, decides KYB, stages issuer recoveries and
 custody proposals. BA and KYC are unaffected.
 - First: rotate the SA to the successor if it still signs; other Admins keep
   pausing (the attacker can clear it); maintenance on.
-- Recovery: remove the attacker's Admins, set the treasury back, cancel its
-  issuer recoveries (the issuer can cancel too) and custody proposals.
-  Lost or taken over: the upgrade path above.
-- Cannot: recover a lost or taken-over SA on-chain (only the upgrade path);
-  undo KYB decisions or treasury payouts that already landed.
+- Recovery: the upgrade authority cancels the attacker's Admin grants and
+  its super admin rotation (48 hours to do so); remove the attacker's
+  Admins, set the treasury back, cancel its issuer recoveries (the issuer
+  can cancel too) and custody proposals (the SA, or the vault's current
+  operator while it is an Admin). Lost: the D4 recovery (7 days). Taken
+  over (it cancels the recovery): the incident build above.
+- Cannot: shorten the 7 days without the incident build; undo KYB decisions
+  or treasury payouts that already landed.
 
 **An Admin key compromised or lost.**
 - First: the SA runs `remove_admin` on `/admin/admins` (with the SA in the
@@ -880,22 +1027,39 @@ custody proposals. BA and KYC are unaffected.
 **Blocklist authority compromised.** The attacker can block escrow PDAs
 (refunds and returns stop), switch KycGated classes to Open, re-point
 registries, unblock sanctioned wallets.
-- First: rotate the BA if it still signs (operator front); then undo with
-  `chain:emergency` (`unblock`, `hook-mode`) signed by the new BA.
-- Lost or taken over: the upgrade path above (8.3 adds the timelocked
-  recovery).
-- Cannot: recover the BA on-chain (only the proposing BA can name a
-  successor); stop its blocks or hook-mode switches with the pause (the hook
-  never reads it); reverse transfers that happened while a class was Open.
+- First: rotate the BA if it still signs (operator front, no timelock);
+  then undo with `chain:emergency` (`unblock`, `hook-mode`) signed by the
+  new BA.
+- Lost: the D4 hook recovery (`hook-ix propose_blocklist_recovery`, 7
+  days). Taken over (it cancels the recovery): the incident build above
+  (the hook part).
+- Cannot: stop its blocks or hook-mode switches with the pause (the hook
+  never reads it); reverse transfers that happened while a class was Open;
+  pause the blocklist gates (a compromised BA can block buyers, takers,
+  founders, vesting recipients and OTC expiries until it is replaced).
 
 **KYC key compromised or lost.** Compromised: it issues passports (anyone can
 receive KycGated units) or revokes them (receivers are refused). Rotate it if
 it still signs (propose on `/admin/kyc`, accept on `/account/roles`), then
 revoke every passport it issued since the compromise.
-Lost: create a new registry from a key that never created one, re-point every
-KycGated mint with `update_transfer_hook_config` (the BA; `chain:emergency
-hook-mode kyc-gated` with `CHAIN_KYC_REGISTRY=<new>`), move the
-`NEXT_PUBLIC_KYC_REGISTRY` pin (a redeploy), re-issue the passports.
+Lost: the program has no KYC recovery by design (signer matrix §5); the
+registry is replaced, as `kyc_registry_authority.rs` documents:
+
+1. create a replacement registry (admin co-signed) from a key that has
+   NEVER created one — each creator's `["kyc_registry", key]` seed slot is
+   single-use, and the lost key's slot stays occupied;
+2. re-point each KycGated mint with `update_transfer_hook_config`
+   (KycGated -> KycGated, the new registry passed as `kyc_registry_account`;
+   the BA: `chain:emergency hook-mode kyc-gated` with
+   `CHAIN_KYC_REGISTRY=<new>`);
+3. set the front's `NEXT_PUBLIC_KYC_REGISTRY` pin to the new address and
+   redeploy — until then every KYC surface keeps resolving the dead registry
+   (the pin fails closed, it never falls back to a scan);
+4. re-issue passports in the new registry (entries do not carry over).
+
+Until step 2 a holder approved only in the old registry still passes the
+hook; after it, only the new registry's passports count. Until the repoint,
+old passports cannot be revoked.
 - Cannot: get the old registry's authority back (only its holder proposes a
   successor); carry passports over to a new registry (they are re-issued,
   person by person); undo transfers to receivers the compromised key
@@ -1020,9 +1184,47 @@ page on our domain asks users to sign transfers. Maintenance does not help
 - Cannot: reverse transfers users signed; stop transfers of wallets that are
   not blocked.
 
+**Issuer proceeds freeze (D1) and the O-9 SOP.** When an issuer is
+suspected of fraud or its funds must be held (a court or regulator
+request, a KYB failure found late):
+- Freeze: any Admin, on `/admin/issuers` → Proceeds freeze (the reason text
+  goes to the audit log, its SHA-256 on chain), or out of band with
+  `chain:emergency` `CHAIN_EMERGENCY_OP=freeze-issuer CHAIN_ISSUER=<issuer
+  PDA> CHAIN_FREEZE_REASON_SHA256=<sha256 of the trimmed reason text>`.
+  It refuses that issuer's `open_sale`, `buy`, `close_sale`,
+  `open_payout_vault`, `release_payout` and `claim_founder_yield` (6143);
+  investors' refunds and claims stay open. There is no on-chain refund:
+  the money stays in the proceeds or payout escrow until the super admin
+  unfreezes it or a program upgrade (disclosed in the Terms and on
+  `/security`).
+- The freeze does not stop the issuer wallet's own secondary sales (offers,
+  OTC) or P2P transfers (O-9). If that matters, the BA blocks the issuer's
+  authority wallet(s) (`chain:emergency block`), with its consequences:
+  a public sanctions marker; every outgoing unit transfer of that wallet
+  stops, for every issuer under it; its holdings become clawable
+  (`clawback_blocklisted_holder`, irreversible through the quarantine);
+  and an unfreeze does **not** unblock it (`remove_from_blocklist`
+  separately). The freeze and the unfreeze raise the critical
+  `onchain:issuer-freeze` alarm; an alarm on the frozen issuer wallet's own
+  activity (offers, deals, transfers; design 8.3 §3.2) is not built yet:
+  watch that wallet on the explorer meanwhile. Units moved away before the
+  freeze stay out of reach.
+- Unfreeze: the super admin only, on `/admin/issuers` (or
+  `chain:squads-export registry-ix unfreeze_issuer_proceeds` when the vault
+  is the super admin); the rent returns to the freezer.
+- A rollback to an rc.x program lifts every freeze silently: set
+  *Issuer proceeds* (0x20) first (§10).
+
 **Other.**
-- Wrong pending proposal: platform and BA proposals cannot be cancelled,
-  propose again to overwrite; a KYC proposal can be cancelled.
+- Wrong pending proposal (v1.0.0-rc): a super admin rotation or an Admin
+  grant is cancelled by the super admin, any Admin or the upgrade
+  authority; a custody rotation by the super admin or the vault's current
+  operator (with its Admin record); a BA, KYC or issuer proposal by its
+  current holder. Proposing again also overwrites (and restarts the clock).
+- An OTC deal whose permissionless expiry fails with 6144 (a deposited
+  party is blocked, O-11): an Admin cancels it on `/admin/otc`
+  (`cancel_otc_deal`, a legal-reviewed decision: the refund goes to the
+  blocked party too).
 - Crash during a send: see below.
 
 **Tell people.** Users: a banner (maintenance message) and email, what is
@@ -2240,13 +2442,18 @@ every tool that loads the map prints the consequences:
 
 - one lost or compromised key affects every role at once, and no second
   signature stands in the way;
-- it can clear the pause and also block wallets and switch hook modes, and
-  there is no on-chain recovery of the SA or the BA (until 8.3, only a
-  program upgrade through Squads);
+- it can clear the pause and also block wallets and switch hook modes; a
+  lost key is recovered only by the upgrade authority after 7 days (D4), a
+  compromised one only with the incident build (§11), for the SA and the BA
+  at once;
 - blocklist plus clawback with one key; KYC decisions and their enforcement
   together; the KYC registry and the hook's registry pin together; KYB and
   KYC together;
-- protocol fees land on an operational key.
+- protocol fees land on an operational key;
+- (v1.0.0-rc, O-10) the timelock veto and the recoveries rest on the
+  upgrade authority alone: no Admin can veto the company wallet's own
+  proposals (it is the SA and removes Admins at once), and the 30-day
+  clawback grace protects nobody (the same key revokes and claws back).
 
 The treasury may leave the Squads vault only as such an acknowledged role
 key. An acknowledged KYC and SA overlap stands in for `allowKycAdmin`, so
@@ -2255,7 +2462,14 @@ one approval executes (threshold 1) is a single-key upgrade authority: not
 recommended, and on mainnet it needs
 `"acknowledgedSingleKeyUpgradeAuthority": "<squads.multisig>"`; raise the
 threshold later with a Squads config transaction. The tools never move an
-upgrade authority to a plain key.
+upgrade authority to a plain key, and the upgrade authority never holds an
+operational role: the role map refuses the vault in `admins[]`, a handover
+target refuses it as SA or Admin, and `chain:inventory` blocks SA, BA or an
+Admin record equal to an upgrade authority (review finding 6). The
+minimum for this model (O-10): the vault is a Squads multisig of at least
+two people, none of whose keys is the company wallet. Recommended on top:
+one independent Admin (below) and the KYC authority on its own key, so
+the clawback grace means something.
 
 Mitigations that go with the model: one more Admin record (§11 ground
 rules), so a lost company wallet does not also remove the pause. It is not
@@ -2269,7 +2483,10 @@ split the roles again when people are available, with the same
 `chain:handover` plan.
 
 **Mainnet.** The company wallet enters through the bootstrap role map (§4–§7:
-X3, X2, X1 and S6 are all its signatures); no handover is needed.
+X3, X2, X1, S5c and S6 are all its signatures, inside the bootstrap window,
+so no 48-hour wait); no handover is needed. Initialize the mainnet Platform
+only when the company wallet and the Squads vault exist, and close the
+bootstrap window right after X1 (S5c): an open window is a blocker after X1.
 
 **Devnet: 6AnF… → the company wallet.** Write the target outside the
 repository (`~/mancipatio-devnet/handover-company.json`), public keys only:
@@ -2311,42 +2528,58 @@ CHAIN_ROLE_MAP=~/mancipatio-devnet/handover-company.json CHAIN_SITE_ORIGIN=https
 CHAIN_OUTPUT=../docs/mainnet-readiness/handover/01-plan.json npm run chain:handover
 ```
 
-It sends nothing. It prints, and writes to `01-plan.json.md`, the ordered
-steps; each names the instruction, who signs (the current holder or the new
-key), the page and control, what must be done first and what proves it:
+It sends nothing. It reads the chain clock and prints, and writes to
+`01-plan.json.md`, the ordered steps; each names the instruction, who signs
+(the current holder or the new key), **when** (now, `T+48h`, or the chain
+window of a proposal already on chain), the page and control, what must be
+done first and what proves it. Since v1.0.0-rc (D3) every proposal goes out
+at T and every timelocked execution follows at T+48h, so the handover takes
+about 48 hours, not one wait per role:
 
 1. **Prepare** (off-chain): the company wallet signs in on the site (SIWS,
    the Terms) as the primary wallet of its own account, and gets about
    0.05 SOL. Maintenance off.
-2. **Grant**: `6AnF` runs `add_admin(company)` on `/admin/admins`, so the
-   company wallet already works as an Admin while `6AnF` still holds
-   everything.
-3. **Move**, each proposed by `6AnF` and accepted by the company wallet on
-   `/account/roles`: custody vaults `6AnF` operates (`/admin/custody`), the
-   KYC registry authority (propose on `/admin/kyc`; the registry address,
-   bitmaps and passports stay, so `NEXT_PUBLIC_KYC_REGISTRY` does not
-   change), the BlocklistAuthority (`/account/roles`), then the treasury
-   (`set_protocol_treasury`, `/admin/platform`).
-4. **Super admin last**: `6AnF` proposes, the company wallet accepts; the
-   accept closes `6AnF`'s Admin record. Until here `6AnF` could repair any
-   step. When the target keeps `6AnF` in `admins`, the next step is
-   `add_admin(6AnF)` by the company wallet on `/admin/admins`, right after
-   the accept (its custody vaults and rights issuances have no Admin in
-   between).
+2. **T: proposals** by `6AnF`: `propose_admin(company)` on `/admin/admins`
+   (so the company wallet works as an Admin before the rotation; it also
+   needs that record to take custody vaults), then
+   `propose_platform_admin(company)` on `/account/roles` (Change Super
+   Admin). Both start their 48 hours now. Any Admin or the upgrade
+   authority can cancel either inside its window.
+3. **T: instant moves**, each proposed by `6AnF` and accepted by the
+   company wallet on `/account/roles`: the KYC registry authority (propose
+   on `/admin/kyc`; the registry address, bitmaps and passports stay, so
+   `NEXT_PUBLIC_KYC_REGISTRY` does not change), the BlocklistAuthority
+   (`/account/roles`), then the treasury (`set_protocol_treasury`,
+   `/admin/platform`). No timelock: 14 days to accept.
+4. **T+48h: executions**, in this order: the company wallet runs its own
+   `add_admin` (`/account/roles` → Waiting for your acceptance → Admin);
+   `6AnF` proposes the custody vaults it operates to the company wallet
+   (`/admin/custody`) and the company wallet accepts; **the super admin
+   last**: the company wallet accepts the platform admin. The accept closes
+   `6AnF`'s Admin record and makes every grant `6AnF` staged stale (6152),
+   so each `add_admin` lands before it. Until here `6AnF` could repair any
+   step. When the target keeps `6AnF` in `admins`, the company wallet
+   proposes `6AnF` again right after the accept and `6AnF` executes 48 hours
+   later (T+96h); its custody vaults and rights issuances have no Admin in
+   between.
 5. **Cleanup**: the company wallet removes the Admin records the target does
-   not keep (their sale approvals stay valid: review and revoke them); then
-   re-run the plan (only the verification step remains) and
-   `chain:inventory`.
+   not keep (their sale approvals stay valid: review and revoke them) and
+   cancels every Admin grant the plan does not execute (stale ones of an
+   earlier super admin included, K1.10); then re-run the plan (only the
+   verification step remains) and `chain:inventory` (no `pending-admin`, no
+   `pending-recovery`).
 
 Decide before step 4: issuers `6AnF` holds (rotate on `/issuer/rotation`, or
 keep `6AnF` as their issuer key; an Admin-key successor must accept before
-step 4), rights issuances `6AnF` opened (K19: publish their milestones first,
-or keep `6AnF` in the target's `admins`, which plans the re-grant after step
-4), issuer recoveries it staged (stale after step 4). There is no role table in the database: roles are read
-from the chain (`lib/server/admin-gate.ts`), so nothing changes there. The
-upgrade authority (the devnet deployer) is not part of the handover. When
-package 8.3 adds the timelock for the super-admin rotation and `add_admin`,
-steps 2 and 4 wait for it: re-run the plan.
+the super admin accept), rights issuances `6AnF` opened (K19: publish their
+milestones first, or keep `6AnF` in the target's `admins`, which plans the
+re-grant after the accept), issuer recoveries it staged (stale after the
+accept), and any recovery by the upgrade authority that is pending (the
+accept is refused while it is, 6155 / 6020). There is no role table in the
+database: roles are read from the chain (`lib/server/admin-gate.ts`), so
+nothing changes there. The upgrade authority (the devnet deployer) is not
+part of the handover; the plan warns when the target would make it the SA,
+the BA or an Admin.
 
 ## EXTERNAL checks (open until the rehearsal proves them)
 

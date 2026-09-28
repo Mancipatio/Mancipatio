@@ -94,6 +94,16 @@ function clean(map: RoleMap): Inventory {
   };
 }
 
+/** A 64-byte ELF64 LE header with the given e_machine and e_flags. */
+function elf(eFlags: number, eMachine = EM_BPF): Uint8Array {
+  const bytes = new Uint8Array(128);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(0x12, eMachine, true);
+  view.setUint32(0x30, eFlags, true);
+  return bytes;
+}
+
 const bySeverity = (findings: Finding[], code: string) => findings.filter((f) => f.code === code).map((f) => f.severity);
 const phases: InventoryPhase[] = ["in-progress", "pre-handover", "handed-over"];
 
@@ -118,6 +128,15 @@ describe("inventory findings (§6)", () => {
     open.platform!.pauseFlags = 0x80;
     open.platform!.pauseFlagsHex = "0x80";
     expect(phases.map((phase) => bySeverity(inventoryFindings(open, map, phase), "bootstrap-open"))).toEqual([["blocker"], ["blocker"], ["blocker"]]);
+    // Bit 7 with an emergency area clear (an rc.x build unpaused, a rollback): a blocker even without a role map.
+    const rolledBack = clean(map);
+    rolledBack.platform!.pauseFlags = 0x80 | 0x1c;
+    rolledBack.platform!.pauseFlagsHex = "0x9c";
+    expect(bySeverity(inventoryFindings(rolledBack, null, "in-progress"), "bootstrap-open")).toEqual(["blocker"]);
+    const fresh = clean(map);
+    fresh.platform!.pauseFlags = 0xff;
+    fresh.platform!.pauseFlagsHex = "0xff";
+    expect(bySeverity(inventoryFindings(fresh, null, "in-progress"), "bootstrap-open")).toEqual(["info"]);
     // Only the emergency areas count as paused.
     const payout = clean(map);
     payout.platform!.pauseFlags = 0x40;
@@ -142,6 +161,42 @@ describe("inventory findings (§6)", () => {
     const custody = clean(map);
     custody.authorityTransfers = [{ address: key(157), target: key(158), kind: "custody", currentAuthority: key(159), newAuthority: key(160), proposedBy: map.superAdmin, stale: false }];
     expect(phases.map((phase) => bySeverity(inventoryFindings(custody, map, phase), "pending-proposal"))).toEqual([[], ["blocker"], ["blocker"]]);
+  });
+
+  it("the upgrade authority holds no operational role: SA == UA, BA == UA, Admin == UA are blockers (review finding 6)", async () => {
+    const { map } = await world();
+    const vault = map.squads.vault;
+    // The live UA (the vault after S7) as the super admin, the BA and an Admin.
+    const inv = clean(map);
+    inv.platform!.admin = vault;
+    inv.blocklist!.authority = vault;
+    inv.admins.push({ record: key(141), admin: vault, addedBy: map.superAdmin });
+    for (const code of ["sa-is-ua", "ba-is-ua", "admin-is-ua"]) {
+      expect(phases.map((phase) => bySeverity(inventoryFindings(inv, map, phase), code)), code).toEqual([["blocker"], ["blocker"], ["blocker"]]);
+    }
+    expect(inventoryFindings(inv, map, "handed-over").find((f) => f.code === "sa-is-ua")!.message).toMatch(/the asset_registry upgrade authority and the transfer_hook upgrade authority/);
+    // Before S7 the deployer is the UA: its roles are the deployer's own findings,
+    // but the vault S7 installs is checked already (a blocker from pre-handover).
+    const before = clean(map);
+    for (const p of before.programs) p.upgradeAuthority = map.deployer;
+    before.platform!.admin = map.deployer;
+    before.admins.push({ record: key(142), admin: map.deployer, addedBy: map.deployer });
+    expect(inventoryFindings(before, map, "in-progress").filter((f) => f.code.endsWith("-is-ua"))).toEqual([]);
+    const vaultSa = clean(map);
+    for (const p of vaultSa.programs) p.upgradeAuthority = map.deployer;
+    vaultSa.platform!.admin = vault;
+    expect(phases.map((phase) => bySeverity(inventoryFindings(vaultSa, map, phase), "sa-is-ua"))).toEqual([["warning"], ["blocker"], []]);
+    expect(inventoryFindings(vaultSa, map, "pre-handover").find((f) => f.code === "sa-is-ua")!.message).toMatch(/the Squads vault \(the upgrade authority after S7\)/);
+    // Without a role map: a blocker from pre-handover on (in progress it may still be the deployer).
+    expect(phases.map((phase) => bySeverity(inventoryFindings(inv, null, phase), "ba-is-ua"))).toEqual([["warning"], ["blocker"], ["blocker"]]);
+  });
+
+  it("a mainnet Release must be SBPF v3 (release-sbpf)", async () => {
+    const { map } = await world();
+    const inv = clean(map);
+    inv.sbpf = [sbpfVersionOf("asset_registry", elf(0)), sbpfVersionOf("transfer_hook", elf(3, EM_SBPF))];
+    expect(bySeverity(inventoryFindings(inv, null, "in-progress", { network: "mainnet" }), "release-sbpf")).toEqual(["blocker"]);
+    expect(bySeverity(inventoryFindings(inv, map, "in-progress"), "release-sbpf")).toEqual([]);
   });
 
   it("deployer roles: info while in progress, blockers at handover; its UA only after handover", async () => {
@@ -307,15 +362,6 @@ describe("role overlaps (Talas 8.2)", () => {
 });
 
 describe("cluster gates: SIMD-0500 and rent (release-lanac-6, -7)", () => {
-  /** A 64-byte ELF64 LE header with the given e_machine and e_flags. */
-  function elf(eFlags: number, eMachine = EM_BPF): Uint8Array {
-    const bytes = new Uint8Array(128);
-    bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
-    const view = new DataView(bytes.buffer);
-    view.setUint16(0x12, eMachine, true);
-    view.setUint32(0x30, eFlags, true);
-    return bytes;
-  }
   const gates = (states: Partial<Record<string, "pending" | "active">> = {}, lamportsPerByte = 5080): NetworkGates => ({
     lamportsPerByte,
     features: FEATURE_GATES.map((gate) => {
