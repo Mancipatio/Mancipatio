@@ -29,9 +29,12 @@ import {
 } from "@/lib/resell";
 import { createOtcRequest } from "@/lib/otc";
 import { detectNetwork } from "@/lib/network";
-import { defaultPaymentMint } from "@/lib/payment-mints";
-import { paymentAmountHint, usePaymentMintCheck } from "@/lib/use-payment-mint";
-import { PaymentMintStatus } from "@/components/payment-mint-status";
+import {
+  PaymentMintPicker,
+  PaymentPriceField,
+  TradeConfirmation,
+  usePaymentPriceForm,
+} from "@/components/payment-price-fields";
 import {
   combine,
   maxLength,
@@ -721,8 +724,10 @@ function MarkMatchedModal({
 /**
  * The listing owner asks the platform to open the on-chain OTC escrow against
  * an interested buyer wallet (mirror of the buyer-initiated flow on the public
- * resell board). Amount/price are integer base units, same convention as the
- * offers UI. The signed route stamps requested_by with the seller's wallet.
+ * resell board). Share units are whole units; the price is typed in the
+ * payment token's units and sent as base units after a review step
+ * (components/payment-price-fields.tsx). The signed route stamps
+ * requested_by with the seller's wallet.
  */
 function SellerOtcRequestModal({
   listing,
@@ -741,25 +746,24 @@ function SellerOtcRequestModal({
   const network = detectNetwork();
   const [buyer, setBuyer] = useState("");
   const [amount, setAmount] = useState(String(listing.amount));
-  // Do NOT prefill from ask_price: it's a HUMAN figure (e.g. "1500 USDC") while
-  // this field is integer payment-mint BASE units. Prefilling would settle
-  // 10^decimals too little. Leave empty; the ask is shown as a reference.
-  const [price, setPrice] = useState("");
-  const [paymentMint, setPaymentMint] = useState(() => defaultPaymentMint(network) ?? "");
+  // The price in the payment token's units, from the allowed list
+  // (lansiranje-16); base units only in the payload and the review. The
+  // listing's ask is shown as a reference, not prefilled.
+  const payment = usePaymentPriceForm(client.runtime.rpc, network);
   const [busy, setBusy] = useState(false);
-  // Convenience check of the entry rule; /api/otc/create re-checks it.
-  const mintCheck = usePaymentMintCheck(client.runtime.rpc, network, paymentMint);
-  const priceHint = paymentAmountHint(price, mintCheck);
+  const [reviewing, setReviewing] = useState(false);
 
   const base58Ok = (v: string) => /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(v.trim());
   const buyerOk = base58Ok(buyer) && buyer.trim() !== sellerWallet;
   const amountOk = /^[1-9]\d*$/.test(amount.trim());
-  const priceOk = /^[1-9]\d*$/.test(price.trim());
-  const mintOk = base58Ok(paymentMint);
-  const valid = buyerOk && amountOk && priceOk && mintOk && mintCheck.status !== "error";
+  const priceBase = payment.priceBase;
+  const paymentMint = payment.check.status === "ok" ? payment.check.mint : null;
+  // The request carries JSON numbers: the price must stay a safe integer.
+  const priceOk = priceBase !== null && priceBase <= BigInt(Number.MAX_SAFE_INTEGER);
+  const valid = buyerOk && amountOk && priceOk && paymentMint !== null;
 
   async function submit() {
-    if (!valid || busy || !listing.share_class_pda) return;
+    if (!valid || busy || !listing.share_class_pda || priceBase === null || paymentMint === null) return;
     setBusy(true);
     try {
       await createOtcRequest(conn.wallet, {
@@ -769,8 +773,8 @@ function SellerOtcRequestModal({
         seller_wallet: sellerWallet,
         buyer_wallet: buyer.trim(),
         amount: Number(amount.trim()),
-        price: Number(price.trim()),
-        payment_mint: paymentMint.trim(),
+        price: Number(priceBase),
+        payment_mint: paymentMint,
       });
     } catch (err) {
       setBusy(false);
@@ -836,63 +840,44 @@ function SellerOtcRequestModal({
                 disabled={busy}
               />
             </label>
-            <label className="block">
-              <FieldLabel required>Total price (payment units)</FieldLabel>
-              <input
-                value={price}
-                inputMode="numeric"
-                onChange={(e) => setPrice(e.target.value)}
-                placeholder="e.g. 1000000"
-                className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
-                disabled={busy}
-              />
-              {listing.ask_price !== null && (
-                <span className="mt-1 block text-[11px] text-amber-700">
-                  Listing asks {listing.ask_price} {listing.ask_currency}. Enter
-                  this in the payment mint&apos;s base units (e.g. ×10⁶ for
-                  USDC/USDT), not the plain number.
-                </span>
-              )}
-              {priceHint && (
-                <span className="mt-1 block text-[11px] text-slate-500">{priceHint}</span>
-              )}
-            </label>
-          </div>
-          <label className="block">
-            <FieldLabel required>Payment mint</FieldLabel>
-            <input
-              value={paymentMint}
-              onChange={(e) => setPaymentMint(e.target.value)}
-              placeholder="USDC mint address"
-              className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 font-mono text-xs focus:border-slate-400 focus:outline-none"
-              disabled={busy}
+            <PaymentPriceField
+              form={payment}
+              note={listing.ask_price !== null ? `Listing asks ${listing.ask_price} ${listing.ask_currency}.` : null}
             />
-            <PaymentMintStatus check={mintCheck} />
-            <FieldHelp>
-              The token the buyer pays in (plain SPL or Token-2022, without a
-              transfer hook).
-            </FieldHelp>
-            {paymentMint.trim().length > 0 && !mintOk && (
-              <FieldError error="Not a valid mint address" />
-            )}
-          </label>
+          </div>
+          <PaymentMintPicker form={payment} />
+          {priceBase !== null && !priceOk && (
+            <FieldError error="That price is too large for a request." />
+          )}
+          {reviewing && valid && priceBase !== null && payment.decimals !== null && (
+            <div className="space-y-2">
+              <p className="text-sm font-medium text-slate-800">Check the request before you sign it:</p>
+              <TradeConfirmation
+                units={BigInt(amount.trim())}
+                priceBase={priceBase}
+                decimals={payment.decimals}
+                label={payment.label}
+                role="seller"
+              />
+            </div>
+          )}
         </div>
         <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={reviewing ? () => setReviewing(false) : onClose}
             disabled={busy}
             className="rounded-md px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200 disabled:opacity-50"
           >
-            Cancel
+            {reviewing ? "Back" : "Cancel"}
           </button>
           <button
             type="button"
-            onClick={() => void submit()}
+            onClick={() => (reviewing ? void submit() : setReviewing(true))}
             disabled={!valid || busy}
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
-            {busy ? "Submitting…" : "Submit request"}
+            {busy ? "Submitting…" : reviewing ? "Confirm and sign request" : "Review request"}
           </button>
         </div>
       </div>

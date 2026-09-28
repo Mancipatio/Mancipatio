@@ -43,6 +43,7 @@ import {
 } from "@/lib/otc";
 import { checkReceiverEligibility } from "@/lib/passport";
 import { detectNetwork } from "@/lib/network";
+import { formatPaymentForDisplay } from "@/lib/payment-price";
 import { createOtcDealInstruction, newDealId, resolveDealExpiry } from "@/lib/otc-deal";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
 import { recordAudit } from "@/lib/supabase";
@@ -286,7 +287,7 @@ function OtcOversight() {
                       {String(offer.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-slate-700">
-                      {String(offer.price)}
+                      {formatPaymentForDisplay(offer.price, offer.paymentMint.toString(), detectNetwork())}
                     </td>
                     <td className="px-4 py-3 font-mono text-xs text-slate-500">
                       {offer.maker.toString().slice(0, 6)}…
@@ -387,13 +388,13 @@ function OfferDetail({
 
       <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
         <Field label="Amount (share units)" value={String(offer.amount)} />
-        <Field label="Price (payment units)" value={String(offer.price)} />
+        <Field label="Price" value={`${formatPaymentForDisplay(offer.price, offer.paymentMint.toString(), detectNetwork())} (${String(offer.price)} base units)`} />
         <Field label="Status" value={STATUS_LABEL[offer.status] ?? "?"} />
         <Field
           label="Unit price"
           value={
             offer.amount > BigInt(0)
-              ? `${Number(offer.price) / Number(offer.amount)}`
+              ? formatPaymentForDisplay(offer.price / offer.amount, offer.paymentMint.toString(), detectNetwork())
               : "—"
           }
         />
@@ -908,7 +909,7 @@ function OtcEscrowAdmin() {
                       {String(r.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {String(r.price)}
+                      {formatPaymentForDisplay(BigInt(r.price), r.payment_mint, detectNetwork())}
                     </td>
                     <td
                       className="px-4 py-3 font-mono text-xs text-slate-500"
@@ -1008,7 +1009,7 @@ function OtcEscrowAdmin() {
                       {String(deal.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {String(deal.price)}
+                      {formatPaymentForDisplay(deal.price, deal.paymentMint.toString(), detectNetwork())}
                     </td>
                     {/* Ledgered amounts, not just the flags: cancel / expire
                         refund at most these numbers to each depositor (the

@@ -13,6 +13,8 @@ import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findOfferPda } from "@/lib/pdas";
 import { SkeletonTable } from "@/components/skeleton";
+import { detectNetwork } from "@/lib/network";
+import { formatPaymentForDisplay } from "@/lib/payment-price";
 
 export default function PublicOtcPage() {
   const client = useSolanaClient();
@@ -147,7 +149,7 @@ export default function PublicOtcPage() {
                       {String(o.amount)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {String(o.price)}
+                      {formatPaymentForDisplay(o.price, o.paymentMint.toString(), detectNetwork())}
                     </td>
                     <td className="px-4 py-3 font-mono text-[11px] text-mx-ink-faint">
                       {o.maker.toString().slice(0, 6)}…

@@ -29,6 +29,8 @@ import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { isOfferFunded } from "@/lib/escrow-ledger";
 import { inspectPaymentMint } from "@/lib/transaction-builders";
+import { paymentMintLabel } from "@/lib/payment-mints";
+import { describeTrade, formatPaymentAmount } from "@/lib/payment-price";
 import {
   checkReceiverEligibility,
   type ReceiverEligibility,
@@ -85,6 +87,9 @@ export default function TakeOfferPage({
   // resolves; a refused mint shows why.
   const [payTokenProgram, setPayTokenProgram] = useState<Address | null>(null);
   const [payMintError, setPayMintError] = useState<string | null>(null);
+  // The payment mint's decimals, read from chain with the entry check, so the
+  // price reads "12.5 USDC" instead of raw base units (lansiranje-16).
+  const [payDecimals, setPayDecimals] = useState<number | null>(null);
   // Investor-passport pre-check for KYC-gated mints (the program re-checks the
   // taker's passport on-chain; surface it before the wallet prompt). null =
   // unknown/not-gated.
@@ -172,7 +177,7 @@ export default function TakeOfferPage({
     async function detect() {
       if (loaded === null || typeof loaded === "string") return;
       try {
-        const { owner } = await inspectPaymentMint(
+        const { owner, decimals } = await inspectPaymentMint(
           client.runtime.rpc,
           loaded.offer.paymentMint,
           detectNetwork(),
@@ -180,11 +185,13 @@ export default function TakeOfferPage({
         );
         if (!cancelled) {
           setPayTokenProgram(owner);
+          setPayDecimals(decimals);
           setPayMintError(null);
         }
       } catch (err) {
         if (!cancelled) {
           setPayTokenProgram(null);
+          setPayDecimals(null);
           setPayMintError(
             err instanceof Error
               ? err.message
@@ -531,6 +538,15 @@ export default function TakeOfferPage({
   const payMintShort = `${offer.paymentMint.toString().slice(0, 6)}…${offer.paymentMint
     .toString()
     .slice(-4)}`;
+  // Human units once the mint's decimals are read; the exact base units stay
+  // on the secondary line of the confirmation.
+  const payLabel = paymentMintLabel(offer.paymentMint.toString(), detectNetwork());
+  const priceText = payDecimals !== null
+    ? formatPaymentAmount(offer.price, payDecimals, payLabel)
+    : `${offer.price} base units`;
+  const trade = payDecimals !== null && offer.amount > BigInt(0)
+    ? describeTrade(offer.amount, offer.price, payDecimals, payLabel)
+    : null;
 
   const terms: { label: string; value: string; mono?: boolean }[] = [
     { label: "Share class", value: assetName },
@@ -544,7 +560,8 @@ export default function TakeOfferPage({
       value: `${offer.deposited} / ${offer.amount} units`,
       mono: true,
     },
-    { label: "Total price", value: `${offer.price} base units`, mono: true },
+    { label: "Total price", value: priceText, mono: true },
+    ...(trade ? [{ label: "Price per unit", value: trade.perUnit, mono: true }] : []),
     { label: "Payment mint", value: payMintShort, mono: true },
     { label: "Maker", value: makerShort, mono: true },
   ];
@@ -619,7 +636,7 @@ export default function TakeOfferPage({
             <p className="mb-5 text-[12px] leading-relaxed text-mx-ink-faint">
               {expiredOpen
                 ? "The expiry passed without a taker. Trigger the on-chain expiry to return the escrowed share units to the maker."
-                : `You pay ${String(offer.price)} and receive ${String(offer.amount)} share units.`}
+                : `You pay ${priceText} and receive ${String(offer.amount)} share units.`}
             </p>
 
             {/* Price summary */}
@@ -630,7 +647,7 @@ export default function TakeOfferPage({
                     You pay
                   </span>
                   <span className="font-mono text-[15px] font-bold text-mx-ink">
-                    {String(offer.price)}
+                    {priceText}
                   </span>
                 </div>
                 <div className="flex items-center justify-between rounded-[3px] border border-mx-indigo bg-mx-indigo-soft px-4 py-3">
@@ -709,7 +726,7 @@ export default function TakeOfferPage({
                           ? "Your own offer"
                           : insufficient
                             ? "Insufficient balance"
-                            : `Pay ${String(offer.price)} & take`}
+                            : `Pay ${priceText} & take`}
                 </button>
                 <p className="mt-3 text-center text-[11px] leading-relaxed text-mx-ink-faint">
                   Atomic settlement: payment to maker and share release to you
@@ -745,8 +762,14 @@ export default function TakeOfferPage({
             <div className="overflow-hidden rounded-[3px] border border-mx-rule">
               {[
                 { label: "Share class", value: assetName },
-                { label: "Amount", value: `${offer.amount} units` },
-                { label: "You pay", value: `${offer.price} base units` },
+                { label: "Amount", value: trade?.units ?? `${offer.amount} units` },
+                { label: "You pay", value: priceText },
+                ...(trade
+                  ? [
+                      { label: "Price per unit", value: trade.perUnit },
+                      { label: "On-chain", value: trade.base },
+                    ]
+                  : []),
                 { label: "Maker", value: makerShort },
               ].map((row, i, arr) => (
                 <div
