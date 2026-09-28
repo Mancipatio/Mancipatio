@@ -124,6 +124,10 @@ jobs:
       - name: SBPF v3 ELF + symbol + security.txt gate
         run: bash scripts/check-sbf-elf.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
 
+      # ... and the gate still rejects patched copies of these exact bytes.
+      - name: ELF gate negative control
+        run: bash scripts/check-sbf-elf-selftest.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
+
       # The Docker build leaves target/ owned by root, so host cargo writes its
       # own build products elsewhere. The tests still include_bytes! the release
       # .so files from program/target/deploy (paths are source-relative).
@@ -135,11 +139,15 @@ jobs:
           cargo test --workspace --locked --no-fail-fast
           sha256sum --check sbf-sha256.txt
 
+      # `arch: v3`: the on-chain verify (solana-verify verify-from-repo, the
+      # OtterSec PDA) must pass `--arch v3 -b <base image>`; the default v0
+      # does not reproduce these hashes.
       - name: Executable hashes
         run: |
           {
             echo "base image: $BASE_IMAGE"
             echo "base image digest: $BASE_IMAGE_DIGEST"
+            echo "arch: v3"
             echo "commit: $GITHUB_SHA"
             echo -n "asset_registry: "
             solana-verify get-executable-hash target/deploy/asset_registry.so
@@ -229,6 +237,7 @@ jobs:
           cp art/target/deploy/*.so art/hashes.txt art/sbf-sha256.txt dist/
           cp front/idl/asset_registry.json front/idl/transfer_hook.json dist/
           grep -qx "commit: $GITHUB_SHA" dist/hashes.txt
+          grep -qx "arch: v3" dist/hashes.txt
           (cd dist && sha256sum -- *.so *.json hashes.txt sbf-sha256.txt > SHA256SUMS)
           cat dist/SHA256SUMS
 

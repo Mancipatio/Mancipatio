@@ -36,14 +36,15 @@ jobs:
   # yanked crates) against the Cargo.lock the verifiable build uses. Warnings
   # (unmaintained, unsound) are printed, not fatal; a vulnerability fails.
   # cargo-audit itself is installed at a pinned version with its own lockfile.
-  # Baseline 2026-09-28 (cargo-audit 0.22.2, 1271 advisories, 399 crates):
-  # 0 vulnerabilities, so no --ignore; 7 warnings, all transitive through the
-  # Solana/Anchor/LiteSVM stack: unmaintained ansi_term (RUSTSEC-2021-0139,
-  # litesvm), bincode 1.3 (RUSTSEC-2025-0141), derivative (RUSTSEC-2024-0388)
-  # and paste (RUSTSEC-2024-0436) via solana-bn254/poseidon, libsecp256k1 0.6
-  # (RUSTSEC-2025-0161, agave-syscalls); unsound anyhow Error::downcast_mut
-  # (RUSTSEC-2026-0190, anchor build-time crates) and rand 0.7 with a custom
-  # logger (RUSTSEC-2026-0097). An ignore added later names its advisory and
+  # Baseline 2026-09-28 after LiteSVM 0.15.2 (cargo-audit 0.22.2, 1271
+  # advisories, 414 crates): 0 vulnerabilities, so no --ignore; 6 warnings,
+  # all transitive through the Solana/Anchor/LiteSVM stack: unmaintained
+  # ansi_term (RUSTSEC-2021-0139, litesvm), bincode 1.3 (RUSTSEC-2025-0141),
+  # derivative (RUSTSEC-2024-0388) and paste (RUSTSEC-2024-0436) via
+  # solana-bn254/poseidon, libsecp256k1 0.7 (RUSTSEC-2025-0161,
+  # solana-syscalls 4.1 under litesvm); unsound anyhow Error::downcast_mut (RUSTSEC-2026-0190,
+  # anchor build-time crates). (LiteSVM 0.10 also pulled rand 0.7,
+  # RUSTSEC-2026-0097: gone.) An ignore added later names its advisory and
   # why here, never a blanket flag.
   audit:
     name: cargo audit (RustSec)
@@ -115,6 +116,13 @@ jobs:
 
       - name: SBPF v3 ELF + symbol + security.txt gate
         run: bash scripts/check-sbf-elf.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
+
+      # The gate replaces cargo-build-sbf's skipped check_undefined_symbols:
+      # it must PASS the real artifacts and FAIL patched copies of them (v0
+      # e_flags, an unknown syscall hash, a call outside .text, 0 or 2
+      # security.txt markers), or a parser bug could wave everything through.
+      - name: ELF gate negative control
+        run: bash scripts/check-sbf-elf-selftest.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
 
       # ProgramData capacity of the deployed asset_registry: an upgrade larger
       # than this needs `solana program extend` first. SBPF v3 shrank the
