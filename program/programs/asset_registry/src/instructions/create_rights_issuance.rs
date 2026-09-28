@@ -60,7 +60,7 @@ pub struct CreateRightsIssuance<'info> {
     #[account(
         seeds = [PLATFORM_SEED],
         bump = platform.bump,
-        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS) @ RegistryError::PlatformPaused,
+        constraint = !platform.is_paused(PAUSE_DISTRIBUTIONS | PAUSE_PAYOUT_MODULES) @ RegistryError::PlatformPaused,
     )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
 }

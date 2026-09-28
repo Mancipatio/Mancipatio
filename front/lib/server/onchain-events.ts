@@ -10,11 +10,15 @@ import { getBase58Decoder } from "@solana/kit";
 import {
   ClawbackReason,
   IssuerAuthorityChangeKind,
+  PlatformAdminChangeKind,
   getClawbackReasonDecoder,
   getIssuerAuthorityChangeKindDecoder,
+  getPlatformAdminChangeKindDecoder,
 } from "@/lib/generated/asset_registry";
 
-export type FieldType = "u8" | "bool" | "pubkey" | "u64" | "i64" | "bytes128" | "ClawbackReason" | "IssuerAuthorityChangeKind";
+export type FieldType =
+  | "u8" | "bool" | "pubkey" | "u64" | "i64" | "bytes32" | "bytes128"
+  | "ClawbackReason" | "IssuerAuthorityChangeKind" | "PlatformAdminChangeKind";
 
 export type EventSpec = {
   name: string;
@@ -23,7 +27,8 @@ export type EventSpec = {
 };
 
 const SIZES: Record<FieldType, number> = {
-  u8: 1, bool: 1, pubkey: 32, u64: 8, i64: 8, bytes128: 128, ClawbackReason: 1, IssuerAuthorityChangeKind: 1,
+  u8: 1, bool: 1, pubkey: 32, u64: 8, i64: 8, bytes32: 32, bytes128: 128,
+  ClawbackReason: 1, IssuerAuthorityChangeKind: 1, PlatformAdminChangeKind: 1,
 };
 
 export const EVENT_SPECS: readonly EventSpec[] = [
@@ -68,6 +73,31 @@ export const EVENT_SPECS: readonly EventSpec[] = [
       ["amount", "u64"]] },
   { name: "CustodyReverted", discriminator: [124, 204, 74, 1, 228, 187, 191, 144],
     fields: [["custody_vault", "pubkey"], ["mint", "pubkey"], ["burned", "u64"]] },
+  // v1.0.0-rc (8.3): D1 proceeds freeze, D3 admin grants and platform
+  // rotations (48 h timelock), D4 the upgrade authority's recovery. `kind` of
+  // an AuthorityProposal event: 0 platform, 1 custody, 2 issuer, 3 KYC registry.
+  { name: "IssuerProceedsFrozen", discriminator: [70, 166, 216, 216, 94, 42, 4, 103],
+    fields: [["issuer", "pubkey"], ["frozen_by", "pubkey"], ["frozen_at", "i64"], ["reason_hash", "bytes32"]] },
+  { name: "IssuerProceedsUnfrozen", discriminator: [87, 176, 20, 56, 242, 17, 67, 162],
+    fields: [["issuer", "pubkey"], ["unfrozen_by", "pubkey"], ["frozen_by", "pubkey"], ["frozen_at", "i64"]] },
+  { name: "AdminProposed", discriminator: [129, 249, 226, 227, 199, 82, 110, 243],
+    fields: [["new_admin", "pubkey"], ["proposed_by", "pubkey"], ["proposed_at", "i64"], ["eta", "i64"], ["expires_at", "i64"],
+      ["bootstrap_open", "bool"]] },
+  { name: "AdminProposalCancelled", discriminator: [158, 7, 69, 243, 15, 126, 0, 184],
+    fields: [["new_admin", "pubkey"], ["proposed_by", "pubkey"], ["cancelled_by", "pubkey"]] },
+  { name: "AdminAdded", discriminator: [23, 13, 37, 90, 130, 53, 75, 251],
+    fields: [["admin", "pubkey"], ["added_by", "pubkey"], ["proposed_at", "i64"]] },
+  { name: "AuthorityProposalCreated", discriminator: [181, 8, 121, 90, 217, 34, 126, 195],
+    fields: [["target", "pubkey"], ["kind", "u8"], ["current_authority", "pubkey"], ["new_authority", "pubkey"],
+      ["proposed_by", "pubkey"], ["eta", "i64"], ["expires_at", "i64"]] },
+  { name: "AuthorityProposalCancelled", discriminator: [201, 36, 146, 19, 47, 101, 65, 248],
+    fields: [["target", "pubkey"], ["kind", "u8"], ["cancelled_by", "pubkey"], ["cancelled_new_authority", "pubkey"]] },
+  { name: "PlatformAdminChanged", discriminator: [67, 17, 203, 46, 181, 236, 207, 6],
+    fields: [["old_admin", "pubkey"], ["new_admin", "pubkey"], ["kind", "PlatformAdminChangeKind"]] },
+  { name: "PlatformRecoveryProposed", discriminator: [81, 66, 73, 168, 142, 59, 27, 163],
+    fields: [["current_admin", "pubkey"], ["new_admin", "pubkey"], ["proposed_by", "pubkey"], ["eta", "i64"], ["expires_at", "i64"]] },
+  { name: "PlatformRecoveryCancelled", discriminator: [172, 148, 135, 31, 43, 178, 224, 20],
+    fields: [["cancelled_by", "pubkey"], ["new_admin", "pubkey"]] },
 ];
 
 export type EventValue = string | number | boolean;
@@ -110,6 +140,9 @@ export function decodeRegistryEvent(bytes: Uint8Array): DecodedEvent {
       case "i64":
         data[field] = view.getBigInt64(offset, true).toString();
         break;
+      case "bytes32":
+        data[field] = hex(bytes.subarray(offset, offset + 32));
+        break;
       case "bytes128":
         data[field] = hex(bytes.subarray(offset, offset + 128));
         break;
@@ -124,6 +157,12 @@ export function decodeRegistryEvent(bytes: Uint8Array): DecodedEvent {
         const kind = getIssuerAuthorityChangeKindDecoder().decode(bytes.subarray(offset, offset + 1));
         data[field] = kind === IssuerAuthorityChangeKind.Rotation ? "rotation"
           : kind === IssuerAuthorityChangeKind.TimelockedRecovery ? "timelocked_recovery" : "registration_recovery";
+        break;
+      }
+      case "PlatformAdminChangeKind": {
+        if (bytes[offset] > 1) return { name: spec.name, error: "LAYOUT" };
+        const kind = getPlatformAdminChangeKindDecoder().decode(bytes.subarray(offset, offset + 1));
+        data[field] = kind === PlatformAdminChangeKind.Rotation ? "rotation" : "recovery";
         break;
       }
     }

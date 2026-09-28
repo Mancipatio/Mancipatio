@@ -16,6 +16,8 @@ mod pause;
 mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -600,6 +602,8 @@ fn deposit_asset_ix(ctx: &Ctx, signer: &Pubkey, deal_id: u64) -> Instruction {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     // deposit leg (source authority = seller) + settle leg (source authority = deal PDA)
@@ -624,6 +628,8 @@ fn deposit_payment_ix(ctx: &Ctx, signer: &Pubkey, deal_id: u64) -> Instruction {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     // settle leg (source authority = deal PDA) — unused if the asset is not in yet
@@ -645,6 +651,8 @@ fn expire_deal_ix(ctx: &Ctx, payer: &Pubkey, deal_id: u64) -> Instruction {
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     metas.extend_from_slice(&hook_metas(ctx, &deal_pda));
@@ -1406,7 +1414,14 @@ fn otc_reclaim_after_completed_cancelled_and_expired() {
     send(
         &mut svm,
         &[&ctx.payer],
-        &[create_deal_ix_with(&ctx, &admin, 4, 0, &spl_mint, &spl)],
+        &[create_deal_ix_with(
+            &ctx,
+            &admin,
+            4,
+            asset_registry::OTC_DEAL_MAX_TTL_SECS,
+            &spl_mint,
+            &spl,
+        )],
         "create spl deal",
     );
     let (_, _, spl_payment_escrow) = deal_pdas(&ctx, 4);
@@ -1443,17 +1458,17 @@ fn otc_reclaim_refusals_and_the_tombstone_is_permanent() {
     warp_to(&mut svm, 1_000);
     let admin = ctx.payer.pubkey();
     let other = funded_wallet(&mut svm);
-    send(
-        &mut svm,
-        &[&ctx.payer],
-        &[reclaim::add_admin_ix(&admin, &other.pubkey())],
-        "second admin",
-    );
+    v1::grant_admin(&mut svm, &ctx.payer, &other).expect("second admin");
     for id in 1..=2u64 {
         send(
             &mut svm,
             &[&ctx.payer],
-            &[create_deal_ix(&ctx, &admin, id, 0)],
+            &[create_deal_ix(
+                &ctx,
+                &admin,
+                id,
+                asset_registry::OTC_DEAL_MAX_TTL_SECS,
+            )],
             "create_otc_deal",
         );
     }
@@ -1546,7 +1561,12 @@ fn otc_reclaim_refusals_and_the_tombstone_is_permanent() {
     let err = try_send(
         &mut svm,
         &[&ctx.payer],
-        &[create_deal_ix(&ctx, &admin, 2, 0)],
+        &[create_deal_ix(
+            &ctx,
+            &admin,
+            2,
+            asset_registry::OTC_DEAL_MAX_TTL_SECS,
+        )],
     )
     .expect_err("a tombstoned deal id cannot be re-created");
     assert!(err.contains("already in use"), "got: {err}");
@@ -1557,4 +1577,154 @@ fn otc_reclaim_refusals_and_the_tombstone_is_permanent() {
         reclaim::assert_code(try_send(&mut svm, &[signer], &[ix]), 3002);
     }
     reclaim::assert_tombstone(&svm, &deal_2);
+}
+
+// ── v1.0.0-rc (design 8.3): mandatory expiry, blocked parties ───────────────
+
+/// prog-novac-12 (§8.2, §14.3.1): every deal expires, in (now, now + 90 d].
+#[test]
+fn a_deal_expiry_must_be_in_the_future_and_at_most_ninety_days_away() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let admin = ctx.payer.pubkey();
+    let max = asset_registry::OTC_DEAL_MAX_TTL_SECS;
+    for (id, expires_at) in [(1u64, 0), (2, 1_000), (3, 1_000 + max + 1)] {
+        let err = try_send(
+            &mut svm,
+            &[&ctx.payer],
+            &[create_deal_ix(&ctx, &admin, id, expires_at)],
+        )
+        .expect_err("out-of-range expiry");
+        assert!(err.contains("Custom(6149)"), "expiry {expires_at}: {err}");
+    }
+    for (id, expires_at) in [(4u64, 1_001), (5, 1_000 + max)] {
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[create_deal_ix(&ctx, &admin, id, expires_at)],
+            "in-range expiry",
+        );
+    }
+}
+
+/// prog-novac-4 (§8.1, §14.2.3): neither deposit accepts a blocked buyer or
+/// seller — the registry refuses before any hook CPI.
+#[test]
+fn otc_deposits_refuse_a_blocked_buyer_or_seller() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let admin = ctx.payer.pubkey();
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[create_deal_ix(&ctx, &admin, 1, 2_000)],
+        "create_otc_deal",
+    );
+    let (buyer, seller) = (ctx.buyer.pubkey(), ctx.seller.pubkey());
+    for blocked in [buyer, seller] {
+        v1::fabricate_block_entry(&mut svm, &blocked);
+        for (who, ix) in [
+            (&ctx.buyer, deposit_payment_ix(&ctx, &buyer, 1)),
+            (&ctx.seller, deposit_asset_ix(&ctx, &seller, 1)),
+        ] {
+            let err = try_send(&mut svm, &[who], &[ix]).expect_err("blocked party");
+            assert!(
+                err.contains("Custom(6144)") && err.contains("PartyBlocklisted"),
+                "{blocked} blocked: {err}"
+            );
+        }
+        v1::clear_block_entry(&mut svm, &blocked);
+    }
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_payment_ix(&ctx, &buyer, 1)],
+        "payment after unblock",
+    );
+    send(
+        &mut svm,
+        &[&ctx.seller],
+        &[deposit_asset_ix(&ctx, &seller, 1)],
+        "asset after unblock: settles",
+    );
+    let (deal, _, _) = deal_pdas(&ctx, 1);
+    let state: asset_registry::OtcDeal = load(&svm, &deal);
+    assert_eq!(state.status, asset_registry::OtcDealStatus::Completed);
+}
+
+/// O-11 (§8.1, §14.2.7): the permissionless expiry refunds no DEPOSITED leg
+/// to a blocked party; an undeposited leg does not matter; the Admin cancel
+/// stays the manual path and refunds both.
+#[test]
+fn a_permissionless_expiry_never_refunds_a_blocked_party_but_the_admin_cancel_does() {
+    let (mut svm, ctx) = boot();
+    warp_to(&mut svm, 1_000);
+    let admin = ctx.payer.pubkey();
+    let (buyer, seller) = (ctx.buyer.pubkey(), ctx.seller.pubkey());
+    for id in 1..=4u64 {
+        send(
+            &mut svm,
+            &[&ctx.payer],
+            &[create_deal_ix(&ctx, &admin, id, 2_000)],
+            "create_otc_deal",
+        );
+    }
+    // 1: payment deposited; 2 and 3: asset deposited; 4: both deposited.
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_payment_ix(&ctx, &buyer, 1)],
+        "pay 1",
+    );
+    send(
+        &mut svm,
+        &[&ctx.seller],
+        &[deposit_asset_ix(&ctx, &seller, 2)],
+        "asset 2",
+    );
+    send(
+        &mut svm,
+        &[&ctx.seller],
+        &[deposit_asset_ix(&ctx, &seller, 3)],
+        "asset 3",
+    );
+    send(
+        &mut svm,
+        &[&ctx.buyer],
+        &[deposit_payment_ix(&ctx, &buyer, 4)],
+        "pay 4",
+    );
+    warp_to(&mut svm, 2_001);
+    let stranger = Keypair::new();
+    svm.airdrop(&stranger.pubkey(), 1_000_000_000).unwrap();
+    let expire = |id| expire_deal_ix(&ctx, &stranger.pubkey(), id);
+
+    v1::fabricate_block_entry(&mut svm, &buyer);
+    let err = try_send(&mut svm, &[&stranger], &[expire(1)]).unwrap_err();
+    assert!(
+        err.contains("Custom(6144)"),
+        "blocked buyer, payment deposited: {err}"
+    );
+    send(
+        &mut svm,
+        &[&stranger],
+        &[expire(2)],
+        "blocked buyer, only the asset deposited",
+    );
+    v1::clear_block_entry(&mut svm, &buyer);
+    v1::fabricate_block_entry(&mut svm, &seller);
+    let err = try_send(&mut svm, &[&stranger], &[expire(3)]).unwrap_err();
+    assert!(
+        err.contains("Custom(6144)"),
+        "blocked seller, asset deposited: {err}"
+    );
+    v1::fabricate_block_entry(&mut svm, &buyer);
+    let payment_before = token_balance(&svm, &ctx.buyer_payment_ata);
+    send(
+        &mut svm,
+        &[&ctx.payer],
+        &[cancel_deal_ix(&ctx, &admin, 4)],
+        "the Admin cancel refunds a blocked buyer",
+    );
+    assert!(token_balance(&svm, &ctx.buyer_payment_ata) > payment_before);
 }

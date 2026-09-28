@@ -10,8 +10,10 @@ import {
   combineCodec,
   fixDecoderSize,
   fixEncoderSize,
+  getAddressEncoder,
   getBytesDecoder,
   getBytesEncoder,
+  getProgramDerivedAddress,
   getStructDecoder,
   getStructEncoder,
   transformEncoder,
@@ -60,6 +62,8 @@ export type TakeOfferInstruction<
   TAccountShareTokenProgram extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountTakerBlockEntry extends string | AccountMeta<string> = string,
+  TAccountMakerBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -102,6 +106,12 @@ export type TakeOfferInstruction<
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountTakerBlockEntry extends string
+        ? ReadonlyAccount<TAccountTakerBlockEntry>
+        : TAccountTakerBlockEntry,
+      TAccountMakerBlockEntry extends string
+        ? ReadonlyAccount<TAccountMakerBlockEntry>
+        : TAccountMakerBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -146,6 +156,8 @@ export type TakeOfferAsyncInput<
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountTakerBlockEntry extends string = string,
+  TAccountMakerBlockEntry extends string = string,
 > = {
   taker: TransactionSigner<TAccountTaker>;
   offer: Address<TAccountOffer>;
@@ -175,6 +187,18 @@ export type TakeOfferAsyncInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform?: Address<TAccountPlatform>;
+  /**
+   * v1 (appended after `platform`, before the hook tail): the taker is not blocked ...
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  takerBlockEntry?: Address<TAccountTakerBlockEntry>;
+  /**
+   * ... nor is the maker (the payee).
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  makerBlockEntry: Address<TAccountMakerBlockEntry>;
 };
 
 export async function getTakeOfferInstructionAsync<
@@ -190,6 +214,8 @@ export async function getTakeOfferInstructionAsync<
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountTakerBlockEntry extends string,
+  TAccountMakerBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: TakeOfferAsyncInput<
@@ -204,7 +230,9 @@ export async function getTakeOfferInstructionAsync<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountTakerBlockEntry,
+    TAccountMakerBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -221,7 +249,9 @@ export async function getTakeOfferInstructionAsync<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountTakerBlockEntry,
+    TAccountMakerBlockEntry
   >
 > {
   // Program address.
@@ -257,6 +287,14 @@ export async function getTakeOfferInstructionAsync<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    takerBlockEntry: {
+      value: input.takerBlockEntry ?? null,
+      isWritable: false,
+    },
+    makerBlockEntry: {
+      value: input.makerBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -271,6 +309,18 @@ export async function getTakeOfferInstructionAsync<
   }
   if (!accounts.platform.value) {
     accounts.platform.value = await findPlatformPda();
+  }
+  if (!accounts.takerBlockEntry.value) {
+    accounts.takerBlockEntry.value = await getProgramDerivedAddress({
+      programAddress:
+        "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy" as Address<"GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy">,
+      seeds: [
+        getBytesEncoder().encode(
+          new Uint8Array([98, 108, 111, 99, 107, 101, 100]),
+        ),
+        getAddressEncoder().encode(expectAddress(accounts.taker.value)),
+      ],
+    });
   }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
@@ -288,6 +338,8 @@ export async function getTakeOfferInstructionAsync<
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.takerBlockEntry),
+      getAccountMeta(accounts.makerBlockEntry),
     ],
     data: getTakeOfferInstructionDataEncoder().encode({}),
     programAddress,
@@ -304,7 +356,9 @@ export async function getTakeOfferInstructionAsync<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountTakerBlockEntry,
+    TAccountMakerBlockEntry
   >);
 }
 
@@ -321,6 +375,8 @@ export type TakeOfferInput<
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountTakerBlockEntry extends string = string,
+  TAccountMakerBlockEntry extends string = string,
 > = {
   taker: TransactionSigner<TAccountTaker>;
   offer: Address<TAccountOffer>;
@@ -350,6 +406,18 @@ export type TakeOfferInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform: Address<TAccountPlatform>;
+  /**
+   * v1 (appended after `platform`, before the hook tail): the taker is not blocked ...
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  takerBlockEntry: Address<TAccountTakerBlockEntry>;
+  /**
+   * ... nor is the maker (the payee).
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  makerBlockEntry: Address<TAccountMakerBlockEntry>;
 };
 
 export function getTakeOfferInstruction<
@@ -365,6 +433,8 @@ export function getTakeOfferInstruction<
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountTakerBlockEntry extends string,
+  TAccountMakerBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: TakeOfferInput<
@@ -379,7 +449,9 @@ export function getTakeOfferInstruction<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountTakerBlockEntry,
+    TAccountMakerBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): TakeOfferInstruction<
@@ -395,7 +467,9 @@ export function getTakeOfferInstruction<
   TAccountEscrowMarker,
   TAccountShareTokenProgram,
   TAccountPaymentTokenProgram,
-  TAccountPlatform
+  TAccountPlatform,
+  TAccountTakerBlockEntry,
+  TAccountMakerBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -430,6 +504,14 @@ export function getTakeOfferInstruction<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    takerBlockEntry: {
+      value: input.takerBlockEntry ?? null,
+      isWritable: false,
+    },
+    makerBlockEntry: {
+      value: input.makerBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -451,6 +533,8 @@ export function getTakeOfferInstruction<
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.takerBlockEntry),
+      getAccountMeta(accounts.makerBlockEntry),
     ],
     data: getTakeOfferInstructionDataEncoder().encode({}),
     programAddress,
@@ -467,7 +551,9 @@ export function getTakeOfferInstruction<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountTakerBlockEntry,
+    TAccountMakerBlockEntry
   >);
 }
 
@@ -505,6 +591,18 @@ export type ParsedTakeOfferInstruction<
      * account indices and the remaining-accounts hook tail keep their positions.
      */
     platform: TAccountMetas[11];
+    /**
+     * v1 (appended after `platform`, before the hook tail): the taker is not blocked ...
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    takerBlockEntry: TAccountMetas[12];
+    /**
+     * ... nor is the maker (the payee).
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    makerBlockEntry: TAccountMetas[13];
   };
   data: TakeOfferInstructionData;
 };
@@ -517,7 +615,7 @@ export function parseTakeOfferInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedTakeOfferInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 12) {
+  if (instruction.accounts.length < 14) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -542,6 +640,8 @@ export function parseTakeOfferInstruction<
       shareTokenProgram: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
       platform: getNextAccount(),
+      takerBlockEntry: getNextAccount(),
+      makerBlockEntry: getNextAccount(),
     },
     data: getTakeOfferInstructionDataDecoder().decode(instruction.data),
   };

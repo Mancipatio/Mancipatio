@@ -3,11 +3,10 @@
 // instructions; it must equal the program's own checks
 // (`platform.is_paused(MASK)` per instruction file, MASK one constant or
 // several ORed) for every bit the front defines, conditional exactly where
-// the program's check is (`x || !platform.is_paused(..)`). A bit the front
-// does not define yet (8.3 adds 0x40) is 8.3's front part: add the constant
-// to lib/pause-flags.ts and one entry per check to PAUSE_BIT_FLOWS (with
-// `when` for a conditional one). MODULE_FLOWS maps each pilot-scope module
-// to the on-chain entries it owns.
+// the program's check is (`x || !platform.is_paused(..)`). A new bit (8.3
+// added 0x40) is its constant in lib/pause-flags.ts plus one entry per check
+// in PAUSE_BIT_FLOWS (with `when` for a conditional one). MODULE_FLOWS maps
+// each pilot-scope module to the on-chain entries it owns.
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -20,6 +19,7 @@ import {
   CREATE_PROPOSAL_DISCRIMINATOR,
   TAKE_OFFER_DISCRIMINATOR,
   getOpenCustodyVaultInstructionDataEncoder,
+  getOpenSaleInstructionDataEncoder,
   RaiseType,
   RealizeAction,
   VaultType,
@@ -36,6 +36,7 @@ import {
   outOfScopeInstruction,
   PAUSE_BIT_FLOWS,
   PAUSE_FLAGS_TTL_MS,
+  PAYOUT_MODULES_OFF_MESSAGE,
   pauseFlowsFor,
   pauseMaskFor,
   pausedFlowFor,
@@ -171,9 +172,32 @@ describe("the mask model (several bits per instruction, conditional checks)", ()
   });
 
   it("pauseMaskFor ORs every bit that can stop an instruction", () => {
-    expect(pauseMaskFor(AssetRegistryInstruction.Buy)).toBe(PAUSE.PAUSE_PRIMARY);
+    // v1: a set 0x40 MAY hold back a buy (into a Startup sale).
+    expect(pauseMaskFor(AssetRegistryInstruction.Buy)).toBe(PAUSE.PAUSE_PRIMARY | PAUSE.PAUSE_PAYOUT_MODULES);
+    expect(pauseMaskFor(AssetRegistryInstruction.RouteYield)).toBe(PAUSE.PAUSE_DISTRIBUTIONS | PAUSE.PAUSE_PAYOUT_MODULES);
     expect(pauseMaskFor(AssetRegistryInstruction.OpenCustodyVault)).toBe(PAUSE.PAUSE_CUSTODY_ENTRY);
     expect(pauseMaskFor(AssetRegistryInstruction.CancelOffer)).toBe(0);
+  });
+
+  it("the real map: 0x40 holds back a Startup raise (open_sale data or the sale's raise type), not a Mature one", () => {
+    const openSale = (raiseType: RaiseType) => ({
+      programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
+      data: new Uint8Array(getOpenSaleInstructionDataEncoder().encode({
+        saleId: BigInt(1), pricePerUnit: BigInt(1), totalForSale: BigInt(1), startTs: BigInt(0), endTs: BigInt(1),
+        raiseType, cliffMonths: 0, vestingMonths: 0,
+      })),
+    });
+    const PAYOUT = PAUSE.PAUSE_PAYOUT_MODULES;
+    expect(pausedInstruction(PAYOUT, [openSale(RaiseType.Startup)])).toEqual({ instruction: AssetRegistryInstruction.OpenSale, bit: PAYOUT });
+    expect(pausedInstruction(PAYOUT, [openSale(RaiseType.Mature)])).toBeNull();
+    // buy carries no raise type: it passes unless the page says the sale is Startup.
+    expect(pausedInstruction(PAYOUT, [ix(BUY_DISCRIMINATOR)])).toBeNull();
+    expect(pausedInstruction(PAYOUT, [ix(BUY_DISCRIMINATOR)], { raiseType: RaiseType.Startup })?.bit).toBe(PAYOUT);
+    // Not worded as an emergency: the modules are switched off (on mainnet for good, D2).
+    expect(pausedFlowFor(PAYOUT, AssetRegistryInstruction.Buy, { raiseType: RaiseType.Startup })).toBe(PAYOUT_MODULES_OFF_MESSAGE);
+    expect(pausedFlowFor(PAYOUT, AssetRegistryInstruction.RouteYield)).toBe(PAYOUT_MODULES_OFF_MESSAGE);
+    // The bootstrap marker holds nothing back.
+    expect(pausedInstruction(PAUSE.PLATFORM_BOOTSTRAP_OPEN, [ix(BUY_DISCRIMINATOR), ix(CREATE_OFFER_DISCRIMINATOR)])).toBeNull();
   });
 });
 

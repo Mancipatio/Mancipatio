@@ -105,6 +105,16 @@ pub struct OpenSale<'info> {
         constraint = !platform.is_paused(PAUSE_PRIMARY) @ RegistryError::PlatformPaused,
     )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
+
+    /// D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+    /// unset (no freeze in force).
+    /// CHECK: address pinned by the seeds; `util::is_unset` (fail-closed).
+    #[account(
+        seeds = [ISSUER_FREEZE_SEED, issuer.key().as_ref()],
+        bump,
+        constraint = crate::util::is_unset(&issuer_freeze) @ RegistryError::IssuerProceedsFrozen,
+    )]
+    pub issuer_freeze: UncheckedAccount<'info>,
 }
 
 /// Opens a primary sale of a share class — `total_for_sale` units at
@@ -128,13 +138,25 @@ pub fn handle_open_sale(
         &ctx.accounts.payment_token_program.to_account_info(),
     )?;
 
+    // D2: a Startup raise feeds the payout-vault / Merkle-vote module, which
+    // stays off on mainnet while `PAUSE_PAYOUT_MODULES` is set.
+    crate::util::ensure(
+        raise_type != RaiseType::Startup || !ctx.accounts.platform.is_paused(PAUSE_PAYOUT_MODULES),
+        RegistryError::PlatformPaused,
+    )?;
     require!(total_for_sale > 0, RegistryError::InvalidSaleParams);
     // A zero price would hand out units for free (and a Startup vault of 0).
     require!(price_per_unit > 0, RegistryError::InvalidSalePrice);
-    require!(
-        end_ts == 0 || end_ts > start_ts,
-        RegistryError::InvalidSaleParams
-    );
+    // Every sale ends (prog-novac-15): `end_ts` is required, after the start,
+    // and at most 365 days after max(start_ts, now). `buy` keeps accepting
+    // `end_ts == 0` only for legacy (rc.x) devnet sales.
+    crate::util::ensure(end_ts > 0, RegistryError::SaleDurationInvalid)?;
+    require!(end_ts > start_ts, RegistryError::InvalidSaleParams);
+    let latest_end = start_ts
+        .max(Clock::get()?.unix_timestamp)
+        .checked_add(MAX_SALE_DURATION_SECS)
+        .ok_or(RegistryError::Overflow)?;
+    crate::util::ensure(end_ts <= latest_end, RegistryError::SaleDurationInvalid)?;
     if raise_type == RaiseType::Startup {
         require!(
             vesting_months > cliff_months,

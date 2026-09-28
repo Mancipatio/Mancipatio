@@ -43,9 +43,10 @@
 // transfer lists it, so it is paged last on its own budget
 // (GAP_SCAN_HOOK_PAGES) and running out of it does not fail
 // gap-scan-incomplete (`hook_complete` in its evidence): a hook-only
-// transaction changes no mirrored account (Execute writes nothing, the hook's
-// accounts are not mirrored); the hook's authority instructions carry the
-// blocklist-authority PDA and its config is created through asset_registry,
+// transaction changes no mirrored account (Execute writes nothing; the only
+// mirrored hook accounts, the blocklist-authority proposal and recovery of
+// 0079, are written by the hook's authority instructions, which carry the
+// blocklist-authority PDA) and its config is created through asset_registry,
 // both scanned in full. (A KYC-gated transfer also lists the asset_registry
 // program ID, as an extra account meta: at that volume its own listing runs
 // out of pages too.)
@@ -65,6 +66,17 @@
 // than 36 hours (the daily job missed a run, or is disabled): medium and
 // failing on mainnet, so ops hears of it a day or more before the routes
 // stop. Elsewhere both hold (nothing opens).
+// role-change-pending (0079, high): the "timelock running" incident, open
+// while the mirror holds a live staged Admin grant, Super Admin rotation or
+// upgrade-authority recovery (v1.0.0-rc D3/D4). payout-modules (critical,
+// mainnet): the mirrored Platform must keep bit 0x40 set (D2). Before 0079
+// role-change-pending reports nothing. bootstrap-open (critical, mainnet):
+// the one-way bootstrap window (bit 0x80) is open while an emergency area is
+// clear — a live platform on which add_admin and the Super Admin rotation
+// skip their 48 h (an rc.x rollback that unpaused and came back to v1). The
+// half of chain:inventory's rule that needs the deployer key (the Super
+// Admin is no longer the deployer) stays in chain:inventory: the server does
+// not know that key.
 // indexer-reconcile-age (0075, low): the last full reconcile is older than
 // reconcile_max_age_hours (default 168). Not a freshness condition: the
 // heartbeat keeps proving from its watermarks; a reconcile also catches what
@@ -99,6 +111,7 @@ import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, ty
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
+import { EMERGENCY_PAUSE_BITS, PAUSE_PAYOUT_MODULES, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags } from "@/lib/pause-flags";
 import { listProblem, SANCTIONS_MAX_LIST_AGE_MS } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
@@ -342,6 +355,114 @@ export async function sanctionsListReport(sb: SupabaseClient, network: Network, 
       last_status: row?.last_status ?? null, last_error: row?.last_error ?? null,
     },
   };
+}
+
+/** Mirror rows of a pending role change (0079): unix-second strings or numbers. */
+type Pending = { eta?: number | string | null; expires_at?: number | string | null; kind?: number | null };
+const ROLE_CHANGE_TABLES = [
+  ["pending_admins", "admin_grants", "Admin grant"],
+  ["authority_proposals", "platform_rotations", "Super Admin rotation"],
+  ["platform_recoveries", "platform_recoveries", "Super Admin recovery"],
+  ["blocklist_recoveries", "blocklist_recoveries", "blocklist authority recovery"],
+] as const;
+
+/**
+ * role-change-pending (0079, v1.0.0-rc D3/D4, high): the "timelock running"
+ * incident. Open while the mirror holds a live (unexpired) staged Admin grant,
+ * Super Admin rotation (AuthorityProposal kind 0), or upgrade-authority
+ * recovery of the Super Admin or the blocklist authority: each exists so that
+ * someone can veto it before it executes, and each instruction already raised
+ * a critical alarm. It clears once none is live. [] before 0079 is applied
+ * (nothing to watch); null when the mirror cannot be read.
+ */
+export async function roleChangesReport(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report[] | null> {
+  const results = await Promise.all(ROLE_CHANGE_TABLES.map(([table]) =>
+    sb.from(table).select(table === "authority_proposals" ? "kind,eta,expires_at" : "eta,expires_at")
+      .eq("network", network).limit(1000).abortSignal(dbSignal(signal))));
+  if (results.some((r) => r.error && missingRelation(r.error))) return [];
+  if (results.some((r) => r.error)) return null;
+  const nowSec = Math.floor(now / 1000);
+  const seconds = (v: unknown) => (typeof v === "number" || (typeof v === "string" && /^-?\d+$/.test(v)) ? Number(v) : null);
+  const counts: Record<string, number> = {};
+  const parts: string[] = [];
+  let nextEta: number | null = null;
+  ROLE_CHANGE_TABLES.forEach(([table, key, label], i) => {
+    const live = ((results[i].data ?? []) as Pending[]).filter((row) => {
+      const expires = seconds(row.expires_at);
+      // An unreadable expiry counts as live (the conservative side).
+      return (expires === null || expires > nowSec) && (table !== "authority_proposals" || Number(row.kind) === 0);
+    });
+    counts[key] = live.length;
+    if (live.length) parts.push(`${live.length} ${label}${live.length === 1 ? "" : "s"}`);
+    for (const row of live) {
+      const eta = seconds(row.eta);
+      if (eta !== null && eta > nowSec && (nextEta === null || eta < nextEta)) nextEta = eta;
+    }
+  });
+  const total = Object.values(counts).reduce((a, b) => a + b, 0);
+  const when = nextEta === null ? null : `${new Date(nextEta * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return [{
+    check: "role-change-pending", state: total ? "fail" : "pass", severity: "high", category: "onchain", source: "onchain:role-change-pending",
+    summary: total
+      ? `Role change pending (timelock running): ${parts.join(", ")}${when ? `; the next becomes executable at ${when}` : "; executable now"}. Cancel any you did not expect (/admin/admins, /admin/platform)`
+      : "No role change is pending",
+    evidence: { ...counts, next_eta: nextEta },
+  }];
+}
+
+/**
+ * payout-modules (D2, critical, mainnet only): the payout / Merkle modules bit
+ * (0x40) of the mirrored Platform must stay SET on mainnet. The clear itself
+ * is a critical instruction alarm; this incident stays open while the mirror
+ * shows it clear. Elsewhere it passes (devnet may switch them on). Hold while
+ * no Platform is mirrored; null when the mirror cannot be read.
+ */
+export async function payoutModulesReport(sb: SupabaseClient, network: Network, signal: AbortSignal): Promise<Report | null> {
+  const base = { check: "payout-modules", severity: "critical" as const, category: "onchain" as const, source: "onchain:payout-modules" };
+  if (network !== "mainnet") return { ...base, state: "pass", summary: "The payout modules may be switched on off mainnet" };
+  const { data, error } = await sb.from("platforms").select("pause_flags").eq("network", network)
+    .abortSignal(dbSignal(signal)).maybeSingle();
+  if (error) return null;
+  const flags = (data as { pause_flags?: number | null } | null)?.pause_flags;
+  if (typeof flags !== "number") return { ...base, state: "hold", summary: "No Platform is mirrored yet" };
+  const off = (flags & PAUSE_PAYOUT_MODULES) !== 0;
+  return { ...base, state: off ? "pass" : "fail",
+    summary: off ? "The payout modules are switched off (0x40 set)"
+      : "The payout modules are switched ON on mainnet (0x40 clear): Startup raises, yield routing, Rights-Token issuances and milestones are open",
+    evidence: { pause_flags: flags } };
+}
+
+/**
+ * bootstrap-open (D3, critical, mainnet only): bit 0x80 (the one-way
+ * bootstrap window, which waives the 48 h of add_admin and of the Super
+ * Admin rotation) must be closed on a live platform. v1 closes it with the
+ * first clear of any pause bit, so bit 7 next to a clear emergency area means
+ * an rc.x build unpaused (a rollback, runbook §10) and the platform came back
+ * to v1 with the timelocks silently off. Fail while the mirror shows that;
+ * pass while bit 7 is closed, or open with every emergency area paused (the
+ * bootstrap itself). Hold while no Platform is mirrored; null when the mirror
+ * cannot be read. The deployer half of chain:inventory's `bootstrap-open`
+ * (bit 7 still open once the final Super Admin holds the platform) needs the
+ * deployer key, which the server does not have: the inventory keeps it.
+ */
+export async function bootstrapOpenReport(sb: SupabaseClient, network: Network, signal: AbortSignal): Promise<Report | null> {
+  const base = { check: "bootstrap-open", severity: "critical" as const, category: "onchain" as const, source: "onchain:bootstrap-open" };
+  if (network !== "mainnet") return { ...base, state: "pass", summary: "The bootstrap window is watched on mainnet only" };
+  const { data, error } = await sb.from("platforms").select("pause_flags").eq("network", network)
+    .abortSignal(dbSignal(signal)).maybeSingle();
+  if (error) return null;
+  const flags = (data as { pause_flags?: number | null } | null)?.pause_flags;
+  if (typeof flags !== "number") return { ...base, state: "hold", summary: "No Platform is mirrored yet" };
+  const open = (flags & PLATFORM_BOOTSTRAP_OPEN) !== 0;
+  const unpaused = (flags & EMERGENCY_PAUSE_BITS) !== EMERGENCY_PAUSE_BITS;
+  if (open && unpaused) {
+    return { ...base, state: "fail",
+      summary: `The bootstrap window (bit 0x80) is open on a live platform (${formatPauseFlags(flags)}): add_admin and the Super Admin rotation skip their 48-hour timelock. The Super Admin closes it with set_pause_flags(0, 0x80) (/admin/platform, "Close bootstrap window")`,
+      evidence: { pause_flags: flags } };
+  }
+  return { ...base, state: "pass",
+    summary: open ? "The bootstrap window is open while every emergency area is paused (bootstrap)" : "The bootstrap window is closed",
+    evidence: { pause_flags: flags } };
 }
 
 type Hold = { subject: string; ref: string; code: string; payment_mint: string | null; created_at: string };
@@ -637,6 +758,9 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => fxAndHolds(sb, network, now, signal));
   await collect(() => indexerFreshness(sb, network, now, signal));
   await collect(() => sanctionsListReport(sb, network, now, signal));
+  await collect(() => roleChangesReport(sb, network, now, signal));
+  await collect(() => payoutModulesReport(sb, network, signal));
+  await collect(() => bootstrapOpenReport(sb, network, signal));
   await record(cheap);
 
   // 2. The operational watches (chain reads), in parallel with the gap scan,

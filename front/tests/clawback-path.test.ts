@@ -10,6 +10,9 @@ import {
   checkSameKey,
   sameKeyHoldsBothRoles,
   sameKeyWarning,
+  KYC_EXPIRY_CLAWBACK_GRACE_SECONDS,
+  clawbackGraceNotice,
+  passportStatus,
   type PassportStatus,
 } from "@/lib/clawback-path";
 import { fetchBlockEntry } from "@/lib/blocklist";
@@ -26,8 +29,28 @@ const ADMIN = "6D6TgUKrYY6dJrCUZ6LcJKt5EGGdCUgHtVeUKmRZbUJ2" as Address;
 const REGISTRY_PROGRAM =
   "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS" as Address;
 
+describe("passportStatus (v1.0.0-rc: 30-day grace after expiry)", () => {
+  it("mirrors clawback_from_holder: Revoked, or expiry + 30 days <= now", () => {
+    const expiry = 1_000_000;
+    expect(KYC_EXPIRY_CLAWBACK_GRACE_SECONDS).toBe(2_592_000);
+    expect(passportStatus(null, expiry)).toBe("missing");
+    expect(passportStatus({ revoked: true, expiry: BigInt(expiry) }, 0)).toBe("revoked");
+    expect(passportStatus({ revoked: false, expiry: BigInt(expiry) }, expiry - 1)).toBe("eligible");
+    expect(passportStatus({ revoked: false, expiry: BigInt(expiry) }, expiry)).toBe("grace");
+    expect(passportStatus({ revoked: false, expiry: BigInt(expiry) }, expiry + KYC_EXPIRY_CLAWBACK_GRACE_SECONDS - 1)).toBe("grace");
+    expect(passportStatus({ revoked: false, expiry: BigInt(expiry) }, expiry + KYC_EXPIRY_CLAWBACK_GRACE_SECONDS)).toBe("expired");
+  });
+
+  it("the grace is pinned to the program constant", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { join } = await import("node:path");
+    const rust = readFileSync(join(process.cwd(), "../program/programs/asset_registry/src/constants.rs"), "utf8");
+    expect(rust).toMatch(new RegExp(`pub const KYC_EXPIRY_CLAWBACK_GRACE_SECS: i64 = ${KYC_EXPIRY_CLAWBACK_GRACE_SECONDS.toLocaleString("en-US").replace(/,/g, "_")};`));
+  });
+});
+
 describe("chooseClawbackPath", () => {
-  const statuses: PassportStatus[] = ["revoked", "expired", "eligible", "missing"];
+  const statuses: PassportStatus[] = ["revoked", "expired", "grace", "eligible", "missing"];
 
   it("covers the full decision matrix", () => {
     for (const hookConfigured of [false, true])
@@ -215,5 +238,19 @@ describe("clawback tx-error hints", () => {
   it("6087 covers a blocked escrow, whose own exits are refused too", () => {
     expect(hint(6087)).toMatch(/remove it from the blocklist first/);
     expect(hint(6087)).toMatch(/block the recipient wallet instead/);
+  });
+});
+
+describe("clawbackGraceNotice (30-day grace after a passport expiry)", () => {
+  const expiry = 1_700_000_000;
+  const GRACE = KYC_EXPIRY_CLAWBACK_GRACE_SECONDS;
+  it("names the opening date only inside the grace", () => {
+    const n = clawbackGraceNotice({ revoked: false, expiry: BigInt(expiry) }, expiry + 1);
+    expect(n?.opensAt).toBe(expiry + GRACE);
+    expect(n?.message).toContain("2023-12-14 22:13 UTC");
+    expect(clawbackGraceNotice({ revoked: false, expiry: BigInt(expiry) }, expiry - 1)).toBeNull();
+    expect(clawbackGraceNotice({ revoked: false, expiry: BigInt(expiry) }, expiry + GRACE)).toBeNull();
+    expect(clawbackGraceNotice({ revoked: true, expiry: BigInt(expiry) }, expiry + 1)).toBeNull();
+    expect(clawbackGraceNotice(null, expiry + 1)).toBeNull();
   });
 });

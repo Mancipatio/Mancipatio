@@ -8,6 +8,9 @@
  *   block      add_to_blocklist(wallet)      the BlocklistAuthority
  *   unblock    remove_from_blocklist(wallet) the BlocklistAuthority
  *   hook-mode  update_transfer_hook_config   the BlocklistAuthority
+ *   freeze-issuer freeze_issuer_proceeds     any Admin or the super admin
+ *                (D1, v1.0.0-rc: stops that issuer's sales and proceeds
+ *                exits; only the super admin lifts it, never this tool)
  *
  * No front, no database, no role map: the signer's role is read from the
  * chain at finalized. A dry run (the default) probes, builds, simulates and
@@ -34,14 +37,20 @@ import {
 import {
   ADMIN_DISCRIMINATOR,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
+  ISSUER_DISCRIMINATOR,
+  ISSUER_FREEZE_DISCRIMINATOR,
   KYC_REGISTRY_DISCRIMINATOR,
   PLATFORM_DISCRIMINATOR,
   findAdminRecordPda,
+  findIssuerFreezePda,
   findPlatformPda,
   getAdminDecoder,
+  getFreezeIssuerProceedsInstructionAsync,
+  getIssuerFreezeDecoder,
   getPlatformDecoder,
   getSetPauseFlagsInstructionAsync,
 } from "@/lib/generated/asset_registry";
+import { hashHex } from "@/lib/issuer-freeze";
 import {
   BLOCKLIST_AUTHORITY_DISCRIMINATOR,
   BLOCK_ENTRY_DISCRIMINATOR,
@@ -58,7 +67,13 @@ import {
   getTransferHookConfigDecoder,
   getUpdateTransferHookConfigInstructionAsync,
 } from "@/lib/generated/transfer_hook";
-import { PAUSE_FLAGS_ALL, describePausedAreas, formatPauseFlags, unknownPauseBits } from "@/lib/pause-flags";
+import {
+  PAUSE_FLAGS_ALL,
+  PAUSE_PAYOUT_MODULES,
+  RESUME_EVERYTHING_MASK,
+  describePausedAreas,
+  formatPauseFlags,
+} from "@/lib/pause-flags";
 import { fetchRawAccounts, hasDiscriminator } from "./accounts";
 import type { ToolContext, ToolStatus } from "./context";
 import { idlProbeEvidence, probeIdl, type IdlProbe } from "./idl-plan";
@@ -86,7 +101,7 @@ import {
   type StepRecord,
 } from "./tx";
 
-export const EMERGENCY_OPS = ["pause", "unpause", "block", "unblock", "hook-mode"] as const;
+export const EMERGENCY_OPS = ["pause", "unpause", "block", "unblock", "hook-mode", "freeze-issuer"] as const;
 export type EmergencyOp = (typeof EMERGENCY_OPS)[number];
 
 /** CHAIN_PAUSE_BITS names (lib/pause-flags.ts bits). */
@@ -97,13 +112,16 @@ export const PAUSE_BIT_NAMES: Record<string, number> = {
   "custody-entry": 0x08,
   distributions: 0x10,
   "issuer-proceeds": 0x20,
+  /** D2: stays set on mainnet; clears only on its own (never with `all`). */
+  "payout-modules": PAUSE_PAYOUT_MODULES,
 };
 
 export type EmergencyRequest =
   | { op: "pause"; signer: Address; mask: number }
   | { op: "unpause"; signer: Address; mask: number | "all" }
   | { op: "block" | "unblock"; signer: Address; wallet: Address; confirmWallet: Address | null }
-  | { op: "hook-mode"; signer: Address; mint: Address; mode: RestrictionMode; registry: Address | null };
+  | { op: "hook-mode"; signer: Address; mint: Address; mode: RestrictionMode; registry: Address | null }
+  | { op: "freeze-issuer"; signer: Address; issuer: Address; reasonHash: Uint8Array };
 
 function address(env: ToolContext["env"], name: string): Address {
   const value = env[name]?.trim();
@@ -142,7 +160,24 @@ export function readEmergencyRequest(env: ToolContext["env"]): EmergencyRequest 
     if (mask & ~PAUSE_FLAGS_ALL) throw new ChainGateError(`pause sets only defined bits (${formatPauseFlags(PAUSE_FLAGS_ALL)})`);
     return { op, signer, mask };
   }
-  if (op === "unpause") return { op, signer, mask: parsePauseBits(env.CHAIN_PAUSE_BITS, true) };
+  if (op === "unpause") {
+    const mask = parsePauseBits(env.CHAIN_PAUSE_BITS, true);
+    // The program clears the payout modules only in a call of its own (6154).
+    if (mask !== "all" && (mask & PAUSE_PAYOUT_MODULES) !== 0 && mask !== PAUSE_PAYOUT_MODULES) {
+      throw new ChainGateError("CHAIN_PAUSE_BITS: payout-modules (0x40) is cleared only on its own; unpause it in a separate call");
+    }
+    return { op, signer, mask };
+  }
+  if (op === "freeze-issuer") {
+    // Only the SHA-256 of the case-file reason goes on chain (the same rule as
+    // /admin/issuers: lib/issuer-freeze.ts freezeReasonHash, UTF-8 of the
+    // trimmed text); the text itself stays in the incident record.
+    const hash = env.CHAIN_FREEZE_REASON_SHA256?.trim().toLowerCase();
+    if (!hash || !/^[0-9a-f]{64}$/.test(hash)) {
+      throw new ChainGateError("CHAIN_FREEZE_REASON_SHA256 must be the 64-hex SHA-256 of the case-file reason (printf %s \"<trimmed reason>\" | shasum -a 256)");
+    }
+    return { op, signer, issuer: address(env, "CHAIN_ISSUER"), reasonHash: Uint8Array.from(Buffer.from(hash, "hex")) };
+  }
   if (op === "block" || op === "unblock") {
     const confirm = env.CHAIN_CONFIRM_WALLET?.trim();
     return { op, signer, wallet: address(env, "CHAIN_WALLET"), confirmWallet: confirm && isAddress(confirm) ? confirm : null };
@@ -154,6 +189,26 @@ export function readEmergencyRequest(env: ToolContext["env"]): EmergencyRequest 
   if (mode === RestrictionMode.Open && registryRaw) throw new ChainGateError("CHAIN_KYC_REGISTRY must be unset for open (the hook stores None)");
   const registry = mode === RestrictionMode.KycGated ? address(env, "CHAIN_KYC_REGISTRY") : null;
   return { op, signer, mint: address(env, "CHAIN_MINT"), mode, registry };
+}
+
+/**
+ * D2: on mainnet the payout / Merkle modules (0x40) stay off; switching them
+ * on is an owner decision after a vote of at least 7 days, never an incident
+ * step (the /admin/platform panel refuses it on mainnet as well). An unpause
+ * that clears 0x40 on mainnet therefore needs the explicit override
+ * CHAIN_ENABLE_PAYOUT_MODULES=<the signing super admin, typed out>, which the
+ * evidence records. Returns whether the override was used.
+ */
+export function assertPayoutModulesClearAllowed(req: EmergencyRequest, network: string, env: ToolContext["env"]): boolean {
+  if (req.op !== "unpause" || req.mask === "all" || (req.mask & PAUSE_PAYOUT_MODULES) === 0) return false;
+  if (network !== "mainnet") return false;
+  const confirm = env.CHAIN_ENABLE_PAYOUT_MODULES?.trim();
+  if (confirm !== req.signer) {
+    throw new ChainGateError(
+      "CHAIN_PAUSE_BITS: clearing payout-modules (0x40) on mainnet switches on Startup raises, yield routing, Rights-Token issuances and milestones (D2: an owner decision after a vote of at least 7 days, never an emergency step). With that decision recorded, set CHAIN_ENABLE_PAYOUT_MODULES=<the signing super admin> (recorded)",
+    );
+  }
+  return true;
 }
 
 // ── State ────────────────────────────────────────────────────────────────────
@@ -169,6 +224,10 @@ export type EmergencyState = {
   hookConfig: { mode: RestrictionMode; registry: Address | null } | null;
   /** hook-mode kyc-gated: the target registry is a live KycRegistry. */
   registryLive: boolean | null;
+  /** freeze-issuer: the Issuer account is live (owner and discriminator). */
+  issuerLive?: boolean | null;
+  /** freeze-issuer: the issuer's live IssuerFreeze, or null. */
+  issuerFreeze?: { frozenBy: Address; frozenAt: bigint; reasonHash: string } | null;
 };
 
 /** Finalized probe of every account the request depends on (one call). */
@@ -180,7 +239,9 @@ export async function probeEmergencyState(rpc: ChainRpc, req: EmergencyRequest):
   const entry = wallet ? (await findBlockEntryPda({ wallet }))[0] : null;
   const config = req.op === "hook-mode" ? (await findConfigPda({ mint: req.mint }))[0] : null;
   const registry = req.op === "hook-mode" ? req.registry : null;
-  const wanted = [platform, adminRecord, ba, entry, config, registry].filter((a): a is Address => a !== null);
+  const issuer = req.op === "freeze-issuer" ? req.issuer : null;
+  const freeze = issuer ? (await findIssuerFreezePda({ issuer }))[0] : null;
+  const wanted = [platform, adminRecord, ba, entry, config, registry, issuer, freeze].filter((a): a is Address => a !== null);
   const accounts = await fetchRawAccounts(rpc, wanted);
   const get = (a: Address | null) => (a ? accounts.get(a) ?? null : null);
 
@@ -214,6 +275,18 @@ export async function probeEmergencyState(rpc: ChainRpc, req: EmergencyRequest):
   if (registry) {
     const r = get(registry);
     state.registryLive = Boolean(r && r.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(r.data, KYC_REGISTRY_DISCRIMINATOR));
+  }
+  if (issuer && freeze) {
+    const i = get(issuer);
+    state.issuerLive = Boolean(i && i.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(i.data, ISSUER_DISCRIMINATOR));
+    const f = get(freeze);
+    // Any data at the PDA counts as frozen (the program's is_unset is fail-closed).
+    if (f && f.data.length) {
+      const value = f.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(f.data, ISSUER_FREEZE_DISCRIMINATOR) ? getIssuerFreezeDecoder().decode(f.data) : null;
+      state.issuerFreeze = value
+        ? { frozenBy: value.frozenBy, frozenAt: value.frozenAt, reasonHash: hashHex(value.reasonHash) }
+        : { frozenBy: f.owner, frozenAt: BigInt(0), reasonHash: "" };
+    } else state.issuerFreeze = null;
   }
   return state;
 }
@@ -252,7 +325,7 @@ export async function planEmergency(req: EmergencyRequest, state: EmergencyState
     id,
     title,
     signer,
-    signerRole: req.op === "pause" ? "admin" : req.op === "unpause" ? "superAdmin" : "blocklistAuthority",
+    signerRole: req.op === "pause" || req.op === "freeze-issuer" ? "admin" : req.op === "unpause" ? "superAdmin" : "blocklistAuthority",
     ixs,
     preconditions,
     simulate: "now",
@@ -279,13 +352,49 @@ export async function planEmergency(req: EmergencyRequest, state: EmergencyState
     }
     const isSa = (s: EmergencyState) => s.platform?.admin === S;
     if (!isSa(state)) throw new ChainPlanError(`Only the super admin clears pause bits; ${S} is not the super admin (${state.platform.admin})`);
-    const mask = req.mask === "all" ? PAUSE_FLAGS_ALL | unknownPauseBits(flags) : req.mask;
+    // `all`: every emergency area (and the bootstrap marker, which any clear
+    // closes anyway), never the payout modules.
+    const mask = req.mask === "all" ? RESUME_EVERYTHING_MASK : req.mask;
+    if (req.mask === "all" && (flags & PAUSE_PAYOUT_MODULES) !== 0) {
+      notes.push("The payout modules (0x40) stay off; they are cleared only on their own (CHAIN_PAUSE_BITS=payout-modules), and on mainnet only with CHAIN_ENABLE_PAYOUT_MODULES (D2).");
+    }
     const done = (s: EmergencyState) => Boolean(s.platform && (s.platform.pauseFlags & mask) === 0);
     const summary = `clear ${formatPauseFlags(mask)} (${describePausedAreas(mask) || "undefined bits"}); now ${formatPauseFlags(flags)}`;
     const plan: EmergencyPlan = { step: null, role: "super admin", program: "asset_registry", instruction: "set_pause_flags", summary, noop: null, notes };
     if (done(state)) return { ...plan, noop: `none of the requested bits is set (${formatPauseFlags(flags)})` };
     const ixs = [await getSetPauseFlagsInstructionAsync({ authority: signer, setMask: 0, clearMask: mask })];
     return { ...plan, step: step("unpause", `set_pause_flags(clear ${formatPauseFlags(mask)})`, ixs, [pre(`platform.admin=${S}`, isSa)], done) };
+  }
+
+  if (req.op === "freeze-issuer") {
+    if (!state.platform) throw new ChainPlanError("The Platform account does not exist on this network");
+    const may = (s: EmergencyState) => Boolean(s.platform && (s.platform.admin === S || s.signerIsAdmin));
+    if (!may(state)) throw new ChainPlanError(`${S} is neither the super admin nor an Admin: it cannot freeze an issuer's proceeds`);
+    if (!state.issuerLive) throw new ChainPlanError(`${req.issuer} is not a live Issuer account`);
+    const done = (s: EmergencyState) => Boolean(s.issuerFreeze);
+    const plan: EmergencyPlan = {
+      step: null,
+      role: "Admin or super admin",
+      program: "asset_registry",
+      instruction: "freeze_issuer_proceeds",
+      summary: `freeze the proceeds of issuer ${req.issuer} (reason sha256 ${hashHex(req.reasonHash)})`,
+      noop: null,
+      notes,
+    };
+    if (state.issuerFreeze) {
+      // A second freeze is refused on-chain (the account is in use); the first freezer and reason stay.
+      return { ...plan, noop: `issuer ${req.issuer} is already frozen by ${state.issuerFreeze.frozenBy} (reason sha256 ${state.issuerFreeze.reasonHash || "unknown"})` };
+    }
+    notes.push(
+      "The freeze refuses open_sale, buy, close_sale, open_payout_vault, release_payout and claim_founder_yield of this issuer (6143); investors' refunds and claims stay open.",
+      "It does not stop the issuer wallet's own secondary sales (offers, OTC) or transfers: block that wallet too (op=block, the BA; freeze SOP O-9 in runbook §11).",
+      "Only the super admin lifts it (unfreeze_issuer_proceeds on /admin/issuers, or chain:squads-export registry-ix when the super admin is the vault); the freezer pays the rent and gets it back then.",
+    );
+    const ixs = [await getFreezeIssuerProceedsInstructionAsync({ authority: signer, issuer: req.issuer, reasonHash: req.reasonHash })];
+    return {
+      ...plan,
+      step: step("freeze-issuer", `freeze_issuer_proceeds(${req.issuer})`, ixs, [pre(`signer ${S} is the super admin or an Admin`, may), pre(`issuer ${req.issuer} is not frozen`, (s) => !s.issuerFreeze)], done),
+    };
   }
 
   const isBa = (s: EmergencyState) => s.blocklistAuthority === S;
@@ -402,6 +511,10 @@ export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
   ctx.phase = "inputs";
   const req = readEmergencyRequest(ctx.env);
   evidence.request = req;
+  if (assertPayoutModulesClearAllowed(req, config.network, ctx.env)) {
+    evidence.payoutModulesOverride = req.signer;
+    ctx.log("warning: CHAIN_ENABLE_PAYOUT_MODULES: the payout modules (0x40) are cleared on mainnet (D2 owner decision; recorded in the evidence)");
+  }
   // The mainnet source guard of the other sending tools: the IDL check below
   // covers one instruction definition, not the code that builds and signs it.
   if (config.network === "mainnet") {

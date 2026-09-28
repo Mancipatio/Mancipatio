@@ -8,6 +8,7 @@ import { isAddress, type Address } from "@solana/kit";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
 import type { Network } from "@/lib/network";
+import { EMERGENCY_PAUSE_BITS, formatPauseFlags } from "@/lib/pause-flags";
 import {
   DEFAULT_APPROVED_JURISDICTIONS,
   getRegistryPda,
@@ -65,6 +66,13 @@ export type RoleMap = {
   protocolFeeBps: number;
   squads: SquadsMapConfig;
   unpauseBy: "superAdmin" | "deployer";
+  /**
+   * The pause bits the bootstrap's unpause (S6 / S6d) clears: a non-empty
+   * subset of the six emergency areas (0x3F, the default). Never the payout
+   * modules (0x40), which stay set on mainnet (D2) and clear only in a call
+   * of their own.
+   */
+  unpauseMask: number;
   /** D6: an extra canonical-metadata authority; none by default. */
   metadataAuthority: Address | null;
   allowNonZeroFee: boolean;
@@ -116,7 +124,7 @@ export function overlapConsequences(roles: readonly OverlapRole[]): string[] {
   ];
   const admin = roles.includes("admin") || roles.includes("superAdmin");
   if (has(roles, "superAdmin", "blocklistAuthority")) {
-    out.push("the key can clear every pause bit and also block wallets and switch classes between Open and KycGated, and there is no on-chain recovery of the SA or the BA (a lost key needs a program upgrade through Squads)");
+    out.push("the key can clear every pause bit and also block wallets and switch classes between Open and KycGated, and a lost key is recovered only by the program upgrade authority (Squads) after a 7-day timelock (D4), for the SA and the BA at once");
   }
   if (roles.includes("blocklistAuthority") && admin) {
     out.push("blocklist and clawback with one key: it can block a holder and claw back that holder's units (clawback_blocklisted_holder) alone");
@@ -463,6 +471,15 @@ export async function validateRoleMap(
   const unpauseBy = input.unpauseBy === undefined ? "superAdmin" : input.unpauseBy;
   if (unpauseBy !== "superAdmin" && unpauseBy !== "deployer") errors.push('unpauseBy must be "superAdmin" or "deployer"');
   if (mainnet && unpauseBy !== "superAdmin") errors.push("unpauseBy must be superAdmin on mainnet (D4)");
+  // v1.0.0-rc (§5.4, K1.3): the first unpause closes the bootstrap window, so
+  // it follows X1; after X1 only the super admin clears a pause bit.
+  if (unpauseBy === "deployer" && input.deployer !== input.superAdmin) {
+    errors.push("unpauseBy deployer needs deployer == superAdmin: the first unpause follows X1 (it closes the bootstrap window), and after X1 only the super admin clears pause bits");
+  }
+  const unpauseMask = input.unpauseMask === undefined ? EMERGENCY_PAUSE_BITS : input.unpauseMask;
+  if (typeof unpauseMask !== "number" || !Number.isInteger(unpauseMask) || unpauseMask <= 0 || (unpauseMask & ~EMERGENCY_PAUSE_BITS) !== 0) {
+    errors.push(`unpauseMask must be a non-empty subset of the emergency pause bits ${formatPauseFlags(EMERGENCY_PAUSE_BITS)} (never 0x40 or 0x80)`);
+  }
 
   // Role isolation.
   const memberKeys = new Set<string>(members.map((m) => m.key));
@@ -501,6 +518,13 @@ export async function validateRoleMap(
     errors.push("kyc.authority must not be the superAdmin (its Admin record blocks the handover unless allowKycAdmin)");
   }
   if (squadsKeys.has(superAdmin) && !k4Fallback) errors.push("superAdmin must not be the Squads vault or multisig (unless k4Fallback)");
+  // The vault is the upgrade authority: an Admin record for it, or the SA
+  // role, removes the upgrade authority's independent veto and recovery
+  // (design 8.3 O-10; review finding 6). chain:inventory blocks them live.
+  if (admins.some((admin) => squadsKeys.has(admin))) errors.push("admins must not list the Squads vault or multisig (it is the upgrade authority: Admin == UA)");
+  if (squadsKeys.has(superAdmin) && k4Fallback) {
+    warnings.push("superAdmin is the Squads vault (k4Fallback): the vault is also the upgrade authority, so chain:inventory blocks the handover (sa-is-ua) until the super admin rotates to a Ledger");
+  }
   if (squadsKeys.has(protocolTreasury) && protocolTreasury !== vault) errors.push("protocolTreasury must not be the Squads multisig account (use the vault)");
 
   // KYC registry pin (D3).
@@ -540,6 +564,7 @@ export async function validateRoleMap(
       protocolFeeBps,
       squads: { multisig, vaultIndex, vault, threshold, timeLock, configAuthority, members },
       unpauseBy: unpauseBy as RoleMap["unpauseBy"],
+      unpauseMask: unpauseMask as number,
       metadataAuthority,
       allowNonZeroFee,
       k4Fallback,

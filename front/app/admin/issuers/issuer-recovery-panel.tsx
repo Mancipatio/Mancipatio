@@ -124,7 +124,7 @@ export function IssuerRecoveryPanel({
     now === null
       ? ({ kind: "none" } as const)
       : issuerRecoveryState(recovery, { address: issuer.toString(), authority: authority.toString() }, platformAdmin, now);
-  const transferState = issuerTransferState(issuer.toString(), authority.toString(), transfer);
+  const transferState = issuerTransferState(issuer.toString(), authority.toString(), transfer, now);
   const can = issuerAuthorityActions(wallet, {
     issuerAuthority: authority.toString(),
     platformAdmin,

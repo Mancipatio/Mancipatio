@@ -32,6 +32,7 @@ import {
 } from "@solana/kit";
 import {
   findAcceptPlatformAdminNewAdminRecordPda,
+  findAcceptPlatformAdminRecoveryPda,
   findAcceptPlatformAdminTransferPda,
   findPlatformPda,
 } from "../pdas";
@@ -61,6 +62,7 @@ export type AcceptPlatformAdminInstruction<
   TAccountNewAdminRecord extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountRecovery extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -85,6 +87,9 @@ export type AcceptPlatformAdminInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountRecovery extends string
+        ? ReadonlyAccount<TAccountRecovery>
+        : TAccountRecovery,
       ...TRemainingAccounts,
     ]
   >;
@@ -128,6 +133,7 @@ export type AcceptPlatformAdminAsyncInput<
   TAccountOldAdminRecord extends string = string,
   TAccountNewAdminRecord extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountRecovery extends string = string,
 > = {
   newAdmin: TransactionSigner<TAccountNewAdmin>;
   platform?: Address<TAccountPlatform>;
@@ -136,6 +142,13 @@ export type AcceptPlatformAdminAsyncInput<
   oldAdminRecord: Address<TAccountOldAdminRecord>;
   newAdminRecord?: Address<TAccountNewAdminRecord>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * A pending upgrade-authority recovery (it may not exist); a live one
+   * refuses the accept. A recovery is always against the live super admin
+   * (it moves only by this accept, which it blocks, or by the execute,
+   * which closes it), so an A -> B -> A round trip cannot revive one.
+   */
+  recovery?: Address<TAccountRecovery>;
 };
 
 export async function getAcceptPlatformAdminInstructionAsync<
@@ -145,6 +158,7 @@ export async function getAcceptPlatformAdminInstructionAsync<
   TAccountOldAdminRecord extends string,
   TAccountNewAdminRecord extends string,
   TAccountSystemProgram extends string,
+  TAccountRecovery extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: AcceptPlatformAdminAsyncInput<
@@ -153,7 +167,8 @@ export async function getAcceptPlatformAdminInstructionAsync<
     TAccountTransfer,
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountRecovery
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -164,7 +179,8 @@ export async function getAcceptPlatformAdminInstructionAsync<
     TAccountTransfer,
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountRecovery
   >
 > {
   // Program address.
@@ -179,6 +195,7 @@ export async function getAcceptPlatformAdminInstructionAsync<
     oldAdminRecord: { value: input.oldAdminRecord ?? null, isWritable: true },
     newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    recovery: { value: input.recovery ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -204,6 +221,11 @@ export async function getAcceptPlatformAdminInstructionAsync<
     accounts.systemProgram.value =
       "11111111111111111111111111111111" as Address<"11111111111111111111111111111111">;
   }
+  if (!accounts.recovery.value) {
+    accounts.recovery.value = await findAcceptPlatformAdminRecoveryPda({
+      platform: expectAddress(accounts.platform.value),
+    });
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -214,6 +236,7 @@ export async function getAcceptPlatformAdminInstructionAsync<
       getAccountMeta(accounts.oldAdminRecord),
       getAccountMeta(accounts.newAdminRecord),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.recovery),
     ],
     data: getAcceptPlatformAdminInstructionDataEncoder().encode({}),
     programAddress,
@@ -224,7 +247,8 @@ export async function getAcceptPlatformAdminInstructionAsync<
     TAccountTransfer,
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountRecovery
   >);
 }
 
@@ -235,6 +259,7 @@ export type AcceptPlatformAdminInput<
   TAccountOldAdminRecord extends string = string,
   TAccountNewAdminRecord extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountRecovery extends string = string,
 > = {
   newAdmin: TransactionSigner<TAccountNewAdmin>;
   platform: Address<TAccountPlatform>;
@@ -243,6 +268,13 @@ export type AcceptPlatformAdminInput<
   oldAdminRecord: Address<TAccountOldAdminRecord>;
   newAdminRecord: Address<TAccountNewAdminRecord>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * A pending upgrade-authority recovery (it may not exist); a live one
+   * refuses the accept. A recovery is always against the live super admin
+   * (it moves only by this accept, which it blocks, or by the execute,
+   * which closes it), so an A -> B -> A round trip cannot revive one.
+   */
+  recovery: Address<TAccountRecovery>;
 };
 
 export function getAcceptPlatformAdminInstruction<
@@ -252,6 +284,7 @@ export function getAcceptPlatformAdminInstruction<
   TAccountOldAdminRecord extends string,
   TAccountNewAdminRecord extends string,
   TAccountSystemProgram extends string,
+  TAccountRecovery extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: AcceptPlatformAdminInput<
@@ -260,7 +293,8 @@ export function getAcceptPlatformAdminInstruction<
     TAccountTransfer,
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountRecovery
   >,
   config?: { programAddress?: TProgramAddress },
 ): AcceptPlatformAdminInstruction<
@@ -270,7 +304,8 @@ export function getAcceptPlatformAdminInstruction<
   TAccountTransfer,
   TAccountOldAdminRecord,
   TAccountNewAdminRecord,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountRecovery
 > {
   // Program address.
   const programAddress =
@@ -284,6 +319,7 @@ export function getAcceptPlatformAdminInstruction<
     oldAdminRecord: { value: input.oldAdminRecord ?? null, isWritable: true },
     newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    recovery: { value: input.recovery ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -305,6 +341,7 @@ export function getAcceptPlatformAdminInstruction<
       getAccountMeta(accounts.oldAdminRecord),
       getAccountMeta(accounts.newAdminRecord),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.recovery),
     ],
     data: getAcceptPlatformAdminInstructionDataEncoder().encode({}),
     programAddress,
@@ -315,7 +352,8 @@ export function getAcceptPlatformAdminInstruction<
     TAccountTransfer,
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountRecovery
   >);
 }
 
@@ -332,6 +370,13 @@ export type ParsedAcceptPlatformAdminInstruction<
     oldAdminRecord: TAccountMetas[3];
     newAdminRecord: TAccountMetas[4];
     systemProgram: TAccountMetas[5];
+    /**
+     * A pending upgrade-authority recovery (it may not exist); a live one
+     * refuses the accept. A recovery is always against the live super admin
+     * (it moves only by this accept, which it blocks, or by the execute,
+     * which closes it), so an A -> B -> A round trip cannot revive one.
+     */
+    recovery: TAccountMetas[6];
   };
   data: AcceptPlatformAdminInstructionData;
 };
@@ -344,7 +389,7 @@ export function parseAcceptPlatformAdminInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedAcceptPlatformAdminInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 6) {
+  if (instruction.accounts.length < 7) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -363,6 +408,7 @@ export function parseAcceptPlatformAdminInstruction<
       oldAdminRecord: getNextAccount(),
       newAdminRecord: getNextAccount(),
       systemProgram: getNextAccount(),
+      recovery: getNextAccount(),
     },
     data: getAcceptPlatformAdminInstructionDataDecoder().decode(
       instruction.data,

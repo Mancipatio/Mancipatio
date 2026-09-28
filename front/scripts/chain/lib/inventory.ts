@@ -1,10 +1,20 @@
 /**
  * Tool 3: inventory (`chain:inventory`), read-only on any network
  * (design-3.3 §6). Collects programs, canonical IDL, platform, admins,
- * blocklist authority, KYC registries, authority transfers, issuer
+ * blocklist authority, KYC registries, authority proposals, issuer
  * recoveries, role drift, leftover buffers, the Squads multisig and its
  * proposals that are not final, then
  * classifies findings per phase (`in-progress | pre-handover | handed-over`).
+ *
+ * v1.0.0-rc (8.3) adds: staged Admin grants (`PendingAdmin`), the upgrade
+ * authority's recoveries (`PlatformRecovery`, hook `BlocklistRecovery`),
+ * issuer proceeds freezes, the bootstrap marker (pause bit 7), the payout
+ * modules bit (0x40, set for good on mainnet), incident bytes on chain, and
+ * rc.x `AuthorityTransfer` (137 B) / `BlocklistAuthorityTransfer` (73 B)
+ * accounts the v1 program can no longer read or close, and the upgrade
+ * authority holding an operational role (SA == UA, BA == UA, an Admin record
+ * of the UA; review finding 6, O-10): its veto and D4 recovery need it to be
+ * a separate key, so each is a blocker.
  *
  * `F/scripts/ops/devnet-rollout-inventory.mjs` is unchanged; this tool is
  * the mainnet-capable, role-map-aware inventory.
@@ -13,26 +23,38 @@ import fs from "node:fs";
 import { getAddressEncoder, type Address } from "@solana/kit";
 import {
   ADMIN_DISCRIMINATOR,
-  AUTHORITY_TRANSFER_DISCRIMINATOR,
+  AUTHORITY_PROPOSAL_DISCRIMINATOR,
   ASSET_DISCRIMINATOR,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
   CUSTODY_VAULT_DISCRIMINATOR,
   ISSUER_DISCRIMINATOR,
+  ISSUER_FREEZE_DISCRIMINATOR,
   ISSUER_RECOVERY_DISCRIMINATOR,
   KYC_REGISTRY_DISCRIMINATOR,
   KybStatus,
+  OTC_DEAL_DISCRIMINATOR,
+  OtcDealStatus,
   PAYOUT_VAULT_DISCRIMINATOR,
+  PENDING_ADMIN_DISCRIMINATOR,
   PLATFORM_DISCRIMINATOR,
+  PLATFORM_RECOVERY_DISCRIMINATOR,
   RIGHTS_ISSUANCE_DISCRIMINATOR,
   SALE_DISCRIMINATOR,
   SHARE_CLASS_DISCRIMINATOR,
+  SaleStatus,
   VaultState,
+  VaultType,
+  findAcceptPlatformAdminRecoveryPda,
   findAcceptPlatformAdminTransferPda,
   findPlatformPda,
   getAdminDecoder,
   getAssetDecoder,
-  getAuthorityTransferDecoder,
+  getAuthorityProposalDecoder,
   getCustodyVaultDecoder,
+  getIssuerFreezeDecoder,
+  getOtcDealDecoder,
+  getPendingAdminDecoder,
+  getPlatformRecoveryDecoder,
   getIssuerDecoder,
   getIssuerRecoveryDecoder,
   getKycRegistryDecoder,
@@ -44,14 +66,25 @@ import {
 } from "@/lib/generated/asset_registry";
 import {
   BLOCKLIST_AUTHORITY_DISCRIMINATOR,
-  BLOCKLIST_AUTHORITY_TRANSFER_DISCRIMINATOR,
+  BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR,
+  BLOCKLIST_RECOVERY_DISCRIMINATOR,
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   findBlocklistAuthorityPda,
+  findRecoveryPda as findBlocklistRecoveryPda,
   findTransferPda,
   getBlocklistAuthorityDecoder,
-  getBlocklistAuthorityTransferDecoder,
+  getBlocklistAuthorityProposalDecoder,
+  getBlocklistRecoveryDecoder,
 } from "@/lib/generated/transfer_hook";
-import { formatPauseFlags, unknownPauseBits } from "@/lib/pause-flags";
+import {
+  EMERGENCY_PAUSE_BITS,
+  PAUSE_FLAGS_ALL,
+  PAUSE_PAYOUT_MODULES,
+  describePausedAreas,
+  formatPauseFlags,
+  isBootstrapOpen,
+  unknownPauseBits,
+} from "@/lib/pause-flags";
 import {
   fetchProgramAccounts,
   fetchRawAccount,
@@ -79,6 +112,7 @@ import {
 } from "./network-gates";
 import { executableHash, loadRelease, releaseEvidence, type Release } from "./release";
 import { DEFAULT_ADDRESS, describeOverlap, loadRoleMap, mapKeys, roleOverlapsOf, type RoleMap } from "./role-map";
+import { LEGACY_AUTHORITY_TRANSFER, LEGACY_BLOCKLIST_AUTHORITY_TRANSFER } from "@/lib/legacy-accounts";
 import type { ChainRpc } from "./rpc";
 import { ChainGateError, IDL_PROGRAMS, sha256Hex, type ProgramName } from "./safety";
 import { checkSquadsAccount, scanOpenProposals, type ProposalScan, type SquadsCheck } from "./squads";
@@ -104,8 +138,11 @@ export type ProgramInventory = {
   capacity: number | null;
   payloadExecutableHash: string | null;
   release: { equal: boolean; length: number; headroom: number; verifyHash: string | null } | null;
+  /** The live bytes are the Release's `*-incident.so` (deployed only during an incident). */
+  incident?: boolean;
 };
 
+/** An `AuthorityProposal` ["authority_proposal", target] (v1.0.0-rc). */
 export type TransferRow = {
   address: Address;
   target: Address;
@@ -113,6 +150,28 @@ export type TransferRow = {
   currentAuthority: Address;
   newAuthority: Address;
   proposedBy: Address;
+  stale: boolean;
+  /** Unix seconds (decimal strings): executable from `eta`, strictly before `expiresAt`. */
+  eta?: string;
+  expiresAt?: string;
+};
+
+/**
+ * rc.x `AuthorityTransfer` (137 B, registry) and `BlocklistAuthorityTransfer`
+ * (73 B, hook): the v1 program neither reads nor closes them. Their layouts
+ * left the IDL, so they are matched by their pinned discriminator and size
+ * (one definition, shared with the indexer: lib/legacy-accounts.ts).
+ */
+export { LEGACY_AUTHORITY_TRANSFER, LEGACY_BLOCKLIST_AUTHORITY_TRANSFER };
+
+export type RecoveryRow = {
+  address: Address;
+  currentAuthority: Address;
+  newAuthority: Address;
+  proposedBy: Address;
+  eta: string;
+  expiresAt: string;
+  /** The role moved after the proposal: it can no longer execute. */
   stale: boolean;
 };
 
@@ -135,6 +194,16 @@ export type Inventory = {
   kycRegistries: { address: Address; authority: Address; entriesCount: string; proposed: Address | null }[];
   kycPin: { address: Address; live: boolean } | null;
   authorityTransfers: TransferRow[];
+  /** Staged Admin grants (`PendingAdmin`); `stale`: proposed by an earlier super admin. */
+  pendingAdmins?: { address: Address; newAdmin: Address; proposedBy: Address; eta: string; expiresAt: string; stale: boolean }[];
+  /** The upgrade authority's pending recoveries of the super admin and the blocklist authority. */
+  recoveries?: { platform: RecoveryRow | null; blocklist: RecoveryRow | null };
+  /** Issuers whose proceeds are frozen (D1). */
+  issuerFreezes?: { address: Address; issuer: Address; frozenBy: Address; frozenAt: string }[];
+  /** rc.x authority-transfer accounts still on chain. */
+  legacyTransfers?: { address: Address; program: ProgramName; size: number }[];
+  /** rc.x accounts without the deadline v1 now requires (they keep their old behaviour). */
+  legacyDeadlines?: { deliveryEscrows: Address[]; otcDeals: Address[]; sales: Address[] };
   issuerRecoveries: { address: Address; issuer: Address; newAuthority: Address; proposedBy: Address; eta: string; expiresAt: string }[];
   drift: {
     custodyWithoutAdmin: { vault: Address; authority: Address }[];
@@ -228,6 +297,9 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
       release: compare
         ? { equal: compare.equal, length: compare.length, headroom: compare.headroom, verifyHash: release!.verifyHashes[name] ?? null }
         : null,
+      ...(decoded && release?.incident
+        ? { incident: comparePayload(decoded.payload, release.incident.so[name]).equal }
+        : {}),
     });
   }
 
@@ -240,15 +312,24 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
   const [platformTransfer] = await findAcceptPlatformAdminTransferPda({ platform: platformAddress });
   const [blocklistAddress] = await findBlocklistAuthorityPda();
   const [blocklistTransfer] = await findTransferPda();
-  const singles = await fetchRawAccounts(rpc, [platformAddress, platformTransfer, blocklistAddress, blocklistTransfer]);
+  const [platformRecoveryAddress] = await findAcceptPlatformAdminRecoveryPda({ platform: platformAddress });
+  const [blocklistRecoveryAddress] = await findBlocklistRecoveryPda();
+  const singles = await fetchRawAccounts(rpc, [
+    platformAddress,
+    platformTransfer,
+    blocklistAddress,
+    blocklistTransfer,
+    platformRecoveryAddress,
+    blocklistRecoveryAddress,
+  ]);
   let platform: Inventory["platform"] = null;
   const platformRaw = singles.get(platformAddress);
   if (platformRaw && platformRaw.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(platformRaw.data, PLATFORM_DISCRIMINATOR)) {
     const value = getPlatformDecoder().decode(platformRaw.data);
     const transferRaw = singles.get(platformTransfer);
     let proposed: Address | null = null;
-    if (transferRaw && transferRaw.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(transferRaw.data, AUTHORITY_TRANSFER_DISCRIMINATOR)) {
-      proposed = getAuthorityTransferDecoder().decode(transferRaw.data).newAuthority;
+    if (transferRaw && transferRaw.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(transferRaw.data, AUTHORITY_PROPOSAL_DISCRIMINATOR)) {
+      proposed = getAuthorityProposalDecoder().decode(transferRaw.data).newAuthority;
     }
     platform = {
       address: platformAddress,
@@ -272,14 +353,43 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
     if (
       transferRaw &&
       transferRaw.owner === TRANSFER_HOOK_PROGRAM_ADDRESS &&
-      hasDiscriminator(transferRaw.data, BLOCKLIST_AUTHORITY_TRANSFER_DISCRIMINATOR)
+      hasDiscriminator(transferRaw.data, BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR)
     ) {
-      const transfer = getBlocklistAuthorityTransferDecoder().decode(transferRaw.data);
+      const transfer = getBlocklistAuthorityProposalDecoder().decode(transferRaw.data);
       proposed = transfer.currentAuthority === value.authority ? transfer.newAuthority : null;
-      if (!proposed) decodeErrors.push("BlocklistAuthorityTransfer is stale (current authority moved)");
+      if (!proposed) decodeErrors.push("BlocklistAuthorityProposal is stale (current authority moved)");
     }
     blocklist = { authority: value.authority, proposed };
   } else if (baRaw) decodeErrors.push("BlocklistAuthority: account at the PDA does not decode");
+
+  // The upgrade authority's recoveries (D4): single PDAs.
+  const recoveriesOut: NonNullable<Inventory["recoveries"]> = { platform: null, blocklist: null };
+  const prRaw = singles.get(platformRecoveryAddress);
+  if (prRaw && prRaw.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(prRaw.data, PLATFORM_RECOVERY_DISCRIMINATOR)) {
+    const value = getPlatformRecoveryDecoder().decode(prRaw.data);
+    recoveriesOut.platform = {
+      address: platformRecoveryAddress,
+      currentAuthority: value.currentAdmin,
+      newAuthority: value.newAdmin,
+      proposedBy: value.proposedBy,
+      eta: value.eta.toString(),
+      expiresAt: value.expiresAt.toString(),
+      stale: !platform || value.currentAdmin !== platform.admin,
+    };
+  } else if (prRaw) decodeErrors.push("PlatformRecovery: account at the PDA does not decode");
+  const brRaw = singles.get(blocklistRecoveryAddress);
+  if (brRaw && brRaw.owner === TRANSFER_HOOK_PROGRAM_ADDRESS && hasDiscriminator(brRaw.data, BLOCKLIST_RECOVERY_DISCRIMINATOR)) {
+    const value = getBlocklistRecoveryDecoder().decode(brRaw.data);
+    recoveriesOut.blocklist = {
+      address: blocklistRecoveryAddress,
+      currentAuthority: value.currentAuthority,
+      newAuthority: value.newAuthority,
+      proposedBy: value.proposedBy,
+      eta: value.eta.toString(),
+      expiresAt: value.expiresAt.toString(),
+      stale: !blocklist || value.currentAuthority !== blocklist.authority,
+    };
+  } else if (brRaw) decodeErrors.push("BlocklistRecovery: account at the PDA does not decode");
 
   // 4, 6, 7, 8: registry-owned scans.
   const AR = ASSET_REGISTRY_PROGRAM_ADDRESS;
@@ -288,7 +398,21 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
   );
   const adminSet = new Set<string>(admins.map((a) => a.admin));
   const registries = await scanByDiscriminator(rpc, AR, KYC_REGISTRY_DISCRIMINATOR, getKycRegistryDecoder(), "KycRegistry", decodeErrors);
-  const transfers = await scanByDiscriminator(rpc, AR, AUTHORITY_TRANSFER_DISCRIMINATOR, getAuthorityTransferDecoder(), "AuthorityTransfer", decodeErrors);
+  const transfers = await scanByDiscriminator(rpc, AR, AUTHORITY_PROPOSAL_DISCRIMINATOR, getAuthorityProposalDecoder(), "AuthorityProposal", decodeErrors);
+  const pendingAdminRows = await scanByDiscriminator(rpc, AR, PENDING_ADMIN_DISCRIMINATOR, getPendingAdminDecoder(), "PendingAdmin", decodeErrors);
+  const freezes = await scanByDiscriminator(rpc, AR, ISSUER_FREEZE_DISCRIMINATOR, getIssuerFreezeDecoder(), "IssuerFreeze", decodeErrors);
+  const otcDeals = await scanByDiscriminator(rpc, AR, OTC_DEAL_DISCRIMINATOR, getOtcDealDecoder(), "OtcDeal", decodeErrors);
+  // rc.x layouts, gone from the IDL: pinned discriminator and size, no decode.
+  const legacyTransfers: NonNullable<Inventory["legacyTransfers"]> = [];
+  for (const [program, name, legacy] of [
+    [AR, "asset_registry", LEGACY_AUTHORITY_TRANSFER],
+    [TRANSFER_HOOK_PROGRAM_ADDRESS, "transfer_hook", LEGACY_BLOCKLIST_AUTHORITY_TRANSFER],
+  ] as const) {
+    const rows = await fetchProgramAccounts(rpc, program, [{ offset: 0, bytes: legacy.discriminator }]);
+    for (const row of rows) {
+      if (row.owner === program && row.data.length === legacy.size) legacyTransfers.push({ address: row.address, program: name, size: legacy.size });
+    }
+  }
   const recoveries = await scanByDiscriminator(rpc, AR, ISSUER_RECOVERY_DISCRIMINATOR, getIssuerRecoveryDecoder(), "IssuerRecovery", decodeErrors);
   const custody = await scanByDiscriminator(rpc, AR, CUSTODY_VAULT_DISCRIMINATOR, getCustodyVaultDecoder(), "CustodyVault", decodeErrors);
   const rights = await scanByDiscriminator(rpc, AR, RIGHTS_ISSUANCE_DISCRIMINATOR, getRightsIssuanceDecoder(), "RightsIssuance", decodeErrors);
@@ -325,9 +449,33 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
       newAuthority: value.newAuthority,
       proposedBy: value.proposedBy,
       stale: current === undefined || current !== value.currentAuthority,
+      eta: value.eta.toString(),
+      expiresAt: value.expiresAt.toString(),
     };
   });
   const pendingByTarget = new Map<string, TransferRow>(authorityTransfers.filter((t) => !t.stale).map((t) => [t.target, t]));
+  const pendingAdmins: NonNullable<Inventory["pendingAdmins"]> = pendingAdminRows.map(({ address, value }) => ({
+    address,
+    newAdmin: value.newAdmin,
+    proposedBy: value.proposedBy,
+    eta: value.eta.toString(),
+    expiresAt: value.expiresAt.toString(),
+    stale: !platform || value.proposedBy !== platform.admin,
+  }));
+  const issuerFreezes: NonNullable<Inventory["issuerFreezes"]> = freezes.map(({ address, value }) => ({
+    address,
+    issuer: value.issuer,
+    frozenBy: value.frozenBy,
+    frozenAt: value.frozenAt.toString(),
+  }));
+  // rc.x accounts created without the deadlines v1 requires (info only).
+  const legacyDeadlines: NonNullable<Inventory["legacyDeadlines"]> = {
+    deliveryEscrows: custody
+      .filter((c) => c.value.vaultType === VaultType.DeliveryEscrow && c.value.deadline === BigInt(0) && LIVE_CUSTODY.has(c.value.state))
+      .map((c) => c.address),
+    otcDeals: otcDeals.filter((d) => d.value.expiresAt === BigInt(0) && d.value.status === OtcDealStatus.Open).map((d) => d.address),
+    sales: sales.filter((s) => s.value.endTs === BigInt(0) && s.value.status === SaleStatus.Open).map((s) => s.address),
+  };
   const kycRegistries = registries.map(({ address, value }) => {
     const pending = pendingByTarget.get(address);
     return {
@@ -440,6 +588,11 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
     kycRegistries,
     kycPin,
     authorityTransfers,
+    pendingAdmins,
+    recoveries: recoveriesOut,
+    issuerFreezes,
+    legacyTransfers,
+    legacyDeadlines,
     issuerRecoveries: recoveries.map(({ address, value }) => ({
       address,
       issuer: value.issuer,
@@ -462,7 +615,49 @@ export async function collectInventory(rpc: ChainRpc, input: CollectInput): Prom
 
 export type FindingOptions = {
   handoverWhilePaused?: boolean;
+  /** The cluster, for the mainnet-only checks when there is no role map. */
+  network?: string;
 };
+
+/**
+ * Review finding 6 (rejected in the program, enforced here) and O-10: the
+ * program upgrade authority must hold no operational role. It is the only
+ * veto that survives a compromised super admin (cancel of a grant or a
+ * rotation) and the only recovery of a lost SA or BA (D4); as the SA, the BA
+ * or an Admin it would veto and recover itself. Checked against the live
+ * upgrade authorities and, before the handover, against the vault S7 installs.
+ * The bootstrap deployer holds SA, BA and an Admin record by design until the
+ * handover: its own findings (deployer-role) cover it.
+ */
+function uaOverlapFindings(
+  inv: Inventory,
+  map: RoleMap | null,
+  phase: InventoryPhase,
+  add: (severity: Severity, code: string, message: string) => void,
+) {
+  const holders = new Map<string, string[]>();
+  for (const p of inv.programs) {
+    if (!p.upgradeAuthority || p.upgradeAuthority === map?.deployer) continue;
+    holders.set(p.upgradeAuthority, [...(holders.get(p.upgradeAuthority) ?? []), `the ${p.name} upgrade authority`]);
+  }
+  const future = map && phase !== "handed-over" && !holders.has(map.squads.vault);
+  if (future) holders.set(map.squads.vault, ["the Squads vault (the upgrade authority after S7)"]);
+  const adminKeys = new Set<string>(inv.admins.map((a) => a.admin));
+  for (const [key, what] of holders) {
+    const live = !(future && key === map!.squads.vault);
+    // Live: always a blocker (without a role map it may still be the
+    // bootstrap deployer while in progress). The future vault: from the
+    // pre-handover phase on.
+    const severity: Severity = live ? (map || phase !== "in-progress" ? "blocker" : "warning") : phase === "in-progress" ? "warning" : "blocker";
+    const label = what.join(" and ");
+    if (inv.platform?.admin === key) add(severity, "sa-is-ua", `the super admin ${key} is ${label}: the upgrade authority's veto and recovery (D4) would be its own; rotate the super admin to a separate key`);
+    if (inv.blocklist?.authority === key) add(severity, "ba-is-ua", `the blocklist authority ${key} is ${label}: rotate it to a separate key`);
+    if (adminKeys.has(key)) add(severity, "admin-is-ua", `${label} ${key} holds an Admin record: remove it (remove_admin), the upgrade authority holds no operational role`);
+  }
+}
+
+/** Custody states in which a vault still moves units. */
+const LIVE_CUSTODY = new Set<VaultState>([VaultState.Active, VaultState.Triggered]);
 
 /** Classifies the inventory (design §6 findings table). */
 export function inventoryFindings(
@@ -508,9 +703,80 @@ export function inventoryFindings(
 
   if (!inv.platform) gate("platform-missing", "Platform is not initialized");
   if (!inv.blocklist) gate("blocklist-missing", "BlocklistAuthority is not initialized");
-  if (inv.platform && inv.platform.pauseFlags !== 0) {
-    if (atHandover && !options.handoverWhilePaused) add("blocker", "paused", `pause flags ${inv.platform.pauseFlagsHex} at handover`);
-    else add("info", "paused", `pause flags ${inv.platform.pauseFlagsHex}`);
+  const network = map?.network ?? options.network ?? null;
+  if (inv.platform) {
+    const flags = inv.platform.pauseFlags;
+    // Only the emergency areas count as "paused": the payout modules (0x40)
+    // stay off for good on mainnet, and bit 7 is the bootstrap marker. With a
+    // role map, only the areas S6 opens (`map.unpauseMask`) must be clear at
+    // handover: the pilot keeps the others paused on purpose (0x1c with the
+    // company example's 0x23), before and after S7 — an info, not a blocker.
+    const mustOpen = map ? map.unpauseMask & EMERGENCY_PAUSE_BITS : EMERGENCY_PAUSE_BITS;
+    const held = flags & mustOpen;
+    const pilot = flags & EMERGENCY_PAUSE_BITS & ~mustOpen;
+    if (held !== 0) {
+      const which = map ? ` (${formatPauseFlags(held)} of the unpauseMask ${formatPauseFlags(mustOpen)})` : "";
+      if (atHandover && !options.handoverWhilePaused) add("blocker", "paused", `pause flags ${inv.platform.pauseFlagsHex}${which} at handover`);
+      else add("info", "paused", `pause flags ${inv.platform.pauseFlagsHex}${which}`);
+    }
+    if (pilot !== 0) {
+      add("info", "pilot-paused", `areas outside the role map's unpauseMask stay paused (${formatPauseFlags(pilot)}: ${describePausedAreas(pilot)})`);
+    }
+    if (network === "mainnet" && (flags & PAUSE_PAYOUT_MODULES) === 0) {
+      add("blocker", "payout-modules", `pause bit 0x40 (payout / Merkle modules) is clear on mainnet (${inv.platform.pauseFlagsHex}); D2 keeps it set`);
+    }
+    // Bit 7 must be closed once the final super admin holds the platform (X1).
+    const x1Done = map ? inv.platform.admin === map.superAdmin : false;
+    // A v1 program closes bit 7 with the first clear; bit 7 next to a clear
+    // emergency area means an rc.x build unpaused (a rollback): the timelocks
+    // would be waived on a live platform.
+    const unpaused = (flags & EMERGENCY_PAUSE_BITS) !== EMERGENCY_PAUSE_BITS;
+    if (isBootstrapOpen(flags)) {
+      if (atHandover || x1Done || unpaused) add("blocker", "bootstrap-open", `the bootstrap window (bit 7) is still open (${inv.platform.pauseFlagsHex}${unpaused ? ", with areas unpaused" : ""}): the super admin closes it with set_pause_flags(0, 0x80)`);
+      else add("info", "bootstrap-open", "the bootstrap window (bit 7) is open: Admin grants and the super admin rotation skip their 48 h");
+    }
+    // K1.3: the deployer never lifts a pause (the first unpause is the final SA's).
+    if (map && inv.platform.admin === map.deployer && map.unpauseBy !== "deployer" && (flags & PAUSE_FLAGS_ALL) !== PAUSE_FLAGS_ALL) {
+      add("blocker", "deployer-unpaused", `the deployer is the super admin and a pause bit is clear (${inv.platform.pauseFlagsHex})`);
+    }
+  }
+  for (const p of inv.programs) {
+    if (p.incident) add("blocker", "incident-bytes", `${p.name}: the live program is the Release's incident build; restore the release .so once the incident is closed`);
+  }
+  // Every mainnet Release from v0.0.0-rc.2 on is SBPF v3 (design 8.3 §11).
+  if (network === "mainnet") {
+    for (const info of inv.sbpf ?? []) {
+      if (info.version !== 3) add("blocker", "release-sbpf", `${info.program}: the Release .so is ${info.version === null ? "not an SBPF ELF" : `SBPF v${info.version} (e_flags ${info.eFlags})`}; a mainnet Release must be SBPF v3 (e_flags 3)`);
+    }
+  }
+  uaOverlapFindings(inv, map, phase, add);
+  for (const legacy of inv.legacyTransfers ?? []) {
+    add("blocker", "legacy-transfer", `${legacy.program}: rc.x authority transfer ${legacy.address} (${legacy.size} B) is still on chain; the v1 program cannot close it (cancel it on rc.x before the upgrade)`);
+  }
+  for (const pending of inv.pendingAdmins ?? []) {
+    const text = `Admin grant to ${pending.newAdmin} (${pending.address}) is pending (executable ${pending.eta}–${pending.expiresAt})${pending.stale ? ", proposed by an earlier super admin: cancel it" : ""}`;
+    if (atHandover) add("blocker", "pending-admin", text);
+    else add(pending.stale ? "warning" : "info", "pending-admin", text);
+  }
+  for (const [label, recovery] of [["super admin", inv.recoveries?.platform], ["blocklist authority", inv.recoveries?.blocklist]] as const) {
+    if (!recovery) continue;
+    const text = `a ${label} recovery to ${recovery.newAuthority} by the upgrade authority is pending (${recovery.address}, executable ${recovery.eta}–${recovery.expiresAt})${recovery.stale ? " and stale" : ""}`;
+    if (atHandover) add("blocker", "pending-recovery", text);
+    else add("warning", "pending-recovery", text);
+  }
+  for (const t of inv.authorityTransfers) {
+    if (atHandover && !t.stale && (t.kind === "custody" || t.kind === "issuer" || t.kind === "unknown")) {
+      add("blocker", "pending-proposal", `${t.kind} proposal ${t.address} to ${t.newAuthority} is still pending`);
+    }
+  }
+  for (const freeze of inv.issuerFreezes ?? []) {
+    add("info", "issuer-freeze", `issuer ${freeze.issuer}: proceeds frozen by ${freeze.frozenBy} at ${freeze.frozenAt}`);
+  }
+  const deadlines = inv.legacyDeadlines;
+  if (deadlines) {
+    for (const vault of deadlines.deliveryEscrows) add("info", "legacy-deadline", `delivery escrow ${vault} has no deadline (rc.x)`);
+    for (const deal of deadlines.otcDeals) add("info", "legacy-deadline", `OTC deal ${deal} never expires (expires_at 0, rc.x)`);
+    for (const sale of deadlines.sales) add("info", "legacy-deadline", `sale ${sale} has no end (end_ts 0, rc.x)`);
   }
   if (inv.lockPresent) add("warning", "lock", "a chain lock is present for this network (resolve with CHAIN_RECOVER=1)");
   for (const error of inv.decodeErrors) add("warning", "decode", error);
@@ -688,6 +954,7 @@ export async function inventoryTool(ctx: ToolContext): Promise<ToolStatus> {
   });
   const findings = inventoryFindings(inv, loaded?.map ?? null, phase, {
     handoverWhilePaused: ctx.env.CHAIN_HANDOVER_WHILE_PAUSED?.trim() === "1",
+    network: config.network,
   });
   evidence.inventory = inventoryEvidence(inv);
   evidence.findings = findings;

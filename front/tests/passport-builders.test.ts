@@ -38,7 +38,7 @@ const HOLDER = address("So11111111111111111111111111111111111111112");
 async function transferPda(registry: string) {
   const [pda] = await getProgramDerivedAddress({
     programAddress: ASSET_REGISTRY_PROGRAM_ADDRESS,
-    seeds: [getUtf8Encoder().encode("authority_transfer"), getAddressEncoder().encode(address(registry))],
+    seeds: [getUtf8Encoder().encode("authority_proposal"), getAddressEncoder().encode(address(registry))],
   });
   return pda;
 }
@@ -65,7 +65,7 @@ describe("passport builders take the registry by address", () => {
     }
   });
 
-  it("propose / accept / cancel use ['authority_transfer', registry]", async () => {
+  it("propose / accept / cancel use ['authority_proposal', registry]", async () => {
     const signer = await generateKeyPairSigner();
     const expected = await transferPda(REGISTRY);
     expect(await findKycRegistryTransferPda(REGISTRY)).toBe(expected);
@@ -127,10 +127,11 @@ describe("IDL guard (2C-1)", () => {
     expect(signers("update_kyc_registry_jurisdictions")).toEqual(["authority"]);
   });
 
-  it("the hook's update ends with an optional kyc_registry_account and appends 6016", () => {
+  it("the hook's update ends with an optional kyc_registry_account and 6016 is KycRegistryNotAllowed", () => {
     const accounts = ix("update_transfer_hook_config", hook).accounts;
     expect(accounts.at(-1)).toMatchObject({ name: "kyc_registry_account", optional: true });
-    expect(hook.errors.at(-1)).toEqual(expect.objectContaining({ code: 6016, name: "KycRegistryNotAllowed" }));
+    // 2C-1 appended 6016; v1.0.0-rc appended 6017–6020 after it.
+    expect(hook.errors.find((e: { code: number }) => e.code === 6016)).toEqual(expect.objectContaining({ code: 6016, name: "KycRegistryNotAllowed" }));
   });
 });
 

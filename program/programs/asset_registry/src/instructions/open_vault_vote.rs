@@ -48,6 +48,14 @@ pub fn handle_open_vault_vote(
         total_weight > 0 && voting_period > 0,
         RegistryError::InvalidRaiseParams
     );
+    // D2: at least 7 days of NOTICE. It is not a brake on a malicious root —
+    // only keys in the Admin-chosen snapshot vote, and no instruction cancels
+    // a vote; mainnet safety is `PAUSE_PAYOUT_MODULES` (no Startup sale can
+    // open, so no payout vault exists).
+    crate::util::ensure(
+        voting_period >= MIN_VAULT_VOTING_PERIOD_SECS,
+        RegistryError::VotingPeriodTooShort,
+    )?;
     let now = Clock::get()?.unix_timestamp;
 
     let vote = &mut ctx.accounts.vote;

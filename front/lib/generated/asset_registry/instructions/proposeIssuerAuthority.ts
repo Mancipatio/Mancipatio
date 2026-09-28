@@ -57,6 +57,7 @@ export type ProposeIssuerAuthorityInstruction<
   TAccountTransfer extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountAuthorityBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -75,6 +76,9 @@ export type ProposeIssuerAuthorityInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountAuthorityBlockEntry extends string
+        ? ReadonlyAccount<TAccountAuthorityBlockEntry>
+        : TAccountAuthorityBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -123,11 +127,20 @@ export type ProposeIssuerAuthorityAsyncInput<
   TAccountIssuer extends string = string,
   TAccountTransfer extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountAuthorityBlockEntry extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   issuer: Address<TAccountIssuer>;
   transfer?: Address<TAccountTransfer>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * prog-novac-4: a blocklisted issuer authority cannot stage a rotation
+   * (a new, unblocked key would otherwise reach the proceeds exits after
+   * `sync_sale_authority` / `sync_payout_founder`).
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  authorityBlockEntry: Address<TAccountAuthorityBlockEntry>;
   newAuthority: ProposeIssuerAuthorityInstructionDataArgs["newAuthority"];
 };
 
@@ -136,13 +149,15 @@ export async function getProposeIssuerAuthorityInstructionAsync<
   TAccountIssuer extends string,
   TAccountTransfer extends string,
   TAccountSystemProgram extends string,
+  TAccountAuthorityBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ProposeIssuerAuthorityAsyncInput<
     TAccountAuthority,
     TAccountIssuer,
     TAccountTransfer,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -151,7 +166,8 @@ export async function getProposeIssuerAuthorityInstructionAsync<
     TAccountAuthority,
     TAccountIssuer,
     TAccountTransfer,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >
 > {
   // Program address.
@@ -164,6 +180,10 @@ export async function getProposeIssuerAuthorityInstructionAsync<
     issuer: { value: input.issuer ?? null, isWritable: false },
     transfer: { value: input.transfer ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    authorityBlockEntry: {
+      value: input.authorityBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -191,6 +211,7 @@ export async function getProposeIssuerAuthorityInstructionAsync<
       getAccountMeta(accounts.issuer),
       getAccountMeta(accounts.transfer),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.authorityBlockEntry),
     ],
     data: getProposeIssuerAuthorityInstructionDataEncoder().encode(
       args as ProposeIssuerAuthorityInstructionDataArgs,
@@ -201,7 +222,8 @@ export async function getProposeIssuerAuthorityInstructionAsync<
     TAccountAuthority,
     TAccountIssuer,
     TAccountTransfer,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >);
 }
 
@@ -210,11 +232,20 @@ export type ProposeIssuerAuthorityInput<
   TAccountIssuer extends string = string,
   TAccountTransfer extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountAuthorityBlockEntry extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   issuer: Address<TAccountIssuer>;
   transfer: Address<TAccountTransfer>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * prog-novac-4: a blocklisted issuer authority cannot stage a rotation
+   * (a new, unblocked key would otherwise reach the proceeds exits after
+   * `sync_sale_authority` / `sync_payout_founder`).
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  authorityBlockEntry: Address<TAccountAuthorityBlockEntry>;
   newAuthority: ProposeIssuerAuthorityInstructionDataArgs["newAuthority"];
 };
 
@@ -223,13 +254,15 @@ export function getProposeIssuerAuthorityInstruction<
   TAccountIssuer extends string,
   TAccountTransfer extends string,
   TAccountSystemProgram extends string,
+  TAccountAuthorityBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ProposeIssuerAuthorityInput<
     TAccountAuthority,
     TAccountIssuer,
     TAccountTransfer,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): ProposeIssuerAuthorityInstruction<
@@ -237,7 +270,8 @@ export function getProposeIssuerAuthorityInstruction<
   TAccountAuthority,
   TAccountIssuer,
   TAccountTransfer,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountAuthorityBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -249,6 +283,10 @@ export function getProposeIssuerAuthorityInstruction<
     issuer: { value: input.issuer ?? null, isWritable: false },
     transfer: { value: input.transfer ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    authorityBlockEntry: {
+      value: input.authorityBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -271,6 +309,7 @@ export function getProposeIssuerAuthorityInstruction<
       getAccountMeta(accounts.issuer),
       getAccountMeta(accounts.transfer),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.authorityBlockEntry),
     ],
     data: getProposeIssuerAuthorityInstructionDataEncoder().encode(
       args as ProposeIssuerAuthorityInstructionDataArgs,
@@ -281,7 +320,8 @@ export function getProposeIssuerAuthorityInstruction<
     TAccountAuthority,
     TAccountIssuer,
     TAccountTransfer,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >);
 }
 
@@ -295,6 +335,14 @@ export type ParsedProposeIssuerAuthorityInstruction<
     issuer: TAccountMetas[1];
     transfer: TAccountMetas[2];
     systemProgram: TAccountMetas[3];
+    /**
+     * prog-novac-4: a blocklisted issuer authority cannot stage a rotation
+     * (a new, unblocked key would otherwise reach the proceeds exits after
+     * `sync_sale_authority` / `sync_payout_founder`).
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    authorityBlockEntry: TAccountMetas[4];
   };
   data: ProposeIssuerAuthorityInstructionData;
 };
@@ -307,7 +355,7 @@ export function parseProposeIssuerAuthorityInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedProposeIssuerAuthorityInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 4) {
+  if (instruction.accounts.length < 5) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -324,6 +372,7 @@ export function parseProposeIssuerAuthorityInstruction<
       issuer: getNextAccount(),
       transfer: getNextAccount(),
       systemProgram: getNextAccount(),
+      authorityBlockEntry: getNextAccount(),
     },
     data: getProposeIssuerAuthorityInstructionDataDecoder().decode(
       instruction.data,

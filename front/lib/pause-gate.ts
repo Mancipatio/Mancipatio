@@ -20,9 +20,9 @@
 //     cannot tell from the instruction data and the facts a page passes (a
 //     field of an account decides); null lets the transaction go on to the
 //     program, which decides (fail open, like a failed read).
-// A new bit (8.3: 0x40 PAUSE_PAYOUT_MODULES) is its constant in
-// lib/pause-flags.ts plus its entries here, one per check, with `when` for
-// the conditional ones; nothing else changes. Bit 0x80 (8.3's one-way
+// A new bit is its constant in lib/pause-flags.ts plus its entries here, one
+// per check, with `when` for the conditional ones; nothing else changes (8.3
+// added 0x40 PAUSE_PAYOUT_MODULES this way). Bit 0x80 (the one-way
 // PLATFORM_BOOTSTRAP_OPEN marker) is not a pause bit and gets no entry.
 //
 // The pilot-scope map is MODULE_FLOWS below: each module switch and the
@@ -55,10 +55,11 @@ import {
   fetchMaybePlatform,
   findPlatformPda,
   getOpenCustodyVaultInstructionDataDecoder,
+  getOpenSaleInstructionDataDecoder,
   identifyAssetRegistryInstruction,
+  RaiseType,
   RealizeAction,
   VaultType,
-  type RaiseType,
 } from "@/lib/generated/asset_registry";
 import { detectNetwork, type Network } from "@/lib/network";
 import {
@@ -68,6 +69,7 @@ import {
   PAUSE_FLAGS,
   PAUSE_ISSUER_PROCEEDS,
   PAUSE_ONBOARDING,
+  PAUSE_PAYOUT_MODULES,
   PAUSE_PRIMARY,
   PAUSE_SECONDARY,
   isPaused,
@@ -104,6 +106,23 @@ const notQuarantineVault: GateCondition = ({ data }) => {
   }
 };
 
+/**
+ * A Startup raise: `open_sale` names its raise type in the instruction data;
+ * `buy` reads it from the Sale account (a fact the page passes). Null when
+ * neither says.
+ */
+const startupRaise: GateCondition = ({ data, facts }) => {
+  if (data) {
+    try {
+      if (identifyAssetRegistryInstruction(data) === Ix.OpenSale)
+        return getOpenSaleInstructionDataDecoder().decode(data).raiseType === RaiseType.Startup;
+    } catch {
+      return null;
+    }
+  }
+  return facts.raiseType === undefined ? null : facts.raiseType === RaiseType.Startup;
+};
+
 /** Pause bit → the instructions it stops, one entry per program check. The one place to add a bit. */
 export const PAUSE_BIT_FLOWS: readonly PauseFlow[] = [
   {
@@ -127,6 +146,11 @@ export const PAUSE_BIT_FLOWS: readonly PauseFlow[] = [
     ],
   },
   { bit: PAUSE_ISSUER_PROCEEDS, instructions: [Ix.CloseSale, Ix.ReleasePayout, Ix.ClaimFounderYield] },
+  // D2: the payout / Merkle modules. Yield routing and Rights-Token entries
+  // check it in one mask with PAUSE_DISTRIBUTIONS; a Startup raise (opening
+  // one, or buying into one already open) checks it on its own.
+  { bit: PAUSE_PAYOUT_MODULES, instructions: [Ix.RouteYield, Ix.CreateRightsIssuance, Ix.PublishMilestone] },
+  { bit: PAUSE_PAYOUT_MODULES, instructions: [Ix.OpenSale, Ix.Buy], when: startupRaise },
 ];
 
 const FLOWS_BY_INSTRUCTION = new Map<AssetRegistryInstruction, PauseFlow[]>();
@@ -205,8 +229,13 @@ export function pausedInstruction(
   return null;
 }
 
+/** The refusal for the payout modules: switched off (on mainnet for good, D2), not an emergency. */
+export const PAYOUT_MODULES_OFF_MESSAGE =
+  "Startup raises, yield routing and Rights-Token issuances and milestones (the payout modules) are switched off on Manci. Nothing was sent to your wallet.";
+
 /** The user-facing refusal for a paused bit (the program's own wording, plus the area). */
 export function pausedFlowMessage(bit: number): string {
+  if (bit === PAUSE_PAYOUT_MODULES) return PAYOUT_MODULES_OFF_MESSAGE;
   const flag = PAUSE_FLAGS.find((f) => f.bit === bit);
   const area = flag ? `${flag.label} is paused on Manci (emergency pause). ` : "Manci has temporarily paused this action (emergency pause). ";
   return `${area}Nothing was sent to your wallet. ${PAUSE_EXITS_OPEN}`;

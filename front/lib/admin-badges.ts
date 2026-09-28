@@ -96,7 +96,9 @@ const NOUN: Record<AdminBadgeHref, [one: string, many: string]> = {
   "/admin/inquiries": ["inquiry to handle", "inquiries to handle"],
   "/admin/kyc": ["passport request to decide", "passport requests to decide"],
   "/admin/compliance": ["compliance alert to handle", "compliance alerts to handle"],
+  "/admin/admins": ["Admin grant to review", "Admin grants to review"],
   "/admin/payouts": ["payout schedule overdue", "payout schedules overdue"],
+  "/admin/platform": ["pending authority change to review", "pending authority changes to review"],
 };
 
 /** Fixed labels of the reason keys (never data from the response). */
@@ -115,6 +117,11 @@ const PART_LABEL: Record<BadgePart, string> = {
   noShareClasses: "no share class yet",
   yours: "closable by you",
   issuers: "for the issuer to close",
+  timelock: "in the 48 h review window",
+  stale: "from an earlier Super Admin (cancel)",
+  awaitingKey: "waiting for the new key",
+  rotation: "Super Admin rotation in its 48 h window",
+  recovery: "upgrade-authority recovery pending",
 };
 
 /** Extra context per page, appended to the tooltip. */
@@ -122,6 +129,8 @@ const NOTE: Partial<Record<AdminBadgeHref, string>> = {
   "/admin/clients": "a dossier can be in several",
   "/admin/assets": "activation needs this wallet's admin record",
   "/admin/custody": "confirming a conversion needs the vault authority's wallet",
+  "/admin/admins": "the Super Admin, any Admin or the upgrade authority can cancel",
+  "/admin/platform": "cancel any change you did not expect",
 };
 
 function listParts(parts: Partial<Record<BadgePart, number>> | undefined): string[] {

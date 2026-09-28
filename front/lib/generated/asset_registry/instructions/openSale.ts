@@ -38,6 +38,7 @@ import {
 } from "@solana/kit";
 import {
   findApproverAdminRecordPda,
+  findIssuerFreezePda,
   findPlatformPda,
   findProceedsPda,
   findSaleApprovalPda,
@@ -82,6 +83,7 @@ export type OpenSaleInstruction<
   TAccountApprovedBy extends string | AccountMeta<string> = string,
   TAccountApproverAdminRecord extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountIssuerFreeze extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -130,6 +132,9 @@ export type OpenSaleInstruction<
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountIssuerFreeze extends string
+        ? ReadonlyAccount<TAccountIssuerFreeze>
+        : TAccountIssuerFreeze,
       ...TRemainingAccounts,
     ]
   >;
@@ -213,6 +218,7 @@ export type OpenSaleAsyncInput<
   TAccountApprovedBy extends string = string,
   TAccountApproverAdminRecord extends string = string,
   TAccountPlatform extends string = string,
+  TAccountIssuerFreeze extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   issuer: Address<TAccountIssuer>;
@@ -247,6 +253,11 @@ export type OpenSaleAsyncInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform?: Address<TAccountPlatform>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze?: Address<TAccountIssuerFreeze>;
   saleId: OpenSaleInstructionDataArgs["saleId"];
   pricePerUnit: OpenSaleInstructionDataArgs["pricePerUnit"];
   totalForSale: OpenSaleInstructionDataArgs["totalForSale"];
@@ -272,6 +283,7 @@ export async function getOpenSaleInstructionAsync<
   TAccountApprovedBy extends string,
   TAccountApproverAdminRecord extends string,
   TAccountPlatform extends string,
+  TAccountIssuerFreeze extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenSaleAsyncInput<
@@ -288,7 +300,8 @@ export async function getOpenSaleInstructionAsync<
     TAccountSaleApproval,
     TAccountApprovedBy,
     TAccountApproverAdminRecord,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountIssuerFreeze
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -307,7 +320,8 @@ export async function getOpenSaleInstructionAsync<
     TAccountSaleApproval,
     TAccountApprovedBy,
     TAccountApproverAdminRecord,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountIssuerFreeze
   >
 > {
   // Program address.
@@ -336,6 +350,7 @@ export async function getOpenSaleInstructionAsync<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -375,6 +390,11 @@ export async function getOpenSaleInstructionAsync<
   if (!accounts.platform.value) {
     accounts.platform.value = await findPlatformPda();
   }
+  if (!accounts.issuerFreeze.value) {
+    accounts.issuerFreeze.value = await findIssuerFreezePda({
+      issuer: expectAddress(accounts.issuer.value),
+    });
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -393,6 +413,7 @@ export async function getOpenSaleInstructionAsync<
       getAccountMeta(accounts.approvedBy),
       getAccountMeta(accounts.approverAdminRecord),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.issuerFreeze),
     ],
     data: getOpenSaleInstructionDataEncoder().encode(
       args as OpenSaleInstructionDataArgs,
@@ -413,7 +434,8 @@ export async function getOpenSaleInstructionAsync<
     TAccountSaleApproval,
     TAccountApprovedBy,
     TAccountApproverAdminRecord,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountIssuerFreeze
   >);
 }
 
@@ -432,6 +454,7 @@ export type OpenSaleInput<
   TAccountApprovedBy extends string = string,
   TAccountApproverAdminRecord extends string = string,
   TAccountPlatform extends string = string,
+  TAccountIssuerFreeze extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   issuer: Address<TAccountIssuer>;
@@ -466,6 +489,11 @@ export type OpenSaleInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform: Address<TAccountPlatform>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
   saleId: OpenSaleInstructionDataArgs["saleId"];
   pricePerUnit: OpenSaleInstructionDataArgs["pricePerUnit"];
   totalForSale: OpenSaleInstructionDataArgs["totalForSale"];
@@ -491,6 +519,7 @@ export function getOpenSaleInstruction<
   TAccountApprovedBy extends string,
   TAccountApproverAdminRecord extends string,
   TAccountPlatform extends string,
+  TAccountIssuerFreeze extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenSaleInput<
@@ -507,7 +536,8 @@ export function getOpenSaleInstruction<
     TAccountSaleApproval,
     TAccountApprovedBy,
     TAccountApproverAdminRecord,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountIssuerFreeze
   >,
   config?: { programAddress?: TProgramAddress },
 ): OpenSaleInstruction<
@@ -525,7 +555,8 @@ export function getOpenSaleInstruction<
   TAccountSaleApproval,
   TAccountApprovedBy,
   TAccountApproverAdminRecord,
-  TAccountPlatform
+  TAccountPlatform,
+  TAccountIssuerFreeze
 > {
   // Program address.
   const programAddress =
@@ -553,6 +584,7 @@ export function getOpenSaleInstruction<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -585,6 +617,7 @@ export function getOpenSaleInstruction<
       getAccountMeta(accounts.approvedBy),
       getAccountMeta(accounts.approverAdminRecord),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.issuerFreeze),
     ],
     data: getOpenSaleInstructionDataEncoder().encode(
       args as OpenSaleInstructionDataArgs,
@@ -605,7 +638,8 @@ export function getOpenSaleInstruction<
     TAccountSaleApproval,
     TAccountApprovedBy,
     TAccountApproverAdminRecord,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountIssuerFreeze
   >);
 }
 
@@ -648,6 +682,11 @@ export type ParsedOpenSaleInstruction<
      * account indices and the remaining-accounts hook tail keep their positions.
      */
     platform: TAccountMetas[13];
+    /**
+     * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+     * unset (no freeze in force).
+     */
+    issuerFreeze: TAccountMetas[14];
   };
   data: OpenSaleInstructionData;
 };
@@ -660,7 +699,7 @@ export function parseOpenSaleInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedOpenSaleInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 14) {
+  if (instruction.accounts.length < 15) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -687,6 +726,7 @@ export function parseOpenSaleInstruction<
       approvedBy: getNextAccount(),
       approverAdminRecord: getNextAccount(),
       platform: getNextAccount(),
+      issuerFreeze: getNextAccount(),
     },
     data: getOpenSaleInstructionDataDecoder().decode(instruction.data),
   };

@@ -106,7 +106,8 @@ solana_security_txt::security_txt! {
     contacts: "email:security@mancipatio.io",
     policy: "https://www.manci.io/security",
     preferred_languages: "en",
-    source_code: "https://github.com/Mancipatio/Mancipatio"
+    source_code: "https://github.com/Mancipatio/Mancipatio",
+    auditors: "None"
 }
 
 /// The `asset_registry` program — owner of the `KycRegistry` / `KycEntry`
@@ -120,7 +121,22 @@ pub const HOOK_CONFIG_SEED: &[u8] = b"hook_cfg";
 pub const BLOCK_ENTRY_SEED: &[u8] = b"blocked";
 /// PDA seed for the singleton blocklist authority.
 pub const BLOCKLIST_AUTHORITY_SEED: &[u8] = b"blocklist_authority";
+/// LEGACY (rc.x): `BlocklistAuthorityTransfer` PDA. No v1 instruction reads
+/// it; v1 stages rotations at `BLOCKLIST_AUTHORITY_PROPOSAL_SEED`.
 pub const BLOCKLIST_AUTHORITY_TRANSFER_SEED: &[u8] = b"blocklist_authority_transfer";
+/// `BlocklistAuthorityProposal` PDA (v1): a BA rotation acceptable for 14 days.
+pub const BLOCKLIST_AUTHORITY_PROPOSAL_SEED: &[u8] = b"blocklist_authority_proposal";
+/// `BlocklistRecovery` PDA (D4): the upgrade authority's recovery of a LOST
+/// BlocklistAuthority key.
+pub const BLOCKLIST_RECOVERY_SEED: &[u8] = b"blocklist_recovery";
+/// Every proposal expires 14 days after its eta.
+pub const PROPOSAL_WINDOW_SECS: i64 = 1_209_600;
+/// A BA recovery executes 7 days after it was proposed. The `incident` build
+/// (never a release artifact) sets it to 0 for a COMPROMISED key.
+#[cfg(not(feature = "incident"))]
+pub const RECOVERY_DELAY_SECS: i64 = 604_800;
+#[cfg(feature = "incident")]
+pub const RECOVERY_DELAY_SECS: i64 = 0;
 /// Must match `spl_transfer_hook_interface`'s `EXTRA_ACCOUNT_METAS_SEED`.
 pub const EXTRA_METAS_SEED: &[u8] = b"extra-account-metas";
 /// PDA seed (under `asset_registry`) for a per-holder `KycEntry`.
@@ -359,6 +375,7 @@ pub mod transfer_hook {
     }
 
     /// Stages an operational authority change; does not affect ProgramData.
+    /// Acceptable by `new_authority` for 14 days; a re-proposal overwrites it.
     pub fn propose_blocklist_authority(
         ctx: Context<ProposeBlocklistAuthority>,
         new_authority: Pubkey,
@@ -368,17 +385,110 @@ pub mod transfer_hook {
             new_authority != Pubkey::default() && new_authority != current,
             HookError::InvalidProposedAuthority
         );
+        let now = Clock::get()?.unix_timestamp;
         let transfer = &mut ctx.accounts.transfer;
         transfer.current_authority = current;
         transfer.new_authority = new_authority;
+        transfer.proposed_at = now;
+        transfer.expires_at = now.saturating_add(PROPOSAL_WINDOW_SECS);
         transfer.bump = ctx.bumps.transfer;
         Ok(())
     }
 
+    /// The proposed key takes the BlocklistAuthority (before the proposal
+    /// expires). REFUSED while a recovery is pending (`RecoveryPending`): it
+    /// is cancelled first (`cancel_blocklist_recovery`: the current authority
+    /// or the proposing upgrade authority), or it executes.
+    /// A retire here would let a COMPROMISED authority defeat the `incident`
+    /// build's recovery, which it cannot cancel, by rotating to a second key
+    /// of its own in one transaction (propose + accept) before the execute.
+    /// A recovery is always against the live authority (it can only move by
+    /// this accept, which it blocks, or by the execute, which closes it), so
+    /// no A -> B -> A round trip can revive one either.
     pub fn accept_blocklist_authority(ctx: Context<AcceptBlocklistAuthority>) -> Result<()> {
+        require!(
+            Clock::get()?.unix_timestamp < ctx.accounts.transfer.expires_at,
+            HookError::ProposalExpired
+        );
+        require!(
+            !is_live_recovery(
+                &ctx.accounts.recovery.to_account_info(),
+                &ctx.accounts.blocklist_authority.authority,
+            ),
+            HookError::RecoveryPending
+        );
         ctx.accounts.blocklist_authority.authority = ctx.accounts.new_authority.key();
         msg!(
             "Blocklist operational authority rotated — {}",
+            ctx.accounts.new_authority.key()
+        );
+        Ok(())
+    }
+
+    /// The current BlocklistAuthority withdraws a pending rotation (live or
+    /// expired); the rent returns to it.
+    pub fn cancel_blocklist_authority_transfer(
+        _ctx: Context<CancelBlocklistAuthorityTransfer>,
+    ) -> Result<()> {
+        msg!("Blocklist authority rotation cancelled");
+        Ok(())
+    }
+
+    /// D4: the program upgrade authority proposes recovering a LOST
+    /// BlocklistAuthority key, executable after 7 days for 14 days. A
+    /// re-proposal overwrites it and restarts both clocks.
+    pub fn propose_blocklist_recovery(
+        ctx: Context<ProposeBlocklistRecovery>,
+        new_authority: Pubkey,
+    ) -> Result<()> {
+        let current = ctx.accounts.blocklist_authority.authority;
+        require!(
+            new_authority != Pubkey::default() && new_authority != current,
+            HookError::InvalidProposedAuthority
+        );
+        let now = Clock::get()?.unix_timestamp;
+        let eta = now.saturating_add(RECOVERY_DELAY_SECS);
+        let recovery = &mut ctx.accounts.recovery;
+        recovery.current_authority = current;
+        recovery.new_authority = new_authority;
+        recovery.proposed_by = ctx.accounts.upgrade_authority.key();
+        recovery.proposed_at = now;
+        recovery.eta = eta;
+        recovery.expires_at = eta.saturating_add(PROPOSAL_WINDOW_SECS);
+        recovery.bump = ctx.bumps.recovery;
+        msg!(
+            "Blocklist authority recovery proposed — {} executable from {}",
+            new_authority,
+            eta
+        );
+        Ok(())
+    }
+
+    /// The current BlocklistAuthority (the holder of a key that was not
+    /// lost) or the proposer cancels a recovery. In the `incident` build only
+    /// the proposer may: the case is a COMPROMISED BlocklistAuthority.
+    pub fn cancel_blocklist_recovery(_ctx: Context<CancelBlocklistRecovery>) -> Result<()> {
+        msg!("Blocklist authority recovery cancelled");
+        Ok(())
+    }
+
+    /// The recovered key executes inside `[eta, expires_at)`, while the
+    /// BlocklistAuthority is still the one proposed against and the proposer
+    /// is still the upgrade authority. Retires a pending rotation.
+    pub fn execute_blocklist_recovery(ctx: Context<ExecuteBlocklistRecovery>) -> Result<()> {
+        let now = Clock::get()?.unix_timestamp;
+        require!(now >= ctx.accounts.recovery.eta, HookError::TimelockActive);
+        require!(
+            now < ctx.accounts.recovery.expires_at,
+            HookError::ProposalExpired
+        );
+        retire_pending(
+            &ctx.accounts.transfer.to_account_info(),
+            BlocklistAuthorityProposal::DISCRIMINATOR,
+        )?;
+        ctx.accounts.blocklist_authority.authority = ctx.accounts.new_authority.key();
+        msg!(
+            "Blocklist authority recovered — {}",
             ctx.accounts.new_authority.key()
         );
         Ok(())
@@ -999,9 +1109,9 @@ pub struct ProposeBlocklistAuthority<'info> {
     #[account(seeds = [BLOCKLIST_AUTHORITY_SEED], bump = blocklist_authority.bump,
         has_one = authority @ HookError::Unauthorized)]
     pub blocklist_authority: Account<'info, BlocklistAuthority>,
-    #[account(init_if_needed, payer = authority, space = 8 + BlocklistAuthorityTransfer::INIT_SPACE,
-        seeds = [BLOCKLIST_AUTHORITY_TRANSFER_SEED], bump)]
-    pub transfer: Account<'info, BlocklistAuthorityTransfer>,
+    #[account(init_if_needed, payer = authority, space = 8 + BlocklistAuthorityProposal::INIT_SPACE,
+        seeds = [BLOCKLIST_AUTHORITY_PROPOSAL_SEED], bump)]
+    pub transfer: Account<'info, BlocklistAuthorityProposal>,
     pub system_program: Program<'info, System>,
 }
 
@@ -1011,16 +1121,164 @@ pub struct AcceptBlocklistAuthority<'info> {
     pub new_authority: Signer<'info>,
     #[account(mut, seeds = [BLOCKLIST_AUTHORITY_SEED], bump = blocklist_authority.bump)]
     pub blocklist_authority: Account<'info, BlocklistAuthority>,
-    #[account(mut, close = new_authority, seeds = [BLOCKLIST_AUTHORITY_TRANSFER_SEED], bump = transfer.bump,
+    #[account(mut, close = new_authority, seeds = [BLOCKLIST_AUTHORITY_PROPOSAL_SEED], bump = transfer.bump,
         constraint = transfer.current_authority == blocklist_authority.authority && transfer.new_authority == new_authority.key() @ HookError::InvalidAuthorityTransfer)]
-    pub transfer: Account<'info, BlocklistAuthorityTransfer>,
+    pub transfer: Account<'info, BlocklistAuthorityProposal>,
+    /// A pending recovery (it may not exist); a live one refuses the accept.
+    /// CHECK: address pinned by the seeds; `is_live_recovery` checks the rest.
+    #[account(seeds = [BLOCKLIST_RECOVERY_SEED], bump)]
+    pub recovery: UncheckedAccount<'info>,
 }
 
+#[derive(Accounts)]
+pub struct CancelBlocklistAuthorityTransfer<'info> {
+    #[account(mut)]
+    pub authority: Signer<'info>,
+    #[account(seeds = [BLOCKLIST_AUTHORITY_SEED], bump = blocklist_authority.bump,
+        constraint = blocklist_authority.authority == authority.key() @ HookError::Unauthorized)]
+    pub blocklist_authority: Account<'info, BlocklistAuthority>,
+    #[account(mut, close = authority, seeds = [BLOCKLIST_AUTHORITY_PROPOSAL_SEED], bump = transfer.bump)]
+    pub transfer: Account<'info, BlocklistAuthorityProposal>,
+}
+
+#[derive(Accounts)]
+pub struct ProposeBlocklistRecovery<'info> {
+    /// `ProgramData.upgrade_authority_address`; pays the proposal's rent.
+    #[account(mut)]
+    pub upgrade_authority: Signer<'info>,
+    #[account(seeds = [BLOCKLIST_AUTHORITY_SEED], bump = blocklist_authority.bump)]
+    pub blocklist_authority: Account<'info, BlocklistAuthority>,
+    #[account(init_if_needed, payer = upgrade_authority, space = 8 + BlocklistRecovery::INIT_SPACE,
+        seeds = [BLOCKLIST_RECOVERY_SEED], bump)]
+    pub recovery: Account<'info, BlocklistRecovery>,
+    #[account(constraint = program.programdata_address()? == Some(program_data.key()) @ HookError::Unauthorized)]
+    pub program: Program<'info, crate::program::TransferHook>,
+    #[account(constraint = program_data.upgrade_authority_address == Some(upgrade_authority.key()) @ HookError::Unauthorized)]
+    pub program_data: Account<'info, ProgramData>,
+    pub system_program: Program<'info, System>,
+}
+
+/// The current BlocklistAuthority or the proposer; the proposer only in the
+/// `incident` build (a COMPROMISED BlocklistAuthority must not cancel).
+fn may_cancel_recovery(canceller: &Pubkey, ba: &Pubkey, recovery: &BlocklistRecovery) -> bool {
+    #[cfg(not(feature = "incident"))]
+    let holder = canceller == ba;
+    #[cfg(feature = "incident")]
+    let holder = {
+        let _ = ba;
+        false
+    };
+    holder || *canceller == recovery.proposed_by
+}
+
+#[derive(Accounts)]
+pub struct CancelBlocklistRecovery<'info> {
+    /// Not `mut`: it may be the same key as `proposer`.
+    pub canceller: Signer<'info>,
+    #[account(seeds = [BLOCKLIST_AUTHORITY_SEED], bump = blocklist_authority.bump)]
+    pub blocklist_authority: Account<'info, BlocklistAuthority>,
+    #[account(mut, close = proposer, seeds = [BLOCKLIST_RECOVERY_SEED], bump = recovery.bump,
+        constraint = may_cancel_recovery(&canceller.key(), &blocklist_authority.authority, &recovery) @ HookError::Unauthorized)]
+    pub recovery: Account<'info, BlocklistRecovery>,
+    /// CHECK: the proposing upgrade authority; the rent always returns to it.
+    #[account(mut, address = recovery.proposed_by @ HookError::InvalidRecovery)]
+    pub proposer: UncheckedAccount<'info>,
+}
+
+#[derive(Accounts)]
+pub struct ExecuteBlocklistRecovery<'info> {
+    pub new_authority: Signer<'info>,
+    #[account(mut, seeds = [BLOCKLIST_AUTHORITY_SEED], bump = blocklist_authority.bump)]
+    pub blocklist_authority: Account<'info, BlocklistAuthority>,
+    #[account(mut, close = proposer, seeds = [BLOCKLIST_RECOVERY_SEED], bump = recovery.bump,
+        constraint = recovery.current_authority == blocklist_authority.authority
+            && recovery.new_authority == new_authority.key() @ HookError::InvalidRecovery)]
+    pub recovery: Account<'info, BlocklistRecovery>,
+    /// CHECK: the proposing upgrade authority; receives the recovery's rent.
+    #[account(mut, address = recovery.proposed_by @ HookError::InvalidRecovery)]
+    pub proposer: UncheckedAccount<'info>,
+    /// Binds `program_data` to THIS program.
+    #[account(constraint = program.programdata_address()? == Some(program_data.key()) @ HookError::Unauthorized)]
+    pub program: Program<'info, crate::program::TransferHook>,
+    /// The upgrade authority must still be the proposer.
+    #[account(constraint = program_data.upgrade_authority_address == Some(recovery.proposed_by) @ HookError::InvalidRecovery)]
+    pub program_data: Account<'info, ProgramData>,
+    /// A pending rotation, retired here when present (it may not exist).
+    /// CHECK: address pinned by the seeds; `retire_pending` checks the rest.
+    #[account(mut, seeds = [BLOCKLIST_AUTHORITY_PROPOSAL_SEED], bump)]
+    pub transfer: UncheckedAccount<'info>,
+}
+
+/// `true` iff `record` is a hook-owned `BlocklistRecovery` proposed against
+/// `authority` (its `current_authority`, bytes 8..40). A missing, foreign or
+/// retired account is not live.
+fn is_live_recovery(record: &AccountInfo, authority: &Pubkey) -> bool {
+    if record.owner != &crate::ID {
+        return false;
+    }
+    match record.try_borrow_data() {
+        Ok(data) => {
+            data.len() >= 40
+                && data[..8] == *BlocklistRecovery::DISCRIMINATOR
+                && data[8..40] == authority.to_bytes()
+        }
+        Err(_) => false,
+    }
+}
+
+/// Retires a pending `BlocklistAuthorityProposal` when the BlocklistAuthority
+/// moves by a recovery: its `current_authority` (bytes 8..40) becomes the
+/// default key, which the live authority can never equal, so an A -> B -> A
+/// round trip cannot revive it. Cancel still returns the rent. A missing or
+/// foreign account is a no-op.
+fn retire_pending(record: &AccountInfo, discriminator: &[u8]) -> Result<()> {
+    if record.owner != &crate::ID || record.data_is_empty() {
+        return Ok(());
+    }
+    let mut data = record.try_borrow_mut_data()?;
+    if data.len() >= 40 && data[..8] == *discriminator {
+        data[8..40].fill(0);
+    }
+    Ok(())
+}
+
+/// LEGACY (rc.x, 73 B) at `["blocklist_authority_transfer"]`; no v1
+/// instruction reads it (kept for decoding leftovers).
 #[account]
 #[derive(InitSpace)]
 pub struct BlocklistAuthorityTransfer {
     pub current_authority: Pubkey,
     pub new_authority: Pubkey,
+    pub bump: u8,
+}
+
+/// A staged BlocklistAuthority rotation (v1). Seeds:
+/// `["blocklist_authority_proposal"]`. Layout: current_authority 8,
+/// new_authority 40, proposed_at 72, expires_at 80, bump 88; 89 B.
+#[account]
+#[derive(InitSpace)]
+pub struct BlocklistAuthorityProposal {
+    pub current_authority: Pubkey,
+    pub new_authority: Pubkey,
+    pub proposed_at: i64,
+    /// `proposed_at + PROPOSAL_WINDOW_SECS`; acceptable strictly before it.
+    pub expires_at: i64,
+    pub bump: u8,
+}
+
+/// D4: the upgrade authority's recovery of a LOST BlocklistAuthority key.
+/// Seeds: `["blocklist_recovery"]`. Layout: current_authority 8,
+/// new_authority 40, proposed_by 72, proposed_at 104, eta 112,
+/// expires_at 120, bump 128; 129 B.
+#[account]
+#[derive(InitSpace)]
+pub struct BlocklistRecovery {
+    pub current_authority: Pubkey,
+    pub new_authority: Pubkey,
+    pub proposed_by: Pubkey,
+    pub proposed_at: i64,
+    pub eta: i64,
+    pub expires_at: i64,
     pub bump: u8,
 }
 
@@ -1256,4 +1514,13 @@ pub enum HookError {
     InvalidAuthorityTransfer,
     #[msg("Open restriction mode must not name a KYC registry")]
     KycRegistryNotAllowed,
+    // ── v1.0.0-rc (appended: every earlier code keeps its position) ──
+    #[msg("This proposal has expired; propose again")]
+    ProposalExpired,
+    #[msg("This change is still inside its timelock")]
+    TimelockActive,
+    #[msg("Recovery does not match the current blocklist authority, the executing key or the current upgrade authority")]
+    InvalidRecovery,
+    #[msg("A recovery of the blocklist authority is pending; it must be cancelled or executed before a rotation")]
+    RecoveryPending,
 }

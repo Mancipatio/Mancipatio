@@ -26,8 +26,8 @@ const STATUS_THEME: Record<
     chip: "bg-red-50 text-red-700 ring-1 ring-inset ring-red-200",
     dot: "bg-red-500",
   },
-  // Only undefined bits set: nothing is gated, but the byte is not clean.
-  undefined: {
+  // Nothing is paused, but the one-way bootstrap window is still open.
+  notice: {
     bar: "linear-gradient(90deg, #f59e0b 0%, #d97706 100%)",
     chip: "bg-amber-50 text-amber-800 ring-1 ring-inset ring-amber-200",
     dot: "bg-amber-500",

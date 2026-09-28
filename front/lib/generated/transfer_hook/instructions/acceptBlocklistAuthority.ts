@@ -24,12 +24,17 @@ import {
   type Instruction,
   type InstructionWithAccounts,
   type InstructionWithData,
+  type ReadonlyAccount,
   type ReadonlyUint8Array,
   type TransactionSigner,
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findBlocklistAuthorityPda, findTransferPda } from "../pdas";
+import {
+  findBlocklistAuthorityPda,
+  findRecoveryPda,
+  findTransferPda,
+} from "../pdas";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "../programs";
 import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
 
@@ -48,6 +53,7 @@ export type AcceptBlocklistAuthorityInstruction<
   TAccountNewAuthority extends string | AccountMeta<string> = string,
   TAccountBlocklistAuthority extends string | AccountMeta<string> = string,
   TAccountTransfer extends string | AccountMeta<string> = string,
+  TAccountRecovery extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -63,6 +69,9 @@ export type AcceptBlocklistAuthorityInstruction<
       TAccountTransfer extends string
         ? WritableAccount<TAccountTransfer>
         : TAccountTransfer,
+      TAccountRecovery extends string
+        ? ReadonlyAccount<TAccountRecovery>
+        : TAccountRecovery,
       ...TRemainingAccounts,
     ]
   >;
@@ -103,22 +112,27 @@ export type AcceptBlocklistAuthorityAsyncInput<
   TAccountNewAuthority extends string = string,
   TAccountBlocklistAuthority extends string = string,
   TAccountTransfer extends string = string,
+  TAccountRecovery extends string = string,
 > = {
   newAuthority: TransactionSigner<TAccountNewAuthority>;
   blocklistAuthority?: Address<TAccountBlocklistAuthority>;
   transfer?: Address<TAccountTransfer>;
+  /** A pending recovery (it may not exist); a live one refuses the accept. */
+  recovery?: Address<TAccountRecovery>;
 };
 
 export async function getAcceptBlocklistAuthorityInstructionAsync<
   TAccountNewAuthority extends string,
   TAccountBlocklistAuthority extends string,
   TAccountTransfer extends string,
+  TAccountRecovery extends string,
   TProgramAddress extends Address = typeof TRANSFER_HOOK_PROGRAM_ADDRESS,
 >(
   input: AcceptBlocklistAuthorityAsyncInput<
     TAccountNewAuthority,
     TAccountBlocklistAuthority,
-    TAccountTransfer
+    TAccountTransfer,
+    TAccountRecovery
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -126,7 +140,8 @@ export async function getAcceptBlocklistAuthorityInstructionAsync<
     TProgramAddress,
     TAccountNewAuthority,
     TAccountBlocklistAuthority,
-    TAccountTransfer
+    TAccountTransfer,
+    TAccountRecovery
   >
 > {
   // Program address.
@@ -141,6 +156,7 @@ export async function getAcceptBlocklistAuthorityInstructionAsync<
       isWritable: true,
     },
     transfer: { value: input.transfer ?? null, isWritable: true },
+    recovery: { value: input.recovery ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -154,6 +170,9 @@ export async function getAcceptBlocklistAuthorityInstructionAsync<
   if (!accounts.transfer.value) {
     accounts.transfer.value = await findTransferPda();
   }
+  if (!accounts.recovery.value) {
+    accounts.recovery.value = await findRecoveryPda();
+  }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
@@ -161,6 +180,7 @@ export async function getAcceptBlocklistAuthorityInstructionAsync<
       getAccountMeta(accounts.newAuthority),
       getAccountMeta(accounts.blocklistAuthority),
       getAccountMeta(accounts.transfer),
+      getAccountMeta(accounts.recovery),
     ],
     data: getAcceptBlocklistAuthorityInstructionDataEncoder().encode({}),
     programAddress,
@@ -168,7 +188,8 @@ export async function getAcceptBlocklistAuthorityInstructionAsync<
     TProgramAddress,
     TAccountNewAuthority,
     TAccountBlocklistAuthority,
-    TAccountTransfer
+    TAccountTransfer,
+    TAccountRecovery
   >);
 }
 
@@ -176,29 +197,35 @@ export type AcceptBlocklistAuthorityInput<
   TAccountNewAuthority extends string = string,
   TAccountBlocklistAuthority extends string = string,
   TAccountTransfer extends string = string,
+  TAccountRecovery extends string = string,
 > = {
   newAuthority: TransactionSigner<TAccountNewAuthority>;
   blocklistAuthority: Address<TAccountBlocklistAuthority>;
   transfer: Address<TAccountTransfer>;
+  /** A pending recovery (it may not exist); a live one refuses the accept. */
+  recovery: Address<TAccountRecovery>;
 };
 
 export function getAcceptBlocklistAuthorityInstruction<
   TAccountNewAuthority extends string,
   TAccountBlocklistAuthority extends string,
   TAccountTransfer extends string,
+  TAccountRecovery extends string,
   TProgramAddress extends Address = typeof TRANSFER_HOOK_PROGRAM_ADDRESS,
 >(
   input: AcceptBlocklistAuthorityInput<
     TAccountNewAuthority,
     TAccountBlocklistAuthority,
-    TAccountTransfer
+    TAccountTransfer,
+    TAccountRecovery
   >,
   config?: { programAddress?: TProgramAddress },
 ): AcceptBlocklistAuthorityInstruction<
   TProgramAddress,
   TAccountNewAuthority,
   TAccountBlocklistAuthority,
-  TAccountTransfer
+  TAccountTransfer,
+  TAccountRecovery
 > {
   // Program address.
   const programAddress =
@@ -212,6 +239,7 @@ export function getAcceptBlocklistAuthorityInstruction<
       isWritable: true,
     },
     transfer: { value: input.transfer ?? null, isWritable: true },
+    recovery: { value: input.recovery ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -224,6 +252,7 @@ export function getAcceptBlocklistAuthorityInstruction<
       getAccountMeta(accounts.newAuthority),
       getAccountMeta(accounts.blocklistAuthority),
       getAccountMeta(accounts.transfer),
+      getAccountMeta(accounts.recovery),
     ],
     data: getAcceptBlocklistAuthorityInstructionDataEncoder().encode({}),
     programAddress,
@@ -231,7 +260,8 @@ export function getAcceptBlocklistAuthorityInstruction<
     TProgramAddress,
     TAccountNewAuthority,
     TAccountBlocklistAuthority,
-    TAccountTransfer
+    TAccountTransfer,
+    TAccountRecovery
   >);
 }
 
@@ -244,6 +274,8 @@ export type ParsedAcceptBlocklistAuthorityInstruction<
     newAuthority: TAccountMetas[0];
     blocklistAuthority: TAccountMetas[1];
     transfer: TAccountMetas[2];
+    /** A pending recovery (it may not exist); a live one refuses the accept. */
+    recovery: TAccountMetas[3];
   };
   data: AcceptBlocklistAuthorityInstructionData;
 };
@@ -256,7 +288,7 @@ export function parseAcceptBlocklistAuthorityInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedAcceptBlocklistAuthorityInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 3) {
+  if (instruction.accounts.length < 4) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -272,6 +304,7 @@ export function parseAcceptBlocklistAuthorityInstruction<
       newAuthority: getNextAccount(),
       blocklistAuthority: getNextAccount(),
       transfer: getNextAccount(),
+      recovery: getNextAccount(),
     },
     data: getAcceptBlocklistAuthorityInstructionDataDecoder().decode(
       instruction.data,

@@ -59,6 +59,7 @@ export type PushVestedInstruction<
   TAccountRecipientTokenAccount extends string | AccountMeta<string> = string,
   TAccountTokenProgram extends string | AccountMeta<string> =
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  TAccountRecipientBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -86,6 +87,9 @@ export type PushVestedInstruction<
       TAccountTokenProgram extends string
         ? ReadonlyAccount<TAccountTokenProgram>
         : TAccountTokenProgram,
+      TAccountRecipientBlockEntry extends string
+        ? ReadonlyAccount<TAccountRecipientBlockEntry>
+        : TAccountRecipientBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -132,6 +136,7 @@ export type PushVestedAsyncInput<
   TAccountEscrow extends string = string,
   TAccountRecipientTokenAccount extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountRecipientBlockEntry extends string = string,
 > = {
   /**
    * Anyone — pays for the delivery. Permissionless by design: in Push mode
@@ -149,6 +154,13 @@ export type PushVestedAsyncInput<
    */
   recipientTokenAccount: Address<TAccountRecipientTokenAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * v1 (appended before the hook tail): the recipient is not blocked (the
+   * crank is permissionless, so the check cannot rely on the caller).
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  recipientBlockEntry: Address<TAccountRecipientBlockEntry>;
   positionIndex: PushVestedInstructionDataArgs["positionIndex"];
 };
 
@@ -160,6 +172,7 @@ export async function getPushVestedInstructionAsync<
   TAccountEscrow extends string,
   TAccountRecipientTokenAccount extends string,
   TAccountTokenProgram extends string,
+  TAccountRecipientBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: PushVestedAsyncInput<
@@ -169,7 +182,8 @@ export async function getPushVestedInstructionAsync<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -181,7 +195,8 @@ export async function getPushVestedInstructionAsync<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >
 > {
   // Program address.
@@ -200,6 +215,10 @@ export async function getPushVestedInstructionAsync<
       isWritable: true,
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    recipientBlockEntry: {
+      value: input.recipientBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -231,6 +250,7 @@ export async function getPushVestedInstructionAsync<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.recipientTokenAccount),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.recipientBlockEntry),
     ],
     data: getPushVestedInstructionDataEncoder().encode(
       args as PushVestedInstructionDataArgs,
@@ -244,7 +264,8 @@ export async function getPushVestedInstructionAsync<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >);
 }
 
@@ -256,6 +277,7 @@ export type PushVestedInput<
   TAccountEscrow extends string = string,
   TAccountRecipientTokenAccount extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountRecipientBlockEntry extends string = string,
 > = {
   /**
    * Anyone — pays for the delivery. Permissionless by design: in Push mode
@@ -273,6 +295,13 @@ export type PushVestedInput<
    */
   recipientTokenAccount: Address<TAccountRecipientTokenAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * v1 (appended before the hook tail): the recipient is not blocked (the
+   * crank is permissionless, so the check cannot rely on the caller).
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  recipientBlockEntry: Address<TAccountRecipientBlockEntry>;
   positionIndex: PushVestedInstructionDataArgs["positionIndex"];
 };
 
@@ -284,6 +313,7 @@ export function getPushVestedInstruction<
   TAccountEscrow extends string,
   TAccountRecipientTokenAccount extends string,
   TAccountTokenProgram extends string,
+  TAccountRecipientBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: PushVestedInput<
@@ -293,7 +323,8 @@ export function getPushVestedInstruction<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): PushVestedInstruction<
@@ -304,7 +335,8 @@ export function getPushVestedInstruction<
   TAccountTokenMint,
   TAccountEscrow,
   TAccountRecipientTokenAccount,
-  TAccountTokenProgram
+  TAccountTokenProgram,
+  TAccountRecipientBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -322,6 +354,10 @@ export function getPushVestedInstruction<
       isWritable: true,
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    recipientBlockEntry: {
+      value: input.recipientBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -347,6 +383,7 @@ export function getPushVestedInstruction<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.recipientTokenAccount),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.recipientBlockEntry),
     ],
     data: getPushVestedInstructionDataEncoder().encode(
       args as PushVestedInstructionDataArgs,
@@ -360,7 +397,8 @@ export function getPushVestedInstruction<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >);
 }
 
@@ -386,6 +424,13 @@ export type ParsedPushVestedInstruction<
      */
     recipientTokenAccount: TAccountMetas[5];
     tokenProgram: TAccountMetas[6];
+    /**
+     * v1 (appended before the hook tail): the recipient is not blocked (the
+     * crank is permissionless, so the check cannot rely on the caller).
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    recipientBlockEntry: TAccountMetas[7];
   };
   data: PushVestedInstructionData;
 };
@@ -398,7 +443,7 @@ export function parsePushVestedInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedPushVestedInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 7) {
+  if (instruction.accounts.length < 8) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -418,6 +463,7 @@ export function parsePushVestedInstruction<
       escrow: getNextAccount(),
       recipientTokenAccount: getNextAccount(),
       tokenProgram: getNextAccount(),
+      recipientBlockEntry: getNextAccount(),
     },
     data: getPushVestedInstructionDataDecoder().decode(instruction.data),
   };

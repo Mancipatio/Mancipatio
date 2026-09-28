@@ -3,7 +3,7 @@ vi.mock("server-only", () => ({}));
 import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
 import {
-  getAuthorityTransferEncoder,
+  getAuthorityProposalEncoder,
   getCustodyVaultDecoder,
   getCustodyVaultEncoder,
   getIssuerDecoder,
@@ -15,6 +15,7 @@ import {
   getShareClassEncoder,
 } from "@/lib/generated/asset_registry";
 import { address } from "@solana/kit";
+import { findAuthorityProposalPda } from "@/lib/pdas";
 
 describe("one generated indexer decoder", () => {
   it("covers all 14 existing mirror entities with complete typed non-zero projections", async () => {
@@ -74,16 +75,24 @@ describe("one generated indexer decoder", () => {
 describe("issuer authority rotation (2C-2)", () => {
   const key = address("11111111111111111111111111111111");
   const other = address("SysvarC1ock11111111111111111111111111111111");
-  it("ignores the staged transfer and recovery accounts (no mirror table)", async () => {
+  // v1.0.0-rc (8.3): the staged rotation (AuthorityProposal) is mirrored
+  // since 0079 (authority_proposals), keyed by ["authority_proposal", target];
+  // the issuer recovery still has no mirror table.
+  it("ignores the issuer recovery (no mirror table) and mirrors the staged rotation at its derived PDA", async () => {
     const recovery = new Uint8Array(getIssuerRecoveryEncoder().encode({
       issuer: key, currentAuthority: key, newAuthority: other, proposedBy: key,
       proposedAt: BigInt(1), eta: BigInt(2), expiresAt: BigInt(3), version: 1, bump: 255,
     }));
-    const transfer = new Uint8Array(getAuthorityTransferEncoder().encode({
-      target: key, currentAuthority: key, newAuthority: other, proposedBy: key, bump: 255,
+    const transfer = new Uint8Array(getAuthorityProposalEncoder().encode({
+      target: key, currentAuthority: key, newAuthority: other, proposedBy: key,
+      proposedAt: BigInt(1), eta: BigInt(1), expiresAt: BigInt(2), kind: 2, version: 1, bump: 255,
     }));
     expect(await decodeIndexerAccount(String(key), INDEXER_PROGRAM, recovery)).toBeNull();
-    expect(await decodeIndexerAccount(String(key), INDEXER_PROGRAM, transfer)).toBeNull();
+    await expect(decodeIndexerAccount(String(key), INDEXER_PROGRAM, transfer)).rejects.toThrow(/derived PDA/);
+    const pda = await findAuthorityProposalPda(key);
+    expect(await decodeIndexerAccount(pda, INDEXER_PROGRAM, transfer)).toMatchObject({
+      table: "authority_proposals", row: { pda, target: key, kind: 2, new_authority: other, eta: "1", expires_at: "2" },
+    });
   });
   it("re-projects a rotated Issuer with the new authority and nothing else changed", async () => {
     const f = indexerFixtures().find((f) => f.table === "issuers")!;

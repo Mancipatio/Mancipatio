@@ -11,8 +11,6 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
   findIssuerPda,
-  getCloseSaleInstruction,
-  findPlatformPda,
   getOpenSaleInstructionAsync,
   fetchMaybeSaleApproval,
   findSaleApprovalPda,
@@ -22,6 +20,8 @@ import {
   type Sale,
   type SaleApproval,
 } from "@/lib/generated/asset_registry";
+import { buildCloseSaleInstruction } from "@/lib/proceeds-exits";
+import { saleEndError, saleEndInputBounds } from "@/lib/deadline-bounds";
 import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
@@ -393,16 +393,14 @@ function SaleDetail({
           mint: sale.paymentMint,
           tokenProgram: paymentTokenProgram,
         });
-      // Emergency-pause gate (read-only) — the last named account.
-      const [platform] = await findPlatformPda();
-      const closeIx = getCloseSaleInstruction({
-        platform,
+      // The pause gate, the issuer's proceeds freeze and both parties'
+      // blocklist entries (lib/proceeds-exits).
+      const closeIx = await buildCloseSaleInstruction(client.runtime.rpc, {
         authority: signer,
-        sale: salePda,
-        proceeds: sale.proceeds,
-        paymentMint: sale.paymentMint,
+        sale: { address: salePda, shareClass: sale.shareClass, proceeds: sale.proceeds, paymentMint: sale.paymentMint },
         destination: destAta,
-        paymentTokenProgram: paymentTokenProgram,
+        destinationOwner: wallet,
+        paymentTokenProgram,
       });
       const sig = await tx.send({
         instructions: [...syncIxs, createDestAtaIx, closeIx],
@@ -541,7 +539,10 @@ function OpenSaleModal({
   const [saleId, setSaleId] = useState("1");
   const [pricePerUnit, setPricePerUnit] = useState("");
   const [totalForSale, setTotalForSale] = useState("");
-  const [endTs, setEndTs] = useState("");
+  // v1: every sale ends, at most 365 days out (6145); the input starts at a
+  // 30-day default and cannot go past the cap minus the chain-clock margin.
+  const [endBounds] = useState(() => saleEndInputBounds());
+  const [endTs, setEndTs] = useState(endBounds.defaultValue);
   // The Admin SaleApproval for (share class, sale id): open_sale consumes it,
   // and it fixes the payment mint, price range, maximum raise and raise type.
   const [approval, setApproval] = useState<SaleApproval | null>(null);
@@ -671,6 +672,14 @@ function OpenSaleModal({
       const endTsBig = endTs.trim()
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
+      // v1: every sale ends, at most 365 days out (SaleDurationInvalid 6145),
+      // judged with the chain-clock margin (lib/deadline-bounds.ts).
+      const endError = saleEndError(BigInt(0), endTsBig);
+      if (endError) {
+        toast.dismiss(pendingId);
+        toast.showError("Sale end date", endError);
+        return;
+      }
       const signer = walletSigner(conn.wallet);
       // The payment mint comes from the approval (classic SPL or Token-2022).
       const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(
@@ -897,11 +906,14 @@ function OpenSaleModal({
           </div>
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-              End date (optional, leave blank for no end)
+              End date (required: every sale ends, at most 365 days out)
             </span>
             <input
               type="datetime-local"
+              required
               value={endTs}
+              min={endBounds.min}
+              max={endBounds.max}
               onChange={(e) => setEndTs(e.target.value)}
               className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
             />

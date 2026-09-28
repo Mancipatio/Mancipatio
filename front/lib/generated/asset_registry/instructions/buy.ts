@@ -10,8 +10,10 @@ import {
   combineCodec,
   fixDecoderSize,
   fixEncoderSize,
+  getAddressEncoder,
   getBytesDecoder,
   getBytesEncoder,
+  getProgramDerivedAddress,
   getStructDecoder,
   getStructEncoder,
   getU64Decoder,
@@ -32,9 +34,13 @@ import {
   type WritableAccount,
   type WritableSignerAccount,
 } from "@solana/kit";
-import { findPlatformPda } from "../pdas";
+import { findIssuerFreezePda, findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
-import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
+import {
+  expectAddress,
+  getAccountMetaFactory,
+  type ResolvedAccount,
+} from "../shared";
 
 export const BUY_DISCRIMINATOR = new Uint8Array([
   102, 6, 61, 18, 1, 218, 235, 234,
@@ -59,6 +65,8 @@ export type BuyInstruction<
   TAccountAsset extends string | AccountMeta<string> = string,
   TAccountIssuer extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountBuyerBlockEntry extends string | AccountMeta<string> = string,
+  TAccountIssuerFreeze extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -104,6 +112,12 @@ export type BuyInstruction<
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountBuyerBlockEntry extends string
+        ? ReadonlyAccount<TAccountBuyerBlockEntry>
+        : TAccountBuyerBlockEntry,
+      TAccountIssuerFreeze extends string
+        ? ReadonlyAccount<TAccountIssuerFreeze>
+        : TAccountIssuerFreeze,
       ...TRemainingAccounts,
     ]
   >;
@@ -156,6 +170,8 @@ export type BuyAsyncInput<
   TAccountAsset extends string = string,
   TAccountIssuer extends string = string,
   TAccountPlatform extends string = string,
+  TAccountBuyerBlockEntry extends string = string,
+  TAccountIssuerFreeze extends string = string,
 > = {
   buyer: TransactionSigner<TAccountBuyer>;
   sale: Address<TAccountSale>;
@@ -181,6 +197,17 @@ export type BuyAsyncInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform?: Address<TAccountPlatform>;
+  /**
+   * v1 (appended after `platform`): the buyer is not on the hook blocklist.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  buyerBlockEntry?: Address<TAccountBuyerBlockEntry>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze?: Address<TAccountIssuerFreeze>;
   amount: BuyInstructionDataArgs["amount"];
 };
 
@@ -198,6 +225,8 @@ export async function getBuyInstructionAsync<
   TAccountAsset extends string,
   TAccountIssuer extends string,
   TAccountPlatform extends string,
+  TAccountBuyerBlockEntry extends string,
+  TAccountIssuerFreeze extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: BuyAsyncInput<
@@ -213,7 +242,9 @@ export async function getBuyInstructionAsync<
     TAccountPaymentTokenProgram,
     TAccountAsset,
     TAccountIssuer,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountIssuerFreeze
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -231,7 +262,9 @@ export async function getBuyInstructionAsync<
     TAccountPaymentTokenProgram,
     TAccountAsset,
     TAccountIssuer,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountIssuerFreeze
   >
 > {
   // Program address.
@@ -265,6 +298,11 @@ export async function getBuyInstructionAsync<
     asset: { value: input.asset ?? null, isWritable: false },
     issuer: { value: input.issuer ?? null, isWritable: false },
     platform: { value: input.platform ?? null, isWritable: false },
+    buyerBlockEntry: {
+      value: input.buyerBlockEntry ?? null,
+      isWritable: false,
+    },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -277,6 +315,23 @@ export async function getBuyInstructionAsync<
   // Resolve default values.
   if (!accounts.platform.value) {
     accounts.platform.value = await findPlatformPda();
+  }
+  if (!accounts.buyerBlockEntry.value) {
+    accounts.buyerBlockEntry.value = await getProgramDerivedAddress({
+      programAddress:
+        "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy" as Address<"GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy">,
+      seeds: [
+        getBytesEncoder().encode(
+          new Uint8Array([98, 108, 111, 99, 107, 101, 100]),
+        ),
+        getAddressEncoder().encode(expectAddress(accounts.buyer.value)),
+      ],
+    });
+  }
+  if (!accounts.issuerFreeze.value) {
+    accounts.issuerFreeze.value = await findIssuerFreezePda({
+      issuer: expectAddress(accounts.issuer.value),
+    });
   }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
@@ -295,6 +350,8 @@ export async function getBuyInstructionAsync<
       getAccountMeta(accounts.asset),
       getAccountMeta(accounts.issuer),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.buyerBlockEntry),
+      getAccountMeta(accounts.issuerFreeze),
     ],
     data: getBuyInstructionDataEncoder().encode(args as BuyInstructionDataArgs),
     programAddress,
@@ -312,7 +369,9 @@ export async function getBuyInstructionAsync<
     TAccountPaymentTokenProgram,
     TAccountAsset,
     TAccountIssuer,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountIssuerFreeze
   >);
 }
 
@@ -330,6 +389,8 @@ export type BuyInput<
   TAccountAsset extends string = string,
   TAccountIssuer extends string = string,
   TAccountPlatform extends string = string,
+  TAccountBuyerBlockEntry extends string = string,
+  TAccountIssuerFreeze extends string = string,
 > = {
   buyer: TransactionSigner<TAccountBuyer>;
   sale: Address<TAccountSale>;
@@ -355,6 +416,17 @@ export type BuyInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform: Address<TAccountPlatform>;
+  /**
+   * v1 (appended after `platform`): the buyer is not on the hook blocklist.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  buyerBlockEntry: Address<TAccountBuyerBlockEntry>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
   amount: BuyInstructionDataArgs["amount"];
 };
 
@@ -372,6 +444,8 @@ export function getBuyInstruction<
   TAccountAsset extends string,
   TAccountIssuer extends string,
   TAccountPlatform extends string,
+  TAccountBuyerBlockEntry extends string,
+  TAccountIssuerFreeze extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: BuyInput<
@@ -387,7 +461,9 @@ export function getBuyInstruction<
     TAccountPaymentTokenProgram,
     TAccountAsset,
     TAccountIssuer,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountIssuerFreeze
   >,
   config?: { programAddress?: TProgramAddress },
 ): BuyInstruction<
@@ -404,7 +480,9 @@ export function getBuyInstruction<
   TAccountPaymentTokenProgram,
   TAccountAsset,
   TAccountIssuer,
-  TAccountPlatform
+  TAccountPlatform,
+  TAccountBuyerBlockEntry,
+  TAccountIssuerFreeze
 > {
   // Program address.
   const programAddress =
@@ -437,6 +515,11 @@ export function getBuyInstruction<
     asset: { value: input.asset ?? null, isWritable: false },
     issuer: { value: input.issuer ?? null, isWritable: false },
     platform: { value: input.platform ?? null, isWritable: false },
+    buyerBlockEntry: {
+      value: input.buyerBlockEntry ?? null,
+      isWritable: false,
+    },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -462,6 +545,8 @@ export function getBuyInstruction<
       getAccountMeta(accounts.asset),
       getAccountMeta(accounts.issuer),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.buyerBlockEntry),
+      getAccountMeta(accounts.issuerFreeze),
     ],
     data: getBuyInstructionDataEncoder().encode(args as BuyInstructionDataArgs),
     programAddress,
@@ -479,7 +564,9 @@ export function getBuyInstruction<
     TAccountPaymentTokenProgram,
     TAccountAsset,
     TAccountIssuer,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountIssuerFreeze
   >);
 }
 
@@ -513,6 +600,17 @@ export type ParsedBuyInstruction<
      * account indices and the remaining-accounts hook tail keep their positions.
      */
     platform: TAccountMetas[12];
+    /**
+     * v1 (appended after `platform`): the buyer is not on the hook blocklist.
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    buyerBlockEntry: TAccountMetas[13];
+    /**
+     * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+     * unset (no freeze in force).
+     */
+    issuerFreeze: TAccountMetas[14];
   };
   data: BuyInstructionData;
 };
@@ -525,7 +623,7 @@ export function parseBuyInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedBuyInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 13) {
+  if (instruction.accounts.length < 15) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -551,6 +649,8 @@ export function parseBuyInstruction<
       asset: getNextAccount(),
       issuer: getNextAccount(),
       platform: getNextAccount(),
+      buyerBlockEntry: getNextAccount(),
+      issuerFreeze: getNextAccount(),
     },
     data: getBuyInstructionDataDecoder().decode(instruction.data),
   };

@@ -162,11 +162,13 @@ export const MAX_CU_PRICE = MAX_COMPUTE_UNIT_PRICE;
 export const DEFAULT_RPS = 2;
 export const MAX_RPS = 20;
 
-export type RehearsalRole = "superAdmin" | "blocklistAuthority" | "kycAuthority";
+/** `admin`: the first role-map admin, which executes its own `add_admin` (v1.0.0-rc). */
+export type RehearsalRole = "superAdmin" | "blocklistAuthority" | "kycAuthority" | "admin";
 const REHEARSAL_ROLES: readonly RehearsalRole[] = [
   "superAdmin",
   "blocklistAuthority",
   "kycAuthority",
+  "admin",
 ];
 
 export type ChainConfig = {
@@ -267,7 +269,7 @@ function parseRehearsal(
     const file = part.slice(index + 1).trim();
     if (index <= 0 || !file || !REHEARSAL_ROLES.includes(role) || out[role]) {
       throw new ChainGateError(
-        "CHAIN_REHEARSAL_SIGNERS must be role=keypair pairs (superAdmin, blocklistAuthority, kycAuthority), comma separated",
+        "CHAIN_REHEARSAL_SIGNERS must be role=keypair pairs (superAdmin, blocklistAuthority, kycAuthority, admin), comma separated",
       );
     }
     out[role] = file;

@@ -3,12 +3,15 @@ import path from "node:path";
 import { createNoopSigner, isSignerRole, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
 import {
+  findAcceptPlatformAdminRecoveryPda,
   findAcceptPlatformAdminTransferPda,
   findAdminRecordPda,
   findPlatformPda,
+  getPlatformRecoveryEncoder,
   getAcceptPlatformAdminInstructionAsync,
+  getAddAdminInstructionAsync,
   getAdminEncoder,
-  getAuthorityTransferEncoder,
+  getAuthorityProposalEncoder,
   getKycRegistryEncoder,
   getPlatformEncoder,
   getSetPauseFlagsInstructionAsync,
@@ -18,7 +21,7 @@ import {
   findTransferPda,
   getAcceptBlocklistAuthorityInstructionAsync,
   getBlocklistAuthorityEncoder,
-  getBlocklistAuthorityTransferEncoder,
+  getBlocklistAuthorityProposalEncoder,
 } from "@/lib/generated/transfer_hook";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import {
@@ -64,25 +67,67 @@ async function plan(w: World, signers?: Parameters<typeof planBootstrap>[2]): Pr
 
 const ids = (p: BootstrapPlan) => p.steps.map((s) => s.id);
 
+/**
+ * A full rehearsal sends every bootstrap transaction through the fake chain
+ * (v1: 13 of them, with the Admin's own add_admin and the bootstrap close):
+ * more than vitest's 5 s default under a loaded parallel run.
+ */
+const REHEARSAL_TIMEOUT_MS = 30_000;
+
+/** Every role key as a rehearsal signer, the role-map admin included (v1: it executes its own add_admin). */
+const rehearsalAll = (w: World) => ({
+  CHAIN_REHEARSAL_SIGNERS: [
+    `superAdmin=${w.pairs.superAdmin.path}`,
+    `blocklistAuthority=${w.pairs.blocklistAuthority.path}`,
+    `kycAuthority=${w.pairs.kycAuthority.path}`,
+    `admin=${w.pairs.admin.path}`,
+  ].join(","),
+});
+
+/** A v1 AuthorityProposal (no timelock, 14 days) as the chain would hold it. */
+const proposalBytes = (target: Address, currentAuthority: Address, newAuthority: Address, kind: number) =>
+  new Uint8Array(
+    getAuthorityProposalEncoder().encode({
+      target,
+      currentAuthority,
+      newAuthority,
+      proposedBy: currentAuthority,
+      proposedAt: 1_900_000_000,
+      eta: 1_900_000_000,
+      expiresAt: 1_900_000_000 + 1_209_600,
+      kind,
+      version: 1,
+      bump: 255,
+    }),
+  );
+
 describe("bootstrap plan on an empty chain (C1)", () => {
-  it("builds cycle 1 through the real builders: S1/S2 now, the rest at-send, S5 included", async () => {
+  it("builds cycle 1 through the real builders: S1/S2 now, the rest at-send; S5 waits for the Admin's own add_admin", async () => {
     const w = await world();
     const p = await plan(w);
     const admin = w.keys.admins[0];
-    expect(ids(p)).toEqual(["S1", "S2", "S2b", `S3:${admin}`, "S4", "S4b", "S5"]);
-    expect(p.steps.map((s) => s.simulate)).toEqual(["now", "now", "at-send", "at-send", "at-send", "at-send", "at-send"]);
+    // v1 (D3): S3 proposes the grant; the admin key executes add_admin (A3) itself.
+    expect(ids(p)).toEqual(["S1", "S2", "S2b", `S3:${admin}`, "S4", "S4b"]);
+    expect(p.steps.map((s) => s.simulate)).toEqual(["now", "now", "at-send", "at-send", "at-send", "at-send"]);
     expect(p.stops).toEqual([]);
-    expect(p.awaiting.map((a) => a.id)).toEqual(["X3", "X2", "X1"]);
-    expect(p.awaiting.find((a) => a.id === "X1")).toMatchObject({ page: "/issuer/authority", key: w.keys.superAdmin });
+    expect(p.awaiting.map((a) => a.id)).toEqual([`A3:${admin}`, "X3", "X2"]);
+    expect(p.awaiting.find((a) => a.id === `A3:${admin}`)).toMatchObject({ page: "/account/roles", key: admin, role: "admin" });
     // uloge-runbook-10: the proposed KYC key is no kycProvider (and no Admin)
     // before it accepts, so /admin/kyc refuses it; it accepts on /account/roles.
     expect(p.awaiting.find((a) => a.id === "X2")).toMatchObject({ page: "/account/roles", key: w.keys.kycAuthority });
-    expect(p.blocked.map((b) => b.id)).toEqual(["S6"]);
+    // Every grant executes while the bootstrap window is open, before X1.
+    expect(p.blocked.map((b) => b.id)).toEqual(["S5", "X1", "S5c", "S6"]);
+    expect(p.blocked.find((b) => b.id === "S5")?.reason).toBe(`waits for A3:${admin}`);
     expect(p.handover).toEqual({ planned: false, reason: "earlier steps are pending" });
     expect(p.skipped.map((s) => s.id)).toEqual(expect.arrayContaining(["S1b", "S4c", "S4b.cancel"]));
+    // With the admin's own signer (rehearsal) the grant and S5 join cycle 1.
+    const withAdmin = await plan(w, { deployer: createNoopSigner(w.keys.deployer), rehearsal: { admin: createNoopSigner(admin) } });
+    expect(ids(withAdmin)).toEqual(["S1", "S2", "S2b", `S3:${admin}`, `A3:${admin}`, "S4", "S4b", "S5"]);
+    expect(withAdmin.awaiting.map((a) => a.id)).toEqual(["X3", "X2", "X1"]);
+    expect(withAdmin.awaiting.find((a) => a.id === "X1")).toMatchObject({ page: "/issuer/authority", key: w.keys.superAdmin });
   });
 
-  it("every transaction has exactly one signer: the deployer", async () => {
+  it("every deployer transaction has exactly one signer: the deployer", async () => {
     const w = await world();
     const p = await plan(w);
     for (const step of p.steps) {
@@ -119,6 +164,7 @@ describe("bootstrap plan on an empty chain (C1)", () => {
     expect(lines.join("\n")).toMatch(/deferred: depends on/);
     expect(lines.join("\n")).toMatch(new RegExp(`NEXT_PUBLIC_KYC_REGISTRY=${w.map.kyc.registry}`));
     expect(lines.join("\n")).toMatch(/ACTION REQUIRED X3/);
+    expect(lines.join("\n")).toMatch(/^bootstrap window: opens at S1 \(a fresh Platform is 0xff\)/m);
     expect(w.chain.calls).not.toContain("sendTransaction");
   });
 });
@@ -137,12 +183,14 @@ describe("bootstrap send (C1, C7)", () => {
     expect(evidence.error ?? null).toBeNull();
     expect(evidence.status).toBe("awaiting");
     const steps = evidence.steps as { id: string; outcome: string }[];
-    expect(steps.map((s) => s.id)).toEqual(["S1", "S2", "S2b", `S3:${w.keys.admins[0]}`, "S4", "S4b", "S5"]);
+    expect(steps.map((s) => s.id)).toEqual(["S1", "S2", "S2b", `S3:${w.keys.admins[0]}`, "S4", "S4b"]);
     expect(steps.every((s) => s.outcome === "finalized")).toBe(true);
     expect(order).toEqual(steps.flatMap(() => ["simulate", "send"]));
     const state = await probeBootstrapState(rpcFor(w), w.map);
-    expect(state.platform?.admin).toBe(w.keys.deployer);
-    expect(state.platformProposed).toBe(w.keys.superAdmin);
+    expect(state.platform).toMatchObject({ admin: w.keys.deployer, pauseFlags: 0xff });
+    expect(state.pendingAdmins[w.keys.admins[0]]).toBe(true);
+    // S5 waits for the admin's own add_admin.
+    expect(state.platformProposed).toBeNull();
     expect(state.blocklist).toEqual({ authority: w.keys.deployer, proposed: w.keys.blocklistAuthority });
     expect(state.registryProposed).toBe(w.keys.kycAuthority);
     // The lock is released once every signature resolved.
@@ -195,28 +243,28 @@ describe("bootstrap send (C1, C7)", () => {
     expect(idlSend.error ?? null).toBeNull();
     expect(idlSend.status).toBe("completed");
 
-    const rehearsal = {
-      CHAIN_REHEARSAL_SIGNERS: [
-        `superAdmin=${w.pairs.superAdmin.path}`,
-        `blocklistAuthority=${w.pairs.blocklistAuthority.path}`,
-        `kycAuthority=${w.pairs.kycAuthority.path}`,
-      ].join(","),
-    };
-    const cycle = await sendRun(w, rehearsal);
+    const cycle = await sendRun(w, rehearsalAll(w));
     expect(cycle.error ?? null).toBeNull();
     expect((cycle.steps as { id: string }[]).map((s) => s.id)).toEqual([
       "S1",
       "S2",
       "S2b",
       `S3:${w.keys.admins[0]}`,
+      `A3:${w.keys.admins[0]}`,
       "S4",
       "S4b",
       "X3",
       "X2",
       "S5",
       "X1",
+      "S5c",
       "S6",
     ]);
+    // Inside the bootstrap window: no 48 h wait; S5c then closed it, S6 resumed
+    // the emergency areas and left the payout modules off (0x40).
+    const after = await probeBootstrapState(rpcFor(w), w.map);
+    expect(after.platform).toMatchObject({ admin: w.keys.superAdmin, pauseFlags: 0x40 });
+    expect(after.adminRecords[w.keys.admins[0]]).toBe(true);
     const lines: string[] = [];
     const pending = await dryRun(w, {}, lines);
     expect(pending.status).toBe("awaiting");
@@ -232,13 +280,11 @@ describe("bootstrap send (C1, C7)", () => {
     const inventory = await runTool("inventory", env(w, { CHAIN_PHASE: "handed-over" }), inventoryTool, deps(w));
     expect(inventory.error ?? null).toBeNull();
     expect((inventory.findings as { severity: string; message: string }[]).filter((f) => f.severity === "blocker")).toEqual([]);
-  });
+  }, REHEARSAL_TIMEOUT_MS);
 
   it("S7 waits for the unpause unless CHAIN_HANDOVER_WHILE_PAUSED=1", async () => {
     const w = await world();
-    await sendRun(w, {
-      CHAIN_REHEARSAL_SIGNERS: `superAdmin=${w.pairs.superAdmin.path},blocklistAuthority=${w.pairs.blocklistAuthority.path},kycAuthority=${w.pairs.kycAuthority.path}`,
-    });
+    await sendRun(w, rehearsalAll(w));
     // An Admin pauses again after S6.
     const sa = await signerOf(w, "superAdmin");
     await ledger(w, sa, [await getSetPauseFlagsInstructionAsync({ authority: sa, setMask: 0x3f, clearMask: 0 })]);
@@ -255,19 +301,17 @@ describe("bootstrap send (C1, C7)", () => {
     const paused = await handover(true);
     expect(paused.handover.planned).toBe(true);
     expect(ids(paused)).toEqual(["S7"]);
-  });
+  }, REHEARSAL_TIMEOUT_MS);
 
   it("S7 refuses a wrong CHAIN_CONFIRM_HANDOVER and a pre-handover inventory with blockers", async () => {
     const w = await world();
-    await sendRun(w, {
-      CHAIN_REHEARSAL_SIGNERS: `superAdmin=${w.pairs.superAdmin.path},blocklistAuthority=${w.pairs.blocklistAuthority.path},kycAuthority=${w.pairs.kycAuthority.path}`,
-    });
+    await sendRun(w, rehearsalAll(w));
     const wrong = await dryRun(w, { CHAIN_HANDOVER: "1", CHAIN_CONFIRM_HANDOVER: key(3) });
     expect(wrong.error).toMatch(/CHAIN_CONFIRM_HANDOVER must equal the vault/);
     // No canonical IDL on this chain: the inventory has blockers.
     const blocked = await dryRun(w, { CHAIN_HANDOVER: "1", CHAIN_CONFIRM_HANDOVER: w.keys.vault });
     expect(blocked.error).toMatch(/pre-handover inventory has \d+ blockers/);
-  });
+  }, REHEARSAL_TIMEOUT_MS);
 });
 
 describe("temporary KYC grant (D17 fallback, C5)", () => {
@@ -281,11 +325,16 @@ describe("temporary KYC grant (D17 fallback, C5)", () => {
     const one = await plan(w);
     const admin = w.keys.admins[0];
     expect(ids(one)).toEqual(["S1", "S2", "S2b", `S3:${admin}`, "S3k", "S4", "S4b"]);
-    expect(one.blocked.map((b) => b.id)).toEqual(expect.arrayContaining(["S3r", "S5"]));
+    expect(one.awaiting.map((a) => a.id)).toEqual([`A3:${admin}`, "A3k", "X3", "X2"]);
+    expect(one.blocked.map((b) => b.id)).toEqual(expect.arrayContaining(["S5"]));
     await sendRun(w);
 
-    // X2 and X3 on the operator front.
+    // On the operator front, inside the bootstrap window: both grants execute
+    // (each signed by its own key), then X2 and X3.
+    const adminSigner = await signerOf(w, "admin");
     const kyc = await signerOf(w, "kycAuthority");
+    await ledger(w, adminSigner, [await getAddAdminInstructionAsync({ newAdmin: adminSigner, proposer: w.keys.deployer, newAdminArg: admin })]);
+    await ledger(w, kyc, [await getAddAdminInstructionAsync({ newAdmin: kyc, proposer: w.keys.deployer, newAdminArg: w.keys.kycAuthority })]);
     await ledger(w, kyc, [await buildAcceptKycAuthority({ newAuthoritySigner: kyc, registry: w.map.kyc.registry! })]);
     const ba = await signerOf(w, "blocklistAuthority");
     await ledger(w, ba, [await getAcceptBlocklistAuthorityInstructionAsync({ newAuthority: ba })]);
@@ -296,20 +345,42 @@ describe("temporary KYC grant (D17 fallback, C5)", () => {
     const afterTwo = await probeBootstrapState(rpcFor(w), w.map);
     expect(afterTwo.adminRecords[w.keys.kycAuthority]).toBe(false);
 
-    // X1 and S6 on the operator front.
+    // X1, S5c and S6 on the operator front (X1 at once: bootstrap is open).
     const sa = await signerOf(w, "superAdmin");
     const [oldAdminRecord] = await findAdminRecordPda({ authority: w.keys.deployer });
     await ledger(w, sa, [await getAcceptPlatformAdminInstructionAsync({ newAdmin: sa, oldAdminRecord })]);
+    await ledger(w, sa, [await getSetPauseFlagsInstructionAsync({ authority: sa, setMask: 0, clearMask: 0x80 })]);
     await ledger(w, sa, [await getSetPauseFlagsInstructionAsync({ authority: sa, setMask: 0, clearMask: 0x3f })]);
 
     const three = await plan(w);
     expect(ids(three)).toEqual([]);
     expect(three.awaiting).toEqual([]);
     expect(three.handover.reason).toMatch(/CHAIN_HANDOVER=1/);
-  });
+  }, REHEARSAL_TIMEOUT_MS);
+
+  it("an unused temporary grant is cancelled once the KYC key accepted the registry", async () => {
+    const w = await world();
+    const json = JSON.parse(fs.readFileSync(w.mapFile, "utf8"));
+    json.kyc.tempAdminGrant = true;
+    fs.writeFileSync(w.mapFile, JSON.stringify(json));
+    w.map = (await validateRoleMap(json, { network: "devnet", genesis: CLUSTER_GENESIS_HASHES.devnet })).map;
+    await sendRun(w);
+    const adminSigner = await signerOf(w, "admin");
+    await ledger(w, adminSigner, [await getAddAdminInstructionAsync({ newAdmin: adminSigner, proposer: w.keys.deployer, newAdminArg: w.keys.admins[0] })]);
+    const kyc = await signerOf(w, "kycAuthority");
+    await ledger(w, kyc, [await buildAcceptKycAuthority({ newAuthoritySigner: kyc, registry: w.map.kyc.registry! })]);
+    const ba = await signerOf(w, "blocklistAuthority");
+    await ledger(w, ba, [await getAcceptBlocklistAuthorityInstructionAsync({ newAuthority: ba })]);
+    const two = await plan(w);
+    expect(ids(two)).toEqual(["S3r.cancel", "S5"]);
+    expect(two.skipped.map((s) => s.id)).toEqual(expect.arrayContaining(["A3k", "S3r"]));
+    await sendRun(w);
+    expect((await probeBootstrapState(rpcFor(w), w.map)).pendingAdmins[w.keys.kycAuthority]).toBe(false);
+  }, REHEARSAL_TIMEOUT_MS);
 });
 
 describe("partial progress and stops", () => {
+  /** A v1 Platform (0xff unless given: every pause bit plus the bootstrap window). */
   async function seedPlatform(w: World, value: { admin: Address; protocolTreasury?: Address; protocolFeeBps?: number; pauseFlags?: number }) {
     const [platform] = await findPlatformPda();
     w.chain.set(platform, {
@@ -320,7 +391,7 @@ describe("partial progress and stops", () => {
           admin: value.admin,
           protocolTreasury: value.protocolTreasury ?? w.keys.vault,
           protocolFeeBps: value.protocolFeeBps ?? 0,
-          pauseFlags: value.pauseFlags ?? 0x3f,
+          pauseFlags: value.pauseFlags ?? 0xff,
           issuersCount: 0,
           version: 2,
           bump: 255,
@@ -337,8 +408,16 @@ describe("partial progress and stops", () => {
       const [transfer] = await findTransferPda();
       w.chain.set(transfer, {
         owner: HOOK,
-        lamports: rent(73),
-        data: new Uint8Array(getBlocklistAuthorityTransferEncoder().encode({ currentAuthority: authority, newAuthority: proposed, bump: 255 })),
+        lamports: rent(89),
+        data: new Uint8Array(
+          getBlocklistAuthorityProposalEncoder().encode({
+            currentAuthority: authority,
+            newAuthority: proposed,
+            proposedAt: w.chain.now,
+            expiresAt: w.chain.now + 1_209_600,
+            bump: 255,
+          }),
+        ),
       });
     }
   }
@@ -361,10 +440,8 @@ describe("partial progress and stops", () => {
     if (proposed) {
       w.chain.set(await findKycRegistryTransferPda(registry), {
         owner: REGISTRY,
-        lamports: rent(137),
-        data: new Uint8Array(
-          getAuthorityTransferEncoder().encode({ target: registry, currentAuthority: authority, newAuthority: proposed, proposedBy: authority, bump: 255 }),
-        ),
+        lamports: rent(163),
+        data: proposalBytes(registry, authority, proposed, 3),
       });
     }
   }
@@ -374,15 +451,106 @@ describe("partial progress and stops", () => {
     await seedPlatform(w, { admin: w.keys.deployer });
     await seedBlocklist(w, w.keys.deployer);
     const p = await plan(w);
-    expect(ids(p)).toEqual(["S2b", `S3:${w.keys.admins[0]}`, "S4", "S4b", "S5"]);
+    expect(ids(p)).toEqual(["S2b", `S3:${w.keys.admins[0]}`, "S4", "S4b"]);
     expect(Object.fromEntries(p.steps.map((s) => [s.id, s.simulate]))).toEqual({
       S2b: "now",
       [`S3:${w.keys.admins[0]}`]: "now",
       S4: "now",
       S4b: "at-send",
-      S5: "now",
     });
     expect(p.skipped.map((s) => s.id)).toEqual(expect.arrayContaining(["S1", "S2"]));
+    expect(p.notes).toEqual([]);
+    // A Platform whose bootstrap window already closed: each grant waits 48 h.
+    const closed = await world();
+    await seedPlatform(closed, { admin: closed.keys.deployer, pauseFlags: 0x7f });
+    await seedBlocklist(closed, closed.keys.deployer);
+    expect((await plan(closed)).notes.join()).toMatch(/bootstrap window is closed: each add_admin waits 48 hours/);
+  });
+
+  it("a closed bootstrap window: add_admin waits 48 hours after its proposal (the plan shows when), an expired grant is proposed again", async () => {
+    const w = await world();
+    await seedPlatform(w, { admin: w.keys.deployer, pauseFlags: 0x7f });
+    await seedBlocklist(w, w.keys.deployer);
+    const admin = w.keys.admins[0];
+    const withAdmin = { deployer: createNoopSigner(w.keys.deployer), rehearsal: { admin: createNoopSigner(admin) } };
+    const first = await plan(w, withAdmin);
+    expect(ids(first)).toContain(`S3:${admin}`);
+    expect(ids(first)).not.toContain(`A3:${admin}`);
+    expect(first.blocked.find((b) => b.id === `A3:${admin}`)?.reason).toMatch(
+      new RegExp(`^timelock \\(48 hours after S3:${admin}; the bootstrap window is closed\\): Executable from .* \\(in 2d 0h 00m\\), until `),
+    );
+    // S5 waits for the grant's execution, X1 for S5.
+    expect(first.blocked.find((b) => b.id === "S5")?.reason).toBe(`waits for A3:${admin}`);
+    const lines: string[] = [];
+    const sent = await sendRun(w, { CHAIN_REHEARSAL_SIGNERS: `admin=${w.pairs.admin.path}` }, lines);
+    expect(sent.error ?? null).toBeNull();
+    expect(lines.join("\n")).toMatch(/^bootstrap window: closed \(0x7f, chain time .*\): add_admin runs 48 hours after its propose_admin/m);
+    // 48 hours later (chain time) the grant executes.
+    w.chain.now += 172_800;
+    const later = await plan(w, withAdmin);
+    expect(ids(later)).toContain(`A3:${admin}`);
+    expect(later.skipped.find((s) => s.id === `S3:${admin}`)?.reason).toBe("Admin grant already proposed");
+    // Past its 14-day window it is proposed again instead of failing with 6151.
+    w.chain.now += 1_209_600;
+    const expired = await plan(w, withAdmin);
+    expect(ids(expired)).toContain(`S3:${admin}`);
+    expect(expired.blocked.find((b) => b.id === `A3:${admin}`)?.reason).toMatch(/^timelock .*\(in 2d 0h 00m\)/);
+  });
+
+  it("X1 waits for the rotation's 48 hours once the window is closed, and a pending super admin recovery refuses it", async () => {
+    const w = await world();
+    await seedPlatform(w, { admin: w.keys.deployer, pauseFlags: 0x7f });
+    await seedBlocklist(w, w.keys.deployer);
+    const [record] = await findAdminRecordPda({ authority: w.keys.admins[0] });
+    w.chain.set(record, { owner: REGISTRY, lamports: rent(81), data: new Uint8Array(getAdminEncoder().encode({ admin: w.keys.admins[0], addedBy: w.keys.deployer, bump: 255 })) });
+    await seedRegistry(w, w.keys.kycAuthority);
+    const [ba] = await findBlocklistAuthorityPda();
+    w.chain.set(ba, { owner: HOOK, lamports: rent(41), data: new Uint8Array(getBlocklistAuthorityEncoder().encode({ authority: w.keys.blocklistAuthority, bump: 255 })) });
+    const sa = { deployer: createNoopSigner(w.keys.deployer), rehearsal: { superAdmin: createNoopSigner(w.keys.superAdmin) } };
+    const cycle = await plan(w, sa);
+    expect(ids(cycle)).toEqual(["S5"]);
+    expect(cycle.blocked.find((b) => b.id === "X1")?.reason).toMatch(/^timelock \(48 hours after S5; the bootstrap window is closed\): Executable from .*\(in 2d 0h 00m\)/);
+    // Nothing after X1 may run before it: S5c and S6 wait.
+    expect(cycle.blocked.map((b) => b.id)).toEqual(expect.arrayContaining(["X1", "S6"]));
+    await sendRun(w);
+    w.chain.now += 172_800;
+    expect(ids(await plan(w, sa))).toEqual(["X1", "S6"]);
+    // A recovery by the upgrade authority is pending: the accept is refused (6155).
+    const [platform] = await findPlatformPda();
+    const [recovery] = await findAcceptPlatformAdminRecoveryPda({ platform });
+    const now = BigInt(w.chain.now);
+    w.chain.set(recovery, {
+      owner: REGISTRY,
+      lamports: rent(162),
+      data: new Uint8Array(
+        getPlatformRecoveryEncoder().encode({ platform, currentAdmin: w.keys.deployer, newAdmin: key(90), proposedBy: w.keys.deployer, proposedAt: now, eta: now + BigInt(604_800), expiresAt: now + BigInt(604_800 + 1_209_600), version: 1, bump: 255 }),
+      ),
+    });
+    const refused = await plan(w, sa);
+    expect(ids(refused)).toEqual([]);
+    expect(refused.blocked.find((b) => b.id === "X1")?.reason).toMatch(/super admin recovery .* pending: accept_platform_admin is refused \(6155\)/);
+  });
+
+  it("the first unpause waits for every role step (design 8.3 §5.4): S6 is not planned before the BA and KYC accepts", async () => {
+    const w = await world();
+    const signers = { deployer: createNoopSigner(w.keys.deployer), rehearsal: { superAdmin: createNoopSigner(w.keys.superAdmin), admin: createNoopSigner(w.keys.admins[0]) } };
+    const p = await plan(w, signers);
+    // Grants, S5, X1 and the explicit close run inside the bootstrap window …
+    expect(ids(p)).toEqual(["S1", "S2", "S2b", `S3:${w.keys.admins[0]}`, `A3:${w.keys.admins[0]}`, "S4", "S4b", "S5", "X1", "S5c"]);
+    // … but the unpause waits for X3 and X2 (on the operator front).
+    expect(p.awaiting.map((a) => a.id)).toEqual(["X3", "X2"]);
+    expect(p.blocked.find((b) => b.id === "S6")?.reason).toBe("waits for X3, X2");
+  });
+
+  it("v1 role-map rules: the deployer unpauses only as the super admin; the vault (upgrade authority) holds no Admin record", async () => {
+    const w = await world();
+    const json = JSON.parse(fs.readFileSync(w.mapFile, "utf8"));
+    const devnet = { network: "devnet" as const, genesis: CLUSTER_GENESIS_HASHES.devnet };
+    await expect(validateRoleMap({ ...json, unpauseBy: "deployer" }, devnet)).rejects.toThrow(/unpauseBy deployer needs deployer == superAdmin/);
+    await expect(validateRoleMap({ ...json, unpauseBy: "deployer", superAdmin: json.deployer }, devnet)).resolves.toBeTruthy();
+    await expect(validateRoleMap({ ...json, admins: [...json.admins, w.keys.vault] }, devnet)).rejects.toThrow(/admins must not list the Squads vault or multisig \(it is the upgrade authority: Admin == UA\)/);
+    const k4 = await validateRoleMap({ ...json, superAdmin: w.keys.vault, k4Fallback: true }, devnet);
+    expect(k4.warnings.join(" ")).toMatch(/chain:inventory blocks the handover \(sa-is-ua\)/);
   });
 
   it("stops on a fee the map does not have (no setter)", async () => {
@@ -428,23 +596,53 @@ describe("partial progress and stops", () => {
     await seedRegistry(w, w.keys.deployer, key(96));
     const [platform] = await findPlatformPda();
     const [transfer] = await findAcceptPlatformAdminTransferPda({ platform });
-    w.chain.set(transfer, {
-      owner: REGISTRY,
-      lamports: rent(137),
-      data: new Uint8Array(
-        getAuthorityTransferEncoder().encode({ target: platform, currentAuthority: w.keys.deployer, newAuthority: key(95), proposedBy: w.keys.deployer, bump: 255 }),
-      ),
-    });
-    const p = await plan(w);
-    expect(ids(p)).toEqual(["S2b", `S3:${w.keys.admins[0]}`, "S4b.cancel", "S4b", "S5"]);
+    w.chain.set(transfer, { owner: REGISTRY, lamports: rent(163), data: proposalBytes(platform, w.keys.deployer, key(95), 0) });
+    const admin = w.keys.admins[0];
+    const p = await plan(w, { deployer: createNoopSigner(w.keys.deployer), rehearsal: { admin: createNoopSigner(admin) } });
+    expect(ids(p)).toEqual(["S2b", `S3:${admin}`, `A3:${admin}`, "S4b.cancel", "S4b", "S5"]);
     expect(p.notes.join()).toMatch(/overwrites a pending blocklist proposal/);
     // Send it and check the final proposals point at the map keys.
-    const evidence = await sendRun(w);
+    const evidence = await sendRun(w, { CHAIN_REHEARSAL_SIGNERS: `admin=${w.pairs.admin.path}` });
     expect(evidence.error ?? null).toBeNull();
     const state = await probeBootstrapState(rpcFor(w), w.map);
     expect(state.blocklist?.proposed).toBe(w.keys.blocklistAuthority);
     expect(state.registryProposed).toBe(w.keys.kycAuthority);
     expect(state.platformProposed).toBe(w.keys.superAdmin);
+  });
+
+  it("proposals retired by an executed recovery (current_authority = default) are no proposal: the probe passes and S4b / S5 propose over them", async () => {
+    // execute_platform_recovery / execute_blocklist_recovery zero the pending
+    // proposal's current_authority and leave the account in place.
+    const retired = "11111111111111111111111111111111" as Address;
+    const w = await world();
+    await seedPlatform(w, { admin: w.keys.deployer });
+    await seedBlocklist(w, w.keys.deployer, key(97));
+    const [transferBa] = await findTransferPda();
+    w.chain.set(transferBa, {
+      owner: HOOK,
+      lamports: rent(89),
+      data: new Uint8Array(
+        getBlocklistAuthorityProposalEncoder().encode({
+          currentAuthority: retired,
+          newAuthority: key(97),
+          proposedAt: w.chain.now,
+          expiresAt: w.chain.now + 1_209_600,
+          bump: 255,
+        }),
+      ),
+    });
+    const [platform] = await findPlatformPda();
+    const [transfer] = await findAcceptPlatformAdminTransferPda({ platform });
+    w.chain.set(transfer, { owner: REGISTRY, lamports: rent(163), data: proposalBytes(platform, retired, key(95), 0) });
+    const state = await probeBootstrapState(rpcFor(w), w.map);
+    expect(state.platformProposed).toBeNull();
+    expect(state.blocklist?.proposed).toBeNull();
+    expect(state.platformWindow).toBeNull();
+    expect(state.blocklistWindow).toBeNull();
+    const admin = w.keys.admins[0];
+    const p = await plan(w, { deployer: createNoopSigner(w.keys.deployer), rehearsal: { admin: createNoopSigner(admin) } });
+    expect(p.stops).toEqual([]);
+    expect(ids(p)).toEqual(expect.arrayContaining(["S4b", "S5"]));
   });
 
   it("stops when the deployer balance cannot pay for the cycle", async () => {
@@ -460,10 +658,12 @@ describe("operator pages (uloge-runbook-10)", () => {
   /** What performs each action on its page: the component or the builder. */
   const PERFORMS: Record<string, string> = {
     S1b: "getSetProtocolTreasuryInstructionAsync",
-    S3: "getAddAdminInstructionAsync",
+    S3: "buildProposeAdmin",
+    A3: "PendingRolesPanel",
     X3: "AuthorityRotation",
     X2: "PendingRolesPanel",
     X1: "AuthorityRotation",
+    S5c: "PauseFlagsPanel",
     S6: "PauseFlagsPanel",
   };
   const frontDir = path.resolve(__dirname, "..");
@@ -486,7 +686,7 @@ describe("operator pages (uloge-runbook-10)", () => {
     const w = await world();
     const { adminRouteRequirement } = await import("@/lib/role-resolution");
     const actions = bootstrapExternalActions(w.map);
-    expect(actions.map((a) => a.id.split(":")[0])).toEqual(["S1b", "S3", "X3", "X2", "X1", "S6"]);
+    expect(actions.map((a) => a.id.split(":")[0])).toEqual(["S1b", "S3", "A3", "X3", "X2", "X1", "S5c", "S6"]);
     for (const action of actions) {
       const id = action.id.split(":")[0];
       expect(pageSource(action.page), `${action.id} on ${action.page}`).toContain(PERFORMS[id]);
@@ -530,9 +730,10 @@ describe("company wallet for every operational role (Talas 8.2)", () => {
     const pair = w.pairs.superAdmin.path;
     const cycle = await sendRun(w, { CHAIN_REHEARSAL_SIGNERS: `superAdmin=${pair},blocklistAuthority=${pair},kycAuthority=${pair}` });
     expect(cycle.error ?? null).toBeNull();
-    expect((cycle.steps as { id: string }[]).map((s) => s.id)).toEqual(["S1", "S2", "S2b", "S4", "S4b", "X3", "X2", "S5", "X1", "S6"]);
+    expect((cycle.steps as { id: string }[]).map((s) => s.id)).toEqual(["S1", "S2", "S2b", "S4", "S4b", "X3", "X2", "S5", "X1", "S5c", "S6"]);
     const state = await probeBootstrapState(rpcFor(w), w.map);
-    expect(state.platform).toMatchObject({ admin: company, protocolTreasury: company, pauseFlags: 0 });
+    // The emergency areas resumed; the payout modules stay off (D2).
+    expect(state.platform).toMatchObject({ admin: company, protocolTreasury: company, pauseFlags: 0x40 });
     expect(state.blocklist?.authority).toBe(company);
     expect(state.registry?.authority).toBe(company);
 
@@ -544,5 +745,46 @@ describe("company wallet for every operational role (Talas 8.2)", () => {
     expect(findings.filter((f) => f.severity === "blocker")).toEqual([]);
     expect(findings.find((f) => f.code === "role-overlap")?.message).toMatch(/\(acknowledged\).*clawback/);
     expect(findings.find((f) => f.code === "kyc-admin")?.severity).toBe("warning");
-  });
+  }, REHEARSAL_TIMEOUT_MS);
+
+  it("the pilot mask (unpauseMask 35, role-map.company.example.json): S6 leaves 0x5c, S7 hands over with 0 blockers and no CHAIN_HANDOVER_WHILE_PAUSED", async () => {
+    const w = await world();
+    const company = w.keys.superAdmin;
+    const json = JSON.parse(fs.readFileSync(w.mapFile, "utf8"));
+    Object.assign(json, {
+      admins: [],
+      blocklistAuthority: company,
+      kyc: { ...json.kyc, authority: company },
+      protocolTreasury: company,
+      acknowledgedRoleOverlaps: [
+        {
+          key: company,
+          roles: ["superAdmin", "kyc.authority", "blocklistAuthority", "protocolTreasury"],
+          reason: "Company wallet holds every operational role (test)",
+        },
+      ],
+      unpauseMask: 35,
+    });
+    fs.writeFileSync(w.mapFile, JSON.stringify(json));
+    w.map = (await validateRoleMap(json, { network: "devnet", genesis: CLUSTER_GENESIS_HASHES.devnet })).map;
+    expect(w.map.unpauseMask).toBe(0x23);
+    const idlDry = await runTool("idl", env(w, { CHAIN_IDL_MODE: "send" }), idlTool, deps(w));
+    expect((await runTool("idl", sendEnv(w, idlDry.planDigest as string, { CHAIN_IDL_MODE: "send" }), idlTool, deps(w))).status).toBe("completed");
+    const pair = w.pairs.superAdmin.path;
+    const cycle = await sendRun(w, { CHAIN_REHEARSAL_SIGNERS: `superAdmin=${pair},blocklistAuthority=${pair},kycAuthority=${pair}` });
+    expect(cycle.error ?? null).toBeNull();
+    const state = await probeBootstrapState(rpcFor(w), w.map);
+    // Trading, custody entry and distributions stay paused (0x1c), 0x40 off.
+    expect(state.platform?.pauseFlags).toBe(0x5c);
+
+    const s7 = await sendRun(w, { CHAIN_HANDOVER: "1", CHAIN_CONFIRM_HANDOVER: w.keys.vault });
+    expect(s7.error ?? null).toBeNull();
+    expect((s7.handoverInventory as { blockers: string[] }).blockers).toEqual([]);
+    const after = await probeBootstrapState(rpcFor(w), w.map);
+    expect(Object.values(after.ua)).toEqual([w.keys.vault, w.keys.vault]);
+    const inventory = await runTool("inventory", env(w, { CHAIN_PHASE: "handed-over" }), inventoryTool, deps(w));
+    const findings = inventory.findings as { severity: string; code: string; message: string }[];
+    expect(findings.filter((f) => f.severity === "blocker")).toEqual([]);
+    expect(findings.find((f) => f.code === "pilot-paused")?.severity).toBe("info");
+  }, REHEARSAL_TIMEOUT_MS);
 });

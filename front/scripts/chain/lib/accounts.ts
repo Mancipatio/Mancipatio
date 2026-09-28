@@ -2,6 +2,7 @@
  * Finalized raw account reads shared by the probes and the inventory.
  */
 import {
+  address,
   getBase58Decoder,
   type Address,
   type Base58EncodedBytes,
@@ -98,3 +99,24 @@ export function hasDiscriminator(data: Uint8Array, discriminator: Uint8Array): b
   for (let i = 0; i < discriminator.length; i++) if (data[i] !== discriminator[i]) return false;
   return true;
 }
+
+/** The Clock sysvar (slot u64, epoch_start_timestamp i64, epoch u64, leader_schedule_epoch u64, unix_timestamp i64). */
+export const CLOCK_SYSVAR = address("SysvarC1ock11111111111111111111111111111111");
+const CLOCK_UNIX_TIMESTAMP_OFFSET = 32;
+
+/**
+ * The chain's `Clock::unix_timestamp` (seconds), the time every timelock
+ * (`eta`, `expires_at`) is compared against; null when the sysvar cannot be
+ * read. Never the local clock.
+ */
+export async function fetchChainTime(
+  rpc: ChainRpc,
+  commitment: "finalized" | "confirmed" = "finalized",
+): Promise<bigint | null> {
+  const { value } = await rpc.getAccountInfo(CLOCK_SYSVAR, { encoding: "base64", commitment }).send();
+  if (!value) return null;
+  const data = Buffer.from((value as WireAccount).data[0], "base64");
+  if (data.length < CLOCK_UNIX_TIMESTAMP_OFFSET + 8) return null;
+  return data.readBigInt64LE(CLOCK_UNIX_TIMESTAMP_OFFSET);
+}
+

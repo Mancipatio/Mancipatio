@@ -114,14 +114,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -197,14 +197,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -385,6 +385,74 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "authority_block_entry",
+          "docs": [
+            "prog-novac-4: the OUTGOING authority is not blocklisted (it may have",
+            "been blocked after the proposal). A super-admin issuer recovery stays",
+            "the path off a blocked key.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.authority",
+                "account": "Issuer"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": []
@@ -432,14 +500,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -454,6 +522,9 @@
     },
     {
       "name": "accept_platform_admin",
+      "docs": [
+        "The proposed key becomes the super admin (retires a pending recovery)."
+      ],
       "discriminator": [
         138,
         66,
@@ -509,14 +580,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -577,6 +648,45 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "recovery",
+          "docs": [
+            "A pending upgrade-authority recovery (it may not exist); a live one",
+            "refuses the accept. A recovery is always against the live super admin",
+            "(it moves only by this accept, which it blocks, or by the execute,",
+            "which closes it), so an A -> B -> A round trip cannot revive one."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "platform"
+              }
+            ]
+          }
         }
       ],
       "args": []
@@ -686,7 +796,7 @@
     {
       "name": "add_admin",
       "docs": [
-        "Super admin grants the admin role to `new_admin`."
+        "`new_admin` itself executes a pending grant inside its window."
       ],
       "discriminator": [
         177,
@@ -700,7 +810,10 @@
       ],
       "accounts": [
         {
-          "name": "super_admin",
+          "name": "new_admin",
+          "docs": [
+            "The proposed key itself; pays the Admin record's rent."
+          ],
           "writable": true,
           "signer": true
         },
@@ -725,6 +838,44 @@
           }
         },
         {
+          "name": "pending_admin",
+          "docs": [
+            "Consumed here (rent to the proposer). Stale once the super admin that",
+            "proposed it is no longer the super admin."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103,
+                  95,
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "new_admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        },
+        {
           "name": "admin_record",
           "writable": true,
           "pda": {
@@ -740,7 +891,7 @@
                 ]
               },
               {
-                "kind": "arg",
+                "kind": "account",
                 "path": "new_admin"
               }
             ]
@@ -1575,6 +1726,104 @@
               }
             ]
           }
+        },
+        {
+          "name": "buyer_block_entry",
+          "docs": [
+            "v1 (appended after `platform`): the buyer is not on the hook blocklist.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "buyer"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "issuer_freeze",
+          "docs": [
+            "D1: the issuer's `IssuerFreeze` PDA `[\"issuer_freeze\", issuer]` must be",
+            "unset (no freeze in force)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -1583,6 +1832,254 @@
           "type": "u64"
         }
       ]
+    },
+    {
+      "name": "cancel_admin_proposal",
+      "docs": [
+        "The super admin, any Admin or the upgrade authority cancels a pending",
+        "admin grant."
+      ],
+      "discriminator": [
+        68,
+        6,
+        145,
+        131,
+        16,
+        73,
+        182,
+        229
+      ],
+      "accounts": [
+        {
+          "name": "canceller",
+          "docs": [
+            "The super admin, a live Admin, or the program upgrade authority. Not",
+            "`mut`: it may be the same key as `proposer`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "canceller_admin_record",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "canceller"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_admin",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103,
+                  95,
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "pending_admin.new_admin",
+                "account": "PendingAdmin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        },
+        {
+          "name": "program",
+          "address": "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
+        },
+        {
+          "name": "program_data"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_custody_authority_transfer",
+      "docs": [
+        "The super admin, or the current vault authority while it holds a live",
+        "Admin record, cancels a pending custody rotation."
+      ],
+      "discriminator": [
+        132,
+        254,
+        172,
+        220,
+        229,
+        28,
+        137,
+        65
+      ],
+      "accounts": [
+        {
+          "name": "canceller",
+          "docs": [
+            "The super admin, or the current vault authority while it holds a live",
+            "Admin record. Not `mut`: it may be the same key as `proposer`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "canceller_admin_record",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "canceller"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "custody_vault",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  99,
+                  117,
+                  115,
+                  116,
+                  111,
+                  100,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "custody_vault.share_class",
+                "account": "CustodyVault"
+              },
+              {
+                "kind": "account",
+                "path": "custody_vault.vault_id",
+                "account": "CustodyVault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "custody_vault"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        }
+      ],
+      "args": []
     },
     {
       "name": "cancel_issuer_authority_transfer",
@@ -1649,14 +2146,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -1820,14 +2317,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -2116,6 +2613,206 @@
         },
         {
           "name": "payment_token_program"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_platform_admin_transfer",
+      "docs": [
+        "The super admin, any Admin or the upgrade authority cancels a pending",
+        "super-admin rotation."
+      ],
+      "discriminator": [
+        184,
+        242,
+        132,
+        36,
+        159,
+        240,
+        178,
+        98
+      ],
+      "accounts": [
+        {
+          "name": "canceller",
+          "docs": [
+            "The super admin, a live Admin, or the program upgrade authority. Not",
+            "`mut`: it may be the same key as `proposer`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "canceller_admin_record",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "canceller"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "platform"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        },
+        {
+          "name": "program",
+          "address": "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
+        },
+        {
+          "name": "program_data"
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_platform_recovery",
+      "docs": [
+        "The current super admin or the proposer cancels a recovery."
+      ],
+      "discriminator": [
+        8,
+        41,
+        66,
+        94,
+        38,
+        150,
+        155,
+        145
+      ],
+      "accounts": [
+        {
+          "name": "canceller",
+          "docs": [
+            "The current super admin or the proposer. Not `mut`: it may be the same",
+            "key as `proposer`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "platform"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
         }
       ],
       "args": []
@@ -2523,6 +3220,118 @@
                 ]
               }
             ]
+          }
+        },
+        {
+          "name": "share_class",
+          "docs": [
+            "D1 chain to the issuer: the vault's share class ..."
+          ]
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "... and its asset (`asset.issuer` keys the freeze below)."
+          ]
+        },
+        {
+          "name": "issuer_freeze",
+          "docs": [
+            "D1: the issuer's `IssuerFreeze` PDA `[\"issuer_freeze\", issuer]` must be",
+            "unset (no freeze in force)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset.issuer",
+                "account": "Asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "founder_block_entry",
+          "docs": [
+            "prog-novac-4: the payee (`vault.founder`) is not blocked.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.founder",
+                "account": "PayoutVault"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
           }
         }
       ],
@@ -3014,6 +3823,73 @@
         },
         {
           "name": "token_program"
+        },
+        {
+          "name": "recipient_block_entry",
+          "docs": [
+            "v1 (appended before the hook tail): the recipient is not blocked; units",
+            "for a blocked wallet stay in the vesting escrow until it is unblocked.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position.wallet",
+                "account": "VestingPosition"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": [
@@ -3853,6 +4729,182 @@
                 ]
               }
             ]
+          }
+        },
+        {
+          "name": "share_class",
+          "docs": [
+            "D1 chain to the issuer: the sale's share class ..."
+          ]
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "... and its asset (`asset.issuer` keys the freeze below)."
+          ]
+        },
+        {
+          "name": "issuer_freeze",
+          "docs": [
+            "D1: the issuer's `IssuerFreeze` PDA `[\"issuer_freeze\", issuer]` must be",
+            "unset (no freeze in force)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset.issuer",
+                "account": "Asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "authority_block_entry",
+          "docs": [
+            "prog-novac-4: the signing sale authority is not blocked ...",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "destination_block_entry",
+          "docs": [
+            "... nor is the owner of the proceeds destination.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "destination.owner"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
           }
         }
       ],
@@ -5506,6 +6558,138 @@
               }
             ]
           }
+        },
+        {
+          "name": "buyer_block_entry",
+          "docs": [
+            "v1 (appended after `platform`, before the hook tail): the buyer is not blocked ...",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "deal.buyer",
+                "account": "OtcDeal"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "seller_block_entry",
+          "docs": [
+            "... nor is the seller. The registry refuses before any hook CPI.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "deal.seller",
+                "account": "OtcDeal"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": []
@@ -5675,6 +6859,138 @@
                 ]
               }
             ]
+          }
+        },
+        {
+          "name": "buyer_block_entry",
+          "docs": [
+            "v1 (appended after `platform`, before the hook tail): the buyer is not blocked ...",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "deal.buyer",
+                "account": "OtcDeal"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "seller_block_entry",
+          "docs": [
+            "... nor is the seller. The registry refuses before any hook CPI.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "deal.seller",
+                "account": "OtcDeal"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
           }
         }
       ],
@@ -6592,14 +7908,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -6608,6 +7924,196 @@
               }
             ]
           }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "execute_platform_recovery",
+      "docs": [
+        "The recovered key executes a recovery once its timelock has passed."
+      ],
+      "discriminator": [
+        104,
+        112,
+        22,
+        194,
+        154,
+        72,
+        242,
+        137
+      ],
+      "accounts": [
+        {
+          "name": "new_admin",
+          "docs": [
+            "The recovered key; pays its Admin record's rent (a Squads vault can)."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "platform"
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        },
+        {
+          "name": "program",
+          "docs": [
+            "Binds `program_data` to THIS program (another program's ProgramData",
+            "with the same upgrade authority must not stand in)."
+          ],
+          "address": "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
+        },
+        {
+          "name": "program_data",
+          "docs": [
+            "The upgrade authority must still be the proposer."
+          ]
+        },
+        {
+          "name": "old_admin_record",
+          "docs": [
+            "handler when present."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "platform.admin",
+                "account": "Platform"
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_admin_record",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "new_admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "docs": [
+            "A pending super-admin rotation, retired here when present."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "platform"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
         }
       ],
       "args": []
@@ -6862,6 +8368,137 @@
         },
         {
           "name": "payment_token_program"
+        },
+        {
+          "name": "buyer_block_entry",
+          "docs": [
+            "O-11 (appended before the hook tail): the buyer's hook BlockEntry.",
+            "Only its address is pinned here; the handler refuses a permissionless",
+            "refund of a DEPOSITED leg to a blocked party (the Admin",
+            "`cancel_otc_deal` stays the manual path)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "deal.buyer",
+                "account": "OtcDeal"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "seller_block_entry",
+          "docs": [
+            "The seller's hook BlockEntry (see `buyer_block_entry`)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "deal.seller",
+                "account": "OtcDeal"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": []
@@ -7063,6 +8700,149 @@
       "args": []
     },
     {
+      "name": "freeze_issuer_proceeds",
+      "docs": [
+        "Any Admin (or the super admin) freezes one issuer's proceeds."
+      ],
+      "discriminator": [
+        120,
+        89,
+        174,
+        115,
+        92,
+        198,
+        23,
+        203
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "docs": [
+            "A live Admin, or the super admin (with or without an Admin record).",
+            "Pays the freeze's rent and gets it back on unfreeze."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "admin_record",
+          "docs": [
+            "`authority` is the super admin."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "authority"
+              }
+            ]
+          }
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.legal_entity_id",
+                "account": "Issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer_freeze",
+          "docs": [
+            "A second freeze of the same issuer fails (the account is in use): it",
+            "never silently overwrites the first freezer or reason."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "reason_hash",
+          "type": {
+            "array": [
+              "u8",
+              32
+            ]
+          }
+        }
+      ]
+    },
+    {
       "name": "freeze_vault",
       "docs": [
         "Permissionless: freezes an Active vault when the founder is ≥3",
@@ -7109,7 +8889,8 @@
     {
       "name": "initialize_platform",
       "docs": [
-        "Creates the platform singleton. The signer becomes the platform admin."
+        "Creates the platform singleton. The signer becomes the platform admin.",
+        "It starts fully paused with the one-way bootstrap window open (0xFF)."
       ],
       "discriminator": [
         119,
@@ -7959,6 +9740,52 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "share_class",
+          "docs": [
+            "D1 chain to the issuer: the sale's share class ..."
+          ]
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "... and its asset (`asset.issuer` keys the freeze below)."
+          ]
+        },
+        {
+          "name": "issuer_freeze",
+          "docs": [
+            "D1: the issuer's `IssuerFreeze` PDA `[\"issuer_freeze\", issuer]` must be",
+            "unset (no freeze in force)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset.issuer",
+                "account": "Asset"
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -8232,6 +10059,39 @@
               }
             ]
           }
+        },
+        {
+          "name": "issuer_freeze",
+          "docs": [
+            "D1: the issuer's `IssuerFreeze` PDA `[\"issuer_freeze\", issuer]` must be",
+            "unset (no freeze in force)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer"
+              }
+            ]
+          }
         }
       ],
       "args": [
@@ -8462,7 +10322,119 @@
       ]
     },
     {
+      "name": "propose_admin",
+      "docs": [
+        "Super admin proposes granting the admin role to `new_admin`",
+        "(executable from 48 h later, for 14 days; waived during bootstrap)."
+      ],
+      "discriminator": [
+        121,
+        214,
+        199,
+        212,
+        87,
+        39,
+        117,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "super_admin",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "new_admin_record",
+          "docs": [
+            "The key must not hold the role already."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "new_admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "pending_admin",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  101,
+                  110,
+                  100,
+                  105,
+                  110,
+                  103,
+                  95,
+                  97,
+                  100,
+                  109,
+                  105,
+                  110
+                ]
+              },
+              {
+                "kind": "arg",
+                "path": "new_admin"
+              }
+            ]
+          }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
       "name": "propose_custody_authority",
+      "docs": [
+        "Super admin proposes a new custody vault authority (an Admin key),",
+        "acceptable for 14 days."
+      ],
       "discriminator": [
         109,
         75,
@@ -8567,14 +10539,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -8661,14 +10633,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -8681,6 +10653,74 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "authority_block_entry",
+          "docs": [
+            "prog-novac-4: a blocklisted issuer authority cannot stage a rotation",
+            "(a new, unblocked key would otherwise reach the proceeds exits after",
+            "`sync_sale_authority` / `sync_payout_founder`).",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.authority",
+                "account": "Issuer"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": [
@@ -8845,14 +10885,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -8876,6 +10916,10 @@
     },
     {
       "name": "propose_platform_admin",
+      "docs": [
+        "Super admin proposes a new super admin: acceptable by that key from",
+        "48 h after the proposal (waived while bootstrap is open), for 14 days."
+      ],
       "discriminator": [
         26,
         187,
@@ -8930,14 +10974,14 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               },
               {
@@ -8946,6 +10990,104 @@
               }
             ]
           }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_admin",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "propose_platform_recovery",
+      "docs": [
+        "The upgrade authority proposes recovering a LOST super-admin key,",
+        "executable after 7 days for 14 days."
+      ],
+      "discriminator": [
+        242,
+        73,
+        9,
+        87,
+        56,
+        172,
+        78,
+        222
+      ],
+      "accounts": [
+        {
+          "name": "upgrade_authority",
+          "docs": [
+            "`ProgramData.upgrade_authority_address`; pays the proposal's rent."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "platform"
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "address": "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS"
+        },
+        {
+          "name": "program_data"
         },
         {
           "name": "system_program",
@@ -9249,6 +11391,73 @@
         },
         {
           "name": "token_program"
+        },
+        {
+          "name": "recipient_block_entry",
+          "docs": [
+            "v1 (appended before the hook tail): the recipient is not blocked (the",
+            "crank is permissionless, so the check cannot rely on the caller).",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "position.wallet",
+                "account": "VestingPosition"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": [
@@ -9880,6 +12089,118 @@
                 ]
               }
             ]
+          }
+        },
+        {
+          "name": "share_class",
+          "docs": [
+            "D1 chain to the issuer: the vault's share class ..."
+          ]
+        },
+        {
+          "name": "asset",
+          "docs": [
+            "... and its asset (`asset.issuer` keys the freeze below)."
+          ]
+        },
+        {
+          "name": "issuer_freeze",
+          "docs": [
+            "D1: the issuer's `IssuerFreeze` PDA `[\"issuer_freeze\", issuer]` must be",
+            "unset (no freeze in force)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "asset.issuer",
+                "account": "Asset"
+              }
+            ]
+          }
+        },
+        {
+          "name": "founder_block_entry",
+          "docs": [
+            "prog-novac-4: the payee (`vault.founder`) is not blocked.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "vault.founder",
+                "account": "PayoutVault"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
           }
         }
       ],
@@ -10822,7 +13143,9 @@
       "name": "set_pause_flags",
       "docs": [
         "Emergency pause: `flags = (flags | set_mask) & !clear_mask`. Any Admin",
-        "may set defined bits; only the super admin may clear."
+        "may set defined bits (0x7F); only the super admin may clear, and",
+        "`PAUSE_PAYOUT_MODULES` (0x40) only in a call of its own. Any clear also",
+        "closes the one-way bootstrap window (bit 7)."
       ],
       "discriminator": [
         205,
@@ -11260,6 +13583,137 @@
               }
             ]
           }
+        },
+        {
+          "name": "taker_block_entry",
+          "docs": [
+            "v1 (appended after `platform`, before the hook tail): the taker is not blocked ...",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "taker"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
+        },
+        {
+          "name": "maker_block_entry",
+          "docs": [
+            "... nor is the maker (the payee).",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "offer.maker",
+                "account": "Offer"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": []
@@ -11311,6 +13765,84 @@
               }
             ]
           }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "unfreeze_issuer_proceeds",
+      "docs": [
+        "Only the super admin lifts an issuer freeze."
+      ],
+      "discriminator": [
+        174,
+        164,
+        136,
+        60,
+        64,
+        100,
+        66,
+        45
+      ],
+      "accounts": [
+        {
+          "name": "super_admin",
+          "signer": true
+        },
+        {
+          "name": "platform",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  112,
+                  108,
+                  97,
+                  116,
+                  102,
+                  111,
+                  114,
+                  109
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "issuer_freeze",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  105,
+                  115,
+                  115,
+                  117,
+                  101,
+                  114,
+                  95,
+                  102,
+                  114,
+                  101,
+                  101,
+                  122,
+                  101
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer_freeze.issuer",
+                "account": "IssuerFreeze"
+              }
+            ]
+          }
+        },
+        {
+          "name": "frozen_by",
+          "writable": true
         }
       ],
       "args": []
@@ -11842,16 +14374,16 @@
       ]
     },
     {
-      "name": "AuthorityTransfer",
+      "name": "AuthorityProposal",
       "discriminator": [
-        43,
-        243,
-        199,
-        71,
-        139,
-        255,
-        231,
-        113
+        119,
+        182,
+        97,
+        205,
+        131,
+        194,
+        102,
+        72
       ]
     },
     {
@@ -11959,6 +14491,19 @@
       ]
     },
     {
+      "name": "IssuerFreeze",
+      "discriminator": [
+        122,
+        60,
+        186,
+        188,
+        111,
+        89,
+        223,
+        45
+      ]
+    },
+    {
       "name": "IssuerPermissions",
       "discriminator": [
         84,
@@ -12063,6 +14608,19 @@
       ]
     },
     {
+      "name": "PendingAdmin",
+      "discriminator": [
+        220,
+        45,
+        135,
+        16,
+        196,
+        153,
+        181,
+        56
+      ]
+    },
+    {
       "name": "Platform",
       "discriminator": [
         77,
@@ -12073,6 +14631,19 @@
         98,
         91,
         12
+      ]
+    },
+    {
+      "name": "PlatformRecovery",
+      "discriminator": [
+        165,
+        33,
+        229,
+        197,
+        198,
+        16,
+        39,
+        10
       ]
     },
     {
@@ -12220,6 +14791,71 @@
     }
   ],
   "events": [
+    {
+      "name": "AdminAdded",
+      "discriminator": [
+        23,
+        13,
+        37,
+        90,
+        130,
+        53,
+        75,
+        251
+      ]
+    },
+    {
+      "name": "AdminProposalCancelled",
+      "discriminator": [
+        158,
+        7,
+        69,
+        243,
+        15,
+        126,
+        0,
+        184
+      ]
+    },
+    {
+      "name": "AdminProposed",
+      "discriminator": [
+        129,
+        249,
+        226,
+        227,
+        199,
+        82,
+        110,
+        243
+      ]
+    },
+    {
+      "name": "AuthorityProposalCancelled",
+      "discriminator": [
+        201,
+        36,
+        146,
+        19,
+        47,
+        101,
+        65,
+        248
+      ]
+    },
+    {
+      "name": "AuthorityProposalCreated",
+      "discriminator": [
+        181,
+        8,
+        121,
+        90,
+        217,
+        34,
+        126,
+        195
+      ]
+    },
     {
       "name": "BlocklistClawback",
       "discriminator": [
@@ -12377,6 +15013,32 @@
       ]
     },
     {
+      "name": "IssuerProceedsFrozen",
+      "discriminator": [
+        70,
+        166,
+        216,
+        216,
+        94,
+        42,
+        4,
+        103
+      ]
+    },
+    {
+      "name": "IssuerProceedsUnfrozen",
+      "discriminator": [
+        87,
+        176,
+        20,
+        56,
+        242,
+        17,
+        67,
+        162
+      ]
+    },
+    {
       "name": "IssuerRecoveryCancelled",
       "discriminator": [
         156,
@@ -12504,6 +15166,45 @@
         168,
         89,
         91
+      ]
+    },
+    {
+      "name": "PlatformAdminChanged",
+      "discriminator": [
+        67,
+        17,
+        203,
+        46,
+        181,
+        236,
+        207,
+        6
+      ]
+    },
+    {
+      "name": "PlatformRecoveryCancelled",
+      "discriminator": [
+        172,
+        148,
+        135,
+        31,
+        43,
+        178,
+        224,
+        20
+      ]
+    },
+    {
+      "name": "PlatformRecoveryProposed",
+      "discriminator": [
+        81,
+        66,
+        73,
+        168,
+        142,
+        59,
+        27,
+        163
       ]
     },
     {
@@ -13153,7 +15854,7 @@
     {
       "code": 6079,
       "name": "ClawbackHolderStillEligible",
-      "msg": "Clawback requires the holder's KYC entry to be Revoked or expired"
+      "msg": "Clawback requires the holder's KYC entry to be Revoked, or expired for at least 30 days"
     },
     {
       "code": 6080,
@@ -13469,6 +16170,71 @@
       "code": 6142,
       "name": "VaultTypeRetired",
       "msg": "ConversionPending custody vaults are retired; holder conversions use a DeliveryEscrow"
+    },
+    {
+      "code": 6143,
+      "name": "IssuerProceedsFrozen",
+      "msg": "Issuer proceeds are frozen; this path stays closed until the super admin unfreezes the issuer"
+    },
+    {
+      "code": 6144,
+      "name": "PartyBlocklisted",
+      "msg": "A party to this transfer is on the transfer-hook blocklist (live BlockEntry)"
+    },
+    {
+      "code": 6145,
+      "name": "SaleDurationInvalid",
+      "msg": "Sale end_ts is required and must be at most 365 days after max(start_ts, now)"
+    },
+    {
+      "code": 6146,
+      "name": "KycExpiryTooFar",
+      "msg": "KYC entry expiry may be at most 2 years from now"
+    },
+    {
+      "code": 6147,
+      "name": "VotingPeriodTooShort",
+      "msg": "A payout vault vote must run for at least 7 days"
+    },
+    {
+      "code": 6148,
+      "name": "DeliveryDeadlineOutOfRange",
+      "msg": "A DeliveryEscrow deadline must be between now + 24 hours and now + 365 days"
+    },
+    {
+      "code": 6149,
+      "name": "DealExpiryOutOfRange",
+      "msg": "An OTC deal expiry must be in the future and at most 90 days away"
+    },
+    {
+      "code": 6150,
+      "name": "TimelockActive",
+      "msg": "This change is still inside its timelock"
+    },
+    {
+      "code": 6151,
+      "name": "ProposalExpired",
+      "msg": "This proposal has expired; propose again"
+    },
+    {
+      "code": 6152,
+      "name": "InvalidAdminProposal",
+      "msg": "Admin proposal does not match the executing key or the current super admin"
+    },
+    {
+      "code": 6153,
+      "name": "InvalidPlatformRecovery",
+      "msg": "Super-admin recovery does not match the current super admin, the executing key or the current upgrade authority"
+    },
+    {
+      "code": 6154,
+      "name": "PayoutModulesClearNotExplicit",
+      "msg": "PAUSE_PAYOUT_MODULES may only be cleared on its own (clear_mask == 0x40)"
+    },
+    {
+      "code": 6155,
+      "name": "PlatformRecoveryPending",
+      "msg": "A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation"
     }
   ],
   "types": [
@@ -13493,6 +16259,90 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminAdded",
+      "docs": [
+        "Emitted by `add_admin`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "added_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminProposalCancelled",
+      "docs": [
+        "Emitted by `cancel_admin_proposal`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "cancelled_by",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AdminProposed",
+      "docs": [
+        "Emitted by `propose_admin` (a re-proposal emits again)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          },
+          {
+            "name": "eta",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "bootstrap_open",
+            "docs": [
+              "Bootstrap was open at proposal time (the timelock may be waived)."
+            ],
+            "type": "bool"
           }
         ]
       }
@@ -13641,10 +16491,19 @@
       }
     },
     {
-      "name": "AuthorityTransfer",
+      "name": "AuthorityProposal",
       "docs": [
-        "A staged operational authority change; no program upgrade authority changes.",
-        "Seeds: [\"authority_transfer\", target account]."
+        "A staged operational authority change (v1): platform super admin, custody",
+        "vault authority, issuer authority or KYC registry authority. Seeds:",
+        "`[\"authority_proposal\", target]`. Acceptable only by `new_authority`,",
+        "inside `[eta, expires_at)` (the platform flow has a 48 h timelock; the",
+        "others have `eta = proposed_at`), and while `current_authority` is still",
+        "the live authority. A re-proposal overwrites it and restarts both clocks.",
+        "",
+        "⚠ Layout (pinned by a test): target 8, current_authority 40,",
+        "new_authority 72 (the same offset as `AuthorityTransfer` and",
+        "`IssuerRecovery`, for memcmp listings), proposed_by 104, proposed_at 136,",
+        "eta 144, expires_at 152, kind 160, version 161, bump 162; 163 B."
       ],
       "type": {
         "kind": "struct",
@@ -13663,11 +16522,111 @@
           },
           {
             "name": "proposed_by",
+            "docs": [
+              "The proposing key (paid the rent). Accept refunds the rent to the",
+              "acceptor, as the rc.x transfer did; a cancel refunds it here."
+            ],
             "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          },
+          {
+            "name": "eta",
+            "docs": [
+              "Executable at or after this unix ts."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "docs": [
+              "`eta + PROPOSAL_WINDOW_SECS`; executable strictly before it."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "kind",
+            "docs": [
+              "`AUTHORITY_PROPOSAL_KIND_*`."
+            ],
+            "type": "u8"
+          },
+          {
+            "name": "version",
+            "type": "u8"
           },
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthorityProposalCancelled",
+      "docs": [
+        "Emitted by `cancel_platform_admin_transfer` and",
+        "`cancel_custody_authority_transfer`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "target",
+            "type": "pubkey"
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "cancelled_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "cancelled_new_authority",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "AuthorityProposalCreated",
+      "docs": [
+        "Emitted by `propose_platform_admin` and `propose_custody_authority`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "target",
+            "type": "pubkey"
+          },
+          {
+            "name": "kind",
+            "type": "u8"
+          },
+          {
+            "name": "current_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "eta",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
           }
         ]
       }
@@ -14676,6 +17635,57 @@
       }
     },
     {
+      "name": "IssuerFreeze",
+      "docs": [
+        "D1: the proceeds of one issuer are frozen while this PDA exists",
+        "(`close_sale`, `open_payout_vault`, `release_payout`,",
+        "`claim_founder_yield`, `buy`, `open_sale`). Any Admin (or the super admin)",
+        "freezes; only the super admin unfreezes (closes it, rent to `frozen_by`).",
+        "Seeds: `[\"issuer_freeze\", issuer]`.",
+        "",
+        "⚠ Layout (pinned by a test; indexers list by discriminator + dataSize 114):",
+        "issuer 8, frozen_by 40, frozen_at 72, reason_hash 80, version 112,",
+        "bump 113; 114 B."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "frozen_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "frozen_at",
+            "type": "i64"
+          },
+          {
+            "name": "reason_hash",
+            "docs": [
+              "sha256 of the off-chain reason (case file)."
+            ],
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
       "name": "IssuerPermissions",
       "docs": [
         "An operational grant for one issuer authority; never confers global admin.",
@@ -14707,6 +17717,65 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerProceedsFrozen",
+      "docs": [
+        "Emitted by `freeze_issuer_proceeds`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "frozen_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "frozen_at",
+            "type": "i64"
+          },
+          {
+            "name": "reason_hash",
+            "type": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "IssuerProceedsUnfrozen",
+      "docs": [
+        "Emitted by `unfreeze_issuer_proceeds`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "issuer",
+            "type": "pubkey"
+          },
+          {
+            "name": "unfrozen_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "frozen_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "frozen_at",
+            "type": "i64"
           }
         ]
       }
@@ -15750,6 +18819,58 @@
       }
     },
     {
+      "name": "PendingAdmin",
+      "docs": [
+        "D3: a super-admin proposal to grant the Admin role to `new_admin`,",
+        "executable by `new_admin` itself (`add_admin`) inside `[eta, expires_at)`",
+        "while `proposed_by` is still the super admin; cancellable by the super",
+        "admin, any Admin or the program upgrade authority. Seeds:",
+        "`[\"pending_admin\", new_admin]`.",
+        "",
+        "⚠ Layout (pinned by a test): new_admin 8, proposed_by 40, proposed_at 72,",
+        "eta 80, expires_at 88, version 96, bump 97; 98 B."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          },
+          {
+            "name": "eta",
+            "docs": [
+              "`proposed_at + ADMIN_TIMELOCK_SECS` (waived while bootstrap is open)."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "docs": [
+              "`eta + PROPOSAL_WINDOW_SECS`."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
       "name": "Platform",
       "docs": [
         "Singleton. Seeds: `[\"platform\"]`."
@@ -15791,6 +18912,159 @@
           {
             "name": "bump",
             "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PlatformAdminChangeKind",
+      "docs": [
+        "How `Platform.admin` changed (carried by `PlatformAdminChanged`)."
+      ],
+      "type": {
+        "kind": "enum",
+        "variants": [
+          {
+            "name": "Rotation"
+          },
+          {
+            "name": "Recovery"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PlatformAdminChanged",
+      "docs": [
+        "Emitted whenever `Platform.admin` changes."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "old_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "kind",
+            "type": {
+              "defined": {
+                "name": "PlatformAdminChangeKind"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "name": "PlatformRecovery",
+      "docs": [
+        "D4: the program upgrade authority's recovery of a LOST super-admin key.",
+        "Executable by `new_admin` inside `[eta, expires_at)` (7 days after the",
+        "proposal) while `current_admin` is still the super admin and `proposed_by`",
+        "still the upgrade authority; cancellable by the current super admin or the",
+        "proposer. Seeds: `[\"platform_recovery\", platform]`.",
+        "",
+        "⚠ Layout (pinned by a test): platform 8, current_admin 40, new_admin 72,",
+        "proposed_by 104, proposed_at 136, eta 144, expires_at 152, version 160,",
+        "bump 161; 162 B. While `current_admin` (40..72) is the super admin it is",
+        "live, and `accept_platform_admin` refuses (`util::is_live_pending`)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "platform",
+            "type": "pubkey"
+          },
+          {
+            "name": "current_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "docs": [
+              "The program upgrade authority that proposed (and paid)."
+            ],
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          },
+          {
+            "name": "eta",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
+          },
+          {
+            "name": "version",
+            "type": "u8"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PlatformRecoveryCancelled",
+      "docs": [
+        "Emitted by `cancel_platform_recovery`."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "cancelled_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          }
+        ]
+      }
+    },
+    {
+      "name": "PlatformRecoveryProposed",
+      "docs": [
+        "Emitted by `propose_platform_recovery` (a re-proposal emits again)."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "current_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_admin",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "eta",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
           }
         ]
       }

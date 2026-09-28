@@ -173,6 +173,23 @@ pub fn handle_open_custody_vault(
     // `revert_custody_vault` while disabling the permissionless branch in both,
     // silently inverting the intended semantics.
     require!(deadline >= 0, RegistryError::InvalidDeadline);
+    // A DeliveryEscrow always gets a deadline (kritičar-4): between now + 24 h
+    // and now + 365 days, so the beneficiary's permissionless
+    // `return_custody_vault` always opens. The burn-only quarantine keeps
+    // `deadline == 0` — it must never have a permissionless exit.
+    if vault_type == VaultType::DeliveryEscrow {
+        let now = Clock::get()?.unix_timestamp;
+        let earliest = now
+            .checked_add(DELIVERY_ESCROW_MIN_DEADLINE_SECS)
+            .ok_or(RegistryError::Overflow)?;
+        let latest = now
+            .checked_add(DELIVERY_ESCROW_MAX_DEADLINE_SECS)
+            .ok_or(RegistryError::Overflow)?;
+        crate::util::ensure(
+            deadline >= earliest && deadline <= latest,
+            RegistryError::DeliveryDeadlineOutOfRange,
+        )?;
+    }
 
     // Only a realize action that `realize_custody_vault` actually implements
     // may be stored. `trigger_custody_vault` moves Active → Triggered, and from

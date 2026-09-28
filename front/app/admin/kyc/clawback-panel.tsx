@@ -50,8 +50,10 @@ import { fetchBlockEntry, type LiveBlockEntry } from "@/lib/blocklist";
 import {
   checkSameKey,
   chooseClawbackPath,
+  clawbackGraceNotice,
   CLAWBACK_IX_NAME,
   sameKeyWarning,
+  passportStatus,
   type ClawbackPath,
   type PassportStatus,
 } from "@/lib/clawback-path";
@@ -75,6 +77,8 @@ type Preflight = {
   hookGated: boolean;
   kycRegistry: Address | null;
   entryStatus: PassportStatus;
+  /** Inside the 30-day grace: why the passport path is closed, and until when. */
+  graceNotice: string | null;
   /** Live transfer-hook BlockEntry for the holder, or null. */
   blockEntry: LiveBlockEntry | null;
   /** Current Blocklist Authority key (null if it could not be read). */
@@ -164,20 +168,18 @@ export function ClawbackPanel() {
           ? config.data.kycRegistry.value
           : null;
 
-      // 2. Holder's KYC entry (passport path) — must be Revoked or expired.
+      // 2. Holder's KYC entry (passport path) — must be Revoked, or expired
+      //    for at least 30 days (v1.0.0-rc grace; the program decides).
       let entryStatus: PassportStatus = "missing";
+      let passport: { revoked: boolean; expiry: bigint } | null = null;
+      let graceNotice: string | null = null;
       if (gated && registry) {
         const [entryPda] = await findKycEntryPda({ kycRegistry: registry, holder: h });
         const entry = await fetchMaybeKycEntry(client.runtime.rpc, entryPda);
         if (entry.exists) {
-          if (entry.data.status === KycStatus.Revoked) entryStatus = "revoked";
-          else if (
-            entry.data.status === KycStatus.Expired ||
-            (entry.data.status === KycStatus.Approved &&
-              Number(entry.data.expiry) <= Math.floor(Date.now() / 1000))
-          )
-            entryStatus = "expired";
-          else entryStatus = "eligible";
+          passport = { revoked: entry.data.status === KycStatus.Revoked, expiry: entry.data.expiry };
+          entryStatus = passportStatus(passport, Math.floor(Date.now() / 1000));
+          graceNotice = clawbackGraceNotice(passport, Math.floor(Date.now() / 1000))?.message ?? null;
         }
       }
 
@@ -228,6 +230,7 @@ export function ClawbackPanel() {
         hookGated: gated,
         kycRegistry: registry,
         entryStatus,
+        graceNotice,
         blockEntry,
         blocklistAuthority,
         path: chooseClawbackPath({
@@ -390,7 +393,8 @@ export function ClawbackPanel() {
         routes: on any mint, Open or KYC-gated, once the Blocklist Authority
         has put the wallet on the blocklist (blocklist path — two keys); or on a
         KYC-gated mint, after the holder&apos;s passport is revoked or has
-        expired (passport path). Either way the units move into a burn-only
+        expired for at least 30 days (passport path; the grace lets the holder
+        renew). Either way the units move into a burn-only
         quarantine vault — they cannot come back out through any wallet exit.
       </p>
 
@@ -477,10 +481,12 @@ export function ClawbackPanel() {
                 {pre.entryStatus === "revoked"
                   ? "Passport revoked"
                   : pre.entryStatus === "expired"
-                    ? "Passport expired"
-                    : pre.entryStatus === "eligible"
-                      ? "Passport valid"
-                      : "No KYC entry for this holder"}
+                    ? "Passport expired (30-day grace over)"
+                    : pre.entryStatus === "grace"
+                      ? "Passport expired — inside the 30-day grace, the passport path is not open yet"
+                      : pre.entryStatus === "eligible"
+                        ? "Passport valid"
+                        : "No KYC entry for this holder"}
               </span>
             )}
             <span
@@ -512,11 +518,26 @@ export function ClawbackPanel() {
         )}
       </div>
 
+      {pre && !pre.path && pre.entryStatus === "grace" && (
+        <div className="mt-3 max-w-3xl rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+          <p>{pre.graceNotice}</p>
+          <button
+            type="button"
+            disabled
+            className="mt-2 rounded-lg bg-red-700 px-4 py-2 text-sm font-medium text-white opacity-50"
+          >
+            Claw back into quarantine
+          </button>
+        </div>
+      )}
+
       {pre && !pre.path && pre.hookConfigured && (
         <p className="mt-3 max-w-3xl text-xs text-slate-600">
           {!pre.hookGated
             ? "On an Open mint only a blocklisted wallet can be clawed back. "
-            : pre.entryStatus === "missing"
+            : pre.entryStatus === "grace"
+              ? "Until the grace ends, only the blocklist path can claw back. "
+              : pre.entryStatus === "missing"
               ? // 2D: a closed (rent-reclaimed) passport reads as missing.
                 "This holder is not on the blocklist and has no passport in this registry. If it was closed (rent reclaimed), the passport path needs ONE transaction that re-approves the holder with an expiry a second away, revokes the passport and claws back (KYC provider + Admin signing together; never split, which would open a receive window). "
               : "This holder is not on the blocklist and their passport is still valid, so there is nothing to claw back on. "}

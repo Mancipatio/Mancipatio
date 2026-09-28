@@ -48,6 +48,14 @@ export const TRANSFER_HOOK_ERROR__INVALID_PROPOSED_AUTHORITY = 0x177e; // 6014
 export const TRANSFER_HOOK_ERROR__INVALID_AUTHORITY_TRANSFER = 0x177f; // 6015
 /** KycRegistryNotAllowed: Open restriction mode must not name a KYC registry */
 export const TRANSFER_HOOK_ERROR__KYC_REGISTRY_NOT_ALLOWED = 0x1780; // 6016
+/** ProposalExpired: This proposal has expired; propose again */
+export const TRANSFER_HOOK_ERROR__PROPOSAL_EXPIRED = 0x1781; // 6017
+/** TimelockActive: This change is still inside its timelock */
+export const TRANSFER_HOOK_ERROR__TIMELOCK_ACTIVE = 0x1782; // 6018
+/** InvalidRecovery: Recovery does not match the current blocklist authority, the executing key or the current upgrade authority */
+export const TRANSFER_HOOK_ERROR__INVALID_RECOVERY = 0x1783; // 6019
+/** RecoveryPending: A recovery of the blocklist authority is pending; it must be cancelled or executed before a rotation */
+export const TRANSFER_HOOK_ERROR__RECOVERY_PENDING = 0x1784; // 6020
 
 export type TransferHookError =
   | typeof TRANSFER_HOOK_ERROR__HOLDER_KYC_EXPIRED
@@ -58,14 +66,18 @@ export type TransferHookError =
   | typeof TRANSFER_HOOK_ERROR__INVALID_KYC_ENTRY
   | typeof TRANSFER_HOOK_ERROR__INVALID_KYC_REGISTRY
   | typeof TRANSFER_HOOK_ERROR__INVALID_PROPOSED_AUTHORITY
+  | typeof TRANSFER_HOOK_ERROR__INVALID_RECOVERY
   | typeof TRANSFER_HOOK_ERROR__INVALID_TOKEN_ACCOUNT
   | typeof TRANSFER_HOOK_ERROR__JURISDICTION_BLOCKED
   | typeof TRANSFER_HOOK_ERROR__KYC_REGISTRY_NOT_ALLOWED
   | typeof TRANSFER_HOOK_ERROR__KYC_REGISTRY_REQUIRED
   | typeof TRANSFER_HOOK_ERROR__META_LIST_NOT_INITIALIZED
   | typeof TRANSFER_HOOK_ERROR__MISSING_EXTRA_ACCOUNT
+  | typeof TRANSFER_HOOK_ERROR__PROPOSAL_EXPIRED
   | typeof TRANSFER_HOOK_ERROR__RECEIVER_NOT_APPROVED
+  | typeof TRANSFER_HOOK_ERROR__RECOVERY_PENDING
   | typeof TRANSFER_HOOK_ERROR__SENDER_BLOCKED
+  | typeof TRANSFER_HOOK_ERROR__TIMELOCK_ACTIVE
   | typeof TRANSFER_HOOK_ERROR__UNAUTHORIZED;
 
 let transferHookErrorMessages: Record<TransferHookError, string> | undefined;
@@ -79,14 +91,18 @@ if (process.env.NODE_ENV !== "production") {
     [TRANSFER_HOOK_ERROR__INVALID_KYC_ENTRY]: `KYC entry account is malformed or truncated`,
     [TRANSFER_HOOK_ERROR__INVALID_KYC_REGISTRY]: `KYC registry account is malformed, truncated, or unexpected`,
     [TRANSFER_HOOK_ERROR__INVALID_PROPOSED_AUTHORITY]: `Proposed authority must be a different nonzero key`,
+    [TRANSFER_HOOK_ERROR__INVALID_RECOVERY]: `Recovery does not match the current blocklist authority, the executing key or the current upgrade authority`,
     [TRANSFER_HOOK_ERROR__INVALID_TOKEN_ACCOUNT]: `Expected a Token-2022 token account`,
     [TRANSFER_HOOK_ERROR__JURISDICTION_BLOCKED]: `Receiver's jurisdiction is not allowed by the registry`,
     [TRANSFER_HOOK_ERROR__KYC_REGISTRY_NOT_ALLOWED]: `Open restriction mode must not name a KYC registry`,
     [TRANSFER_HOOK_ERROR__KYC_REGISTRY_REQUIRED]: `KycGated restriction mode requires a kyc_registry`,
     [TRANSFER_HOOK_ERROR__META_LIST_NOT_INITIALIZED]: `ExtraAccountMetaList must be initialized before it can be updated`,
     [TRANSFER_HOOK_ERROR__MISSING_EXTRA_ACCOUNT]: `Expected extra account was not provided`,
+    [TRANSFER_HOOK_ERROR__PROPOSAL_EXPIRED]: `This proposal has expired; propose again`,
     [TRANSFER_HOOK_ERROR__RECEIVER_NOT_APPROVED]: `Receiver has no approved KYC entry in the registry`,
+    [TRANSFER_HOOK_ERROR__RECOVERY_PENDING]: `A recovery of the blocklist authority is pending; it must be cancelled or executed before a rotation`,
     [TRANSFER_HOOK_ERROR__SENDER_BLOCKED]: `Sender is on the blocklist`,
+    [TRANSFER_HOOK_ERROR__TIMELOCK_ACTIVE]: `This change is still inside its timelock`,
     [TRANSFER_HOOK_ERROR__UNAUTHORIZED]: `Signer is not the blocklist authority`,
   };
 }

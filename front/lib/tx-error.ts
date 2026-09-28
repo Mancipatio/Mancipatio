@@ -39,6 +39,19 @@ import {
   ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL,
   ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
   ASSET_REGISTRY_ERROR__VAULT_NOT_ACCEPTING_DEPOSITS,
+  ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN,
+  ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED,
+  ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID,
+  ASSET_REGISTRY_ERROR__KYC_EXPIRY_TOO_FAR,
+  ASSET_REGISTRY_ERROR__VOTING_PERIOD_TOO_SHORT,
+  ASSET_REGISTRY_ERROR__DELIVERY_DEADLINE_OUT_OF_RANGE,
+  ASSET_REGISTRY_ERROR__DEAL_EXPIRY_OUT_OF_RANGE,
+  ASSET_REGISTRY_ERROR__TIMELOCK_ACTIVE,
+  ASSET_REGISTRY_ERROR__PROPOSAL_EXPIRED,
+  ASSET_REGISTRY_ERROR__INVALID_ADMIN_PROPOSAL,
+  ASSET_REGISTRY_ERROR__INVALID_PLATFORM_RECOVERY,
+  ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT,
+  ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING,
 } from "@/lib/generated/asset_registry";
 import {
   isSolanaError,
@@ -87,6 +100,29 @@ function gatherLogs(value: unknown, out: string[], depth = 0): void {
   }
 }
 
+// v1.0.0-rc (8.3) hints, declared before CUSTOM_ERROR_HINTS reads them.
+/** The issuer's proceeds are frozen by Manci (IssuerProceedsFrozen, 6143). */
+export const ISSUER_PROCEEDS_FROZEN_HINT =
+  "Manci has frozen this issuer's proceeds, so its sales cannot open, take money or pay out until the Super Admin lifts the freeze. Money already paid into its sales stays in the sale escrow meanwhile; offer and OTC exits, investor yield and claims keep working (IssuerProceedsFrozen).";
+/** A party of the transaction is on the transfer-hook blocklist (PartyBlocklisted, 6144). */
+export const PARTY_BLOCKLISTED_HINT =
+  "A wallet in this transaction (payer, recipient, or the issuer key) is on the Manci blocklist, so the transaction was refused. If an OTC deal cannot expire because of it, ask a Manci Admin to cancel the deal (PartyBlocklisted).";
+/** A timelocked action run before its eta (registry TimelockActive 6150, hook 6018). */
+export const TIMELOCK_ACTIVE_HINT =
+  "This change is still inside its waiting period (48 hours for an Admin grant or a Super Admin rotation, 7 days for a recovery). It can be executed once the countdown ends (TimelockActive).";
+/** A proposal run after its window (registry ProposalExpired 6151, hook 6017). */
+export const PROPOSAL_EXPIRED_HINT =
+  "This proposal has expired (proposals can be executed for 14 days after they become executable). Cancel it and propose again (ProposalExpired).";
+/** A rotation refused while a recovery is pending (registry 6155, hook RecoveryPending 6020). */
+export const PLATFORM_RECOVERY_PENDING_HINT =
+  "A recovery of this role by the program upgrade authority is pending, so the role cannot be rotated. Cancel the recovery first (or let it be executed), then rotate (PlatformRecoveryPending).";
+/** transfer_hook: the blocklist-authority recovery does not match (InvalidRecovery, 6019). */
+export const BLOCKLIST_RECOVERY_INVALID_HINT =
+  "This blocklist-authority recovery no longer matches: the blocklist authority changed since it was proposed, this wallet is not the proposed key, or the signer is not the program upgrade authority (InvalidRecovery).";
+/** transfer_hook: a BA rotation refused while a recovery is pending (RecoveryPending, 6020). */
+export const BLOCKLIST_RECOVERY_PENDING_HINT =
+  "A recovery of the blocklist authority by the program upgrade authority is pending, so the role cannot be rotated. Cancel the recovery first (or let it be executed), then rotate (RecoveryPending).";
+
 // asset_registry custom errors whose raw log ("custom program error: 0x17bd")
 // is meaningless to a user but whose cause is actionable. Codes come from the
 // GENERATED error constants, so a program renumbering can never leave a stale
@@ -94,9 +130,10 @@ function gatherLogs(value: unknown, out: string[], depth = 0): void {
 const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
   (
     [
-      // 6112 / 6113: every propose / accept of an authority transfer (platform
-      // admin, custody vault, KYC registry). They are above every transfer-hook
-      // code (≤ 6016), so the hex cannot collide across programs.
+      // 6112 / 6113: every propose / accept of an authority proposal (platform
+      // admin, custody vault, KYC registry, issuer). They are above every
+      // transfer-hook code (≤ 6020), so the hex cannot collide across programs;
+      // registry codes 6017–6020 are left out of this table for the same reason.
       [
         ASSET_REGISTRY_ERROR__INVALID_AUTHORITY_TRANSFER,
         "The pending transfer does not match: cancelled, replaced, or proposed to another wallet (InvalidAuthorityTransfer).",
@@ -139,7 +176,7 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       ],
       [
         ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS,
-        "Those pause flags are not valid: only the six defined areas can be paused, and one area cannot be paused and resumed in the same step (InvalidPauseFlags).",
+        "Those pause flags are not valid: only the seven pause bits (0x7F) can be set — the bootstrap marker (0x80) never — and one bit cannot be set and cleared in the same step (InvalidPauseFlags).",
       ],
       [
         ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED,
@@ -218,7 +255,7 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
       // Clawback (both permanent-delegate paths; 2C-4 appended 6137 / 6138).
       [
         ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE,
-        "This holder's passport is still valid, so the passport path cannot claw back. If the wallet is sanctioned, have the Blocklist Authority block it and use the blocklist path (ClawbackHolderStillEligible).",
+        "The passport path claws back only from a holder whose passport is revoked, or expired for at least 30 days (the grace lets a holder renew). If the wallet is sanctioned, have the Blocklist Authority block it and use the blocklist path (ClawbackHolderStillEligible).",
       ],
       [
         ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED,
@@ -261,6 +298,44 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
         ASSET_REGISTRY_ERROR__NOT_FOUNDER,
         "This wallet is not the payout vault's founder. If the issuer key was rotated, sync the payout vault first (NotFounder).",
       ],
+      // v1.0.0-rc (8.3) appended 6143–6155.
+      [ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN, ISSUER_PROCEEDS_FROZEN_HINT],
+      [ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED, PARTY_BLOCKLISTED_HINT],
+      [
+        ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID,
+        "A sale needs an end date after its start and at most 365 days after it (or after now, if it starts in the past) (SaleDurationInvalid).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__KYC_EXPIRY_TOO_FAR,
+        "A passport may be valid for at most 2 years from today. Choose an earlier expiry (KycExpiryTooFar).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__VOTING_PERIOD_TOO_SHORT,
+        "A payout-vault vote must run for at least 7 days so every holder has notice (VotingPeriodTooShort).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__DELIVERY_DEADLINE_OUT_OF_RANGE,
+        "A delivery escrow's deadline must be at least 24 hours and at most 365 days away (DeliveryDeadlineOutOfRange).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__DEAL_EXPIRY_OUT_OF_RANGE,
+        "An OTC deal needs an expiry at most 90 days away (DealExpiryOutOfRange).",
+      ],
+      [ASSET_REGISTRY_ERROR__TIMELOCK_ACTIVE, TIMELOCK_ACTIVE_HINT],
+      [ASSET_REGISTRY_ERROR__PROPOSAL_EXPIRED, PROPOSAL_EXPIRED_HINT],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_ADMIN_PROPOSAL,
+        "This Admin grant no longer matches: connect the proposed wallet itself, and check that the Super Admin who proposed it still holds the role (a proposal from an earlier Super Admin must be proposed again) (InvalidAdminProposal).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__INVALID_PLATFORM_RECOVERY,
+        "This Super Admin recovery no longer matches: the Super Admin changed since it was proposed, this wallet is not the proposed key, or the signer is not the program upgrade authority (InvalidPlatformRecovery).",
+      ],
+      [
+        ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT,
+        "The payout modules (0x40) can only be switched on in a call of their own. Resume the other areas separately; nothing was changed (PayoutModulesClearNotExplicit).",
+      ],
+      [ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING, PLATFORM_RECOVERY_PENDING_HINT],
     ] as const
   ).map(([code, hint]) => [`0x${code.toString(16)}`, hint]),
 );
@@ -317,6 +392,14 @@ function customErrorHint(text: string): string | null {
   if (/caused by account: sale\. Error Code: Unauthorized\b/.test(text))
     return SALE_AUTHORITY_HINT + (features().issuerRotation ? SALE_SYNC_SUFFIX : "");
   if (/Error Code: KycRegistryNotAllowed\b/.test(text)) return KYC_REGISTRY_NOT_ALLOWED_HINT;
+  // transfer_hook 6017–6020 share their numbers with registry codes
+  // (VaultNotExpired..SaleWindowClosed), so they match by Anchor's name.
+  // ProposalExpired / TimelockActive exist in both programs with the same
+  // meaning; the registry's recovery-pending error has its own name.
+  if (/Error Code: ProposalExpired\b/.test(text)) return PROPOSAL_EXPIRED_HINT;
+  if (/Error Code: TimelockActive\b/.test(text)) return TIMELOCK_ACTIVE_HINT;
+  if (/Error Code: InvalidRecovery\b/.test(text)) return BLOCKLIST_RECOVERY_INVALID_HINT;
+  if (/Error Code: RecoveryPending\b/.test(text)) return BLOCKLIST_RECOVERY_PENDING_HINT;
   if (/Error Code: InvalidKycRegistry\b/.test(text)) return INVALID_KYC_REGISTRY_HINT;
   // open_sale without a usable approval: Anchor names the account; the bare
   // codes (3012 / 2006) are shared by every account of every instruction.
@@ -417,6 +500,9 @@ export function explainSendError(err: unknown): string {
     if (cursor instanceof MaintenanceModeError) return cursor.message;
     // The emergency pause and the pilot scope, read before the wallet opened (lib/pause-gate.ts).
     if (cursor instanceof PausedFlowError || cursor instanceof ModuleDisabledFlowError) return cursor.message;
+    // A set freeze / blocklist gate account, read before the wallet opened
+    // (lib/proceeds-gate.ts; matched by name: that module imports this one).
+    if (cursor.name === "GateAccountSetError") return cursor.message;
   }
 
   // Common case: a wallet-side rejection.

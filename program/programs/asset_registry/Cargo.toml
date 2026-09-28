@@ -18,6 +18,9 @@ idl-build = ["anchor-lang/idl-build", "anchor-spl/idl-build"]
 anchor-debug = []
 custom-heap = []
 custom-panic = []
+# Incident artifact (design 8.3 §7.4): zero recovery delay and proposer-only
+# cancel, for a COMPROMISED super admin. Never a release / devnet / test build.
+incident = []
 
 [dependencies]
 anchor-lang = { version = "1.0.0", features = ["init-if-needed"] }

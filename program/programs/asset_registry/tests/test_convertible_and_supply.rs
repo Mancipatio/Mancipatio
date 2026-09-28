@@ -10,6 +10,8 @@
 mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -450,29 +452,7 @@ fn double_gate_rejects_non_admin_and_non_issuer_admin() {
     // A real admin who is NOT the issuer authority — has_one gate fires.
     let other_admin = Keypair::new();
     svm.airdrop(&other_admin.pubkey(), 100_000_000_000).unwrap();
-    let (other_admin_pda, _) = Pubkey::find_program_address(
-        &[asset_registry::ADMIN_SEED, other_admin.pubkey().as_ref()],
-        &ctx.program_id,
-    );
-    send(
-        &mut svm,
-        &[&ctx.payer],
-        &[Instruction::new_with_bytes(
-            ctx.program_id,
-            &ixd::AddAdmin {
-                new_admin: other_admin.pubkey(),
-            }
-            .data(),
-            acc::AddAdmin {
-                super_admin: ctx.payer.pubkey(),
-                platform: ctx.platform_pda,
-                admin_record: other_admin_pda,
-                system_program: system_program::ID,
-            }
-            .to_account_metas(None),
-        )],
-        "add_admin",
-    );
+    v1::grant_admin(&mut svm, &ctx.payer, &other_admin).expect("add_admin");
     let err = try_send(
         &mut svm,
         &[&other_admin],

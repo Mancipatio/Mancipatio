@@ -95,6 +95,15 @@ describe("role map v2 validation", () => {
     expect(await rejects({ ...json, unpauseBy: "deployer" }, mainnet)).toMatch(/unpauseBy must be superAdmin on mainnet/);
   });
 
+  it("unpauseMask: the emergency areas by default, never the payout modules or the bootstrap marker (8.3)", async () => {
+    const { json } = await map({}, "mainnet");
+    expect((await validateRoleMap(json, mainnet)).map.unpauseMask).toBe(0x3f);
+    expect((await validateRoleMap({ ...json, unpauseMask: 0x03 }, mainnet)).map.unpauseMask).toBe(0x03);
+    for (const bad of [0, 0x40, 0x7f, 0x80, 0xbf, "0x3f", 1.5]) {
+      expect(await rejects({ ...json, unpauseMask: bad }, mainnet)).toMatch(/unpauseMask must be a non-empty subset of the emergency pause bits 0x3f/);
+    }
+  });
+
   it("isolates the deployer and the bufferWriter", async () => {
     const { keys, json } = await map();
     expect(await rejects({ ...json, blocklistAuthority: keys.deployer })).toMatch(/deployer must hold no final role/);
@@ -168,12 +177,15 @@ describe("role map v2 validation", () => {
     expect(parsed.protocolTreasury).toBe(parsed.superAdmin);
     expect(parsed.allowKycAdmin).toBe(true);
     expect(parsed.acknowledgedSingleKeyUpgradeAuthority).toBe(false);
+    // v1.0.0-rc: the first unpause opens only the pilot areas (0x23); 0x1c and 0x40 stay set.
+    expect(parsed.unpauseMask).toBe(0x23);
     expect(parsed.kyc.registry).toBe(await getRegistryPda(parsed.deployer));
     const text = warnings.join("\n");
     expect(text).toMatch(/ROLE OVERLAP \(acknowledged\): \S+ is superAdmin \+ kyc\.authority \+ blocklistAuthority \+ protocolTreasury/);
     expect(text).toMatch(/no second signature/);
     expect(text).toMatch(/claw back/);
-    expect(text).toMatch(/no on-chain recovery/);
+    // v1.0.0-rc (D4): a lost SA / BA key is recovered only by the upgrade authority after 7 days.
+    expect(text).toMatch(/recovered only by the program upgrade authority .* 7-day timelock/);
     expect(text).toMatch(/reason: "Licensed operator/);
     // It keeps a second Admin record (another person's Ledger) for the pause.
     expect(parsed.admins).toHaveLength(1);

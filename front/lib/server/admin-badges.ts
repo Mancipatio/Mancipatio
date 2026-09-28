@@ -10,9 +10,10 @@
 //   The result holds integers, fixed reason keys and one timestamp per queue.
 // * Isolation: every source has its own 4 s budget (abort + race); a failing
 //   or slow source is `null` ("unavailable") and the others still answer.
-// * Indexer sources (issuers, assets, sales, proposals) share one
-//   indexer_sync_state read and run only while the mirror is fresh
-//   (lib/indexer-freshness.ts); otherwise they are `null` ("indexer").
+// * Indexer sources (issuers, assets, sales, proposals, and the 0079 role
+//   state behind Admins and Platform) share one indexer_sync_state read and
+//   run only while the mirror is fresh (lib/indexer-freshness.ts); otherwise
+//   they are `null` ("indexer").
 // * Memo: 10 s per network|role|wallet, concurrent callers share one run.
 //   `fresh` (sent right after an admin action) never takes a value or a run
 //   that started before it arrived — those may have read before the action's
@@ -38,14 +39,17 @@ import { KybStatus } from "@/lib/generated/asset_registry/types/kybStatus";
 import { ProposalStatus } from "@/lib/generated/asset_registry/types/proposalStatus";
 import { SaleStatus } from "@/lib/generated/asset_registry/types/saleStatus";
 import {
+  adminGrantBadge,
   assetActivationBlock,
   CONVERSION_ADMIN_STATUSES,
   DELIVERY_ADMIN_STATUSES,
+  platformChangeBadge,
   VESTING_REVIEW_FILTER,
   type AdminBadge,
   type AdminBadgeHref,
   type AdminBadges,
   type BadgePart,
+  type StagedChangeRow,
 } from "@/lib/admin-badge-rules";
 
 export const BADGE_SOURCE_TIMEOUT_MS = 4_000;
@@ -117,7 +121,16 @@ function withParts(count: number, parts: Partial<Record<BadgePart, number>>): Ad
   return { count, parts };
 }
 
-/** The 13 queues of the admin menu, in menu order (the badge table of the design). */
+/** The mirrored Platform's Super Admin and pause flags (0079 staged-change badges). */
+async function platformState(sb: SupabaseClient, network: Network, signal: AbortSignal) {
+  const [row] = await rows<{ admin: string | null; pause_flags: number | null }>(
+    sb.from("platforms").select("admin,pause_flags").eq("network", network).limit(1).abortSignal(signal),
+  );
+  return { superAdmin: row?.admin ?? null, pauseFlags: typeof row?.pause_flags === "number" ? row.pause_flags : null };
+}
+
+
+/** The 15 queues of the admin menu, in menu order (the badge table of the design; Admins and Platform: v1.0.0-rc). */
 export const BADGE_SOURCES: readonly Source[] = [
   {
     // KYB decisions are verify_issuer_kyb, which only Platform.admin can sign:
@@ -307,6 +320,23 @@ export const BADGE_SOURCES: readonly Source[] = [
     },
   },
   {
+    // v1.0.0-rc (0079): staged Admin grants in their 48 h review window, and
+    // live ones from an earlier Super Admin (to cancel). The veto is any
+    // admin's (or the upgrade authority's), so no actor restriction.
+    href: "/admin/admins",
+    roles: ADMIN,
+    indexer: true,
+    read: async ({ sb, network, nowSec, signal }) => {
+      // The role-state mirrors (service role only) hold a handful of rows.
+      const [grants, platform] = await Promise.all([
+        rows<StagedChangeRow>(sb.from("pending_admins").select("proposed_by,proposed_at,eta,expires_at")
+          .eq("network", network).limit(ROW_CAP).abortSignal(signal)),
+        platformState(sb, network, signal),
+      ]);
+      return adminGrantBadge(grants, { ...platform, nowSec });
+    },
+  },
+  {
     // Active schedules whose next_due is in the past: the red "overdue" rows.
     // Overdue or freezable payout vaults are RPC-only and not counted. No
     // network column (see the header).
@@ -316,6 +346,28 @@ export const BADGE_SOURCES: readonly Source[] = [
       count: await headCount(sb.from("payout_schedules").select("id", HEAD)
         .eq("active", true).lt("next_due", today).abortSignal(signal)),
     }),
+  },
+  {
+    // v1.0.0-rc (0079): a Super Admin rotation in its 48 h window and any
+    // live upgrade-authority recovery (Super Admin or blocklist authority).
+    href: "/admin/platform",
+    roles: ADMIN,
+    indexer: true,
+    read: async ({ sb, network, nowSec, signal }) => {
+      const [rotations, recoveries, blocklistRecoveries, blocklistRotations, platform] = await Promise.all([
+        // kind 0: the Platform (Super Admin) rotation; the others are custody, issuer and KYC registry.
+        rows<StagedChangeRow>(sb.from("authority_proposals").select("proposed_at,eta,expires_at,current_authority")
+          .eq("network", network).eq("kind", 0).limit(ROW_CAP).abortSignal(signal)),
+        rows<StagedChangeRow>(sb.from("platform_recoveries").select("proposed_at,eta,expires_at")
+          .eq("network", network).limit(ROW_CAP).abortSignal(signal)),
+        rows<StagedChangeRow>(sb.from("blocklist_recoveries").select("proposed_at,eta,expires_at")
+          .eq("network", network).limit(ROW_CAP).abortSignal(signal)),
+        rows<StagedChangeRow>(sb.from("blocklist_authority_proposals").select("proposed_at,expires_at")
+          .eq("network", network).limit(ROW_CAP).abortSignal(signal)),
+        platformState(sb, network, signal),
+      ]);
+      return platformChangeBadge({ rotations, recoveries: [...recoveries, ...blocklistRecoveries], blocklistRotations }, { ...platform, nowSec });
+    },
   },
 ];
 

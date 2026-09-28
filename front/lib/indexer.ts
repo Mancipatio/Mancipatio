@@ -47,12 +47,20 @@ export type ReconcileReport = Record<
     /** Rows on-chain that the indexer never saw. */
     missing: number;
     /**
-     * Subset of `missing` that this run REBUILT from chain bytes — all 14 existing mirror types use the shared generated decoder.
+     * Subset of `missing` that this run REBUILT from chain bytes — every mirror type (the 14 market
+     * tables and, since 0079, the 6 role-state tables) uses the shared generated decoder.
      * Older servers omit the field.
      */
     rebuilt?: number;
   }
 >;
+
+/**
+ * rc.x AuthorityTransfer (137 B) / BlocklistAuthorityTransfer (73 B) accounts
+ * still on chain (lib/legacy-accounts.ts): never mirrored; the v1 programs can
+ * neither read nor close them. Older servers omit the list.
+ */
+export type ReconcileLegacyAccount = { address: string; program: "asset_registry" | "transfer_hook"; type: string; size: number };
 
 /**
  * Trigger a server-side indexer reconcile (signed + admin-gated). Re-scans the
@@ -61,8 +69,8 @@ export type ReconcileReport = Record<
  */
 export async function runReconcile(
   session: WalletSession | null | undefined,
-): Promise<{ network: string; report: ReconcileReport }> {
-  return await signedFetch<{ network: string; report: ReconcileReport }>(
+): Promise<{ network: string; report: ReconcileReport; legacy?: ReconcileLegacyAccount[] }> {
+  return await signedFetch<{ network: string; report: ReconcileReport; legacy?: ReconcileLegacyAccount[] }>(
     session,
     "/api/admin/reconcile",
     "admin.reconcile",

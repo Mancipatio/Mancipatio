@@ -9,6 +9,18 @@
   "instructions": [
     {
       "name": "accept_blocklist_authority",
+      "docs": [
+        "The proposed key takes the BlocklistAuthority (before the proposal",
+        "expires). REFUSED while a recovery is pending (`RecoveryPending`): it",
+        "is cancelled first (`cancel_blocklist_recovery`: the current authority",
+        "or the proposing upgrade authority), or it executes.",
+        "A retire here would let a COMPROMISED authority defeat the `incident`",
+        "build's recovery, which it cannot cancel, by rotating to a second key",
+        "of its own in one transaction (propose + accept) before the execute.",
+        "A recovery is always against the live authority (it can only move by",
+        "this accept, which it blocks, or by the execute, which closes it), so",
+        "no A -> B -> A round trip can revive one either."
+      ],
       "discriminator": [
         145,
         184,
@@ -85,14 +97,47 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
+                  97,
+                  108
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "docs": [
+            "A pending recovery (it may not exist); a live one refuses the accept."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  114,
                   101,
-                  114
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
                 ]
               }
             ]
@@ -188,6 +233,346 @@
           "type": "pubkey"
         }
       ]
+    },
+    {
+      "name": "cancel_blocklist_authority_transfer",
+      "docs": [
+        "The current BlocklistAuthority withdraws a pending rotation (live or",
+        "expired); the rent returns to it."
+      ],
+      "discriminator": [
+        251,
+        56,
+        42,
+        254,
+        184,
+        179,
+        185,
+        198
+      ],
+      "accounts": [
+        {
+          "name": "authority",
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "transfer",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "cancel_blocklist_recovery",
+      "docs": [
+        "The current BlocklistAuthority (the holder of a key that was not",
+        "lost) or the proposer cancels a recovery. In the `incident` build only",
+        "the proposer may: the case is a COMPROMISED BlocklistAuthority."
+      ],
+      "discriminator": [
+        195,
+        68,
+        112,
+        202,
+        52,
+        55,
+        135,
+        124
+      ],
+      "accounts": [
+        {
+          "name": "canceller",
+          "docs": [
+            "Not `mut`: it may be the same key as `proposer`."
+          ],
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        }
+      ],
+      "args": []
+    },
+    {
+      "name": "execute_blocklist_recovery",
+      "docs": [
+        "The recovered key executes inside `[eta, expires_at)`, while the",
+        "BlocklistAuthority is still the one proposed against and the proposer",
+        "is still the upgrade authority. Retires a pending rotation."
+      ],
+      "discriminator": [
+        246,
+        88,
+        209,
+        159,
+        6,
+        137,
+        191,
+        161
+      ],
+      "accounts": [
+        {
+          "name": "new_authority",
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "proposer",
+          "writable": true
+        },
+        {
+          "name": "program",
+          "docs": [
+            "Binds `program_data` to THIS program."
+          ],
+          "address": "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+        },
+        {
+          "name": "program_data",
+          "docs": [
+            "The upgrade authority must still be the proposer."
+          ]
+        },
+        {
+          "name": "transfer",
+          "docs": [
+            "A pending rotation, retired here when present (it may not exist)."
+          ],
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121,
+                  95,
+                  112,
+                  114,
+                  111,
+                  112,
+                  111,
+                  115,
+                  97,
+                  108
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "args": []
     },
     {
       "name": "initialize_blocklist_authority",
@@ -481,7 +866,8 @@
     {
       "name": "propose_blocklist_authority",
       "docs": [
-        "Stages an operational authority change; does not affect ProgramData."
+        "Stages an operational authority change; does not affect ProgramData.",
+        "Acceptable by `new_authority` for 14 days; a re-proposal overwrites it."
       ],
       "discriminator": [
         127,
@@ -561,18 +947,125 @@
                   116,
                   121,
                   95,
-                  116,
+                  112,
                   114,
-                  97,
-                  110,
+                  111,
+                  112,
+                  111,
                   115,
-                  102,
-                  101,
-                  114
+                  97,
+                  108
                 ]
               }
             ]
           }
+        },
+        {
+          "name": "system_program",
+          "address": "11111111111111111111111111111111"
+        }
+      ],
+      "args": [
+        {
+          "name": "new_authority",
+          "type": "pubkey"
+        }
+      ]
+    },
+    {
+      "name": "propose_blocklist_recovery",
+      "docs": [
+        "D4: the program upgrade authority proposes recovering a LOST",
+        "BlocklistAuthority key, executable after 7 days for 14 days. A",
+        "re-proposal overwrites it and restarts both clocks."
+      ],
+      "discriminator": [
+        169,
+        177,
+        244,
+        120,
+        149,
+        40,
+        125,
+        234
+      ],
+      "accounts": [
+        {
+          "name": "upgrade_authority",
+          "docs": [
+            "`ProgramData.upgrade_authority_address`; pays the proposal's rent."
+          ],
+          "writable": true,
+          "signer": true
+        },
+        {
+          "name": "blocklist_authority",
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  97,
+                  117,
+                  116,
+                  104,
+                  111,
+                  114,
+                  105,
+                  116,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "recovery",
+          "writable": true,
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  108,
+                  105,
+                  115,
+                  116,
+                  95,
+                  114,
+                  101,
+                  99,
+                  111,
+                  118,
+                  101,
+                  114,
+                  121
+                ]
+              }
+            ]
+          }
+        },
+        {
+          "name": "program",
+          "address": "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy"
+        },
+        {
+          "name": "program_data"
         },
         {
           "name": "system_program",
@@ -864,16 +1357,29 @@
       ]
     },
     {
-      "name": "BlocklistAuthorityTransfer",
+      "name": "BlocklistAuthorityProposal",
       "discriminator": [
-        171,
-        162,
-        208,
-        78,
-        168,
-        214,
-        135,
-        50
+        207,
+        222,
+        200,
+        184,
+        14,
+        103,
+        144,
+        208
+      ]
+    },
+    {
+      "name": "BlocklistRecovery",
+      "discriminator": [
+        175,
+        123,
+        209,
+        201,
+        84,
+        149,
+        81,
+        186
       ]
     },
     {
@@ -975,6 +1481,26 @@
       "code": 6016,
       "name": "KycRegistryNotAllowed",
       "msg": "Open restriction mode must not name a KYC registry"
+    },
+    {
+      "code": 6017,
+      "name": "ProposalExpired",
+      "msg": "This proposal has expired; propose again"
+    },
+    {
+      "code": 6018,
+      "name": "TimelockActive",
+      "msg": "This change is still inside its timelock"
+    },
+    {
+      "code": 6019,
+      "name": "InvalidRecovery",
+      "msg": "Recovery does not match the current blocklist authority, the executing key or the current upgrade authority"
+    },
+    {
+      "code": 6020,
+      "name": "RecoveryPending",
+      "msg": "A recovery of the blocklist authority is pending; it must be cancelled or executed before a rotation"
     }
   ],
   "types": [
@@ -1023,7 +1549,12 @@
       }
     },
     {
-      "name": "BlocklistAuthorityTransfer",
+      "name": "BlocklistAuthorityProposal",
+      "docs": [
+        "A staged BlocklistAuthority rotation (v1). Seeds:",
+        "`[\"blocklist_authority_proposal\"]`. Layout: current_authority 8,",
+        "new_authority 40, proposed_at 72, expires_at 80, bump 88; 89 B."
+      ],
       "type": {
         "kind": "struct",
         "fields": [
@@ -1034,6 +1565,59 @@
           {
             "name": "new_authority",
             "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "docs": [
+              "`proposed_at + PROPOSAL_WINDOW_SECS`; acceptable strictly before it."
+            ],
+            "type": "i64"
+          },
+          {
+            "name": "bump",
+            "type": "u8"
+          }
+        ]
+      }
+    },
+    {
+      "name": "BlocklistRecovery",
+      "docs": [
+        "D4: the upgrade authority's recovery of a LOST BlocklistAuthority key.",
+        "Seeds: `[\"blocklist_recovery\"]`. Layout: current_authority 8,",
+        "new_authority 40, proposed_by 72, proposed_at 104, eta 112,",
+        "expires_at 120, bump 128; 129 B."
+      ],
+      "type": {
+        "kind": "struct",
+        "fields": [
+          {
+            "name": "current_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "new_authority",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_by",
+            "type": "pubkey"
+          },
+          {
+            "name": "proposed_at",
+            "type": "i64"
+          },
+          {
+            "name": "eta",
+            "type": "i64"
+          },
+          {
+            "name": "expires_at",
+            "type": "i64"
           },
           {
             "name": "bump",

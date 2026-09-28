@@ -26,15 +26,35 @@ import {
   setComputeUnitLimitInstruction,
   setComputeUnitPriceInstruction,
 } from "@/lib/compute-budget";
+import {
+  findAcceptPlatformAdminRecoveryPda,
+  findAcceptPlatformAdminTransferPda,
+  findIssuerFreezePda,
+  findPendingAdminPda,
+  findPlatformPda,
+  getAuthorityProposalEncoder,
+  getIssuerFreezeEncoder,
+  getPendingAdminEncoder,
+  getPlatformEncoder,
+  getPlatformRecoveryEncoder,
+} from "@/lib/generated/asset_registry";
+import {
+  findBlocklistAuthorityPda,
+  findRecoveryPda as findBlocklistRecoveryPda,
+  getBlocklistAuthorityEncoder,
+  getBlocklistRecoveryEncoder,
+} from "@/lib/generated/transfer_hook";
 import { runTool } from "@/scripts/chain/lib/context";
+import { executableHash } from "@/scripts/chain/lib/release";
 import { LOADER_V3, programDataAddress } from "@/scripts/chain/lib/loader-v3";
 import { FEATURE_PROGRAM, SBPF_DEPLOY_GATE } from "@/scripts/chain/lib/network-gates";
 import { pmWrite } from "@/scripts/chain/lib/program-metadata";
-import { type ChainEnv } from "@/scripts/chain/lib/safety";
+import { sha256Hex, type ChainEnv } from "@/scripts/chain/lib/safety";
 import {
   MAX_EXTERNAL_TRANSFER_LAMPORTS,
   MULTISIG_DISCRIMINATOR,
   OTTERSEC_VERIFY_PROGRAM,
+  SQUADS_INNER_MESSAGE_BUDGET,
   SQUADS_V4_PROGRAM,
   assertOnlyVaultSigner,
   OTTER_VERIFY_IX,
@@ -50,9 +70,10 @@ import {
   verifyParamProblems,
   type VerifyParams,
 } from "@/scripts/chain/lib/squads";
-import { assertSquadsVerified, squadsExportTool } from "@/scripts/chain/lib/squads-export";
+import { assertSquadsVerified, planSquadsOp, squadsExportTool } from "@/scripts/chain/lib/squads-export";
+import type { RoleMap } from "@/scripts/chain/lib/role-map";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
-import { deps, env, releaseDir, seedIdl, world, type World } from "./helpers/chain-world";
+import { deps, env, releaseDir, rpcFor, seedIdl, world, type World } from "./helpers/chain-world";
 
 const fixture = JSON.parse(fs.readFileSync(path.resolve(__dirname, "fixtures/squads-multisig-v4.json"), "utf8"));
 const blockhash = { blockhash: "11111111111111111111111111111111" as never, lastValidBlockHeight: BigInt(100) };
@@ -287,12 +308,20 @@ describe("chain:squads-export ops", () => {
   it("registry-ix: only the allowlist, built with the vault as signer", async () => {
     const w = await handedOver();
     expect((await exportOp(w, "registry-ix", { instruction: "close_sale", args: {} })).error).toMatch(/registry-ix instruction must be one of/);
-    const ok = await exportOp(w, "registry-ix", { instruction: "add_admin", args: { newAdmin: w.keys.admins[0] } });
+    // v1.0.0-rc (D3): the vault proposes the grant; the admin key executes add_admin itself.
+    const ok = await exportOp(w, "registry-ix", { instruction: "propose_admin", args: { newAdmin: w.keys.admins[0] } });
     expect(ok.error ?? null).toBeNull();
     const ix = (ok.export as Exported).transactions[0].instructions[0];
     expect(ix.program).toBe(REGISTRY);
     expect(ix.accounts.filter((a) => a.signer).map((a) => a.address)).toEqual([w.keys.vault]);
     expect((ok.export as Exported).header.preconditions.join("\n")).toMatch(/is in role-map admins/);
+    // add_admin is signed by the new key: through Squads only for the vault itself.
+    expect((await exportOp(w, "registry-ix", { instruction: "add_admin", args: { newAdmin: w.keys.admins[0] } })).error).toMatch(/signed by the new Admin key itself/);
+    expect((await exportOp(w, "registry-ix", { instruction: "add_admin", args: {} })).error).toMatch(/no Admin grant is staged for the vault/);
+    // The upgrade authority's veto and recovery: nothing to cancel on a fresh chain.
+    expect((await exportOp(w, "registry-ix", { instruction: "cancel_platform_admin_transfer", args: {} })).error).toMatch(/no super admin rotation is staged/);
+    expect((await exportOp(w, "hook-ix", { instruction: "cancel_blocklist_recovery", args: {} })).error).toMatch(/no blocklist authority recovery is pending/);
+    expect((await exportOp(w, "hook-ix", { instruction: "add_to_blocklist", args: {} })).error).toMatch(/hook-ix instruction must be one of/);
   });
 
   it("registry-ix: arguments are checked against the role map (targets, treasury, fee, masks)", async () => {
@@ -300,10 +329,10 @@ describe("chain:squads-export ops", () => {
     const run = (instruction: string, args: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
       exportOp(w, "registry-ix", { instruction, args, ...extra });
     // Targets outside the map need an explicit confirmTarget; hot keys never.
-    expect((await run("add_admin", { newAdmin: key(80) })).error).toMatch(/not the role-map key .*confirmTarget/);
-    expect((await run("add_admin", { newAdmin: key(80) }, { confirmTarget: key(80) })).error ?? null).toBeNull();
-    expect((await run("add_admin", { newAdmin: w.keys.deployer }, { confirmTarget: w.keys.deployer })).error).toMatch(/hot key/);
-    expect((await run("add_admin", { newAdmin: w.keys.kycAuthority }, { confirmTarget: w.keys.kycAuthority })).error).toMatch(/allowKycAdmin/);
+    expect((await run("propose_admin", { newAdmin: key(80) })).error).toMatch(/not the role-map key .*confirmTarget/);
+    expect((await run("propose_admin", { newAdmin: key(80) }, { confirmTarget: key(80) })).error ?? null).toBeNull();
+    expect((await run("propose_admin", { newAdmin: w.keys.deployer }, { confirmTarget: w.keys.deployer })).error).toMatch(/hot key/);
+    expect((await run("propose_admin", { newAdmin: w.keys.kycAuthority }, { confirmTarget: w.keys.kycAuthority })).error).toMatch(/allowKycAdmin/);
     expect((await run("propose_platform_admin", { newAdmin: key(88) })).error).toMatch(/not the role-map key/);
     expect((await run("propose_platform_admin", { newAdmin: w.keys.superAdmin })).error ?? null).toBeNull();
     expect((await run("initialize_blocklist_authority", { authority: key(87) })).error).toMatch(/not the role-map key/);
@@ -324,6 +353,25 @@ describe("chain:squads-export ops", () => {
     const resume = await run("set_pause_flags", { clearMask: 0x3f });
     expect(resume.error ?? null).toBeNull();
     expect((resume.export as Exported).header.preconditions.join("\n")).toMatch(/pause set 0x00 .*clear 0x3f \(Onboarding/);
+    // v1.0.0-rc: bit 7 is never set, and 0x40 clears only on its own (6154).
+    expect((await run("set_pause_flags", { setMask: 0x80 })).error).toMatch(/setMask may hold only the pause bits 0x7f/);
+    expect((await run("set_pause_flags", { clearMask: 0x7f })).error).toMatch(/clear only in a call of their own/);
+    expect((await run("set_pause_flags", { clearMask: 0x40 })).error ?? null).toBeNull();
+  });
+
+  it("D2: on mainnet a clear of the payout modules (0x40) needs confirmPayoutModules = the multisig; other clears and devnet are unchanged", async () => {
+    const w = await handedOver();
+    const mainnet: RoleMap = { ...w.map, network: "mainnet" };
+    const plan = (params: Record<string, unknown>, map: RoleMap = mainnet) =>
+      planSquadsOp({ op: "registry-ix", params: params as never, rpc: rpcFor(w), map, release: null, idlSources: null });
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 } })).rejects.toThrow(/D2: an owner decision .*confirmPayoutModules/);
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 }, confirmPayoutModules: w.keys.vault })).rejects.toThrow(/confirmPayoutModules/);
+    const confirmed = await plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 }, confirmPayoutModules: mainnet.squads.multisig });
+    expect(confirmed.preconditions.join("\n")).toMatch(/D2 owner decision: the payout modules \(0x40\) are switched ON on mainnet/);
+    // Other areas, and a SET of 0x40, need nothing.
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x23 } })).resolves.toBeDefined();
+    await expect(plan({ instruction: "set_pause_flags", args: { setMask: 0x40 } })).resolves.toBeDefined();
+    await expect(plan({ instruction: "set_pause_flags", args: { clearMask: 0x40 } }, w.map)).resolves.toBeDefined();
   });
 
   it("set-upgrade-authority and metadata-set-authority: hot keys refused, a new key must be confirmed", async () => {
@@ -653,5 +701,132 @@ describe("chain:squads-export ops", () => {
     await exportOp(w, "set-upgrade-authority", { programs: ["transfer_hook"], newAuthority: null, confirmImmutable: true });
     expect(w.chain.calls).not.toContain("sendTransaction");
     expect(w.chain.calls).not.toContain("simulateTransaction");
+  });
+});
+
+describe("chain:squads-export v1.0.0-rc role ops (design 8.3 §7, K2.11)", () => {
+  /** A handed-over chain whose Platform (SA = the map SA) and BlocklistAuthority exist. */
+  async function live() {
+    const w = await handedOver();
+    const [platform] = await findPlatformPda();
+    w.chain.set(platform, {
+      owner: REGISTRY,
+      lamports: rent(94),
+      data: new Uint8Array(getPlatformEncoder().encode({ admin: w.keys.superAdmin, protocolTreasury: w.keys.vault, protocolFeeBps: 0, pauseFlags: 0x40, issuersCount: 0, version: 2, bump: 255 })),
+    });
+    const [ba] = await findBlocklistAuthorityPda();
+    w.chain.set(ba, { owner: HOOK, lamports: rent(41), data: new Uint8Array(getBlocklistAuthorityEncoder().encode({ authority: w.keys.blocklistAuthority, bump: 255 })) });
+    return { w, platform, now: BigInt(w.chain.now) };
+  }
+  const WINDOW = BigInt(1_209_600);
+  /** One vault transaction inside the Squads inner budget, signed by the vault alone; its account count. */
+  function single(evidence: Record<string, unknown>, vault: string) {
+    expect(evidence.error ?? null).toBeNull();
+    const exported = evidence.export as Exported;
+    expect(exported.transactions).toHaveLength(1);
+    const [tx] = exported.transactions;
+    expect(tx.messageBytes).toBeLessThanOrEqual(SQUADS_INNER_MESSAGE_BUDGET);
+    expect(tx.instructions).toHaveLength(1);
+    expect(tx.instructions[0].accounts.filter((a) => a.signer).map((a) => a.address)).toEqual([vault]);
+    return { accounts: tx.instructions[0].accounts.length, exported };
+  }
+
+  it("the upgrade authority's veto and D4 recoveries, the grant, the freeze: each one vault transaction within the size guard", async () => {
+    const { w, platform, now } = await live();
+    const vault = w.keys.vault;
+    const run = (instruction: string, args: Record<string, unknown> = {}, op = "registry-ix") => exportOp(w, op, { instruction, args });
+
+    // D4 registry: propose (6 accounts, the vault as the upgrade authority).
+    const propose = single(await run("propose_platform_recovery", { newAdmin: w.keys.superAdmin }), vault);
+    expect(propose.accounts).toBe(6);
+    expect(propose.exported.header.postconditions.join(" ")).toMatch(/7 days after the proposal/);
+    // Recovered to the vault itself: cancel (4) and execute (10, K2.11) through Squads.
+    const [recovery] = await findAcceptPlatformAdminRecoveryPda({ platform });
+    w.chain.set(recovery, {
+      owner: REGISTRY,
+      lamports: rent(162),
+      data: new Uint8Array(
+        getPlatformRecoveryEncoder().encode({ platform, currentAdmin: w.keys.superAdmin, newAdmin: vault, proposedBy: vault, proposedAt: now, eta: now + BigInt(604_800), expiresAt: now + BigInt(604_800) + WINDOW, version: 1, bump: 255 }),
+      ),
+    });
+    expect(single(await run("cancel_platform_recovery"), vault).accounts).toBe(4);
+    const execute = single(await run("execute_platform_recovery"), vault);
+    expect(execute.accounts).toBe(10);
+    expect(execute.exported.header.preconditions.join(" ")).toMatch(/the vault becomes the super admin/);
+    // The veto: cancel a staged grant and a staged rotation (7 accounts each).
+    const [pending] = await findPendingAdminPda({ newAdmin: key(81) });
+    w.chain.set(pending, {
+      owner: REGISTRY,
+      lamports: rent(98),
+      data: new Uint8Array(getPendingAdminEncoder().encode({ newAdmin: key(81), proposedBy: w.keys.superAdmin, proposedAt: now, eta: now + BigInt(172_800), expiresAt: now + BigInt(172_800) + WINDOW, version: 1, bump: 255 })),
+    });
+    expect(single(await run("cancel_admin_proposal", { newAdmin: key(81) }), vault).accounts).toBe(7);
+    const [transfer] = await findAcceptPlatformAdminTransferPda({ platform });
+    w.chain.set(transfer, {
+      owner: REGISTRY,
+      lamports: rent(163),
+      data: new Uint8Array(
+        getAuthorityProposalEncoder().encode({ target: platform, currentAuthority: w.keys.superAdmin, newAuthority: key(82), proposedBy: w.keys.superAdmin, proposedAt: now, eta: now + BigInt(172_800), expiresAt: now + BigInt(172_800) + WINDOW, kind: 0, version: 1, bump: 255 }),
+      ),
+    });
+    expect(single(await run("cancel_platform_admin_transfer"), vault).accounts).toBe(7);
+    // Freeze and unfreeze (the vault as an Admin / as the super admin in the k4 layout).
+    const reasonHash = "ab".repeat(32);
+    expect(single(await run("freeze_issuer_proceeds", { issuer: key(83), reasonHash }), vault).accounts).toBe(6);
+    expect((await run("freeze_issuer_proceeds", { issuer: key(83), reasonHash: "nope" })).error).toMatch(/64-hex sha256/);
+    const [freeze] = await findIssuerFreezePda({ issuer: key(83) });
+    w.chain.set(freeze, {
+      owner: REGISTRY,
+      lamports: rent(114),
+      data: new Uint8Array(getIssuerFreezeEncoder().encode({ issuer: key(83), frozenBy: key(84), frozenAt: now, reasonHash: new Uint8Array(32), version: 1, bump: 255 })),
+    });
+    const unfreeze = single(await run("unfreeze_issuer_proceeds", { issuer: key(83) }), vault);
+    expect(unfreeze.accounts).toBe(4);
+    expect(unfreeze.exported.transactions[0].instructions[0].accounts.map((a) => a.address)).toContain(key(84));
+    // D4 hook: propose (6), and for the vault as the new BA cancel (4) and execute (7).
+    expect(single(await run("propose_blocklist_recovery", { newAuthority: w.keys.blocklistAuthority }, "hook-ix"), vault).accounts).toBe(6);
+    const [hookRecovery] = await findBlocklistRecoveryPda();
+    w.chain.set(hookRecovery, {
+      owner: HOOK,
+      lamports: rent(129),
+      data: new Uint8Array(
+        getBlocklistRecoveryEncoder().encode({ currentAuthority: w.keys.blocklistAuthority, newAuthority: vault, proposedBy: vault, proposedAt: now, eta: now + BigInt(604_800), expiresAt: now + BigInt(604_800) + WINDOW, bump: 255 }),
+      ),
+    });
+    expect(single(await run("cancel_blocklist_recovery", {}, "hook-ix"), vault).accounts).toBe(4);
+    expect(single(await run("execute_blocklist_recovery", {}, "hook-ix"), vault).accounts).toBe(7);
+    // The vault is the upgrade authority: never an Admin (review finding 6); as the SA only with a warning.
+    expect((await exportOp(w, "registry-ix", { instruction: "propose_admin", args: { newAdmin: vault }, confirmTarget: vault })).error).toMatch(/Admin == UA/);
+    const toVault = single(await run("propose_platform_admin", { newAdmin: vault }), vault);
+    expect(toVault.exported.header.postconditions.join(" ")).toMatch(/chain:inventory blocks it \(sa-is-ua\)/);
+  });
+
+  it("upgrade to the Release's incident build: only with confirmIncident, bytes checked against the incident .so; then back to the release build", async () => {
+    const w = await handedOver();
+    const release = releaseDir();
+    const incident = { asset_registry: new Uint8Array([1, 2, 9]), transfer_hook: new Uint8Array([4, 5, 9]) };
+    for (const name of ["asset_registry", "transfer_hook"] as const) {
+      fs.writeFileSync(path.join(release, `${name}-incident.so`), incident[name]);
+      fs.appendFileSync(path.join(release, "sbf-sha256.txt"), `${sha256Hex(incident[name])}  target/deploy-incident/${name}.so\n`);
+      fs.appendFileSync(path.join(release, "hashes.txt"), `${name}-incident: ${executableHash(incident[name])}\n`);
+    }
+    const files = fs.readdirSync(release).filter((f) => f !== "SHA256SUMS").sort();
+    fs.writeFileSync(path.join(release, "SHA256SUMS"), files.map((f) => `${sha256Hex(fs.readFileSync(path.join(release, f)))}  ${f}`).join("\n") + "\n");
+    loaderBuffer(w, key(90), w.keys.vault, incident.transfer_hook);
+    const env = { CHAIN_RELEASE_DIR: release };
+    expect((await exportOp(w, "upgrade", { artifact: "incident", buffers: { transferHook: key(90) } }, env)).error).toMatch(/needs confirmIncident: true/);
+    // A release-build buffer is not the incident build.
+    loaderBuffer(w, key(91), w.keys.vault, new Uint8Array([4, 5, 6]));
+    expect((await exportOp(w, "upgrade", { artifact: "incident", confirmIncident: true, buffers: { transferHook: key(91) } }, env)).error).toMatch(/buffer bytes differ from the Release incident .so/);
+    const ok = await exportOp(w, "upgrade", { artifact: "incident", confirmIncident: true, buffers: { transferHook: key(90) } }, env);
+    expect(ok.error ?? null).toBeNull();
+    const header = (ok.export as Exported).header;
+    expect(header.preconditions.join("\n")).toMatch(/INCIDENT BUILD: zero recovery delay/);
+    expect(header.postconditions.join("\n")).toMatch(/then this op again with the release build/);
+    // An rc.x Release has no incident build.
+    expect((await exportOp(w, "upgrade", { artifact: "incident", confirmIncident: true, buffers: { transferHook: key(90) } }, { CHAIN_RELEASE_DIR: releaseDir() })).error).toMatch(/carries no incident build/);
+    expect((await exportOp(w, "upgrade", { artifact: "debug", buffers: { transferHook: key(90) } }, env)).error).toMatch(/artifact must be "release" or "incident"/);
+    // The restore: the release build, as for any upgrade.
+    expect((await exportOp(w, "upgrade", { buffers: { transferHook: key(91) } }, env)).error ?? null).toBeNull();
   });
 });

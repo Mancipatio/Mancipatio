@@ -8,9 +8,13 @@
 
 export * from "./acceptBlocklistAuthority";
 export * from "./addToBlocklist";
+export * from "./cancelBlocklistAuthorityTransfer";
+export * from "./cancelBlocklistRecovery";
+export * from "./executeBlocklistRecovery";
 export * from "./initializeBlocklistAuthority";
 export * from "./initializeExtraAccountMetaList";
 export * from "./initializeTransferHookConfig";
 export * from "./proposeBlocklistAuthority";
+export * from "./proposeBlocklistRecovery";
 export * from "./removeFromBlocklist";
 export * from "./updateTransferHookConfig";

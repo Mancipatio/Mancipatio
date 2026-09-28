@@ -59,6 +59,9 @@ export type OpenPayoutVaultInstruction<
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountShareClass extends string | AccountMeta<string> = string,
+  TAccountAsset extends string | AccountMeta<string> = string,
+  TAccountIssuerFreeze extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -89,6 +92,15 @@ export type OpenPayoutVaultInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountShareClass extends string
+        ? ReadonlyAccount<TAccountShareClass>
+        : TAccountShareClass,
+      TAccountAsset extends string
+        ? ReadonlyAccount<TAccountAsset>
+        : TAccountAsset,
+      TAccountIssuerFreeze extends string
+        ? ReadonlyAccount<TAccountIssuerFreeze>
+        : TAccountIssuerFreeze,
       ...TRemainingAccounts,
     ]
   >;
@@ -138,6 +150,9 @@ export type OpenPayoutVaultAsyncInput<
   TAccountEscrow extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountAsset extends string = string,
+  TAccountIssuerFreeze extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   sale: Address<TAccountSale>;
@@ -147,6 +162,15 @@ export type OpenPayoutVaultAsyncInput<
   escrow?: Address<TAccountEscrow>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /** D1 chain to the issuer: the sale's share class ... */
+  shareClass: Address<TAccountShareClass>;
+  /** ... and its asset (`asset.issuer` keys the freeze below). */
+  asset: Address<TAccountAsset>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
   metadataHash: OpenPayoutVaultInstructionDataArgs["metadataHash"];
 };
 
@@ -159,6 +183,9 @@ export async function getOpenPayoutVaultInstructionAsync<
   TAccountEscrow extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountShareClass extends string,
+  TAccountAsset extends string,
+  TAccountIssuerFreeze extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenPayoutVaultAsyncInput<
@@ -169,7 +196,10 @@ export async function getOpenPayoutVaultInstructionAsync<
     TAccountVault,
     TAccountEscrow,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -182,7 +212,10 @@ export async function getOpenPayoutVaultInstructionAsync<
     TAccountVault,
     TAccountEscrow,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze
   >
 > {
   // Program address.
@@ -202,6 +235,9 @@ export async function getOpenPayoutVaultInstructionAsync<
       isWritable: false,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    shareClass: { value: input.shareClass ?? null, isWritable: false },
+    asset: { value: input.asset ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -238,6 +274,9 @@ export async function getOpenPayoutVaultInstructionAsync<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.asset),
+      getAccountMeta(accounts.issuerFreeze),
     ],
     data: getOpenPayoutVaultInstructionDataEncoder().encode(
       args as OpenPayoutVaultInstructionDataArgs,
@@ -252,7 +291,10 @@ export async function getOpenPayoutVaultInstructionAsync<
     TAccountVault,
     TAccountEscrow,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze
   >);
 }
 
@@ -265,6 +307,9 @@ export type OpenPayoutVaultInput<
   TAccountEscrow extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountAsset extends string = string,
+  TAccountIssuerFreeze extends string = string,
 > = {
   authority: TransactionSigner<TAccountAuthority>;
   sale: Address<TAccountSale>;
@@ -274,6 +319,15 @@ export type OpenPayoutVaultInput<
   escrow: Address<TAccountEscrow>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /** D1 chain to the issuer: the sale's share class ... */
+  shareClass: Address<TAccountShareClass>;
+  /** ... and its asset (`asset.issuer` keys the freeze below). */
+  asset: Address<TAccountAsset>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
   metadataHash: OpenPayoutVaultInstructionDataArgs["metadataHash"];
 };
 
@@ -286,6 +340,9 @@ export function getOpenPayoutVaultInstruction<
   TAccountEscrow extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountSystemProgram extends string,
+  TAccountShareClass extends string,
+  TAccountAsset extends string,
+  TAccountIssuerFreeze extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: OpenPayoutVaultInput<
@@ -296,7 +353,10 @@ export function getOpenPayoutVaultInstruction<
     TAccountVault,
     TAccountEscrow,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze
   >,
   config?: { programAddress?: TProgramAddress },
 ): OpenPayoutVaultInstruction<
@@ -308,7 +368,10 @@ export function getOpenPayoutVaultInstruction<
   TAccountVault,
   TAccountEscrow,
   TAccountPaymentTokenProgram,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountShareClass,
+  TAccountAsset,
+  TAccountIssuerFreeze
 > {
   // Program address.
   const programAddress =
@@ -327,6 +390,9 @@ export function getOpenPayoutVaultInstruction<
       isWritable: false,
     },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    shareClass: { value: input.shareClass ?? null, isWritable: false },
+    asset: { value: input.asset ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -353,6 +419,9 @@ export function getOpenPayoutVaultInstruction<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.asset),
+      getAccountMeta(accounts.issuerFreeze),
     ],
     data: getOpenPayoutVaultInstructionDataEncoder().encode(
       args as OpenPayoutVaultInstructionDataArgs,
@@ -367,7 +436,10 @@ export function getOpenPayoutVaultInstruction<
     TAccountVault,
     TAccountEscrow,
     TAccountPaymentTokenProgram,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze
   >);
 }
 
@@ -385,6 +457,15 @@ export type ParsedOpenPayoutVaultInstruction<
     escrow: TAccountMetas[5];
     paymentTokenProgram: TAccountMetas[6];
     systemProgram: TAccountMetas[7];
+    /** D1 chain to the issuer: the sale's share class ... */
+    shareClass: TAccountMetas[8];
+    /** ... and its asset (`asset.issuer` keys the freeze below). */
+    asset: TAccountMetas[9];
+    /**
+     * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+     * unset (no freeze in force).
+     */
+    issuerFreeze: TAccountMetas[10];
   };
   data: OpenPayoutVaultInstructionData;
 };
@@ -397,7 +478,7 @@ export function parseOpenPayoutVaultInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedOpenPayoutVaultInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 8) {
+  if (instruction.accounts.length < 11) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -418,6 +499,9 @@ export function parseOpenPayoutVaultInstruction<
       escrow: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
       systemProgram: getNextAccount(),
+      shareClass: getNextAccount(),
+      asset: getNextAccount(),
+      issuerFreeze: getNextAccount(),
     },
     data: getOpenPayoutVaultInstructionDataDecoder().decode(instruction.data),
   };

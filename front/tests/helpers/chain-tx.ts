@@ -90,11 +90,12 @@ export function encodeEvent(name: string, values: Record<string, unknown>): Uint
   for (const [field, type] of spec.fields) {
     const v = values[field];
     switch (type) {
-      case "u8": case "ClawbackReason": case "IssuerAuthorityChangeKind": out[o] = Number(v ?? 0); o += 1; break;
+      case "u8": case "ClawbackReason": case "IssuerAuthorityChangeKind": case "PlatformAdminChangeKind": out[o] = Number(v ?? 0); o += 1; break;
       case "bool": out[o] = v ? 1 : 0; o += 1; break;
       case "pubkey": out.set(getAddressEncoder().encode((v ?? KEY) as Address), o); o += 32; break;
       case "u64": view.setBigUint64(o, BigInt((v as string | number | bigint | undefined) ?? 0), true); o += 8; break;
       case "i64": view.setBigInt64(o, BigInt((v as string | number | bigint | undefined) ?? 0), true); o += 8; break;
+      case "bytes32": if (v instanceof Uint8Array) out.set(v.subarray(0, 32), o); o += 32; break;
       case "bytes128": o += 128; break;
     }
   }

@@ -25,7 +25,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     asset_registry::{
-        accounts as acc, instruction as ixd, AuthorityTransfer, HolderApproved, HolderRevoked,
+        accounts as acc, instruction as ixd, AuthorityProposal, HolderApproved, HolderRevoked,
         KycEntry, KycRegistry, KycRegistryAuthorityChanged, KycRegistryAuthorityProposalCancelled,
         KycRegistryAuthorityProposed, KycRegistryJurisdictionsUpdated, KycStatus,
     },
@@ -222,7 +222,7 @@ fn rotation_moves_only_the_authority_and_refunds_the_acceptor() {
     assert_eq!(proposed[0].registry, registry);
     assert_eq!(proposed[0].current_authority, a.pubkey());
     assert_eq!(proposed[0].new_authority, b.pubkey());
-    let staged: AuthorityTransfer = load(&w.svm, &transfer);
+    let staged: AuthorityProposal = load(&w.svm, &transfer);
     assert_eq!(staged.target, registry);
     assert_eq!(staged.current_authority, a.pubkey());
     assert_eq!(staged.new_authority, b.pubkey());
@@ -455,6 +455,99 @@ fn only_the_current_authority_cancels_and_is_refunded() {
     assert_eq!(w.registry().authority, a.pubkey());
 }
 
+/// prog-vlast-11 (design 8.3 §14.6.2): a proposal is acceptable strictly
+/// before `proposed_at + 14 days`; the current authority still cancels an
+/// expired one; a re-proposal restarts the clock.
+#[test]
+fn a_registry_rotation_expires_after_fourteen_days_and_stays_cancellable() {
+    let mut w = boot();
+    let (a, b) = (World::key(&w.a), World::key(&w.b));
+    let registry = w.registry;
+    let clock = |w: &World| w.svm.get_sysvar::<solana_clock::Clock>();
+    w.send(
+        &a,
+        kyc::propose_ix(&a.pubkey(), &registry, &b.pubkey()),
+        "propose A -> B",
+    );
+    let staged: AuthorityProposal = load(&w.svm, &kyc::transfer_pda(&registry));
+    let t0 = clock(&w).unix_timestamp;
+    assert_eq!(
+        staged.kind,
+        asset_registry::AUTHORITY_PROPOSAL_KIND_KYC_REGISTRY
+    );
+    assert_eq!((staged.proposed_at, staged.eta), (t0, t0));
+    assert_eq!(staged.expires_at, t0 + asset_registry::PROPOSAL_WINDOW_SECS);
+    let mut at = clock(&w);
+    at.unix_timestamp = staged.expires_at;
+    w.svm.set_sysvar(&at);
+    w.expect_code(
+        &b,
+        kyc::accept_ix(&b.pubkey(), &registry),
+        6151,
+        "at expires_at",
+    );
+    w.send(
+        &a,
+        kyc::cancel_ix(&a.pubkey(), &registry),
+        "A cancels the expired one",
+    );
+    // A fresh proposal is acceptable again.
+    w.send(
+        &a,
+        kyc::propose_ix(&a.pubkey(), &registry, &b.pubkey()),
+        "re-propose",
+    );
+    w.send(&b, kyc::accept_ix(&b.pubkey(), &registry), "B accepts");
+    assert_eq!(w.registry().authority, b.pubkey());
+}
+
+/// prog-vlast-16 (design 8.3 §8.2, §14.3.4): a KYC entry is valid at most 2
+/// years from the approval; an expiry at or before now stays 6011.
+#[test]
+fn a_kyc_entry_expires_at_most_two_years_after_the_approval() {
+    let mut w = boot();
+    let a = World::key(&w.a);
+    let registry = w.registry;
+    let mut clock = w.svm.get_sysvar::<solana_clock::Clock>();
+    clock.unix_timestamp = 10_000;
+    w.svm.set_sysvar(&clock);
+    let max = asset_registry::MAX_KYC_VALIDITY_SECS;
+    let holder = Pubkey::new_unique();
+    let approve = |expiry: i64| {
+        Instruction::new_with_bytes(
+            asset_registry::ID,
+            &ixd::ApproveHolder {
+                holder,
+                jurisdiction: J,
+                accreditation_level: 1,
+                expiry,
+                provider_id: 1,
+                external_ref_hash: [5u8; 32],
+            }
+            .data(),
+            acc::ApproveHolder {
+                authority: a.pubkey(),
+                kyc_registry: registry,
+                kyc_entry: kyc::entry_pda(&registry, &holder),
+                system_program: system_program::ID,
+            }
+            .to_account_metas(None),
+        )
+    };
+    w.expect_code(&a, approve(10_000 + max + 1), 6146, "a second past 2 years");
+    w.expect_code(&a, approve(10_000), 6011, "not in the future");
+    w.send(&a, approve(10_000 + max), "exactly 2 years");
+    let entry: KycEntry = load(&w.svm, &kyc::entry_pda(&registry, &holder));
+    assert_eq!(entry.expiry, 10_000 + max);
+    // A re-approval is bounded the same way.
+    w.expect_code(
+        &a,
+        approve(10_000 + max + 1),
+        6146,
+        "a re-approval beyond 2 years",
+    );
+}
+
 // ── 7. Round trip (init_if_needed after close) ──────────────────────────────
 
 #[test]
@@ -514,7 +607,7 @@ fn a_platform_admin_transfer_cannot_stand_in_for_the_registry_transfer() {
         "propose into the platform transfer",
     );
     assert_eq!(w.registry().authority, a.pubkey());
-    let staged: AuthorityTransfer = load(&w.svm, &platform_transfer);
+    let staged: AuthorityProposal = load(&w.svm, &platform_transfer);
     assert_eq!(
         staged.target,
         kyc::platform_pda(),

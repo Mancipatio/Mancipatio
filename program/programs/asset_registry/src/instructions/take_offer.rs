@@ -44,6 +44,7 @@ pub struct TakeOffer<'info> {
     #[account(
         mut,
         constraint = taker_payment_account.mint == offer.payment_mint @ RegistryError::Unauthorized,
+        constraint = taker_payment_account.owner == taker.key() @ RegistryError::Unauthorized,
     )]
     pub taker_payment_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -76,6 +77,29 @@ pub struct TakeOffer<'info> {
         constraint = !platform.is_paused(PAUSE_SECONDARY) @ RegistryError::PlatformPaused,
     )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
+
+    /// v1 (appended after `platform`, before the hook tail): the taker is not blocked ...
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, taker.key().as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&taker_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub taker_block_entry: UncheckedAccount<'info>,
+    /// ... nor is the maker (the payee).
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, offer.maker.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&maker_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub maker_block_entry: UncheckedAccount<'info>,
     // remaining_accounts: the escrow→taker leg's hook tail (source authority =
     // offer PDA) — [BlockEntry, ExtraAccountMetaList, hook program] in Open
     // mode, 9 accounts in KycGated mode (see docs in transfer_hook).

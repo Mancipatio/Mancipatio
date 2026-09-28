@@ -1,18 +1,37 @@
 import "server-only";
 import { address, getProgramDerivedAddress, getAddressEncoder, getU64Encoder, getU16Encoder, isSome, type Decoder, type ReadonlyUint8Array } from "@solana/kit";
 import * as accounts from "@/lib/generated/asset_registry";
+import * as hook from "@/lib/generated/transfer_hook";
+import { legacyAccountType } from "@/lib/legacy-accounts";
+import {
+  findAuthorityProposalPda,
+  findBlocklistAuthorityProposalPda,
+  findBlocklistRecoveryPda,
+  findIssuerFreezePda,
+  findPendingAdminPda,
+} from "@/lib/pdas";
 
 /** One generated-codec projection shared by live jobs and complete reconciliation. */
 export const INDEXER_LAYOUT_VERSION = 2;
 export const INDEXER_PROGRAM = accounts.ASSET_REGISTRY_PROGRAM_ADDRESS;
+/** v1.0.0-rc (8.3): two transfer_hook account types are mirrored too (ROLE_STATE_ENTITIES). */
+export const INDEXER_HOOK_PROGRAM = hook.TRANSFER_HOOK_PROGRAM_ADDRESS;
 type Row = Record<string, unknown>;
 /**
  * `address` is the snapshot address of the account being decoded, or null when
  * the caller has none. Seed-derived entities ignore it (their row `pda` is
  * re-derived and compared by decodeIndexerAccount); `kyc_registries` REQUIRES
  * it, because a rotated registry's address is not derivable from its fields.
+ * `program` is the owner the account must have; `size`, when set, is the
+ * exact account size (fixed layouts only: any other size is IDL drift).
  */
-type Entry = { table: string; discriminator: ReadonlyUint8Array; decode: (data: Uint8Array, address: string | null) => Promise<Row> };
+type Entry = {
+  table: string;
+  program: string;
+  discriminator: ReadonlyUint8Array;
+  size?: number;
+  decode: (data: Uint8Array, address: string | null) => Promise<Row>;
+};
 const text = (s: string) => new TextEncoder().encode(s);
 const key = (s: string) => getAddressEncoder().encode(address(s));
 const u64 = (n: number | bigint) => getU64Encoder().encode(n);
@@ -26,8 +45,12 @@ async function pda(seeds: readonly ReadonlyUint8Array[]) {
 function spec<T>(
   table: string, discriminator: ReadonlyUint8Array, decoder: Decoder<T>,
   project: (value: T) => Row, derive: (value: T, address: string | null) => Promise<string>, expectedVersion: number | readonly number[] = 1,
+  owner: { program: string; size?: number } = { program: INDEXER_PROGRAM },
 ): Entry {
-  return { table, discriminator, decode: async (bytes, address) => {
+  return { table, program: owner.program, discriminator, size: owner.size, decode: async (bytes, address) => {
+    if (owner.size !== undefined && bytes.length !== owner.size) {
+      throw new Error(`${table} account is ${bytes.length} bytes; the layout is exactly ${owner.size}`);
+    }
     const value = decoder.decode(bytes);
     const version = (value as { version?: number }).version;
     if (version !== undefined && !(Array.isArray(expectedVersion) ? expectedVersion.includes(version) : version === expectedVersion)) {
@@ -130,12 +153,67 @@ export const INDEXER_ENTITIES: readonly Entry[] = [
   }), (a) => pda([text("kyc"), key(a.registry), key(a.holder)])),
 ];
 
+const i64 = (n: bigint) => n.toString();
+const hookOwner = (size: number) => ({ program: INDEXER_HOOK_PROGRAM, size });
+const registryOwner = (size: number) => ({ program: INDEXER_PROGRAM, size });
+
+/**
+ * v1.0.0-rc (8.3): the pending role changes and the issuer proceeds freezes,
+ * mirrored into the service-role-only tables of 0079 (never read by the
+ * browser). They feed the admin menu badges and the "timelock running"
+ * incident (lib/server/alarm-checks.ts); the pages still read the chain.
+ * Every address is re-derived through the generated PDA helpers (lib/pdas.ts)
+ * and every layout is fixed, so the size is exact. Kept apart from
+ * INDEXER_ENTITIES: those 14 are the public market mirror.
+ *
+ * Timestamps are i64 unix seconds (bigint columns); `kind` of an
+ * AuthorityProposal is 0 platform, 1 custody, 2 issuer, 3 KYC registry.
+ */
+export const ROLE_STATE_ENTITIES: readonly Entry[] = [
+  spec("issuer_freezes", accounts.getIssuerFreezeDiscriminatorBytes(), accounts.getIssuerFreezeDecoder(), (a) => ({
+    issuer_pda: a.issuer, frozen_by: a.frozenBy, frozen_at: i64(a.frozenAt), reason_hash: hex(a.reasonHash),
+  }), (a) => findIssuerFreezePda(a.issuer), 1, registryOwner(accounts.getIssuerFreezeSize())),
+  spec("pending_admins", accounts.getPendingAdminDiscriminatorBytes(), accounts.getPendingAdminDecoder(), (a) => ({
+    new_admin: a.newAdmin, proposed_by: a.proposedBy, proposed_at: i64(a.proposedAt), eta: i64(a.eta), expires_at: i64(a.expiresAt),
+  }), (a) => findPendingAdminPda(a.newAdmin), 1, registryOwner(accounts.getPendingAdminSize())),
+  spec("authority_proposals", accounts.getAuthorityProposalDiscriminatorBytes(), accounts.getAuthorityProposalDecoder(), (a) => ({
+    target: a.target, kind: a.kind, current_authority: a.currentAuthority, new_authority: a.newAuthority, proposed_by: a.proposedBy,
+    proposed_at: i64(a.proposedAt), eta: i64(a.eta), expires_at: i64(a.expiresAt),
+  }), (a) => findAuthorityProposalPda(a.target), 1, registryOwner(accounts.getAuthorityProposalSize())),
+  spec("platform_recoveries", accounts.getPlatformRecoveryDiscriminatorBytes(), accounts.getPlatformRecoveryDecoder(), (a) => ({
+    platform_pda: a.platform, current_admin: a.currentAdmin, new_admin: a.newAdmin, proposed_by: a.proposedBy,
+    proposed_at: i64(a.proposedAt), eta: i64(a.eta), expires_at: i64(a.expiresAt),
+  }), async (a) => (await accounts.findAcceptPlatformAdminRecoveryPda({ platform: a.platform }))[0], 1,
+  registryOwner(accounts.getPlatformRecoverySize())),
+  // transfer_hook singletons; no version field (account_version 0).
+  spec("blocklist_authority_proposals", hook.getBlocklistAuthorityProposalDiscriminatorBytes(), hook.getBlocklistAuthorityProposalDecoder(), (a) => ({
+    current_authority: a.currentAuthority, new_authority: a.newAuthority, proposed_at: i64(a.proposedAt), expires_at: i64(a.expiresAt),
+  }), () => findBlocklistAuthorityProposalPda(), 1, hookOwner(hook.getBlocklistAuthorityProposalSize())),
+  spec("blocklist_recoveries", hook.getBlocklistRecoveryDiscriminatorBytes(), hook.getBlocklistRecoveryDecoder(), (a) => ({
+    current_authority: a.currentAuthority, new_authority: a.newAuthority, proposed_by: a.proposedBy,
+    proposed_at: i64(a.proposedAt), eta: i64(a.eta), expires_at: i64(a.expiresAt),
+  }), () => findBlocklistRecoveryPda(), 1, hookOwner(hook.getBlocklistRecoverySize())),
+];
+
+/** Every mirrored type: the 14 market tables, then the 6 role-state tables (0079). */
+export const ALL_INDEXER_ENTITIES: readonly Entry[] = [...INDEXER_ENTITIES, ...ROLE_STATE_ENTITIES];
+
 export type DecodedIndexerAccount = { table: string; row: Row };
 export async function decodeIndexerAccount(pdaAddress: string, owner: string, bytes: Uint8Array): Promise<DecodedIndexerAccount | null> {
-  if (owner !== INDEXER_PROGRAM) return null; // ordinary wallet/token accounts are not registry accounts
-  if (bytes.length < 8) throw new Error("Incomplete registry discriminator");
-  const entry = INDEXER_ENTITIES.find((e) => bytes.length >= 8 && e.discriminator.every((b, i) => bytes[i] === b));
-  if (!entry) return null; // valid registry account type outside the 14 existing mirror tables
+  if (owner === INDEXER_HOOK_PROGRAM) {
+    // Only the two role-state singletons are mirrored; BlockEntry, the
+    // blocklist authority, per-mint configs and the TLV meta lists are not.
+    if (bytes.length < 8) return null;
+  } else if (owner !== INDEXER_PROGRAM) {
+    return null; // ordinary wallet/token accounts are not program accounts
+  } else if (bytes.length < 8) {
+    throw new Error("Incomplete registry discriminator");
+  }
+  // rc.x AuthorityTransfer / BlocklistAuthorityTransfer: a known, inert layout
+  // (lib/legacy-accounts.ts), never mirrored. The reconcile reports them.
+  if (legacyAccountType(owner, bytes)) return null;
+  const entry = ALL_INDEXER_ENTITIES.find((e) => e.program === owner && e.discriminator.every((b, i) => bytes[i] === b));
+  if (!entry) return null; // valid program account type outside the mirror tables
   const row = await entry.decode(bytes, pdaAddress); // generated decoder enforces complete field lengths
   if (row.pda !== pdaAddress) throw new Error(`${entry.table} derived PDA does not match the snapshot address`);
   return { table: entry.table, row };

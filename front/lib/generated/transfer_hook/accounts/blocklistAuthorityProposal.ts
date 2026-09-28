@@ -19,6 +19,8 @@ import {
   getAddressEncoder,
   getBytesDecoder,
   getBytesEncoder,
+  getI64Decoder,
+  getI64Encoder,
   getStructDecoder,
   getStructEncoder,
   getU8Decoder,
@@ -37,97 +39,107 @@ import {
   type ReadonlyUint8Array,
 } from "@solana/kit";
 
-export const BLOCKLIST_AUTHORITY_TRANSFER_DISCRIMINATOR = new Uint8Array([
-  171, 162, 208, 78, 168, 214, 135, 50,
+export const BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR = new Uint8Array([
+  207, 222, 200, 184, 14, 103, 144, 208,
 ]);
 
-export function getBlocklistAuthorityTransferDiscriminatorBytes() {
+export function getBlocklistAuthorityProposalDiscriminatorBytes() {
   return fixEncoderSize(getBytesEncoder(), 8).encode(
-    BLOCKLIST_AUTHORITY_TRANSFER_DISCRIMINATOR,
+    BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR,
   );
 }
 
-export type BlocklistAuthorityTransfer = {
+export type BlocklistAuthorityProposal = {
   discriminator: ReadonlyUint8Array;
   currentAuthority: Address;
   newAuthority: Address;
+  proposedAt: bigint;
+  /** `proposed_at + PROPOSAL_WINDOW_SECS`; acceptable strictly before it. */
+  expiresAt: bigint;
   bump: number;
 };
 
-export type BlocklistAuthorityTransferArgs = {
+export type BlocklistAuthorityProposalArgs = {
   currentAuthority: Address;
   newAuthority: Address;
+  proposedAt: number | bigint;
+  /** `proposed_at + PROPOSAL_WINDOW_SECS`; acceptable strictly before it. */
+  expiresAt: number | bigint;
   bump: number;
 };
 
-/** Gets the encoder for {@link BlocklistAuthorityTransferArgs} account data. */
-export function getBlocklistAuthorityTransferEncoder(): FixedSizeEncoder<BlocklistAuthorityTransferArgs> {
+/** Gets the encoder for {@link BlocklistAuthorityProposalArgs} account data. */
+export function getBlocklistAuthorityProposalEncoder(): FixedSizeEncoder<BlocklistAuthorityProposalArgs> {
   return transformEncoder(
     getStructEncoder([
       ["discriminator", fixEncoderSize(getBytesEncoder(), 8)],
       ["currentAuthority", getAddressEncoder()],
       ["newAuthority", getAddressEncoder()],
+      ["proposedAt", getI64Encoder()],
+      ["expiresAt", getI64Encoder()],
       ["bump", getU8Encoder()],
     ]),
     (value) => ({
       ...value,
-      discriminator: BLOCKLIST_AUTHORITY_TRANSFER_DISCRIMINATOR,
+      discriminator: BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR,
     }),
   );
 }
 
-/** Gets the decoder for {@link BlocklistAuthorityTransfer} account data. */
-export function getBlocklistAuthorityTransferDecoder(): FixedSizeDecoder<BlocklistAuthorityTransfer> {
+/** Gets the decoder for {@link BlocklistAuthorityProposal} account data. */
+export function getBlocklistAuthorityProposalDecoder(): FixedSizeDecoder<BlocklistAuthorityProposal> {
   return getStructDecoder([
     ["discriminator", fixDecoderSize(getBytesDecoder(), 8)],
     ["currentAuthority", getAddressDecoder()],
     ["newAuthority", getAddressDecoder()],
+    ["proposedAt", getI64Decoder()],
+    ["expiresAt", getI64Decoder()],
     ["bump", getU8Decoder()],
   ]);
 }
 
-/** Gets the codec for {@link BlocklistAuthorityTransfer} account data. */
-export function getBlocklistAuthorityTransferCodec(): FixedSizeCodec<
-  BlocklistAuthorityTransferArgs,
-  BlocklistAuthorityTransfer
+/** Gets the codec for {@link BlocklistAuthorityProposal} account data. */
+export function getBlocklistAuthorityProposalCodec(): FixedSizeCodec<
+  BlocklistAuthorityProposalArgs,
+  BlocklistAuthorityProposal
 > {
   return combineCodec(
-    getBlocklistAuthorityTransferEncoder(),
-    getBlocklistAuthorityTransferDecoder(),
+    getBlocklistAuthorityProposalEncoder(),
+    getBlocklistAuthorityProposalDecoder(),
   );
 }
 
-export function decodeBlocklistAuthorityTransfer<
+export function decodeBlocklistAuthorityProposal<
   TAddress extends string = string,
 >(
   encodedAccount: EncodedAccount<TAddress>,
-): Account<BlocklistAuthorityTransfer, TAddress>;
-export function decodeBlocklistAuthorityTransfer<
+): Account<BlocklistAuthorityProposal, TAddress>;
+export function decodeBlocklistAuthorityProposal<
   TAddress extends string = string,
 >(
   encodedAccount: MaybeEncodedAccount<TAddress>,
-): MaybeAccount<BlocklistAuthorityTransfer, TAddress>;
-export function decodeBlocklistAuthorityTransfer<
+): MaybeAccount<BlocklistAuthorityProposal, TAddress>;
+export function decodeBlocklistAuthorityProposal<
   TAddress extends string = string,
 >(
   encodedAccount: EncodedAccount<TAddress> | MaybeEncodedAccount<TAddress>,
 ):
-  | Account<BlocklistAuthorityTransfer, TAddress>
-  | MaybeAccount<BlocklistAuthorityTransfer, TAddress> {
+  | Account<BlocklistAuthorityProposal, TAddress>
+  | MaybeAccount<BlocklistAuthorityProposal, TAddress> {
   return decodeAccount(
     encodedAccount as MaybeEncodedAccount<TAddress>,
-    getBlocklistAuthorityTransferDecoder(),
+    getBlocklistAuthorityProposalDecoder(),
   );
 }
 
-export async function fetchBlocklistAuthorityTransfer<
+export async function fetchBlocklistAuthorityProposal<
   TAddress extends string = string,
 >(
   rpc: Parameters<typeof fetchEncodedAccount>[0],
   address: Address<TAddress>,
   config?: FetchAccountConfig,
-): Promise<Account<BlocklistAuthorityTransfer, TAddress>> {
-  const maybeAccount = await fetchMaybeBlocklistAuthorityTransfer(
+): Promise<Account<BlocklistAuthorityProposal, TAddress>> {
+  const maybeAccount = await fetchMaybeBlocklistAuthorityProposal(
     rpc,
     address,
     config,
@@ -136,23 +148,23 @@ export async function fetchBlocklistAuthorityTransfer<
   return maybeAccount;
 }
 
-export async function fetchMaybeBlocklistAuthorityTransfer<
+export async function fetchMaybeBlocklistAuthorityProposal<
   TAddress extends string = string,
 >(
   rpc: Parameters<typeof fetchEncodedAccount>[0],
   address: Address<TAddress>,
   config?: FetchAccountConfig,
-): Promise<MaybeAccount<BlocklistAuthorityTransfer, TAddress>> {
+): Promise<MaybeAccount<BlocklistAuthorityProposal, TAddress>> {
   const maybeAccount = await fetchEncodedAccount(rpc, address, config);
-  return decodeBlocklistAuthorityTransfer(maybeAccount);
+  return decodeBlocklistAuthorityProposal(maybeAccount);
 }
 
-export async function fetchAllBlocklistAuthorityTransfer(
+export async function fetchAllBlocklistAuthorityProposal(
   rpc: Parameters<typeof fetchEncodedAccounts>[0],
   addresses: Array<Address>,
   config?: FetchAccountsConfig,
-): Promise<Account<BlocklistAuthorityTransfer>[]> {
-  const maybeAccounts = await fetchAllMaybeBlocklistAuthorityTransfer(
+): Promise<Account<BlocklistAuthorityProposal>[]> {
+  const maybeAccounts = await fetchAllMaybeBlocklistAuthorityProposal(
     rpc,
     addresses,
     config,
@@ -161,17 +173,17 @@ export async function fetchAllBlocklistAuthorityTransfer(
   return maybeAccounts;
 }
 
-export async function fetchAllMaybeBlocklistAuthorityTransfer(
+export async function fetchAllMaybeBlocklistAuthorityProposal(
   rpc: Parameters<typeof fetchEncodedAccounts>[0],
   addresses: Array<Address>,
   config?: FetchAccountsConfig,
-): Promise<MaybeAccount<BlocklistAuthorityTransfer>[]> {
+): Promise<MaybeAccount<BlocklistAuthorityProposal>[]> {
   const maybeAccounts = await fetchEncodedAccounts(rpc, addresses, config);
   return maybeAccounts.map((maybeAccount) =>
-    decodeBlocklistAuthorityTransfer(maybeAccount),
+    decodeBlocklistAuthorityProposal(maybeAccount),
   );
 }
 
-export function getBlocklistAuthorityTransferSize(): number {
-  return 73;
+export function getBlocklistAuthorityProposalSize(): number {
+  return 89;
 }

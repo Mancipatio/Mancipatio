@@ -5,10 +5,11 @@ import {
   findPlatformPda,
   fetchMaybePlatform,
   findTransferPda,
-  fetchMaybeAuthorityTransfer,
+  fetchMaybeAuthorityProposal,
   fetchMaybeAdmin,
   getProposeCustodyAuthorityInstructionAsync,
   getAcceptCustodyAuthorityInstructionAsync,
+  getCancelCustodyAuthorityTransferInstructionAsync,
   VaultState,
 } from "@/lib/generated/asset_registry";
 import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
@@ -40,12 +41,14 @@ export async function custodyAuthorityRecord(
 // ── Custody operator rotation (Talas 3.1 K10) ───────────────────────────────
 //
 // `accept_custody_authority` requires the vault to be Active or Triggered,
-// `transfer.current_authority == vault.authority` and `transfer.proposed_by ==
-// platform.admin`. A proposal made before the vault operator or the Super
-// Admin changed is therefore STALE: it can never be accepted, and only a new
-// proposal by the live Super Admin (which overwrites it) helps. A stale
-// proposal is reported, not thrown; a transfer of the wrong owner or target
-// still throws.
+// `transfer.current_authority == vault.authority`, `transfer.proposed_by ==
+// platform.admin` and, since v1.0.0-rc, a proposal younger than 14 days
+// (`AuthorityProposal.expires_at`, ProposalExpired 6151). A proposal made
+// before the vault operator or the Super Admin changed is therefore STALE: it
+// can never be accepted; the Super Admin re-proposes (overwriting it) or it is
+// cancelled — by the Super Admin, or by the vault's current operator while it
+// holds a live Admin record. A stale proposal is reported, not thrown; a
+// proposal of the wrong owner or target still throws.
 
 /** Accept (and propose) need the vault in one of these states. */
 export function isCustodyRotatable(state: VaultState): boolean {
@@ -54,6 +57,8 @@ export function isCustodyRotatable(state: VaultState): boolean {
 
 export const CUSTODY_STALE_PROPOSAL =
   "Proposal is stale — the Super Admin must re-propose";
+export const CUSTODY_EXPIRED_PROPOSAL =
+  "Proposal expired (14 days) — the Super Admin must re-propose, or cancel it";
 
 /**
  * Why the proposed wallet cannot accept custody responsibility now, or null.
@@ -64,10 +69,13 @@ export function custodyAcceptBlocker(p: {
   stale: boolean;
   vaultState: VaultState;
   acceptorIsAdmin: boolean;
+  /** Chain time is at or past the proposal's `expires_at` (unknown: false; the program decides). */
+  expired?: boolean;
 }): string | null {
   if (!isCustodyRotatable(p.vaultState))
     return `The vault is ${VaultState[p.vaultState] ?? "closed"}; custody responsibility can move only while it is Active or Triggered.`;
   if (p.stale) return CUSTODY_STALE_PROPOSAL;
+  if (p.expired) return CUSTODY_EXPIRED_PROPOSAL;
   if (!p.acceptorIsAdmin)
     return "This wallet needs an active Admin record before it can accept custody responsibility.";
   return null;
@@ -86,6 +94,8 @@ export type CustodyAuthorityState = {
   /** The staged operator, or null. */
   proposed: Address | null;
   proposedBy: Address | null;
+  /** When the staged proposal stops being acceptable (unix s), or null. */
+  expiresAt: bigint | null;
   /**
    * A proposal exists but accept would fail: the vault operator or the Super
    * Admin changed after it was made. The Super Admin re-proposes.
@@ -106,7 +116,7 @@ export async function loadCustodyAuthority(
   const [vault, platform, transfer] = await Promise.all([
     fetchMaybeLiveCustodyVault(rpc, vaultPda, options),
     fetchMaybePlatform(rpc, platformPda, options),
-    fetchMaybeAuthorityTransfer(rpc, transferPda, options),
+    fetchMaybeAuthorityProposal(rpc, transferPda, options),
   ]);
   if (
     !vault.exists ||
@@ -136,8 +146,52 @@ export async function loadCustodyAuthority(
     vaultState: vault.data.state,
     proposed: transfer.exists ? transfer.data.newAuthority : null,
     proposedBy: transfer.exists ? transfer.data.proposedBy : null,
+    expiresAt: transfer.exists ? transfer.data.expiresAt : null,
     stale,
   };
+}
+
+/**
+ * `cancel_custody_authority_transfer`: withdraws a staged custody rotation
+ * (live, stale or expired). The Super Admin may always cancel; the vault's
+ * current operator only while it holds a live Admin record (an operator
+ * removed for cause cannot block its own replacement). The rent returns to
+ * the proposer.
+ */
+export async function buildCancelCustodyAuthorityTransfer(
+  rpc: Rpc,
+  vaultPda: Address,
+  signer: TransactionSigner,
+) {
+  const state = await loadCustodyAuthority(rpc, vaultPda);
+  if (!state.proposed || !state.proposedBy)
+    throw new Error("No custody operator proposal is staged for this vault");
+  if (signer.address !== state.superAdmin) {
+    if (signer.address !== state.current)
+      throw new Error(
+        "Only the Super Admin or the vault's current custody operator can cancel this proposal",
+      );
+    const [record] = await findAdminRecordPda({ authority: signer.address });
+    const admin = await fetchMaybeAdmin(rpc, record, {
+      commitment: "finalized",
+      abortSignal: AbortSignal.timeout(8_000),
+    });
+    if (
+      !admin.exists ||
+      admin.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS ||
+      admin.data.admin !== signer.address
+    )
+      throw new Error(
+        "The custody operator can cancel only while it holds a live Admin role; ask the Super Admin",
+      );
+  }
+  return getCancelCustodyAuthorityTransferInstructionAsync({
+    canceller: signer,
+    platform: state.platformPda,
+    custodyVault: vaultPda,
+    transfer: state.transferPda,
+    proposer: state.proposedBy,
+  });
 }
 export async function buildCustodyAuthorityChange(
   rpc: Rpc,

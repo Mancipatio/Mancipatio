@@ -142,6 +142,19 @@ pub struct ClaimVested<'info> {
     pub recipient_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub token_program: Interface<'info, TokenInterface>,
+
+    /// v1 (appended before the hook tail): the recipient is not blocked; units
+    /// for a blocked wallet stay in the vesting escrow until it is unblocked.
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, position.wallet.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&recipient_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub recipient_block_entry: UncheckedAccount<'info>,
     // remaining_accounts — transfer-hook accounts for the escrow → recipient
     // leg. EscrowIdentity separates inbound routing from outbound delivery;
     // release_vested screens every recipient, including the series authority.
@@ -221,6 +234,19 @@ pub struct PushVested<'info> {
     pub recipient_token_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
     pub token_program: Interface<'info, TokenInterface>,
+
+    /// v1 (appended before the hook tail): the recipient is not blocked (the
+    /// crank is permissionless, so the check cannot rely on the caller).
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, position.wallet.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&recipient_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub recipient_block_entry: UncheckedAccount<'info>,
     // remaining_accounts — transfer-hook accounts for the escrow → recipient
     // leg (same receiver-KYC semantics as `claim_vested`).
 }

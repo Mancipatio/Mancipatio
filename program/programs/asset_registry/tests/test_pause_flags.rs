@@ -18,6 +18,8 @@
 mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -30,7 +32,7 @@ use {
         accounts as acc, instruction as ixd, AssetType, JurisdictionRules, PauseFlagsChanged,
         Platform, ProtocolTreasuryChanged, ShareClassType, PAUSE_CUSTODY_ENTRY,
         PAUSE_DISTRIBUTIONS, PAUSE_FLAGS_ALL, PAUSE_ISSUER_PROCEEDS, PAUSE_ONBOARDING,
-        PAUSE_PRIMARY, PAUSE_SECONDARY, RIGHT_VOTE,
+        PAUSE_PAYOUT_MODULES, PAUSE_PRIMARY, PAUSE_SECONDARY, PLATFORM_BOOTSTRAP_OPEN, RIGHT_VOTE,
     },
     litesvm::LiteSVM,
     solana_keypair::Keypair,
@@ -165,25 +167,8 @@ fn boot() -> Ctx {
         &[init_platform_ix(&payer.pubkey(), treasury)],
         "initialize_platform",
     );
-    send(
-        &mut svm,
-        &[&payer],
-        &[Instruction::new_with_bytes(
-            asset_registry::ID,
-            &ixd::AddAdmin {
-                new_admin: admin.pubkey(),
-            }
-            .data(),
-            acc::AddAdmin {
-                super_admin: payer.pubkey(),
-                platform: pause::platform_pda(),
-                admin_record: pause::admin_pda(&admin.pubkey()),
-                system_program: system_program::ID,
-            }
-            .to_account_metas(None),
-        )],
-        "add_admin",
-    );
+    // Bootstrap window open (0xFF): the grant runs as one transaction.
+    v1::grant_admin(&mut svm, &payer, &admin).expect("add_admin");
     Ctx {
         svm,
         payer,
@@ -435,12 +420,14 @@ fn fresh_platform_starts_fully_paused_in_the_old_layout() {
     let account = ctx.svm.get_account(&pause::platform_pda()).unwrap();
     assert_eq!(account.data.len(), 85, "no layout size change");
     assert_eq!(
-        account.data[74], PAUSE_FLAGS_ALL,
-        "byte 74 carries the flags"
+        account.data[74],
+        PAUSE_FLAGS_ALL | PLATFORM_BOOTSTRAP_OPEN,
+        "byte 74 carries the flags and the bootstrap marker"
     );
-    assert_eq!(PAUSE_FLAGS_ALL, 0x3F);
+    assert_eq!(PAUSE_FLAGS_ALL, 0x7F);
     let platform = load_platform(&ctx.svm);
-    assert_eq!(platform.pause_flags, 0x3F);
+    assert_eq!(platform.pause_flags, 0xFF);
+    assert!(platform.bootstrap_open());
     assert_eq!(platform.protocol_treasury, ctx.treasury);
     assert_eq!(platform.admin, ctx.payer.pubkey());
 }
@@ -537,9 +524,9 @@ fn admins_set_bits_that_combine_and_only_the_super_admin_clears() {
 
     // Undefined set bits, or a bit both set and cleared → InvalidPauseFlags.
     expect_code(
-        pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0x40, 0),
+        pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0x80, 0),
         6118,
-        "undefined set bit",
+        "the bootstrap marker is never settable",
     );
     expect_code(
         pause::set_pause_flags(&mut ctx.svm, &ctx.admin, 0x80, 0),
@@ -587,15 +574,21 @@ fn admins_set_bits_that_combine_and_only_the_super_admin_clears() {
         (0x0A, 0x1A, ctx.admin.pubkey())
     );
 
-    // Undefined bits already in the byte (e.g. a future program's) gate
-    // nothing and only the super admin can normalize them away.
+    // Bits 6-7 already in the byte: only the super admin clears them, and
+    // `PAUSE_PAYOUT_MODULES` (0x40) only in a call of its own.
     write_pause_byte(&mut ctx.svm, 0xCC);
     expect_code(
         pause::set_pause_flags(&mut ctx.svm, &ctx.admin, 0, 0xC0),
         6119,
-        "admin cannot clear undefined bits",
+        "admin cannot clear",
     );
-    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0xC0).unwrap();
+    expect_code(
+        pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0xC0),
+        6154,
+        "0x40 together with another bit",
+    );
+    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0x80).unwrap();
+    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0x40).unwrap();
     assert_eq!(pause::pause_flags(&ctx.svm), 0x0C);
 
     // A removed Admin loses the right to pause.
@@ -632,8 +625,62 @@ fn admins_set_bits_that_combine_and_only_the_super_admin_clears() {
     gone.owner = system_program::ID;
     ctx.svm.set_account(super_record, gone).unwrap();
     pause::set_pause_flags(&mut ctx.svm, &ctx.payer, PAUSE_FLAGS_ALL, 0).unwrap();
-    assert_eq!(pause::pause_flags(&ctx.svm), 0x3F);
+    assert_eq!(pause::pause_flags(&ctx.svm), 0x7F);
     pause::unpause_all(&mut ctx.svm, &ctx.payer);
+}
+
+/// D2 / K1.2 (design 8.3 §4.2, §14.4.1-3): the payout-modules bit (0x40) is
+/// set by any Admin, cleared only by the super admin and only in a call of
+/// its own (6154), so "resume everything" can never switch the modules on.
+#[test]
+fn the_payout_modules_bit_clears_only_on_its_own_and_never_by_an_admin() {
+    let mut ctx = boot();
+    assert_eq!(
+        pause::pause_flags(&ctx.svm),
+        0xFF,
+        "init: every bit + bootstrap"
+    );
+    pause::set_pause_flags(&mut ctx.svm, &ctx.admin, PAUSE_PAYOUT_MODULES, 0)
+        .expect("an Admin sets 0x40 (idempotent)");
+    expect_code(
+        pause::set_pause_flags(&mut ctx.svm, &ctx.admin, 0, PAUSE_PAYOUT_MODULES),
+        6119,
+        "an Admin clears 0x40",
+    );
+    for mask in [0x7Fu8, 0xFF, 0x41, 0xC0] {
+        expect_code(
+            pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, mask),
+            6154,
+            &format!("clear {mask:#04x}"),
+        );
+    }
+    assert_eq!(pause::pause_flags(&ctx.svm), 0xFF, "nothing changed");
+    // Everything else (bit 7 included) in one call: the bootstrap closes.
+    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0xBF).expect("clear 0xBF");
+    assert_eq!(pause::pause_flags(&ctx.svm), 0x40);
+    assert!(!load_platform(&ctx.svm).bootstrap_open());
+    // The modules bit alone.
+    let logs = try_send_logs(
+        &mut ctx.svm,
+        &[&ctx.payer],
+        &[pause::set_pause_flags_ix(
+            &ctx.payer.pubkey(),
+            0,
+            PAUSE_PAYOUT_MODULES,
+        )],
+    )
+    .expect("clear 0x40 alone");
+    assert_eq!(pause::pause_flags(&ctx.svm), 0);
+    let changed = events::<PauseFlagsChanged>(&logs);
+    assert_eq!((changed[0].old, changed[0].new), (0x40, 0x00));
+    // `set_pause` touches bit 0 only and needs no special call.
+    send(
+        &mut ctx.svm,
+        &[&ctx.payer],
+        &[set_pause_ix(&ctx.payer.pubkey(), true)],
+        "set_pause(true)",
+    );
+    assert_eq!(pause::pause_flags(&ctx.svm), 0x01);
 }
 
 #[test]
@@ -758,7 +805,11 @@ fn legacy_pause_bytes_keep_their_meaning_and_rollback_is_reachable() {
     )
     .0;
     pause::assert_paused(
-        try_send(&mut ctx.svm, &[&second_issuer], &[second.clone()]),
+        try_send(
+            &mut ctx.svm,
+            &[&second_issuer],
+            std::slice::from_ref(&second),
+        ),
         "legacy byte 1 pauses onboarding",
     );
     send(
@@ -773,8 +824,9 @@ fn legacy_pause_bytes_keep_their_meaning_and_rollback_is_reachable() {
     send(&mut ctx.svm, &[&second_issuer], &[second], "legacy byte 0");
 
     // Rollback precondition: the OLD binary decodes `paused` as a borsh bool,
-    // which rejects any byte above 1. After the super admin clears 0xFE the
-    // byte is back to 0/1 and the old layout decodes again.
+    // which rejects any byte above 1. After the super admin clears 0xBE and
+    // then 0x40 (v1: the payout-modules bit clears only on its own) the byte
+    // is back to 0/1 and the old layout decodes again.
     #[derive(AnchorDeserialize)]
     #[allow(dead_code)]
     struct LegacyPlatform {
@@ -791,9 +843,15 @@ fn legacy_pause_bytes_keep_their_meaning_and_rollback_is_reachable() {
         LegacyPlatform::try_from_slice(&data[8..])
     };
     pause::set_pause_flags(&mut ctx.svm, &ctx.admin, PAUSE_FLAGS_ALL, 0).unwrap();
-    assert_eq!(pause::pause_flags(&ctx.svm), 0x3F);
-    assert!(legacy(&ctx.svm).is_err(), "0x3F is not a borsh bool");
-    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0xFE).unwrap();
+    assert_eq!(pause::pause_flags(&ctx.svm), 0x7F);
+    assert!(legacy(&ctx.svm).is_err(), "0x7F is not a borsh bool");
+    expect_code(
+        pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0xFE),
+        6154,
+        "one call cannot also clear the payout modules",
+    );
+    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0xBE).unwrap();
+    pause::set_pause_flags(&mut ctx.svm, &ctx.payer, 0, 0x40).unwrap();
     assert_eq!(pause::pause_flags(&ctx.svm), 0x01);
     let old = legacy(&ctx.svm).expect("old layout decodes after normalization");
     assert!(old.paused, "bit0 == the old onboarding pause");
@@ -835,7 +893,10 @@ fn super_admin_rotates_the_protocol_treasury() {
     assert_eq!(load_platform(&ctx.svm).protocol_treasury, ctx.treasury);
 
     // Works during a full pause (administration is never gated).
-    assert_eq!(pause::pause_flags(&ctx.svm), PAUSE_FLAGS_ALL);
+    assert_eq!(
+        pause::pause_flags(&ctx.svm),
+        PAUSE_FLAGS_ALL | PLATFORM_BOOTSTRAP_OPEN
+    );
     let logs = try_send_logs(
         &mut ctx.svm,
         &[&ctx.payer],
@@ -844,7 +905,11 @@ fn super_admin_rotates_the_protocol_treasury() {
     .unwrap();
     let platform = load_platform(&ctx.svm);
     assert_eq!(platform.protocol_treasury, new_treasury);
-    assert_eq!(platform.pause_flags, PAUSE_FLAGS_ALL, "flags untouched");
+    assert_eq!(
+        platform.pause_flags,
+        PAUSE_FLAGS_ALL | PLATFORM_BOOTSTRAP_OPEN,
+        "flags untouched"
+    );
     let changed = events::<ProtocolTreasuryChanged>(&logs);
     assert_eq!(changed.len(), 1);
     assert_eq!(changed[0].old, ctx.treasury);
@@ -869,6 +934,7 @@ fn every_defined_bit_is_distinct() {
         PAUSE_CUSTODY_ENTRY,
         PAUSE_DISTRIBUTIONS,
         PAUSE_ISSUER_PROCEEDS,
+        PAUSE_PAYOUT_MODULES,
     ];
     let mut all = 0u8;
     for bit in bits {
@@ -877,6 +943,11 @@ fn every_defined_bit_is_distinct() {
         all |= bit;
     }
     assert_eq!(all, PAUSE_FLAGS_ALL);
+    assert_eq!(
+        PAUSE_FLAGS_ALL & PLATFORM_BOOTSTRAP_OPEN,
+        0,
+        "bit 7 is no pause bit"
+    );
 }
 
 /// release-lanac-8 / design 8.3 §10: every release `.so` carries exactly
@@ -919,7 +990,7 @@ fn both_programs_embed_security_txt() {
         assert!(txt.source_release.is_none(), "{name}: no source_release");
         assert!(txt.source_revision.is_none(), "{name}: no source_revision");
         assert!(txt.encryption.is_none() && txt.expiry.is_none(), "{name}");
-        // Absent: the parser splits "" into one empty entry.
-        assert_eq!(txt.auditors, [""], "{name}: auditors");
+        // No audit yet (design 8.3 §10); switched in the post-audit v1.0.0.
+        assert_eq!(txt.auditors, ["None"], "{name}: auditors");
     }
 }

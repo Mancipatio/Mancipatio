@@ -1,8 +1,9 @@
 //! KYC registry authority rotation (propose / accept / cancel).
 //!
 //! The registry ADDRESS is permanent (`["kyc_registry", creating authority]`);
-//! only `KycRegistry.authority` moves. The staged transfer reuses the
-//! per-target `AuthorityTransfer` PDA `["authority_transfer", registry]`.
+//! only `KycRegistry.authority` moves. The staged transfer is the per-target
+//! `AuthorityProposal` PDA `["authority_proposal", registry]` (v1); the
+//! proposed key accepts within 14 days of the proposal.
 //!
 //! Signers: the only proposer and the only canceller is the CURRENT registry
 //! authority; the only acceptor is the proposed new authority. There is
@@ -29,11 +30,11 @@
 
 use anchor_lang::prelude::*;
 
-use super::rotate_authority::{validate_new_authority, write_proposal};
+use super::rotate_authority::{require_not_expired, validate_new_authority, write_proposal};
 use crate::constants::*;
 use crate::error::RegistryError;
 use crate::state::{
-    AuthorityTransfer, KycRegistry, KycRegistryAuthorityChanged,
+    AuthorityProposal, KycRegistry, KycRegistryAuthorityChanged,
     KycRegistryAuthorityProposalCancelled, KycRegistryAuthorityProposed,
 };
 
@@ -43,9 +44,9 @@ pub struct ProposeKycRegistryAuthority<'info> {
     pub authority: Signer<'info>,
     #[account(has_one = authority @ RegistryError::Unauthorized)]
     pub kyc_registry: Box<Account<'info, KycRegistry>>,
-    #[account(init_if_needed, payer = authority, space = 8 + AuthorityTransfer::INIT_SPACE,
-        seeds = [AUTHORITY_TRANSFER_SEED, kyc_registry.key().as_ref()], bump)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    #[account(init_if_needed, payer = authority, space = 8 + AuthorityProposal::INIT_SPACE,
+        seeds = [AUTHORITY_PROPOSAL_SEED, kyc_registry.key().as_ref()], bump)]
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -64,8 +65,10 @@ pub fn handle_propose_kyc_registry_authority(
         current,
         new_authority,
         ctx.accounts.authority.key(),
+        AUTHORITY_PROPOSAL_KIND_KYC_REGISTRY,
+        0,
         ctx.bumps.transfer,
-    );
+    )?;
     emit!(KycRegistryAuthorityProposed {
         registry,
         current_authority: current,
@@ -86,12 +89,12 @@ pub struct AcceptKycRegistryAuthority<'info> {
     #[account(mut)]
     pub kyc_registry: Box<Account<'info, KycRegistry>>,
     #[account(mut, close = new_authority,
-        seeds = [AUTHORITY_TRANSFER_SEED, kyc_registry.key().as_ref()], bump = transfer.bump,
+        seeds = [AUTHORITY_PROPOSAL_SEED, kyc_registry.key().as_ref()], bump = transfer.bump,
         constraint = transfer.target == kyc_registry.key()
             && transfer.current_authority == kyc_registry.authority
             && transfer.proposed_by == kyc_registry.authority
             && transfer.new_authority == new_authority.key() @ RegistryError::InvalidAuthorityTransfer)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
 }
 
 /// The proposed authority accepts; the registry address, bitmaps, entries and
@@ -99,6 +102,7 @@ pub struct AcceptKycRegistryAuthority<'info> {
 pub fn handle_accept_kyc_registry_authority(
     ctx: Context<AcceptKycRegistryAuthority>,
 ) -> Result<()> {
+    require_not_expired(&ctx.accounts.transfer)?;
     let registry = ctx.accounts.kyc_registry.key();
     let old_authority = ctx.accounts.kyc_registry.authority;
     let new_authority = ctx.accounts.new_authority.key();
@@ -124,9 +128,9 @@ pub struct CancelKycRegistryAuthorityTransfer<'info> {
     #[account(has_one = authority @ RegistryError::Unauthorized)]
     pub kyc_registry: Box<Account<'info, KycRegistry>>,
     #[account(mut, close = authority,
-        seeds = [AUTHORITY_TRANSFER_SEED, kyc_registry.key().as_ref()], bump = transfer.bump,
+        seeds = [AUTHORITY_PROPOSAL_SEED, kyc_registry.key().as_ref()], bump = transfer.bump,
         constraint = transfer.target == kyc_registry.key() @ RegistryError::InvalidAuthorityTransfer)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
 }
 
 /// The current registry authority withdraws a pending proposal; the rent

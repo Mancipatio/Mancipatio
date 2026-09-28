@@ -1,10 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
-const mocks = vi.hoisted(() => ({ multiple: vi.fn(), program: vi.fn(), rpc: vi.fn(), pages: vi.fn(), states: vi.fn(), filters: [] as unknown[][] }));
+const mocks = vi.hoisted(() => ({ multiple: vi.fn(), program: vi.fn(), hook: vi.fn(), rpc: vi.fn(), pages: vi.fn(), states: vi.fn(), filters: [] as unknown[][] }));
 vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
+// v1.0.0-rc (8.3): the complete reconcile also scans the transfer_hook program
+// (its two mirrored layouts and the rc.x transfer, filtered); `hook` answers those.
+const HOOK_PROGRAM = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy";
 vi.mock("@/lib/server/rpc", () => ({ getServerRpc: () => ({
   getMultipleAccounts: (...args: unknown[]) => ({ send: (opts: unknown) => mocks.multiple(...args, opts) }),
-  getProgramAccounts: (...args: unknown[]) => ({ send: (opts: unknown) => mocks.program(...args, opts) }),
+  getProgramAccounts: (...args: unknown[]) => ({ send: (opts: unknown) => (args[0] === HOOK_PROGRAM ? mocks.hook : mocks.program)(...args, opts) }),
 }) }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({
   rpc: (name: string, args: unknown) => ({ abortSignal: (signal: AbortSignal) => mocks.rpc(name, args, signal) }),
@@ -19,7 +22,7 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({
     }; return q;
   },
 }) }));
-import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM } from "@/lib/server/indexer-accounts";
+import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_PROGRAM, ROLE_STATE_ENTITIES } from "@/lib/server/indexer-accounts";
 import { reconcileAllIndexerAccounts, reconcileIndexerJobs, refreshIndexedAddresses } from "@/lib/server/indexer-sync";
 import { indexerFixtures } from "./helpers/indexer-fixtures";
 import { CLOSED_ACCOUNT_TAG } from "@/lib/closed-account";
@@ -35,6 +38,7 @@ const applied = () => mocks.rpc.mock.calls.filter(([name]) => name === "apply_in
 beforeEach(() => {
   vi.resetAllMocks(); mocks.filters.length = 0;
   mocks.pages.mockResolvedValue({ data: [], error: null }); mocks.states.mockResolvedValue({ error: null });
+  mocks.hook.mockResolvedValue({ context: { slot: 500 }, value: [] });
   mocks.rpc.mockImplementation(async (name, args) => name === "apply_indexer_snapshot" ? { data: { written: args.p_rows.length, closed: args.p_closed.length, stale: 0, applied: args.p_rows.map((v: { row: { pda: string } }) => v.row.pda), deleted: {} }, error: null } : { data: true, error: null });
 });
 describe("finalized indexer snapshots and retries", () => {
@@ -75,8 +79,10 @@ describe("finalized indexer snapshots and retries", () => {
     }).sort((a, b) => a.pda.localeCompare(b.pda));
     mocks.pages.mockImplementation(async (table, after) => ({ data: table === "platforms" ? after === null ? existing.slice(0, 1000) : existing.slice(1000) : [], error: null }));
     const result = await reconcileAllIndexerAccounts(deadline());
-    expect(Object.keys(result.report)).toHaveLength(14);
-    for (const r of Object.values(result.report)) expect(r).toMatchObject({ onchain: 1, rebuilt: 1 });
+    // The 14 market mirrors, then the 6 role-state mirrors of 0079 (none on this chain).
+    expect(Object.keys(result.report)).toHaveLength(20);
+    for (const e of INDEXER_ENTITIES) expect(result.report[e.table]).toMatchObject({ onchain: 1, rebuilt: 1 });
+    for (const e of ROLE_STATE_ENTITIES) expect(result.report[e.table]).toMatchObject({ onchain: 0, rebuilt: 0 });
     const writes = applied(); expect(writes[0][1].p_rows).toHaveLength(14);
     expect(writes.flatMap(([, args]) => args.p_closed)).toHaveLength(1001);
     expect(mocks.pages.mock.calls.filter(([table]) => table === "platforms")).toHaveLength(2);

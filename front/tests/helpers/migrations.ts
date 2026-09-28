@@ -98,6 +98,9 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   "spv_issuance_jobs", "sale_capacity_holds",
   // 0075 indexer freshness heartbeat
   "indexer_heartbeat_state", "indexer_heartbeat_watermarks",
+  // 0079 indexer mirror of the v1.0.0-rc role state
+  "issuer_freezes", "pending_admins", "authority_proposals", "platform_recoveries",
+  "blocklist_authority_proposals", "blocklist_recoveries",
 ] as const;
 
 /** Every `network` column that defaults to public.deployment_network(). */

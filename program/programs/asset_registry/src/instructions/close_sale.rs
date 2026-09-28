@@ -44,6 +44,44 @@ pub struct CloseSale<'info> {
         constraint = !platform.is_paused(PAUSE_ISSUER_PROCEEDS) @ RegistryError::PlatformPaused,
     )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
+
+    /// D1 chain to the issuer: the sale's share class ...
+    #[account(address = sale.share_class @ RegistryError::Unauthorized)]
+    pub share_class: Box<Account<'info, crate::state::ShareClass>>,
+    /// ... and its asset (`asset.issuer` keys the freeze below).
+    #[account(address = share_class.asset @ RegistryError::Unauthorized)]
+    pub asset: Box<Account<'info, crate::state::Asset>>,
+    /// D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+    /// unset (no freeze in force).
+    /// CHECK: address pinned by the seeds; `util::is_unset` (fail-closed).
+    #[account(
+        seeds = [ISSUER_FREEZE_SEED, asset.issuer.as_ref()],
+        bump,
+        constraint = crate::util::is_unset(&issuer_freeze) @ RegistryError::IssuerProceedsFrozen,
+    )]
+    pub issuer_freeze: UncheckedAccount<'info>,
+    /// prog-novac-4: the signing sale authority is not blocked ...
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, authority.key().as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&authority_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub authority_block_entry: UncheckedAccount<'info>,
+    /// ... nor is the owner of the proceeds destination.
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, destination.owner.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&destination_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub destination_block_entry: UncheckedAccount<'info>,
 }
 
 /// Closes a sale: sweeps the proceeds escrow to the issuer's payment account,

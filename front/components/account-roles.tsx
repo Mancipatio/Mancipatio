@@ -9,6 +9,7 @@ import Link from "next/link";
 import { useWalletConnection } from "@solana/react-hooks";
 import { AuthorityRotation } from "@/app/admin/platform/authority-rotation";
 import { OpenProposalsPanel, PendingRolesPanel } from "@/components/pending-roles-panel";
+import { RoleRecoveryNotice } from "@/components/role-recovery-notice";
 import { RoleReadError } from "@/components/require-role";
 import { SkeletonCard } from "@/components/skeleton";
 import { WalletRequired } from "@/components/wallet-required";
@@ -107,6 +108,7 @@ export function AccountRoles() {
           {role.isSuperAdmin && <AuthorityRotation kind="platform" />}
           {role.isBlocklistAuthority && <AuthorityRotation kind="blocklist" />}
 
+          <RoleRecoveryNotice />
           <PendingRolesPanel maintenance={inMaintenance} />
           <OpenProposalsPanel maintenance={inMaintenance} />
 

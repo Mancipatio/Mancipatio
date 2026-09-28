@@ -171,11 +171,11 @@ fn verify_bootstrap(registry: bool) {
         );
         assert_eq!(
             state.pause_flags,
-            asset_registry::PAUSE_FLAGS_ALL,
-            "a fresh platform starts fully paused"
+            asset_registry::PAUSE_FLAGS_ALL | asset_registry::PLATFORM_BOOTSTRAP_OPEN,
+            "a fresh platform starts fully paused, bootstrap window open"
         );
         assert_eq!(account.data.len(), 85);
-        assert_eq!(account.data[74], 0x3F);
+        assert_eq!(account.data[74], 0xFF);
     } else {
         let state =
             transfer_hook::BlocklistAuthority::try_deserialize(&mut account.data.as_slice())

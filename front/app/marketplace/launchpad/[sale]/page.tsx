@@ -44,6 +44,9 @@ import { findSalePda } from "@/lib/pdas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { pausedFlowFor } from "@/lib/pause-gate";
+import { assertGateAccountsUnset } from "@/lib/proceeds-gate";
+import { useIssuerFreezes } from "@/lib/use-issuer-freeze";
+import { ProceedsFrozenNotice } from "@/components/proceeds-frozen-notice";
 import { screenOwnWallet } from "@/lib/compliance";
 import { usePauseFlags } from "@/lib/use-pause-flags";
 import {
@@ -188,6 +191,12 @@ export default function DealPage({
   const [paymentDecimals, setPaymentDecimals] = useState<number | null>(null);
   // Live clock so "days left" / expiry update on a long-open page.
   const [now, setNow] = useState(() => Math.floor(Date.now() / 1000));
+  // D1: the issuer's proceeds freeze, read before the user starts (a Mature
+  // buy only; the send path reads the gate accounts again, lib/proceeds-gate.ts).
+  const saleShareClass =
+    sale && sale !== "not_found" && sale.raiseType === RaiseType.Mature ? sale.shareClass : null;
+  const issuerFreeze = useIssuerFreezes({ shareClasses: [saleShareClass] });
+  const issuerFrozen = saleShareClass ? issuerFreeze.isFrozen({ shareClass: saleShareClass }) === true : false;
   useEffect(() => {
     const id = setInterval(() => setNow(Math.floor(Date.now() / 1000)), 30_000);
     return () => clearInterval(id);
@@ -577,6 +586,7 @@ export default function DealPage({
     : null;
   const canCommit =
     !buyPaused &&
+    !issuerFrozen &&
     !!walletAddress &&
     purchaseRecovery.ready &&
     documentTerms?.sale === salePubkey &&
@@ -829,6 +839,10 @@ export default function DealPage({
         amount: units,
         terms: documentTerms,
       });
+      // The issuer's freeze (6143) and the buyer's blocklist entry (6144) are
+      // read BEFORE the preparation transaction: that one would land (and
+      // cost rent) although the purchase must fail.
+      await assertGateAccountsUnset(client.runtime.rpc, plan.purchaseInstructions);
       if (plan.preparationInstructions.length) {
         const preparationSignature = await tx.send({
           instructions: plan.preparationInstructions,
@@ -1578,6 +1592,9 @@ export default function DealPage({
               <p role="status" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
                 {buyPaused}
               </p>
+            )}
+            {issuerFrozen && (
+              <ProceedsFrozenNotice className="mb-3" closed="this sale takes no purchases" />
             )}
             {/* Commit / Buy button */}
             {!walletAddress ? (

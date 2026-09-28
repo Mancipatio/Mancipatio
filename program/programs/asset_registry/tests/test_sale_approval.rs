@@ -13,6 +13,8 @@ mod reclaim;
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -119,23 +121,6 @@ struct Env {
 
 fn platform() -> Pubkey {
     pause::platform_pda()
-}
-
-fn add_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        asset_registry::ID,
-        &ixd::AddAdmin {
-            new_admin: *new_admin,
-        }
-        .data(),
-        acc::AddAdmin {
-            super_admin: *super_admin,
-            platform: platform(),
-            admin_record: pause::admin_pda(new_admin),
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    )
 }
 
 fn remove_admin_ix(super_admin: &Pubkey, admin: &Pubkey) -> Instruction {
@@ -253,13 +238,9 @@ fn boot() -> (LiteSVM, Env) {
         )],
         "initialize_platform",
     );
+    // Day-D order: roles inside the bootstrap window, then the first unpause.
+    v1::grant_admin(&mut svm, &payer, &admin2).expect("add admin2");
     pause::unpause_all(&mut svm, &payer);
-    send(
-        &mut svm,
-        &[&payer],
-        &[add_admin_ix(&payer.pubkey(), &admin2.pubkey())],
-        "add admin2",
-    );
 
     send(
         &mut svm,
@@ -456,7 +437,7 @@ fn open_sale_ix(env: &Env, a: &OpenArgs) -> Instruction {
             price_per_unit: a.price,
             total_for_sale: a.total,
             start_ts: 0,
-            end_ts: 0,
+            end_ts: asset_registry::MAX_SALE_DURATION_SECS,
             raise_type: a.raise_type,
             cliff_months,
             vesting_months,
@@ -481,6 +462,7 @@ fn open_sale_ix(env: &Env, a: &OpenArgs) -> Instruction {
             approved_by: a.approved_by,
             approver_admin_record: pause::admin_pda(&a.approved_by),
             platform: platform(),
+            issuer_freeze: v1::issuer_freeze(&env.issuer),
         }
         .to_account_metas(None),
     )
@@ -504,12 +486,7 @@ fn approve_requires_a_live_admin_record() {
     // A removed Admin is no longer one.
     let admin3 = Keypair::new();
     svm.airdrop(&admin3.pubkey(), 10_000_000_000).unwrap();
-    send(
-        &mut svm,
-        &[&env.payer],
-        &[add_admin_ix(&env.payer.pubkey(), &admin3.pubkey())],
-        "add admin3",
-    );
+    v1::grant_admin(&mut svm, &env.payer, &admin3).expect("add admin3");
     send(
         &mut svm,
         &[&env.payer],
@@ -1123,7 +1100,7 @@ fn approval_fixes_the_payout_schedule_and_the_start() {
             price_per_unit: 10,
             total_for_sale: 100,
             start_ts,
-            end_ts: 0,
+            end_ts: start_ts.max(0) + asset_registry::MAX_SALE_DURATION_SECS,
             raise_type: RaiseType::Startup,
             cliff_months: cliff,
             vesting_months: vesting,
@@ -1217,6 +1194,8 @@ fn close_sale_closes_the_proceeds_and_the_sale_stays_the_reuse_guard() {
     let authority_before = lamports(&svm, &env.payer.pubkey());
     let fee = Keypair::new();
     svm.airdrop(&fee.pubkey(), 1_000_000_000).unwrap();
+    let chain = v1::sale_chain(&svm, &sale);
+    let destination_owner = v1::token_owner(&svm, &destination);
     send(
         &mut svm,
         &[&fee, &env.payer],
@@ -1231,6 +1210,11 @@ fn close_sale_closes_the_proceeds_and_the_sale_stays_the_reuse_guard() {
                 destination,
                 payment_token_program: TOKEN_2022,
                 platform: platform(),
+                share_class: chain.share_class,
+                asset: chain.asset,
+                issuer_freeze: v1::issuer_freeze(&chain.issuer),
+                authority_block_entry: v1::block_entry(&env.payer.pubkey()),
+                destination_block_entry: v1::block_entry(&destination_owner),
             }
             .to_account_metas(None),
         )],
@@ -1265,4 +1249,132 @@ fn close_sale_closes_the_proceeds_and_the_sale_stays_the_reuse_guard() {
         6001,
         "Unauthorized",
     );
+}
+
+// ── v1.0.0-rc (design 8.3): mandatory sale end, payout-modules pause ────────
+
+/// prog-novac-15 (§8.2, §14.3.3): `end_ts` is required (6145), after
+/// `start_ts` (6022) and at most 365 days after max(start_ts, now) (6145).
+#[test]
+fn a_sale_must_end_within_365_days_of_its_start_or_of_now() {
+    let (mut svm, env) = boot();
+    let mut clock = svm.get_sysvar::<solana_clock::Clock>();
+    clock.unix_timestamp = 50_000;
+    svm.set_sysvar(&clock);
+    let now = 50_000;
+    let max = asset_registry::MAX_SALE_DURATION_SECS;
+    let t = terms(&svm);
+    for id in [1u64, 2] {
+        approve(&mut svm, &env, &env.payer, id, t).unwrap();
+    }
+    let open = |id: u64, start_ts: i64, end_ts: i64| {
+        let mut ix = open_sale_ix(&env, &OpenArgs::new(&env, id, 10, 100, &env.payer));
+        ix.data = ixd::OpenSale {
+            sale_id: id,
+            price_per_unit: 10,
+            total_for_sale: 100,
+            start_ts,
+            end_ts,
+            raise_type: RaiseType::Mature,
+            cliff_months: 0,
+            vesting_months: 0,
+        }
+        .data();
+        ix
+    };
+    for (what, start, end, code, name) in [
+        ("no end", now, 0, 6145, "SaleDurationInvalid"),
+        (
+            "end before start",
+            now + 10,
+            now + 10,
+            6022,
+            "InvalidSaleParams",
+        ),
+        (
+            "a day too long",
+            now + 10,
+            now + 10 + max + 1,
+            6145,
+            "SaleDurationInvalid",
+        ),
+        (
+            "from now, a day too long",
+            now - 1_000,
+            now + max + 1,
+            6145,
+            "SaleDurationInvalid",
+        ),
+    ] {
+        let err = try_send(&mut svm, &[&env.payer], &[open(1, start, end)]);
+        assert_error(err, code, name);
+        let _ = what;
+    }
+    try_send(
+        &mut svm,
+        &[&env.payer],
+        &[open(1, now + 10, now + 10 + max)],
+    )
+    .expect("exactly 365 days after the start");
+    // A start in the past: the 365 days run from now.
+    try_send(&mut svm, &[&env.payer], &[open(2, now - 1_000, now + max)])
+        .expect("365 days after now");
+}
+
+/// D2 (§4.2, §14.3.3): `PAUSE_PAYOUT_MODULES` stops a Startup raise (the
+/// payout-vault module) and nothing else of `open_sale`.
+#[test]
+fn the_payout_modules_bit_stops_startup_raises_but_not_mature_ones() {
+    let (mut svm, env) = boot();
+    let startup = Terms::covering(&svm, 10, 100, RaiseType::Startup).with_schedule(6, 24);
+    approve(&mut svm, &env, &env.payer, 1, startup).unwrap();
+    let mature = terms(&svm);
+    approve(&mut svm, &env, &env.payer, 2, mature).unwrap();
+    pause::set_pause_flags(
+        &mut svm,
+        &env.admin2,
+        asset_registry::PAUSE_PAYOUT_MODULES,
+        0,
+    )
+    .expect("any Admin sets it");
+    let now = svm.get_sysvar::<solana_clock::Clock>().unix_timestamp;
+    let mut ix = open_sale_ix(
+        &env,
+        &OpenArgs {
+            raise_type: RaiseType::Startup,
+            ..OpenArgs::new(&env, 1, 10, 100, &env.payer)
+        },
+    );
+    ix.data = ixd::OpenSale {
+        sale_id: 1,
+        price_per_unit: 10,
+        total_for_sale: 100,
+        start_ts: 0,
+        end_ts: now + asset_registry::MAX_SALE_DURATION_SECS,
+        raise_type: RaiseType::Startup,
+        cliff_months: 6,
+        vesting_months: 24,
+    }
+    .data();
+    pause::assert_paused(
+        try_send(&mut svm, &[&env.payer], std::slice::from_ref(&ix)),
+        "a Startup raise under PAUSE_PAYOUT_MODULES",
+    );
+    try_send(
+        &mut svm,
+        &[&env.payer],
+        &[open_sale_ix(
+            &env,
+            &OpenArgs::new(&env, 2, 10, 100, &env.payer),
+        )],
+    )
+    .expect("a Mature raise is untouched");
+    pause::set_pause_flags(
+        &mut svm,
+        &env.payer,
+        0,
+        asset_registry::PAUSE_PAYOUT_MODULES,
+    )
+    .expect("the super admin clears it on its own");
+    try_send(&mut svm, &[&env.payer], &[ix]).expect("the Startup raise opens");
 }

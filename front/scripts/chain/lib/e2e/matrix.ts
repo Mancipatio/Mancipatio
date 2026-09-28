@@ -10,13 +10,19 @@
  * of silently expecting a stale number.
  */
 import {
+  ASSET_REGISTRY_ERROR__DEAL_EXPIRY_OUT_OF_RANGE,
+  ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN,
   ASSET_REGISTRY_ERROR__OFFER_EXPIRED,
+  ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED,
+  ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT,
   ASSET_REGISTRY_ERROR__RECEIVER_NOT_APPROVED,
   ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED,
+  ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID,
   ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE,
   ASSET_REGISTRY_ERROR__SALE_NOT_STARTED,
   ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL,
   ASSET_REGISTRY_ERROR__SALE_SOLD_OUT,
+  ASSET_REGISTRY_ERROR__TIMELOCK_ACTIVE,
   ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN,
   ASSET_REGISTRY_ERROR__WRONG_DEAL_PARTY,
 } from "@/lib/generated/asset_registry";
@@ -89,6 +95,19 @@ export const E2E_STEPS: readonly StepSpec[] = [
   },
   { id: "1.12e", group: 1, title: "approve_holder(B2) on R0", networks: LOCAL, signer: "kycAuthority", expect: ok },
   { id: "1.12f", group: 1, title: "buy on the KycGated class with a passport (B2)", networks: LOCAL, signer: "buyer2", expect: ok },
+  // v1.0.0-rc (8.3): a blocked payer (prog-novac-4) and a frozen issuer (D1).
+  { id: "1.13a", group: 1, title: "add_to_blocklist(B4) by the BA", networks: LOCAL, signer: "blocklistAuthority", expect: ok },
+  {
+    id: "1.13b", group: 1, title: "buy on sale #1 by the blocked buyer B4", networks: LOCAL, signer: "buyer4",
+    expect: fails(ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED, "PartyBlocklisted"),
+  },
+  { id: "1.13c", group: 1, title: "remove_from_blocklist(B4) by the BA", networks: LOCAL, signer: "blocklistAuthority", expect: ok },
+  { id: "1.14a", group: 1, title: "freeze_issuer_proceeds(e2e issuer) by the Admin", networks: LOCAL, signer: "admin", expect: ok },
+  {
+    id: "1.14b", group: 1, title: "buy on sale #1 while its issuer's proceeds are frozen (B1)", networks: LOCAL, signer: "buyer1",
+    expect: fails(ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN, "IssuerProceedsFrozen"),
+  },
+  { id: "1.14c", group: 1, title: "unfreeze_issuer_proceeds by the Super Admin", networks: LOCAL, signer: "superAdmin", expect: ok },
 
   // G2: a sale beyond its approval.
   { id: "2.1", group: 2, title: "approve_sale #2 (max gross G, price [p, p])", networks: BOTH, signer: "admin", expect: ok },
@@ -99,6 +118,11 @@ export const E2E_STEPS: readonly StepSpec[] = [
   {
     id: "2.3", group: 2, title: "open_sale #2 with a price above the approved maximum", networks: BOTH, signer: "issuer",
     expect: fails(ASSET_REGISTRY_ERROR__SALE_PRICE_OUTSIDE_APPROVAL, "SalePriceOutsideApproval"),
+  },
+  {
+    // v1.0.0-rc (8.3 §8.2): every sale ends within 365 days of max(start, now).
+    id: "2.2b", group: 2, title: "open_sale #2 ending 366 days after its start", networks: LOCAL, signer: "issuer",
+    expect: fails(ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID, "SaleDurationInvalid"),
   },
   { id: "2.4a", group: 2, title: "open_sale #2 at exactly the approved gross", networks: BOTH, signer: "issuer", expect: ok },
   { id: "2.4b", group: 2, title: "buy the whole sale #2 (B3)", networks: BOTH, signer: "buyer3", expect: ok },
@@ -122,6 +146,17 @@ export const E2E_STEPS: readonly StepSpec[] = [
     id: "2.7c", group: 2, title: "buy before sale #5 starts", networks: BOTH, signer: "buyer1",
     expect: fails(ASSET_REGISTRY_ERROR__SALE_NOT_STARTED, "SaleNotStarted"),
   },
+  // v1.0.0-rc (8.3 D2/D3), with the bootstrap window closed by G0.
+  {
+    id: "2.8", group: 2, title: "set_pause_flags(clear 0x41) by the SA: 0x40 clears only on its own", networks: LOCAL, signer: "superAdmin",
+    expect: fails(ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT, "PayoutModulesClearNotExplicit"),
+  },
+  { id: "2.9a", group: 2, title: "propose_admin(fresh key) by the SA (funds the key)", networks: LOCAL, signer: "superAdmin", expect: ok },
+  {
+    id: "2.9b", group: 2, title: "add_admin by the proposed key at once (48 h timelock)", networks: LOCAL, signer: "admin",
+    expect: fails(ASSET_REGISTRY_ERROR__TIMELOCK_ACTIVE, "TimelockActive"),
+  },
+  { id: "2.9c", group: 2, title: "cancel_admin_proposal by a live Admin (the veto)", networks: LOCAL, signer: "admin", expect: ok },
 
   // G3: OTC.
   { id: "3.1", group: 3, title: "create_offer #1 + deposit_to_offer_escrow (B1)", networks: BOTH, signer: "buyer1", expect: ok },
@@ -152,6 +187,26 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "3.6a", group: 3, title: "create_otc_deal #2 (seller B1, buyer B2)", networks: BOTH, signer: "admin", expect: ok },
   { id: "3.6b", group: 3, title: "deposit_otc_payment for deal #2 (B2)", networks: BOTH, signer: "buyer2", expect: ok },
   { id: "3.6c", group: 3, title: "cancel_otc_deal #2 (Admin; refunds the payment)", networks: BOTH, signer: "admin", expect: ok },
+  // v1.0.0-rc (8.3): the party blocklist in trades and refunds (O-11), and the deal deadline.
+  { id: "3.7a", group: 3, title: "create_otc_deal #3 expiring in about 90 s (seller B1, buyer B2)", networks: LOCAL, signer: "admin", expect: ok },
+  { id: "3.7b", group: 3, title: "deposit_otc_payment for deal #3 (B2)", networks: LOCAL, signer: "buyer2", expect: ok },
+  {
+    id: "3.9", group: 3, title: "create_otc_deal #9 expiring 91 days out", networks: BOTH, signer: "admin",
+    expect: fails(ASSET_REGISTRY_ERROR__DEAL_EXPIRY_OUT_OF_RANGE, "DealExpiryOutOfRange"),
+  },
+  { id: "3.8a", group: 3, title: "add_to_blocklist(B2) by the BA", networks: LOCAL, signer: "blocklistAuthority", expect: ok },
+  { id: "3.8b", group: 3, title: "create_offer #4 + deposit_to_offer_escrow (B1)", networks: LOCAL, signer: "buyer1", expect: ok },
+  {
+    id: "3.8c", group: 3, title: "take_offer #4 by the blocked taker B2", networks: LOCAL, signer: "buyer2",
+    expect: fails(ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED, "PartyBlocklisted"),
+  },
+  {
+    id: "3.7c", group: 3, title: "expire_otc_deal #3 after its expiry: its blocked buyer is not refunded (O-11)", networks: LOCAL, signer: "buyer3",
+    expect: fails(ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED, "PartyBlocklisted"),
+  },
+  { id: "3.7d", group: 3, title: "cancel_otc_deal #3 (Admin; refunds the blocked buyer)", networks: LOCAL, signer: "admin", expect: ok },
+  { id: "3.8d", group: 3, title: "remove_from_blocklist(B2) by the BA", networks: LOCAL, signer: "blocklistAuthority", expect: ok },
+  { id: "3.8e", group: 3, title: "cancel_offer #4 (B1)", networks: LOCAL, signer: "buyer1", expect: ok },
 ];
 
 /** "1-3", "0,1,2", "2" → sorted unique group numbers (0..8). */

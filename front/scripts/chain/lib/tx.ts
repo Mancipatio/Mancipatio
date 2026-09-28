@@ -33,6 +33,7 @@ import {
   setComputeUnitLimitInstruction,
   setComputeUnitPriceInstruction,
 } from "@/lib/compute-budget";
+import { classifyFailure, describeFailure } from "./e2e/errors";
 import type { Journal } from "./journal";
 import type { ChainRpc } from "./rpc";
 import {
@@ -199,9 +200,16 @@ export async function simulateSigned(
   return simulationResult(value);
 }
 
+/**
+ * The failure with our program's error name first ("asset_registry:
+ * PartyBlocklisted (6144)": the registry and hook numbers overlap, so the
+ * failing program decides), then the raw error and the last log lines.
+ */
 export function summarizeSimulation(result: SimulationResult): string {
   const tail = result.logs.slice(-4).join(" | ");
-  return `${toJson(result.err, 0)}${tail ? ` (logs: ${tail})` : ""}`;
+  const failure = result.ok ? null : classifyFailure(result.err, result.logs);
+  const named = failure && (failure.program === "asset_registry" || failure.program === "transfer_hook") && failure.code !== null ? `${describeFailure(failure)} ` : "";
+  return `${named}${toJson(result.err, 0)}${tail ? ` (logs: ${tail})` : ""}`;
 }
 
 export function computeUnitLimit(unitsConsumed: bigint | null): number {

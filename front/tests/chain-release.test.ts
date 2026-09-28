@@ -3,7 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { RELEASE_FILES, executableHash, loadRelease, parseSha256Sums } from "@/scripts/chain/lib/release";
+import { INCIDENT_RELEASE_FILES, RELEASE_FILES, executableHash, loadRelease, parseSha256Sums } from "@/scripts/chain/lib/release";
 import { ChainGateError, sha256Hex } from "@/scripts/chain/lib/safety";
 import { releaseDir, root } from "./helpers/chain-world";
 
@@ -123,6 +123,39 @@ describe("loadRelease", () => {
   });
 });
 
+describe("loadRelease: the v1.0.0-rc incident build", () => {
+  /** A flat Release plus `<name>-incident.so`, recorded in sbf-sha256.txt and hashes.txt. */
+  function withIncident(dir: string, bytes = { asset_registry: new Uint8Array([7, 7]), transfer_hook: new Uint8Array([8, 8]) }) {
+    for (const [name, so] of Object.entries(bytes)) {
+      fs.writeFileSync(path.join(dir, `${name}-incident.so`), so);
+      fs.appendFileSync(path.join(dir, "sbf-sha256.txt"), `${sha256Hex(so)}  target/deploy-incident/${name}.so\n`);
+      fs.appendFileSync(path.join(dir, "hashes.txt"), `${name}-incident: ${executableHash(so)}\n`);
+    }
+    writeSums(dir, [...RELEASE_FILES, ...INCIDENT_RELEASE_FILES]);
+    return dir;
+  }
+
+  it("reads it when present (older Releases have none) and binds it to sbf-sha256.txt", () => {
+    expect(loadRelease(releaseDir(), { requireSums: true }).incident).toBeNull();
+    const release = loadRelease(withIncident(releaseDir()), { requireSums: true });
+    expect(release.incident?.so.transfer_hook).toEqual(new Uint8Array([8, 8]));
+    expect(release.incident?.verifyHashes.asset_registry).toBe(executableHash(new Uint8Array([7, 7])));
+  });
+
+  it("refuses half an incident build, bytes sbf-sha256.txt does not name, and incident bytes equal to the release", () => {
+    const half = withIncident(releaseDir());
+    fs.rmSync(path.join(half, "transfer_hook-incident.so"));
+    writeSums(half, [...RELEASE_FILES, "asset_registry-incident.so"]);
+    refuse(() => loadRelease(half, { requireSums: true }), /only some of its incident artifacts/);
+    const swapped = withIncident(releaseDir());
+    fs.writeFileSync(path.join(swapped, "asset_registry-incident.so"), new Uint8Array([6]));
+    writeSums(swapped, [...RELEASE_FILES, ...INCIDENT_RELEASE_FILES]);
+    refuse(() => loadRelease(swapped, { requireSums: true }), /asset_registry-incident.so does not match sbf-sha256.txt/);
+    const same = withIncident(releaseDir(), { asset_registry: new Uint8Array([1, 2, 3]), transfer_hook: new Uint8Array([8]) });
+    refuse(() => loadRelease(same, { requireSums: true }), /asset_registry-incident.so equals the release asset_registry.so/);
+  });
+});
+
 describe("verifiable-build.yml produces exactly what loadRelease reads", () => {
   const workflow = fs.readFileSync(path.join(root, ".github", "workflows", "verifiable-build.yml"), "utf8");
 
@@ -207,7 +240,11 @@ describe("verifiable-build.yml shell steps, executed locally", () => {
   const baseImage = workflow.match(/^\s+BASE_IMAGE: (\S+)$/m)![1];
   const commit = "c".repeat(40);
 
-  /** A runner workspace after the build job and the bundle job's download. */
+  /**
+   * A runner workspace after the build job and the bundle job's download.
+   * v1.0.0-rc builds the incident variant too (target/deploy-incident, with
+   * other bytes than the release .so).
+   */
   function workspace(so: Record<"asset_registry" | "transfer_hook", Uint8Array>) {
     const ws = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "runner-"));
     const bin = path.join(ws, ".bin");
@@ -225,8 +262,10 @@ describe("verifiable-build.yml shell steps, executed locally", () => {
     const env = { PATH: `${bin}:${process.env.PATH}`, BASE_IMAGE: baseImage, GITHUB_SHA: commit };
     const program = path.join(ws, "program");
     fs.mkdirSync(path.join(program, "target", "deploy"), { recursive: true });
+    fs.mkdirSync(path.join(program, "target", "deploy-incident"), { recursive: true });
     for (const name of ["asset_registry", "transfer_hook"] as const) {
       fs.writeFileSync(path.join(program, "target", "deploy", `${name}.so`), so[name]);
+      fs.writeFileSync(path.join(program, "target", "deploy-incident", `${name}.so`), new Uint8Array([...so[name], 9]));
     }
     // Build job (working-directory: program): the sbf-sha256 line of the
     // test step (cargo test itself is program-ci's job) and "Executable hashes".
@@ -240,7 +279,8 @@ describe("verifiable-build.yml shell steps, executed locally", () => {
     // upload-artifact roots a multi-path upload at the paths' common
     // ancestor; download-artifact unpacks it into `art`.
     const uploaded = uploadedPaths();
-    expect(uploaded.length).toBe(4);
+    // Two release .so, two incident .so, hashes.txt, sbf-sha256.txt.
+    expect(uploaded.length).toBe(6);
     const parts = uploaded.map((p) => p.split("/"));
     let common = 0;
     while (parts.every((p) => p.length > common + 1 && p[common] === parts[0][common])) common++;
@@ -276,10 +316,13 @@ describe("verifiable-build.yml shell steps, executed locally", () => {
     expect(release.commit).toBe(commit);
     expect(release.baseImage).toBe(baseImage);
     expect(release.arch).toBe("v3");
-    expect(release.sha256Sums.files).toEqual([...RELEASE_FILES].sort());
+    expect(release.sha256Sums.files).toEqual([...RELEASE_FILES, ...INCIDENT_RELEASE_FILES].sort());
     expect(release.verifyHashMatches).toEqual({ asset_registry: true, transfer_hook: true });
     expect(release.verifyHashes.asset_registry).not.toBe(sha256Hex(so.asset_registry));
-    expect(fs.readdirSync(path.join(ws, "dist")).sort()).toEqual([...RELEASE_FILES, "SHA256SUMS"].sort());
+    expect(fs.readdirSync(path.join(ws, "dist")).sort()).toEqual([...RELEASE_FILES, ...INCIDENT_RELEASE_FILES, "SHA256SUMS"].sort());
+    // The incident build is read, bound by sbf-sha256.txt, with its own hashes.txt lines.
+    expect(release.incident?.so.asset_registry).toEqual(new Uint8Array([1, 2, 3, 0, 0, 9]));
+    expect(release.incident?.verifyHashes.transfer_hook).toBe(executableHash(new Uint8Array([4, 5, 6, 0, 9])));
   });
 
   it.skipIf(!hasTools)("the bundle step fails on a .so that changed after the build, or on another commit", () => {
@@ -300,5 +343,68 @@ describe("verifiable-build.yml shell steps, executed locally", () => {
     expect(sh(stepRun("Assemble the Release bundle"), tampered.ws, tampered.env).status).toBe(0);
     fs.appendFileSync(path.join(tampered.ws, "dist", "asset_registry.json"), " ");
     expect(sh(stepRun("Re-check the bundle"), tampered.ws, tampered.env).status).not.toBe(0);
+  });
+
+  /**
+   * The incident step, run against shims that reproduce where the real tools
+   * write: `docker run … pwd` prints the image's workdir, and `solana-verify
+   * build --library-name <lib>` runs cargo-build-sbf in
+   * <workdir>/programs/<lib>/ (solana-verify 0.5.1 `docker exec -w`), which
+   * joins a RELATIVE --sbf-out-dir to that directory (cargo-build-sbf 4.2.0)
+   * and maps the container workdir to program/ (the mount).
+   */
+  function incidentWorkspace() {
+    const ws = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), "runner-incident-"));
+    const bin = path.join(ws, ".bin");
+    fs.mkdirSync(bin);
+    const program = path.join(ws, "program");
+    const workdir = "/build";
+    fs.writeFileSync(path.join(bin, "docker"), `#!/bin/bash\nif [[ "$1" == run && "$*" == *pwd* ]]; then echo ${workdir}; exit 0; fi\nexit 3\n`);
+    fs.writeFileSync(
+      path.join(bin, "solana-verify"),
+      `#!${process.execPath}\n` +
+        `const fs = require("fs"), path = require("path");\n` +
+        `const args = process.argv.slice(2);\n` +
+        `if (args[0] !== "build") process.exit(2);\n` +
+        `const lib = args[args.indexOf("--library-name") + 1];\n` +
+        `const extra = (args.find((a) => a.startsWith("--cargo-build-sbf-args=")) || "").slice(23).split(/\\s+/).filter(Boolean);\n` +
+        `const at = extra.indexOf("--sbf-out-dir");\n` +
+        `if (at < 0 || !extra.includes("incident")) process.exit(4);\n` +
+        `const out = extra[at + 1];\n` +
+        `const cwd = path.join(${JSON.stringify(program)}, "programs", lib);\n` +
+        `const host = path.isAbsolute(out) ? (out.startsWith(${JSON.stringify(workdir + "/")}) ? path.join(${JSON.stringify(program)}, out.slice(${workdir.length + 1})) : null) : path.join(cwd, out);\n` +
+        `if (!host) process.exit(5);\n` +
+        `fs.mkdirSync(host, { recursive: true });\n` +
+        `fs.writeFileSync(path.join(host, lib + ".so"), Buffer.from([7, 7, lib.length]));\n`,
+    );
+    fs.chmodSync(path.join(bin, "docker"), 0o755);
+    fs.chmodSync(path.join(bin, "solana-verify"), 0o755);
+    fs.mkdirSync(path.join(program, "target", "deploy"), { recursive: true });
+    for (const name of ["asset_registry", "transfer_hook"]) {
+      fs.mkdirSync(path.join(program, "programs", name), { recursive: true });
+      fs.writeFileSync(path.join(program, "target", "deploy", `${name}.so`), new Uint8Array([1, name.length]));
+    }
+    return { program, env: { PATH: `${bin}:${process.env.PATH}`, BASE_IMAGE: baseImage, RUNNER_TEMP: ws } };
+  }
+
+  it.skipIf(!hasTools)("the incident step writes to program/target/deploy-incident, and refuses when an artifact is missing", () => {
+    const step = stepRun("Verifiable build — incident artifacts");
+    const ok = incidentWorkspace();
+    const run = sh(step, ok.program, ok.env);
+    expect(run.stderr).toBe("");
+    expect(run.status).toBe(0);
+    for (const name of ["asset_registry", "transfer_hook"]) {
+      expect(fs.existsSync(path.join(ok.program, "target", "deploy-incident", `${name}.so`))).toBe(true);
+      expect(fs.existsSync(path.join(ok.program, "programs", name, "target"))).toBe(false);
+    }
+    // The pre-fix form (a relative --sbf-out-dir) lands the .so under
+    // programs/<lib>/target: the step must fail instead of passing silently.
+    const relative = step.replace("--sbf-out-dir $workdir/target/deploy-incident", "--sbf-out-dir target/deploy-incident");
+    expect(relative).not.toBe(step);
+    const stale = incidentWorkspace();
+    const refused = sh(relative, stale.program, stale.env);
+    expect(refused.status).not.toBe(0);
+    expect(refused.stdout).toContain("target/deploy-incident/asset_registry.so was not written");
+    expect(fs.existsSync(path.join(stale.program, "programs", "asset_registry", "target", "deploy-incident", "asset_registry.so"))).toBe(true);
   });
 });

@@ -15,7 +15,9 @@
 // mediate (a buy, an OTC offer or take) against the sanctions lists
 // (lib/server/onchain-screening.ts, 8.5): a hit is a compliance alert with
 // the transaction; a list that cannot answer on mainnet keeps the job
-// pending (SANCTIONS_UNAVAILABLE) until it can.
+// pending (SANCTIONS_UNAVAILABLE) until it can. A trade or transfer is also
+// matched against the authority wallets of frozen issuers
+// (lib/server/frozen-issuer-activity.ts, D1 / O-9): a hit is a high alert.
 
 import "server-only";
 import {
@@ -32,7 +34,11 @@ import {
   ADD_ADMIN_DISCRIMINATOR,
   APPROVE_SALE_DISCRIMINATOR,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
+  CANCEL_ADMIN_PROPOSAL_DISCRIMINATOR,
+  CANCEL_CUSTODY_AUTHORITY_TRANSFER_DISCRIMINATOR,
   CANCEL_ISSUER_AUTHORITY_TRANSFER_DISCRIMINATOR,
+  CANCEL_PLATFORM_ADMIN_TRANSFER_DISCRIMINATOR,
+  CANCEL_PLATFORM_RECOVERY_DISCRIMINATOR,
   CANCEL_ISSUER_RECOVERY_DISCRIMINATOR,
   CANCEL_KYC_REGISTRY_AUTHORITY_TRANSFER_DISCRIMINATOR,
   CLAWBACK_BLOCKLISTED_HOLDER_DISCRIMINATOR,
@@ -40,6 +46,8 @@ import {
   CREATE_KYC_REGISTRY_DISCRIMINATOR,
   CREATE_PROPOSAL_DISCRIMINATOR,
   EXECUTE_ISSUER_RECOVERY_DISCRIMINATOR,
+  EXECUTE_PLATFORM_RECOVERY_DISCRIMINATOR,
+  FREEZE_ISSUER_PROCEEDS_DISCRIMINATOR,
   LOCK_SUPPLY_DISCRIMINATOR,
   MINT_TO_TREASURY_DISCRIMINATOR,
   OPEN_CUSTODY_VAULT_DISCRIMINATOR,
@@ -52,11 +60,13 @@ import {
   ROUTE_YIELD_DISCRIMINATOR,
   TRIGGER_CUSTODY_VAULT_DISCRIMINATOR,
   VaultType,
+  PROPOSE_ADMIN_DISCRIMINATOR,
   PROPOSE_CUSTODY_AUTHORITY_DISCRIMINATOR,
   PROPOSE_ISSUER_AUTHORITY_DISCRIMINATOR,
   PROPOSE_ISSUER_RECOVERY_DISCRIMINATOR,
   PROPOSE_KYC_REGISTRY_AUTHORITY_DISCRIMINATOR,
   PROPOSE_PLATFORM_ADMIN_DISCRIMINATOR,
+  PROPOSE_PLATFORM_RECOVERY_DISCRIMINATOR,
   RECLAIM_RENT_DISCRIMINATOR,
   RECOVER_ISSUER_REGISTRATION_DISCRIMINATOR,
   REMOVE_ADMIN_DISCRIMINATOR,
@@ -64,6 +74,7 @@ import {
   SET_PAUSE_DISCRIMINATOR,
   SET_PAUSE_FLAGS_DISCRIMINATOR,
   SET_PROTOCOL_TREASURY_DISCRIMINATOR,
+  UNFREEZE_ISSUER_PROCEEDS_DISCRIMINATOR,
   UPDATE_KYC_REGISTRY_JURISDICTIONS_DISCRIMINATOR,
   VERIFY_ISSUER_KYB_DISCRIMINATOR,
   getAddAdminInstructionDataDecoder,
@@ -72,15 +83,18 @@ import {
   getClawbackFromHolderInstructionDataDecoder,
   getCreateKycRegistryInstructionDataDecoder,
   getCreateProposalInstructionDataDecoder,
+  getFreezeIssuerProceedsInstructionDataDecoder,
   getOpenCustodyVaultInstructionDataDecoder,
   getOpenVaultVoteInstructionDataDecoder,
   getPublishMilestoneInstructionDataDecoder,
   getRouteYieldInstructionDataDecoder,
+  getProposeAdminInstructionDataDecoder,
   getProposeCustodyAuthorityInstructionDataDecoder,
   getProposeIssuerAuthorityInstructionDataDecoder,
   getProposeIssuerRecoveryInstructionDataDecoder,
   getProposeKycRegistryAuthorityInstructionDataDecoder,
   getProposePlatformAdminInstructionDataDecoder,
+  getProposePlatformRecoveryInstructionDataDecoder,
   getRemoveAdminInstructionDataDecoder,
   getSetIssuerPermissionsInstructionDataDecoder,
   getSetPauseFlagsInstructionDataDecoder,
@@ -91,18 +105,35 @@ import {
 } from "@/lib/generated/asset_registry";
 import {
   ACCEPT_BLOCKLIST_AUTHORITY_DISCRIMINATOR,
+  CANCEL_BLOCKLIST_AUTHORITY_TRANSFER_DISCRIMINATOR,
+  CANCEL_BLOCKLIST_RECOVERY_DISCRIMINATOR,
+  EXECUTE_BLOCKLIST_RECOVERY_DISCRIMINATOR,
   INITIALIZE_BLOCKLIST_AUTHORITY_DISCRIMINATOR,
   PROPOSE_BLOCKLIST_AUTHORITY_DISCRIMINATOR,
+  PROPOSE_BLOCKLIST_RECOVERY_DISCRIMINATOR,
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   UPDATE_TRANSFER_HOOK_CONFIG_DISCRIMINATOR,
   getInitializeBlocklistAuthorityInstructionDataDecoder,
   getProposeBlocklistAuthorityInstructionDataDecoder,
+  getProposeBlocklistRecoveryInstructionDataDecoder,
 } from "@/lib/generated/transfer_hook";
 import { detectNetwork, type Network } from "@/lib/network";
-import { PAUSE_FLAGS_ALL, describePausedAreas, formatPauseFlags } from "@/lib/pause-flags";
+import {
+  EMERGENCY_PAUSE_BITS,
+  PAUSE_PAYOUT_MODULES,
+  PLATFORM_BOOTSTRAP_OPEN,
+  describePausedAreas,
+  formatPauseFlags,
+} from "@/lib/pause-flags";
 import { USDC } from "@/lib/payment-mints";
 import { decodeRegistryEvent, type EventValue } from "@/lib/server/onchain-events";
 import { screenTransactionParties } from "@/lib/server/onchain-screening";
+import {
+  frozenIssuerActivity,
+  frozenIssuerAlerts,
+  isTradeOrTransfer,
+  loadFrozenIssuerWallets,
+} from "@/lib/server/frozen-issuer-activity";
 import { finalizedTransaction } from "@/lib/server/sale-capacity-chain";
 import { raiseSystemAlert, type Severity } from "@/lib/server/system-alerts";
 import { transactionInvocations, type AttributedInvocation, type InvocationTx } from "@/lib/server/tx-invocations";
@@ -174,11 +205,30 @@ function pauseClassify(setMask: number, clearMask: number, ev: Record<string, Ev
   const now = typeof ev?.new === "number" ? ev.new : null;
   const noop = old !== null && now !== null && old === now;
   const change = old !== null && now !== null ? ` (${formatPauseFlags(old)} → ${formatPauseFlags(now)}: ${pauseLabel(now)})` : "";
+  // v1.0.0-rc: closing the one-way bootstrap window on its own unpauses nothing.
+  if (clearMask === PLATFORM_BOOTSTRAP_OPEN) {
+    return { source: "onchain:pause", severity: noop ? "low" : "high", summary: `Bootstrap window closed${change}` };
+  }
+  // D2: the payout / Merkle modules (0x40) stay off on mainnet. Switching them
+  // on (a clear of its own, 6154) or off is an owner decision: critical. The
+  // event only lowers it: a set that leaves 0x40 as it was is judged by its
+  // other bits below; without the event the bit counts as changed.
+  const payoutChanged = old !== null && now !== null ? ((old ^ now) & PAUSE_PAYOUT_MODULES) !== 0 : true;
+  if (clearMask & PAUSE_PAYOUT_MODULES) {
+    return { source: "onchain:pause", severity: noop ? "low" : "critical",
+      summary: `Payout modules switched ON (0x40 cleared: Startup raises, yield routing, Rights-Token issuances, milestones)${change}` };
+  }
+  if (setMask & PAUSE_PAYOUT_MODULES && payoutChanged) {
+    return { source: "onchain:pause", severity: "critical", summary: `Payout modules switched off (0x40 set)${change}` };
+  }
   if (clearMask !== 0) {
     return { source: "onchain:pause", severity: noop ? "low" : "critical", summary: `Pause flags cleared (unpause)${change}` };
   }
   if (setMask !== 0) {
-    const full = setMask === PAUSE_FLAGS_ALL || now === PAUSE_FLAGS_ALL;
+    // "Full": every emergency area paused (the payout modules bit 0x40 stays
+    // set on mainnet anyway, and bit 7 is not a pause).
+    const all = (flags: number | null) => flags !== null && (flags & EMERGENCY_PAUSE_BITS) === EMERGENCY_PAUSE_BITS;
+    const full = all(setMask) || all(now);
     return { source: "onchain:pause", severity: noop ? "low" : full ? "critical" : "high", summary: `Pause flags set${change}` };
   }
   return { source: "onchain:pause", severity: "low", summary: `Pause flags unchanged${change}` };
@@ -193,6 +243,18 @@ function int(value: unknown): number | null {
 }
 const enumName = (names: Record<number, string>, value: unknown) =>
   typeof value === "number" && names[value] !== undefined ? names[value] : null;
+/** An event's i64 (decimal string) as "YYYY-MM-DD HH:MM UTC", or null. */
+function utc(value: EventValue | undefined): string | null {
+  const n = typeof value === "string" && /^-?\d+$/.test(value) ? Number(value) : null;
+  if (n === null || !Number.isSafeInteger(n) || n <= 0 || n > 8_640_000_000_000) return null;
+  return `${new Date(n * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+}
+/** " (executable from …, until …)" when the event gave the window. */
+function windowText(ev: Record<string, EventValue> | undefined, verb = "executable"): string {
+  const from = utc(ev?.eta);
+  const until = utc(ev?.expires_at);
+  return from && until ? ` (${verb} from ${from} until ${until})` : "";
+}
 
 /** The instruction catalogue (design §4.1). */
 export const ALARM_INSTRUCTIONS: readonly Entry[] = [
@@ -212,21 +274,106 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
     classify: ({ args, events }) => ({ source: "onchain:treasury", severity: "critical",
       summary: `Protocol treasury set to ${String(args?.newTreasury)}`,
       evidence: { new_treasury: args?.newTreasury, old_treasury: events.ProtocolTreasuryChanged?.old ?? null } }) },
+  // v1.0.0-rc (8.3, D3): the Super Admin rotation runs through an
+  // AuthorityProposal with a 48 h eta; the SA, any Admin or the upgrade
+  // authority may cancel it. Every step is critical: the timelock only helps
+  // if someone looks during it.
   { name: "propose_platform_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(PROPOSE_PLATFORM_ADMIN_DISCRIMINATOR),
-    decode: dec(getProposePlatformAdminInstructionDataDecoder()), accounts: { authority: 0 }, format: "platform", fallback: "high",
-    classify: ({ args }) => ({ source: "onchain:platform-admin", severity: "high",
-      summary: `Super admin transfer proposed to ${String(args?.newAdmin)}`, evidence: { new_admin: args?.newAdmin } }) },
+    decode: dec(getProposePlatformAdminInstructionDataDecoder()), accounts: { authority: 0, platform: 1, transfer: 2 }, format: "platform", fallback: "critical",
+    classify: ({ args, events }) => {
+      const ev = events.AuthorityProposalCreated;
+      return { source: "onchain:platform-admin", severity: "critical",
+        summary: `Super admin rotation proposed to ${String(args?.newAdmin)}${windowText(ev, "acceptable")}; the Super Admin, any Admin or the upgrade authority can cancel it`,
+        evidence: { new_admin: args?.newAdmin, eta: ev?.eta ?? null, expires_at: ev?.expires_at ?? null } };
+    } },
   { name: "accept_platform_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(ACCEPT_PLATFORM_ADMIN_DISCRIMINATOR),
-    decode: null, accounts: { new_admin: 0 }, format: "platform", fallback: "critical",
-    classify: ({ account }) => ({ source: "onchain:platform-admin", severity: "critical",
-      summary: `Super admin transfer accepted by ${account(0)}` }) },
+    decode: null, accounts: { new_admin: 0, platform: 1, transfer: 2 }, format: "platform", fallback: "critical",
+    classify: ({ account, events }) => ({ source: "onchain:platform-admin", severity: "critical",
+      summary: `Super admin transfer accepted by ${account(0)}`,
+      evidence: { old_admin: events.PlatformAdminChanged?.old_admin ?? null } }) },
+  { name: "cancel_platform_admin_transfer", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CANCEL_PLATFORM_ADMIN_TRANSFER_DISCRIMINATOR),
+    decode: null, accounts: { canceller: 0, platform: 2, transfer: 3, proposer: 4 }, format: "platform", fallback: "critical",
+    classify: ({ account, events }) => {
+      const ev = events.AuthorityProposalCancelled;
+      return { source: "onchain:platform-admin", severity: "critical",
+        summary: `Super admin rotation${ev ? ` to ${String(ev.cancelled_new_authority)}` : ""} cancelled by ${account(0)}`,
+        evidence: { cancelled_new_authority: ev?.cancelled_new_authority ?? null } };
+    } },
+  // D3: an Admin grant is propose_admin (Super Admin) then, 48 h later and
+  // within 14 days, add_admin signed by the NEW admin; the SA, any Admin or
+  // the upgrade authority can cancel it. All three steps are critical.
+  { name: "propose_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(PROPOSE_ADMIN_DISCRIMINATOR),
+    decode: dec(getProposeAdminInstructionDataDecoder()), accounts: { super_admin: 0, platform: 1, pending_admin: 3 }, format: "platform", fallback: "critical",
+    classify: ({ args, events }) => {
+      const ev = events.AdminProposed;
+      const bootstrap = ev?.bootstrap_open === true;
+      return { source: "onchain:admin-grant", severity: "critical",
+        summary: `Admin grant proposed for ${String(args?.newAdmin)}${bootstrap
+          ? " (bootstrap window open: the new key can execute it at once)" : windowText(ev)}; the Super Admin, any Admin or the upgrade authority can cancel it`,
+        evidence: { new_admin: args?.newAdmin, eta: ev?.eta ?? null, expires_at: ev?.expires_at ?? null,
+          bootstrap_open: typeof ev?.bootstrap_open === "boolean" ? ev.bootstrap_open : null } };
+    } },
   { name: "add_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(ADD_ADMIN_DISCRIMINATOR),
-    decode: dec(getAddAdminInstructionDataDecoder()), accounts: { super_admin: 0, admin_record: 2 }, format: "platform", fallback: "high",
-    classify: ({ args }) => ({ source: "onchain:admin-record", severity: "high", summary: `Admin added: ${String(args?.newAdmin)}`,
-      evidence: { admin: args?.newAdmin } }) },
+    // v1.0.0-rc: the executor, signed by the NEW admin (the grant was proposed 48 h earlier).
+    decode: dec(getAddAdminInstructionDataDecoder()), accounts: { new_admin: 0, pending_admin: 2, proposer: 3, admin_record: 4 }, format: "platform",
+    fallback: "critical",
+    classify: ({ args, events }) => ({ source: "onchain:admin-record", severity: "critical",
+      summary: `Admin added: ${String(args?.newAdmin)} (staged grant executed by the new key)`,
+      evidence: { admin: args?.newAdmin, added_by: events.AdminAdded?.added_by ?? null, proposed_at: events.AdminAdded?.proposed_at ?? null } }) },
+  { name: "cancel_admin_proposal", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CANCEL_ADMIN_PROPOSAL_DISCRIMINATOR),
+    decode: null, accounts: { canceller: 0, pending_admin: 3, proposer: 4 }, format: "platform", fallback: "critical",
+    classify: ({ account, events }) => {
+      const ev = events.AdminProposalCancelled;
+      return { source: "onchain:admin-grant", severity: "critical",
+        summary: `Admin grant${ev ? ` for ${String(ev.new_admin)}` : ""} cancelled by ${account(0)}`,
+        evidence: { new_admin: ev?.new_admin ?? null, proposed_by: ev?.proposed_by ?? null } };
+    } },
+  // D4: the upgrade authority replaces a lost Super Admin (7 days, cancellable
+  // by the current Super Admin or the upgrade authority).
+  { name: "propose_platform_recovery", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(PROPOSE_PLATFORM_RECOVERY_DISCRIMINATOR),
+    decode: dec(getProposePlatformRecoveryInstructionDataDecoder()), accounts: { upgrade_authority: 0, platform: 1, recovery: 2 }, format: "platform",
+    fallback: "critical",
+    classify: ({ args, events }) => {
+      const ev = events.PlatformRecoveryProposed;
+      return { source: "onchain:platform-recovery", severity: "critical",
+        summary: `Super admin recovery proposed by the upgrade authority: ${String(args?.newAdmin)} replaces ${String(ev?.current_admin ?? "the Super Admin")}${windowText(ev)} unless the Super Admin cancels it`,
+        evidence: { new_admin: args?.newAdmin, current_admin: ev?.current_admin ?? null, eta: ev?.eta ?? null, expires_at: ev?.expires_at ?? null } };
+    } },
+  { name: "cancel_platform_recovery", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CANCEL_PLATFORM_RECOVERY_DISCRIMINATOR),
+    decode: null, accounts: { canceller: 0, recovery: 2, proposer: 3 }, format: "platform", fallback: "critical",
+    classify: ({ account, events }) => ({ source: "onchain:platform-recovery", severity: "critical",
+      summary: `Super admin recovery${events.PlatformRecoveryCancelled ? ` to ${String(events.PlatformRecoveryCancelled.new_admin)}` : ""} cancelled by ${account(0)}`,
+      evidence: { new_admin: events.PlatformRecoveryCancelled?.new_admin ?? null } }) },
+  { name: "execute_platform_recovery", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(EXECUTE_PLATFORM_RECOVERY_DISCRIMINATOR),
+    decode: null, accounts: { new_admin: 0, platform: 1, recovery: 2 }, format: "platform", fallback: "critical",
+    classify: ({ account, events }) => ({ source: "onchain:platform-recovery", severity: "critical",
+      summary: `Super admin recovery executed: ${account(0)} is the Super Admin${events.PlatformAdminChanged ? ` (was ${String(events.PlatformAdminChanged.old_admin)})` : ""}`,
+      evidence: { old_admin: events.PlatformAdminChanged?.old_admin ?? null, kind: events.PlatformAdminChanged?.kind ?? null } }) },
+  // D1: freeze and unfreeze of an issuer's proceeds (issuer-scoped: minimal;
+  // the reason stays off chain, only its SHA-256 is evidence).
+  { name: "freeze_issuer_proceeds", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(FREEZE_ISSUER_PROCEEDS_DISCRIMINATOR),
+    decode: dec(getFreezeIssuerProceedsInstructionDataDecoder()), accounts: { authority: 0, issuer: 3, issuer_freeze: 4 }, format: "minimal",
+    fallback: "critical",
+    classify: ({ args, account, events }) => {
+      const ev = events.IssuerProceedsFrozen;
+      const hash = ev?.reason_hash ?? (args?.reasonHash instanceof Uint8Array
+        ? Array.from(args.reasonHash, (b) => b.toString(16).padStart(2, "0")).join("") : null);
+      return { source: "onchain:issuer-freeze", severity: "critical",
+        summary: "Issuer proceeds frozen: sales, buys and proceeds exits of this issuer stay closed until the Super Admin unfreezes",
+        evidence: { frozen_by: ev?.frozen_by ?? account(0) ?? null, frozen_at: ev?.frozen_at ?? null, reason_hash: hash } };
+    } },
+  { name: "unfreeze_issuer_proceeds", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(UNFREEZE_ISSUER_PROCEEDS_DISCRIMINATOR),
+    decode: null, accounts: { super_admin: 0, issuer_freeze: 2, frozen_by: 3 }, format: "minimal", fallback: "critical",
+    classify: ({ events }) => {
+      const ev = events.IssuerProceedsUnfrozen;
+      return { source: "onchain:issuer-freeze", severity: "critical", summary: "Issuer proceeds unfrozen by the Super Admin",
+        evidence: { issuer: ev?.issuer ?? null, frozen_at: ev?.frozen_at ?? null } };
+    } },
+  // K1.1c: instant, so a compromised Super Admin can strip every Admin (and
+  // with it their veto of its 48 h changes) at once: critical, like add_admin.
   { name: "remove_admin", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(REMOVE_ADMIN_DISCRIMINATOR),
-    decode: dec(getRemoveAdminInstructionDataDecoder()), accounts: { super_admin: 0, admin_record: 2 }, format: "platform", fallback: "high",
-    classify: ({ args }) => ({ source: "onchain:admin-record", severity: "high", summary: `Admin removed: ${String(args?.admin)}`,
+    decode: dec(getRemoveAdminInstructionDataDecoder()), accounts: { super_admin: 0, admin_record: 2 }, format: "platform", fallback: "critical",
+    classify: ({ args }) => ({ source: "onchain:admin-record", severity: "critical", summary: `Admin removed: ${String(args?.admin)}`,
       evidence: { admin: args?.admin } }) },
   { name: "propose_custody_authority", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(PROPOSE_CUSTODY_AUTHORITY_DISCRIMINATOR),
     decode: dec(getProposeCustodyAuthorityInstructionDataDecoder()), accounts: { super_admin: 0, custody_vault: 2 }, format: "platform", fallback: "medium",
@@ -236,6 +383,11 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
     decode: null, accounts: { new_authority: 0, custody_vault: 2 }, format: "platform", fallback: "high",
     classify: ({ account }) => ({ source: "onchain:custody-authority", severity: "high",
       summary: `Custody authority transfer accepted by ${account(0)}` }) },
+  { name: "cancel_custody_authority_transfer", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CANCEL_CUSTODY_AUTHORITY_TRANSFER_DISCRIMINATOR),
+    decode: null, accounts: { canceller: 0, custody_vault: 3, transfer: 4, proposer: 5 }, format: "platform", fallback: "high",
+    classify: ({ account, events }) => ({ source: "onchain:custody-authority", severity: "high",
+      summary: `Custody authority transfer cancelled by ${account(0)}`,
+      evidence: { cancelled_new_authority: events.AuthorityProposalCancelled?.cancelled_new_authority ?? null } }) },
   { name: "set_issuer_permissions", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(SET_ISSUER_PERMISSIONS_DISCRIMINATOR),
     decode: dec(getSetIssuerPermissionsInstructionDataDecoder()), accounts: { super_admin: 0, issuer: 2, permissions: 3 }, format: "minimal", fallback: "critical",
     classify: ({ args }) => {
@@ -405,14 +557,37 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
     decode: dec(getInitializeBlocklistAuthorityInstructionDataDecoder()), accounts: { payer: 0, blocklist_authority: 1 }, format: "platform", fallback: "high",
     classify: ({ args }) => ({ source: "onchain:blocklist-authority", severity: "high",
       summary: `Blocklist authority initialized: ${String(args?.authority)}`, evidence: { authority: args?.authority } }) },
+  // v1.0.0-rc (8.3): every blocklist-authority rotation step is critical (the
+  // hook emits no events; its accounts and arguments are the evidence), and
+  // so is every step of the upgrade authority's recovery of it (D4).
   { name: "propose_blocklist_authority", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(PROPOSE_BLOCKLIST_AUTHORITY_DISCRIMINATOR),
-    decode: dec(getProposeBlocklistAuthorityInstructionDataDecoder()), accounts: { authority: 0, blocklist_authority: 1 }, format: "platform", fallback: "high",
-    classify: ({ args }) => ({ source: "onchain:blocklist-authority", severity: "high",
-      summary: `Blocklist authority transfer proposed to ${String(args?.newAuthority)}`, evidence: { new_authority: args?.newAuthority } }) },
+    decode: dec(getProposeBlocklistAuthorityInstructionDataDecoder()), accounts: { authority: 0, blocklist_authority: 1, transfer: 2 }, format: "platform",
+    fallback: "critical",
+    classify: ({ args }) => ({ source: "onchain:blocklist-authority", severity: "critical",
+      summary: `Blocklist authority transfer proposed to ${String(args?.newAuthority)} (acceptable at once, for 14 days)`,
+      evidence: { new_authority: args?.newAuthority } }) },
   { name: "accept_blocklist_authority", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(ACCEPT_BLOCKLIST_AUTHORITY_DISCRIMINATOR),
-    decode: null, accounts: { new_authority: 0, blocklist_authority: 1 }, format: "platform", fallback: "critical",
+    decode: null, accounts: { new_authority: 0, blocklist_authority: 1, transfer: 2 }, format: "platform", fallback: "critical",
     classify: ({ account }) => ({ source: "onchain:blocklist-authority", severity: "critical",
       summary: `Blocklist authority transfer accepted by ${account(0)}` }) },
+  { name: "cancel_blocklist_authority_transfer", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(CANCEL_BLOCKLIST_AUTHORITY_TRANSFER_DISCRIMINATOR),
+    decode: null, accounts: { authority: 0, blocklist_authority: 1, transfer: 2 }, format: "platform", fallback: "critical",
+    classify: ({ account }) => ({ source: "onchain:blocklist-authority", severity: "critical",
+      summary: `Blocklist authority transfer cancelled by ${account(0)}` }) },
+  { name: "propose_blocklist_recovery", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(PROPOSE_BLOCKLIST_RECOVERY_DISCRIMINATOR),
+    decode: dec(getProposeBlocklistRecoveryInstructionDataDecoder()), accounts: { upgrade_authority: 0, blocklist_authority: 1, recovery: 2 }, format: "platform",
+    fallback: "critical",
+    classify: ({ args }) => ({ source: "onchain:blocklist-recovery", severity: "critical",
+      summary: `Blocklist authority recovery proposed by the upgrade authority: ${String(args?.newAuthority)} can take over in 7 days unless the blocklist authority cancels it`,
+      evidence: { new_authority: args?.newAuthority } }) },
+  { name: "cancel_blocklist_recovery", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(CANCEL_BLOCKLIST_RECOVERY_DISCRIMINATOR),
+    decode: null, accounts: { canceller: 0, recovery: 2, proposer: 3 }, format: "platform", fallback: "critical",
+    classify: ({ account }) => ({ source: "onchain:blocklist-recovery", severity: "critical",
+      summary: `Blocklist authority recovery cancelled by ${account(0)}` }) },
+  { name: "execute_blocklist_recovery", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(EXECUTE_BLOCKLIST_RECOVERY_DISCRIMINATOR),
+    decode: null, accounts: { new_authority: 0, blocklist_authority: 1, recovery: 2 }, format: "platform", fallback: "critical",
+    classify: ({ account }) => ({ source: "onchain:blocklist-recovery", severity: "critical",
+      summary: `Blocklist authority recovery executed: ${account(0)} is the blocklist authority` }) },
   { name: "update_transfer_hook_config", program: TRANSFER_HOOK_PROGRAM_ADDRESS, discriminator: disc(UPDATE_TRANSFER_HOOK_CONFIG_DISCRIMINATOR),
     decode: null, accounts: { authority: 0, mint: 2, config: 3 }, format: "platform", fallback: "high",
     classify: ({ account }) => ({ source: "onchain:hook-config", severity: "high", summary: `Transfer hook configuration of mint ${account(2)} changed` }) },
@@ -662,6 +837,27 @@ export async function processEventJob(
     return retry("DB_UNAVAILABLE", backoff(job.attempts));
   }
   if (signal.aborted || Date.now() >= deadlineMs) return "pending";
+  // A trade or transfer by a FROZEN issuer's authority wallet (D1, O-9: the
+  // program does not stop its own secondary sales): high, so the Blocklist
+  // Authority can act before the units are gone. Only trades and transfers
+  // read the freeze mirror; a mirror that cannot be read retries the job.
+  let frozenAlerts = 0;
+  if (isTradeOrTransfer(tx)) {
+    try {
+      const frozen = await loadFrozenIssuerWallets(sb, job.network as Network, databaseSignal(signal));
+      for (const alert of frozenIssuerAlerts(job.signature, frozenIssuerActivity(tx, frozen))) {
+        if (signal.aborted || Date.now() >= deadlineMs) return "pending";
+        await raiseSystemAlert(sb, {
+          network: job.network as Network, dedupKey: alert.dedupKey, category: "onchain", source: alert.source,
+          severity: alert.severity, summary: alert.summary, evidence: alert.evidence, txSignature: job.signature, notify: true,
+        }, signal);
+        frozenAlerts++;
+      }
+    } catch {
+      return retry("DB_UNAVAILABLE", backoff(job.attempts));
+    }
+  }
+  if (signal.aborted || Date.now() >= deadlineMs) return "pending";
   // The signers of unmediated entries, screened after the fact (idempotent:
   // one open alert per wallet). A list that cannot answer on mainnet keeps
   // the job pending; a failed alert write retries like any effect above.
@@ -674,7 +870,7 @@ export async function processEventJob(
   if (screened === "retry") return retry("SANCTIONS_UNAVAILABLE", backoff(job.attempts));
   if (signal.aborted || Date.now() >= deadlineMs) return "pending";
   await writeJob(sb, job, {
-    status: "complete", alerts: result.alarms.length + screened.hits, attempts: job.attempts + 1,
+    status: "complete", alerts: result.alarms.length + frozenAlerts + screened.hits, attempts: job.attempts + 1,
     last_error: result.issues.length ? result.issues[0] : null,
   }, signal);
   return "complete";

@@ -29,7 +29,8 @@ solana_security_txt::security_txt! {
     contacts: "email:security@mancipatio.io",
     policy: "https://www.manci.io/security",
     preferred_languages: "en",
-    source_code: "https://github.com/Mancipatio/Mancipatio"
+    source_code: "https://github.com/Mancipatio/Mancipatio",
+    auditors: "None"
 }
 
 #[program]
@@ -37,6 +38,7 @@ pub mod asset_registry {
     use super::*;
 
     /// Creates the platform singleton. The signer becomes the platform admin.
+    /// It starts fully paused with the one-way bootstrap window open (0xFF).
     pub fn initialize_platform(
         ctx: Context<InitializePlatform>,
         protocol_treasury: Pubkey,
@@ -62,15 +64,25 @@ pub mod asset_registry {
         instructions::handle_recover_issuer_registration(ctx, jurisdiction, kyb_doc_hash)
     }
 
+    /// Super admin proposes a new super admin: acceptable by that key from
+    /// 48 h after the proposal (waived while bootstrap is open), for 14 days.
     pub fn propose_platform_admin(
         ctx: Context<ProposePlatformAdmin>,
         new_admin: Pubkey,
     ) -> Result<()> {
         instructions::handle_propose_platform_admin(ctx, new_admin)
     }
+    /// The proposed key becomes the super admin (retires a pending recovery).
     pub fn accept_platform_admin(ctx: Context<AcceptPlatformAdmin>) -> Result<()> {
         instructions::handle_accept_platform_admin(ctx)
     }
+    /// The super admin, any Admin or the upgrade authority cancels a pending
+    /// super-admin rotation.
+    pub fn cancel_platform_admin_transfer(ctx: Context<CancelPlatformAdminTransfer>) -> Result<()> {
+        instructions::handle_cancel_platform_admin_transfer(ctx)
+    }
+    /// Super admin proposes a new custody vault authority (an Admin key),
+    /// acceptable for 14 days.
     pub fn propose_custody_authority(
         ctx: Context<ProposeCustodyAuthority>,
         new_authority: Pubkey,
@@ -80,6 +92,46 @@ pub mod asset_registry {
     pub fn accept_custody_authority(ctx: Context<AcceptCustodyAuthority>) -> Result<()> {
         instructions::handle_accept_custody_authority(ctx)
     }
+    /// The super admin, or the current vault authority while it holds a live
+    /// Admin record, cancels a pending custody rotation.
+    pub fn cancel_custody_authority_transfer(
+        ctx: Context<CancelCustodyAuthorityTransfer>,
+    ) -> Result<()> {
+        instructions::handle_cancel_custody_authority_transfer(ctx)
+    }
+
+    // ── D4: super-admin recovery by the program upgrade authority ──────────
+
+    /// The upgrade authority proposes recovering a LOST super-admin key,
+    /// executable after 7 days for 14 days.
+    pub fn propose_platform_recovery(
+        ctx: Context<ProposePlatformRecovery>,
+        new_admin: Pubkey,
+    ) -> Result<()> {
+        instructions::handle_propose_platform_recovery(ctx, new_admin)
+    }
+    /// The current super admin or the proposer cancels a recovery.
+    pub fn cancel_platform_recovery(ctx: Context<CancelPlatformRecovery>) -> Result<()> {
+        instructions::handle_cancel_platform_recovery(ctx)
+    }
+    /// The recovered key executes a recovery once its timelock has passed.
+    pub fn execute_platform_recovery(ctx: Context<ExecutePlatformRecovery>) -> Result<()> {
+        instructions::handle_execute_platform_recovery(ctx)
+    }
+
+    // ── D1: issuer proceeds freeze ─────────────────────────────────────────
+
+    /// Any Admin (or the super admin) freezes one issuer's proceeds.
+    pub fn freeze_issuer_proceeds(
+        ctx: Context<FreezeIssuerProceeds>,
+        reason_hash: [u8; 32],
+    ) -> Result<()> {
+        instructions::handle_freeze_issuer_proceeds(ctx, reason_hash)
+    }
+    /// Only the super admin lifts an issuer freeze.
+    pub fn unfreeze_issuer_proceeds(ctx: Context<UnfreezeIssuerProceeds>) -> Result<()> {
+        instructions::handle_unfreeze_issuer_proceeds(ctx)
+    }
 
     /// Legacy onboarding switch (super admin): sets / clears only
     /// `PAUSE_ONBOARDING`. The full emergency pause is `set_pause_flags`.
@@ -88,7 +140,9 @@ pub mod asset_registry {
     }
 
     /// Emergency pause: `flags = (flags | set_mask) & !clear_mask`. Any Admin
-    /// may set defined bits; only the super admin may clear.
+    /// may set defined bits (0x7F); only the super admin may clear, and
+    /// `PAUSE_PAYOUT_MODULES` (0x40) only in a call of its own. Any clear also
+    /// closes the one-way bootstrap window (bit 7).
     pub fn set_pause_flags(
         ctx: Context<SetPauseFlags>,
         set_mask: u8,
@@ -105,9 +159,21 @@ pub mod asset_registry {
         instructions::handle_set_protocol_treasury(ctx, new_treasury)
     }
 
-    /// Super admin grants the admin role to `new_admin`.
+    /// Super admin proposes granting the admin role to `new_admin`
+    /// (executable from 48 h later, for 14 days; waived during bootstrap).
+    pub fn propose_admin(ctx: Context<ProposeAdmin>, new_admin: Pubkey) -> Result<()> {
+        instructions::handle_propose_admin(ctx, new_admin)
+    }
+
+    /// `new_admin` itself executes a pending grant inside its window.
     pub fn add_admin(ctx: Context<AddAdmin>, new_admin: Pubkey) -> Result<()> {
         instructions::handle_add_admin(ctx, new_admin)
+    }
+
+    /// The super admin, any Admin or the upgrade authority cancels a pending
+    /// admin grant.
+    pub fn cancel_admin_proposal(ctx: Context<CancelAdminProposal>) -> Result<()> {
+        instructions::handle_cancel_admin_proposal(ctx)
     }
 
     /// Super admin revokes the admin role from `admin`.

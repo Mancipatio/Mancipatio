@@ -4,9 +4,12 @@ import { describe, expect, it } from "vitest";
 
 // Every gated instruction reads the Platform READ-ONLY (so gated transactions
 // never write-lock the singleton and contend with each other), and the 20
-// that gained it in 2A carry it as the LAST named account (old account
-// indices and remaining-accounts tails keep their positions). check:idl keeps
-// this committed IDL identical to the one built from the Rust source.
+// that gained it in 2A carry it as the LAST named account of that package
+// (old account indices and remaining-accounts tails keep their positions).
+// v1.0.0-rc (8.3) appends its gate accounts AFTER the Platform, all
+// read-only: hook blocklist entries and the issuer's proceeds freeze.
+// check:idl keeps this committed IDL identical to the one built from the Rust
+// source.
 type IdlAccount = { name: string; writable?: boolean; signer?: boolean };
 type IdlInstruction = { name: string; accounts: IdlAccount[] };
 const idl = JSON.parse(
@@ -37,9 +40,21 @@ const GATED_2A = [
 ];
 /** Gated before 2A, with the Platform already in their accounts. */
 const GATED_EARLIER = ["create_asset", "add_share_class", "route_yield"];
+/** v1.0.0-rc gate accounts appended after the Platform (none for the rest). */
+const V1_AFTER_PLATFORM: Record<string, string[]> = {
+  buy: ["buyer_block_entry", "issuer_freeze"],
+  claim_founder_yield: ["share_class", "asset", "issuer_freeze", "founder_block_entry"],
+  close_sale: ["share_class", "asset", "issuer_freeze", "authority_block_entry", "destination_block_entry"],
+  deposit_otc_asset: ["buyer_block_entry", "seller_block_entry"],
+  deposit_otc_payment: ["buyer_block_entry", "seller_block_entry"],
+  open_sale: ["issuer_freeze"],
+  release_payout: ["share_class", "asset", "issuer_freeze", "founder_block_entry"],
+  take_offer: ["taker_block_entry", "maker_block_entry"],
+};
 /** The only instructions that may write the Platform. */
 const PLATFORM_WRITERS = [
   "accept_platform_admin",
+  "execute_platform_recovery", // v1.0.0-rc: the recovered super admin
   "initialize_platform",
   "register_issuer", // issuers_count
   "set_pause",
@@ -48,14 +63,22 @@ const PLATFORM_WRITERS = [
 ];
 
 describe("emergency-pause gate in the committed IDL", () => {
-  it.each(GATED_2A)("%s reads the Platform last and read-only", (name) => {
+  it.each(GATED_2A)("%s reads the Platform read-only, followed only by its read-only v1 gates", (name) => {
     const ix = byName.get(name);
     expect(ix, name).toBeDefined();
-    const last = ix!.accounts.at(-1)!;
-    expect(last.name).toBe("platform");
-    expect(last.writable ?? false).toBe(false);
-    expect(last.signer ?? false).toBe(false);
+    const after = V1_AFTER_PLATFORM[name] ?? [];
+    const at = ix!.accounts.length - 1 - after.length;
+    const platform = ix!.accounts[at];
+    expect(platform.name).toBe("platform");
+    expect(platform.writable ?? false).toBe(false);
+    expect(platform.signer ?? false).toBe(false);
     expect(ix!.accounts.filter((a) => a.name === "platform")).toHaveLength(1);
+    const appended = ix!.accounts.slice(at + 1);
+    expect(appended.map((a) => a.name)).toEqual(after);
+    for (const a of appended) {
+      expect(a.writable ?? false, `${name}.${a.name}`).toBe(false);
+      expect(a.signer ?? false, `${name}.${a.name}`).toBe(false);
+    }
   });
 
   // Package 2C-3 appends the optional KYC registry AFTER the Platform, so no
@@ -86,13 +109,12 @@ describe("emergency-pause gate in the committed IDL", () => {
       "authority", "issuer", "asset", "share_class", "mint", "payment_mint",
       "sale", "proceeds", "payment_token_program", "system_program",
     ]);
-    expect(names.at(-4)).toBe("sale_approval");
-    expect(names.at(-3)).toBe("approved_by");
-    expect(names.at(-2)).toBe("approver_admin_record");
+    // ... then the Platform and v1's issuer_freeze.
+    expect(names.slice(-5)).toEqual(["sale_approval", "approved_by", "approver_admin_record", "platform", "issuer_freeze"]);
     const accounts = byName.get("open_sale")!.accounts;
+    expect(accounts.at(-5)!.writable).toBe(true);
     expect(accounts.at(-4)!.writable).toBe(true);
-    expect(accounts.at(-3)!.writable).toBe(true);
-    expect(accounts.at(-2)!.writable ?? false).toBe(false);
+    expect(accounts.at(-3)!.writable ?? false).toBe(false);
   });
 
   it.each(["approve_sale", "revoke_sale_approval"])(

@@ -3,22 +3,14 @@
  * sysvar's `unix_timestamp` plus a margin, never the local time, and a wait
  * polls that same clock.
  */
-import { address } from "@solana/kit";
+import { fetchChainTime } from "../accounts";
 import type { ChainRpc } from "../rpc";
 import { ChainAbortError, ChainPlanError } from "../safety";
 
-const CLOCK_SYSVAR = address("SysvarC1ock11111111111111111111111111111111");
-/** slot u64, epoch_start_timestamp i64, epoch u64, leader_schedule_epoch u64, unix_timestamp i64. */
-const UNIX_TIMESTAMP_OFFSET = 32;
-
 export async function chainNow(rpc: ChainRpc): Promise<bigint> {
-  const { value } = await rpc
-    .getAccountInfo(CLOCK_SYSVAR, { encoding: "base64", commitment: "confirmed" })
-    .send();
-  if (!value) throw new ChainPlanError("The Clock sysvar is unreadable");
-  const data = Buffer.from(value.data[0], "base64");
-  if (data.length < UNIX_TIMESTAMP_OFFSET + 8) throw new ChainPlanError("The Clock sysvar is too short");
-  return data.readBigInt64LE(UNIX_TIMESTAMP_OFFSET);
+  const now = await fetchChainTime(rpc, "confirmed");
+  if (now === null) throw new ChainPlanError("The Clock sysvar is unreadable");
+  return now;
 }
 
 /** Polls the chain clock until it reaches `target` (seconds). */

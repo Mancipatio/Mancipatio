@@ -162,7 +162,9 @@ pub enum RegistryError {
     KycProofRequired,
     #[msg("Destination must be the issuer treasury or the escrow of a CustodyVault / RightsIssuance of this mint (pass that PDA in remaining accounts)")]
     MintDestinationNotBound,
-    #[msg("Clawback requires the holder's KYC entry to be Revoked or expired")]
+    #[msg(
+        "Clawback requires the holder's KYC entry to be Revoked, or expired for at least 30 days"
+    )]
     ClawbackHolderStillEligible,
     #[msg("Clawback is only available on KycGated mints")]
     ClawbackNotKycGated,
@@ -296,4 +298,31 @@ pub enum RegistryError {
     BeneficiaryNotAllowed,
     #[msg("ConversionPending custody vaults are retired; holder conversions use a DeliveryEscrow")]
     VaultTypeRetired,
+    // ── v1.0.0-rc (design 8.3; appended: every earlier code keeps its position) ──
+    #[msg("Issuer proceeds are frozen; this path stays closed until the super admin unfreezes the issuer")]
+    IssuerProceedsFrozen,
+    #[msg("A party to this transfer is on the transfer-hook blocklist (live BlockEntry)")]
+    PartyBlocklisted,
+    #[msg("Sale end_ts is required and must be at most 365 days after max(start_ts, now)")]
+    SaleDurationInvalid,
+    #[msg("KYC entry expiry may be at most 2 years from now")]
+    KycExpiryTooFar,
+    #[msg("A payout vault vote must run for at least 7 days")]
+    VotingPeriodTooShort,
+    #[msg("A DeliveryEscrow deadline must be between now + 24 hours and now + 365 days")]
+    DeliveryDeadlineOutOfRange,
+    #[msg("An OTC deal expiry must be in the future and at most 90 days away")]
+    DealExpiryOutOfRange,
+    #[msg("This change is still inside its timelock")]
+    TimelockActive,
+    #[msg("This proposal has expired; propose again")]
+    ProposalExpired,
+    #[msg("Admin proposal does not match the executing key or the current super admin")]
+    InvalidAdminProposal,
+    #[msg("Super-admin recovery does not match the current super admin, the executing key or the current upgrade authority")]
+    InvalidPlatformRecovery,
+    #[msg("PAUSE_PAYOUT_MODULES may only be cleared on its own (clear_mask == 0x40)")]
+    PayoutModulesClearNotExplicit,
+    #[msg("A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation")]
+    PlatformRecoveryPending,
 }

@@ -2,10 +2,12 @@
 // admin menu counts and the matching page filters share.
 import { describe, expect, it } from "vitest";
 import {
+  adminGrantBadge,
   assetActivationBlock,
   clientReviewReasons,
   conversionWaitsForAdmin,
   deliveryWaitsForAdmin,
+  platformChangeBadge,
   proposalAwaitsFinalize,
   saleExpiredOpen,
   vestingSeriesNeedsReview,
@@ -107,5 +109,49 @@ describe("isIndexerStateFresh (one rule for lib/indexer.ts and the badges)", () 
     ["garbage", row({ checked_at: "soon" })],
   ])("%s is not fresh", (_label, value) => {
     expect(isIndexerStateFresh(value, now)).toBe(false);
+  });
+});
+
+// v1.0.0-rc (0079): the Admins and Platform badges over the role-state mirror.
+describe("staged role changes (adminGrantBadge, platformChangeBadge)", () => {
+  const now = 1_000_000;
+  const SA = "SuperAdmin1111111111111111111111";
+  const ctx = { superAdmin: SA, pauseFlags: 0x40, nowSec: now };
+  const row = (proposedAt: number, eta: number | null, expiresAt: number, extra: Record<string, string> = {}) =>
+    ({ proposed_at: proposedAt, eta, expires_at: expiresAt, ...extra });
+
+  it("admins: a grant in its 48 h window counts, a stale live one counts, an executable one waits on the new key, an expired one is gone", () => {
+    const badge = adminGrantBadge([
+      row(now - 10, now + 100, now + 1_000, { proposed_by: SA }),         // timelock
+      row(now - 200, now - 100, now + 1_000, { proposed_by: SA }),        // executable: aside
+      row(now - 10, now + 100, now + 1_000, { proposed_by: "Earlier1" }), // stale
+      row(now - 999, now - 900, now - 1, { proposed_by: "Earlier1" }),    // expired
+    ], ctx);
+    expect(badge).toEqual({ count: 2, parts: { timelock: 1, stale: 1 }, aside: { awaitingKey: 1 } });
+  });
+
+  it("admins: the open bootstrap window waives the timelock (executable at once), never the expiry; string timestamps work", () => {
+    const grant = [row(now - 10, now + 100, now + 1_000, { proposed_by: SA })];
+    expect(adminGrantBadge(grant, { ...ctx, pauseFlags: 0xff })).toEqual({ count: 0, parts: { timelock: 0, stale: 0 }, aside: { awaitingKey: 1 } });
+    expect(adminGrantBadge([{ proposed_at: String(now - 10), eta: String(now + 100), expires_at: String(now + 1_000), proposed_by: SA }], ctx).count).toBe(1);
+    // Super Admin unknown (no Platform mirrored): nothing is called stale.
+    expect(adminGrantBadge([row(now - 10, now + 100, now + 1_000, { proposed_by: "Earlier1" })], { ...ctx, superAdmin: null }).parts)
+      .toEqual({ timelock: 1, stale: 0 });
+  });
+
+  it("platform: a Super Admin rotation in its window and every live recovery count; executable and blocklist rotations wait on the key", () => {
+    const badge = platformChangeBadge({
+      rotations: [
+        row(now - 10, now + 100, now + 1_000, { current_authority: SA }),    // rotation
+        row(now - 10, now + 100, now + 1_000, { current_authority: "Old1" }), // dead: the SA moved on
+        row(now - 999, now - 998, now - 1, { current_authority: SA }),        // expired
+      ],
+      recoveries: [row(now - 10, now + 600_000, now + 2_000_000), row(now - 700_000, now - 90_000, now + 10), row(now - 9, now - 8, now - 1)],
+      blocklistRotations: [row(now - 10, null, now + 1_209_600), row(now - 10, null, now - 1)],
+    }, ctx);
+    expect(badge).toEqual({ count: 3, parts: { rotation: 1, recovery: 2 }, aside: { awaitingKey: 1 } });
+    // Past its eta the rotation waits on the new Super Admin.
+    expect(platformChangeBadge({ rotations: [row(now - 300, now - 100, now + 1_000, { current_authority: SA })], recoveries: [], blocklistRotations: [] }, ctx))
+      .toEqual({ count: 0, parts: { rotation: 0, recovery: 0 }, aside: { awaitingKey: 1 } });
   });
 });

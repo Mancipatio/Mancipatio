@@ -29,9 +29,13 @@ import {
   buildCancelKycRegistryProposal,
   findPendingRolesForWallet,
   pendingBadgeCount,
+  type AcceptableKind,
   type PendingRoleRow,
   type PendingRoles,
 } from "@/lib/pending-roles";
+import { buildCancelOperationalAuthority } from "@/lib/operational-authority";
+import { describeProposalWindow, proposalWindowState } from "@/lib/proposal-window";
+import { useChainClock } from "@/lib/use-chain-clock";
 import type { OutgoingProposal, PendingRole } from "@/lib/role-resolution";
 import { recordAudit, type AuditCategory } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
@@ -43,25 +47,35 @@ const short = (a: string) => `${a.slice(0, 4)}…${a.slice(-4)}`;
 
 const KIND_TITLE: Record<PendingRoleRow["kind"], string> = {
   platform: "Super Admin",
+  platformRecovery: "Super Admin (recovery)",
+  admin: "Admin",
   blocklist: "Blocklist authority",
+  blocklistRecovery: "Blocklist authority (recovery)",
   kyc: "KYC provider (registry authority)",
   custody: "Custody operator",
   issuer: "Issuer key",
   issuerRecovery: "Issuer key recovery",
 };
 
-const AUDIT_CATEGORY: Record<"platform" | "blocklist" | "kyc" | "custody", AuditCategory> = {
+const AUDIT_CATEGORY: Record<AcceptableKind, AuditCategory> = {
   platform: "platform",
+  platformRecovery: "platform",
+  admin: "admins",
   blocklist: "platform",
+  blocklistRecovery: "platform",
   kyc: "issuers",
   custody: "custody",
 };
 
-type Acceptable = Extract<PendingRoleRow, { kind: "platform" | "blocklist" | "kyc" | "custody" }>;
+type Acceptable = Extract<PendingRoleRow, { kind: AcceptableKind }>;
 
 function isAcceptable(row: PendingRoleRow): row is Acceptable {
-  return row.kind === "platform" || row.kind === "blocklist" || row.kind === "kyc" || row.kind === "custody";
+  return row.kind !== "issuer" && row.kind !== "issuerRecovery";
 }
+
+/** Recoveries and Admin grants are executed, rotations accepted. */
+const actionVerb = (row: Acceptable) =>
+  row.kind === "platformRecovery" || row.kind === "blocklistRecovery" ? "Execute" : "Accept";
 
 /** The single-read proposals of the role snapshot, as rows (the scan fallback). */
 function singleReadRows(pending: readonly PendingRole[]): PendingRoleRow[] {
@@ -74,6 +88,7 @@ function singleReadRows(pending: readonly PendingRole[]): PendingRoleRow[] {
           proposedBy: p.currentAuthority,
           counted: true,
           blocked: null,
+          window: null,
           platformRegistry: true,
         }
       : {
@@ -83,6 +98,7 @@ function singleReadRows(pending: readonly PendingRole[]): PendingRoleRow[] {
           proposedBy: p.currentAuthority,
           counted: true,
           blocked: null,
+          window: null,
         },
   );
 }
@@ -115,8 +131,24 @@ function acceptDescription(row: Acceptable) {
           <PlatformAcceptChecklist />
         </div>
       );
+    case "platformRecovery":
+      return (
+        <div className="space-y-2">
+          <p>
+            The program upgrade authority recovers the Super Admin role to the
+            connected wallet (the current Super Admin key was reported lost).
+            The former Super Admin&apos;s Admin record is closed and a pending
+            Super Admin rotation is retired.
+          </p>
+          <PlatformAcceptChecklist />
+        </div>
+      );
+    case "admin":
+      return "The connected wallet takes the Admin role the Super Admin proposed: it pays for its Admin record and can then operate issuance and custody. The Super Admin can remove the role at any time.";
     case "blocklist":
       return "The connected wallet becomes the blocklist authority: it alone adds and removes blocklist entries and switches the transfer-hook mode.";
+    case "blocklistRecovery":
+      return "The program upgrade authority recovers the blocklist authority to the connected wallet (the current key was reported lost). A pending blocklist-authority rotation is retired.";
     case "kyc":
       return row.platformRegistry
         ? "The connected wallet becomes the registry authority: it alone issues and revokes passports and edits the jurisdictions. The registry address does not change."
@@ -192,7 +224,7 @@ export function PendingRolesPanel({ maintenance }: { maintenance: boolean }) {
       const ix = await buildAcceptPendingRole(rpc, row, signer);
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       const signature = typeof sig === "string" ? sig : "";
-      toast.showTx(signature, { title: `${KIND_TITLE[row.kind]} accepted` });
+      toast.showTx(signature, { title: `${KIND_TITLE[row.kind]} ${actionVerb(row) === "Execute" ? "recovered" : "accepted"}` });
       void recordAudit({
         ix_name: ixName,
         category: AUDIT_CATEGORY[row.kind],
@@ -209,7 +241,7 @@ export function PendingRolesPanel({ maintenance }: { maintenance: boolean }) {
       await load();
     } catch (err) {
       const detail = explainSendError(err);
-      toast.showError(`${KIND_TITLE[row.kind]} not accepted`, detail);
+      toast.showError(`${KIND_TITLE[row.kind]} not ${actionVerb(row) === "Execute" ? "recovered" : "accepted"}`, detail);
       void recordAudit({
         ix_name: ixName,
         category: AUDIT_CATEGORY[row.kind],
@@ -253,6 +285,9 @@ export function PendingRolesPanel({ maintenance }: { maintenance: boolean }) {
                   </>
                 )}
               </p>
+              {row.window && row.kind !== "issuerRecovery" && (
+                <p className="mt-0.5 text-xs text-slate-500">{describeProposalWindow(row.window)}</p>
+              )}
               <RowAction
                 row={row}
                 disabled={busy || tx.isSending || maintenance}
@@ -267,11 +302,11 @@ export function PendingRolesPanel({ maintenance }: { maintenance: boolean }) {
       </button>
       <ConfirmModal
         open={confirm !== null}
-        title={confirm ? `Accept the ${KIND_TITLE[confirm.kind]} role?` : ""}
+        title={confirm ? `${actionVerb(confirm)} the ${KIND_TITLE[confirm.kind]} role?` : ""}
         description={confirm ? acceptDescription(confirm) : ""}
         kind="warning"
         requireReason={false}
-        confirmLabel="Accept"
+        confirmLabel={confirm ? actionVerb(confirm) : "Accept"}
         busy={busy || tx.isSending}
         onConfirm={() => (confirm ? accept(confirm) : undefined)}
         onClose={() => setConfirm(null)}
@@ -298,7 +333,7 @@ function RowAction({
         onClick={() => onAccept(row)}
         className="mt-2 rounded-lg bg-brand-700 px-3 py-1.5 text-xs font-semibold text-white disabled:opacity-50"
       >
-        Accept
+        {actionVerb(row)}
       </button>
     );
   }
@@ -327,6 +362,12 @@ const OUTGOING_TITLE: Record<OutgoingProposal["kind"], string> = {
   kyc: "KYC registry authority",
 };
 
+const CANCEL_IX: Record<OutgoingProposal["kind"], string> = {
+  platform: "cancel_platform_admin_transfer",
+  blocklist: "cancel_blocklist_authority_transfer",
+  kyc: "cancel_kyc_registry_authority_transfer",
+};
+
 /** Section 4: proposals this wallet made as the current authority. */
 export function OpenProposalsPanel({ maintenance }: { maintenance: boolean }) {
   const role = useRole({ kyc: true });
@@ -338,38 +379,44 @@ export function OpenProposalsPanel({ maintenance }: { maintenance: boolean }) {
   const wallet = conn.wallet?.account.address?.toString() ?? null;
   const [cancel, setCancel] = useState<OutgoingProposal | null>(null);
   const [busy, setBusy] = useState(false);
+  const now = useChainClock();
 
-  async function cancelKyc(p: OutgoingProposal) {
+  async function cancelProposal(p: OutgoingProposal) {
     if (!conn.wallet || !wallet) return;
     setBusy(true);
-    const metadata = { registry: p.target, cancelled_new_authority: p.newAuthority };
+    const ixName = CANCEL_IX[p.kind];
+    const category: AuditCategory = p.kind === "kyc" ? "issuers" : "platform";
+    const metadata = { target: p.target, cancelled_new_authority: p.newAuthority };
     try {
       const signer = walletSigner(conn.wallet);
-      const ix = await buildCancelKycRegistryProposal(rpc, p.target, signer);
+      const ix =
+        p.kind === "kyc"
+          ? await buildCancelKycRegistryProposal(rpc, p.target, signer)
+          : await buildCancelOperationalAuthority(rpc, p.kind, signer);
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       const signature = typeof sig === "string" ? sig : "";
-      toast.showTx(signature, { title: "Registry authority proposal cancelled" });
+      toast.showTx(signature, { title: `${OUTGOING_TITLE[p.kind]} proposal cancelled` });
       void recordAudit({
-        ix_name: "cancel_kyc_registry_authority_transfer",
-        category: "issuers",
+        ix_name: ixName,
+        category,
         actor_wallet: wallet,
-        reason: "Registry authority proposal cancelled at /account/roles",
+        reason: "Authority proposal cancelled at /account/roles",
         target_label: p.target.toString(),
         tx_signature: signature || undefined,
         status: "success",
         metadata,
       });
       setCancel(null);
-      invalidateKycAuthorityContext(rpc);
+      if (p.kind === "kyc") invalidateKycAuthorityContext(rpc);
       invalidateRoles();
     } catch (err) {
       const detail = explainSendError(err);
       toast.showError("Proposal not cancelled", detail);
       void recordAudit({
-        ix_name: "cancel_kyc_registry_authority_transfer",
-        category: "issuers",
+        ix_name: ixName,
+        category,
         actor_wallet: wallet,
-        reason: "Registry authority proposal cancelled at /account/roles",
+        reason: "Authority proposal cancelled at /account/roles",
         target_label: p.target.toString(),
         status: "failed",
         metadata: { ...metadata, error: detail },
@@ -396,43 +443,47 @@ export function OpenProposalsPanel({ maintenance }: { maintenance: boolean }) {
                   Stale: it can no longer be accepted. Cancel it or propose again.
                 </p>
               )}
-              {p.kind === "kyc" ? (
-                <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
-                  <button
-                    type="button"
-                    disabled={busy || tx.isSending || maintenance}
-                    onClick={() => setCancel(p)}
-                    className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold text-slate-700 disabled:opacity-50"
-                  >
-                    Cancel proposal
-                  </button>
+              <p className="mt-1 text-xs text-slate-500">
+                {describeProposalWindow(
+                  proposalWindowState({ proposedAt: p.eta, eta: p.eta, expiresAt: p.expiresAt }, now),
+                )}
+              </p>
+              <div className="mt-2 flex flex-wrap items-center gap-3 text-xs">
+                <button
+                  type="button"
+                  disabled={busy || tx.isSending || maintenance}
+                  onClick={() => setCancel(p)}
+                  className="rounded-lg border border-slate-300 px-3 py-1.5 font-semibold text-slate-700 disabled:opacity-50"
+                >
+                  Cancel proposal
+                </button>
+                {p.kind === "kyc" ? (
                   <Link href="/admin/kyc" className="text-brand-700 underline-offset-2 hover:underline">
                     Replace it on /admin/kyc
                   </Link>
-                </div>
-              ) : (
-                <p className="mt-1 text-xs text-slate-600">
-                  There is no cancel instruction: replace the proposal in
-                  &ldquo;Your operational authorities&rdquo; above.
-                </p>
-              )}
+                ) : (
+                  <span className="text-slate-600">
+                    or replace it in &ldquo;Your operational authorities&rdquo; above.
+                  </span>
+                )}
+              </div>
             </li>
           ))}
         </ul>
       )}
       <ConfirmModal
         open={cancel !== null}
-        title="Cancel the registry authority proposal?"
+        title={cancel ? `Cancel the ${OUTGOING_TITLE[cancel.kind]} proposal?` : ""}
         description={
           cancel
-            ? `The proposal to ${cancel.newAuthority} is withdrawn and its rent returns to you. You stay the registry authority.`
+            ? `The proposal to ${cancel.newAuthority} is withdrawn and its rent returns to the proposer. You keep the role.`
             : ""
         }
         kind="warning"
         requireReason={false}
         confirmLabel="Cancel proposal"
         busy={busy || tx.isSending}
-        onConfirm={() => (cancel ? cancelKyc(cancel) : undefined)}
+        onConfirm={() => (cancel ? cancelProposal(cancel) : undefined)}
         onClose={() => setCancel(null)}
       />
     </div>

@@ -186,6 +186,17 @@ describe("registry panel helpers", () => {
     expect(kycTransferState(OTHER, ROTATED, live)).toEqual({ kind: "none" });
   });
 
+  it("an expired proposal (chain clock at or past expires_at, 6151) offers no accept; the authority cancels", () => {
+    const staged = { target: PINNED, currentAuthority: ROTATED, newAuthority: ADMIN, proposedBy: ROTATED, expiresAt: BigInt(1_000) };
+    expect(kycTransferState(PINNED, ROTATED, staged, BigInt(999))).toEqual({ kind: "live", newAuthority: ADMIN });
+    const expired = kycTransferState(PINNED, ROTATED, staged, BigInt(1_000));
+    expect(expired).toEqual({ kind: "expired", newAuthority: ADMIN, expiresAt: 1_000 });
+    expect(kycRegistryActions(ADMIN, ROTATED, expired).canAccept).toBe(false);
+    expect(kycRegistryActions(ROTATED, ROTATED, expired).canCancel).toBe(true);
+    // Without a clock the expiry is not judged here (the program decides).
+    expect(kycTransferState(PINNED, ROTATED, staged)).toEqual({ kind: "live", newAuthority: ADMIN });
+  });
+
   it("gates actions on on-chain roles only", () => {
     const live = kycTransferState(PINNED, ROTATED, {
       target: PINNED, currentAuthority: ROTATED, newAuthority: ADMIN, proposedBy: ROTATED,

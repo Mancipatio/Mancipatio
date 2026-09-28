@@ -39,7 +39,7 @@ export const root = repoRoot();
 export const SOL = BigInt(1_000_000_000);
 export const CAPACITY = { assetRegistry: 4096, transferHook: 2048 };
 
-export type Roles = "deployer" | "superAdmin" | "blocklistAuthority" | "kycAuthority" | "bufferWriter";
+export type Roles = "deployer" | "superAdmin" | "blocklistAuthority" | "kycAuthority" | "bufferWriter" | "admin";
 
 export type World = {
   dir: string;
@@ -59,6 +59,8 @@ export async function world(mapOverrides: Record<string, unknown> = {}): Promise
     blocklistAuthority: writeKeypair(dir, "ba"),
     kycAuthority: writeKeypair(dir, "kyc"),
     bufferWriter: writeKeypair(dir, "writer"),
+    // v1: an Admin executes its own add_admin, so the role-map admin is a real key.
+    admin: writeKeypair(dir, "admin"),
   };
   const keys = await defaultKeys({
     deployer: pairs.deployer.address,
@@ -66,13 +68,14 @@ export async function world(mapOverrides: Record<string, unknown> = {}): Promise
     blocklistAuthority: pairs.blocklistAuthority.address,
     kycAuthority: pairs.kycAuthority.address,
     bufferWriter: pairs.bufferWriter.address,
+    admins: [pairs.admin.address],
   });
   const chain = new FakeChain();
   await chain.deployProgram(REGISTRY, { authority: keys.deployer, payload: new Uint8Array([1, 2, 3]), capacity: CAPACITY.assetRegistry });
   await chain.deployProgram(HOOK, { authority: keys.deployer, payload: new Uint8Array([4, 5, 6]), capacity: CAPACITY.transferHook });
   chain.fund(keys.deployer, BigInt(100) * SOL);
   chain.fund(keys.bufferWriter, BigInt(10) * SOL);
-  for (const pair of [pairs.superAdmin, pairs.blocklistAuthority, pairs.kycAuthority]) chain.fund(pair.address, SOL);
+  for (const pair of [pairs.superAdmin, pairs.blocklistAuthority, pairs.kycAuthority, pairs.admin]) chain.fund(pair.address, SOL);
   await chain.seedMultisig({ multisig: keys.multisig, threshold: 2, members: keys.members.map((k) => ({ key: k, mask: 7 })) });
   chain.fund(keys.vault, SOL);
   const json = await roleMapJson(keys, "devnet", CLUSTER_GENESIS_HASHES.devnet, { programDataMaxLen: CAPACITY, ...mapOverrides });

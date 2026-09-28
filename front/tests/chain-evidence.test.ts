@@ -43,7 +43,11 @@ const buyer = key(1),
   platform = key(11),
   // DeliveryEscrow realize (2C-3): the pinned KYC registry + the holder's entry.
   kycRegistry = key(12),
-  kycEntry = key(13);
+  kycEntry = key(13),
+  // v1 buy gates (appended after the Platform): the buyer's hook blocklist
+  // entry and the issuer's proceeds freeze.
+  buyerBlockEntry = key(14),
+  issuerFreeze = key(15);
 const signature = getBase58Decoder().decode(new Uint8Array(64).fill(42));
 const expected = {
   buyer,
@@ -81,6 +85,8 @@ function fixture() {
     platform,
     kycRegistry,
     kycEntry,
+    buyerBlockEntry,
+    issuerFreeze,
   ];
   const compiled = (
     program: string,
@@ -112,6 +118,8 @@ function fixture() {
       asset: shareClass,
       issuer: buyer,
       platform,
+      buyerBlockEntry,
+      issuerFreeze,
       amount: 3,
     }),
   );
@@ -379,13 +387,14 @@ describe("chain-derived purchase evidence", () => {
   it("still parses a pre-2A buy: 12 named accounts, then the receiver tail", () => {
     // Before the emergency-pause upgrade `buy` had no Platform account, so in
     // historical transactions position 12 holds the first tail account.
-    // Evidence must never read accounts.platform.
+    // Evidence must never read accounts.platform (nor the v1 gates after it).
     const { tx } = fixture();
     const keys = tx.transaction.message.accountKeys;
     const tail = [key(20), key(21), key(22)];
     tx.transaction.message.accountKeys = [...keys, ...tail];
     const [buy] = tx.transaction.message.instructions;
-    expect(buy.accounts).toHaveLength(13);
+    // v1: 12 named + Platform + buyer_block_entry + issuer_freeze.
+    expect(buy.accounts).toHaveLength(15);
     tx.transaction.message.instructions = [
       {
         ...buy,

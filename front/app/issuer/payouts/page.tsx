@@ -18,12 +18,13 @@ import {
   findAssetPda,
   findIssuerPda,
   getPostUpdateInstruction,
-  getReleasePayoutInstruction,
-  findPlatformPda,
   PayoutVaultState,
   type Sale,
   type ShareClass,
 } from "@/lib/generated/asset_registry";
+import { buildReleasePayoutInstruction } from "@/lib/proceeds-exits";
+import { useIssuerFreezes } from "@/lib/use-issuer-freeze";
+import { ProceedsFrozenNotice } from "@/components/proceeds-frozen-notice";
 import {
   DISTRIBUTION_STATUS_BADGE,
   DISTRIBUTION_STATUS_LABEL,
@@ -558,6 +559,10 @@ function VaultDetail({
   const [showUpdate, setShowUpdate] = useState(false);
   const [updateText, setUpdateText] = useState("");
   const [confirmRelease, setConfirmRelease] = useState(false);
+  // D1: a frozen issuer's tranche cannot be released (6143); the send path
+  // refuses again before the wallet opens (lib/proceeds-gate.ts).
+  const issuerFreeze = useIssuerFreezes({ shareClasses: [v.shareClass] });
+  const proceedsFrozen = issuerFreeze.isFrozen({ shareClass: v.shareClass }) === true;
 
   // 2C-2: the vault still names an earlier issuer key. Every founder action
   // below prepends the permissionless sync (atomic with the action).
@@ -656,14 +661,16 @@ function VaultDetail({
           mint: v.paymentMint,
           tokenProgram,
         });
-      // Emergency-pause gate (read-only) — the last named account.
-      const [platform] = await findPlatformPda();
-      const ix = getReleasePayoutInstruction({
-        platform,
+      // The pause gate, the issuer's proceeds freeze and the founder's
+      // blocklist entry (lib/proceeds-exits). The founder is this wallet:
+      // a stale snapshot is synced to it in front of the release.
+      const ix = await buildReleasePayoutInstruction(client.runtime.rpc, {
         vault: vaultPda,
         escrow,
+        shareClass: v.shareClass,
         paymentMint: v.paymentMint,
         founderAccount,
+        founder: wallet,
         paymentTokenProgram: tokenProgram,
       });
       const sig = await tx.send({
@@ -812,6 +819,7 @@ function VaultDetail({
         <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
           Available actions
         </p>
+        {proceedsFrozen && <ProceedsFrozenNotice closed="no tranche can be released to you" />}
         <div className="flex flex-wrap gap-2">
           {v.state === PayoutVaultState.Active && (
             <>
@@ -832,10 +840,12 @@ function VaultDetail({
               </button>
               <button
                 type="button"
-                disabled={tx.isSending || !releaseReady}
+                disabled={tx.isSending || !releaseReady || proceedsFrozen}
                 onClick={() => setConfirmRelease(true)}
                 title={
-                  !releaseReady
+                  proceedsFrozen
+                    ? "Proceeds frozen: no tranche can be released until the Super Admin lifts the freeze."
+                    : !releaseReady
                     ? v.tranchesReleased >= v.numTranches
                       ? "All tranches released."
                       : v.updatesPosted <= v.tranchesReleased

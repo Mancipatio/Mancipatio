@@ -3,10 +3,15 @@ import os from "node:os";
 import path from "node:path";
 import { createKeyPairSignerFromBytes, getAddressEncoder, signBytes, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
+import { createHash } from "node:crypto";
 import {
+  KybStatus,
   findAdminRecordPda,
+  findIssuerFreezePda,
   findPlatformPda,
   getAdminEncoder,
+  getIssuerEncoder,
+  getIssuerFreezeDecoder,
   getKycRegistryEncoder,
   getPlatformEncoder,
 } from "@/lib/generated/asset_registry";
@@ -21,7 +26,7 @@ import {
 } from "@/lib/generated/transfer_hook";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import { runTool } from "@/scripts/chain/lib/context";
-import { compareIdlInstruction, emergencyTool, parsePauseBits, probeEmergencyState, readEmergencyRequest } from "@/scripts/chain/lib/emergency";
+import { assertPayoutModulesClearAllowed, compareIdlInstruction, emergencyTool, parsePauseBits, probeEmergencyState, readEmergencyRequest } from "@/scripts/chain/lib/emergency";
 import { LEDGER_DIR, LEDGER_PACKAGES, messageHash, nodeHidLedgerOpener, type LedgerDevice } from "@/scripts/chain/lib/ledger";
 import type { ChainEnv } from "@/scripts/chain/lib/safety";
 import { HOOK, REGISTRY, key, rent } from "./helpers/chain-fake";
@@ -92,7 +97,9 @@ describe("chain:emergency inputs", () => {
   it("parses the op, the signer and each op's arguments", () => {
     const base = { CHAIN_EMERGENCY_SIGNER: key(1) };
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "primary,secondary" })).toEqual({ op: "pause", signer: key(1), mask: 0x06 });
-    expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "all" })).toMatchObject({ mask: 0x3f });
+    // v1.0.0-rc: `all` pauses every pause bit, the payout modules (0x40) included.
+    expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "all" })).toMatchObject({ mask: 0x7f });
+    expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "unpause", CHAIN_PAUSE_BITS: "payout-modules" })).toMatchObject({ mask: 0x40 });
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "unpause", CHAIN_PAUSE_BITS: "all" })).toMatchObject({ mask: "all" });
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "block", CHAIN_WALLET: key(2) })).toMatchObject({ wallet: key(2), confirmWallet: null });
     expect(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "kyc-gated", CHAIN_KYC_REGISTRY: key(4) })).toMatchObject({
@@ -103,11 +110,29 @@ describe("chain:emergency inputs", () => {
     const refuse = (value: ChainEnv, pattern: RegExp) => expect(() => readEmergencyRequest({ ...base, ...value })).toThrow(pattern);
     refuse({ CHAIN_EMERGENCY_OP: "drain" }, /CHAIN_EMERGENCY_OP must be one of/);
     refuse({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "everything" }, /unknown area "everything"/);
-    refuse({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "0x40" }, /only defined bits/);
+    refuse({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "0x80" }, /only defined bits/);
+    // The payout modules clear only on their own (the program's 6154).
+    refuse({ CHAIN_EMERGENCY_OP: "unpause", CHAIN_PAUSE_BITS: "primary,payout-modules" }, /cleared only on its own/);
     refuse({ CHAIN_EMERGENCY_OP: "pause" }, /CHAIN_PAUSE_BITS is required/);
     refuse({ CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "open", CHAIN_KYC_REGISTRY: key(4) }, /must be unset for open/);
     refuse({ CHAIN_EMERGENCY_OP: "hook-mode", CHAIN_MINT: key(3), CHAIN_HOOK_MODE: "kyc-gated" }, /CHAIN_KYC_REGISTRY must be a valid address/);
     expect(() => readEmergencyRequest({ CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "all" })).toThrow(/CHAIN_EMERGENCY_SIGNER/);
+  });
+
+  it("D2: clearing the payout modules (0x40) on mainnet needs CHAIN_ENABLE_PAYOUT_MODULES=<the signer>; elsewhere and for other bits nothing changes", () => {
+    const base = { CHAIN_EMERGENCY_SIGNER: key(1), CHAIN_EMERGENCY_OP: "unpause" };
+    const payout = readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "payout-modules" });
+    const numeric = readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "64" });
+    for (const req of [payout, numeric]) {
+      expect(() => assertPayoutModulesClearAllowed(req, "mainnet", {})).toThrow(/D2: an owner decision .*CHAIN_ENABLE_PAYOUT_MODULES/);
+      expect(() => assertPayoutModulesClearAllowed(req, "mainnet", { CHAIN_ENABLE_PAYOUT_MODULES: key(2) })).toThrow(/CHAIN_ENABLE_PAYOUT_MODULES/);
+      expect(assertPayoutModulesClearAllowed(req, "mainnet", { CHAIN_ENABLE_PAYOUT_MODULES: key(1) })).toBe(true);
+      expect(assertPayoutModulesClearAllowed(req, "devnet", {})).toBe(false);
+    }
+    // `all` never touches 0x40; other areas are not gated.
+    expect(assertPayoutModulesClearAllowed(readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "all" }), "mainnet", {})).toBe(false);
+    expect(assertPayoutModulesClearAllowed(readEmergencyRequest({ ...base, CHAIN_PAUSE_BITS: "primary" }), "mainnet", {})).toBe(false);
+    expect(assertPayoutModulesClearAllowed(readEmergencyRequest({ ...base, CHAIN_EMERGENCY_OP: "pause", CHAIN_PAUSE_BITS: "payout-modules" }), "mainnet", {})).toBe(false);
   });
 });
 
@@ -138,7 +163,7 @@ describe("chain:emergency pause (ops-qa-8)", () => {
     expect(again.noop).toMatch(/already set/);
   });
 
-  it("only the super admin clears; `all` also clears undefined bits", async () => {
+  it("only the super admin clears; `all` clears every emergency area and the bootstrap marker, never the payout modules", async () => {
     const w = await seeded(0xff);
     const byAdmin = await dry(w, { CHAIN_EMERGENCY_OP: "unpause", CHAIN_EMERGENCY_SIGNER: w.keys.kycAuthority, CHAIN_PAUSE_BITS: "all" });
     expect(byAdmin.error).toMatch(/Only the super admin clears pause bits/);
@@ -147,6 +172,10 @@ describe("chain:emergency pause (ops-qa-8)", () => {
     const op = { CHAIN_EMERGENCY_OP: "unpause", CHAIN_EMERGENCY_SIGNER: w.keys.superAdmin, CHAIN_PAUSE_BITS: "all" };
     const sent = await send(w, op, { CHAIN_KEYPAIR: w.pairs.superAdmin.path });
     expect(sent.error ?? null).toBeNull();
+    expect(await platformFlags(w)).toBe(0x40);
+    // Off mainnet the super admin may switch the payout modules on, alone.
+    const payout = await send(w, { ...op, CHAIN_PAUSE_BITS: "payout-modules" }, { CHAIN_KEYPAIR: w.pairs.superAdmin.path });
+    expect(payout.error ?? null).toBeNull();
     expect(await platformFlags(w)).toBe(0);
   });
 
@@ -156,7 +185,7 @@ describe("chain:emergency pause (ops-qa-8)", () => {
     const calls: string[] = [];
     const sent = await send(w, op, { CHAIN_SIGNER: "usb://ledger?key=0" }, { ledger: fakeLedger(w.pairs.superAdmin.path, calls) });
     expect(sent.error ?? null).toBeNull();
-    expect(await platformFlags(w)).toBe(0x3f);
+    expect(await platformFlags(w)).toBe(0x7f);
     expect(calls[0]).toBe("address 44'/501'/0'");
     expect(calls[1]).toMatch(/^sign 44'\/501'\/0' [1-9A-HJ-NP-Za-km-z]{32,44}$/);
     expect(calls.at(-1)).toBe("close");
@@ -181,6 +210,61 @@ describe("chain:emergency pause (ops-qa-8)", () => {
       deps(w),
     );
     expect(refused.error).toMatch(/CHAIN_CONFIRM_PLAN does not match/);
+    expect(w.chain.calls).not.toContain("sendTransaction");
+  });
+});
+
+describe("chain:emergency freeze-issuer (D1, v1.0.0-rc)", () => {
+  async function withIssuer() {
+    const w = await seeded();
+    const issuer = key(170);
+    w.chain.set(issuer, {
+      owner: REGISTRY,
+      lamports: rent(117),
+      data: new Uint8Array(
+        getIssuerEncoder().encode({ authority: key(171), legalEntityId: new Uint8Array(32), jurisdiction: 688, kybStatus: KybStatus.Verified, kybDocHash: new Uint8Array(32), assetsCount: 0, version: 2, bump: 255 }),
+      ),
+    });
+    return { w, issuer };
+  }
+  const reasonHash = createHash("sha256").update("Case 2026-17: proceeds held pending review").digest("hex");
+
+  it("an Admin freezes an issuer's proceeds with the case-file hash; the freeze is checked at finalized; a second one is a no-op", async () => {
+    const { w, issuer } = await withIssuer();
+    const op = { CHAIN_EMERGENCY_OP: "freeze-issuer", CHAIN_EMERGENCY_SIGNER: w.keys.kycAuthority, CHAIN_ISSUER: issuer, CHAIN_FREEZE_REASON_SHA256: reasonHash };
+    const lines: string[] = [];
+    const plan = await dry(w, op, lines);
+    expect(plan.error ?? null).toBeNull();
+    expect(plan.status).toBe("awaiting");
+    expect(plan.role).toBe("Admin or super admin");
+    expect(plan.simulation).toMatch(/simulated ok/);
+    expect(lines.join("\n")).toMatch(new RegExp(`freeze the proceeds of issuer ${issuer} \\(reason sha256 ${reasonHash}\\)`));
+    // The O-9 residual is spelled out: the issuer wallet's own sales need a block.
+    expect(lines.join("\n")).toMatch(/does not stop the issuer wallet's own secondary sales .*op=block/);
+    const sent = await send(w, op, { CHAIN_KEYPAIR: w.pairs.kycAuthority.path });
+    expect(sent.error ?? null).toBeNull();
+    expect(sent.status).toBe("completed");
+    const [freeze] = await findIssuerFreezePda({ issuer });
+    const value = getIssuerFreezeDecoder().decode(w.chain.get(freeze)!.data);
+    expect(value).toMatchObject({ issuer, frozenBy: w.keys.kycAuthority });
+    expect(Buffer.from(value.reasonHash).toString("hex")).toBe(reasonHash);
+    const again = await dry(w, op);
+    expect(again.status).toBe("completed");
+    expect(again.noop).toMatch(new RegExp(`already frozen by ${w.keys.kycAuthority} \\(reason sha256 ${reasonHash}\\)`));
+    // The pause ops are unchanged by the new op (no regression): an Admin still pauses.
+    const pause = await dry(w, { CHAIN_EMERGENCY_OP: "pause", CHAIN_EMERGENCY_SIGNER: w.keys.kycAuthority, CHAIN_PAUSE_BITS: "issuer-proceeds" });
+    expect(pause.simulation).toMatch(/simulated ok/);
+  });
+
+  it("refuses a signer without an Admin record, an account that is no Issuer and a missing or malformed reason hash", async () => {
+    const { w, issuer } = await withIssuer();
+    const op = { CHAIN_EMERGENCY_OP: "freeze-issuer", CHAIN_ISSUER: issuer, CHAIN_FREEZE_REASON_SHA256: reasonHash };
+    expect((await dry(w, { ...op, CHAIN_EMERGENCY_SIGNER: w.keys.blocklistAuthority })).error).toMatch(/neither the super admin nor an Admin: it cannot freeze/);
+    expect((await dry(w, { ...op, CHAIN_EMERGENCY_SIGNER: w.keys.superAdmin, CHAIN_ISSUER: key(172) })).error).toMatch(/is not a live Issuer account/);
+    const base = { CHAIN_EMERGENCY_SIGNER: w.keys.superAdmin, CHAIN_EMERGENCY_OP: "freeze-issuer", CHAIN_ISSUER: issuer };
+    expect(() => readEmergencyRequest(base)).toThrow(/CHAIN_FREEZE_REASON_SHA256 must be the 64-hex SHA-256/);
+    expect(() => readEmergencyRequest({ ...base, CHAIN_FREEZE_REASON_SHA256: "not-hex" })).toThrow(/CHAIN_FREEZE_REASON_SHA256/);
+    expect(readEmergencyRequest({ ...base, CHAIN_FREEZE_REASON_SHA256: reasonHash.toUpperCase() })).toMatchObject({ op: "freeze-issuer", issuer });
     expect(w.chain.calls).not.toContain("sendTransaction");
   });
 });

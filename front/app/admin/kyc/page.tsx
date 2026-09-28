@@ -1,6 +1,7 @@
 "use client";
 
 import { WALLET_CONNECT_LABEL, WALLET_CONNECT_DESCRIPTION } from "@/lib/wallet-copy";
+import { kycExpiryError, passportExpirySeconds } from "@/lib/deadline-bounds";
 
 import { WalletRequired } from "@/components/wallet-required";
 
@@ -914,14 +915,16 @@ function PassportRequests({ registryVersion }: { registryVersion: number }) {
       // verification, +365d policy); fall back to the policy window when the
       // stored date is missing/past (approve_holder requires expiry > now).
       const nowSec = Math.floor(Date.now() / 1000);
-      const storedExpirySec = linked.kyc_expires_at
-        ? Math.floor(new Date(linked.kyc_expires_at).getTime() / 1000)
-        : 0;
-      const expirySec =
-        storedExpirySec > nowSec
-          ? storedExpirySec
-          : nowSec + KYC_VALIDITY_DAYS * 24 * 3600;
+      // v1: approve_holder refuses an expiry more than 2 years out (6146);
+      // the helper caps it with the chain-clock margin.
+      const expirySec = passportExpirySeconds(linked.kyc_expires_at, nowSec, KYC_VALIDITY_DAYS);
       const expiry = BigInt(expirySec);
+      const expiryError = kycExpiryError(expiry, BigInt(nowSec));
+      if (expiryError) {
+        toast.dismiss(pendingId);
+        toast.showError("Cannot issue passport", expiryError);
+        return;
+      }
       const expiresAtIso = new Date(expirySec * 1000).toISOString();
       // The external ref binds the passport to the off-chain dossier (client
       // id + verification stamp), not just to the request row.

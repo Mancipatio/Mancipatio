@@ -8,6 +8,12 @@
  *   (`target/deploy/*.so`, hashes.txt, sbf-sha256.txt; no IDL, no SHA256SUMS).
  *
  * When SHA256SUMS is present it is verified first; a mainnet run requires it.
+ *
+ * v1.0.0-rc Releases also carry the incident build (design 8.3 §7.4):
+ * `<name>-incident.so` (flat) or `target/deploy-incident/<name>.so`, with
+ * `<name>-incident:` lines in hashes.txt and `target/deploy-incident/` lines
+ * in sbf-sha256.txt. It is deployed only during an incident; the inventory
+ * blocks while it is live. Older Releases have none (`incident: null`).
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -37,6 +43,8 @@ export type Release = {
   verifyHashMatches: Record<ProgramName, boolean | null>;
   sbfSha256: Record<string, string>;
   sha256Sums: { present: boolean; fileSha256: string | null; files: string[] };
+  /** The incident artifacts and their solana-verify hashes, or null (rc.x Releases). */
+  incident: { so: Record<ProgramName, Uint8Array>; verifyHashes: Record<ProgramName, string | null> } | null;
 };
 
 /** Files a GitHub Release must list in SHA256SUMS (design §8). */
@@ -48,6 +56,32 @@ export const RELEASE_FILES = [
   "hashes.txt",
   "sbf-sha256.txt",
 ];
+
+/** The incident build of a v1.0.0-rc Release (flat layout); optional for older Releases. */
+export const INCIDENT_RELEASE_FILES = ["asset_registry-incident.so", "transfer_hook-incident.so"];
+
+const HEX64 = /^[0-9a-f]{64}$/;
+
+/** `<name>-incident: <hash>` lines of hashes.txt. */
+function incidentVerifyHashes(text: string): Record<ProgramName, string | null> {
+  const out = {} as Record<ProgramName, string | null>;
+  for (const name of IDL_PROGRAMS) {
+    const line = text.split(/\r?\n/).find((l) => l.startsWith(`${name}-incident:`));
+    const value = line ? line.slice(line.indexOf(":") + 1).trim() : null;
+    out[name] = value && HEX64.test(value) ? value : null;
+  }
+  return out;
+}
+
+/** `<sha256>  target/deploy-incident/<name>.so` lines of sbf-sha256.txt. */
+function incidentSbfSha256(text: string): Partial<Record<ProgramName, string>> {
+  const out: Partial<Record<ProgramName, string>> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const match = line.match(/^([0-9a-f]{64})\s+\*?target\/deploy-incident\/([a-z0-9_]+)\.so\s*$/);
+    if (match && (IDL_PROGRAMS as readonly string[]).includes(match[2])) out[match[2] as ProgramName] = match[1];
+  }
+  return out;
+}
 
 export function parseSha256Sums(text: string): Map<string, string> {
   const entries = new Map<string, string>();
@@ -130,6 +164,28 @@ export function loadRelease(dir: string, options: { requireSums: boolean }): Rel
       throw new ChainGateError(`${name}.so does not match sbf-sha256.txt`);
     }
   }
+  // The incident build: all or nothing, bound by sbf-sha256.txt like the release bytes.
+  const incidentPaths = IDL_PROGRAMS.map((name) =>
+    flat ? path.join(dir, `${name}-incident.so`) : path.join(dir, "target", "deploy-incident", `${name}.so`),
+  );
+  const incidentPresent = incidentPaths.filter((file) => fs.existsSync(file)).length;
+  let incident: Release["incident"] = null;
+  if (incidentPresent) {
+    if (incidentPresent !== IDL_PROGRAMS.length) throw new ChainGateError("The Release has only some of its incident artifacts");
+    const incidentSo = Object.fromEntries(
+      IDL_PROGRAMS.map((name, i) => [name, readRequired(incidentPaths[i], `${name}-incident.so`)]),
+    ) as Record<ProgramName, Uint8Array>;
+    const recorded = incidentSbfSha256(sbfText);
+    for (const name of IDL_PROGRAMS) {
+      if (recorded[name] !== sha256Hex(incidentSo[name])) {
+        throw new ChainGateError(`${name}-incident.so does not match sbf-sha256.txt`);
+      }
+      if (sha256Hex(incidentSo[name]) === sha256Hex(so[name])) {
+        throw new ChainGateError(`${name}-incident.so equals the release ${name}.so`);
+      }
+    }
+    incident = { so: incidentSo, verifyHashes: incidentVerifyHashes(hashesText) };
+  }
   // Recorded, not enforced: sbf-sha256.txt already binds the .so bytes, and
   // the solana-verify hash definition (sha256 without trailing zeros) is only
   // re-checked here as evidence.
@@ -161,6 +217,7 @@ export function loadRelease(dir: string, options: { requireSums: boolean }): Rel
     verifyHashMatches,
     sbfSha256: sbf.sha256,
     sha256Sums: { present: sumsPresent, fileSha256: sumsSha, files: listed },
+    incident,
   };
 }
 
@@ -196,5 +253,9 @@ export function releaseEvidence(release: Release | null) {
       ? Object.fromEntries(IDL_PROGRAMS.map((name) => [name, sha256Hex(release.idl![name])]))
       : null,
     sha256Sums: release.sha256Sums,
+    incidentSoSha256: release.incident
+      ? Object.fromEntries(IDL_PROGRAMS.map((name) => [name, sha256Hex(release.incident!.so[name])]))
+      : null,
+    incidentVerifyHashes: release.incident?.verifyHashes ?? null,
   };
 }

@@ -63,6 +63,8 @@ export type DepositOtcAssetInstruction<
   TAccountShareTokenProgram extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountBuyerBlockEntry extends string | AccountMeta<string> = string,
+  TAccountSellerBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -108,6 +110,12 @@ export type DepositOtcAssetInstruction<
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountBuyerBlockEntry extends string
+        ? ReadonlyAccount<TAccountBuyerBlockEntry>
+        : TAccountBuyerBlockEntry,
+      TAccountSellerBlockEntry extends string
+        ? ReadonlyAccount<TAccountSellerBlockEntry>
+        : TAccountSellerBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -155,6 +163,8 @@ export type DepositOtcAssetAsyncInput<
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountBuyerBlockEntry extends string = string,
+  TAccountSellerBlockEntry extends string = string,
 > = {
   seller: TransactionSigner<TAccountSeller>;
   deal: Address<TAccountDeal>;
@@ -180,6 +190,18 @@ export type DepositOtcAssetAsyncInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform?: Address<TAccountPlatform>;
+  /**
+   * v1 (appended after `platform`, before the hook tail): the buyer is not blocked ...
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  buyerBlockEntry: Address<TAccountBuyerBlockEntry>;
+  /**
+   * ... nor is the seller. The registry refuses before any hook CPI.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  sellerBlockEntry: Address<TAccountSellerBlockEntry>;
 };
 
 export async function getDepositOtcAssetInstructionAsync<
@@ -196,6 +218,8 @@ export async function getDepositOtcAssetInstructionAsync<
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountBuyerBlockEntry extends string,
+  TAccountSellerBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DepositOtcAssetAsyncInput<
@@ -211,7 +235,9 @@ export async function getDepositOtcAssetInstructionAsync<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -229,7 +255,9 @@ export async function getDepositOtcAssetInstructionAsync<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >
 > {
   // Program address.
@@ -266,6 +294,14 @@ export async function getDepositOtcAssetInstructionAsync<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    buyerBlockEntry: {
+      value: input.buyerBlockEntry ?? null,
+      isWritable: false,
+    },
+    sellerBlockEntry: {
+      value: input.sellerBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -298,6 +334,8 @@ export async function getDepositOtcAssetInstructionAsync<
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.buyerBlockEntry),
+      getAccountMeta(accounts.sellerBlockEntry),
     ],
     data: getDepositOtcAssetInstructionDataEncoder().encode({}),
     programAddress,
@@ -315,7 +353,9 @@ export async function getDepositOtcAssetInstructionAsync<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >);
 }
 
@@ -333,6 +373,8 @@ export type DepositOtcAssetInput<
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountBuyerBlockEntry extends string = string,
+  TAccountSellerBlockEntry extends string = string,
 > = {
   seller: TransactionSigner<TAccountSeller>;
   deal: Address<TAccountDeal>;
@@ -358,6 +400,18 @@ export type DepositOtcAssetInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform: Address<TAccountPlatform>;
+  /**
+   * v1 (appended after `platform`, before the hook tail): the buyer is not blocked ...
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  buyerBlockEntry: Address<TAccountBuyerBlockEntry>;
+  /**
+   * ... nor is the seller. The registry refuses before any hook CPI.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  sellerBlockEntry: Address<TAccountSellerBlockEntry>;
 };
 
 export function getDepositOtcAssetInstruction<
@@ -374,6 +428,8 @@ export function getDepositOtcAssetInstruction<
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountBuyerBlockEntry extends string,
+  TAccountSellerBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: DepositOtcAssetInput<
@@ -389,7 +445,9 @@ export function getDepositOtcAssetInstruction<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): DepositOtcAssetInstruction<
@@ -406,7 +464,9 @@ export function getDepositOtcAssetInstruction<
   TAccountEscrowMarker,
   TAccountShareTokenProgram,
   TAccountPaymentTokenProgram,
-  TAccountPlatform
+  TAccountPlatform,
+  TAccountBuyerBlockEntry,
+  TAccountSellerBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -442,6 +502,14 @@ export function getDepositOtcAssetInstruction<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    buyerBlockEntry: {
+      value: input.buyerBlockEntry ?? null,
+      isWritable: false,
+    },
+    sellerBlockEntry: {
+      value: input.sellerBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -464,6 +532,8 @@ export function getDepositOtcAssetInstruction<
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.buyerBlockEntry),
+      getAccountMeta(accounts.sellerBlockEntry),
     ],
     data: getDepositOtcAssetInstructionDataEncoder().encode({}),
     programAddress,
@@ -481,7 +551,9 @@ export function getDepositOtcAssetInstruction<
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >);
 }
 
@@ -515,6 +587,18 @@ export type ParsedDepositOtcAssetInstruction<
      * account indices and the remaining-accounts hook tail keep their positions.
      */
     platform: TAccountMetas[12];
+    /**
+     * v1 (appended after `platform`, before the hook tail): the buyer is not blocked ...
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    buyerBlockEntry: TAccountMetas[13];
+    /**
+     * ... nor is the seller. The registry refuses before any hook CPI.
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    sellerBlockEntry: TAccountMetas[14];
   };
   data: DepositOtcAssetInstructionData;
 };
@@ -527,7 +611,7 @@ export function parseDepositOtcAssetInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedDepositOtcAssetInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 13) {
+  if (instruction.accounts.length < 15) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -553,6 +637,8 @@ export function parseDepositOtcAssetInstruction<
       shareTokenProgram: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
       platform: getNextAccount(),
+      buyerBlockEntry: getNextAccount(),
+      sellerBlockEntry: getNextAccount(),
     },
     data: getDepositOtcAssetInstructionDataDecoder().decode(instruction.data),
   };

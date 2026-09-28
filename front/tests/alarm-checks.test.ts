@@ -47,10 +47,11 @@ import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import {
   GAP_SCAN_HOOK_PAGES, GAP_SCAN_OVERDUE_MS, GAP_SCAN_PAGES, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram,
-  runAlarmChecks, thresholdState,
+  bootstrapOpenReport, payoutModulesReport, roleChangesReport, runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { USDC } from "@/lib/payment-mints";
+import { SOURCE_LABELS } from "@/lib/server/system-alerts";
 import { buildTx } from "./helpers/chain-tx";
 
 const MINT = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
@@ -471,5 +472,88 @@ describe("indexer-freshness (0075)", () => {
     const down = await run({ indexer_sync_state: ready(1) }, ["indexer_heartbeat_state"]);
     expect(down.report).toBeUndefined();
     expect(down.result.expected).toBe(down.result.reports.length + 1);
+  });
+});
+
+// v1.0.0-rc (8.3): the "timelock running" incident over the 0079 mirror, and
+// the mainnet payout-modules invariant (D2).
+describe("role-change-pending and payout-modules", () => {
+  const nowSec = () => Math.floor(Date.now() / 1000);
+  const heartbeats = { worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }] };
+  const incident = (rpcs: Rpc[], check: string) => rpcs.find((r) => r.fn === "report_incident" && r.args.p_check === check)?.args;
+
+  it("opens (high) while a staged grant, Super Admin rotation or recovery is live, and names the next eta", async () => {
+    const eta = nowSec() + 3_600;
+    const { sb, rpcs } = mockSb({ ...heartbeats,
+      pending_admins: [{ eta, expires_at: eta + 1_209_600 }, { eta: nowSec() - 10, expires_at: nowSec() - 1 }],
+      authority_proposals: [{ kind: 0, eta: eta + 60, expires_at: eta + 99_999 }, { kind: 1, eta: 0, expires_at: eta }],
+      platform_recoveries: [], blocklist_recoveries: [{ eta: nowSec() - 5, expires_at: nowSec() + 60 }] });
+    const result = await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(result.reports.length).toBe(result.expected);
+    const args = incident(rpcs, "role-change-pending");
+    expect(args).toMatchObject({ p_state: "fail", p_severity: "high", p_category: "onchain", p_source: "onchain:role-change-pending",
+      p_evidence: { admin_grants: 1, platform_rotations: 1, platform_recoveries: 0, blocklist_recoveries: 1, next_eta: eta } });
+    expect(String(args?.p_summary)).toMatch(/1 Admin grant, 1 Super Admin rotation, 1 blocklist authority recovery; the next becomes executable at .+ UTC/);
+  });
+
+  it("passes when nothing live is left (expired or custody rotations only); reports nothing before 0079", async () => {
+    const quiet = mockSb({ ...heartbeats, pending_admins: [{ eta: 1, expires_at: nowSec() - 1 }], authority_proposals: [{ kind: 2, eta: 1, expires_at: nowSec() + 60 }] });
+    await runAlarmChecks(quiet.sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(quiet.rpcs, "role-change-pending")).toMatchObject({ p_state: "pass", p_evidence: { admin_grants: 0, platform_rotations: 0 } });
+    const before = mockSb(heartbeats, ["platform_recoveries"], {}, { platform_recoveries: "42P01" });
+    const result = await runAlarmChecks(before.sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(before.rpcs, "role-change-pending")).toBeUndefined();
+    expect(result.reports.length).toBe(result.expected);
+    const down = mockSb(heartbeats, ["pending_admins"]);
+    const partial = await runAlarmChecks(down.sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(down.rpcs, "role-change-pending")).toBeUndefined();
+    expect(partial.expected).toBe(partial.reports.length + 1);
+  });
+
+  it("payout-modules: mainnet must keep 0x40 set (critical); other networks pass", async () => {
+    const report = async (platforms: Record<string, unknown>[], network: "mainnet" | "devnet" = "mainnet", broken: string[] = []) =>
+      payoutModulesReport(mockSb({ platforms }, broken).sb, network, AbortSignal.timeout(5_000));
+    expect(await report([{ pause_flags: 0x40 }])).toMatchObject({ state: "pass", severity: "critical", source: "onchain:payout-modules" });
+    expect(await report([{ pause_flags: 0x3f }])).toMatchObject({ state: "fail", severity: "critical", evidence: { pause_flags: 0x3f } });
+    expect(await report([])).toMatchObject({ state: "hold" });
+    expect(await report([{ pause_flags: 0 }], "devnet")).toMatchObject({ state: "pass" });
+    expect(await report([{ pause_flags: 0x40 }], "mainnet", ["platforms"])).toBeNull();
+    // Recorded with the other cheap checks (devnet here).
+    const { sb, rpcs } = mockSb(heartbeats);
+    await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(rpcs, "payout-modules")).toMatchObject({ p_state: "pass", p_severity: "critical" });
+  });
+
+  it("bootstrap-open: on mainnet bit 0x80 next to a clear emergency area fails (critical); the bootstrap itself passes", async () => {
+    const report = async (platforms: Record<string, unknown>[], network: "mainnet" | "devnet" = "mainnet", broken: string[] = []) =>
+      bootstrapOpenReport(mockSb({ platforms }, broken).sb, network, AbortSignal.timeout(5_000));
+    // After an rc.x rollback that unpaused: bit 7 still set, areas clear.
+    expect(await report([{ pause_flags: 0x80 | 0x40 }])).toMatchObject({ state: "fail", severity: "critical", source: "onchain:bootstrap-open", evidence: { pause_flags: 0xc0 } });
+    expect(await report([{ pause_flags: 0x80 | 0x40 | 0x1c }])).toMatchObject({ state: "fail" });
+    // The bootstrap (0xff: every area paused) and a closed window pass.
+    expect(await report([{ pause_flags: 0xff }])).toMatchObject({ state: "pass", summary: expect.stringMatching(/bootstrap/) });
+    expect(await report([{ pause_flags: 0x5c }])).toMatchObject({ state: "pass", summary: "The bootstrap window is closed" });
+    expect(await report([])).toMatchObject({ state: "hold" });
+    expect(await report([{ pause_flags: 0xc0 }], "devnet")).toMatchObject({ state: "pass" });
+    expect(await report([{ pause_flags: 0xc0 }], "mainnet", ["platforms"])).toBeNull();
+    expect(SOURCE_LABELS["onchain:bootstrap-open"]).toMatchObject({ format: "platform" });
+    // Recorded with the other cheap checks (devnet here).
+    const { sb, rpcs } = mockSb(heartbeats);
+    await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(rpcs, "bootstrap-open")).toMatchObject({ p_state: "pass", p_severity: "critical" });
+  });
+
+  it("roleChangesReport reads only this network's rows", async () => {
+    const calls: string[] = [];
+    const sb = { from: (table: string) => {
+      const b: Record<string, unknown> = {};
+      b.select = () => b; b.limit = () => b;
+      b.eq = (column: string, value: string) => { calls.push(`${table}:${column}=${value}`); return b; };
+      b.abortSignal = async () => ({ data: [], error: null });
+      return b;
+    } };
+    expect(await roleChangesReport(sb as never, "devnet", Date.now(), AbortSignal.timeout(5_000))).toMatchObject([{ state: "pass" }]);
+    expect(calls).toEqual(["pending_admins:network=devnet", "authority_proposals:network=devnet", "platform_recoveries:network=devnet",
+      "blocklist_recoveries:network=devnet"]);
   });
 });

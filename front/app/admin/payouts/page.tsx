@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import { MIN_VAULT_VOTING_PERIOD_SECONDS } from "@/lib/deadline-bounds";
 import {PushDistributions} from "./push-distributions";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { isAddress, type Address } from "@solana/kit";
@@ -1257,7 +1258,8 @@ function OpenVoteModal({
     finally { setVerifying(false); }
   }
 
-  const daysOk = /^[1-9]\d*$/.test(votingDays.trim());
+  // v1: a vault vote runs at least 7 days (VotingPeriodTooShort 6147): it gives holders notice.
+  const daysOk = /^[1-9]\d*$/.test(votingDays.trim()) && Number(votingDays) * 86_400 >= MIN_VAULT_VOTING_PERIOD_SECONDS;
   const canSubmit =
     !!wallet &&
     !!built &&
@@ -1334,7 +1336,7 @@ function OpenVoteModal({
       />
       <label className="block">
         <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-          Voting window (days)
+          Voting window (days, at least 7: it gives every holder notice)
         </span>
         <input
           value={votingDays}

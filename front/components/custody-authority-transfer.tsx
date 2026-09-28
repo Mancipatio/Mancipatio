@@ -9,10 +9,14 @@ import {
 } from "@solana/react-hooks";
 import {
   loadCustodyAuthority,
+  buildCancelCustodyAuthorityTransfer,
   buildCustodyAuthorityChange,
   isCustodyRotatable,
   type CustodyAuthorityState,
 } from "@/lib/custody-authority";
+import { explainSendError } from "@/lib/tx-error";
+import { useChainClock } from "@/lib/use-chain-clock";
+import { describeProposalWindow, proposalWindowState } from "@/lib/proposal-window";
 import { VaultState } from "@/lib/generated/asset_registry";
 import { walletSigner } from "@/lib/wallet-signer";
 import { useToast } from "@/lib/toast";
@@ -49,35 +53,41 @@ export function CustodyAuthorityTransfer({
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
   }, [refresh]);
-  async function submit(action: "propose" | "accept", target?: string) {
+  async function submit(action: "propose" | "accept" | "cancel", target?: string) {
     if (!conn.wallet) return;
     try {
       const signer = walletSigner(conn.wallet),
-        ix = await buildCustodyAuthorityChange(
-          client.runtime.rpc,
-          vaultPda,
-          signer,
-          action,
-          (target ?? next).trim(),
-        );
+        ix =
+          action === "cancel"
+            ? await buildCancelCustodyAuthorityTransfer(client.runtime.rpc, vaultPda, signer)
+            : await buildCustodyAuthorityChange(
+                client.runtime.rpc,
+                vaultPda,
+                signer,
+                action,
+                (target ?? next).trim(),
+              );
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
       toast.showTx(sig, {
         title:
           action === "propose"
             ? "Custody operator proposed"
-            : "Custody operator accepted",
+            : action === "cancel"
+              ? "Custody operator proposal cancelled"
+              : "Custody operator accepted",
       });
       invalidateRoles();
       await refresh();
       await onRefresh();
     } catch (error) {
-      toast.showError(
-        "Custody operator change pending",
-        error instanceof Error ? error.message : undefined,
-      );
+      toast.showError("Custody operator change pending", explainSendError(error));
     }
   }
+  const now = useChainClock();
   const wallet = conn.wallet?.account.address;
+  // The Super Admin, or the vault's operator (the program checks its live Admin record).
+  const canCancel = !!state?.proposed && (wallet === state.superAdmin || wallet === state.current);
+  const expired = state?.expiresAt != null && now >= state.expiresAt;
   const rotatable = state ? isCustodyRotatable(state.vaultState) : false;
   const isSuperAdmin = !!state && wallet === state.superAdmin;
   return (
@@ -87,8 +97,9 @@ export function CustodyAuthorityTransfer({
       </h3>
       <p className="mt-1 text-xs text-slate-600">
         The Super Admin proposes an active Admin. That wallet signs acceptance
-        (on this page or at /account/roles) before custody responsibility
-        changes.
+        (on this page or at /account/roles) within 14 days before custody
+        responsibility changes. The Super Admin, or the current operator while
+        it is still an Admin, can cancel a proposal.
       </p>
       {error && <p className="mt-2 text-amber-800">{error}</p>}
       {state && !rotatable && (
@@ -106,7 +117,24 @@ export function CustodyAuthorityTransfer({
               was proposed, so it can no longer be accepted)
             </span>
           )}
+          {state.expiresAt != null && (
+            <span className="ml-1 block font-sans text-slate-500">
+              {describeProposalWindow(
+                proposalWindowState({ proposedAt: 0, eta: 0, expiresAt: state.expiresAt }, now),
+              )}
+            </span>
+          )}
         </p>
+      )}
+      {canCancel && (
+        <button
+          type="button"
+          disabled={tx.isSending}
+          onClick={() => void submit("cancel")}
+          className="mt-2 rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 disabled:opacity-50"
+        >
+          Cancel proposal
+        </button>
       )}
       {state && rotatable && isSuperAdmin && (
         <div className="mt-3 flex flex-wrap gap-2">
@@ -143,7 +171,7 @@ export function CustodyAuthorityTransfer({
       {state && rotatable && !state.stale && state.proposed === wallet && (
         <button
           type="button"
-          disabled={tx.isSending}
+          disabled={tx.isSending || expired}
           onClick={() => void submit("accept")}
           className="mt-3 rounded-lg bg-brand-700 px-3 py-2 text-xs font-semibold text-white disabled:opacity-50"
         >

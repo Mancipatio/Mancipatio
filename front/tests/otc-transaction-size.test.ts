@@ -14,14 +14,19 @@ import {
 } from "@/lib/generated/transfer_hook";
 import {
   buildDepositOtcAssetInstructions,
+  buildDepositOtcPaymentInstructions,
+  buildExpireOtcDealInstructions,
   buildTakeOfferInstructions,
 } from "@/lib/otc-transactions";
+import { findBlockEntryPda } from "@/lib/pdas";
+import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import { vestingTransactionBytes } from "@/lib/vesting-creation";
 
-// The two largest secondary-market wallet transactions, built by the same
-// functions the pages call, under the worst case: a KycGated mint (9-account
-// hook tails), every idempotent ATA creation, and no address shared between
-// the parties. 2A added the read-only Platform PDA (+33 bytes) to both.
+// The secondary-market wallet transactions, built by the same functions the
+// pages call, under the worst case: a KycGated mint (9-account hook tails),
+// every idempotent ATA creation, and no address shared between the parties.
+// 2A added the read-only Platform PDA (+33 bytes); v1.0.0-rc (8.3) appends
+// both parties' hook blocklist entries (+2 × 33 bytes) after it.
 const PACKET_LIMIT = 1232;
 const key = (n: number) =>
   address(getBase58Decoder().decode(new Uint8Array(32).fill(n)));
@@ -65,6 +70,18 @@ async function expectPlatformGate(
   expect(accounts[index].role).toBe(AccountRole.READONLY);
 }
 
+/** The v1 party gates: `wallets`' ["blocked", wallet] entries, read-only, from `index`. */
+async function expectBlockEntries(
+  accounts: readonly { address: Address; role: AccountRole }[],
+  index: number,
+  wallets: Address[],
+) {
+  for (const [i, wallet] of wallets.entries()) {
+    expect(accounts[index + i].address).toBe(await findBlockEntryPda(wallet));
+    expect(accounts[index + i].role).toBe(AccountRole.READONLY);
+  }
+}
+
 describe("OTC wallet transactions stay within one packet", () => {
   it.each([RestrictionMode.Open, RestrictionMode.KycGated])(
     "settling deposit_otc_asset: 2 ATAs + two hook tails (mode %s)",
@@ -85,9 +102,11 @@ describe("OTC wallet transactions stay within one packet", () => {
       expect(instructions).toHaveLength(3);
       const deposit = instructions.at(-1)!;
       const tail = mode === RestrictionMode.KycGated ? 9 : 3;
-      // 13 named accounts, Platform last, then both equal-length hook tails.
-      expect(deposit.accounts).toHaveLength(13 + 2 * tail);
+      // 13 named accounts through the Platform, the buyer's and the seller's
+      // blocklist entries, then both equal-length hook tails.
+      expect(deposit.accounts).toHaveLength(15 + 2 * tail);
       await expectPlatformGate(deposit.accounts!, 12);
+      await expectBlockEntries(deposit.accounts!, 13, [key(12), key(1)]);
       const bytes = vestingTransactionBytes(instructions, seller);
       expect(bytes).toBeLessThanOrEqual(PACKET_LIMIT);
       if (mode === RestrictionMode.KycGated) expect(bytes).toBeGreaterThan(1000);
@@ -112,12 +131,58 @@ describe("OTC wallet transactions stay within one packet", () => {
       expect(instructions).toHaveLength(4);
       const take = instructions.at(-1)!;
       const tail = mode === RestrictionMode.KycGated ? 9 : 3;
-      // 12 named accounts, Platform last, then the release hook tail.
-      expect(take.accounts).toHaveLength(12 + tail);
+      // 12 named accounts through the Platform, the taker's and the maker's
+      // blocklist entries, then the release hook tail.
+      expect(take.accounts).toHaveLength(14 + tail);
       await expectPlatformGate(take.accounts!, 11);
+      await expectBlockEntries(take.accounts!, 12, [key(21), key(23)]);
       expect(vestingTransactionBytes(instructions, taker)).toBeLessThanOrEqual(
         PACKET_LIMIT,
       );
+    },
+  );
+
+  it.each([RestrictionMode.Open, RestrictionMode.KycGated])(
+    "settling deposit_otc_payment: 2 ATAs + the settle hook tail (mode %s)",
+    async (mode) => {
+      const buyer = createNoopSigner(key(31));
+      const instructions = await buildDepositOtcPaymentInstructions(rpc(mode), {
+        buyer,
+        dealPda: key(32),
+        deal: { mint: key(3), seller: key(33), paymentMint: key(4), assetEscrow: key(34), paymentEscrow: key(35) },
+        paymentTokenProgram: TOKEN_CLASSIC,
+      });
+      expect(instructions).toHaveLength(3);
+      const deposit = instructions.at(-1)!;
+      const tail = mode === RestrictionMode.KycGated ? 9 : 3;
+      expect(deposit.accounts).toHaveLength(15 + tail);
+      await expectPlatformGate(deposit.accounts!, 12);
+      await expectBlockEntries(deposit.accounts!, 13, [key(31), key(33)]);
+      // The buyer pays from its own ATA (the program refuses another owner's).
+      const [own] = await findAssociatedTokenPda({ owner: key(31), mint: key(4), tokenProgram: TOKEN_CLASSIC });
+      expect(deposit.accounts![4].address).toBe(own);
+      expect(vestingTransactionBytes(instructions, buyer)).toBeLessThanOrEqual(PACKET_LIMIT);
+    },
+  );
+
+  it.each([RestrictionMode.Open, RestrictionMode.KycGated])(
+    "expire_otc_deal: 2 ATAs + the refund hook tail, both parties' blocklist entries before it (mode %s)",
+    async (mode) => {
+      const payer = createNoopSigner(key(41));
+      const instructions = await buildExpireOtcDealInstructions(rpc(mode), {
+        payer,
+        dealPda: key(42),
+        deal: { mint: key(3), buyer: key(43), seller: key(44), paymentMint: key(4), assetEscrow: key(45), paymentEscrow: key(46) },
+        paymentTokenProgram: TOKEN_CLASSIC,
+      });
+      expect(instructions).toHaveLength(3);
+      const expire = instructions.at(-1)!;
+      const tail = mode === RestrictionMode.KycGated ? 9 : 3;
+      // 11 named accounts (no Platform: an exit), then the buyer's and the
+      // seller's blocklist entries, then the refund tail.
+      expect(expire.accounts).toHaveLength(13 + tail);
+      await expectBlockEntries(expire.accounts!, 11, [key(43), key(44)]);
+      expect(vestingTransactionBytes(instructions, payer)).toBeLessThanOrEqual(PACKET_LIMIT);
     },
   );
 });

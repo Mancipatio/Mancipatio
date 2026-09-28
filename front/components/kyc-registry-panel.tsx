@@ -34,6 +34,8 @@ import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
 import { walletSigner } from "@/lib/wallet-signer";
+import { useChainClock } from "@/lib/use-chain-clock";
+import { formatUtc } from "@/lib/issuer-authority";
 
 type Action =
   | { kind: "propose"; newAuthority: string }
@@ -110,6 +112,7 @@ export function KycRegistryPanel({
               currentAuthority: t.currentAuthority.toString(),
               newAuthority: t.newAuthority.toString(),
               proposedBy: t.proposedBy.toString(),
+              expiresAt: t.expiresAt,
             }
           : null,
       );
@@ -124,7 +127,10 @@ export function KycRegistryPanel({
     void loadPending();
   }, [loadPending]);
 
-  const state = kycTransferState(registryAddress.toString(), authority, pending);
+  // v1: accept_kyc_registry_authority refuses a proposal from its expires_at
+  // on (ProposalExpired 6151); the chain clock decides (display clock here).
+  const now = useChainClock();
+  const state = kycTransferState(registryAddress.toString(), authority, pending, now);
   const can = kycRegistryActions(wallet, authority, state);
   const proposeError = proposedKycAuthorityError(proposeInput, authority);
 
@@ -263,6 +269,12 @@ export function KycRegistryPanel({
                 {state.kind === "stale" && (
                   <span className="ml-1 text-amber-700">
                     (stale: proposed under a previous authority, so it cannot be accepted)
+                  </span>
+                )}
+                {state.kind === "expired" && (
+                  <span className="ml-1 text-amber-700">
+                    (expired on {formatUtc(state.expiresAt)}: it can no longer be accepted; cancel it or
+                    propose again)
                   </span>
                 )}
               </>

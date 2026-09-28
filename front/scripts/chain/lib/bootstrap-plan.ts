@@ -7,11 +7,27 @@
  * `requireProgramUpgradeAuthority`, which checks the existing ProgramData.
  *
  * Steps: S1 initialize_platform, S1b set_protocol_treasury, S2
- * initialize_blocklist_authority(deployer), S2b propose BA, S3 add_admin (not
- * the SA), S3k temp KYC admin, S4 create_kyc_registry, S4c jurisdictions,
- * S4b propose KYC, X3/X2/X1 Ledger accepts (external, or rehearsal signers
- * off mainnet), S3r remove the temp grant, S5 propose SA, S6 unpause, S7
- * ProgramData SetAuthority → vault.
+ * initialize_blocklist_authority(deployer), S2b propose BA, S3 propose_admin
+ * (not the SA) and A3 add_admin (the NEW admin key signs), S3k/A3k the temp
+ * KYC admin, S4 create_kyc_registry, S4c jurisdictions, S4b propose KYC,
+ * X3/X2/X1 Ledger accepts (external, or rehearsal signers off mainnet), S3r
+ * remove the temp grant, S5 propose SA, S5c close the bootstrap window, S6
+ * unpause, S7 ProgramData SetAuthority → vault.
+ *
+ * v1.0.0-rc (design 8.3 §5.4, §6): a fresh Platform is 0xFF — every pause
+ * bit plus the one-way bootstrap marker (bit 7). While bit 7 is set the 48 h
+ * timelocks of `add_admin` and `accept_platform_admin` are waived, and ANY
+ * clear of a pause bit closes it for good. So every Admin grant executes and
+ * the super admin rotation lands (X1) before the first unpause; right after
+ * X1 the final super admin closes the window explicitly (S5c), and S6 then
+ * clears only `map.unpauseMask` (never the payout modules, 0x40). The first
+ * unpause (S6, or S6d where the deployer is the super admin) waits for every
+ * role step (design 8.3 §5.4, K1.3).
+ *
+ * Every proposal has a window of chain time (lib/proposal-window.ts): the
+ * probe reads the Clock sysvar, so a grant or a super admin rotation proposed
+ * while the window is closed shows as waiting with its eta (48 hours), and an
+ * expired proposal is proposed again instead of being accepted into a 6151.
  */
 import {
   createNoopSigner,
@@ -22,18 +38,25 @@ import {
 import {
   ADMIN_DISCRIMINATOR,
   ASSET_REGISTRY_PROGRAM_ADDRESS,
-  AUTHORITY_TRANSFER_DISCRIMINATOR,
+  AUTHORITY_PROPOSAL_DISCRIMINATOR,
   KYC_REGISTRY_DISCRIMINATOR,
+  PENDING_ADMIN_DISCRIMINATOR,
+  findAcceptPlatformAdminTransferPda,
   findAdminRecordPda,
+  findPendingAdminPda,
   getAcceptPlatformAdminInstructionAsync,
   getAddAdminInstructionAsync,
   getAdminDecoder,
   getAdminSize,
-  getAuthorityTransferDecoder,
-  getAuthorityTransferSize,
+  getAuthorityProposalDecoder,
+  getAuthorityProposalSize,
+  getCancelAdminProposalInstructionAsync,
   getKycRegistryDecoder,
   getKycRegistrySize,
+  getPendingAdminDecoder,
+  getPendingAdminSize,
   getPlatformSize,
+  getProposeAdminInstructionAsync,
   getProposePlatformAdminInstructionAsync,
   getRemoveAdminInstructionAsync,
   getSetPauseFlagsInstructionAsync,
@@ -42,7 +65,12 @@ import {
   findPlatformPda,
 } from "@/lib/generated/asset_registry";
 import {
+  BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR,
+  TRANSFER_HOOK_PROGRAM_ADDRESS,
+  findTransferPda,
   getAcceptBlocklistAuthorityInstructionAsync,
+  getBlocklistAuthorityProposalDecoder,
+  getBlocklistAuthorityProposalSize,
   getBlocklistAuthoritySize,
   getProposeBlocklistAuthorityInstructionAsync,
 } from "@/lib/generated/transfer_hook";
@@ -56,12 +84,25 @@ import {
   findKycRegistryTransferPda,
   jurisdictionBitmap,
 } from "@/lib/passport";
-import { PAUSE_FLAGS_ALL, formatPauseFlags, unknownPauseBits } from "@/lib/pause-flags";
+import {
+  CLOSE_BOOTSTRAP_MASKS,
+  PAUSE_FLAGS_ALL,
+  PLATFORM_BOOTSTRAP_OPEN,
+  formatPauseFlags,
+  isBootstrapOpen,
+} from "@/lib/pause-flags";
 import {
   buildInitializeBlocklistAuthorityInstruction,
   buildInitializePlatformInstruction,
 } from "@/lib/program-bootstrap";
-import { fetchRawAccount, fetchRawAccounts, hasDiscriminator } from "./accounts";
+import {
+  ADMIN_TIMELOCK_SECONDS,
+  PROPOSAL_WINDOW_SECONDS,
+  describeProposalWindow,
+  proposalWindowState,
+  type ProposalWindow,
+} from "@/lib/proposal-window";
+import { fetchChainTime, fetchRawAccount, fetchRawAccounts, hasDiscriminator } from "./accounts";
 import type { ToolContext, ToolStatus } from "./context";
 import { PROGRAM_IDS, idlProbeEvidence, probeIdl, resolveIdlSources } from "./idl-plan";
 import { collectInventory, inventoryFindings, lockIsPresent } from "./inventory";
@@ -106,10 +147,25 @@ export type BootstrapState = {
   blocklist: { authority: Address; proposed: Address | null } | null;
   /** Admin record presence by wallet (the deployer, SA, admins[], kyc.authority). */
   adminRecords: Record<string, boolean>;
+  /**
+   * A staged Admin grant (`PendingAdmin`) naming the wallet, proposed by the
+   * live platform admin (only those can execute), by wallet as above.
+   */
+  pendingAdmins: Record<string, boolean>;
   registry: { authority: Address; approved: Uint8Array; blocked: Uint8Array } | null;
   /** A pending, acceptable KYC registry proposal. */
   registryProposed: Address | null;
   balance: bigint;
+  /** Chain time (Clock sysvar, finalized) the windows are judged by; null when unreadable. */
+  now: bigint | null;
+  /** The window of each staged grant in `pendingAdmins` (raw eta: the bootstrap waiver is applied when judged). */
+  pendingAdminWindows: Record<string, ProposalWindow | null>;
+  /** The windows of the staged super admin rotation, BA and KYC proposals (null: none, or unknown). */
+  platformWindow: ProposalWindow | null;
+  blocklistWindow: ProposalWindow | null;
+  registryWindow: ProposalWindow | null;
+  /** A recovery by the program upgrade authority is pending: X1 / X3 are refused (6155 / hook 6020). */
+  recoveryPending: { platform: boolean; blocklist: boolean };
 };
 
 export function cloneState(state: BootstrapState): BootstrapState {
@@ -120,16 +176,55 @@ export function cloneState(state: BootstrapState): BootstrapState {
     platformProposed: state.platformProposed,
     blocklist: state.blocklist ? { ...state.blocklist } : null,
     adminRecords: { ...state.adminRecords },
+    pendingAdmins: { ...state.pendingAdmins },
     registry: state.registry ? { ...state.registry } : null,
     registryProposed: state.registryProposed,
     balance: state.balance,
+    now: state.now,
+    pendingAdminWindows: { ...state.pendingAdminWindows },
+    platformWindow: state.platformWindow,
+    blocklistWindow: state.blocklistWindow,
+    registryWindow: state.registryWindow,
+    recoveryPending: { ...state.recoveryPending },
   };
+}
+
+/** The window a proposal staged now gets (the program's own arithmetic), or null without chain time. */
+function stagedWindow(p: BootstrapState, timelockSeconds: number): ProposalWindow | null {
+  if (p.now === null) return null;
+  return {
+    proposedAt: p.now,
+    eta: p.now + BigInt(timelockSeconds),
+    expiresAt: p.now + BigInt(timelockSeconds + PROPOSAL_WINDOW_SECONDS),
+  };
+}
+
+/**
+ * "waiting" | "open" | "expired" for a proposal window at the plan's chain
+ * time, or "unknown" (no window or no clock). `bootstrapWaived`: the 48 h the
+ * program waives while bit 7 is open (admin grants and the SA rotation).
+ */
+export function windowKind(p: BootstrapState, window: ProposalWindow | null, bootstrapWaived: boolean) {
+  if (!window || p.now === null) return "unknown" as const;
+  return proposalWindowState(window, p.now, { pauseFlags: p.platform?.pauseFlags ?? 0, bootstrapWaived }).kind;
+}
+
+/** Why an execute / accept cannot run yet (its timelock, or an expired proposal), or null. */
+function windowBlocker(p: BootstrapState, window: ProposalWindow | null, bootstrapWaived: boolean, proposeId: string): string | null {
+  if (!window || p.now === null) return null;
+  const state = proposalWindowState(window, p.now, { pauseFlags: p.platform?.pauseFlags ?? 0, bootstrapWaived });
+  if (state.kind === "waiting") return `timelock (48 hours after ${proposeId}; the bootstrap window is closed): ${describeProposalWindow(state)}`;
+  if (state.kind === "expired") return `the proposal ${describeProposalWindow(state).toLowerCase()} ${proposeId} proposes it again`;
+  return null;
 }
 
 function publicWrap<T>(fn: () => Promise<T>): Promise<T> {
   return fn().catch((error: unknown) => {
     const message = (error as Error)?.message ?? "";
-    if (/proposal is stale or invalid|Unexpected (platform|blocklist authority) owner/.test(message)) {
+    // A stale proposal (retired by an executed recovery) is reported, not
+    // thrown (lib/operational-authority.ts): the plan treats it as none, and
+    // the next propose overwrites it. Only a foreign one is fatal.
+    if (/authority proposal is invalid|Unexpected (platform|blocklist authority) owner/.test(message)) {
       throw new ChainPlanError(message);
     }
     throw error;
@@ -173,10 +268,16 @@ export async function probeBootstrapState(rpc: ChainRpc, map: RoleMap): Promise<
 
   const wallets = [...new Set([map.deployer, map.superAdmin, ...map.admins, map.kyc.authority])];
   const records = await Promise.all(wallets.map(async (wallet) => (await findAdminRecordPda({ authority: wallet }))[0]));
+  const pendings = await Promise.all(wallets.map(async (wallet) => (await findPendingAdminPda({ newAdmin: wallet }))[0]));
   const registry = map.kyc.registry!;
   const transferPda = await findKycRegistryTransferPda(registry);
-  const accounts = await fetchRawAccounts(rpc, [...records, registry, transferPda]);
+  const [platformPda] = await findPlatformPda();
+  const [platformTransferPda] = await findAcceptPlatformAdminTransferPda({ platform: platformPda });
+  const [blocklistTransferPda] = await findTransferPda();
+  const accounts = await fetchRawAccounts(rpc, [...records, ...pendings, registry, transferPda, platformTransferPda, blocklistTransferPda]);
   const adminRecords: Record<string, boolean> = {};
+  const pendingAdmins: Record<string, boolean> = {};
+  const pendingAdminWindows: Record<string, ProposalWindow | null> = {};
   wallets.forEach((wallet, i) => {
     const account = accounts.get(records[i]);
     adminRecords[wallet] = Boolean(
@@ -185,6 +286,13 @@ export async function probeBootstrapState(rpc: ChainRpc, map: RoleMap): Promise<
         hasDiscriminator(account.data, ADMIN_DISCRIMINATOR) &&
         getAdminDecoder().decode(account.data).admin === wallet,
     );
+    const pending = accounts.get(pendings[i]);
+    const value =
+      pending && platform && pending.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(pending.data, PENDING_ADMIN_DISCRIMINATOR)
+        ? getPendingAdminDecoder().decode(pending.data)
+        : null;
+    pendingAdmins[wallet] = Boolean(value && platform && value.newAdmin === wallet && value.proposedBy === platform.admin);
+    pendingAdminWindows[wallet] = value && pendingAdmins[wallet] ? { proposedAt: value.proposedAt, eta: value.eta, expiresAt: value.expiresAt } : null;
   });
   let registryState: BootstrapState["registry"] = null;
   const registryAccount = accounts.get(registry);
@@ -200,24 +308,59 @@ export async function probeBootstrapState(rpc: ChainRpc, map: RoleMap): Promise<
     };
   }
   let registryProposed: Address | null = null;
+  let registryWindow: ProposalWindow | null = null;
   const transfer = accounts.get(transferPda);
-  if (registryState && transfer && transfer.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(transfer.data, AUTHORITY_TRANSFER_DISCRIMINATOR)) {
-    const value = getAuthorityTransferDecoder().decode(transfer.data);
+  if (registryState && transfer && transfer.owner === ASSET_REGISTRY_PROGRAM_ADDRESS && hasDiscriminator(transfer.data, AUTHORITY_PROPOSAL_DISCRIMINATOR)) {
+    const value = getAuthorityProposalDecoder().decode(transfer.data);
     if (value.target === registry && value.currentAuthority === registryState.authority && value.proposedBy === registryState.authority) {
       registryProposed = value.newAuthority;
+      registryWindow = { proposedAt: value.proposedAt, eta: value.eta, expiresAt: value.expiresAt };
     }
   }
+  // The raw windows of the live SA and BA proposals (loadOperationalAuthority
+  // already refused a foreign one; a stale one — retired by a recovery — is
+  // no proposal for the plan: S5 / S4b propose over it).
+  const platformProposed = platformAuthority && !platformAuthority.stale ? platformAuthority.proposed : null;
+  const blocklistProposed = blocklistAuthority && !blocklistAuthority.stale ? blocklistAuthority.proposed : null;
+  let platformWindow: ProposalWindow | null = null;
+  const platformTransfer = accounts.get(platformTransferPda);
+  if (platformProposed && platformTransfer && hasDiscriminator(platformTransfer.data, AUTHORITY_PROPOSAL_DISCRIMINATOR)) {
+    const value = getAuthorityProposalDecoder().decode(platformTransfer.data);
+    platformWindow = { proposedAt: value.proposedAt, eta: value.eta, expiresAt: value.expiresAt };
+  }
+  let blocklistWindow: ProposalWindow | null = null;
+  const blocklistTransfer = accounts.get(blocklistTransferPda);
+  if (
+    blocklistProposed &&
+    blocklistTransfer &&
+    blocklistTransfer.owner === TRANSFER_HOOK_PROGRAM_ADDRESS &&
+    hasDiscriminator(blocklistTransfer.data, BLOCKLIST_AUTHORITY_PROPOSAL_DISCRIMINATOR)
+  ) {
+    const value = getBlocklistAuthorityProposalDecoder().decode(blocklistTransfer.data);
+    blocklistWindow = { proposedAt: value.proposedAt, eta: value.proposedAt, expiresAt: value.expiresAt };
+  }
+  const now = await fetchChainTime(rpc);
   const balance = await rpc.getBalance(map.deployer, { commitment: "finalized" }).send();
   return {
     deployed,
     ua,
     platform,
-    platformProposed: platformAuthority?.proposed ?? null,
-    blocklist: blocklistAuthority ? { authority: blocklistAuthority.current, proposed: blocklistAuthority.proposed } : null,
+    platformProposed,
+    blocklist: blocklistAuthority ? { authority: blocklistAuthority.current, proposed: blocklistProposed } : null,
     adminRecords,
+    pendingAdmins,
     registry: registryState,
     registryProposed,
     balance: balance.value,
+    now,
+    pendingAdminWindows,
+    platformWindow,
+    blocklistWindow,
+    registryWindow,
+    recoveryPending: {
+      platform: Boolean(platformAuthority?.recoveryPending),
+      blocklist: Boolean(blocklistAuthority?.recoveryPending),
+    },
   };
 }
 
@@ -225,6 +368,7 @@ export async function probeBootstrapState(rpc: ChainRpc, map: RoleMap): Promise<
 
 export type BootstrapSigners = {
   deployer: TransactionSigner;
+  /** Off mainnet: the role keys, to run their accepts here (`admin`: the first role-map admin). */
   rehearsal: Partial<Record<RehearsalRole, TransactionSigner>>;
 };
 
@@ -269,6 +413,8 @@ type StepDef = {
   skip: (p: BootstrapState) => string | null;
   stop?: (p: BootstrapState) => string | null;
   gate?: (done: Map<string, Outcome>, p: BootstrapState) => string | null;
+  /** Its proposal's window (timelock, expiry) or a pending recovery refuses it for now. */
+  timelock?: (p: BootstrapState) => string | null;
   preconditions: (p: BootstrapState) => Precondition<BootstrapState>[];
   external?: ExternalAction;
   build: (p: BootstrapState, signer: TransactionSigner) => Promise<Instruction[]>;
@@ -280,7 +426,6 @@ type StepDef = {
 
 const pre = (label: string, holds: (s: BootstrapState) => boolean): Precondition<BootstrapState> => ({ label, holds });
 const bitmapsEqual = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b));
-const BLOCKLIST_TRANSFER_SIZE = 8 + 32 + 32 + 1;
 export const SIGNATURE_FEE = BigInt(5000);
 export const FEE_MARGIN = BigInt(10_000_000);
 
@@ -298,7 +443,78 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
   const blocked = jurisdictionBitmap(map.kyc.blockedJurisdictions);
   const deployerIsSa = D === SA;
   const unpauseByDeployer = map.unpauseBy === "deployer" || deployerIsSa;
-  const cycleOne = ["S1", "S1b", "S2", "S2b", ...map.admins.map((a) => `S3:${a}`), "S3k", "S4", "S4c", "S4b.cancel", "S4b"];
+  const unpauseMask = map.unpauseMask;
+  /** The rehearsal signer holding `key` (a role key; `admin` is the first role-map admin), or null. */
+  const signerFor = (key: Address): TransactionSigner | null =>
+    Object.values(signers.rehearsal).find((signer) => signer?.address === key) ?? null;
+  const grants = map.admins.flatMap((a) => [`S3:${a}`, `A3:${a}`]);
+  const tempGrant = map.kyc.tempAdminGrant ? ["S3k", "A3k"] : [];
+  const cycleOne = ["S1", "S1b", "S2", "S2b", ...grants, ...tempGrant, "S4", "S4c", "S4b.cancel", "S4b"];
+  /** Every Admin grant executes while the bootstrap window is open (before any unpause and X1). */
+  const executions = [...map.admins.map((a) => `A3:${a}`), ...(map.kyc.tempAdminGrant ? ["A3k"] : [])];
+  /** Every role step but the super admin rotation: none may follow the first unpause (§5.4). */
+  const roleSteps = [...grants, ...tempGrant, "X3", "X2", ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])];
+  const waitsFor = (ids: string[]) => (done: Map<string, Outcome>) => {
+    const open = ids.filter((id) => done.has(id) && done.get(id) !== "included" && done.get(id) !== "skipped");
+    return open.length ? `waits for ${open.join(", ")}` : null;
+  };
+  /** propose_admin (the platform admin) then add_admin (the new key itself signs). */
+  const grantSteps = (id: string, admin: Address, label: string, executor: TransactionSigner | null): StepDef[] => [
+    {
+      id: `S3${id}`,
+      title: `propose_admin(${admin})${label}`,
+      applies: true,
+      signerRole: "deployer",
+      signer: d,
+      // An expired grant is proposed again (propose_admin overwrites it and restarts the clock).
+      skip: (p) =>
+        p.adminRecords[admin]
+          ? "Admin record exists"
+          : p.pendingAdmins[admin] && windowKind(p, p.pendingAdminWindows[admin], true) !== "expired"
+            ? "Admin grant already proposed"
+            : null,
+      preconditions: () => [
+        pre(`platform.admin=${D}`, (s) => s.platform?.admin === D),
+        pre(`admin(${admin}):absent`, (s) => !s.adminRecords[admin]),
+        pre(`pendingAdmin(${admin}):absent-or-expired`, (s) => !s.pendingAdmins[admin] || windowKind(s, s.pendingAdminWindows[admin], true) === "expired"),
+      ],
+      external: { id: `S3${id}`, role: "superAdmin", key: SA, page: "/admin/admins", action: `propose the Admin role for ${admin} (Propose admin role)` },
+      build: async (_p, signer) => [await getProposeAdminInstructionAsync({ superAdmin: signer, newAdmin: admin })],
+      apply: (p) => {
+        p.pendingAdmins[admin] = true;
+        p.pendingAdminWindows[admin] = stagedWindow(p, ADMIN_TIMELOCK_SECONDS);
+      },
+      postCheck: (s) => Boolean(s.pendingAdmins[admin] || s.adminRecords[admin]),
+      rentSizes: [getPendingAdminSize()],
+    },
+    {
+      id: `A3${id}`,
+      title: `add_admin(${admin}) — signed by the new Admin key${label}`,
+      applies: true,
+      signerRole: "admin",
+      signer: executor,
+      skip: (p) => (p.adminRecords[admin] ? "Admin record exists" : null),
+      // Inside the bootstrap window at once; once it is closed, 48 hours after S3 (D3).
+      timelock: (p) => windowBlocker(p, p.pendingAdminWindows[admin], true, `S3${id}`),
+      preconditions: () => [pre(`pendingAdmin(${admin})`, (s) => Boolean(s.pendingAdmins[admin]))],
+      external: {
+        id: `A3${id}`,
+        role: "admin",
+        key: admin,
+        page: "/account/roles",
+        action: "take the Admin role under Waiting for your acceptance (at once while the bootstrap window is open, else 48 hours after the proposal), then click Refresh",
+      },
+      build: async (p, signer) => [
+        await getAddAdminInstructionAsync({ newAdmin: signer, proposer: p.platform!.admin, newAdminArg: admin }),
+      ],
+      apply: (p) => {
+        p.adminRecords[admin] = true;
+        p.pendingAdmins[admin] = false;
+        p.pendingAdminWindows[admin] = null;
+      },
+      postCheck: (s) => Boolean(s.adminRecords[admin]),
+    },
+  ];
 
   const defs: StepDef[] = [
     {
@@ -324,7 +540,8 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
         }),
       ],
       apply: (p) => {
-        p.platform = { admin: D, protocolTreasury: T, protocolFeeBps: map.protocolFeeBps, pauseFlags: PAUSE_FLAGS_ALL };
+        // initialize_platform writes 0xFF: every pause bit plus the bootstrap marker.
+        p.platform = { admin: D, protocolTreasury: T, protocolFeeBps: map.protocolFeeBps, pauseFlags: PAUSE_FLAGS_ALL | PLATFORM_BOOTSTRAP_OPEN };
         p.adminRecords[D] = true;
       },
       postCheck: (s) => s.platform?.admin === D && s.platform.protocolTreasury === T && s.platform.protocolFeeBps === map.protocolFeeBps,
@@ -378,8 +595,13 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       applies: true,
       signerRole: "deployer",
       signer: d,
+      // An expired proposal is proposed again (it overwrites and restarts the 14 days).
       skip: (p) =>
-        p.blocklist?.authority === BA ? "BA is the map key" : p.blocklist?.proposed === BA ? "already proposed to the map key" : null,
+        p.blocklist?.authority === BA
+          ? "BA is the map key"
+          : p.blocklist?.proposed === BA && windowKind(p, p.blocklistWindow, false) !== "expired"
+            ? "already proposed to the map key"
+            : null,
       preconditions: (p) => {
         const proposed = p.blocklist?.proposed ?? null;
         return [
@@ -390,43 +612,21 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       build: async (_p, signer) => [await getProposeBlocklistAuthorityInstructionAsync({ authority: signer, newAuthority: BA })],
       apply: (p) => {
         p.blocklist!.proposed = BA;
+        p.blocklistWindow = stagedWindow(p, 0);
       },
       postCheck: (s) => s.blocklist?.proposed === BA,
-      rentSizes: [BLOCKLIST_TRANSFER_SIZE],
+      rentSizes: [getBlocklistAuthorityProposalSize()],
     },
-    ...map.admins.map(
-      (admin): StepDef => ({
-        id: `S3:${admin}`,
-        title: `add_admin(${admin})`,
-        applies: true,
-        signerRole: "deployer",
-        signer: d,
-        skip: (p) => (p.adminRecords[admin] ? "Admin record exists" : null),
-        preconditions: () => [pre(`platform.admin=${D}`, (s) => s.platform?.admin === D), pre(`admin(${admin}):absent`, (s) => !s.adminRecords[admin])],
-        external: { id: `S3:${admin}`, role: "superAdmin", key: SA, page: "/admin/admins", action: `grant Admin to ${admin}` },
-        build: async (_p, signer) => [await getAddAdminInstructionAsync({ superAdmin: signer, newAdmin: admin })],
-        apply: (p) => {
-          p.adminRecords[admin] = true;
-        },
-        postCheck: (s) => Boolean(s.adminRecords[admin]),
-        rentSizes: [getAdminSize()],
+    ...map.admins.flatMap((admin) => grantSteps(`:${admin}`, admin, "", signerFor(admin))),
+    ...grantSteps("k", K, " — temporary KYC grant (D17 fallback)", signers.rehearsal.kycAuthority ?? null).map(
+      (def): StepDef => ({
+        ...def,
+        applies: map.kyc.tempAdminGrant,
+        // Not needed once the KYC key accepted the registry; never an operator page.
+        skip: (p) => def.skip(p) ?? (p.registry?.authority === K ? "KYC already accepted" : null),
+        external: def.id === "A3k" ? def.external : undefined,
       }),
     ),
-    {
-      id: "S3k",
-      title: `add_admin(${K}) — temporary KYC grant (D17 fallback)`,
-      applies: map.kyc.tempAdminGrant,
-      signerRole: "deployer",
-      signer: d,
-      skip: (p) => (p.adminRecords[K] ? "Admin record exists" : p.registry?.authority === K ? "KYC already accepted" : null),
-      preconditions: () => [pre(`platform.admin=${D}`, (s) => s.platform?.admin === D), pre(`admin(${K}):absent`, (s) => !s.adminRecords[K])],
-      build: async (_p, signer) => [await getAddAdminInstructionAsync({ superAdmin: signer, newAdmin: K })],
-      apply: (p) => {
-        p.adminRecords[K] = true;
-      },
-      postCheck: (s) => Boolean(s.adminRecords[K]),
-      rentSizes: [getAdminSize()],
-    },
     {
       id: "S4",
       title: `create_kyc_registry(authority = admin = deployer) → ${registry}`,
@@ -478,7 +678,11 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       applies: true,
       signerRole: "deployer",
       signer: d,
-      skip: (p) => (!p.registryProposed || p.registryProposed === K ? "no foreign proposal" : null),
+      // A foreign proposal, or the map key's once it expired, is withdrawn first.
+      skip: (p) =>
+        !p.registryProposed || (p.registryProposed === K && windowKind(p, p.registryWindow, false) !== "expired")
+          ? "no foreign or expired proposal"
+          : null,
       preconditions: (p) => {
         const proposed = p.registryProposed;
         return [
@@ -489,6 +693,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       build: async (_p, signer) => [await buildCancelKycAuthorityTransfer({ authoritySigner: signer, registry })],
       apply: (p) => {
         p.registryProposed = null;
+        p.registryWindow = null;
       },
       postCheck: (s) => s.registryProposed === null,
     },
@@ -498,7 +703,12 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       applies: true,
       signerRole: "deployer",
       signer: d,
-      skip: (p) => (p.registry?.authority === K ? "KYC authority is the map key" : p.registryProposed === K ? "already proposed to the map key" : null),
+      skip: (p) =>
+        p.registry?.authority === K
+          ? "KYC authority is the map key"
+          : p.registryProposed === K && windowKind(p, p.registryWindow, false) !== "expired"
+            ? "already proposed to the map key"
+            : null,
       preconditions: () => [
         pre(`kycRegistry.authority=${D}`, (s) => s.registry?.authority === D),
         pre("kycRegistry.proposed=none", (s) => s.registryProposed === null),
@@ -506,9 +716,10 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       build: async (_p, signer) => [await buildProposeKycAuthority({ authoritySigner: signer, registry, newAuthority: K })],
       apply: (p) => {
         p.registryProposed = K;
+        p.registryWindow = stagedWindow(p, 0);
       },
       postCheck: (s) => s.registryProposed === K,
-      rentSizes: [getAuthorityTransferSize()],
+      rentSizes: [getAuthorityProposalSize()],
     },
     {
       id: "X3",
@@ -517,6 +728,10 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signerRole: "blocklistAuthority",
       signer: signers.rehearsal.blocklistAuthority ?? null,
       skip: (p) => (p.blocklist?.authority === BA ? "BA accepted" : null),
+      timelock: (p) =>
+        p.recoveryPending.blocklist
+          ? "a blocklist authority recovery by the upgrade authority is pending: the accept is refused (hook 6020) until it is cancelled or executed"
+          : windowBlocker(p, p.blocklistWindow, false, "S2b"),
       preconditions: () => [pre(`blocklist.proposed=${BA}`, (s) => s.blocklist?.proposed === BA)],
       external: { id: "X3", role: "blocklistAuthority", key: BA, page: "/issuer/authority", action: "accept the blocklist authority (or under Waiting for your acceptance on /account/roles), then click Refresh" },
       build: async (_p, signer) => [await getAcceptBlocklistAuthorityInstructionAsync({ newAuthority: signer })],
@@ -526,38 +741,13 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       postCheck: (s) => s.blocklist?.authority === BA,
     },
     {
-      id: "S6d",
-      title: "set_pause_flags(clear every bit) by the deployer",
-      applies: unpauseByDeployer,
-      signerRole: "deployer",
-      signer: d,
-      skip: (p) => (p.platform?.pauseFlags === 0 ? "not paused" : null),
-      preconditions: (p) => {
-        const flags = p.platform?.pauseFlags ?? 0;
-        return [
-          pre(`platform.admin=${D}`, (s) => s.platform?.admin === D),
-          pre(`platform.pauseFlags=${formatPauseFlags(flags)}`, (s) => s.platform?.pauseFlags === flags),
-        ];
-      },
-      build: async (p, signer) => [
-        await getSetPauseFlagsInstructionAsync({
-          authority: signer,
-          setMask: 0,
-          clearMask: PAUSE_FLAGS_ALL | unknownPauseBits(p.platform!.pauseFlags),
-        }),
-      ],
-      apply: (p) => {
-        p.platform!.pauseFlags = 0;
-      },
-      postCheck: (s) => s.platform?.pauseFlags === 0,
-    },
-    {
       id: "X2",
       title: `accept_kyc_registry_authority (${K})`,
       applies: true,
       signerRole: "kycAuthority",
       signer: signers.rehearsal.kycAuthority ?? null,
       skip: (p) => (p.registry?.authority === K ? "KYC accepted" : null),
+      timelock: (p) => windowBlocker(p, p.registryWindow, false, "S4b"),
       preconditions: () => [pre(`kycRegistry.proposed=${K}`, (s) => s.registryProposed === K)],
       external: {
         id: "X2",
@@ -596,18 +786,72 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       postCheck: (s) => !s.adminRecords[K],
     },
     {
+      // v1: the temporary grant was proposed but never executed before the
+      // KYC key accepted the registry: withdraw it (a pending grant blocks the
+      // handover inventory).
+      id: "S3r.cancel",
+      title: `cancel_admin_proposal(${K}) — the unused temporary KYC grant`,
+      applies: map.kyc.tempAdminGrant,
+      signerRole: "deployer",
+      signer: d,
+      skip: (p) => (!p.pendingAdmins[K] ? "no pending grant" : null),
+      preconditions: () => [
+        pre(`kycRegistry.authority=${K}`, (s) => s.registry?.authority === K),
+        pre(`platform.admin=${D}`, (s) => s.platform?.admin === D),
+        pre(`pendingAdmin(${K}):present`, (s) => Boolean(s.pendingAdmins[K])),
+      ],
+      build: async (_p, signer) => [
+        await getCancelAdminProposalInstructionAsync({
+          canceller: signer,
+          pendingAdmin: (await findPendingAdminPda({ newAdmin: K }))[0],
+          proposer: D,
+          programData: await programDataAddress(PROGRAM_IDS.asset_registry),
+        }),
+      ],
+      apply: (p) => {
+        p.pendingAdmins[K] = false;
+      },
+      postCheck: (s) => !s.pendingAdmins[K],
+    },
+    {
+      id: "S6d",
+      title: `set_pause_flags(clear ${formatPauseFlags(unpauseMask)}) by the deployer`,
+      applies: unpauseByDeployer,
+      signerRole: "deployer",
+      signer: d,
+      skip: (p) => (((p.platform?.pauseFlags ?? 0) & unpauseMask) === 0 ? "not paused" : null),
+      // Any clear closes the bootstrap window: every role step lands first (§5.4).
+      gate: waitsFor(roleSteps),
+      preconditions: (p) => {
+        const flags = p.platform?.pauseFlags ?? 0;
+        return [
+          pre(`platform.admin=${D}`, (s) => s.platform?.admin === D),
+          pre(`platform.pauseFlags=${formatPauseFlags(flags)}`, (s) => s.platform?.pauseFlags === flags),
+        ];
+      },
+      build: async (_p, signer) => [
+        await getSetPauseFlagsInstructionAsync({ authority: signer, setMask: 0, clearMask: unpauseMask }),
+      ],
+      apply: (p) => {
+        p.platform!.pauseFlags &= ~(unpauseMask | PLATFORM_BOOTSTRAP_OPEN);
+      },
+      postCheck: (s) => ((s.platform?.pauseFlags ?? 0) & unpauseMask) === 0,
+    },
+    {
       id: "S5",
       title: `propose_platform_admin → ${SA}`,
       applies: !deployerIsSa,
       signerRole: "deployer",
       signer: d,
-      skip: (p) => (p.platform?.admin === SA ? "SA is the platform admin" : p.platformProposed === SA ? "already proposed to the SA" : null),
-      gate: (done) => {
-        const open = [...cycleOne, ...(map.kyc.tempAdminGrant ? ["S3r"] : [])].filter(
-          (id) => done.has(id) && done.get(id) !== "included" && done.get(id) !== "skipped",
-        );
-        return open.length ? `waits for ${open.join(", ")}` : null;
-      },
+      skip: (p) =>
+        p.platform?.admin === SA
+          ? "SA is the platform admin"
+          : p.platformProposed === SA && windowKind(p, p.platformWindow, true) !== "expired"
+            ? "already proposed to the SA"
+            : null,
+      // Every Admin grant executes before X1: the accept makes their proposer
+      // stale, and a closed bootstrap window would add the 48 h.
+      gate: waitsFor([...cycleOne, ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])]),
       preconditions: (p) => {
         const proposed = p.platformProposed;
         return [
@@ -618,9 +862,10 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       build: async (_p, signer) => [await getProposePlatformAdminInstructionAsync({ authority: signer, newAdmin: SA })],
       apply: (p) => {
         p.platformProposed = SA;
+        p.platformWindow = stagedWindow(p, ADMIN_TIMELOCK_SECONDS);
       },
       postCheck: (s) => s.platformProposed === SA,
-      rentSizes: [getAuthorityTransferSize()],
+      rentSizes: [getAuthorityProposalSize()],
     },
     {
       id: "X1",
@@ -629,6 +874,12 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signerRole: "superAdmin",
       signer: deployerIsSa ? null : signers.rehearsal.superAdmin ?? null,
       skip: (p) => (p.platform?.admin === SA ? "SA accepted" : null),
+      // The accept makes every grant the deployer staged stale (6152): they execute first.
+      gate: waitsFor([...executions, ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])]),
+      timelock: (p) =>
+        p.recoveryPending.platform
+          ? "a super admin recovery by the upgrade authority is pending: accept_platform_admin is refused (6155) until it is cancelled or executed"
+          : windowBlocker(p, p.platformWindow, true, "S5"),
       preconditions: () => [pre(`platform.proposed=${SA}`, (s) => s.platformProposed === SA)],
       external: { id: "X1", role: "superAdmin", key: SA, page: "/issuer/authority", action: "accept the platform admin (or under Waiting for your acceptance on /account/roles), then click Refresh" },
       build: async (p, signer) => [
@@ -642,16 +893,46 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
         p.platform!.admin = SA;
         p.adminRecords[SA] = true;
         p.platformProposed = null;
+        p.platformWindow = null;
+        // The grants the deployer staged are stale from here (6152).
+        for (const wallet of Object.keys(p.pendingAdmins)) p.pendingAdmins[wallet] = false;
       },
       postCheck: (s) => s.platform?.admin === SA,
     },
     {
+      id: "S5c",
+      title: "set_pause_flags(0, 0x80) — close the bootstrap window",
+      applies: true,
+      signerRole: deployerIsSa ? "deployer" : "superAdmin",
+      signer: saSigner,
+      skip: (p) => (!p.platform || !isBootstrapOpen(p.platform.pauseFlags) ? "the bootstrap window is closed" : null),
+      gate: waitsFor([...executions, "X1"]),
+      preconditions: () => [
+        pre(`platform.admin=${SA}`, (s) => s.platform?.admin === SA),
+        pre("platform.bootstrapOpen", (s) => Boolean(s.platform && isBootstrapOpen(s.platform.pauseFlags))),
+      ],
+      external: {
+        id: "S5c",
+        role: "superAdmin",
+        key: SA,
+        page: "/admin/platform",
+        action: 'close the bootstrap window in the PauseFlagsPanel ("Close bootstrap window")',
+      },
+      build: async (_p, signer) => [await getSetPauseFlagsInstructionAsync({ authority: signer, ...CLOSE_BOOTSTRAP_MASKS })],
+      apply: (p) => {
+        p.platform!.pauseFlags &= ~PLATFORM_BOOTSTRAP_OPEN;
+      },
+      postCheck: (s) => Boolean(s.platform && !isBootstrapOpen(s.platform.pauseFlags)),
+    },
+    {
       id: "S6",
-      title: "set_pause_flags(clear every bit) by the superAdmin",
+      title: `set_pause_flags(clear ${formatPauseFlags(unpauseMask)}) by the superAdmin`,
       applies: !unpauseByDeployer,
       signerRole: "superAdmin",
       signer: saSigner,
-      skip: (p) => (p.platform?.pauseFlags === 0 ? "not paused" : null),
+      skip: (p) => (((p.platform?.pauseFlags ?? 0) & unpauseMask) === 0 ? "not paused" : null),
+      // The first unpause follows every role step, X1 and the explicit close (§5.4, K1.3).
+      gate: waitsFor([...roleSteps, "X1", "S5c"]),
       preconditions: (p) => {
         const flags = p.platform?.pauseFlags ?? 0;
         return [
@@ -660,19 +941,16 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
         ];
       },
       // The PauseFlagsPanel lives on /admin/platform (3.1); accept_platform_admin
-      // gave the SA its Admin record, so the admin gate lets it in.
-      external: { id: "S6", role: "superAdmin", key: SA, page: "/admin/platform", action: 'clear every pause bit in the PauseFlagsPanel ("Resume everything")' },
-      build: async (p, signer) => [
-        await getSetPauseFlagsInstructionAsync({
-          authority: signer,
-          setMask: 0,
-          clearMask: PAUSE_FLAGS_ALL | unknownPauseBits(p.platform!.pauseFlags),
-        }),
+      // gave the SA its Admin record, so the admin gate lets it in. "Resume
+      // everything" clears every emergency area, never the payout modules.
+      external: { id: "S6", role: "superAdmin", key: SA, page: "/admin/platform", action: `clear the pause bits ${formatPauseFlags(unpauseMask)} in the PauseFlagsPanel ("Resume everything" when that is every emergency area)` },
+      build: async (_p, signer) => [
+        await getSetPauseFlagsInstructionAsync({ authority: signer, setMask: 0, clearMask: unpauseMask }),
       ],
       apply: (p) => {
-        p.platform!.pauseFlags = 0;
+        p.platform!.pauseFlags &= ~(unpauseMask | PLATFORM_BOOTSTRAP_OPEN);
       },
-      postCheck: (s) => s.platform?.pauseFlags === 0,
+      postCheck: (s) => ((s.platform?.pauseFlags ?? 0) & unpauseMask) === 0,
     },
   ];
   return defs;
@@ -743,7 +1021,7 @@ export async function planBootstrap(
       done.set(def.id, "skipped");
       continue;
     }
-    const gate = def.gate?.(done, p);
+    const gate = def.gate?.(done, p) ?? def.timelock?.(p);
     if (gate) {
       plan.blocked.push({ id: def.id, reason: gate });
       done.set(def.id, "blocked");
@@ -789,10 +1067,13 @@ export async function planBootstrap(
   }
   const included = new Set(plan.steps.map((step) => step.id));
   if (included.has("S2b") && state.blocklist?.proposed && state.blocklist.proposed !== map.blocklistAuthority) {
-    plan.notes.push(`S2b overwrites a pending blocklist proposal to ${state.blocklist.proposed} (proposals cannot be cancelled)`);
+    plan.notes.push(`S2b overwrites a pending blocklist proposal to ${state.blocklist.proposed} (a re-proposal restarts its 14-day window)`);
   }
   if (included.has("S5") && state.platformProposed && state.platformProposed !== map.superAdmin) {
-    plan.notes.push(`S5 overwrites a pending platform admin proposal to ${state.platformProposed} (proposals cannot be cancelled)`);
+    plan.notes.push(`S5 overwrites a pending platform admin proposal to ${state.platformProposed} (a re-proposal restarts its 48-hour wait and 14-day window)`);
+  }
+  if (state.platform && !isBootstrapOpen(state.platform.pauseFlags) && [...plan.awaiting, ...plan.blocked].some((a) => a.id.startsWith("A3"))) {
+    plan.notes.push("the bootstrap window is closed: each add_admin waits 48 hours after its propose_admin (and X1 48 hours after S5)");
   }
   if (included.has("S4b.cancel")) {
     plan.notes.push(`S4b.cancel withdraws a pending KYC proposal to ${state.registryProposed} before proposing kyc.authority`);
@@ -815,7 +1096,7 @@ export async function planBootstrap(
     if (pending) reason = "earlier steps are pending";
     else if (!h.requested) reason = "set CHAIN_HANDOVER=1 and CHAIN_CONFIRM_HANDOVER=<vault> to plan S7";
     else if (h.confirmVault !== V) plan.stops.push(`S7: CHAIN_CONFIRM_HANDOVER must equal the vault ${V}`);
-    else if (state.platform && state.platform.pauseFlags !== 0 && !h.whilePaused) reason = "S6 (unpause) is not done; or set CHAIN_HANDOVER_WHILE_PAUSED=1";
+    else if (state.platform && (state.platform.pauseFlags & map.unpauseMask) !== 0 && !h.whilePaused) reason = "S6 (unpause) is not done; or set CHAIN_HANDOVER_WHILE_PAUSED=1";
     else if (h.inventoryBlockers === null) reason = "the pre-handover inventory did not run";
     else if (h.inventoryBlockers > 0) plan.stops.push(`S7: the pre-handover inventory has ${h.inventoryBlockers} blockers`);
     else if (IDL_PROGRAMS.some((name) => state.ua[name] !== D && state.ua[name] !== V)) {
@@ -835,7 +1116,10 @@ export async function planBootstrap(
         pre(`blocklist.authority=${map.blocklistAuthority}`, (s) => s.blocklist?.authority === map.blocklistAuthority),
         pre(`kycRegistry.authority=${map.kyc.authority}`, (s) => s.registry?.authority === map.kyc.authority),
       );
-      if (!h.whilePaused) labels.push(pre("platform.pauseFlags=0x00", (s) => s.platform?.pauseFlags === 0));
+      labels.push(pre("platform.bootstrapClosed", (s) => Boolean(s.platform && !isBootstrapOpen(s.platform.pauseFlags))));
+      if (!h.whilePaused) {
+        labels.push(pre(`platform.pauseFlags&${formatPauseFlags(map.unpauseMask)}=0x00`, (s) => ((s.platform?.pauseFlags ?? 0) & map.unpauseMask) === 0));
+      }
       plan.steps.push({
         id: "S7",
         title: `SetAuthority → vault ${V} for both ProgramData accounts (one transaction)`,
@@ -870,7 +1154,18 @@ export async function planBootstrap(
 
 // ── Tool ────────────────────────────────────────────────────────────────────
 
-function printPlan(ctx: ToolContext, plan: BootstrapPlan, simulations: Map<string, string>) {
+/** One line on the bootstrap window (bit 7) and what it means for the timelocks. */
+export function bootstrapWindowLine(state: BootstrapState): string | null {
+  if (!state.platform) return "bootstrap window: opens at S1 (a fresh Platform is 0xff): every grant (A3) and X1 then execute at once, until S5c closes it right after X1";
+  const time = state.now === null ? "chain time unknown" : `chain time ${new Date(Number(state.now) * 1000).toISOString().slice(0, 16).replace("T", " ")} UTC`;
+  return isBootstrapOpen(state.platform.pauseFlags)
+    ? `bootstrap window: OPEN (${formatPauseFlags(state.platform.pauseFlags)}, ${time}): A3 and X1 execute at once; S5c closes it for good right after X1, before the first unpause`
+    : `bootstrap window: closed (${formatPauseFlags(state.platform.pauseFlags)}, ${time}): add_admin runs 48 hours after its propose_admin and X1 48 hours after S5, each within 14 days`;
+}
+
+function printPlan(ctx: ToolContext, plan: BootstrapPlan, simulations: Map<string, string>, state?: BootstrapState) {
+  const window = state ? bootstrapWindowLine(state) : null;
+  if (window) ctx.log(window);
   ctx.log("id          signer              simulate  action");
   for (const step of plan.steps) {
     const sim = simulations.get(step.id) ?? (step.simulate === "at-send" ? `deferred: depends on ${step.dependsOn ?? "an earlier step"}` : "");
@@ -896,16 +1191,19 @@ function readHandover(env: ToolContext["env"]) {
 
 async function loadSigners(ctx: ToolContext, map: RoleMap): Promise<BootstrapSigners> {
   const { config } = ctx;
-  const roleKey: Record<RehearsalRole, Address> = {
+  const roleKey: Record<RehearsalRole, Address | undefined> = {
     superAdmin: map.superAdmin,
     blocklistAuthority: map.blocklistAuthority,
     kycAuthority: map.kyc.authority,
+    admin: map.admins[0],
   };
   const rehearsal: BootstrapSigners["rehearsal"] = {};
   for (const role of Object.keys(config.rehearsalSigners) as RehearsalRole[]) {
+    const expected = roleKey[role];
+    if (!expected) throw new ChainGateError(`CHAIN_REHEARSAL_SIGNERS names ${role}, but the role map has no such key`);
     rehearsal[role] = config.send
-      ? await loadHotSigner(config.rehearsalSigners[role]!, roleKey[role], `rehearsal ${role}`)
-      : createNoopSigner(roleKey[role]);
+      ? await loadHotSigner(config.rehearsalSigners[role]!, expected, `rehearsal ${role}`)
+      : createNoopSigner(expected);
   }
   const deployer = config.send ? await loadHotSigner(config.keypairPath!, map.deployer, "deployer") : createNoopSigner(map.deployer);
   return { deployer, rehearsal };
@@ -1009,7 +1307,7 @@ export async function bootstrapTool(ctx: ToolContext): Promise<ToolStatus> {
     }
     evidence.simulations = Object.fromEntries(simulations);
   }
-  printPlan(ctx, plan, simulations);
+  printPlan(ctx, plan, simulations, state);
   ctx.log(`NEXT_PUBLIC_KYC_REGISTRY=${map.kyc.registry} (pin it on the operator front before S4)`);
   ctx.log(`plan digest: ${digest}`);
   if (plan.stops.length) throw new ChainPlanError(`bootstrap stopped: ${plan.stops.join("; ")}`);

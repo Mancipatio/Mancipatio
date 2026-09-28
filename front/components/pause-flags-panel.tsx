@@ -17,34 +17,46 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { useRole } from "@/lib/auth";
 import { useMaintenance } from "@/lib/maintenance-client";
 import {
+  CLOSE_BOOTSTRAP_MASKS,
   describePausedAreas,
   formatPauseFlags,
+  isBootstrapOpen,
   PAUSE_EXITS_OPEN,
   PAUSE_FLAGS,
   PAUSE_FLAGS_ALL,
+  PAUSE_PAYOUT_MODULES,
+  PLATFORM_BOOTSTRAP_OPEN,
+  RESUME_EVERYTHING_MASK,
   pauseAuditMetadata,
   pauseControls,
   pauseMasks,
   pauseRole,
-  unknownPauseBits,
 } from "@/lib/pause-flags";
+import { detectNetwork } from "@/lib/network";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { useToast } from "@/lib/toast";
 
 type Pending = {
-  action: "pause" | "resume";
+  /** "bootstrap": `set_pause_flags(0, 0x80)`, closing the one-way window. */
+  action: "pause" | "resume" | "bootstrap";
   /** Bits the action targets. */
   bits: number;
   title: string;
 };
 
 /**
- * Emergency pause: one row per `Platform.pause_flags` bit. Any Admin can
- * pause an area (or everything); only the Super Admin can resume. The program
- * combines concurrent pauses (`new = (old | set) & !clear`), so a pause never
- * wipes a bit another Admin set in the meantime.
+ * Emergency pause: one row per `Platform.pause_flags` pause bit. Any Admin
+ * can pause an area (or everything); only the Super Admin can resume. The
+ * program combines concurrent pauses (`new = (old | set) & !clear`), so a
+ * pause never wipes a bit another Admin set in the meantime.
+ *
+ * v1.0.0-rc: "Resume everything" never switches the payout modules (0x40)
+ * on — the program clears that bit only in a call of its own (6154), and the
+ * panel offers it only off mainnet, as its own confirmed action. Bit 7 is the
+ * one-way bootstrap window: any resume closes it; the Super Admin can also
+ * close it explicitly.
  */
 export function PauseFlagsPanel({
   platform,
@@ -68,9 +80,12 @@ export function PauseFlagsPanel({
     platform.admin,
     role.isAdmin,
   );
-  const controls = pauseControls(flags, { isAdmin, isSuperAdmin });
-  const unknown = unknownPauseBits(flags);
+  // D2: the payout / Merkle modules stay off on mainnet; elsewhere the Super
+  // Admin may switch them on, in a call of its own.
+  const allowPayoutModules = detectNetwork() !== "mainnet";
+  const controls = pauseControls(flags, { isAdmin, isSuperAdmin }, { allowPayoutModules });
   const areas = describePausedAreas(flags);
+  const bootstrapOpen = isBootstrapOpen(flags);
 
   /** The flags on chain right after this transaction confirmed (null when
    *  the read fails; the tx's PauseFlagsChanged event stays authoritative). */
@@ -88,7 +103,10 @@ export function PauseFlagsPanel({
 
   async function apply(reason: string) {
     if (!pending || !wallet || !conn.wallet) return;
-    const { setMask, clearMask } = pauseMasks(pending.action, pending.bits);
+    const { setMask, clearMask } =
+      pending.action === "bootstrap"
+        ? CLOSE_BOOTSTRAP_MASKS
+        : pauseMasks(pending.action, pending.bits);
     // The panel's cached view: another Admin may have moved the flags since.
     const metadata = pauseAuditMetadata(setMask, clearMask, flags);
     const pendingId = toast.showPending(`${pending.title}…`, reason);
@@ -149,6 +167,12 @@ export function PauseFlagsPanel({
             {areas ? `Paused: ${areas}.` : "Nothing is paused."}{" "}
             <span className="font-mono">{formatPauseFlags(flags)}</span>
           </p>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Bootstrap window ({formatPauseFlags(PLATFORM_BOOTSTRAP_OPEN)}):{" "}
+            {bootstrapOpen
+              ? "open — Admin grants and a Super Admin rotation skip their 48-hour wait. Any resume closes it for good."
+              : "closed for good."}
+          </p>
         </div>
         <div className="flex gap-2">
           {controls.pauseEverything && (
@@ -174,14 +198,30 @@ export function PauseFlagsPanel({
               onClick={() =>
                 setPending({
                   action: "resume",
-                  // Clears undefined bits too (rollback normalization).
-                  bits: flags,
+                  // Every emergency area and bit 7, never the payout modules.
+                  bits: RESUME_EVERYTHING_MASK,
                   title: "Resume every area",
                 })
               }
               className="rounded-md border border-emerald-300 bg-emerald-50 px-2.5 py-1 text-[12px] font-medium text-emerald-900 hover:bg-emerald-100 disabled:opacity-50"
             >
               Resume everything
+            </button>
+          )}
+          {controls.closeBootstrap && (
+            <button
+              type="button"
+              disabled={tx.isSending}
+              onClick={() =>
+                setPending({
+                  action: "bootstrap",
+                  bits: PLATFORM_BOOTSTRAP_OPEN,
+                  title: "Close the bootstrap window",
+                })
+              }
+              className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1 text-[12px] font-medium text-amber-900 hover:bg-amber-100 disabled:opacity-50"
+            >
+              Close bootstrap window
             </button>
           )}
         </div>
@@ -222,13 +262,19 @@ export function PauseFlagsPanel({
                       setPending({
                         action: "resume",
                         bits: flag.bit,
-                        title: `Resume ${flag.label.toLowerCase()}`,
+                        title:
+                          flag.bit === PAUSE_PAYOUT_MODULES
+                            ? "Enable the payout modules (clear 0x40)"
+                            : `Resume ${flag.label.toLowerCase()}`,
                       })
                     }
                     className="rounded-md border border-slate-300 px-2 py-0.5 text-[11.5px] font-medium text-slate-800 hover:border-slate-400 disabled:opacity-50"
                   >
-                    Resume
+                    {flag.bit === PAUSE_PAYOUT_MODULES ? "Enable" : "Resume"}
                   </button>
+                )}
+                {paused && flag.bit === PAUSE_PAYOUT_MODULES && !allowPayoutModules && (
+                  <span className="text-[11px] text-slate-500">Stays off on mainnet</span>
                 )}
                 {action === "pause" && (
                   <button
@@ -261,12 +307,7 @@ export function PauseFlagsPanel({
           next to each area as the set mask and a clear mask of 0x00.
         </p>
       )}
-      {unknown !== 0 && (
-        <p className="mt-2 text-xs text-amber-700">
-          Undefined bits {formatPauseFlags(unknown)} are set. They pause
-          nothing; the Super Admin can clear them with Resume everything.
-        </p>
-      )}
+
       <p className="mt-2 text-xs text-slate-500">
         {PAUSE_EXITS_OPEN} The transfer hook never reads the pause.{" "}
         {isSuperAdmin
@@ -283,9 +324,31 @@ export function PauseFlagsPanel({
           onConfirm={(reason) => apply(reason)}
           title={pending.title}
           kind={pending.action === "pause" ? "destructive" : "warning"}
-          confirmLabel={pending.action === "pause" ? "Pause" : "Resume"}
+          confirmLabel={
+            pending.action === "pause"
+              ? "Pause"
+              : pending.action === "bootstrap"
+                ? "Close window"
+                : pending.bits === PAUSE_PAYOUT_MODULES
+                  ? "Enable payout modules"
+                  : "Resume"
+          }
           description={
-            pending.action === "pause" ? (
+            pending.action === "bootstrap" ? (
+              <p>
+                Closes the one-way bootstrap window for good: from now on
+                every Admin grant and Super Admin rotation waits its 48 hours.
+                No area is resumed. The reason is recorded in the audit log.
+              </p>
+            ) : pending.action === "resume" && pending.bits === PAUSE_PAYOUT_MODULES ? (
+              <p>
+                This switches the payout and Merkle modules <strong>on</strong>:
+                Startup raises, yield routing, Rights-Token issuances and
+                milestones. They are off on mainnet by decision (D2); do this
+                only on a test network, on purpose. The reason is recorded in
+                the audit log.
+              </p>
+            ) : pending.action === "pause" ? (
               <p>
                 This stops:{" "}
                 <strong>
@@ -300,10 +363,11 @@ export function PauseFlagsPanel({
                 This resumes:{" "}
                 <strong>
                   {describePausedAreas(pending.bits & flags) ||
-                    "undefined bits only"}
+                    "nothing paused (it only closes the bootstrap window)"}
                 </strong>
-                . Resume only once the cause of the pause is resolved. The
-                reason is recorded in the audit log.
+                . The payout modules stay as they are, and the bootstrap
+                window closes for good. Resume only once the cause of the
+                pause is resolved. The reason is recorded in the audit log.
               </p>
             )
           }

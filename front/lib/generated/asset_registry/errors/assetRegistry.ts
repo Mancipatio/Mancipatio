@@ -172,7 +172,7 @@ export const ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_POST_LAUNCH_MINT = 0x17bc; // 6
 export const ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED = 0x17bd; // 6077
 /** MintDestinationNotBound: Destination must be the issuer treasury or the escrow of a CustodyVault / RightsIssuance of this mint (pass that PDA in remaining accounts) */
 export const ASSET_REGISTRY_ERROR__MINT_DESTINATION_NOT_BOUND = 0x17be; // 6078
-/** ClawbackHolderStillEligible: Clawback requires the holder's KYC entry to be Revoked or expired */
+/** ClawbackHolderStillEligible: Clawback requires the holder's KYC entry to be Revoked, or expired for at least 30 days */
 export const ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE = 0x17bf; // 6079
 /** ClawbackNotKycGated: Clawback is only available on KycGated mints */
 export const ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED = 0x17c0; // 6080
@@ -300,6 +300,32 @@ export const ASSET_REGISTRY_ERROR__ACCOUNT_NOT_CLOSABLE = 0x17fc; // 6140
 export const ASSET_REGISTRY_ERROR__BENEFICIARY_NOT_ALLOWED = 0x17fd; // 6141
 /** VaultTypeRetired: ConversionPending custody vaults are retired; holder conversions use a DeliveryEscrow */
 export const ASSET_REGISTRY_ERROR__VAULT_TYPE_RETIRED = 0x17fe; // 6142
+/** IssuerProceedsFrozen: Issuer proceeds are frozen; this path stays closed until the super admin unfreezes the issuer */
+export const ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN = 0x17ff; // 6143
+/** PartyBlocklisted: A party to this transfer is on the transfer-hook blocklist (live BlockEntry) */
+export const ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED = 0x1800; // 6144
+/** SaleDurationInvalid: Sale end_ts is required and must be at most 365 days after max(start_ts, now) */
+export const ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID = 0x1801; // 6145
+/** KycExpiryTooFar: KYC entry expiry may be at most 2 years from now */
+export const ASSET_REGISTRY_ERROR__KYC_EXPIRY_TOO_FAR = 0x1802; // 6146
+/** VotingPeriodTooShort: A payout vault vote must run for at least 7 days */
+export const ASSET_REGISTRY_ERROR__VOTING_PERIOD_TOO_SHORT = 0x1803; // 6147
+/** DeliveryDeadlineOutOfRange: A DeliveryEscrow deadline must be between now + 24 hours and now + 365 days */
+export const ASSET_REGISTRY_ERROR__DELIVERY_DEADLINE_OUT_OF_RANGE = 0x1804; // 6148
+/** DealExpiryOutOfRange: An OTC deal expiry must be in the future and at most 90 days away */
+export const ASSET_REGISTRY_ERROR__DEAL_EXPIRY_OUT_OF_RANGE = 0x1805; // 6149
+/** TimelockActive: This change is still inside its timelock */
+export const ASSET_REGISTRY_ERROR__TIMELOCK_ACTIVE = 0x1806; // 6150
+/** ProposalExpired: This proposal has expired; propose again */
+export const ASSET_REGISTRY_ERROR__PROPOSAL_EXPIRED = 0x1807; // 6151
+/** InvalidAdminProposal: Admin proposal does not match the executing key or the current super admin */
+export const ASSET_REGISTRY_ERROR__INVALID_ADMIN_PROPOSAL = 0x1808; // 6152
+/** InvalidPlatformRecovery: Super-admin recovery does not match the current super admin, the executing key or the current upgrade authority */
+export const ASSET_REGISTRY_ERROR__INVALID_PLATFORM_RECOVERY = 0x1809; // 6153
+/** PayoutModulesClearNotExplicit: PAUSE_PAYOUT_MODULES may only be cleared on its own (clear_mask == 0x40) */
+export const ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT = 0x180a; // 6154
+/** PlatformRecoveryPending: A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation */
+export const ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING = 0x180b; // 6155
 
 export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ACCOUNT_MIGRATION_REQUIRED
@@ -322,8 +348,10 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED
   | typeof ASSET_REGISTRY_ERROR__DEAL_ALREADY_DEPOSITED
   | typeof ASSET_REGISTRY_ERROR__DEAL_EXPIRED
+  | typeof ASSET_REGISTRY_ERROR__DEAL_EXPIRY_OUT_OF_RANGE
   | typeof ASSET_REGISTRY_ERROR__DEAL_NOT_EXPIRED
   | typeof ASSET_REGISTRY_ERROR__DEAL_NOT_OPEN
+  | typeof ASSET_REGISTRY_ERROR__DELIVERY_DEADLINE_OUT_OF_RANGE
   | typeof ASSET_REGISTRY_ERROR__DELIVERY_VAULT_USE_RETURN
   | typeof ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY
   | typeof ASSET_REGISTRY_ERROR__DISTRIBUTION_NOT_ACTIVE
@@ -331,6 +359,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__ESCROW_NOT_EMPTY
   | typeof ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID
   | typeof ASSET_REGISTRY_ERROR__IMMUTABLE_OWNER_REQUIRED
+  | typeof ASSET_REGISTRY_ERROR__INVALID_ADMIN_PROPOSAL
   | typeof ASSET_REGISTRY_ERROR__INVALID_APPROVAL_WINDOW
   | typeof ASSET_REGISTRY_ERROR__INVALID_ASSET_ID
   | typeof ASSET_REGISTRY_ERROR__INVALID_AUTHORITY_TRANSFER
@@ -350,6 +379,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__INVALID_METADATA_FIELD
   | typeof ASSET_REGISTRY_ERROR__INVALID_OFFER_PARAMS
   | typeof ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS
+  | typeof ASSET_REGISTRY_ERROR__INVALID_PLATFORM_RECOVERY
   | typeof ASSET_REGISTRY_ERROR__INVALID_PRE_CLIFF_BPS
   | typeof ASSET_REGISTRY_ERROR__INVALID_PROPOSAL_PARAMS
   | typeof ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY
@@ -367,10 +397,12 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__INVALID_VESTING_ALLOCATION
   | typeof ASSET_REGISTRY_ERROR__INVALID_VESTING_SCHEDULE
   | typeof ASSET_REGISTRY_ERROR__ISSUER_NOT_VERIFIED
+  | typeof ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN
   | typeof ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED
   | typeof ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE
   | typeof ASSET_REGISTRY_ERROR__ISSUER_REGISTRATION_NOT_RECOVERABLE
   | typeof ASSET_REGISTRY_ERROR__KYC_EXPIRY_IN_PAST
+  | typeof ASSET_REGISTRY_ERROR__KYC_EXPIRY_TOO_FAR
   | typeof ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED
   | typeof ASSET_REGISTRY_ERROR__MAX_SUPPLY_EXCEEDED
   | typeof ASSET_REGISTRY_ERROR__MILESTONE_LOCKED
@@ -389,11 +421,15 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__OFFER_NOT_FUNDED
   | typeof ASSET_REGISTRY_ERROR__OFFER_NOT_OPEN
   | typeof ASSET_REGISTRY_ERROR__OVERFLOW
+  | typeof ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED
   | typeof ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED
+  | typeof ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT
   | typeof ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_POST_LAUNCH_MINT
   | typeof ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_REQUIRES_UNIT_SUPPLY
   | typeof ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_SINGLE_CLASS
   | typeof ASSET_REGISTRY_ERROR__PLATFORM_PAUSED
+  | typeof ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING
+  | typeof ASSET_REGISTRY_ERROR__PROPOSAL_EXPIRED
   | typeof ASSET_REGISTRY_ERROR__PROPOSAL_NOT_ACTIVE
   | typeof ASSET_REGISTRY_ERROR__PROPOSAL_NOT_ENDED
   | typeof ASSET_REGISTRY_ERROR__RECEIVER_JURISDICTION_BLOCKED
@@ -404,6 +440,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__REVERT_NOT_ALLOWED
   | typeof ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED
   | typeof ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH
+  | typeof ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID
   | typeof ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE
   | typeof ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED
   | typeof ASSET_REGISTRY_ERROR__SALE_NOT_OPEN
@@ -414,6 +451,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL
   | typeof ASSET_REGISTRY_ERROR__SALE_WINDOW_CLOSED
   | typeof ASSET_REGISTRY_ERROR__SUPPLY_LOCKED
+  | typeof ASSET_REGISTRY_ERROR__TIMELOCK_ACTIVE
   | typeof ASSET_REGISTRY_ERROR__TOO_MANY_SHARE_CLASSES
   | typeof ASSET_REGISTRY_ERROR__TRANCHE_NOT_DUE
   | typeof ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN
@@ -444,6 +482,7 @@ export type AssetRegistryError =
   | typeof ASSET_REGISTRY_ERROR__VOTE_NOT_ENDED
   | typeof ASSET_REGISTRY_ERROR__VOTING_CLOSED
   | typeof ASSET_REGISTRY_ERROR__VOTING_NOT_STARTED
+  | typeof ASSET_REGISTRY_ERROR__VOTING_PERIOD_TOO_SHORT
   | typeof ASSET_REGISTRY_ERROR__WRONG_DEAL_PARTY;
 
 let assetRegistryErrorMessages: Record<AssetRegistryError, string> | undefined;
@@ -460,7 +499,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__CANNOT_REVOKE_PLATFORM_ADMIN]: `Rotate the platform admin before revoking its global admin role`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_DESTINATION_INVALID]: `Clawback destination must be the escrow of an Active RedemptionQueue + BurnAndAttest custody vault of this share class`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_NOT_BLOCKED]: `Holder is not on the transfer-hook blocklist (no live BlockEntry for this wallet)`,
-    [ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE]: `Clawback requires the holder's KYC entry to be Revoked or expired`,
+    [ASSET_REGISTRY_ERROR__CLAWBACK_HOLDER_STILL_ELIGIBLE]: `Clawback requires the holder's KYC entry to be Revoked, or expired for at least 30 days`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_NOT_KYC_GATED]: `Clawback is only available on KycGated mints`,
     [ASSET_REGISTRY_ERROR__CLAWBACK_TARGET_IS_ESCROW]: `Clawback target is a program escrow, not a holder wallet`,
     [ASSET_REGISTRY_ERROR__CONVERTIBLE_TARGET_INVALID]: `Convertible target must be an existing share class of the same asset and not the class itself`,
@@ -469,8 +508,10 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__CUSTODY_KYC_REGISTRY_REQUIRED]: `A DeliveryEscrow custody vault must pin a KYC registry at open; realize must pass it with the beneficiary's KYC entry`,
     [ASSET_REGISTRY_ERROR__DEAL_ALREADY_DEPOSITED]: `This side of the OTC deal is already deposited`,
     [ASSET_REGISTRY_ERROR__DEAL_EXPIRED]: `OTC deal has expired`,
+    [ASSET_REGISTRY_ERROR__DEAL_EXPIRY_OUT_OF_RANGE]: `An OTC deal expiry must be in the future and at most 90 days away`,
     [ASSET_REGISTRY_ERROR__DEAL_NOT_EXPIRED]: `OTC deal has not expired yet`,
     [ASSET_REGISTRY_ERROR__DEAL_NOT_OPEN]: `OTC deal is not open`,
+    [ASSET_REGISTRY_ERROR__DELIVERY_DEADLINE_OUT_OF_RANGE]: `A DeliveryEscrow deadline must be between now + 24 hours and now + 365 days`,
     [ASSET_REGISTRY_ERROR__DELIVERY_VAULT_USE_RETURN]: `DeliveryEscrow vaults cannot be reverted — use return_custody_vault`,
     [ASSET_REGISTRY_ERROR__DEPOSITOR_NOT_BENEFICIARY]: `Only a DeliveryEscrow custody vault accepts deposits, and only from its own beneficiary`,
     [ASSET_REGISTRY_ERROR__DISTRIBUTION_NOT_ACTIVE]: `Distribution is not active for this action`,
@@ -478,6 +519,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__ESCROW_NOT_EMPTY]: `Escrow token account still holds tokens; only an empty escrow can be closed`,
     [ASSET_REGISTRY_ERROR__HOOK_CONFIG_INVALID]: `Transfer-hook config is missing or does not belong to this mint and share class`,
     [ASSET_REGISTRY_ERROR__IMMUTABLE_OWNER_REQUIRED]: `Share-token recipients must have the Token-2022 ImmutableOwner extension`,
+    [ASSET_REGISTRY_ERROR__INVALID_ADMIN_PROPOSAL]: `Admin proposal does not match the executing key or the current super admin`,
     [ASSET_REGISTRY_ERROR__INVALID_APPROVAL_WINDOW]: `Approval window out of range (1 hour to 90 days), or set for a non-Approval series`,
     [ASSET_REGISTRY_ERROR__INVALID_ASSET_ID]: `Asset id must be 1..=32 bytes`,
     [ASSET_REGISTRY_ERROR__INVALID_AUTHORITY_TRANSFER]: `Authority proposal does not match the current authority and accepting signer`,
@@ -497,6 +539,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__INVALID_METADATA_FIELD]: `Only the metadata uri field may be updated`,
     [ASSET_REGISTRY_ERROR__INVALID_OFFER_PARAMS]: `Invalid OTC offer parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_PAUSE_FLAGS]: `Pause flags contain undefined bits, or a bit is both set and cleared`,
+    [ASSET_REGISTRY_ERROR__INVALID_PLATFORM_RECOVERY]: `Super-admin recovery does not match the current super admin, the executing key or the current upgrade authority`,
     [ASSET_REGISTRY_ERROR__INVALID_PRE_CLIFF_BPS]: `Pre-cliff percentage exceeds 100%`,
     [ASSET_REGISTRY_ERROR__INVALID_PROPOSAL_PARAMS]: `Invalid governance proposal parameters`,
     [ASSET_REGISTRY_ERROR__INVALID_PROPOSED_AUTHORITY]: `Proposed authority must be a different nonzero key`,
@@ -514,10 +557,12 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__INVALID_VESTING_ALLOCATION]: `Allocation must be greater than zero`,
     [ASSET_REGISTRY_ERROR__INVALID_VESTING_SCHEDULE]: `Invalid vesting schedule: 1-64 tranches, strictly ascending unlock times, every amount > 0`,
     [ASSET_REGISTRY_ERROR__ISSUER_NOT_VERIFIED]: `Issuer KYB is not verified`,
+    [ASSET_REGISTRY_ERROR__ISSUER_PROCEEDS_FROZEN]: `Issuer proceeds are frozen; this path stays closed until the super admin unfreezes the issuer`,
     [ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_EXPIRED]: `Issuer recovery execution window has passed; the super admin must re-propose`,
     [ASSET_REGISTRY_ERROR__ISSUER_RECOVERY_TIMELOCK_ACTIVE]: `Issuer recovery is still inside its 7-day timelock`,
     [ASSET_REGISTRY_ERROR__ISSUER_REGISTRATION_NOT_RECOVERABLE]: `Only an unverified issuer registration with no assets can be recovered`,
     [ASSET_REGISTRY_ERROR__KYC_EXPIRY_IN_PAST]: `KYC entry expiry is in the past`,
+    [ASSET_REGISTRY_ERROR__KYC_EXPIRY_TOO_FAR]: `KYC entry expiry may be at most 2 years from now`,
     [ASSET_REGISTRY_ERROR__KYC_PROOF_REQUIRED]: `Buy requires the mint's hook accounts (config or meta list) to prove its restriction mode`,
     [ASSET_REGISTRY_ERROR__MAX_SUPPLY_EXCEEDED]: `Mint would exceed the share class max supply`,
     [ASSET_REGISTRY_ERROR__MILESTONE_LOCKED]: `Vesting milestone is still locked`,
@@ -536,11 +581,15 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__OFFER_NOT_FUNDED]: `OTC offer escrow is not funded with enough units`,
     [ASSET_REGISTRY_ERROR__OFFER_NOT_OPEN]: `OTC offer is not open`,
     [ASSET_REGISTRY_ERROR__OVERFLOW]: `Numeric overflow`,
+    [ASSET_REGISTRY_ERROR__PARTY_BLOCKLISTED]: `A party to this transfer is on the transfer-hook blocklist (live BlockEntry)`,
     [ASSET_REGISTRY_ERROR__PAUSE_CLEAR_NOT_ALLOWED]: `Only the super admin may clear pause flags`,
+    [ASSET_REGISTRY_ERROR__PAYOUT_MODULES_CLEAR_NOT_EXPLICIT]: `PAUSE_PAYOUT_MODULES may only be cleared on its own (clear_mask == 0x40)`,
     [ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_POST_LAUNCH_MINT]: `A PhysicalGood share class must not be mintable post-launch`,
     [ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_REQUIRES_UNIT_SUPPLY]: `A PhysicalGood asset's share class must have max_supply = 1`,
     [ASSET_REGISTRY_ERROR__PHYSICAL_GOOD_SINGLE_CLASS]: `A PhysicalGood asset can hold exactly one share class (class_index 0)`,
     [ASSET_REGISTRY_ERROR__PLATFORM_PAUSED]: `Platform is paused`,
+    [ASSET_REGISTRY_ERROR__PLATFORM_RECOVERY_PENDING]: `A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation`,
+    [ASSET_REGISTRY_ERROR__PROPOSAL_EXPIRED]: `This proposal has expired; propose again`,
     [ASSET_REGISTRY_ERROR__PROPOSAL_NOT_ACTIVE]: `Proposal is not active`,
     [ASSET_REGISTRY_ERROR__PROPOSAL_NOT_ENDED]: `Proposal voting window has not ended yet`,
     [ASSET_REGISTRY_ERROR__RECEIVER_JURISDICTION_BLOCKED]: `Receiver's jurisdiction is not allowed by the registry`,
@@ -551,6 +600,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__REVERT_NOT_ALLOWED]: `Revert not allowed — without a positive deadline only the vault authority may revert`,
     [ASSET_REGISTRY_ERROR__SALE_APPROVAL_EXPIRED]: `Sale approval has expired`,
     [ASSET_REGISTRY_ERROR__SALE_APPROVAL_MISMATCH]: `Sale does not match its approval (issuer, share class, payment mint, raise type or rent recipient)`,
+    [ASSET_REGISTRY_ERROR__SALE_DURATION_INVALID]: `Sale end_ts is required and must be at most 365 days after max(start_ts, now)`,
     [ASSET_REGISTRY_ERROR__SALE_EXCEEDS_APPROVED_RAISE]: `price_per_unit x total_for_sale exceeds the approved maximum gross raise`,
     [ASSET_REGISTRY_ERROR__SALE_ID_ALREADY_USED]: `A sale with this id already exists for the share class`,
     [ASSET_REGISTRY_ERROR__SALE_NOT_OPEN]: `Sale is not open`,
@@ -561,6 +611,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__SALE_VESTING_OUTSIDE_APPROVAL]: `Sale cliff / vesting months differ from the approved schedule`,
     [ASSET_REGISTRY_ERROR__SALE_WINDOW_CLOSED]: `Sale window has closed`,
     [ASSET_REGISTRY_ERROR__SUPPLY_LOCKED]: `Share class supply is locked — minting is closed`,
+    [ASSET_REGISTRY_ERROR__TIMELOCK_ACTIVE]: `This change is still inside its timelock`,
     [ASSET_REGISTRY_ERROR__TOO_MANY_SHARE_CLASSES]: `Share class limit reached for this asset`,
     [ASSET_REGISTRY_ERROR__TRANCHE_NOT_DUE]: `Next tranche is not due yet`,
     [ASSET_REGISTRY_ERROR__TREASURY_MINT_REQUIRES_ADMIN]: `Minting into the issuer treasury requires a platform Admin issuer key; the MINT permission only funds custody or rights escrows`,
@@ -591,6 +642,7 @@ if (process.env.NODE_ENV !== "production") {
     [ASSET_REGISTRY_ERROR__VOTE_NOT_ENDED]: `Vault vote has already ended`,
     [ASSET_REGISTRY_ERROR__VOTING_CLOSED]: `Voting window has closed`,
     [ASSET_REGISTRY_ERROR__VOTING_NOT_STARTED]: `Voting has not started yet`,
+    [ASSET_REGISTRY_ERROR__VOTING_PERIOD_TOO_SHORT]: `A payout vault vote must run for at least 7 days`,
     [ASSET_REGISTRY_ERROR__WRONG_DEAL_PARTY]: `Signer is not the required deal party`,
   };
 }

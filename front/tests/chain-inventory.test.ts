@@ -2,11 +2,12 @@ import fs from "node:fs";
 import path from "node:path";
 import { getAddressEncoder, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
-import { getAuthorityTransferEncoder } from "@/lib/generated/asset_registry";
+import { getAuthorityProposalEncoder } from "@/lib/generated/asset_registry";
 import { bootstrapTool } from "@/scripts/chain/lib/bootstrap-plan";
 import { runTool } from "@/scripts/chain/lib/context";
 import { resolveIdlSources, type IdlProbe } from "@/scripts/chain/lib/idl-plan";
 import {
+  LEGACY_AUTHORITY_TRANSFER,
   collectInventory,
   inventoryFindings,
   inventoryTool,
@@ -93,6 +94,16 @@ function clean(map: RoleMap): Inventory {
   };
 }
 
+/** A 64-byte ELF64 LE header with the given e_machine and e_flags. */
+function elf(eFlags: number, eMachine = EM_BPF): Uint8Array {
+  const bytes = new Uint8Array(128);
+  bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  const view = new DataView(bytes.buffer);
+  view.setUint16(0x12, eMachine, true);
+  view.setUint32(0x30, eFlags, true);
+  return bytes;
+}
+
 const bySeverity = (findings: Finding[], code: string) => findings.filter((f) => f.code === code).map((f) => f.severity);
 const phases: InventoryPhase[] = ["in-progress", "pre-handover", "handed-over"];
 
@@ -100,6 +111,92 @@ describe("inventory findings (§6)", () => {
   it("a clean handed-over state has no findings", async () => {
     const { map } = await world();
     expect(inventoryFindings(clean(map), map, "handed-over")).toEqual([]);
+  });
+
+  it("v1.0.0-rc: timelocked proposals, recoveries, bit 7, 0x40 on mainnet, incident bytes and rc.x accounts", async () => {
+    const { map } = await world();
+    const pending = { address: key(150), newAdmin: key(151), proposedBy: map.superAdmin, eta: "10", expiresAt: "20", stale: false };
+    const withPending = { ...clean(map), pendingAdmins: [pending] };
+    expect(phases.map((phase) => bySeverity(inventoryFindings(withPending, map, phase), "pending-admin"))).toEqual([["info"], ["blocker"], ["blocker"]]);
+    const stale = { ...clean(map), pendingAdmins: [{ ...pending, stale: true }] };
+    expect(bySeverity(inventoryFindings(stale, map, "in-progress"), "pending-admin")).toEqual(["warning"]);
+    const recovery = { address: key(152), currentAuthority: map.superAdmin, newAuthority: key(153), proposedBy: map.squads.vault, eta: "1", expiresAt: "2", stale: false };
+    const withRecovery = { ...clean(map), recoveries: { platform: recovery, blocklist: null } };
+    expect(phases.map((phase) => bySeverity(inventoryFindings(withRecovery, map, phase), "pending-recovery"))).toEqual([["warning"], ["blocker"], ["blocker"]]);
+    // Bit 7 still open once the final super admin holds the platform (X1): blocker in every phase.
+    const open = clean(map);
+    open.platform!.pauseFlags = 0x80;
+    open.platform!.pauseFlagsHex = "0x80";
+    expect(phases.map((phase) => bySeverity(inventoryFindings(open, map, phase), "bootstrap-open"))).toEqual([["blocker"], ["blocker"], ["blocker"]]);
+    // Bit 7 with an emergency area clear (an rc.x build unpaused, a rollback): a blocker even without a role map.
+    const rolledBack = clean(map);
+    rolledBack.platform!.pauseFlags = 0x80 | 0x1c;
+    rolledBack.platform!.pauseFlagsHex = "0x9c";
+    expect(bySeverity(inventoryFindings(rolledBack, null, "in-progress"), "bootstrap-open")).toEqual(["blocker"]);
+    const fresh = clean(map);
+    fresh.platform!.pauseFlags = 0xff;
+    fresh.platform!.pauseFlagsHex = "0xff";
+    expect(bySeverity(inventoryFindings(fresh, null, "in-progress"), "bootstrap-open")).toEqual(["info"]);
+    // Only the emergency areas count as paused.
+    const payout = clean(map);
+    payout.platform!.pauseFlags = 0x40;
+    payout.platform!.pauseFlagsHex = "0x40";
+    expect(inventoryFindings(payout, map, "handed-over")).toEqual([]);
+    // 0x40 clear on mainnet (no role map: the network option decides).
+    expect(bySeverity(inventoryFindings(clean(map), null, "in-progress", { network: "mainnet" }), "payout-modules")).toEqual(["blocker"]);
+    expect(bySeverity(inventoryFindings(payout, null, "in-progress", { network: "mainnet" }), "payout-modules")).toEqual([]);
+    // The deployer as super admin with a pause bit clear (K1.3).
+    const deployerSa = clean(map);
+    deployerSa.platform!.admin = map.deployer;
+    expect(bySeverity(inventoryFindings(deployerSa, map, "in-progress"), "deployer-unpaused")).toEqual(["blocker"]);
+    // Incident bytes live; an rc.x transfer left on chain; a freeze is information.
+    const incident = clean(map);
+    incident.programs[1].incident = true;
+    expect(bySeverity(inventoryFindings(incident, map, "in-progress"), "incident-bytes")).toEqual(["blocker"]);
+    const legacy = { ...clean(map), legacyTransfers: [{ address: key(154), program: "transfer_hook" as const, size: 73 }] };
+    expect(bySeverity(inventoryFindings(legacy, map, "in-progress"), "legacy-transfer")).toEqual(["blocker"]);
+    const frozen = { ...clean(map), issuerFreezes: [{ address: key(155), issuer: key(156), frozenBy: map.superAdmin, frozenAt: "7" }] };
+    expect(bySeverity(inventoryFindings(frozen, map, "handed-over"), "issuer-freeze")).toEqual(["info"]);
+    // A live custody proposal at handover.
+    const custody = clean(map);
+    custody.authorityTransfers = [{ address: key(157), target: key(158), kind: "custody", currentAuthority: key(159), newAuthority: key(160), proposedBy: map.superAdmin, stale: false }];
+    expect(phases.map((phase) => bySeverity(inventoryFindings(custody, map, phase), "pending-proposal"))).toEqual([[], ["blocker"], ["blocker"]]);
+  });
+
+  it("the upgrade authority holds no operational role: SA == UA, BA == UA, Admin == UA are blockers (review finding 6)", async () => {
+    const { map } = await world();
+    const vault = map.squads.vault;
+    // The live UA (the vault after S7) as the super admin, the BA and an Admin.
+    const inv = clean(map);
+    inv.platform!.admin = vault;
+    inv.blocklist!.authority = vault;
+    inv.admins.push({ record: key(141), admin: vault, addedBy: map.superAdmin });
+    for (const code of ["sa-is-ua", "ba-is-ua", "admin-is-ua"]) {
+      expect(phases.map((phase) => bySeverity(inventoryFindings(inv, map, phase), code)), code).toEqual([["blocker"], ["blocker"], ["blocker"]]);
+    }
+    expect(inventoryFindings(inv, map, "handed-over").find((f) => f.code === "sa-is-ua")!.message).toMatch(/the asset_registry upgrade authority and the transfer_hook upgrade authority/);
+    // Before S7 the deployer is the UA: its roles are the deployer's own findings,
+    // but the vault S7 installs is checked already (a blocker from pre-handover).
+    const before = clean(map);
+    for (const p of before.programs) p.upgradeAuthority = map.deployer;
+    before.platform!.admin = map.deployer;
+    before.admins.push({ record: key(142), admin: map.deployer, addedBy: map.deployer });
+    expect(inventoryFindings(before, map, "in-progress").filter((f) => f.code.endsWith("-is-ua"))).toEqual([]);
+    const vaultSa = clean(map);
+    for (const p of vaultSa.programs) p.upgradeAuthority = map.deployer;
+    vaultSa.platform!.admin = vault;
+    expect(phases.map((phase) => bySeverity(inventoryFindings(vaultSa, map, phase), "sa-is-ua"))).toEqual([["warning"], ["blocker"], []]);
+    expect(inventoryFindings(vaultSa, map, "pre-handover").find((f) => f.code === "sa-is-ua")!.message).toMatch(/the Squads vault \(the upgrade authority after S7\)/);
+    // Without a role map: a blocker from pre-handover on (in progress it may still be the deployer).
+    expect(phases.map((phase) => bySeverity(inventoryFindings(inv, null, phase), "ba-is-ua"))).toEqual([["warning"], ["blocker"], ["blocker"]]);
+  });
+
+  it("a mainnet Release must be SBPF v3 (release-sbpf)", async () => {
+    const { map } = await world();
+    const inv = clean(map);
+    inv.sbpf = [sbpfVersionOf("asset_registry", elf(0)), sbpfVersionOf("transfer_hook", elf(3, EM_SBPF))];
+    expect(bySeverity(inventoryFindings(inv, null, "in-progress", { network: "mainnet" }), "release-sbpf")).toEqual(["blocker"]);
+    expect(bySeverity(inventoryFindings(inv, map, "in-progress"), "release-sbpf")).toEqual([]);
   });
 
   it("deployer roles: info while in progress, blockers at handover; its UA only after handover", async () => {
@@ -191,6 +288,24 @@ describe("inventory findings (§6)", () => {
     paused.platform!.pauseFlagsHex = "0x3f";
     expect(bySeverity(inventoryFindings(paused, map, "pre-handover"), "paused")).toEqual(["blocker"]);
     expect(bySeverity(inventoryFindings(paused, map, "pre-handover", { handoverWhilePaused: true }), "paused")).toEqual(["info"]);
+    // The company pilot (unpauseMask 0x23): S6 leaves 0x1c paused on purpose
+    // and 0x40 stays set, so the Platform reads 0x5c at handover and after it.
+    // Only the mask's areas block; the pilot areas are an info.
+    const pilotMap = { ...map, unpauseMask: 0x23 };
+    const pilot = clean(pilotMap);
+    pilot.platform!.pauseFlags = 0x5c;
+    pilot.platform!.pauseFlagsHex = "0x5c";
+    for (const phase of ["pre-handover", "handed-over"] as const) {
+      const findings = inventoryFindings(pilot, pilotMap, phase);
+      expect(bySeverity(findings, "paused")).toEqual([]);
+      expect(bySeverity(findings, "pilot-paused")).toEqual(["info"]);
+      expect(findings.filter((f) => f.severity === "blocker")).toEqual([]);
+    }
+    // An area of the mask still paused (primary issuance, 0x02) blocks.
+    const notOpened = clean(pilotMap);
+    notOpened.platform!.pauseFlags = 0x5e;
+    notOpened.platform!.pauseFlagsHex = "0x5e";
+    expect(bySeverity(inventoryFindings(notOpened, pilotMap, "pre-handover"), "paused")).toEqual(["blocker"]);
     const idl = clean(map);
     idl.idl[0] = probe("asset_registry", { status: "update" });
     idl.idl[1] = probe("transfer_hook", { trimmed: false, extraAuthority: key(160) });
@@ -265,15 +380,6 @@ describe("role overlaps (Talas 8.2)", () => {
 });
 
 describe("cluster gates: SIMD-0500 and rent (release-lanac-6, -7)", () => {
-  /** A 64-byte ELF64 LE header with the given e_machine and e_flags. */
-  function elf(eFlags: number, eMachine = EM_BPF): Uint8Array {
-    const bytes = new Uint8Array(128);
-    bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
-    const view = new DataView(bytes.buffer);
-    view.setUint16(0x12, eMachine, true);
-    view.setUint32(0x30, eFlags, true);
-    return bytes;
-  }
   const gates = (states: Partial<Record<string, "pending" | "active">> = {}, lamportsPerByte = 5080): NetworkGates => ({
     lamportsPerByte,
     features: FEATURE_GATES.map((gate) => {
@@ -403,18 +509,35 @@ describe("Squads proposals (6.1 rehearsal: failed executions stay Approved)", ()
 describe("inventory collection on a live-shaped chain", () => {
   it("collects admins, proposals, transfers (stale flagged), buffers and the Squads decode", async () => {
     const w = await world();
-    const dry = await runTool("bootstrap", env(w), bootstrapTool, deps(w));
-    const sent = await runTool("bootstrap", sendEnv(w, dry.planDigest as string), bootstrapTool, deps(w));
+    // The admin executes its own add_admin (rehearsal signer), so S5 lands in the same cycle.
+    const rehearsal = { CHAIN_REHEARSAL_SIGNERS: `admin=${w.pairs.admin.path}` };
+    const dry = await runTool("bootstrap", env(w, rehearsal), bootstrapTool, deps(w));
+    const sent = await runTool("bootstrap", sendEnv(w, dry.planDigest as string, rehearsal), bootstrapTool, deps(w));
     expect(sent.error ?? null).toBeNull();
-    // A stale transfer, a loader buffer of the deployer and a PM buffer of the bufferWriter.
+    // A stale proposal, an rc.x AuthorityTransfer (137 B), a loader buffer of
+    // the deployer and a PM buffer of the bufferWriter.
     const registry = w.map.kyc.registry!;
     w.chain.set(key(180), {
       owner: REGISTRY,
-      lamports: rent(137),
+      lamports: rent(163),
       data: new Uint8Array(
-        getAuthorityTransferEncoder().encode({ target: registry, currentAuthority: key(181), newAuthority: key(182), proposedBy: key(181), bump: 255 }),
+        getAuthorityProposalEncoder().encode({
+          target: registry,
+          currentAuthority: key(181),
+          newAuthority: key(182),
+          proposedBy: key(181),
+          proposedAt: 0,
+          eta: 0,
+          expiresAt: 1,
+          kind: 3,
+          version: 1,
+          bump: 255,
+        }),
       ),
     });
+    const legacy = new Uint8Array(LEGACY_AUTHORITY_TRANSFER.size);
+    legacy.set(LEGACY_AUTHORITY_TRANSFER.discriminator);
+    w.chain.set(key(185), { owner: REGISTRY, lamports: rent(137), data: legacy });
     const loaderBuffer = new Uint8Array(37 + 4);
     new DataView(loaderBuffer.buffer).setUint32(0, 1, true);
     loaderBuffer[4] = 1;
@@ -428,7 +551,11 @@ describe("inventory collection on a live-shaped chain", () => {
     const idlSources = resolveIdlSources({ env: {}, config: { network: "devnet" } as never, frontDir: path.join(root, "front") }, null);
     const inv = await collectInventory(rpcFor(w), { map: w.map, release: null, idlSources, lockPresent: false, kycPin: registry, scanBuffers: true });
     expect(inv.admins.map((a) => a.admin).sort()).toEqual([w.keys.deployer, ...w.keys.admins].sort());
-    expect(inv.platform).toMatchObject({ admin: w.keys.deployer, proposed: w.keys.superAdmin, pauseFlagsHex: "0x3f" });
+    // v1: a fresh Platform is 0xff (every pause bit plus the bootstrap window).
+    expect(inv.platform).toMatchObject({ admin: w.keys.deployer, proposed: w.keys.superAdmin, pauseFlagsHex: "0xff" });
+    expect(inv.pendingAdmins).toEqual([]);
+    expect(inv.legacyTransfers).toEqual([{ address: key(185), program: "asset_registry", size: 137 }]);
+    expect(inv.recoveries).toEqual({ platform: null, blocklist: null });
     expect(inv.blocklist).toEqual({ authority: w.keys.deployer, proposed: w.keys.blocklistAuthority });
     expect(inv.kycRegistries).toEqual([{ address: registry, authority: w.keys.deployer, entriesCount: "0", proposed: w.keys.kycAuthority }]);
     const kinds = inv.authorityTransfers.map((t) => [t.kind, t.stale]).sort();
@@ -442,6 +569,8 @@ describe("inventory collection on a live-shaped chain", () => {
     expect(findings.find((f) => f.code === "deployer-role")?.severity).toBe("info");
     expect(findings.filter((f) => f.code === "buffer").map((f) => f.severity)).toEqual(["warning", "warning"]);
     expect(findings.find((f) => f.code === "stale-transfer")?.severity).toBe("warning");
+    expect(findings.find((f) => f.code === "legacy-transfer")?.severity).toBe("blocker");
+    expect(findings.find((f) => f.code === "bootstrap-open")?.severity).toBe("info");
   });
 
   it("lists the multisig's open proposals: Approved (also stale) and Active, not the final ones", async () => {

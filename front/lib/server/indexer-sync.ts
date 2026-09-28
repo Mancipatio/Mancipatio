@@ -1,11 +1,14 @@
 import "server-only";
 import { randomUUID } from "node:crypto";
-import { address } from "@solana/kit";
+import { address, getBase58Decoder, type Base58EncodedBytes, type ReadonlyUint8Array } from "@solana/kit";
 import { getServerRpc } from "@/lib/server/rpc";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { SiwsError } from "@/lib/server/siws";
-import { decodeIndexerAccount, INDEXER_ENTITIES, INDEXER_LAYOUT_VERSION, INDEXER_PROGRAM, type DecodedIndexerAccount } from "@/lib/server/indexer-accounts";
+import { LEGACY_BLOCKLIST_AUTHORITY_TRANSFER, legacyAccountType } from "@/lib/legacy-accounts";
+import {
+  ALL_INDEXER_ENTITIES, decodeIndexerAccount, INDEXER_HOOK_PROGRAM, INDEXER_LAYOUT_VERSION, INDEXER_PROGRAM, type DecodedIndexerAccount,
+} from "@/lib/server/indexer-accounts";
 
 type Job = { id: string; network: string; signature: string; slot: number | string | null; wallets: string[]; attempts: number };
 type Stats = { complete: number; pending: number; invalid: number };
@@ -101,6 +104,31 @@ export async function reconcileIndexerJobs(limit = 10, deadlineMs = Date.now() +
   return stats;
 }
 
+/** An rc.x account the v1 programs can neither read nor close (lib/legacy-accounts.ts). */
+export type LegacyAccountRow = { address: string; program: "asset_registry" | "transfer_hook"; type: string; size: number };
+type HookScan = { discriminator: ReadonlyUint8Array; size: number };
+
+/**
+ * One transfer_hook scan: the program's accounts of ONE layout (discriminator
+ * and exact size), at finalized and no older than the registry snapshot. The
+ * hook also owns a BlockEntry per blocked wallet and the per-mint accounts,
+ * none of them mirrored, so the scan is filtered instead of complete.
+ */
+async function scanHook(scan: HookScan, minContextSlot: number, deadlineMs: number, signal?: AbortSignal) {
+  const prefix = getBase58Decoder().decode(Uint8Array.from(scan.discriminator)) as Base58EncodedBytes;
+  const snapshot = await getServerRpc().getProgramAccounts(INDEXER_HOOK_PROGRAM, {
+    encoding: "base64", commitment: "finalized", withContext: true, minContextSlot: BigInt(minContextSlot),
+    filters: [{ memcmp: { offset: BigInt(0), encoding: "base58", bytes: prefix } }, { dataSize: BigInt(scan.size) }],
+  }).send({ abortSignal: signalFor(deadlineMs, signal) });
+  if (!snapshot || !snapshot.context || !Array.isArray(snapshot.value)) throw new SiwsError(503, "Complete hook snapshot unavailable");
+  const slot = slotNumber(snapshot.context.slot);
+  if (slot < minContextSlot) throw new SiwsError(503, "Hook snapshot is older than the program snapshot");
+  for (const account of snapshot.value) {
+    if (!account?.account || account.account.owner !== INDEXER_HOOK_PROGRAM) throw new SiwsError(503, "Hook snapshot contains an unexpected account owner");
+  }
+  return { slot, accounts: snapshot.value as { pubkey: string; account: { owner: string; data: unknown } }[] };
+}
+
 async function reconcileCompleteSnapshot(deadlineMs: number, signal?: AbortSignal) {
   const network = detectNetwork();
   const sb = getSupabaseAdmin();
@@ -108,19 +136,46 @@ async function reconcileCompleteSnapshot(deadlineMs: number, signal?: AbortSigna
     .send({ abortSignal: signalFor(deadlineMs, signal) });
   if (!snapshot || !snapshot.context || !Array.isArray(snapshot.value)) throw new SiwsError(503, "Complete program snapshot unavailable");
   const slot = slotNumber(snapshot.context.slot);
-  const rows: DecodedIndexerAccount[] = [];
+  // Each group is applied at the slot of the snapshot it was read from.
+  const groups: { slot: number; rows: DecodedIndexerAccount[] }[] = [{ slot, rows: [] }];
+  const legacy: LegacyAccountRow[] = [];
   const chainPdas = new Set<string>();
+  /** The slot a table's closures are applied at: its own snapshot's. */
+  const closeSlot = new Map<string, number>();
   // Validate every tracked account before applying anything or deleting rows.
   for (const account of snapshot.value) {
     if (Date.now() >= deadlineMs) throw new SiwsError(503, "Reconcile deadline reached — try again");
     if (!account?.account || account.account.owner !== INDEXER_PROGRAM) throw new SiwsError(503, "Program snapshot contains an unexpected account owner");
     const encoded = bytes(account.account.data);
+    const old = legacyAccountType(account.account.owner, encoded);
+    if (old) { legacy.push({ address: String(account.pubkey), program: old.program, type: old.name, size: old.size }); continue; }
     const decoded = await decodeIndexerAccount(account.pubkey, account.account.owner, encoded);
-    if (decoded) { decoded.row.raw = { base64: Buffer.from(encoded).toString("base64") }; rows.push(decoded); chainPdas.add(account.pubkey); }
+    if (decoded) { decoded.row.raw = { base64: Buffer.from(encoded).toString("base64") }; groups[0].rows.push(decoded); chainPdas.add(account.pubkey); }
   }
+  // v1.0.0-rc: the mirrored hook layouts, then the rc.x hook transfer (report only).
+  for (const entity of ALL_INDEXER_ENTITIES.filter((e) => e.program === INDEXER_HOOK_PROGRAM)) {
+    const scan = await scanHook({ discriminator: entity.discriminator, size: entity.size! }, slot, deadlineMs, signal);
+    const group = { slot: scan.slot, rows: [] as DecodedIndexerAccount[] };
+    for (const account of scan.accounts) {
+      const encoded = bytes(account.account.data);
+      const decoded = await decodeIndexerAccount(account.pubkey, account.account.owner, encoded);
+      if (!decoded) throw new SiwsError(503, `Hook snapshot returned an account that is not a ${entity.table} row`);
+      decoded.row.raw = { base64: Buffer.from(encoded).toString("base64") };
+      group.rows.push(decoded);
+      chainPdas.add(account.pubkey);
+    }
+    groups.push(group);
+    closeSlot.set(entity.table, scan.slot);
+  }
+  const hookLegacy = await scanHook(LEGACY_BLOCKLIST_AUTHORITY_TRANSFER, slot, deadlineMs, signal);
+  for (const account of hookLegacy.accounts) {
+    const old = legacyAccountType(account.account.owner, bytes(account.account.data));
+    if (old) legacy.push({ address: String(account.pubkey), program: old.program, type: old.name, size: old.size });
+  }
+  const rows = groups.flatMap((group) => group.rows);
   const report: Record<string, { onchain: number; refreshed: number; deleted: number; missing: number; rebuilt: number }> = {};
   const existingByTable = new Map<string, Set<string>>();
-  for (const entity of INDEXER_ENTITIES) {
+  for (const entity of ALL_INDEXER_ENTITIES) {
     const existing = new Set<string>();
     let after: string | null = null;
     for (;;) {
@@ -137,25 +192,39 @@ async function reconcileCompleteSnapshot(deadlineMs: number, signal?: AbortSigna
     const missing = matching.filter(({ row }) => !existing.has(String(row.pda))).length;
     report[entity.table] = { onchain: matching.length, refreshed: 0, deleted: 0, missing, rebuilt: 0 };
   }
-  for (let from = 0; from < rows.length; from += 100) {
-    const batch = rows.slice(from, from + 100);
-    const result = await applySnapshot(network, slot, batch, [], null, signalFor(deadlineMs, signal));
-    for (const row of batch.filter(({ row }) => result.applied.includes(String(row.pda)))) {
-      if (existingByTable.get(row.table)!.has(String(row.row.pda))) report[row.table].refreshed++;
-      else report[row.table].rebuilt++;
+  for (const group of groups) {
+    for (let from = 0; from < group.rows.length; from += 100) {
+      const batch = group.rows.slice(from, from + 100);
+      const result = await applySnapshot(network, group.slot, batch, [], null, signalFor(deadlineMs, signal));
+      for (const row of batch.filter(({ row }) => result.applied.includes(String(row.pda)))) {
+        if (existingByTable.get(row.table)!.has(String(row.row.pda))) report[row.table].refreshed++;
+        else report[row.table].rebuilt++;
+      }
     }
   }
-  const closed = [...new Set([...existingByTable.values()].flatMap((set) => [...set]).filter((pda) => !chainPdas.has(pda)))];
-  for (let from = 0; from < closed.length; from += 100) {
-    const batch = closed.slice(from, from + 100);
-    const result = await applySnapshot(network, slot, [], batch, null, signalFor(deadlineMs, signal));
-    for (const [table, deleted] of Object.entries(result.deleted)) report[table].deleted += deleted.length;
+  // Rows whose account is gone, closed at their table's snapshot slot.
+  const closedBySlot = new Map<number, Set<string>>();
+  for (const [table, set] of existingByTable) {
+    const at = closeSlot.get(table) ?? slot;
+    for (const pda of set) {
+      if (chainPdas.has(pda)) continue;
+      if (!closedBySlot.has(at)) closedBySlot.set(at, new Set());
+      closedBySlot.get(at)!.add(pda);
+    }
+  }
+  for (const [at, set] of closedBySlot) {
+    const closed = [...set];
+    for (let from = 0; from < closed.length; from += 100) {
+      const batch = closed.slice(from, from + 100);
+      const result = await applySnapshot(network, at, [], batch, null, signalFor(deadlineMs, signal));
+      for (const [table, deleted] of Object.entries(result.deleted)) report[table].deleted += deleted.length;
+    }
   }
   const state = await sb.from("indexer_sync_state").upsert({ network, status: "ready", last_slot: slot,
     completed_at: new Date().toISOString(), checked_at: new Date().toISOString() }, { onConflict: "network" })
     .abortSignal(signalFor(deadlineMs, signal));
   if (state.error) throw new SiwsError(503, "Indexer sync acknowledgement unavailable");
-  return { network, slot, report };
+  return { network, slot, report, legacy };
 }
 
 export async function reconcileAllIndexerAccounts(deadlineMs = Date.now() + 45_000, signal?: AbortSignal) {

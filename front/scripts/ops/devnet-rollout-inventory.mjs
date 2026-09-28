@@ -33,6 +33,7 @@ import { execFileSync } from 'node:child_process';
 import { address, getAddressDecoder, getAddressEncoder, getProgramDerivedAddress } from '@solana/kit';
 import { isRegistryTombstone } from './closed-account-tag.mjs';
 import { candidateMatchesArtifact, readArtifactProvenance } from './artifact-provenance.mjs';
+import { legacyAccountType } from './legacy-accounts.mjs';
 
 const FRONT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const arg = (name, fallback) => { const i = process.argv.indexOf(name); return i < 0 ? fallback : process.argv[i + 1]; };
@@ -230,6 +231,15 @@ function decodeAccount(programName, pubkey, account) {
     } catch (error) { row.decode_error = error.message; evidence.blockers.push(`Cannot safely decode ${type.name} ${pubkey}: ${error.message}`); }
   } else if (account.executable || account.data.length >= 4 && account.data.readUInt32LE(0) === 2) {
     row.note = 'Non-Anchor program-owned data; inspected separately if executable';
+  } else if (legacyAccountType(programName, account.data)) {
+    // v1.0.0-rc (8.3): rc.x AuthorityTransfer (137 B) / BlocklistAuthorityTransfer
+    // (73 B) left the IDL. A known layout, not an unknown one; still a blocker:
+    // the v1 program can neither read nor close it (devnet plan B1).
+    const legacy = legacyAccountType(programName, account.data);
+    row.type = legacy.name;
+    row.legacy_rc = true;
+    row.discriminator_hex = account.data.subarray(0, 8).toString('hex');
+    evidence.blockers.push(`Legacy rc.x ${legacy.name} ${pubkey} (${legacy.size} B, ["${legacy.seed}"]) is still on chain; the v1 ${programName} program can neither read nor close it. Cancel or accept it on rc.x before the upgrade`);
   } else {
     row.discriminator_hex = account.data.subarray(0, 8).toString('hex');
     // Hook TLV accounts have the Execute discriminator, not an Anchor account discriminator.

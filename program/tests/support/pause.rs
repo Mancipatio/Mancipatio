@@ -66,16 +66,36 @@ pub fn set_pause_flags(
         .map_err(|e| format!("{e:?}"))
 }
 
-/// Clears every pause bit (super admin), asserting the result.
+/// Clears every pause bit and the bootstrap marker (super admin), asserting
+/// the result. v1: `PAUSE_PAYOUT_MODULES` clears only in a call of its own,
+/// so this is two calls — everything else (0xBF), then 0x40.
 pub fn unpause_all(svm: &mut LiteSVM, super_admin: &Keypair) {
-    set_pause_flags(svm, super_admin, 0, asset_registry::PAUSE_FLAGS_ALL)
+    set_pause_flags(svm, super_admin, 0, !asset_registry::PAUSE_PAYOUT_MODULES)
         .expect("super admin clears the initial pause");
+    if pause_flags(svm) & asset_registry::PAUSE_PAYOUT_MODULES != 0 {
+        set_pause_flags(svm, super_admin, 0, asset_registry::PAUSE_PAYOUT_MODULES)
+            .expect("super admin enables the payout modules");
+    }
     assert_eq!(pause_flags(svm), 0);
 }
 
-/// Pauses exactly `flags`, clearing every other bit (super admin).
+/// Pauses exactly `flags`, clearing every other bit (super admin); a clear of
+/// `PAUSE_PAYOUT_MODULES` goes in a second call of its own.
 pub fn pause_only(svm: &mut LiteSVM, super_admin: &Keypair, flags: u8) {
-    set_pause_flags(svm, super_admin, flags, !flags).expect("super admin sets the pause");
+    let clear = !flags;
+    set_pause_flags(
+        svm,
+        super_admin,
+        flags,
+        clear & !asset_registry::PAUSE_PAYOUT_MODULES,
+    )
+    .expect("super admin sets the pause");
+    if clear & asset_registry::PAUSE_PAYOUT_MODULES != 0
+        && pause_flags(svm) & asset_registry::PAUSE_PAYOUT_MODULES != 0
+    {
+        set_pause_flags(svm, super_admin, 0, asset_registry::PAUSE_PAYOUT_MODULES)
+            .expect("super admin clears the payout modules");
+    }
     assert_eq!(pause_flags(svm), flags);
 }
 

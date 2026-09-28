@@ -2,7 +2,12 @@
  * G2: a sale is bound by its SaleApproval (design-6.3 §A G2): the gross and
  * the price range cap open_sale, a sold-out sale refuses the next unit, an
  * expired approval cannot open a sale, a non-Admin cannot approve, and a sale
- * that has not started refuses purchases. The approval that must expire is
+ * that has not started refuses purchases. Localnet adds the v1.0.0-rc bound
+ * on a sale's length (2.2b: at most 365 days, 6145) and, with the bootstrap
+ * window closed by G0, the Super Admin's own limits: a clear mixing the
+ * payout modules with another bit is refused (2.8, 6154), and an Admin grant
+ * cannot be executed inside its 48 hours (2.9b, 6150; the app's builders),
+ * after which a live Admin vetoes it (2.9c). The approval that must expire is
  * created first so the wait overlaps the other steps.
  */
 import type { Address } from "@solana/kit";
@@ -12,10 +17,16 @@ import {
   findSaleApprovalPda,
   getRevokeSaleApprovalInstructionAsync,
 } from "@/lib/generated/asset_registry";
-import { findSalePda } from "@/lib/pdas";
+import { findPendingAdminPda, findSalePda } from "@/lib/pdas";
+import { getSetPauseFlagsInstructionAsync } from "@/lib/generated/asset_registry";
+import { buildAddAdmin, buildCancelAdminProposal, buildProposeAdmin } from "@/lib/admin-grants";
+import { PAUSE_ONBOARDING, PAUSE_PAYOUT_MODULES } from "@/lib/pause-flags";
+import { ChainPlanError } from "../../safety";
+import { fundInstructions, topUp } from "../fixtures";
+import { loadOrCreateRoleKey } from "../keys";
 import { chainNow, waitForChainTime } from "../clock";
 import { entity } from "../state";
-import { CLOCK_GUARD_S, ONE_DAY, expiringDeadline, type World } from "../world";
+import { CLOCK_GUARD_S, ONE_DAY, accountExists, expiringDeadline, type World } from "../world";
 import { UNIT_PRICE, approveSaleIxs, buyIxs, openSaleIxs, saleApprovalExists, saleEnd, saleExists, saleSold } from "./g1";
 
 const SALE2_TOTAL = BigInt(5);
@@ -86,6 +97,18 @@ export async function runGroup2(w: World): Promise<"completed"> {
       ixs: await openSaleIxs(w, { classKey: "classA", saleId: 2, price: UNIT_PRICE * BigInt(2), total: BigInt(2), startTs: now, endTs: saleEnd(w, now) }),
     }),
     { notRun: approval2Live },
+  );
+  // 2.2b: the duration is checked before the approval's terms; a consumed
+  // approval (sale #2 open) can no longer show it.
+  await w.runner.step(
+    "2.2b",
+    async () => ({
+      payer: issuer,
+      ixs: await openSaleIxs(w, { classKey: "classA", saleId: 2, price: UNIT_PRICE, total: SALE2_TOTAL, startTs: now, endTs: now + BigInt(366) * ONE_DAY }),
+    }),
+    {
+      notRun: async () => ((await saleExists(w, "classA", 2)) ? "sale #2 is open (2.4a consumed approval #2); the duration refusal can no longer be shown" : null),
+    },
   );
   await w.runner.step(
     "2.4a",
@@ -171,5 +194,38 @@ export async function runGroup2(w: World): Promise<"completed"> {
       },
     },
   );
+
+  // 2.8–2.9 (localnet, v1.0.0-rc D2/D3): the bootstrap window is closed (G0).
+  if (w.runner.applies("2.8")) {
+    const sa = w.roles.superAdmin;
+    if (!sa) throw new ChainPlanError("2.8 needs the localnet Super Admin key");
+    await w.runner.step("2.8", async () => ({
+      payer: sa,
+      ixs: [await getSetPauseFlagsInstructionAsync({ authority: sa, setMask: 0, clearMask: PAUSE_PAYOUT_MODULES | PAUSE_ONBOARDING })],
+    }));
+    // A fresh key the Super Admin proposes as Admin: funded in the same
+    // transaction, since add_admin makes it pay its Admin record (the init
+    // precedes the timelock check).
+    const grantee = await loadOrCreateRoleKey(w.config.dir, "admin-grant");
+    const pending = await findPendingAdminPda(grantee.address);
+    const staged = () => accountExists(w.rpc, pending);
+    await w.runner.step(
+      "2.9a",
+      async () => {
+        const fund = await topUp(w.rpc, grantee.address, BigInt(100_000_000));
+        return {
+          payer: sa,
+          ixs: [...fundInstructions(w.roles.funder, fund ? [fund] : []), await buildProposeAdmin(w.rpc, sa, grantee.address)],
+        };
+      },
+      { done: async () => (await staged()) || w.runner.passed("2.9c") },
+    );
+    await w.runner.step("2.9b", async () => ({ payer: admin, ixs: [await buildAddAdmin(w.rpc, grantee)] }), {
+      notRun: async () => ((await staged()) ? null : "the grant is no longer staged (2.9c cancelled it)"),
+    });
+    await w.runner.step("2.9c", async () => ({ payer: admin, ixs: [await buildCancelAdminProposal(w.rpc, admin, grantee.address)] }), {
+      done: async () => !(await staged()),
+    });
+  }
   return "completed";
 }

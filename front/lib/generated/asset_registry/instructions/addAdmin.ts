@@ -34,11 +34,12 @@ import {
 } from "@solana/kit";
 import {
   findAcceptPlatformAdminNewAdminRecordPda,
+  findPendingAdminPda,
   findPlatformPda,
 } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
 import {
-  expectSome,
+  expectAddress,
   getAccountMetaFactory,
   type ResolvedAccount,
 } from "../shared";
@@ -53,8 +54,10 @@ export function getAddAdminDiscriminatorBytes() {
 
 export type AddAdminInstruction<
   TProgram extends string = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
-  TAccountSuperAdmin extends string | AccountMeta<string> = string,
+  TAccountNewAdmin extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountPendingAdmin extends string | AccountMeta<string> = string,
+  TAccountProposer extends string | AccountMeta<string> = string,
   TAccountAdminRecord extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
@@ -63,13 +66,19 @@ export type AddAdminInstruction<
   InstructionWithData<ReadonlyUint8Array> &
   InstructionWithAccounts<
     [
-      TAccountSuperAdmin extends string
-        ? WritableSignerAccount<TAccountSuperAdmin> &
-            AccountSignerMeta<TAccountSuperAdmin>
-        : TAccountSuperAdmin,
+      TAccountNewAdmin extends string
+        ? WritableSignerAccount<TAccountNewAdmin> &
+            AccountSignerMeta<TAccountNewAdmin>
+        : TAccountNewAdmin,
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountPendingAdmin extends string
+        ? WritableAccount<TAccountPendingAdmin>
+        : TAccountPendingAdmin,
+      TAccountProposer extends string
+        ? WritableAccount<TAccountProposer>
+        : TAccountProposer,
       TAccountAdminRecord extends string
         ? WritableAccount<TAccountAdminRecord>
         : TAccountAdminRecord,
@@ -115,28 +124,41 @@ export function getAddAdminInstructionDataCodec(): FixedSizeCodec<
 }
 
 export type AddAdminAsyncInput<
-  TAccountSuperAdmin extends string = string,
+  TAccountNewAdmin extends string = string,
   TAccountPlatform extends string = string,
+  TAccountPendingAdmin extends string = string,
+  TAccountProposer extends string = string,
   TAccountAdminRecord extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
-  superAdmin: TransactionSigner<TAccountSuperAdmin>;
+  /** The proposed key itself; pays the Admin record's rent. */
+  newAdmin: TransactionSigner<TAccountNewAdmin>;
   platform?: Address<TAccountPlatform>;
+  /**
+   * Consumed here (rent to the proposer). Stale once the super admin that
+   * proposed it is no longer the super admin.
+   */
+  pendingAdmin?: Address<TAccountPendingAdmin>;
+  proposer: Address<TAccountProposer>;
   adminRecord?: Address<TAccountAdminRecord>;
   systemProgram?: Address<TAccountSystemProgram>;
-  newAdmin: AddAdminInstructionDataArgs["newAdmin"];
+  newAdminArg: AddAdminInstructionDataArgs["newAdmin"];
 };
 
 export async function getAddAdminInstructionAsync<
-  TAccountSuperAdmin extends string,
+  TAccountNewAdmin extends string,
   TAccountPlatform extends string,
+  TAccountPendingAdmin extends string,
+  TAccountProposer extends string,
   TAccountAdminRecord extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: AddAdminAsyncInput<
-    TAccountSuperAdmin,
+    TAccountNewAdmin,
     TAccountPlatform,
+    TAccountPendingAdmin,
+    TAccountProposer,
     TAccountAdminRecord,
     TAccountSystemProgram
   >,
@@ -144,8 +166,10 @@ export async function getAddAdminInstructionAsync<
 ): Promise<
   AddAdminInstruction<
     TProgramAddress,
-    TAccountSuperAdmin,
+    TAccountNewAdmin,
     TAccountPlatform,
+    TAccountPendingAdmin,
+    TAccountProposer,
     TAccountAdminRecord,
     TAccountSystemProgram
   >
@@ -156,8 +180,10 @@ export async function getAddAdminInstructionAsync<
 
   // Original accounts.
   const originalAccounts = {
-    superAdmin: { value: input.superAdmin ?? null, isWritable: true },
+    newAdmin: { value: input.newAdmin ?? null, isWritable: true },
     platform: { value: input.platform ?? null, isWritable: false },
+    pendingAdmin: { value: input.pendingAdmin ?? null, isWritable: true },
+    proposer: { value: input.proposer ?? null, isWritable: true },
     adminRecord: { value: input.adminRecord ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
@@ -167,15 +193,20 @@ export async function getAddAdminInstructionAsync<
   >;
 
   // Original args.
-  const args = { ...input };
+  const args = { ...input, newAdmin: input.newAdminArg };
 
   // Resolve default values.
   if (!accounts.platform.value) {
     accounts.platform.value = await findPlatformPda();
   }
+  if (!accounts.pendingAdmin.value) {
+    accounts.pendingAdmin.value = await findPendingAdminPda({
+      newAdmin: expectAddress(accounts.newAdmin.value),
+    });
+  }
   if (!accounts.adminRecord.value) {
     accounts.adminRecord.value = await findAcceptPlatformAdminNewAdminRecordPda(
-      { newAdmin: expectSome(args.newAdmin) },
+      { newAdmin: expectAddress(accounts.newAdmin.value) },
     );
   }
   if (!accounts.systemProgram.value) {
@@ -186,8 +217,10 @@ export async function getAddAdminInstructionAsync<
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
     accounts: [
-      getAccountMeta(accounts.superAdmin),
+      getAccountMeta(accounts.newAdmin),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.pendingAdmin),
+      getAccountMeta(accounts.proposer),
       getAccountMeta(accounts.adminRecord),
       getAccountMeta(accounts.systemProgram),
     ],
@@ -197,44 +230,61 @@ export async function getAddAdminInstructionAsync<
     programAddress,
   } as AddAdminInstruction<
     TProgramAddress,
-    TAccountSuperAdmin,
+    TAccountNewAdmin,
     TAccountPlatform,
+    TAccountPendingAdmin,
+    TAccountProposer,
     TAccountAdminRecord,
     TAccountSystemProgram
   >);
 }
 
 export type AddAdminInput<
-  TAccountSuperAdmin extends string = string,
+  TAccountNewAdmin extends string = string,
   TAccountPlatform extends string = string,
+  TAccountPendingAdmin extends string = string,
+  TAccountProposer extends string = string,
   TAccountAdminRecord extends string = string,
   TAccountSystemProgram extends string = string,
 > = {
-  superAdmin: TransactionSigner<TAccountSuperAdmin>;
+  /** The proposed key itself; pays the Admin record's rent. */
+  newAdmin: TransactionSigner<TAccountNewAdmin>;
   platform: Address<TAccountPlatform>;
+  /**
+   * Consumed here (rent to the proposer). Stale once the super admin that
+   * proposed it is no longer the super admin.
+   */
+  pendingAdmin: Address<TAccountPendingAdmin>;
+  proposer: Address<TAccountProposer>;
   adminRecord: Address<TAccountAdminRecord>;
   systemProgram?: Address<TAccountSystemProgram>;
-  newAdmin: AddAdminInstructionDataArgs["newAdmin"];
+  newAdminArg: AddAdminInstructionDataArgs["newAdmin"];
 };
 
 export function getAddAdminInstruction<
-  TAccountSuperAdmin extends string,
+  TAccountNewAdmin extends string,
   TAccountPlatform extends string,
+  TAccountPendingAdmin extends string,
+  TAccountProposer extends string,
   TAccountAdminRecord extends string,
   TAccountSystemProgram extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: AddAdminInput<
-    TAccountSuperAdmin,
+    TAccountNewAdmin,
     TAccountPlatform,
+    TAccountPendingAdmin,
+    TAccountProposer,
     TAccountAdminRecord,
     TAccountSystemProgram
   >,
   config?: { programAddress?: TProgramAddress },
 ): AddAdminInstruction<
   TProgramAddress,
-  TAccountSuperAdmin,
+  TAccountNewAdmin,
   TAccountPlatform,
+  TAccountPendingAdmin,
+  TAccountProposer,
   TAccountAdminRecord,
   TAccountSystemProgram
 > {
@@ -244,8 +294,10 @@ export function getAddAdminInstruction<
 
   // Original accounts.
   const originalAccounts = {
-    superAdmin: { value: input.superAdmin ?? null, isWritable: true },
+    newAdmin: { value: input.newAdmin ?? null, isWritable: true },
     platform: { value: input.platform ?? null, isWritable: false },
+    pendingAdmin: { value: input.pendingAdmin ?? null, isWritable: true },
+    proposer: { value: input.proposer ?? null, isWritable: true },
     adminRecord: { value: input.adminRecord ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
   };
@@ -255,7 +307,7 @@ export function getAddAdminInstruction<
   >;
 
   // Original args.
-  const args = { ...input };
+  const args = { ...input, newAdmin: input.newAdminArg };
 
   // Resolve default values.
   if (!accounts.systemProgram.value) {
@@ -266,8 +318,10 @@ export function getAddAdminInstruction<
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
   return Object.freeze({
     accounts: [
-      getAccountMeta(accounts.superAdmin),
+      getAccountMeta(accounts.newAdmin),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.pendingAdmin),
+      getAccountMeta(accounts.proposer),
       getAccountMeta(accounts.adminRecord),
       getAccountMeta(accounts.systemProgram),
     ],
@@ -277,8 +331,10 @@ export function getAddAdminInstruction<
     programAddress,
   } as AddAdminInstruction<
     TProgramAddress,
-    TAccountSuperAdmin,
+    TAccountNewAdmin,
     TAccountPlatform,
+    TAccountPendingAdmin,
+    TAccountProposer,
     TAccountAdminRecord,
     TAccountSystemProgram
   >);
@@ -290,10 +346,17 @@ export type ParsedAddAdminInstruction<
 > = {
   programAddress: Address<TProgram>;
   accounts: {
-    superAdmin: TAccountMetas[0];
+    /** The proposed key itself; pays the Admin record's rent. */
+    newAdmin: TAccountMetas[0];
     platform: TAccountMetas[1];
-    adminRecord: TAccountMetas[2];
-    systemProgram: TAccountMetas[3];
+    /**
+     * Consumed here (rent to the proposer). Stale once the super admin that
+     * proposed it is no longer the super admin.
+     */
+    pendingAdmin: TAccountMetas[2];
+    proposer: TAccountMetas[3];
+    adminRecord: TAccountMetas[4];
+    systemProgram: TAccountMetas[5];
   };
   data: AddAdminInstructionData;
 };
@@ -306,7 +369,7 @@ export function parseAddAdminInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedAddAdminInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 4) {
+  if (instruction.accounts.length < 6) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -319,8 +382,10 @@ export function parseAddAdminInstruction<
   return {
     programAddress: instruction.programAddress,
     accounts: {
-      superAdmin: getNextAccount(),
+      newAdmin: getNextAccount(),
       platform: getNextAccount(),
+      pendingAdmin: getNextAccount(),
+      proposer: getNextAccount(),
       adminRecord: getNextAccount(),
       systemProgram: getNextAccount(),
     },

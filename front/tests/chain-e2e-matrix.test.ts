@@ -56,6 +56,52 @@ describe("e2e matrix", () => {
     expect(stepSpec("1.3").networks).toEqual(["devnet", "localnet"]);
   });
 
+  it("v1.0.0-rc negative cases run on localnet: a blocked buyer (6144), frozen proceeds (6143), a sale beyond 365 days (6145)", () => {
+    const expected = (id: string) => {
+      const spec = stepSpec(id);
+      expect(spec.networks, id).toEqual(["localnet"]);
+      return spec.expect.ok ? "ok" : `${spec.expect.code} ${spec.expect.name}`;
+    };
+    expect(["1.13a", "1.13b", "1.13c"].map(expected)).toEqual(["ok", "6144 PartyBlocklisted", "ok"]);
+    expect(["1.14a", "1.14b", "1.14c"].map(expected)).toEqual(["ok", "6143 IssuerProceedsFrozen", "ok"]);
+    expect(expected("2.2b")).toBe("6145 SaleDurationInvalid");
+    // Each block and freeze is undone inside group 1, before groups 2 and 3 buy and sell again.
+    const ids = stepsFor("localnet", [1]).map((s) => s.id);
+    expect(ids.slice(-6)).toEqual(["1.13a", "1.13b", "1.13c", "1.14a", "1.14b", "1.14c"]);
+    // The duration refusal needs approval #2 unconsumed: it precedes 2.4a.
+    const g2 = stepsFor("localnet", [2]).map((s) => s.id);
+    expect(g2.indexOf("2.2b")).toBeLessThan(g2.indexOf("2.4a"));
+  });
+
+  it("v1.0.0-rc review (8.3 §6): the SA's clear of 0x40 with another bit (6154), a grant inside its timelock (6150), a blocked taker and a blocked buyer's expiry (6144), a deal past 90 days (6149)", () => {
+    const expected = (id: string) => {
+      const spec = stepSpec(id);
+      return `${spec.networks.join("+")} ${spec.expect.ok ? "ok" : `${spec.expect.code} ${spec.expect.name}`}`;
+    };
+    expect(["2.8", "2.9a", "2.9b", "2.9c"].map(expected)).toEqual([
+      "localnet 6154 PayoutModulesClearNotExplicit",
+      "localnet ok",
+      "localnet 6150 TimelockActive",
+      "localnet ok",
+    ]);
+    expect(["3.7a", "3.7b", "3.8a", "3.8b", "3.8c", "3.7c", "3.7d", "3.8d", "3.8e"].map(expected)).toEqual([
+      "localnet ok",
+      "localnet ok",
+      "localnet ok",
+      "localnet ok",
+      "localnet 6144 PartyBlocklisted",
+      "localnet 6144 PartyBlocklisted",
+      "localnet ok",
+      "localnet ok",
+      "localnet ok",
+    ]);
+    expect(expected("3.9")).toBe("devnet+localnet 6149 DealExpiryOutOfRange");
+    // The block is lifted inside group 3 (the last G3 buy/take, 3.4b, is B2's).
+    const g3 = stepsFor("localnet", [3]).map((s) => s.id);
+    expect(g3.indexOf("3.8a")).toBeLessThan(g3.indexOf("3.8d"));
+    expect(stepsFor("devnet", [2, 3]).some((s) => ["2.8", "2.9a", "3.7a", "3.8a"].includes(s.id))).toBe(false);
+  });
+
   it("filters by network and group", () => {
     const devnet = stepsFor("devnet", [1, 2, 3]);
     expect(devnet.some((s) => s.id === "1.11")).toBe(false);

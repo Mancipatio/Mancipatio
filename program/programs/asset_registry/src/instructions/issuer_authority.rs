@@ -6,11 +6,12 @@
 //! The `Issuer` layout is frozen (117 B): these instructions write only
 //! `Issuer.authority`; all new state lives in separate PDAs.
 //!
-//! * Regular rotation reuses `AuthorityTransfer` at
-//!   `["authority_transfer", issuer]` (the 2C-1 pattern). Only the current
-//!   authority proposes and cancels; only the proposed key accepts. The seed is
-//!   the Issuer PDA, so a platform, custody or KYC-registry transfer can never
-//!   stand in for it.
+//! * Regular rotation uses `AuthorityProposal` at
+//!   `["authority_proposal", issuer]` (v1; the rc.x `AuthorityTransfer` seed is
+//!   never read). Only the current authority proposes and cancels; only the
+//!   proposed key accepts, within 14 days of the proposal (`ProposalExpired`
+//!   after). The seed is the Issuer PDA, so a platform, custody or
+//!   KYC-registry proposal can never stand in for it.
 //! * Recovery lives in `IssuerRecovery` at `["issuer_recovery", issuer]`: the
 //!   super admin (`Platform.admin`) proposes, it becomes executable at `eta`
 //!   (7 days) and expires 14 days later; the CURRENT issuer authority or the
@@ -58,14 +59,21 @@
 //!
 //! None of these reads the pause flags: rotation and recovery are security
 //! exits, and a sync moves no funds (the payout exits stay gated).
+//!
+//! prog-novac-4: a blocklisted authority can neither propose nor hand over a
+//! regular rotation (`PartyBlocklisted` on the current key's BlockEntry in
+//! both). Otherwise a BA block of the issuer wallet W1 would be bypassed in
+//! three transactions: W1 proposes W2, W2 accepts, anyone syncs, and W2 runs
+//! `close_sale` / `release_payout` / `claim_founder_yield` to itself. The
+//! super-admin recovery (7 days) stays available for a blocked key.
 
 use anchor_lang::prelude::*;
 
-use super::rotate_authority::{validate_new_authority, write_proposal};
+use super::rotate_authority::{require_not_expired, validate_new_authority, write_proposal};
 use crate::constants::*;
 use crate::error::RegistryError;
 use crate::state::{
-    Asset, AuthorityTransfer, Issuer, IssuerAuthorityChangeKind, IssuerAuthorityChanged,
+    Asset, AuthorityProposal, Issuer, IssuerAuthorityChangeKind, IssuerAuthorityChanged,
     IssuerAuthorityProposalCancelled, IssuerAuthorityProposed, IssuerPermissions, IssuerRecovery,
     IssuerRecoveryCancelled, IssuerRecoveryProposed, PayoutFounderSynced, PayoutVault, Platform,
     Sale, SaleAuthoritySynced, ShareClass,
@@ -81,10 +89,23 @@ pub struct ProposeIssuerAuthority<'info> {
     #[account(seeds = [ISSUER_SEED, issuer.legal_entity_id.as_ref()], bump = issuer.bump,
         has_one = authority @ RegistryError::Unauthorized)]
     pub issuer: Box<Account<'info, Issuer>>,
-    #[account(init_if_needed, payer = authority, space = 8 + AuthorityTransfer::INIT_SPACE,
-        seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    #[account(init_if_needed, payer = authority, space = 8 + AuthorityProposal::INIT_SPACE,
+        seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump)]
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
     pub system_program: Program<'info, System>,
+    /// prog-novac-4: a blocklisted issuer authority cannot stage a rotation
+    /// (a new, unblocked key would otherwise reach the proceeds exits after
+    /// `sync_sale_authority` / `sync_payout_founder`).
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, issuer.authority.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&authority_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub authority_block_entry: UncheckedAccount<'info>,
 }
 
 /// The current issuer authority stages a new authority. A re-proposal
@@ -103,8 +124,10 @@ pub fn handle_propose_issuer_authority(
         current,
         new_authority,
         ctx.accounts.authority.key(),
+        AUTHORITY_PROPOSAL_KIND_ISSUER,
+        0,
         ctx.bumps.transfer,
-    );
+    )?;
     emit!(IssuerAuthorityProposed {
         issuer,
         current_authority: current,
@@ -121,12 +144,12 @@ pub struct AcceptIssuerAuthority<'info> {
     #[account(mut, seeds = [ISSUER_SEED, issuer.legal_entity_id.as_ref()], bump = issuer.bump)]
     pub issuer: Box<Account<'info, Issuer>>,
     #[account(mut, close = new_authority,
-        seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump = transfer.bump,
+        seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump = transfer.bump,
         constraint = transfer.target == issuer.key()
             && transfer.current_authority == issuer.authority
             && transfer.proposed_by == issuer.authority
             && transfer.new_authority == new_authority.key() @ RegistryError::InvalidAuthorityTransfer)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
     /// The outgoing authority's grant, closed here when present (rent to the
     /// acceptor); its capabilities move to `new_permissions`.
     /// CHECK: address pinned by seeds; owner, discriminator and contents are
@@ -149,6 +172,19 @@ pub struct AcceptIssuerAuthority<'info> {
     #[account(mut, seeds = [ISSUER_RECOVERY_SEED, issuer.key().as_ref()], bump)]
     pub recovery: UncheckedAccount<'info>,
     pub system_program: Program<'info, System>,
+    /// prog-novac-4: the OUTGOING authority is not blocklisted (it may have
+    /// been blocked after the proposal). A super-admin issuer recovery stays
+    /// the path off a blocked key.
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, issuer.authority.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&authority_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub authority_block_entry: UncheckedAccount<'info>,
 }
 
 /// The proposed authority accepts. Only `Issuer.authority` changes (legal ID,
@@ -157,6 +193,7 @@ pub struct AcceptIssuerAuthority<'info> {
 /// A pending recovery is retired. The new key may be a global Admin only when
 /// the outgoing key is one too (otherwise `InvalidProposedAuthority`).
 pub fn handle_accept_issuer_authority(ctx: Context<AcceptIssuerAuthority>) -> Result<()> {
+    require_not_expired(&ctx.accounts.transfer)?;
     let issuer = ctx.accounts.issuer.key();
     let old_authority = ctx.accounts.issuer.authority;
     let new_authority = ctx.accounts.new_authority.key();
@@ -212,9 +249,9 @@ pub struct CancelIssuerAuthorityTransfer<'info> {
         has_one = authority @ RegistryError::Unauthorized)]
     pub issuer: Box<Account<'info, Issuer>>,
     #[account(mut, close = authority,
-        seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump = transfer.bump,
+        seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump = transfer.bump,
         constraint = transfer.target == issuer.key() @ RegistryError::InvalidAuthorityTransfer)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
 }
 
 /// The current issuer authority withdraws a pending proposal (including one a
@@ -362,7 +399,7 @@ pub struct ExecuteIssuerRecovery<'info> {
     pub new_admin_record: UncheckedAccount<'info>,
     /// The issuer's pending regular rotation, retired here when present (it may not exist).
     /// CHECK: address pinned by seeds; `util::retire_pending_proposal` checks the rest.
-    #[account(mut, seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump)]
+    #[account(mut, seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump)]
     pub transfer: UncheckedAccount<'info>,
 }
 
@@ -391,7 +428,7 @@ pub fn handle_execute_issuer_recovery(ctx: Context<ExecuteIssuerRecovery>) -> Re
     if retire_pending_proposal(
         &ctx.accounts.transfer.to_account_info(),
         &issuer,
-        AuthorityTransfer::DISCRIMINATOR,
+        AuthorityProposal::DISCRIMINATOR,
     )? {
         msg!("Issuer {} pending authority transfer retired", issuer);
     }

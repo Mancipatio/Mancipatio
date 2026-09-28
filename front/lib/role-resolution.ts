@@ -37,14 +37,14 @@ import {
   getAdminDecoder,
   getAdminDiscriminatorBytes,
   getAdminSize,
-  getAuthorityTransferDecoder,
-  getAuthorityTransferDiscriminatorBytes,
-  getAuthorityTransferSize,
+  getAuthorityProposalDecoder,
+  getAuthorityProposalDiscriminatorBytes,
+  getAuthorityProposalSize,
   getPlatformDecoder,
   getPlatformDiscriminatorBytes,
   getPlatformSize,
   type Admin,
-  type AuthorityTransfer,
+  type AuthorityProposal,
   type Platform,
 } from "@/lib/generated/asset_registry";
 import {
@@ -54,11 +54,11 @@ import {
   getBlocklistAuthorityDecoder,
   getBlocklistAuthorityDiscriminatorBytes,
   getBlocklistAuthoritySize,
-  getBlocklistAuthorityTransferDecoder,
-  getBlocklistAuthorityTransferDiscriminatorBytes,
-  getBlocklistAuthorityTransferSize,
+  getBlocklistAuthorityProposalDecoder,
+  getBlocklistAuthorityProposalDiscriminatorBytes,
+  getBlocklistAuthorityProposalSize,
   type BlocklistAuthority,
-  type BlocklistAuthorityTransfer,
+  type BlocklistAuthorityProposal,
 } from "@/lib/generated/transfer_hook";
 import {
   decodeKycRegistryAccount,
@@ -68,7 +68,8 @@ import {
   type KycRegistryRecord,
 } from "@/lib/kyc-authority";
 import { kycTransferState } from "@/lib/kyc-registry-rotation";
-import { findAuthorityTransferPda } from "@/lib/pdas";
+import { PLATFORM_BOOTSTRAP_OPEN } from "@/lib/pause-flags";
+import { findAuthorityProposalPda } from "@/lib/pdas";
 
 export type Rpc = SolanaClient["runtime"]["rpc"];
 
@@ -100,14 +101,14 @@ export type RoleSnapshot = {
   /** `["admin", wallet]` — decoded only when owner/discriminator/length pass. */
   adminRecord: OwnedAccount<Admin> | null;
   blocklistAuthority: OwnedAccount<BlocklistAuthority> | null;
-  /** asset_registry `["authority_transfer", platform]`. */
-  platformTransfer: OwnedAccount<AuthorityTransfer> | null;
-  /** transfer_hook `["blocklist_authority_transfer"]`. */
-  blocklistTransfer: OwnedAccount<BlocklistAuthorityTransfer> | null;
+  /** asset_registry `["authority_proposal", platform]`. */
+  platformTransfer: OwnedAccount<AuthorityProposal> | null;
+  /** transfer_hook `["blocklist_authority_proposal"]`. */
+  blocklistTransfer: OwnedAccount<BlocklistAuthorityProposal> | null;
   /** The platform registry (pin, or unpinned heuristic), or null. */
   kycRegistry: KycRegistryRecord | null;
-  /** `["authority_transfer", registry]` of `kycRegistry`. */
-  kycTransfer: OwnedAccount<AuthorityTransfer> | null;
+  /** `["authority_proposal", registry]` of `kycRegistry`. */
+  kycTransfer: OwnedAccount<AuthorityProposal> | null;
   /**
    * The KYC registry was looked up: always on a pinned build, only on demand
    * (`withKycScan`) on an unpinned one. False means "not evaluated" — the
@@ -127,6 +128,13 @@ export type PendingRole = {
   /** Platform PDA, BlocklistAuthority PDA or the KYC registry address. */
   target: Address;
   currentAuthority: Address;
+  /**
+   * Chain time (unix s) the proposal becomes acceptable and stops being
+   * acceptable. v1.0.0-rc proposals carry both; the platform's eta is
+   * waived while the bootstrap window is open (the program's effective eta).
+   */
+  eta: bigint;
+  expiresAt: bigint;
 };
 
 /** A proposal this wallet made as the current authority. */
@@ -134,8 +142,14 @@ export type OutgoingProposal = {
   kind: PendingRoleKind;
   target: Address;
   newAuthority: Address;
-  /** False for a KYC proposal that no longer matches the registry (cancel or replace it). */
+  /**
+   * False for a proposal that no longer matches the live holder: a KYC
+   * proposal made under an earlier registry authority, or a Super Admin /
+   * blocklist proposal retired by an executed recovery (cancel or replace it).
+   */
   live: boolean;
+  eta: bigint;
+  expiresAt: bigint;
 };
 
 export type RoleFlags = {
@@ -210,13 +224,13 @@ const decodePlatform = (a: MaybeEncodedAccount) =>
   decodeOwned(a, ASSET_REGISTRY_PROGRAM_ADDRESS, getPlatformDiscriminatorBytes(), getPlatformSize(), getPlatformDecoder());
 const decodeAdmin = (a: MaybeEncodedAccount) =>
   decodeOwned(a, ASSET_REGISTRY_PROGRAM_ADDRESS, getAdminDiscriminatorBytes(), getAdminSize(), getAdminDecoder());
-const decodeAuthorityTransfer = (a: MaybeEncodedAccount) =>
+const decodeAuthorityProposal = (a: MaybeEncodedAccount) =>
   decodeOwned(
     a,
     ASSET_REGISTRY_PROGRAM_ADDRESS,
-    getAuthorityTransferDiscriminatorBytes(),
-    getAuthorityTransferSize(),
-    getAuthorityTransferDecoder(),
+    getAuthorityProposalDiscriminatorBytes(),
+    getAuthorityProposalSize(),
+    getAuthorityProposalDecoder(),
   );
 const decodeBlocklistAuthority = (a: MaybeEncodedAccount) =>
   decodeOwned(
@@ -230,9 +244,9 @@ const decodeBlocklistTransfer = (a: MaybeEncodedAccount) =>
   decodeOwned(
     a,
     TRANSFER_HOOK_PROGRAM_ADDRESS,
-    getBlocklistAuthorityTransferDiscriminatorBytes(),
-    getBlocklistAuthorityTransferSize(),
-    getBlocklistAuthorityTransferDecoder(),
+    getBlocklistAuthorityProposalDiscriminatorBytes(),
+    getBlocklistAuthorityProposalSize(),
+    getBlocklistAuthorityProposalDecoder(),
   );
 
 /**
@@ -240,7 +254,7 @@ const decodeBlocklistTransfer = (a: MaybeEncodedAccount) =>
  *
  * Pinned: `verifyNetwork()` first, then ONE `getMultipleAccounts` for the 7
  * accounts (Platform, the wallet's Admin record, BlocklistAuthority, the
- * platform and blocklist transfers, the pinned registry and its transfer).
+ * platform and blocklist proposals, the pinned registry and its proposal).
  *
  * Unpinned (devnet / preview only — mainnet builds require a pin): the same
  * batch minus the registry pair; the registry is resolved only when
@@ -270,7 +284,7 @@ export async function readRoleSnapshot(
     platformTransferPda,
     blocklistTransferPda,
   ];
-  if (opts.pinned) addresses.push(opts.pinned, await findAuthorityTransferPda(opts.pinned));
+  if (opts.pinned) addresses.push(opts.pinned, await findAuthorityProposalPda(opts.pinned));
 
   const accounts = await fetchEncodedAccounts(
     rpc as unknown as Parameters<typeof fetchEncodedAccounts>[0],
@@ -283,7 +297,7 @@ export async function readRoleSnapshot(
     platform: decodePlatform(accounts[0]),
     adminRecord: decodeAdmin(accounts[1]),
     blocklistAuthority: decodeBlocklistAuthority(accounts[2]),
-    platformTransfer: decodeAuthorityTransfer(accounts[3]),
+    platformTransfer: decodeAuthorityProposal(accounts[3]),
     blocklistTransfer: decodeBlocklistTransfer(accounts[4]),
   };
 
@@ -299,7 +313,7 @@ export async function readRoleSnapshot(
       snapshot.kycUnavailable = `Pinned KYC registry ${opts.pinned} not found on ${opts.network ?? "this network"} — check NEXT_PUBLIC_KYC_REGISTRY.`;
       return snapshot;
     }
-    snapshot.kycTransfer = decodeAuthorityTransfer(accounts[6]);
+    snapshot.kycTransfer = decodeAuthorityProposal(accounts[6]);
     return snapshot;
   }
 
@@ -313,10 +327,10 @@ export async function readRoleSnapshot(
     if (ctx.registry) {
       const transfer = await fetchEncodedAccount(
         rpc as unknown as Parameters<typeof fetchEncodedAccount>[0],
-        await findAuthorityTransferPda(ctx.registry.address),
+        await findAuthorityProposalPda(ctx.registry.address),
         { commitment, abortSignal: AbortSignal.timeout(10_000) },
       );
-      snapshot.kycTransfer = decodeAuthorityTransfer(transfer);
+      snapshot.kycTransfer = decodeAuthorityProposal(transfer);
     }
   } catch (err) {
     snapshot.kycRegistry = null;
@@ -364,11 +378,19 @@ export function deriveRoles(wallet: Address | string, s: RoleSnapshot): RoleFlag
       : null;
   if (platform && pt && pt.target === platform.address) {
     const live = pt.currentAuthority === platform.data.admin && pt.proposedBy === platform.data.admin;
+    // The bootstrap window waives the 48 h wait (the program's effective eta).
+    const window = {
+      eta: (platform.data.pauseFlags & PLATFORM_BOOTSTRAP_OPEN) !== 0 ? pt.proposedAt : pt.eta,
+      expiresAt: pt.expiresAt,
+    };
     if (live && pt.newAuthority.toString() === w) {
-      pending.push({ kind: "platform", target: platform.address, currentAuthority: platform.data.admin });
+      pending.push({ kind: "platform", target: platform.address, currentAuthority: platform.data.admin, ...window });
     }
-    if (live && isSuperAdmin) {
-      outgoing.push({ kind: "platform", target: platform.address, newAuthority: pt.newAuthority, live: true });
+    // A stale one (retired by an executed recovery, which zeroes its
+    // current_authority, or made under an earlier Super Admin) is listed for
+    // the live Super Admin too: it can still be cancelled or overwritten.
+    if (isSuperAdmin) {
+      outgoing.push({ kind: "platform", target: platform.address, newAuthority: pt.newAuthority, live, ...window });
     }
   }
 
@@ -377,12 +399,16 @@ export function deriveRoles(wallet: Address | string, s: RoleSnapshot): RoleFlag
     s.blocklistTransfer && s.blocklistTransfer.programAddress === TRANSFER_HOOK_PROGRAM_ADDRESS
       ? s.blocklistTransfer.data
       : null;
-  if (ba && bt && bt.currentAuthority === ba.data.authority) {
-    if (bt.newAuthority.toString() === w) {
-      pending.push({ kind: "blocklist", target: ba.address, currentAuthority: ba.data.authority });
+  if (ba && bt) {
+    const live = bt.currentAuthority === ba.data.authority;
+    // No timelock on a BA rotation: acceptable from the proposal to its expiry.
+    const window = { eta: bt.proposedAt, expiresAt: bt.expiresAt };
+    if (live && bt.newAuthority.toString() === w) {
+      pending.push({ kind: "blocklist", target: ba.address, currentAuthority: ba.data.authority, ...window });
     }
+    // A stale one (retired by execute_blocklist_recovery) stays cancellable by the live BA.
     if (isBlocklistAuthority) {
-      outgoing.push({ kind: "blocklist", target: ba.address, newAuthority: bt.newAuthority, live: true });
+      outgoing.push({ kind: "blocklist", target: ba.address, newAuthority: bt.newAuthority, live, ...window });
     }
   }
 
@@ -398,11 +424,13 @@ export function deriveRoles(wallet: Address | string, s: RoleSnapshot): RoleFlag
       newAuthority: kt.newAuthority.toString(),
       proposedBy: kt.proposedBy.toString(),
     });
+    const window = { eta: kt.eta, expiresAt: kt.expiresAt };
     if (state.kind === "live" && state.newAuthority === w) {
       pending.push({
         kind: "kyc",
         target: s.kycRegistry.address,
         currentAuthority: s.kycRegistry.registry.authority,
+        ...window,
       });
     }
     if (state.kind !== "none" && isKycProvider) {
@@ -411,6 +439,7 @@ export function deriveRoles(wallet: Address | string, s: RoleSnapshot): RoleFlag
         target: s.kycRegistry.address,
         newAuthority: kt.newAuthority,
         live: state.kind === "live",
+        ...window,
       });
     }
   }

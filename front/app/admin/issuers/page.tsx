@@ -55,6 +55,7 @@ import { useToast } from "@/lib/toast";
 import { recordAudit } from "@/lib/supabase";
 import { IssuerPermissionsPanel } from "./issuer-permissions-panel";
 import { IssuerRecoveryPanel } from "./issuer-recovery-panel";
+import { IssuerFreezePanel } from "./issuer-freeze-panel";
 import { IssuerRowGroup, reviewScrollOptions } from "./issuer-row";
 import { recoveryPathFor } from "@/lib/issuer-recovery";
 import { RequireRole } from "@/components/require-role";
@@ -910,6 +911,7 @@ function IssuerDetail({
             Recover this unused registration with both wallets →
           </a>
         )}
+      {issuerPda && <IssuerFreezePanel issuer={issuerPda} label={legalId} />}
       {issuerPda && (
         <IssuerPermissionsPanel
           issuer={issuerPda}
