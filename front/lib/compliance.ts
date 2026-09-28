@@ -182,6 +182,15 @@ export async function refreshSanctionsList(session: WalletSession | null | undef
   return signedFetch<SanctionsRefreshOutcome>(session, "/api/compliance/sanctions-refresh", "compliance.sanctionsRefresh", {});
 }
 
+/**
+ * The connected wallet screens itself before an on-chain buy (8.5). Resolves
+ * when clear; throws with the server's words on a hit (403) or while the
+ * screen is unavailable on mainnet (503) — the caller builds nothing then.
+ */
+export async function screenOwnWallet(session: WalletSession | null | undefined): Promise<void> {
+  await signedFetch<{ clear: boolean }>(session, "/api/compliance/screen-wallet", "compliance.screenWallet", {});
+}
+
 /** A compliance alert raised by the wallet screen (lib/server/sanctions.ts). */
 export function isScreeningHit(alert: Pick<ComplianceAlert, "evidence" | "wallet">): boolean {
   return !!alert.wallet && (alert.evidence as { screening?: unknown } | null)?.screening === "wallet-address";

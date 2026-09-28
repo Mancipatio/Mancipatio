@@ -17,6 +17,11 @@ import { memorySupabase } from "./helpers/memory-supabase";
 vi.mock("server-only", () => ({}));
 const db = vi.hoisted(() => ({ ref: null as null | ReturnType<typeof import("./helpers/memory-supabase").memorySupabase> }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => db.ref!.client }));
+const signer = vi.hoisted(() => ({ wallet: "" }));
+vi.mock("@/lib/server/siws", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/server/siws")>()),
+  verifySigned: vi.fn(async () => ({ wallet: signer.wallet, params: {}, via: "session" })),
+}));
 
 import { OFAC_SDN_SOURCE, OFAC_SDN_XML_URL, parseSdnXml, SdnListFormatError } from "@/lib/ofac-sdn";
 import {
@@ -33,6 +38,8 @@ import {
 import { runSanctionsRefresh } from "@/lib/server/sanctions-refresh";
 import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { POST as internalRefresh } from "@/app/api/internal/sanctions/route";
+import { POST as screenWalletRoute } from "@/app/api/compliance/screen-wallet/route";
+import { SESSION_READ_ACTIONS } from "@/lib/siws-session";
 
 const FIXTURE = readFileSync(join(process.cwd(), "tests/fixtures/ofac-sdn-sample.xml"), "utf8");
 const LISTED = "6t3xLqAFPZoE4mzWzxabrKxK8cGoHxAmaCj3MigJpWh5";
@@ -189,6 +196,26 @@ describe("the sales and trading compliance screen (refuseSuspendedClient)", () =
       status: 403, message: SCREENING_COUNTERPARTY_HIT,
     });
     await expect(refuseSuspendedClient(db.ref!.client as never, CLEAN, "trading")).resolves.toEqual({ clientId: null });
+  });
+});
+
+describe("POST /api/compliance/screen-wallet (the buyer's own pre-check before an on-chain buy)", () => {
+  const post = async (wallet: string) => {
+    signer.wallet = wallet;
+    const res = await screenWalletRoute(new Request("https://manci.test/api/compliance/screen-wallet", { method: "POST", body: "{}" }));
+    return { status: res.status, body: (await res.json()) as { error?: string } };
+  };
+
+  it("answers clear, refuses a listed buyer with the alert raised, and fails closed on mainnet", async () => {
+    expect(SESSION_READ_ACTIONS.has("compliance.screenWallet")).toBe(true);
+    loadList();
+    expect((await post(CLEAN)).status).toBe(200);
+    const hit = await post(LISTED);
+    expect(hit).toEqual({ status: 403, body: { ok: false, error: SCREENING_SELF_HIT } });
+    expect(db.ref!.rows("compliance_alerts")).toEqual([expect.objectContaining({ p_wallet: LISTED })]);
+    db.ref!.tables.sanctions_list_state = [];
+    clearSanctionsCache();
+    expect((await post(CLEAN)).status).toBe(503);
   });
 });
 

@@ -36,6 +36,9 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "compliance.openWallets",
   // The sanctions lists' freshness: dates, counts and codes (8.5).
   "compliance.sanctionsStatus",
+  // The caller screens its OWN wallet before a buy (8.5); its only write is
+  // the compliance alert of a hit, one per wallet while open.
+  "compliance.screenWallet",
   "conversion.adminList",
   "conversion.listMine",
   "delivery.adminList",

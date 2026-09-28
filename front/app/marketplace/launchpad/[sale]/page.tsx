@@ -50,6 +50,7 @@ import { findSalePda } from "@/lib/pdas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { pausedFlowFor } from "@/lib/pause-gate";
+import { screenOwnWallet } from "@/lib/compliance";
 import { usePauseFlags } from "@/lib/use-pause-flags";
 import {
   getListing,
@@ -854,6 +855,10 @@ export default function DealPage({
         throw new Error(
           "Read and accept the investment document and the risk warning first",
         );
+      // Sanctions screen of the buyer BEFORE the buy (8.5): an Open-class buy
+      // mints without the transfer hook, so this is the last point where a
+      // listed wallet is stopped before it pays. Throws with the reason.
+      await screenOwnWallet(conn.wallet);
       const signer = walletSigner(conn.wallet);
       const plan = await buildDocumentedPurchase(client.runtime.rpc, {
         buyer: signer,
