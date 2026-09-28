@@ -14,7 +14,7 @@ import { requireDocumentVersion } from "@/lib/server/document-versions";
 import type { SaleDocumentTerms } from "@/lib/document-terms";
 import {
   offeringClearance,
-  sscDecisionRef,
+  sscApprovalRef,
   type OfferingClearanceProfile,
 } from "@/lib/whitepaper-approval";
 export async function saleAssetAddress(saleAddress: string) {
@@ -54,9 +54,11 @@ export async function saleAssetAddress(saleAddress: string) {
 }
 /** Columns every network reads. */
 const DOCUMENT_COLUMNS = "whitepaper_path,whitepaper_sha256,whitepaper_version_id,whitepaper_status,ssc_decision_ref";
-/** Mainnet also reads the offering exemption (migration 0076). Test networks
- *  never select it, so a front deployed before 0076 is applied keeps working. */
-const MAINNET_DOCUMENT_COLUMNS = `${DOCUMENT_COLUMNS},offering_exemption_ref,offering_exemption_reason`;
+/** Mainnet also reads the verified decision document (0048) and the offering
+ *  exemption (migration 0076). Test networks never select the 0076 columns,
+ *  so a front deployed before 0076 is applied keeps working. */
+const MAINNET_DOCUMENT_COLUMNS =
+  `${DOCUMENT_COLUMNS},ssc_decision_version_id,offering_exemption_ref,offering_exemption_reason`;
 
 /**
  * The verified document a sale's purchases and commitments accept (served by
@@ -113,6 +115,6 @@ export async function publishedSaleDocument(
     sha256: v.sha256,
     verifiedAt: v.verified_at,
     url: `${base}/storage/v1/object/public/documents/${v.path.split("/").map(encodeURIComponent).join("/")}`,
-    sscDecisionRef: sscDecisionRef(p),
+    sscDecisionRef: sscApprovalRef(p, network),
   };
 }

@@ -15,7 +15,7 @@ vi.mock("@/lib/network", async (importOriginal) => ({
 }));
 
 import { requireAcceptedTos, tosServerGateEnforced } from "@/lib/server/tos-gate";
-import { tosGateFailsClosed } from "@/lib/tos";
+import { tosGateFailsClosed, tosGateMounted } from "@/lib/tos";
 import { TOS_VERSION } from "@/lib/tos-version";
 
 const WALLET = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
@@ -92,6 +92,28 @@ describe("client gate policy", () => {
     expect(tosGateFailsClosed("mainnet")).toBe(true);
     for (const network of ["devnet", "testnet", "localnet"] as const) {
       expect(tosGateFailsClosed(network)).toBe(false);
+    }
+  });
+});
+
+describe("where the app shell mounts the client gate (review 8.1 #2, #8)", () => {
+  it("covers the resell board, whose OTC request the server gate covers", () => {
+    // /markets/resell → "Request OTC escrow" → /api/otc/create (requireAcceptedTos).
+    expect(tosGateMounted("marketplace", "/markets/resell")).toBe(true);
+    expect(tosGateMounted("marketplace", "/markets/resell/")).toBe(true);
+    // The other signed buyer/seller routes' pages.
+    for (const path of ["/marketplace/launchpad/abc", "/marketplace/otc", "/portfolio/listings"]) {
+      expect(tosGateMounted(path.startsWith("/portfolio") ? "portfolio" : "marketplace", path), path).toBe(true);
+    }
+  });
+
+  it("keeps the browsing pages under /markets/ and the exempt sections without it", () => {
+    for (const path of ["/markets/types", "/markets/types/equity", "/markets/whitepapers", "/markets/equity", "/markets/resellers"]) {
+      expect(tosGateMounted("marketplace", path), path).toBe(false);
+    }
+    for (const section of ["documentation", "admin", "onboarding", "application", "account"]) {
+      expect(tosGateMounted(section, "/markets/resell"), section).toBe(false);
+      expect(tosGateMounted(section, "/marketplace"), section).toBe(false);
     }
   });
 });

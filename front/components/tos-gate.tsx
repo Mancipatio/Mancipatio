@@ -2,7 +2,8 @@
 
 // ToS interstitial (P1 item 3c).
 //
-// Mounted in the marketplace and portfolio layouts (NOT admin — admin routes
+// Mounted by the app shell on the marketplace and portfolio pages and on the
+// /markets/resell board (lib/tos.ts tosGateMounted; NOT admin — admin routes
 // are deliberately exempt). When a wallet is connected and has not accepted
 // the current TOS_VERSION, a blocking modal covers the page until the user
 // signs an acceptance via the signed /api/tos/accept route (W2-SD1's route;

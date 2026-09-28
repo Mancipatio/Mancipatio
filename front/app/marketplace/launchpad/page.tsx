@@ -21,7 +21,8 @@ import { fmtMoney } from "@/lib/format";
 import { formatPaymentTotal } from "@/lib/commitment-totals";
 import { Badge, EmptyState, Grid, PageHeader, Section } from "@/components/mx";
 import { listAssetProfiles } from "@/lib/asset-profiles";
-import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
+import { SSC_NOT_APPROVED_LABEL, sscApprovalRef } from "@/lib/whitepaper-approval";
+import { detectNetwork } from "@/lib/network";
 
 // ── derived card shape ─────────────────────────────────────────────────────
 type DealCard = {
@@ -118,7 +119,7 @@ export default function PublicLaunchpadPage() {
           pdas: Array.from(new Set(assetBySale.values())),
         });
         for (const profile of profiles) {
-          const ref = sscDecisionRef(profile);
+          const ref = sscApprovalRef(profile, detectNetwork());
           if (ref) decisionByAsset.set(profile.asset_pda, ref);
         }
       } catch {

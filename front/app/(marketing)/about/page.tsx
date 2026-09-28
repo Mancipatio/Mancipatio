@@ -14,6 +14,7 @@ import {
 } from "@/components/mx";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
 import { securityReviewFact } from "@/lib/legal/audit";
+import { SecurityAuditReportLink } from "@/components/legal/security-review";
 import {
   hasOperatorEntity,
   operatorFor,
@@ -125,6 +126,7 @@ export default function AboutPage() {
         <Eyebrow>The honest line</Eyebrow>
         <H2 className="mb-7">Where things stand</H2>
         <Facts items={WHERE_THINGS_STAND} />
+        <SecurityAuditReportLink className="mt-7" />
         <p className="mt-7">
           <TextLink href={MX_ROUTES.company}>Company and licence →</TextLink>
         </p>

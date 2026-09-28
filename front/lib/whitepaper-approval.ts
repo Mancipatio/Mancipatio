@@ -8,7 +8,11 @@
 // On MAINNET the same evidence gates the offering itself (lansiranje-2):
 // offeringClearance below is checked when an admin reserves a sale approval
 // (/api/sale-approvals/reserve) and whenever the sale's document is served
-// for a purchase or commitment (lib/server/sale-document.ts).
+// for a purchase or commitment (lib/server/sale-document.ts). There an
+// approval also needs the verified copy of the decision
+// (ssc_decision_version_id), and /api/profiles/upsert lets only the SUPER
+// admin record one — the same bar as an offering exemption, so neither route
+// to a cleared offering is weaker than the other.
 
 import type { AssetProfile } from "@/lib/asset-profiles";
 import type { Network } from "@/lib/network";
@@ -26,7 +30,26 @@ export function sscDecisionRef(
   return profile.ssc_decision_ref?.trim() || null;
 }
 
-export type OfferingClearanceProfile = Pick<AssetProfile, "whitepaper_status" | "ssc_decision_ref"> &
+/**
+ * The decision reference shown as an approval on `network`. Test networks: as
+ * sscDecisionRef. MAINNET: only with the verified copy of the decision
+ * (ssc_decision_version_id — set by /api/profiles/upsert from an uploaded,
+ * hash-checked file, never by a caller), so a bare reference typed into the
+ * profile is never presented as the Commission's approval.
+ */
+export function sscApprovalRef(
+  profile: Pick<AssetProfile, "whitepaper_status" | "ssc_decision_ref" | "ssc_decision_version_id">,
+  network: Network,
+): string | null {
+  const ref = sscDecisionRef(profile);
+  if (network !== "mainnet") return ref;
+  return ref && profile.ssc_decision_version_id ? ref : null;
+}
+
+export type OfferingClearanceProfile = Pick<
+  AssetProfile,
+  "whitepaper_status" | "ssc_decision_ref" | "ssc_decision_version_id"
+> &
   Pick<AssetProfile, "offering_exemption_ref" | "offering_exemption_reason">;
 
 export type OfferingClearance =
@@ -35,14 +58,16 @@ export type OfferingClearance =
   | { cleared: false; reason: string };
 
 export const OFFERING_NOT_CLEARED =
-  "On mainnet a sale needs a whitepaper approved by the Serbian Securities Commission (with its decision " +
-  "reference recorded) or an offering exemption recorded by the super admin with counsel's reference.";
+  "On mainnet a sale needs a whitepaper approved by the Serbian Securities Commission (its decision " +
+  "reference and the verified decision document recorded by the super admin) or an offering exemption " +
+  "recorded by the super admin with counsel's reference.";
 
 /**
  * Whether a sale of the asset behind `profile` may be approved, opened for
  * purchases or take commitments on `network`. Mainnet: an SSC-approved
- * whitepaper with a decision reference, or a recorded exemption (counsel's
- * reference AND the reason, both set). Test networks: always (unchanged).
+ * whitepaper with a decision reference and the verified decision document
+ * (sscApprovalRef), or a recorded exemption (counsel's reference AND the
+ * reason, both set). Test networks: always (unchanged).
  */
 export function offeringClearance(
   profile: OfferingClearanceProfile | null,
@@ -50,7 +75,7 @@ export function offeringClearance(
 ): OfferingClearance {
   if (network !== "mainnet") return { cleared: true, basis: "test_network" };
   if (!profile) return { cleared: false, reason: OFFERING_NOT_CLEARED };
-  const decision = sscDecisionRef(profile);
+  const decision = sscApprovalRef(profile, network);
   if (decision) return { cleared: true, basis: "ssc_approved", ref: decision };
   const ref = profile.offering_exemption_ref?.trim();
   const reason = profile.offering_exemption_reason?.trim();

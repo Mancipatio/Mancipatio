@@ -1,6 +1,7 @@
 // THE SLOT for counsel's mainnet legal texts. The devnet pilot's Terms and
 // Privacy Policy stay where they are (app/(marketing)/legal/*/devnet-*.tsx);
-// a mainnet build renders these instead, through components/legal-document.tsx.
+// a mainnet build renders these instead, through
+// components/legal/legal-document.tsx.
 //
 // How to add counsel's text:
 //   - Paste each document as a LegalDocument (lib/legal/document.ts): plain

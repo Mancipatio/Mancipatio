@@ -19,9 +19,9 @@ import { detectNetwork } from "@/lib/network";
 /**
  * Company and licence: who operates Manci on this network, its registration
  * details, the licence it holds, the law that governs the Terms, and the
- * legal, privacy and security contacts. Everything comes from the operator
- * record (lib/legal/operator.ts); a field that is not set is not shown. The
- * devnet record has no entity and shows its pilot notice instead.
+ * support, legal, privacy and security contacts. Everything comes from the
+ * operator record (lib/legal/operator.ts); a field that is not set is not
+ * shown. The devnet record has no entity and shows its pilot notice instead.
  */
 export const metadata: Metadata = {
   title: "Company and licence — Manci",

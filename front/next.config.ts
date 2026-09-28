@@ -31,6 +31,24 @@ const NETWORKS = ["mainnet", "devnet", "testnet", "localnet"];
 const MAINNET_LEGAL_ACK = "MAINNET_LEGAL_COPY_APPROVED";
 
 /**
+ * The network a build with `env` runs as: lib/network.ts detectNetwork()'s
+ * rule, spelled out because this file takes no `@/` imports (a test keeps the
+ * two equal). An explicit NEXT_PUBLIC_NETWORK wins (returned as given, even
+ * when invalid: assertBuildNetwork refuses that); otherwise the RPC URL
+ * decides, and devnet is the fallback.
+ */
+export function buildNetwork(env: Record<string, string | undefined>): string {
+  const explicit = env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() ?? "";
+  if (explicit) return explicit;
+  const rpc = env.NEXT_PUBLIC_SOLANA_RPC_URL ?? "";
+  if (rpc.includes("devnet")) return "devnet";
+  if (rpc.includes("testnet")) return "testnet";
+  if (rpc.includes("mainnet")) return "mainnet";
+  if (rpc.includes("localhost") || rpc.includes("127.0.0.1")) return "localnet";
+  return "devnet";
+}
+
+/**
  * NEXT_PUBLIC_NETWORK must be explicit in a deployed build. lib/network.ts
  * falls back to sniffing NEXT_PUBLIC_SOLANA_RPC_URL (and then to devnet) when
  * it is unset — convenient locally, but on Vercel it would silently ship a
@@ -40,6 +58,10 @@ const MAINNET_LEGAL_ACK = "MAINNET_LEGAL_COPY_APPROVED";
  *     throw at runtime anyway);
  *   - a production build ON VERCEL (VERCEL=1 or VERCEL_ENV set — Production
  *     and Preview alike) also fails when the variable is unset.
+ *   - a production build ANYWHERE fails when the variable is unset but the
+ *     RPC URL would make it run as mainnet (buildNetwork): every mainnet
+ *     guard here keys on NEXT_PUBLIC_NETWORK=mainnet, so a mainnet build must
+ *     say so;
  *   - a MAINNET production build (anywhere) also fails unless
  *     MAINNET_LEGAL_COPY_APPROVED=true — see MAINNET_LEGAL_ACK below.
  * Local devnet/testnet/localnet builds, CI (which sets
@@ -65,11 +87,17 @@ export function assertBuildNetwork(
         "for this environment — the build refuses to guess the network from the RPC URL.",
     );
   }
+  if (!value && buildNetwork(env) === "mainnet") {
+    throw new Error(
+      "Refusing a production build that would run as mainnet (NEXT_PUBLIC_SOLANA_RPC_URL) without " +
+        "NEXT_PUBLIC_NETWORK=mainnet: set it explicitly, so the mainnet build checks run.",
+    );
+  }
   if (value === "mainnet" && env[MAINNET_LEGAL_ACK]?.trim() !== "true") {
     throw new Error(
-      `Refusing a mainnet build: the Terms of Service and Privacy Policy (app/(marketing)/legal/) ` +
-        "still say the platform runs on Solana devnet with no real assets. Land counsel's mainnet " +
-        `legal copy, then set ${MAINNET_LEGAL_ACK}=true for this build.`,
+      `Refusing a mainnet build: set ${MAINNET_LEGAL_ACK}=true only after counsel has reviewed the ` +
+        "rendered mainnet pages (Terms of Service, Privacy Policy, /legal/company, the purchase risk " +
+        "warning; their texts are in lib/legal/). See ops/runbook-mainnet.md §17.",
     );
   }
 }
@@ -89,7 +117,10 @@ export function assertBuildMainnetLegal(
   slots: MainnetLegalSlots = MAINNET_LEGAL_SLOTS,
 ): void {
   if (phase !== PHASE_PRODUCTION_BUILD) return;
-  if (env.NEXT_PUBLIC_NETWORK?.trim().toLowerCase() !== "mainnet") return;
+  // The runtime's rule (buildNetwork), not only the explicit variable: a
+  // build that would run as mainnet is checked even if assertBuildNetwork
+  // were bypassed.
+  if (buildNetwork(env) !== "mainnet") return;
   const problems = mainnetLegalProblems(env, slots);
   if (problems.length === 0) return;
   throw new Error(

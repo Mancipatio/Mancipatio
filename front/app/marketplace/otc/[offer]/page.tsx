@@ -39,6 +39,7 @@ import { findOfferPda } from "@/lib/pdas";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { PurchaseRiskWarning } from "@/components/legal/purchase-risk-warning";
 import { SkeletonCard } from "@/components/skeleton";
 import { useToast } from "@/lib/toast";
 import { detectNetwork } from "@/lib/network";
@@ -73,6 +74,9 @@ export default function TakeOfferPage({
   >(null);
   const [failed, setFailed] = useState(false);
   const [showConfirm, setShowConfirm] = useState(false);
+  // Taking an offer is a purchase: the buyer confirms the purchase risk
+  // warning (lib/legal/risk-warning.ts) in the confirmation, every time.
+  const [acceptedRisk, setAcceptedRisk] = useState(false);
   // Taker's available payment-token balance (base units), or null while unknown.
   const [payBalance, setPayBalance] = useState<bigint | null>(null);
   // The payment mint may be SPL Token or Token-2022 — read it from chain under
@@ -401,6 +405,10 @@ export default function TakeOfferPage({
       toast.showError("Payment token unavailable", blockedReason);
       return;
     }
+    if (!acceptedRisk) {
+      toast.showError("Risk warning", "Read and confirm the risk warning first.");
+      return;
+    }
 
     const pendingId = toast.showPending(`Taking offer #${offer.offerId}…`);
     try {
@@ -683,7 +691,10 @@ export default function TakeOfferPage({
                 <button
                   type="button"
                   disabled={!canTake}
-                  onClick={() => setShowConfirm(true)}
+                  onClick={() => {
+                    setAcceptedRisk(false);
+                    setShowConfirm(true);
+                  }}
                   className={`w-full rounded-[3px] py-3.5 text-[14px] font-semibold transition-all ${
                     canTake
                       ? "bg-mx-ink text-mx-paper hover:opacity-90 active:scale-[0.98]"
@@ -723,6 +734,7 @@ export default function TakeOfferPage({
         confirmLabel="Confirm & take →"
         cancelLabel="Cancel"
         busy={tx.isSending}
+        confirmDisabled={!acceptedRisk}
         description={
           <div className="space-y-3">
             <p className="text-sm text-mx-ink-soft">
@@ -752,6 +764,10 @@ export default function TakeOfferPage({
                 </div>
               ))}
             </div>
+            <PurchaseRiskWarning
+              acknowledged={acceptedRisk}
+              onAcknowledgedChange={setAcceptedRisk}
+            />
           </div>
         }
       />

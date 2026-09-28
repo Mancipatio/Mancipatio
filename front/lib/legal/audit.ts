@@ -5,8 +5,9 @@
 // (engineering and AI-assisted reviews, LiteSVM tests); no independent
 // auditor has reviewed the programs, and the sentence could be read as if one
 // had. Until an external audit of the deployed release is complete, the pages
-// say exactly that; afterwards they name the auditor, the scope and the
-// report — set SECURITY_AUDIT below, one edit, no page changes.
+// say exactly that; afterwards they name the auditor and the scope and link
+// the report (components/legal/security-review.tsx renders the link on
+// /risks and /about) — set SECURITY_AUDIT below, one edit, no page changes.
 //
 // Directive-free and import-free.
 
@@ -17,7 +18,7 @@ export type SecurityAudit = {
   scope: string;
   /** Date the final report was delivered, yyyy-mm-dd. */
   completedOn: string;
-  /** Public URL of the report. */
+  /** Public https URL of the report (linked from /risks and /about). */
   reportUrl: string;
 };
 
@@ -45,4 +46,12 @@ export function securityReviewFact(audit: SecurityAudit | null = SECURITY_AUDIT)
   return audit
     ? `Externally audited by ${audit.firm} (${audit.completedOn})`
     : "Internal security reviews only; no external audit completed yet";
+}
+
+/** The link to the external audit report; null until an audit is recorded. */
+export function securityAuditReport(
+  audit: SecurityAudit | null = SECURITY_AUDIT,
+): { href: string; label: string } | null {
+  if (!audit) return null;
+  return { href: audit.reportUrl, label: `Read the ${audit.firm} audit report (${audit.completedOn})` };
 }

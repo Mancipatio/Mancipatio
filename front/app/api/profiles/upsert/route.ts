@@ -12,6 +12,12 @@
 //     ssc_decision_* evidence fields are settable ONLY via requireAdmin;
 //   - setting whitepaper_status = "ssc_approved" REQUIRES a decision
 //     reference (in this patch or already stored on the row).
+//   - MAINNET: an SSC approval clears the offering for sale
+//     (lib/whitepaper-approval.ts offeringClearance), so recording or changing
+//     one (status, reference, decision document, or a new whitepaper file
+//     under an approval) needs the SUPER admin and the verified decision
+//     document (ssc_decision_version_id) — the bar the offering exemption
+//     has. Withdrawing an approval stays open to any admin.
 //   - the offering exemption (offering_exemption_ref / _reason, 0076) is
 //     admin-only too, and recording one needs the SUPER admin; the server
 //     stamps offering_exemption_recorded_by / _at and writes an audit event.
@@ -45,6 +51,29 @@ const SSC_FIELDS = new Set([
   "ssc_decision_doc_sha256",
 ]);
 const SSC_STATUS_VALUES = new Set(["ssc_approval_pending", "ssc_approved"]);
+
+/** Nullish and blank compare equal: an unchanged field re-sent by the form. */
+function sameValue(a: unknown, b: unknown): boolean {
+  const norm = (v: unknown) => (v === undefined || v === "" ? null : v);
+  return norm(a) === norm(b);
+}
+
+/**
+ * Whether the patch records or changes an SSC approval: the row ends up
+ * ssc_approved and the status, a decision field or the whitepaper file
+ * differs from what is stored. Re-saving an approved profile unchanged (the
+ * admin form re-sends the reference) is not a change.
+ */
+function changesSscApproval(
+  existing: Record<string, unknown> | null,
+  cleaned: Record<string, unknown>,
+  effectiveStatus: unknown,
+  changedFile: boolean,
+): boolean {
+  if (effectiveStatus !== "ssc_approved") return false;
+  if (existing?.whitepaper_status !== "ssc_approved" || changedFile) return true;
+  return [...SSC_FIELDS].some((key) => key in cleaned && !sameValue(cleaned[key], existing?.[key]));
+}
 
 /**
  * The offering exemption (migration 0076): counsel's reference and the reason
@@ -227,6 +256,21 @@ export async function POST(request: Request) {
       else if(typeof path === "string" && path.startsWith(`whitepapers/${assetPda}/`)) {
         cleaned.ssc_decision_version_id=(await requireDocumentVersion("documents",path,effective.ssc_decision_doc_sha256)).id;
       } else throw new SiwsError(400,"SSC document must belong to this asset");
+    }
+
+    // Mainnet: recording or changing an SSC approval is a super-admin
+    // decision backed by the verified decision document (see header).
+    if (detectNetwork() === "mainnet" && changesSscApproval(existing, cleaned, effective.whitepaper_status, changedFile)) {
+      await requireSuperAdmin(wallet);
+      const decisionVersion = "ssc_decision_version_id" in cleaned
+        ? cleaned.ssc_decision_version_id
+        : existing?.ssc_decision_version_id;
+      if (!decisionVersion) {
+        throw new SiwsError(
+          409,
+          "On mainnet an SSC approval needs the verified decision document: upload it with the decision reference",
+        );
+      }
     }
 
     // ssc_approved requires decision evidence — from this patch or the row.

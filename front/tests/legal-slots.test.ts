@@ -10,8 +10,12 @@
 // a slot.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
 import { assertBuildMainnetLegal } from "@/next.config";
+import { OperatorContactDetails } from "@/components/legal/operator-details";
+import { SecurityAuditReportLink } from "@/components/legal/security-review";
 import {
   forbiddenMainnetPhrases,
   isIsoDate,
@@ -20,6 +24,8 @@ import {
 } from "@/lib/legal/document";
 import {
   OPERATORS,
+  copyrightHolder,
+  operatorFooterLine,
   operatorFor,
   operatorProblems,
   operatorSentence,
@@ -33,7 +39,12 @@ import {
 } from "@/lib/legal/readiness";
 import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";
 import { PURCHASE_RISK_WARNING, NO_INVESTOR_PROTECTION } from "@/lib/legal/risk-warning";
-import { SECURITY_AUDIT, securityReviewFact, securityReviewStatement } from "@/lib/legal/audit";
+import {
+  SECURITY_AUDIT,
+  securityAuditReport,
+  securityReviewFact,
+  securityReviewStatement,
+} from "@/lib/legal/audit";
 import {
   DEVNET_TOS_VERSION,
   MAINNET_TOS_UNPUBLISHED,
@@ -58,7 +69,7 @@ const COMPANY: Operator = {
     services: ["Operating a digital asset trading platform"],
     registerUrl: null,
   },
-  contacts: { legal: "legal@example.com", privacy: "privacy@example.com", security: "security@example.com", dpo: null },
+  contacts: { support: null, legal: "legal@example.com", privacy: "privacy@example.com", security: "security@example.com", dpo: null },
   governingLaw: "the law of the Republic of Serbia",
   disputeResolution: "the competent court in Belgrade",
   pilotNotice: null,
@@ -99,6 +110,9 @@ describe("operator record", () => {
     expect(operatorProblems({ ...COMPANY, contacts: { ...COMPANY.contacts, dpo: "nobody" } })).toEqual([
       "operator.contacts.dpo must be an email address or null",
     ]);
+    expect(operatorProblems({ ...COMPANY, contacts: { ...COMPANY.contacts, support: "support desk" } })).toEqual([
+      "operator.contacts.support must be an email address or null",
+    ]);
     expect(operatorProblems({ ...COMPANY, pilotNotice: "Pilot" })).toEqual(["operator.pilotNotice must be null on mainnet"]);
     expect(
       operatorProblems({ ...COMPANY, licence: { ...COMPANY.licence!, decisionDate: "15.10.2026", services: [] } }),
@@ -120,6 +134,33 @@ describe("operator record", () => {
         "registration number (MB) 21000000, tax ID (PIB) 110000000. Licence: Securities Commission of the " +
         "Republic of Serbia, decision 5/0-01-1/26 of 2026-10-15.",
     );
+  });
+
+  it("has a support slot: optional (the contact form), shown when set (review 8.1 #4, #12)", () => {
+    expect(operatorProblems({ ...COMPANY, contacts: { ...COMPANY.contacts, support: null } })).toEqual([]);
+    expect(operatorProblems({ ...COMPANY, contacts: { ...COMPANY.contacts, support: "support@example.com" } })).toEqual([]);
+    const withSupport = renderToStaticMarkup(
+      createElement(OperatorContactDetails, { operator: { ...COMPANY, contacts: { ...COMPANY.contacts, support: "support@example.com" } } }),
+    );
+    expect(withSupport).toContain("Support");
+    expect(withSupport).toContain('href="mailto:support@example.com"');
+    expect(renderToStaticMarkup(createElement(OperatorContactDetails, { operator: COMPANY }))).not.toContain(">Support<");
+  });
+
+  it("names the operator in the footer the pages actually render (review 8.1 #1)", () => {
+    expect(operatorFooterLine(OPERATORS.devnet, 2026)).toBeNull();
+    expect(copyrightHolder(OPERATORS.devnet)).toBe("Manci");
+    expect(operatorFooterLine(COMPANY, 2027)).toBe(
+      "© 2027 Manci d.o.o. Beograd · Knez Mihailova 1, 11000 Belgrade, Serbia · MB 21000000 · PIB 110000000 · " +
+        "Licence: Securities Commission of the Republic of Serbia, decision 5/0-01-1/26 of 2026-10-15",
+    );
+    expect(operatorFooterLine({ ...COMPANY, licence: null }, 2027)).not.toContain("Licence");
+    // components/app-shell.tsx is the footer every public and app page renders.
+    const shell = readFileSync(join(process.cwd(), "components/app-shell.tsx"), "utf8");
+    const footer = /<footer className="app-footer">[\s\S]*?<\/footer>/.exec(shell)?.[0] ?? "";
+    expect(footer).toContain('href="/legal/company"');
+    expect(footer).toContain("{operatorLine");
+    expect(shell).toMatch(/operatorFooterLine\(operatorFor\(network\)/);
   });
 
   it("publishes the same security contact as public/.well-known/security.txt on every network", () => {
@@ -227,6 +268,38 @@ describe("assertBuildMainnetLegal (next.config.ts)", () => {
   });
 });
 
+describe("next.config.ts runs the legal guard (review 8.1 #9)", () => {
+  // config() stops at the mainnet Supabase guard while no mainnet project is
+  // recorded, so a behavioural test cannot reach this guard through it yet;
+  // the wiring is checked on the source instead: every exported build guard
+  // is called from config(), before the config is returned.
+  it("calls every exported assertBuild* guard, assertBuildMainnetLegal included", () => {
+    const source = readFileSync(join(process.cwd(), "next.config.ts"), "utf8");
+    const body = /export default function config\(phase: string\): NextConfig \{([\s\S]*?)\n\}/.exec(source)?.[1] ?? "";
+    const guards = [...source.matchAll(/export function (assertBuild\w+)\(/g)].map((m) => m[1]);
+    expect(guards).toContain("assertBuildMainnetLegal");
+    const returnAt = body.indexOf("return nextConfig");
+    expect(returnAt).toBeGreaterThan(0);
+    for (const guard of guards) {
+      const at = body.indexOf(`${guard}(phase);`);
+      expect(at, guard).toBeGreaterThanOrEqual(0);
+      expect(at, guard).toBeLessThan(returnAt);
+    }
+  });
+
+  it("checks a build that would run as mainnet from the RPC URL alone (review 8.1 #7)", () => {
+    expect(() =>
+      assertBuildMainnetLegal(BUILD, { NEXT_PUBLIC_SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=x" }),
+    ).toThrow(/^Refusing a mainnet build: the operator and legal slots are not complete/);
+    expect(() =>
+      assertBuildMainnetLegal(BUILD, { NEXT_PUBLIC_SOLANA_RPC_URL: "https://mainnet.helius-rpc.com/?api-key=x" }, READY),
+    ).not.toThrow();
+    expect(() =>
+      assertBuildMainnetLegal(BUILD, { NEXT_PUBLIC_SOLANA_RPC_URL: "https://api.devnet.solana.com" }),
+    ).not.toThrow();
+  });
+});
+
 describe("Terms version per network", () => {
   it("keeps the devnet version and takes counsel's version on mainnet", () => {
     expect(DEVNET_TOS_VERSION).toBe("2026-07-18");
@@ -248,6 +321,23 @@ describe("program security and risk wording", () => {
     expect(securityReviewFact(audit)).toBe("Externally audited by Example Audits (2026-12-01)");
     for (const page of ["app/(marketing)/risks/page.tsx", "app/(marketing)/about/page.tsx"]) {
       expect(readFileSync(join(process.cwd(), page), "utf8"), page).not.toMatch(/systematic security review/);
+    }
+  });
+
+  it("links the audit report once an audit is recorded, from /risks and /about (review 8.1 #3, #11)", () => {
+    const audit = { firm: "Example Audits", scope: "both programs at v1.0.0", completedOn: "2026-12-01", reportUrl: "https://example.com/r.pdf" };
+    expect(securityAuditReport(null)).toBeNull();
+    expect(securityAuditReport(audit)).toEqual({
+      href: "https://example.com/r.pdf",
+      label: "Read the Example Audits audit report (2026-12-01)",
+    });
+    const link = renderToStaticMarkup(createElement(SecurityAuditReportLink, { audit }));
+    expect(link).toContain('href="https://example.com/r.pdf"');
+    expect(link).toContain('rel="noopener noreferrer"');
+    expect(renderToStaticMarkup(createElement(SecurityAuditReportLink, { audit: null }))).toBe("");
+    if (SECURITY_AUDIT) expect(SECURITY_AUDIT.reportUrl).toMatch(/^https:\/\//);
+    for (const page of ["app/(marketing)/risks/page.tsx", "app/(marketing)/about/page.tsx"]) {
+      expect(readFileSync(join(process.cwd(), page), "utf8"), page).toMatch(/<SecurityAuditReportLink /);
     }
   });
 

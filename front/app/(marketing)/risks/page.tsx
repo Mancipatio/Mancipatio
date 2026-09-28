@@ -10,6 +10,7 @@ import {
 } from "@/components/mx";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
 import { securityReviewStatement } from "@/lib/legal/audit";
+import { SecurityAuditReportLink } from "@/components/legal/security-review";
 import { NO_INVESTOR_PROTECTION } from "@/lib/legal/risk-warning";
 
 /**
@@ -132,6 +133,7 @@ export default function RisksPage() {
         <Body className="mt-3.5">
           Software can contain defects. {securityReviewStatement()}
         </Body>
+        <SecurityAuditReportLink className="mt-3.5" />
       </Section>
 
       <Section>

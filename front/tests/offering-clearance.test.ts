@@ -2,11 +2,12 @@
 // may be approved (/api/sale-approvals/reserve → requireMainnetOfferingClearance)
 // and its document served for purchases and commitments
 // (lib/server/sale-document.ts publishedSaleDocument) only with an
-// SSC-approved whitepaper (status + decision reference) or a recorded offering
-// exemption; test networks are unchanged and never read the 0076 columns. The
-// exemption itself is admin-only and needs the super admin to record
-// (/api/profiles/upsert). Chain reads, SIWS, the admin gate and Supabase are
-// mocked; the routes and helpers run for real.
+// SSC-approved whitepaper (status + decision reference + the verified decision
+// document) or a recorded offering exemption; test networks are unchanged and
+// never read the 0076 columns. Both are the super admin's to record on
+// mainnet (/api/profiles/upsert): the exemption everywhere, the SSC approval
+// on mainnet. Chain reads, SIWS, the admin gate and Supabase are mocked; the
+// routes and helpers run for real.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
@@ -133,8 +134,8 @@ describe("offeringClearance", () => {
     }
   });
 
-  it("mainnet: an SSC-approved whitepaper with its decision reference, or a complete exemption", () => {
-    expect(offeringClearance({ ...base, whitepaper_status: "ssc_approved", ssc_decision_ref: " 5/0-01/26 " }, "mainnet"))
+  it("mainnet: an SSC-approved whitepaper with its decision reference and document, or a complete exemption", () => {
+    expect(offeringClearance({ ...base, whitepaper_status: "ssc_approved", ssc_decision_ref: " 5/0-01/26 ", ssc_decision_version_id: VERSION }, "mainnet"))
       .toEqual({ cleared: true, basis: "ssc_approved", ref: "5/0-01/26" });
     expect(offeringClearance({ ...base, offering_exemption_ref: "Opinion 12/2026", offering_exemption_reason: "Fewer than 20 investors" }, "mainnet"))
       .toEqual({ cleared: true, basis: "exemption", ref: "Opinion 12/2026" });
@@ -144,7 +145,10 @@ describe("offeringClearance", () => {
     const refused = { cleared: false, reason: OFFERING_NOT_CLEARED };
     expect(offeringClearance(base, "mainnet")).toEqual(refused);
     expect(offeringClearance({ ...base, ssc_decision_ref: "5/0-01/26" }, "mainnet")).toEqual(refused);
-    expect(offeringClearance({ ...base, whitepaper_status: "ssc_approved", ssc_decision_ref: "  " }, "mainnet")).toEqual(refused);
+    expect(offeringClearance({ ...base, whitepaper_status: "ssc_approved", ssc_decision_ref: "  ", ssc_decision_version_id: VERSION }, "mainnet")).toEqual(refused);
+    // A typed reference without the verified decision document (review 8.1 #6).
+    expect(offeringClearance({ ...base, whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26" }, "mainnet")).toEqual(refused);
+    expect(offeringClearance({ ...base, whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26", ssc_decision_version_id: null }, "mainnet")).toEqual(refused);
     expect(offeringClearance({ ...base, offering_exemption_ref: "Opinion 12/2026" }, "mainnet")).toEqual(refused);
     expect(offeringClearance({ ...base, offering_exemption_reason: "Private placement" }, "mainnet")).toEqual(refused);
     expect(offeringClearance(null, "mainnet")).toEqual(refused);
@@ -166,10 +170,20 @@ describe("publishedSaleDocument", () => {
     expect(state.selects[0].columns).toContain("offering_exemption_ref,offering_exemption_reason");
   });
 
+  it("mainnet: an exempt sale with a bare, unverified SSC reference is not labeled approved", async () => {
+    state.network = "mainnet";
+    state.profile = {
+      ...PUBLISHED, whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26", ssc_decision_version_id: null,
+      offering_exemption_ref: "Opinion 12/2026", offering_exemption_reason: "Fewer than 20 investors",
+    };
+    expect((await publishedSaleDocument(SALE)).sscDecisionRef).toBeNull();
+  });
+
   it("mainnet: serves an SSC-approved document with its decision reference, or an exempt one", async () => {
     state.network = "mainnet";
-    state.profile = { ...PUBLISHED, whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26" };
+    state.profile = { ...PUBLISHED, whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26", ssc_decision_version_id: VERSION };
     expect((await publishedSaleDocument(SALE)).sscDecisionRef).toBe("5/0-01/26");
+    expect(state.selects.at(-1)?.columns).toContain("ssc_decision_version_id");
     state.profile = { ...PUBLISHED, offering_exemption_ref: "Opinion 12/2026", offering_exemption_reason: "Fewer than 20 investors" };
     expect((await publishedSaleDocument(SALE)).sscDecisionRef).toBeNull();
   });
@@ -186,7 +200,10 @@ describe("requireMainnetOfferingClearance (sale approval reserve)", () => {
     await expect(requireMainnetOfferingClearance(sb, ASSET)).rejects.toMatchObject({ status: 503 });
     state.profileError = null;
     state.profile = { whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26", offering_exemption_ref: null, offering_exemption_reason: null };
+    await expect(requireMainnetOfferingClearance(sb, ASSET)).rejects.toMatchObject({ status: 409 });
+    state.profile = { ...state.profile, ssc_decision_version_id: VERSION };
     await expect(requireMainnetOfferingClearance(sb, ASSET)).resolves.toBeUndefined();
+    expect(state.selects.at(-1)?.columns).toContain("ssc_decision_version_id");
   });
 });
 
@@ -235,5 +252,69 @@ describe("/api/profiles/upsert — the offering exemption", () => {
     expect((await call({ display_name: "Acme" })).status).toBe(200);
     expect(Object.keys(state.upserts[0]).filter((k) => k.startsWith("offering_exemption"))).toEqual([]);
     expect(state.audits).toEqual([]);
+  });
+});
+
+describe("/api/profiles/upsert — the SSC approval on mainnet (review 8.1 #6)", () => {
+  const call = async (profile: Record<string, unknown>) => {
+    state.params = { profile: { asset_pda: ASSET, category: "equity", ...profile } };
+    const res = await upsertRoute(new Request("https://www.manci.io/api/profiles/upsert", { method: "POST", body: "{}" }));
+    return { status: res.status, body: await res.json() };
+  };
+  const DECISION_PATH = `whitepapers/${ASSET}/ssc-decision/abcd1234-decision.pdf`;
+  const APPROVED = {
+    ...PUBLISHED, whitepaper_status: "ssc_approved" as const, ssc_decision_ref: "5/0-01/26",
+    ssc_decision_doc_path: DECISION_PATH, ssc_decision_doc_sha256: SHA, ssc_decision_version_id: VERSION,
+  };
+
+  it("an admin who is not the super admin cannot record an approval with a bare reference", async () => {
+    state.network = "mainnet";
+    state.profile = PUBLISHED;
+    const { status, body } = await call({ whitepaper_status: "ssc_approved", ssc_decision_ref: "x" });
+    expect(status).toBe(403);
+    expect(body.error).toMatch(/Super admin/);
+    expect(state.upserts).toEqual([]);
+  });
+
+  it("the super admin needs the verified decision document, then the approval clears the offering", async () => {
+    state.network = "mainnet";
+    state.superAdmin = true;
+    state.profile = PUBLISHED;
+    const bare = await call({ whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26" });
+    expect(bare.status).toBe(409);
+    expect(bare.body.error).toMatch(/verified decision document/);
+    expect(state.upserts).toEqual([]);
+
+    const withDocument = await call({
+      whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26",
+      ssc_decision_doc_path: DECISION_PATH, ssc_decision_doc_sha256: SHA,
+    });
+    expect(withDocument.status).toBe(200);
+    expect(state.upserts[0]).toMatchObject({ whitepaper_status: "ssc_approved", ssc_decision_version_id: VERSION });
+    expect(offeringClearance({ ...APPROVED, offering_exemption_ref: null, offering_exemption_reason: null }, "mainnet"))
+      .toMatchObject({ cleared: true, basis: "ssc_approved" });
+  });
+
+  it("changing the reference of a recorded approval is the super admin's too", async () => {
+    state.network = "mainnet";
+    state.profile = APPROVED;
+    const { status, body } = await call({ whitepaper_status: "ssc_approved", ssc_decision_ref: "9/9-99/26" });
+    expect(status).toBe(403);
+    expect(body.error).toMatch(/Super admin/);
+    expect(state.upserts).toEqual([]);
+  });
+
+  it("any admin may re-save an approved profile unchanged or withdraw the approval", async () => {
+    state.network = "mainnet";
+    state.profile = APPROVED;
+    expect((await call({ whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26", display_name: "Acme" })).status).toBe(200);
+    expect((await call({ whitepaper_status: "published", ssc_decision_ref: null })).status).toBe(200);
+    expect(state.upserts).toHaveLength(2);
+  });
+
+  it("devnet is unchanged: any admin records an approval with a reference", async () => {
+    state.profile = PUBLISHED;
+    expect((await call({ whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26" })).status).toBe(200);
+    expect(state.upserts[0]).toMatchObject({ whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26" });
   });
 });

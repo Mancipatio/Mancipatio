@@ -107,13 +107,14 @@ export async function subjectSpvId(sb: SupabaseClient, asset: string, issuer: st
 /**
  * MAINNET only (the caller checks the network): refuses (409) a sale approval
  * for an asset whose offering is not cleared — neither an SSC-approved
- * whitepaper with its decision reference nor a recorded offering exemption
+ * whitepaper with its decision reference and verified decision document nor
+ * a recorded offering exemption
  * (lib/whitepaper-approval.ts offeringClearance). 503 when the profile cannot
  * be read.
  */
 export async function requireMainnetOfferingClearance(sb: SupabaseClient, asset: string): Promise<void> {
   const { data, error } = await sb.from("asset_profiles")
-    .select("whitepaper_status,ssc_decision_ref,offering_exemption_ref,offering_exemption_reason")
+    .select("whitepaper_status,ssc_decision_ref,ssc_decision_version_id,offering_exemption_ref,offering_exemption_reason")
     .eq("network", "mainnet").eq("asset_pda", asset).maybeSingle();
   if (error) throw new SiwsError(503, "Could not load the asset's whitepaper status");
   const clearance = offeringClearance((data ?? null) as OfferingClearanceProfile | null, "mainnet");

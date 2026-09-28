@@ -4,7 +4,7 @@
 //
 // Directive-free and import-free: next.config.ts loads it through
 // lib/legal/readiness.ts, and server and client pages render it
-// (components/legal-document.tsx).
+// (components/legal/legal-document.tsx).
 
 /**
  * One block of a clause: a paragraph or a bulleted list. Plain text only (no

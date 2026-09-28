@@ -85,10 +85,11 @@ export function OperatorLicenceDetails({ licence }: { licence: OperatorLicence }
   return <DetailList rows={rows} />;
 }
 
-/** Legal, privacy, security and DPO addresses that are set. */
+/** Support, legal, privacy, security and DPO addresses that are set. */
 export function OperatorContactDetails({ operator }: { operator: Operator }) {
-  const { legal, privacy, security, dpo } = operator.contacts;
+  const { support, legal, privacy, security, dpo } = operator.contacts;
   const rows: Array<[string, ReactNode]> = [];
+  if (support) rows.push(["Support", <Mail key="support" address={support} />]);
   if (legal) rows.push(["Legal notices", <Mail key="legal" address={legal} />]);
   if (privacy) rows.push(["Personal data", <Mail key="privacy" address={privacy} />]);
   if (dpo) rows.push(["Data protection officer", <Mail key="dpo" address={dpo} />]);

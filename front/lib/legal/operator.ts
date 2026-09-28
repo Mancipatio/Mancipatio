@@ -1,8 +1,8 @@
 // The platform operator: the legal entity that runs Manci on a network, its
 // licence, its contacts and the law that governs its terms. ONE record per
 // network, and every page that names the operator reads it from here: the
-// footer, the Terms (operator clause), the Privacy Policy (controller),
-// /about, /contact, /security and /legal/company.
+// app footer (components/app-shell.tsx), the Terms (operator clause), the
+// Privacy Policy (controller), /about, /contact, /security and /legal/company.
 //
 // Why a committed file rather than NEXT_PUBLIC_* variables: these details are
 // public by nature (they are in the business register and on the licence),
@@ -34,6 +34,9 @@ export type OperatorLicence = {
 };
 
 export type OperatorContacts = {
+  /** User support. Optional: null means the contact form (/contact) is the
+   *  support channel, which the site links from every page. */
+  support: string | null;
   /** Legal notices and questions about the Terms. */
   legal: string | null;
   /** Personal-data requests (the controller's contact). */
@@ -74,8 +77,10 @@ export type Operator = {
   pilotNotice: string | null;
 };
 
-/** The addresses the site and the programs' security.txt already publish. */
+/** The addresses the site and the programs' security.txt already publish.
+ *  No support address is published today: support is the contact form. */
 const CURRENT_CONTACTS: OperatorContacts = {
+  support: null,
   legal: "legal@mancipatio.io",
   privacy: "privacy@mancipatio.io",
   security: "security@mancipatio.io",
@@ -115,6 +120,8 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     //        services: ["…as worded in the decision…"], registerUrl: null }
     licence: null,
     // Confirm these before launch: they are the addresses published today.
+    // Set `support` if the company has a support mailbox (null keeps the
+    // contact form as the support channel).
     contacts: CURRENT_CONTACTS,
     governingLaw: null,
     disputeResolution: null,
@@ -135,6 +142,37 @@ export function hasOperatorEntity(operator: Operator): boolean {
 /** "Securities Commission of the Republic of Serbia, decision 1/2026 of 2026-10-01". */
 export function licenceLine(licence: OperatorLicence): string {
   return `${licence.authority}, decision ${licence.decisionNumber} of ${licence.decisionDate}`;
+}
+
+/** The copyright holder: the registered name, or the brand without an entity. */
+export function copyrightHolder(operator: Operator): string {
+  return hasOperatorEntity(operator) ? operator.legalName!.trim() : operator.brand;
+}
+
+/** "<office> · MB … · PIB …" when a legal entity is named; null otherwise. */
+export function operatorRegistrationLine(operator: Operator): string | null {
+  if (!hasOperatorEntity(operator)) return null;
+  const parts = [
+    operator.registeredOffice,
+    operator.registrationNumber ? `MB ${operator.registrationNumber}` : null,
+    operator.taxId ? `PIB ${operator.taxId}` : null,
+  ].filter((part): part is string => Boolean(part?.trim()));
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * The footer's operator line: "© <year> <registered name> · <office> · MB …
+ * · PIB … · Licence: <authority>, decision … of …". null while no legal
+ * entity operates the network (the devnet pilot): the footer then shows only
+ * its link to /legal/company, which carries the pilot notice.
+ */
+export function operatorFooterLine(operator: Operator, year: number): string | null {
+  if (!hasOperatorEntity(operator)) return null;
+  const parts = [`© ${year} ${copyrightHolder(operator)}`];
+  const registration = operatorRegistrationLine(operator);
+  if (registration) parts.push(registration);
+  if (operator.licence) parts.push(`Licence: ${licenceLine(operator.licence)}`);
+  return parts.join(" · ");
 }
 
 /**
@@ -186,9 +224,13 @@ export function operatorProblems(operator: Operator): string[] {
       problems.push(`operator.contacts.${key} must be an email address`);
     }
   }
-  const dpo = operator.contacts.dpo;
-  if (dpo !== null && !EMAIL_RE.test(dpo.trim())) {
-    problems.push("operator.contacts.dpo must be an email address or null");
+  // Optional contacts: null is allowed (support → the contact form; a DPO is
+  // not always required), anything set must be an address.
+  for (const key of ["support", "dpo"] as const) {
+    const email = operator.contacts[key];
+    if (email !== null && !EMAIL_RE.test(email.trim())) {
+      problems.push(`operator.contacts.${key} must be an email address or null`);
+    }
   }
   if (operator.pilotNotice !== null) {
     problems.push("operator.pilotNotice must be null on mainnet");

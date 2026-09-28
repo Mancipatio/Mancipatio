@@ -1375,11 +1375,11 @@ Devnet, testnet and localnet keep the pilot's texts and are never checked.
 
 | Slot | File | Filled by |
 |---|---|---|
-| Operator: registered and short name, registered office, MB, PIB, register, governing law, forum for disputes, legal / privacy / security / DPO addresses | `front/lib/legal/operator.ts` (`OPERATORS.mainnet`) | owner (company data), counsel (law and forum) |
+| Operator: registered and short name, registered office, MB, PIB, register, governing law, forum for disputes, legal / privacy / security addresses, optional support and DPO addresses (support `null` = the contact form) | `front/lib/legal/operator.ts` (`OPERATORS.mainnet`) | owner (company data), counsel (law and forum) |
 | Licence: authority, decision number and date, licensed services, register entry | same record, `licence` | owner, from the decision |
 | Mainnet Terms, Privacy Policy, acceptance-dialog summary | `front/lib/legal/mainnet-copy.ts` | counsel |
 | Purchase risk warning (ZDI art. 15(2)) | `front/lib/legal/risk-warning.ts` (`status: "counsel"` once approved) | counsel |
-| External audit | `front/lib/legal/audit.ts` (`SECURITY_AUDIT`) | owner, when the report exists |
+| External audit: firm, scope, date, public report URL (linked from `/risks` and `/about`) | `front/lib/legal/audit.ts` (`SECURITY_AUDIT`) | owner, when the report exists |
 
 When the company and the licence arrive:
 
@@ -1394,10 +1394,27 @@ When the company and the licence arrive:
    material change needs a new version. The devnet version stays
    `DEVNET_TOS_VERSION` (`front/lib/tos-version.ts`).
 3. `npx vitest run tests/legal-slots.test.ts --silent=false` until the
-   "mainnet legal slots" report says complete, then review the rendered
-   `/legal/terms`, `/legal/privacy`, `/legal/company`, the footer and a sale
-   page with counsel on a mainnet preview, and only then set
-   `MAINNET_LEGAL_COPY_APPROVED=true` in the mainnet Vercel project.
+   "mainnet legal slots" report says complete.
+4. Review the rendered `/legal/terms`, `/legal/privacy`, `/legal/company`,
+   `/risks`, the footer, a sale page and an OTC take confirmation with
+   counsel. A production build (Vercel Preview included) refuses
+   `NEXT_PUBLIC_NETWORK=mainnet` without `MAINNET_LEGAL_COPY_APPROVED=true`,
+   so review on either:
+   - a local dev server, which runs no build checks:
+     `cd front && NEXT_PUBLIC_NETWORK=mainnet npx next dev` (the legal pages
+     and the footer need no database; do not point it at any production
+     Supabase project), or
+   - a Preview deployment of the mainnet Vercel project with
+     `MAINNET_LEGAL_COPY_APPROVED=true` set for the **Preview** environment
+     only (it then also needs the other mainnet build checks: the Supabase
+     project, the KYC registry pin).
+5. Only after that review set `MAINNET_LEGAL_COPY_APPROVED=true` for the
+   **Production** environment of the mainnet Vercel project.
+
+A mainnet build must set `NEXT_PUBLIC_NETWORK=mainnet`: a production build
+that leaves it unset while `NEXT_PUBLIC_SOLANA_RPC_URL` points at mainnet is
+refused (the runtime would run as mainnet, but the build checks key on the
+variable).
 
 Build-time variables (mainnet Vercel project only, never `NEXT_PUBLIC_`):
 
@@ -1412,16 +1429,23 @@ Server variable (runtime): `TOS_SERVER_GATE=enforce` makes a TEST network
 require a recorded Terms acceptance on `/api/launchpad/commit`,
 `/api/otc/create` and `/api/resell/create` (409 without, 503 when it cannot
 be checked), to rehearse mainnet, where it is always on. The client dialog
-fails closed on mainnet regardless. Binding the Terms version into the
-purchase memo is a separate, later change.
+fails closed on mainnet regardless; it is mounted on the marketplace and
+portfolio pages and on the `/markets/resell` board (whose OTC request is one
+of the gated routes), so every gated route has a page that offers the
+acceptance. Binding the Terms version into the purchase memo is a separate,
+later change.
 
 Whitepaper gate (lansiranje-2): on mainnet a sale approval
 (`/api/sale-approvals/reserve`) and the sale's purchase document
 (`/api/launchpad/terms`, `/api/launchpad/commit`) require either an
-SSC-approved whitepaper with its decision reference, or an **offering
-exemption** recorded by the super admin (Admin → asset → Whitepaper &
-disclosure: counsel's reference and the reason; the server stamps who and
-when and writes an `offering_exemption_record` audit event). The exemption
+SSC-approved whitepaper with its decision reference **and the uploaded,
+hash-verified decision document**, or an **offering exemption** recorded by
+the super admin (Admin → asset → Whitepaper & disclosure: counsel's
+reference and the reason; the server stamps who and when and writes an
+`offering_exemption_record` audit event). On mainnet recording or changing
+an SSC approval (status, reference, decision document, or a new whitepaper
+file under an approval) is also the **super admin's**, and is refused
+without the decision document; any admin may withdraw one. The exemption
 columns come from migration `0076_offering_exemption.sql` (expand-only).
 Devnet rollout: `bash scripts/ops/backup.sh devnet pre-0076`, then
 `MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0076_offering_exemption.sql`;

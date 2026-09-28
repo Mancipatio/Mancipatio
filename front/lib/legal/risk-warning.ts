@@ -1,11 +1,13 @@
-// The risk warning a buyer reads and confirms before a purchase (launchpad
-// sale page) and sees before paying into an OTC deal. ZDI art. 15(2): before
-// the relationship is established the user must be warned of the risk of
-// partial or total loss and that digital asset transactions are not covered
-// by deposit insurance or investor protection.
+// The risk warning a buyer reads and confirms before a purchase: the
+// launchpad sale page and the OTC take-offer confirmation
+// (/marketplace/otc/[offer]) carry its checkbox; the OTC deal deposit
+// (/portfolio/deals) shows it above the Deposit button. ZDI art. 15(2):
+// before the relationship is established the user must be warned of the risk
+// of partial or total loss and that digital asset transactions are not
+// covered by deposit insurance or investor protection.
 //
-// ONE constant, rendered by components/purchase-risk-warning.tsx. The wording
-// below is engineering's draft of facts the site already states (/risks,
+// ONE constant, rendered by components/legal/purchase-risk-warning.tsx. The
+// wording below is engineering's draft of facts the site already states (/risks,
 // /security); counsel replaces it and sets `status: "counsel"`. A mainnet
 // build refuses the draft (lib/legal/readiness.ts).
 //

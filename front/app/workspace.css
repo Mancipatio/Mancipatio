@@ -94,9 +94,10 @@
 .app-section-tabs { padding:0 250px 0 32px; background:#fff; border-bottom:1px solid var(--app-line); display:flex; gap:23px; overflow-x:auto; }
 .app-section-tabs>a { font-size:12px; padding:14px 0; border-bottom:2px solid transparent; color:var(--app-muted); white-space:nowrap; }
 .app-section-tabs>a.is-active { border-color:var(--app-green); color:var(--app-green); }
-.app-footer { padding:18px 32px; display:flex; justify-content:space-between; gap:14px; color:#657267; font-size:11px; border-top:1px solid var(--app-line); }
-.app-footer>div { display:flex; gap:21px; }
+.app-footer { padding:18px 32px; display:flex; flex-wrap:wrap; justify-content:space-between; gap:14px; color:#657267; font-size:11px; border-top:1px solid var(--app-line); }
+.app-footer>div { display:flex; flex-wrap:wrap; gap:8px 21px; }
 .app-footer-dot { margin:0 7px; }
+.app-footer-operator { flex-basis:100%; margin:0; line-height:1.6; }
 .app-market-content[data-mx] { background:transparent; }
 .app-market-content .mx-wrap { max-width:none; padding:0; }
 .app-market-content .mx-sec { padding:28px 0; }

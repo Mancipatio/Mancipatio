@@ -118,6 +118,8 @@ import {
 import { getBase58Decoder } from "@solana/kit";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
 import { applicationSnapshot, snapshotHash, TOKEN_PROGRAM } from "@/lib/server/sale-capacity";
+import { OFFERING_NOT_CLEARED } from "@/lib/whitepaper-approval";
+import { USDC } from "@/lib/payment-mints";
 import { POST as reserveRoute } from "@/app/api/sale-approvals/reserve/route";
 import { POST as confirmRoute } from "@/app/api/sale-approvals/confirm/route";
 import { POST as releaseRoute } from "@/app/api/sale-approvals/release/route";
@@ -270,6 +272,50 @@ describe("reserve", () => {
     state.rpc.applicant_wallets = [ADMIN];
     state.rows.launch_applications = { ...APP_ROW, network: "mainnet", applicant_wallet: ADMIN };
     expect((await call(reserveRoute, reserveParams())).status).toBe(403);
+  });
+
+  // Mainnet whitepaper gate (lansiranje-2, review 8.1 #5): the route itself
+  // refuses an offering that is not cleared, before reserving anything.
+  describe("on mainnet (offering clearance)", () => {
+    const usdc = () => USDC.mainnet!.mint as string;
+    const mainnetParams = () => ({ ...reserveParams(), payment_mint: usdc() });
+    const profile = (over: Record<string, unknown> = {}) => ({
+      spv_id: null, whitepaper_status: "published", ssc_decision_ref: null, ssc_decision_version_id: null,
+      offering_exemption_ref: null, offering_exemption_reason: null, ...over,
+    });
+    beforeEach(() => {
+      state.network = "mainnet";
+      state.accounts.set(usdc(), mintAccount(6));
+      state.rows.launch_applications = { ...APP_ROW, network: "mainnet" };
+    });
+
+    it("refuses (409) without an SSC approval or an exemption, and reserves nothing", async () => {
+      for (const row of [
+        profile(),
+        // A typed reference without the verified decision document.
+        profile({ whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26" }),
+        null,
+      ]) {
+        state.rows.asset_profiles = row;
+        const { status, body } = await call(reserveRoute, mainnetParams());
+        expect(status, JSON.stringify(row)).toBe(409);
+        expect(body.error).toBe(OFFERING_NOT_CLEARED);
+      }
+      expect(rpcCall("reserve_sale_capacity")).toBeUndefined();
+      expect(state.calls.filter((c) => c.kind !== "rpc")).toEqual([]);
+    });
+
+    it("reserves with a recorded exemption or a verified SSC approval", async () => {
+      state.rows.asset_profiles = profile({ offering_exemption_ref: "Opinion 12/2026", offering_exemption_reason: "Fewer than 20 investors" });
+      expect((await call(reserveRoute, mainnetParams())).status).toBe(200);
+      expect(rpcCall("reserve_sale_capacity")).toMatchObject({ p_network: "mainnet", p_payment_mint: usdc() });
+      state.calls = [];
+      state.rows.asset_profiles = profile({
+        whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26", ssc_decision_version_id: "10000000-0000-4000-8000-000000000001",
+      });
+      expect((await call(reserveRoute, mainnetParams())).status).toBe(200);
+      expect(rpcCall("reserve_sale_capacity")).toBeDefined();
+    });
   });
 
   it("fixes the payout schedule: 0/0 for mature, the application's for startup", async () => {
