@@ -16,6 +16,9 @@ const eslintConfig = defineConfig([
     "lib/generated/**",
     // Supabase Deno edge functions (not part of the Next.js app):
     "supabase/functions/**",
+    // Playwright UI smoke output (traces, HTML report):
+    "ui-smoke/.results/**",
+    "ui-smoke/.report/**",
   ]),
 ]);
 
