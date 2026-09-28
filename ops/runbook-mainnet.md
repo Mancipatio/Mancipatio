@@ -1549,7 +1549,12 @@ left on chain (never mirrored). Rollback: re-apply 0047's
 helius-webhook [--use-api]`, `secrets list`, `secrets set --env-file <file>`
 (mode 600) and `secrets unset NAME…`, and appends `--project-ref` from the
 target. Delete `front/supabase/.temp/` before the first use; the wrapper
-refuses while a linked project is recorded there. A plain deploy bundles the
+refuses while a linked project is recorded there. The CLI (2.101) records the
+project again on every call, so the wrapper removes `front/supabase/.temp/`
+after each call it runs (also when the call fails or is interrupted) and
+exits with the CLI's status: consecutive wrapper calls need no manual
+`rm -rf`. A refusal means something outside the wrapper linked a project:
+find out what before deleting it. A plain deploy bundles the
 function in Docker; without a running Docker, add `--use-api` (Supabase
 bundles it server-side; the project still comes from the target).
 
@@ -1676,8 +1681,9 @@ minutes.
 
 1. Supabase dashboard: enable the new API keys (the legacy ones stay
    enabled).
-2. `rm -rf supabase/.temp`, then create `~/.mancipatio/devnet-edge.env` as
-   under "Credential files".
+2. `rm -rf supabase/.temp` (once: later wrapper calls clean up after
+   themselves), then create `~/.mancipatio/devnet-edge.env` as under
+   "Credential files".
 3. ```
    bash scripts/ops/supabase.sh devnet secrets set --env-file ~/.mancipatio/devnet-edge.env
    bash scripts/ops/supabase.sh devnet secrets list

@@ -17,7 +17,10 @@
 #
 # Delete front/supabase/.temp/ (project-ref, linked-project.json,
 # pooler-url) before the first use: a linked project must never decide where
-# a command goes. The wrapper refuses while those files exist.
+# a command goes. The wrapper refuses while those files exist. The CLI
+# (2.101) writes supabase/.temp/ again on every call, so the wrapper removes
+# it after each call it runs, whatever the outcome (also on Ctrl-C), and
+# exits with the CLI's status.
 # `verify_jwt = false` for helius-webhook stays in supabase/config.toml.
 # bash 3.2-safe.
 set -euo pipefail
@@ -100,4 +103,11 @@ case "$1 ${2:-}" in
 esac
 
 echo "supabase $1 $2 → target $target ($network, $ref)" >&2
-exec supabase "$@" --project-ref "$ref"
+# The CLI records the project it just used in supabase/.temp/; left there, it
+# would make the leftover check above refuse the next call.
+trap 'rm -rf supabase/.temp' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+status=0
+supabase "$@" --project-ref "$ref" || status=$?
+exit "$status"

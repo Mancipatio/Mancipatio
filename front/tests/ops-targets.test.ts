@@ -57,6 +57,12 @@ case "$name" in
     for a in "$@"; do [ "$prev" = "-f" ] && out="$a"; prev="$a"; done
     if [ -n "$out" ]; then printf 'PGDMP' > "$out"; else printf 'PGDMP-DATA'; fi ;;
   age) cat ;;
+  supabase)
+    # Like CLI 2.101: every call records the project it used.
+    mkdir -p supabase/.temp
+    printf '{"ref":"%s"}' "\${*: -1}" > supabase/.temp/linked-project.json
+    printf 'v2.101.0' > supabase/.temp/cli-latest
+    exit "\${STUB_SUPABASE_EXIT:-0}" ;;
 esac
 exit 0
 `;
@@ -499,6 +505,29 @@ describe("scripts/ops/supabase.sh", () => {
     const run = box.run("scripts/ops/supabase.sh", args);
     expect(run.status).not.toBe(0);
     expect(named(run, "supabase")).toEqual([]);
+  });
+
+  it("removes the supabase/.temp/ the CLI writes after every call, so the next call runs, and passes the CLI's status on", () => {
+    const box = sandbox();
+    const temp = join(box.root, "supabase/.temp");
+    const first = box.run("scripts/ops/supabase.sh", ["devnet", "secrets", "list"]);
+    expect(first.status, first.stderr).toBe(0);
+    expect(named(first, "supabase")).toHaveLength(1);
+    expect(existsSync(temp)).toBe(false);
+    const second = box.run("scripts/ops/supabase.sh", ["devnet", "functions", "deploy", "helius-webhook", "--use-api"]);
+    expect(second.status, second.stderr).toBe(0);
+    expect(named(second, "supabase")).toHaveLength(1);
+    expect(existsSync(temp)).toBe(false);
+    // A failing CLI call: its status, and still no link left behind.
+    const failed = box.run("scripts/ops/supabase.sh", ["devnet", "secrets", "list"], { STUB_SUPABASE_EXIT: "3" });
+    expect(failed.status).toBe(3);
+    expect(named(failed, "supabase")).toHaveLength(1);
+    expect(existsSync(temp)).toBe(false);
+    // A refused call never reaches the CLI and leaves an existing .temp alone.
+    mkdirSync(temp);
+    writeFileSync(join(temp, "project-ref"), "otherprojectref00001");
+    expect(named(box.run("scripts/ops/supabase.sh", ["devnet", "secrets", "list"]), "supabase")).toEqual([]);
+    expect(existsSync(join(temp, "project-ref"))).toBe(true);
   });
 
   it("refuses a world-readable env file and a leftover linked project", () => {
