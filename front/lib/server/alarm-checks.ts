@@ -73,10 +73,11 @@
 // role-change-pending reports nothing. bootstrap-open (critical, mainnet):
 // the one-way bootstrap window (bit 0x80) is open while an emergency area is
 // clear — a live platform on which add_admin and the Super Admin rotation
-// skip their 48 h (an rc.x rollback that unpaused and came back to v1). The
-// half of chain:inventory's rule that needs the deployer key (the Super
-// Admin is no longer the deployer) stays in chain:inventory: the server does
-// not know that key.
+// skip their 48 h (an rc.x rollback that unpaused and came back to v1) — or
+// has stayed open, fully paused, for BOOTSTRAP_WINDOW_MAX_HOURS since the
+// Platform's first indexed transaction (Day D is over, S5c was forgotten).
+// The half of chain:inventory's rule that needs the role map (the final
+// Super Admin holds the platform) stays in chain:inventory.
 // indexer-reconcile-age (0075, low): the last full reconcile is older than
 // reconcile_max_age_hours (default 168). Not a freshness condition: the
 // heartbeat keeps proving from its watermarks; a reconcile also catches what
@@ -432,37 +433,67 @@ export async function payoutModulesReport(sb: SupabaseClient, network: Network, 
     evidence: { pause_flags: flags } };
 }
 
+/** Day D (runbook §0A, §4-§5) runs inside the bootstrap window: bootstrap-open fails once it is older than this (K1.11). */
+export const BOOTSTRAP_WINDOW_MAX_HOURS = 72;
+
 /**
  * bootstrap-open (D3, critical, mainnet only): bit 0x80 (the one-way
  * bootstrap window, which waives the 48 h of add_admin and of the Super
  * Admin rotation) must be closed on a live platform. v1 closes it with the
  * first clear of any pause bit, so bit 7 next to a clear emergency area means
  * an rc.x build unpaused (a rollback, runbook §10) and the platform came back
- * to v1 with the timelocks silently off. Fail while the mirror shows that;
- * pass while bit 7 is closed, or open with every emergency area paused (the
- * bootstrap itself). Hold while no Platform is mirrored; null when the mirror
- * cannot be read. The deployer half of chain:inventory's `bootstrap-open`
- * (bit 7 still open once the final Super Admin holds the platform) needs the
- * deployer key, which the server does not have: the inventory keeps it.
+ * to v1 with the timelocks silently off. Fail while the mirror shows that.
+ * Open with every emergency area paused is the bootstrap itself, which Day D
+ * ends (S5c closes the window right after X1): it passes until the window is
+ * BOOTSTRAP_WINDOW_MAX_HOURS old, then fails (a forgotten S5c, K1.11). The
+ * window's age comes from the Platform's own state and the first indexed
+ * transaction that touched it (initialize_platform), with no key: the other
+ * half of chain:inventory's rule (bit 7 open once the final Super Admin holds
+ * the platform) needs the role map, and the inventory keeps it. A window
+ * whose first transaction is not indexed passes as before (the indexer's own
+ * incidents report a mirror without events). Pass while bit 7 is closed; hold
+ * while no Platform is mirrored; null when the mirror cannot be read.
  */
-export async function bootstrapOpenReport(sb: SupabaseClient, network: Network, signal: AbortSignal): Promise<Report | null> {
+export async function bootstrapOpenReport(sb: SupabaseClient, network: Network, signal: AbortSignal, now = Date.now()): Promise<Report | null> {
   const base = { check: "bootstrap-open", severity: "critical" as const, category: "onchain" as const, source: "onchain:bootstrap-open" };
   if (network !== "mainnet") return { ...base, state: "pass", summary: "The bootstrap window is watched on mainnet only" };
-  const { data, error } = await sb.from("platforms").select("pause_flags").eq("network", network)
+  const { data, error } = await sb.from("platforms").select("pda,pause_flags").eq("network", network)
     .abortSignal(dbSignal(signal)).maybeSingle();
   if (error) return null;
-  const flags = (data as { pause_flags?: number | null } | null)?.pause_flags;
+  const platform = data as { pda?: string | null; pause_flags?: number | null } | null;
+  const flags = platform?.pause_flags;
   if (typeof flags !== "number") return { ...base, state: "hold", summary: "No Platform is mirrored yet" };
   const open = (flags & PLATFORM_BOOTSTRAP_OPEN) !== 0;
   const unpaused = (flags & EMERGENCY_PAUSE_BITS) !== EMERGENCY_PAUSE_BITS;
+  const close = 'The Super Admin closes it with set_pause_flags(0, 0x80) (/admin/platform, "Close bootstrap window")';
   if (open && unpaused) {
     return { ...base, state: "fail",
-      summary: `The bootstrap window (bit 0x80) is open on a live platform (${formatPauseFlags(flags)}): add_admin and the Super Admin rotation skip their 48-hour timelock. The Super Admin closes it with set_pause_flags(0, 0x80) (/admin/platform, "Close bootstrap window")`,
+      summary: `The bootstrap window (bit 0x80) is open on a live platform (${formatPauseFlags(flags)}): add_admin and the Super Admin rotation skip their 48-hour timelock. ${close}`,
       evidence: { pause_flags: flags } };
   }
+  if (!open) return { ...base, state: "pass", summary: "The bootstrap window is closed", evidence: { pause_flags: flags } };
+  // The bootstrap: how long has the window been open?
+  let openedAt: number | null = null;
+  if (typeof platform?.pda === "string" && BASE58.test(platform.pda)) {
+    const first = await sb.from("indexer_events").select("block_time,created_at").eq("network", network)
+      .contains("wallets", [platform.pda]).order("created_at", { ascending: true }).limit(1)
+      .abortSignal(dbSignal(signal)).maybeSingle();
+    if (first.error) return null;
+    const row = first.data as { block_time?: string | null; created_at?: string | null } | null;
+    const at = Date.parse(row?.block_time ?? row?.created_at ?? "");
+    openedAt = Number.isFinite(at) ? at : null;
+  }
+  const hours = openedAt === null ? null : Math.max(0, Math.floor((now - openedAt) / 3_600_000));
+  if (openedAt !== null && hours !== null && hours >= BOOTSTRAP_WINDOW_MAX_HOURS) {
+    return { ...base, state: "fail",
+      summary: `The bootstrap window (bit 0x80) has been open for ${hours} hours (every area paused): Day D is over, yet add_admin and the Super Admin rotation still skip their 48-hour timelock. ${close} right after X1 (S5c)`,
+      evidence: { pause_flags: flags, opened_at: new Date(openedAt).toISOString(), hours_open: hours, max_hours: BOOTSTRAP_WINDOW_MAX_HOURS } };
+  }
   return { ...base, state: "pass",
-    summary: open ? "The bootstrap window is open while every emergency area is paused (bootstrap)" : "The bootstrap window is closed",
-    evidence: { pause_flags: flags } };
+    summary: openedAt === null
+      ? "The bootstrap window is open while every emergency area is paused (bootstrap; its first transaction is not indexed)"
+      : `The bootstrap window is open while every emergency area is paused (bootstrap, ${hours} of ${BOOTSTRAP_WINDOW_MAX_HOURS} hours)`,
+    evidence: { pause_flags: flags, ...(openedAt === null ? {} : { opened_at: new Date(openedAt).toISOString(), hours_open: hours }) } };
 }
 
 type Hold = { subject: string; ref: string; code: string; payment_mint: string | null; created_at: string };
@@ -760,7 +791,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => sanctionsListReport(sb, network, now, signal));
   await collect(() => roleChangesReport(sb, network, now, signal));
   await collect(() => payoutModulesReport(sb, network, signal));
-  await collect(() => bootstrapOpenReport(sb, network, signal));
+  await collect(() => bootstrapOpenReport(sb, network, signal, now));
   await record(cheap);
 
   // 2. The operational watches (chain reads), in parallel with the gap scan,

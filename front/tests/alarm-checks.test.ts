@@ -548,6 +548,40 @@ describe("role-change-pending and payout-modules", () => {
     expect(incident(rpcs, "bootstrap-open")).toMatchObject({ p_state: "pass", p_severity: "critical" });
   });
 
+  it("bootstrap-open: a fully paused window fails once it is 72 hours past the Platform's first indexed transaction (K1.11)", async () => {
+    const now = Date.parse("2026-10-01T12:00:00Z");
+    const at = (hoursAgo: number) => new Date(now - hoursAgo * 3_600_000).toISOString();
+    const reads: string[] = [];
+    const sb = (events: Record<string, unknown>[], flags = 0xff, broken = false) => ({ from: (table: string) => {
+      const b: Record<string, unknown> = {};
+      b.select = () => b; b.order = () => b; b.limit = () => b; b.abortSignal = () => b;
+      b.eq = (column: string, value: unknown) => { reads.push(`${table}:${column}=${value}`); return b; };
+      b.contains = (column: string, value: unknown[]) => { reads.push(`${table}:${column}@>${value.join(",")}`); return b; };
+      b.maybeSingle = async () => table === "platforms" ? { data: { pda: MINT, pause_flags: flags }, error: null }
+        : broken ? { data: null, error: { code: "08006" } } : { data: events[0] ?? null, error: null };
+      return b;
+    } }) as never;
+    const report = (events: Record<string, unknown>[], flags = 0xff, broken = false, network: "mainnet" | "devnet" = "mainnet") =>
+      bootstrapOpenReport(sb(events, flags, broken), network, AbortSignal.timeout(5_000), now);
+    // Day D and the two days after it: the bootstrap.
+    expect(await report([{ block_time: at(71.9), created_at: at(71) }])).toMatchObject({ state: "pass", evidence: { hours_open: 71 } });
+    expect(reads).toEqual(["platforms:network=mainnet", "indexer_events:network=mainnet", `indexer_events:wallets@>${MINT}`]);
+    // 72 hours after initialize_platform, still fully paused with bit 7 open: S5c was forgotten.
+    expect(await report([{ block_time: at(72), created_at: at(71) }])).toMatchObject({ state: "fail", severity: "critical",
+      source: "onchain:bootstrap-open", summary: expect.stringMatching(/open for 72 hours.*S5c/),
+      evidence: { pause_flags: 0xff, opened_at: at(72), hours_open: 72, max_hours: 72 } });
+    // No block time: the row's insert time.
+    expect(await report([{ block_time: null, created_at: at(100) }])).toMatchObject({ state: "fail", evidence: { hours_open: 100 } });
+    // No indexed transaction touched the Platform: passes as before; unreadable: the check could not run.
+    expect(await report([])).toMatchObject({ state: "pass", summary: expect.stringMatching(/not indexed/) });
+    expect(await report([], 0xff, true)).toBeNull();
+    // A closed window reads no events; devnet never alarms.
+    reads.length = 0;
+    expect(await report([{ block_time: at(500) }], 0x5c)).toMatchObject({ state: "pass", summary: "The bootstrap window is closed" });
+    expect(reads).toEqual(["platforms:network=mainnet"]);
+    expect(await report([{ block_time: at(500) }], 0xff, false, "devnet")).toMatchObject({ state: "pass" });
+  });
+
   it("roleChangesReport reads only this network's rows", async () => {
     const calls: string[] = [];
     const sb = { from: (table: string) => {
