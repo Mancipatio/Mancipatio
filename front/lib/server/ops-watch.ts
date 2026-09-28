@@ -6,14 +6,17 @@
 // and report nothing while unset:
 //
 //   ALARM_BALANCE_WATCH  comma-separated `label:address[:minSol]` (at most
-//                        20; label [a-z0-9-]{1,30}; minSol default 0.1).
-//                        One incident per address, sol-balance:<address>
+//                        20 entries; label [a-z0-9-]{1,30}; minSol default
+//                        0.1). One incident per address, sol-balance:<address>
 //                        (high): fail below minSol, pass from 1.25 × minSol,
 //                        hold between. A missing account counts as 0 SOL.
 //                        Watch every key that must sign in an emergency: the
 //                        super admin, every Admin, the BlocklistAuthority,
 //                        the KYC authority (it pays KycEntry rent) and the
-//                        bufferWriter.
+//                        bufferWriter. One key holding several roles (the
+//                        company wallet model) may be listed under each
+//                        label: the entries merge into one watch, with every
+//                        label and the highest minSol.
 //   ALARM_SQUADS_CONFIG  JSON: the role map's `squads` object (multisig,
 //                        threshold, timeLock, configAuthority, members with
 //                        permissions; vault and vaultIndex are ignored).
@@ -21,21 +24,32 @@
 //                        on-chain Multisig differs from it (members and their
 //                        permissions, threshold, time lock, config
 //                        authority) or cannot be read as a Squads v4
-//                        Multisig. squads-proposals:<multisig> fails while a
-//                        proposal among the last PROPOSAL_WINDOW transaction
-//                        indexes is open: Approved or Executing (it can
-//                        execute) critical, Draft or Active (not stale) high.
-//                        So a proposal is seen while it gathers approvals and
+//                        Multisig. squads-proposal:<proposal PDA>: one
+//                        incident PER open proposal, Approved or Executing
+//                        (it can execute) critical, Draft or Active (not
+//                        stale) high, an unreadable Proposal account
+//                        critical. So each new proposal pages on its own,
+//                        even while another one is open or acknowledged, and
+//                        a proposal is seen while it gathers approvals and
 //                        waits out the time lock, not only once it executes
 //                        (the program-upgrade and treasury instruction
 //                        alarms fire on execution). The team's own proposals
 //                        page too: that is the point.
+//                        Every run reads the newest PROPOSAL_WINDOW
+//                        transaction indexes, one PROPOSAL_SWEEP_CHUNK of the
+//                        older ones in rotation (a proposal created late for
+//                        an old index, or one pushed out of the window by a
+//                        flood of new transactions, is read within
+//                        ceil(older / chunk) minutes), and every proposal
+//                        whose incident is still open, wherever it is.
 // A set value that does not parse is an incident of its own (ops-watch-config,
 // high), never a silent skip. An incident whose address or multisig is no
 // longer configured reports pass, so it clears.
 //
-// RPC: one getMultipleAccounts for the balances, one for the multisig and one
-// for its proposal window, per run.
+// RPC: at most one getMultipleAccounts for the balances, one for the
+// multisig and three for proposals (window, sweep chunk, open incidents) per
+// run, each bounded by OPS_WATCH_RPC_TIMEOUT_MS on top of the caller's
+// signal: a hanging RPC fails the watch quickly and never the other checks.
 
 import "server-only";
 import { fetchEncodedAccounts, isAddress, type Address } from "@solana/kit";
@@ -65,7 +79,13 @@ export type AccountFetcher = (addresses: string[], signal: AbortSignal) => Promi
 export const BALANCE_WATCH_MAX = 20;
 export const DEFAULT_MIN_SOL = 0.1;
 /** The most recent transaction indexes whose proposals are read each run. */
-export const PROPOSAL_WINDOW = 50;
+export const PROPOSAL_WINDOW = 100;
+/** Older transaction indexes read per run, one chunk per minute in rotation. */
+export const PROPOSAL_SWEEP_CHUNK = 100;
+/** Open proposals reported individually per run (executable first, then newest). */
+export const PROPOSAL_REPORTS_MAX = 20;
+/** Each chain read of a watch, on top of the caller's signal. */
+export const OPS_WATCH_RPC_TIMEOUT_MS = 5_000;
 
 const serverFetcher: AccountFetcher = async (addresses, signal) => {
   const out = new Map<string, WatchedAccount | null>();
@@ -78,11 +98,28 @@ const serverFetcher: AccountFetcher = async (addresses, signal) => {
   return out;
 };
 
+/** One read bounded by its own timeout; rejects on abort even if the fetcher ignores its signal. */
+function boundedFetcher(fetchAccounts: AccountFetcher, timeoutMs: number): AccountFetcher {
+  return (addresses, signal) => {
+    const bounded = AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]);
+    return new Promise((resolve, reject) => {
+      const onAbort = () => reject(new Error("Chain read timed out"));
+      if (bounded.aborted) return onAbort();
+      bounded.addEventListener("abort", onAbort, { once: true });
+      fetchAccounts(addresses, bounded).then(resolve, reject).finally(() => bounded.removeEventListener("abort", onAbort));
+    });
+  };
+}
+
 // ── Configuration ────────────────────────────────────────────────────────
 
 export type BalanceWatch = { label: string; address: string; minLamports: bigint };
 
-/** ALARM_BALANCE_WATCH; [] when unset, "invalid" when set but unusable. */
+/**
+ * ALARM_BALANCE_WATCH; [] when unset, "invalid" when set but unusable. The
+ * same address under several labels (one key, several roles) is one watch:
+ * its labels joined with "+", the highest threshold.
+ */
 export function parseBalanceWatch(value: string | undefined): BalanceWatch[] | "invalid" {
   const raw = value?.trim();
   if (!raw) return [];
@@ -94,8 +131,14 @@ export function parseBalanceWatch(value: string | undefined): BalanceWatch[] | "
     if (extra !== undefined || !/^[a-z0-9-]{1,30}$/.test(label ?? "") || !address || !isAddress(address)) return "invalid";
     const sol = min === undefined || min === "" ? DEFAULT_MIN_SOL : Number(min);
     if (!Number.isFinite(sol) || sol <= 0 || sol > 1_000) return "invalid";
-    if (out.some((w) => w.address === address)) return "invalid";
-    out.push({ label, address, minLamports: BigInt(Math.round(sol * 1e9)) });
+    const minLamports = BigInt(Math.round(sol * 1e9));
+    const same = out.find((w) => w.address === address);
+    if (same) {
+      if (!same.label.split("+").includes(label)) same.label += `+${label}`;
+      if (minLamports > same.minLamports) same.minLamports = minLamports;
+    } else {
+      out.push({ label, address, minLamports });
+    }
   }
   return out;
 }
@@ -157,15 +200,39 @@ export function balanceReport(watch: BalanceWatch, lamports: bigint): WatchRepor
   };
 }
 
-type Proposal = { index: string; status: string; approvals: number; stale: boolean };
+/** index: null for a tracked proposal whose account could not be decoded. */
+type OpenProposal = { pda: string; index: bigint | null; status: string; approvals: number; stale: boolean; unreadable: boolean };
 
-/** The Multisig against the expected configuration, and its open proposals. */
+const PROPOSAL_CHECK = "squads-proposal";
+
+/** Transaction indexes read this run: the newest window and one older chunk in rotation. */
+export function proposalScanIndexes(last: bigint, now: number): { recent: bigint[]; sweep: bigint[] } {
+  const window = BigInt(PROPOSAL_WINDOW);
+  const first = last >= window ? last - window + BigInt(1) : BigInt(1);
+  const recent: bigint[] = [];
+  for (let index = first; index <= last; index++) recent.push(index);
+  const sweep: bigint[] = [];
+  const older = first - BigInt(1);
+  if (older >= BigInt(1)) {
+    const chunk = BigInt(PROPOSAL_SWEEP_CHUNK);
+    const chunks = (older + chunk - BigInt(1)) / chunk;
+    const from = (BigInt(Math.floor(now / 60_000)) % chunks) * chunk + BigInt(1);
+    const to = from + chunk - BigInt(1) < older ? from + chunk - BigInt(1) : older;
+    for (let index = from; index <= to; index++) sweep.push(index);
+  }
+  return { recent, sweep };
+}
+
+/**
+ * The Multisig against the expected configuration, and one incident per open
+ * proposal. `openKeys`: the open incident keys, so a proposal whose incident
+ * is open is read wherever its index is, and passes once it is no longer open.
+ */
 export async function squadsReports(
-  watch: SquadsWatch, fetchAccounts: AccountFetcher, signal: AbortSignal,
+  watch: SquadsWatch, fetchAccounts: AccountFetcher, signal: AbortSignal, openKeys: readonly string[] = [], now = Date.now(),
 ): Promise<WatchReport[]> {
   const base = { category: "onchain" as const };
   const configCheck = `squads-config:${watch.multisig}`;
-  const proposalsCheck = `squads-proposals:${watch.multisig}`;
   const account = (await fetchAccounts([watch.multisig], signal)).get(watch.multisig) ?? null;
   let decoded: DecodedMultisig | null = null;
   const problems: string[] = [];
@@ -189,43 +256,82 @@ export async function squadsReports(
       threshold: decoded?.threshold ?? null, time_lock: decoded?.timeLock ?? null, members: decoded?.members.length ?? null },
   }];
   if (!decoded) return reports;
+  const multisig = decoded;
 
-  const last = decoded.transactionIndex;
-  const window = BigInt(PROPOSAL_WINDOW);
-  const first = last >= window ? last - window + BigInt(1) : BigInt(1);
-  const pdas: { index: bigint; pda: string }[] = [];
-  for (let index = first; index <= last; index++) pdas.push({ index, pda: await squadsProposalPda(watch.multisig, index) });
-  const accounts = pdas.length ? await fetchAccounts(pdas.map((p) => p.pda), signal) : new Map<string, WatchedAccount | null>();
-  const open: Proposal[] = [];
-  const unreadable: string[] = [];
-  for (const { index, pda } of pdas) {
-    const proposal = accounts.get(pda);
-    if (!proposal) continue;
-    try {
-      if (proposal.owner !== SQUADS_V4_PROGRAM) throw new Error("owner");
-      const p = decodeProposal(proposal.data);
-      if (p.multisig !== watch.multisig || p.transactionIndex !== index) throw new Error("mismatch");
-      if (FINAL_PROPOSAL_STATUSES.includes(p.status)) continue;
-      const stale = index <= decoded.staleTransactionIndex;
-      // A stale Draft or Active proposal can no longer be approved; an Approved one still executes.
-      if (stale && (p.status === "Draft" || p.status === "Active")) continue;
-      open.push({ index: index.toString(), status: p.status, approvals: p.approved.length, stale });
-    } catch {
-      unreadable.push(index.toString());
-    }
+  const { recent, sweep } = proposalScanIndexes(multisig.transactionIndex, now);
+  const pdaOf = async (indexes: bigint[]) =>
+    Promise.all(indexes.map(async (index) => ({ index, pda: await squadsProposalPda(watch.multisig, index) as string })));
+  const scanned = [...await pdaOf(recent), ...await pdaOf(sweep)];
+  const indexOf = new Map<string, bigint | null>(scanned.map((p) => [p.pda, p.index]));
+  // Proposals whose incident is open but whose index is outside this run's reads.
+  const tracked = openKeys.filter((k) => k.startsWith(`${PROPOSAL_CHECK}:`)).map((k) => k.slice(PROPOSAL_CHECK.length + 1))
+    .filter((pda) => !indexOf.has(pda)).slice(0, 100);
+  for (const pda of tracked) indexOf.set(pda, null);
+  // Three reads at most (window, sweep chunk, tracked), each under its own timeout.
+  const read = new Map<string, WatchedAccount | null>();
+  const groups = [scanned.slice(0, recent.length), scanned.slice(recent.length)].map((g) => g.map((p) => p.pda));
+  for (const group of [...groups, tracked]) {
+    if (!group.length) continue;
+    for (const [pda, value] of await fetchAccounts(group, signal)) read.set(pda, value);
   }
-  const executable = open.some((p) => p.status === "Approved" || p.status === "Executing");
-  const list = open.slice(0, 5).map((p) => `#${p.index} ${p.status} (${p.approvals}/${decoded!.threshold})`).join(", ");
-  reports.push({
-    ...base, check: proposalsCheck, state: open.length || unreadable.length ? "fail" : "pass",
-    severity: executable || unreadable.length ? "critical" : "high", source: "onchain:squads-proposal",
-    summary: open.length || unreadable.length
-      ? `Squads multisig ${watch.multisig}: ${open.length} open proposal(s)${list ? `: ${list}` : ""}`
-        + `${unreadable.length ? `; ${unreadable.length} proposal account(s) could not be read` : ""}. Check each one before it executes.`
-      : `Squads multisig ${watch.multisig} has no open proposal`,
-    evidence: { multisig: watch.multisig, open: open.slice(0, 20), unreadable: unreadable.slice(0, 20),
-      scanned: [first.toString(), last.toString()], time_lock: decoded.timeLock },
-  });
+
+  const open: OpenProposal[] = [];
+  const closed: string[] = [];
+  for (const [pda, expectedIndex] of indexOf) {
+    if (!read.has(pda)) continue;
+    const proposal = read.get(pda) ?? null;
+    // A missing account was never proposed or was closed after it finished; an
+    // account the Squads program does not own cannot be one of its proposals.
+    if (!proposal || proposal.owner !== SQUADS_V4_PROGRAM) {
+      closed.push(pda);
+      continue;
+    }
+    let p;
+    try {
+      p = decodeProposal(proposal.data);
+    } catch {
+      open.push({ pda, index: expectedIndex, status: "unreadable", approvals: 0, stale: false, unreadable: true });
+      continue;
+    }
+    if (p.multisig !== watch.multisig) {
+      // A proposal of another multisig (only a tracked one can be): no longer watched.
+      if (expectedIndex === null) closed.push(pda);
+      else open.push({ pda, index: expectedIndex, status: "unreadable", approvals: 0, stale: false, unreadable: true });
+      continue;
+    }
+    if (expectedIndex !== null && p.transactionIndex !== expectedIndex) {
+      open.push({ pda, index: expectedIndex, status: "unreadable", approvals: 0, stale: false, unreadable: true });
+      continue;
+    }
+    const stale = p.transactionIndex <= multisig.staleTransactionIndex;
+    // A stale Draft or Active proposal can no longer be approved; an Approved one still executes.
+    if (FINAL_PROPOSAL_STATUSES.includes(p.status) || (stale && (p.status === "Draft" || p.status === "Active"))) {
+      closed.push(pda);
+      continue;
+    }
+    open.push({ pda, index: p.transactionIndex, status: p.status, approvals: p.approved.length, stale, unreadable: false });
+  }
+
+  const critical = (p: OpenProposal) => p.unreadable || p.status === "Approved" || p.status === "Executing";
+  const rank = (p: OpenProposal) => p.index ?? BigInt(-1);
+  open.sort((a, b) => Number(critical(b)) - Number(critical(a)) || (rank(b) > rank(a) ? 1 : rank(b) < rank(a) ? -1 : 0));
+  for (const p of open.slice(0, PROPOSAL_REPORTS_MAX)) {
+    reports.push({
+      ...base, check: `${PROPOSAL_CHECK}:${p.pda}`, state: "fail", severity: critical(p) ? "critical" : "high", source: "onchain:squads-proposal",
+      summary: p.unreadable
+        ? `Squads multisig ${watch.multisig}: the proposal account ${p.pda} (#${p.index ?? "?"}) could not be read as its Squads v4 Proposal. Check it before anything executes.`
+        : `Squads multisig ${watch.multisig}: proposal #${p.index} is ${p.status} (${p.approvals}/${multisig.threshold} approvals${p.stale ? ", stale" : ""}). Check it before it executes.`,
+      evidence: { multisig: watch.multisig, proposal: p.pda, index: p.index?.toString() ?? null, status: p.status, approvals: p.approvals,
+        threshold: multisig.threshold, stale: p.stale, time_lock: multisig.timeLock, open_proposals: open.length },
+    });
+  }
+  // Only a proposal read this run and no longer open passes (one over the report cap keeps its incident).
+  const openKeySet = new Set(openKeys);
+  for (const pda of closed) {
+    if (!openKeySet.has(`${PROPOSAL_CHECK}:${pda}`)) continue;
+    reports.push({ ...base, check: `${PROPOSAL_CHECK}:${pda}`, state: "pass", severity: "high", source: "onchain:squads-proposal",
+      summary: `Squads proposal ${pda} is no longer open`, evidence: { multisig: watch.multisig, proposal: pda } });
+  }
   return reports;
 }
 
@@ -237,7 +343,9 @@ export async function squadsReports(
 export async function opsWatchReports(
   sb: SupabaseClient, network: Network, signal: AbortSignal,
   env: Record<string, string | undefined> = process.env, fetchAccounts: AccountFetcher = serverFetcher,
+  options: { rpcTimeoutMs?: number; now?: number } = {},
 ): Promise<WatchReport[]> {
+  const fetchBounded = boundedFetcher(fetchAccounts, options.rpcTimeoutMs ?? OPS_WATCH_RPC_TIMEOUT_MS);
   const balances = parseBalanceWatch(env.ALARM_BALANCE_WATCH);
   const squads = parseSquadsWatch(env.ALARM_SQUADS_CONFIG);
   const invalid = [...(balances === "invalid" ? ["ALARM_BALANCE_WATCH"] : []), ...(squads === "invalid" ? ["ALARM_SQUADS_CONFIG"] : [])];
@@ -250,11 +358,11 @@ export async function opsWatchReports(
 
   const watched = balances === "invalid" ? [] : balances;
   if (watched.length) {
-    const accounts = await fetchAccounts(watched.map((w) => w.address), signal);
+    const accounts = await fetchBounded(watched.map((w) => w.address), signal);
     for (const w of watched) reports.push(balanceReport(w, accounts.get(w.address)?.lamports ?? BigInt(0)));
   }
   const multisig = squads && squads !== "invalid" ? squads : null;
-  if (multisig) reports.push(...await squadsReports(multisig, fetchAccounts, signal));
+  if (multisig) reports.push(...await squadsReports(multisig, fetchBounded, signal, openKeys, options.now));
 
   // Open incidents of addresses or a multisig no longer watched: the condition is gone.
   // An invalid value keeps its incidents (nothing is known about them).
@@ -265,10 +373,13 @@ export async function opsWatchReports(
     if (kind === "sol-balance" && balances !== "invalid" && subject) {
       reports.push({ check: key, state: "pass", severity: "high", category: "onchain", source: "onchain:low-balance",
         summary: `Operational key ${subject} is no longer watched` });
-    } else if ((kind === "squads-config" || kind === "squads-proposals") && squads !== "invalid" && subject) {
-      reports.push({ check: key, state: "pass", severity: kind === "squads-config" ? "critical" : "high", category: "onchain",
-        source: kind === "squads-config" ? "onchain:squads-config" : "onchain:squads-proposal",
+    } else if (kind === "squads-config" && squads !== "invalid" && subject) {
+      reports.push({ check: key, state: "pass", severity: "critical", category: "onchain", source: "onchain:squads-config",
         summary: `Squads multisig ${subject} is no longer watched` });
+    } else if (kind === PROPOSAL_CHECK && squads === null && subject) {
+      // With a multisig configured, squadsReports reads every open proposal incident itself.
+      reports.push({ check: key, state: "pass", severity: "high", category: "onchain", source: "onchain:squads-proposal",
+        summary: `Squads proposal ${subject} is no longer watched` });
     }
   }
   return reports;

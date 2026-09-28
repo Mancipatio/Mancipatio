@@ -26,7 +26,8 @@ vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => { throw new Er
 import nodemailer from "nodemailer";
 import { sendEmail } from "@/lib/server/email";
 import {
-  DIGEST_LIMIT, alertDigest, alertRecipients, alertWebhookConfig, alertWebhookPayload, notifyPendingAlerts, type DigestRow,
+  DIGEST_LIMIT, SOURCE_LABELS, alertDigest, alertRecipients, alertWebhookBody, alertWebhookConfig, alertWebhookPayload, notifyPendingAlerts,
+  type DigestRow,
 } from "@/lib/server/system-alerts";
 
 const SIG = "5".repeat(88);
@@ -79,8 +80,11 @@ describe("recipients", () => {
 });
 
 type Finish = { p_rows: { id: string; severity: string }[]; p_sent: boolean; p_error: string | null };
+type Incident = { p_check: string; p_state: string; p_severity: string; p_source: string; p_summary: string; p_evidence: Record<string, unknown> };
 function outbox(rows: DigestRow[]) {
   const finishes: Finish[] = [];
+  // Each channel's outcome is reported as an incident (report_incident), beside the outbox update.
+  const incidents: Incident[] = [];
   let selected = "";
   let limit = 0;
   const sb = {
@@ -97,12 +101,17 @@ function outbox(rows: DigestRow[]) {
       });
       return b;
     },
-    rpc: (_fn: string, args: Finish) => {
+    rpc: (fn: string, args: Finish & Incident) => {
+      if (fn === "report_incident") {
+        incidents.push(args);
+        return { abortSignal: () => Promise.resolve({ data: { action: "opened", alert_id: null }, error: null }) };
+      }
       finishes.push(args);
       return { abortSignal: () => Promise.resolve({ data: args.p_rows.length, error: null }) };
     },
   };
-  return { sb: sb as never, finishes, selected: () => selected };
+  const channels = () => Object.fromEntries(incidents.map((i) => [i.p_check, i.p_state]));
+  return { sb: sb as never, finishes, incidents, channels, selected: () => selected };
 }
 
 describe("notifyPendingAlerts", () => {
@@ -195,7 +204,10 @@ describe("alert webhook", () => {
   it("config: https only (http for localhost), a known min severity, no whitespace in the token", () => {
     expect(alertWebhookConfig({})).toBeNull();
     expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "https://hooks.slack.com/services/T/B/X" }))
-      .toEqual({ url: "https://hooks.slack.com/services/T/B/X", token: null, minSeverity: "high" });
+      .toEqual({ url: "https://hooks.slack.com/services/T/B/X", token: null, minSeverity: "high", format: "json" });
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "https://chat.googleapis.com/v1/spaces/X/messages?key=k", ALERT_WEBHOOK_FORMAT: "Text" }))
+      .toMatchObject({ format: "text" });
+    expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "https://h.example", ALERT_WEBHOOK_FORMAT: "slack" })).toBe("invalid");
     expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "http://localhost:8080/hook", ALERT_WEBHOOK_MIN_SEVERITY: "Critical" }))
       .toMatchObject({ minSeverity: "critical" });
     expect(alertWebhookConfig({ ALERT_WEBHOOK_URL: "http://hooks.example/x" })).toBe("invalid");
@@ -269,6 +281,44 @@ describe("alert webhook", () => {
     expect(logged).not.toContain("ntfy.example");
     expect(logged).not.toContain("tk_secret");
     errors.mockRestore();
+  });
+
+  it("text format: the body is {text} and nothing else (Google Chat refuses unknown fields; Mattermost reads priority)", async () => {
+    const rows = [row({ severity: "critical", source: "onchain:treasury", summary: "Protocol treasury set to X" })];
+    const text = alertWebhookBody("text", rows, "mainnet", "https://www.manci.io");
+    expect(Object.keys(text)).toEqual(["text"]);
+    expect(text.text).toBe(alertWebhookPayload(rows, "mainnet", "https://www.manci.io").text);
+    expect(alertWebhookBody("json", rows, "mainnet", "https://www.manci.io")).toMatchObject({ priority: 5, severity: "critical" });
+    vi.stubEnv("ALERT_WEBHOOK_FORMAT", "text");
+    await notifyPendingAlerts(Date.now() + 10_000, undefined, outbox(rows).sb);
+    expect(Object.keys(JSON.parse(String(calls[0].init.body)))).toEqual(["text"]);
+  });
+
+  it("a dead channel is an incident of its own, delivered by the other channel; delivering again clears it", async () => {
+    expect(SOURCE_LABELS["worker:alert-channel"]).toMatchObject({ format: "platform" });
+    // Webhook refused (e.g. a revoked token), email fine: every row is 'sent', so nothing gets stuck.
+    answer = "500";
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const box = outbox([row({ severity: "critical" })]);
+    await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);
+    expect(box.finishes).toEqual([expect.objectContaining({ p_sent: true })]);
+    expect(box.channels()).toEqual({ "alert-channel-webhook": "fail", "alert-channel-email": "pass" });
+    const webhook = box.incidents.find((i) => i.p_check === "alert-channel-webhook")!;
+    expect(webhook).toMatchObject({ p_severity: "high", p_source: "worker:alert-channel", p_evidence: { channel: "webhook", outcome: "failed", alerts: 1 } });
+    expect(webhook.p_summary).toMatch(/failed .*the other channel delivered it/);
+    // Never the URL or the token.
+    expect(JSON.stringify(box.incidents)).not.toMatch(/ntfy\.example|tk_secret/);
+    // The other way round: SMTP down, webhook up.
+    answer = "ok";
+    smtp.mode = "fail";
+    const back = outbox([row({ severity: "high" })]);
+    await notifyPendingAlerts(Date.now() + 10_000, undefined, back.sb);
+    expect(back.channels()).toEqual({ "alert-channel-email": "fail", "alert-channel-webhook": "pass" });
+    // A channel with no row to send (medium rows stay off the webhook) says nothing.
+    smtp.mode = "ok";
+    const quiet = outbox([row({ severity: "medium" })]);
+    await notifyPendingAlerts(Date.now() + 10_000, undefined, quiet.sb);
+    expect(quiet.channels()).toEqual({ "alert-channel-email": "pass" });
   });
 
   it("webhook only (no email): it takes every row the outbox sends; neither channel: NOT_CONFIGURED", async () => {

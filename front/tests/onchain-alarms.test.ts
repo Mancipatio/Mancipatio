@@ -83,13 +83,13 @@ beforeEach(async () => {
 });
 
 /** One invocation, optionally inside Squads, with its events logged (or no logs). */
-function run(ixs: Ix[], opts: { inner?: boolean; events?: Uint8Array[][]; logs?: "none" | "truncated" } = {}) {
+function run(ixs: Ix[], opts: { inner?: boolean; events?: Uint8Array[][]; logs?: "none" | "truncated"; blockTime?: number | null } = {}) {
   const instructions = opts.inner ? [{ ix: { program: SQUADS, accounts: [A], data: new Uint8Array([0]) }, inner: ixs }] : ixs.map((ix) => ({ ix }));
   const frames = ixs.map((ix, k) => ({ program: ix.program, data: (opts.events?.[k] ?? []).map(b64) }));
   let logs: string[] | null = logTree(opts.inner ? [{ program: SQUADS, children: frames }] : frames);
   if (opts.logs === "none") logs = null;
   if (opts.logs === "truncated") logs = [`Program ${R} invoke [1]`, "Log truncated"];
-  const { tx } = buildTx({ signature: SIG, instructions, logs });
+  const { tx } = buildTx({ signature: SIG, instructions, logs, blockTime: opts.blockTime });
   return alarmsForTransaction("devnet", SIG, tx, PD);
 }
 const pauseFlags = (setMask: number, clearMask: number) =>
@@ -242,10 +242,19 @@ describe("admin money and token actions", () => {
       .toMatchObject({ source: "onchain:yield-route", severity: "high", evidence: { amount: "5000000", investor_root: "07".repeat(32) } });
     expect(one(run([ix(getPublishMilestoneInstructionDataEncoder(), { index: 2, merkleRoot: root, amountPool: BigInt(10), unlockTs: BigInt(0) })])))
       .toMatchObject({ source: "onchain:milestone", severity: "high", evidence: { index: 2, amount_pool: "10" } });
-    const proposal = (window: number) => ix(getCreateProposalInstructionDataEncoder(), {
-      proposalId: BigInt(1), metadataHash: root, snapshotSlot: BigInt(5), snapshotRoot: root, startTs: BigInt(1_000), endTs: BigInt(1_000 + window) });
-    expect(one(run([proposal(7 * DAY)]))).toMatchObject({ source: "onchain:proposal", severity: "medium" });
-    expect(one(run([proposal(DAY)])).severity).toBe("high");
+    // buildTx's default block time: the window runs from the later of start_ts and it.
+    const BLOCK = 1_700_000_000;
+    const proposal = (start: number, end: number) => ix(getCreateProposalInstructionDataEncoder(), {
+      proposalId: BigInt(1), metadataHash: root, snapshotSlot: BigInt(5), snapshotRoot: root, startTs: BigInt(start), endTs: BigInt(end) });
+    expect(one(run([proposal(BLOCK + DAY, BLOCK + 8 * DAY)]))).toMatchObject({ source: "onchain:proposal", severity: "medium",
+      evidence: { voting_window_seconds: 7 * DAY, block_time: BLOCK } });
+    expect(one(run([proposal(BLOCK + DAY, BLOCK + 2 * DAY)])).severity).toBe("high");
+    // start_ts 0 (the admin UI: "open now") or any past start: voting opens at creation.
+    expect(one(run([proposal(0, BLOCK + 60)]))).toMatchObject({ severity: "high", evidence: { voting_window_seconds: 60 } });
+    expect(one(run([proposal(0, BLOCK + 7 * DAY)])).severity).toBe("medium");
+    // Already over (end_ts in the past), or the block time unknown: short.
+    expect(one(run([proposal(0, BLOCK - 10)])).severity).toBe("high");
+    expect(one(run([proposal(BLOCK + DAY, BLOCK + 8 * DAY)], { blockTime: null })).severity).toBe("high");
   });
 
   it("lock_supply is high; custody open, trigger and realize are medium; open never names the beneficiary", () => {

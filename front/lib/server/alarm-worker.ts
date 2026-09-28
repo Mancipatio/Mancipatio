@@ -116,7 +116,11 @@ export async function runAlarmWorker(limit = 10): Promise<AlarmWorkerResult> {
         notify = { status: "failed", count: 0 };
       }
     }
-    // A failing channel (email or webhook) is "failed": partial, the heartbeat does not move.
+    // A failing channel (email or webhook) is "failed": the final heartbeat is partial, but
+    // last_ok_at already moved before notify, so /api/health/alarms stays green while the
+    // other channel delivers. The failing channel is its own incident instead
+    // (system-alerts reportAlertChannels), delivered by the other one; when every channel
+    // fails, rows stay pending and health goes red (notify_pending:stuck).
     // Mainnet requires email (runbook §15); elsewhere an unconfigured outbox only waits.
     const notifyOk = notify.status !== "failed" && !(notify.status === "not_configured" && network === "mainnet");
     const status = stagesOk && notifyOk ? "processed" : "partial";

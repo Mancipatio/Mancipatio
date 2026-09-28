@@ -35,7 +35,7 @@ holder of each (in the private operations notes, not here).
 | `GOOGLE_CLIENT_SECRET` | Vercel (server) | Operator | Yearly | Google sign-in | A separate OAuth client for mainnet |
 | `HEALTH_TOKEN` | Vercel + the uptime monitor | Operator | Yearly | Monitor details until updated in both | New, ≥ 32 |
 | `SENTRY_DSN` | Vercel (server) | Operator | When the project changes | Error reports | A mainnet project (EU region) |
-| `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_TOKEN` | Vercel (server) | Operator | On staff change, or a leak | The second alert channel (alarm health goes red while it fails) | A mainnet channel or topic |
+| `ALERT_WEBHOOK_URL`, `ALERT_WEBHOOK_TOKEN` | Vercel (server) | Operator | On staff change, or a leak | The second alert channel: while it fails, the `alert-channel-webhook` incident is emailed (alarm health stays green unless email fails too); send a test alert after rotating | A mainnet channel or topic |
 
 ## Operator credentials
 

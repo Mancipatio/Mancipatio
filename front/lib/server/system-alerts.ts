@@ -17,9 +17,16 @@
 // alertWebhook). Both are sent in parallel under the same deadline; one
 // channel failing or hanging never stops the other. A row is marked sent
 // when at least one channel delivered it; rows no channel delivered back off
-// (finish_alert_notifications). A failing channel still makes the run
-// "failed", so the alarm worker's heartbeat does not move and the dead-man
-// switch (/api/health/alarms) goes red until the channel is fixed.
+// (finish_alert_notifications).
+//
+// So one dead channel is NOT visible on /api/health/alarms: the other
+// channel delivers the rows (nothing gets stuck), and the alarm worker's
+// heartbeat moved before notify. Each channel's outcome is therefore an
+// incident of its own (alert-channel-email, alert-channel-webhook: high,
+// reportAlertChannels): a failing channel opens it, and the OTHER channel
+// delivers that alert in the next digest; it clears after three digests the
+// channel delivered. Only when every channel fails do rows stay pending, and
+// /api/health/alarms goes red (notify_pending:stuck).
 //
 // Delivery is at-least-once: a send that timed out may still have gone
 // through, and its rows are sent again in the next digest.
@@ -78,6 +85,7 @@ export const SOURCE_LABELS: Record<string, { label: string; format: "platform" |
   "onchain:squads-config": { label: "Squads multisig configuration changed", format: "platform" },
   "onchain:squads-proposal": { label: "Squads multisig proposal open", format: "platform" },
   "worker:ops-watch-config": { label: "Alarm watch configuration invalid", format: "platform" },
+  "worker:alert-channel": { label: "Alert channel failing", format: "platform" },
 };
 
 export function sourceLabel(source: string) {
@@ -231,15 +239,20 @@ export function alertDigest(rows: readonly DigestRow[], network: Network, origin
  *                               below it go by email only. Without a
  *                               configured email channel the webhook gets
  *                               every row the outbox sends (never low).
+ *   ALERT_WEBHOOK_FORMAT        json (default) | text
  *
- * The body (alertWebhookPayload) carries `text` (Slack, Mattermost, Google
- * Chat incoming webhooks read it), `title` and `priority` (ntfy templates:
- * `https://ntfy.sh/<topic>?tpl=yes&t={{.title}}&m={{.text}}`), and the
- * structured `severity`, `network`, `count`, `alerts[]` and `review_url` a
- * relay (Telegram bot proxy, PagerDuty/Opsgenie bridge) can map. Anything
- * 2xx counts as delivered. The URL and token are secrets: never logged.
+ * json: the body (alertWebhookPayload) carries `text`, `title` and
+ * `priority` (1–5) for ntfy templates
+ * (`https://ntfy.sh/<topic>?tpl=yes&t={{.title}}&m={{.text}}&p={{.priority}}`),
+ * and the structured `severity`, `network`, `count`, `alerts[]` and
+ * `review_url` a relay (Telegram bot proxy, PagerDuty/Opsgenie bridge) can
+ * map. text: the body is `{"text": …}` and nothing else, for chat incoming
+ * webhooks that refuse unknown fields (Google Chat) or read `priority` as
+ * something else (Mattermost); use it for Slack too. Anything 2xx counts as
+ * delivered. The URL and token are secrets: never logged.
  */
-export type AlertWebhook = { url: string; token: string | null; minSeverity: Severity };
+export type WebhookFormat = "json" | "text";
+export type AlertWebhook = { url: string; token: string | null; minSeverity: Severity; format: WebhookFormat };
 
 export const WEBHOOK_MIN_SEVERITY_DEFAULT: Severity = "high";
 
@@ -259,7 +272,9 @@ export function alertWebhookConfig(env: Record<string, string | undefined> = pro
   if (token && (token.length > 4096 || /\s/.test(token))) return "invalid";
   const min = env.ALERT_WEBHOOK_MIN_SEVERITY?.trim().toLowerCase() || WEBHOOK_MIN_SEVERITY_DEFAULT;
   if (min !== "medium" && min !== "high" && min !== "critical") return "invalid";
-  return { url: url.toString(), token, minSeverity: min };
+  const format = env.ALERT_WEBHOOK_FORMAT?.trim().toLowerCase() || "json";
+  if (format !== "json" && format !== "text") return "invalid";
+  return { url: url.toString(), token, minSeverity: min, format };
 }
 
 /** The usable webhook, or null (unset or invalid: /api/health/alarms reports an invalid one). */
@@ -271,7 +286,7 @@ export function alertWebhook(env: Record<string, string | undefined> = process.e
 /** ntfy-style priority (1..5) of the most severe row. */
 const PRIORITY: Record<Severity, number> = { low: 2, medium: 3, high: 4, critical: 5 };
 
-/** Pure: the webhook body for one digest. The same privacy rules as the email. */
+/** Pure: the webhook body for one digest (json format). The same privacy rules as the email. */
 export function alertWebhookPayload(rows: readonly DigestRow[], network: Network, origin: string | null = siteOrigin()) {
   const title = digestSubject(rows, network);
   const top = [...SEVERITIES].reverse().find((s) => rows.some((r) => r.severity === s)) ?? "low";
@@ -290,9 +305,15 @@ export function alertWebhookPayload(rows: readonly DigestRow[], network: Network
   return { text, title, severity: top, priority: PRIORITY[top], network, count: rows.length, alerts, review_url: reviewUrl };
 }
 
+/** Pure: the body a webhook of this format receives. */
+export function alertWebhookBody(format: WebhookFormat, rows: readonly DigestRow[], network: Network, origin: string | null = siteOrigin()) {
+  const payload = alertWebhookPayload(rows, network, origin);
+  return format === "text" ? { text: payload.text } : payload;
+}
+
 /** One POST; never throws, never logs the URL, the token or the response body. */
 export async function sendAlertWebhook(
-  webhook: AlertWebhook, payload: ReturnType<typeof alertWebhookPayload>, timeoutMs: number,
+  webhook: AlertWebhook, payload: ReturnType<typeof alertWebhookBody>, timeoutMs: number,
 ): Promise<{ sent: boolean; error?: "WEBHOOK_FAILED" | "WEBHOOK_TIMEOUT" }> {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return { sent: false, error: "WEBHOOK_TIMEOUT" };
   const signal = AbortSignal.timeout(timeoutMs);
@@ -321,6 +342,41 @@ export async function sendAlertWebhook(
 // ── The outbox ───────────────────────────────────────────────────────────
 
 export type ChannelOutcome = "sent" | "failed" | "timeout" | "skipped" | "not_configured";
+type Channel = "email" | "webhook";
+
+/** Each channel's own incident (see the header): a dead channel is otherwise invisible. */
+export const CHANNEL_INCIDENTS: Readonly<Record<Channel, string>> = {
+  email: "alert-channel-email",
+  webhook: "alert-channel-webhook",
+};
+const CHANNEL_REPORT_TIMEOUT_MS = 2_000;
+
+/**
+ * The outcome of each channel in one digest, as its incident: failed or
+ * timed out is fail (high), delivered or no longer configured is pass; a
+ * channel that had no row to send (skipped) says nothing. Never throws.
+ */
+export async function reportAlertChannels(
+  sb: SupabaseClient, network: Network, channels: Record<Channel, ChannelOutcome>, count: number,
+): Promise<void> {
+  const names: Record<Channel, string> = { email: "email", webhook: "webhook (ALERT_WEBHOOK_URL)" };
+  const reports = (Object.keys(CHANNEL_INCIDENTS) as Channel[]).flatMap((channel) => {
+    const outcome = channels[channel];
+    if (outcome === "skipped") return [];
+    const failing = outcome === "failed" || outcome === "timeout";
+    const other = channels[channel === "email" ? "webhook" : "email"];
+    const summary = failing
+      ? `The ${names[channel]} alert channel ${outcome === "timeout" ? "timed out" : "failed"} on a digest of ${count} alert(s); `
+        + (other === "sent" ? "the other channel delivered it. Fix the channel: alerts reach one channel only" : "no other channel delivered it")
+      : `The ${names[channel]} alert channel ${outcome === "sent" ? "delivered a digest" : "is not configured"}`;
+    return [reportIncident(sb, {
+      network, check: CHANNEL_INCIDENTS[channel], state: failing ? "fail" : "pass", category: "worker", source: "worker:alert-channel",
+      severity: "high", summary, evidence: { channel, outcome, alerts: count },
+    }, AbortSignal.timeout(CHANNEL_REPORT_TIMEOUT_MS))];
+  });
+  const results = await Promise.allSettled(reports);
+  if (results.some((r) => r.status === "rejected")) console.error("[alarms] alert channel incident not recorded");
+}
 type SendError = "SEND_FAILED" | "SEND_TIMEOUT" | "WEBHOOK_FAILED" | "WEBHOOK_TIMEOUT";
 
 export type NotifyResult =
@@ -338,6 +394,7 @@ export type NotifyResult =
  * within `deadlineMs`, over every configured channel in parallel.
  * No channel configured: NOT_CONFIGURED, rows stay pending. Never selects
  * evidence. "sent" only when every channel that had rows delivered them.
+ * Each channel's outcome is also reported as its incident (reportAlertChannels).
  */
 export async function notifyPendingAlerts(deadlineMs: number, signal?: AbortSignal, sb: SupabaseClient = getSupabaseAdmin()): Promise<NotifyResult> {
   const recipients = alertRecipients();
@@ -378,7 +435,7 @@ export async function notifyPendingAlerts(deadlineMs: number, signal?: AbortSign
         return sendEmail({ to: recipients!, subject, html, redactErrors: true, timeoutMs });
       })()
       : Promise.resolve(null),
-    webhook && hookRows.length ? sendAlertWebhook(webhook, alertWebhookPayload(hookRows, network), timeoutMs) : Promise.resolve(null),
+    webhook && hookRows.length ? sendAlertWebhook(webhook, alertWebhookBody(webhook.format, hookRows, network), timeoutMs) : Promise.resolve(null),
   ]);
   const mail = mailResult.status === "fulfilled" ? mailResult.value : { sent: false, error: "FAILED" };
   const hook = hookResult.status === "fulfilled" ? hookResult.value : { sent: false, error: "WEBHOOK_FAILED" as const };
@@ -402,8 +459,11 @@ export async function notifyPendingAlerts(deadlineMs: number, signal?: AbortSign
     }).abortSignal(AbortSignal.timeout(3_000));
     if (result.error) console.error("[alarms] outbox update failed");
   };
+  // In parallel with the outbox update: within the same few seconds.
+  const channelIncidents = reportAlertChannels(sb, network, channels, rows.length);
   await finish(rows.filter((r) => delivered.has(r.id)), true);
   await finish(rows.filter((r) => !delivered.has(r.id)), false);
+  await channelIncidents;
   return error
     ? { status: "failed", count: rows.length, error, channels }
     : { status: "sent", count: rows.length, channels };

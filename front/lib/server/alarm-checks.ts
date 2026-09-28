@@ -68,11 +68,19 @@
 // a mint in use, or of the network's default payment mint (on mainnet a
 // stale one fails /api/health), is within FX expiry warning of its max age
 // (the smaller of FX_EXPIRY_WARN_MS and half the max age: day 5 of the
-// mainnet 7-day rate), or past it. The rate is refreshed by hand on
-// /admin/limits, so the reminder comes before sales stop.
+// mainnet 7-day rate) and not yet past it. The rate is refreshed by hand on
+// /admin/limits, so the reminder comes before sales stop. Past the max age it
+// passes: fx-stale reports a mint in use from then on (and /api/health the
+// default mint on mainnet), so one condition is never two alerts.
 //
-// The operational watches (lib/server/ops-watch.ts): SOL balances of the
-// operational keys and the Squads multisig, when configured.
+// The operational watches (lib/server/ops-watch.ts: SOL balances of the
+// operational keys and the Squads multisig, when configured) read the chain,
+// so they run AFTER the cheap incidents are recorded, in parallel with the
+// gap scan, under their own budget (OPS_WATCH_BUDGET_MS, ending
+// OPS_WATCH_RESERVE_MS before the checks deadline; each chain read bounded
+// too), and record their incidents as soon as they finish: a slow or hanging
+// RPC costs neither the cheap incidents nor the gap scan. A watch that cannot
+// finish is a check that could not run.
 
 import "server-only";
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -110,6 +118,10 @@ const FRESHNESS_BOOTSTRAP_SECONDS = 30 * 60;
 const RECONCILE_MAX_AGE_HOURS_DEFAULT = 168;
 /** fx-expiring warns this long before a rate's max age (capped at half the max age). */
 export const FX_EXPIRY_WARN_MS = 2 * 24 * 3_600_000;
+/** The operational watches' budget within the checks stage. */
+export const OPS_WATCH_BUDGET_MS = 8_000;
+/** The part of the checks budget the operational watches leave for recording their incidents. */
+export const OPS_WATCH_RESERVE_MS = 1_000;
 const BASE58 = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 
 export type CheckReport = { check: string; state: IncidentState; severity: Severity };
@@ -316,21 +328,22 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
     if (r.kind !== "rate" || max === null || !Number.isFinite(asOf)) return null;
     return { ms: asOf + max * 1000 - now, window: Math.min(FX_EXPIRY_WARN_MS, (max * 1000) / 2) };
   };
+  // Within the warning window and not yet expired (past the max age is fx-stale's).
   const expiring = (r: FxRow) => {
     const l = left(r);
-    return l !== null && l.ms <= l.window;
+    return l !== null && l.ms > 0 && l.ms <= l.window;
   };
   for (const mint of expiryTracked) {
     const row = rates.get(mint);
     const l = row ? left(row) : null;
     if (!row || !l) continue;
     const hours = Math.max(0, Math.floor(l.ms / 3_600_000));
-    reports.push({ check: `fx-expiring:${mint}`, state: l.ms <= l.window ? "fail" : "pass", severity: "medium", category: "fx",
+    reports.push({ check: `fx-expiring:${mint}`, state: expiring(row) ? "fail" : "pass", severity: "medium", category: "fx",
       source: "fx:expiring",
       summary: l.ms <= 0
-        ? `The EUR rate of ${mint} is past its max age: refresh it on /admin/limits`
+        ? `The EUR rate of ${mint} is past its max age (reported as fx-stale while the mint is in use)`
         : `The EUR rate of ${mint} reaches its max age in ${hours} hour(s): refresh it on /admin/limits`,
-      evidence: { payment_mint: mint, as_of: row.as_of, hours_left: l.ms <= 0 ? 0 : hours } });
+      evidence: { payment_mint: mint, as_of: row.as_of, hours_left: hours } });
     reported.add(`fx-expiring:${mint}`);
   }
   for (const mint of inUse) {
@@ -498,7 +511,7 @@ export function gapScanOverdueState(at: number | null, ranNow: boolean, now: num
 /**
  * The last gap scan's stamp; the cheap checks, recorded at once; then the gap
  * scan (when due) under its own sub-deadline, and its incidents plus
- * gap-scan-overdue. Never throws: `expected` against `reports.length` tells
+ * gap-scan-overdue, with the operational watches running beside it. Never throws: `expected` against `reports.length` tells
  * the worker whether the stage was complete (a due scan that got no time, or
  * an unreadable stamp, is a check that could not run).
  */
@@ -560,12 +573,30 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => retryHeartbeat(sb, network, now, signal));
   await collect(() => fxAndHolds(sb, network, now, signal));
   await collect(() => indexerFreshness(sb, network, now, signal));
-  await collect(() => opsWatchReports(sb, network, signal));
   await record(cheap);
 
-  // 2. The gap scan, in what is left minus the reserve for its own incidents.
-  let gap: ChecksResult["gapScan"] = null;
+  // 2. The operational watches (chain reads), in parallel with the gap scan,
+  // on their own budget; their incidents are recorded as soon as they finish.
   const gapDeadline = deadlineMs - GAP_SCAN_RESERVE_MS;
+  const opsWatch = (async () => {
+    const budget = Math.min(OPS_WATCH_BUDGET_MS, deadlineMs - OPS_WATCH_RESERVE_MS - Date.now());
+    if (signal.aborted || budget <= 0) {
+      expected++;
+      return;
+    }
+    let watches: Report[];
+    try {
+      watches = await opsWatchReports(sb, network, AbortSignal.any([signal, AbortSignal.timeout(budget)]));
+    } catch {
+      expected++;
+      console.error("[alarms] the operational watches could not run");
+      return;
+    }
+    await record(watches);
+  })();
+
+  // 3. The gap scan, in what is left minus the reserve for its own incidents.
+  let gap: ChecksResult["gapScan"] = null;
   const reports: Report[] = [];
   if (due && !signal.aborted && Date.now() < gapDeadline) {
     const gapSignal = AbortSignal.any([signal, AbortSignal.timeout(Math.max(1, gapDeadline - Date.now()))]);
@@ -606,6 +637,6 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
       summary: minutes === null ? "No gap scan has started yet" : `The last gap scan started ${minutes} minute(s) ago`,
       evidence: { minutes_since_last_scan: minutes, overdue_after_minutes: GAP_SCAN_OVERDUE_MS / 60_000, ran_now: gap !== null } });
   }
-  await record(reports);
+  await Promise.all([record(reports), opsWatch]);
   return { reports: done, expected, gapScan: gap };
 }

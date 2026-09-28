@@ -133,6 +133,8 @@ export type ProgramDataAddresses = { assetRegistry: string; transferHook: string
 type Events = Record<string, Record<string, EventValue>>;
 type Ctx = {
   network: Network;
+  /** The transaction's block time (unix seconds), null when unknown. */
+  blockTime: number | null;
   args: Record<string, unknown> | null;
   account: (i: number) => string | undefined;
   events: Events;
@@ -337,15 +339,20 @@ export const ALARM_INSTRUCTIONS: readonly Entry[] = [
   { name: "create_proposal", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(CREATE_PROPOSAL_DISCRIMINATOR),
     decode: dec(getCreateProposalInstructionDataDecoder()), accounts: { authority: 0, share_class: 2, proposal: 3 },
     format: "minimal", fallback: "high",
-    classify: ({ args }) => {
+    classify: ({ args, blockTime }) => {
       const start = int(args?.startTs);
       const end = int(args?.endTs);
-      const window = start !== null && end !== null ? end - start : null;
+      // Votes are cast while start_ts <= now < end_ts (cast_vote.rs), and
+      // create_proposal only requires end_ts >= start_ts: a start in the past
+      // (the admin UI sends 0: "open now") opens voting at creation. So the
+      // window holders really get runs from the later of start_ts and the
+      // block time; unknown, zero or negative is short.
+      const window = start !== null && end !== null && blockTime !== null ? end - Math.max(start, blockTime) : null;
       const short = window === null || window < SHORT_VOTING_WINDOW_SECONDS;
       return { source: "onchain:proposal", severity: short ? "high" : "medium",
-        summary: short ? `Governance proposal created with a short voting window (${window ?? "?"} s)` : "Governance proposal created",
+        summary: short ? `Governance proposal created with a short voting window (${window ?? "?"} s from creation)` : "Governance proposal created",
         evidence: { proposal_id: args?.proposalId ?? null, snapshot_slot: args?.snapshotSlot ?? null, start_ts: start, end_ts: end,
-          snapshot_root: args?.snapshotRoot ?? null } };
+          block_time: blockTime, voting_window_seconds: window, snapshot_root: args?.snapshotRoot ?? null } };
     } },
   { name: "lock_supply", program: ASSET_REGISTRY_PROGRAM_ADDRESS, discriminator: disc(LOCK_SUPPLY_DISCRIMINATOR),
     decode: null, accounts: { authority: 0, share_class: 2 }, format: "minimal", fallback: "high",
@@ -525,7 +532,7 @@ export function alarmsForTransaction(
     }
     const { events, layoutErrors } = inv.programId === ASSET_REGISTRY_PROGRAM_ADDRESS
       ? eventsOf(inv) : { events: {}, layoutErrors: [] };
-    const ctx: Ctx = { network, args, account: (i) => inv.accounts[i], events };
+    const ctx: Ctx = { network, blockTime: int(tx.blockTime), args, account: (i) => inv.accounts[i], events };
     let classified: Classified;
     if (entry.decode && !args) {
       classified = { source: entry.classify({ ...ctx, args: {} })?.source ?? "onchain:decode", severity: entry.fallback,
