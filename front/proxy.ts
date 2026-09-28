@@ -5,6 +5,9 @@
 //     mainnet for a request without Vercel's country header (fail closed).
 //   - Pages: the /not-available page is shown in place (rewrite); a page
 //     without the header is served.
+// On mainnet the headers count only on Vercel's runtime (VERCEL=1), which
+// sets them itself; anywhere else a client could send its own
+// `x-vercel-ip-country: DE`, so there the request is treated as having none.
 import { NextResponse, type NextRequest } from "next/server";
 import {
   COUNTRY_HEADER,
@@ -15,17 +18,20 @@ import {
   geoblockDecision,
   geoblockKind,
   parseGeoblockList,
+  trustsCountryHeaders,
 } from "@/lib/geoblock";
 import { detectNetwork } from "@/lib/network";
 
 export function proxy(request: NextRequest) {
   const kind = geoblockKind(request.nextUrl.pathname);
   if (!kind) return NextResponse.next();
+  const network = detectNetwork();
+  const trusted = trustsCountryHeaders(network, { VERCEL: process.env.VERCEL });
   const decision = geoblockDecision({
     config: parseGeoblockList(process.env[GEOBLOCK_ENV]),
-    country: request.headers.get(COUNTRY_HEADER),
-    region: request.headers.get(REGION_HEADER),
-    network: detectNetwork(),
+    country: trusted ? request.headers.get(COUNTRY_HEADER) : null,
+    region: trusted ? request.headers.get(REGION_HEADER) : null,
+    network,
     kind,
   });
   if (decision === "allow") return NextResponse.next();
@@ -44,7 +50,7 @@ export function proxy(request: NextRequest) {
 // Literal matchers (Next reads them at build time); geoblockKind() decides.
 export const config = {
   matcher: [
-    "/api/launchpad/:path*",
+    "/api/launchpad/commit",
     "/api/compliance/screen-wallet",
     "/api/otc/create",
     "/api/resell/create",
@@ -57,7 +63,7 @@ export const config = {
     "/api/clients/accept-tos",
     "/api/tos/accept",
     "/marketplace/:path*",
-    "/portfolio/:path*",
+    "/portfolio/governance/:path*",
     "/issuer/:path*",
     "/verify",
     "/onboarding/:path*",

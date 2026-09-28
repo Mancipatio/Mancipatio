@@ -1,9 +1,10 @@
 import type { NextConfig } from "next";
 // The runtime imports: the operator and legal slots, and (8.5) the geoblock
 // list's parser, by relative path. lib/legal/* is directive-free and imports
-// nothing but its siblings, lib/geoblock.ts imports nothing, so Next's
-// next.config.ts loader (SWC with its require hook) compiles them like this
-// file; no package and no `@/` alias is loaded here.
+// nothing but its siblings, lib/geoblock.ts only lib/countries.ts (which
+// imports nothing), so Next's next.config.ts loader (SWC with its require
+// hook) compiles them like this file; no package and no `@/` alias is
+// loaded here.
 import {
   MAINNET_LEGAL_SLOTS,
   MAINNET_LICENSE_WAIVER,
@@ -509,7 +510,8 @@ export function assertBuildFeatureFlags(phase: string, env: Record<string, strin
  * does not serve are counsel's decision, so a MAINNET production build
  * refuses without GEOBLOCK_COUNTRIES — a list of ISO 3166 codes, or `none`
  * written down on purpose. Any production build refuses a malformed list
- * (a typo would silently block nothing).
+ * and a code that is no country (a typo, or "UK" for GB, would silently
+ * block nothing).
  */
 export function assertBuildGeoblock(phase: string, env: Record<string, string | undefined> = process.env): void {
   if (phase !== PHASE_PRODUCTION_BUILD) return;

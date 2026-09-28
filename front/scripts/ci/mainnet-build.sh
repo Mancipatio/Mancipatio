@@ -257,6 +257,8 @@ expect_refusal "is not a flag value" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_IS
 expect_refusal "is not a flag value" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=enabled
 expect_refusal "GEOBLOCK_COUNTRIES is not set" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=
 expect_refusal "is not an ISO 3166 country" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=Iran
+# A well-formed code that is no country blocks nothing: refused, with the fix.
+expect_refusal "did you mean GB" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=KP,IR,UK
 expect_config_pass "GEOBLOCK_COUNTRIES=none, written down" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=none
 
 echo "== 2. the guards pass and the mainnet variant compiles"

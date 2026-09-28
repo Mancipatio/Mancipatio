@@ -5,7 +5,7 @@
 // required by a mainnet build (next.config.ts assertBuildGeoblock).
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NextRequest } from "next/server";
 import {
   GEOBLOCKED_API_ROUTES,
@@ -14,6 +14,7 @@ import {
   geoblockDecision,
   geoblockKind,
   parseGeoblockList,
+  trustsCountryHeaders,
 } from "@/lib/geoblock";
 import { assertBuildGeoblock } from "@/next.config";
 import { config as proxyConfig, proxy } from "@/proxy";
@@ -39,6 +40,16 @@ describe("parseGeoblockList", () => {
     for (const bad of ["Iran", "IRN", "U", "UA-", "UA-4444", "KP;IR"]) {
       expect(parseGeoblockList(bad).ok, bad).toBe(false);
     }
+  });
+
+  it("refuses a well-formed code that is no country (it would block nothing), with the code the edge reports", () => {
+    expect(parseGeoblockList("KP,IR,UK")).toEqual({ ok: false, error: '"UK" is not an ISO 3166-1 country code (did you mean GB?)' });
+    expect(parseGeoblockList("EL")).toEqual({ ok: false, error: '"EL" is not an ISO 3166-1 country code (did you mean GR?)' });
+    expect(parseGeoblockList("EU")).toMatchObject({ ok: false });
+    expect(parseGeoblockList("UK-01")).toMatchObject({ ok: false });
+    // User-assigned codes are allowed: the CI placeholder, and XK (Kosovo) as Vercel reports it.
+    expect(parseGeoblockList("AA,ZZ,QM-01,XK")).toMatchObject({ ok: true, set: true });
+    expect(parseGeoblockList("GB,GR,RU,BY")).toMatchObject({ ok: true, set: true });
   });
 });
 
@@ -77,9 +88,12 @@ describe("the routes it covers", () => {
     expect(geoblockKind("/api/otc/create/")).toBe("api");
     expect(geoblockKind("/marketplace")).toBe("page");
     expect(geoblockKind("/marketplace/launchpad/Sale111")).toBe("page");
-    expect(geoblockKind("/portfolio/offers")).toBe("page");
+    expect(geoblockKind("/portfolio/governance")).toBe("page");
+    // The portfolio carries the exits of existing positions (and the purchase
+    // record records a buy that already landed): not geoblocked.
     for (const open of ["/", "/legal/terms", "/not-available", "/api/health", "/api/internal/alarms", "/api/otc/list",
-      "/api/launchpad/terms", "/admin/kyc", "/api/conversion/cancel", "/marketplaces"]) {
+      "/api/launchpad/terms", "/admin/kyc", "/api/conversion/cancel", "/marketplaces", "/portfolio", "/portfolio/offers",
+      "/portfolio/rights", "/api/launchpad/record-purchase"]) {
       expect(geoblockKind(open), open).toBeNull();
     }
   });
@@ -99,6 +113,8 @@ describe("the routes it covers", () => {
 describe("proxy.ts", () => {
   const request = (path: string, headers: Record<string, string> = {}) =>
     new NextRequest(new URL(path, "https://www.manci.io"), { method: path.startsWith("/api/") ? "POST" : "GET", headers });
+  // Vercel's runtime, which sets the country headers itself.
+  beforeEach(() => vi.stubEnv("VERCEL", "1"));
 
   it("answers 451 to a transactional request from a listed country", async () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
@@ -122,6 +138,18 @@ describe("proxy.ts", () => {
     expect(proxy(request("/api/launchpad/commit", { "x-vercel-ip-country": "RS" })).headers.get("x-middleware-next")).toBe("1");
   });
 
+  it("mainnet off Vercel: a client's own country header is not believed (451 on a transactional route)", () => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    vi.stubEnv("GEOBLOCK_COUNTRIES", "KP,IR");
+    vi.stubEnv("VERCEL", "");
+    const spoofed = proxy(request("/api/launchpad/commit", { "x-vercel-ip-country": "DE" }));
+    expect(spoofed.status).toBe(451);
+    expect(proxy(request("/marketplace", { "x-vercel-ip-country": "IR" })).headers.get("x-middleware-next")).toBe("1");
+    expect(trustsCountryHeaders("mainnet", {})).toBe(false);
+    expect(trustsCountryHeaders("mainnet", { VERCEL: "1" })).toBe(true);
+    expect(trustsCountryHeaders("devnet", {})).toBe(true);
+  });
+
   it("devnet without a list or a header lets everything through", () => {
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
     vi.stubEnv("GEOBLOCK_COUNTRIES", "");
@@ -134,6 +162,11 @@ describe("next.config.ts assertBuildGeoblock", () => {
     expect(() => assertBuildGeoblock(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet" })).toThrow(/GEOBLOCK_COUNTRIES is not set/);
     expect(() => assertBuildGeoblock(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet", GEOBLOCK_COUNTRIES: "none" })).not.toThrow();
     expect(() => assertBuildGeoblock(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet", GEOBLOCK_COUNTRIES: "KP,IR,UA-43" })).not.toThrow();
+  });
+
+  it("refuses a code that is no country, naming the right one", () => {
+    expect(() => assertBuildGeoblock(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet", GEOBLOCK_COUNTRIES: "KP,IR,UK" })).toThrow(/did you mean GB/);
+    expect(() => assertBuildGeoblock(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet", GEOBLOCK_COUNTRIES: "AA,ZZ,QM-01" })).not.toThrow();
   });
 
   it("any production build refuses a malformed list; devnet may leave it unset; dev is not checked", () => {
