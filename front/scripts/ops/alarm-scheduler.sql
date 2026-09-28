@@ -10,7 +10,10 @@
 -- project): this install refuses unless that row exists, names this
 -- project's network (public.deployment_network(), migration 0070) and the
 -- target's siteOrigin. The Vault secret is the same one
--- ('mancipatio_retry_worker_<network>', D8).
+-- ('mancipatio_retry_worker_<network>', D8), and so is the optional Vercel
+-- bypass secret ('mancipatio_vercel_bypass_<network>', sent as
+-- x-vercel-protection-bypass while the deployment is behind Deployment
+-- Protection; see retry-scheduler.sql).
 --
 -- Installation always DISABLES 'mancipatio-alarms-<network>' until a live
 -- check passes; enable it with
@@ -64,6 +67,10 @@ begin
         and decrypted_secret !~ '[[:space:]]') <> 1 then
     raise exception 'Expected one configured % worker credential in Vault (mancipatio_retry_worker_%)', net, net;
   end if;
+  if exists (select 1 from vault.decrypted_secrets
+      where name='mancipatio_vercel_bypass_'||net and decrypted_secret !~ '^[A-Za-z0-9_-]{32,128}$') then
+    raise exception 'The optional Vercel protection bypass secret mancipatio_vercel_bypass_% must be 32-128 letters, digits, _ or -', net;
+  end if;
 end;
 $$;
 
@@ -91,7 +98,7 @@ create or replace function mancipatio_ops.invoke_alarm_worker()
 returns bigint language plpgsql security definer set search_path='' set lock_timeout='3s' as $$
 declare
   net text; worker_origin text;
-  worker_secret text; result extensions.http_response; payload jsonb;
+  worker_secret text; bypass text; result extensions.http_response; payload jsonb;
   started timestamptz:=clock_timestamp(); finished timestamptz; run_id bigint;
   status_code integer; succeeded boolean:=false; result_kind text:='configuration_error';
   worker_state text; notify text; counters integer[]:=array[null,null,null,null,null]::integer[];
@@ -110,6 +117,14 @@ begin
         from vault.decrypted_secrets where name='mancipatio_retry_worker_'||net;
     exception when others then worker_secret:=null;
     end;
+    -- Optional: the Vercel "Protection Bypass for Automation" secret, while
+    -- the deployment sits behind Deployment Protection (runbook, Launch day).
+    begin
+      select decrypted_secret into bypass
+        from vault.decrypted_secrets where name='mancipatio_vercel_bypass_'||net;
+    exception when others then bypass:=null;
+    end;
+    if bypass !~ '^[A-Za-z0-9_-]{32,128}$' then bypass:=null;end if;
   end if;
   if worker_secret is not null and length(worker_secret)>=32 and worker_secret !~ '[[:space:]]' then
     begin
@@ -123,10 +138,12 @@ begin
       perform pg_catalog.set_config('http.timeout_msec','55000',true);
       select * into result from extensions.http((
         'POST',worker_origin||'/api/internal/alarms?limit=20',
-        array[('Authorization','Bearer '||worker_secret)::extensions.http_header],
+        array[('Authorization','Bearer '||worker_secret)::extensions.http_header]
+          || case when bypass is null then array[]::extensions.http_header[]
+             else array[('x-vercel-protection-bypass',bypass)::extensions.http_header] end,
         'application/json','{}'
       )::extensions.http_request);
-      worker_secret:=null;
+      worker_secret:=null;bypass:=null;
       status_code:=result.status;
       result_kind:='http_error';
       if result.status in (200,503) then
@@ -165,7 +182,7 @@ begin
       when query_canceled then result_kind:='timeout';
       when others then result_kind:='transport_error';
     end;
-    worker_secret:=null;payload:=null;result:=null;
+    worker_secret:=null;bypass:=null;payload:=null;result:=null;
     perform extensions.http_reset_curlopt();
   end if;
   finished:=clock_timestamp();

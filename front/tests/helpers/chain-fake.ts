@@ -19,8 +19,10 @@ import {
   getBase58Encoder,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
+  unwrapOption,
   type Address,
   type Instruction,
+  type Option,
   type RpcTransport,
 } from "@solana/kit";
 import {
@@ -39,12 +41,16 @@ import {
   type Platform,
 } from "@/lib/generated/asset_registry";
 import {
+  RestrictionMode,
   TRANSFER_HOOK_PROGRAM_ADDRESS,
   TransferHookInstruction,
+  getBlockEntryEncoder,
   getBlocklistAuthorityDecoder,
   getBlocklistAuthorityEncoder,
   getBlocklistAuthorityTransferDecoder,
   getBlocklistAuthorityTransferEncoder,
+  getTransferHookConfigDecoder,
+  getTransferHookConfigEncoder,
   parseTransferHookInstruction,
 } from "@/lib/generated/transfer_hook";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
@@ -655,6 +661,11 @@ export class FakeChain {
         const platform = platformOf();
         const setMask = args.setMask as number;
         const clearMask = args.clearMask as number;
+        if (platform.admin !== at("authority")) {
+          // Any active Admin may set bits (set_pause.rs); only the SA clears.
+          const record = s.get(at("adminRecord"));
+          if (!record || getAdminDecoder().decode(record.data).admin !== at("authority")) fail("Unauthorized");
+        }
         if (clearMask && platform.admin !== at("authority")) fail("PauseClearNotAllowed");
         writePlatform({ ...platform, pauseFlags: (platform.pauseFlags | setMask) & ~clearMask & 0xff });
         return;
@@ -705,6 +716,42 @@ export class FakeChain {
         if (transfer.newAuthority !== at("newAuthority") || transfer.currentAuthority !== ba.authority) fail("InvalidAuthorityTransfer");
         account.data = new Uint8Array(getBlocklistAuthorityEncoder().encode({ ...ba, authority: at("newAuthority") as Address }));
         s.delete(at("transfer"));
+        return;
+      }
+      case TransferHookInstruction.AddToBlocklist:
+      case TransferHookInstruction.RemoveFromBlocklist: {
+        signed(at("authority"));
+        const ba = getBlocklistAuthorityDecoder().decode((s.get(at("blocklistAuthority")) ?? fail("missing", 3012)).data);
+        if (ba.authority !== at("authority")) fail("Unauthorized");
+        if (parsed.instructionType === TransferHookInstruction.AddToBlocklist) {
+          if (s.get(at("blockEntry"))) fail("already in use", 0);
+          s.set(at("blockEntry"), {
+            owner: HOOK,
+            lamports: rent(73),
+            data: new Uint8Array(getBlockEntryEncoder().encode({ wallet: args.wallet as Address, addedBy: at("authority") as Address, bump: 255 })),
+          });
+        } else {
+          if (!s.get(at("blockEntry"))) fail("AccountNotInitialized", 3012);
+          s.delete(at("blockEntry"));
+        }
+        return;
+      }
+      case TransferHookInstruction.UpdateTransferHookConfig: {
+        signed(at("authority"));
+        const ba = getBlocklistAuthorityDecoder().decode((s.get(at("blocklistAuthority")) ?? fail("missing", 3012)).data);
+        if (ba.authority !== at("authority")) fail("Unauthorized");
+        const account = s.get(at("config")) ?? fail("config missing", 3012);
+        const config = getTransferHookConfigDecoder().decode(account.data);
+        const registry = unwrapOption(args.kycRegistry as Option<Address>);
+        if ((args.restrictionMode === RestrictionMode.KycGated) !== (registry !== null)) fail("InvalidKycRegistry");
+        if (registry) {
+          const passed = accounts.kycRegistryAccount?.address;
+          const live = passed ? s.get(passed) : undefined;
+          if (passed !== registry || !live || live.owner !== REGISTRY) fail("InvalidKycRegistry");
+        }
+        account.data = new Uint8Array(
+          getTransferHookConfigEncoder().encode({ ...config, restrictionMode: args.restrictionMode as RestrictionMode, kycRegistry: registry }),
+        );
         return;
       }
       default:

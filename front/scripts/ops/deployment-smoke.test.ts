@@ -4,7 +4,7 @@ import { getAddressDecoder } from "@solana/kit";
 import { beforeAll, describe, expect, it } from "vitest";
 import { networkLabel } from "@/lib/network";
 import { siwsMessage, type SiwsPayload } from "@/lib/siws-client";
-import { otherNetwork, smokeTarget } from "./live-targets";
+import { otherNetwork, smokeBypassHeaders, smokeTarget } from "./live-targets";
 
 // No existing wallet or Solana asset mutation is used. The worker may update
 // verified DB records. This key lives only in memory and has no funds/roles.
@@ -13,9 +13,12 @@ import { otherNetwork, smokeTarget } from "./live-targets";
 // MANCI_ALLOW_MAINNET=1). The origin is that target's siteOrigin in
 // scripts/ops/targets.json; SMOKE_ORIGIN may point at a preview instead, but
 // never at another target's origin. Every network expectation below follows
-// the selected target.
+// the selected target. Behind Vercel Deployment Protection (runbook §0A,
+// until D11) MANCIPATIO_VERCEL_BYPASS_FILE names the file with the bypass
+// secret, and every request below sends it as x-vercel-protection-bypass.
 let network: "devnet" | "mainnet" = "devnet";
 let origin = "";
+let bypass: Record<string, string> = {};
 const ephemeral = generateKeyPairSync("ed25519");
 const wallet = getAddressDecoder().decode(
   ephemeral.publicKey.export({ format: "der", type: "spki" }).subarray(-32),
@@ -45,7 +48,7 @@ function envelope(action: string, override: Partial<SiwsPayload> = {}) {
 async function post(path: string, body: unknown) {
   return fetch(origin + path, {
     method: "POST",
-    headers: { "Content-Type": "application/json", Origin: origin },
+    headers: { "Content-Type": "application/json", Origin: origin, ...bypass },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(55_000),
     redirect: "error",
@@ -54,13 +57,14 @@ async function post(path: string, body: unknown) {
 beforeAll(async () => {
   // Throws before any request without an explicit, configured target.
   ({ network, origin } = smokeTarget(process.env));
-  const response = await fetch(origin, { signal: AbortSignal.timeout(15_000) });
+  bypass = smokeBypassHeaders(process.env);
+  const response = await fetch(origin, { headers: bypass, signal: AbortSignal.timeout(15_000) });
   expect(response.status).toBe(200);
   // Stop if this deployment serves a different network than the target.
   const page = await response.text();
   expect(page).toContain(networkLabel(network));
   // The build's network, as the server reports it (page markup changes with the layout).
-  const health = await fetch(`${origin}/api/health`, { signal: AbortSignal.timeout(15_000), redirect: "error" });
+  const health = await fetch(`${origin}/api/health`, { headers: bypass, signal: AbortSignal.timeout(15_000), redirect: "error" });
   expect(health.status).toBe(200);
   expect(((await health.json()) as { network?: string }).network).toBe(network);
 });
@@ -68,6 +72,7 @@ beforeAll(async () => {
 describe("deployed release: public access and SIWS boundaries", () => {
   it("serves the new pilot documentation", async () => {
     const response = await fetch(origin + "/docs/pilot", {
+      headers: bypass,
       signal: AbortSignal.timeout(15_000),
     });
     expect(response.status).toBe(200);
@@ -141,6 +146,7 @@ describe("deployed release: public access and SIWS boundaries", () => {
       headers: {
         Authorization: `Bearer ${secret}`,
         "Content-Type": "application/json",
+        ...bypass,
       },
       body: "{}",
       signal: AbortSignal.timeout(55_000),

@@ -28,6 +28,7 @@ import {
 } from "@/lib/compute-budget";
 import { runTool } from "@/scripts/chain/lib/context";
 import { LOADER_V3, programDataAddress } from "@/scripts/chain/lib/loader-v3";
+import { FEATURE_PROGRAM, SBPF_DEPLOY_GATE } from "@/scripts/chain/lib/network-gates";
 import { pmWrite } from "@/scripts/chain/lib/program-metadata";
 import { type ChainEnv } from "@/scripts/chain/lib/safety";
 import {
@@ -229,6 +230,41 @@ describe("chain:squads-export ops", () => {
     await w.chain.deployProgram(HOOK, { authority: w.keys.deployer, payload: new Uint8Array([4, 5, 6]), capacity: 2048 });
     loaderBuffer(w, key(75), w.keys.vault, new Uint8Array([4, 5, 6]));
     expect((await exportOp(w, "upgrade", { buffers: { transferHook: key(75) } }, { CHAIN_RELEASE_DIR: release })).error).toMatch(/upgrade authority .* not the vault/);
+  });
+
+  it("upgrade: refused once SIMD-0500 is active unless the Release is SBPF v3 (release-lanac-7)", async () => {
+    const w = await handedOver();
+    const slot = new Uint8Array(9);
+    slot[0] = 1;
+    w.chain.set(SBPF_DEPLOY_GATE.id, { owner: FEATURE_PROGRAM, lamports: rent(9), data: slot });
+    loaderBuffer(w, key(76), w.keys.vault, new Uint8Array([4, 5, 6]));
+    const refused = await exportOp(w, "upgrade", { buffers: { transferHook: key(76) } }, { CHAIN_RELEASE_DIR: releaseDir() });
+    expect(refused.error).toMatch(/transfer_hook: the Release .so is SBPF unknown and SIMD-0500 active .*the loader refuses it/);
+    // An SBPF v3 ELF header passes the gate.
+    const v3 = new Uint8Array(128);
+    v3.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+    new DataView(v3.buffer).setUint16(0x12, 263, true);
+    new DataView(v3.buffer).setUint32(0x30, 3, true);
+    loaderBuffer(w, key(77), w.keys.vault, v3);
+    const ok = await exportOp(w, "upgrade", { buffers: { transferHook: key(77) } }, { CHAIN_RELEASE_DIR: releaseDir({}, { transfer_hook: v3 }) });
+    expect(ok.error ?? null).toBeNull();
+    expect((ok.export as Exported).header.preconditions.join("\n")).toMatch(/transfer_hook: Release .so SBPF v3; SIMD-0500 active/);
+  });
+
+  it("registry-ix set_protocol_treasury: the vault or the role-map treasury, anything else confirmed", async () => {
+    const w = await handedOver();
+    const company = w.keys.superAdmin;
+    const json = JSON.parse(fs.readFileSync(w.mapFile, "utf8"));
+    json.protocolTreasury = company;
+    json.acknowledgedRoleOverlaps = [{ key: company, roles: ["superAdmin", "protocolTreasury"], reason: "company wallet" }];
+    fs.writeFileSync(w.mapFile, JSON.stringify(json));
+    const run = (args: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+      exportOp(w, "registry-ix", { instruction: "set_protocol_treasury", args, ...extra });
+    const toCompany = await run({ newTreasury: company });
+    expect(toCompany.error ?? null).toBeNull();
+    expect((toCompany.export as Exported).header.preconditions.join("\n")).toMatch(/= the role-map treasury/);
+    expect((await run({ newTreasury: w.keys.vault })).error ?? null).toBeNull();
+    expect((await run({ newTreasury: key(91) })).error).toMatch(/not the role-map key/);
   });
 
   it("extend-program is refused: a vault cannot extend a program (EXTERNAL #2, 6.1 rehearsal)", async () => {

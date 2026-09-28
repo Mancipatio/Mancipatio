@@ -27,7 +27,13 @@ import {
   findKycRegistryTransferPda,
   jurisdictionBitmap,
 } from "@/lib/passport";
-import { bootstrapTool, planBootstrap, probeBootstrapState, type BootstrapPlan } from "@/scripts/chain/lib/bootstrap-plan";
+import {
+  bootstrapExternalActions,
+  bootstrapTool,
+  planBootstrap,
+  probeBootstrapState,
+  type BootstrapPlan,
+} from "@/scripts/chain/lib/bootstrap-plan";
 import { runTool } from "@/scripts/chain/lib/context";
 import { idlTool } from "@/scripts/chain/lib/idl-plan";
 import { inventoryTool } from "@/scripts/chain/lib/inventory";
@@ -68,7 +74,9 @@ describe("bootstrap plan on an empty chain (C1)", () => {
     expect(p.stops).toEqual([]);
     expect(p.awaiting.map((a) => a.id)).toEqual(["X3", "X2", "X1"]);
     expect(p.awaiting.find((a) => a.id === "X1")).toMatchObject({ page: "/issuer/authority", key: w.keys.superAdmin });
-    expect(p.awaiting.find((a) => a.id === "X2")).toMatchObject({ page: "/admin/kyc", key: w.keys.kycAuthority });
+    // uloge-runbook-10: the proposed KYC key is no kycProvider (and no Admin)
+    // before it accepts, so /admin/kyc refuses it; it accepts on /account/roles.
+    expect(p.awaiting.find((a) => a.id === "X2")).toMatchObject({ page: "/account/roles", key: w.keys.kycAuthority });
     expect(p.blocked.map((b) => b.id)).toEqual(["S6"]);
     expect(p.handover).toEqual({ planned: false, reason: "earlier steps are pending" });
     expect(p.skipped.map((s) => s.id)).toEqual(expect.arrayContaining(["S1b", "S4c", "S4b.cancel"]));
@@ -445,5 +453,96 @@ describe("partial progress and stops", () => {
     const evidence = await dryRun(w);
     expect(evidence.status).toBe("failed");
     expect(evidence.error).toMatch(/deployer balance 10000 lamports is below/);
+  });
+});
+
+describe("operator pages (uloge-runbook-10)", () => {
+  /** What performs each action on its page: the component or the builder. */
+  const PERFORMS: Record<string, string> = {
+    S1b: "getSetProtocolTreasuryInstructionAsync",
+    S3: "getAddAdminInstructionAsync",
+    X3: "AuthorityRotation",
+    X2: "PendingRolesPanel",
+    X1: "AuthorityRotation",
+    S6: "PauseFlagsPanel",
+  };
+  const frontDir = path.resolve(__dirname, "..");
+  /** The page file plus the local modules it imports directly. */
+  function pageSource(page: string): string {
+    const file = path.join(frontDir, "app", page, "page.tsx");
+    expect(fs.existsSync(file), `${page} has no page.tsx`).toBe(true);
+    const source = fs.readFileSync(file, "utf8");
+    const parts = [source];
+    for (const [, spec] of source.matchAll(/from "(@\/[^"]+|\.\/[^"]+)"/g)) {
+      const base = spec.startsWith("@/") ? path.join(frontDir, spec.slice(2)) : path.join(path.dirname(file), spec);
+      for (const candidate of [`${base}.tsx`, `${base}.ts`]) {
+        if (fs.existsSync(candidate)) parts.push(fs.readFileSync(candidate, "utf8"));
+      }
+    }
+    return parts.join("\n");
+  }
+
+  it("every external action names a page that exists, performs it and lets its signer in", async () => {
+    const w = await world();
+    const { adminRouteRequirement } = await import("@/lib/role-resolution");
+    const actions = bootstrapExternalActions(w.map);
+    expect(actions.map((a) => a.id.split(":")[0])).toEqual(["S1b", "S3", "X3", "X2", "X1", "S6"]);
+    for (const action of actions) {
+      const id = action.id.split(":")[0];
+      expect(pageSource(action.page), `${action.id} on ${action.page}`).toContain(PERFORMS[id]);
+      if (action.page.startsWith("/admin")) {
+        // Only the SA (an Admin record since X1) is sent into the admin area.
+        expect(action.role).toBe("superAdmin");
+        expect(adminRouteRequirement(action.page)).toContain("admin");
+      }
+    }
+  });
+});
+
+describe("company wallet for every operational role (Talas 8.2)", () => {
+  it("bootstraps SA = BA = KYC = treasury on one acknowledged key and hands over with 0 blockers", async () => {
+    const w = await world();
+    const company = w.keys.superAdmin;
+    const json = JSON.parse(fs.readFileSync(w.mapFile, "utf8"));
+    Object.assign(json, {
+      admins: [],
+      blocklistAuthority: company,
+      kyc: { ...json.kyc, authority: company },
+      protocolTreasury: company,
+      acknowledgedRoleOverlaps: [
+        {
+          key: company,
+          roles: ["superAdmin", "kyc.authority", "blocklistAuthority", "protocolTreasury"],
+          reason: "Company wallet holds every operational role (test)",
+        },
+      ],
+    });
+    fs.writeFileSync(w.mapFile, JSON.stringify(json));
+    const loaded = await validateRoleMap(json, { network: "devnet", genesis: CLUSTER_GENESIS_HASHES.devnet });
+    w.map = loaded.map;
+    expect(loaded.warnings.join("\n")).toMatch(/ROLE OVERLAP \(acknowledged\)/);
+    expect(w.map.allowKycAdmin).toBe(true);
+
+    const idlDry = await runTool("idl", env(w, { CHAIN_IDL_MODE: "send" }), idlTool, deps(w));
+    const idlSend = await runTool("idl", sendEnv(w, idlDry.planDigest as string, { CHAIN_IDL_MODE: "send" }), idlTool, deps(w));
+    expect(idlSend.status).toBe("completed");
+
+    const pair = w.pairs.superAdmin.path;
+    const cycle = await sendRun(w, { CHAIN_REHEARSAL_SIGNERS: `superAdmin=${pair},blocklistAuthority=${pair},kycAuthority=${pair}` });
+    expect(cycle.error ?? null).toBeNull();
+    expect((cycle.steps as { id: string }[]).map((s) => s.id)).toEqual(["S1", "S2", "S2b", "S4", "S4b", "X3", "X2", "S5", "X1", "S6"]);
+    const state = await probeBootstrapState(rpcFor(w), w.map);
+    expect(state.platform).toMatchObject({ admin: company, protocolTreasury: company, pauseFlags: 0 });
+    expect(state.blocklist?.authority).toBe(company);
+    expect(state.registry?.authority).toBe(company);
+
+    const s7 = await sendRun(w, { CHAIN_HANDOVER: "1", CHAIN_CONFIRM_HANDOVER: w.keys.vault });
+    expect(s7.error ?? null).toBeNull();
+    expect((s7.handoverInventory as { blockers: string[] }).blockers).toEqual([]);
+    const inventory = await runTool("inventory", env(w, { CHAIN_PHASE: "handed-over" }), inventoryTool, deps(w));
+    const findings = inventory.findings as { severity: string; code: string; message: string }[];
+    expect(findings.filter((f) => f.severity === "blocker")).toEqual([]);
+    expect(findings.find((f) => f.code === "role-overlap")?.message).toMatch(/\(acknowledged\).*clawback/);
+    expect(findings.find((f) => f.code === "kyc-admin")?.severity).toBe("warning");
   });
 });

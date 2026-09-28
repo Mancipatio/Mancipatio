@@ -15,7 +15,7 @@ import {
   loadTargets, resolveTarget, targetLine, TargetError, validateTargets,
 } from "../scripts/ops/target.mjs";
 import {
-  applyReconcileEnv, otherNetwork, reconcileRpcUrl, reconcileTarget, smokeTarget,
+  applyReconcileEnv, otherNetwork, reconcileRpcUrl, reconcileTarget, smokeBypassHeaders, smokeTarget,
 } from "../scripts/ops/live-targets";
 
 const FRONT = process.cwd();
@@ -535,6 +535,30 @@ describe("live operator runners (deployment smoke, index reconcile)", () => {
     expect(() => smokeTarget({ ...env, SMOKE_ORIGIN: "https://www.manci.io" }, CONFIGURED)).toThrow(/another target's origin/);
     for (const bad of ["http://preview.manci.test", "https://preview.manci.test/path", "https://preview.manci.test:8443"])
       expect(() => smokeTarget({ ...env, SMOKE_ORIGIN: bad }, CONFIGURED), bad).toThrow(/https:\/\/<host>/);
+  });
+
+  it("smoke: the Deployment Protection bypass comes from a file, only well-formed, and is optional", () => {
+    const secret = "b".repeat(32);
+    const files: Record<string, string> = { "/ok": `VERCEL_AUTOMATION_BYPASS_SECRET=${secret}\n`, "/bare": secret, "/short": "VERCEL_AUTOMATION_BYPASS_SECRET=abc" };
+    const read = (file: string) => {
+      if (!(file in files)) throw new Error("ENOENT");
+      return files[file];
+    };
+    expect(smokeBypassHeaders({}, read)).toEqual({});
+    expect(smokeBypassHeaders({ MANCIPATIO_VERCEL_BYPASS_FILE: "/ok" }, read)).toEqual({ "x-vercel-protection-bypass": secret });
+    for (const bad of ["/bare", "/short"]) {
+      expect(() => smokeBypassHeaders({ MANCIPATIO_VERCEL_BYPASS_FILE: bad }, read)).toThrow(/one line VERCEL_AUTOMATION_BYPASS_SECRET=/);
+    }
+    const missing = (() => {
+      try {
+        smokeBypassHeaders({ MANCIPATIO_VERCEL_BYPASS_FILE: "/secret/path" }, read);
+      } catch (error) {
+        return (error as Error).message;
+      }
+      return "";
+    })();
+    expect(missing).toMatch(/unreadable \(path withheld\)/);
+    expect(missing).not.toContain("/secret/path");
   });
 
   it("reconcile: pinned project, env file rules, per-network RPC keys and no public mainnet RPC", () => {

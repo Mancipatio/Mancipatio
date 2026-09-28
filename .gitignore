@@ -1,9 +1,12 @@
 # Markdown files and the top-level docs/ directories are not tracked.
 # The docs/ rules are anchored so application routes such as front/app/docs
-# stay tracked. The one exception is the mainnet runbook, which the chain CLI
-# (front/scripts/chain) and the Release workflow refer to by path.
+# stay tracked. The exceptions are the operator documents in ops/: the
+# mainnet runbook, which the chain CLI (front/scripts/chain) and the Release
+# workflow refer to by path, and the procedures it points to.
 *.md
 !/ops/runbook-mainnet.md
+!/ops/sop-admin.md
+!/ops/wind-down-plan.md
 /docs/
 /front/docs/
 /program/docs/

@@ -20,6 +20,7 @@ import {
   unresolvedSignatures,
   type HeldLock,
 } from "./journal";
+import type { LedgerOpener } from "./ledger";
 import { createChainRpc, type ChainRpc, type RpcCallRecord } from "./rpc";
 import {
   ChainAbortError,
@@ -56,6 +57,10 @@ export type ToolDeps = {
   signalHandlers?: boolean;
   /** Pre-aborted or externally controlled signal (tests). */
   signal?: AbortSignal;
+  /** chain:emergency with CHAIN_SIGNER: opens the Ledger (tests inject a device). */
+  ledger?: LedgerOpener;
+  /** The mainnet source guard's `git status` (tests inject the tree state). */
+  sourceDirty?: (root: string) => string[];
 };
 
 export type ToolContext = {

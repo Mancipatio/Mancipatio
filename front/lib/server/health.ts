@@ -31,9 +31,13 @@
 //   paymentFx     the EUR rate of the network's default payment mint (USDC)
 //                 that sale approvals count the raise cap with (Talas 4.2
 //                 §3.6, D18). Mainnet: missing, unreadable or past its max
-//                 age → fail; at ≥ 80 % of its max age → warn. Other
-//                 networks: the same conditions only warn. An eur_peg row
-//                 never goes stale; a network without a default mint is ok.
+//                 age → fail; at ≥ 80 % of its max age → warn. A missing row
+//                 before the first sale approval and the first sale only
+//                 warns (missing_before_first_sale): on launch day the super
+//                 admin seeds it after the bootstrap (Talas 8.2), and nothing
+//                 counts with it until then; if that cannot be read, fail.
+//                 Other networks: the same conditions only warn. An eur_peg
+//                 row never goes stale; a network without a default mint is ok.
 //   databaseNetwork  the database's public.deployment_network() (migration
 //                 0070) must serve this deployment: equal networks, or both
 //                 non-mainnet (a testnet front may use the devnet project,
@@ -267,6 +271,28 @@ export function intervalSeconds(value: unknown): number | null {
   return Number.isFinite(total) && total > 0 ? total : null;
 }
 
+/**
+ * True only when both reads prove that nothing on `network` counts with the
+ * rate yet: no sale approval reservation and no indexed sale. Any error,
+ * timeout or unexpected answer is false, so a missing rate then fails.
+ */
+async function rateNotYetUsed(sb: SupabaseClient, network: Network): Promise<boolean> {
+  const count = async (table: "sale_capacity_reservations" | "sales") => {
+    const result = await bounded((signal) => sb.from(table)
+      .select("network", { count: "exact", head: true })
+      .eq("network", network)
+      .abortSignal(signal), HEALTH_DB_TIMEOUT_MS);
+    if (result === TIMEOUT || !result || result.error) return null;
+    return safeInteger(result.count);
+  };
+  try {
+    const [reservations, sales] = await Promise.all([count("sale_capacity_reservations"), count("sales")]);
+    return reservations === 0 && sales === 0;
+  } catch {
+    return false;
+  }
+}
+
 async function checkPaymentFx(sb: SupabaseClient | null, network: Network, now: number): Promise<PaymentFxCheck> {
   const empty = { kind: null, ageSeconds: null, maxAgeSeconds: null } as const;
   const mint = defaultPaymentMint(network);
@@ -284,7 +310,12 @@ async function checkPaymentFx(sb: SupabaseClient | null, network: Network, now: 
     if (result === TIMEOUT) return { status: bad, reason: "timeout", ...empty };
     if (result.error) return { status: bad, reason: "unavailable", ...empty };
     const row = result.data as { kind?: unknown; as_of?: unknown; max_age?: unknown } | null;
-    if (!row) return { status: bad, reason: "missing", ...empty };
+    if (!row) {
+      if (bad === "fail" && (await rateNotYetUsed(sb, network))) {
+        return { status: "warn", reason: "missing_before_first_sale", ...empty };
+      }
+      return { status: bad, reason: "missing", ...empty };
+    }
     if (row.kind === "eur_peg") return { status: "ok", kind: "eur_peg", ageSeconds: ageSeconds(row.as_of, now), maxAgeSeconds: null };
     const age = ageSeconds(row.as_of, now);
     const maxAge = intervalSeconds(row.max_age);

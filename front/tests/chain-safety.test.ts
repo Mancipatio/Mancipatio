@@ -10,6 +10,7 @@ import {
   assertOutputPath,
   assertReleaseSource,
   installFetchGuard,
+  ledgerDerivationPath,
   loadHotSigner,
   readChainConfig,
   repoRoot,
@@ -105,6 +106,35 @@ describe("environment gates (runner contract §3.1)", () => {
     refuse(() => config("squads-export", base({ CHAIN_ROLE_MAP: "m", CHAIN_SEND: "1" })), /never sends/);
     refuse(() => config("bootstrap", base({ CHAIN_ROLE_MAP: "m.json", CHAIN_KEYPAIR: "k.json" })), /only read in send mode/);
     refuse(() => config("bootstrap", base()), /CHAIN_ROLE_MAP is required/);
+  });
+
+  it("chain:handover never sends; chain:emergency sends with one signer: a keypair or a Ledger URL (Talas 8.2)", () => {
+    refuse(() => config("handover", base()), /CHAIN_ROLE_MAP is required for handover/);
+    refuse(() => config("handover", base({ CHAIN_ROLE_MAP: "t.json", CHAIN_SEND: "1", CHAIN_KEYPAIR: "k", CHAIN_CONFIRM_PLAN: "d" })), /never sends/);
+    // Neither needs a Release on mainnet (emergency checks the live IDL instead).
+    const mainnet = { CHAIN_NETWORK: "mainnet", CHAIN_ALLOW_MAINNET: "1" };
+    expect(config("handover", base({ ...mainnet, CHAIN_ROLE_MAP: "t.json" })).releaseDir).toBeNull();
+    expect(config("emergency", base(mainnet)).releaseDir).toBeNull();
+    const ledger = config("emergency", base({ CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d", CHAIN_SIGNER: "usb://ledger?key=0" }));
+    expect(ledger).toMatchObject({ send: true, keypairPath: null, signerUrl: "usb://ledger?key=0" });
+    expect(config("emergency", base({ CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d", CHAIN_KEYPAIR: "k.json" })).signerUrl).toBeNull();
+    refuse(() => config("emergency", base({ CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d" })), /one signer: CHAIN_KEYPAIR or CHAIN_SIGNER/);
+    refuse(() => config("emergency", base({ CHAIN_SEND: "1", CHAIN_SIGNER: "usb://ledger" })), /CHAIN_CONFIRM_PLAN/);
+    refuse(
+      () => config("emergency", base({ CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d", CHAIN_KEYPAIR: "k.json", CHAIN_SIGNER: "usb://ledger" })),
+      /not both/,
+    );
+    refuse(() => config("emergency", base({ CHAIN_SIGNER: "usb://ledger" })), /CHAIN_SIGNER is only read in send mode/);
+    refuse(() => config("bootstrap", base({ CHAIN_ROLE_MAP: "m", CHAIN_SIGNER: "usb://ledger" })), /read by chain:emergency only/);
+    refuse(() => config("emergency", base({ CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d", CHAIN_SIGNER: "usb://trezor" })), /CHAIN_SIGNER must be usb:\/\/ledger/);
+  });
+
+  it("maps Solana CLI Ledger URLs to the hardened derivation path", () => {
+    expect(ledgerDerivationPath("usb://ledger")).toBe("44'/501'");
+    expect(ledgerDerivationPath("usb://ledger?key=0")).toBe("44'/501'/0'");
+    expect(ledgerDerivationPath("usb://ledger?key=2/0")).toBe("44'/501'/2'/0'");
+    refuse(() => ledgerDerivationPath("usb://ledger?key=-1"), /CHAIN_SIGNER must be/);
+    refuse(() => ledgerDerivationPath("usb://ledger/BsNsvfXqQTtJnagwFWdBS7FBXgnsK8VZ5CmuznN85swK?key=0"), /CHAIN_SIGNER must be/);
   });
 
   it("caps CHAIN_CU_PRICE, CHAIN_RPS and CHAIN_DEADLINE_MIN", () => {

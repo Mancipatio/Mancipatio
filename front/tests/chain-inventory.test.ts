@@ -15,6 +15,17 @@ import {
   type InventoryPhase,
 } from "@/scripts/chain/lib/inventory";
 import { LOADER_V3 } from "@/scripts/chain/lib/loader-v3";
+import {
+  EM_BPF,
+  EM_SBPF,
+  FEATURE_GATES,
+  FEATURE_PROGRAM,
+  SBPF_DEPLOY_GATE,
+  networkGateFindings,
+  sbpfUpgradeProblem,
+  sbpfVersionOf,
+  type NetworkGates,
+} from "@/scripts/chain/lib/network-gates";
 import { PM_HEADER_LENGTH, PM_PROGRAM } from "@/scripts/chain/lib/program-metadata";
 import type { RoleMap } from "@/scripts/chain/lib/role-map";
 import {
@@ -207,6 +218,149 @@ describe("inventory findings (§6)", () => {
       ["k14-sale", "warning"],
       ["k14-payout", "warning"],
     ]);
+  });
+});
+
+describe("role overlaps (Talas 8.2)", () => {
+  it("one role-overlap warning per shared key, saying whether the map acknowledges it", async () => {
+    const { map } = await world();
+    const shared = { ...map, blocklistAuthority: map.superAdmin, kyc: { ...map.kyc, authority: map.superAdmin } };
+    const open = inventoryFindings(clean(shared), shared, "handed-over").filter((f) => f.code === "role-overlap");
+    expect(open.map((f) => f.severity)).toEqual(["warning"]);
+    expect(open[0].message).toMatch(/\(not acknowledged\): \S+ is superAdmin \+ kyc\.authority \+ blocklistAuthority/);
+    const acked = {
+      ...shared,
+      acknowledgedRoleOverlaps: [{ key: map.superAdmin, roles: ["superAdmin", "kyc.authority", "blocklistAuthority"] as never, reason: "company" }],
+    };
+    const [finding] = inventoryFindings(clean(acked), acked, "handed-over").filter((f) => f.code === "role-overlap");
+    expect(finding.message).toMatch(/\(acknowledged\).*reason: "company"/);
+    // Distinct keys: nothing to report.
+    expect(inventoryFindings(clean(map), map, "handed-over").filter((f) => f.code === "role-overlap")).toEqual([]);
+  });
+
+  it("without a role map the live overlaps are reported (devnet today: one key holds SA, KYC, BA and the treasury)", async () => {
+    const { map } = await world();
+    const inv = clean(map);
+    const owner = map.superAdmin;
+    inv.blocklist = { authority: owner, proposed: null };
+    inv.kycRegistries[0].authority = owner;
+    inv.platform!.protocolTreasury = owner;
+    const findings = inventoryFindings(inv, null, "in-progress");
+    expect(bySeverity(findings, "ba-is-sa")).toEqual(["warning"]);
+    const [live] = findings.filter((f) => f.code === "role-overlap");
+    expect(live.message).toMatch(/\(not acknowledged\): \S+ is superAdmin \+ kyc\.authority \+ blocklistAuthority \+ protocolTreasury.*\(live state, no role map\)$/);
+    // Without the pinned registry the KYC authority is unknown: no finding.
+    inv.kycPin = null;
+    expect(inventoryFindings(inv, null, "in-progress").filter((f) => f.code === "role-overlap")).toEqual([]);
+  });
+
+  it("a treasury mismatch names the role-map treasury", async () => {
+    const { map } = await world();
+    const inv = clean(map);
+    inv.platform!.protocolTreasury = key(190);
+    expect(inventoryFindings(inv, map, "handed-over").find((f) => f.code === "treasury")?.message).toBe(
+      `protocol treasury ${key(190)} is not the role-map treasury ${map.protocolTreasury}`,
+    );
+  });
+});
+
+describe("cluster gates: SIMD-0500 and rent (release-lanac-6, -7)", () => {
+  /** A 64-byte ELF64 LE header with the given e_machine and e_flags. */
+  function elf(eFlags: number, eMachine = EM_BPF): Uint8Array {
+    const bytes = new Uint8Array(128);
+    bytes.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+    const view = new DataView(bytes.buffer);
+    view.setUint16(0x12, eMachine, true);
+    view.setUint32(0x30, eFlags, true);
+    return bytes;
+  }
+  const gates = (states: Partial<Record<string, "pending" | "active">> = {}, lamportsPerByte = 5080): NetworkGates => ({
+    lamportsPerByte,
+    features: FEATURE_GATES.map((gate) => {
+      const state = states[gate.id] ?? "not-scheduled";
+      return { ...gate, state, activatedAt: state === "active" ? "446256000" : null };
+    }),
+  });
+
+  it("reads the SBPF version from e_flags and refuses what is not an SBPF ELF", () => {
+    expect(sbpfVersionOf("asset_registry", elf(0))).toMatchObject({ version: 0, eMachine: 247, eFlags: 0, error: null });
+    expect(sbpfVersionOf("transfer_hook", elf(3, EM_SBPF))).toMatchObject({ version: 3, eMachine: 263 });
+    expect(sbpfVersionOf("asset_registry", new Uint8Array([1, 2, 3])).error).toMatch(/shorter than an ELF64 header/);
+    expect(sbpfVersionOf("asset_registry", elf(7)).error).toMatch(/not an SBPF version/);
+    expect(sbpfVersionOf("asset_registry", elf(0, 62)).error).toMatch(/e_machine 62/);
+  });
+
+  it("SIMD-0500: active blocks an SBPF v0 Release, pending warns, not scheduled is info; v3 always passes", () => {
+    const v0 = [sbpfVersionOf("asset_registry", elf(0)), sbpfVersionOf("transfer_hook", elf(0))];
+    const v3 = [sbpfVersionOf("asset_registry", elf(3, EM_SBPF)), sbpfVersionOf("transfer_hook", elf(3, EM_SBPF))];
+    const codes = (findings: { severity: string; code: string }[]) => findings.filter((f) => f.code.startsWith("sbpf")).map((f) => `${f.code}:${f.severity}`);
+    expect(codes(networkGateFindings(gates({ [SBPF_DEPLOY_GATE.id]: "active" }), v0))).toEqual(["sbpf-gate:blocker", "sbpf-gate:blocker"]);
+    expect(codes(networkGateFindings(gates({ [SBPF_DEPLOY_GATE.id]: "pending" }), v0))).toEqual(["sbpf-gate:warning", "sbpf-gate:warning"]);
+    expect(codes(networkGateFindings(gates(), v0))).toEqual(["sbpf:info", "sbpf:info"]);
+    expect(codes(networkGateFindings(gates({ [SBPF_DEPLOY_GATE.id]: "active" }), v3))).toEqual(["sbpf:info", "sbpf:info"]);
+    expect(codes(networkGateFindings(gates({ [SBPF_DEPLOY_GATE.id]: "active" }), null))).toEqual(["sbpf-gate:warning"]);
+    expect(sbpfUpgradeProblem(gates({ [SBPF_DEPLOY_GATE.id]: "active" }), v0[0])).toMatch(/SBPF v0 .*the loader refuses it/);
+    expect(sbpfUpgradeProblem(gates({ [SBPF_DEPLOY_GATE.id]: "active" }), v3[0])).toBeNull();
+    expect(sbpfUpgradeProblem(gates({ [SBPF_DEPLOY_GATE.id]: "pending" }), v0[0])).toBeNull();
+  });
+
+  it("SIMD-0500 active blocks only a deploy still to come: S7 and handed-over see a warning (the live v0 program keeps running)", async () => {
+    const { map } = await world();
+    const v0 = [sbpfVersionOf("asset_registry", elf(0)), sbpfVersionOf("transfer_hook", elf(0))];
+    const withRelease = (equal: boolean) => {
+      const inv = clean(map);
+      inv.gates = gates({ [SBPF_DEPLOY_GATE.id]: "active" });
+      inv.sbpf = v0;
+      for (const p of inv.programs) p.release = { equal, length: 3, headroom: 1_000_000, verifyHash: null };
+      return inv;
+    };
+    // The Release is live: no phase blocks on it (S7 runs the pre-handover phase).
+    expect(phases.map((phase) => bySeverity(inventoryFindings(withRelease(true), map, phase), "sbpf-gate"))).toEqual([
+      ["warning", "warning"],
+      ["warning", "warning"],
+      ["warning", "warning"],
+    ]);
+    const live = inventoryFindings(withRelease(true), map, "pre-handover").find((f) => f.code === "sbpf-gate")!;
+    expect(live.message).toMatch(/the deployed program keeps running, but this Release can no longer be deployed or used for an upgrade/);
+    // Not live yet: the deploy still to come is refused while in progress; at
+    // handover the release-bytes gate is what blocks, not SIMD-0500.
+    const notLive = withRelease(false);
+    expect(bySeverity(inventoryFindings(notLive, map, "in-progress"), "sbpf-gate")).toEqual(["blocker", "blocker"]);
+    expect(bySeverity(inventoryFindings(notLive, map, "pre-handover"), "sbpf-gate")).toEqual(["warning", "warning"]);
+    expect(bySeverity(inventoryFindings(notLive, map, "pre-handover"), "release-bytes")).toEqual(["blocker", "blocker"]);
+    // The upgrade refusal (chain:squads-export op=upgrade) is unchanged.
+    expect(sbpfUpgradeProblem(gates({ [SBPF_DEPLOY_GATE.id]: "active" }), v0[0])).toMatch(/the loader refuses it/);
+  });
+
+  it("rent: the current lamports per byte and SIMD-0437-3..5 / SIMD-0438; a reset or a superseded key warns", () => {
+    const rent = networkGateFindings(gates(), null).find((f) => f.code === "rent")!;
+    expect(rent.severity).toBe("info");
+    expect(rent.message).toMatch(/^lamports per byte 5080; .*SIMD-0437-3 not-scheduled; SIMD-0437-4 not-scheduled; SIMD-0437-5 not-scheduled; SIMD-0438 not-scheduled/);
+    const reset = FEATURE_GATES.find((g) => g.simd === "SIMD-0438" && !g.superseded)!;
+    expect(networkGateFindings(gates({ [reset.id]: "pending" }), null).find((f) => f.code === "rent-reset")?.severity).toBe("warning");
+    const old = FEATURE_GATES.find((g) => g.superseded)!;
+    expect(networkGateFindings(gates({ [old.id]: "active" }), null).find((f) => f.code === "feature-superseded")?.message).toMatch(old.id);
+  });
+
+  it("collectInventory decodes the feature accounts, the rent and the holdings from the chain", async () => {
+    const w = await world();
+    const slot = new Uint8Array(9);
+    slot[0] = 1;
+    new DataView(slot.buffer).setBigUint64(1, BigInt(446_256_000), true);
+    w.chain.set(SBPF_DEPLOY_GATE.id, { owner: FEATURE_PROGRAM, lamports: rent(9), data: Uint8Array.of(0, 0, 0, 0, 0, 0, 0, 0, 0) });
+    const rent5080 = FEATURE_GATES.find((g) => g.simd === "SIMD-0437-2")!;
+    w.chain.set(rent5080.id, { owner: FEATURE_PROGRAM, lamports: rent(9), data: slot });
+    const idlSources = resolveIdlSources({ env: {}, config: { network: "devnet" } as never, frontDir: path.join(root, "front") }, null);
+    const inv = await collectInventory(rpcFor(w), { map: w.map, release: null, idlSources, lockPresent: false, kycPin: null, scanBuffers: false });
+    const state = Object.fromEntries(inv.gates!.features.map((f) => [f.id, f.state]));
+    expect(state[SBPF_DEPLOY_GATE.id]).toBe("pending");
+    expect(state[rent5080.id]).toBe("active");
+    expect(inv.gates!.features.find((f) => f.id === rent5080.id)?.activatedAt).toBe("446256000");
+    // The fake cluster keeps the legacy rent: 6960 lamports per byte.
+    expect(inv.gates!.lamportsPerByte).toBe(6960);
+    expect(inv.holdings).toEqual({ custodyVaults: [], rightsIssuances: [], issuers: [] });
+    expect(inv.sbpf).toBeUndefined();
+    expect(bySeverity(inventoryFindings(inv, w.map, "in-progress"), "sbpf-gate")).toEqual(["warning"]);
   });
 });
 

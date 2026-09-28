@@ -193,6 +193,35 @@ describe("GET /api/health", () => {
       expect(JSON.stringify(result.body)).not.toMatch(/57014|timeout"|EPjF/);
     });
 
+    it.each<[string, Reply, Reply, number, Record<string, unknown>]>([
+      ["nothing counts with it yet", { data: null, error: null, count: 0 }, { data: null, error: null, count: 0 }, 200, { status: "warn", reason: "missing_before_first_sale" }],
+      ["a sale approval exists", { data: null, error: null, count: 1 }, { data: null, error: null, count: 0 }, 503, { status: "fail", reason: "missing" }],
+      ["a sale exists", { data: null, error: null, count: 0 }, { data: null, error: null, count: 2 }, 503, { status: "fail", reason: "missing" }],
+      ["the sales cannot be read", { data: null, error: null, count: 0 }, { data: null, error: { code: "x", message: "y" } }, 503, { status: "fail", reason: "missing" }],
+    ])("mainnet: a missing rate before the first sale (Talas 8.2), when %s", async (_label, reservations, sales, status, expected) => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
+      m.replies.fx_rates = { data: null, error: null };
+      m.replies.sale_capacity_reservations = reservations;
+      m.replies.sales = sales;
+      const result = await get();
+      expect(result.body.checks.paymentFx).toMatchObject(expected);
+      expect(result.status).toBe(status);
+      for (const table of ["sale_capacity_reservations", "sales"]) {
+        const call = m.calls.find((c) => c.table === table)!;
+        expect(call.filters).toEqual([["network", "mainnet"]]);
+        expect(call.select).toEqual(["network", { count: "exact", head: true }]);
+        expect(call.signal).toBeInstanceOf(AbortSignal);
+      }
+    });
+
+    it("devnet never asks whether a sale exists", async () => {
+      m.replies.fx_rates = { data: null, error: null };
+      const { body } = await get();
+      expect(body.checks.paymentFx).toMatchObject({ status: "warn", reason: "missing" });
+      expect(m.calls.some((c) => c.table === "sales" || c.table === "sale_capacity_reservations")).toBe(false);
+    });
+
     it("mainnet: an anonymous caller sees ok:false (uptime alarms fire)", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
