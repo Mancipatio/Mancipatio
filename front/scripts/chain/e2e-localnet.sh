@@ -1,37 +1,69 @@
 #!/usr/bin/env bash
 # Local validator for `npm run chain:e2e` on localnet (Talas 6.3, design-6.3 §C).
 #
-#   bash scripts/chain/e2e-localnet.sh start   # fresh ledger, release .so, prints the CHAIN_* lines
+#   bash scripts/chain/e2e-localnet.sh start        # fresh ledger, release .so, prints the CHAIN_* lines
 #   bash scripts/chain/e2e-localnet.sh stop
 #   bash scripts/chain/e2e-localnet.sh status
+#   bash scripts/chain/e2e-localnet.sh warp <slot>  # restart this validator on its ledger at <slot>
 #
 # The programs are the Release artefacts (checked against SHA256SUMS) loaded
 # as upgradeable programs whose upgrade authority is a local deployer key
 # (<E2E_DIR>/keys/deployer.json, 600, also the faucet --mint). Ports stay
-# clear of a default validator (8899/8900, 18000-18040, 19900): RPC 8999,
-# WS 9000, gossip 18100, dynamic 18101-18140, faucet 19910. The ledger lives
-# in E2E_SCRATCH (default $TMPDIR/manci-e2e-6.3), never in the repository.
+# clear of a default validator (8899/8900, 18000-18040, 19900): by default
+# RPC 8999, WS 9000 (always RPC + 1), gossip 18100, dynamic 18101-18140,
+# faucet 19910; E2E_RPC_PORT, E2E_GOSSIP_PORT, E2E_DYNAMIC_PORTS and
+# E2E_FAUCET_PORT move them (parallel runs). A faucet on RPC + 1 takes the
+# WS port: the validator then logs that its pubsub service could not bind,
+# which chain:e2e does not use (HTTP only). The ledger lives in E2E_SCRATCH
+# (default $TMPDIR/manci-e2e-6.3), never in the repository.
 # E2E_CLONE_FEATURES=0 skips the mainnet feature-set clone (on by default,
 # as in the 6.1 rehearsal; a read-only fetch by the validator at start).
 # `stop` kills only a pid whose command is solana-test-validator on this
 # ledger (a stale pid file is just removed) and waits up to 15 s for it.
+#
+# Time (design-6.3 §D; the 7-day recoveries, the 48 h grants, the 30-day
+# KYC grace): a test validator has no runtime clock control, only
+# `--warp-slot` at a (re)start. `warp <slot>` stops THIS validator (the same
+# ours() check as stop), restarts it on the same ledger with only the ports
+# and `--warp-slot <slot>` (the genesis flags are ignored on an existing
+# ledger anyway) and returns once a full snapshot at least 300 slots past the
+# warp exists: a restart from the warp's own snapshot fails (its leader is
+# the default key), and one whose status cache still holds pre-warp slots
+# fails the SlotHistory check. After a warp the Clock sysvar runs from the
+# restart's root timestamp at 75 % of 400 ms per slot since the epoch's
+# first slot (epoch 0; half that in later epochs, as measured on Agave
+# 4.2.2), so the jump is chosen by the slot; scripts/chain/lib/e2e/warp.ts
+# computes it and re-reads the clock. Genesis therefore uses a long epoch,
+# E2E_SLOTS_PER_EPOCH (default 20,000,000 slots: about 69 days of warp in
+# epoch 0 and 35 in each later one; ~1.2 GB RSS).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(git rev-parse --show-toplevel)"
 E2E_DIR="${E2E_DIR:-$ROOT/docs/mainnet-readiness/e2e-6.3/localnet}"
 SCRATCH="${E2E_SCRATCH:-${TMPDIR:-/tmp}/manci-e2e-6.3}"
 RELEASE="${E2E_RELEASE_DIR:-$ROOT/docs/mainnet-readiness/release-v0.0.0-rc.1}"
-RPC_PORT=8999
-WS_PORT=9000
-GOSSIP_PORT=18100
-DYNAMIC_PORTS=18101-18140
-FAUCET_PORT=19910
+number() {
+  case "$2" in '' | *[!0-9]*) echo "$1 must be a number" >&2; exit 2 ;; esac
+}
+RPC_PORT="${E2E_RPC_PORT:-8999}"
+number E2E_RPC_PORT "$RPC_PORT"
+WS_PORT=$((RPC_PORT + 1))
+GOSSIP_PORT="${E2E_GOSSIP_PORT:-18100}"
+number E2E_GOSSIP_PORT "$GOSSIP_PORT"
+DYNAMIC_PORTS="${E2E_DYNAMIC_PORTS:-18101-18140}"
+if ! [[ "$DYNAMIC_PORTS" =~ ^[0-9]+-[0-9]+$ ]]; then echo "E2E_DYNAMIC_PORTS must be MIN-MAX" >&2; exit 2; fi
+FAUCET_PORT="${E2E_FAUCET_PORT:-19910}"
+number E2E_FAUCET_PORT "$FAUCET_PORT"
+SLOTS_PER_EPOCH="${E2E_SLOTS_PER_EPOCH:-20000000}"
+number E2E_SLOTS_PER_EPOCH "$SLOTS_PER_EPOCH"
 URL="http://127.0.0.1:${RPC_PORT}"
 REGISTRY=FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS
 HOOK=GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy
 PID_FILE="$SCRATCH/validator.pid"
 LEDGER="$SCRATCH/ledger"
 LOG="$SCRATCH/validator.log"
+# A warp must be past this many slots before the next restart (see above).
+WARP_SETTLE_SLOTS=300
 
 # Ours = alive AND its command line is this script's validator on this
 # ledger: a stale pid file must never make us kill a reused pid.
@@ -60,13 +92,48 @@ assert_ignored() {
   done
 }
 
+ports_free() {
+  local port
+  for port in $RPC_PORT $WS_PORT $GOSSIP_PORT $FAUCET_PORT; do
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then echo "port $port is in use"; exit 1; fi
+  done
+}
+
+# Starts the validator in the background with the ports and the given extra
+# flags, records its pid and waits up to 90 s for the RPC.
+launch() {
+  nohup solana-test-validator --ledger "$LEDGER" --bind-address 127.0.0.1 \
+    --rpc-port "$RPC_PORT" --gossip-port "$GOSSIP_PORT" --dynamic-port-range "$DYNAMIC_PORTS" \
+    --faucet-port "$FAUCET_PORT" "$@" >>"$LOG" 2>&1 &
+  echo $! >"$PID_FILE"
+  for _ in $(seq 1 90); do
+    if solana cluster-version -u "$URL" >/dev/null 2>&1; then return 0; fi
+    sleep 1
+  done
+  solana cluster-version -u "$URL" >/dev/null || { echo "validator did not start; see $LOG"; exit 1; }
+}
+
+halt() {
+  local pid
+  pid="$(cat "$PID_FILE")"
+  kill "$pid"
+  for _ in $(seq 1 15); do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+  done
+  if kill -0 "$pid" 2>/dev/null; then echo "pid $pid did not exit within 15 s; pid file kept"; exit 1; fi
+  rm -f "$PID_FILE"
+}
+
+latest_snapshot() {
+  ls "$LEDGER" 2>/dev/null | sed -nE 's/^snapshot-([0-9]+)-.*\.tar\.zst$/\1/p' | sort -n | tail -1
+}
+
 case "${1:-}" in
   start)
     if ours; then echo "already running (pid $(cat "$PID_FILE"))"; exit 1; fi
     rm -f "$PID_FILE"
-    for port in $RPC_PORT $WS_PORT $GOSSIP_PORT $FAUCET_PORT; do
-      if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then echo "port $port is in use"; exit 1; fi
-    done
+    ports_free
     # Exactly one line per program, then the check: a SHA256SUMS missing a
     # line would otherwise verify only the other file.
     sums="$(grep -E ' \*?(asset_registry|transfer_hook)\.so$' "$RELEASE/SHA256SUMS" || true)"
@@ -103,18 +170,10 @@ case "${1:-}" in
     DEPLOYER="$(solana address -k "$DEPLOYER_KEY")"
     clone=()
     if [ "${E2E_CLONE_FEATURES:-1}" = "1" ]; then clone=(--url mainnet-beta --clone-feature-set); fi
-    nohup solana-test-validator --reset --ledger "$LEDGER" --bind-address 127.0.0.1 \
-      --rpc-port "$RPC_PORT" --gossip-port "$GOSSIP_PORT" --dynamic-port-range "$DYNAMIC_PORTS" \
-      --faucet-port "$FAUCET_PORT" --mint "$DEPLOYER" \
+    launch --reset --mint "$DEPLOYER" --slots-per-epoch "$SLOTS_PER_EPOCH" \
       --upgradeable-program "$REGISTRY" "$RELEASE/asset_registry.so" "$DEPLOYER" \
       --upgradeable-program "$HOOK" "$RELEASE/transfer_hook.so" "$DEPLOYER" \
-      ${clone[@]+"${clone[@]}"} >"$LOG" 2>&1 &
-    echo $! >"$PID_FILE"
-    for _ in $(seq 1 90); do
-      if solana cluster-version -u "$URL" >/dev/null 2>&1; then break; fi
-      sleep 1
-    done
-    solana cluster-version -u "$URL" >/dev/null || { echo "validator did not start; see $LOG"; exit 1; }
+      ${clone[@]+"${clone[@]}"}
     GENESIS="$(solana genesis-hash -u "$URL")"
     umask 077
     cat >"$E2E_DIR/validator.txt" <<EOF
@@ -128,6 +187,30 @@ EOF
     echo "validator up (pid $(cat "$PID_FILE")), genesis $GENESIS, deployer $DEPLOYER"
     echo "env: $E2E_DIR/validator.txt"
     ;;
+  warp)
+    target="${2:-}"
+    case "$target" in '' | *[!0-9]*) echo "usage: $0 warp <slot>" >&2; exit 2 ;; esac
+    if ! ours; then echo "not running: warp restarts only this script's validator on $LEDGER"; exit 1; fi
+    current="$(solana slot -u "$URL" --commitment finalized)"
+    if [ "$target" -le "$current" ]; then echo "warp slot $target is not past the finalized slot $current"; exit 1; fi
+    # A snapshot from before this warp must itself be settled (a previous
+    # warp's own snapshot would make the restart fail).
+    halt
+    ports_free
+    echo "=== warp to slot $target ($(date -u +%FT%TZ)) ===" >>"$LOG"
+    launch --warp-slot "$target"
+    need=$((target + WARP_SETTLE_SLOTS))
+    waited=0
+    until [ "$(latest_snapshot || echo 0)" -ge "$need" ] 2>/dev/null; do
+      if ! ours; then echo "the validator exited after the warp; see $LOG"; exit 1; fi
+      if [ "$waited" -ge "${E2E_WARP_SETTLE_TIMEOUT_S:-900}" ]; then
+        echo "no snapshot past slot $need within ${waited} s; see $LOG"; exit 1
+      fi
+      sleep 5
+      waited=$((waited + 5))
+    done
+    echo "warped to slot $target (pid $(cat "$PID_FILE")); settled at snapshot $(latest_snapshot) after ${waited} s"
+    ;;
   stop)
     if ! ours; then
       [ -f "$PID_FILE" ] && echo "pid file is stale (not this validator); removed"
@@ -135,21 +218,14 @@ EOF
       echo "not running"
       exit 0
     fi
-    pid="$(cat "$PID_FILE")"
-    kill "$pid"
-    for _ in $(seq 1 15); do
-      kill -0 "$pid" 2>/dev/null || break
-      sleep 1
-    done
-    if kill -0 "$pid" 2>/dev/null; then echo "pid $pid did not exit within 15 s; pid file kept"; exit 1; fi
-    rm -f "$PID_FILE"
+    halt
     echo "stopped"
     ;;
   status)
     if ours; then echo "running (pid $(cat "$PID_FILE")) at $URL"; else echo "not running"; fi
     ;;
   *)
-    echo "usage: $0 start|stop|status" >&2
+    echo "usage: $0 start|stop|status|warp <slot>" >&2
     exit 2
     ;;
 esac

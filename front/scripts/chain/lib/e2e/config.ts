@@ -25,6 +25,18 @@ export type E2eConfig = {
   checkpointWaitMin: number;
   minPayerLamports: bigint;
   maxRequests: number;
+  /**
+   * E2E_WARP=1 (localnet only): the time-bound steps (48 h, 7 d, 30 d, three
+   * payout months) warp the local validator's clock (warp.ts); without it
+   * they are recorded as not run.
+   */
+  warp: boolean;
+  /**
+   * E2E_DEVNET_G4_G6=1: lets groups 4-6 run their devnet subset. Off by
+   * default until a first devnet run has proven it (the localnet run covers
+   * every step; devnet leaves lasting state on a shared cluster).
+   */
+  devnetG4G6: boolean;
 };
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
@@ -64,6 +76,8 @@ export function readE2eConfig(env: ChainEnv, network: Network, root: string): E2
     throw new ChainGateError("E2E_PAYER is required: the Admin on devnet, the validator's deployer on localnet");
   }
   if (!isAddress(payerRaw)) throw new ChainGateError("E2E_PAYER is not a valid address");
+  const warp = env.E2E_WARP?.trim() === "1";
+  if (warp && network !== "localnet") throw new ChainGateError("E2E_WARP is localnet only");
   return {
     network,
     dir,
@@ -75,5 +89,7 @@ export function readE2eConfig(env: ChainEnv, network: Network, root: string): E2
       Math.round(positiveNumber(env, "E2E_MIN_PAYER_SOL", network === "devnet" ? 1 : 50, 1000) * LAMPORTS_PER_SOL),
     ),
     maxRequests: Math.floor(positiveNumber(env, "E2E_MAX_REQUESTS", network === "devnet" ? 2500 : 20000, 100000)),
+    warp,
+    devnetG4G6: network === "devnet" && env.E2E_DEVNET_G4_G6?.trim() === "1",
   };
 }

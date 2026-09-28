@@ -11,10 +11,11 @@ import type { Address, KeyPairSigner } from "@solana/kit";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import type { ChainRpc } from "../rpc";
 import type { Timing } from "../tx";
-import { chainNow } from "./clock";
+import { chainNow, waitForChainTime } from "./clock";
 import type { E2eConfig } from "./config";
 import type { E2eNetwork } from "./matrix";
 import type { E2eRunner } from "./runner";
+import type { WarpFn } from "./warp";
 
 export type Roles = {
   /** Pays the fixtures: the devnet Admin, or the localnet deployer. */
@@ -41,6 +42,8 @@ export type World = {
   log: (line: string) => void;
   sleep: Timing["sleep"];
   signal: AbortSignal;
+  /** Localnet clock warp (E2E_WARP=1), else null (warp.ts). */
+  warp?: WarpFn | null;
 };
 
 export function sha256Bytes(text: string): Uint8Array {
@@ -93,3 +96,34 @@ export async function expiringDeadline(
 
 /** Margin (s) so a clock guard never races the simulation that follows it. */
 export const CLOCK_GUARD_S = BigInt(10);
+
+/** Longest real wait for a chain time when no warp is available (s). */
+export const MAX_CLOCK_WAIT_S = BigInt(900);
+/** Below this a wait beats a warp (a warp restarts the validator and waits for its snapshot). */
+export const WARP_MIN_GAP_S = BigInt(300);
+
+/**
+ * Brings the chain clock to `target` (design-6.3 §D): a wait when it is at
+ * most WARP_MIN_GAP_S away (or MAX_CLOCK_WAIT_S without a warp), else a
+ * localnet warp when E2E_WARP is on. Returns why it cannot (the caller
+ * records the steps that need that time as not run), or null once the clock
+ * is there.
+ */
+export async function reachChainTime(w: World, target: bigint, label: string): Promise<string | null> {
+  const now = await chainNow(w.rpc);
+  if (now >= target) return null;
+  if (w.warp && target - now > WARP_MIN_GAP_S) {
+    await w.warp(target, label);
+    return null;
+  }
+  if (target - now > MAX_CLOCK_WAIT_S) {
+    return `${label} is ${target - now} s of chain time away: needs a warp (E2E_WARP=1 on localnet)`;
+  }
+  await waitForChainTime({ rpc: w.rpc, target, sleep: w.sleep, signal: w.signal, log: w.log, label });
+  return null;
+}
+
+/** Records every applicable step of `ids` that has not passed as not run. */
+export function markAllNotRun(w: World, ids: readonly string[], reason: string): void {
+  for (const id of ids) w.runner.markNotRun(id, reason);
+}
