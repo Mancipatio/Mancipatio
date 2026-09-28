@@ -1,7 +1,8 @@
 # Front CI — typecheck, lint, unit tests, a production build (plus a Deno
 # type-check of the Supabase edge function), the mainnet variant of the
-# build with placeholder values, a dependency audit and program IDL/SDK drift
-# for front/. The builds run without deployment secrets, so a merge that
+# build with placeholder values, the Playwright UI smoke over a localnet and
+# the mainnet build, a dependency audit and program IDL/SDK drift for front/.
+# The builds run without deployment secrets, so a merge that
 # would break the Vercel build is caught here first. The drift job also
 # watches program/ because the client SDK in front/lib/generated is derived
 # from the program source.
@@ -120,7 +121,7 @@ jobs:
     name: next build (mainnet, placeholder env)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
 
@@ -135,6 +136,104 @@ jobs:
 
       - name: Mainnet guards and build
         run: bash scripts/ci/mainnet-build.sh
+
+      # ops-qa-5: the UI smoke over the mainnet build just made (CI keeps its
+      # .next/): every page, the admin wallet gate, no "devnet" wording.
+      - name: Resolve the Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Playwright browser
+        id: playwright-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium-shell
+
+      - name: Install the Playwright browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Install the browser's system libraries
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium-headless-shell
+
+      - name: UI smoke over the mainnet build
+        timeout-minutes: 10
+        env:
+          UI_SMOKE_NETWORK: mainnet
+        run: npm run ui-smoke
+
+      - name: Keep the smoke report of a failed run
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-smoke-mainnet
+          path: |
+            front/ui-smoke/.report
+            front/ui-smoke/.results
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # ops-qa-5 (plan 6.5): the Playwright UI smoke (front/ui-smoke/,
+  # ops/ui-smoke.md) over a production build with placeholder settings: a
+  # localnet build whose RPC, PubSub and Supabase hosts do not exist and are
+  # answered by the tests; a mock Wallet Standard wallet signs with a test key.
+  # Every page, the SIWS session sign-in, the admin role gate, the sale page's
+  # pause / proceeds-freeze / geoblock gates. Nothing leaves the runner.
+  ui-smoke:
+    name: UI smoke (Playwright, localnet placeholder build)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: 22.23.2
+          cache: npm
+          cache-dependency-path: front/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve the Playwright version
+        id: playwright
+        run: echo "version=$(node -p "require('@playwright/test/package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the Playwright browser
+        id: playwright-cache
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}-chromium-shell
+
+      - name: Install the Playwright browser
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps --only-shell chromium
+
+      - name: Install the browser's system libraries
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium-headless-shell
+
+      - name: Production build (localnet, placeholder settings)
+        run: npm run ui-smoke:build
+
+      - name: UI smoke
+        timeout-minutes: 10
+        run: npm run ui-smoke
+
+      - name: Keep the smoke report of a failed run
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ui-smoke-localnet
+          path: |
+            front/ui-smoke/.report
+            front/ui-smoke/.results
+          retention-days: 7
+          if-no-files-found: ignore
 
   # front-app-16 / ops-qa-14: no HIGH (or critical) advisory in the production
   # dependency tree, nor in the chain:emergency Ledger packages. Dev-only

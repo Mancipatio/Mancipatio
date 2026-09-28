@@ -1,7 +1,7 @@
 // Playwright UI smoke (ops-qa-5, plan 6.5): every page of a PRODUCTION build
 // (`next build` + `next start` on 127.0.0.1:3310) with a mocked chain, a mock
-// Wallet Standard wallet and no external network. How to run it: README.md
-// ("UI smoke"). The build is not made here: run `npm run ui-smoke:build`
+// Wallet Standard wallet and no external network. How to run it:
+// ops/ui-smoke.md. The build is not made here: run `npm run ui-smoke:build`
 // (localnet) or scripts/ci/mainnet-build.sh with CI=1 (mainnet) first.
 //
 // The default build is a localnet build with placeholder settings

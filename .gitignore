@@ -2,15 +2,17 @@
 # The docs/ rules are anchored so application routes such as front/app/docs
 # stay tracked. The exceptions are the operator documents in ops/: the
 # mainnet runbook, which the chain CLI (front/scripts/chain) and the Release
-# workflow refer to by path, the procedures it points to, and the env and
+# workflow refer to by path, the procedures it points to, the env and
 # secrets inventories the build guards (front/next.config.ts) refer to (names
-# only, never values).
+# only, never values), and how to run the UI smoke that Front CI and
+# front/playwright.config.ts refer to.
 *.md
 !/ops/runbook-mainnet.md
 !/ops/sop-admin.md
 !/ops/wind-down-plan.md
 !/ops/env-vars.md
 !/ops/secrets.md
+!/ops/ui-smoke.md
 /docs/
 /front/docs/
 /program/docs/
