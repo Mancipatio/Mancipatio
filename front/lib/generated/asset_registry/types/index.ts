@@ -18,6 +18,7 @@ export * from "./kycStatus";
 export * from "./offerStatus";
 export * from "./otcDealStatus";
 export * from "./payoutVaultState";
+export * from "./platformAdminChangeKind";
 export * from "./proposalOutcome";
 export * from "./proposalStatus";
 export * from "./raiseType";

@@ -8,5 +8,6 @@
 
 export * from "./blockEntry";
 export * from "./blocklistAuthority";
-export * from "./blocklistAuthorityTransfer";
+export * from "./blocklistAuthorityProposal";
+export * from "./blocklistRecovery";
 export * from "./transferHookConfig";

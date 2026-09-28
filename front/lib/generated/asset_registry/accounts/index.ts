@@ -8,7 +8,7 @@
 
 export * from "./admin";
 export * from "./asset";
-export * from "./authorityTransfer";
+export * from "./authorityProposal";
 export * from "./claimRecord";
 export * from "./custodyVault";
 export * from "./distribution";
@@ -17,6 +17,7 @@ export * from "./distributionPlan";
 export * from "./escrowIdentity";
 export * from "./escrowMarker";
 export * from "./issuer";
+export * from "./issuerFreeze";
 export * from "./issuerPermissions";
 export * from "./issuerRecovery";
 export * from "./kycEntry";
@@ -25,7 +26,9 @@ export * from "./milestoneClaim";
 export * from "./offer";
 export * from "./otcDeal";
 export * from "./payoutVault";
+export * from "./pendingAdmin";
 export * from "./platform";
+export * from "./platformRecovery";
 export * from "./proposal";
 export * from "./rightsIssuance";
 export * from "./sale";

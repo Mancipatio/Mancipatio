@@ -7,34 +7,27 @@
  */
 
 import {
-  getAddressEncoder,
   getBytesEncoder,
   getProgramDerivedAddress,
   type Address,
   type ProgramDerivedAddress,
 } from "@solana/kit";
 
-export type AcceptIssuerAuthorityTransferSeeds = {
-  issuer: Address;
-};
-
-export async function findAcceptIssuerAuthorityTransferPda(
-  seeds: AcceptIssuerAuthorityTransferSeeds,
+export async function findRecoveryPda(
   config: { programAddress?: Address | undefined } = {},
 ): Promise<ProgramDerivedAddress> {
   const {
-    programAddress = "FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS" as Address<"FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS">,
+    programAddress = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy" as Address<"GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy">,
   } = config;
   return await getProgramDerivedAddress({
     programAddress,
     seeds: [
       getBytesEncoder().encode(
         new Uint8Array([
-          97, 117, 116, 104, 111, 114, 105, 116, 121, 95, 112, 114, 111, 112,
-          111, 115, 97, 108,
+          98, 108, 111, 99, 107, 108, 105, 115, 116, 95, 114, 101, 99, 111, 118,
+          101, 114, 121,
         ]),
       ),
-      getAddressEncoder().encode(seeds.issuer),
     ],
   });
 }

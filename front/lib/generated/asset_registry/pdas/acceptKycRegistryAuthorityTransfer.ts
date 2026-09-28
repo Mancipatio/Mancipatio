@@ -30,8 +30,8 @@ export async function findAcceptKycRegistryAuthorityTransferPda(
     seeds: [
       getBytesEncoder().encode(
         new Uint8Array([
-          97, 117, 116, 104, 111, 114, 105, 116, 121, 95, 116, 114, 97, 110,
-          115, 102, 101, 114,
+          97, 117, 116, 104, 111, 114, 105, 116, 121, 95, 112, 114, 111, 112,
+          111, 115, 97, 108,
         ]),
       ),
       getAddressEncoder().encode(seeds.kycRegistry),

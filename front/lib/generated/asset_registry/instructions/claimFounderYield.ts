@@ -53,6 +53,10 @@ export type ClaimFounderYieldInstruction<
   TAccountFounderAccount extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountShareClass extends string | AccountMeta<string> = string,
+  TAccountAsset extends string | AccountMeta<string> = string,
+  TAccountIssuerFreeze extends string | AccountMeta<string> = string,
+  TAccountFounderBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -80,6 +84,18 @@ export type ClaimFounderYieldInstruction<
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountShareClass extends string
+        ? ReadonlyAccount<TAccountShareClass>
+        : TAccountShareClass,
+      TAccountAsset extends string
+        ? ReadonlyAccount<TAccountAsset>
+        : TAccountAsset,
+      TAccountIssuerFreeze extends string
+        ? ReadonlyAccount<TAccountIssuerFreeze>
+        : TAccountIssuerFreeze,
+      TAccountFounderBlockEntry extends string
+        ? ReadonlyAccount<TAccountFounderBlockEntry>
+        : TAccountFounderBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -121,6 +137,10 @@ export type ClaimFounderYieldAsyncInput<
   TAccountFounderAccount extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountAsset extends string = string,
+  TAccountIssuerFreeze extends string = string,
+  TAccountFounderBlockEntry extends string = string,
 > = {
   founder: TransactionSigner<TAccountFounder>;
   vault: Address<TAccountVault>;
@@ -133,6 +153,21 @@ export type ClaimFounderYieldAsyncInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform?: Address<TAccountPlatform>;
+  /** D1 chain to the issuer: the vault's share class ... */
+  shareClass: Address<TAccountShareClass>;
+  /** ... and its asset (`asset.issuer` keys the freeze below). */
+  asset: Address<TAccountAsset>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
+  /**
+   * prog-novac-4: the payee (`vault.founder`) is not blocked.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  founderBlockEntry: Address<TAccountFounderBlockEntry>;
 };
 
 export async function getClaimFounderYieldInstructionAsync<
@@ -143,6 +178,10 @@ export async function getClaimFounderYieldInstructionAsync<
   TAccountFounderAccount extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountShareClass extends string,
+  TAccountAsset extends string,
+  TAccountIssuerFreeze extends string,
+  TAccountFounderBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ClaimFounderYieldAsyncInput<
@@ -152,7 +191,11 @@ export async function getClaimFounderYieldInstructionAsync<
     TAccountPaymentMint,
     TAccountFounderAccount,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountFounderBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -164,7 +207,11 @@ export async function getClaimFounderYieldInstructionAsync<
     TAccountPaymentMint,
     TAccountFounderAccount,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountFounderBlockEntry
   >
 > {
   // Program address.
@@ -183,6 +230,13 @@ export async function getClaimFounderYieldInstructionAsync<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    shareClass: { value: input.shareClass ?? null, isWritable: false },
+    asset: { value: input.asset ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
+    founderBlockEntry: {
+      value: input.founderBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -204,6 +258,10 @@ export async function getClaimFounderYieldInstructionAsync<
       getAccountMeta(accounts.founderAccount),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.asset),
+      getAccountMeta(accounts.issuerFreeze),
+      getAccountMeta(accounts.founderBlockEntry),
     ],
     data: getClaimFounderYieldInstructionDataEncoder().encode({}),
     programAddress,
@@ -215,7 +273,11 @@ export async function getClaimFounderYieldInstructionAsync<
     TAccountPaymentMint,
     TAccountFounderAccount,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountFounderBlockEntry
   >);
 }
 
@@ -227,6 +289,10 @@ export type ClaimFounderYieldInput<
   TAccountFounderAccount extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountAsset extends string = string,
+  TAccountIssuerFreeze extends string = string,
+  TAccountFounderBlockEntry extends string = string,
 > = {
   founder: TransactionSigner<TAccountFounder>;
   vault: Address<TAccountVault>;
@@ -239,6 +305,21 @@ export type ClaimFounderYieldInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform: Address<TAccountPlatform>;
+  /** D1 chain to the issuer: the vault's share class ... */
+  shareClass: Address<TAccountShareClass>;
+  /** ... and its asset (`asset.issuer` keys the freeze below). */
+  asset: Address<TAccountAsset>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
+  /**
+   * prog-novac-4: the payee (`vault.founder`) is not blocked.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  founderBlockEntry: Address<TAccountFounderBlockEntry>;
 };
 
 export function getClaimFounderYieldInstruction<
@@ -249,6 +330,10 @@ export function getClaimFounderYieldInstruction<
   TAccountFounderAccount extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountShareClass extends string,
+  TAccountAsset extends string,
+  TAccountIssuerFreeze extends string,
+  TAccountFounderBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ClaimFounderYieldInput<
@@ -258,7 +343,11 @@ export function getClaimFounderYieldInstruction<
     TAccountPaymentMint,
     TAccountFounderAccount,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountFounderBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): ClaimFounderYieldInstruction<
@@ -269,7 +358,11 @@ export function getClaimFounderYieldInstruction<
   TAccountPaymentMint,
   TAccountFounderAccount,
   TAccountPaymentTokenProgram,
-  TAccountPlatform
+  TAccountPlatform,
+  TAccountShareClass,
+  TAccountAsset,
+  TAccountIssuerFreeze,
+  TAccountFounderBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -287,6 +380,13 @@ export function getClaimFounderYieldInstruction<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    shareClass: { value: input.shareClass ?? null, isWritable: false },
+    asset: { value: input.asset ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
+    founderBlockEntry: {
+      value: input.founderBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -303,6 +403,10 @@ export function getClaimFounderYieldInstruction<
       getAccountMeta(accounts.founderAccount),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.asset),
+      getAccountMeta(accounts.issuerFreeze),
+      getAccountMeta(accounts.founderBlockEntry),
     ],
     data: getClaimFounderYieldInstructionDataEncoder().encode({}),
     programAddress,
@@ -314,7 +418,11 @@ export function getClaimFounderYieldInstruction<
     TAccountPaymentMint,
     TAccountFounderAccount,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountFounderBlockEntry
   >);
 }
 
@@ -335,6 +443,21 @@ export type ParsedClaimFounderYieldInstruction<
      * account indices and the remaining-accounts hook tail keep their positions.
      */
     platform: TAccountMetas[6];
+    /** D1 chain to the issuer: the vault's share class ... */
+    shareClass: TAccountMetas[7];
+    /** ... and its asset (`asset.issuer` keys the freeze below). */
+    asset: TAccountMetas[8];
+    /**
+     * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+     * unset (no freeze in force).
+     */
+    issuerFreeze: TAccountMetas[9];
+    /**
+     * prog-novac-4: the payee (`vault.founder`) is not blocked.
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    founderBlockEntry: TAccountMetas[10];
   };
   data: ClaimFounderYieldInstructionData;
 };
@@ -347,7 +470,7 @@ export function parseClaimFounderYieldInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedClaimFounderYieldInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 7) {
+  if (instruction.accounts.length < 11) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -367,6 +490,10 @@ export function parseClaimFounderYieldInstruction<
       founderAccount: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
       platform: getNextAccount(),
+      shareClass: getNextAccount(),
+      asset: getNextAccount(),
+      issuerFreeze: getNextAccount(),
+      founderBlockEntry: getNextAccount(),
     },
     data: getClaimFounderYieldInstructionDataDecoder().decode(instruction.data),
   };

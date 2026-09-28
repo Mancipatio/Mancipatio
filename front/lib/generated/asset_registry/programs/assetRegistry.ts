@@ -29,11 +29,15 @@ import {
   parseApproveSaleInstruction,
   parseApproveVestingTrancheInstruction,
   parseBuyInstruction,
+  parseCancelAdminProposalInstruction,
+  parseCancelCustodyAuthorityTransferInstruction,
   parseCancelIssuerAuthorityTransferInstruction,
   parseCancelIssuerRecoveryInstruction,
   parseCancelKycRegistryAuthorityTransferInstruction,
   parseCancelOfferInstruction,
   parseCancelOtcDealInstruction,
+  parseCancelPlatformAdminTransferInstruction,
+  parseCancelPlatformRecoveryInstruction,
   parseCancelVestingSeriesInstruction,
   parseCastVaultVoteInstruction,
   parseCastVoteInstruction,
@@ -62,11 +66,13 @@ import {
   parseDisableVestingCancellationInstruction,
   parseDistributeBatchInstruction,
   parseExecuteIssuerRecoveryInstruction,
+  parseExecutePlatformRecoveryInstruction,
   parseExpireOfferInstruction,
   parseExpireOtcDealInstruction,
   parseFinalizeProposalInstruction,
   parseFinalizeVaultVoteInstruction,
   parseFinalizeVestingSeriesInstruction,
+  parseFreezeIssuerProceedsInstruction,
   parseFreezeVaultInstruction,
   parseInitializePlatformInstruction,
   parseInitializeShareClassMintInstruction,
@@ -77,11 +83,13 @@ import {
   parseOpenSaleInstruction,
   parseOpenVaultVoteInstruction,
   parsePostUpdateInstruction,
+  parseProposeAdminInstruction,
   parseProposeCustodyAuthorityInstruction,
   parseProposeIssuerAuthorityInstruction,
   parseProposeIssuerRecoveryInstruction,
   parseProposeKycRegistryAuthorityInstruction,
   parseProposePlatformAdminInstruction,
+  parseProposePlatformRecoveryInstruction,
   parsePublishMilestoneInstruction,
   parsePushVestedInstruction,
   parseRealizeCustodyVaultInstruction,
@@ -105,6 +113,7 @@ import {
   parseSyncSaleAuthorityInstruction,
   parseTakeOfferInstruction,
   parseTriggerCustodyVaultInstruction,
+  parseUnfreezeIssuerProceedsInstruction,
   parseUpdateKycRegistryJurisdictionsInstruction,
   parseUpdateMintMetadataInstruction,
   parseVerifyIssuerKybInstruction,
@@ -122,11 +131,15 @@ import {
   type ParsedApproveSaleInstruction,
   type ParsedApproveVestingTrancheInstruction,
   type ParsedBuyInstruction,
+  type ParsedCancelAdminProposalInstruction,
+  type ParsedCancelCustodyAuthorityTransferInstruction,
   type ParsedCancelIssuerAuthorityTransferInstruction,
   type ParsedCancelIssuerRecoveryInstruction,
   type ParsedCancelKycRegistryAuthorityTransferInstruction,
   type ParsedCancelOfferInstruction,
   type ParsedCancelOtcDealInstruction,
+  type ParsedCancelPlatformAdminTransferInstruction,
+  type ParsedCancelPlatformRecoveryInstruction,
   type ParsedCancelVestingSeriesInstruction,
   type ParsedCastVaultVoteInstruction,
   type ParsedCastVoteInstruction,
@@ -155,11 +168,13 @@ import {
   type ParsedDisableVestingCancellationInstruction,
   type ParsedDistributeBatchInstruction,
   type ParsedExecuteIssuerRecoveryInstruction,
+  type ParsedExecutePlatformRecoveryInstruction,
   type ParsedExpireOfferInstruction,
   type ParsedExpireOtcDealInstruction,
   type ParsedFinalizeProposalInstruction,
   type ParsedFinalizeVaultVoteInstruction,
   type ParsedFinalizeVestingSeriesInstruction,
+  type ParsedFreezeIssuerProceedsInstruction,
   type ParsedFreezeVaultInstruction,
   type ParsedInitializePlatformInstruction,
   type ParsedInitializeShareClassMintInstruction,
@@ -170,11 +185,13 @@ import {
   type ParsedOpenSaleInstruction,
   type ParsedOpenVaultVoteInstruction,
   type ParsedPostUpdateInstruction,
+  type ParsedProposeAdminInstruction,
   type ParsedProposeCustodyAuthorityInstruction,
   type ParsedProposeIssuerAuthorityInstruction,
   type ParsedProposeIssuerRecoveryInstruction,
   type ParsedProposeKycRegistryAuthorityInstruction,
   type ParsedProposePlatformAdminInstruction,
+  type ParsedProposePlatformRecoveryInstruction,
   type ParsedPublishMilestoneInstruction,
   type ParsedPushVestedInstruction,
   type ParsedRealizeCustodyVaultInstruction,
@@ -198,6 +215,7 @@ import {
   type ParsedSyncSaleAuthorityInstruction,
   type ParsedTakeOfferInstruction,
   type ParsedTriggerCustodyVaultInstruction,
+  type ParsedUnfreezeIssuerProceedsInstruction,
   type ParsedUpdateKycRegistryJurisdictionsInstruction,
   type ParsedUpdateMintMetadataInstruction,
   type ParsedVerifyIssuerKybInstruction,
@@ -211,7 +229,7 @@ export const ASSET_REGISTRY_PROGRAM_ADDRESS =
 export enum AssetRegistryAccount {
   Admin,
   Asset,
-  AuthorityTransfer,
+  AuthorityProposal,
   ClaimRecord,
   CustodyVault,
   Distribution,
@@ -220,6 +238,7 @@ export enum AssetRegistryAccount {
   EscrowIdentity,
   EscrowMarker,
   Issuer,
+  IssuerFreeze,
   IssuerPermissions,
   IssuerRecovery,
   KycEntry,
@@ -228,7 +247,9 @@ export enum AssetRegistryAccount {
   Offer,
   OtcDeal,
   PayoutVault,
+  PendingAdmin,
   Platform,
+  PlatformRecovery,
   Proposal,
   RightsIssuance,
   Sale,
@@ -272,12 +293,12 @@ export function identifyAssetRegistryAccount(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
-        new Uint8Array([43, 243, 199, 71, 139, 255, 231, 113]),
+        new Uint8Array([119, 182, 97, 205, 131, 194, 102, 72]),
       ),
       0,
     )
   ) {
-    return AssetRegistryAccount.AuthorityTransfer;
+    return AssetRegistryAccount.AuthorityProposal;
   }
   if (
     containsBytes(
@@ -371,6 +392,17 @@ export function identifyAssetRegistryAccount(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([122, 60, 186, 188, 111, 89, 223, 45]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryAccount.IssuerFreeze;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([84, 45, 83, 86, 162, 132, 169, 30]),
       ),
       0,
@@ -459,12 +491,34 @@ export function identifyAssetRegistryAccount(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([220, 45, 135, 16, 196, 153, 181, 56]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryAccount.PendingAdmin;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([77, 92, 204, 58, 187, 98, 91, 12]),
       ),
       0,
     )
   ) {
     return AssetRegistryAccount.Platform;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([165, 33, 229, 197, 198, 16, 39, 10]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryAccount.PlatformRecovery;
   }
   if (
     containsBytes(
@@ -605,11 +659,15 @@ export enum AssetRegistryInstruction {
   ApproveSale,
   ApproveVestingTranche,
   Buy,
+  CancelAdminProposal,
+  CancelCustodyAuthorityTransfer,
   CancelIssuerAuthorityTransfer,
   CancelIssuerRecovery,
   CancelKycRegistryAuthorityTransfer,
   CancelOffer,
   CancelOtcDeal,
+  CancelPlatformAdminTransfer,
+  CancelPlatformRecovery,
   CancelVestingSeries,
   CastVaultVote,
   CastVote,
@@ -638,11 +696,13 @@ export enum AssetRegistryInstruction {
   DisableVestingCancellation,
   DistributeBatch,
   ExecuteIssuerRecovery,
+  ExecutePlatformRecovery,
   ExpireOffer,
   ExpireOtcDeal,
   FinalizeProposal,
   FinalizeVaultVote,
   FinalizeVestingSeries,
+  FreezeIssuerProceeds,
   FreezeVault,
   InitializePlatform,
   InitializeShareClassMint,
@@ -653,11 +713,13 @@ export enum AssetRegistryInstruction {
   OpenSale,
   OpenVaultVote,
   PostUpdate,
+  ProposeAdmin,
   ProposeCustodyAuthority,
   ProposeIssuerAuthority,
   ProposeIssuerRecovery,
   ProposeKycRegistryAuthority,
   ProposePlatformAdmin,
+  ProposePlatformRecovery,
   PublishMilestone,
   PushVested,
   RealizeCustodyVault,
@@ -681,6 +743,7 @@ export enum AssetRegistryInstruction {
   SyncSaleAuthority,
   TakeOffer,
   TriggerCustodyVault,
+  UnfreezeIssuerProceeds,
   UpdateKycRegistryJurisdictions,
   UpdateMintMetadata,
   VerifyIssuerKyb,
@@ -828,6 +891,28 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([68, 6, 145, 131, 16, 73, 182, 229]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CancelAdminProposal;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([132, 254, 172, 220, 229, 28, 137, 65]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CancelCustodyAuthorityTransfer;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([116, 70, 121, 72, 14, 114, 226, 159]),
       ),
       0,
@@ -878,6 +963,28 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.CancelOtcDeal;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([184, 242, 132, 36, 159, 240, 178, 98]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CancelPlatformAdminTransfer;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([8, 41, 66, 94, 38, 150, 155, 145]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.CancelPlatformRecovery;
   }
   if (
     containsBytes(
@@ -1191,6 +1298,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([104, 112, 22, 194, 154, 72, 242, 137]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ExecutePlatformRecovery;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([161, 133, 120, 51, 0, 201, 224, 248]),
       ),
       0,
@@ -1241,6 +1359,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.FinalizeVestingSeries;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([120, 89, 174, 115, 92, 198, 23, 203]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.FreezeIssuerProceeds;
   }
   if (
     containsBytes(
@@ -1356,6 +1485,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([121, 214, 199, 212, 87, 39, 117, 234]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ProposeAdmin;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([109, 75, 237, 194, 252, 255, 135, 128]),
       ),
       0,
@@ -1406,6 +1546,17 @@ export function identifyAssetRegistryInstruction(
     )
   ) {
     return AssetRegistryInstruction.ProposePlatformAdmin;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([242, 73, 9, 87, 56, 172, 78, 222]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.ProposePlatformRecovery;
   }
   if (
     containsBytes(
@@ -1664,6 +1815,17 @@ export function identifyAssetRegistryInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([174, 164, 136, 60, 64, 100, 66, 45]),
+      ),
+      0,
+    )
+  ) {
+    return AssetRegistryInstruction.UnfreezeIssuerProceeds;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([62, 194, 115, 242, 149, 115, 88, 84]),
       ),
       0,
@@ -1760,6 +1922,12 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.Buy;
     } & ParsedBuyInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.CancelAdminProposal;
+    } & ParsedCancelAdminProposalInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.CancelCustodyAuthorityTransfer;
+    } & ParsedCancelCustodyAuthorityTransferInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.CancelIssuerAuthorityTransfer;
     } & ParsedCancelIssuerAuthorityTransferInstruction<TProgram>)
   | ({
@@ -1774,6 +1942,12 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.CancelOtcDeal;
     } & ParsedCancelOtcDealInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.CancelPlatformAdminTransfer;
+    } & ParsedCancelPlatformAdminTransferInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.CancelPlatformRecovery;
+    } & ParsedCancelPlatformRecoveryInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.CancelVestingSeries;
     } & ParsedCancelVestingSeriesInstruction<TProgram>)
@@ -1859,6 +2033,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.ExecuteIssuerRecovery;
     } & ParsedExecuteIssuerRecoveryInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.ExecutePlatformRecovery;
+    } & ParsedExecutePlatformRecoveryInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.ExpireOffer;
     } & ParsedExpireOfferInstruction<TProgram>)
   | ({
@@ -1873,6 +2050,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.FinalizeVestingSeries;
     } & ParsedFinalizeVestingSeriesInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.FreezeIssuerProceeds;
+    } & ParsedFreezeIssuerProceedsInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.FreezeVault;
     } & ParsedFreezeVaultInstruction<TProgram>)
@@ -1904,6 +2084,9 @@ export type ParsedAssetRegistryInstruction<
       instructionType: AssetRegistryInstruction.PostUpdate;
     } & ParsedPostUpdateInstruction<TProgram>)
   | ({
+      instructionType: AssetRegistryInstruction.ProposeAdmin;
+    } & ParsedProposeAdminInstruction<TProgram>)
+  | ({
       instructionType: AssetRegistryInstruction.ProposeCustodyAuthority;
     } & ParsedProposeCustodyAuthorityInstruction<TProgram>)
   | ({
@@ -1918,6 +2101,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.ProposePlatformAdmin;
     } & ParsedProposePlatformAdminInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.ProposePlatformRecovery;
+    } & ParsedProposePlatformRecoveryInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.PublishMilestone;
     } & ParsedPublishMilestoneInstruction<TProgram>)
@@ -1987,6 +2173,9 @@ export type ParsedAssetRegistryInstruction<
   | ({
       instructionType: AssetRegistryInstruction.TriggerCustodyVault;
     } & ParsedTriggerCustodyVaultInstruction<TProgram>)
+  | ({
+      instructionType: AssetRegistryInstruction.UnfreezeIssuerProceeds;
+    } & ParsedUnfreezeIssuerProceedsInstruction<TProgram>)
   | ({
       instructionType: AssetRegistryInstruction.UpdateKycRegistryJurisdictions;
     } & ParsedUpdateKycRegistryJurisdictionsInstruction<TProgram>)
@@ -2092,6 +2281,21 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseBuyInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.CancelAdminProposal: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.CancelAdminProposal,
+        ...parseCancelAdminProposalInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.CancelCustodyAuthorityTransfer: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType:
+          AssetRegistryInstruction.CancelCustodyAuthorityTransfer,
+        ...parseCancelCustodyAuthorityTransferInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.CancelIssuerAuthorityTransfer: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2126,6 +2330,20 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.CancelOtcDeal,
         ...parseCancelOtcDealInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.CancelPlatformAdminTransfer: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.CancelPlatformAdminTransfer,
+        ...parseCancelPlatformAdminTransferInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.CancelPlatformRecovery: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.CancelPlatformRecovery,
+        ...parseCancelPlatformRecoveryInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.CancelVestingSeries: {
@@ -2324,6 +2542,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parseExecuteIssuerRecoveryInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.ExecutePlatformRecovery: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ExecutePlatformRecovery,
+        ...parseExecutePlatformRecoveryInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.ExpireOffer: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2357,6 +2582,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.FinalizeVestingSeries,
         ...parseFinalizeVestingSeriesInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.FreezeIssuerProceeds: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.FreezeIssuerProceeds,
+        ...parseFreezeIssuerProceedsInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.FreezeVault: {
@@ -2429,6 +2661,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
         ...parsePostUpdateInstruction(instruction),
       };
     }
+    case AssetRegistryInstruction.ProposeAdmin: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ProposeAdmin,
+        ...parseProposeAdminInstruction(instruction),
+      };
+    }
     case AssetRegistryInstruction.ProposeCustodyAuthority: {
       assertIsInstructionWithAccounts(instruction);
       return {
@@ -2462,6 +2701,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.ProposePlatformAdmin,
         ...parseProposePlatformAdminInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.ProposePlatformRecovery: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.ProposePlatformRecovery,
+        ...parseProposePlatformRecoveryInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.PublishMilestone: {
@@ -2623,6 +2869,13 @@ export function parseAssetRegistryInstruction<TProgram extends string>(
       return {
         instructionType: AssetRegistryInstruction.TriggerCustodyVault,
         ...parseTriggerCustodyVaultInstruction(instruction),
+      };
+    }
+    case AssetRegistryInstruction.UnfreezeIssuerProceeds: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: AssetRegistryInstruction.UnfreezeIssuerProceeds,
+        ...parseUnfreezeIssuerProceedsInstruction(instruction),
       };
     }
     case AssetRegistryInstruction.UpdateKycRegistryJurisdictions: {

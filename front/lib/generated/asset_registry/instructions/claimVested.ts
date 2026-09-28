@@ -61,6 +61,7 @@ export type ClaimVestedInstruction<
   TAccountRecipientTokenAccount extends string | AccountMeta<string> = string,
   TAccountTokenProgram extends string | AccountMeta<string> =
     "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+  TAccountRecipientBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -88,6 +89,9 @@ export type ClaimVestedInstruction<
       TAccountTokenProgram extends string
         ? ReadonlyAccount<TAccountTokenProgram>
         : TAccountTokenProgram,
+      TAccountRecipientBlockEntry extends string
+        ? ReadonlyAccount<TAccountRecipientBlockEntry>
+        : TAccountRecipientBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -134,6 +138,7 @@ export type ClaimVestedAsyncInput<
   TAccountEscrow extends string = string,
   TAccountRecipientTokenAccount extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountRecipientBlockEntry extends string = string,
 > = {
   /** The recipient — must be the wallet currently recorded on the position. */
   recipient: TransactionSigner<TAccountRecipient>;
@@ -144,6 +149,13 @@ export type ClaimVestedAsyncInput<
   /** The recipient's token account — must be owned by the position's wallet. */
   recipientTokenAccount: Address<TAccountRecipientTokenAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * v1 (appended before the hook tail): the recipient is not blocked; units
+   * for a blocked wallet stay in the vesting escrow until it is unblocked.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  recipientBlockEntry: Address<TAccountRecipientBlockEntry>;
   positionIndex: ClaimVestedInstructionDataArgs["positionIndex"];
 };
 
@@ -155,6 +167,7 @@ export async function getClaimVestedInstructionAsync<
   TAccountEscrow extends string,
   TAccountRecipientTokenAccount extends string,
   TAccountTokenProgram extends string,
+  TAccountRecipientBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ClaimVestedAsyncInput<
@@ -164,7 +177,8 @@ export async function getClaimVestedInstructionAsync<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -176,7 +190,8 @@ export async function getClaimVestedInstructionAsync<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >
 > {
   // Program address.
@@ -195,6 +210,10 @@ export async function getClaimVestedInstructionAsync<
       isWritable: true,
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    recipientBlockEntry: {
+      value: input.recipientBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -226,6 +245,7 @@ export async function getClaimVestedInstructionAsync<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.recipientTokenAccount),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.recipientBlockEntry),
     ],
     data: getClaimVestedInstructionDataEncoder().encode(
       args as ClaimVestedInstructionDataArgs,
@@ -239,7 +259,8 @@ export async function getClaimVestedInstructionAsync<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >);
 }
 
@@ -251,6 +272,7 @@ export type ClaimVestedInput<
   TAccountEscrow extends string = string,
   TAccountRecipientTokenAccount extends string = string,
   TAccountTokenProgram extends string = string,
+  TAccountRecipientBlockEntry extends string = string,
 > = {
   /** The recipient — must be the wallet currently recorded on the position. */
   recipient: TransactionSigner<TAccountRecipient>;
@@ -261,6 +283,13 @@ export type ClaimVestedInput<
   /** The recipient's token account — must be owned by the position's wallet. */
   recipientTokenAccount: Address<TAccountRecipientTokenAccount>;
   tokenProgram?: Address<TAccountTokenProgram>;
+  /**
+   * v1 (appended before the hook tail): the recipient is not blocked; units
+   * for a blocked wallet stay in the vesting escrow until it is unblocked.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  recipientBlockEntry: Address<TAccountRecipientBlockEntry>;
   positionIndex: ClaimVestedInstructionDataArgs["positionIndex"];
 };
 
@@ -272,6 +301,7 @@ export function getClaimVestedInstruction<
   TAccountEscrow extends string,
   TAccountRecipientTokenAccount extends string,
   TAccountTokenProgram extends string,
+  TAccountRecipientBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ClaimVestedInput<
@@ -281,7 +311,8 @@ export function getClaimVestedInstruction<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): ClaimVestedInstruction<
@@ -292,7 +323,8 @@ export function getClaimVestedInstruction<
   TAccountTokenMint,
   TAccountEscrow,
   TAccountRecipientTokenAccount,
-  TAccountTokenProgram
+  TAccountTokenProgram,
+  TAccountRecipientBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -310,6 +342,10 @@ export function getClaimVestedInstruction<
       isWritable: true,
     },
     tokenProgram: { value: input.tokenProgram ?? null, isWritable: false },
+    recipientBlockEntry: {
+      value: input.recipientBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -335,6 +371,7 @@ export function getClaimVestedInstruction<
       getAccountMeta(accounts.escrow),
       getAccountMeta(accounts.recipientTokenAccount),
       getAccountMeta(accounts.tokenProgram),
+      getAccountMeta(accounts.recipientBlockEntry),
     ],
     data: getClaimVestedInstructionDataEncoder().encode(
       args as ClaimVestedInstructionDataArgs,
@@ -348,7 +385,8 @@ export function getClaimVestedInstruction<
     TAccountTokenMint,
     TAccountEscrow,
     TAccountRecipientTokenAccount,
-    TAccountTokenProgram
+    TAccountTokenProgram,
+    TAccountRecipientBlockEntry
   >);
 }
 
@@ -367,6 +405,13 @@ export type ParsedClaimVestedInstruction<
     /** The recipient's token account — must be owned by the position's wallet. */
     recipientTokenAccount: TAccountMetas[5];
     tokenProgram: TAccountMetas[6];
+    /**
+     * v1 (appended before the hook tail): the recipient is not blocked; units
+     * for a blocked wallet stay in the vesting escrow until it is unblocked.
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    recipientBlockEntry: TAccountMetas[7];
   };
   data: ClaimVestedInstructionData;
 };
@@ -379,7 +424,7 @@ export function parseClaimVestedInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedClaimVestedInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 7) {
+  if (instruction.accounts.length < 8) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -399,6 +444,7 @@ export function parseClaimVestedInstruction<
       escrow: getNextAccount(),
       recipientTokenAccount: getNextAccount(),
       tokenProgram: getNextAccount(),
+      recipientBlockEntry: getNextAccount(),
     },
     data: getClaimVestedInstructionDataDecoder().decode(instruction.data),
   };

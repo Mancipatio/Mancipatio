@@ -385,6 +385,74 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "authority_block_entry",
+          "docs": [
+            "prog-novac-4: the OUTGOING authority is not blocklisted (it may have",
+            "been blocked after the proposal). A super-admin issuer recovery stays",
+            "the path off a blocked key.",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.authority",
+                "account": "Issuer"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": []
@@ -584,10 +652,11 @@
         {
           "name": "recovery",
           "docs": [
-            "A pending upgrade-authority recovery, retired here when present (it",
-            "may not exist), so an A -> B -> A round trip cannot revive it."
+            "A pending upgrade-authority recovery (it may not exist); a live one",
+            "refuses the accept. A recovery is always against the live super admin",
+            "(it moves only by this accept, which it blocks, or by the execute,",
+            "which closes it), so an A -> B -> A round trip cannot revive one."
           ],
-          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -10584,6 +10653,74 @@
         {
           "name": "system_program",
           "address": "11111111111111111111111111111111"
+        },
+        {
+          "name": "authority_block_entry",
+          "docs": [
+            "prog-novac-4: a blocklisted issuer authority cannot stage a rotation",
+            "(a new, unblocked key would otherwise reach the proceeds exits after",
+            "`sync_sale_authority` / `sync_payout_founder`).",
+            "seeds); it must be unset — system-owned, no data (`util::is_unset`,",
+            "fail-closed: a live BlockEntry is refused)."
+          ],
+          "pda": {
+            "seeds": [
+              {
+                "kind": "const",
+                "value": [
+                  98,
+                  108,
+                  111,
+                  99,
+                  107,
+                  101,
+                  100
+                ]
+              },
+              {
+                "kind": "account",
+                "path": "issuer.authority",
+                "account": "Issuer"
+              }
+            ],
+            "program": {
+              "kind": "const",
+              "value": [
+                225,
+                125,
+                200,
+                237,
+                143,
+                240,
+                207,
+                120,
+                184,
+                22,
+                189,
+                220,
+                252,
+                83,
+                248,
+                5,
+                75,
+                156,
+                41,
+                113,
+                177,
+                91,
+                0,
+                163,
+                121,
+                91,
+                134,
+                160,
+                81,
+                21,
+                48,
+                232
+              ]
+            }
+          }
         }
       ],
       "args": [
@@ -16093,6 +16230,11 @@
       "code": 6154,
       "name": "PayoutModulesClearNotExplicit",
       "msg": "PAUSE_PAYOUT_MODULES may only be cleared on its own (clear_mask == 0x40)"
+    },
+    {
+      "code": 6155,
+      "name": "PlatformRecoveryPending",
+      "msg": "A super-admin recovery is pending against the current super admin; it must be cancelled or executed before a rotation"
     }
   ],
   "types": [
@@ -18829,7 +18971,8 @@
         "",
         "⚠ Layout (pinned by a test): platform 8, current_admin 40, new_admin 72,",
         "proposed_by 104, proposed_at 136, eta 144, expires_at 152, version 160,",
-        "bump 161; 162 B. `util::retire_pending_proposal` zeroes bytes 40..72."
+        "bump 161; 162 B. While `current_admin` (40..72) is the super admin it is",
+        "live, and `accept_platform_admin` refuses (`util::is_live_pending`)."
       ],
       "type": {
         "kind": "struct",

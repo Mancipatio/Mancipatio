@@ -14,12 +14,12 @@ import {
   type ProgramDerivedAddress,
 } from "@solana/kit";
 
-export type AcceptIssuerAuthorityTransferSeeds = {
-  issuer: Address;
+export type CancellerAdminRecordSeeds = {
+  canceller: Address;
 };
 
-export async function findAcceptIssuerAuthorityTransferPda(
-  seeds: AcceptIssuerAuthorityTransferSeeds,
+export async function findCancellerAdminRecordPda(
+  seeds: CancellerAdminRecordSeeds,
   config: { programAddress?: Address | undefined } = {},
 ): Promise<ProgramDerivedAddress> {
   const {
@@ -28,13 +28,8 @@ export async function findAcceptIssuerAuthorityTransferPda(
   return await getProgramDerivedAddress({
     programAddress,
     seeds: [
-      getBytesEncoder().encode(
-        new Uint8Array([
-          97, 117, 116, 104, 111, 114, 105, 116, 121, 95, 112, 114, 111, 112,
-          111, 115, 97, 108,
-        ]),
-      ),
-      getAddressEncoder().encode(seeds.issuer),
+      getBytesEncoder().encode(new Uint8Array([97, 100, 109, 105, 110])),
+      getAddressEncoder().encode(seeds.canceller),
     ],
   });
 }

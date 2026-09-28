@@ -65,6 +65,7 @@ export type AcceptIssuerAuthorityInstruction<
   TAccountRecovery extends string | AccountMeta<string> = string,
   TAccountSystemProgram extends string | AccountMeta<string> =
     "11111111111111111111111111111111",
+  TAccountAuthorityBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -98,6 +99,9 @@ export type AcceptIssuerAuthorityInstruction<
       TAccountSystemProgram extends string
         ? ReadonlyAccount<TAccountSystemProgram>
         : TAccountSystemProgram,
+      TAccountAuthorityBlockEntry extends string
+        ? ReadonlyAccount<TAccountAuthorityBlockEntry>
+        : TAccountAuthorityBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -144,6 +148,7 @@ export type AcceptIssuerAuthorityAsyncInput<
   TAccountNewAdminRecord extends string = string,
   TAccountRecovery extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountAuthorityBlockEntry extends string = string,
 > = {
   newAuthority: TransactionSigner<TAccountNewAuthority>;
   issuer: Address<TAccountIssuer>;
@@ -162,6 +167,14 @@ export type AcceptIssuerAuthorityAsyncInput<
   /** The issuer's pending recovery, retired here when present (it may not exist). */
   recovery?: Address<TAccountRecovery>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * prog-novac-4: the OUTGOING authority is not blocklisted (it may have
+   * been blocked after the proposal). A super-admin issuer recovery stays
+   * the path off a blocked key.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  authorityBlockEntry: Address<TAccountAuthorityBlockEntry>;
 };
 
 export async function getAcceptIssuerAuthorityInstructionAsync<
@@ -174,6 +187,7 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
   TAccountNewAdminRecord extends string,
   TAccountRecovery extends string,
   TAccountSystemProgram extends string,
+  TAccountAuthorityBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: AcceptIssuerAuthorityAsyncInput<
@@ -185,7 +199,8 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
     TAccountRecovery,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -199,7 +214,8 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
     TAccountRecovery,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >
 > {
   // Program address.
@@ -217,6 +233,10 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: false },
     recovery: { value: input.recovery ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    authorityBlockEntry: {
+      value: input.authorityBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -262,6 +282,7 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
       getAccountMeta(accounts.newAdminRecord),
       getAccountMeta(accounts.recovery),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.authorityBlockEntry),
     ],
     data: getAcceptIssuerAuthorityInstructionDataEncoder().encode({}),
     programAddress,
@@ -275,7 +296,8 @@ export async function getAcceptIssuerAuthorityInstructionAsync<
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
     TAccountRecovery,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >);
 }
 
@@ -289,6 +311,7 @@ export type AcceptIssuerAuthorityInput<
   TAccountNewAdminRecord extends string = string,
   TAccountRecovery extends string = string,
   TAccountSystemProgram extends string = string,
+  TAccountAuthorityBlockEntry extends string = string,
 > = {
   newAuthority: TransactionSigner<TAccountNewAuthority>;
   issuer: Address<TAccountIssuer>;
@@ -307,6 +330,14 @@ export type AcceptIssuerAuthorityInput<
   /** The issuer's pending recovery, retired here when present (it may not exist). */
   recovery: Address<TAccountRecovery>;
   systemProgram?: Address<TAccountSystemProgram>;
+  /**
+   * prog-novac-4: the OUTGOING authority is not blocklisted (it may have
+   * been blocked after the proposal). A super-admin issuer recovery stays
+   * the path off a blocked key.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  authorityBlockEntry: Address<TAccountAuthorityBlockEntry>;
 };
 
 export function getAcceptIssuerAuthorityInstruction<
@@ -319,6 +350,7 @@ export function getAcceptIssuerAuthorityInstruction<
   TAccountNewAdminRecord extends string,
   TAccountRecovery extends string,
   TAccountSystemProgram extends string,
+  TAccountAuthorityBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: AcceptIssuerAuthorityInput<
@@ -330,7 +362,8 @@ export function getAcceptIssuerAuthorityInstruction<
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
     TAccountRecovery,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): AcceptIssuerAuthorityInstruction<
@@ -343,7 +376,8 @@ export function getAcceptIssuerAuthorityInstruction<
   TAccountOldAdminRecord,
   TAccountNewAdminRecord,
   TAccountRecovery,
-  TAccountSystemProgram
+  TAccountSystemProgram,
+  TAccountAuthorityBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -360,6 +394,10 @@ export function getAcceptIssuerAuthorityInstruction<
     newAdminRecord: { value: input.newAdminRecord ?? null, isWritable: false },
     recovery: { value: input.recovery ?? null, isWritable: true },
     systemProgram: { value: input.systemProgram ?? null, isWritable: false },
+    authorityBlockEntry: {
+      value: input.authorityBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -384,6 +422,7 @@ export function getAcceptIssuerAuthorityInstruction<
       getAccountMeta(accounts.newAdminRecord),
       getAccountMeta(accounts.recovery),
       getAccountMeta(accounts.systemProgram),
+      getAccountMeta(accounts.authorityBlockEntry),
     ],
     data: getAcceptIssuerAuthorityInstructionDataEncoder().encode({}),
     programAddress,
@@ -397,7 +436,8 @@ export function getAcceptIssuerAuthorityInstruction<
     TAccountOldAdminRecord,
     TAccountNewAdminRecord,
     TAccountRecovery,
-    TAccountSystemProgram
+    TAccountSystemProgram,
+    TAccountAuthorityBlockEntry
   >);
 }
 
@@ -424,6 +464,14 @@ export type ParsedAcceptIssuerAuthorityInstruction<
     /** The issuer's pending recovery, retired here when present (it may not exist). */
     recovery: TAccountMetas[7];
     systemProgram: TAccountMetas[8];
+    /**
+     * prog-novac-4: the OUTGOING authority is not blocklisted (it may have
+     * been blocked after the proposal). A super-admin issuer recovery stays
+     * the path off a blocked key.
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    authorityBlockEntry: TAccountMetas[9];
   };
   data: AcceptIssuerAuthorityInstructionData;
 };
@@ -436,7 +484,7 @@ export function parseAcceptIssuerAuthorityInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedAcceptIssuerAuthorityInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 9) {
+  if (instruction.accounts.length < 10) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -458,6 +506,7 @@ export function parseAcceptIssuerAuthorityInstruction<
       newAdminRecord: getNextAccount(),
       recovery: getNextAccount(),
       systemProgram: getNextAccount(),
+      authorityBlockEntry: getNextAccount(),
     },
     data: getAcceptIssuerAuthorityInstructionDataDecoder().decode(
       instruction.data,

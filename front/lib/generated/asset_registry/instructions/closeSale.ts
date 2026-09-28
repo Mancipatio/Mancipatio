@@ -10,8 +10,10 @@ import {
   combineCodec,
   fixDecoderSize,
   fixEncoderSize,
+  getAddressEncoder,
   getBytesDecoder,
   getBytesEncoder,
+  getProgramDerivedAddress,
   getStructDecoder,
   getStructEncoder,
   transformEncoder,
@@ -32,7 +34,11 @@ import {
 } from "@solana/kit";
 import { findPlatformPda } from "../pdas";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "../programs";
-import { getAccountMetaFactory, type ResolvedAccount } from "../shared";
+import {
+  expectAddress,
+  getAccountMetaFactory,
+  type ResolvedAccount,
+} from "../shared";
 
 export const CLOSE_SALE_DISCRIMINATOR = new Uint8Array([
   124, 201, 1, 146, 231, 103, 193, 152,
@@ -51,6 +57,11 @@ export type CloseSaleInstruction<
   TAccountDestination extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
   TAccountPlatform extends string | AccountMeta<string> = string,
+  TAccountShareClass extends string | AccountMeta<string> = string,
+  TAccountAsset extends string | AccountMeta<string> = string,
+  TAccountIssuerFreeze extends string | AccountMeta<string> = string,
+  TAccountAuthorityBlockEntry extends string | AccountMeta<string> = string,
+  TAccountDestinationBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -78,6 +89,21 @@ export type CloseSaleInstruction<
       TAccountPlatform extends string
         ? ReadonlyAccount<TAccountPlatform>
         : TAccountPlatform,
+      TAccountShareClass extends string
+        ? ReadonlyAccount<TAccountShareClass>
+        : TAccountShareClass,
+      TAccountAsset extends string
+        ? ReadonlyAccount<TAccountAsset>
+        : TAccountAsset,
+      TAccountIssuerFreeze extends string
+        ? ReadonlyAccount<TAccountIssuerFreeze>
+        : TAccountIssuerFreeze,
+      TAccountAuthorityBlockEntry extends string
+        ? ReadonlyAccount<TAccountAuthorityBlockEntry>
+        : TAccountAuthorityBlockEntry,
+      TAccountDestinationBlockEntry extends string
+        ? ReadonlyAccount<TAccountDestinationBlockEntry>
+        : TAccountDestinationBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -117,6 +143,11 @@ export type CloseSaleAsyncInput<
   TAccountDestination extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountAsset extends string = string,
+  TAccountIssuerFreeze extends string = string,
+  TAccountAuthorityBlockEntry extends string = string,
+  TAccountDestinationBlockEntry extends string = string,
 > = {
   /** Mut (2D): receives the closed proceeds account's rent. */
   authority: TransactionSigner<TAccountAuthority>;
@@ -131,6 +162,27 @@ export type CloseSaleAsyncInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform?: Address<TAccountPlatform>;
+  /** D1 chain to the issuer: the sale's share class ... */
+  shareClass: Address<TAccountShareClass>;
+  /** ... and its asset (`asset.issuer` keys the freeze below). */
+  asset: Address<TAccountAsset>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
+  /**
+   * prog-novac-4: the signing sale authority is not blocked ...
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  authorityBlockEntry?: Address<TAccountAuthorityBlockEntry>;
+  /**
+   * ... nor is the owner of the proceeds destination.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  destinationBlockEntry: Address<TAccountDestinationBlockEntry>;
 };
 
 export async function getCloseSaleInstructionAsync<
@@ -141,6 +193,11 @@ export async function getCloseSaleInstructionAsync<
   TAccountDestination extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountShareClass extends string,
+  TAccountAsset extends string,
+  TAccountIssuerFreeze extends string,
+  TAccountAuthorityBlockEntry extends string,
+  TAccountDestinationBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CloseSaleAsyncInput<
@@ -150,7 +207,12 @@ export async function getCloseSaleInstructionAsync<
     TAccountPaymentMint,
     TAccountDestination,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountAuthorityBlockEntry,
+    TAccountDestinationBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -162,7 +224,12 @@ export async function getCloseSaleInstructionAsync<
     TAccountPaymentMint,
     TAccountDestination,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountAuthorityBlockEntry,
+    TAccountDestinationBlockEntry
   >
 > {
   // Program address.
@@ -181,6 +248,17 @@ export async function getCloseSaleInstructionAsync<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    shareClass: { value: input.shareClass ?? null, isWritable: false },
+    asset: { value: input.asset ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
+    authorityBlockEntry: {
+      value: input.authorityBlockEntry ?? null,
+      isWritable: false,
+    },
+    destinationBlockEntry: {
+      value: input.destinationBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -190,6 +268,18 @@ export async function getCloseSaleInstructionAsync<
   // Resolve default values.
   if (!accounts.platform.value) {
     accounts.platform.value = await findPlatformPda();
+  }
+  if (!accounts.authorityBlockEntry.value) {
+    accounts.authorityBlockEntry.value = await getProgramDerivedAddress({
+      programAddress:
+        "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy" as Address<"GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy">,
+      seeds: [
+        getBytesEncoder().encode(
+          new Uint8Array([98, 108, 111, 99, 107, 101, 100]),
+        ),
+        getAddressEncoder().encode(expectAddress(accounts.authority.value)),
+      ],
+    });
   }
 
   const getAccountMeta = getAccountMetaFactory(programAddress, "programId");
@@ -202,6 +292,11 @@ export async function getCloseSaleInstructionAsync<
       getAccountMeta(accounts.destination),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.asset),
+      getAccountMeta(accounts.issuerFreeze),
+      getAccountMeta(accounts.authorityBlockEntry),
+      getAccountMeta(accounts.destinationBlockEntry),
     ],
     data: getCloseSaleInstructionDataEncoder().encode({}),
     programAddress,
@@ -213,7 +308,12 @@ export async function getCloseSaleInstructionAsync<
     TAccountPaymentMint,
     TAccountDestination,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountAuthorityBlockEntry,
+    TAccountDestinationBlockEntry
   >);
 }
 
@@ -225,6 +325,11 @@ export type CloseSaleInput<
   TAccountDestination extends string = string,
   TAccountPaymentTokenProgram extends string = string,
   TAccountPlatform extends string = string,
+  TAccountShareClass extends string = string,
+  TAccountAsset extends string = string,
+  TAccountIssuerFreeze extends string = string,
+  TAccountAuthorityBlockEntry extends string = string,
+  TAccountDestinationBlockEntry extends string = string,
 > = {
   /** Mut (2D): receives the closed proceeds account's rent. */
   authority: TransactionSigner<TAccountAuthority>;
@@ -239,6 +344,27 @@ export type CloseSaleInput<
    * account indices and the remaining-accounts hook tail keep their positions.
    */
   platform: Address<TAccountPlatform>;
+  /** D1 chain to the issuer: the sale's share class ... */
+  shareClass: Address<TAccountShareClass>;
+  /** ... and its asset (`asset.issuer` keys the freeze below). */
+  asset: Address<TAccountAsset>;
+  /**
+   * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+   * unset (no freeze in force).
+   */
+  issuerFreeze: Address<TAccountIssuerFreeze>;
+  /**
+   * prog-novac-4: the signing sale authority is not blocked ...
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  authorityBlockEntry: Address<TAccountAuthorityBlockEntry>;
+  /**
+   * ... nor is the owner of the proceeds destination.
+   * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+   * fail-closed: a live BlockEntry is refused).
+   */
+  destinationBlockEntry: Address<TAccountDestinationBlockEntry>;
 };
 
 export function getCloseSaleInstruction<
@@ -249,6 +375,11 @@ export function getCloseSaleInstruction<
   TAccountDestination extends string,
   TAccountPaymentTokenProgram extends string,
   TAccountPlatform extends string,
+  TAccountShareClass extends string,
+  TAccountAsset extends string,
+  TAccountIssuerFreeze extends string,
+  TAccountAuthorityBlockEntry extends string,
+  TAccountDestinationBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: CloseSaleInput<
@@ -258,7 +389,12 @@ export function getCloseSaleInstruction<
     TAccountPaymentMint,
     TAccountDestination,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountAuthorityBlockEntry,
+    TAccountDestinationBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): CloseSaleInstruction<
@@ -269,7 +405,12 @@ export function getCloseSaleInstruction<
   TAccountPaymentMint,
   TAccountDestination,
   TAccountPaymentTokenProgram,
-  TAccountPlatform
+  TAccountPlatform,
+  TAccountShareClass,
+  TAccountAsset,
+  TAccountIssuerFreeze,
+  TAccountAuthorityBlockEntry,
+  TAccountDestinationBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -287,6 +428,17 @@ export function getCloseSaleInstruction<
       isWritable: false,
     },
     platform: { value: input.platform ?? null, isWritable: false },
+    shareClass: { value: input.shareClass ?? null, isWritable: false },
+    asset: { value: input.asset ?? null, isWritable: false },
+    issuerFreeze: { value: input.issuerFreeze ?? null, isWritable: false },
+    authorityBlockEntry: {
+      value: input.authorityBlockEntry ?? null,
+      isWritable: false,
+    },
+    destinationBlockEntry: {
+      value: input.destinationBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -303,6 +455,11 @@ export function getCloseSaleInstruction<
       getAccountMeta(accounts.destination),
       getAccountMeta(accounts.paymentTokenProgram),
       getAccountMeta(accounts.platform),
+      getAccountMeta(accounts.shareClass),
+      getAccountMeta(accounts.asset),
+      getAccountMeta(accounts.issuerFreeze),
+      getAccountMeta(accounts.authorityBlockEntry),
+      getAccountMeta(accounts.destinationBlockEntry),
     ],
     data: getCloseSaleInstructionDataEncoder().encode({}),
     programAddress,
@@ -314,7 +471,12 @@ export function getCloseSaleInstruction<
     TAccountPaymentMint,
     TAccountDestination,
     TAccountPaymentTokenProgram,
-    TAccountPlatform
+    TAccountPlatform,
+    TAccountShareClass,
+    TAccountAsset,
+    TAccountIssuerFreeze,
+    TAccountAuthorityBlockEntry,
+    TAccountDestinationBlockEntry
   >);
 }
 
@@ -337,6 +499,27 @@ export type ParsedCloseSaleInstruction<
      * account indices and the remaining-accounts hook tail keep their positions.
      */
     platform: TAccountMetas[6];
+    /** D1 chain to the issuer: the sale's share class ... */
+    shareClass: TAccountMetas[7];
+    /** ... and its asset (`asset.issuer` keys the freeze below). */
+    asset: TAccountMetas[8];
+    /**
+     * D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+     * unset (no freeze in force).
+     */
+    issuerFreeze: TAccountMetas[9];
+    /**
+     * prog-novac-4: the signing sale authority is not blocked ...
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    authorityBlockEntry: TAccountMetas[10];
+    /**
+     * ... nor is the owner of the proceeds destination.
+     * seeds); it must be unset — system-owned, no data (`util::is_unset`,
+     * fail-closed: a live BlockEntry is refused).
+     */
+    destinationBlockEntry: TAccountMetas[11];
   };
   data: CloseSaleInstructionData;
 };
@@ -349,7 +532,7 @@ export function parseCloseSaleInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedCloseSaleInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 7) {
+  if (instruction.accounts.length < 12) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -369,6 +552,11 @@ export function parseCloseSaleInstruction<
       destination: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
       platform: getNextAccount(),
+      shareClass: getNextAccount(),
+      asset: getNextAccount(),
+      issuerFreeze: getNextAccount(),
+      authorityBlockEntry: getNextAccount(),
+      destinationBlockEntry: getNextAccount(),
     },
     data: getCloseSaleInstructionDataDecoder().decode(instruction.data),
   };

@@ -19,18 +19,26 @@ import {
 import {
   parseAcceptBlocklistAuthorityInstruction,
   parseAddToBlocklistInstruction,
+  parseCancelBlocklistAuthorityTransferInstruction,
+  parseCancelBlocklistRecoveryInstruction,
+  parseExecuteBlocklistRecoveryInstruction,
   parseInitializeBlocklistAuthorityInstruction,
   parseInitializeExtraAccountMetaListInstruction,
   parseInitializeTransferHookConfigInstruction,
   parseProposeBlocklistAuthorityInstruction,
+  parseProposeBlocklistRecoveryInstruction,
   parseRemoveFromBlocklistInstruction,
   parseUpdateTransferHookConfigInstruction,
   type ParsedAcceptBlocklistAuthorityInstruction,
   type ParsedAddToBlocklistInstruction,
+  type ParsedCancelBlocklistAuthorityTransferInstruction,
+  type ParsedCancelBlocklistRecoveryInstruction,
+  type ParsedExecuteBlocklistRecoveryInstruction,
   type ParsedInitializeBlocklistAuthorityInstruction,
   type ParsedInitializeExtraAccountMetaListInstruction,
   type ParsedInitializeTransferHookConfigInstruction,
   type ParsedProposeBlocklistAuthorityInstruction,
+  type ParsedProposeBlocklistRecoveryInstruction,
   type ParsedRemoveFromBlocklistInstruction,
   type ParsedUpdateTransferHookConfigInstruction,
 } from "../instructions";
@@ -41,7 +49,8 @@ export const TRANSFER_HOOK_PROGRAM_ADDRESS =
 export enum TransferHookAccount {
   BlockEntry,
   BlocklistAuthority,
-  BlocklistAuthorityTransfer,
+  BlocklistAuthorityProposal,
+  BlocklistRecovery,
   TransferHookConfig,
 }
 
@@ -75,12 +84,23 @@ export function identifyTransferHookAccount(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
-        new Uint8Array([171, 162, 208, 78, 168, 214, 135, 50]),
+        new Uint8Array([207, 222, 200, 184, 14, 103, 144, 208]),
       ),
       0,
     )
   ) {
-    return TransferHookAccount.BlocklistAuthorityTransfer;
+    return TransferHookAccount.BlocklistAuthorityProposal;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([175, 123, 209, 201, 84, 149, 81, 186]),
+      ),
+      0,
+    )
+  ) {
+    return TransferHookAccount.BlocklistRecovery;
   }
   if (
     containsBytes(
@@ -101,10 +121,14 @@ export function identifyTransferHookAccount(
 export enum TransferHookInstruction {
   AcceptBlocklistAuthority,
   AddToBlocklist,
+  CancelBlocklistAuthorityTransfer,
+  CancelBlocklistRecovery,
+  ExecuteBlocklistRecovery,
   InitializeBlocklistAuthority,
   InitializeExtraAccountMetaList,
   InitializeTransferHookConfig,
   ProposeBlocklistAuthority,
+  ProposeBlocklistRecovery,
   RemoveFromBlocklist,
   UpdateTransferHookConfig,
 }
@@ -134,6 +158,39 @@ export function identifyTransferHookInstruction(
     )
   ) {
     return TransferHookInstruction.AddToBlocklist;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([251, 56, 42, 254, 184, 179, 185, 198]),
+      ),
+      0,
+    )
+  ) {
+    return TransferHookInstruction.CancelBlocklistAuthorityTransfer;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([195, 68, 112, 202, 52, 55, 135, 124]),
+      ),
+      0,
+    )
+  ) {
+    return TransferHookInstruction.CancelBlocklistRecovery;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([246, 88, 209, 159, 6, 137, 191, 161]),
+      ),
+      0,
+    )
+  ) {
+    return TransferHookInstruction.ExecuteBlocklistRecovery;
   }
   if (
     containsBytes(
@@ -183,6 +240,17 @@ export function identifyTransferHookInstruction(
     containsBytes(
       data,
       fixEncoderSize(getBytesEncoder(), 8).encode(
+        new Uint8Array([169, 177, 244, 120, 149, 40, 125, 234]),
+      ),
+      0,
+    )
+  ) {
+    return TransferHookInstruction.ProposeBlocklistRecovery;
+  }
+  if (
+    containsBytes(
+      data,
+      fixEncoderSize(getBytesEncoder(), 8).encode(
         new Uint8Array([132, 125, 30, 120, 139, 22, 210, 90]),
       ),
       0,
@@ -216,6 +284,15 @@ export type ParsedTransferHookInstruction<
       instructionType: TransferHookInstruction.AddToBlocklist;
     } & ParsedAddToBlocklistInstruction<TProgram>)
   | ({
+      instructionType: TransferHookInstruction.CancelBlocklistAuthorityTransfer;
+    } & ParsedCancelBlocklistAuthorityTransferInstruction<TProgram>)
+  | ({
+      instructionType: TransferHookInstruction.CancelBlocklistRecovery;
+    } & ParsedCancelBlocklistRecoveryInstruction<TProgram>)
+  | ({
+      instructionType: TransferHookInstruction.ExecuteBlocklistRecovery;
+    } & ParsedExecuteBlocklistRecoveryInstruction<TProgram>)
+  | ({
       instructionType: TransferHookInstruction.InitializeBlocklistAuthority;
     } & ParsedInitializeBlocklistAuthorityInstruction<TProgram>)
   | ({
@@ -227,6 +304,9 @@ export type ParsedTransferHookInstruction<
   | ({
       instructionType: TransferHookInstruction.ProposeBlocklistAuthority;
     } & ParsedProposeBlocklistAuthorityInstruction<TProgram>)
+  | ({
+      instructionType: TransferHookInstruction.ProposeBlocklistRecovery;
+    } & ParsedProposeBlocklistRecoveryInstruction<TProgram>)
   | ({
       instructionType: TransferHookInstruction.RemoveFromBlocklist;
     } & ParsedRemoveFromBlocklistInstruction<TProgram>)
@@ -251,6 +331,28 @@ export function parseTransferHookInstruction<TProgram extends string>(
       return {
         instructionType: TransferHookInstruction.AddToBlocklist,
         ...parseAddToBlocklistInstruction(instruction),
+      };
+    }
+    case TransferHookInstruction.CancelBlocklistAuthorityTransfer: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType:
+          TransferHookInstruction.CancelBlocklistAuthorityTransfer,
+        ...parseCancelBlocklistAuthorityTransferInstruction(instruction),
+      };
+    }
+    case TransferHookInstruction.CancelBlocklistRecovery: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: TransferHookInstruction.CancelBlocklistRecovery,
+        ...parseCancelBlocklistRecoveryInstruction(instruction),
+      };
+    }
+    case TransferHookInstruction.ExecuteBlocklistRecovery: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: TransferHookInstruction.ExecuteBlocklistRecovery,
+        ...parseExecuteBlocklistRecoveryInstruction(instruction),
       };
     }
     case TransferHookInstruction.InitializeBlocklistAuthority: {
@@ -279,6 +381,13 @@ export function parseTransferHookInstruction<TProgram extends string>(
       return {
         instructionType: TransferHookInstruction.ProposeBlocklistAuthority,
         ...parseProposeBlocklistAuthorityInstruction(instruction),
+      };
+    }
+    case TransferHookInstruction.ProposeBlocklistRecovery: {
+      assertIsInstructionWithAccounts(instruction);
+      return {
+        instructionType: TransferHookInstruction.ProposeBlocklistRecovery,
+        ...parseProposeBlocklistRecoveryInstruction(instruction),
       };
     }
     case TransferHookInstruction.RemoveFromBlocklist: {

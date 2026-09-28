@@ -61,6 +61,8 @@ export type ExpireOtcDealInstruction<
   TAccountEscrowMarker extends string | AccountMeta<string> = string,
   TAccountShareTokenProgram extends string | AccountMeta<string> = string,
   TAccountPaymentTokenProgram extends string | AccountMeta<string> = string,
+  TAccountBuyerBlockEntry extends string | AccountMeta<string> = string,
+  TAccountSellerBlockEntry extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
 > = Instruction<TProgram> &
   InstructionWithData<ReadonlyUint8Array> &
@@ -100,6 +102,12 @@ export type ExpireOtcDealInstruction<
       TAccountPaymentTokenProgram extends string
         ? ReadonlyAccount<TAccountPaymentTokenProgram>
         : TAccountPaymentTokenProgram,
+      TAccountBuyerBlockEntry extends string
+        ? ReadonlyAccount<TAccountBuyerBlockEntry>
+        : TAccountBuyerBlockEntry,
+      TAccountSellerBlockEntry extends string
+        ? ReadonlyAccount<TAccountSellerBlockEntry>
+        : TAccountSellerBlockEntry,
       ...TRemainingAccounts,
     ]
   >;
@@ -145,6 +153,8 @@ export type ExpireOtcDealAsyncInput<
   TAccountEscrowMarker extends string = string,
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountBuyerBlockEntry extends string = string,
+  TAccountSellerBlockEntry extends string = string,
 > = {
   /**
    * Permissionless after `expires_at` — any signer may pay the fee.
@@ -167,6 +177,15 @@ export type ExpireOtcDealAsyncInput<
   escrowMarker?: Address<TAccountEscrowMarker>;
   shareTokenProgram: Address<TAccountShareTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * O-11 (appended before the hook tail): the buyer's hook BlockEntry.
+   * Only its address is pinned here; the handler refuses a permissionless
+   * refund of a DEPOSITED leg to a blocked party (the Admin
+   * `cancel_otc_deal` stays the manual path).
+   */
+  buyerBlockEntry: Address<TAccountBuyerBlockEntry>;
+  /** The seller's hook BlockEntry (see `buyer_block_entry`). */
+  sellerBlockEntry: Address<TAccountSellerBlockEntry>;
 };
 
 export async function getExpireOtcDealInstructionAsync<
@@ -181,6 +200,8 @@ export async function getExpireOtcDealInstructionAsync<
   TAccountEscrowMarker extends string,
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountBuyerBlockEntry extends string,
+  TAccountSellerBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ExpireOtcDealAsyncInput<
@@ -194,7 +215,9 @@ export async function getExpireOtcDealInstructionAsync<
     TAccountBuyerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): Promise<
@@ -210,7 +233,9 @@ export async function getExpireOtcDealInstructionAsync<
     TAccountBuyerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >
 > {
   // Program address.
@@ -242,6 +267,14 @@ export async function getExpireOtcDealInstructionAsync<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    buyerBlockEntry: {
+      value: input.buyerBlockEntry ?? null,
+      isWritable: false,
+    },
+    sellerBlockEntry: {
+      value: input.sellerBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -269,6 +302,8 @@ export async function getExpireOtcDealInstructionAsync<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.buyerBlockEntry),
+      getAccountMeta(accounts.sellerBlockEntry),
     ],
     data: getExpireOtcDealInstructionDataEncoder().encode({}),
     programAddress,
@@ -284,7 +319,9 @@ export async function getExpireOtcDealInstructionAsync<
     TAccountBuyerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >);
 }
 
@@ -300,6 +337,8 @@ export type ExpireOtcDealInput<
   TAccountEscrowMarker extends string = string,
   TAccountShareTokenProgram extends string = string,
   TAccountPaymentTokenProgram extends string = string,
+  TAccountBuyerBlockEntry extends string = string,
+  TAccountSellerBlockEntry extends string = string,
 > = {
   /**
    * Permissionless after `expires_at` — any signer may pay the fee.
@@ -322,6 +361,15 @@ export type ExpireOtcDealInput<
   escrowMarker: Address<TAccountEscrowMarker>;
   shareTokenProgram: Address<TAccountShareTokenProgram>;
   paymentTokenProgram: Address<TAccountPaymentTokenProgram>;
+  /**
+   * O-11 (appended before the hook tail): the buyer's hook BlockEntry.
+   * Only its address is pinned here; the handler refuses a permissionless
+   * refund of a DEPOSITED leg to a blocked party (the Admin
+   * `cancel_otc_deal` stays the manual path).
+   */
+  buyerBlockEntry: Address<TAccountBuyerBlockEntry>;
+  /** The seller's hook BlockEntry (see `buyer_block_entry`). */
+  sellerBlockEntry: Address<TAccountSellerBlockEntry>;
 };
 
 export function getExpireOtcDealInstruction<
@@ -336,6 +384,8 @@ export function getExpireOtcDealInstruction<
   TAccountEscrowMarker extends string,
   TAccountShareTokenProgram extends string,
   TAccountPaymentTokenProgram extends string,
+  TAccountBuyerBlockEntry extends string,
+  TAccountSellerBlockEntry extends string,
   TProgramAddress extends Address = typeof ASSET_REGISTRY_PROGRAM_ADDRESS,
 >(
   input: ExpireOtcDealInput<
@@ -349,7 +399,9 @@ export function getExpireOtcDealInstruction<
     TAccountBuyerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >,
   config?: { programAddress?: TProgramAddress },
 ): ExpireOtcDealInstruction<
@@ -364,7 +416,9 @@ export function getExpireOtcDealInstruction<
   TAccountBuyerPaymentAccount,
   TAccountEscrowMarker,
   TAccountShareTokenProgram,
-  TAccountPaymentTokenProgram
+  TAccountPaymentTokenProgram,
+  TAccountBuyerBlockEntry,
+  TAccountSellerBlockEntry
 > {
   // Program address.
   const programAddress =
@@ -395,6 +449,14 @@ export function getExpireOtcDealInstruction<
       value: input.paymentTokenProgram ?? null,
       isWritable: false,
     },
+    buyerBlockEntry: {
+      value: input.buyerBlockEntry ?? null,
+      isWritable: false,
+    },
+    sellerBlockEntry: {
+      value: input.sellerBlockEntry ?? null,
+      isWritable: false,
+    },
   };
   const accounts = originalAccounts as Record<
     keyof typeof originalAccounts,
@@ -415,6 +477,8 @@ export function getExpireOtcDealInstruction<
       getAccountMeta(accounts.escrowMarker),
       getAccountMeta(accounts.shareTokenProgram),
       getAccountMeta(accounts.paymentTokenProgram),
+      getAccountMeta(accounts.buyerBlockEntry),
+      getAccountMeta(accounts.sellerBlockEntry),
     ],
     data: getExpireOtcDealInstructionDataEncoder().encode({}),
     programAddress,
@@ -430,7 +494,9 @@ export function getExpireOtcDealInstruction<
     TAccountBuyerPaymentAccount,
     TAccountEscrowMarker,
     TAccountShareTokenProgram,
-    TAccountPaymentTokenProgram
+    TAccountPaymentTokenProgram,
+    TAccountBuyerBlockEntry,
+    TAccountSellerBlockEntry
   >);
 }
 
@@ -461,6 +527,15 @@ export type ParsedExpireOtcDealInstruction<
     escrowMarker: TAccountMetas[8];
     shareTokenProgram: TAccountMetas[9];
     paymentTokenProgram: TAccountMetas[10];
+    /**
+     * O-11 (appended before the hook tail): the buyer's hook BlockEntry.
+     * Only its address is pinned here; the handler refuses a permissionless
+     * refund of a DEPOSITED leg to a blocked party (the Admin
+     * `cancel_otc_deal` stays the manual path).
+     */
+    buyerBlockEntry: TAccountMetas[11];
+    /** The seller's hook BlockEntry (see `buyer_block_entry`). */
+    sellerBlockEntry: TAccountMetas[12];
   };
   data: ExpireOtcDealInstructionData;
 };
@@ -473,7 +548,7 @@ export function parseExpireOtcDealInstruction<
     InstructionWithAccounts<TAccountMetas> &
     InstructionWithData<ReadonlyUint8Array>,
 ): ParsedExpireOtcDealInstruction<TProgram, TAccountMetas> {
-  if (instruction.accounts.length < 11) {
+  if (instruction.accounts.length < 13) {
     // TODO: Coded error.
     throw new Error("Not enough accounts");
   }
@@ -497,6 +572,8 @@ export function parseExpireOtcDealInstruction<
       escrowMarker: getNextAccount(),
       shareTokenProgram: getNextAccount(),
       paymentTokenProgram: getNextAccount(),
+      buyerBlockEntry: getNextAccount(),
+      sellerBlockEntry: getNextAccount(),
     },
     data: getExpireOtcDealInstructionDataDecoder().decode(instruction.data),
   };

@@ -11,8 +11,15 @@
       "name": "accept_blocklist_authority",
       "docs": [
         "The proposed key takes the BlocklistAuthority (before the proposal",
-        "expires). A pending recovery is retired, so an A -> B -> A round trip",
-        "cannot revive it."
+        "expires). REFUSED while a recovery is pending (`RecoveryPending`): it",
+        "is cancelled first (`cancel_blocklist_recovery`: the current authority",
+        "or the proposing upgrade authority), or it executes.",
+        "A retire here would let a COMPROMISED authority defeat the `incident`",
+        "build's recovery, which it cannot cancel, by rotating to a second key",
+        "of its own in one transaction (propose + accept) before the execute.",
+        "A recovery is always against the live authority (it can only move by",
+        "this accept, which it blocks, or by the execute, which closes it), so",
+        "no A -> B -> A round trip can revive one either."
       ],
       "discriminator": [
         145,
@@ -106,9 +113,8 @@
         {
           "name": "recovery",
           "docs": [
-            "A pending recovery, always retired here when present (it may not exist)."
+            "A pending recovery (it may not exist); a live one refuses the accept."
           ],
-          "writable": true,
           "pda": {
             "seeds": [
               {
@@ -1490,6 +1496,11 @@
       "code": 6019,
       "name": "InvalidRecovery",
       "msg": "Recovery does not match the current blocklist authority, the executing key or the current upgrade authority"
+    },
+    {
+      "code": 6020,
+      "name": "RecoveryPending",
+      "msg": "A recovery of the blocklist authority is pending; it must be cancelled or executed before a rotation"
     }
   ],
   "types": [

@@ -10,4 +10,5 @@ export * from "./blockEntry";
 export * from "./blocklistAuthority";
 export * from "./config";
 export * from "./extraAccountMetaList";
+export * from "./recovery";
 export * from "./transfer";
