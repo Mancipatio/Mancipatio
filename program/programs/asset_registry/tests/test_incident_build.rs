@@ -3,7 +3,10 @@
 //! into `target/deploy-incident/`) has a zero recovery delay, and only the
 //! proposing upgrade authority may cancel a recovery — the case is a
 //! COMPROMISED super admin / BlocklistAuthority, which must not be able to
-//! block its own replacement. Never a release, devnet or CI-test artifact.
+//! block its own replacement. Never the deployed release and never on
+//! devnet: program-ci and verifiable-build build, gate and test it with every
+//! release, and the Release ships it beside the release bytes (O-12) for the
+//! upgrade authority to deploy only in an incident.
 //!
 //! The artifacts are read at run time. Without them the tests report and
 //! pass, unless `MANCI_REQUIRE_INCIDENT=1` (program-ci sets it right after

@@ -136,9 +136,34 @@ jobs:
       - name: ELF gate negative control
         run: bash scripts/check-sbf-elf-selftest.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
 
+      # Incident artifacts (design 8.3 §7.4, O-12): the SAME source with
+      # `--features incident` (zero recovery delay, proposer-only cancel),
+      # built next to the release ones in this job so the tests below can
+      # never run against a stale copy. Never deployed except in an incident.
+      # Same shell as the release build above, so the same (asserted)
+      # cargo-build-sbf 4.2.0 / platform-tools v1.56 resolves.
+      - name: Build the incident artifacts (SBPF v3, --features incident)
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo build-sbf --workspace --arch v3 --tools-version v1.56 --features incident --sbf-out-dir target/deploy-incident -- --locked 2>&1 | tee target/build-sbf-incident.log
+          if grep -E "Stack offset of [0-9]+ exceeded|exceeded max offset" target/build-sbf-incident.log; then
+            echo "::error::an incident-build function exceeds the SBF stack frame"
+            exit 1
+          fi
+          if cmp -s target/deploy/asset_registry.so target/deploy-incident/asset_registry.so ||
+            cmp -s target/deploy/transfer_hook.so target/deploy-incident/transfer_hook.so; then
+            echo "::error::an incident artifact equals its release artifact: --features incident did not apply"
+            exit 1
+          fi
+
+      - name: Incident artifacts ELF gate
+        run: bash scripts/check-sbf-elf.sh target/deploy-incident/asset_registry.so target/deploy-incident/transfer_hook.so
+
       # ProgramData capacity of the deployed asset_registry: an upgrade larger
       # than this needs `solana program extend` first. SBPF v3 shrank the
-      # rc.1 logic from 2,469,512 B (v0) to 2,044,248 B. Devnet capacity is
+      # rc.1 logic from 2,469,512 B (v0) to 2,044,248 B; v1.0.0-rc (v3) is
+      # 2,217,968 B (incident 2,217,840 B). Devnet capacity is
       # 2,537,208 B: 2,471,672 (2C-2) + the 65,536 B extend of the 2C-4
       # rollout. Evidence, `solana program show FJs1EM1N… -u devnet` at
       # 2026-09-23T22:09Z (slot 503104632), saved as
@@ -162,7 +187,8 @@ jobs:
 
       # ProgramData capacity of the deployed transfer_hook (devnet `solana
       # program show` before 2A: 392,712 B; no hook extend since). SBPF v3
-      # shrank the rc.1 hook from 390,152 B (v0) to 338,560 B.
+      # shrank the rc.1 hook from 390,152 B (v0) to 338,560 B; v1.0.0-rc (v3)
+      # is 389,432 B (incident 389,216 B), 3,280 B under the capacity.
       - name: transfer_hook size budget
         env:
           TRANSFER_HOOK_CAPACITY: "392712"
@@ -178,7 +204,11 @@ jobs:
             echo "::warning::transfer_hook.so is within 2 KiB of the ProgramData capacity (${headroom} B left): plan solana program extend"
           fi
 
+      # MANCI_REQUIRE_INCIDENT=1: test_incident_build fails (instead of
+      # skipping) when the incident artifacts are missing or stale.
       - name: Test the freshly built artifacts
+        env:
+          MANCI_REQUIRE_INCIDENT: "1"
         run: cargo test --workspace --locked
 
       # After build-sbf: the LiteSVM tests include_bytes! the fresh .so files.
@@ -187,11 +217,26 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --locked --all-targets -- -D warnings -A clippy::too_many_arguments -A clippy::diverging_sub_expression
 
+      # The `#[cfg(feature = "incident")]` branches compile and lint too.
+      - name: Clippy (incident feature)
+        run: cargo clippy --workspace --locked --all-targets --features asset_registry/incident,transfer_hook/incident -- -D warnings -A clippy::too_many_arguments -A clippy::diverging_sub_expression
+
       - name: Generate IDL from source with the pinned host compiler
         run: |
           mkdir -p target/idl
           anchor idl build -p asset_registry -o "$PWD/target/idl/asset_registry.json" -- --locked --lib
           anchor idl build -p transfer_hook -o "$PWD/target/idl/transfer_hook.json" -- --locked --lib
+
+      # Design 8.3 §14.11.3: the incident build exposes exactly the release
+      # interface (same instructions, accounts, errors), so every client and
+      # the Squads export work unchanged against it.
+      - name: Incident IDL equals the release IDL
+        run: |
+          mkdir -p target/idl-incident
+          for p in asset_registry transfer_hook; do
+            anchor idl build -p "$p" -o "$PWD/target/idl-incident/$p.json" -- --locked --lib --features incident
+            cmp "target/idl/$p.json" "target/idl-incident/$p.json"
+          done
 
       - name: Record tested artifact identity
         run: |
@@ -204,6 +249,10 @@ jobs:
             bash scripts/check-sbf-elf.sh target/deploy/asset_registry.so target/deploy/transfer_hook.so
             sha256sum target/deploy/asset_registry.so target/deploy/transfer_hook.so target/idl/asset_registry.json target/idl/transfer_hook.json
             wc -c target/deploy/asset_registry.so target/deploy/transfer_hook.so
+            echo "incident artifacts (never a release / devnet deploy):"
+            bash scripts/check-sbf-elf.sh target/deploy-incident/asset_registry.so target/deploy-incident/transfer_hook.so
+            sha256sum target/deploy-incident/asset_registry.so target/deploy-incident/transfer_hook.so
+            wc -c target/deploy-incident/asset_registry.so target/deploy-incident/transfer_hook.so
           } > target/tested-artifacts.txt
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
@@ -212,6 +261,8 @@ jobs:
           path: |
             program/target/deploy/asset_registry.so
             program/target/deploy/transfer_hook.so
+            program/target/deploy-incident/asset_registry.so
+            program/target/deploy-incident/transfer_hook.so
             program/target/idl/asset_registry.json
             program/target/idl/transfer_hook.json
             program/target/tested-artifacts.txt
