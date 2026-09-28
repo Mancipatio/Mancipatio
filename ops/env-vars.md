@@ -54,7 +54,8 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `GOOGLE_CLIENT_SECRET` | Secret | of that client | set | Google sign-in off | `lib/server/account-google.ts` |
 | `HEALTH_TOKEN` | Secret | ≥ 32, no whitespace (guard `health-token`) | recommended | `/api/health` never shows details | `lib/server/health.ts` |
 | `SENTRY_DSN` | Secret-ish (project key) | `https://<key>@<org>.ingest.de.sentry.io/<project id>` of an EU project: the guard `sentry` applies the runtime parser's rules | recommended | Server errors only in Vercel logs | `lib/request-error-report.ts` |
-| `MAINNET_LEGAL_COPY_APPROVED` | Build | `true` once counsel's mainnet copy is merged (guard) | — | Mainnet build refused | `next.config.ts` |
+| `MAINNET_LEGAL_COPY_APPROVED` | Build | `true` only after counsel reviewed the rendered mainnet pages (guard; runbook §17) | — | Mainnet build refused | `next.config.ts` |
+| `MAINNET_LICENSE_NOT_REQUIRED` | Build | `true` **only** on counsel's written opinion that no licence is needed, while `OPERATORS.mainnet.licence` is null; refused together with a recorded licence (guard; runbook §17) | — | Mainnet build refused while no licence is recorded | `lib/legal/readiness.ts` |
 | `MAINNET_OPS_WAIVERS` | Build | empty; see below | — | Every operations guard applies | `next.config.ts` |
 | `VERCEL`, `VERCEL_ENV`, `VERCEL_GIT_COMMIT_SHA`, `NODE_ENV` | Platform | set by Vercel | set by Vercel | — | build guards, `/api/health` commit |
 
@@ -67,9 +68,12 @@ A mainnet `next build` refuses without each of these, by name:
 ones for that build and logs it; an unknown name fails the build. A waiver
 is a conscious, temporary decision: write down why and until when.
 Independent of the waivers, a mainnet build also needs the legal copy flag,
-the mainnet Supabase project, the KYC registry pin and the RPC settings
-above. CI proves all of it with placeholders on every change
-(`front/scripts/ci/mainnet-build.sh`).
+the operator and legal slots in `front/lib/legal/` (the operator record, the
+licence or `MAINNET_LICENSE_NOT_REQUIRED`, counsel's Terms, Privacy Policy,
+acceptance summary and risk warning: runbook §17), the mainnet Supabase
+project, the KYC registry pin and the RPC settings above. CI proves all of it
+on every change (`front/scripts/ci/mainnet-build.sh`): placeholder variables,
+and an invented legal-slot fixture written into its throwaway checkout only.
 
 ### Feature flags
 

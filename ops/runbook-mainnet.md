@@ -1206,6 +1206,19 @@ chain run under a mainnet identity.
 
 Before every migration: `bash scripts/ops/backup.sh <target> pre-<migration>`.
 
+### Client-documents bucket limits (0077, package 8.4)
+
+`0077_client_documents_bucket_limits.sql` pins the upload route's limits on
+the private KYC bucket `client-documents` (15 MiB; PDF, PNG, JPEG, DOCX), as
+0031 and 0048 did for the other document buckets. Expand-only: the route
+already refuses everything the bucket now refuses, and existing objects are
+untouched. Devnet rollout, after 0076 and in any order against the front:
+`bash scripts/ops/backup.sh devnet pre-0077`, then
+`MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0077_client_documents_bucket_limits.sql`;
+check with `select id, file_size_limit, allowed_mime_types from
+storage.buckets where id = 'client-documents';` (15728640 and the four
+types). The mainnet project gets it with the rest of the chain.
+
 ### Backups (D14, D17)
 
 - Devnet: `backup.sh devnet <label>` writes a full and a schema-only dump
@@ -1912,7 +1925,10 @@ When the company and the licence arrive:
    material change needs a new version. The devnet version stays
    `DEVNET_TOS_VERSION` (`front/lib/tos-version.ts`).
 3. `npx vitest run tests/legal-slots.test.ts --silent=false` until the
-   "mainnet legal slots" report says complete.
+   "mainnet legal slots" report says complete. (CI's mainnet build,
+   `front/scripts/ci/mainnet-build.sh`, proves the guard with an invented
+   fixture of these slots written into its throwaway checkout; it never
+   checks the committed values, this test does.)
 4. Review the rendered `/legal/terms`, `/legal/privacy`, `/legal/company`,
    `/risks`, the footer, a sale page and an OTC take confirmation with
    counsel. A production build (Vercel Preview included) refuses
@@ -1925,7 +1941,9 @@ When the company and the licence arrive:
    - a Preview deployment of the mainnet Vercel project with
      `MAINNET_LEGAL_COPY_APPROVED=true` set for the **Preview** environment
      only (it then also needs the other mainnet build checks: the Supabase
-     project, the KYC registry pin).
+     project, the KYC registry pin, the RPC and operations settings of
+     `ops/env-vars.md`, where an operations requirement can be waived by name
+     for the Preview with `MAINNET_OPS_WAIVERS`).
 5. Only after that review set `MAINNET_LEGAL_COPY_APPROVED=true` for the
    **Production** environment of the mainnet Vercel project.
 

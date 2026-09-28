@@ -113,7 +113,9 @@ jobs:
         run: npm run check:edge
 
   # front-app-18: the mainnet guards refuse without their settings, pass with
-  # placeholders, and the mainnet branches compile. No secret is involved.
+  # placeholders (and an invented fixture of the lib/legal/ slots, written into
+  # the runner's checkout only), and the mainnet branches compile. No secret
+  # is involved.
   build-mainnet:
     name: next build (mainnet, placeholder env)
     if: github.event_name != 'schedule'

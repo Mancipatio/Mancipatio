@@ -1,4 +1,4 @@
--- 0076: size cap and MIME allowlist on the private KYC bucket (podaci-infra-16).
+-- 0077: size cap and MIME allowlist on the private KYC bucket (podaci-infra-16).
 --
 -- client-documents (0025) was created without either, so only the upload
 -- route enforced them: 15 MiB (app/api/clients/_helpers.ts MAX_UPLOAD_BYTES)
@@ -9,8 +9,9 @@
 --
 -- Expand-only and compatible with the deployed front: the route already
 -- refuses everything the bucket now refuses. Existing objects are untouched
--- (Storage checks the limits on upload). Apply order: any time after 0075,
--- with db.sh like 0071-0075; no code depends on it. Idempotent.
+-- (Storage checks the limits on upload). Apply order: any time after 0076
+-- (0076_offering_exemption.sql; the two are independent), with db.sh like
+-- 0071-0076; no code depends on it. Idempotent.
 
 begin;
 

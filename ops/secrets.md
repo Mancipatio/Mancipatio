@@ -53,11 +53,11 @@ KYC registry authority, BlocklistAuthority, protocol treasury, and the
 program upgrade authority. Owner decision (2026-09-28): once the company
 exists, one company wallet takes over every role now held by the operator's
 personal wallet; the upgrade authority stays with the Squads multisig. The
-move is the on-chain two-step transfer of each role (runbook §7–8), never a
-key copy. Keep the company wallet on a hardware device with a tested
-backup, list it (and every Admin) in `ALARM_BALANCE_WATCH`, and the multisig
-in `ALARM_SQUADS_CONFIG`, so a low balance or a Squads proposal pages the
-team.
+move is the on-chain two-step transfer of each role (runbook §19,
+`npm run chain:handover`), never a key copy. Keep the company wallet on a
+hardware device with a tested backup, list it (and every Admin) in
+`ALARM_BALANCE_WATCH`, and the multisig in `ALARM_SQUADS_CONFIG`, so a low
+balance or a Squads proposal pages the team.
 
 ## On a suspected leak
 
