@@ -23,19 +23,21 @@
 #
 # Time (design-6.3 §D; the 7-day recoveries, the 48 h grants, the 30-day
 # KYC grace): a test validator has no runtime clock control, only
-# `--warp-slot` at a (re)start. `warp <slot>` stops THIS validator (the same
-# ours() check as stop), restarts it on the same ledger with only the ports
-# and `--warp-slot <slot>` (the genesis flags are ignored on an existing
-# ledger anyway) and returns once a full snapshot at least 300 slots past the
-# warp exists: a restart from the warp's own snapshot fails (its leader is
-# the default key), and one whose status cache still holds pre-warp slots
-# fails the SlotHistory check. After a warp the Clock sysvar runs from the
-# restart's root timestamp at 75 % of 400 ms per slot since the epoch's
-# first slot (epoch 0; half that in later epochs, as measured on Agave
-# 4.2.2), so the jump is chosen by the slot; scripts/chain/lib/e2e/warp.ts
-# computes it and re-reads the clock. Genesis therefore uses a long epoch,
-# E2E_SLOTS_PER_EPOCH (default 20,000,000 slots: about 69 days of warp in
-# epoch 0 and 35 in each later one; ~1.2 GB RSS).
+# `--warp-slot` at a (re)start. `warp <slot>` first waits for a full
+# snapshot at or past the finalized slot (the restart loads the newest
+# snapshot and warps from it without replaying the blockstore after it, so
+# a finalized transaction past it would be lost), stops THIS validator (the
+# same ours() check as stop), restarts it on the same ledger with only the
+# ports and `--warp-slot <slot>` (the genesis flags are ignored on an
+# existing ledger anyway) and returns once a full snapshot at least 300
+# slots past the warp exists: a restart from the warp's own snapshot fails
+# (its leader is the default key), and one whose status cache still holds
+# pre-warp slots fails the SlotHistory check. Which slot gives which
+# clock (a jump inside the epoch, then a reset into a later epoch so the
+# clock moves again) is scripts/chain/lib/e2e/warp.ts's; a jump of D
+# seconds needs D / 0.3 slots inside one epoch, so genesis uses a long
+# epoch, E2E_SLOTS_PER_EPOCH (default 20,000,000 slots: up to about 69
+# days per jump; ~1.2 GB RSS).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 ROOT="$(git rev-parse --show-toplevel)"
@@ -129,6 +131,31 @@ latest_snapshot() {
   ls "$LEDGER" 2>/dev/null | sed -nE 's/^snapshot-([0-9]+)-.*\.tar\.zst$/\1/p' | sort -n | tail -1
 }
 
+# The newest full snapshot both as an archive and as the bank snapshot
+# directory a restart loads (the older of the two), or 0.
+settled_snapshot() {
+  local archive dir
+  archive="$(latest_snapshot)"
+  dir="$(ls "$LEDGER/snapshots" 2>/dev/null | sed -nE '/^[0-9]+$/p' | sort -n | tail -1)"
+  archive="${archive:-0}"
+  dir="${dir:-0}"
+  if [ "$archive" -lt "$dir" ]; then echo "$archive"; else echo "$dir"; fi
+}
+
+# Waits until this validator has a full snapshot at or past slot $1.
+wait_snapshot() {
+  local waited=0
+  until [ "$(settled_snapshot)" -ge "$1" ]; do
+    if ! ours; then echo "the validator exited ($2); see $LOG" >&2; exit 1; fi
+    if [ "$waited" -ge "${E2E_WARP_SETTLE_TIMEOUT_S:-900}" ]; then
+      echo "no snapshot at or past slot $1 within ${waited} s ($2); see $LOG" >&2; exit 1
+    fi
+    sleep 2
+    waited=$((waited + 2))
+  done
+  echo "$waited"
+}
+
 case "${1:-}" in
   start)
     if ours; then echo "already running (pid $(cat "$PID_FILE"))"; exit 1; fi
@@ -193,23 +220,19 @@ EOF
     if ! ours; then echo "not running: warp restarts only this script's validator on $LEDGER"; exit 1; fi
     current="$(solana slot -u "$URL" --commitment finalized)"
     if [ "$target" -le "$current" ]; then echo "warp slot $target is not past the finalized slot $current"; exit 1; fi
-    # A snapshot from before this warp must itself be settled (a previous
-    # warp's own snapshot would make the restart fail).
+    # The restart loads the newest full snapshot and warps from it WITHOUT
+    # replaying the blockstore after it: every finalized transaction must be
+    # in a snapshot first, or the warp silently drops it (observed: a
+    # finalized open_payout_vault 65 slots past the snapshot was gone).
+    before="$(wait_snapshot "$current" "before the warp")"
     halt
     ports_free
-    echo "=== warp to slot $target ($(date -u +%FT%TZ)) ===" >>"$LOG"
+    echo "=== warp to slot $target from snapshot $(settled_snapshot) ($(date -u +%FT%TZ)) ===" >>"$LOG"
     launch --warp-slot "$target"
-    need=$((target + WARP_SETTLE_SLOTS))
-    waited=0
-    until [ "$(latest_snapshot || echo 0)" -ge "$need" ] 2>/dev/null; do
-      if ! ours; then echo "the validator exited after the warp; see $LOG"; exit 1; fi
-      if [ "$waited" -ge "${E2E_WARP_SETTLE_TIMEOUT_S:-900}" ]; then
-        echo "no snapshot past slot $need within ${waited} s; see $LOG"; exit 1
-      fi
-      sleep 5
-      waited=$((waited + 5))
-    done
-    echo "warped to slot $target (pid $(cat "$PID_FILE")); settled at snapshot $(latest_snapshot) after ${waited} s"
+    # A snapshot past the warp must itself be settled before the next
+    # restart (the warp's own snapshot would make that restart fail).
+    after="$(wait_snapshot $((target + WARP_SETTLE_SLOTS)) "after the warp")"
+    echo "warped to slot $target (pid $(cat "$PID_FILE")); snapshot waits ${before} s before, ${after} s after (settled at $(settled_snapshot))"
     ;;
   stop)
     if ! ours; then
