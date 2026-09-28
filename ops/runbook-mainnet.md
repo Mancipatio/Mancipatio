@@ -853,6 +853,28 @@ source paths are clean (see "Safety rules").
 - Exercise these scenarios as a timed tabletop on devnet (6.5) and record it
   under `docs/mainnet-readiness/`.
 
+### Accepted program risks (v1.0.0-rc)
+
+Known behaviours that v1.0.0-rc keeps on purpose; each goes into the audit
+package as an accepted risk with the operating rule that contains it.
+
+- **`trigger_custody_vault` checks only its operator** (gap 2026-09-28
+  prog-vlast-12, low). It moves an Active vault to Triggered when the vault
+  `authority` (an Admin) signs; it does not look at the vault type, the
+  deposit or the beneficiary's KYC. The KYC of a DeliveryEscrow's
+  beneficiary is checked only at `realize_custody_vault`, so a vault
+  triggered while the beneficiary's passport is missing or expired cannot
+  realize (6069 `ReceiverNotApproved`, 6070 `ReceiverKycExpired`), and a
+  Triggered vault takes no more deposits (6086 `VaultNotAcceptingDeposits`).
+  No token can leave to the wrong party: the escrow stays put until the
+  beneficiary's KYC is renewed and the vault realizes, or it is returned
+  (`return_custody_vault` accepts Active and Triggered DeliveryEscrow
+  vaults). Rule: trigger a DeliveryEscrow only after checking on
+  `/admin/custody` that the beneficiary's passport is verified and valid
+  past the planned realize; if one was triggered anyway, renew the KYC and
+  realize, or return the vault. A later release may add the same KYC check
+  to the trigger of a DeliveryEscrow (not in v1).
+
 ### `chain:emergency` (out of band: no front, no database)
 
 For a pause, an unpause, the blocklist and the hook mode when the front, the
