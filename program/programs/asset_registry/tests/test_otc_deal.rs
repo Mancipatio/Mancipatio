@@ -16,6 +16,8 @@ mod pause;
 mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -600,6 +602,8 @@ fn deposit_asset_ix(ctx: &Ctx, signer: &Pubkey, deal_id: u64) -> Instruction {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     // deposit leg (source authority = seller) + settle leg (source authority = deal PDA)
@@ -624,6 +628,8 @@ fn deposit_payment_ix(ctx: &Ctx, signer: &Pubkey, deal_id: u64) -> Instruction {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     // settle leg (source authority = deal PDA) — unused if the asset is not in yet
@@ -645,6 +651,8 @@ fn expire_deal_ix(ctx: &Ctx, payer: &Pubkey, deal_id: u64) -> Instruction {
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     metas.extend_from_slice(&hook_metas(ctx, &deal_pda));
@@ -1406,7 +1414,14 @@ fn otc_reclaim_after_completed_cancelled_and_expired() {
     send(
         &mut svm,
         &[&ctx.payer],
-        &[create_deal_ix_with(&ctx, &admin, 4, 0, &spl_mint, &spl)],
+        &[create_deal_ix_with(
+            &ctx,
+            &admin,
+            4,
+            asset_registry::OTC_DEAL_MAX_TTL_SECS,
+            &spl_mint,
+            &spl,
+        )],
         "create spl deal",
     );
     let (_, _, spl_payment_escrow) = deal_pdas(&ctx, 4);
@@ -1443,17 +1458,17 @@ fn otc_reclaim_refusals_and_the_tombstone_is_permanent() {
     warp_to(&mut svm, 1_000);
     let admin = ctx.payer.pubkey();
     let other = funded_wallet(&mut svm);
-    send(
-        &mut svm,
-        &[&ctx.payer],
-        &[reclaim::add_admin_ix(&admin, &other.pubkey())],
-        "second admin",
-    );
+    v1::grant_admin(&mut svm, &ctx.payer, &other).expect("second admin");
     for id in 1..=2u64 {
         send(
             &mut svm,
             &[&ctx.payer],
-            &[create_deal_ix(&ctx, &admin, id, 0)],
+            &[create_deal_ix(
+                &ctx,
+                &admin,
+                id,
+                asset_registry::OTC_DEAL_MAX_TTL_SECS,
+            )],
             "create_otc_deal",
         );
     }
@@ -1546,7 +1561,12 @@ fn otc_reclaim_refusals_and_the_tombstone_is_permanent() {
     let err = try_send(
         &mut svm,
         &[&ctx.payer],
-        &[create_deal_ix(&ctx, &admin, 2, 0)],
+        &[create_deal_ix(
+            &ctx,
+            &admin,
+            2,
+            asset_registry::OTC_DEAL_MAX_TTL_SECS,
+        )],
     )
     .expect_err("a tombstoned deal id cannot be re-created");
     assert!(err.contains("already in use"), "got: {err}");

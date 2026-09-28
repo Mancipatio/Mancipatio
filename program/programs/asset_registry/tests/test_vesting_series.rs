@@ -7,6 +7,8 @@
 mod pause;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -366,6 +368,7 @@ fn claim(svm: &mut LiteSVM, ctx: &SeriesCtx, signer: &Keypair, index: u32) -> Re
             escrow: ctx.escrow,
             recipient_token_account: ata,
             token_program: TOKEN_2022,
+            recipient_block_entry: v1::block_entry(&v1::token_owner(svm, &ata)),
         }
         .to_account_metas(None),
         data: ixd::ClaimVested {
@@ -392,6 +395,7 @@ fn push(svm: &mut LiteSVM, ctx: &SeriesCtx, payer: &Keypair, index: u32) -> Resu
             escrow: ctx.escrow,
             recipient_token_account: ata,
             token_program: TOKEN_2022,
+            recipient_block_entry: v1::block_entry(&v1::token_owner(svm, &ata)),
         }
         .to_account_metas(None),
         data: ixd::PushVested {
@@ -585,6 +589,7 @@ fn recovery_repoints_the_position_and_zeroes_the_old_wallet() {
             escrow: ctx.escrow,
             recipient_token_account: new_ata,
             token_program: TOKEN_2022,
+            recipient_block_entry: v1::block_entry(&v1::token_owner(&svm, &new_ata)),
         }
         .to_account_metas(None),
         data: ixd::ClaimVested { position_index: 0 }.data(),
@@ -1060,6 +1065,7 @@ fn legacy_spl_vesting_escrow_still_funds_and_delivers() {
     );
     assert_eq!(token_balance(&svm, &escrow), 100);
     warp_to(&mut svm, 1_001);
+    let recipient_block_entry = v1::block_entry(&v1::token_owner(&svm, &destination));
     send(
         &mut svm,
         &[&recipient],
@@ -1074,6 +1080,7 @@ fn legacy_spl_vesting_escrow_still_funds_and_delivers() {
                 escrow,
                 recipient_token_account: destination,
                 token_program,
+                recipient_block_entry,
             }
             .to_account_metas(None),
         )],
@@ -1654,7 +1661,8 @@ fn distribution_pause_gates_vesting_funding_while_setup_and_exits_stay_open() {
     pause::pause_only(
         &mut svm,
         &operator,
-        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+        asset_registry::PAUSE_FLAGS_ALL
+            & !(asset_registry::PAUSE_DISTRIBUTIONS | asset_registry::PAUSE_PAYOUT_MODULES),
     );
     deposit(&mut svm, &ctx, 400);
 

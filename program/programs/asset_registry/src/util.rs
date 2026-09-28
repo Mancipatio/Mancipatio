@@ -226,6 +226,86 @@ pub fn ensure(ok: bool, code: RegistryError) -> Result<()> {
     }
 }
 
+/// An "unset" PDA — the absence the v1 gates require (no `IssuerFreeze`, no
+/// hook `BlockEntry`): system-owned with no data. Lamports are irrelevant, so
+/// a stranger pre-funding the address cannot freeze or block anyone.
+/// Anything else counts as SET — fail-closed (a hook-owned BlockEntry, a
+/// registry-owned IssuerFreeze, or any other owner / data).
+#[inline(never)]
+pub fn is_unset(account: &AccountInfo) -> bool {
+    account.owner == &anchor_lang::system_program::ID && account.data_is_empty()
+}
+
+/// A timelocked proposal executes inside `[eta, expires_at)`:
+/// `TimelockActive` before, `ProposalExpired` from `expires_at` on.
+#[inline(never)]
+pub fn require_window(now: i64, eta: i64, expires_at: i64) -> Result<()> {
+    ensure(now >= eta, RegistryError::TimelockActive)?;
+    ensure(now < expires_at, RegistryError::ProposalExpired)
+}
+
+/// While the one-way bootstrap window is open (Platform bit 7: the platform
+/// has never been unpaused, so no entry flow has run and no investor funds
+/// exist) the admin-grant and super-admin-rotation timelocks are waived AT
+/// EXECUTION — `eta` becomes `proposed_at`. The expiry never is. A proposal
+/// staged during bootstrap but executed after it closed waits its full eta.
+pub fn effective_eta(platform: &crate::state::Platform, proposed_at: i64, eta: i64) -> i64 {
+    if platform.bootstrap_open() {
+        proposed_at
+    } else {
+        eta
+    }
+}
+
+/// The veto of a timelocked admin grant or super-admin rotation (D3): the
+/// super admin, any live Admin, or the program's upgrade authority
+/// (`program_data` is already bound to this program by the caller's
+/// constraint). The upgrade authority is the veto a compromised super admin
+/// cannot remove (`remove_admin` is instant); it adds no trust, since it can
+/// replace the program anyway.
+#[inline(never)]
+pub fn is_veto_holder(
+    platform: &crate::state::Platform,
+    key: &Pubkey,
+    admin_record: &AccountInfo,
+    program_data: &ProgramData,
+) -> bool {
+    *key == platform.admin
+        || program_data.upgrade_authority_address == Some(*key)
+        || is_active_admin(admin_record, key)
+}
+
+/// Installs `new_admin` as `Platform.admin` (shared by
+/// `accept_platform_admin` and `execute_platform_recovery`): the outgoing
+/// super admin's Admin record, when present, is validated and closed (rent to
+/// `rent_to`), and `new_admin_record` (already `init_if_needed` at
+/// `["admin", new_admin]`) is written with `added_by` = the outgoing key.
+/// Returns the outgoing key. The upgrade authority is never touched.
+pub fn install_platform_admin<'info>(
+    platform: &mut Account<'info, crate::state::Platform>,
+    old_admin_record: &AccountInfo<'info>,
+    new_admin_record: &mut Account<'info, crate::state::Admin>,
+    new_admin: Pubkey,
+    new_admin_bump: u8,
+    rent_to: &AccountInfo<'info>,
+) -> Result<Pubkey> {
+    let previous = platform.admin;
+    if !old_admin_record.data_is_empty() {
+        ensure(
+            is_active_admin(old_admin_record, &previous),
+            RegistryError::Unauthorized,
+        )?;
+        // Close the validated old Admin PDA, including when migrating a legacy
+        // operational role. A missing old role needs no repair just to rotate.
+        close_program_account(old_admin_record, rent_to)?;
+    }
+    new_admin_record.admin = new_admin;
+    new_admin_record.added_by = previous;
+    new_admin_record.bump = new_admin_bump;
+    platform.admin = new_admin;
+    Ok(previous)
+}
+
 /// Closes an EMPTY escrow token account owned by `program` and whose token
 /// authority is the PDA signing with `seeds`; its rent goes to `recipient`.
 /// A non-zero balance is refused (`EscrowNotEmpty`): dust is never burned or
@@ -309,16 +389,18 @@ pub fn take_old_grant(
     Ok(Some((grant.capabilities, grant.updated_by)))
 }
 
-/// Retires a pending `AuthorityTransfer` or `IssuerRecovery` of `issuer` at
-/// `record` (the caller pins its address by seeds) when the issuer authority
-/// changes by the OTHER path: its `current_authority` (byte 40 in both
-/// layouts) becomes the default key, which no issuer authority can equal, so
-/// an A -> B -> A round trip can never make it acceptable / executable again.
-/// Cancel still works and returns the rent. Returns whether a live-looking
-/// proposal was retired; a missing account is a no-op.
+/// Retires a pending proposal of `target` at `record` (the caller pins its
+/// address by seeds) when the authority it would change moves by ANOTHER
+/// path: an `AuthorityProposal` / `IssuerRecovery` of an issuer, or an
+/// `AuthorityProposal` / `PlatformRecovery` of the platform. Its
+/// `current_authority` (byte 40 in every such layout) becomes the default
+/// key, which no live authority can equal, so an A -> B -> A round trip can
+/// never make it acceptable / executable again. Cancel still works and
+/// returns the rent. Returns whether a live-looking proposal was retired; a
+/// missing account is a no-op.
 pub fn retire_pending_proposal(
     record: &AccountInfo,
-    issuer: &Pubkey,
+    target: &Pubkey,
     discriminator: &[u8],
 ) -> Result<bool> {
     if record.data_is_empty() || record.owner != &crate::ID {
@@ -326,7 +408,7 @@ pub fn retire_pending_proposal(
     }
     let mut data = record.try_borrow_mut_data()?;
     require!(
-        data.len() >= 72 && data[..8] == *discriminator && data[8..40] == issuer.to_bytes(),
+        data.len() >= 72 && data[..8] == *discriminator && data[8..40] == target.to_bytes(),
         RegistryError::Unauthorized
     );
     if data[40..72].iter().all(|b| *b == 0) {

@@ -147,12 +147,14 @@ pub const MIN_LIQ_PREF_BPS: u16 = 10_000;
 pub const STATE_VERSION: u8 = 1;
 
 // ── Emergency pause (`Platform.pause_flags`, byte 74) ────────────────────────
-// Each bit stops one family of platform-mediated ENTRY flows. Exits (cancels,
-// expiries, refunds, claims, custody burns/returns) never read these bits, and
-// the transfer hook never reads the Platform — wallet-to-wallet transfers stay
-// free. Any Admin may SET bits; only the super admin (`Platform.admin`) may
-// CLEAR them. Values 0 and 1 keep the meaning of the former `paused: bool`
-// (1 = onboarding paused). Bits outside `PAUSE_FLAGS_ALL` gate nothing.
+// Bits 0-6 each stop one family of platform-mediated ENTRY flows. Exits
+// (cancels, expiries, refunds, claims, custody burns/returns) never read these
+// bits, and the transfer hook never reads the Platform — wallet-to-wallet
+// transfers stay free. Any Admin may SET bits; only the super admin
+// (`Platform.admin`) may CLEAR them, and `PAUSE_PAYOUT_MODULES` only in a call
+// of its own. Values 0 and 1 keep the meaning of the former `paused: bool`
+// (1 = onboarding paused). Bit 7 is not a pause bit: it is the one-way
+// `PLATFORM_BOOTSTRAP_OPEN` marker (see below).
 /// Issuer registration, asset / share-class creation, share-class mint setup.
 pub const PAUSE_ONBOARDING: u8 = 1 << 0;
 /// Primary issuance: `open_sale`, `buy`, `mint_to_treasury`.
@@ -167,13 +169,79 @@ pub const PAUSE_DISTRIBUTIONS: u8 = 1 << 4;
 /// Proceeds paid out to issuers / founders (`close_sale`, `release_payout`,
 /// `claim_founder_yield`).
 pub const PAUSE_ISSUER_PROCEEDS: u8 = 1 << 5;
-/// Every defined pause bit. A fresh `initialize_platform` starts here.
+/// The payout / Merkle modules (D2, off on mainnet): Startup raises
+/// (`open_sale` with `RaiseType::Startup`), `route_yield`,
+/// `create_rights_issuance` and `publish_milestone`. Their exits (vault
+/// lifecycle, refunds and claims) stay open. Clearing it must be a
+/// `set_pause_flags` call of its own (`PayoutModulesClearNotExplicit`).
+pub const PAUSE_PAYOUT_MODULES: u8 = 1 << 6;
+/// Every defined pause bit (0x7F).
 pub const PAUSE_FLAGS_ALL: u8 = PAUSE_ONBOARDING
     | PAUSE_PRIMARY
     | PAUSE_SECONDARY
     | PAUSE_CUSTODY_ENTRY
     | PAUSE_DISTRIBUTIONS
-    | PAUSE_ISSUER_PROCEEDS;
+    | PAUSE_ISSUER_PROCEEDS
+    | PAUSE_PAYOUT_MODULES;
+/// Bit 7 of `pause_flags` — NOT a pause bit and never in `PAUSE_FLAGS_ALL`.
+/// Set only by `initialize_platform` (0xFF); cleared by the first
+/// `set_pause_flags` with a non-zero clear mask or `set_pause(false)` (the
+/// first unpause), or explicitly with `set_pause_flags(0, 0x80)`. Nothing can
+/// set it again. While it is set the admin-grant and super-admin-rotation
+/// timelocks are waived at execution (bootstrap); proposal expiries never are.
+pub const PLATFORM_BOOTSTRAP_OPEN: u8 = 1 << 7;
+/// `open_vault_vote`: a payout-vault vote runs at least 7 days (notice).
+pub const MIN_VAULT_VOTING_PERIOD_SECS: i64 = 604_800;
+
+// ── D1: issuer proceeds freeze ───────────────────────────────────────────────
+/// `IssuerFreeze` PDA: `["issuer_freeze", issuer]`. While it exists every
+/// proceeds exit of that issuer (and its `buy` / `open_sale`) is closed.
+pub const ISSUER_FREEZE_SEED: &[u8] = b"issuer_freeze";
+
+// ── D3: timelocked admin grants and super-admin rotation ────────────────────
+/// `PendingAdmin` PDA: `["pending_admin", new_admin]`.
+pub const PENDING_ADMIN_SEED: &[u8] = b"pending_admin";
+/// `AuthorityProposal` PDA: `["authority_proposal", target]` (platform,
+/// custody vault, issuer or KYC registry). Replaces the legacy
+/// `AUTHORITY_TRANSFER_SEED` accounts, which no instruction reads any more.
+pub const AUTHORITY_PROPOSAL_SEED: &[u8] = b"authority_proposal";
+/// `add_admin` executes at or after `proposed_at + 48 h`.
+pub const ADMIN_TIMELOCK_SECS: i64 = 172_800;
+/// `accept_platform_admin` executes at or after `proposed_at + 48 h`.
+pub const SUPER_ADMIN_ROTATION_TIMELOCK_SECS: i64 = 172_800;
+/// Every proposal expires 14 days after its eta (eta = proposed_at when the
+/// flow has no timelock).
+pub const PROPOSAL_WINDOW_SECS: i64 = 1_209_600;
+/// `AuthorityProposal.kind`.
+pub const AUTHORITY_PROPOSAL_KIND_PLATFORM: u8 = 0;
+pub const AUTHORITY_PROPOSAL_KIND_CUSTODY: u8 = 1;
+pub const AUTHORITY_PROPOSAL_KIND_ISSUER: u8 = 2;
+pub const AUTHORITY_PROPOSAL_KIND_KYC_REGISTRY: u8 = 3;
+
+// ── D4: super-admin recovery by the program upgrade authority ───────────────
+/// `PlatformRecovery` PDA: `["platform_recovery", platform]`.
+pub const PLATFORM_RECOVERY_SEED: &[u8] = b"platform_recovery";
+/// Recovery executes at or after `proposed_at + 7 days`, strictly before
+/// `eta + PROPOSAL_WINDOW_SECS`. The `incident` build (never a release
+/// artifact; design 8.3 §7.4) sets it to 0 for a COMPROMISED super admin.
+#[cfg(not(feature = "incident"))]
+pub const PLATFORM_RECOVERY_DELAY_SECS: i64 = 604_800;
+#[cfg(feature = "incident")]
+pub const PLATFORM_RECOVERY_DELAY_SECS: i64 = 0;
+
+// ── Mandatory bounds (mainnet defaults) ──────────────────────────────────────
+/// A primary sale ends at most 365 days after `max(start_ts, now)`.
+pub const MAX_SALE_DURATION_SECS: i64 = 31_536_000;
+/// `approve_holder`: a KYC entry expires at most 2 years (730 days) from now.
+pub const MAX_KYC_VALIDITY_SECS: i64 = 63_072_000;
+/// `clawback_from_holder` for an EXPIRED entry opens 30 days after its
+/// expiry (a Revoked entry is immediate).
+pub const KYC_EXPIRY_CLAWBACK_GRACE_SECS: i64 = 2_592_000;
+/// `create_otc_deal`: `now < expires_at <= now + 90 days`.
+pub const OTC_DEAL_MAX_TTL_SECS: i64 = 7_776_000;
+/// DeliveryEscrow custody vault: `now + 24 h <= deadline <= now + 365 days`.
+pub const DELIVERY_ESCROW_MIN_DEADLINE_SECS: i64 = 86_400;
+pub const DELIVERY_ESCROW_MAX_DEADLINE_SECS: i64 = 31_536_000;
 
 // ── Vesting series (spec: "11. Vesting — Mancipatio") ───────────────────────
 /// Seed for a `VestingSeries` PDA — `["vesting_series", authority, series_id]`.
@@ -200,6 +268,9 @@ pub const CUSTODY_STATE_VERSION: u8 = 2;
 
 /// Scoped issuer permissions and staged operational authority changes.
 pub const ISSUER_PERMISSIONS_SEED: &[u8] = b"issuer_permissions";
+/// LEGACY (rc.x): `AuthorityTransfer` PDAs. v1 stages every rotation at
+/// `AUTHORITY_PROPOSAL_SEED`; accounts left at this seed are inert, and the
+/// devnet go/no-go requires that none exist before the v1 upgrade.
 pub const AUTHORITY_TRANSFER_SEED: &[u8] = b"authority_transfer";
 pub const ISSUER_PERMISSION_MINT: u8 = 1;
 pub const ISSUER_PERMISSION_METADATA: u8 = 2;

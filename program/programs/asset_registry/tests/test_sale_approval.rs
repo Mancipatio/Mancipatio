@@ -13,6 +13,8 @@ mod reclaim;
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -119,23 +121,6 @@ struct Env {
 
 fn platform() -> Pubkey {
     pause::platform_pda()
-}
-
-fn add_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        asset_registry::ID,
-        &ixd::AddAdmin {
-            new_admin: *new_admin,
-        }
-        .data(),
-        acc::AddAdmin {
-            super_admin: *super_admin,
-            platform: platform(),
-            admin_record: pause::admin_pda(new_admin),
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    )
 }
 
 fn remove_admin_ix(super_admin: &Pubkey, admin: &Pubkey) -> Instruction {
@@ -253,13 +238,9 @@ fn boot() -> (LiteSVM, Env) {
         )],
         "initialize_platform",
     );
+    // Day-D order: roles inside the bootstrap window, then the first unpause.
+    v1::grant_admin(&mut svm, &payer, &admin2).expect("add admin2");
     pause::unpause_all(&mut svm, &payer);
-    send(
-        &mut svm,
-        &[&payer],
-        &[add_admin_ix(&payer.pubkey(), &admin2.pubkey())],
-        "add admin2",
-    );
 
     send(
         &mut svm,
@@ -456,7 +437,7 @@ fn open_sale_ix(env: &Env, a: &OpenArgs) -> Instruction {
             price_per_unit: a.price,
             total_for_sale: a.total,
             start_ts: 0,
-            end_ts: 0,
+            end_ts: asset_registry::MAX_SALE_DURATION_SECS,
             raise_type: a.raise_type,
             cliff_months,
             vesting_months,
@@ -481,6 +462,7 @@ fn open_sale_ix(env: &Env, a: &OpenArgs) -> Instruction {
             approved_by: a.approved_by,
             approver_admin_record: pause::admin_pda(&a.approved_by),
             platform: platform(),
+            issuer_freeze: v1::issuer_freeze(&env.issuer),
         }
         .to_account_metas(None),
     )
@@ -504,12 +486,7 @@ fn approve_requires_a_live_admin_record() {
     // A removed Admin is no longer one.
     let admin3 = Keypair::new();
     svm.airdrop(&admin3.pubkey(), 10_000_000_000).unwrap();
-    send(
-        &mut svm,
-        &[&env.payer],
-        &[add_admin_ix(&env.payer.pubkey(), &admin3.pubkey())],
-        "add admin3",
-    );
+    v1::grant_admin(&mut svm, &env.payer, &admin3).expect("add admin3");
     send(
         &mut svm,
         &[&env.payer],
@@ -1123,7 +1100,7 @@ fn approval_fixes_the_payout_schedule_and_the_start() {
             price_per_unit: 10,
             total_for_sale: 100,
             start_ts,
-            end_ts: 0,
+            end_ts: start_ts.max(0) + asset_registry::MAX_SALE_DURATION_SECS,
             raise_type: RaiseType::Startup,
             cliff_months: cliff,
             vesting_months: vesting,
@@ -1217,6 +1194,8 @@ fn close_sale_closes_the_proceeds_and_the_sale_stays_the_reuse_guard() {
     let authority_before = lamports(&svm, &env.payer.pubkey());
     let fee = Keypair::new();
     svm.airdrop(&fee.pubkey(), 1_000_000_000).unwrap();
+    let chain = v1::sale_chain(&svm, &sale);
+    let destination_owner = v1::token_owner(&svm, &destination);
     send(
         &mut svm,
         &[&fee, &env.payer],
@@ -1231,6 +1210,11 @@ fn close_sale_closes_the_proceeds_and_the_sale_stays_the_reuse_guard() {
                 destination,
                 payment_token_program: TOKEN_2022,
                 platform: platform(),
+                share_class: chain.share_class,
+                asset: chain.asset,
+                issuer_freeze: v1::issuer_freeze(&chain.issuer),
+                authority_block_entry: v1::block_entry(&env.payer.pubkey()),
+                destination_block_entry: v1::block_entry(&destination_owner),
             }
             .to_account_metas(None),
         )],

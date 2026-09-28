@@ -125,11 +125,16 @@ pub fn handle_create_otc_deal(
         ctx.accounts.payment_mint.key() == payment_mint,
         RegistryError::InvalidDealParams
     );
+    // Every deal expires (prog-novac-12): `now < expires_at <= now + 90 d`,
+    // so the permissionless `expire_otc_deal` refund always opens.
     let now = Clock::get()?.unix_timestamp;
-    require!(
-        expires_at == 0 || expires_at > now,
-        RegistryError::InvalidExpiry
-    );
+    let latest = now
+        .checked_add(OTC_DEAL_MAX_TTL_SECS)
+        .ok_or(RegistryError::Overflow)?;
+    crate::util::ensure(
+        expires_at > now && expires_at <= latest,
+        RegistryError::DealExpiryOutOfRange,
+    )?;
 
     let deal = &mut ctx.accounts.deal;
     deal.admin = ctx.accounts.authority.key();

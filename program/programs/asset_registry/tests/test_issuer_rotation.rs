@@ -32,11 +32,11 @@ use {
         AccountSerialize, Discriminator, InstructionData, Space, ToAccountMetas,
     },
     asset_registry::{
-        accounts as acc, error::RegistryError, instruction as ixd, AuthorityTransfer, Issuer,
-        IssuerAuthorityChangeKind, IssuerAuthorityChanged, IssuerAuthorityProposalCancelled,
-        IssuerAuthorityProposed, IssuerPermissions, IssuerRecovery, IssuerRecoveryCancelled,
-        IssuerRecoveryProposed, KybStatus, PayoutFounderSynced, PayoutVault, RaiseType, Sale,
-        SaleAuthoritySynced,
+        accounts as acc, error::RegistryError, instruction as ixd, AuthorityProposal,
+        AuthorityTransfer, Issuer, IssuerAuthorityChangeKind, IssuerAuthorityChanged,
+        IssuerAuthorityProposalCancelled, IssuerAuthorityProposed, IssuerPermissions,
+        IssuerRecovery, IssuerRecoveryCancelled, IssuerRecoveryProposed, KybStatus,
+        PayoutFounderSynced, PayoutVault, RaiseType, Sale, SaleAuthoritySynced,
     },
     issuer::*,
     solana_keypair::Keypair,
@@ -183,7 +183,7 @@ fn open_sale_ix(
             price_per_unit: 1,
             total_for_sale: 1_000_000,
             start_ts: 0,
-            end_ts: 0,
+            end_ts: w.now() + asset_registry::MAX_SALE_DURATION_SECS,
             raise_type,
             cliff_months,
             vesting_months,
@@ -204,6 +204,7 @@ fn open_sale_ix(
             approved_by: w.admin.pubkey(),
             approver_admin_record: admin_pda(&w.admin.pubkey()),
             platform: platform_pda(),
+            issuer_freeze: issuer_freeze_pda(&fx.issuer),
         }
         .to_account_metas(None),
     )
@@ -249,6 +250,8 @@ fn buy(w: &mut World, fx: &Fixture, m: &Market, sale: &Pubkey, units: u64) {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: platform_pda(),
+        buyer_block_entry: block_entry_pda(&m.buyer.pubkey()),
+        issuer_freeze: issuer_freeze_pda(&fx.issuer),
     }
     .to_account_metas(None);
     metas.push(AccountMeta::new_readonly(extra_metas, false));
@@ -262,11 +265,14 @@ fn buy(w: &mut World, fx: &Fixture, m: &Market, sale: &Pubkey, units: u64) {
 }
 
 fn close_sale_ix(
+    w: &World,
     authority: &Pubkey,
     sale: &Pubkey,
     m: &Market,
     destination: &Pubkey,
 ) -> Instruction {
+    let share_class = w.load::<asset_registry::Sale>(sale).share_class;
+    let (asset, issuer) = w.chain(&share_class);
     Instruction::new_with_bytes(
         asset_registry::ID,
         &ixd::CloseSale {}.data(),
@@ -278,12 +284,19 @@ fn close_sale_ix(
             destination: *destination,
             payment_token_program: TOKEN_2022,
             platform: platform_pda(),
+            share_class,
+            asset,
+            issuer_freeze: issuer_freeze_pda(&issuer),
+            authority_block_entry: block_entry_pda(authority),
+            destination_block_entry: block_entry_pda(&w.token_owner(destination)),
         }
         .to_account_metas(None),
     )
 }
 
-fn open_payout_vault_ix(authority: &Pubkey, sale: &Pubkey, m: &Market) -> Instruction {
+fn open_payout_vault_ix(w: &World, authority: &Pubkey, sale: &Pubkey, m: &Market) -> Instruction {
+    let share_class = w.load::<asset_registry::Sale>(sale).share_class;
+    let (asset, issuer) = w.chain(&share_class);
     let vault = payout_pda(sale);
     Instruction::new_with_bytes(
         asset_registry::ID,
@@ -300,6 +313,9 @@ fn open_payout_vault_ix(authority: &Pubkey, sale: &Pubkey, m: &Market) -> Instru
             escrow: payout_escrow_pda(&vault),
             payment_token_program: TOKEN_2022,
             system_program: system_program::ID,
+            share_class,
+            asset,
+            issuer_freeze: issuer_freeze_pda(&issuer),
         }
         .to_account_metas(None),
     )
@@ -320,7 +336,9 @@ fn post_update_ix(founder: &Pubkey, vault: &Pubkey) -> Instruction {
     )
 }
 
-fn release_ix(vault: &Pubkey, m: &Market, founder_account: &Pubkey) -> Instruction {
+fn release_ix(w: &World, vault: &Pubkey, m: &Market, founder_account: &Pubkey) -> Instruction {
+    let v = w.load::<asset_registry::PayoutVault>(vault);
+    let (asset, issuer) = w.chain(&v.share_class);
     Instruction::new_with_bytes(
         asset_registry::ID,
         &ixd::ReleasePayout {}.data(),
@@ -331,17 +349,24 @@ fn release_ix(vault: &Pubkey, m: &Market, founder_account: &Pubkey) -> Instructi
             founder_account: *founder_account,
             payment_token_program: TOKEN_2022,
             platform: platform_pda(),
+            share_class: v.share_class,
+            asset,
+            issuer_freeze: issuer_freeze_pda(&issuer),
+            founder_block_entry: block_entry_pda(&v.founder),
         }
         .to_account_metas(None),
     )
 }
 
 fn claim_founder_yield_ix(
+    w: &World,
     founder: &Pubkey,
     vault: &Pubkey,
     m: &Market,
     to: &Pubkey,
 ) -> Instruction {
+    let v = w.load::<asset_registry::PayoutVault>(vault);
+    let (asset, issuer) = w.chain(&v.share_class);
     Instruction::new_with_bytes(
         asset_registry::ID,
         &ixd::ClaimFounderYield {}.data(),
@@ -353,6 +378,10 @@ fn claim_founder_yield_ix(
             founder_account: *to,
             payment_token_program: TOKEN_2022,
             platform: platform_pda(),
+            share_class: v.share_class,
+            asset,
+            issuer_freeze: issuer_freeze_pda(&issuer),
+            founder_block_entry: block_entry_pda(&v.founder),
         }
         .to_account_metas(None),
     )
@@ -414,7 +443,7 @@ fn rotation_changes_only_the_authority_and_refunds_the_acceptor() {
     assert_eq!(proposed[0].issuer, fx.issuer);
     assert_eq!(proposed[0].current_authority, a.pubkey());
     assert_eq!(proposed[0].new_authority, b.pubkey());
-    let staged: AuthorityTransfer = w.load(&transfer);
+    let staged: AuthorityProposal = w.load(&transfer);
     assert_eq!(staged.target, fx.issuer);
     assert_eq!(staged.current_authority, a.pubkey());
     assert_eq!(staged.new_authority, b.pubkey());
@@ -572,7 +601,7 @@ fn a_re_proposal_replaces_the_pending_one_and_only_the_authority_cancels() {
         "re-propose C",
     );
     assert_eq!(
-        w.load::<AuthorityTransfer>(&transfer).new_authority,
+        w.load::<AuthorityProposal>(&transfer).new_authority,
         c.pubkey()
     );
     w.expect_code(
@@ -806,7 +835,7 @@ fn a_platform_or_kyc_registry_transfer_cannot_stand_in_for_the_issuer_transfer()
     );
     assert_eq!(w.load::<Issuer>(&fx.issuer).authority, a.pubkey());
     assert_eq!(
-        w.load::<AuthorityTransfer>(&platform_transfer).target,
+        w.load::<AuthorityProposal>(&platform_transfer).target,
         platform_pda()
     );
 }
@@ -818,24 +847,7 @@ fn only_the_super_admin_proposes_a_recovery_and_eta_is_seven_days_out() {
     let Scene { mut w, a, b, c, fx } = scene();
     let admin = w.admin.insecure_clone();
     // C becomes an ordinary Admin: still not the super admin.
-    w.send(
-        &[&admin],
-        &[Instruction::new_with_bytes(
-            asset_registry::ID,
-            &ixd::AddAdmin {
-                new_admin: c.pubkey(),
-            }
-            .data(),
-            acc::AddAdmin {
-                super_admin: admin.pubkey(),
-                platform: platform_pda(),
-                admin_record: admin_pda(&c.pubkey()),
-                system_program: system_program::ID,
-            }
-            .to_account_metas(None),
-        )],
-        "add_admin C",
-    );
+    w.grant_admin(&c);
     w.expect_code(
         &[&c],
         &[propose_issuer_recovery_ix(
@@ -1130,6 +1142,9 @@ fn a_rotation_or_a_super_admin_change_makes_a_recovery_stale() {
         )],
         "propose platform admin -> D",
     );
+    // v1: the super-admin rotation executes 48 h after the proposal.
+    let now = w.now();
+    w.warp_to(now + asset_registry::SUPER_ADMIN_ROTATION_TIMELOCK_SECS);
     w.send(
         &[&d],
         &[Instruction::new_with_bytes(
@@ -1142,6 +1157,7 @@ fn a_rotation_or_a_super_admin_change_makes_a_recovery_stale() {
                 old_admin_record: admin_pda(&old_admin.pubkey()),
                 new_admin_record: admin_pda(&d.pubkey()),
                 system_program: system_program::ID,
+                recovery: platform_recovery_pda(),
             }
             .to_account_metas(None),
         )],
@@ -1299,7 +1315,7 @@ fn every_new_instruction_works_while_fully_paused_and_payout_exits_stay_gated() 
     let startup = sale(&mut w, &a, &fx, &m, 2, RaiseType::Startup, 100);
     w.send(
         &[&a],
-        &[open_payout_vault_ix(&a.pubkey(), &startup, &m)],
+        &[open_payout_vault_ix(&w, &a.pubkey(), &startup, &m)],
         "open vault",
     );
     let vault = payout_pda(&startup);
@@ -1361,14 +1377,14 @@ fn every_new_instruction_works_while_fully_paused_and_payout_exits_stay_gated() 
     let dest = ata(&mut w, &m.payment_mint, &c.pubkey());
     w.expect_code(
         &[&c],
-        &[close_sale_ix(&c.pubkey(), &mature, &m, &dest)],
+        &[close_sale_ix(&w, &c.pubkey(), &mature, &m, &dest)],
         ERR_PAUSED,
         "close_sale stays paused",
     );
     let b_dest = ata(&mut w, &m.payment_mint, &b.pubkey());
     w.expect_code(
         &[],
-        &[release_ix(&vault, &m, &b_dest)],
+        &[release_ix(&w, &vault, &m, &b_dest)],
         ERR_PAUSED,
         "release stays paused",
     );
@@ -1391,13 +1407,13 @@ fn close_sale_follows_the_synced_authority() {
     // The residual window: before a sync the old key still closes a sale.
     w.send(
         &[&a],
-        &[close_sale_ix(&a.pubkey(), &first, &m, &a_dest)],
+        &[close_sale_ix(&w, &a.pubkey(), &first, &m, &a_dest)],
         "old key closes an unsynced sale",
     );
     assert_eq!(balance(&w, &a_dest), 100);
     w.expect_code(
         &[&b],
-        &[close_sale_ix(&b.pubkey(), &second, &m, &b_dest)],
+        &[close_sale_ix(&w, &b.pubkey(), &second, &m, &b_dest)],
         ERR_UNAUTHORIZED,
         "new key before sync",
     );
@@ -1415,13 +1431,13 @@ fn close_sale_follows_the_synced_authority() {
     assert_eq!(synced[0].new_authority, b.pubkey());
     w.expect_code(
         &[&a],
-        &[close_sale_ix(&a.pubkey(), &second, &m, &a_dest)],
+        &[close_sale_ix(&w, &a.pubkey(), &second, &m, &a_dest)],
         ERR_UNAUTHORIZED,
         "old key after sync",
     );
     w.send(
         &[&b],
-        &[close_sale_ix(&b.pubkey(), &second, &m, &b_dest)],
+        &[close_sale_ix(&w, &b.pubkey(), &second, &m, &b_dest)],
         "new key closes",
     );
     assert_eq!(
@@ -1441,7 +1457,7 @@ fn payout_vaults_follow_the_synced_founder() {
     let vaulted = sale(&mut w, &a, &fx, &m, 4, RaiseType::Startup, 100);
     w.send(
         &[&a],
-        &[open_payout_vault_ix(&a.pubkey(), &vaulted, &m)],
+        &[open_payout_vault_ix(&w, &a.pubkey(), &vaulted, &m)],
         "A opens vault 4",
     );
     let vault = payout_pda(&vaulted);
@@ -1450,7 +1466,7 @@ fn payout_vaults_follow_the_synced_founder() {
     // open_payout_vault: the sale's authority snapshot decides.
     w.expect_code(
         &[&b],
-        &[open_payout_vault_ix(&b.pubkey(), &unvaulted, &m)],
+        &[open_payout_vault_ix(&w, &b.pubkey(), &unvaulted, &m)],
         ERR_UNAUTHORIZED,
         "new key before the sale sync",
     );
@@ -1461,7 +1477,7 @@ fn payout_vaults_follow_the_synced_founder() {
     );
     w.send(
         &[&b],
-        &[open_payout_vault_ix(&b.pubkey(), &unvaulted, &m)],
+        &[open_payout_vault_ix(&w, &b.pubkey(), &unvaulted, &m)],
         "B opens vault 3",
     );
     assert_eq!(
@@ -1499,14 +1515,14 @@ fn payout_vaults_follow_the_synced_founder() {
     let b_dest = ata(&mut w, &m.payment_mint, &b.pubkey());
     w.expect_code(
         &[],
-        &[release_ix(&vault, &m, &a_dest)],
+        &[release_ix(&w, &vault, &m, &a_dest)],
         ERR_NOT_FOUNDER,
         "release to A",
     );
     let tranche = w.load::<PayoutVault>(&vault).tranche_amount;
     w.send(
         &[],
-        &[release_ix(&vault, &m, &b_dest)],
+        &[release_ix(&w, &vault, &m, &b_dest)],
         "release to B (permissionless)",
     );
     assert_eq!(balance(&w, &b_dest), tranche);
@@ -1516,13 +1532,13 @@ fn payout_vaults_follow_the_synced_founder() {
     assert!(claimable > 0);
     w.expect_code(
         &[&a],
-        &[claim_founder_yield_ix(&a.pubkey(), &vault, &m, &a_dest)],
+        &[claim_founder_yield_ix(&w, &a.pubkey(), &vault, &m, &a_dest)],
         ERR_NOT_FOUNDER,
         "A claims",
     );
     w.send(
         &[&b],
-        &[claim_founder_yield_ix(&b.pubkey(), &vault, &m, &b_dest)],
+        &[claim_founder_yield_ix(&w, &b.pubkey(), &vault, &m, &b_dest)],
         "B claims",
     );
     assert_eq!(balance(&w, &b_dest), tranche + claimable);
@@ -1617,7 +1633,7 @@ fn accept_and_every_sync_fit_in_one_atomic_transaction() {
         let s = sale(&mut w, &a, &fx, &m, id, RaiseType::Startup, 120);
         w.send(
             &[&a],
-            &[open_payout_vault_ix(&a.pubkey(), &s, &m)],
+            &[open_payout_vault_ix(&w, &a.pubkey(), &s, &m)],
             "open vault",
         );
         vaults.push(payout_pda(&s));
@@ -1791,23 +1807,6 @@ fn layouts_and_error_codes_are_positional() {
 
 // ── 22. Review round: Admin keys, retired proposals, foreign accounts ────────
 
-fn add_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        asset_registry::ID,
-        &ixd::AddAdmin {
-            new_admin: *new_admin,
-        }
-        .data(),
-        acc::AddAdmin {
-            super_admin: *super_admin,
-            platform: platform_pda(),
-            admin_record: admin_pda(new_admin),
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    )
-}
-
 /// `ix` with every account meta keyed `from` re-pointed at `to`.
 fn swap_account(mut ix: Instruction, from: &Pubkey, to: &Pubkey) -> Instruction {
     let mut hit = false;
@@ -1825,11 +1824,7 @@ fn swap_account(mut ix: Instruction, from: &Pubkey, to: &Pubkey) -> Instruction 
 fn a_plain_issuer_key_never_rotates_or_recovers_onto_a_global_admin_key() {
     let Scene { mut w, a, b, c, fx } = scene();
     let admin = w.admin.insecure_clone();
-    w.send(
-        &[&admin],
-        &[add_admin_ix(&admin.pubkey(), &b.pubkey())],
-        "add_admin B",
-    );
+    w.grant_admin(&b);
 
     // A (plain key, MINT|METADATA grant) -> B (Admin): refused at accept,
     // since an Admin skips the per-issuer grant.
@@ -1907,11 +1902,7 @@ fn a_plain_issuer_key_never_rotates_or_recovers_onto_a_global_admin_key() {
     );
 
     // Admin -> Admin gains nothing and stays possible.
-    w.send(
-        &[&admin],
-        &[add_admin_ix(&admin.pubkey(), &a.pubkey())],
-        "add_admin A",
-    );
+    w.grant_admin(&a);
     w.rotate(&fx.issuer, &a, &b);
     assert_eq!(w.load::<Issuer>(&fx.issuer).authority, b.pubkey());
 }
@@ -1988,7 +1979,7 @@ fn recovered_with_a_pending_rotation(s: &mut Scene) {
     assert!(logs
         .iter()
         .any(|l| l.contains("pending authority transfer retired")));
-    let transfer = s.w.load::<AuthorityTransfer>(&transfer_pda(&s.fx.issuer));
+    let transfer = s.w.load::<AuthorityProposal>(&transfer_pda(&s.fx.issuer));
     assert_eq!(transfer.current_authority, Pubkey::default());
     assert_eq!(transfer.new_authority, s.c.pubkey());
 }
@@ -2193,7 +2184,7 @@ fn another_issuers_proposals_and_wrong_grant_pdas_are_refused() {
     assert_eq!(w.load::<Issuer>(&fx.issuer).authority, b.pubkey());
     // Y's own proposals are untouched.
     assert_eq!(
-        w.load::<AuthorityTransfer>(&transfer_pda(&y))
+        w.load::<AuthorityProposal>(&transfer_pda(&y))
             .current_authority,
         c.pubkey()
     );
@@ -2216,7 +2207,7 @@ fn sync_payout_founder_refuses_a_foreign_or_forged_chain_and_is_idempotent() {
     let s = sale(&mut w, &a, &fx, &m, 2, RaiseType::Startup, 120);
     w.send(
         &[&a],
-        &[open_payout_vault_ix(&a.pubkey(), &s, &m)],
+        &[open_payout_vault_ix(&w, &a.pubkey(), &s, &m)],
         "open vault",
     );
     let vault = payout_pda(&s);

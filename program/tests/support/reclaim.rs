@@ -4,31 +4,10 @@
 //! default rate differs from devnet's 5,080 lamports/B.
 #![allow(dead_code)]
 use anchor_lang::{
-    prelude::Pubkey,
-    solana_program::{instruction::Instruction, system_program},
-    InstructionData, ToAccountMetas,
+    prelude::Pubkey, solana_program::instruction::Instruction, InstructionData, ToAccountMetas,
 };
 use asset_registry::{accounts as acc, instruction as ixd, CLOSED_ACCOUNT_TAG};
 use litesvm::LiteSVM;
-
-/// Super admin grants the Admin role to `new_admin`.
-pub fn add_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
-    let pda = |seeds: &[&[u8]]| Pubkey::find_program_address(seeds, &asset_registry::ID).0;
-    Instruction::new_with_bytes(
-        asset_registry::ID,
-        &ixd::AddAdmin {
-            new_admin: *new_admin,
-        }
-        .data(),
-        acc::AddAdmin {
-            super_admin: *super_admin,
-            platform: pda(&[asset_registry::PLATFORM_SEED]),
-            admin_record: pda(&[asset_registry::ADMIN_SEED, new_admin.as_ref()]),
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    )
-}
 
 /// `reclaim_rent`. `None` optional accounts go out as the program-id
 /// placeholder (Anchor's encoding of an absent optional account).

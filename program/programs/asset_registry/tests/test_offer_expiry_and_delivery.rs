@@ -18,6 +18,8 @@ mod pause;
 mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -46,6 +48,10 @@ use {
 };
 
 const TOKEN_2022: Pubkey = spl_token_2022_interface::id();
+/// v1 DeliveryEscrow deadlines for a vault opened at clock 1_000: the
+/// earliest allowed (now + 24 h) and the latest (now + 365 d).
+const DE_SOON: i64 = 1_000 + asset_registry::DELIVERY_ESCROW_MIN_DEADLINE_SECS;
+const DE_LONG: i64 = 1_000 + asset_registry::DELIVERY_ESCROW_MAX_DEADLINE_SECS;
 
 // ── Helpers (pattern from test_happy_path.rs / test_payout_vault.rs) ─────────
 
@@ -642,6 +648,8 @@ fn take_offer_ix(
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        taker_block_entry: v1::block_entry(taker),
+        maker_block_entry: v1::block_entry(&ctx.holder.pubkey()),
     }
     .to_account_metas(None);
     metas.extend_from_slice(&hook_metas(ctx, &offer_pda));
@@ -949,7 +957,7 @@ fn delivery_vault_requires_beneficiary() {
             1,
             VaultType::DeliveryEscrow,
             10,
-            4_102_444_800,
+            DE_LONG,
             Pubkey::default(),
         )],
     )
@@ -1051,7 +1059,7 @@ fn open_mode_deposit_ledgers_and_raw_funding() {
             vault_id,
             VaultType::DeliveryEscrow,
             30,
-            0,
+            DE_LONG,
             ctx.holder.pubkey(),
         )],
         "open delivery vault",
@@ -1116,7 +1124,7 @@ fn return_by_authority_sends_escrow_to_beneficiary() {
             vault_id,
             VaultType::DeliveryEscrow,
             30,
-            4_102_444_800, // far-future deadline
+            DE_LONG, // the longest v1 deadline
             ctx.holder.pubkey(),
         )],
         "open delivery vault",
@@ -1182,14 +1190,14 @@ fn return_by_anyone_after_deadline() {
             vault_id,
             VaultType::DeliveryEscrow,
             20,
-            2_000, // deadline soon
+            DE_SOON, // the earliest v1 deadline
             ctx.holder.pubkey(),
         )],
         "open delivery vault",
     );
     fund_vault_escrow(&mut svm, &ctx, &escrow_pda, 20);
 
-    warp_to(&mut svm, 3_000); // past deadline — permissionless
+    warp_to(&mut svm, DE_SOON + 1_000); // past deadline — permissionless
 
     let stranger = Keypair::new();
     svm.airdrop(&stranger.pubkey(), 100_000_000_000).unwrap();
@@ -1210,12 +1218,27 @@ fn return_by_anyone_after_deadline() {
 }
 
 #[test]
-fn deadline_zero_disables_permissionless_return() {
+fn delivery_escrow_needs_a_deadline_and_it_keeps_strangers_out_until_then() {
     let (mut svm, ctx) = boot(30);
     warp_to(&mut svm, 1_000);
 
     let vault_id = 1u64;
     let (custody_pda, escrow_pda) = custody_pdas(&ctx, vault_id);
+    // v1: a DeliveryEscrow always has a deadline (24 h..365 d).
+    let err = try_send(
+        &mut svm,
+        &[&ctx.payer],
+        &[open_vault_ix(
+            &ctx,
+            vault_id,
+            VaultType::DeliveryEscrow,
+            20,
+            0,
+            ctx.holder.pubkey(),
+        )],
+    )
+    .expect_err("deadline 0 is refused for a DeliveryEscrow");
+    assert!(err.contains("Custom(6148)"), "got: {err}");
     send(
         &mut svm,
         &[&ctx.payer],
@@ -1224,15 +1247,15 @@ fn deadline_zero_disables_permissionless_return() {
             vault_id,
             VaultType::DeliveryEscrow,
             20,
-            0, // deadline 0 — no permissionless return, ever
+            DE_LONG,
             ctx.holder.pubkey(),
         )],
-        "open delivery vault (deadline 0)",
+        "open delivery vault (longest deadline)",
     );
     fund_vault_escrow(&mut svm, &ctx, &escrow_pda, 20);
 
-    // A stranger can never return a deadline-0 vault, no matter the clock.
-    warp_to(&mut svm, 4_102_444_800);
+    // A stranger cannot return it before the deadline.
+    warp_to(&mut svm, DE_LONG - 1);
     let stranger = Keypair::new();
     svm.airdrop(&stranger.pubkey(), 100_000_000_000).unwrap();
     let err = try_send(
@@ -1245,7 +1268,7 @@ fn deadline_zero_disables_permissionless_return() {
             &ctx.holder_share_ata,
         )],
     )
-    .expect_err("permissionless return with deadline 0 must fail");
+    .expect_err("permissionless return before the deadline must fail");
     assert!(err.contains("ReturnNotAllowed"), "got: {err}");
 
     // The vault authority still exits at any time.
@@ -1258,7 +1281,7 @@ fn deadline_zero_disables_permissionless_return() {
             vault_id,
             &ctx.holder_share_ata,
         )],
-        "return_custody_vault (authority, deadline 0)",
+        "return_custody_vault (authority, before the deadline)",
     );
     let vault: CustodyVault = load(&svm, &custody_pda);
     assert_eq!(vault.state, VaultState::Returned);
@@ -1283,7 +1306,7 @@ fn triggered_blocks_permissionless_return_before_deadline_only() {
             vault_id,
             VaultType::DeliveryEscrow,
             20,
-            2_000,
+            DE_SOON,
             ctx.holder.pubkey(),
         )],
         "open delivery vault 1",
@@ -1313,7 +1336,7 @@ fn triggered_blocks_permissionless_return_before_deadline_only() {
     let vault: CustodyVault = load(&svm, &custody_pda);
     assert_eq!(vault.state, VaultState::Triggered);
 
-    // Deadline (2_000) has not passed — a stranger must fail.
+    // Deadline (DE_SOON) has not passed — a stranger must fail.
     let stranger = Keypair::new();
     svm.airdrop(&stranger.pubkey(), 100_000_000_000).unwrap();
     let err = try_send(
@@ -1360,7 +1383,7 @@ fn triggered_blocks_permissionless_return_before_deadline_only() {
             vault_id2,
             VaultType::DeliveryEscrow,
             20,
-            2_000,
+            DE_SOON,
             ctx.holder.pubkey(),
         )],
         "open delivery vault 2",
@@ -1386,7 +1409,7 @@ fn triggered_blocks_permissionless_return_before_deadline_only() {
         "trigger_custody_vault 2",
     );
 
-    warp_to(&mut svm, 3_000); // deadline passed
+    warp_to(&mut svm, DE_SOON + 1_000); // deadline passed
     send(
         &mut svm,
         &[&stranger],
@@ -1442,14 +1465,14 @@ fn revert_on_delivery_vault_fails() {
             vault_id,
             VaultType::DeliveryEscrow,
             10,
-            2_000,
+            DE_SOON,
             ctx.holder.pubkey(),
         )],
         "open delivery vault",
     );
     fund_vault_escrow(&mut svm, &ctx, &escrow_pda, 10);
 
-    warp_to(&mut svm, 3_000); // past deadline — revert would otherwise be legal
+    warp_to(&mut svm, DE_SOON + 1_000); // past deadline — revert would otherwise be legal
 
     let (custody_pda, _) = custody_pdas(&ctx, vault_id);
     let err = try_send(
@@ -1772,7 +1795,7 @@ fn custody_entry_pause_gates_deposits_while_return_and_revert_stay_open() {
             1,
             VaultType::DeliveryEscrow,
             30,
-            0,
+            DE_LONG,
             ctx.holder.pubkey(),
         )],
         "open delivery vault",
@@ -2016,7 +2039,7 @@ fn open_mode_delivery_realize_requires_beneficiary_kyc() {
             1,
             VaultType::DeliveryEscrow,
             20,
-            0,
+            DE_LONG,
             holder_pk,
         )],
         "open delivery vault",
@@ -2085,7 +2108,7 @@ fn delivery_vault_pins_registry_v2_layout() {
                 1,
                 VaultType::DeliveryEscrow,
                 10,
-                0,
+                DE_LONG,
                 ctx.holder.pubkey(),
             ),
             open_vault_ix(&ctx, 2, VaultType::RedemptionQueue, 0, 0, Pubkey::default()),
@@ -2575,7 +2598,7 @@ fn custody_reclaim_after_realize_revert_and_return() {
             3,
             VaultType::DeliveryEscrow,
             10,
-            0,
+            DE_LONG,
             ctx.holder.pubkey(),
         )],
         "open 3",
@@ -2704,7 +2727,7 @@ fn custody_reclaim_refusals() {
     reclaim::assert_code(try_send(&mut svm, &[&ctx.payer], &[own()]), 6139);
 }
 
-/// D15: a custody `AuthorityTransfer` left pending is not retired by the
+/// D15: a custody `AuthorityProposal` left pending is not retired by the
 /// reclaim, but it can never be accepted: accept needs a decodable vault.
 #[test]
 fn stale_custody_authority_transfer_cannot_be_accepted_after_reclaim() {
@@ -2712,15 +2735,10 @@ fn stale_custody_authority_transfer_cannot_be_accepted_after_reclaim() {
     warp_to(&mut svm, 1_000);
     let authority = ctx.payer.pubkey();
     let next = funded_wallet(&mut svm);
-    send(
-        &mut svm,
-        &[&ctx.payer],
-        &[reclaim::add_admin_ix(&authority, &next.pubkey())],
-        "add admin",
-    );
+    v1::grant_admin(&mut svm, &ctx.payer, &next).expect("add admin");
     let (vault_pda, _) = custody_pdas(&ctx, 1);
     let transfer = Pubkey::find_program_address(
-        &[asset_registry::AUTHORITY_TRANSFER_SEED, vault_pda.as_ref()],
+        &[asset_registry::AUTHORITY_PROPOSAL_SEED, vault_pda.as_ref()],
         &asset_registry::ID,
     )
     .0;

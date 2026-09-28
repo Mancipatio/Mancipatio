@@ -2318,7 +2318,7 @@ fn blocklist_authority_rotation_requires_live_proposal_and_recipient_consent() {
     let singleton =
         Pubkey::find_program_address(&[transfer_hook::BLOCKLIST_AUTHORITY_SEED], &program_id).0;
     let transfer = Pubkey::find_program_address(
-        &[transfer_hook::BLOCKLIST_AUTHORITY_TRANSFER_SEED],
+        &[transfer_hook::BLOCKLIST_AUTHORITY_PROPOSAL_SEED],
         &program_id,
     )
     .0;
@@ -2344,6 +2344,11 @@ fn blocklist_authority_rotation_requires_live_proposal_and_recipient_consent() {
             program_id,
             &ixd::AcceptBlocklistAuthority {}.data(),
             acc::AcceptBlocklistAuthority {
+                recovery: Pubkey::find_program_address(
+                    &[transfer_hook::BLOCKLIST_RECOVERY_SEED],
+                    &transfer_hook::ID,
+                )
+                .0,
                 new_authority,
                 blocklist_authority: singleton,
                 transfer,

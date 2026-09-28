@@ -13,6 +13,8 @@ mod pause;
 mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -1251,7 +1253,8 @@ fn legacy_distribution_retains_funder_close_refund_without_a_new_plan() {
 fn distribution_pause_gates_create_and_distribute_but_not_close() {
     let (mut svm, ctx) = boot();
     let payer = ctx.payer.insecure_clone();
-    let all_but = asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS;
+    let all_but = asset_registry::PAUSE_FLAGS_ALL
+        & !(asset_registry::PAUSE_DISTRIBUTIONS | asset_registry::PAUSE_PAYOUT_MODULES);
     let recipients = recipients(&mut svm, &ctx, 1);
 
     pause::pause_only(&mut svm, &payer, asset_registry::PAUSE_DISTRIBUTIONS);
@@ -1344,12 +1347,7 @@ fn another_admin_closes_and_all_rent_goes_to_the_creating_admin() {
     let admin = ctx.payer.pubkey();
     let closer = Keypair::new();
     svm.airdrop(&closer.pubkey(), 1_000_000_000).unwrap();
-    send(
-        &mut svm,
-        &[&ctx.payer],
-        &[reclaim::add_admin_ix(&admin, &closer.pubkey())],
-        "second admin",
-    );
+    v1::grant_admin(&mut svm, &ctx.payer, &closer).expect("second admin");
     reclaim::assert_code(
         try_send(
             &mut svm,

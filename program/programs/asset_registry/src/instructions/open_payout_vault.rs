@@ -49,6 +49,22 @@ pub struct OpenPayoutVault<'info> {
 
     pub payment_token_program: Interface<'info, TokenInterface>,
     pub system_program: Program<'info, System>,
+
+    /// D1 chain to the issuer: the sale's share class ...
+    #[account(address = sale.share_class @ RegistryError::Unauthorized)]
+    pub share_class: Box<Account<'info, crate::state::ShareClass>>,
+    /// ... and its asset (`asset.issuer` keys the freeze below).
+    #[account(address = share_class.asset @ RegistryError::Unauthorized)]
+    pub asset: Box<Account<'info, crate::state::Asset>>,
+    /// D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+    /// unset (no freeze in force).
+    /// CHECK: address pinned by the seeds; `util::is_unset` (fail-closed).
+    #[account(
+        seeds = [ISSUER_FREEZE_SEED, asset.issuer.as_ref()],
+        bump,
+        constraint = crate::util::is_unset(&issuer_freeze) @ RegistryError::IssuerProceedsFrozen,
+    )]
+    pub issuer_freeze: UncheckedAccount<'info>,
 }
 
 pub fn handle_open_payout_vault(

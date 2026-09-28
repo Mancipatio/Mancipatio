@@ -25,7 +25,7 @@ use {
         AccountDeserialize, InstructionData, ToAccountMetas,
     },
     asset_registry::{
-        accounts as acc, instruction as ixd, AuthorityTransfer, HolderApproved, HolderRevoked,
+        accounts as acc, instruction as ixd, AuthorityProposal, HolderApproved, HolderRevoked,
         KycEntry, KycRegistry, KycRegistryAuthorityChanged, KycRegistryAuthorityProposalCancelled,
         KycRegistryAuthorityProposed, KycRegistryJurisdictionsUpdated, KycStatus,
     },
@@ -222,7 +222,7 @@ fn rotation_moves_only_the_authority_and_refunds_the_acceptor() {
     assert_eq!(proposed[0].registry, registry);
     assert_eq!(proposed[0].current_authority, a.pubkey());
     assert_eq!(proposed[0].new_authority, b.pubkey());
-    let staged: AuthorityTransfer = load(&w.svm, &transfer);
+    let staged: AuthorityProposal = load(&w.svm, &transfer);
     assert_eq!(staged.target, registry);
     assert_eq!(staged.current_authority, a.pubkey());
     assert_eq!(staged.new_authority, b.pubkey());
@@ -514,7 +514,7 @@ fn a_platform_admin_transfer_cannot_stand_in_for_the_registry_transfer() {
         "propose into the platform transfer",
     );
     assert_eq!(w.registry().authority, a.pubkey());
-    let staged: AuthorityTransfer = load(&w.svm, &platform_transfer);
+    let staged: AuthorityProposal = load(&w.svm, &platform_transfer);
     assert_eq!(
         staged.target,
         kyc::platform_pda(),

@@ -113,10 +113,16 @@ pub struct Platform {
 }
 
 impl Platform {
-    /// Whether any bit of `flag` is paused. Bits outside `PAUSE_FLAGS_ALL`
-    /// gate nothing — no instruction asks for them.
+    /// Whether any bit of `flag` is paused. Bit 7 (`PLATFORM_BOOTSTRAP_OPEN`)
+    /// is not a pause bit — no instruction asks for it here.
     pub fn is_paused(&self, flag: u8) -> bool {
         self.pause_flags & flag != 0
+    }
+
+    /// The one-way bootstrap window (bit 7): set by `initialize_platform`,
+    /// closed by the first unpause or explicitly, never re-opened.
+    pub fn bootstrap_open(&self) -> bool {
+        self.pause_flags & crate::constants::PLATFORM_BOOTSTRAP_OPEN != 0
     }
 }
 
@@ -1377,8 +1383,11 @@ pub struct IssuerPermissions {
     pub bump: u8,
 }
 
-/// A staged operational authority change; no program upgrade authority changes.
-/// Seeds: ["authority_transfer", target account].
+/// LEGACY (rc.x, 137 B): a staged operational authority change at
+/// `["authority_transfer", target]`. No v1 instruction reads or writes it —
+/// v1 stages rotations in `AuthorityProposal` under a new seed, so a pending
+/// v1 proposal stays invisible to an rc.x rollback and a leftover rc.x
+/// transfer can never be accepted by v1. Kept for decoding leftovers.
 #[account]
 #[derive(InitSpace)]
 pub struct AuthorityTransfer {
@@ -1387,6 +1396,206 @@ pub struct AuthorityTransfer {
     pub new_authority: Pubkey,
     pub proposed_by: Pubkey,
     pub bump: u8,
+}
+
+/// A staged operational authority change (v1): platform super admin, custody
+/// vault authority, issuer authority or KYC registry authority. Seeds:
+/// `["authority_proposal", target]`. Acceptable only by `new_authority`,
+/// inside `[eta, expires_at)` (the platform flow has a 48 h timelock; the
+/// others have `eta = proposed_at`), and while `current_authority` is still
+/// the live authority. A re-proposal overwrites it and restarts both clocks.
+///
+/// ⚠ Layout (pinned by a test): target 8, current_authority 40,
+/// new_authority 72 (the same offset as `AuthorityTransfer` and
+/// `IssuerRecovery`, for memcmp listings), proposed_by 104, proposed_at 136,
+/// eta 144, expires_at 152, kind 160, version 161, bump 162; 163 B.
+#[account]
+#[derive(InitSpace)]
+pub struct AuthorityProposal {
+    pub target: Pubkey,
+    pub current_authority: Pubkey,
+    pub new_authority: Pubkey,
+    /// The proposing key (paid the rent). Accept refunds the rent to the
+    /// acceptor, as the rc.x transfer did; a cancel refunds it here.
+    pub proposed_by: Pubkey,
+    pub proposed_at: i64,
+    /// Executable at or after this unix ts.
+    pub eta: i64,
+    /// `eta + PROPOSAL_WINDOW_SECS`; executable strictly before it.
+    pub expires_at: i64,
+    /// `AUTHORITY_PROPOSAL_KIND_*`.
+    pub kind: u8,
+    pub version: u8,
+    pub bump: u8,
+}
+
+/// D3: a super-admin proposal to grant the Admin role to `new_admin`,
+/// executable by `new_admin` itself (`add_admin`) inside `[eta, expires_at)`
+/// while `proposed_by` is still the super admin; cancellable by the super
+/// admin, any Admin or the program upgrade authority. Seeds:
+/// `["pending_admin", new_admin]`.
+///
+/// ⚠ Layout (pinned by a test): new_admin 8, proposed_by 40, proposed_at 72,
+/// eta 80, expires_at 88, version 96, bump 97; 98 B.
+#[account]
+#[derive(InitSpace)]
+pub struct PendingAdmin {
+    pub new_admin: Pubkey,
+    pub proposed_by: Pubkey,
+    pub proposed_at: i64,
+    /// `proposed_at + ADMIN_TIMELOCK_SECS` (waived while bootstrap is open).
+    pub eta: i64,
+    /// `eta + PROPOSAL_WINDOW_SECS`.
+    pub expires_at: i64,
+    pub version: u8,
+    pub bump: u8,
+}
+
+/// D4: the program upgrade authority's recovery of a LOST super-admin key.
+/// Executable by `new_admin` inside `[eta, expires_at)` (7 days after the
+/// proposal) while `current_admin` is still the super admin and `proposed_by`
+/// still the upgrade authority; cancellable by the current super admin or the
+/// proposer. Seeds: `["platform_recovery", platform]`.
+///
+/// ⚠ Layout (pinned by a test): platform 8, current_admin 40, new_admin 72,
+/// proposed_by 104, proposed_at 136, eta 144, expires_at 152, version 160,
+/// bump 161; 162 B. `util::retire_pending_proposal` zeroes bytes 40..72.
+#[account]
+#[derive(InitSpace)]
+pub struct PlatformRecovery {
+    pub platform: Pubkey,
+    pub current_admin: Pubkey,
+    pub new_admin: Pubkey,
+    /// The program upgrade authority that proposed (and paid).
+    pub proposed_by: Pubkey,
+    pub proposed_at: i64,
+    pub eta: i64,
+    pub expires_at: i64,
+    pub version: u8,
+    pub bump: u8,
+}
+
+/// D1: the proceeds of one issuer are frozen while this PDA exists
+/// (`close_sale`, `open_payout_vault`, `release_payout`,
+/// `claim_founder_yield`, `buy`, `open_sale`). Any Admin (or the super admin)
+/// freezes; only the super admin unfreezes (closes it, rent to `frozen_by`).
+/// Seeds: `["issuer_freeze", issuer]`.
+///
+/// ⚠ Layout (pinned by a test; indexers list by discriminator + dataSize 114):
+/// issuer 8, frozen_by 40, frozen_at 72, reason_hash 80, version 112,
+/// bump 113; 114 B.
+#[account]
+#[derive(InitSpace)]
+pub struct IssuerFreeze {
+    pub issuer: Pubkey,
+    pub frozen_by: Pubkey,
+    pub frozen_at: i64,
+    /// sha256 of the off-chain reason (case file).
+    pub reason_hash: [u8; 32],
+    pub version: u8,
+    pub bump: u8,
+}
+
+/// Emitted by `freeze_issuer_proceeds`.
+#[event]
+pub struct IssuerProceedsFrozen {
+    pub issuer: Pubkey,
+    pub frozen_by: Pubkey,
+    pub frozen_at: i64,
+    pub reason_hash: [u8; 32],
+}
+
+/// Emitted by `unfreeze_issuer_proceeds`.
+#[event]
+pub struct IssuerProceedsUnfrozen {
+    pub issuer: Pubkey,
+    pub unfrozen_by: Pubkey,
+    pub frozen_by: Pubkey,
+    pub frozen_at: i64,
+}
+
+/// Emitted by `propose_admin` (a re-proposal emits again).
+#[event]
+pub struct AdminProposed {
+    pub new_admin: Pubkey,
+    pub proposed_by: Pubkey,
+    pub proposed_at: i64,
+    pub eta: i64,
+    pub expires_at: i64,
+    /// Bootstrap was open at proposal time (the timelock may be waived).
+    pub bootstrap_open: bool,
+}
+
+/// Emitted by `cancel_admin_proposal`.
+#[event]
+pub struct AdminProposalCancelled {
+    pub new_admin: Pubkey,
+    pub proposed_by: Pubkey,
+    pub cancelled_by: Pubkey,
+}
+
+/// Emitted by `add_admin`.
+#[event]
+pub struct AdminAdded {
+    pub admin: Pubkey,
+    pub added_by: Pubkey,
+    pub proposed_at: i64,
+}
+
+/// Emitted by `propose_platform_admin` and `propose_custody_authority`.
+#[event]
+pub struct AuthorityProposalCreated {
+    pub target: Pubkey,
+    pub kind: u8,
+    pub current_authority: Pubkey,
+    pub new_authority: Pubkey,
+    pub proposed_by: Pubkey,
+    pub eta: i64,
+    pub expires_at: i64,
+}
+
+/// Emitted by `cancel_platform_admin_transfer` and
+/// `cancel_custody_authority_transfer`.
+#[event]
+pub struct AuthorityProposalCancelled {
+    pub target: Pubkey,
+    pub kind: u8,
+    pub cancelled_by: Pubkey,
+    pub cancelled_new_authority: Pubkey,
+}
+
+/// How `Platform.admin` changed (carried by `PlatformAdminChanged`).
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, Debug)]
+pub enum PlatformAdminChangeKind {
+    /// `accept_platform_admin`: proposed by the super admin, after 48 h.
+    Rotation,
+    /// `execute_platform_recovery`: proposed by the upgrade authority, after 7 days.
+    Recovery,
+}
+
+/// Emitted whenever `Platform.admin` changes.
+#[event]
+pub struct PlatformAdminChanged {
+    pub old_admin: Pubkey,
+    pub new_admin: Pubkey,
+    pub kind: PlatformAdminChangeKind,
+}
+
+/// Emitted by `propose_platform_recovery` (a re-proposal emits again).
+#[event]
+pub struct PlatformRecoveryProposed {
+    pub current_admin: Pubkey,
+    pub new_admin: Pubkey,
+    pub proposed_by: Pubkey,
+    pub eta: i64,
+    pub expires_at: i64,
+}
+
+/// Emitted by `cancel_platform_recovery`.
+#[event]
+pub struct PlatformRecoveryCancelled {
+    pub cancelled_by: Pubkey,
+    pub new_admin: Pubkey,
 }
 
 /// A super-admin recovery of a LOST issuer authority key, effective only after
@@ -1567,7 +1776,7 @@ mod tests {
         assert_eq!(data[8..40], [1; 32]);
         assert_eq!(data[40..72], [2; 32]);
         assert_eq!(data[72..74], [0x03, 0x04]);
-        assert_eq!(data[74], 0x3F);
+        assert_eq!(data[74], 0x7F);
         assert_eq!(data[75..83], 7u64.to_le_bytes());
         assert_eq!(data[83], 1);
         assert_eq!(data[84], 254);
@@ -1677,12 +1886,188 @@ mod tests {
         assert_eq!(PAUSE_CUSTODY_ENTRY, 0x08);
         assert_eq!(PAUSE_DISTRIBUTIONS, 0x10);
         assert_eq!(PAUSE_ISSUER_PROCEEDS, 0x20);
-        assert_eq!(PAUSE_FLAGS_ALL, 0x3F);
+        assert_eq!(PAUSE_PAYOUT_MODULES, 0x40);
+        assert_eq!(PAUSE_FLAGS_ALL, 0x7F);
+        assert_eq!(PLATFORM_BOOTSTRAP_OPEN, 0x80);
+        assert_eq!(PAUSE_FLAGS_ALL & PLATFORM_BOOTSTRAP_OPEN, 0);
         // Legacy `paused = true` (byte 1) gates only onboarding.
         assert!(platform(1).is_paused(PAUSE_ONBOARDING));
         assert!(!platform(1).is_paused(PAUSE_PRIMARY));
         assert!(!platform(0).is_paused(PAUSE_FLAGS_ALL));
-        // Undefined bits gate nothing.
-        assert!(!platform(0xC0).is_paused(PAUSE_FLAGS_ALL));
+        // Bit 7 is the bootstrap marker, not a pause bit.
+        assert!(!platform(0x80).is_paused(PAUSE_FLAGS_ALL));
+        assert!(platform(0x80).bootstrap_open());
+        assert!(platform(0xFF).bootstrap_open());
+        assert!(!platform(0x7F).bootstrap_open());
+        assert!(platform(0x40).is_paused(PAUSE_PAYOUT_MODULES));
+    }
+
+    fn key(b: u8) -> Pubkey {
+        Pubkey::new_from_array([b; 32])
+    }
+
+    /// Serializes `account` and checks its length and discriminator.
+    fn bytes<T: AccountSerialize + Discriminator>(account: &T, len: usize) -> Vec<u8> {
+        let mut data = Vec::new();
+        account.try_serialize(&mut data).unwrap();
+        assert_eq!(data.len(), len);
+        assert_eq!(&data[..8], T::DISCRIMINATOR);
+        data
+    }
+
+    #[test]
+    fn issuer_freeze_layout_is_pinned() {
+        assert_eq!(8 + IssuerFreeze::INIT_SPACE, 114);
+        let data = bytes(
+            &IssuerFreeze {
+                issuer: key(1),
+                frozen_by: key(2),
+                frozen_at: 3,
+                reason_hash: [4; 32],
+                version: 5,
+                bump: 6,
+            },
+            114,
+        );
+        assert_eq!(data[8..40], [1; 32]);
+        assert_eq!(data[40..72], [2; 32]);
+        assert_eq!(data[72..80], 3i64.to_le_bytes());
+        assert_eq!(data[80..112], [4; 32]);
+        assert_eq!((data[112], data[113]), (5, 6));
+    }
+
+    #[test]
+    fn pending_admin_layout_is_pinned() {
+        assert_eq!(8 + PendingAdmin::INIT_SPACE, 98);
+        let data = bytes(
+            &PendingAdmin {
+                new_admin: key(1),
+                proposed_by: key(2),
+                proposed_at: 3,
+                eta: 4,
+                expires_at: 5,
+                version: 6,
+                bump: 7,
+            },
+            98,
+        );
+        assert_eq!(data[8..40], [1; 32]);
+        assert_eq!(data[40..72], [2; 32]);
+        assert_eq!(data[72..80], 3i64.to_le_bytes());
+        assert_eq!(data[80..88], 4i64.to_le_bytes());
+        assert_eq!(data[88..96], 5i64.to_le_bytes());
+        assert_eq!((data[96], data[97]), (6, 7));
+    }
+
+    #[test]
+    fn authority_proposal_layout_is_pinned() {
+        assert_eq!(8 + AuthorityProposal::INIT_SPACE, 163);
+        assert_eq!(8 + AuthorityTransfer::INIT_SPACE, 137);
+        let data = bytes(
+            &AuthorityProposal {
+                target: key(1),
+                current_authority: key(2),
+                new_authority: key(3),
+                proposed_by: key(4),
+                proposed_at: 5,
+                eta: 6,
+                expires_at: 7,
+                kind: 8,
+                version: 9,
+                bump: 10,
+            },
+            163,
+        );
+        assert_eq!(data[8..40], [1; 32]);
+        assert_eq!(data[40..72], [2; 32]);
+        // Same new_authority offset as the legacy AuthorityTransfer and IssuerRecovery.
+        assert_eq!(data[72..104], [3; 32]);
+        assert_eq!(data[104..136], [4; 32]);
+        assert_eq!(data[136..144], 5i64.to_le_bytes());
+        assert_eq!(data[144..152], 6i64.to_le_bytes());
+        assert_eq!(data[152..160], 7i64.to_le_bytes());
+        assert_eq!((data[160], data[161], data[162]), (8, 9, 10));
+        // A new seed and type: the legacy discriminator is different.
+        assert_ne!(
+            AuthorityProposal::DISCRIMINATOR,
+            AuthorityTransfer::DISCRIMINATOR
+        );
+    }
+
+    #[test]
+    fn platform_recovery_layout_is_pinned() {
+        assert_eq!(8 + PlatformRecovery::INIT_SPACE, 162);
+        let data = bytes(
+            &PlatformRecovery {
+                platform: key(1),
+                current_admin: key(2),
+                new_admin: key(3),
+                proposed_by: key(4),
+                proposed_at: 5,
+                eta: 6,
+                expires_at: 7,
+                version: 8,
+                bump: 9,
+            },
+            162,
+        );
+        assert_eq!(data[8..40], [1; 32]);
+        assert_eq!(data[40..72], [2; 32]);
+        assert_eq!(data[72..104], [3; 32]);
+        assert_eq!(data[104..136], [4; 32]);
+        assert_eq!(data[136..144], 5i64.to_le_bytes());
+        assert_eq!(data[144..152], 6i64.to_le_bytes());
+        assert_eq!(data[152..160], 7i64.to_le_bytes());
+        assert_eq!((data[160], data[161]), (8, 9));
+    }
+
+    /// Error codes are append-only: pin 6142 and every v1 code.
+    #[test]
+    fn v1_error_codes_are_pinned() {
+        use crate::error::RegistryError as E;
+        let code = |e: E| 6000 + e as u32;
+        assert_eq!(code(E::VaultTypeRetired), 6142);
+        assert_eq!(code(E::IssuerProceedsFrozen), 6143);
+        assert_eq!(code(E::PartyBlocklisted), 6144);
+        assert_eq!(code(E::SaleDurationInvalid), 6145);
+        assert_eq!(code(E::KycExpiryTooFar), 6146);
+        assert_eq!(code(E::VotingPeriodTooShort), 6147);
+        assert_eq!(code(E::DeliveryDeadlineOutOfRange), 6148);
+        assert_eq!(code(E::DealExpiryOutOfRange), 6149);
+        assert_eq!(code(E::TimelockActive), 6150);
+        assert_eq!(code(E::ProposalExpired), 6151);
+        assert_eq!(code(E::InvalidAdminProposal), 6152);
+        assert_eq!(code(E::InvalidPlatformRecovery), 6153);
+        assert_eq!(code(E::PayoutModulesClearNotExplicit), 6154);
+        // Reused codes the v1 paths rely on.
+        assert_eq!(code(E::PlatformPaused), 6000);
+        assert_eq!(code(E::Unauthorized), 6001);
+        assert_eq!(code(E::KycExpiryInPast), 6011);
+        assert_eq!(code(E::InvalidSaleParams), 6022);
+        assert_eq!(code(E::InvalidRaiseParams), 6046);
+        assert_eq!(code(E::InvalidDeadline), 6067);
+        assert_eq!(code(E::ClawbackHolderStillEligible), 6079);
+        assert_eq!(code(E::InvalidProposedAuthority), 6112);
+        assert_eq!(code(E::InvalidAuthorityTransfer), 6113);
+        assert_eq!(code(E::InvalidPauseFlags), 6118);
+        assert_eq!(code(E::PauseClearNotAllowed), 6119);
+    }
+
+    #[test]
+    fn v1_constants_are_pinned() {
+        assert_eq!(ADMIN_TIMELOCK_SECS, 48 * 3_600);
+        assert_eq!(SUPER_ADMIN_ROTATION_TIMELOCK_SECS, 48 * 3_600);
+        assert_eq!(PROPOSAL_WINDOW_SECS, 14 * 86_400);
+        #[cfg(not(feature = "incident"))]
+        assert_eq!(PLATFORM_RECOVERY_DELAY_SECS, 7 * 86_400);
+        #[cfg(feature = "incident")]
+        assert_eq!(PLATFORM_RECOVERY_DELAY_SECS, 0);
+        assert_eq!(MAX_SALE_DURATION_SECS, 365 * 86_400);
+        assert_eq!(MAX_KYC_VALIDITY_SECS, 730 * 86_400);
+        assert_eq!(KYC_EXPIRY_CLAWBACK_GRACE_SECS, 30 * 86_400);
+        assert_eq!(OTC_DEAL_MAX_TTL_SECS, 90 * 86_400);
+        assert_eq!(DELIVERY_ESCROW_MIN_DEADLINE_SECS, 86_400);
+        assert_eq!(DELIVERY_ESCROW_MAX_DEADLINE_SECS, 365 * 86_400);
+        assert_eq!(MIN_VAULT_VOTING_PERIOD_SECS, 7 * 86_400);
     }
 }

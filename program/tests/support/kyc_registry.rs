@@ -16,7 +16,8 @@ use asset_registry::{accounts as acc, instruction as ixd, JURISDICTION_BITMAP_BY
 pub type Bitmap = [u8; JURISDICTION_BITMAP_BYTES];
 
 /// 2100-01-01 — a KYC expiry that never lapses in tests.
-pub const FAR_FUTURE: i64 = 4_102_444_800;
+// v1: at most 2 years ahead (`approve_holder`); test clocks start at 0.
+pub const FAR_FUTURE: i64 = asset_registry::MAX_KYC_VALIDITY_SECS;
 
 pub fn platform_pda() -> Pubkey {
     Pubkey::find_program_address(&[asset_registry::PLATFORM_SEED], &asset_registry::ID).0
@@ -51,7 +52,7 @@ pub fn entry_pda(registry: &Pubkey, holder: &Pubkey) -> Pubkey {
 /// `["authority_transfer", target]` — the per-target staged rotation.
 pub fn transfer_pda(target: &Pubkey) -> Pubkey {
     Pubkey::find_program_address(
-        &[asset_registry::AUTHORITY_TRANSFER_SEED, target.as_ref()],
+        &[asset_registry::AUTHORITY_PROPOSAL_SEED, target.as_ref()],
         &asset_registry::ID,
     )
     .0

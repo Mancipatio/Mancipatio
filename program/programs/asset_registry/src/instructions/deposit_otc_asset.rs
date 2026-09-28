@@ -80,6 +80,29 @@ pub struct DepositOtcAsset<'info> {
         constraint = !platform.is_paused(PAUSE_SECONDARY) @ RegistryError::PlatformPaused,
     )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
+
+    /// v1 (appended after `platform`, before the hook tail): the buyer is not blocked ...
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, deal.buyer.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&buyer_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub buyer_block_entry: UncheckedAccount<'info>,
+    /// ... nor is the seller. The registry refuses before any hook CPI.
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, deal.seller.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&seller_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub seller_block_entry: UncheckedAccount<'info>,
     // remaining_accounts: the deposit leg's hook tail (source authority =
     // seller), plus — when this deposit completes the pair — the settle leg's
     // hook tail (source authority = deal PDA). Both legs transfer the same

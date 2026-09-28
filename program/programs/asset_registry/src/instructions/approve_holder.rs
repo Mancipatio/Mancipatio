@@ -52,6 +52,11 @@ pub fn handle_approve_holder(
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
     require!(expiry > now, RegistryError::KycExpiryInPast);
+    // prog-vlast-16: a passport is re-checked at least every 2 years.
+    let latest = now
+        .checked_add(MAX_KYC_VALIDITY_SECS)
+        .ok_or(RegistryError::Overflow)?;
+    crate::util::ensure(expiry <= latest, RegistryError::KycExpiryTooFar)?;
 
     let entry = &mut ctx.accounts.kyc_entry;
     // A freshly `init`-ed account is all zeros; every initialised entry carries

@@ -57,10 +57,13 @@ pub fn handle_initialize_platform(
     platform.admin = ctx.accounts.admin.key();
     platform.protocol_treasury = protocol_treasury;
     platform.protocol_fee_bps = protocol_fee_bps;
-    // A fresh platform starts fully paused: the bootstrap finishes its setup
-    // (blocklist authority, admins, custody) and then clears the flags with
-    // `set_pause_flags(0, PAUSE_FLAGS_ALL)` before handing over authority.
-    platform.pause_flags = PAUSE_FLAGS_ALL;
+    // A fresh platform starts fully paused (0x7F) with the one-way bootstrap
+    // window open (bit 7, 0xFF in all): every role step (admin grants,
+    // super-admin rotation, blocklist authority, custody) runs first, the
+    // window is then closed explicitly (`set_pause_flags(0, 0x80)`) or by the
+    // first unpause, and `PAUSE_PAYOUT_MODULES` can only be cleared in a call
+    // of its own.
+    platform.pause_flags = PAUSE_FLAGS_ALL | PLATFORM_BOOTSTRAP_OPEN;
     platform.issuers_count = 0;
     platform.version = STATE_VERSION;
     platform.bump = ctx.bumps.platform;

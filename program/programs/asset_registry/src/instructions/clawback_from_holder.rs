@@ -210,8 +210,16 @@ pub fn handle_clawback_from_holder<'info>(
     } else {
         ClawbackReason::Expired
     };
+    // prog-vlast-7: a merely EXPIRED passport gets a 30-day grace to renew
+    // before its units can be seized; a revocation is immediate. (The grace
+    // protects a holder only while the KYC registry authority and the Admins
+    // are different keys.)
+    let grace_end = entry
+        .expiry
+        .checked_add(KYC_EXPIRY_CLAWBACK_GRACE_SECS)
+        .ok_or(RegistryError::Overflow)?;
     require!(
-        entry.status == KycStatus::Revoked || entry.expiry <= now,
+        entry.status == KycStatus::Revoked || grace_end <= now,
         RegistryError::ClawbackHolderStillEligible
     );
 

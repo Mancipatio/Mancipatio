@@ -6,11 +6,12 @@
 //! The `Issuer` layout is frozen (117 B): these instructions write only
 //! `Issuer.authority`; all new state lives in separate PDAs.
 //!
-//! * Regular rotation reuses `AuthorityTransfer` at
-//!   `["authority_transfer", issuer]` (the 2C-1 pattern). Only the current
-//!   authority proposes and cancels; only the proposed key accepts. The seed is
-//!   the Issuer PDA, so a platform, custody or KYC-registry transfer can never
-//!   stand in for it.
+//! * Regular rotation uses `AuthorityProposal` at
+//!   `["authority_proposal", issuer]` (v1; the rc.x `AuthorityTransfer` seed is
+//!   never read). Only the current authority proposes and cancels; only the
+//!   proposed key accepts, within 14 days of the proposal (`ProposalExpired`
+//!   after). The seed is the Issuer PDA, so a platform, custody or
+//!   KYC-registry proposal can never stand in for it.
 //! * Recovery lives in `IssuerRecovery` at `["issuer_recovery", issuer]`: the
 //!   super admin (`Platform.admin`) proposes, it becomes executable at `eta`
 //!   (7 days) and expires 14 days later; the CURRENT issuer authority or the
@@ -61,11 +62,11 @@
 
 use anchor_lang::prelude::*;
 
-use super::rotate_authority::{validate_new_authority, write_proposal};
+use super::rotate_authority::{require_not_expired, validate_new_authority, write_proposal};
 use crate::constants::*;
 use crate::error::RegistryError;
 use crate::state::{
-    Asset, AuthorityTransfer, Issuer, IssuerAuthorityChangeKind, IssuerAuthorityChanged,
+    Asset, AuthorityProposal, Issuer, IssuerAuthorityChangeKind, IssuerAuthorityChanged,
     IssuerAuthorityProposalCancelled, IssuerAuthorityProposed, IssuerPermissions, IssuerRecovery,
     IssuerRecoveryCancelled, IssuerRecoveryProposed, PayoutFounderSynced, PayoutVault, Platform,
     Sale, SaleAuthoritySynced, ShareClass,
@@ -81,9 +82,9 @@ pub struct ProposeIssuerAuthority<'info> {
     #[account(seeds = [ISSUER_SEED, issuer.legal_entity_id.as_ref()], bump = issuer.bump,
         has_one = authority @ RegistryError::Unauthorized)]
     pub issuer: Box<Account<'info, Issuer>>,
-    #[account(init_if_needed, payer = authority, space = 8 + AuthorityTransfer::INIT_SPACE,
-        seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    #[account(init_if_needed, payer = authority, space = 8 + AuthorityProposal::INIT_SPACE,
+        seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump)]
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
     pub system_program: Program<'info, System>,
 }
 
@@ -103,8 +104,10 @@ pub fn handle_propose_issuer_authority(
         current,
         new_authority,
         ctx.accounts.authority.key(),
+        AUTHORITY_PROPOSAL_KIND_ISSUER,
+        0,
         ctx.bumps.transfer,
-    );
+    )?;
     emit!(IssuerAuthorityProposed {
         issuer,
         current_authority: current,
@@ -121,12 +124,12 @@ pub struct AcceptIssuerAuthority<'info> {
     #[account(mut, seeds = [ISSUER_SEED, issuer.legal_entity_id.as_ref()], bump = issuer.bump)]
     pub issuer: Box<Account<'info, Issuer>>,
     #[account(mut, close = new_authority,
-        seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump = transfer.bump,
+        seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump = transfer.bump,
         constraint = transfer.target == issuer.key()
             && transfer.current_authority == issuer.authority
             && transfer.proposed_by == issuer.authority
             && transfer.new_authority == new_authority.key() @ RegistryError::InvalidAuthorityTransfer)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
     /// The outgoing authority's grant, closed here when present (rent to the
     /// acceptor); its capabilities move to `new_permissions`.
     /// CHECK: address pinned by seeds; owner, discriminator and contents are
@@ -157,6 +160,7 @@ pub struct AcceptIssuerAuthority<'info> {
 /// A pending recovery is retired. The new key may be a global Admin only when
 /// the outgoing key is one too (otherwise `InvalidProposedAuthority`).
 pub fn handle_accept_issuer_authority(ctx: Context<AcceptIssuerAuthority>) -> Result<()> {
+    require_not_expired(&ctx.accounts.transfer)?;
     let issuer = ctx.accounts.issuer.key();
     let old_authority = ctx.accounts.issuer.authority;
     let new_authority = ctx.accounts.new_authority.key();
@@ -212,9 +216,9 @@ pub struct CancelIssuerAuthorityTransfer<'info> {
         has_one = authority @ RegistryError::Unauthorized)]
     pub issuer: Box<Account<'info, Issuer>>,
     #[account(mut, close = authority,
-        seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump = transfer.bump,
+        seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump = transfer.bump,
         constraint = transfer.target == issuer.key() @ RegistryError::InvalidAuthorityTransfer)]
-    pub transfer: Account<'info, AuthorityTransfer>,
+    pub transfer: Box<Account<'info, AuthorityProposal>>,
 }
 
 /// The current issuer authority withdraws a pending proposal (including one a
@@ -362,7 +366,7 @@ pub struct ExecuteIssuerRecovery<'info> {
     pub new_admin_record: UncheckedAccount<'info>,
     /// The issuer's pending regular rotation, retired here when present (it may not exist).
     /// CHECK: address pinned by seeds; `util::retire_pending_proposal` checks the rest.
-    #[account(mut, seeds = [AUTHORITY_TRANSFER_SEED, issuer.key().as_ref()], bump)]
+    #[account(mut, seeds = [AUTHORITY_PROPOSAL_SEED, issuer.key().as_ref()], bump)]
     pub transfer: UncheckedAccount<'info>,
 }
 
@@ -391,7 +395,7 @@ pub fn handle_execute_issuer_recovery(ctx: Context<ExecuteIssuerRecovery>) -> Re
     if retire_pending_proposal(
         &ctx.accounts.transfer.to_account_info(),
         &issuer,
-        AuthorityTransfer::DISCRIMINATOR,
+        AuthorityProposal::DISCRIMINATOR,
     )? {
         msg!("Issuer {} pending authority transfer retired", issuer);
     }

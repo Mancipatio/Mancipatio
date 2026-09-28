@@ -45,6 +45,8 @@ mod pause;
 mod reclaim;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -80,7 +82,9 @@ const SELLER_UNITS: u64 = 100;
 const BUYER_PAYMENT: u64 = 10_000_000;
 /// Jurisdiction used for every KYC approval here (bit set in the registry).
 const JURISDICTION: u16 = 222;
-const FAR_FUTURE: i64 = 4_102_444_800; // 2100-01-01
+// v1: a KYC entry may be valid at most 2 years ahead (`approve_holder`); test
+// clocks start at 0, so "far future" is the 2-year cap itself.
+const FAR_FUTURE: i64 = asset_registry::MAX_KYC_VALIDITY_SECS;
 
 // ── Helpers (pattern from test_otc_deal.rs) ──────────────────────────────────
 
@@ -707,8 +711,12 @@ fn deal_pdas(ctx: &Ctx, deal_id: u64) -> (Pubkey, Pubkey, Pubkey) {
     (deal_pda, asset_escrow_pda, payment_escrow_pda)
 }
 
+/// v1: every deal expires (at most 90 days out); the longest expiry keeps
+/// the old "never expires" behaviour within any test.
 fn create_deal(svm: &mut LiteSVM, ctx: &Ctx, deal_id: u64) -> Pubkey {
-    create_deal_with_expiry(svm, ctx, deal_id, 0)
+    let expires_at = svm.get_sysvar::<solana_clock::Clock>().unix_timestamp
+        + asset_registry::OTC_DEAL_MAX_TTL_SECS;
+    create_deal_with_expiry(svm, ctx, deal_id, expires_at)
 }
 
 fn create_deal_with_expiry(svm: &mut LiteSVM, ctx: &Ctx, deal_id: u64, expires_at: i64) -> Pubkey {
@@ -768,6 +776,8 @@ fn deposit_asset_ix(ctx: &Ctx, deal_id: u64, with_settle: bool) -> Instruction {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     // deposit leg: seller ATA (owner seller) → escrow (owner deal PDA)
@@ -807,6 +817,8 @@ fn deposit_payment_ix(ctx: &Ctx, deal_id: u64, with_settle: bool) -> Instruction
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     if with_settle {
@@ -861,6 +873,8 @@ fn expire_deal_ix(ctx: &Ctx, payer: &Pubkey, deal_id: u64) -> Instruction {
         escrow_marker: escrow_marker_of(ctx, &deal_pda),
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        seller_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     // refund leg: escrow (owner deal PDA) → seller ATA (owner seller)
@@ -1398,6 +1412,8 @@ fn take_offer_ix(
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        taker_block_entry: v1::block_entry(taker),
+        maker_block_entry: v1::block_entry(&ctx.seller.pubkey()),
     }
     .to_account_metas(None);
     // escrow (owner offer PDA) → taker ATA (owner taker)
@@ -1829,6 +1845,10 @@ fn open_delivery_vault(
     beneficiary: &Pubkey,
 ) -> (Pubkey, Pubkey) {
     let (custody_pda, escrow_pda) = custody_pdas(ctx, vault_id);
+    // v1: a DeliveryEscrow always has a deadline; the longest (365 d) keeps
+    // the old "no deadline" behaviour within any test.
+    let deadline = svm.get_sysvar::<solana_clock::Clock>().unix_timestamp
+        + asset_registry::DELIVERY_ESCROW_MAX_DEADLINE_SECS;
     send(
         svm,
         &[&ctx.payer],
@@ -1839,7 +1859,7 @@ fn open_delivery_vault(
                 vault_type: VaultType::DeliveryEscrow,
                 realize_action: RealizeAction::BurnAndAttest,
                 amount: CUSTODY_DEPOSIT,
-                deadline: 0,
+                deadline,
                 metadata_hash: [7u8; 32],
                 beneficiary: *beneficiary,
             }

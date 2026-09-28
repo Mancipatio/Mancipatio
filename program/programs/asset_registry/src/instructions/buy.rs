@@ -49,6 +49,7 @@ pub struct Buy<'info> {
     #[account(
         mut,
         constraint = buyer_payment_account.mint == sale.payment_mint @ RegistryError::Unauthorized,
+        constraint = buyer_payment_account.owner == buyer.key() @ RegistryError::Unauthorized,
     )]
     pub buyer_payment_account: Box<InterfaceAccount<'info, TokenAccount>>,
 
@@ -78,6 +79,27 @@ pub struct Buy<'info> {
         constraint = !platform.is_paused(PAUSE_PRIMARY) @ RegistryError::PlatformPaused,
     )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
+
+    /// v1 (appended after `platform`): the buyer is not on the hook blocklist.
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, buyer.key().as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&buyer_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub buyer_block_entry: UncheckedAccount<'info>,
+    /// D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+    /// unset (no freeze in force).
+    /// CHECK: address pinned by the seeds; `util::is_unset` (fail-closed).
+    #[account(
+        seeds = [ISSUER_FREEZE_SEED, issuer.key().as_ref()],
+        bump,
+        constraint = crate::util::is_unset(&issuer_freeze) @ RegistryError::IssuerProceedsFrozen,
+    )]
+    pub issuer_freeze: UncheckedAccount<'info>,
     // remaining_accounts — accounts the fail-closed receiver-KYC check in the
     // handler resolves. No transfer runs here (delivery is a `mint_to`), so
     // this is NOT a positional hook tail: each account is looked up by its

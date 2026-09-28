@@ -37,6 +37,8 @@ mod reclaim;
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -70,7 +72,9 @@ const TOTAL_FOR_SALE: u64 = 500;
 const BUYER_PAYMENT: u64 = 100_000_000;
 /// Jurisdiction used for every KYC approval here (bit set in the registry).
 const JURISDICTION: u16 = 222;
-const FAR_FUTURE: i64 = 4_102_444_800; // 2100-01-01
+// v1: a KYC entry may be valid at most 2 years ahead (`approve_holder`); test
+// clocks start at 0, so "far future" is the 2-year cap itself.
+const FAR_FUTURE: i64 = asset_registry::MAX_KYC_VALIDITY_SECS;
 
 // ── Helpers (pattern from test_escrow_marker_kyc.rs) ─────────────────────────
 
@@ -307,6 +311,8 @@ fn buy_ix(ctx: &Ctx, amount: u64, tail: Vec<AccountMeta>) -> Instruction {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        issuer_freeze: v1::issuer_freeze(&ctx.issuer_pda),
     }
     .to_account_metas(None);
     metas.extend(tail);
@@ -355,6 +361,14 @@ fn open_vault_with_action(
     realize_action: RealizeAction,
     beneficiary: Pubkey,
 ) -> (Pubkey, Pubkey) {
+    // v1: a DeliveryEscrow always carries a deadline (24 h..365 d); the
+    // longest one keeps the old "no deadline" behaviour within any test.
+    let deadline = if vault_type == VaultType::DeliveryEscrow {
+        svm.get_sysvar::<solana_clock::Clock>().unix_timestamp
+            + asset_registry::DELIVERY_ESCROW_MAX_DEADLINE_SECS
+    } else {
+        0
+    };
     open_vault_with_deadline(
         svm,
         ctx,
@@ -362,7 +376,7 @@ fn open_vault_with_action(
         vault_type,
         realize_action,
         beneficiary,
-        0,
+        deadline,
     )
 }
 
@@ -452,7 +466,20 @@ fn try_open_vault_with_action(
     realize_action: RealizeAction,
     beneficiary: Pubkey,
 ) -> Result<(), String> {
-    let (ix, _, _) = open_vault_ix(ctx, vault_id, vault_type, realize_action, beneficiary, 0);
+    let deadline = if vault_type == VaultType::DeliveryEscrow {
+        svm.get_sysvar::<solana_clock::Clock>().unix_timestamp
+            + asset_registry::DELIVERY_ESCROW_MAX_DEADLINE_SECS
+    } else {
+        0
+    };
+    let (ix, _, _) = open_vault_ix(
+        ctx,
+        vault_id,
+        vault_type,
+        realize_action,
+        beneficiary,
+        deadline,
+    );
     try_send(svm, &[&ctx.payer], &[ix])
 }
 
@@ -888,6 +915,8 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
         sale_id,
         approval_terms,
     );
+    let sale_end = svm.get_sysvar::<solana_clock::Clock>().unix_timestamp
+        + asset_registry::MAX_SALE_DURATION_SECS;
     send(
         &mut svm,
         &[&payer],
@@ -898,7 +927,7 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
                 price_per_unit: PRICE_PER_UNIT,
                 total_for_sale: TOTAL_FOR_SALE,
                 start_ts: 0,
-                end_ts: 0,
+                end_ts: sale_end,
                 raise_type: RaiseType::Mature,
                 cliff_months: 0,
                 vesting_months: 0,
@@ -919,6 +948,7 @@ fn boot_asset_type(kyc_gated: bool, asset_type: AssetType) -> (LiteSVM, Ctx) {
                 approved_by: payer.pubkey(),
                 approver_admin_record: sale_approval::admin_pda(&payer.pubkey()),
                 platform: pause::platform_pda(),
+                issuer_freeze: v1::issuer_freeze(&issuer_pda),
             }
             .to_account_metas(None),
         )],
@@ -2927,7 +2957,7 @@ fn admin_address(authority: Pubkey) -> Pubkey {
 }
 fn authority_transfer_address(target: Pubkey) -> Pubkey {
     Pubkey::find_program_address(
-        &[asset_registry::AUTHORITY_TRANSFER_SEED, target.as_ref()],
+        &[asset_registry::AUTHORITY_PROPOSAL_SEED, target.as_ref()],
         &asset_registry::ID,
     )
     .0
@@ -2956,6 +2986,7 @@ fn accept_platform_ix(current: Pubkey, new_admin: Pubkey) -> Instruction {
             old_admin_record: admin_address(current),
             new_admin_record: admin_address(new_admin),
             system_program: system_program::ID,
+            recovery: v1::platform_recovery(),
         }
         .to_account_metas(None),
     )
@@ -2968,25 +2999,27 @@ fn rotate_platform(svm: &mut LiteSVM, ctx: &Ctx, next: &Keypair) {
         &[propose_platform_ix(ctx.payer.pubkey(), next.pubkey())],
         "propose application admin",
     );
+    // Past the 48 h timelock for the accept, then back: the rotation leaves
+    // no timestamp behind, and the callers' deadlines stay where they were.
+    let clock: solana_clock::Clock = svm.get_sysvar();
+    after_rotation_timelock(svm);
     send(
         svm,
         &[next],
         &[accept_platform_ix(ctx.payer.pubkey(), next.pubkey())],
         "accept application admin",
     );
+    svm.set_sysvar(&clock);
 }
+/// v1: only the super admin may even PROPOSE a grant (`propose_admin`).
 fn add_admin_ix(super_admin: Pubkey, new_admin: Pubkey) -> Instruction {
-    Instruction::new_with_bytes(
-        asset_registry::ID,
-        &ixd::AddAdmin { new_admin }.data(),
-        acc::AddAdmin {
-            super_admin,
-            platform: platform_address(),
-            admin_record: admin_address(new_admin),
-            system_program: system_program::ID,
-        }
-        .to_account_metas(None),
-    )
+    v1::propose_admin_ix(&super_admin, &new_admin)
+}
+/// Moves the clock past the 48 h super-admin rotation timelock.
+fn after_rotation_timelock(svm: &mut LiteSVM) {
+    let mut clock: solana_clock::Clock = svm.get_sysvar();
+    clock.unix_timestamp += asset_registry::SUPER_ADMIN_ROTATION_TIMELOCK_SECS;
+    svm.set_sysvar(&clock);
 }
 fn permission_address(issuer: Pubkey, authority: Pubkey) -> Pubkey {
     Pubkey::find_program_address(
@@ -3107,6 +3140,7 @@ fn application_admin_rotation_requires_acceptance_revokes_old_role_and_preserves
     )
     .unwrap_err()
     .contains("InvalidAuthorityTransfer"));
+    after_rotation_timelock(&mut svm);
     send(
         &mut svm,
         &[&final_admin],
@@ -3134,12 +3168,7 @@ fn application_admin_rotation_requires_acceptance_revokes_old_role_and_preserves
     )
     .unwrap_err()
     .contains("Unauthorized"));
-    send(
-        &mut svm,
-        &[&final_admin],
-        &[add_admin_ix(final_admin.pubkey(), proposed.pubkey())],
-        "new admin manages roles",
-    );
+    v1::grant_admin(&mut svm, &final_admin, &proposed).expect("new admin manages roles");
     assert_eq!(
         svm.get_account(&program_data).unwrap().data,
         deployment_before,
@@ -3588,7 +3617,7 @@ fn revoked_custody_operator_can_be_rotated_without_blocking_deadline_refund() {
         VaultType::DeliveryEscrow,
         RealizeAction::BurnAndAttest,
         ctx.buyer.pubkey(),
-        2_000,
+        1_000 + asset_registry::DELIVERY_ESCROW_MIN_DEADLINE_SECS,
     );
     let mut deposit_metas = acc::DepositToCustodyVault {
         depositor: ctx.buyer.pubkey(),
@@ -3682,12 +3711,7 @@ fn revoked_custody_operator_can_be_rotated_without_blocking_deadline_refund() {
     let wrong_recipient = Keypair::new();
     svm.airdrop(&wrong_recipient.pubkey(), 100_000_000_000)
         .unwrap();
-    send(
-        &mut svm,
-        &[&new_root],
-        &[add_admin_ix(new_root.pubkey(), wrong_recipient.pubkey())],
-        "another real operator",
-    );
+    v1::grant_admin(&mut svm, &new_root, &wrong_recipient).expect("another real operator");
     let accept = |new_authority| {
         Instruction::new_with_bytes(
             ctx.program_id,
@@ -3737,7 +3761,10 @@ fn revoked_custody_operator_can_be_rotated_without_blocking_deadline_refund() {
         )],
         "new operator realizes burn-only vault",
     );
-    warp_to(&mut svm, 2_000);
+    warp_to(
+        &mut svm,
+        1_000 + asset_registry::DELIVERY_ESCROW_MIN_DEADLINE_SECS,
+    );
     send(
         &mut svm,
         &[&ctx.buyer],
@@ -4151,6 +4178,10 @@ fn hooked_vesting_deposits_without_pda_kyc_and_screens_both_delivery_modes() {
                 escrow,
                 recipient_token_account: ctx.buyer_share_ata,
                 token_program: TOKEN_2022,
+                recipient_block_entry: v1::block_entry(&v1::token_owner(
+                    &svm,
+                    &ctx.buyer_share_ata,
+                )),
             }
             .to_account_metas(None)
         } else {
@@ -4162,6 +4193,10 @@ fn hooked_vesting_deposits_without_pda_kyc_and_screens_both_delivery_modes() {
                 escrow,
                 recipient_token_account: ctx.buyer_share_ata,
                 token_program: TOKEN_2022,
+                recipient_block_entry: v1::block_entry(&v1::token_owner(
+                    &svm,
+                    &ctx.buyer_share_ata,
+                )),
             }
             .to_account_metas(None)
         };
@@ -5039,7 +5074,8 @@ fn distribution_pause_gates_rights_entries_but_not_milestone_claims() {
     pause::pause_only(
         &mut svm,
         &ctx.payer,
-        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+        asset_registry::PAUSE_FLAGS_ALL
+            & !(asset_registry::PAUSE_DISTRIBUTIONS | asset_registry::PAUSE_PAYOUT_MODULES),
     );
     send(
         &mut svm,
@@ -5076,7 +5112,8 @@ fn distribution_pause_gates_rights_entries_but_not_milestone_claims() {
     pause::pause_only(
         &mut svm,
         &ctx.payer,
-        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+        asset_registry::PAUSE_FLAGS_ALL
+            & !(asset_registry::PAUSE_DISTRIBUTIONS | asset_registry::PAUSE_PAYOUT_MODULES),
     );
     send(&mut svm, &[&ctx.payer], &[publish_ix], "publish_milestone");
 
@@ -5240,8 +5277,8 @@ fn send_with_logs(
 /// Decodes every `BlocklistClawback` event from `Program data:` log lines.
 fn blocklist_clawback_events(logs: &[String]) -> Vec<asset_registry::BlocklistClawback> {
     use anchor_lang::{
-        AnchorDeserialize, Discriminator,
         __private::base64::{engine::general_purpose::STANDARD, Engine as _},
+        AnchorDeserialize, Discriminator,
     };
     let disc = asset_registry::BlocklistClawback::DISCRIMINATOR;
     logs.iter()
@@ -5448,7 +5485,7 @@ fn rotate_blocklist_authority(svm: &mut LiteSVM, ctx: &Ctx, next: &Keypair) {
     let singleton =
         Pubkey::find_program_address(&[transfer_hook::BLOCKLIST_AUTHORITY_SEED], &ctx.hook_id).0;
     let transfer = Pubkey::find_program_address(
-        &[transfer_hook::BLOCKLIST_AUTHORITY_TRANSFER_SEED],
+        &[transfer_hook::BLOCKLIST_AUTHORITY_PROPOSAL_SEED],
         &ctx.hook_id,
     )
     .0;
@@ -5478,6 +5515,11 @@ fn rotate_blocklist_authority(svm: &mut LiteSVM, ctx: &Ctx, next: &Keypair) {
             ctx.hook_id,
             &transfer_hook::instruction::AcceptBlocklistAuthority {}.data(),
             transfer_hook::accounts::AcceptBlocklistAuthority {
+                recovery: Pubkey::find_program_address(
+                    &[transfer_hook::BLOCKLIST_RECOVERY_SEED],
+                    &transfer_hook::ID,
+                )
+                .0,
                 new_authority: next.pubkey(),
                 blocklist_authority: singleton,
                 transfer,

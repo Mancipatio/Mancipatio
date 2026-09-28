@@ -6,6 +6,8 @@ mod pause;
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -440,6 +442,8 @@ fn setup_sale(
         sale_id,
         terms,
     );
+    let sale_end = svm.get_sysvar::<solana_clock::Clock>().unix_timestamp
+        + asset_registry::MAX_SALE_DURATION_SECS;
     send(
         svm,
         &[&payer],
@@ -450,7 +454,7 @@ fn setup_sale(
                 price_per_unit,
                 total_for_sale: 1_000_000,
                 start_ts: 0,
-                end_ts: 0,
+                end_ts: sale_end,
                 raise_type,
                 cliff_months,
                 vesting_months,
@@ -471,6 +475,7 @@ fn setup_sale(
                 approved_by: payer.pubkey(),
                 approver_admin_record: sale_approval::admin_pda(&payer.pubkey()),
                 platform: pause::platform_pda(),
+                issuer_freeze: v1::issuer_freeze(&issuer_pda),
             }
             .to_account_metas(None),
         )],
@@ -539,6 +544,8 @@ fn buy_ix(ctx: &SaleCtx, units: u64) -> Instruction {
         share_token_program: TOKEN_2022,
         payment_token_program: TOKEN_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&ctx.buyer.pubkey()),
+        issuer_freeze: v1::issuer_freeze(&ctx.issuer),
     }
     .to_account_metas(None);
     metas.push(AccountMeta::new_readonly(extra_metas_pda, false));
@@ -579,6 +586,9 @@ fn open_payout_vault_ix(ctx: &SaleCtx, metadata_hash: [u8; 32]) -> (Instruction,
             escrow: escrow_pda,
             payment_token_program: TOKEN_2022,
             system_program: system_program::ID,
+            share_class: ctx.share_class,
+            asset: ctx.asset,
+            issuer_freeze: v1::issuer_freeze(&ctx.issuer),
         }
         .to_account_metas(None),
     );
@@ -692,6 +702,10 @@ fn send_release(
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
                 platform: pause::platform_pda(),
+                share_class: ctx.share_class,
+                asset: ctx.asset,
+                issuer_freeze: v1::issuer_freeze(&ctx.issuer),
+                founder_block_entry: v1::block_entry(&ctx.payer.pubkey()),
             }
             .to_account_metas(None),
         )],
@@ -720,6 +734,10 @@ fn try_send_release(
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
                 platform: pause::platform_pda(),
+                share_class: ctx.share_class,
+                asset: ctx.asset,
+                issuer_freeze: v1::issuer_freeze(&ctx.issuer),
+                founder_block_entry: v1::block_entry(&ctx.payer.pubkey()),
             }
             .to_account_metas(None),
         )],
@@ -1781,6 +1799,10 @@ fn send_claim_founder_yield(
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
                 platform: pause::platform_pda(),
+                share_class: ctx.share_class,
+                asset: ctx.asset,
+                issuer_freeze: v1::issuer_freeze(&ctx.issuer),
+                founder_block_entry: v1::block_entry(&ctx.payer.pubkey()),
             }
             .to_account_metas(None),
         )],
@@ -1810,6 +1832,10 @@ fn try_send_claim_founder_yield(
                 founder_account: *founder_ata,
                 payment_token_program: TOKEN_2022,
                 platform: pause::platform_pda(),
+                share_class: ctx.share_class,
+                asset: ctx.asset,
+                issuer_freeze: v1::issuer_freeze(&ctx.issuer),
+                founder_block_entry: v1::block_entry(&ctx.payer.pubkey()),
             }
             .to_account_metas(None),
         )],
@@ -1947,8 +1973,8 @@ fn repeated_freeze_uses_new_vote_round_and_old_outcomes_cannot_finalize_or_refun
     let root = util::snapshot_leaf(&ctx.buyer.pubkey(), 120);
     warp_to(&mut svm, first_start + 2 * 2_592_000 + 1);
     send_freeze(&mut svm, &ctx, &vault);
-    let first = open_vote(&mut svm, &ctx, &vault, root, 120, 100);
-    let err = try_open_vote(&mut svm, &ctx, &vault, root, 120, 101).unwrap_err();
+    let first = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
+    let err = try_open_vote(&mut svm, &ctx, &vault, root, 120, 604_801).unwrap_err();
     assert!(
         err.contains("VaultVoteAlreadyOpen"),
         "only one pending round: {err}"
@@ -1977,7 +2003,7 @@ fn repeated_freeze_uses_new_vote_round_and_old_outcomes_cannot_finalize_or_refun
     svm.expire_blockhash();
     assert!(try_finalize(&mut svm, &ctx, &vault, &first).is_err());
     assert_eq!(load::<PayoutVault>(&svm, &vault).start_ts, before);
-    let second = open_vote(&mut svm, &ctx, &vault, root, 120, 100);
+    let second = open_vote(&mut svm, &ctx, &vault, root, 120, 604_800);
     assert_ne!(first, second);
     assert_eq!(load::<VaultVote>(&svm, &second).round, 2);
     svm.expire_blockhash();
@@ -2130,7 +2156,7 @@ fn open_sale_ix(ctx: &SaleCtx, sale_id: u64, price_per_unit: u64) -> Instruction
             price_per_unit,
             total_for_sale: 1_000,
             start_ts: 0,
-            end_ts: 0,
+            end_ts: asset_registry::MAX_SALE_DURATION_SECS,
             raise_type: RaiseType::Mature,
             cliff_months: 0,
             vesting_months: 0,
@@ -2155,6 +2181,7 @@ fn open_sale_ix(ctx: &SaleCtx, sale_id: u64, price_per_unit: u64) -> Instruction
             approved_by: ctx.payer.pubkey(),
             approver_admin_record: sale_approval::admin_pda(&ctx.payer.pubkey()),
             platform: pause::platform_pda(),
+            issuer_freeze: v1::issuer_freeze(&ctx.issuer),
         }
         .to_account_metas(None),
     )
@@ -2219,6 +2246,10 @@ fn release_ix(ctx: &SaleCtx, vault: &Pubkey, escrow: &Pubkey) -> Instruction {
             founder_account: ctx.founder_payment_ata,
             payment_token_program: TOKEN_2022,
             platform: pause::platform_pda(),
+            share_class: ctx.share_class,
+            asset: ctx.asset,
+            issuer_freeze: v1::issuer_freeze(&ctx.issuer),
+            founder_block_entry: v1::block_entry(&ctx.payer.pubkey()),
         }
         .to_account_metas(None),
     )
@@ -2367,7 +2398,8 @@ fn issuer_proceeds_and_yield_bits_leave_investor_exits_open() {
     pause::pause_only(
         &mut svm,
         &payer,
-        asset_registry::PAUSE_FLAGS_ALL & !asset_registry::PAUSE_DISTRIBUTIONS,
+        asset_registry::PAUSE_FLAGS_ALL
+            & !(asset_registry::PAUSE_DISTRIBUTIONS | asset_registry::PAUSE_PAYOUT_MODULES),
     );
     let err = try_send(
         &mut svm,

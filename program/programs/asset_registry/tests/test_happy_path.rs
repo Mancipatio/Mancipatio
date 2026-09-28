@@ -11,6 +11,8 @@ mod pause;
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -314,8 +316,11 @@ fn run_happy_path(mut svm: LiteSVM) {
     let platform: Platform = load(&svm, &platform_pda, "platform");
     assert_eq!(platform.admin, payer.pubkey());
     assert_eq!(platform.protocol_fee_bps, 250);
-    // A fresh platform starts fully paused; the bootstrap clears it.
-    assert_eq!(platform.pause_flags, asset_registry::PAUSE_FLAGS_ALL);
+    // A fresh platform starts fully paused with the bootstrap window open (0xFF).
+    assert_eq!(
+        platform.pause_flags,
+        asset_registry::PAUSE_FLAGS_ALL | asset_registry::PLATFORM_BOOTSTRAP_OPEN
+    );
     assert_eq!(platform.version, 1);
     pause::unpause_all(&mut svm, &payer);
 
@@ -472,7 +477,7 @@ fn run_happy_path(mut svm: LiteSVM) {
                 holder,
                 jurisdiction: 222,
                 accreditation_level: 2,
-                expiry: 4_102_444_800, // 2100-01-01
+                expiry: asset_registry::MAX_KYC_VALIDITY_SECS, // the v1 2-year cap (clock ~0)
                 provider_id: 1,
                 external_ref_hash: [5u8; 32],
             }
@@ -937,6 +942,8 @@ fn run_happy_path(mut svm: LiteSVM) {
         sale_id,
         approval_terms,
     );
+    let sale_end = svm.get_sysvar::<solana_clock::Clock>().unix_timestamp
+        + asset_registry::MAX_SALE_DURATION_SECS;
     send(
         &mut svm,
         &payer,
@@ -947,7 +954,7 @@ fn run_happy_path(mut svm: LiteSVM) {
                 price_per_unit: 1_000_000, // 1 payment-token unit per share unit
                 total_for_sale: 500,
                 start_ts: 0,
-                end_ts: 0,
+                end_ts: sale_end,
                 raise_type: RaiseType::Mature,
                 cliff_months: 0,
                 vesting_months: 0,
@@ -968,6 +975,7 @@ fn run_happy_path(mut svm: LiteSVM) {
                 approved_by: payer.pubkey(),
                 approver_admin_record: sale_approval::admin_pda(&payer.pubkey()),
                 platform: pause::platform_pda(),
+                issuer_freeze: v1::issuer_freeze(&issuer_pda),
             }
             .to_account_metas(None),
         ),
@@ -1000,6 +1008,8 @@ fn run_happy_path(mut svm: LiteSVM) {
         share_token_program: token_2022,
         payment_token_program: token_2022,
         platform: pause::platform_pda(),
+        buyer_block_entry: v1::block_entry(&buyer.pubkey()),
+        issuer_freeze: v1::issuer_freeze(&issuer_pda),
     }
     .to_account_metas(None);
     buy_metas.push(AccountMeta::new_readonly(extra_metas_pda, false));
@@ -1026,6 +1036,11 @@ fn run_happy_path(mut svm: LiteSVM) {
             destination: issuer_payment_ata,
             payment_token_program: token_2022,
             platform: pause::platform_pda(),
+            share_class: v1::sale_chain(&svm, &sale_pda).share_class,
+            asset: v1::sale_chain(&svm, &sale_pda).asset,
+            issuer_freeze: v1::issuer_freeze(&v1::sale_chain(&svm, &sale_pda).issuer),
+            authority_block_entry: v1::block_entry(&payer.pubkey()),
+            destination_block_entry: v1::block_entry(&v1::token_owner(&svm, &issuer_payment_ata)),
         }
         .to_account_metas(None),
     );
@@ -1225,6 +1240,8 @@ fn run_happy_path(mut svm: LiteSVM) {
         share_token_program: token_2022,
         payment_token_program: token_2022,
         platform: pause::platform_pda(),
+        taker_block_entry: v1::block_entry(&taker.pubkey()),
+        maker_block_entry: v1::block_entry(&v1::offer_maker(&svm, &offer_pda)),
     }
     .to_account_metas(None);
     take_metas.push(AccountMeta::new_readonly(offer_block_pda, false));
@@ -1853,7 +1870,7 @@ fn approve_holder_for(
                 holder,
                 jurisdiction: 111,
                 accreditation_level: 1,
-                expiry: 4_102_444_800, // 2100-01-01
+                expiry: asset_registry::MAX_KYC_VALIDITY_SECS, // the v1 2-year cap (clock ~0)
                 provider_id: 1,
                 external_ref_hash: [7u8; 32],
             }
@@ -2020,11 +2037,11 @@ fn approve_holder_reapproves_after_revoke() {
             kyc_registry_pda,
             kyc_entry_pda,
             holder,
-            222,           // new jurisdiction
-            3,             // new accreditation tier
-            4_133_980_800, // new expiry (2101-01-01)
-            9,             // new provider
-            [9u8; 32],     // new dossier hash
+            222,                                            // new jurisdiction
+            3,                                              // new accreditation tier
+            asset_registry::MAX_KYC_VALIDITY_SECS - 86_400, // a new expiry (within the 2-year cap)
+            9,                                              // new provider
+            [9u8; 32],                                      // new dossier hash
         ),
         "approve_holder (re-approval after revoke)",
     );
@@ -2032,7 +2049,11 @@ fn approve_holder_reapproves_after_revoke() {
     assert_eq!(after.status, KycStatus::Approved, "status refreshed");
     assert_eq!(after.jurisdiction, 222, "jurisdiction overwritten");
     assert_eq!(after.accreditation_level, 3, "tier overwritten");
-    assert_eq!(after.expiry, 4_133_980_800, "expiry overwritten");
+    assert_eq!(
+        after.expiry,
+        asset_registry::MAX_KYC_VALIDITY_SECS - 86_400,
+        "expiry overwritten"
+    );
     assert_eq!(after.provider_id, 9, "provider overwritten");
     assert_eq!(
         after.external_ref_hash, [9u8; 32],

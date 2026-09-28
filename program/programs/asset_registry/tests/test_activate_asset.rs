@@ -10,6 +10,8 @@ mod pause;
 mod sale_approval;
 #[path = "../../../tests/support/mod.rs"]
 mod support;
+#[path = "../../../tests/support/v1.rs"]
+mod v1;
 
 use {
     anchor_lang::{
@@ -471,7 +473,7 @@ fn open_sale_on_draft_rejected() {
                 price_per_unit: 1,
                 total_for_sale: 100,
                 start_ts: 0,
-                end_ts: 0,
+                end_ts: asset_registry::MAX_SALE_DURATION_SECS,
                 raise_type: asset_registry::RaiseType::Mature,
                 cliff_months: 0,
                 vesting_months: 0,
@@ -492,6 +494,7 @@ fn open_sale_on_draft_rejected() {
                 approved_by: ctx.payer.pubkey(),
                 approver_admin_record: sale_approval::admin_pda(&ctx.payer.pubkey()),
                 platform: pause::platform_pda(),
+                issuer_freeze: v1::issuer_freeze(&ctx.issuer_pda),
             }
             .to_account_metas(None),
         )

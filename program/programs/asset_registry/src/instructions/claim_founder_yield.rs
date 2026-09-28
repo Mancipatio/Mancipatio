@@ -41,6 +41,33 @@ pub struct ClaimFounderYield<'info> {
         constraint = !platform.is_paused(PAUSE_ISSUER_PROCEEDS) @ RegistryError::PlatformPaused,
     )]
     pub platform: Box<Account<'info, crate::state::Platform>>,
+
+    /// D1 chain to the issuer: the vault's share class ...
+    #[account(address = vault.share_class @ RegistryError::Unauthorized)]
+    pub share_class: Box<Account<'info, crate::state::ShareClass>>,
+    /// ... and its asset (`asset.issuer` keys the freeze below).
+    #[account(address = share_class.asset @ RegistryError::Unauthorized)]
+    pub asset: Box<Account<'info, crate::state::Asset>>,
+    /// D1: the issuer's `IssuerFreeze` PDA `["issuer_freeze", issuer]` must be
+    /// unset (no freeze in force).
+    /// CHECK: address pinned by the seeds; `util::is_unset` (fail-closed).
+    #[account(
+        seeds = [ISSUER_FREEZE_SEED, asset.issuer.as_ref()],
+        bump,
+        constraint = crate::util::is_unset(&issuer_freeze) @ RegistryError::IssuerProceedsFrozen,
+    )]
+    pub issuer_freeze: UncheckedAccount<'info>,
+    /// prog-novac-4: the payee (`vault.founder`) is not blocked.
+    /// CHECK: the hook's `["blocked", wallet]` PDA (address pinned by the
+    /// seeds); it must be unset — system-owned, no data (`util::is_unset`,
+    /// fail-closed: a live BlockEntry is refused).
+    #[account(
+        seeds = [HOOK_BLOCK_ENTRY_SEED, vault.founder.as_ref()],
+        seeds::program = TRANSFER_HOOK_PROGRAM,
+        bump,
+        constraint = crate::util::is_unset(&founder_block_entry) @ RegistryError::PartyBlocklisted,
+    )]
+    pub founder_block_entry: UncheckedAccount<'info>,
 }
 
 /// Receiver KYC: NOT APPLICABLE — this escrow pays out the PAYMENT mint, a

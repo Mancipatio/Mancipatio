@@ -70,7 +70,7 @@ pub fn permissions_pda(issuer: &Pubkey, authority: &Pubkey) -> Pubkey {
     ])
 }
 pub fn transfer_pda(target: &Pubkey) -> Pubkey {
-    pda(&[asset_registry::AUTHORITY_TRANSFER_SEED, target.as_ref()])
+    pda(&[asset_registry::AUTHORITY_PROPOSAL_SEED, target.as_ref()])
 }
 pub fn recovery_pda(issuer: &Pubkey) -> Pubkey {
     pda(&[asset_registry::ISSUER_RECOVERY_SEED, issuer.as_ref()])
@@ -117,6 +117,21 @@ pub struct World {
 impl World {
     /// Both programs, a platform whose super admin is `admin`, unpaused.
     pub fn boot() -> Self {
+        let mut world = Self::boot_inner();
+        world.unpause_everything();
+        world
+    }
+
+    /// Like `boot`, but grants the Admin role to `admins` inside the
+    /// bootstrap window, before the first unpause (the Day-D order).
+    pub fn boot_with_admins(admins: &[&Keypair]) -> Self {
+        let mut world = Self::boot_inner();
+        world.bootstrap_admins(admins);
+        world.unpause_everything();
+        world
+    }
+
+    fn boot_inner() -> Self {
         let mut svm = LiteSVM::new();
         svm.add_program(
             asset_registry::ID,
@@ -167,8 +182,79 @@ impl World {
             )],
             "initialize_platform",
         );
-        world.set_pause(0, asset_registry::PAUSE_FLAGS_ALL);
         world
+    }
+
+    /// Both programs and a platform whose super admin is `admin`, still fully
+    /// paused with the bootstrap window open (0xFF).
+    pub fn boot_paused() -> Self {
+        let mut world = Self::boot_inner();
+        world.bootstrap_admins(&[]);
+        world
+    }
+
+    /// The v1 unpause: bits 0-5 and the bootstrap marker in one call, then
+    /// `PAUSE_PAYOUT_MODULES` in a call of its own.
+    pub fn unpause_everything(&mut self) {
+        self.set_pause(0, !asset_registry::PAUSE_PAYOUT_MODULES);
+        self.set_pause(0, asset_registry::PAUSE_PAYOUT_MODULES);
+    }
+
+    /// Grants the Admin role to each key while the bootstrap window is still
+    /// open (propose + add in one transaction).
+    pub fn bootstrap_admins(&mut self, admins: &[&Keypair]) {
+        for new_admin in admins {
+            self.grant_admin(new_admin);
+        }
+    }
+
+    /// The v1 two-step admin grant (`propose_admin` by the super admin,
+    /// `add_admin` signed by the new key). With bootstrap open both run in
+    /// one transaction; afterwards the clock moves to the eta for the
+    /// `add_admin` and back (an Admin record carries no timestamp).
+    pub fn grant_admin(&mut self, new_admin: &Keypair) {
+        let admin = self.admin.insecure_clone();
+        let propose = propose_admin_ix(&admin.pubkey(), &new_admin.pubkey());
+        let add = add_admin_ix(&new_admin.pubkey(), &admin.pubkey());
+        if self.bootstrap_open() {
+            self.send(
+                &[&admin, new_admin],
+                &[propose, add],
+                "propose_admin + add_admin",
+            );
+            return;
+        }
+        self.send(&[&admin], &[propose], "propose_admin");
+        let now = self.now();
+        self.warp_to(now + asset_registry::ADMIN_TIMELOCK_SECS);
+        let result = self.try_send(&[new_admin], &[add]);
+        self.warp_to(now);
+        result.unwrap_or_else(|e| panic!("[add_admin] tx failed: {e}"));
+    }
+
+    /// `(asset, issuer)` of a share class.
+    pub fn chain(&self, share_class: &Pubkey) -> (Pubkey, Pubkey) {
+        let asset = self.load::<asset_registry::ShareClass>(share_class).asset;
+        (asset, self.load::<asset_registry::Asset>(&asset).issuer)
+    }
+
+    /// The owner of an SPL / Token-2022 token account (bytes 32..64).
+    pub fn token_owner(&self, token_account: &Pubkey) -> Pubkey {
+        let data = self
+            .svm
+            .get_account(token_account)
+            .expect("token account")
+            .data;
+        Pubkey::new_from_array(data[32..64].try_into().unwrap())
+    }
+
+    pub fn bootstrap_open(&self) -> bool {
+        self.svm
+            .get_account(&platform_pda())
+            .expect("Platform")
+            .data[74]
+            & asset_registry::PLATFORM_BOOTSTRAP_OPEN
+            != 0
     }
 
     pub fn funded(&mut self) -> Keypair {
@@ -791,4 +877,66 @@ pub fn sync_payout_founder_ix_with(
         }
         .to_account_metas(None),
     )
+}
+
+pub fn pending_admin_pda(new_admin: &Pubkey) -> Pubkey {
+    pda(&[asset_registry::PENDING_ADMIN_SEED, new_admin.as_ref()])
+}
+
+pub fn propose_admin_ix(super_admin: &Pubkey, new_admin: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::ProposeAdmin {
+            new_admin: *new_admin,
+        }
+        .data(),
+        acc::ProposeAdmin {
+            super_admin: *super_admin,
+            platform: platform_pda(),
+            new_admin_record: admin_pda(new_admin),
+            pending_admin: pending_admin_pda(new_admin),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+/// `add_admin` signed by the proposed key, refunding `proposer`.
+pub fn add_admin_ix(new_admin: &Pubkey, proposer: &Pubkey) -> Instruction {
+    Instruction::new_with_bytes(
+        asset_registry::ID,
+        &ixd::AddAdmin {
+            new_admin: *new_admin,
+        }
+        .data(),
+        acc::AddAdmin {
+            new_admin: *new_admin,
+            platform: platform_pda(),
+            pending_admin: pending_admin_pda(new_admin),
+            proposer: *proposer,
+            admin_record: admin_pda(new_admin),
+            system_program: system_program::ID,
+        }
+        .to_account_metas(None),
+    )
+}
+
+pub fn issuer_freeze_pda(issuer: &Pubkey) -> Pubkey {
+    pda(&[asset_registry::ISSUER_FREEZE_SEED, issuer.as_ref()])
+}
+
+/// The transfer hook's `["blocked", wallet]` BlockEntry PDA.
+pub fn block_entry_pda(wallet: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(
+        &[asset_registry::HOOK_BLOCK_ENTRY_SEED, wallet.as_ref()],
+        &transfer_hook::ID,
+    )
+    .0
+}
+
+pub fn platform_recovery_pda() -> Pubkey {
+    pda(&[
+        asset_registry::PLATFORM_RECOVERY_SEED,
+        platform_pda().as_ref(),
+    ])
 }

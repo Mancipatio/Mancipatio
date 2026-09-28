@@ -63,6 +63,18 @@ pub struct ExpireOtcDeal<'info> {
 
     pub share_token_program: Interface<'info, TokenInterface>,
     pub payment_token_program: Interface<'info, TokenInterface>,
+
+    /// O-11 (appended before the hook tail): the buyer's hook BlockEntry.
+    /// Only its address is pinned here; the handler refuses a permissionless
+    /// refund of a DEPOSITED leg to a blocked party (the Admin
+    /// `cancel_otc_deal` stays the manual path).
+    /// CHECK: address pinned by the seeds; read by `util::is_unset`.
+    #[account(seeds = [HOOK_BLOCK_ENTRY_SEED, deal.buyer.as_ref()], seeds::program = TRANSFER_HOOK_PROGRAM, bump)]
+    pub buyer_block_entry: UncheckedAccount<'info>,
+    /// The seller's hook BlockEntry (see `buyer_block_entry`).
+    /// CHECK: address pinned by the seeds; read by `util::is_unset`.
+    #[account(seeds = [HOOK_BLOCK_ENTRY_SEED, deal.seller.as_ref()], seeds::program = TRANSFER_HOOK_PROGRAM, bump)]
+    pub seller_block_entry: UncheckedAccount<'info>,
     // remaining_accounts: the refund leg's hook tail (source authority = deal
     // PDA) — [BlockEntry, ExtraAccountMetaList, hook program] in Open mode,
     // 9 accounts in KycGated mode (see docs in transfer_hook).
@@ -85,6 +97,14 @@ pub fn handle_expire_otc_deal<'info>(ctx: Context<'info, ExpireOtcDeal<'info>>) 
         expires_at > 0 && now > expires_at,
         RegistryError::DealNotExpired
     );
+    // O-11: a permissionless refund never pays a blocked party. Only the
+    // legs that were actually deposited are checked.
+    let deal = &ctx.accounts.deal;
+    crate::util::ensure(
+        (!deal.payment_deposited || crate::util::is_unset(&ctx.accounts.buyer_block_entry))
+            && (!deal.asset_deposited || crate::util::is_unset(&ctx.accounts.seller_block_entry)),
+        RegistryError::PartyBlocklisted,
+    )?;
 
     refund_otc_deposits(
         &ctx.accounts.deal,
