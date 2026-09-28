@@ -2,6 +2,7 @@
 // reconcile-index). Pure: callers pass the environment and, in tests, the
 // targets; nothing here reads a file other than scripts/ops/targets.json or
 // touches the network.
+import { readFileSync } from "node:fs";
 import { loadTargets, SITE_ORIGIN } from "./target.mjs";
 
 export type LiveNetwork = "devnet" | "mainnet";
@@ -36,6 +37,33 @@ export function smokeTarget(env: Env, targets: Targets = loadTargets()): { netwo
   const foreign = Object.entries(targets).some(([name, target]) => name !== network && target.siteOrigin === override);
   if (foreign) throw new Error("SMOKE_ORIGIN is another target's origin");
   return { network, origin: override };
+}
+
+/** The Vercel "Protection Bypass for Automation" secret, as the schedulers accept it. */
+const BYPASS_SECRET = /^[A-Za-z0-9_-]{32,128}$/;
+
+/**
+ * MANCIPATIO_VERCEL_BYPASS_FILE=<file> holding one line
+ * `VERCEL_AUTOMATION_BYPASS_SECRET=<secret>` (never the value on a command
+ * line): the header the smoke run sends while the deployment is behind Vercel
+ * Deployment Protection (runbook §0A D6). Without the variable: no header
+ * (a public deployment, §0A D11). The secret is never logged.
+ */
+export function smokeBypassHeaders(env: Env, read: (file: string) => string = (file) => readFileSync(file, "utf8")): Record<string, string> {
+  const file = env.MANCIPATIO_VERCEL_BYPASS_FILE?.trim();
+  if (!file) return {};
+  let line: string;
+  try {
+    line = read(file).trim();
+  } catch {
+    throw new Error("MANCIPATIO_VERCEL_BYPASS_FILE is unreadable (path withheld)");
+  }
+  const prefix = "VERCEL_AUTOMATION_BYPASS_SECRET=";
+  const secret = line.startsWith(prefix) ? line.slice(prefix.length) : "";
+  if (!BYPASS_SECRET.test(secret)) {
+    throw new Error("MANCIPATIO_VERCEL_BYPASS_FILE must hold one line VERCEL_AUTOMATION_BYPASS_SECRET=<32-128 letters, digits, _ or ->");
+  }
+  return { "x-vercel-protection-bypass": secret };
 }
 
 /** RPC keys the reconcile runner may take from its env file, per network. */
