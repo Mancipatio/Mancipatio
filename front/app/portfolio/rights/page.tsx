@@ -46,6 +46,8 @@ import {
   type VestingMilestone,
 } from "@/lib/generated/asset_registry";
 import { buildClaimFounderYieldInstruction } from "@/lib/proceeds-exits";
+import { useIssuerFreezes } from "@/lib/use-issuer-freeze";
+import { ProceedsFrozenNotice } from "@/components/proceeds-frozen-notice";
 import {
   findVaultPda,
 } from "@/lib/generated/asset_registry/pdas";
@@ -620,6 +622,12 @@ function VaultCard({
     };
   }, [client, wallet, walletIsIssuer, founder, shareClass, saleAddress]);
   const isFounder = wallet?.toString() === vault.founder.toString() || founderSync.length > 0;
+  // D1: a frozen issuer's founder yield cannot be claimed (6143). Read only
+  // for the founder with something to claim; the send path refuses again
+  // before the wallet opens (lib/proceeds-gate.ts).
+  const founderClaim = isFounder && vault.founderYieldClaimable > BigInt(0) ? shareClass : null;
+  const issuerFreeze = useIssuerFreezes({ shareClasses: [founderClaim] });
+  const proceedsFrozen = founderClaim ? issuerFreeze.isFrozen({ shareClass: founderClaim }) === true : false;
   const [yieldProof, setYieldProof] = useState<
     SnapshotProof | "loading" | "missing"
   >("loading");
@@ -914,13 +922,15 @@ function VaultCard({
         {isFounder && vault.founderYieldClaimable > BigInt(0) && (
           <button
             type="button"
-            disabled={tx.isSending}
+            disabled={tx.isSending || proceedsFrozen}
             onClick={() => void claimFounderYield()}
+            title={proceedsFrozen ? "Proceeds frozen: founder yield cannot be claimed until the Super Admin lifts the freeze." : undefined}
             className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
             Claim founder yield ({String(vault.founderYieldClaimable)})
           </button>
         )}
+        {proceedsFrozen && <ProceedsFrozenNotice className="w-full" closed="founder yield cannot be claimed" />}
 
         {/* Frozen-vault investor vote */}
         {vault.state === PayoutVaultState.Frozen &&

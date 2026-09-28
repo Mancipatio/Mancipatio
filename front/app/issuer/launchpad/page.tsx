@@ -36,7 +36,7 @@ import {
   type ShareClass,
 } from "@/lib/generated/asset_registry";
 import { buildCloseSaleInstruction, buildOpenPayoutVaultInstruction } from "@/lib/proceeds-exits";
-import { saleEndError } from "@/lib/deadline-bounds";
+import { saleEndError, saleEndInputBounds } from "@/lib/deadline-bounds";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
@@ -48,6 +48,8 @@ import { useToast } from "@/lib/toast";
 import { upsertListing } from "@/lib/launchpad";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { syncSaleIfNeeded } from "@/lib/issuer-authority";
+import { useIssuerFreezes } from "@/lib/use-issuer-freeze";
+import { ProceedsFrozenNotice } from "@/components/proceeds-frozen-notice";
 import {
   isApprovalLive,
   listIssuerSaleApprovals,
@@ -106,6 +108,7 @@ function LaunchpadInner() {
   const [showOpen, setShowOpen] = useState(false);
   const [autoOpened, setAutoOpened] = useState(false);
   const [confirmClose, setConfirmClose] = useState<Sale | null>(null);
+  const issuerFreeze = useIssuerFreezes({ issuers: [issuerPda] });
 
   const refresh = useCallback(async () => {
     try {
@@ -195,7 +198,10 @@ function LaunchpadInner() {
 
   const verified = me?.kybStatus === 1;
   const mintableScs = myShareClasses.filter((sc) => sc.mintInitialized);
-  const canOpen = verified && mintableScs.length > 0;
+  // D1: a frozen issuer can neither open nor close a sale (6143); the send
+  // path refuses again before the wallet opens (lib/proceeds-gate.ts).
+  const proceedsFrozen = issuerFreeze.isFrozen({ issuer: issuerPda }) === true;
+  const canOpen = verified && mintableScs.length > 0 && !proceedsFrozen;
 
   // After a sale closes (instant close_sale for Mature, or the
   // open_payout_vault close flow for Startup) the server alone books what was
@@ -327,7 +333,9 @@ function LaunchpadInner() {
               ? "Verify KYB first."
               : mintableScs.length === 0
                 ? "Initialize a share-class mint first."
-                : undefined
+                : proceedsFrozen
+                  ? "Manci has frozen this issuer's proceeds: no sale can be opened until the Super Admin lifts the freeze."
+                  : undefined
           }
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
         >
@@ -339,6 +347,9 @@ function LaunchpadInner() {
         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
           KYB pending — sale creation locked.
         </div>
+      )}
+      {proceedsFrozen && (
+        <ProceedsFrozenNotice className="mt-6" closed="no sale can be opened or closed, and no payout vault opened," />
       )}
       {verified && mintableScs.length === 0 && (
         <div className="mt-6 rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-700">
@@ -450,12 +461,15 @@ function LaunchpadInner() {
                           type="button"
                           disabled={
                             tx.isSending ||
+                            proceedsFrozen ||
                             (s.raiseType === RaiseType.Startup && !STARTUP_RAISES)
                           }
                           title={
-                            s.raiseType === RaiseType.Startup && !STARTUP_RAISES
-                              ? featureDisabledMessage("startupRaises")
-                              : undefined
+                            proceedsFrozen
+                              ? "Proceeds frozen: the sale cannot be closed until the Super Admin lifts the freeze."
+                              : s.raiseType === RaiseType.Startup && !STARTUP_RAISES
+                                ? featureDisabledMessage("startupRaises")
+                                : undefined
                           }
                           aria-describedby={
                             s.raiseType === RaiseType.Startup && !STARTUP_RAISES
@@ -689,7 +703,10 @@ function OpenSaleModal({
 
   const [pricePerUnit, setPricePerUnit] = useState("");
   const [totalForSale, setTotalForSale] = useState("");
-  const [endTs, setEndTs] = useState("");
+  // v1: every sale ends, at most 365 days out (6145); the input starts at a
+  // 30-day default and cannot go past the cap minus the chain-clock margin.
+  const [endBounds] = useState(() => saleEndInputBounds());
+  const [endTs, setEndTs] = useState(endBounds.defaultValue);
 
   // Locked by the approval, including the payout schedule (on-chain since the
   // approval carries it; open_sale requires it exactly).
@@ -733,7 +750,8 @@ function OpenSaleModal({
       const endTsBig = endTs.trim()
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
-      // v1: every sale ends, at most 365 days out (SaleDurationInvalid 6145).
+      // v1: every sale ends, at most 365 days out (SaleDurationInvalid 6145),
+      // judged with the chain-clock margin (lib/deadline-bounds.ts).
       const endError = saleEndError(BigInt(0), endTsBig);
       if (endError) throw new Error(endError);
       const signer = walletSigner(conn.wallet);
@@ -993,11 +1011,14 @@ function OpenSaleModal({
             </label>
             <label className="block sm:col-span-2">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                End date (optional)
+                End date (required: every sale ends, at most 365 days out)
               </span>
               <input
                 type="datetime-local"
+                required
                 value={endTs}
+                min={endBounds.min}
+                max={endBounds.max}
                 onChange={(e) => setEndTs(e.target.value)}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />

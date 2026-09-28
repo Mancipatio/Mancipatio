@@ -41,6 +41,7 @@ import {
   VaultState,
   findAdminRecordPda,
   findPlatformPda,
+  getPendingAdminEncoder,
   parseAddAdminInstruction,
   parseCancelAdminProposalInstruction,
   parseCancelCustodyAuthorityTransferInstruction,
@@ -65,7 +66,8 @@ import {
   buildReleasePayoutInstruction,
 } from "@/lib/proceeds-exits";
 import { buildVestingReleaseInstruction } from "@/lib/vesting-release";
-import { STALE_ADMIN_PROPOSAL, buildAddAdmin, buildCancelAdminProposal, buildProposeAdmin } from "@/lib/admin-grants";
+import { STALE_ADMIN_PROPOSAL, buildAddAdmin, buildCancelAdminProposal, buildProposeAdmin, listPendingAdmins } from "@/lib/admin-grants";
+import { proposalWindowState } from "@/lib/proposal-window";
 import { buildCancelCustodyAuthorityTransfer } from "@/lib/custody-authority";
 import { buildCancelRoleRecovery, buildExecuteRoleRecovery } from "@/lib/role-recovery";
 import {
@@ -175,6 +177,21 @@ describe("Admin grants (D3)", () => {
     expect(parsed.data.newAdmin).toBe(NEW);
     mocks.pendingAdmin.mockResolvedValue(owned({ newAdmin: NEW, proposedBy: WALLET, proposedAt: BigInt(0), eta: BigInt(1), expiresAt: BigInt(2) }));
     await expect(buildAddAdmin(rpc, createNoopSigner(NEW))).rejects.toThrow(STALE_ADMIN_PROPOSAL);
+  });
+
+  it("the pending list carries the Platform flags: while bit 7 is open the grant is executable at once (util::effective_eta)", async () => {
+    const [pda] = [await findPendingAdminPda(NEW)];
+    const data = getPendingAdminEncoder().encode({ newAdmin: NEW, proposedBy: SA, proposedAt: 1_000, eta: 1_000 + 172_800, expiresAt: 1_000 + 172_800 + 1_209_600, version: 1, bump: 255 });
+    const list = { getProgramAccounts: () => ({ send: async () => [{ pubkey: pda, account: { owner: ASSET_REGISTRY_PROGRAM_ADDRESS, data: [Buffer.from(data).toString("base64"), "base64"] } }] }) } as never;
+    mocks.platform.mockResolvedValue(owned({ admin: SA, pauseFlags: 0xff }));
+    const [open] = await listPendingAdmins(list);
+    expect(open.platformPauseFlags).toBe(0xff);
+    expect(proposalWindowState(open, 1_010, { pauseFlags: open.platformPauseFlags, bootstrapWaived: true }).kind).toBe("open");
+    // Without the flags the page showed the 48 h wait the program does not apply.
+    expect(proposalWindowState(open, 1_010).kind).toBe("waiting");
+    mocks.platform.mockResolvedValue(owned({ admin: SA, pauseFlags: 0x7f }));
+    const [closed] = await listPendingAdmins(list);
+    expect(proposalWindowState(closed, 1_010, { pauseFlags: closed.platformPauseFlags, bootstrapWaived: true }).kind).toBe("waiting");
   });
 
   it("cancel_admin_proposal: any canceller (the program decides), rent to the proposer, ProgramData named", async () => {

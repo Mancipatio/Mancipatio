@@ -54,7 +54,7 @@ const PILLARS: Array<{ title: string; body: string }> = [
   },
   {
     title: "Issuer proceeds freeze",
-    body: "Any Manci admin can freeze the proceeds of one issuer: its primary sales, sale withdrawals and payouts to the issuer stop. Only the Super Admin can lift the freeze. Investor exits — refunds, investor yield and claims — keep working, and the freeze does not reach units the issuer’s own wallet already holds.",
+    body: "Any Manci admin can freeze the proceeds of one issuer: its primary sales, sale withdrawals and payouts to the issuer stop. Only the Super Admin can lift the freeze. Money buyers already paid into that issuer’s sale stays locked in the sale’s escrow while the freeze lasts: it is not paid to the issuer, and there is no refund of it to buyers (they keep the units they bought). The exits of what the issuer does not receive keep working — cancelling an offer, expiring or cancelling an OTC deal, custody returns, investor yield and claims. When a party of an OTC deal is on the blocklist the deal cannot expire; a Manci admin cancels it, which returns the deposits. The freeze does not reach units the issuer’s own wallet already holds.",
   },
   {
     title: "Timelocked role changes",

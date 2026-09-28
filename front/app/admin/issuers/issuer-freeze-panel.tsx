@@ -3,11 +3,12 @@
 // Freeze / unfreeze the proceeds of ONE issuer (D1, v1.0.0-rc). Any live
 // Admin (or the Super Admin) freezes; only the Super Admin lifts it. The
 // reason text goes to the audit log; the chain keeps its SHA-256 only.
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type Address } from "@solana/kit";
 import { useSolanaClient, useWalletConnection, useSendTransaction } from "@solana/react-hooks";
 import {
   FROZEN_PATHS,
+  FROZEN_SALE_PAYMENTS_NOTE,
   NOT_FROZEN_PATHS,
   buildFreezeIssuerProceeds,
   buildUnfreezeIssuerProceeds,
@@ -25,6 +26,7 @@ import { useToast } from "@/lib/toast";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { startFinalityPoll } from "@/lib/finality-poll";
 
 export function IssuerFreezePanel({ issuer, label }: { issuer: Address; label: string }) {
   const client = useSolanaClient();
@@ -39,13 +41,24 @@ export function IssuerFreezePanel({ issuer, label }: { issuer: Address; label: s
   const [confirm, setConfirm] = useState<"freeze" | "unfreeze" | null>(null);
   const [check, setCheck] = useState("");
   const [checkResult, setCheckResult] = useState<boolean | null>(null);
+  /**
+   * A freeze / unfreeze was sent (confirmed) but the finalized read does not
+   * show it yet (~15–30 s): both buttons stay off meanwhile, so a second
+   * click cannot build on the old state.
+   */
+  const [settling, setSettling] = useState<"freeze" | "unfreeze" | null>(null);
+  const stopPoll = useRef<(() => void) | null>(null);
 
-  const refresh = useCallback(async () => {
+  /** Resolves the fresh state (undefined when it could not be read). */
+  const refresh = useCallback(async (): Promise<IssuerFreezeState | null | undefined> => {
     try {
-      setFreeze(await loadIssuerFreeze(client.runtime.rpc, issuer));
+      const next = await loadIssuerFreeze(client.runtime.rpc, issuer);
+      setFreeze(next);
       setError(null);
+      return next;
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not read the freeze state");
+      return undefined;
     }
   }, [client, issuer]);
 
@@ -53,6 +66,7 @@ export function IssuerFreezePanel({ issuer, label }: { issuer: Address; label: s
     // Read the finalized freeze state after hydration.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refresh();
+    return () => stopPoll.current?.();
   }, [refresh]);
 
   const gate = freezeActionGate({ isAdmin, isSuperAdmin }, freeze === undefined ? null : freeze !== null);
@@ -78,7 +92,17 @@ export function IssuerFreezePanel({ issuer, label }: { issuer: Address; label: s
       toast.dismiss(pendingId);
       toast.showTx(sig, { title: kind === "freeze" ? "Proceeds freeze submitted" : "Unfreeze submitted" });
       setConfirm(null);
-      void refresh();
+      setSettling(kind);
+      stopPoll.current?.();
+      stopPoll.current = startFinalityPoll(
+        async () => {
+          const next = await refresh();
+          const done = next !== undefined && (kind === "freeze" ? next !== null : next === null);
+          if (done) setSettling(null);
+          return done;
+        },
+        { onGiveUp: () => setSettling(null) },
+      );
     } catch (err) {
       toast.dismiss(pendingId);
       toast.showError(kind === "freeze" ? "Freeze failed" : "Unfreeze failed", explainSendError(err));
@@ -109,11 +133,17 @@ export function IssuerFreezePanel({ issuer, label }: { issuer: Address; label: s
         >
           {freeze === undefined ? "Reading…" : freeze ? "Proceeds frozen" : "Not frozen"}
         </span>
+        {settling && (
+          <span role="status" className="text-xs text-slate-500">
+            {settling === "freeze" ? "Freeze" : "Unfreeze"} sent: waiting for it to be finalized (usually under 30 s)…
+          </span>
+        )}
       </div>
       <p className="mt-2 max-w-3xl text-xs text-slate-600">
         A freeze stops money from reaching this issuer: {FROZEN_PATHS.join("; ")}. It does not stop{" "}
         {NOT_FROZEN_PATHS.join("; ")}. Any Admin can freeze; only the Super Admin can lift it.
       </p>
+      <p className="mt-1 max-w-3xl text-xs text-amber-800">{FROZEN_SALE_PAYMENTS_NOTE}</p>
 
       {error && <p className="mt-2 text-xs text-amber-800">{error}</p>}
 
@@ -164,7 +194,7 @@ export function IssuerFreezePanel({ issuer, label }: { issuer: Address; label: s
         {!freeze && (
           <button
             type="button"
-            disabled={!conn.wallet || tx.isSending || gate.freeze !== null}
+            disabled={!conn.wallet || tx.isSending || settling !== null || gate.freeze !== null}
             title={gate.freeze ?? undefined}
             onClick={() => setConfirm("freeze")}
             className="rounded-lg bg-red-700 px-3 py-2 text-xs font-semibold text-white hover:bg-red-800 disabled:opacity-50"
@@ -175,7 +205,7 @@ export function IssuerFreezePanel({ issuer, label }: { issuer: Address; label: s
         {freeze && (
           <button
             type="button"
-            disabled={!conn.wallet || tx.isSending || gate.unfreeze !== null}
+            disabled={!conn.wallet || tx.isSending || settling !== null || gate.unfreeze !== null}
             title={gate.unfreeze ?? undefined}
             onClick={() => setConfirm("unfreeze")}
             className="rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-semibold text-slate-900 disabled:opacity-50"

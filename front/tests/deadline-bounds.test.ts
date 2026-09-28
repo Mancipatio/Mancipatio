@@ -30,12 +30,30 @@ describe("saleEndError (open_sale, 6145)", () => {
   const now = BigInt(1_000_000);
   const year = BigInt(BOUNDS.MAX_SALE_DURATION_SECONDS);
   it("requires an end after the start, at most 365 days after max(start, now)", () => {
+    const margin = BigInt(BOUNDS.CHAIN_CLOCK_MARGIN_SECONDS);
     expect(BOUNDS.saleEndError(BigInt(0), BigInt(0), now)).toMatch(/every sale ends/);
     expect(BOUNDS.saleEndError(now, now, now)).toMatch(/end after it starts/);
-    expect(BOUNDS.saleEndError(BigInt(0), now + year, now)).toBeNull();
+    // Intentional (8.3 review): a sale that starts now keeps the chain-clock
+    // margin below the program's cap (the chain clock can lag the browser's,
+    // 6145), like the OTC and DeliveryEscrow bounds. It was now + 365 days.
+    expect(BOUNDS.saleEndError(BigInt(0), now + year - margin, now)).toBeNull();
+    expect(BOUNDS.saleEndError(BigInt(0), now + year - margin + BigInt(1), now)).toMatch(/at most 365 days/);
     expect(BOUNDS.saleEndError(BigInt(0), now + year + BigInt(1), now)).toMatch(/at most 365 days/);
-    // A future start moves the cap with it.
-    expect(BOUNDS.saleEndError(now + BigInt(10), now + BigInt(10) + year, now)).toBeNull();
+    // A future start moves the cap with it (exact: the chain's now cannot pass it).
+    expect(BOUNDS.saleEndError(now + BigInt(10) + margin, now + BigInt(10) + margin + year, now)).toBeNull();
+    // An end already past is refused.
+    expect(BOUNDS.saleEndError(BigInt(0), now - BigInt(1), now)).toMatch(/in the future/);
+  });
+
+  it("the end-date input: required, max 365 days minus the margin, a 30-day default", () => {
+    const nowMs = Date.UTC(2026, 8, 28, 12, 0, 0);
+    const bounds = BOUNDS.saleEndInputBounds(nowMs);
+    const parse = (v: string) => BigInt(Math.floor(new Date(v).getTime() / 1000));
+    const nowSec = BigInt(nowMs / 1000);
+    expect(BOUNDS.saleEndError(BigInt(0), parse(bounds.max), nowSec)).toBeNull();
+    expect(BOUNDS.saleEndError(BigInt(0), parse(bounds.defaultValue), nowSec)).toBeNull();
+    expect(BOUNDS.saleEndError(BigInt(0), parse(bounds.min), nowSec)).toBeNull();
+    expect(parse(bounds.defaultValue) - nowSec).toBe(BigInt(30 * 86_400));
   });
 });
 

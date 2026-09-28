@@ -142,7 +142,11 @@ export type OutgoingProposal = {
   kind: PendingRoleKind;
   target: Address;
   newAuthority: Address;
-  /** False for a KYC proposal that no longer matches the registry (cancel or replace it). */
+  /**
+   * False for a proposal that no longer matches the live holder: a KYC
+   * proposal made under an earlier registry authority, or a Super Admin /
+   * blocklist proposal retired by an executed recovery (cancel or replace it).
+   */
   live: boolean;
   eta: bigint;
   expiresAt: bigint;
@@ -382,8 +386,11 @@ export function deriveRoles(wallet: Address | string, s: RoleSnapshot): RoleFlag
     if (live && pt.newAuthority.toString() === w) {
       pending.push({ kind: "platform", target: platform.address, currentAuthority: platform.data.admin, ...window });
     }
-    if (live && isSuperAdmin) {
-      outgoing.push({ kind: "platform", target: platform.address, newAuthority: pt.newAuthority, live: true, ...window });
+    // A stale one (retired by an executed recovery, which zeroes its
+    // current_authority, or made under an earlier Super Admin) is listed for
+    // the live Super Admin too: it can still be cancelled or overwritten.
+    if (isSuperAdmin) {
+      outgoing.push({ kind: "platform", target: platform.address, newAuthority: pt.newAuthority, live, ...window });
     }
   }
 
@@ -392,14 +399,16 @@ export function deriveRoles(wallet: Address | string, s: RoleSnapshot): RoleFlag
     s.blocklistTransfer && s.blocklistTransfer.programAddress === TRANSFER_HOOK_PROGRAM_ADDRESS
       ? s.blocklistTransfer.data
       : null;
-  if (ba && bt && bt.currentAuthority === ba.data.authority) {
+  if (ba && bt) {
+    const live = bt.currentAuthority === ba.data.authority;
     // No timelock on a BA rotation: acceptable from the proposal to its expiry.
     const window = { eta: bt.proposedAt, expiresAt: bt.expiresAt };
-    if (bt.newAuthority.toString() === w) {
+    if (live && bt.newAuthority.toString() === w) {
       pending.push({ kind: "blocklist", target: ba.address, currentAuthority: ba.data.authority, ...window });
     }
+    // A stale one (retired by execute_blocklist_recovery) stays cancellable by the live BA.
     if (isBlocklistAuthority) {
-      outgoing.push({ kind: "blocklist", target: ba.address, newAuthority: bt.newAuthority, live: true, ...window });
+      outgoing.push({ kind: "blocklist", target: ba.address, newAuthority: bt.newAuthority, live, ...window });
     }
   }
 

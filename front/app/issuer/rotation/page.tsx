@@ -43,6 +43,7 @@ import {
   describeRecoveryState,
   fetchPendingIssuerTransfer,
   findPendingForWallet,
+  formatUtc,
   issuerAuthorityActions,
   issuerRecoveryState,
   issuerSyncInstructions,
@@ -359,8 +360,10 @@ function Rotation() {
     }
   }
 
+  // v1: accept_issuer_authority refuses from expires_at on (ProposalExpired
+  // 6151), judged on the chain-aligned clock.
   const transferState = mine
-    ? issuerTransferState(mine.address.toString(), mine.issuer.authority.toString(), myTransfer)
+    ? issuerTransferState(mine.address.toString(), mine.issuer.authority.toString(), myTransfer, now)
     : ({ kind: "none" } as const);
   const proposeError = mine
     ? proposedIssuerAuthorityError(proposeInput, mine.issuer.authority.toString(), otherAuthorities)
@@ -373,7 +376,7 @@ function Rotation() {
   const incomingTransfers = (pendingForMe?.transfers ?? []).map((t) => {
     const issuer = live.get(t.issuer.toString());
     const state = issuer
-      ? issuerTransferState(t.issuer.toString(), issuer.authority.toString(), t.transfer)
+      ? issuerTransferState(t.issuer.toString(), issuer.authority.toString(), t.transfer, now)
       : ({ kind: "none" } as const);
     return { ...t, issuerRecord: issuer, state };
   });
@@ -438,6 +441,11 @@ function Rotation() {
                   >
                     Accept issuer authority
                   </button>
+                ) : t.state.kind === "expired" ? (
+                  <p className="mt-2 text-xs text-amber-800">
+                    This proposal expired on {formatUtc(t.state.expiresAt)} (14 days), so it can no longer be
+                    accepted. Ask the issuer&apos;s current wallet to propose this wallet again.
+                  </p>
                 ) : (
                   <p className="mt-2 text-xs text-amber-800">
                     This proposal is stale (the issuer key changed since), so it cannot be accepted.
@@ -499,6 +507,12 @@ function Rotation() {
                   to <span className="break-all font-mono">{transferState.newAuthority}</span>
                   {transferState.kind === "stale" && (
                     <span className="ml-1 text-amber-700">(stale: it cannot be accepted, cancel it)</span>
+                  )}
+                  {transferState.kind === "expired" && (
+                    <span className="ml-1 text-amber-700">
+                      (expired on {formatUtc(transferState.expiresAt)}: it cannot be accepted; cancel it or propose
+                      again)
+                    </span>
                   )}
                 </>
               )}

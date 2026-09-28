@@ -26,6 +26,7 @@ import {
   loadKycAuthorityContext,
 } from "@/lib/kyc-authority";
 import { AuthorityRotation, initKey } from "./authority-rotation";
+import { RoleRecoveryNotice } from "@/components/role-recovery-notice";
 import { BlocklistBootstrap } from "./blocklist-bootstrap";
 import { PlatformInitCard } from "./platform-init-card";
 import { ConfirmModal } from "@/components/confirm-modal";
@@ -293,6 +294,9 @@ export default function AdminPage() {
         </p>
       </div>
       <BlocklistBootstrap onInitialized={setBlocklistSuccessor} />
+      {/* Design 8.3 §3: the recovery status with its Cancel, where the
+          recovery alarm and the admin badge lead (also on /account/roles). */}
+      <RoleRecoveryNotice />
       <AuthorityRotation
         key={`platform:${initKey(platformSuccessor)}`}
         kind="platform"

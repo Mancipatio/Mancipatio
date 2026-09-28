@@ -110,6 +110,18 @@ describe("issuerTransferState", () => {
     expect(issuerTransferState(ISSUER, STRANGER, pending())).toEqual({ kind: "stale", newAuthority: B });
     expect(issuerTransferState(ISSUER, A, pending({ proposedBy: STRANGER }))).toEqual({ kind: "stale", newAuthority: B });
   });
+  it("is expired from expires_at on the chain clock (ProposalExpired 6151): no accept, the authority cancels", () => {
+    const staged = pending({ expiresAt: 1_000 });
+    expect(issuerTransferState(ISSUER, A, staged, 999)).toEqual({ kind: "live", newAuthority: B });
+    expect(issuerTransferState(ISSUER, A, staged, 1_000)).toEqual({ kind: "expired", newAuthority: B, expiresAt: 1_000 });
+    // No clock (not read yet) or no expiry: not judged here, the program decides.
+    expect(issuerTransferState(ISSUER, A, staged, null)).toEqual({ kind: "live", newAuthority: B });
+    expect(issuerTransferState(ISSUER, A, pending(), 5_000)).toEqual({ kind: "live", newAuthority: B });
+    const expired = issuerTransferState(ISSUER, A, staged, 2_000);
+    const ctx = { issuerAuthority: A, platformAdmin: null, transfer: expired, recovery: { kind: "none" } as const };
+    expect(issuerAuthorityActions(B, ctx).canAccept).toBe(false);
+    expect(issuerAuthorityActions(A, ctx).canCancelTransfer).toBe(true);
+  });
 });
 
 describe("issuerRecoveryState", () => {

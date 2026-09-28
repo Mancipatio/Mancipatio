@@ -46,6 +46,13 @@ export type PendingAdminRecord = PendingAdmin & {
   address: Address;
   /** Proposed by an earlier Super Admin: `add_admin` refuses it (InvalidAdminProposal); cancel it. */
   stale: boolean;
+  /**
+   * The Platform's pause flags when this was read: while the one-way
+   * bootstrap window (bit 7) is open, `add_admin` runs from `proposed_at`
+   * (`util::effective_eta`), so a page judges the window with
+   * `proposalWindowState(p, now, { pauseFlags: p.platformPauseFlags, bootstrapWaived: true })`.
+   */
+  platformPauseFlags: number;
 };
 
 /** Refusal copy when a proposal from an earlier Super Admin is executed. */
@@ -62,12 +69,12 @@ async function platformAdmin(rpc: Rpc): Promise<{ platform: Address; admin: Addr
 
 /** The staged grant for `newAdmin`, or null (read at finalized). */
 export async function loadPendingAdmin(rpc: Rpc, newAdmin: Address): Promise<PendingAdminRecord | null> {
-  const [[pda], { admin }] = await Promise.all([findPendingAdminPda({ newAdmin }), platformAdmin(rpc)]);
+  const [[pda], { admin, pauseFlags }] = await Promise.all([findPendingAdminPda({ newAdmin }), platformAdmin(rpc)]);
   const pending = await fetchMaybePendingAdmin(rpc, pda, finalized());
   if (!pending.exists) return null;
   if (pending.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS || pending.data.newAdmin !== newAdmin)
     throw new Error("The pending Admin grant is invalid");
-  return { ...pending.data, address: pda, stale: pending.data.proposedBy !== admin };
+  return { ...pending.data, address: pda, stale: pending.data.proposedBy !== admin, platformPauseFlags: pauseFlags };
 }
 
 /**
@@ -76,7 +83,7 @@ export async function loadPendingAdmin(rpc: Rpc, newAdmin: Address): Promise<Pen
  * flagged `stale` (K1.10: cancel them after any Super Admin change).
  */
 export async function listPendingAdmins(rpc: Rpc): Promise<PendingAdminRecord[]> {
-  const { admin } = await platformAdmin(rpc);
+  const { admin, pauseFlags } = await platformAdmin(rpc);
   const disc = getPendingAdminDiscriminatorBytes();
   const records = await rpc
     .getProgramAccounts(ASSET_REGISTRY_PROGRAM_ADDRESS, {
@@ -95,7 +102,7 @@ export async function listPendingAdmins(rpc: Rpc): Promise<PendingAdminRecord[]>
     try {
       const data = getPendingAdminDecoder().decode(Uint8Array.from(base64.encode(r.account.data[0])));
       if (r.pubkey !== (await findPendingAdminPda({ newAdmin: data.newAdmin }))[0]) continue;
-      out.push({ ...data, address: r.pubkey, stale: data.proposedBy !== admin });
+      out.push({ ...data, address: r.pubkey, stale: data.proposedBy !== admin, platformPauseFlags: pauseFlags });
     } catch {
       // Not a PendingAdmin of this layout: never listed.
     }

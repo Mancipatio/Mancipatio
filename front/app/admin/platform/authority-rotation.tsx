@@ -23,6 +23,7 @@ import {
   buildAcceptOperationalAuthority,
   buildCancelOperationalAuthority,
   RECOVERY_PENDING_BLOCKER,
+  STALE_OPERATIONAL_PROPOSAL,
   type OperationalAuthorityKind,
   type OperationalAuthorityState,
 } from "@/lib/operational-authority";
@@ -71,7 +72,9 @@ export function AuthorityRotation({
   const canCancel =
     !!state?.proposed &&
     (kind === "platform" ? role.isAdmin || wallet === state.current : wallet === state.current);
-  const acceptBlocker = state?.recoveryPending
+  const acceptBlocker = state?.stale
+    ? STALE_OPERATIONAL_PROPOSAL
+    : state?.recoveryPending
     ? RECOVERY_PENDING_BLOCKER
     : proposalWindow
       ? proposalWindowBlocker(proposalWindow)
@@ -196,7 +199,13 @@ export function AuthorityRotation({
               Proposed: {state.proposed}
             </p>
           )}
-          {state.proposed && proposalWindow && (
+          {state.proposed && state.stale && (
+            <p className="mt-1 text-xs text-amber-800">
+              Retired by a recovery (or made under an earlier authority): it can no longer be
+              accepted. Cancel it, or propose anew (a new proposal replaces it).
+            </p>
+          )}
+          {state.proposed && !state.stale && proposalWindow && (
             <p className="mt-1 text-xs text-slate-500">{describeProposalWindow(proposalWindow)}</p>
           )}
           {state.recoveryPending && (
@@ -246,7 +255,7 @@ export function AuthorityRotation({
               >
                 Accept authority
               </button>
-              {acceptBlocker && !state.recoveryPending && (
+              {acceptBlocker && !state.recoveryPending && !state.stale && (
                 <p className="mt-1 text-xs text-amber-800">{acceptBlocker}</p>
               )}
             </>
@@ -261,7 +270,7 @@ export function AuthorityRotation({
               Cancel proposal
             </button>
           )}
-          {state.proposed && wallet !== state.proposed && (
+          {state.proposed && !state.stale && wallet !== state.proposed && (
             <p className="mt-2 text-xs text-slate-500">
               The proposed wallet accepts at{" "}
               <Link href={ACCOUNT_ROLES_PATH} className="underline">

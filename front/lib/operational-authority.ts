@@ -10,6 +10,14 @@
 //   no timelock, acceptable for 14 days; only the live BA cancels. An accept
 //   is refused while a `BlocklistRecovery` is pending (hook 6020).
 //
+// A proposal whose `current_authority` is not the live holder is STALE: an
+// executed recovery retires a pending proposal by zeroing that field
+// (`util::retire_pending_proposal`, hook `retire_pending`) instead of closing
+// it. It can never be accepted, but it stays cancellable (rent to its
+// proposer) and a new propose overwrites it (init_if_needed), so it is
+// reported (`stale`), never thrown: only a proposal of the wrong owner or
+// target throws.
+//
 // Every PDA comes from the generated clients.
 import { address, type Address, type TransactionSigner } from "@solana/kit";
 import {
@@ -62,11 +70,21 @@ export type OperationalAuthorityState = {
    * authority: an accept is refused until it is cancelled or executed.
    */
   recoveryPending: boolean;
+  /**
+   * A proposal exists but is not bound to the live holder (retired by an
+   * executed recovery, or made under an earlier holder): accept fails; it can
+   * be cancelled or overwritten by a new proposal.
+   */
+  stale: boolean;
 };
+
+/** Accept refused: the proposal was retired by a recovery or predates the live holder. */
+export const STALE_OPERATIONAL_PROPOSAL =
+  "This proposal was retired by a recovery (or made under an earlier authority), so it can no longer be accepted. The current authority cancels it or proposes anew.";
 
 /** Accept refused while a recovery is pending (registry 6155 / hook 6020). */
 export const RECOVERY_PENDING_BLOCKER =
-  "A recovery of this role by the program upgrade authority is pending. Cancel the recovery first (or let it be executed); until then the proposal cannot be accepted.";
+  "A recovery of this role by the program upgrade authority is pending. Cancel the recovery first (the \"Cancel the recovery\" button in its notice on /admin/platform or /account/roles; the current holder or the upgrade authority), or let it be executed; until then the proposal cannot be accepted.";
 
 export async function loadOperationalAuthority(
   rpc: Rpc,
@@ -95,10 +113,12 @@ export async function loadOperationalAuthority(
     if (
       transfer.exists &&
       (transfer.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS ||
-        transfer.data.target !== target ||
-        transfer.data.currentAuthority !== current.data.admin)
+        transfer.data.target !== target)
     )
-      throw new Error("The platform authority proposal is stale or invalid");
+      throw new Error("The platform authority proposal is invalid");
+    // accept_platform_admin needs current_authority == Platform.admin (and
+    // proposed_by, which propose always writes equal to it).
+    const stale = transfer.exists && transfer.data.currentAuthority !== current.data.admin;
     const bootstrapOpen =
       ((current.data.pauseFlags ?? 0) & PLATFORM_BOOTSTRAP_OPEN) !== 0;
     return {
@@ -118,6 +138,7 @@ export async function loadOperationalAuthority(
         recovery.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS &&
         recovery.data.platform === target &&
         recovery.data.currentAdmin === current.data.admin,
+      stale,
     };
   }
   const [target] = await findBlocklistAuthorityPda(),
@@ -131,12 +152,8 @@ export async function loadOperationalAuthority(
     fetchMaybeBlocklistAuthorityProposal(rpc, proposal, options),
     fetchMaybeBlocklistRecovery(rpc, recoveryPda, options),
   ]);
-  if (
-    transfer.exists &&
-    (transfer.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS ||
-      transfer.data.currentAuthority !== current.data.authority)
-  )
-    throw new Error("The blocklist authority proposal is stale or invalid");
+  if (transfer.exists && transfer.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS)
+    throw new Error("The blocklist authority proposal is invalid");
   return {
     target,
     current: current.data.authority,
@@ -150,6 +167,8 @@ export async function loadOperationalAuthority(
       recovery.exists &&
       recovery.programAddress === TRANSFER_HOOK_PROGRAM_ADDRESS &&
       recovery.data.currentAuthority === current.data.authority,
+    // accept_blocklist_authority: current_authority == BlocklistAuthority.authority.
+    stale: transfer.exists && transfer.data.currentAuthority !== current.data.authority,
   };
 }
 /**
@@ -226,6 +245,7 @@ export async function buildAcceptOperationalAuthority(
     throw new Error(
       `Connect the proposed new authority wallet to accept this change (${PROPOSAL_NOT_FINALIZED_HINT})`,
     );
+  if (state.stale) throw new Error(STALE_OPERATIONAL_PROPOSAL);
   if (state.recoveryPending) throw new Error(RECOVERY_PENDING_BLOCKER);
   if (kind === "blocklist")
     return getAcceptBlocklistAuthorityInstructionAsync({
@@ -245,10 +265,11 @@ export async function buildAcceptOperationalAuthority(
 }
 
 /**
- * Withdraws a staged rotation (live, stale or expired). Platform: the Super
- * Admin, any live Admin or the program upgrade authority signs (the program
- * checks which; the rent returns to the proposer). Blocklist: only the live
- * blocklist authority.
+ * Withdraws a staged rotation (live, stale — retired by a recovery — or
+ * expired). Platform: the Super Admin, any live Admin or the program upgrade
+ * authority signs (the program checks which; the rent returns to the
+ * proposer). Blocklist: only the live blocklist authority (the rent returns
+ * to it).
  */
 export async function buildCancelOperationalAuthority(
   rpc: Rpc,

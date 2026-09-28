@@ -125,11 +125,18 @@ export const FROZEN_PATHS = [
   "open_payout_vault, release_payout and claim_founder_yield (no payout to the founder)",
 ] as const;
 
-/** What a freeze does NOT stop (design 8.3 §3.2, O-9). */
+/**
+ * What a freeze does NOT stop (design 8.3 §3.2, O-9), and what it locks
+ * without an exit (risk 17: disclosed in the Terms, /security and /risks).
+ */
 export const NOT_FROZEN_PATHS = [
-  "investor exits: refunds, investor yield and milestone claims",
+  "the exits of what the issuer does not receive: offer cancels, OTC expiries and Admin cancels, custody returns, investor yield and milestone claims",
   "units the issuer's own wallet already holds: it can still sell them on the secondary market or send them away (O-9)",
 ] as const;
+
+/** Locked while the freeze lasts, with no refund instruction (design 8.3 risk 17). */
+export const FROZEN_SALE_PAYMENTS_NOTE =
+  "Money buyers already paid into this issuer's sales stays in the sale escrow until the Super Admin lifts the freeze: it is neither paid to the issuer nor refunded to the buyers (they keep their units).";
 
 async function platformAdmin(rpc: Rpc): Promise<Address> {
   const [platform] = await findPlatformPda();

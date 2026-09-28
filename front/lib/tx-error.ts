@@ -103,7 +103,7 @@ function gatherLogs(value: unknown, out: string[], depth = 0): void {
 // v1.0.0-rc (8.3) hints, declared before CUSTOM_ERROR_HINTS reads them.
 /** The issuer's proceeds are frozen by Manci (IssuerProceedsFrozen, 6143). */
 export const ISSUER_PROCEEDS_FROZEN_HINT =
-  "Manci has frozen this issuer's proceeds, so sales cannot open, take money or pay out until the Super Admin lifts the freeze. Refunds and holder claims keep working (IssuerProceedsFrozen).";
+  "Manci has frozen this issuer's proceeds, so its sales cannot open, take money or pay out until the Super Admin lifts the freeze. Money already paid into its sales stays in the sale escrow meanwhile; offer and OTC exits, investor yield and claims keep working (IssuerProceedsFrozen).";
 /** A party of the transaction is on the transfer-hook blocklist (PartyBlocklisted, 6144). */
 export const PARTY_BLOCKLISTED_HINT =
   "A wallet in this transaction (payer, recipient, or the issuer key) is on the Manci blocklist, so the transaction was refused. If an OTC deal cannot expire because of it, ask a Manci Admin to cancel the deal (PartyBlocklisted).";
@@ -500,6 +500,9 @@ export function explainSendError(err: unknown): string {
     if (cursor instanceof MaintenanceModeError) return cursor.message;
     // The emergency pause and the pilot scope, read before the wallet opened (lib/pause-gate.ts).
     if (cursor instanceof PausedFlowError || cursor instanceof ModuleDisabledFlowError) return cursor.message;
+    // A set freeze / blocklist gate account, read before the wallet opened
+    // (lib/proceeds-gate.ts; matched by name: that module imports this one).
+    if (cursor.name === "GateAccountSetError") return cursor.message;
   }
 
   // Common case: a wallet-side rejection.

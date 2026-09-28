@@ -14,6 +14,7 @@ import { priceForRequest } from "@/lib/priority-fee";
 import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 import { clearWalletChange } from "@/lib/wallet-changes";
 import { assertInstructionsInScope, assertInstructionsNotPaused } from "@/lib/pause-gate";
+import { assertGateAccountsUnset } from "@/lib/proceeds-gate";
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
@@ -155,6 +156,8 @@ export function withVerifiedTransactions(
       checkAuthority(input, context);
       assertInstructionsInScope(input.instructions, network);
       await assertInstructionsNotPaused(context.rpc, input.instructions);
+      // v1: a frozen issuer or a blocklisted party, as the program would refuse it (lib/proceeds-gate.ts).
+      await assertGateAccountsUnset(context.rpc, input.instructions);
       context.assertCurrent();
       const request = await withFee(input, context);
       // Preparation does not prompt for a message signature. The server policy
@@ -193,6 +196,7 @@ export function withVerifiedTransactions(
       // The pilot scope and the emergency pause, before any wallet prompt (lib/pause-gate.ts).
       assertInstructionsInScope(input.instructions, network);
       await assertInstructionsNotPaused(context.rpc, input.instructions);
+      await assertGateAccountsUnset(context.rpc, input.instructions);
       context.assertCurrent();
       // The fee is settled before the policy check's wallet prompt.
       const request = withLeadingComputeUnitLimit(await withFee(input, context));

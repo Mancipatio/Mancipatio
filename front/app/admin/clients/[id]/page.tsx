@@ -1,6 +1,7 @@
 "use client";
 
 import { WALLET_CONNECT_LABEL, WALLET_CONNECT_DESCRIPTION } from "@/lib/wallet-copy";
+import { kycExpiryError, passportExpirySeconds } from "@/lib/deadline-bounds";
 
 import Link from "next/link";
 import { Fragment, use, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -602,16 +603,20 @@ function ClientDetail({ id }: { id: string }) {
       // On-chain expiry mirrors the off-chain verdict's kyc_expires_at (set at
       // verification). A PAST stored expiry is caught by the gate above, so
       // the policy-window fallback only covers legacy verified rows with no
-      // stored date (approve_holder requires expiry > now).
+      // stored date (approve_holder requires expiry > now). v1: approve_holder
+      // refuses an expiry more than 2 years out (KycExpiryTooFar 6146), and a
+      // stored date can be further (a passport issued under rc.x, a corrected
+      // row): the same helper as /admin/kyc caps it with the chain-clock margin.
       const nowSec = Math.floor(Date.now() / 1000);
-      const storedExpirySec = client.kyc_expires_at
-        ? Math.floor(new Date(client.kyc_expires_at).getTime() / 1000)
-        : 0;
-      const expirySec =
-        storedExpirySec > nowSec
-          ? storedExpirySec
-          : nowSec + KYC_VALIDITY_DAYS * 24 * 3600;
+      const expirySec = passportExpirySeconds(client.kyc_expires_at, nowSec, KYC_VALIDITY_DAYS);
       const expiry = BigInt(expirySec);
+      const expiryError = kycExpiryError(expiry, BigInt(nowSec));
+      if (expiryError) {
+        toast.dismiss(pendingId);
+        pendingId = null;
+        toast.showError("Cannot issue passport", expiryError);
+        return;
+      }
       const providerId = 0;
       const externalRefHash = await dossierHash(
         `${client.id}:${client.kyc_verified_at ?? ""}`,

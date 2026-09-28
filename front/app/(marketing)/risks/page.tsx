@@ -109,6 +109,23 @@ export default function RisksPage() {
       </Section>
 
       <Section>
+        <SectionHead title="The platform can freeze an issuer's proceeds" />
+        <Body className="mt-4">
+          A Manci admin can freeze the proceeds of one issuer, for example on
+          suspicion of fraud. Its sales stop and nothing is paid out to it
+          until the Super Admin lifts the freeze. Money you already paid into
+          that issuer&apos;s sale stays locked in the sale&apos;s escrow for as
+          long as the freeze lasts: it is not refunded to you, and there is no
+          instruction that returns it. You keep the units you bought.
+        </Body>
+        <Body className="mt-3.5">
+          An OTC deal cannot expire while one of its parties is on the
+          blocklist: a Manci admin cancels it, which returns the deposits.
+          Until an admin does, your deposit stays in the deal&apos;s escrow.
+        </Body>
+      </Section>
+
+      <Section>
         <SectionHead title="The regulatory position can change" />
         <Body className="mt-4">
           Company ownership, debt and revenue share are issued through a

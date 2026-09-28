@@ -284,7 +284,10 @@ export default function AdminsPage() {
                     <div className="min-w-0">
                       <p className="break-all font-mono text-xs text-slate-800">{p.newAdmin}</p>
                       <p className="mt-0.5 text-xs text-slate-500">
-                        {describeProposalWindow(proposalWindowState(p, now))}
+                        {/* The program waives the 48 h while the bootstrap window (bit 7) is open (util::effective_eta). */}
+                        {describeProposalWindow(
+                          proposalWindowState(p, now, { pauseFlags: p.platformPauseFlags, bootstrapWaived: true }),
+                        )}
                       </p>
                       {!p.stale && (
                         <p className="mt-1 max-w-xl text-xs text-slate-600">

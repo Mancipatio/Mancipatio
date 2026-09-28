@@ -18,6 +18,10 @@ export const MIN_VAULT_VOTING_PERIOD_SECONDS = 604_800;
 /**
  * Why `open_sale` would refuse this end (SaleDurationInvalid 6145 /
  * InvalidSaleParams), or null. `endTs` 0 means "no end", which v1 refuses.
+ * The program caps the end at max(start, ITS now) + 365 days: when the sale
+ * starts now (or already started) the cap keeps CHAIN_CLOCK_MARGIN_SECONDS
+ * below the browser's, since the chain clock can lag it; a future start is
+ * exact. An end already in the past is refused too (a sale nobody can buy).
  */
 export function saleEndError(
   startTs: bigint,
@@ -26,7 +30,10 @@ export function saleEndError(
 ): string | null {
   if (endTs <= BigInt(0)) return "Choose an end date: every sale ends, at most 365 days out.";
   if (endTs <= startTs) return "The sale must end after it starts.";
-  const latest = (startTs > nowSec ? startTs : nowSec) + BigInt(MAX_SALE_DURATION_SECONDS);
+  if (endTs <= nowSec) return "The sale end date must be in the future.";
+  const margin = BigInt(CHAIN_CLOCK_MARGIN_SECONDS);
+  const from = startTs > nowSec - margin ? startTs : nowSec - margin;
+  const latest = from + BigInt(MAX_SALE_DURATION_SECONDS);
   if (endTs > latest) return "A sale can run for at most 365 days (from its start, or from now if it already started).";
   return null;
 }
@@ -107,4 +114,27 @@ export function passportExpirySeconds(
   const stored = storedExpiryIso ? Math.floor(new Date(storedExpiryIso).getTime() / 1000) : 0;
   const wanted = Number.isFinite(stored) && stored > nowSec ? stored : nowSec + policyDays * 86_400;
   return Math.min(wanted, nowSec + MAX_KYC_VALIDITY_SECONDS - CHAIN_CLOCK_MARGIN_SECONDS);
+}
+
+/** A Date as a `datetime-local` input value (local time, minute precision). */
+export function toDatetimeLocalValue(d: Date): string {
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+}
+
+/** The default sale length when the form opens (the issuer can change it). */
+export const DEFAULT_SALE_DAYS = 30;
+
+/**
+ * The `datetime-local` bounds of a sale's (required) end date when it starts
+ * now: min an hour out, max 365 days minus the chain-clock margin (rounded
+ * down to the minute), and the default DEFAULT_SALE_DAYS out.
+ */
+export function saleEndInputBounds(nowMs: number = Date.now()): { min: string; max: string; defaultValue: string } {
+  const maxMs = Math.floor((nowMs + (MAX_SALE_DURATION_SECONDS - CHAIN_CLOCK_MARGIN_SECONDS) * 1000) / 60_000) * 60_000;
+  return {
+    min: toDatetimeLocalValue(new Date(nowMs + 3_600_000)),
+    max: toDatetimeLocalValue(new Date(maxMs)),
+    defaultValue: toDatetimeLocalValue(new Date(nowMs + DEFAULT_SALE_DAYS * 86_400_000)),
+  };
 }

@@ -28,6 +28,11 @@ export type PendingKycTransfer = {
   currentAuthority: string;
   newAuthority: string;
   proposedBy: string;
+  /**
+   * `AuthorityProposal.expires_at` (unix s): acceptable strictly before it
+   * (ProposalExpired 6151 from then on). Absent: the expiry is not judged.
+   */
+  expiresAt?: bigint | number | null;
 };
 
 export type KycTransferState =
@@ -40,24 +45,33 @@ export type KycTransferState =
    * Accept would fail with InvalidAuthorityTransfer. The current authority
    * can cancel it, or overwrite it with a new proposal.
    */
-  | { kind: "stale"; newAuthority: string };
+  | { kind: "stale"; newAuthority: string }
+  /**
+   * Staged by the current authority, but its 14 days ran out on the chain
+   * clock: accept fails with ProposalExpired (6151). The current authority
+   * cancels it or proposes again.
+   */
+  | { kind: "expired"; newAuthority: string; expiresAt: number };
 
 /**
  * Derives the pending-transfer state exactly as `accept_kyc_registry_authority`
- * checks it: target is this registry, and both `current_authority` and
- * `proposed_by` equal the registry's live authority.
+ * checks it: target is this registry, both `current_authority` and
+ * `proposed_by` equal the registry's live authority and, when `now` (chain
+ * seconds) and the proposal's expiry are known, `now < expires_at`.
  */
 export function kycTransferState(
   registryAddress: string,
   registryAuthority: string,
   pending: PendingKycTransfer | null,
+  now?: bigint | number | null,
 ): KycTransferState {
   if (!pending || pending.target !== registryAddress) return { kind: "none" };
   const live =
     pending.currentAuthority === registryAuthority && pending.proposedBy === registryAuthority;
-  return live
-    ? { kind: "live", newAuthority: pending.newAuthority }
-    : { kind: "stale", newAuthority: pending.newAuthority };
+  if (!live) return { kind: "stale", newAuthority: pending.newAuthority };
+  if (now != null && pending.expiresAt != null && Number(now) >= Number(pending.expiresAt))
+    return { kind: "expired", newAuthority: pending.newAuthority, expiresAt: Number(pending.expiresAt) };
+  return { kind: "live", newAuthority: pending.newAuthority };
 }
 
 /** What the connected wallet may do in the panel, from on-chain state only. */

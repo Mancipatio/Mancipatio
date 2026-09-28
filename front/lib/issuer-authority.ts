@@ -137,20 +137,32 @@ export type IssuerTransferState =
   /** Staged by the live authority: the named wallet can accept. */
   | { kind: "live"; newAuthority: string }
   /** Staged under a previous authority (a recovery moved it): accept fails; the live authority can cancel. */
-  | { kind: "stale"; newAuthority: string };
+  | { kind: "stale"; newAuthority: string }
+  /**
+   * Staged by the live authority, but its 14 days ran out on the chain clock:
+   * accept fails with ProposalExpired (6151); the live authority cancels it
+   * or proposes again.
+   */
+  | { kind: "expired"; newAuthority: string; expiresAt: number };
 
-/** Exactly the `accept_issuer_authority` constraint, read from chain data. */
+/**
+ * Exactly the `accept_issuer_authority` checks, read from chain data: the
+ * constraint (target, current and proposing authority) and, when `now`
+ * (chain seconds) is given, `now < expires_at`.
+ */
 export function issuerTransferState(
   issuerAddress: string,
   issuerAuthority: string,
   pending: PendingIssuerTransfer | null,
+  now?: number | null,
 ): IssuerTransferState {
   if (!pending || pending.target !== issuerAddress) return { kind: "none" };
   const live =
     pending.currentAuthority === issuerAuthority && pending.proposedBy === issuerAuthority;
-  return live
-    ? { kind: "live", newAuthority: pending.newAuthority }
-    : { kind: "stale", newAuthority: pending.newAuthority };
+  if (!live) return { kind: "stale", newAuthority: pending.newAuthority };
+  if (now != null && pending.expiresAt != null && now >= pending.expiresAt)
+    return { kind: "expired", newAuthority: pending.newAuthority, expiresAt: pending.expiresAt };
+  return { kind: "live", newAuthority: pending.newAuthority };
 }
 
 // ── Recovery state ───────────────────────────────────────────────────────────
@@ -205,7 +217,7 @@ export function issuerRecoveryState(
 export type IssuerAuthorityActions = {
   /** Current authority: stage a regular rotation. */
   canPropose: boolean;
-  /** Current authority: withdraw a staged rotation (live or stale). */
+  /** Current authority: withdraw a staged rotation (live, stale or expired). */
   canCancelTransfer: boolean;
   /** The staged new key of a live rotation. */
   canAccept: boolean;

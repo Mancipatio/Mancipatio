@@ -267,6 +267,32 @@ describe("deriveRoles", () => {
     ]);
   });
 
+  it("a proposal retired by an executed recovery (current_authority = default) stays visible to the live holder as not live", () => {
+    // execute_platform_recovery / execute_blocklist_recovery zero the pending
+    // proposal's current_authority instead of closing it: never acceptable,
+    // still cancellable (rent to the proposer) and overwritten by a propose.
+    const RETIRED = "11111111111111111111111111111111" as Address;
+    const platformRetired = snapshot({
+      platformTransfer: owned(proposalOf({ target: PLATFORM_PDA, currentAuthority: RETIRED, newAuthority: WALLET, proposedBy: THIRD })),
+    });
+    expect(deriveRoles(WALLET, platformRetired).pending).toEqual([]);
+    expect(deriveRoles(OTHER, platformRetired).outgoing).toEqual([
+      { kind: "platform", target: PLATFORM_PDA, newAuthority: WALLET, live: false, ...window },
+    ]);
+    const blocklistRetired = snapshot({
+      blocklistTransfer: owned(
+        { currentAuthority: RETIRED, newAuthority: WALLET, proposedAt: PROPOSED_AT, expiresAt: EXPIRES } as never,
+        TRANSFER_HOOK_PROGRAM_ADDRESS,
+      ),
+    });
+    expect(deriveRoles(WALLET, blocklistRetired).pending).toEqual([]);
+    expect(deriveRoles(OTHER, blocklistRetired).outgoing).toEqual([
+      { kind: "blocklist", target: BA_PDA, newAuthority: WALLET, live: false, eta: PROPOSED_AT, expiresAt: EXPIRES },
+    ]);
+    // Nobody else sees it.
+    expect(deriveRoles(THIRD, blocklistRetired).outgoing).toEqual([]);
+  });
+
   it("KYC pending: the accept check of kyc-registry-rotation", () => {
     const t = (over: Partial<AuthorityProposal>) =>
       owned(proposalOf({ target: REGISTRY, currentAuthority: THIRD, newAuthority: WALLET, proposedBy: THIRD, ...over }));

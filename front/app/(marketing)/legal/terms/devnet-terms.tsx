@@ -166,9 +166,15 @@ export function DevnetTerms() {
           <Body className="mt-4">
             The programs also let the platform act on an issuer or a role
             without your signature: any Manci admin can freeze the proceeds of
-            one issuer (its sales, withdrawals and payouts to the issuer stop,
-            while investor refunds and claims continue) and only the Super
-            Admin can lift the freeze; adding an admin or replacing the Super
+            one issuer (its sales, withdrawals and payouts to the issuer stop)
+            and only the Super Admin can lift the freeze. While the freeze
+            lasts, money buyers already paid into that issuer&apos;s sale stays
+            locked in the sale&apos;s escrow: it is neither paid to the issuer
+            nor refunded to buyers, who keep the units they bought. Cancelling
+            an offer, expiring or cancelling an OTC deal, custody returns,
+            investor yield and claims keep working; an OTC deal whose party is
+            on the blocklist cannot expire, and a Manci admin cancels it to
+            return the deposits. Adding an admin or replacing the Super
             Admin takes effect only after a 48-hour waiting period, during
             which it can be cancelled; the program upgrade authority can
             recover a lost Super Admin or Blocklist Authority key to a new key

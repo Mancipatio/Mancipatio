@@ -36,6 +36,7 @@ import { TRANSFER_HOOK_PROGRAM_ADDRESS } from "@/lib/generated/transfer_hook";
 import {
   PROPOSAL_NOT_FINALIZED_HINT,
   RECOVERY_PENDING_BLOCKER,
+  STALE_OPERATIONAL_PROPOSAL,
   assertBlocklistAuthority,
   buildAcceptOperationalAuthority,
   buildCancelOperationalAuthority,
@@ -155,17 +156,19 @@ describe("live operational authority builders", () => {
       expect(mocks.hook).not.toHaveBeenCalled();
     },
   );
-  it("rejects cross-target, stale and wrong-owner proposals", async () => {
+  // Intentional (8.3 review): a stale proposal is REPORTED, not thrown. v1's
+  // executed recoveries retire a pending proposal by zeroing its
+  // current_authority instead of closing it; the program still lets it be
+  // cancelled and overwritten, so throwing here locked the new holder's panel
+  // and builders. Only a wrong target or owner still throws.
+  it("rejects cross-target and wrong-owner proposals; reports a stale one", async () => {
     const [target] = await findPlatformPda();
-    for (const data of [
-      { target: issuer, currentAuthority: current, newAuthority: next },
-      { target, currentAuthority: next, newAuthority: issuer },
-    ]) {
-      mocks.transfer.mockResolvedValue(account(data));
-      await expect(loadOperationalAuthority(rpc, "platform")).rejects.toThrow(
-        "stale or invalid",
-      );
-    }
+    mocks.transfer.mockResolvedValue(account({ target: issuer, currentAuthority: current, newAuthority: next, proposedBy: current }));
+    await expect(loadOperationalAuthority(rpc, "platform")).rejects.toThrow("invalid");
+    mocks.transfer.mockResolvedValue(account({ target, currentAuthority: next, newAuthority: issuer, proposedBy: next }));
+    expect(await loadOperationalAuthority(rpc, "platform")).toMatchObject({ stale: true, proposed: issuer, proposedBy: next });
+    mocks.hookTransfer.mockResolvedValue(account({ currentAuthority: next, newAuthority: issuer }, ASSET_REGISTRY_PROGRAM_ADDRESS));
+    await expect(loadOperationalAuthority(rpc, "blocklist")).rejects.toThrow("invalid");
     mocks.platform.mockResolvedValue(
       account({ admin: current }, TRANSFER_HOOK_PROGRAM_ADDRESS),
     );
@@ -173,6 +176,35 @@ describe("live operational authority builders", () => {
       "owner",
     );
   });
+
+  // execute_platform_recovery / execute_blocklist_recovery retire a pending
+  // proposal: current_authority becomes 1111…1111 and the account stays.
+  it.each(["platform", "blocklist"] as const)(
+    "a %s proposal retired by a recovery: accept refused before signing, cancel and a new propose allowed",
+    async (kind) => {
+      const retired = address("11111111111111111111111111111111");
+      const live = issuer; // the recovered holder
+      const oldHolder = next;
+      const [target] = await findPlatformPda();
+      mocks.platform.mockResolvedValue(account({ admin: live }));
+      mocks.hook.mockResolvedValue(account({ authority: live }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+      const wanted = address("SysvarRent111111111111111111111111111111111");
+      if (kind === "platform")
+        mocks.transfer.mockResolvedValue(account({ target, currentAuthority: retired, newAuthority: wanted, proposedBy: oldHolder, proposedAt: BigInt(1), eta: BigInt(2), expiresAt: BigInt(3) }));
+      else
+        mocks.hookTransfer.mockResolvedValue(account({ currentAuthority: retired, newAuthority: wanted, proposedAt: BigInt(1), expiresAt: BigInt(3) }, TRANSFER_HOOK_PROGRAM_ADDRESS));
+      const state = await loadOperationalAuthority(rpc, kind);
+      expect(state).toMatchObject({ current: live, proposed: wanted, stale: true });
+      await expect(buildAcceptOperationalAuthority(rpc, kind, createNoopSigner(wanted))).rejects.toThrow(STALE_OPERATIONAL_PROPOSAL);
+      // The live holder cancels it (platform: the rent returns to the old proposer).
+      const cancel = await buildCancelOperationalAuthority(rpc, kind, createNoopSigner(live));
+      if (kind === "platform") expect(parseCancelPlatformAdminTransferInstruction(cancel as never).accounts.proposer.address).toBe(oldHolder);
+      else expect(parseCancelBlocklistAuthorityTransferInstruction(cancel as never).accounts.authority.address).toBe(live);
+      // ... or overwrites it with a new proposal.
+      const propose = await buildProposeOperationalAuthority(rpc, kind, createNoopSigner(live), next);
+      expect(propose.accounts[0].address).toBe(live);
+    },
+  );
 });
 // v1.0.0-rc (8.3): proposals carry a window, a pending recovery by the
 // upgrade authority refuses the accept, and both rotations can be cancelled.
