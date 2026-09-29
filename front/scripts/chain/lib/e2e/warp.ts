@@ -5,7 +5,11 @@
  * with `--warp-slot` (scripts/chain/e2e-localnet.sh warp). Opt-in
  * (E2E_WARP=1), localnet only, and only against the validator that script
  * runs (its RPC port must be CHAIN_RPC_URL's); anything else gets no warp and
- * the time-bound steps are recorded as not run.
+ * the time-bound steps are recorded as not run. The script itself refuses,
+ * before stopping anything, unless the run's environment (E2E_SCRATCH, the
+ * ports, CHAIN_RPC_URL, CHAIN_GENESIS_HASH) is the one its `start` recorded
+ * in <E2E_DIR>/validator.txt and the pid it would stop serves that RPC with
+ * those ports: source validator.txt before `npm run chain:e2e`.
  *
  * The Clock sysvar across a warp (Agave 4.2.2, measured on this validator):
  *
@@ -136,18 +140,40 @@ async function readSysvar(rpc: ChainRpc, address: Address, name: string, commitm
   return new Uint8Array(Buffer.from((value as { data: [string, string] }).data[0], "base64"));
 }
 
-/** Longest a warp may take: the restart plus the settle the script waits for. */
-const WARP_TIMEOUT_MS = 20 * 60_000;
+/** e2e-localnet.sh's default for E2E_WARP_SETTLE_TIMEOUT_S (each of its two snapshot waits). */
+export const DEFAULT_WARP_SETTLE_TIMEOUT_S = 900;
+/**
+ * Beyond the two snapshot waits, the script's own limits: the halt (15 s),
+ * the relaunch's RPC wait (90 s) and the RPC / lsof probes, with room so the
+ * script's own timeout (a clear message) always fires before this one.
+ */
+const WARP_SCRIPT_OVERHEAD_S = 300;
+
+/**
+ * How long runScript lets `e2e-localnet.sh warp` run: derived from the same
+ * E2E_WARP_SETTLE_TIMEOUT_S the script reads, so a slow snapshot fails in the
+ * script with its own message instead of being killed mid-wait.
+ */
+export function warpTimeoutMs(env: ChainEnv): number {
+  const raw = env.E2E_WARP_SETTLE_TIMEOUT_S?.trim() || String(DEFAULT_WARP_SETTLE_TIMEOUT_S);
+  const settle = Number(raw);
+  if (!/^[0-9]+$/.test(raw) || settle < 1 || settle > 86_400) {
+    throw new ChainGateError("E2E_WARP_SETTLE_TIMEOUT_S must be a whole number of seconds from 1 to 86400");
+  }
+  return (2 * settle + WARP_SCRIPT_OVERHEAD_S) * 1000;
+}
 
 /**
  * Runs e2e-localnet.sh without blocking the event loop (the run's abort
- * signal stays live); the script gets the run's environment (its ports).
+ * signal stays live); the script gets the run's environment (its scratch and
+ * ports, which it checks against validator.txt) and at most `timeoutMs`.
  */
 function runScript(
   script: string,
   args: string[],
   cwd: string,
   env: ChainEnv,
+  timeoutMs: number,
   signal?: AbortSignal,
 ): Promise<{ status: number | null; signal: NodeJS.Signals | null; stdout: string; stderr: string }> {
   return new Promise((resolve, reject) => {
@@ -156,7 +182,7 @@ function runScript(
     let stderr = "";
     child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
     child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-    const timer = setTimeout(() => child.kill("SIGTERM"), WARP_TIMEOUT_MS);
+    const timer = setTimeout(() => child.kill("SIGTERM"), timeoutMs);
     const abort = () => child.kill("SIGTERM");
     signal?.addEventListener("abort", abort, { once: true });
     child.on("error", (error) => {
@@ -208,6 +234,8 @@ export function localnetWarp(input: {
     throw new ChainGateError(`E2E_WARP: CHAIN_RPC_URL port ${url.port || "(none)"} is not the e2e-localnet.sh RPC port ${scriptPort}`);
   }
   const script = path.join(input.frontDir, "scripts", "chain", "e2e-localnet.sh");
+  // Refused up front (a gate), not at the first warp half-way through a run.
+  const timeoutMs = warpTimeoutMs(input.env);
   const sleep = input.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
   let rateMicro = DEFAULT_RATE_MICRO;
   const readClock = async (commitment: "finalized" | "confirmed") =>
@@ -240,7 +268,7 @@ export function localnetWarp(input: {
           ? `warp   ${label}: ${target - clock.unixTimestamp} s of chain time short; jumping to slot ${plan.slot}`
           : `warp   ${label}: ${moving ? "a fresh epoch first" : "the clock stopped"}; resetting it at slot ${plan.slot}`,
       );
-      const result = await runScript(script, ["warp", plan.slot.toString()], input.frontDir, input.env, input.signal);
+      const result = await runScript(script, ["warp", plan.slot.toString()], input.frontDir, input.env, timeoutMs, input.signal);
       if (result.status !== 0) {
         throw new ChainHaltError(`warp to slot ${plan.slot} failed (${result.status ?? result.signal}): ${tail(result.stdout)} ${tail(result.stderr)}`);
       }

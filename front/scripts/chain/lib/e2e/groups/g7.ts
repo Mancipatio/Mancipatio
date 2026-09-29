@@ -1,20 +1,29 @@
 /**
  * G7 (localnet): the emergency pause matrix (design-6.3 §A G7, v1.0.0-rc
- * pause bits). Positions are staged first (sales, offers, a deal, a delivery
- * vault, a funded distribution, a proposal). With only 0x40 set, as on
- * mainnet, the payout / Merkle entries are refused (6000). Then each
- * emergency bit on its own: an Admin sets it, its entries are refused (6000),
- * the Super Admin clears it. Then every bit is set (0x7F): an Admin cannot
+ * pause bits). Positions are staged first (sales, offers, an unfunded offer,
+ * deals, a delivery vault, a funded distribution, a proposal, a draft asset
+ * with one class). G7 needs 0x40 set when it starts (G5 ends by setting it
+ * again) and refuses to run otherwise: with only 0x40 set, as on mainnet,
+ * the payout / Merkle entries are refused (6000). Then each emergency bit on
+ * its own: an Admin sets it, its entries are refused (6000), the Super Admin
+ * clears it; each entry is one that would land without the bit (the
+ * deposits go to the unfunded offer and a fresh deal, the class and mint to
+ * the draft asset). Then every bit is set (0x7F, checked): an Admin cannot
  * clear (6119), every exit still lands (cancels, expiries, returns, the
  * quarantine and clawback, claims, a vote, approvals, a wallet transfer),
  * the Super Admin cannot clear 0x40 together with other bits (6154), clears
  * the emergency bits (0x3F) and a buy lands again. 0x40 stays set.
+ *
+ * Not here: the 0x10 refusals of create_rights_issuance / publish_milestone
+ * need 0x40 clear (G5 5.5f–i shows them); route_yield has no e2e flow
+ * (LiteSVM: test_payout_vault.rs).
  */
 import type { Address, Instruction, KeyPairSigner } from "@solana/kit";
 import { getCreateAssociatedTokenIdempotentInstructionAsync, findAssociatedTokenPda } from "@solana-program/token-2022";
 import {
   AssetType,
   DistributionStatus,
+  ShareClassType,
   OfferStatus,
   OtcDealStatus,
   VoteChoice,
@@ -30,9 +39,20 @@ import {
   getRegisterIssuerInstructionAsync,
   getRevokeSaleApprovalInstructionAsync,
   fetchMaybeVoteRecord,
+  fetchMaybeShareClass,
+  findAssetPda,
+  findMintPda,
   findVoteRecordPda,
+  getAddShareClassInstructionAsync,
+  getInitializeShareClassMintInstructionAsync,
 } from "@/lib/generated/asset_registry";
-import { getAddToBlocklistInstructionAsync, getRemoveFromBlocklistInstructionAsync } from "@/lib/generated/transfer_hook";
+import {
+  TRANSFER_HOOK_PROGRAM_ADDRESS,
+  findConfigPda,
+  findExtraAccountMetaListPda,
+  getAddToBlocklistInstructionAsync,
+  getRemoveFromBlocklistInstructionAsync,
+} from "@/lib/generated/transfer_hook";
 import { ISSUER_CAPABILITIES, resolveIssuerPermission } from "@/lib/issuer-permissions";
 import { buildDepositOtcAssetInstructions } from "@/lib/otc-transactions";
 import {
@@ -46,7 +66,7 @@ import {
   PAUSE_SECONDARY,
   EMERGENCY_PAUSE_BITS,
 } from "@/lib/pause-flags";
-import { findBlockEntryPda, findOfferPda, findProposalPda, findSalePda } from "@/lib/pdas";
+import { findBlockEntryPda, findOfferPda, findProposalPda, findSalePda, findShareClassPda } from "@/lib/pdas";
 import { buildCloseSaleInstruction } from "@/lib/proceeds-exits";
 import { TOKEN_2022, TOKEN_CLASSIC } from "@/lib/transaction-builders";
 import { ChainPlanError } from "../../safety";
@@ -73,10 +93,21 @@ import { paymentAta, tokenBalance } from "../fixtures";
 import { entity } from "../state";
 import { ONE_DAY, accountExists, defaultJurisdiction, expiringDeadline, sha256Bytes, type World } from "../world";
 import { UNIT_PRICE, approveSaleIxs, buyIxs, openSaleIxs, saleApprovalExists, saleEnd, saleExists, saleSold } from "./g1";
-import { cancelDealIxs, createAndFundOffer, createDealIxs, depositPaymentIxs, offerReturnTail, offerStatus, takeIxs } from "./g3";
+import {
+  cancelDealIxs,
+  createAndFundOffer,
+  createDealIxs,
+  createOfferIxs,
+  depositPaymentIxs,
+  fundOfferIxs,
+  offerReturnTail,
+  offerStatus,
+  takeIxs,
+} from "./g3";
 import { DELIVERY_DEADLINE_S, e2eRegistry } from "./g4";
 import {
   RIGHTS_1,
+  RIGHTS_2,
   castVoteIxs,
   claimMilestoneIxs,
   claimVestedIxs,
@@ -104,15 +135,18 @@ const STARTUP_SALE_31 = 31;
 const OFFER_5 = 5;
 const OFFER_6 = 6;
 const OFFER_7 = 7;
+/** Created without a deposit; its deposit_to_offer_escrow is only tried under 0x04. */
+const OFFER_8 = 8;
 const DEAL_10 = 10;
 const DEAL_11 = 11;
+/** Created without deposits; its deposit_otc_payment is only tried under 0x04. */
+const DEAL_12 = 12;
 const VAULT_V4 = 4;
 const QUARANTINE_A2 = 12;
 const VAULT_REFUSED = 97;
 const DISTRIBUTION_2 = 2;
 const DISTRIBUTION_3 = 3;
 const PROPOSAL_2 = 2;
-const RIGHTS_2 = 2;
 /** Offer #6 expires while the rounds run; its permissionless expire is an exit under 0x7F. */
 const EXPIRING_OFFER_S = BigInt(120);
 
@@ -125,6 +159,15 @@ export async function runGroup7(w: World): Promise<"completed"> {
   const ba = w.roles.blocklistAuthority;
   if (!sa || !ba) throw new ChainPlanError("G7 needs the localnet Super Admin and BlocklistAuthority keys");
   const classA = entity(w.runner.state, "classA") as Address;
+  const flags = () => pauseFlags(w);
+  // As on mainnet: 0x40 is set through the whole group (7.1 relies on it,
+  // 7.8a adds 0x3F to reach 0x7F, 7.9 clears only 0x3F). G5 sets it again
+  // on every path (5.7); a platform without it is not the one G7 tests.
+  if (((await flags()) & PAUSE_PAYOUT_MODULES) === 0) {
+    throw new ChainPlanError(
+      `G7 needs PAUSE_PAYOUT_MODULES (0x40) set, the flags are 0x${(await flags()).toString(16)}: run G5 to its end (5.7 sets it) before G7`,
+    );
+  }
   const now = await chainNow(w.rpc);
 
   // 7.0: the positions the exits below unwind.
@@ -212,9 +255,28 @@ export async function runGroup7(w: World): Promise<"completed"> {
   await w.runner.step("7.0l", async () => ({ payer: admin, ixs: await createProposalIxs(w, PROPOSAL_2, (await chainNow(w.rpc)) + ONE_DAY) }), {
     done: () => accountExists(w.rpc, proposal2),
   });
+  // Entry targets that land without the bit: an unfunded offer, a deal with
+  // no deposit, a draft asset with one class and no mint.
+  const offer8 = await findOfferPda(classA, BigInt(OFFER_8));
+  await w.runner.step("7.0m", async () => ({ payer: b1, ixs: await createOfferIxs(w, b1, OFFER_8, BigInt(1), UNIT_PRICE, BigInt(0)) }), {
+    done: () => accountExists(w.rpc, offer8),
+  });
+  const [deal12] = await findDealPda({ shareClass: classA, dealId: BigInt(DEAL_12) });
+  await w.runner.step("7.0n", async () => ({ payer: admin, ixs: await createDealIxs(w, DEAL_12, b1.address, b2.address, BigInt(1), UNIT_PRICE) }), {
+    done: () => accountExists(w.rpc, deal12),
+  });
+  const draftId = `e2e-${w.runId}-d`;
+  const [draft] = await findAssetPda({ issuer: entity(w.runner.state, "issuer") as Address, assetId: draftId });
+  w.runner.setEntity("draftAsset", draft);
+  await w.runner.step("7.0o", async () => ({ payer: issuerKey, ixs: await createDraftAssetIxs(w, draftId) }), {
+    done: () => accountExists(w.rpc, draft),
+  });
+  const draftClass0 = await findShareClassPda(draft, 0);
+  await w.runner.step("7.0p", async () => ({ payer: issuerKey, ixs: await addDraftClassIxs(w, draft, 0) }), {
+    done: () => accountExists(w.rpc, draftClass0),
+  });
 
   // 7.1: 0x40 alone (as on mainnet) refuses the payout / Merkle entries.
-  const flags = () => pauseFlags(w);
   const whileSet = (bits: number, label: string) => async () =>
     ((await flags()) & bits) === bits ? null : `${label} is no longer set (the round's clear ran)`;
   const refused: Entry[] = [
@@ -270,6 +332,8 @@ export async function runGroup7(w: World): Promise<"completed"> {
             ],
           }),
         },
+        { id: "7.2d", build: async () => ({ payer: issuerKey, ixs: await addDraftClassIxs(w, draft, 1) }) },
+        { id: "7.2e", build: async () => ({ payer: issuerKey, ixs: await initDraftMintIxs(w, draft, draftClass0) }) },
       ],
     },
     {
@@ -325,6 +389,8 @@ export async function runGroup7(w: World): Promise<"completed"> {
             return { payer: b1, ixs: await buildDepositOtcAssetInstructions(w.rpc, { seller: b1, dealPda: deal10, deal: d, paymentTokenProgram: TOKEN_CLASSIC }) };
           },
         },
+        { id: "7.4f", build: async () => ({ payer: b1, ixs: await fundOfferIxs(w, b1, OFFER_8, BigInt(1)) }) },
+        { id: "7.4g", build: async () => ({ payer: b2, ixs: await depositPaymentIxs(w, b2, deal12) }) },
       ],
     },
     {
@@ -411,37 +477,48 @@ export async function runGroup7(w: World): Promise<"completed"> {
   await w.runner.step("7.8a", async () => ({ payer: admin, ixs: await setPauseIxs(w, admin, EMERGENCY_PAUSE_BITS, 0) }), {
     done: async () => (await allSet()) || w.runner.passed("7.9b"),
   });
+  // The exits below are evidence only under every bit: 0x3F plus the 0x40 G7 started with.
+  if (!w.runner.passed("7.9b") && !(await allSet())) {
+    throw new ChainPlanError(`7.8a: the pause flags are 0x${(await flags()).toString(16)}, not 0x7f; the exits would not run under a full pause`);
+  }
   await w.runner.step("7.8b", async () => ({ payer: admin, ixs: await setPauseIxs(w, admin, 0, PAUSE_ONBOARDING) }), { notRun: underAll });
   await w.runner.step("7.8c", async () => ({ payer: b1, ixs: await cancelOfferIxs(w, b1, offer5) }), {
+    notRun: underAll,
     done: async () => (await offerStatus(w, offer5)) === OfferStatus.Cancelled,
   });
   await waitForChainTime({ rpc: w.rpc, target: offer6Expiry + BigInt(2), sleep: w.sleep, signal: w.signal, log: w.log, label: "offer #6 expiry" });
   await w.runner.step("7.8d", async () => ({ payer: b2, ixs: await expireOfferIxs(w, b2, offer6) }), {
+    notRun: underAll,
     done: async () => (await offerStatus(w, offer6)) === OfferStatus.Expired,
   });
   await w.runner.step("7.8e", async () => ({ payer: admin, ixs: await cancelDealIxs(w, deal10) }), {
+    notRun: underAll,
     done: async () => {
       const account = await fetchMaybeOtcDeal(w.rpc, deal10, { commitment: "finalized" });
       return !account.exists || account.data.status === OtcDealStatus.Cancelled;
     },
   });
   await w.runner.step("7.8f", async () => ({ payer: admin, ixs: await returnIxs(w, v4, admin) }), {
+    notRun: underAll,
     done: vaultIn(w, v4, [VaultState.Returned]),
   });
   const qa2 = await vaultPda(w, "classA", QUARANTINE_A2);
   w.runner.setEntity("quarantineA2", qa2);
   await w.runner.step("7.8g", async () => ({ payer: admin, ixs: await openQuarantineIxs(w, "classA", QUARANTINE_A2) }), {
+    notRun: underAll,
     done: () => accountExists(w.rpc, qa2),
   });
   const b2Entry = await findBlockEntryPda(b2.address);
   const b2Blocked = () => accountExists(w.rpc, b2Entry);
   await w.runner.step("7.8h", async () => ({ payer: ba, ixs: [await getAddToBlocklistInstructionAsync({ authority: ba, wallet: b2.address })] }), {
+    notRun: underAll,
     done: async () => (await b2Blocked()) || w.runner.passed("7.8j"),
   });
   await w.runner.step(
     "7.8i",
     async () => ({ payer: admin, ixs: await clawbackIxs(w, { path: "blocklist", classKey: "classA", quarantine: qa2, holder: b2.address, amount: BigInt(1) }) }),
     {
+      notRun: underAll,
       done: async () => {
         const vault = await loadVault(w, qa2);
         return vault === null || vault.state !== VaultState.Active || (await tokenBalance(w.rpc, vault.escrow)) > BigInt(0);
@@ -449,20 +526,25 @@ export async function runGroup7(w: World): Promise<"completed"> {
     },
   );
   await w.runner.step("7.8j", async () => ({ payer: ba, ixs: [await getRemoveFromBlocklistInstructionAsync({ authority: ba, wallet: b2.address })] }), {
+    notRun: underAll,
     done: async () => !(await b2Blocked()),
   });
   await w.runner.step("7.8k", async () => ({ payer: admin, ixs: await triggerIxs(w, qa2) }), {
+    notRun: underAll,
     done: vaultIn(w, qa2, [VaultState.Triggered, VaultState.Realized]),
   });
-  await w.runner.step("7.8l", async () => ({ payer: admin, ixs: await realizeIxs(w, qa2) }), { done: vaultIn(w, qa2, [VaultState.Realized]) });
-  await w.runner.step("7.8m", async () => ({ payer: b3, ixs: await claimVestedIxs(w, b3, 1) }), { done: () => vestingReleased(w, 1) });
+  await w.runner.step("7.8l", async () => ({ payer: admin, ixs: await realizeIxs(w, qa2) }), { notRun: underAll, done: vaultIn(w, qa2, [VaultState.Realized]) });
+  await w.runner.step("7.8m", async () => ({ payer: b3, ixs: await claimVestedIxs(w, b3, 1) }), { notRun: underAll, done: () => vestingReleased(w, 1) });
   await w.runner.step("7.8n", async () => ({ payer: b2, ixs: await claimMilestoneIxs(w, RIGHTS_1, 0, b2) }), {
+    notRun: underAll,
     done: () => milestoneClaimed(w, RIGHTS_1, 0, b2.address),
   });
   await w.runner.step("7.8o", async () => ({ payer: admin, ixs: await closeDistributionIxs(w, plan2) }), {
+    notRun: underAll,
     done: async () => (await distributionStatus(w, plan2)) === DistributionStatus.Closed,
   });
   await w.runner.step("7.8p", async () => ({ payer: b1, ixs: await castVoteIxs(w, PROPOSAL_2, b1, VoteChoice.For) }), {
+    notRun: underAll,
     done: async () => {
       const [record] = await findVoteRecordPda({ proposal: proposal2, voter: b1.address });
       return (await fetchMaybeVoteRecord(w.rpc, record, { commitment: "finalized" })).exists;
@@ -475,12 +557,12 @@ export async function runGroup7(w: World): Promise<"completed"> {
       payer: admin,
       ixs: await approveSaleIxs(w, { classKey: "classA", saleId: SALE_23, maxGross: UNIT_PRICE, minPrice: UNIT_PRICE, maxPrice: UNIT_PRICE, expiresAt: (await chainNow(w.rpc)) + ONE_DAY }),
     }),
-    { done: async () => (await accountExists(w.rpc, approval23)) || w.runner.passed("7.8r") },
+    { notRun: underAll, done: async () => (await accountExists(w.rpc, approval23)) || w.runner.passed("7.8r") },
   );
   await w.runner.step(
     "7.8r",
     async () => ({ payer: admin, ixs: [await getRevokeSaleApprovalInstructionAsync({ authority: admin, saleApproval: approval23, approvedBy: admin.address })] }),
-    { done: async () => !(await accountExists(w.rpc, approval23)) },
+    { notRun: underAll, done: async () => !(await accountExists(w.rpc, approval23)) },
   );
   const b2ShareBefore = w.runner.state.entities.g7TransferB2Before;
   await w.runner.step(
@@ -490,6 +572,7 @@ export async function runGroup7(w: World): Promise<"completed"> {
       return { payer: b1, ixs: await walletTransferIxs(w, b1, b2.address, "classA", BigInt(1)) };
     },
     {
+      notRun: underAll,
       done: async () =>
         b2ShareBefore !== undefined &&
         (await tokenBalance(w.rpc, await shareAta(b2.address, entity(w.runner.state, "mintA") as Address))) > BigInt(b2ShareBefore),
@@ -533,3 +616,61 @@ async function expireOfferIxs(w: World, payer: KeyPairSigner, offer: Address): P
   return [withTail(expire, tail)];
 }
 
+
+/** create_asset of the draft asset D (never activated: add_share_class needs a Draft asset). */
+async function createDraftAssetIxs(w: World, assetId: string): Promise<Instruction[]> {
+  return [
+    await getCreateAssetInstructionAsync({
+      authority: w.roles.issuer,
+      issuer: entity(w.runner.state, "issuer") as Address,
+      assetId,
+      assetType: AssetType.Equity,
+      name: `Manci e2e ${w.runId} draft`,
+      symbolPrefix: "E2D",
+      legalDocHash: sha256Bytes(`manci-e2e:${w.runId}:asset:draft`),
+      jurisdictionRules: { allowedCountries: new Uint8Array(128), maxHolders: 0, restrictedPeriodEnd: BigInt(0), allowP2p: true },
+    }),
+  ];
+}
+
+/** add_share_class `index` (Common; voting, dividend, transferable) on the draft asset D. */
+async function addDraftClassIxs(w: World, asset: Address, index: number): Promise<Instruction[]> {
+  return [
+    await getAddShareClassInstructionAsync({
+      authority: w.roles.issuer,
+      issuer: entity(w.runner.state, "issuer") as Address,
+      asset,
+      shareClass: await findShareClassPda(asset, index),
+      classIndex: index,
+      classType: ShareClassType.Common,
+      rightsBitfield: 1 | 2 | 32,
+      liqPrefMultiplierBps: 10_000,
+      liqSeniority: 0,
+      votingWeight: 1,
+      maxSupply: null,
+      mintablePostLaunch: true,
+    }),
+  ];
+}
+
+/** initialize_share_class_mint of a class of D, as G1 initializes class A's (the issuer's MINT grant). */
+async function initDraftMintIxs(w: World, asset: Address, shareClass: Address): Promise<Instruction[]> {
+  const issuer = entity(w.runner.state, "issuer") as Address;
+  const account = await fetchMaybeShareClass(w.rpc, shareClass, { commitment: "finalized" });
+  if (!account.exists) throw new ChainPlanError(`share class ${shareClass} of the draft asset is not on chain`);
+  const [mint] = await findMintPda({ shareClass });
+  return [
+    await getInitializeShareClassMintInstructionAsync({
+      authority: w.roles.issuer,
+      adminRecord: await resolveIssuerPermission(w.rpc, issuer, w.roles.issuer.address, ISSUER_CAPABILITIES.Mint),
+      issuer,
+      asset,
+      shareClass,
+      mint,
+      hookConfig: (await findConfigPda({ mint }))[0],
+      extraAccountMetaList: (await findExtraAccountMetaListPda({ mint }))[0],
+      transferHookProgram: TRANSFER_HOOK_PROGRAM_ADDRESS,
+      tokenProgram: TOKEN_2022,
+    }),
+  ];
+}

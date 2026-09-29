@@ -39,7 +39,7 @@ import {
   type SimulationResult,
   type Timing,
 } from "../tx";
-import { classifyFailure, describeFailure, matchesExpectation, type ChainFailure } from "./errors";
+import { classifyFailure, describeFailure, failedAccount, matchesExpectation, type ChainFailure } from "./errors";
 import { stepSpec, type E2eNetwork, type StepSpec } from "./matrix";
 import { saveState, type E2eState, type StepState } from "./state";
 
@@ -241,13 +241,16 @@ export class E2eRunner {
       const simulation = await simulateSigned(this.o.rpc, probe.wire);
       const failure = simulation.ok ? null : classifyFailure(simulation.err, simulation.logs);
       journalSimulation("signed", simulation, failure);
-      if (matchesExpectation(spec.expect, failure)) {
+      const logs = simulation.ok ? [] : simulation.logs;
+      const account = failure ? failedAccount(logs, failure.code) : null;
+      const at = (name: string | null | undefined) => (name ? ` at ${name}` : "");
+      if (matchesExpectation(spec.expect, failure, logs)) {
         this.record(spec, { status: "passed", signature: null, actual: failure, at: new Date().toISOString() });
-        this.o.log(`pass   ${id}: refused as expected — ${describeFailure(failure)}`);
+        this.o.log(`pass   ${id}: refused as expected — ${describeFailure(failure)}${at(spec.expect.account)}`);
         this.pushResult(spec, "refused-as-expected", failure, null);
         return "passed";
       }
-      const detail = `expected ${spec.expect.program} ${spec.expect.name} (${spec.expect.code}), got ${describeFailure(failure)}`;
+      const detail = `expected ${spec.expect.program} ${spec.expect.name} (${spec.expect.code})${at(spec.expect.account)}, got ${describeFailure(failure)}${at(account)}`;
       this.record(spec, { status: "failed", signature: null, actual: failure, detail, at: new Date().toISOString() });
       this.pushResult(spec, "mismatch", failure, null);
       throw new ChainPlanError(`${id} ${spec.title}: ${detail}`);

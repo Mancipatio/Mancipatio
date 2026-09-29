@@ -10,7 +10,9 @@
  * - KycGated class B: holders with passports buy; a revoked passport (B3) is
  *   clawed back at once; a valid one (B2) is refused (6079), and so is an
  *   expired one inside the 30-day grace (B4, 6079), which passes after it (a
- *   warp).
+ *   warp). Both B4 steps need B4's buy (6.5e): without it they are not run,
+ *   never passed on an empty balance; QB is still triggered and realized
+ *   with B3's units.
  */
 import type { Address } from "@solana/kit";
 import { findBlockEntryPda } from "@/lib/pdas";
@@ -34,7 +36,7 @@ import {
 } from "../custody";
 import { tokenBalance } from "../fixtures";
 import { entity } from "../state";
-import { CLOCK_GUARD_S, ONE_DAY, accountExists, expiringDeadline, reachChainTime, type World } from "../world";
+import { CLOCK_GUARD_S, ONE_DAY, accountExists, expiringDeadline, markAllNotRun, reachChainTime, type World } from "../world";
 import { UNIT_PRICE, approveSaleIxs, buyIxs, openSaleIxs, saleApprovalExists, saleEnd, saleExists, saleSold } from "./g1";
 import { approveHolderIxs, e2eRegistry } from "./g4";
 
@@ -43,6 +45,8 @@ export const QUARANTINE_B = 11;
 const SALE_B = 7;
 /** B4's passport expires this soon after 6.5c, so the grace can start inside the group. */
 const B4_PASSPORT_S = BigInt(180);
+/** Class B units each of B3 and B4 buys (6.5d, 6.5e); QB then seizes both (6.6b, 6.6e). */
+const CLASS_B_UNITS = BigInt(2);
 
 export async function runGroup6(w: World): Promise<"completed"> {
   const { admin, buyers } = w.roles;
@@ -135,11 +139,11 @@ export async function runGroup6(w: World): Promise<"completed"> {
     { done: () => accountExists(w.rpc, b4Entry) },
   );
   const b4Expiry = BigInt(entity(w.runner.state, "b4PassportExpiry"));
-  await w.runner.step("6.5d", async () => ({ payer: b3, ixs: await buyIxs(w, b3, "classB", SALE_B, BigInt(2)) }), {
-    done: () => saleSold(w, "classB", SALE_B, BigInt(2)),
+  await w.runner.step("6.5d", async () => ({ payer: b3, ixs: await buyIxs(w, b3, "classB", SALE_B, CLASS_B_UNITS) }), {
+    done: () => saleSold(w, "classB", SALE_B, CLASS_B_UNITS),
   });
-  await w.runner.step("6.5e", async () => ({ payer: b4, ixs: await buyIxs(w, b4, "classB", SALE_B, BigInt(2)) }), {
-    done: () => saleSold(w, "classB", SALE_B, BigInt(4)),
+  await w.runner.step("6.5e", async () => ({ payer: b4, ixs: await buyIxs(w, b4, "classB", SALE_B, CLASS_B_UNITS) }), {
+    done: () => saleSold(w, "classB", SALE_B, BigInt(2) * CLASS_B_UNITS),
     notRun: async () => ((await chainNow(w.rpc)) + CLOCK_GUARD_S < b4Expiry ? null : `B4's passport expired at ${b4Expiry} before its buy (chain time)`),
   });
   const b3KycEntry = await getEntryPda(registry, b3.address);
@@ -165,28 +169,46 @@ export async function runGroup6(w: World): Promise<"completed"> {
   const qbActive = async () => ((await vaultIn(w, qb, [VaultState.Active])()) ? null : "quarantine QB is no longer Active (6.6f ran)");
   await w.runner.step("6.6b", kycClawback(b3.address), { done: async () => !(await holds(b3.address)) });
   await w.runner.step("6.6c", kycClawback(b2.address), { notRun: qbActive });
-  // B4's passport has expired, but the 30-day grace has not.
-  const b4Grace = b4Expiry + BigInt(KYC_EXPIRY_CLAWBACK_GRACE_SECONDS);
-  if (!w.runner.passed("6.6d")) {
-    const blocked = await reachChainTime(w, b4Expiry + BigInt(1), "B4's passport expiry");
-    if (blocked) w.runner.markNotRun("6.6d", blocked);
-  }
-  await w.runner.step("6.6d", kycClawback(b4.address), {
-    notRun: async () => {
-      const at = await chainNow(w.rpc);
-      if (at <= b4Expiry) return `B4's passport has not expired yet (chain time ${at})`;
-      if (at + CLOCK_GUARD_S >= b4Grace) return `the 30-day grace after B4's expiry ended at ${b4Grace} (chain time)`;
-      return (await vaultIn(w, qb, [VaultState.Active])()) ? null : "quarantine QB is no longer Active (6.6f ran)";
-    },
-  });
-  if (await holds(b4.address)) {
-    const blocked = await reachChainTime(w, b4Grace + BigInt(1), "the 30-day grace after B4's passport expiry");
-    if (blocked) {
-      for (const id of ["6.6e", "6.6f", "6.6g"]) w.runner.markNotRun(id, blocked);
-      return "completed";
+  // 6.6d/e are about B4's class B units: only a landed 6.5e gave B4 any
+  // (B4's passport expires minutes after 6.5c, so a late resume can miss the
+  // buy for good). Without them there is nothing to refuse or to seize, and
+  // "no units left" would pass 6.6e without a transaction.
+  const b4Bought = w.runner.passed("6.5e");
+  if (!b4Bought) {
+    markAllNotRun(w, ["6.6d", "6.6e"], "B4 never held class B (6.5e did not land before its passport expired)");
+  } else {
+    // B4's passport has expired, but the 30-day grace has not.
+    const b4Grace = b4Expiry + BigInt(KYC_EXPIRY_CLAWBACK_GRACE_SECONDS);
+    if (!w.runner.passed("6.6d")) {
+      const blocked = await reachChainTime(w, b4Expiry + BigInt(1), "B4's passport expiry");
+      if (blocked) w.runner.markNotRun("6.6d", blocked);
     }
+    await w.runner.step("6.6d", kycClawback(b4.address), {
+      notRun: async () => {
+        const at = await chainNow(w.rpc);
+        if (at <= b4Expiry) return `B4's passport has not expired yet (chain time ${at})`;
+        if (at + CLOCK_GUARD_S >= b4Grace) return `the 30-day grace after B4's expiry ended at ${b4Grace} (chain time)`;
+        if (!(await holds(b4.address))) return "B4 holds no class B any more (6.6e ran)";
+        return (await vaultIn(w, qb, [VaultState.Active])()) ? null : "quarantine QB is no longer Active (6.6f ran)";
+      },
+    });
+    if (await holds(b4.address)) {
+      const blocked = await reachChainTime(w, b4Grace + BigInt(1), "the 30-day grace after B4's passport expiry");
+      if (blocked) {
+        markAllNotRun(w, ["6.6e", "6.6f", "6.6g"], blocked);
+        return "completed";
+      }
+    }
+    // Seized, not just gone: B4 bought (6.5e) and holds nothing, and QB's
+    // escrow holds B4's units on top of B3's (6.6b).
+    await w.runner.step("6.6e", kycClawback(b4.address), {
+      done: async () => {
+        if (await holds(b4.address)) return false;
+        const vault = await loadVault(w, qb);
+        return vault !== null && (await tokenBalance(w.rpc, vault.escrow)) >= BigInt(2) * CLASS_B_UNITS;
+      },
+    });
   }
-  await w.runner.step("6.6e", kycClawback(b4.address), { done: async () => !(await holds(b4.address)) });
   await w.runner.step("6.6f", async () => ({ payer: admin, ixs: await triggerIxs(w, qb) }), {
     done: vaultIn(w, qb, [VaultState.Triggered, VaultState.Realized]),
   });

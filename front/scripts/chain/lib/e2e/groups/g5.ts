@@ -8,12 +8,20 @@
  * early finalize, 6031). Localnet adds the payout / Merkle modules, off on
  * mainnet (PAUSE_PAYOUT_MODULES, 0x40): with the bit set a Startup sale and
  * a rights issuance are refused (6000); the Super Admin clears it on its own;
- * a rights issuance with a milestone (refused before its unlock, 6032), a
- * Startup raise into a payout vault whose freeze is refused while nothing is
- * overdue (6038). One clock move (a warp on localnet, a wait on devnet) then
- * runs the "after" steps: the vesting claim, the finalize, the milestone
- * claim, the freeze after three missed monthly updates, and a vault vote
- * that must run at least 7 days (6147). An Admin sets 0x40 again at the end.
+ * a rights issuance whose entries are then refused under the distributions
+ * bit alone (0x10, 6000; G7 cannot show that, 0x40 stays set there), a
+ * milestone (refused before its unlock, 6032), a Startup raise into a payout
+ * vault whose freeze is refused while nothing is overdue (6038). route_yield
+ * (0x10 | 0x40) is not run here: it needs a founder yield flow the e2e does
+ * not stage; LiteSVM covers its pause (test_payout_vault.rs).
+ *
+ * Two clock moves then run the "after" steps. The short one (about three
+ * minutes: a wait) covers the vesting claim, the finalize and the milestone
+ * claim; the long one (two payout months: a localnet warp) the freeze after
+ * three missed monthly updates and a vault vote that must run at least 7
+ * days (6147). Without a warp only the long one's steps are not run. An
+ * Admin sets 0x40 again at the end in every case (5.7): G7 and mainnet
+ * expect it set.
  */
 import { AccountRole, type Address, type Instruction, type KeyPairSigner } from "@solana/kit";
 import { getCreateAssociatedTokenIdempotentInstructionAsync } from "@solana-program/token-2022";
@@ -69,7 +77,7 @@ import {
 import { hookTransferMetas } from "@/lib/hook-metas";
 import { ISSUER_CAPABILITIES, resolveIssuerPermission } from "@/lib/issuer-permissions";
 import { merkleProof, merkleRoot, snapshotLeaf } from "@/lib/merkle";
-import { PAUSE_PAYOUT_MODULES } from "@/lib/pause-flags";
+import { PAUSE_DISTRIBUTIONS, PAUSE_PAYOUT_MODULES } from "@/lib/pause-flags";
 import { vaultVotePda } from "@/lib/payout-vote-pda";
 import { findClaimPda, findMilestonePda, findProposalPda, findRightsIssuancePda, findSalePda } from "@/lib/pdas";
 import { buildOpenPayoutVaultInstruction } from "@/lib/proceeds-exits";
@@ -82,7 +90,7 @@ import { chainNow } from "../clock";
 import { shareAta, withTail } from "../custody";
 import { PAYMENT_UNIT, mintPaymentInstructions, paymentAta, tokenBalance } from "../fixtures";
 import { entity } from "../state";
-import { CLOCK_GUARD_S, ONE_DAY, accountExists, reachChainTime, sha256Bytes, type World } from "../world";
+import { CLOCK_GUARD_S, ONE_DAY, accountExists, markAllNotRun, reachChainTime, sha256Bytes, type World } from "../world";
 import { UNIT_PRICE, buyIxs, saleEnd } from "./g1";
 
 /** How far out the devnet-waitable deadlines of G5 lie (vesting unlock, voting end, milestone unlock). */
@@ -99,6 +107,8 @@ export const DISTRIBUTION_1 = 1;
 export const VESTING_SERIES_1 = 1;
 export const PROPOSAL_1 = 1;
 export const RIGHTS_1 = 1;
+/** Never created: its create_rights_issuance is only ever refused (5.5g under 0x10, G7 7.1a under 0x40). */
+export const RIGHTS_2 = 2;
 export const STARTUP_SALE = 30;
 
 // ── Distributions (the app's canonical plan and builders) ────────────────────
@@ -620,6 +630,22 @@ export async function runGroup5(w: World): Promise<"completed"> {
       { done: escrowFunded },
     );
     const milestone0 = await findMilestonePda(issuance, 0);
+    // 5.5f–i: the distributions bit alone (0x40 is clear here) refuses both
+    // rights entries; 5.5a above and 5.5c below land the same instructions.
+    const distributionsSet = async () =>
+      ((await pauseFlags(w)) & PAUSE_DISTRIBUTIONS) !== 0 ? null : "0x10 is no longer set (5.5i ran)";
+    await w.runner.step("5.5f", async () => ({ payer: admin, ixs: await setPauseIxs(w, admin, PAUSE_DISTRIBUTIONS, 0) }), {
+      done: async () => ((await pauseFlags(w)) & PAUSE_DISTRIBUTIONS) !== 0 || w.runner.passed("5.5i"),
+    });
+    await w.runner.step("5.5g", async () => ({ payer: admin, ixs: await createRightsIxs(w, RIGHTS_2) }), { notRun: distributionsSet });
+    await w.runner.step(
+      "5.5h",
+      async () => ({ payer: admin, ixs: await publishMilestoneIxs(w, RIGHTS_1, 0, (await chainNow(w.rpc)) + SHORT_S) }),
+      { notRun: async () => ((await accountExists(w.rpc, milestone0)) ? "milestone #1/0 is already published (5.5c ran)" : distributionsSet()) },
+    );
+    await w.runner.step("5.5i", async () => ({ payer: sa, ixs: await setPauseIxs(w, sa, 0, PAUSE_DISTRIBUTIONS) }), {
+      done: async () => ((await pauseFlags(w)) & PAUSE_DISTRIBUTIONS) === 0 && w.runner.passed("5.5f"),
+    });
     await w.runner.step(
       "5.5c",
       async () => {
@@ -676,41 +702,66 @@ export async function runGroup5(w: World): Promise<"completed"> {
     });
   }
 
-  // One clock move for every "after" step.
-  let target = [vestingUnlock, proposalEnd].reduce((a, b) => (a > b ? a : b));
+  // The short clock move (≈ SHORT_S, a real wait): the vesting unlock, the
+  // voting end and the milestone unlock.
+  let shortTarget = vestingUnlock > proposalEnd ? vestingUnlock : proposalEnd;
   if (local) {
-    const vault = await fetchMaybePayoutVault(w.rpc, payoutVault, { commitment: "finalized" });
-    const freezeAt = vault.exists ? vault.data.startTs + FREEZE_AFTER_S : BigInt(0);
-    for (const t of [BigInt(entity(w.runner.state, "milestone0UnlockTs")), freezeAt]) if (t > target) target = t;
+    const milestoneUnlock = BigInt(entity(w.runner.state, "milestone0UnlockTs"));
+    if (milestoneUnlock > shortTarget) shortTarget = milestoneUnlock;
   }
-  const after = ["5.2f", "5.3f", "5.5e", "5.6e", "5.6f", "5.6g", "5.7"];
-  if (!after.every((id) => w.runner.passed(id) || !w.runner.applies(id))) {
-    const blocked = await reachChainTime(w, target + BigInt(2), "the G5 unlocks, voting end and three missed payout months");
-    if (blocked) {
-      for (const id of after) w.runner.markNotRun(id, blocked);
-      return "completed";
-    }
+  const shortAfter = ["5.2f", "5.3f", "5.5e"];
+  const pending = (ids: readonly string[]) => !ids.every((id) => w.runner.passed(id) || !w.runner.applies(id));
+  const shortBlocked = pending(shortAfter)
+    ? await reachChainTime(w, shortTarget + BigInt(2), "the G5 vesting unlock, voting end and milestone unlock")
+    : null;
+  if (shortBlocked) {
+    markAllNotRun(w, shortAfter, shortBlocked);
+  } else {
+    await w.runner.step("5.2f", async () => ({ payer: b2, ixs: await claimVestedIxs(w, b2, 0) }), {
+      done: () => vestingReleased(w, 0),
+    });
+    await w.runner.step("5.3f", async () => ({ payer: b3, ixs: [getFinalizeProposalInstruction({ payer: b3, proposal })] }), {
+      done: async () => (await proposalStatus(w, PROPOSAL_1)) === ProposalStatus.Finalized,
+    });
+  }
+  if (!local) return "completed";
+  if (!shortBlocked) {
+    await w.runner.step("5.5e", async () => ({ payer: b1, ixs: await claimMilestoneIxs(w, RIGHTS_1, 0, b1) }), {
+      done: () => milestoneClaimed(w, RIGHTS_1, 0, b1.address),
+    });
   }
 
-  await w.runner.step("5.2f", async () => ({ payer: b2, ixs: await claimVestedIxs(w, b2, 0) }), {
-    done: () => vestingReleased(w, 0),
+  // The long clock move (two payout months, a warp): the freeze and the vault vote.
+  const longAfter = ["5.6e", "5.6f", "5.6g"];
+  if (pending(longAfter)) {
+    const vault = await payoutVaultData(w, payoutVault);
+    const longBlocked = vault
+      ? await reachChainTime(w, vault.startTs + FREEZE_AFTER_S + BigInt(2), "three missed payout months of vault #30")
+      : "payout vault #30 is not on chain (5.6c did not land)";
+    if (longBlocked) markAllNotRun(w, longAfter, longBlocked);
+    else await freezeAndVote(w, payoutVault);
+  }
+  // Every path ends with 0x40 set again: the payout modules stay off, as on mainnet.
+  await w.runner.step("5.7", async () => ({ payer: admin, ixs: await setPauseIxs(w, admin, PAUSE_PAYOUT_MODULES, 0) }), {
+    done: async () => ((await pauseFlags(w)) & PAUSE_PAYOUT_MODULES) !== 0,
   });
-  await w.runner.step("5.3f", async () => ({ payer: b3, ixs: [getFinalizeProposalInstruction({ payer: b3, proposal })] }), {
-    done: async () => (await proposalStatus(w, PROPOSAL_1)) === ProposalStatus.Finalized,
-  });
-  if (!local) return "completed";
-  await w.runner.step("5.5e", async () => ({ payer: b1, ixs: await claimMilestoneIxs(w, RIGHTS_1, 0, b1) }), {
-    done: () => milestoneClaimed(w, RIGHTS_1, 0, b1.address),
-  });
-  const vaultState = async () => {
-    const vault = await fetchMaybePayoutVault(w.rpc, payoutVault, { commitment: "finalized" });
-    return vault.exists ? vault.data : null;
-  };
+  return "completed";
+}
+
+async function payoutVaultData(w: World, payoutVault: Address) {
+  const vault = await fetchMaybePayoutVault(w.rpc, payoutVault, { commitment: "finalized" });
+  return vault.exists ? vault.data : null;
+}
+
+/** 5.6e–g, after three missed monthly updates: the freeze, then a vault vote shorter than 7 days (refused) and one of 7. */
+async function freezeAndVote(w: World, payoutVault: Address): Promise<void> {
+  const { admin, buyers } = w.roles;
+  const [b1, , b3] = buyers;
   await w.runner.step("5.6e", async () => ({ payer: b3, ixs: [getFreezeVaultInstruction({ vault: payoutVault })] }), {
-    done: async () => (await vaultState())?.state === PayoutVaultState.Frozen,
+    done: async () => (await payoutVaultData(w, payoutVault))?.state === PayoutVaultState.Frozen,
   });
   const vote = async (days: bigint) => {
-    const data = await vaultState();
+    const data = await payoutVaultData(w, payoutVault);
     if (!data) throw new ChainPlanError("payout vault #30 is not on chain");
     const { root } = await snapshot([[b1.address, BigInt(3)]]);
     return [
@@ -724,17 +775,13 @@ export async function runGroup5(w: World): Promise<"completed"> {
       }),
     ];
   };
-  const votePending = async () => (await vaultState())?.votePending === true;
+  const votePending = async () => (await payoutVaultData(w, payoutVault))?.votePending === true;
   await w.runner.step("5.6f", async () => ({ payer: admin, ixs: await vote(BigInt(1)) }), {
     notRun: async () => ((await votePending()) ? "a vault vote is already open (5.6g ran)" : null),
   });
   await w.runner.step("5.6g", async () => ({ payer: admin, ixs: await vote(BigInt(MIN_VAULT_VOTING_PERIOD_SECONDS) / ONE_DAY) }), {
     done: votePending,
   });
-  await w.runner.step("5.7", async () => ({ payer: admin, ixs: await setPauseIxs(w, admin, PAUSE_PAYOUT_MODULES, 0) }), {
-    done: async () => ((await pauseFlags(w)) & PAUSE_PAYOUT_MODULES) !== 0,
-  });
-  return "completed";
 }
 
 async function approvalExists(w: World, saleId: number): Promise<boolean> {

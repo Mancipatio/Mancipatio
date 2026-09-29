@@ -65,25 +65,30 @@ async function paymentAtaOf(owner: Address, mint: Address): Promise<Address> {
   return (await findAssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_CLASSIC }))[0];
 }
 
-/** create_offer + deposit_to_offer_escrow in one transaction (maker → escrow leg). */
-export async function createAndFundOffer(w: World, maker: KeyPairSigner, offerId: number, amount: bigint, price: bigint, expiresAt: bigint) {
+/** create_offer alone: an Open offer of class A with an empty escrow. */
+export async function createOfferIxs(w: World, maker: KeyPairSigner, offerId: number, amount: bigint, price: bigint, expiresAt: bigint) {
+  return [
+    await getCreateOfferInstructionAsync({
+      maker,
+      shareClass: entity(w.runner.state, "classA") as Address,
+      mint: entity(w.runner.state, "mintA") as Address,
+      paymentMint: entity(w.runner.state, "paymentMint") as Address,
+      tokenProgram: TOKEN_2022,
+      offerId: BigInt(offerId),
+      amount,
+      price,
+      expiresAt,
+    }),
+  ];
+}
+
+/** deposit_to_offer_escrow of `amount` into class A offer `offerId` (maker → escrow hook tail). */
+export async function fundOfferIxs(w: World, maker: KeyPairSigner, offerId: number, amount: bigint) {
   const shareClass = entity(w.runner.state, "classA") as Address;
   const mint = entity(w.runner.state, "mintA") as Address;
-  const paymentMint = entity(w.runner.state, "paymentMint") as Address;
   const offer = await findOfferPda(shareClass, BigInt(offerId));
   const [escrow] = await findCreateOfferEscrowPda({ offer });
   const makerShare = await shareAta(maker.address, mint);
-  const create = await getCreateOfferInstructionAsync({
-    maker,
-    shareClass,
-    mint,
-    paymentMint,
-    tokenProgram: TOKEN_2022,
-    offerId: BigInt(offerId),
-    amount,
-    price,
-    expiresAt,
-  });
   const fund = await getDepositToOfferEscrowInstructionAsync({
     maker,
     offer,
@@ -100,7 +105,16 @@ export async function createAndFundOffer(w: World, maker: KeyPairSigner, offerId
     sourceOwner: maker.address,
     destOwner: offer,
   });
-  return { offer, ixs: [create, withTail(fund, tail)] };
+  return [withTail(fund, tail)];
+}
+
+/** create_offer + deposit_to_offer_escrow in one transaction (maker → escrow leg). */
+export async function createAndFundOffer(w: World, maker: KeyPairSigner, offerId: number, amount: bigint, price: bigint, expiresAt: bigint) {
+  const offer = await findOfferPda(entity(w.runner.state, "classA") as Address, BigInt(offerId));
+  return {
+    offer,
+    ixs: [...(await createOfferIxs(w, maker, offerId, amount, price, expiresAt)), ...(await fundOfferIxs(w, maker, offerId, amount))],
+  };
 }
 
 /** The escrow → maker leg shared by cancel_offer and expire_offer. */

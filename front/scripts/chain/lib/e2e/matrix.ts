@@ -63,7 +63,18 @@ export type ProgramLabel = "asset_registry" | "transfer_hook";
 
 export type Expect =
   | { ok: true }
-  | { ok: false; program: ProgramLabel; code: number; name: string };
+  | {
+      ok: false;
+      program: ProgramLabel;
+      code: number;
+      name: string;
+      /**
+       * The account Anchor names in "AnchorError caused by account: <name>"
+       * (errors.matchesExpectation). Set for 3012: any missing account raises
+       * it, so the code alone does not say which one the step is about.
+       */
+      account?: string;
+    };
 
 export type StepSpec = {
   id: string;
@@ -84,6 +95,14 @@ const fails = (code: number, name: string, program: ProgramLabel = "asset_regist
   program,
   code,
   name,
+});
+/** Anchor's 3012 for one named account (the one the step removes or never creates). */
+const uninitialized = (account: string): Expect => ({
+  ok: false,
+  program: "asset_registry",
+  code: ANCHOR_ACCOUNT_NOT_INITIALIZED,
+  name: "AccountNotInitialized",
+  account,
 });
 
 export const E2E_STEPS: readonly StepSpec[] = [
@@ -165,7 +184,7 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "2.5c", group: 2, title: "revoke_sale_approval #3", networks: BOTH, signer: "admin", expect: ok },
   {
     id: "2.6", group: 2, title: "approve_sale signed by a buyer (no Admin record)", networks: BOTH, signer: "buyer1",
-    expect: fails(ANCHOR_ACCOUNT_NOT_INITIALIZED, "AccountNotInitialized"),
+    expect: uninitialized("admin_record"),
   },
   { id: "2.7a", group: 2, title: "approve_sale #5", networks: BOTH, signer: "admin", expect: ok },
   { id: "2.7b", group: 2, title: "open_sale #5 starting in an hour", networks: BOTH, signer: "issuer", expect: ok },
@@ -194,7 +213,7 @@ export const E2E_STEPS: readonly StepSpec[] = [
     // cancel_offer closes the escrow marker, so the take is refused at account
     // validation (3012) before the status check (OfferNotOpen) is reached.
     id: "3.3c", group: 3, title: "take the cancelled offer #2", networks: BOTH, signer: "buyer2",
-    expect: fails(ANCHOR_ACCOUNT_NOT_INITIALIZED, "AccountNotInitialized"),
+    expect: uninitialized("escrow_marker"),
   },
   { id: "3.4a", group: 3, title: "create_offer #3 expiring in about a minute + deposit (B1)", networks: BOTH, signer: "buyer1", expect: ok },
   {
@@ -263,7 +282,7 @@ export const E2E_STEPS: readonly StepSpec[] = [
   {
     // realizeKycAccounts names the beneficiary's KycEntry, which does not exist yet.
     id: "4.8", group: 4, title: "realize V1 without the beneficiary's passport", networks: BOTH, signer: "admin",
-    expect: fails(ANCHOR_ACCOUNT_NOT_INITIALIZED, "AccountNotInitialized"),
+    expect: uninitialized("kyc_entry"),
   },
   { id: "4.9", group: 4, title: "approve_holder(B1) on the e2e KYC registry (KYC authority signs)", networks: BOTH, signer: "admin", expect: ok },
   { id: "4.10", group: 4, title: "realize V1 with the passport (burns the deposit)", networks: BOTH, signer: "admin", expect: ok },
@@ -272,7 +291,7 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "4.11c", group: 4, title: "trigger_custody_vault V2", networks: BOTH, signer: "admin", expect: ok },
   {
     id: "4.11d", group: 4, title: "realize V2 without a passport", networks: BOTH, signer: "admin",
-    expect: fails(ANCHOR_ACCOUNT_NOT_INITIALIZED, "AccountNotInitialized"),
+    expect: uninitialized("kyc_entry"),
   },
   { id: "4.11e", group: 4, title: "return_custody_vault V2 by its authority (the deposit goes back without KYC)", networks: BOTH, signer: "admin", expect: ok },
   { id: "4.12a", group: 4, title: "open DeliveryEscrow V3 (beneficiary B1, deadline +25 h)", networks: LOCAL, signer: "admin", expect: ok },
@@ -285,9 +304,10 @@ export const E2E_STEPS: readonly StepSpec[] = [
 
   // G5: distribution, vesting, governance on both networks; the payout / Merkle
   // modules (0x40, off on mainnet) on localnet: refused while set (6000), run
-  // with the bit cleared on its own by the SA, then set again. The "after"
-  // steps follow one clock move (a warp on localnet, which also covers the
-  // three missed payout months; a wait on devnet).
+  // with the bit cleared on its own by the SA, then set again (5.7, on every
+  // path). The "after" steps follow two clock moves: a wait of minutes (the
+  // unlocks, the voting end) and, on localnet, a warp of two payout months
+  // (the freeze and the vault vote; not run without E2E_WARP).
   { id: "5.0", group: 5, title: "payment balance for the Admin (it funds the distributions)", networks: BOTH, signer: "funder", expect: ok },
   { id: "5.1a", group: 5, title: "create_distribution #1 (canonical plan: B1, B2, B3; funded by the Admin)", networks: BOTH, signer: "admin", expect: ok },
   { id: "5.1b", group: 5, title: "distribute_batch #1 batch 0", networks: BOTH, signer: "admin", expect: ok },
@@ -323,6 +343,18 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "5.4d", group: 5, title: "set_pause_flags(clear 0x40 on its own) by the SA", networks: LOCAL, signer: "superAdmin", expect: ok },
   { id: "5.5a", group: 5, title: "create_rights_issuance #1 (class A underlying)", networks: LOCAL, signer: "admin", expect: ok },
   { id: "5.5b", group: 5, title: "mint_to_treasury of 4 units into the rights escrow (issuer, MINT grant)", networks: LOCAL, signer: "issuer", expect: ok },
+  // The distributions bit alone (0x40 clear) gates the rights entries too; G7
+  // keeps 0x40 set, so it can only show them refused under 0x40.
+  { id: "5.5f", group: 5, title: "set_pause_flags(set 0x10) by the Admin (0x40 clear)", networks: LOCAL, signer: "admin", expect: ok },
+  {
+    id: "5.5g", group: 5, title: "create_rights_issuance #2 while 0x10 alone is set", networks: LOCAL, signer: "admin",
+    expect: fails(ASSET_REGISTRY_ERROR__PLATFORM_PAUSED, "PlatformPaused"),
+  },
+  {
+    id: "5.5h", group: 5, title: "publish_milestone #1/0 while 0x10 alone is set", networks: LOCAL, signer: "admin",
+    expect: fails(ASSET_REGISTRY_ERROR__PLATFORM_PAUSED, "PlatformPaused"),
+  },
+  { id: "5.5i", group: 5, title: "set_pause_flags(clear 0x10) by the SA", networks: LOCAL, signer: "superAdmin", expect: ok },
   { id: "5.5c", group: 5, title: "publish_milestone #1/0 (B1: 2, B2: 1; unlock ~3 min)", networks: LOCAL, signer: "admin", expect: ok },
   {
     id: "5.5d", group: 5, title: "claim_milestone by B1 before the unlock", networks: LOCAL, signer: "buyer1",
@@ -404,6 +436,11 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "7.0j", group: 7, title: "deposit_to_custody_vault V4 by B1 (1 unit)", networks: LOCAL, signer: "buyer1", expect: ok },
   { id: "7.0k", group: 7, title: "create_distribution #2 (funded by the Admin; left unpaid)", networks: LOCAL, signer: "admin", expect: ok },
   { id: "7.0l", group: 7, title: "create_proposal #2 (class A, voting one day)", networks: LOCAL, signer: "admin", expect: ok },
+  // Targets for entries that would land without their bit (7.2d/e, 7.4f/g).
+  { id: "7.0m", group: 7, title: "create_offer #8 without a deposit (B1; funded only under 0x04)", networks: LOCAL, signer: "buyer1", expect: ok },
+  { id: "7.0n", group: 7, title: "create_otc_deal #12 (seller B1, buyer B2; paid only under 0x04)", networks: LOCAL, signer: "admin", expect: ok },
+  { id: "7.0o", group: 7, title: "create_asset D (stays a draft)", networks: LOCAL, signer: "issuer", expect: ok },
+  { id: "7.0p", group: 7, title: "add_share_class 0 on the draft asset D (no mint yet)", networks: LOCAL, signer: "issuer", expect: ok },
   ...pausedEntries("7.1", "0x40 alone (as on mainnet)", [
     ["a", "create_rights_issuance #2", "admin"],
     ["b", "publish_milestone #1/1", "admin"],
@@ -412,6 +449,8 @@ export const E2E_STEPS: readonly StepSpec[] = [
   ...pauseRound("7.2", "0x01 onboarding", [
     ["b", "register_issuer (B4 as a new issuer)", "buyer4"],
     ["c", "create_asset", "issuer"],
+    ["d", "add_share_class 1 on the draft asset D", "issuer"],
+    ["e", "initialize_share_class_mint of D's class 0", "issuer"],
   ]),
   ...pauseRound("7.3", "0x02 primary", [
     ["b", "buy on sale #20 (B1)", "buyer1"],
@@ -423,6 +462,8 @@ export const E2E_STEPS: readonly StepSpec[] = [
     ["c", "take_offer #5 (B2)", "buyer2"],
     ["d", "create_otc_deal #11", "admin"],
     ["e", "deposit_otc_asset for deal #10 (B1)", "buyer1"],
+    ["f", "deposit_to_offer_escrow into the unfunded offer #8 (B1)", "buyer1"],
+    ["g", "deposit_otc_payment for the fresh deal #12 (B2)", "buyer2"],
   ]),
   ...pauseRound("7.5", "0x08 custody entry", [
     ["b", "open a DeliveryEscrow", "admin"],
@@ -539,7 +580,7 @@ export const E2E_STEPS: readonly StepSpec[] = [
   { id: "8.6e", group: 8, title: "remove_admin(A2) by the SA", networks: LOCAL, signer: "superAdmin", expect: ok },
   {
     id: "8.6f", group: 8, title: "open_sale #40 after its approving Admin was removed", networks: LOCAL, signer: "issuer",
-    expect: fails(ANCHOR_ACCOUNT_NOT_INITIALIZED, "AccountNotInitialized"),
+    expect: uninitialized("approver_admin_record"),
   },
   {
     id: "8.6g", group: 8, title: "remove_admin of the Super Admin's own record", networks: LOCAL, signer: "superAdmin",
