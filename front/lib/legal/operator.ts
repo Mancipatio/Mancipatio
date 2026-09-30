@@ -14,10 +14,11 @@
 // The record is jurisdiction-neutral: every number carries the name its
 // jurisdiction gives it (a Serbian company's "MB" and "PIB", a BVI company's
 // "BVI company number"), and the pages render those names from the record,
-// never from code. A detail the jurisdiction does not assign (a BVI company
-// has no short name and no tax identification number) is stated on purpose
-// as { notAssigned: "<reason>" }; a plain null still means "not filled in"
-// and a mainnet build refuses it, so a forgotten field cannot pass.
+// never from code. A detail the operator's documents show is not assigned
+// (e.g. a short name, where the register records a single name) is stated on
+// purpose as { notAssigned: "<reason>" }; a plain null still means "not
+// filled in" (or not yet confirmed) and a mainnet build refuses it, so a
+// forgotten or unconfirmed field cannot pass.
 //
 // When a detail changes: edit OPERATORS.mainnet below and run
 // `npx vitest run tests/legal-slots.test.ts --silent=false` — its "mainnet
@@ -82,8 +83,9 @@ export type RegisteredNumber = {
  */
 export type NotAssigned = { notAssigned: string };
 
-/** The operator's registered agent, where the jurisdiction has one (a BVI
- *  company must; its registered office is usually the agent's office). */
+/** The operator's registered agent, where the company has one (Manci
+ *  International Ltd.'s Memorandum §4 names it, and §3 puts the registered
+ *  office at the agent's office). */
 export type RegisteredAgent = {
   name: string;
   /** One line, as written in the memorandum. */
@@ -95,8 +97,9 @@ export type Operator = {
   brand: string;
   /** Full registered name, e.g. "Manci d.o.o. Beograd", "Manci International Ltd.". */
   legalName: string | null;
-  /** Short registered name, e.g. "Manci d.o.o.". A register without short
-   *  names (the BVI) takes { notAssigned }: the full name then stands alone. */
+  /** Short registered name, e.g. "Manci d.o.o.". Where the company's
+   *  documents give a single registered name, { notAssigned }: the full name
+   *  then stands alone. */
   shortName: string | NotAssigned | null;
   /** Registered office, one line (street and number or PO box, postcode,
    *  city, country), as the register records it. */
@@ -104,7 +107,8 @@ export type Operator = {
   /** The company registration number, under its name in the jurisdiction. */
   registrationNumber: RegisteredNumber | null;
   /** The tax identification number under its name, or { notAssigned } where
-   *  the jurisdiction assigns none to the company. */
+   *  the owner has confirmed that none is assigned to the company (null until
+   *  then). */
   taxId: RegisteredNumber | NotAssigned | null;
   /** The register the company is entered in, with a link to the entry when
    *  there is a public one per company. */
@@ -157,9 +161,11 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
   },
   // Mainnet: Manci International Ltd., a BVI business company limited by
   // shares (BVI Business Companies Act, 2004), recorded on 2026-09-30 from
-  // its Certificate of Incorporation and its Memorandum of Association (§3
-  // registered office, §4 registered agent). A mainnet build is refused
-  // until every required field is set (lib/legal/readiness.ts).
+  // its Certificate of Incorporation (name, company number, date, register)
+  // and its Memorandum of Association (§3 registered office, §4 registered
+  // agent). The tax number is not in either document and waits for the
+  // owner. A mainnet build is refused until every required field is set
+  // (lib/legal/readiness.ts).
   mainnet: {
     brand: "Manci",
     legalName: "Manci International Ltd.",
@@ -170,11 +176,19 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     // may move it, and this line then changes with it).
     registeredOffice: "Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands",
     registrationNumber: { value: "2219023", label: "BVI company number", shortLabel: "BVI company number" },
-    // VLASNIK POTVRĐUJE (the owner confirms): no tax identification number is
-    // assigned to the company; none appears in its incorporation documents.
-    taxId: { notAssigned: "The British Virgin Islands assign no tax identification number to a BVI business company." },
-    // No public link to a single company's entry.
-    register: { name: "Registry of Corporate Affairs, BVI Financial Services Commission", url: null },
+    // VLASNIK POTVRĐUJE (the owner is to confirm): whether the company has a
+    // tax identification number. Neither the Certificate of Incorporation nor
+    // the Memorandum mentions one, which does not by itself show that none
+    // is assigned. null (a mainnet build refuses it) until the owner confirms
+    // in writing; then the number under its name, or { notAssigned: "<the
+    // confirmed reason>, confirmed by the owner on yyyy-mm-dd" }.
+    taxId: null,
+    // As the Certificate of Incorporation names its issuer: the text reads
+    // "The REGISTRAR of CORPORATE AFFAIRS, of the British Virgin Islands",
+    // and its seal (an image, not in the PDF's text layer) reads "Registrar
+    // of Corporate Affairs" around "BVI Financial Services Commission".
+    // url null: no public link to the company's entry is recorded.
+    register: { name: "Registrar of Corporate Affairs, BVI Financial Services Commission", url: null },
     registeredAgent: {
       name: "SHRM Trustees (BVI) Limited",
       address: "Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands",

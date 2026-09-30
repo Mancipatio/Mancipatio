@@ -34,10 +34,11 @@
 #     8-digit MB and 9-digit PIB with valid check digits, each under its
 #     name as the record carries it), a licence or none, one-clause Terms
 #     and Privacy Policy, a one-line acceptance summary and the risk warning
-#     marked "counsel". Without a licence the fixture also takes the form of
-#     the committed mainnet record (a jurisdiction that assigns no short name
-#     and no tax ID, stated as { notAssigned }), which must pass; a tax ID
-#     left null must not. It never leaves this checkout; the committed slots
+#     marked "counsel". Without a licence the fixture also takes the form a
+#     BVI-style record can take (no short name and no tax ID, each stated as
+#     { notAssigned }: the committed mainnet record states its short name so,
+#     and its tax ID once the owner confirms), which must pass; a tax ID left
+#     null (as committed until then) must not. It never leaves this checkout; the committed slots
 #     stay as they are, and tests/legal-slots.test.ts checks those. The
 #     fixture avoids the words the guard treats as drafts (placeholder, TODO,
 #     TBD, devnet, ...).
@@ -125,9 +126,10 @@ const json = (value) => JSON.stringify(value, null, 2);
 const append = (file, code) =>
   fs.writeFileSync(file, `${fs.readFileSync(path.join(orig, file), "utf8")}\n${HEADER}\n${code}\n`);
 
-// no-licence: like the committed mainnet record, the jurisdiction assigns no
-// short name and no tax ID, stated on purpose. incomplete-operator: the tax
-// ID is simply left out (null), which the guard refuses.
+// no-licence: no short name and no tax ID, each stated on purpose as
+// { notAssigned } (the form of the committed mainnet record once its owner
+// confirms the tax ID). incomplete-operator: the tax ID is simply left out
+// (null, as committed until that confirmation), which the guard refuses.
 const exempt = variant === "no-licence";
 const operator = {
   legalName: "CI Fixture d.o.o. Beograd",
