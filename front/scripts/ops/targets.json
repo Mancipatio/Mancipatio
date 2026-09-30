@@ -9,8 +9,8 @@
   },
   "mainnet": {
     "network": "mainnet",
-    "projectRef": null,
-    "poolerHost": null,
+    "projectRef": "nyltnheatubqmtdanlrr",
+    "poolerHost": "aws-1-eu-west-1.pooler.supabase.com",
     "poolerPort": 5432,
     "siteOrigin": null,
     "backupAgeRecipient": null
