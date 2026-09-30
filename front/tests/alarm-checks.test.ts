@@ -1,7 +1,7 @@
 // Talas 4.4b: the alarm worker's checks (design §3e/§4.2) and the gap scan.
 // The hysteresis itself (report_incident) runs for real in
 // onchain-alarms.postgres.test.ts; here Supabase and RPC are mocked.
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, describe, expect, it, onTestFinished, vi } from "vitest";
 
 vi.mock("server-only", () => ({}));
 const state = vi.hoisted(() => ({
@@ -244,6 +244,11 @@ describe("runAlarmChecks", () => {
   });
 
   it("fx-expiring: the default mint and mints in use warn 2 days (at most half the max age) before the max age", async () => {
+    // The rows are dated from Date.now() and the checks read it again: frozen,
+    // so `hours_left` (floored) cannot drop a unit when a millisecond passes in
+    // between. Only Date is faked; timers (AbortSignal.timeout) stay real.
+    vi.useFakeTimers({ toFake: ["Date"], now: Date.now() });
+    onTestFinished(() => { vi.useRealTimers(); });
     const usdc = USDC.devnet!.mint;
     const check = async (fx: Record<string, unknown>[], extra: Record<string, Record<string, unknown>[]> = {}) => {
       const { sb, rpcs } = mockSb({ worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }], fx_rates: fx, ...extra });
@@ -541,6 +546,40 @@ describe("role-change-pending and payout-modules", () => {
     const { sb, rpcs } = mockSb(heartbeats);
     await runAlarmChecks(sb, Date.now() + 10_000, AbortSignal.timeout(10_000));
     expect(incident(rpcs, "bootstrap-open")).toMatchObject({ p_state: "pass", p_severity: "critical" });
+  });
+
+  it("bootstrap-open: a fully paused window fails once it is 72 hours past the Platform's first indexed transaction (K1.11)", async () => {
+    const now = Date.parse("2026-10-01T12:00:00Z");
+    const at = (hoursAgo: number) => new Date(now - hoursAgo * 3_600_000).toISOString();
+    const reads: string[] = [];
+    const sb = (events: Record<string, unknown>[], flags = 0xff, broken = false) => ({ from: (table: string) => {
+      const b: Record<string, unknown> = {};
+      b.select = () => b; b.order = () => b; b.limit = () => b; b.abortSignal = () => b;
+      b.eq = (column: string, value: unknown) => { reads.push(`${table}:${column}=${value}`); return b; };
+      b.contains = (column: string, value: unknown[]) => { reads.push(`${table}:${column}@>${value.join(",")}`); return b; };
+      b.maybeSingle = async () => table === "platforms" ? { data: { pda: MINT, pause_flags: flags }, error: null }
+        : broken ? { data: null, error: { code: "08006" } } : { data: events[0] ?? null, error: null };
+      return b;
+    } }) as never;
+    const report = (events: Record<string, unknown>[], flags = 0xff, broken = false, network: "mainnet" | "devnet" = "mainnet") =>
+      bootstrapOpenReport(sb(events, flags, broken), network, AbortSignal.timeout(5_000), now);
+    // Day D and the two days after it: the bootstrap.
+    expect(await report([{ block_time: at(71.9), created_at: at(71) }])).toMatchObject({ state: "pass", evidence: { hours_open: 71 } });
+    expect(reads).toEqual(["platforms:network=mainnet", "indexer_events:network=mainnet", `indexer_events:wallets@>${MINT}`]);
+    // 72 hours after initialize_platform, still fully paused with bit 7 open: S5c was forgotten.
+    expect(await report([{ block_time: at(72), created_at: at(71) }])).toMatchObject({ state: "fail", severity: "critical",
+      source: "onchain:bootstrap-open", summary: expect.stringMatching(/open for 72 hours.*S5c/),
+      evidence: { pause_flags: 0xff, opened_at: at(72), hours_open: 72, max_hours: 72 } });
+    // No block time: the row's insert time.
+    expect(await report([{ block_time: null, created_at: at(100) }])).toMatchObject({ state: "fail", evidence: { hours_open: 100 } });
+    // No indexed transaction touched the Platform: passes as before; unreadable: the check could not run.
+    expect(await report([])).toMatchObject({ state: "pass", summary: expect.stringMatching(/not indexed/) });
+    expect(await report([], 0xff, true)).toBeNull();
+    // A closed window reads no events; devnet never alarms.
+    reads.length = 0;
+    expect(await report([{ block_time: at(500) }], 0x5c)).toMatchObject({ state: "pass", summary: "The bootstrap window is closed" });
+    expect(reads).toEqual(["platforms:network=mainnet"]);
+    expect(await report([{ block_time: at(500) }], 0xff, false, "devnet")).toMatchObject({ state: "pass" });
   });
 
   it("roleChangesReport reads only this network's rows", async () => {

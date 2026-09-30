@@ -162,7 +162,10 @@ PauseFlagsPanel (per area or *Pause everything*); out of band:
 - **Custody** (`/admin/custody`): open a vault only for an approved
   conversion or delivery; the Admin who opens it operates it (trigger,
   realize, return, revert). Before an Admin leaves, move its vaults
-  (propose by the SA, accept by the new operator).
+  (propose by the SA, accept by the new operator). Trigger a delivery vault
+  only when the beneficiary's passport is verified and valid past the
+  planned realize: the trigger does not check it and the realize refuses
+  it (runbook §11, "Accepted program risks").
 - **OTC deals** (`/admin/otc`): create a deal with an expiry; cancel one that
   must not settle (any Admin).
 - **Payouts and distributions** (`/admin/payouts`): recompute the snapshot

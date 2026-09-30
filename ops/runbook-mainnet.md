@@ -317,7 +317,7 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, operator keys onboarded on the protected site | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps on the protected site → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
-| D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list") | super admin | §8, §13, §14 step 8, §15 |
+| D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
 | D11 | **Talas 7 go-live**: Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
@@ -852,6 +852,28 @@ source paths are clean (see "Safety rules").
     grace protects nobody then: the same key revokes and claws back.
 - Exercise these scenarios as a timed tabletop on devnet (6.5) and record it
   under `docs/mainnet-readiness/`.
+
+### Accepted program risks (v1.0.0-rc)
+
+Known behaviours that v1.0.0-rc keeps on purpose; each goes into the audit
+package as an accepted risk with the operating rule that contains it.
+
+- **`trigger_custody_vault` checks only its operator** (gap 2026-09-28
+  prog-vlast-12, low). It moves an Active vault to Triggered when the vault
+  `authority` (an Admin) signs; it does not look at the vault type, the
+  deposit or the beneficiary's KYC. The KYC of a DeliveryEscrow's
+  beneficiary is checked only at `realize_custody_vault`, so a vault
+  triggered while the beneficiary's passport is missing or expired cannot
+  realize (6069 `ReceiverNotApproved`, 6070 `ReceiverKycExpired`), and a
+  Triggered vault takes no more deposits (6086 `VaultNotAcceptingDeposits`).
+  No token can leave to the wrong party: the escrow stays put until the
+  beneficiary's KYC is renewed and the vault realizes, or it is returned
+  (`return_custody_vault` accepts Active and Triggered DeliveryEscrow
+  vaults). Rule: trigger a DeliveryEscrow only after checking on
+  `/admin/custody` that the beneficiary's passport is verified and valid
+  past the planned realize; if one was triggered anyway, renew the KYC and
+  realize, or return the vault. A later release may add the same KYC check
+  to the trigger of a DeliveryEscrow (not in v1).
 
 ### `chain:emergency` (out of band: no front, no database)
 
@@ -1549,7 +1571,12 @@ left on chain (never mirrored). Rollback: re-apply 0047's
 helius-webhook [--use-api]`, `secrets list`, `secrets set --env-file <file>`
 (mode 600) and `secrets unset NAME…`, and appends `--project-ref` from the
 target. Delete `front/supabase/.temp/` before the first use; the wrapper
-refuses while a linked project is recorded there. A plain deploy bundles the
+refuses while a linked project is recorded there. The CLI (2.101) records the
+project again on every call, so the wrapper removes `front/supabase/.temp/`
+after each call it runs (also when the call fails or is interrupted) and
+exits with the CLI's status: consecutive wrapper calls need no manual
+`rm -rf`. A refusal means something outside the wrapper linked a project:
+find out what before deleting it. A plain deploy bundles the
 function in Docker; without a running Docker, add `--use-api` (Supabase
 bundles it server-side; the project still comes from the target).
 
@@ -1676,8 +1703,9 @@ minutes.
 
 1. Supabase dashboard: enable the new API keys (the legacy ones stay
    enabled).
-2. `rm -rf supabase/.temp`, then create `~/.mancipatio/devnet-edge.env` as
-   under "Credential files".
+2. `rm -rf supabase/.temp` (once: later wrapper calls clean up after
+   themselves), then create `~/.mancipatio/devnet-edge.env` as under
+   "Credential files".
 3. ```
    bash scripts/ops/supabase.sh devnet secrets set --env-file ~/.mancipatio/devnet-edge.env
    bash scripts/ops/supabase.sh devnet secrets list
@@ -2008,7 +2036,7 @@ counsel decides whether the pilot needs them.
 | `onchain:role-change-pending` (`role-change-pending`, high) | The "timelock running" incident: a staged Admin grant, Super Admin rotation or upgrade-authority recovery is live (the evidence counts each kind and names the next eta). Expected: nothing to do, it clears once each one is executed, cancelled or expired. Otherwise as the row above. |
 | `onchain:issuer-freeze` (critical) | A freeze: confirm it with the Admin who froze (the reason's SHA-256 is in the evidence and on `/admin/issuers`; the text is in the audit log); follow the freeze SOP (O-9). An unfreeze: only the Super Admin can; confirm the decision. |
 | `onchain:frozen-issuer-activity` (high) | A frozen issuer's authority wallet traded or moved units (the evidence names the issuer, its role and the instructions). Check the transaction and decide at once whether the BA blocks the wallet (§11 "Issuer proceeds freeze", O-9); record the decision in the freeze's case file. |
-| `onchain:bootstrap-open` (`bootstrap-open`, critical, mainnet) | Bit 0x80 is open while an emergency area is clear: add_admin and the Super Admin rotation run without their 48 hours (typically a rollback to rc.x that unpaused, §10). The SA closes it at once on `/admin/platform` ("Close bootstrap window", `set_pause_flags(0, 0x80)`); then review every Admin grant and rotation since the rollback (§11). The half of the rule that needs the deployer key (bit 7 still open once the final SA holds the platform) is checked by `chain:inventory` only. |
+| `onchain:bootstrap-open` (`bootstrap-open`, critical, mainnet) | Bit 0x80 is open while an emergency area is clear: add_admin and the Super Admin rotation run without their 48 hours (typically a rollback to rc.x that unpaused, §10). Or it is still open, every area paused, 72 hours after the Platform's first indexed transaction (`initialize_platform`; the evidence has `opened_at` and `hours_open`): Day D is over and S5c was forgotten (K1.11). Either way the SA closes it at once on `/admin/platform` ("Close bootstrap window", `set_pause_flags(0, 0x80)`); then review every Admin grant and rotation since the rollback or since Day D (§11). The half of the rule that needs the role map (bit 7 still open once the final SA holds the platform, sooner than 72 hours) is checked by `chain:inventory` only. |
 | `onchain:payout-modules` (`payout-modules`, critical, mainnet) and `onchain:pause` "Payout modules switched ON" | Bit 0x40 must stay set on mainnet (D2). Unexpected: set it again (`set_pause_flags(0x40, 0)`, any Admin) and treat the Super Admin key as compromised, §11. |
 | Admin actions that move money or tokens: `onchain:vault-vote`, `onchain:yield-route`, `onchain:milestone`, `onchain:proposal`, `onchain:supply-lock`, `onchain:custody-vault`, `onchain:sale-approval` | Compare with the signer matrix and the admin decision behind it (the request or approval on the admin pages). A short voting window (critical or high) is checked with the issuer. Unexpected: that Admin key is compromised, §11 ("An Admin key compromised or lost"). |
 
@@ -2258,6 +2286,172 @@ Mainnet: the same steps on the mainnet project (`MANCI_TARGET=mainnet
 MANCI_ALLOW_MAINNET=1`) after `HELIUS_MAINNET_RPC` and the webhook are
 configured, with step 5 against the mainnet endpoint and at least 24 hours
 of `observe`.
+
+### 6.4 drill: redelivery, lost delivery, full reconcile (devnet)
+
+What it proves on the live stack (gap 2026-09-28 podaci-infra-9,
+ops-qa-12): a redelivered transaction changes nothing, a lost one comes back
+through the gap scan and alarms, the heartbeat stops advertising the mirror
+while it is missing, and how long a full reconcile takes. The same four
+cases, plus snapshots applied out of order, run offline in CI on the
+migration chain (`tests/indexer-resilience.postgres.test.ts`); the
+reconcile's cost per account comes from `npm run ops:reconcile-bench`
+(below). Evidence goes to `docs/mainnet-readiness/drill-6.4/`.
+
+Preconditions: the devnet heartbeat in `on` (status script above), the
+retry and alarm schedulers active (`retry-scheduler-status.sql`,
+`alarm-scheduler-status.sql`), no pending `indexer_jobs`, and the Helius
+devnet webhook enhanced, type ANY, with the 4 addresses (§15). Run from
+`front/`. Every check below is read-only:
+
+```
+MANCI_TARGET=devnet bash scripts/db.sh -Atq -v sig=<signature> -f scripts/ops/indexer-drill-status.sql
+```
+
+With `-Atq` (unaligned, tuples only, quiet) it prints exactly the lines
+this section quotes: first `events|jobs|alarm_jobs|alerts` for that
+transaction, then one row each for the event (`delivery`: `webhook` or
+`gap-scan`), the indexer job, the alarm job, the sync state, the heartbeat,
+the last gap scan and the indexer incidents, each starting with its name
+and in the column order of `scripts/ops/indexer-drill-status.sql` (CI runs
+it the same way, after `assert-target.sql`). Without `-Atq` psql prints
+aligned tables with headers instead.
+
+**D1. Redelivery.** Make one devnet transaction that invokes asset_registry
+(a KYB step on `/admin/issuers` is enough); call its signature S1. Within
+about two minutes the status shows `1|1|1|n`, `delivery` `webhook` and the
+indexer job `complete`. Record `n` and the job's `attempts`, A. A is
+usually 1; it is 2 when the retry run took the job before S1's slot was
+finalized (about 13 s after it: the job reads at `finalized` with
+`minContextSlot` = the event's slot, so that run leaves it `pending` and a
+run a minute or two later completes it). One pending attempt before finality
+is normal, the same path the offline case 4 proves. Deliver S1 again: in the
+Helius dashboard (Webhooks → the devnet webhook → logs) resend that
+delivery, or replay its logged request body (a JSON array, saved as
+`d1-s1.json`) yourself, reading the webhook's authentication header without
+echoing it:
+
+```
+REF=$(node scripts/ops/target.mjs devnet | cut -d'|' -f2)
+printf 'Helius auth header: '; IFS= read -rs HELIUS_AUTH; echo
+for i in 1 2; do printf 'Authorization: %s\n' "$HELIUS_AUTH" | curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  "https://$REF.supabase.co/functions/v1/helius-webhook" \
+  -H @- -H 'Content-Type: application/json' --data @d1-s1.json; done
+unset HELIUS_AUTH
+```
+
+The header reaches curl on its standard input (`-H @-`, curl 7.55 or later;
+`printf` is a shell builtin), so the secret is never a process argument that
+`ps` or process accounting would show, the same rule as D4/D6: never on a
+command line.
+
+Expected: `202` each time; the status still `1|1|1|n` with the same `n`,
+the job still `complete` with the same `attempts` A (nothing reopened, the
+mirror not written again), `sync` `ready`. Anything else is a failed drill.
+
+**D2. Lost delivery.** Break the webhook's delivery: Helius dashboard →
+edit the devnet webhook → Authentication Header: append `-drill` → re-select
+transaction type ANY (the edit form shows it empty) → save. Do not
+screenshot that form (it shows the header in clear). Note the time T0 and
+make one devnet transaction as in D1 (S2). Expected, by the clock:
+
+- T0 + 2–4 min: `heartbeat` `last_reason` `UNINDEXED_SIGNATURE`,
+  `last_expired_at` set, `sync` `checked_age_seconds` over 300 (the site
+  reads the chain; the Issuers / Assets / Launchpad / Governance badges go
+  muted). The status for S2 is `0|0|0|0`.
+- T0 + 5–10 min (the first gap scan whose window, 20 to 5 minutes back,
+  holds S2): `1|1|1|n` with `delivery` `gap-scan` and the alarm job's
+  `source` `gap-scan`; incident `indexer-gap` open (`last_fail_at` set) and
+  an `indexer:gap` alert (high, emailed: "1 finalized program
+  transaction(s) were missing from the index (1 re-queued)").
+- One or two minutes later: the indexer job `complete`, the heartbeat
+  `bumped` again, `sync` fresh.
+- About 15–20 min after the repair: `indexer-gap` `cleared_at` set (three
+  passing scans and 5 minutes).
+
+At T0 + 25 min restore the header (edit → the original value → ANY →
+save). In the Helius logs, record every attempt of S2's delivery (count,
+times, status codes): that is Helius's retry window (G9, §14). A retry that
+arrives after the restore answers `202` and leaves S2 at `1|1|1|n` (D1
+again). Resolve the drill's `indexer:gap` alert in `/admin/compliance` as
+planned.
+
+**D3. Full reconcile, timed.** The operator runner (read-only on the chain:
+it allows only `getGenesisHash` and `getProgramAccounts`; it writes the
+devnet mirror like `/admin/health` → Reconcile) with the devnet keys of
+`.env.local`:
+
+```
+MANCIPATIO_RECONCILE=devnet \
+MANCIPATIO_RECONCILE_PROJECT=$(node scripts/ops/target.mjs devnet | cut -d'|' -f2) \
+MANCIPATIO_RECONCILE_OUTPUT=../docs/mainnet-readiness/drill-6.4/reconcile-devnet.json \
+  npx vitest run --config scripts/ops/reconcile-index.config.ts
+```
+
+Expected: the summary's `readiness` `ready` at `context_slot`, `legacy`
+`[]`, and after D1–D2 every table with `missing` 0, `rebuilt` 0 and
+`deleted` 0 (the jobs and the gap scan already caught up; a non-zero value
+is an account those paths missed: investigate before mainnet).
+`elapsed_ms` is the duration: with today's ~40 devnet accounts, a few
+seconds. The offline benchmark (`RUN_LOCAL_POSTGRES_TESTS=1
+POSTGRES_BIN=<PostgreSQL 17 bin/> npm run ops:reconcile-bench`, 28.9.,
+the slower of the cold and the warm run at each size; a routine reconcile
+over an existing mirror is warm, and was the slower one at 20 000 and
+50 000 accounts: about 0.54 ms per program account plus about 4.4 s fixed, with a 20 ms
+database round trip, 1 s per provider scan and 20 MB/s) puts the 45 s
+route budget at about 75 000 program accounts, and the single registry
+scan under 2 s at 50 000 (the per-call bound is 12 s). Its decoding and
+database time were measured on a laptop's CPU and a local PostgreSQL, not
+on a Vercel function or the Supabase instance, so the figure is an
+estimate; D3's `elapsed_ms` is the measurement. Rule: on mainnet,
+once `elapsed_ms` passes 20 s or the summed `onchain` counts pass 30 000,
+plan the reconcile's split into resumable per-table runs before the next
+growth step; decoding and the snapshot writes dominate, so splitting only
+the scan would not help.
+
+**Mainnet: D1 and D3 again, after D10 and before D11 (§0A).** Not
+earlier: before §2 (D9) the programs do not exist and nothing before D9
+touches the chain, so there is no asset_registry transaction to redeliver,
+and a reconcile of an undeployed program is trivially `ready` with an
+`elapsed_ms` that measures nothing. After D10 the mirror holds the
+bootstrap's real accounts, and the site is still behind Deployment
+Protection, so a failed drill stops the sequence before the first public
+user. No transaction is made for the drill (a mainnet KYB step would be
+real issuer state): D1 redelivers S1 (`initialize_platform`, §4 cycle 1; its
+signature is the step `S1` line of `$E/04b-bootstrap-send.json.journal.jsonl`),
+whose indexer job completed on Day D. Record `n` and A first, then resend
+S1's delivery from the Helius dashboard (the mainnet webhook's logs), or
+replay its logged body with the mainnet webhook's own authentication header
+(the mainnet project's receiver checks its own secret, never the devnet
+one):
+
+```
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -Atq -v sig=<S1> -f scripts/ops/indexer-drill-status.sql
+REF=$(MANCI_ALLOW_MAINNET=1 node scripts/ops/target.mjs mainnet | cut -d'|' -f2)
+printf 'Helius mainnet auth header: '; IFS= read -rs HELIUS_AUTH; echo
+for i in 1 2; do printf 'Authorization: %s\n' "$HELIUS_AUTH" | curl -sS -o /dev/null -w '%{http_code}\n' -X POST \
+  "https://$REF.supabase.co/functions/v1/helius-webhook" \
+  -H @- -H 'Content-Type: application/json' --data @d1-s1.json; done
+unset HELIUS_AUTH
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -Atq -v sig=<S1> -f scripts/ops/indexer-drill-status.sql
+```
+
+Expected as in D1: `202` each time, the same `n` and A, `sync` `ready`.
+Then D3, with the mainnet env file named explicitly (there is no
+`.env.local` default on mainnet):
+
+```
+MANCI_ALLOW_MAINNET=1 MANCIPATIO_RECONCILE=mainnet \
+MANCIPATIO_RECONCILE_PROJECT=$(MANCI_ALLOW_MAINNET=1 node scripts/ops/target.mjs mainnet | cut -d'|' -f2) \
+MANCIPATIO_RECONCILE_ENV_FILE=<mainnet env file> \
+MANCIPATIO_RECONCILE_OUTPUT=../docs/mainnet-readiness/drill-6.4/reconcile-mainnet.json \
+  npx vitest run --config scripts/ops/reconcile-index.config.ts
+```
+
+Expected: `readiness` `ready`, `legacy` `[]`, and `missing`, `rebuilt` and
+`deleted` 0 in every table (the bootstrap's jobs already wrote every
+account; a non-zero value is an account they missed: investigate before
+D11). D2 is a devnet drill only.
 
 ### Rollback
 
