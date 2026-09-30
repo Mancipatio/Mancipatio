@@ -151,8 +151,20 @@ describe("assertBuildSupabase", () => {
 
   it("refuses every mainnet build while no mainnet project is recorded", () => {
     expect(() =>
-      assertBuildSupabase(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet", NEXT_PUBLIC_SUPABASE_URL: url(MAINNET_REF), NEXT_PUBLIC_SUPABASE_ANON_KEY: PUBLISHABLE }),
+      assertBuildSupabase(
+        BUILD,
+        { NEXT_PUBLIC_NETWORK: "mainnet", NEXT_PUBLIC_SUPABASE_URL: url(MAINNET_REF), NEXT_PUBLIC_SUPABASE_ANON_KEY: PUBLISHABLE },
+        { devnet: REFS.devnet, mainnet: null },
+      ),
     ).toThrow(/no mainnet Supabase project is recorded/);
+  });
+
+  it("pins the committed mainnet project: manci-mainnet only", () => {
+    const mainnet = { NEXT_PUBLIC_NETWORK: "mainnet", NEXT_PUBLIC_SUPABASE_ANON_KEY: PUBLISHABLE };
+    expect(SUPABASE_PROJECT_REFS.mainnet).toBe("nyltnheatubqmtdanlrr");
+    expect(() => assertBuildSupabase(BUILD, { ...mainnet, NEXT_PUBLIC_SUPABASE_URL: url("nyltnheatubqmtdanlrr") })).not.toThrow();
+    expect(() => assertBuildSupabase(BUILD, { ...mainnet, NEXT_PUBLIC_SUPABASE_URL: url(MAINNET_REF) })).toThrow(/must be https:\/\/nyltnheatubqmtdanlrr/);
+    expect(() => assertBuildSupabase(BUILD, { NEXT_PUBLIC_NETWORK: "devnet", NEXT_PUBLIC_SUPABASE_URL: url("nyltnheatubqmtdanlrr") })).toThrow(/points at the mainnet Supabase project/);
   });
 
   it("refuses a mainnet build on another project, without a URL, or with a legacy anon key", () => {
@@ -288,8 +300,9 @@ describe("next.config default export", () => {
     expect(() => config(BUILD)).toThrow(/Refusing a mainnet build/);
 
     vi.stubEnv("MAINNET_LEGAL_COPY_APPROVED", "true");
-    // No mainnet Supabase project is recorded yet: every mainnet build stops here.
-    expect(() => config(BUILD)).toThrow(/no mainnet Supabase project is recorded/);
+    // The mainnet project is recorded (manci-mainnet): a mainnet build without
+    // its URL stops here.
+    expect(() => config(BUILD)).toThrow(/NEXT_PUBLIC_SUPABASE_URL must be https:\/\/nyltnheatubqmtdanlrr/);
 
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
     vi.stubEnv("NEXT_PUBLIC_SUPABASE_URL", "https://aaaaaaaaaaaaaaaaaaaa.supabase.co");

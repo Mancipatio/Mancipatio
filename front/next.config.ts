@@ -140,7 +140,7 @@ export function assertBuildMainnetLegal(
  */
 export const SUPABASE_PROJECT_REFS: Readonly<Record<"devnet" | "mainnet", string | null>> = {
   devnet: "gvnckuzmuwozlcohtuhx",
-  mainnet: null,
+  mainnet: "nyltnheatubqmtdanlrr",
 };
 
 /**

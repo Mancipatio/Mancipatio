@@ -116,14 +116,19 @@ const named = (run: Run, tool: string) => run.calls.filter((call) => call[0] ===
 const after = (call: string[], flag: string) => call[call.indexOf(flag) + 1];
 
 describe("targets.json and target.mjs", () => {
-  it("the tracked file is valid: unique refs and origins, session pooler port, mainnet not configured yet", () => {
+  it("the tracked file is valid: unique refs and origins, session pooler port, mainnet project recorded without a site origin yet", () => {
     expect(() => loadTargets()).not.toThrow();
     expect(Object.keys(REAL_TARGETS).sort()).toEqual(["devnet", "mainnet"]);
     expect(REAL_TARGETS.devnet).toEqual({
       network: "devnet", projectRef: DEVNET_REF, poolerHost: DEVNET_HOST, poolerPort: 5432,
       siteOrigin: "https://www.manci.io", backupAgeRecipient: null,
     });
-    expect(REAL_TARGETS.mainnet).toMatchObject({ network: "mainnet", projectRef: null, poolerHost: null, siteOrigin: null });
+    // manci-mainnet (Manci International Ltd. organization, eu-west-1), recorded
+    // 2026-09-30. siteOrigin stays null until devnet moves to devnet.manci.io
+    // (the two targets may not share an origin).
+    expect(REAL_TARGETS.mainnet).toMatchObject({
+      network: "mainnet", projectRef: "nyltnheatubqmtdanlrr", poolerHost: MAINNET_HOST, siteOrigin: null,
+    });
   });
 
   it.each([
@@ -147,7 +152,10 @@ describe("targets.json and target.mjs", () => {
     expect(() => resolveTarget(REAL_TARGETS, "", {})).toThrow(/no default/);
     expect(() => resolveTarget(REAL_TARGETS, "staging", {})).toThrow(/Unknown target "staging"/);
     expect(() => resolveTarget(REAL_TARGETS, "mainnet", {})).toThrow(/MANCI_ALLOW_MAINNET=1/);
-    expect(() => resolveTarget(REAL_TARGETS, "mainnet", { MANCI_ALLOW_MAINNET: "1" })).toThrow(/not configured yet/);
+    expect(targetLine(resolveTarget(REAL_TARGETS, "mainnet", { MANCI_ALLOW_MAINNET: "1" })))
+      .toBe(`mainnet|nyltnheatubqmtdanlrr|${MAINNET_HOST}|5432|-`);
+    const unconfigured = { ...REAL_TARGETS, mainnet: { ...REAL_TARGETS.mainnet, projectRef: null, poolerHost: null } };
+    expect(() => resolveTarget(unconfigured, "mainnet", { MANCI_ALLOW_MAINNET: "1" })).toThrow(/not configured yet/);
     expect(() => resolveTarget(CONFIGURED, "mainnet", { MANCI_ALLOW_MAINNET: "true" })).toThrow(TargetError);
     const noOrigin = { ...CONFIGURED, mainnet: { ...CONFIGURED.mainnet, siteOrigin: null } };
     expect(targetLine(resolveTarget(noOrigin, "mainnet", { MANCI_ALLOW_MAINNET: "1" })))
@@ -166,7 +174,9 @@ describe("targets.json and target.mjs", () => {
     expect(mainnet.status).toBe(1);
     expect(mainnet.stdout).toBe("");
     expect(mainnet.stderr).toMatch(/MANCI_ALLOW_MAINNET=1/);
-    expect(cli(["mainnet"], { MANCI_ALLOW_MAINNET: "1" }).stderr).toMatch(/not configured yet/);
+    expect(cli(["mainnet"], { MANCI_ALLOW_MAINNET: "1" })).toMatchObject({
+      status: 0, stdout: `mainnet|nyltnheatubqmtdanlrr|${MAINNET_HOST}|5432|-\n`,
+    });
     expect(cli([]).status).toBe(2);
     expect(cli(["devnet", "extra"]).status).toBe(2);
     const box = sandbox({ ...CONFIGURED, mainnet: { ...CONFIGURED.mainnet, siteOrigin: null } });
@@ -598,7 +608,10 @@ describe("live operator runners (deployment smoke, index reconcile)", () => {
     const mainnet = { MANCIPATIO_RECONCILE: "mainnet", MANCI_ALLOW_MAINNET: "1", MANCIPATIO_RECONCILE_PROJECT: MAINNET_REF };
     expect(() => reconcileTarget(mainnet, CONFIGURED)).toThrow(/MANCIPATIO_RECONCILE_ENV_FILE is required for mainnet/);
     expect(reconcileTarget({ ...mainnet, MANCIPATIO_RECONCILE_ENV_FILE: "/secure/mainnet.env" }, CONFIGURED).envFile).toBe("/secure/mainnet.env");
-    expect(() => reconcileTarget({ ...mainnet, MANCIPATIO_RECONCILE_ENV_FILE: "x" })).toThrow(/no projectRef for mainnet/);
+    // The committed targets pin manci-mainnet: another project is refused.
+    expect(() => reconcileTarget({ ...mainnet, MANCIPATIO_RECONCILE_ENV_FILE: "x" })).toThrow(/must equal the mainnet projectRef/);
+    const unconfigured = { ...REAL_TARGETS, mainnet: { ...REAL_TARGETS.mainnet, projectRef: null, poolerHost: null } };
+    expect(() => reconcileTarget({ ...mainnet, MANCIPATIO_RECONCILE_ENV_FILE: "x" }, unconfigured)).toThrow(/no projectRef for mainnet/);
 
     const env: Record<string, string | undefined> = {
       HELIUS_DEVNET_RPC: "https://devnet.helius-rpc.com/?api-key=d", HELIUS_TESTNET_RPC: "https://t", SOLANA_LOCALNET_RPC: "http://l",
