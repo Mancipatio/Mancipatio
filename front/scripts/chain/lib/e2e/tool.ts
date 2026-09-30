@@ -27,9 +27,25 @@ import { runGroup0 } from "./groups/g0";
 import { runGroup1 } from "./groups/g1";
 import { runGroup2 } from "./groups/g2";
 import { runGroup3 } from "./groups/g3";
+import { runGroup4 } from "./groups/g4";
+import { runGroup5 } from "./groups/g5";
+import { runGroup6 } from "./groups/g6";
+import { runGroup7 } from "./groups/g7";
+import { runGroup8 } from "./groups/g8";
+import { localnetWarp } from "./warp";
 
-/** Groups this version implements (6.3a); later groups arrive with 6.3b/6.3c. */
+/** Groups 6.3a shipped; they run on both networks. */
 export const IMPLEMENTED_GROUPS = [0, 1, 2, 3];
+
+/**
+ * Groups this version runs on `network`: every group on localnet (6.3b/6.3c
+ * add 4-8); on devnet groups 4-6 (their devnet subset; 7 and 8 are localnet
+ * only) only with E2E_DEVNET_G4_G6=1 until a devnet run has proven them.
+ */
+export function implementedGroups(network: E2eConfig["network"], devnetG4G6: boolean): number[] {
+  if (network === "localnet") return [0, 1, 2, 3, 4, 5, 6, 7, 8];
+  return devnetG4G6 ? [...IMPLEMENTED_GROUPS, 4, 5, 6] : [...IMPLEMENTED_GROUPS];
+}
 
 /**
  * E2E_DIR holds private keys: inside the repository every file the run
@@ -124,8 +140,14 @@ export async function e2eTool(ctx: ToolContext): Promise<ToolStatus> {
   const { config, evidence } = ctx;
   ctx.phase = "inputs";
   const e2e = readE2eConfig(ctx.env, config.network, ctx.root);
-  const unsupported = e2e.groups.filter((g) => !IMPLEMENTED_GROUPS.includes(g));
-  if (unsupported.length) throw new ChainGateError(`E2E_GROUPS ${unsupported.join(",")} are not implemented yet`);
+  const implemented = implementedGroups(e2e.network, e2e.devnetG4G6);
+  const unsupported = e2e.groups.filter((g) => !implemented.includes(g));
+  if (unsupported.length) {
+    throw new ChainGateError(
+      `E2E_GROUPS ${unsupported.join(",")} are not implemented yet on ${e2e.network}` +
+        (e2e.network === "devnet" ? " (groups 4-6: E2E_DEVNET_G4_G6=1 opts in to their unverified devnet subset; 7-8 are localnet only)" : ""),
+    );
+  }
   assertIgnoredDir(e2e.dir, ctx.root);
   const existing = loadState(e2e.dir);
   if (existing) assertStateMatches(existing, { network: e2e.network, genesis: config.expectedGenesis, runId: e2e.runId });
@@ -223,21 +245,37 @@ async function sendRun(
     log: ctx.log,
     sleep: ctx.timing?.sleep ?? DEFAULT_TIMING.sleep,
     signal: ctx.signal,
+    warp: localnetWarp({
+      enabled: e2e.warp,
+      network: e2e.network,
+      rpcUrl: config.rpcUrl,
+      env: ctx.env,
+      frontDir: ctx.frontDir,
+      rpc: ctx.rpc,
+      journal,
+      log: ctx.log,
+      signal: ctx.signal,
+    }),
   };
+  if (world.warp) ctx.log("clock: E2E_WARP=1, time-bound steps warp the local validator");
 
   let status: ToolStatus = "completed";
   let failure: string | null = null;
   try {
     for (const group of e2e.groups) {
       ctx.phase = `group ${group}`;
-      const outcome =
-        group === 0
-          ? (await runGroup0(world, { genesis: config.expectedGenesis, journal, cuPrice: config.cuPrice }), "completed")
-          : group === 1
-            ? await runGroup1(world)
-            : group === 2
-              ? await runGroup2(world)
-              : await runGroup3(world);
+      const runners: Record<number, () => Promise<"completed" | "awaiting">> = {
+        0: async () => (await runGroup0(world, { genesis: config.expectedGenesis, journal, cuPrice: config.cuPrice }), "completed"),
+        1: () => runGroup1(world),
+        2: () => runGroup2(world),
+        3: () => runGroup3(world),
+        4: () => runGroup4(world),
+        5: () => runGroup5(world),
+        6: () => runGroup6(world),
+        7: () => runGroup7(world),
+        8: () => runGroup8(world),
+      };
+      const outcome = await runners[group]();
       if (outcome === "awaiting") {
         status = "awaiting";
         ctx.log("awaiting: re-run the same command after the action above; passed steps are skipped");
