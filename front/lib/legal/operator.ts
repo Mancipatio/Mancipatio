@@ -11,19 +11,30 @@
 // pages render. Filling in the company is one edit to OPERATORS.mainnet, not a
 // dozen Vercel variables where a typo ships unnoticed. Nothing here is secret.
 //
-// When the company and the licence arrive: fill in OPERATORS.mainnet below
-// and run `npx vitest run tests/legal-slots.test.ts --silent=false` — its
-// "mainnet legal slots" report lists every field a mainnet build still refuses.
+// The record is jurisdiction-neutral: every number carries the name its
+// jurisdiction gives it (a Serbian company's "MB" and "PIB", a BVI company's
+// "BVI company number"), and the pages render those names from the record,
+// never from code. A detail the operator's documents show is not assigned
+// (e.g. a short name, where the register records a single name) is stated on
+// purpose as { notAssigned: "<reason>" }; a plain null still means "not
+// filled in" (or not yet confirmed) and a mainnet build refuses it, so a
+// forgotten or unconfirmed field cannot pass.
 //
-// Directive-free and import-free apart from a type (next.config.ts loads it).
+// When a detail changes: edit OPERATORS.mainnet below and run
+// `npx vitest run tests/legal-slots.test.ts --silent=false` — its "mainnet
+// legal slots" report lists every field a mainnet build still refuses.
+//
+// Directive-free; imports only a type and ./document, which is import-free
+// (next.config.ts loads this file).
 
 import type { Network } from "../network";
+import { isIsoDate } from "./document";
 
 /** A licence the operator holds for the services offered on the site. */
 export type OperatorLicence = {
   /** Issuing authority, e.g. "Securities Commission of the Republic of Serbia". */
   authority: string;
-  /** The decision (rešenje) number, as written on the decision. */
+  /** The decision number, as written on the decision. */
   decisionNumber: string;
   /** Date of the decision, yyyy-mm-dd. */
   decisionDate: string;
@@ -48,22 +59,64 @@ export type OperatorContacts = {
   dpo: string | null;
 };
 
+/**
+ * A number the operator is registered under, with the name its jurisdiction
+ * gives it. The pages render the names, so a record from any jurisdiction
+ * reads right: Serbia { value: "21000000", label: "registration number (MB)",
+ * shortLabel: "MB" }, the BVI { value: "2219023", label: "BVI company number",
+ * shortLabel: "BVI company number" }.
+ */
+export type RegisteredNumber = {
+  /** The number as issued. */
+  value: string;
+  /** Its name in a sentence (Terms, Privacy Policy, /contact); with the first
+   *  letter capitalised it is also the /legal/company row label. */
+  label: string;
+  /** Its name in the footer line, before the number ("MB 21000000"). */
+  shortLabel: string;
+};
+
+/**
+ * A detail the operator's jurisdiction does not assign, stated on purpose.
+ * The string is the reason: kept in the record for review, never rendered.
+ * A plain null means "not filled in yet", and a mainnet build refuses it.
+ */
+export type NotAssigned = { notAssigned: string };
+
+/** The operator's registered agent, where the company has one (Manci
+ *  International Ltd.'s Memorandum §4 names it, and §3 puts the registered
+ *  office at the agent's office). */
+export type RegisteredAgent = {
+  name: string;
+  /** One line, as written in the memorandum. */
+  address: string;
+};
+
 export type Operator = {
   /** The trading name used across the site. */
   brand: string;
-  /** Full registered name, e.g. "Manci d.o.o. Beograd". */
+  /** Full registered name, e.g. "Manci d.o.o. Beograd", "Manci International Ltd.". */
   legalName: string | null;
-  /** Short registered name, e.g. "Manci d.o.o.". */
-  shortName: string | null;
-  /** Registered office (sedište), one line: street and number, postcode, city, country. */
+  /** Short registered name, e.g. "Manci d.o.o.". Where the company's
+   *  documents give a single registered name, { notAssigned }: the full name
+   *  then stands alone. */
+  shortName: string | NotAssigned | null;
+  /** Registered office, one line (street and number or PO box, postcode,
+   *  city, country), as the register records it. */
   registeredOffice: string | null;
-  /** Company registration number (matični broj, MB). */
-  registrationNumber: string | null;
-  /** Tax identification number (PIB). */
-  taxId: string | null;
-  /** The register the company is entered in, e.g. the Serbian Business
-   *  Registers Agency (APR), with a link to the entry when there is one. */
+  /** The company registration number, under its name in the jurisdiction. */
+  registrationNumber: RegisteredNumber | null;
+  /** The tax identification number under its name, or { notAssigned } where
+   *  the owner has confirmed that none is assigned to the company (null until
+   *  then). */
+  taxId: RegisteredNumber | NotAssigned | null;
+  /** The register the company is entered in, with a link to the entry when
+   *  there is a public one per company. */
   register: { name: string; url: string | null } | null;
+  /** Optional: the registered agent (shown on /legal/company). */
+  registeredAgent: RegisteredAgent | null;
+  /** Optional: date of incorporation, yyyy-mm-dd (shown on /legal/company). */
+  incorporatedOn: string | null;
   /** null when no licence is held. A mainnet build then also needs
    *  MAINNET_LICENSE_NOT_REQUIRED=true (lib/legal/readiness.ts). */
   licence: OperatorLicence | null;
@@ -97,6 +150,8 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     registrationNumber: null,
     taxId: null,
     register: null,
+    registeredAgent: null,
+    incorporatedOn: null,
     licence: null,
     contacts: CURRENT_CONTACTS,
     governingLaw: null,
@@ -104,27 +159,56 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     pilotNotice:
       "The devnet pilot is not yet operated by a designated legal entity and holds no licence. Tokens on devnet have no economic value. The operator's name, registration details and licence will be published here before the mainnet launch.",
   },
-  // Mainnet: filled in when the company is registered and the licence is
-  // granted. Until every required field is set a mainnet build is refused.
+  // Mainnet: Manci International Ltd., a BVI business company limited by
+  // shares (BVI Business Companies Act, 2004), recorded on 2026-09-30 from
+  // its Certificate of Incorporation (name, company number, date, register)
+  // and its Memorandum of Association (§3 registered office, §4 registered
+  // agent). The tax number is not in either document and waits for the
+  // owner. A mainnet build is refused until every required field is set
+  // (lib/legal/readiness.ts).
   mainnet: {
     brand: "Manci",
-    legalName: null,
-    shortName: null,
-    registeredOffice: null,
-    registrationNumber: null,
+    legalName: "Manci International Ltd.",
+    shortName: {
+      notAssigned: "The Certificate of Incorporation and the Memorandum give a single registered name, with no short form.",
+    },
+    // The registered agent's office (memorandum §3; the directors or members
+    // may move it, and this line then changes with it).
+    registeredOffice: "Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands",
+    registrationNumber: { value: "2219023", label: "BVI company number", shortLabel: "BVI company number" },
+    // VLASNIK POTVRĐUJE (the owner is to confirm): whether the company has a
+    // tax identification number. Neither the Certificate of Incorporation nor
+    // the Memorandum mentions one, which does not by itself show that none
+    // is assigned. null (a mainnet build refuses it) until the owner confirms
+    // in writing; then the number under its name, or { notAssigned: "<the
+    // confirmed reason>, confirmed by the owner on yyyy-mm-dd" }.
     taxId: null,
-    // e.g. { name: "Serbian Business Registers Agency (APR)", url: "<the company's APR entry>" }
-    register: null,
-    // e.g. { authority: "Securities Commission of the Republic of Serbia",
-    //        decisionNumber: "…", decisionDate: "yyyy-mm-dd",
-    //        services: ["…as worded in the decision…"], registerUrl: null }
+    // As the Certificate of Incorporation names its issuer: the text reads
+    // "The REGISTRAR of CORPORATE AFFAIRS, of the British Virgin Islands",
+    // and its seal (an image, not in the PDF's text layer) reads "Registrar
+    // of Corporate Affairs" around "BVI Financial Services Commission".
+    // url null: no public link to the company's entry is recorded.
+    register: { name: "Registrar of Corporate Affairs, BVI Financial Services Commission", url: null },
+    registeredAgent: {
+      name: "SHRM Trustees (BVI) Limited",
+      address: "Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands",
+    },
+    incorporatedOn: "2026-09-28",
+    // No licence, on counsel's written opinion that none is needed: a mainnet
+    // build then needs MAINNET_LICENSE_NOT_REQUIRED=true (runbook §17).
     licence: null,
     // Confirm these before launch: they are the addresses published today.
     // Set `support` if the company has a support mailbox (null keeps the
     // contact form as the support channel).
     contacts: CURRENT_CONTACTS,
-    governingLaw: null,
-    disputeResolution: null,
+    // Owner's decision 2026-09-30: the Terms are governed by the law of the
+    // company's jurisdiction. The forum follows it (the BVI courts); change it
+    // here if counsel prefers arbitration. Once Manci opens beyond invited
+    // clients, users are to contract with the group company of their own
+    // jurisdiction (EU, US, UAE entities in formation), each with its own
+    // record.
+    governingLaw: "the laws of the British Virgin Islands",
+    disputeResolution: "the courts of the British Virgin Islands",
     pilotNotice: null,
   },
 };
@@ -139,6 +223,31 @@ export function hasOperatorEntity(operator: Operator): boolean {
   return Boolean(operator.legalName?.trim());
 }
 
+/** True for a detail stated as not assigned by the jurisdiction. */
+export function isNotAssigned(value: unknown): value is NotAssigned {
+  return typeof value === "object" && value !== null && "notAssigned" in value;
+}
+
+/** The short registered name when the register has one; null otherwise (the
+ *  full registered name then stands alone). */
+export function operatorShortName(operator: Operator): string | null {
+  const short = operator.shortName;
+  return typeof short === "string" && short.trim() ? short.trim() : null;
+}
+
+/**
+ * The operator's numbers that are set, registration number first, as
+ * [name, number] pairs: under their names in a sentence (`"label"`, e.g.
+ * "registration number (MB)") or in the footer (`"shortLabel"`, e.g. "MB").
+ * A number that is not set or not assigned is left out.
+ */
+export function operatorNumbers(operator: Operator, form: "label" | "shortLabel"): Array<[string, string]> {
+  const numbers: Array<RegisteredNumber | NotAssigned | null> = [operator.registrationNumber, operator.taxId];
+  return numbers
+    .filter((number): number is RegisteredNumber => number !== null && !isNotAssigned(number) && Boolean(number.value.trim()))
+    .map((number) => [number[form].trim(), number.value.trim()]);
+}
+
 /** "Securities Commission of the Republic of Serbia, decision 1/2026 of 2026-10-01". */
 export function licenceLine(licence: OperatorLicence): string {
   return `${licence.authority}, decision ${licence.decisionNumber} of ${licence.decisionDate}`;
@@ -149,22 +258,23 @@ export function copyrightHolder(operator: Operator): string {
   return hasOperatorEntity(operator) ? operator.legalName!.trim() : operator.brand;
 }
 
-/** "<office> · MB … · PIB …" when a legal entity is named; null otherwise. */
+/** "<office> · MB … · PIB …" (Serbia), "<office> · BVI company number …"
+ *  (the BVI) when a legal entity is named; null otherwise. */
 export function operatorRegistrationLine(operator: Operator): string | null {
   if (!hasOperatorEntity(operator)) return null;
   const parts = [
-    operator.registeredOffice,
-    operator.registrationNumber ? `MB ${operator.registrationNumber}` : null,
-    operator.taxId ? `PIB ${operator.taxId}` : null,
-  ].filter((part): part is string => Boolean(part?.trim()));
+    operator.registeredOffice?.trim() ?? "",
+    ...operatorNumbers(operator, "shortLabel").map(([name, number]) => `${name} ${number}`),
+  ].filter((part) => part.length > 0);
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
 /**
- * The footer's operator line: "© <year> <registered name> · <office> · MB …
- * · PIB … · Licence: <authority>, decision … of …". null while no legal
- * entity operates the network (the devnet pilot): the footer then shows only
- * its link to /legal/company, which carries the pilot notice.
+ * The footer's operator line: "© <year> <registered name> · <office> · <each
+ * number under its footer name> · Licence: <authority>, decision … of …".
+ * null while no legal entity operates the network (the devnet pilot): the
+ * footer then shows only its link to /legal/company, which carries the pilot
+ * notice.
  */
 export function operatorFooterLine(operator: Operator, year: number): string | null {
   if (!hasOperatorEntity(operator)) return null;
@@ -177,25 +287,42 @@ export function operatorFooterLine(operator: Operator, year: number): string | n
 
 /**
  * One paragraph naming the operator on a legal page: "Manci is operated by
- * <legal name>, registered office …, registration number (MB) …, tax ID (PIB)
- * …. Licence: …." Without an entity it is the pilot notice (devnet).
+ * <legal name>, registered office …, <each number under its name, e.g.
+ * registration number (MB) …, tax ID (PIB) …>. Licence: …." Without an
+ * entity it is the pilot notice (devnet).
  */
 export function operatorSentence(operator: Operator): string | null {
   if (!hasOperatorEntity(operator)) return operator.pilotNotice;
-  const parts = [`${operator.brand} is operated by ${operator.legalName?.trim()}`];
-  if (operator.registeredOffice) parts.push(`registered office ${operator.registeredOffice}`);
-  if (operator.registrationNumber) parts.push(`registration number (MB) ${operator.registrationNumber}`);
-  if (operator.taxId) parts.push(`tax ID (PIB) ${operator.taxId}`);
+  const parts = [`${operator.brand} is operated by ${operator.legalName!.trim()}`];
+  if (operator.registeredOffice?.trim()) parts.push(`registered office ${operator.registeredOffice.trim()}`);
+  for (const [name, number] of operatorNumbers(operator, "label")) parts.push(`${name} ${number}`);
   const licence = operator.licence ? ` Licence: ${licenceLine(operator.licence)}.` : "";
   return `${parts.join(", ")}.${licence}`;
 }
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const DRAFT_MARKER_RE = /\b(TODO|TBD|XXX)\b|placeholder|to be confirmed|lorem ipsum/i;
-const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function missing(value: string | null | undefined): boolean {
   return !value || !value.trim() || DRAFT_MARKER_RE.test(value);
+}
+
+/** What is wrong with a number (`field`) that is set. */
+function numberProblems(field: string, number: RegisteredNumber): string[] {
+  const problems: string[] = [];
+  if (missing(number.value)) problems.push(`operator.${field}.value is not set`);
+  if (missing(number.label)) {
+    problems.push(`operator.${field}.label (its name in a sentence, e.g. "registration number (MB)") is not set`);
+  }
+  if (missing(number.shortLabel)) {
+    problems.push(`operator.${field}.shortLabel (its name in the footer, e.g. "MB") is not set`);
+  }
+  return problems;
+}
+
+/** A detail stated as not assigned must say why. */
+function notAssignedProblems(field: string, value: NotAssigned): string[] {
+  return missing(value.notAssigned) ? [`operator.${field}.notAssigned must give the reason`] : [];
 }
 
 /**
@@ -205,19 +332,40 @@ function missing(value: string | null | undefined): boolean {
  */
 export function operatorProblems(operator: Operator): string[] {
   const problems: string[] = [];
-  const required: Array<[string, string | null]> = [
-    ["legalName (full registered name)", operator.legalName],
-    ["shortName (short registered name)", operator.shortName],
-    ["registeredOffice (sedište)", operator.registeredOffice],
-    ["registrationNumber (MB)", operator.registrationNumber],
-    ["taxId (PIB)", operator.taxId],
-    ["register.name (e.g. APR)", operator.register?.name ?? null],
-    ["governingLaw", operator.governingLaw],
-    ["disputeResolution (court or arbitration)", operator.disputeResolution],
-  ];
-  for (const [field, value] of required) {
-    if (missing(value)) problems.push(`operator.${field} is not set`);
+  const unset = (field: string) => problems.push(`operator.${field} is not set`);
+
+  if (missing(operator.legalName)) unset("legalName (full registered name)");
+
+  const short = operator.shortName;
+  if (isNotAssigned(short)) problems.push(...notAssignedProblems("shortName", short));
+  else if (missing(short)) unset("shortName (short registered name, or { notAssigned: <reason> })");
+
+  if (missing(operator.registeredOffice)) unset("registeredOffice (registered office address)");
+
+  // No exemption: every company has a registration number.
+  if (operator.registrationNumber === null) unset("registrationNumber (company registration number)");
+  else problems.push(...numberProblems("registrationNumber", operator.registrationNumber));
+
+  const tax = operator.taxId;
+  if (tax === null) unset("taxId (tax identification number, or { notAssigned: <reason> })");
+  else if (isNotAssigned(tax)) problems.push(...notAssignedProblems("taxId", tax));
+  else problems.push(...numberProblems("taxId", tax));
+
+  if (missing(operator.register?.name ?? null)) unset("register.name (the company register)");
+
+  // Optional details: null is allowed, anything set must be complete.
+  const agent = operator.registeredAgent;
+  if (agent !== null) {
+    if (missing(agent.name)) unset("registeredAgent.name");
+    if (missing(agent.address)) unset("registeredAgent.address");
   }
+  if (operator.incorporatedOn !== null && !isIsoDate(operator.incorporatedOn)) {
+    problems.push("operator.incorporatedOn must be a yyyy-mm-dd date or null");
+  }
+
+  if (missing(operator.governingLaw)) unset("governingLaw");
+  if (missing(operator.disputeResolution)) unset("disputeResolution (court or arbitration)");
+
   for (const key of ["legal", "privacy", "security"] as const) {
     const email = operator.contacts[key];
     if (missing(email) || !EMAIL_RE.test(email!.trim())) {
@@ -239,7 +387,7 @@ export function operatorProblems(operator: Operator): string[] {
   if (licence) {
     if (missing(licence.authority)) problems.push("operator.licence.authority is not set");
     if (missing(licence.decisionNumber)) problems.push("operator.licence.decisionNumber is not set");
-    if (!ISO_DATE_RE.test(licence.decisionDate) || !Number.isFinite(Date.parse(licence.decisionDate))) {
+    if (!isIsoDate(licence.decisionDate)) {
       problems.push("operator.licence.decisionDate must be a yyyy-mm-dd date");
     }
     if (licence.services.length === 0 || licence.services.some((s) => missing(s))) {

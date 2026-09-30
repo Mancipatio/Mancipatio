@@ -12,9 +12,10 @@ import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { assertBuildMainnetLegal } from "@/next.config";
-import { OperatorContactDetails } from "@/components/legal/operator-details";
+import { ControllerSection } from "@/components/legal/controller-section";
+import { OperatorCompanyDetails, OperatorContactDetails } from "@/components/legal/operator-details";
 import { SecurityAuditReportLink } from "@/components/legal/security-review";
 import {
   forbiddenMainnetPhrases,
@@ -28,6 +29,7 @@ import {
   operatorFooterLine,
   operatorFor,
   operatorProblems,
+  operatorRegistrationLine,
   operatorSentence,
   type Operator,
 } from "@/lib/legal/operator";
@@ -54,14 +56,18 @@ import {
 const BUILD = "phase-production-build";
 const DEV = "phase-development-server";
 
+/** A Serbian company (the form the record was first written for): MB, PIB,
+ *  a short name, the APR, a licence. */
 const COMPANY: Operator = {
   brand: "Manci",
   legalName: "Manci d.o.o. Beograd",
   shortName: "Manci d.o.o.",
   registeredOffice: "Knez Mihailova 1, 11000 Belgrade, Serbia",
-  registrationNumber: "21000000",
-  taxId: "110000000",
+  registrationNumber: { value: "21000000", label: "registration number (MB)", shortLabel: "MB" },
+  taxId: { value: "110000000", label: "tax ID (PIB)", shortLabel: "PIB" },
   register: { name: "Serbian Business Registers Agency (APR)", url: null },
+  registeredAgent: null,
+  incorporatedOn: null,
   licence: {
     authority: "Securities Commission of the Republic of Serbia",
     decisionNumber: "5/0-01-1/26",
@@ -74,6 +80,25 @@ const COMPANY: Operator = {
   disputeResolution: "the competent court in Belgrade",
   pilotNotice: null,
 };
+
+/** The committed mainnet record (Manci International Ltd., BVI), with an
+ *  invented governing law and forum where counsel has not decided yet, and
+ *  an invented "not assigned" tax number while the owner has not confirmed
+ *  one (the committed value is null until then). */
+const BVI: Operator = {
+  ...OPERATORS.mainnet,
+  taxId: OPERATORS.mainnet.taxId ?? { notAssigned: "Stated as not assigned for this test only (test value)." },
+  governingLaw: OPERATORS.mainnet.governingLaw ?? "the law of Example Land (test value)",
+  disputeResolution: OPERATORS.mainnet.disputeResolution ?? "the courts of Example Land (test value)",
+};
+
+const TAX_ID_UNSET = "operator.taxId (tax identification number, or { notAssigned: <reason> }) is not set";
+
+/** Nothing filled in: the devnet record without its pilot notice. */
+const BLANK: Operator = { ...OPERATORS.devnet, pilotNotice: null };
+
+/** Serbian labels, which a BVI company's pages must never show. */
+const SERBIAN_LABELS = /\bMB\b|\bPIB\b|sedište|\bAPR\b/;
 
 const DOC: LegalDocument = {
   version: "2026-11-01",
@@ -95,15 +120,25 @@ const READY: MainnetLegalSlots = {
 describe("operator record", () => {
   it("accepts a complete company and names every missing field", () => {
     expect(operatorProblems(COMPANY)).toEqual([]);
-    const empty = operatorProblems(OPERATORS.mainnet);
-    for (const field of ["legalName", "shortName", "registeredOffice", "registrationNumber (MB)", "taxId (PIB)", "register.name", "governingLaw", "disputeResolution"]) {
-      expect(empty.join("\n"), field).toContain(field);
-    }
+    expect(operatorProblems(BLANK)).toEqual([
+      "operator.legalName (full registered name) is not set",
+      "operator.shortName (short registered name, or { notAssigned: <reason> }) is not set",
+      "operator.registeredOffice (registered office address) is not set",
+      "operator.registrationNumber (company registration number) is not set",
+      "operator.taxId (tax identification number, or { notAssigned: <reason> }) is not set",
+      "operator.register.name (the company register) is not set",
+      "operator.governingLaw is not set",
+      "operator.disputeResolution (court or arbitration) is not set",
+    ]);
   });
 
   it("refuses drafting leftovers, bad emails, a pilot notice and an incomplete licence", () => {
-    expect(operatorProblems({ ...COMPANY, taxId: "TBD" })).toEqual(["operator.taxId (PIB) is not set"]);
-    expect(operatorProblems({ ...COMPANY, registeredOffice: "  " })).toEqual(["operator.registeredOffice (sedište) is not set"]);
+    expect(operatorProblems({ ...COMPANY, taxId: { value: "TBD", label: "tax ID (PIB)", shortLabel: "PIB" } })).toEqual([
+      "operator.taxId.value is not set",
+    ]);
+    expect(operatorProblems({ ...COMPANY, registeredOffice: "  " })).toEqual([
+      "operator.registeredOffice (registered office address) is not set",
+    ]);
     expect(operatorProblems({ ...COMPANY, contacts: { ...COMPANY.contacts, legal: "legal at manci" } })).toEqual([
       "operator.contacts.legal must be an email address",
     ]);
@@ -169,6 +204,178 @@ describe("operator record", () => {
     expect(contact).toBeTruthy();
     expect(OPERATORS.devnet.contacts.security).toBe(contact);
     expect(OPERATORS.mainnet.contacts.security).toBe(contact);
+    // …and as the security.txt embedded in both programs.
+    for (const program of ["asset_registry", "transfer_hook"]) {
+      const source = readFileSync(join(process.cwd(), `../program/programs/${program}/src/lib.rs`), "utf8");
+      const embedded = /security_txt! \{[\s\S]*?contacts: "email:([^"]+)"/.exec(source)?.[1];
+      expect(embedded, program).toBe(contact);
+    }
+  });
+});
+
+describe("a jurisdiction-neutral record: Manci International Ltd. (BVI) on mainnet", () => {
+  it("records the company from its certificate and memorandum; the devnet record is unchanged", () => {
+    const mainnet = OPERATORS.mainnet;
+    expect(mainnet.brand).toBe("Manci");
+    expect(mainnet.legalName).toBe("Manci International Ltd.");
+    expect(mainnet.registeredOffice).toBe("Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands");
+    expect(mainnet.registrationNumber).toEqual({ value: "2219023", label: "BVI company number", shortLabel: "BVI company number" });
+    // The register as the certificate and its seal name the issuer.
+    expect(mainnet.register).toEqual({ name: "Registrar of Corporate Affairs, BVI Financial Services Commission", url: null });
+    expect(mainnet.registeredAgent?.name).toBe("SHRM Trustees (BVI) Limited");
+    expect(mainnet.incorporatedOn).toBe("2026-09-28");
+    // Not in the certificate or the memorandum: null (refused by a mainnet
+    // build) until the owner confirms in writing (runbook §17).
+    expect(mainnet.taxId).toBeNull();
+    expect(mainnet.shortName).toEqual({ notAssigned: expect.stringMatching(/\S/) });
+    expect(mainnet.licence).toBeNull();
+    expect(mainnet.pilotNotice).toBeNull();
+    expect(OPERATORS.devnet.legalName).toBeNull();
+    expect(OPERATORS.devnet.registrationNumber).toBeNull();
+  });
+
+  it("passes the operator check except for the owner's tax number", () => {
+    expect(operatorProblems(BVI)).toEqual([]);
+    expect(operatorProblems({ ...BVI, taxId: null, governingLaw: null, disputeResolution: null })).toEqual([
+      TAX_ID_UNSET,
+      "operator.governingLaw is not set",
+      "operator.disputeResolution (court or arbitration) is not set",
+    ]);
+    // The committed record: the unconfirmed tax number is refused, not
+    // passed over; it is the only field left (governing law and forum: BVI,
+    // the owner's decision of 2026-09-30).
+    expect(operatorProblems(OPERATORS.mainnet)).toEqual([TAX_ID_UNSET]);
+    expect(OPERATORS.mainnet.governingLaw).toBe("the laws of the British Virgin Islands");
+    expect(OPERATORS.mainnet.disputeResolution).toBe("the courts of the British Virgin Islands");
+    // A reason still marked as unconfirmed is refused as well.
+    expect(
+      operatorProblems({ ...BVI, taxId: { notAssigned: "None appears in the incorporation documents; to be confirmed by the owner." } }),
+    ).toEqual(["operator.taxId.notAssigned must give the reason"]);
+  });
+
+  it("allows no tax ID or short name only when stated on purpose, with a reason", () => {
+    const unset = TAX_ID_UNSET;
+    expect(operatorProblems({ ...BVI, taxId: null })).toEqual([unset]);
+    expect(operatorProblems({ ...BVI, taxId: { notAssigned: "  " } })).toEqual(["operator.taxId.notAssigned must give the reason"]);
+    expect(operatorProblems({ ...BVI, taxId: { notAssigned: "TBD" } })).toEqual(["operator.taxId.notAssigned must give the reason"]);
+    expect(operatorProblems({ ...BVI, shortName: null })).toEqual([
+      "operator.shortName (short registered name, or { notAssigned: <reason> }) is not set",
+    ]);
+    expect(operatorProblems({ ...BVI, shortName: { notAssigned: "" } })).toEqual(["operator.shortName.notAssigned must give the reason"]);
+    // Or the full name written as the short name: a string, accepted as such.
+    expect(operatorProblems({ ...BVI, shortName: "Manci International Ltd." })).toEqual([]);
+    // The Serbian record is held to the same rule: a forgotten PIB or short name is refused.
+    expect(operatorProblems({ ...COMPANY, taxId: null })).toEqual([unset]);
+    expect(operatorProblems({ ...COMPANY, shortName: null })).toEqual([
+      "operator.shortName (short registered name, or { notAssigned: <reason> }) is not set",
+    ]);
+  });
+
+  it("refuses a missing registration number, its missing names, a bad incorporation date and a half registered agent", () => {
+    expect(operatorProblems({ ...BVI, registrationNumber: null })).toEqual([
+      "operator.registrationNumber (company registration number) is not set",
+    ]);
+    expect(
+      operatorProblems({ ...BVI, registrationNumber: { value: "2219023", label: " ", shortLabel: "" } }),
+    ).toEqual([
+      'operator.registrationNumber.label (its name in a sentence, e.g. "registration number (MB)") is not set',
+      'operator.registrationNumber.shortLabel (its name in the footer, e.g. "MB") is not set',
+    ]);
+    expect(operatorProblems({ ...BVI, registrationNumber: { ...BVI.registrationNumber!, value: "" } })).toEqual([
+      "operator.registrationNumber.value is not set",
+    ]);
+    for (const date of ["28.09.2026", "2026-02-30", ""]) {
+      expect(operatorProblems({ ...BVI, incorporatedOn: date }), date).toEqual([
+        "operator.incorporatedOn must be a yyyy-mm-dd date or null",
+      ]);
+    }
+    expect(operatorProblems({ ...BVI, incorporatedOn: null, registeredAgent: null })).toEqual([]);
+    expect(operatorProblems({ ...BVI, registeredAgent: { name: "SHRM Trustees (BVI) Limited", address: "" } })).toEqual([
+      "operator.registeredAgent.address is not set",
+    ]);
+  });
+
+  it("names each number under its own jurisdiction's name, never MB or PIB for the BVI", () => {
+    const office = "Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands";
+    expect(operatorRegistrationLine(BVI)).toBe(`${office} · BVI company number 2219023`);
+    expect(operatorFooterLine(BVI, 2026)).toBe(`© 2026 Manci International Ltd. · ${office} · BVI company number 2219023`);
+    expect(operatorSentence(BVI)).toBe(
+      `Manci is operated by Manci International Ltd., registered office ${office}, BVI company number 2219023.`,
+    );
+    for (const text of [operatorRegistrationLine(BVI), operatorFooterLine(BVI, 2026), operatorSentence(BVI)]) {
+      expect(text).not.toMatch(SERBIAN_LABELS);
+      expect(text).not.toMatch(/tax ID|notAssigned|no tax identification/i);
+    }
+    // The Serbian form keeps its names.
+    expect(operatorRegistrationLine(COMPANY)).toBe("Knez Mihailova 1, 11000 Belgrade, Serbia · MB 21000000 · PIB 110000000");
+    expect(operatorSentence(COMPANY)).toContain("registration number (MB) 21000000, tax ID (PIB) 110000000");
+  });
+
+  it("renders the company block and the Privacy Policy controller from the record", () => {
+    const bvi = renderToStaticMarkup(createElement(OperatorCompanyDetails, { operator: BVI }));
+    for (const text of [
+      "Manci International Ltd.",
+      ">BVI company number<",
+      ">2219023<",
+      "Registrar of Corporate Affairs, BVI Financial Services Commission",
+      ">Date of incorporation<",
+      ">2026-09-28<",
+      ">Registered agent<",
+      "SHRM Trustees (BVI) Limited",
+    ]) {
+      expect(bvi, text).toContain(text);
+    }
+    expect(bvi).not.toMatch(SERBIAN_LABELS);
+    expect(bvi).not.toContain("Short name");
+    expect(bvi).not.toContain("Tax ID");
+
+    const serbian = renderToStaticMarkup(createElement(OperatorCompanyDetails, { operator: COMPANY }));
+    for (const text of [">Short name<", ">Registration number (MB)<", ">21000000<", ">Tax ID (PIB)<", ">110000000<"]) {
+      expect(serbian, text).toContain(text);
+    }
+    expect(serbian).not.toContain("Registered agent");
+    expect(serbian).not.toContain("Date of incorporation");
+
+    const controller = renderToStaticMarkup(createElement(ControllerSection, { operator: BVI }));
+    expect(controller).toContain(
+      "Controller of your personal data: Manci International Ltd., Trinity Chambers, PO Box 4301, Road Town, " +
+        "Tortola, British Virgin Islands, BVI company number 2219023.",
+    );
+    expect(controller).not.toMatch(SERBIAN_LABELS);
+    expect(renderToStaticMarkup(createElement(ControllerSection, { operator: COMPANY }))).toContain(
+      "registration number (MB) 21000000, tax ID (PIB) 110000000.",
+    );
+  });
+
+  describe("pages of a mainnet build (NEXT_PUBLIC_NETWORK=mainnet)", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    it("/legal/company names Manci International Ltd. and its BVI details", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      const { default: CompanyPage } = await import("@/app/(marketing)/legal/company/page");
+      const html = renderToStaticMarkup(createElement(CompanyPage));
+      expect(html).toContain("Solana mainnet");
+      expect(html).toContain("Manci International Ltd.");
+      expect(html).toContain(">BVI company number<");
+      expect(html).toContain("SHRM Trustees (BVI) Limited");
+      expect(html).toContain("No licence is recorded for the operator.");
+      expect(html).toContain('href="mailto:security@mancipatio.io"');
+      expect(html).not.toMatch(SERBIAN_LABELS);
+      expect(html).not.toContain(OPERATORS.devnet.pilotNotice!);
+    });
+
+    it("the marketing footer carries the BVI line", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      vi.resetModules();
+      const { SiteFooter } = await import("@/components/mx/site-footer");
+      const html = renderToStaticMarkup(createElement(SiteFooter));
+      expect(html).toContain("Manci International Ltd.");
+      expect(html).toContain("BVI company number 2219023");
+      expect(html).not.toMatch(SERBIAN_LABELS);
+    });
   });
 });
 
@@ -241,8 +448,29 @@ describe("mainnetLegalProblems", () => {
         ? "[legal slots] complete: a mainnet build is not refused by lib/legal/"
         : `[legal slots] a mainnet build is refused until:\n  - ${problems.join("\n  - ")}`,
     );
-    // Today: no company, no licence, no counsel texts, draft risk warning.
-    expect(problems.every((p) => typeof p === "string" && p.length > 0)).toBe(true);
+    // Since 2026-09-30 the company is recorded (Manci International Ltd.,
+    // BVI; governing law and forum BVI since the same day). What is left: the
+    // owner's written confirmation of the tax identification number (or that
+    // none is assigned), and counsel's licence opinion or written waiver, the
+    // Terms, the Privacy Policy, the dialog summary and the risk warning.
+    const owners = [/^operator\.taxId /];
+    const counsels = [
+      /^operator\.governingLaw /,
+      /^operator\.disputeResolution /,
+      /^operator\.licence is not recorded/,
+      /^Terms of Service: /,
+      /^Privacy Policy: /,
+      /^Terms acceptance dialog: /,
+      /^Purchase risk warning: /,
+    ];
+    for (const problem of problems) {
+      expect([...owners, ...counsels].some((pattern) => pattern.test(problem)), problem).toBe(true);
+    }
+    // The owner's open decision is listed while the committed value is null.
+    expect(problems).toContain(TAX_ID_UNSET);
+    // With counsel's waiver the licence is no longer listed.
+    const waived = mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, MAINNET_LEGAL_SLOTS);
+    expect(waived.filter((problem) => problem.startsWith("operator.licence"))).toEqual([]);
   });
 });
 
@@ -255,7 +483,9 @@ describe("assertBuildMainnetLegal (next.config.ts)", () => {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toMatch(/^Refusing a mainnet build: the operator and legal slots are not complete/);
-    expect(message).toContain("operator.legalName (full registered name) is not set");
+    expect(message).toContain(TAX_ID_UNSET);
+    expect(message).not.toContain("operator.governingLaw");
+    expect(message).not.toContain("operator.disputeResolution");
     expect(message).toContain("Terms of Service: counsel's mainnet text has not been added");
   });
 

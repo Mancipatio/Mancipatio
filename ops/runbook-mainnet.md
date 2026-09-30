@@ -2468,18 +2468,89 @@ Devnet, testnet and localnet keep the pilot's texts and are never checked.
 
 | Slot | File | Filled by |
 |---|---|---|
-| Operator: registered and short name, registered office, MB, PIB, register, governing law, forum for disputes, legal / privacy / security addresses, optional support and DPO addresses (support `null` = the contact form) | `front/lib/legal/operator.ts` (`OPERATORS.mainnet`) | owner (company data), counsel (law and forum) |
+| Operator: registered name; short name, or `{ notAssigned: <reason> }` where the register has none; registered office; the company registration number and the tax identification number, each as `{ value, label, shortLabel }` under the name its jurisdiction gives it (Serbia: `registration number (MB)` / `MB`, `tax ID (PIB)` / `PIB`; BVI: `BVI company number`), the tax number `{ notAssigned: <reason> }` only once the owner confirms in writing that none is assigned (`null` until then); register; optional registered agent and date of incorporation; governing law, forum for disputes; legal / privacy / security addresses, optional support and DPO addresses (support `null` = the contact form) | `front/lib/legal/operator.ts` (`OPERATORS.mainnet`) | owner (company data; governing law and forum: BVI, 2026-09-30) |
 | Licence: authority, decision number and date, licensed services, register entry | same record, `licence` | owner, from the decision |
 | Mainnet Terms, Privacy Policy, acceptance-dialog summary | `front/lib/legal/mainnet-copy.ts` | counsel |
-| Purchase risk warning (ZDI art. 15(2)) | `front/lib/legal/risk-warning.ts` (`status: "counsel"` once approved) | counsel |
+| Purchase risk warning (drafted against ZDI art. 15(2), i.e. for a Serbian operator; see below) | `front/lib/legal/risk-warning.ts` (`status: "counsel"` once approved) | counsel |
 | External audit: firm, scope, date, public report URL (linked from `/risks` and `/about`) | `front/lib/legal/audit.ts` (`SECURITY_AUDIT`) | owner, when the report exists |
 
-When the company and the licence arrive:
+The pages render every number under the name stored with it (footer
+`<shortLabel> <value>`, legal pages `<label> <value>`, `/legal/company` the
+label as the row title); no jurisdiction's names are written in code. A
+plain `null` short name or tax number is "not filled in" (or not yet
+confirmed) and refused; only an explicit `{ notAssigned: <reason> }` passes
+(the reason is kept for review and not rendered; a reason still marked "to
+be confirmed" is refused). The registration number has no such exemption.
 
-1. Fill `OPERATORS.mainnet` (no secrets: everything there is public in the
+**State on 2026-09-30.** `OPERATORS.mainnet` is filled from the Certificate
+of Incorporation (name, company number, date of incorporation, and the
+register as the certificate names its issuer) and the Memorandum of
+Association (§3 registered office, §4 registered agent): **Manci
+International Ltd.**, a BVI business company limited by shares, BVI company
+number 2219023, incorporated 2026-09-28, registered office (the registered
+agent's office) Trinity Chambers, PO Box 4301, Road Town, Tortola, British
+Virgin Islands, registered agent SHRM Trustees (BVI) Limited, register:
+Registrar of Corporate Affairs, BVI Financial Services Commission (the
+certificate's text names "the Registrar of Corporate Affairs, of the British
+Virgin Islands"; its seal, an image outside the PDF's text layer, adds "BVI
+Financial Services Commission"; no public link to the company's entry is
+recorded).
+Short name: `{ notAssigned }` (both documents give a single registered
+name). Tax identification number: `null` — neither document mentions one,
+and **the owner is to confirm** in writing whether one is assigned; then
+record the number under its name, or `{ notAssigned: <reason> }` with the
+date of the confirmation. No licence (counsel's written opinion →
+`MAINNET_LICENSE_NOT_REQUIRED=true`; record the opinion's reference in
+MAINNET-PLAN.md). Contacts unchanged (the security address equals
+`public/.well-known/security.txt` and both programs' security.txt; a test
+checks all three). Governing law and forum (owner's decision 2026-09-30):
+the laws of the British Virgin Islands and the courts of the British Virgin
+Islands (counsel may replace the forum with arbitration). Still missing (the
+"mainnet legal slots" report lists exactly these): `taxId` (owner), the
+licence or the waiver, the mainnet Terms, Privacy Policy, acceptance-dialog
+summary and counsel's risk warning.
+
+Written for a Serbian operator, now to be put to counsel for a BVI one.
+Whether each of these still applies with a BVI operator, and whether the
+wording changes, is counsel's decision, not engineering's; nothing below
+is a conclusion:
+
+- The purchase risk warning is drafted against ZDI art. 15(2)
+  (`front/lib/legal/risk-warning.ts:4-8`; the article is named in the
+  source, not on the page).
+- The devnet Privacy Policy cites GDPR (`front/app/(marketing)/legal/privacy/devnet-privacy.tsx:109`,
+  `:175`). The controller block names GDPR art. 13 only in a source comment
+  (`front/components/legal/controller-section.tsx:5`); the rendered block
+  cites no law.
+- The personal-data breach step in §11 ("Personal data breach", line 1168
+  of this file) names the Serbian Commissioner and Art. 52 ZZPL as the
+  supervisory authority.
+- §0 Legal gate (line 133 of this file) asks for an opinion on the Serbian
+  Law on Digital Assets and for a licence from the Serbian Securities
+  Commission (Komisija za hartije od vrednosti), or the opinion that none is
+  needed.
+- Texts on the site that assume the Serbian offering regime: the
+  whitepaper-approval badges, written for ZDI art. 17(3) (named in source
+  comments), that read "Approved by / Not approved by the Serbian Securities
+  Commission"
+  (`front/app/marketplace/launchpad/page.tsx:363-373`,
+  `front/app/marketplace/launchpad/[sale]/page.tsx:1162-1197`,
+  `front/app/marketplace/assets/[id]/page.tsx:293`,
+  `front/lib/whitepaper-approval.ts:22`,
+  `front/app/(marketing)/markets/whitepapers/page.tsx:21`); the asset status
+  labels "Securities Commission (Serbia)" (`front/components/asset-detail.tsx:69-73`);
+  the "Serbian SPV, capped at EUR 3 million per SPV per year" risk text
+  (`front/app/(marketing)/risks/page.tsx:132-133`) and the other "Serbian
+  SPV" wording on the marketing and issuer pages (`grep -rn "Serbian SPV"
+  front/app front/components front/lib`).
+- The devnet Terms and the earlier legal analysis assume Serbian law.
+
+When a detail changes (or, for a new company, when its data arrive):
+
+1. Edit `OPERATORS.mainnet` (no secrets: everything there is public in the
    business register and on the licence). Leave `pilotNotice` null. The
    security address must stay equal to `public/.well-known/security.txt` and
-   the programs' embedded security.txt (a test checks the first).
+   the programs' embedded security.txt (a test checks both).
 2. Paste counsel's texts into `mainnet-copy.ts` as `LegalDocument`s; they do
    not repeat the operator, the governing law or the contacts, which the
    pages render from the operator record. `MAINNET_TERMS.version` is the

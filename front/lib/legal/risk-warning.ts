@@ -4,7 +4,10 @@
 // (/portfolio/deals) shows it above the Deposit button. ZDI art. 15(2):
 // before the relationship is established the user must be warned of the risk
 // of partial or total loss and that digital asset transactions are not
-// covered by deposit insurance or investor protection.
+// covered by deposit insurance or investor protection. (The ZDI reference was
+// written for a Serbian operator; the mainnet operator is a BVI company,
+// lib/legal/operator.ts. Which rules the warning must meet is counsel's
+// question, runbook §17.)
 //
 // ONE constant, rendered by components/legal/purchase-risk-warning.tsx. The
 // wording below is engineering's draft of facts the site already states (/risks,

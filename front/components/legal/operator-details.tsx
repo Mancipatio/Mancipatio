@@ -1,6 +1,8 @@
 import type { ReactNode } from "react";
 import {
   hasOperatorEntity,
+  operatorNumbers,
+  operatorShortName,
   type Operator,
   type OperatorLicence,
 } from "@/lib/legal/operator";
@@ -35,15 +37,26 @@ function Mail({ address }: { address: string }) {
   );
 }
 
-/** Registered name, office, MB, PIB and register; null without an entity. */
+/** "registration number (MB)" → "Registration number (MB)": a name as a row label. */
+function rowLabel(name: string): string {
+  return name.charAt(0).toUpperCase() + name.slice(1);
+}
+
+/**
+ * Registered name, office, the registration and tax numbers under the names
+ * the operator's jurisdiction gives them (MB and PIB, a BVI company number),
+ * register, date of incorporation and registered agent; null without an
+ * entity. A detail the jurisdiction does not assign ({ notAssigned }) is not
+ * shown: the registered name stands for a short name the register lacks.
+ */
 export function OperatorCompanyDetails({ operator }: { operator: Operator }) {
   if (!hasOperatorEntity(operator)) return null;
   const rows: Array<[string, ReactNode]> = [];
   if (operator.legalName) rows.push(["Registered name", operator.legalName]);
-  if (operator.shortName) rows.push(["Short name", operator.shortName]);
+  const shortName = operatorShortName(operator);
+  if (shortName) rows.push(["Short name", shortName]);
   if (operator.registeredOffice) rows.push(["Registered office", operator.registeredOffice]);
-  if (operator.registrationNumber) rows.push(["Registration number (MB)", operator.registrationNumber]);
-  if (operator.taxId) rows.push(["Tax ID (PIB)", operator.taxId]);
+  for (const [name, number] of operatorNumbers(operator, "label")) rows.push([rowLabel(name), number]);
   if (operator.register) {
     rows.push([
       "Register",
@@ -54,6 +67,16 @@ export function OperatorCompanyDetails({ operator }: { operator: Operator }) {
       ) : (
         operator.register.name
       ),
+    ]);
+  }
+  if (operator.incorporatedOn) rows.push(["Date of incorporation", operator.incorporatedOn]);
+  if (operator.registeredAgent) {
+    rows.push([
+      "Registered agent",
+      <>
+        {operator.registeredAgent.name}
+        <span className="block">{operator.registeredAgent.address}</span>
+      </>,
     ]);
   }
   return <DetailList rows={rows} />;
