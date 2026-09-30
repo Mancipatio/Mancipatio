@@ -1,11 +1,13 @@
 import { Body, H2, MX_ROUTES, Section, TextLink } from "@/components/mx";
-import { hasOperatorEntity, type Operator } from "@/lib/legal/operator";
+import { hasOperatorEntity, operatorNumbers, type Operator } from "@/lib/legal/operator";
 
 /**
  * The Privacy Policy's controller block (GDPR art. 13(1)(a) and (b): the
  * controller's identity and contact details, and the DPO's when there is
  * one), generated from the operator record so it matches the footer and
- * /legal/company. Without an entity (devnet) it states the pilot notice.
+ * /legal/company: each number under the name its jurisdiction gives it
+ * ("registration number (MB)", "BVI company number"). Without an entity
+ * (devnet) it states the pilot notice.
  */
 export function ControllerSection({ operator }: { operator: Operator }) {
   const { privacy, dpo } = operator.contacts;
@@ -13,9 +15,8 @@ export function ControllerSection({ operator }: { operator: Operator }) {
   if (!entity && !operator.pilotNotice && !privacy) return null;
   const identity = [
     operator.legalName?.trim(),
-    operator.registeredOffice,
-    operator.registrationNumber ? `registration number (MB) ${operator.registrationNumber}` : null,
-    operator.taxId ? `tax ID (PIB) ${operator.taxId}` : null,
+    operator.registeredOffice?.trim(),
+    ...operatorNumbers(operator, "label").map(([name, number]) => `${name} ${number}`),
   ].filter(Boolean);
   return (
     <Section>
