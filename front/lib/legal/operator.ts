@@ -201,10 +201,14 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     // Set `support` if the company has a support mailbox (null keeps the
     // contact form as the support channel).
     contacts: CURRENT_CONTACTS,
-    // ODLUKA PRAVNIKA (counsel decides): the law governing the Terms and the
-    // forum for disputes. A mainnet build is refused until both are set.
-    governingLaw: null,
-    disputeResolution: null,
+    // Owner's decision 2026-09-30: the Terms are governed by the law of the
+    // company's jurisdiction. The forum follows it (the BVI courts); change it
+    // here if counsel prefers arbitration. Once Manci opens beyond invited
+    // clients, users are to contract with the group company of their own
+    // jurisdiction (EU, US, UAE entities in formation), each with its own
+    // record.
+    governingLaw: "the laws of the British Virgin Islands",
+    disputeResolution: "the courts of the British Virgin Islands",
     pilotNotice: null,
   },
 };

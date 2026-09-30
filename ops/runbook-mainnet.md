@@ -2468,7 +2468,7 @@ Devnet, testnet and localnet keep the pilot's texts and are never checked.
 
 | Slot | File | Filled by |
 |---|---|---|
-| Operator: registered name; short name, or `{ notAssigned: <reason> }` where the register has none; registered office; the company registration number and the tax identification number, each as `{ value, label, shortLabel }` under the name its jurisdiction gives it (Serbia: `registration number (MB)` / `MB`, `tax ID (PIB)` / `PIB`; BVI: `BVI company number`), the tax number `{ notAssigned: <reason> }` only once the owner confirms in writing that none is assigned (`null` until then); register; optional registered agent and date of incorporation; governing law, forum for disputes; legal / privacy / security addresses, optional support and DPO addresses (support `null` = the contact form) | `front/lib/legal/operator.ts` (`OPERATORS.mainnet`) | owner (company data), counsel (law and forum) |
+| Operator: registered name; short name, or `{ notAssigned: <reason> }` where the register has none; registered office; the company registration number and the tax identification number, each as `{ value, label, shortLabel }` under the name its jurisdiction gives it (Serbia: `registration number (MB)` / `MB`, `tax ID (PIB)` / `PIB`; BVI: `BVI company number`), the tax number `{ notAssigned: <reason> }` only once the owner confirms in writing that none is assigned (`null` until then); register; optional registered agent and date of incorporation; governing law, forum for disputes; legal / privacy / security addresses, optional support and DPO addresses (support `null` = the contact form) | `front/lib/legal/operator.ts` (`OPERATORS.mainnet`) | owner (company data; governing law and forum: BVI, 2026-09-30) |
 | Licence: authority, decision number and date, licensed services, register entry | same record, `licence` | owner, from the decision |
 | Mainnet Terms, Privacy Policy, acceptance-dialog summary | `front/lib/legal/mainnet-copy.ts` | counsel |
 | Purchase risk warning (drafted against ZDI art. 15(2), i.e. for a Serbian operator; see below) | `front/lib/legal/risk-warning.ts` (`status: "counsel"` once approved) | counsel |
@@ -2503,10 +2503,12 @@ date of the confirmation. No licence (counsel's written opinion →
 `MAINNET_LICENSE_NOT_REQUIRED=true`; record the opinion's reference in
 MAINNET-PLAN.md). Contacts unchanged (the security address equals
 `public/.well-known/security.txt` and both programs' security.txt; a test
-checks all three). Still missing (the "mainnet legal slots" report lists
-exactly these): `taxId` (owner), `governingLaw` and `disputeResolution`
-(counsel), the licence or the waiver, the mainnet Terms, Privacy Policy,
-acceptance-dialog summary and counsel's risk warning.
+checks all three). Governing law and forum (owner's decision 2026-09-30):
+the laws of the British Virgin Islands and the courts of the British Virgin
+Islands (counsel may replace the forum with arbitration). Still missing (the
+"mainnet legal slots" report lists exactly these): `taxId` (owner), the
+licence or the waiver, the mainnet Terms, Privacy Policy, acceptance-dialog
+summary and counsel's risk warning.
 
 Written for a Serbian operator, now to be put to counsel for a BVI one.
 Whether each of these still applies with a BVI operator, and whether the

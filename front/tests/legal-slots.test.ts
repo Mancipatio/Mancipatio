@@ -234,7 +234,7 @@ describe("a jurisdiction-neutral record: Manci International Ltd. (BVI) on mainn
     expect(OPERATORS.devnet.registrationNumber).toBeNull();
   });
 
-  it("passes the operator check except for the owner's tax number and counsel's governing law and forum", () => {
+  it("passes the operator check except for the owner's tax number", () => {
     expect(operatorProblems(BVI)).toEqual([]);
     expect(operatorProblems({ ...BVI, taxId: null, governingLaw: null, disputeResolution: null })).toEqual([
       TAX_ID_UNSET,
@@ -242,12 +242,11 @@ describe("a jurisdiction-neutral record: Manci International Ltd. (BVI) on mainn
       "operator.disputeResolution (court or arbitration) is not set",
     ]);
     // The committed record: the unconfirmed tax number is refused, not
-    // passed over; the rest is at most counsel's two fields.
-    const committed = operatorProblems(OPERATORS.mainnet);
-    expect(committed).toContain(TAX_ID_UNSET);
-    for (const problem of committed) {
-      expect(problem).toMatch(/^operator\.(taxId|governingLaw|disputeResolution) /);
-    }
+    // passed over; it is the only field left (governing law and forum: BVI,
+    // the owner's decision of 2026-09-30).
+    expect(operatorProblems(OPERATORS.mainnet)).toEqual([TAX_ID_UNSET]);
+    expect(OPERATORS.mainnet.governingLaw).toBe("the laws of the British Virgin Islands");
+    expect(OPERATORS.mainnet.disputeResolution).toBe("the courts of the British Virgin Islands");
     // A reason still marked as unconfirmed is refused as well.
     expect(
       operatorProblems({ ...BVI, taxId: { notAssigned: "None appears in the incorporation documents; to be confirmed by the owner." } }),
@@ -450,10 +449,10 @@ describe("mainnetLegalProblems", () => {
         : `[legal slots] a mainnet build is refused until:\n  - ${problems.join("\n  - ")}`,
     );
     // Since 2026-09-30 the company is recorded (Manci International Ltd.,
-    // BVI). What is left: the owner's written confirmation of the tax
-    // identification number (or that none is assigned), and counsel's
-    // governing law and forum, the licence or the written waiver, the Terms,
-    // the Privacy Policy, the dialog summary and the risk warning.
+    // BVI; governing law and forum BVI since the same day). What is left: the
+    // owner's written confirmation of the tax identification number (or that
+    // none is assigned), and counsel's licence opinion or written waiver, the
+    // Terms, the Privacy Policy, the dialog summary and the risk warning.
     const owners = [/^operator\.taxId /];
     const counsels = [
       /^operator\.governingLaw /,
@@ -485,7 +484,8 @@ describe("assertBuildMainnetLegal (next.config.ts)", () => {
     }
     expect(message).toMatch(/^Refusing a mainnet build: the operator and legal slots are not complete/);
     expect(message).toContain(TAX_ID_UNSET);
-    expect(message).toContain("operator.governingLaw is not set");
+    expect(message).not.toContain("operator.governingLaw");
+    expect(message).not.toContain("operator.disputeResolution");
     expect(message).toContain("Terms of Service: counsel's mainnet text has not been added");
   });
 
