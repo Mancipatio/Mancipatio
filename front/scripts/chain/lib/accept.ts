@@ -138,29 +138,46 @@ export function acceptTarget(req: AcceptRequest, map: RoleMap): AcceptTarget {
   }
 }
 
-/** The next bootstrap actions after this one: deployer cycles and the role steps (with their chain:accept op). */
+/**
+ * The next bootstrap actions: the deployer's next cycle, and each role step
+ * with its chain:accept command, marked `now` when planRoleStep accepts it
+ * against the chain as it is, else `later` with the reason (often the
+ * deployer's cycle it waits for).
+ */
 async function nextActions(ctx: ToolContext, state: BootstrapState, map: RoleMap) {
   const plan = await planBootstrap(state, map, { deployer: createNoopSigner(map.deployer), rehearsal: {} }, {
     rpc: ctx.rpc,
     handover: { requested: false, confirmVault: null, whilePaused: false, inventoryBlockers: null },
   });
+  const roleSteps = [];
+  for (const action of plan.awaiting) {
+    const op = roleStepOp(action.id);
+    let blocker: string | null = null;
+    if (op) {
+      try {
+        await planRoleStep(state, map, action.id, createNoopSigner(action.key), ctx.rpc);
+      } catch (error) {
+        if (!(error instanceof ChainPlanError)) throw error;
+        blocker = error.message;
+      }
+    }
+    roleSteps.push({ id: action.id, op, key: action.key, now: op !== null && blocker === null, blocker });
+  }
   const next = {
     deployerSteps: plan.steps.map((step) => step.id),
-    roleSteps: plan.awaiting.map((action) => ({ id: action.id, op: roleStepOp(action.id), key: action.key })),
+    roleSteps,
     waiting: plan.blocked,
     handover: plan.handover,
     stops: plan.stops,
   };
   if (next.deployerSteps.length) ctx.log(`next: chain:bootstrap (deployer) plans ${next.deployerSteps.join(", ")}`);
-  for (const step of next.roleSteps) {
-    ctx.log(
-      step.op
-        ? `next: ${step.id}: CHAIN_ACCEPT_OP=${step.op} CHAIN_ACCEPT_SIGNER=${step.key} npm run chain:accept`
-        : `next: ${step.id}: the super admin ${step.key} on the operator front`,
-    );
+  for (const step of roleSteps) {
+    if (!step.op) ctx.log(`next: ${step.id}: the super admin ${step.key} on the operator front`);
+    else if (step.now) ctx.log(`next: ${step.id}: CHAIN_ACCEPT_OP=${step.op} CHAIN_ACCEPT_SIGNER=${step.key} npm run chain:accept`);
+    else ctx.log(`later: ${step.id} (CHAIN_ACCEPT_OP=${step.op}): ${step.blocker}`);
   }
   for (const wait of next.waiting) ctx.log(`waiting: ${wait.id}: ${wait.reason}`);
-  if (!next.deployerSteps.length && !next.roleSteps.length && next.handover.reason) ctx.log(`next: S7 (handover): ${next.handover.reason}`);
+  if (!next.deployerSteps.length && !roleSteps.length && next.handover.reason) ctx.log(`next: S7 (handover): ${next.handover.reason}`);
   return next;
 }
 

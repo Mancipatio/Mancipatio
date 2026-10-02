@@ -158,8 +158,14 @@ describe("chain:accept: the bootstrap order on the CLI (runbook §5)", () => {
       expect(text).toContain(`CHAIN_ACCEPT_OP=accept-kyc-registry-authority CHAIN_ACCEPT_SIGNER=${w.company}`);
 
       // A3: the new Admin's own key (here its keypair file).
-      const a3 = await send(w, op("add-admin", admin), { CHAIN_KEYPAIR: w.pairs.admin.path });
+      const a3Lines: string[] = [];
+      const a3 = await send(w, op("add-admin", admin), { CHAIN_KEYPAIR: w.pairs.admin.path }, { lines: a3Lines });
       expect(a3.error ?? null).toBeNull();
+      // X3 and X2 can run now; X1 only after the deployer's S5 (cycle 2).
+      const a3Text = a3Lines.join("\n");
+      expect(a3Text).toContain("next: chain:bootstrap (deployer) plans S5");
+      expect(a3Text).toContain(`next: X3: CHAIN_ACCEPT_OP=accept-blocklist-authority CHAIN_ACCEPT_SIGNER=${w.company} npm run chain:accept`);
+      expect(a3Text).toMatch(/later: X1 \(CHAIN_ACCEPT_OP=accept-platform-admin\): X1 cannot run: platform\.proposed=.* \(no live super admin proposal \(S5 of chain:bootstrap cycle 2 proposes it\)\)/);
       expect(a3.status).toBe("completed");
       expect(a3.step).toBe(`A3:${admin}`);
       expect((a3.steps as { id: string; outcome: string; postCheck: boolean }[])[0]).toMatchObject({ id: `A3:${admin}`, outcome: "finalized", postCheck: true });
@@ -191,7 +197,7 @@ describe("chain:accept: the bootstrap order on the CLI (runbook §5)", () => {
       expect(s6early.error).toMatch(/S6 waits for X1, S5c: each of them lands first/);
       const x1 = await send(w, op("accept-platform-admin", w.company), { CHAIN_SIGNER: "usb://ledger?key=0" }, { ledger: fakeLedger(w.pairs.superAdmin.path, []) });
       expect(x1.error ?? null).toBeNull();
-      expect((x1.next as { roleSteps: { id: string; op: string }[] }).roleSteps).toEqual([{ id: "S5c", op: "close-bootstrap-window", key: w.company }]);
+      expect((x1.next as { roleSteps: unknown[] }).roleSteps).toEqual([{ id: "S5c", op: "close-bootstrap-window", key: w.company, now: true, blocker: null }]);
       state = await probeBootstrapState(rpcFor(w), w.map);
       expect(state.platform?.admin).toBe(w.company);
       expect(state.adminRecords[w.keys.deployer]).toBe(false);
