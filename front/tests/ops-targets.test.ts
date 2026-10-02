@@ -22,6 +22,11 @@ const FRONT = process.cwd();
 const REAL_TARGETS = JSON.parse(readFileSync(join(FRONT, "scripts/ops/targets.json"), "utf8"));
 const DEVNET_REF = "gvnckuzmuwozlcohtuhx";
 const DEVNET_HOST = "aws-0-eu-west-1.pooler.supabase.com";
+/** The site origins recorded for the domain cutover (runbook §18 C and D,
+ *  owner's decision 2026-10-02): mainnet takes www.manci.io, devnet moves to
+ *  devnet.manci.io. */
+const DEVNET_ORIGIN = "https://devnet.manci.io";
+const MAINNET_ORIGIN = "https://www.manci.io";
 const MAINNET_REF = "mainnetprojectref001";
 const MAINNET_HOST = "aws-1-eu-west-1.pooler.supabase.com";
 const AGE_KEY = `age1${"q".repeat(58)}`;
@@ -116,19 +121,22 @@ const named = (run: Run, tool: string) => run.calls.filter((call) => call[0] ===
 const after = (call: string[], flag: string) => call[call.indexOf(flag) + 1];
 
 describe("targets.json and target.mjs", () => {
-  it("the tracked file is valid: unique refs and origins, session pooler port, mainnet project recorded without a site origin yet", () => {
+  it("the tracked file is valid: unique refs and origins, session pooler port, mainnet on www.manci.io and devnet on devnet.manci.io", () => {
     expect(() => loadTargets()).not.toThrow();
     expect(Object.keys(REAL_TARGETS).sort()).toEqual(["devnet", "mainnet"]);
     expect(REAL_TARGETS.devnet).toEqual({
       network: "devnet", projectRef: DEVNET_REF, poolerHost: DEVNET_HOST, poolerPort: 5432,
-      siteOrigin: "https://www.manci.io", backupAgeRecipient: null,
+      siteOrigin: DEVNET_ORIGIN, backupAgeRecipient: null,
     });
     // manci-mainnet (Manci International Ltd. organization, eu-west-1), recorded
-    // 2026-09-30. siteOrigin stays null until devnet moves to devnet.manci.io
-    // (the two targets may not share an origin).
+    // 2026-09-30; its site origin since 2026-10-02 (runbook §18 D), with devnet
+    // moved off it (the two targets may not share an origin, §18 C).
     expect(REAL_TARGETS.mainnet).toMatchObject({
-      network: "mainnet", projectRef: "nyltnheatubqmtdanlrr", poolerHost: MAINNET_HOST, siteOrigin: null,
+      network: "mainnet", projectRef: "nyltnheatubqmtdanlrr", poolerHost: MAINNET_HOST, siteOrigin: MAINNET_ORIGIN,
     });
+    // The scheduler installs take the origin from here (db.sh target_origin):
+    // the devnet jobs must never be pointed at the mainnet site.
+    expect(REAL_TARGETS.devnet.siteOrigin).not.toBe(REAL_TARGETS.mainnet.siteOrigin);
   });
 
   it.each([
@@ -148,12 +156,12 @@ describe("targets.json and target.mjs", () => {
 
   it("resolves a target, refusing unknown, unconfigured, and mainnet without MANCI_ALLOW_MAINNET=1", () => {
     expect(targetLine(resolveTarget(REAL_TARGETS, "devnet", {})))
-      .toBe(`devnet|${DEVNET_REF}|${DEVNET_HOST}|5432|https://www.manci.io`);
+      .toBe(`devnet|${DEVNET_REF}|${DEVNET_HOST}|5432|${DEVNET_ORIGIN}`);
     expect(() => resolveTarget(REAL_TARGETS, "", {})).toThrow(/no default/);
     expect(() => resolveTarget(REAL_TARGETS, "staging", {})).toThrow(/Unknown target "staging"/);
     expect(() => resolveTarget(REAL_TARGETS, "mainnet", {})).toThrow(/MANCI_ALLOW_MAINNET=1/);
     expect(targetLine(resolveTarget(REAL_TARGETS, "mainnet", { MANCI_ALLOW_MAINNET: "1" })))
-      .toBe(`mainnet|nyltnheatubqmtdanlrr|${MAINNET_HOST}|5432|-`);
+      .toBe(`mainnet|nyltnheatubqmtdanlrr|${MAINNET_HOST}|5432|${MAINNET_ORIGIN}`);
     const unconfigured = { ...REAL_TARGETS, mainnet: { ...REAL_TARGETS.mainnet, projectRef: null, poolerHost: null } };
     expect(() => resolveTarget(unconfigured, "mainnet", { MANCI_ALLOW_MAINNET: "1" })).toThrow(/not configured yet/);
     expect(() => resolveTarget(CONFIGURED, "mainnet", { MANCI_ALLOW_MAINNET: "true" })).toThrow(TargetError);
@@ -168,14 +176,14 @@ describe("targets.json and target.mjs", () => {
         encoding: "utf8", env: { NODE_ENV: "test", PATH: dirname(process.execPath), ...env },
       });
     const ok = cli(["devnet"]);
-    expect([ok.status, ok.stdout]).toEqual([0, `devnet|${DEVNET_REF}|${DEVNET_HOST}|5432|https://www.manci.io\n`]);
+    expect([ok.status, ok.stdout]).toEqual([0, `devnet|${DEVNET_REF}|${DEVNET_HOST}|5432|${DEVNET_ORIGIN}\n`]);
     expect(cli(["devnet", "--age-recipient"]).stdout).toBe("-\n");
     const mainnet = cli(["mainnet"]);
     expect(mainnet.status).toBe(1);
     expect(mainnet.stdout).toBe("");
     expect(mainnet.stderr).toMatch(/MANCI_ALLOW_MAINNET=1/);
     expect(cli(["mainnet"], { MANCI_ALLOW_MAINNET: "1" })).toMatchObject({
-      status: 0, stdout: `mainnet|nyltnheatubqmtdanlrr|${MAINNET_HOST}|5432|-\n`,
+      status: 0, stdout: `mainnet|nyltnheatubqmtdanlrr|${MAINNET_HOST}|5432|${MAINNET_ORIGIN}\n`,
     });
     expect(cli([]).status).toBe(2);
     expect(cli(["devnet", "extra"]).status).toBe(2);
@@ -226,7 +234,7 @@ describe("scripts/db.sh", () => {
     expect(after(call, "-U")).toBe(`postgres.${DEVNET_REF}`);
     expect(after(call, "-d")).toBe("postgres");
     expect(call).toContain("ON_ERROR_STOP=1");
-    for (const v of ["target_network=devnet", `target_ref=${DEVNET_REF}`, "target_origin=https://www.manci.io", "bootstrap=0"])
+    for (const v of ["target_network=devnet", `target_ref=${DEVNET_REF}`, `target_origin=${DEVNET_ORIGIN}`, "bootstrap=0"])
       expect(call).toContain(v);
     const files = call.flatMap((arg, i) => (call[i - 1] === "-f" ? [arg] : []));
     expect(files).toEqual(["scripts/ops/assert-target.sql", "supabase/migrations/0071_network_guard.sql"]);
@@ -556,12 +564,14 @@ describe("scripts/ops/supabase.sh", () => {
 
 describe("live operator runners (deployment smoke, index reconcile)", () => {
   it("smoke: explicit network, the target's origin, mainnet only with the allow flag", () => {
-    expect(smokeTarget({ MANCIPATIO_LIVE_SMOKE: "devnet" })).toEqual({ network: "devnet", origin: "https://www.manci.io" });
+    expect(smokeTarget({ MANCIPATIO_LIVE_SMOKE: "devnet" })).toEqual({ network: "devnet", origin: DEVNET_ORIGIN });
     expect(() => smokeTarget({})).toThrow(/Explicit MANCIPATIO_LIVE_SMOKE/);
     expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "testnet" })).toThrow(/Explicit/);
     expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet" })).toThrow(/MANCI_ALLOW_MAINNET=1/);
-    // The tracked mainnet target has no origin yet.
-    expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" })).toThrow(/no siteOrigin for mainnet/);
+    // The tracked mainnet target's origin (runbook §18 D); a target without one is refused.
+    expect(smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" })).toEqual({ network: "mainnet", origin: MAINNET_ORIGIN });
+    const noOrigin = { ...REAL_TARGETS, mainnet: { ...REAL_TARGETS.mainnet, siteOrigin: null } };
+    expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" }, noOrigin)).toThrow(/no siteOrigin for mainnet/);
     expect(smokeTarget({ MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" }, CONFIGURED))
       .toEqual({ network: "mainnet", origin: "https://mainnet.manci.test" });
     expect(otherNetwork("devnet")).toBe("mainnet");
@@ -571,7 +581,9 @@ describe("live operator runners (deployment smoke, index reconcile)", () => {
   it("smoke: SMOKE_ORIGIN may name a preview, never another target's origin or a non-https URL", () => {
     const env = { MANCIPATIO_LIVE_SMOKE: "mainnet", MANCI_ALLOW_MAINNET: "1" };
     expect(smokeTarget({ ...env, SMOKE_ORIGIN: "https://manci-git-x.vercel.app" }, CONFIGURED).origin).toBe("https://manci-git-x.vercel.app");
-    expect(() => smokeTarget({ ...env, SMOKE_ORIGIN: "https://www.manci.io" }, CONFIGURED)).toThrow(/another target's origin/);
+    expect(() => smokeTarget({ ...env, SMOKE_ORIGIN: DEVNET_ORIGIN }, CONFIGURED)).toThrow(/another target's origin/);
+    // With the tracked targets: a devnet smoke can never be pointed at the mainnet site.
+    expect(() => smokeTarget({ MANCIPATIO_LIVE_SMOKE: "devnet", SMOKE_ORIGIN: MAINNET_ORIGIN })).toThrow(/another target's origin/);
     for (const bad of ["http://preview.manci.test", "https://preview.manci.test/path", "https://preview.manci.test:8443"])
       expect(() => smokeTarget({ ...env, SMOKE_ORIGIN: bad }, CONFIGURED), bad).toThrow(/https:\/\/<host>/);
   });

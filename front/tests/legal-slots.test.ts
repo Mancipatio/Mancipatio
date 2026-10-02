@@ -39,7 +39,7 @@ import {
   mainnetLegalProblems,
   type MainnetLegalSlots,
 } from "@/lib/legal/readiness";
-import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";
+import { MAINNET_PRIVACY, MAINNET_TERMS, MAINNET_TOS_GATE_POINTS } from "@/lib/legal/mainnet-copy";
 import { PURCHASE_RISK_WARNING, NO_INVESTOR_PROTECTION } from "@/lib/legal/risk-warning";
 import {
   SECURITY_AUDIT,
@@ -47,11 +47,7 @@ import {
   securityReviewFact,
   securityReviewStatement,
 } from "@/lib/legal/audit";
-import {
-  DEVNET_TOS_VERSION,
-  MAINNET_TOS_UNPUBLISHED,
-  tosVersionFor,
-} from "@/lib/tos-version";
+import { DEVNET_TOS_VERSION, tosVersionFor } from "@/lib/tos-version";
 
 const BUILD = "phase-production-build";
 const DEV = "phase-development-server";
@@ -81,16 +77,13 @@ const COMPANY: Operator = {
   pilotNotice: null,
 };
 
-/** The committed mainnet record (Manci International Ltd., BVI), with an
- *  invented governing law and forum where counsel has not decided yet, and
- *  an invented "not assigned" tax number while the owner has not confirmed
- *  one (the committed value is null until then). */
-const BVI: Operator = {
-  ...OPERATORS.mainnet,
-  taxId: OPERATORS.mainnet.taxId ?? { notAssigned: "Stated as not assigned for this test only (test value)." },
-  governingLaw: OPERATORS.mainnet.governingLaw ?? "the law of Example Land (test value)",
-  disputeResolution: OPERATORS.mainnet.disputeResolution ?? "the courts of Example Land (test value)",
-};
+/** The committed mainnet record (Manci International Ltd., BVI), complete
+ *  since 2026-10-02: the tax number is stated as not assigned on the owner's
+ *  written confirmation of that day. */
+const BVI: Operator = { ...OPERATORS.mainnet };
+
+/** The approval date of counsel's mainnet texts (owner's statement, 2026-10-02). */
+const APPROVED = "2026-10-02";
 
 const TAX_ID_UNSET = "operator.taxId (tax identification number, or { notAssigned: <reason> }) is not set";
 
@@ -224,9 +217,11 @@ describe("a jurisdiction-neutral record: Manci International Ltd. (BVI) on mainn
     expect(mainnet.register).toEqual({ name: "Registrar of Corporate Affairs, BVI Financial Services Commission", url: null });
     expect(mainnet.registeredAgent?.name).toBe("SHRM Trustees (BVI) Limited");
     expect(mainnet.incorporatedOn).toBe("2026-09-28");
-    // Not in the certificate or the memorandum: null (refused by a mainnet
-    // build) until the owner confirms in writing (runbook §17).
-    expect(mainnet.taxId).toBeNull();
+    // Not in the certificate or the memorandum: stated as not assigned, with
+    // the reason and the date of the owner's written confirmation (runbook §17).
+    expect(mainnet.taxId).toEqual({
+      notAssigned: expect.stringMatching(/^BVI business companies are not assigned a tax identification number;.*confirmed in writing on 2026-10-02/),
+    });
     expect(mainnet.shortName).toEqual({ notAssigned: expect.stringMatching(/\S/) });
     expect(mainnet.licence).toBeNull();
     expect(mainnet.pilotNotice).toBeNull();
@@ -234,17 +229,17 @@ describe("a jurisdiction-neutral record: Manci International Ltd. (BVI) on mainn
     expect(OPERATORS.devnet.registrationNumber).toBeNull();
   });
 
-  it("passes the operator check except for the owner's tax number", () => {
+  it("passes the operator check: complete since the owner confirmed the tax number (2026-10-02)", () => {
     expect(operatorProblems(BVI)).toEqual([]);
     expect(operatorProblems({ ...BVI, taxId: null, governingLaw: null, disputeResolution: null })).toEqual([
       TAX_ID_UNSET,
       "operator.governingLaw is not set",
       "operator.disputeResolution (court or arbitration) is not set",
     ]);
-    // The committed record: the unconfirmed tax number is refused, not
-    // passed over; it is the only field left (governing law and forum: BVI,
-    // the owner's decision of 2026-09-30).
-    expect(operatorProblems(OPERATORS.mainnet)).toEqual([TAX_ID_UNSET]);
+    // The committed record is complete: the tax number stated as not
+    // assigned (owner, 2026-10-02); governing law and forum BVI (owner,
+    // 2026-09-30).
+    expect(operatorProblems(OPERATORS.mainnet)).toEqual([]);
     expect(OPERATORS.mainnet.governingLaw).toBe("the laws of the British Virgin Islands");
     expect(OPERATORS.mainnet.disputeResolution).toBe("the courts of the British Virgin Islands");
     // A reason still marked as unconfirmed is refused as well.
@@ -436,57 +431,48 @@ describe("mainnetLegalProblems", () => {
     expect(mainnetLegalProblems({}, { ...READY, tosGatePoints: ["Assets here have no economic value."] })).toEqual([
       "Terms acceptance dialog: contains wording that must not reach mainnet (no economic value)",
     ]);
-    expect(mainnetLegalProblems({}, { ...READY, riskWarning: PURCHASE_RISK_WARNING })).toEqual([
+    expect(mainnetLegalProblems({}, { ...READY, riskWarning: { ...PURCHASE_RISK_WARNING, status: "draft" } })).toEqual([
       expect.stringMatching(/^Purchase risk warning: still engineering's draft/),
     ]);
   });
 
   it("mainnet legal slots report (what a mainnet build refuses today)", () => {
-    const problems = mainnetLegalProblems({}, MAINNET_LEGAL_SLOTS);
+    // No licence is recorded, on counsel's written opinion that none is
+    // needed: a mainnet build sets MAINNET_LICENSE_NOT_REQUIRED=true.
+    const problems = mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, MAINNET_LEGAL_SLOTS);
     console.info(
       problems.length === 0
-        ? "[legal slots] complete: a mainnet build is not refused by lib/legal/"
+        ? `[legal slots] complete: a mainnet build with ${MAINNET_LICENSE_WAIVER}=true is not refused by lib/legal/`
         : `[legal slots] a mainnet build is refused until:\n  - ${problems.join("\n  - ")}`,
     );
-    // Since 2026-09-30 the company is recorded (Manci International Ltd.,
-    // BVI; governing law and forum BVI since the same day). What is left: the
-    // owner's written confirmation of the tax identification number (or that
-    // none is assigned), and counsel's licence opinion or written waiver, the
-    // Terms, the Privacy Policy, the dialog summary and the risk warning.
-    const owners = [/^operator\.taxId /];
-    const counsels = [
-      /^operator\.governingLaw /,
-      /^operator\.disputeResolution /,
-      /^operator\.licence is not recorded/,
-      /^Terms of Service: /,
-      /^Privacy Policy: /,
-      /^Terms acceptance dialog: /,
-      /^Purchase risk warning: /,
-    ];
-    for (const problem of problems) {
-      expect([...owners, ...counsels].some((pattern) => pattern.test(problem)), problem).toBe(true);
-    }
-    // The owner's open decision is listed while the committed value is null.
-    expect(problems).toContain(TAX_ID_UNSET);
-    // With counsel's waiver the licence is no longer listed.
-    const waived = mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, MAINNET_LEGAL_SLOTS);
-    expect(waived.filter((problem) => problem.startsWith("operator.licence"))).toEqual([]);
+    // Complete since 2026-10-02: the company (Manci International Ltd., BVI,
+    // recorded 2026-09-30, its tax number stated as not assigned on the
+    // owner's written confirmation of 2026-10-02) and counsel's Terms, Privacy
+    // Policy, dialog summary and risk warning (approved, per the owner,
+    // 2026-10-02).
+    expect(problems).toEqual([]);
+    // Without counsel's waiver the licence is the one refusal.
+    expect(mainnetLegalProblems({}, MAINNET_LEGAL_SLOTS)).toEqual([
+      expect.stringMatching(/^operator\.licence is not recorded/),
+    ]);
   });
 });
 
 describe("assertBuildMainnetLegal (next.config.ts)", () => {
-  it("refuses a mainnet production build with the slots committed today and lists what is missing", () => {
+  it("passes a mainnet production build with the slots committed today and counsel's licence waiver, refuses it without", () => {
+    const env = { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "true" };
+    expect(() => assertBuildMainnetLegal(BUILD, { ...env, [MAINNET_LICENSE_WAIVER]: "true" })).not.toThrow();
     let message = "";
     try {
-      assertBuildMainnetLegal(BUILD, { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "true" });
+      assertBuildMainnetLegal(BUILD, env);
     } catch (error) {
       message = error instanceof Error ? error.message : String(error);
     }
     expect(message).toMatch(/^Refusing a mainnet build: the operator and legal slots are not complete/);
-    expect(message).toContain(TAX_ID_UNSET);
-    expect(message).not.toContain("operator.governingLaw");
-    expect(message).not.toContain("operator.disputeResolution");
-    expect(message).toContain("Terms of Service: counsel's mainnet text has not been added");
+    expect(message).toContain("operator.licence is not recorded");
+    for (const settled of ["operator.taxId", "operator.governingLaw", "operator.disputeResolution", "Terms of Service:", "Privacy Policy:", "Terms acceptance dialog:", "Purchase risk warning:"]) {
+      expect(message, settled).not.toContain(settled);
+    }
   });
 
   it("passes a mainnet build with complete slots, and never checks other networks or phases", () => {
@@ -531,13 +517,137 @@ describe("next.config.ts runs the legal guard (review 8.1 #9)", () => {
 });
 
 describe("Terms version per network", () => {
-  it("keeps the devnet version and takes counsel's version on mainnet", () => {
+  it("keeps the devnet version and takes counsel's published version on mainnet (2026-10-02)", () => {
     expect(DEVNET_TOS_VERSION).toBe("2026-07-18");
     for (const network of ["devnet", "testnet", "localnet"] as const) {
       expect(tosVersionFor(network)).toBe(DEVNET_TOS_VERSION);
     }
-    expect(tosVersionFor("mainnet")).toBe(MAINNET_TERMS?.version ?? MAINNET_TOS_UNPUBLISHED);
+    expect(MAINNET_TERMS?.version).toBe(APPROVED);
+    expect(MAINNET_TERMS?.lastUpdated).toBe(APPROVED);
+    expect(tosVersionFor("mainnet")).toBe(APPROVED);
   });
+
+  describe("the version a build asks wallets to accept (TOS_VERSION, the acceptance dialog's v<version>)", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    it("is counsel's 2026-10-02 on a mainnet build and the pilot's on devnet", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      vi.resetModules();
+      expect((await import("@/lib/tos-version")).TOS_VERSION).toBe(APPROVED);
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
+      vi.resetModules();
+      expect((await import("@/lib/tos-version")).TOS_VERSION).toBe(DEVNET_TOS_VERSION);
+      // The dialog shows that version and, on mainnet, counsel's summary.
+      const gate = readFileSync(join(process.cwd(), "components/tos-gate.tsx"), "utf8");
+      expect(gate).toContain("(MAINNET_TOS_GATE_POINTS ?? [])");
+      expect(gate).toContain("Terms of Service (v{TOS_VERSION})");
+    });
+  });
+});
+
+/** The visible text of rendered markup: tags dropped, entities decoded. */
+function visibleText(html: string): string {
+  return html
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#x27;/g, "'")
+    .replace(/&quot;/g, '"')
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/\s+/g, " ");
+}
+
+describe("counsel's mainnet texts (approved 2026-10-02, owner's statement)", () => {
+  const NEW_CLAUSE_11 =
+    "wallet signatures for administrative actions; our company's hardware wallet, which holds the super administrator, " +
+    "KYC authority and Blocklist Authority roles and the treasury; and a multisig, with a separate hardware wallet as its " +
+    "member, that holds the authority to upgrade the on-chain programs. A second administrator uses a software wallet.";
+
+  it("are in the slots, dated 2026-10-02, complete and free of test-network wording", () => {
+    expect(MAINNET_TERMS).not.toBeNull();
+    expect(MAINNET_PRIVACY).not.toBeNull();
+    expect(legalDocumentProblems("Terms of Service", MAINNET_TERMS)).toEqual([]);
+    expect(legalDocumentProblems("Privacy Policy", MAINNET_PRIVACY)).toEqual([]);
+    expect(MAINNET_TERMS!.clauses.map((c) => c.title)).toHaveLength(21);
+    expect(MAINNET_TERMS!.clauses[0].title).toBe("1. Acceptance and scope");
+    expect(MAINNET_TERMS!.clauses[20].title).toBe("21. General");
+    expect(MAINNET_PRIVACY!.clauses).toHaveLength(14);
+    expect([MAINNET_PRIVACY!.version, MAINNET_PRIVACY!.lastUpdated]).toEqual([APPROVED, APPROVED]);
+    expect(MAINNET_TOS_GATE_POINTS).toHaveLength(5);
+    expect(forbiddenMainnetPhrases(MAINNET_TOS_GATE_POINTS!.join("\n"))).toEqual([]);
+    // The Terms' risk clause spells out the constant the risk warning uses.
+    const risks = MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!;
+    expect(risks.blocks).toContainEqual({ kind: "paragraph", text: NO_INVESTOR_PROTECTION });
+  });
+
+  it("Privacy clause 11 names which keys a hardware wallet holds, and only that changed", () => {
+    const security = MAINNET_PRIVACY!.clauses.find((c) => c.title === "11. Security")!;
+    expect(security.blocks).toHaveLength(2);
+    const first = security.blocks[0];
+    expect(first.kind).toBe("paragraph");
+    const text = first.kind === "paragraph" ? first.text : "";
+    expect(text.startsWith("We protect personal data with technical and organisational measures appropriate to the risk, including: encrypted connections;")).toBe(true);
+    expect(text.endsWith(NEW_CLAUSE_11)).toBe(true);
+    expect(text).not.toContain("hardware wallets for the keys that control the platform");
+  });
+
+  it("the purchase risk warning is counsel's", () => {
+    expect(PURCHASE_RISK_WARNING.status).toBe("counsel");
+    expect(PURCHASE_RISK_WARNING.points).toHaveLength(10);
+    expect(PURCHASE_RISK_WARNING.points[1]).toBe(NO_INVESTOR_PROTECTION);
+    expect(forbiddenMainnetPhrases([PURCHASE_RISK_WARNING.title, ...PURCHASE_RISK_WARNING.points, PURCHASE_RISK_WARNING.acknowledgement].join("\n"))).toEqual([]);
+  });
+
+  describe("pages of a mainnet build render them (NEXT_PUBLIC_NETWORK=mainnet)", () => {
+    afterEach(() => {
+      vi.unstubAllEnvs();
+      vi.resetModules();
+    });
+
+    it("/legal/terms: the operator block, counsel's 21 clauses dated 2026-10-02, governing law and the legal contact", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      vi.resetModules();
+      const { default: TermsPage } = await import("@/app/(marketing)/legal/terms/page");
+      const text = visibleText(renderToStaticMarkup(createElement(TermsPage)));
+      expect(text).toContain(`Last updated: ${APPROVED}`);
+      expect(text).toContain(MAINNET_TERMS!.lede!);
+      expect(text).toContain("Manci is operated by Manci International Ltd., registered office Trinity Chambers");
+      for (const clause of MAINNET_TERMS!.clauses) expect(text, clause.title).toContain(clause.title);
+      expect(text).toContain("These Terms are governed by the laws of the British Virgin Islands.");
+      expect(text).toContain("Disputes are resolved by the courts of the British Virgin Islands.");
+      expect(text).toContain("legal@mancipatio.io");
+      expect(text).not.toContain("This document has not been published yet.");
+      expect(forbiddenMainnetPhrases(text)).toEqual([]);
+      expect(text).not.toMatch(SERBIAN_LABELS);
+    });
+
+    it("/legal/privacy: the controller block and counsel's 14 clauses dated 2026-10-02, clause 11 as narrowed", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      vi.resetModules();
+      const { default: PrivacyPage } = await import("@/app/(marketing)/legal/privacy/page");
+      const text = visibleText(renderToStaticMarkup(createElement(PrivacyPage)));
+      expect(text).toContain(`Last updated: ${APPROVED}`);
+      expect(text).toContain("Controller of your personal data: Manci International Ltd.");
+      for (const clause of MAINNET_PRIVACY!.clauses) expect(text, clause.title).toContain(clause.title);
+      expect(text).toContain(NEW_CLAUSE_11);
+      expect(text).not.toContain("This document has not been published yet.");
+      expect(forbiddenMainnetPhrases(text)).toEqual([]);
+      expect(text).not.toMatch(SERBIAN_LABELS);
+    });
+
+    it("devnet keeps the pilot's texts", async () => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
+      vi.resetModules();
+      const { default: TermsPage } = await import("@/app/(marketing)/legal/terms/page");
+      const { default: PrivacyPage } = await import("@/app/(marketing)/legal/privacy/page");
+      expect(visibleText(renderToStaticMarkup(createElement(TermsPage)))).not.toContain("2. The closed pilot");
+      expect(visibleText(renderToStaticMarkup(createElement(PrivacyPage)))).not.toContain(NEW_CLAUSE_11);
+    });
+  });
+
 });
 
 describe("program security and risk wording", () => {

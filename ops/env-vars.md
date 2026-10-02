@@ -19,7 +19,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | Variable | Kind | Mainnet | Devnet | When unset | Read by |
 |---|---|---|---|---|---|
 | `NEXT_PUBLIC_NETWORK` | Public, build | `mainnet` (guard) | `devnet` | Vercel builds refuse; any production build refuses when the RPC URL names mainnet; locally sniffed from the RPC URL, else devnet | `lib/network.ts` |
-| `NEXT_PUBLIC_SITE_URL` | Public, build | https origin of the site (guard `site-url`) | `https://www.manci.io` | Email sign-in, account emails and links answer 503 in production | `lib/server/account-origin.ts`, alert links |
+| `NEXT_PUBLIC_SITE_URL` | Public, build | `https://www.manci.io` (guard `site-url`: an https origin; `mainnet.siteOrigin` in `scripts/ops/targets.json`) | `https://devnet.manci.io` once devnet moves (runbook §18 B; `https://www.manci.io` until then) | Email sign-in, account emails and links answer 503 in production | `lib/server/account-origin.ts`, alert links |
 | `NEXT_PUBLIC_SUPABASE_URL` | Public, build | `https://<mainnet ref>.supabase.co` (guard; ref recorded in `SUPABASE_PROJECT_REFS` and `scripts/ops/targets.json`) | devnet project | No database | `lib/supabase*.ts` |
 | `NEXT_PUBLIC_SUPABASE_ANON_KEY` | Public, build | `sb_publishable_…` (guard) | publishable key | No browser database reads | `lib/supabase.ts` |
 | `NEXT_PUBLIC_KYC_REGISTRY` | Public, build | platform KYC registry address (guard) | registry address | Mainnet and Vercel production refuse; else scan fallback | `lib/kyc-registry-pin.ts` |

@@ -9,7 +9,13 @@ import { applyMigrations, TEST_PROJECT_REFS } from "./helpers/migrations";
 // worker target it uses. pg_cron, Vault and the http extension are modelled,
 // as in alarm-scheduler.postgres.test.ts; migration 0078 is stubbed by the two
 // objects the installer checks for.
-const ORIGIN = "https://www.manci.io";
+// The site origins the installs take from scripts/ops/targets.json (db.sh
+// passes the target's siteOrigin as target_origin): devnet.manci.io and, for
+// mainnet, www.manci.io since the domain cutover (runbook §18 C and D).
+const TARGETS = JSON.parse(readFileSync(join(process.cwd(), "scripts/ops/targets.json"), "utf8")) as Record<"devnet" | "mainnet", { siteOrigin: string }>;
+const ORIGIN = TARGETS.devnet.siteOrigin;
+/** Devnet's origin before the cutover, the mainnet site's since (runbook §18). */
+const PRE_CUTOVER_ORIGIN = TARGETS.mainnet.siteOrigin;
 const read = (f: string) => readFileSync(join(process.cwd(), f), "utf8").replace(/^create extension .*;$/gm, "");
 const ASSERT = readFileSync(join(process.cwd(), "scripts/ops/assert-target.sql"), "utf8");
 const RETRY = read("scripts/ops/retry-scheduler.sql");
@@ -78,6 +84,11 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("sanctions schedul
   });
 
   it("installs one disabled daily job on the single-row worker target, and refuses another origin or network", () => {
+    // A devnet project whose retry scheduler still calls the pre-cutover
+    // origin: the sanctions install with the new origin is refused until the retry
+    // scheduler is reinstalled first (runbook §18 C).
+    db.query(ASSERT + "\n" + RETRY, vars("devnet", PRE_CUTOVER_ORIGIN));
+    expect(() => db.query(ASSERT + "\n" + SANCTIONS, vars("devnet", ORIGIN))).toThrow(/is not the target's siteOrigin/);
     db.query(ASSERT + "\n" + RETRY, vars("devnet", ORIGIN));
     db.query(ASSERT + "\n" + SANCTIONS, vars("devnet", ORIGIN));
     expect(db.query("select jobname||'|'||schedule||'|'||active from cron.job where jobname like 'mancipatio-sanctions-%'"))

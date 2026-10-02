@@ -108,7 +108,7 @@ export type Operator = {
   registrationNumber: RegisteredNumber | null;
   /** The tax identification number under its name, or { notAssigned } where
    *  the owner has confirmed that none is assigned to the company (null until
-   *  then). */
+   *  then; Manci International Ltd.: { notAssigned }, confirmed 2026-10-02). */
   taxId: RegisteredNumber | NotAssigned | null;
   /** The register the company is entered in, with a link to the entry when
    *  there is a public one per company. */
@@ -163,9 +163,9 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
   // shares (BVI Business Companies Act, 2004), recorded on 2026-09-30 from
   // its Certificate of Incorporation (name, company number, date, register)
   // and its Memorandum of Association (§3 registered office, §4 registered
-  // agent). The tax number is not in either document and waits for the
-  // owner. A mainnet build is refused until every required field is set
-  // (lib/legal/readiness.ts).
+  // agent); the tax number, which neither document mentions, on the owner's
+  // written confirmation of 2026-10-02. A mainnet build is refused unless
+  // every required field is set (lib/legal/readiness.ts).
   mainnet: {
     brand: "Manci",
     legalName: "Manci International Ltd.",
@@ -176,13 +176,15 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     // may move it, and this line then changes with it).
     registeredOffice: "Trinity Chambers, PO Box 4301, Road Town, Tortola, British Virgin Islands",
     registrationNumber: { value: "2219023", label: "BVI company number", shortLabel: "BVI company number" },
-    // VLASNIK POTVRĐUJE (the owner is to confirm): whether the company has a
-    // tax identification number. Neither the Certificate of Incorporation nor
-    // the Memorandum mentions one, which does not by itself show that none
-    // is assigned. null (a mainnet build refuses it) until the owner confirms
-    // in writing; then the number under its name, or { notAssigned: "<the
-    // confirmed reason>, confirmed by the owner on yyyy-mm-dd" }.
-    taxId: null,
+    // No tax identification number: neither the Certificate of
+    // Incorporation nor the Memorandum mentions one, and the owner confirmed
+    // in writing on 2026-10-02 that the company has none (the BVI assigns
+    // none to its business companies). If one is ever assigned, record it
+    // under its name ({ value, label, shortLabel }); the pages then show it.
+    taxId: {
+      notAssigned:
+        "BVI business companies are not assigned a tax identification number; the owner confirmed in writing on 2026-10-02 that the company has none.",
+    },
     // As the Certificate of Incorporation names its issuer: the text reads
     // "The REGISTRAR of CORPORATE AFFAIRS, of the British Virgin Islands",
     // and its seal (an image, not in the PDF's text layer) reads "Registrar

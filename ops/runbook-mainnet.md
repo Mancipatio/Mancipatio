@@ -1606,9 +1606,11 @@ it and installs `manci_network_guard`: a mainnet project accepts only
 
 `front/scripts/ops/targets.json` (tracked) names each project: network,
 `projectRef`, `poolerHost`, `poolerPort` (5432, the session pooler),
-`siteOrigin` and `backupAgeRecipient`. Mainnet stays `null` until Talas 7;
-`SUPABASE_PROJECT_REFS` in `front/next.config.ts` must match it (a test
-checks).
+`siteOrigin` and `backupAgeRecipient`. Mainnet's project is recorded since
+2026-09-30 and its `siteOrigin` (`https://www.manci.io`, devnet's
+`https://devnet.manci.io`, §18) since 2026-10-02; its `backupAgeRecipient`
+is still `null`. `SUPABASE_PROJECT_REFS` in `front/next.config.ts` must
+match the refs (a test checks).
 
 | Variable | Rule |
 |---|---|
@@ -2681,14 +2683,40 @@ Islands (counsel may replace the forum with arbitration). Still missing (the
 licence or the waiver, the mainnet Terms, Privacy Policy, acceptance-dialog
 summary and counsel's risk warning.
 
+**State on 2026-10-02 (owner's decisions in chat that day).** The slots are
+complete; the "mainnet legal slots" report says so with
+`MAINNET_LICENSE_NOT_REQUIRED=true`, and a mainnet build is refused only
+without that waiver (no licence is recorded):
+- Tax identification number: `{ notAssigned }`. The owner confirmed in
+  writing that the company has none (BVI business companies are not
+  assigned one).
+- Counsel approved the drafts of 2026-09-30 (the mainnet kit's
+  `05-mainnet-copy.draft.ts` and `06-privacy.draft.ts`; the `[COUNSEL]`
+  notes of the `.md` versions are not on the site). Terms, acceptance-dialog
+  summary and Privacy Policy are in `mainnet-copy.ts` verbatim, dated
+  `2026-10-02`. The Terms version every mainnet wallet accepts is therefore
+  `2026-10-02` (the dialog shows `v2026-10-02`; `tosVersionFor("mainnet")`
+  has no fallback any more). The purchase risk warning is the draft's,
+  `status: "counsel"`.
+- One wording change by the owner: Privacy clause 11 now names which keys a
+  hardware wallet holds. The company's Ledger holds super admin, KYC
+  authority, BlocklistAuthority and treasury; a Squads multisig whose member
+  is a separate Ledger holds the upgrade authority; the second administrator
+  uses a software wallet. If that changes (§19, the role map), clause 11
+  changes with it.
+- Still for the owner before the Production build: counsel's written licence
+  opinion on file (its reference in MAINNET-PLAN.md), then
+  `MAINNET_LICENSE_NOT_REQUIRED=true`. After the review of the rendered pages
+  (step 4 below), `MAINNET_LEGAL_COPY_APPROVED=true`.
+
 Written for a Serbian operator, now to be put to counsel for a BVI one.
 Whether each of these still applies with a BVI operator, and whether the
 wording changes, is counsel's decision, not engineering's; nothing below
 is a conclusion:
 
-- The purchase risk warning is drafted against ZDI art. 15(2)
-  (`front/lib/legal/risk-warning.ts:4-8`; the article is named in the
-  source, not on the page).
+- The purchase risk warning was first drafted against ZDI art. 15(2)
+  (`front/lib/legal/risk-warning.ts:6-8`; the article is named in the
+  source, not on the page); its wording is counsel's since 2026-10-02.
 - The devnet Privacy Policy cites GDPR (`front/app/(marketing)/legal/privacy/devnet-privacy.tsx:109`,
   `:175`). The controller block names GDPR art. 13 only in a source comment
   (`front/components/legal/controller-section.tsx:5`); the rendered block
@@ -2730,9 +2758,10 @@ When a detail changes (or, for a new company, when its data arrive):
    `DEVNET_TOS_VERSION` (`front/lib/tos-version.ts`).
 3. `npx vitest run tests/legal-slots.test.ts --silent=false` until the
    "mainnet legal slots" report says complete. (CI's mainnet build,
-   `front/scripts/ci/mainnet-build.sh`, proves the guard with an invented
-   fixture of these slots written into its throwaway checkout; it never
-   checks the committed values, this test does.)
+   `front/scripts/ci/mainnet-build.sh`, loads the config once with the
+   committed slots and the licence waiver, then proves the guard with an
+   invented fixture of these slots written into its throwaway checkout; the
+   content of the committed values is checked by this test.)
 4. Review the rendered `/legal/terms`, `/legal/privacy`, `/legal/company`,
    `/risks`, the footer, a sale page and an OTC take confirmation with
    counsel. A production build (Vercel Preview included) refuses
@@ -2807,6 +2836,31 @@ host to the other (users sign in again); `scripts/ops/targets.json`
 `siteOrigin` is the origin pg_cron calls (the scheduler installs refuse any
 other).
 
+**Order chosen by the owner on 2026-10-02.** `targets.json` already records
+both origins: `mainnet.siteOrigin = https://www.manci.io`,
+`devnet.siteOrigin = https://devnet.manci.io` (PR `feat/mainnet-legal-texts`,
+covering the PRs of C and D). Mainnet takes the domain first (D); the devnet
+DNS (A, B) comes last, then C. Until C, the devnet jobs keep calling
+`https://www.manci.io`. Once that host serves mainnet they are refused there
+(another worker secret, Deployment Protection). So before D, disable them:
+
+```
+MANCI_TARGET=devnet bash scripts/db.sh -c "select cron.alter_job(jobid, active := false) from cron.job where jobname in ('mancipatio-retry-devnet','mancipatio-alarms-devnet','mancipatio-sanctions-devnet')"
+```
+
+Re-install them at C. Other things that read the devnet origin:
+- the deployment smoke: `MANCIPATIO_LIVE_SMOKE=devnet` now probes
+  `devnet.manci.io` and refuses `SMOKE_ORIGIN=https://www.manci.io`
+  (mainnet's origin);
+- the 100-user simulator: `front/scripts/sim/lib/constants.ts`
+  `SITE_ORIGIN` stays `https://www.manci.io`. It refuses a site whose
+  `/api/health` does not report devnet, so after D it stops rather than
+  touch mainnet. Change it at C;
+- `CHAIN_SITE_ORIGIN` in the devnet handover example (§19).
+
+`public/.well-known/security.txt` and the programs' security.txt name
+`www.manci.io`, which is right for mainnet.
+
 **A. DNS (owner).** Add `devnet.manci.io` to the devnet Vercel project and
 create the CNAME record Vercel shows at the registrar; wait for the
 certificate. `manci.io` sends HSTS with `includeSubDomains`, so the new host
@@ -2825,19 +2879,23 @@ domain redirect): SIWS now accepts only the new origin, and old links keep
 working. Check: `curl -s https://devnet.manci.io/api/health` answers
 `"ok":true` and `"network":"devnet"`, and a wallet signs in on the new host.
 
-**C. Devnet schedulers (operator).** A PR sets `devnet.siteOrigin` to
-`https://devnet.manci.io` in `front/scripts/ops/targets.json`; after it
-merges, record the jobs' active state (G6), then:
+**C. Devnet schedulers (operator).** `devnet.siteOrigin` is
+`https://devnet.manci.io` in `front/scripts/ops/targets.json` (since
+2026-10-02). Once `devnet.manci.io` answers (A, B), record the jobs' active
+state (G6), then (the retry scheduler first: the alarm and sanctions
+installs refuse an origin other than the retry worker's):
 
 ```
 MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/retry-scheduler.sql
 MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/alarm-scheduler.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/sanctions-scheduler.sql
 MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/retry-scheduler-status.sql
 MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/alarm-scheduler-status.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/sanctions-scheduler-status.sql
 ```
 
-Both installs leave their job disabled; re-enable each after a clean manual
-run (§14 D, §15 D.3–D.5). Move the external monitors to
+The installs leave their job disabled; re-enable each after a clean manual
+run (§14 D, §15 D.3–D.5, §15 "Sanctions list"). Move the external monitors to
 `https://devnet.manci.io/api/health` and `/api/health/alarms`. The Helius
 devnet webhook calls the Supabase edge function, not the site: unchanged.
 
@@ -2847,9 +2905,10 @@ devnet webhook calls the Supabase edge function, not the site: unchanged.
 `www`). The mainnet project has Deployment Protection on *All Deployments*
 with Vercel Authentication before the domain is attached. Mainnet uses its
 own Google OAuth client (redirect URI on `www.manci.io`) and its own
-Turnstile widget. A PR records `mainnet.siteOrigin = https://www.manci.io`,
-the project ref, pooler host and backup recipient in `targets.json` and
-`SUPABASE_PROJECT_REFS` (§14 mainnet step 1). At Talas 7 (§0A D11)
+Turnstile widget. `targets.json` records `mainnet.siteOrigin =
+https://www.manci.io` (since 2026-10-02) and the project ref and pooler host
+(2026-09-30, also in `SUPABASE_PROJECT_REFS`); the backup recipient follows
+(§14 mainnet step 1). At Talas 7 (§0A D11)
 protection goes back to *Standard Protection*.
 
 **E. Mainnet environment (names only; values live in Vercel, never in the
