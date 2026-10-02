@@ -699,9 +699,11 @@ function answeredSources(quotes: unknown): Set<FxSourceId> {
  * null when it could not be read. Nothing is reported while there is no
  * automatic row and the job is not evidently running (no observation in the
  * last FX_JOB_RUNNING_MS): before its first run, or after the off switch
- * (job disabled, the fx_auto_rates rows deleted), which so clears within
- * about 5 minutes; and nothing before 0080 (the tables do not exist).
- * Earlier incidents then pass.
+ * (job disabled, the fx_auto_rates rows deleted); and nothing before 0080
+ * (the tables do not exist). Earlier incidents then pass. Right after the
+ * off switch the job still ran within FX_JOB_RUNNING_MS, so fx-auto-stale
+ * fails for those minutes; with the incident hysteresis (3 passes, 5
+ * minutes) it clears about 10 minutes after the last run.
  *   fx-auto-stale   the automatic rate is past its max age (15 min), or
  *                   missing while the job runs: the worker stopped or every
  *                   run is refused. High only on mainnet, for a mint in use

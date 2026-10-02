@@ -373,7 +373,7 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, the operator keys that can sign SIWS onboarded on the protected site, the `chain:accept` checkout for a Ledger that cannot | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps (on the protected site, or `chain:accept` for a Ledger that cannot sign SIWS) → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
-| D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied before the front that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
+| D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied to the mainnet project before `release/mainnet` is fast-forwarded to the commit that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
 | D11 | **Talas 7 go-live**: first, Privacy clause 11 checked against the chain and the role map (§17, "State on 2026-10-02"); then Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
@@ -1063,12 +1063,26 @@ source paths are clean (see "Safety rules").
   (`CHAIN_SNAPSHOT_DIR/<program>-idl-pre.json`) is evidence only; no tool
   path uploads it.
 - Front: Vercel Instant Rollback. To a deployment older than the automatic
-  EUR rate (PR #53, migration 0080): first the fx off switch (§15 "Automatic
-  EUR rate": `scripts/ops/fx-auto-off.sql` disables `mancipatio-fx-<network>`
-  and deletes the network's `fx_auto_rates` rows; the old front has no
-  `/api/internal/fx`), and make sure the manual USDC row on `/admin/limits`
-  is fresh: the old front reads only `fx_rates` (health, alarms, the admin
-  page), and with the automatic rows gone the ledger counts that row too.
+  EUR rate (PR #53, migration 0080), in this order:
+  1. the manual USDC row on `/admin/limits` is fresh (kind `rate`, max age
+     at most 7 days on mainnet; `fx-scheduler-status.sql` shows `fresh`):
+     refresh it there FIRST if not. The old front reads only `fx_rates`
+     (health, alarms, the admin page), and once the automatic rows are gone
+     the ledger counts that row too;
+  2. the fx off switch (§15 "Automatic EUR rate", about 45 seconds:
+     `scripts/ops/fx-auto-off.sql` disables `mancipatio-fx-<network>`, waits
+     for a run in flight, deletes the network's `fx_auto_rates` rows and
+     checks nothing came back; the old front has no `/api/internal/fx`);
+  3. the Instant Rollback;
+  4. close the open `fx-*` incidents by hand: the old front's alarm worker
+     has no fx checks, so `fx-auto-stale`, `fx-fallback`, `fx-source-down`,
+     `fx-depeg`, `fx-divergence` and `fx-jump` are no longer cleared
+     automatically (the off switch itself opens `fx-auto-stale` for its
+     first minutes). Resolve each of their alerts on `/admin/compliance`
+     with the note "fx job off: rolled back to a front before #53", then
+     mark the incidents cleared so a later return starts clean:
+     `MANCI_TARGET=<t> bash scripts/db.sh -c "update public.alarm_incidents set cleared_at = now(), pass_streak = 0, updated_at = now() where network = public.deployment_network() and cleared_at is null and split_part(check_key, ':', 1) in ('fx-auto-stale','fx-fallback','fx-source-down','fx-depeg','fx-divergence','fx-jump')"`
+     (mainnet: `MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1`).
 
 ## 11. Incidents
 
@@ -1460,8 +1474,9 @@ so a leak is catastrophic: keep that window short.
   code the attacker could have written.
 
 **Vercel down or a bad deploy.** Chain state is safe. A bad deploy: Vercel
-Instant Rollback (to a deployment older than PR #53: the fx off switch and a
-fresh manual USDC row first, §10). An outage: operators use the local operator front
+Instant Rollback (to a deployment older than PR #53: a fresh manual USDC row,
+then the fx off switch, first; the `fx-*` incidents closed by hand after it,
+§10). An outage: operators use the local operator front
 (`next dev`, §0) or `chain:emergency`; post a status notice.
 - Cannot: serve users (the public site is Vercel); run the retry worker or
   the alarm checks, which pg_cron calls on Vercel (they catch up after).
@@ -2317,8 +2332,8 @@ only through the Raise limits page by the super admin after bootstrap
 (D16); check the EURC mint address against Circle's published address
 before saving it. The fx scheduler (automatic USDC rate) is installed and
 enabled at D10, after the manual USDC fallback (§15 "Automatic EUR rate");
-0080 itself is applied before the mainnet front that carries it (§15
-"Apply migration 0080").
+0080 itself is applied to the mainnet project before `release/mainnet` is
+fast-forwarded to a commit that carries it (§15 "Apply migration 0080").
 
 ### Sanctions list (8.5, migration 0078)
 
@@ -2401,7 +2416,10 @@ the run is skipped), and:
   `ECB_UNAVAILABLE` / `ECB_STALE` (a new instance whose ECB request fails
   falls back to the anchor the last accepted run stored, while it is younger
   than that); without the mint's decimals from chain within the run's
-  15-second budget `DECIMALS_UNAVAILABLE`;
+  15-second budget `DECIMALS_UNAVAILABLE`; a rate or refusal the
+  database's CHECKs refuse (the 0.2–5 EUR bounds of the rate columns) is
+  recorded as refused `INVALID_FX_RATE` (if even that is refused, the run
+  answers failed `INVALID_FX_RATE`, HTTP 503, the code in `fx_http_runs`);
 - otherwise writes `public.fx_auto_rates` (valid **15 minutes**, with the
   per-source quotes and the ECB anchor). Every run, accepted or refused, is a
   row of `public.fx_rate_observations` (kept 30 days). Rate limit, before
@@ -2430,45 +2448,93 @@ or the manual source), and booking never uses a newer one.
 
 #### Apply migration 0080
 
-Devnet first, mainnet second, each BEFORE that network's front deploy of
-the automatic rate (PR #53): the new front reads `fx_auto_rates` and calls
-`claim_fx_auto_run`, and its fx route answers `failed NOT_INSTALLED` without
-them. Expand only: without automatic rows every reader behaves as before.
-Run the block with `<t>` = `devnet`, later with `<t>` = `mainnet` and
-`MANCI_ALLOW_MAINNET=1` exported (`backup.sh` needs it too; its mainnet dump
-is schema-only, PITR is the restore point):
+Apply 0080 to each network's database BEFORE a front that carries the
+automatic rate (PR #53) is built for that network: the new front reads
+`fx_auto_rates` and calls `claim_fx_auto_run`, and its fx route answers
+`failed NOT_INSTALLED` without them. Which push builds which front decides
+the order:
+
+1. **devnet 0080, then merge #53.** `main` deploys the devnet project, so
+   the merge itself is the devnet front deploy;
+2. **mainnet 0080, then fast-forward `release/mainnet`** to that `main`.
+   The mainnet Vercel project (`manci-mainnet`) builds only its production
+   branch `release/mainnet` (Ignored Build Step: only production), so the
+   merge to `main` does not touch mainnet, and the fast-forward is the
+   mainnet front deploy;
+3. then, at §0A D10, the super admin's fresh manual USDC fallback, and only
+   after it the fx scheduler ("Install, prove, enable" below).
+
+Expand only: without automatic rows every reader behaves as before. The
+file is frozen at sha256
+`5e7d01d37c18428df99b8a55eb7b44400a3d676f22dac3f2a01a32763a42943d`
+(`shasum -a 256 supabase/migrations/0080_fx_auto_rates.sql` first). Devnet:
 
 ```
-bash scripts/ops/backup.sh <t> pre-0080
-MANCI_TARGET=<t> bash scripts/db.sh -f supabase/migrations/0080_fx_auto_rates.sql
-MANCI_TARGET=<t> bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0080','fx_auto_rates')"
-MANCI_TARGET=<t> bash scripts/db.sh -c "select to_regprocedure('public.claim_fx_auto_run(text,text)') is not null as claim, to_regprocedure('public.fx_effective_rate(text,text)') is not null as resolver, (select count(*) from pg_constraint where conname like 'fx_%_eur_per_token_bounds') as bounds, has_table_privilege('service_role','public.fx_auto_rates','SELECT') as service_reads, has_table_privilege('service_role','public.fx_auto_rates','INSERT') as service_writes, (select count(*) from public.fx_auto_rates) as automatic_rows, (select version from supabase_migrations.schema_migrations where version='0080') as recorded"
-MANCI_TARGET=<t> bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+bash scripts/ops/backup.sh devnet pre-0080
+MANCI_TARGET=devnet bash scripts/db.sh -f supabase/migrations/0080_fx_auto_rates.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0080','fx_auto_rates') on conflict (version) do nothing"
+MANCI_TARGET=devnet bash scripts/db.sh -c "select to_regprocedure('public.claim_fx_auto_run(text,text)') is not null as claim, to_regprocedure('public.fx_effective_rate(text,text)') is not null as resolver, (select count(*) from pg_constraint where conname like 'fx_%_eur_per_token_bounds') as bounds, has_table_privilege('service_role','public.fx_auto_rates','SELECT') as service_reads, has_table_privilege('service_role','public.fx_auto_rates','INSERT') as service_writes, (select count(*) from public.fx_auto_rates) as automatic_rows, (select version from supabase_migrations.schema_migrations where version='0080') as recorded"
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+```
+
+Mainnet: the same with `MANCI_ALLOW_MAINNET=1` (`backup.sh` needs it too;
+its mainnet dump is schema-only, PITR is the restore point):
+
+```
+export MANCI_ALLOW_MAINNET=1
+bash scripts/ops/backup.sh mainnet pre-0080
+MANCI_TARGET=mainnet bash scripts/db.sh -f supabase/migrations/0080_fx_auto_rates.sql
+MANCI_TARGET=mainnet bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0080','fx_auto_rates') on conflict (version) do nothing"
+MANCI_TARGET=mainnet bash scripts/db.sh -c "select to_regprocedure('public.claim_fx_auto_run(text,text)') is not null as claim, to_regprocedure('public.fx_effective_rate(text,text)') is not null as resolver, (select count(*) from pg_constraint where conname like 'fx_%_eur_per_token_bounds') as bounds, has_table_privilege('service_role','public.fx_auto_rates','SELECT') as service_reads, has_table_privilege('service_role','public.fx_auto_rates','INSERT') as service_writes, (select count(*) from public.fx_auto_rates) as automatic_rows, (select version from supabase_migrations.schema_migrations where version='0080') as recorded"
+MANCI_TARGET=mainnet bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+unset MANCI_ALLOW_MAINNET
 ```
 
 Pass: `t | t | 2 | t | f | 0 | 0080`, and the identity preflight still shows
 `tables_without_guard` `[]` and `defaults_not_dynamic` `{}`. Only then
-deploy the front.
+merge (devnet) or fast-forward (mainnet).
+
+`supabase_migrations.schema_migrations` is bookkeeping: `db.sh` applies
+the file whatever it lists, and the verification query proves the objects,
+not the row. The insert is `on conflict (version) do nothing`, so
+re-running the block is harmless (0080 itself is re-runnable). The
+hand-applied migrations before it were recorded the same way: devnet lists
+0075–0079, and the mainnet bootstrap of 2026-09-30 recorded 0001–0079. An
+earlier version missing from a list is not a fault.
 
 #### Install, prove, enable
 
-After 0080 and the retry scheduler; on mainnet with
-`MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1`, at §0A D10, after the super
-admin has seeded the manual USDC fallback:
+After 0080, the front that carries it and the retry scheduler; at §0A D10
+on mainnet, and in any case only after the super admin has seeded a fresh
+manual USDC fallback on `/admin/limits` (kind `rate`, max age at most 7 days
+on mainnet). Devnet:
 
 ```
-MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-scheduler.sql
-MANCI_TARGET=<t> bash scripts/db.sh -c "select mancipatio_ops.invoke_fx_refresh()"
-MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-scheduler-status.sql
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/fx-scheduler.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "select mancipatio_ops.invoke_fx_refresh()"
+MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/fx-scheduler-status.sql
+MANCI_TARGET=devnet bash scripts/db.sh -c "select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-fx-devnet'"
 ```
 
-Pass: the run is `complete` with `refresh_state accepted`, `fx_auto_rates`
-holds the network's USDC with `fresh = t`, and the effective row shows
-`origin auto` (a `refused` run is complete too: read its `code` before
-enabling). Then enable `mancipatio-fx-<network>`
-(`cron.alter_job(..., active := true)`). `/admin/limits` shows the automatic
-rate, its sources, the ECB anchor and the last run; `/api/health`
-`checks.paymentFx.origin` is `auto`.
+Mainnet:
+
+```
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f scripts/ops/fx-scheduler.sql
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -c "select mancipatio_ops.invoke_fx_refresh()"
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f scripts/ops/fx-scheduler-status.sql
+MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -c "select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-fx-mainnet'"
+```
+
+The install leaves the job disabled; enable it (the last line) only when
+the status passes: the run is `complete` with `refresh_state accepted`,
+`fx_auto_rates` holds the network's USDC with `fresh = t`, and the
+effective row shows `origin auto` (a `refused` run is complete too: read
+its `code` and the ECB deviation next to its band, `ecb_deviation_bps` /
+`ecb_tolerance_bps`, before enabling). `/admin/limits` then shows the
+automatic rate, its sources, the ECB anchor and the last run; `/api/health`
+`checks.paymentFx.origin` is `auto`. The install refuses while
+`fx_effective_rate` is the manual-only resolver of the rollback below:
+re-apply 0080 first.
 
 Keep the manual USDC row seeded as the fallback (kind `rate`, max age at
 most 7 days on mainnet): `fx:fallback` and `/api/health`
@@ -2476,31 +2542,55 @@ most 7 days on mainnet): `fx:fallback` and `/api/health`
 counts. Tick **Override the automatic rate** only to pin a rate on purpose
 (a feed you distrust); `/api/health` warns `manual_override` while it
 counts, and `/admin/limits` warns (without refusing) when the override is
-more than 2 % away from the automatic rate. An override past its own max
-age still counts (fail-closed): approvals refuse `FX_RATE_STALE` until it
-is renewed or saved unticked. A front deployed ahead of 0080 still saves a
-manual rate (without the column); only an override is refused until 0080
-is applied.
+more than 2 % away from a current (fresh) automatic rate; against a stale
+one it does not warn. Every manual write (save or delete) is an audit
+event (`fx_rate_update` / `fx_rate_delete` on `/admin/audit`, category
+Launchpad) with the kind, rate, max age, override flag, the row it
+replaced and the fresh automatic rate with the gap to it. An override past
+its own max age still counts (fail-closed): approvals refuse
+`FX_RATE_STALE` until it is renewed or saved unticked. A front deployed
+ahead of 0080 still saves a manual rate (without the column); only an
+override is refused until 0080 is applied.
 
 **Off switch** (no rollback needed): BOTH halves, the job disabled AND the
 network's automatic rows deleted (a disabled job alone leaves a fresh
 automatic rate counting for up to 15 minutes; deleted rows alone come back
-with the next run). One file does both in one transaction and shows the
-manual rows that count from then on:
+with the next run).
 
-```
-MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-auto-off.sql
-```
+1. **Before it**, check that the manual USDC row is fresh
+   (`fx-scheduler-status.sql`, the manual rows: `fresh`; or `/admin/limits`)
+   and refresh it on `/admin/limits` FIRST if it is not: from the delete on
+   it is the rate that counts, and a stale one makes approvals refuse
+   `FX_RATE_STALE`.
+2. Run the one file (about 45 seconds). It disables the job and commits,
+   waits 40 seconds for a run already in flight (the job's statement
+   timeout is 30 s, its HTTP call stops at 25 s, the route's `maxDuration`
+   is 30 s), deletes the network's automatic rows, and after a 5-second
+   settle checks that the job is still disabled and no automatic row came
+   back. An ERROR "NOT off: …" means just that: run it again. The last
+   result set shows the manual rows that count from then on:
 
-Check that the manual USDC row it lists is `fresh` (`t`); if not, refresh it
-on `/admin/limits` at once. With no automatic row and no run for 5 minutes
-the alarm worker treats the job as off: `fx-auto-stale` and the other `fx-*`
-incidents clear within about 5 minutes. Back on: install, prove and enable
-as above.
+   ```
+   MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/fx-auto-off.sql
+   MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f scripts/ops/fx-auto-off.sql
+   ```
+
+3. The off switch itself raises `fx-auto-stale` for a few minutes: right
+   after the delete there is no automatic row while the job ran in the last
+   5 minutes (medium on mainnet; high only if the mint is in use and no
+   fresh manual row covers it, which step 1 prevents; low elsewhere). Once
+   the last run is 5 minutes old the job counts as off and the `fx-*` checks
+   pass; an incident clears after 3 passes and 5 minutes without a failure.
+   Clearing takes about **10 minutes** in all.
+
+Back on: if the manual-only resolver of the rollback below was applied,
+re-apply 0080 first (`db.sh -f supabase/migrations/0080_fx_auto_rates.sql`;
+`fx-scheduler.sql` refuses otherwise); then install, prove and enable as
+above.
 
 The alarm worker watches the job (`fxAutoReports`; nothing while there is
 no automatic row and no run in the last 5 minutes: before the first run, or
-after the off switch):
+from about 5 minutes after the off switch):
 
 | Incident | Severity | Fails when |
 |---|---|---|
@@ -2533,7 +2623,7 @@ instead), and `fx-expiring` is about a manual rate only.
 | `onchain:squads-config` (`squads-config:<multisig>`, critical) | Members, threshold, time lock or config authority differ from `ALARM_SQUADS_CONFIG` (the role map). A change you approved: update the role map and `ALARM_SQUADS_CONFIG`, redeploy. Unexpected: incident (§11), tell the Squads members, pause if the upgrade authority may be lost. |
 | `onchain:squads-proposal` (`squads-proposal:<proposal>`, Approved/Executing or unreadable critical, Draft/Active high) | Compare with the proposal you expected (§9: the upgrade's buffer, hash and the members who approve). Expected: nothing to do, it clears once the proposal is final (executed, rejected or cancelled) or stale. Unexpected: incident (§11); members reject it and do not execute. |
 | `fx:expiring` (`fx-expiring:<mint>`, medium) | Refresh the EUR rate on the Raise limits page (`/admin/limits`) before its max age: past it `fx:stale` follows and the sales that need the rate stop (on mainnet `/api/health` fails for the default mint). Since 0080 only a manual rate that counts expires this way (the automatic one is renewed every minute). |
-| `fx:auto-stale` (`fx-auto-stale:<mint>`, low / medium / high) | The fx job stopped or every run is refused: `fx-scheduler-status.sql` (outcome, `code`, the quotes), the Vercel logs of `/api/internal/fx`. Medium (mainnet): the manual fallback counts meanwhile, or nothing is paid in the mint yet; check that the fallback is recent. High (mainnet, the mint in use): no fresh rate counts and approvals refuse: refresh the manual rate on `/admin/limits` now, then fix the job. Low: off mainnet. Switched off on purpose: the off switch above clears it within about 5 minutes. |
+| `fx:auto-stale` (`fx-auto-stale:<mint>`, low / medium / high) | The fx job stopped or every run is refused: `fx-scheduler-status.sql` (outcome, `code`, the quotes), the Vercel logs of `/api/internal/fx`. Medium (mainnet): the manual fallback counts meanwhile, or nothing is paid in the mint yet; check that the fallback is recent. High (mainnet, the mint in use): no fresh rate counts and approvals refuse: refresh the manual rate on `/admin/limits` now, then fix the job. Low: off mainnet. Switched off on purpose: the off switch above raises it itself for a few minutes and it clears after about 10 minutes (§15 "Off switch" step 3); after an Instant Rollback to a front older than #53 it is closed by hand (§10). |
 | `fx:depeg` (`fx-depeg:<mint>`, high) | The USDC/EUR median deviates from the ECB reference of the date the summary names by more than the band (2.5 % growing to 5 % with the fix's age): a USDC depeg, a large EUR/USD move since the fix, or broken sources. Check a venue and EUR/USD by hand. A real depeg: the last automatic rate counts for its 15 minutes, then the manual fallback; decide with the owner whether to pin a manual override (and at which rate) or to stop approvals. A broken ECB file or source: the status SQL shows the quotes. |
 | `fx:fallback` (`fx-fallback:<mint>`, medium; low off mainnet when missing) | The automatic rate counts, but the manual fallback behind it is missing or (about to be) out of date: if the automatic rate stops, approvals stop 15 minutes later. Refresh the manual USDC rate on `/admin/limits` (unticked, not an override). |
 | `fx:divergence` (`fx-divergence:<mint>`, medium) | Every run is refused: the automatic rate is NOT written and, 15 minutes after the last accepted run, the manual fallback counts (`fx:auto-stale` follows; check the fallback is recent). The evidence (`sources`) shows the venue that is off. One venue wrong: remove or replace it in `front/lib/fx-auto.ts` (`FX_SOURCES`) and deploy; a disorderly market: wait, or pin a manual override with the owner. |
@@ -2583,19 +2673,32 @@ instead), and `fx-expiring` is about a manual rate only.
   re-runnable). Keep `spv_issuances_sale_once` and the new tables.
 - 0074: `create policy "spv_issuances anon read" on public.spv_issuances for select using (true); grant select on public.spv_issuances to anon, authenticated;`
   and re-apply 0073 section 15 (`record_spv_issuance`).
-- 0080: all of it, in this order (not either/or): disable
-  `mancipatio-fx-<network>` AND delete the network's `fx_auto_rates` rows
-  (the off switch, one file:
-  `MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-auto-off.sql`),
-  then make sure the manual USDC row is fresh; optionally, only after that,
-  make the resolver manual-only (the ledger functions keep calling it):
-  `MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-manual-only.sql`
-  (a file: the function's `$$` body inside `db.sh -c "..."` would be
-  expanded by the shell; it refuses while the job is active). `fx-auto-stale`
-  clears within about 5 minutes after the job stops. Tables, column and
-  writers stay. Re-applying 0080 brings the automatic rate back (also after
-  the manual-only resolver); re-applying 0066 or 0073 (their own rollbacks)
-  restores the direct `fx_rates` reads, so re-apply 0080 after them.
+- 0080: all of it, in this order (not either/or):
+  1. FIRST make sure the manual USDC row is fresh (refresh it on
+     `/admin/limits` if not): from the delete on it is the rate that counts;
+  2. the off switch, one file that disables `mancipatio-fx-<network>` AND,
+     after waiting for a run in flight, deletes the network's
+     `fx_auto_rates` rows (§15 "Off switch"; an ERROR "NOT off" means run
+     it again):
+     `MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/fx-auto-off.sql`,
+     on mainnet
+     `MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f scripts/ops/fx-auto-off.sql`;
+  3. optionally, only after that, make the resolver manual-only (the
+     ledger functions keep calling it):
+     `MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/fx-manual-only.sql`,
+     on mainnet
+     `MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f scripts/ops/fx-manual-only.sql`
+     (a file: the function's `$$` body inside `db.sh -c "..."` would be
+     expanded by the shell; it refuses while the job is active or any
+     automatic row of the network is left).
+
+  The off switch raises `fx-auto-stale` itself for a few minutes; it clears
+  after about 10 minutes (with a front older than #53, by hand: §10).
+  Tables, column and writers stay. Back on: re-apply 0080 (it restores the
+  resolver and its comment; `fx-scheduler.sql` refuses to install over the
+  manual-only one), then install, prove and enable. Re-applying 0066 or
+  0073 (their own rollbacks) restores the direct `fx_rates` reads, so
+  re-apply 0080 after them.
 
 ### Implementation notes (where the code differs from the design text)
 

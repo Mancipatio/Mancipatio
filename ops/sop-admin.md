@@ -134,16 +134,30 @@ Who: the super admin. Page: `/admin/limits` → payment token rates.
 3. Tick "Override the automatic rate" only on purpose (a feed you distrust,
    a depeg decided with the owner); save the rate again unticked to end it.
    `/api/health` warns while an override counts, and the page warns before
-   saving when the override is more than 2 % away from the automatic rate.
-   An override keeps counting after its own maximum age (shown "Out of
-   date"): approvals then refuse until you renew it or save it unticked.
-4. `/api/health` fails when no rate is fresh (`fx:stale`; `fx:auto-stale`
-   high) and warns from 80 % of the maximum age of a manual rate that
-   counts, and while the automatic rate counts but the manual fallback is
-   missing or out of date (`fallback_missing` / `fallback_stale`). Before
-   the first sale a missing or out-of-date rate only warns
-   (`missing_before_first_sale` / `stale_before_first_sale`).
-5. EURC or any other mint is added in code first (with its address checked
+   saving when the override is more than 2 % away from a current automatic
+   rate (an out-of-date automatic rate raises no warning). An override
+   keeps counting after its own maximum age (shown "Out of date"):
+   approvals then refuse until you renew it or save it unticked. Every save
+   or delete of a manual rate is in the audit log (`/admin/audit`,
+   `fx_rate_update` / `fx_rate_delete`), with the automatic rate that was
+   current and the gap to it.
+4. On mainnet `/api/health` fails when no rate is fresh (`stale`,
+   `missing`), except before the first sale approval and the first sale:
+   then a missing or out-of-date rate only warns
+   (`missing_before_first_sale` / `stale_before_first_sale`). Off mainnet it
+   only warns. It also warns from 80 % of the maximum age of a manual rate
+   that counts, and while the automatic rate counts but the manual
+   fallback is missing or out of date (`fallback_missing` /
+   `fallback_stale`). The alarm `fx:auto-stale` is high only on mainnet,
+   for a mint in use (a live approval, an open sale or a raise limit hold
+   paid in it) that no fresh manual rate covers; otherwise it is medium on
+   mainnet and low elsewhere.
+5. Before the off switch of the automatic rate (runbook §15 "Off switch",
+   and before an Instant Rollback to a front without it, §10) the manual
+   USDC rate must be fresh: refresh it here first. The off switch itself
+   raises `fx:auto-stale` for a few minutes; it clears after about 10
+   minutes.
+6. EURC or any other mint is added in code first (with its address checked
    against the issuer's published address), never on this page alone.
 
 ## Blocklist and clawback
