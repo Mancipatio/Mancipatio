@@ -9,6 +9,7 @@
 
 import { OffchainMessageLimitError } from "@/lib/siws-offchain";
 import { HardwareWalletSigningError } from "@/lib/siws-signing";
+import { findLedgerUsbError } from "@/lib/ledger-usb";
 
 /** What the page is waiting on while the private read is in flight. */
 export type ApplicationReadPhase = "signing" | "loading" | "ready" | "error";
@@ -96,6 +97,9 @@ export function classifyApplicationReadError(
   if (error instanceof HardwareWalletSigningError || error instanceof OffchainMessageLimitError) {
     return { kind: "hardware_wallet", message: error.message, detail };
   }
+  // The Ledger (USB) wallet says what to do on the device (lib/ledger-usb.ts).
+  const ledger = findLedgerUsbError(error);
+  if (ledger) return { kind: "hardware_wallet", message: ledger.message, detail };
   if (error && typeof error === "object") {
     const code = (error as { code?: unknown }).code;
     if (code === 4001 || code === "WALLET_REJECTED") {

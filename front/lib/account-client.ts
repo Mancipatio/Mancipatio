@@ -9,6 +9,7 @@ import { invalidateTransactionWalletPolicy } from "@/lib/transaction-wallet-poli
 import { MaintenanceModeError } from "@/lib/maintenance";
 import { OffchainMessageLimitError } from "@/lib/siws-offchain";
 import { HardwareWalletSigningError } from "@/lib/siws-signing";
+import { findLedgerUsbError } from "@/lib/ledger-usb";
 
 export type AccountRequestContext = {
   /** The connected wallet (wallet mode); null when signed in by email/Google. */
@@ -185,6 +186,10 @@ export async function removeAccountWallet(context: AccountRequestContext, wallet
 export function accountErrorMessage(error: unknown, fallback: string) {
   if (error instanceof AccountSessionChangedError || error instanceof MaintenanceModeError ||
       error instanceof HardwareWalletSigningError || error instanceof OffchainMessageLimitError) return error.message;
+  // The Ledger (USB) wallet's own words (unlock, open the Solana app, wrong
+  // Ledger…); never matched against the patterns below ("busy" says "reject").
+  const ledger = findLedgerUsbError(error);
+  if (ledger) return ledger.message;
   const message = error instanceof Error ? error.message.toLowerCase() : "";
   if (message === "your linked account changed. reload your account and try again." ||
       message === "this wallet no longer has access to the selected account.") {

@@ -11,7 +11,13 @@ import { ledgerRejection, LedgerUsbError, type LedgerUsbDevice, type LedgerUsbOp
 /** Ledger's USB vendor id (@ledgerhq/devices ledgerUSBVendorId). */
 const LEDGER_USB_VENDOR_ID = 0x2c97;
 
-type Transport = { close(): Promise<void> };
+/** @ledgerhq/hw-transport's Transport: `close`, and its "disconnect" event
+ * (hw-transport-webhid emits it when navigator.hid reports this device gone). */
+type Transport = {
+  close(): Promise<void>;
+  on?(event: "disconnect", listener: (error?: unknown) => void): void;
+  off?(event: "disconnect", listener: (error?: unknown) => void): void;
+};
 type TransportClass = {
   /** A permitted, connected Ledger, without any browser prompt; null when none. */
   openConnected(): Promise<Transport | null>;
@@ -28,16 +34,41 @@ export type SolanaApp = {
 type SolanaAppClass = new (transport: Transport) => SolanaApp;
 
 /** The wallet's device over a Solana app instance: bytes go in as `Buffer`
- * (what the Ledger packages expect), come out as plain Uint8Array. */
+ * (what the Ledger packages expect), come out as plain Uint8Array.
+ *
+ * A Ledger unplugged while it waits for the user's approval never answers,
+ * and hw-transport-webhid 6.36.0 never rejects that read (it only emits
+ * "disconnect"; its close() then waits for the lost exchange too). So every
+ * call races the transport's "disconnect" event, and after a disconnect
+ * close() does not wait: the wallet's queue (lib/ledger-usb.ts) and the
+ * "confirm on your Ledger" notice are released with a "disconnected" error. */
 export function solanaAppDevice(app: SolanaApp, transport: Transport, BufferClass: typeof Buffer): LedgerUsbDevice {
+  let lost: Error | null = null;
+  let rejectLost: (error: Error) => void = () => undefined;
+  const disconnected = new Promise<never>((_, reject) => { rejectLost = reject; });
+  disconnected.catch(() => undefined); // only observed through the races below
+  const onDisconnect = () => {
+    if (lost) return;
+    // Named as @ledgerhq/errors names it: ledgerUsbError maps it to "disconnected".
+    lost = Object.assign(new Error("The Ledger was disconnected during the request."), { name: "DisconnectedDeviceDuringOperation" });
+    rejectLost(lost);
+  };
+  transport.on?.("disconnect", onDisconnect);
+  const call = <T>(task: () => Promise<T>): Promise<T> => (lost ? Promise.reject(lost) : Promise.race([task(), disconnected]));
+
   return {
-    getAddress: async (path, display = false) => new Uint8Array((await app.getAddress(path, display)).address),
-    getAppConfiguration: () => app.getAppConfiguration(),
-    signOffchainMessage: async (path, message) =>
-      new Uint8Array((await app.signOffchainMessage(path, BufferClass.from(message))).signature),
-    signTransaction: async (path, message) =>
-      new Uint8Array((await app.signTransaction(path, BufferClass.from(message))).signature),
-    close: () => transport.close(),
+    getAddress: (path, display = false) => call(async () => new Uint8Array((await app.getAddress(path, display)).address)),
+    getAppConfiguration: () => call(() => app.getAppConfiguration()),
+    signOffchainMessage: (path, message) =>
+      call(async () => new Uint8Array((await app.signOffchainMessage(path, BufferClass.from(message))).signature)),
+    signTransaction: (path, message) =>
+      call(async () => new Uint8Array((await app.signTransaction(path, BufferClass.from(message))).signature)),
+    close: async () => {
+      transport.off?.("disconnect", onDisconnect);
+      if (!lost) return transport.close();
+      // Gone: release what can be released, never wait for the lost exchange.
+      void transport.close().catch(() => undefined);
+    },
   };
 }
 

@@ -723,12 +723,48 @@ How a Ledger signs these steps: Phantom, Solflare and Jupiter with a Ledger
 do not sign off-chain messages, and every action first needs one (the
 wallet check before each transaction). Connect the Ledger itself instead:
 Chrome or Edge on the computer the Ledger is plugged into, Ledger unlocked
-with the Solana app open (1.8.0 or newer, "Blind signing" enabled for the
-transactions), then **Connect wallet → Ledger (USB)**, and pick the role's
-address from the list (the path is not known in advance; *Show on Ledger*
-confirms it on the device). Compare the text (messages) or the hash
-(transactions) on the device with what the page shows before approving.
-Rehearse once on devnet with the same Ledger before the mainnet steps.
+with the Solana app open (the latest version from Ledger Live, 1.8.0 at the
+very least; "Blind signing" enabled for the transactions), then **Connect
+wallet → Ledger (USB)**, and pick the role's address from the list (the path
+is not known in advance; *Show on Ledger* confirms it on the device).
+Messages (the wallet check): the Ledger shows the text; approve only if it
+starts with `mancipatio:v2` and names this site and the action you started.
+
+Transactions are blind-signed: the Ledger shows only a message hash. **The
+hash the page shows is not an independent check**: the page computed it
+over the bytes it sent, so a compromised page (a bad deploy, injected
+script, a browser extension) would show the hash of its own transaction.
+For every step in this section (A3, X3, X2, X1, S5c, S6), check the
+transaction outside the browser before approving it:
+
+1. Before the ceremony, on the operator computer, have a checkout of the
+   reviewed release with `npm ci` done in `front/`, and a terminal open
+   there. Use a browser profile without extensions for the operator front.
+2. Start the step on the page. When the notice "Confirm the transaction on
+   your Ledger" appears, click **Copy transaction (base64)**.
+3. Run, in that checkout (offline; no RPC, no keys):
+
+   ```sh
+   INSPECT_TX_MESSAGE="$(pbpaste)" INSPECT_ROLE_MAP=<role map path> npm run ops:inspect-tx
+   ```
+
+   It decodes the copied bytes with the committed IDL clients (program,
+   instruction, named accounts with their role-map labels, arguments) and
+   prints `Message hash (the Ledger must show exactly this)`.
+4. Approve on the Ledger only if the printed instruction is the step you
+   started, its accounts and arguments match the role map (e.g. S5c:
+   `asset_registry: SetPauseFlags`, `authority` = superAdmin,
+   `{"setMask":0,"clearMask":128}`), there is no `WARNING`, **and** the
+   hash on the device equals the printed one. Otherwise reject on the
+   Ledger and stop.
+5. The transaction's blockhash expires about a minute after the page built
+   it: keep the command ready. After an expiry or a rejection, start the
+   step again (a new transaction, a new hash).
+
+After the last step, switch **Blind signing** off again (Solana app →
+Settings → Blind signing → Disabled) and check that it reads off; turn it on
+only for the next ceremony. Rehearse the whole procedure once on devnet with
+the same Ledger and browser profile before the mainnet steps.
 
 ## 6. Dry run again, pre-handover inventory
 

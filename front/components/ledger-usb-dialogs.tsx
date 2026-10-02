@@ -142,8 +142,8 @@ function AppStatus({ request }: { request: LedgerAccountChoiceRequest }) {
       </p>
       {!app.signsMessages && (
         <p role="alert" className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-amber-900">
-          This Solana app is too old to sign Manci requests. Update it to {MIN_OFFCHAIN_APP_VERSION} or newer in Ledger
-          Live (My Ledger), then connect again.
+          This Solana app is too old to sign Manci requests. Update it to the latest version
+          ({MIN_OFFCHAIN_APP_VERSION} at the very least) in Ledger Live (My Ledger), then connect again.
         </p>
       )}
       {!app.blindSigningEnabled && (
@@ -199,16 +199,50 @@ function ConfirmNotice({ info }: { info: LedgerConfirmInfo }) {
             {info.hash ? (
               <>
                 <p className="mt-0.5 text-xs text-slate-600">
-                  With blind signing the Ledger shows a message hash. Approve only if it is exactly:
+                  With blind signing the Ledger shows a message hash. This page sent it this transaction, whose hash is:
                 </p>
                 <code className="mt-2 block break-all rounded bg-slate-50 px-2 py-1 font-mono text-xs text-slate-900">{info.hash}</code>
               </>
             ) : (
               <p className="mt-0.5 text-xs text-slate-600">Review the transaction on the Ledger before you approve it.</p>
             )}
+            <p className="mt-2 text-xs text-slate-600">
+              A matching hash proves only that this page and the Ledger agree, not what the transaction does. For a role
+              or admin step, copy the transaction and check it with <code>npm run ops:inspect-tx</code> from the reviewed
+              release on your own computer; approve only if the Ledger shows the hash printed there. Otherwise reject it
+              on the Ledger.
+            </p>
+            <CopyMessage key={info.message} message={info.message} />
           </>
         )}
       </div>
+    </div>
+  );
+}
+
+/** Copies the transaction message (base64) for `npm run ops:inspect-tx`. */
+function CopyMessage({ message }: { message: string }) {
+  const [copied, setCopied] = useState<"idle" | "copied" | "failed">("idle");
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(message);
+      setCopied("copied");
+    } catch {
+      setCopied("failed");
+    }
+  }
+  return (
+    <div className="mt-2 text-xs">
+      <div className="flex items-center gap-2">
+        <button type="button" className={SECONDARY} onClick={() => void copy()}>Copy transaction (base64)</button>
+        {copied === "copied" && <span className="text-emerald-700">Copied</span>}
+        {copied === "failed" && <span className="text-amber-700">The browser refused: copy it from the box below.</span>}
+      </div>
+      {copied === "failed" && (
+        <textarea readOnly rows={3} aria-label="Transaction message (base64)" value={message}
+          onFocus={(event) => event.currentTarget.select()}
+          className="mt-2 block w-full resize-none rounded border border-slate-200 bg-slate-50 px-2 py-1 font-mono text-[10px] text-slate-700" />
+      )}
     </div>
   );
 }

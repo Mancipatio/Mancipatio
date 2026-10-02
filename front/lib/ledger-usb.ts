@@ -31,15 +31,21 @@
 // Transactions (solana:signTransaction): the device signs the transaction
 // message (INS 0x06). Instructions of Manci's programs need "Blind signing"
 // in the Solana app; the device then shows the message hash, and the page
-// shows base58(SHA-256(message)) to compare (as chain:emergency does).
+// shows base58(SHA-256(message)) (as chain:emergency does). That hash only
+// proves that the page and the device agree: a compromised page would show
+// the hash of its own transaction. The independent check is the copied
+// message decoded by `npm run ops:inspect-tx` from a reviewed checkout
+// (scripts/ops/inspect-tx.ts, ops/runbook-mainnet.md §5).
 //
 // Accounts: an address created in Phantom or Solflare does not record its
 // derivation path, so connecting reads the addresses at the usual paths
 // (44'/501'/i' and 44'/501'/i'/0' for i = 0..4, and 44'/501') and the user
-// picks theirs. The choice (path + address, nothing else) is remembered in
-// localStorage for the silent reconnect after a reload, which does not touch
-// the device. Every signature first checks that the device still has that
-// address at that path, and is verified against it before it is returned.
+// picks theirs. The choice (path, address, and whether to reconnect
+// silently: nothing secret) is remembered in localStorage for the silent
+// reconnect after a reload, which does not touch the device. Every signature
+// first checks that the device still has that address at that path, and is
+// verified (ed25519, WebCrypto) against it before it is returned; a browser
+// that cannot verify is refused before the device is asked to sign.
 //
 // Device access is serialized, and the device is closed after each operation
 // so Ledger Live or another tab can use it in between.
@@ -66,6 +72,7 @@ import {
   getAddressDecoder,
   getAddressEncoder,
   getBase58Decoder,
+  getBase64Decoder,
   getPublicKeyFromAddress,
   getTransactionDecoder,
   getTransactionEncoder,
@@ -147,7 +154,9 @@ export type LedgerAccountChoiceRequest = {
 };
 export type LedgerConfirmInfo =
   | { kind: "message"; text: string }
-  | { kind: "transaction"; hash: string | null };
+  /** `hash` = base58(SHA-256(message)) as the device shows it; `message` = the
+   * same bytes in base64, for `npm run ops:inspect-tx` (the independent check). */
+  | { kind: "transaction"; hash: string | null; message: string };
 
 export type LedgerUsbPrompts = {
   /** Resolves with the account the user picked; rejects (code 4001) when cancelled. */
@@ -159,13 +168,14 @@ export type LedgerUsbPrompts = {
   confirmOnDevice(info: LedgerConfirmInfo): () => void;
 };
 
-/** What localStorage keeps: the chosen path and address only. */
+/** Where the wallet keeps the chosen path and address, and whether to
+ * reconnect silently after a reload (`manci:ledger-usb:v1`; nothing secret). */
 export type LedgerUsbStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
 export type LedgerUsbFailure =
-  | "unsupported" // no WebHID in this browser
+  | "unsupported" // no WebHID (or no WebCrypto Ed25519 to check signatures) in this browser
   | "no_access" // no permitted Ledger connected (needs the device chooser)
   | "locked"
   | "app_closed" // dashboard or another app open
@@ -220,8 +230,13 @@ function statusOf(error: unknown): number | null {
 
 const UNLOCK = "Unlock the Ledger, open the Solana app, then try again.";
 
-/** Maps a transport / Ledger app / browser error to what the user can do. */
-export function ledgerUsbError(error: unknown, during: "connect" | "message" | "transaction" = "connect"): unknown {
+/** Maps a transport / Ledger app / browser error to what the user can do.
+ * `appVersion`: the Solana app version the device reported, when known. */
+export function ledgerUsbError(
+  error: unknown,
+  during: "connect" | "message" | "transaction" = "connect",
+  appVersion?: string,
+): unknown {
   if (error instanceof LedgerUsbError || error instanceof OffchainMessageLimitError || isRejection(error)) return error;
   const name = error && typeof error === "object" ? String((error as { name?: unknown }).name ?? "") : "";
   const text = error instanceof Error ? error.message : String(error ?? "");
@@ -244,9 +259,16 @@ export function ledgerUsbError(error: unknown, during: "connect" | "message" | "
     );
   }
   if (status !== null && status >= 0x6a80 && status <= 0x6a83) {
-    return during === "transaction"
-      ? new LedgerUsbError("unsupported_transaction", "The Ledger's Solana app could not read this transaction. Update the Solana app (Ledger Live → My Ledger), then try again.", { cause: error })
-      : new LedgerUsbError("outdated_app", `The Ledger's Solana app refused the request format. Update the Solana app to ${MIN_OFFCHAIN_APP_VERSION} or newer (Ledger Live → My Ledger), then try again.`, { cause: error });
+    if (during === "transaction") {
+      return new LedgerUsbError("unsupported_transaction", "The Ledger's Solana app could not read this transaction. Update the Solana app (Ledger Live → My Ledger), then try again.", { cause: error });
+    }
+    // An app that passed the 1.8.0 check can still lack the parser for this
+    // layout (or refuse its size): "update to 1.8.0" would contradict itself.
+    const app = appVersion ? `Solana app ${appVersion}` : "Solana app";
+    const update = appVersion && !signsOffchainV0(appVersion)
+      ? `Update it to the latest version (${MIN_OFFCHAIN_APP_VERSION} at the very least)`
+      : "Update it to the latest version";
+    return new LedgerUsbError("outdated_app", `The Ledger's ${app} refused the request format. ${update} in Ledger Live (My Ledger), then try again.`, { cause: error });
   }
   if (name === "SecurityError") {
     // The device chooser was asked for without a recent click.
@@ -314,7 +336,8 @@ export function ledgerMessageEnvelope(message: Uint8Array, wallet: string): { en
   return { envelope: offchainEnvelopeBytes(text, wallet, "offchain-v0"), text: offchainBodyText(text) };
 }
 
-/** base58(SHA-256(message)): the hash the Solana app shows when it blind-signs. */
+/** base58(SHA-256(message)): the hash the Solana app shows when it blind-signs.
+ * Computed by the page over the bytes it sends, so it is no independent check. */
 export async function ledgerMessageHash(message: Uint8Array): Promise<string | null> {
   try {
     const digest = await crypto.subtle.digest("SHA-256", Uint8Array.from(message));
@@ -324,16 +347,30 @@ export async function ledgerMessageHash(message: Uint8Array): Promise<string | n
   }
 }
 
-/** Throws unless `signature` is `wallet`'s ed25519 signature over `bytes`
- * (skipped where this browser has no WebCrypto Ed25519). */
-async function assertSignature(signature: Uint8Array, bytes: Uint8Array, wallet: string): Promise<void> {
+/** The account's ed25519 key for checking what the Ledger returns. Read
+ * before the device is asked to sign: a browser without WebCrypto Ed25519 is
+ * refused there, so a signature is never returned unchecked. */
+async function verificationKey(wallet: Address): Promise<CryptoKey> {
+  try {
+    return await getPublicKeyFromAddress(wallet);
+  } catch (error) {
+    throw new LedgerUsbError(
+      "unsupported",
+      "This browser cannot check the Ledger's signatures (no WebCrypto Ed25519). Update Chrome or Edge, then try again. Nothing was signed.",
+      { cause: error },
+    );
+  }
+}
+
+/** Throws unless `signature` is the account's ed25519 signature over `bytes`. */
+async function assertSignature(signature: Uint8Array, bytes: Uint8Array, key: CryptoKey): Promise<void> {
   const bad = () => new LedgerUsbError("bad_signature", "The Ledger returned a signature that does not match the connected account and this request. Nothing was sent.");
   if (signature.length !== 64) throw bad();
   let verified: boolean;
   try {
-    verified = await verifySignature(await getPublicKeyFromAddress(address(wallet)), signatureBytes(signature), bytes);
-  } catch {
-    return;
+    verified = await verifySignature(key, signatureBytes(signature), bytes);
+  } catch (error) {
+    throw new LedgerUsbError("failed", "This browser could not check the Ledger's signature. Nothing was sent.", { cause: error });
   }
   if (!verified) throw bad();
 }
@@ -540,22 +577,25 @@ export function createLedgerUsbWallet(deps: LedgerUsbWalletDeps): Wallet & { rea
           const account = requireAccount(input);
           // Before any device access: an unsupported or over-long request never prompts.
           const { envelope, text } = ledgerMessageEnvelope(new Uint8Array(input.message), account.address);
+          const key = await verificationKey(account.address);
           const signature = await withAccount("message", async (device) => {
             const app = await readAppInfo(device);
             if (!app.signsMessages) {
               throw new LedgerUsbError(
                 "outdated_app",
-                `The Ledger's Solana app ${app.version} cannot sign Manci requests. Update it to ${MIN_OFFCHAIN_APP_VERSION} or newer (Ledger Live → My Ledger), then try again.`,
+                `The Ledger's Solana app ${app.version} cannot sign Manci requests. Update it to the latest version (${MIN_OFFCHAIN_APP_VERSION} at the very least) in Ledger Live (My Ledger), then try again.`,
               );
             }
             const hide = prompts.confirmOnDevice({ kind: "message", text });
             try {
               return await device.signOffchainMessage(account.path, envelope);
+            } catch (error) {
+              throw ledgerUsbError(error, "message", app.version);
             } finally {
               hide();
             }
           });
-          await assertSignature(signature, envelope, account.address);
+          await assertSignature(signature, envelope, key);
           outputs.push({ signedMessage: envelope, signature, signatureType: "ed25519" });
         }
         return outputs;
@@ -582,15 +622,16 @@ export function createLedgerUsbWallet(deps: LedgerUsbWalletDeps): Wallet & { rea
           }
           const message = new Uint8Array(transaction.messageBytes);
           const hash = await ledgerMessageHash(message);
+          const key = await verificationKey(account.address);
           const signature = await withAccount("transaction", async (device) => {
-            const hide = prompts.confirmOnDevice({ kind: "transaction", hash });
+            const hide = prompts.confirmOnDevice({ kind: "transaction", hash, message: getBase64Decoder().decode(message) });
             try {
               return await device.signTransaction(account.path, message);
             } finally {
               hide();
             }
           });
-          await assertSignature(signature, message, account.address);
+          await assertSignature(signature, message, key);
           const signed = getTransactionEncoder().encode({
             ...transaction,
             signatures: Object.freeze({ ...transaction.signatures, [account.address]: signature as SignatureBytes }),

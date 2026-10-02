@@ -32,6 +32,9 @@ export type SimOptions = {
   legacyOffchain?: boolean;
   /** Transactions the app cannot show without blind signing (our programs). */
   needsBlindSigning?: boolean;
+  /** Signing instructions (0x06, 0x07; 0x05 with display) that wait for the
+   * user forever: the device shows the request and nobody answers. */
+  hang?: Set<number>;
 };
 
 const DOMAIN = Buffer.from("\xffsolana offchain", "latin1");
@@ -54,6 +57,14 @@ export class SolanaAppSim extends Transport {
   readonly signed: { ins: number; path: string; message: Buffer }[] = [];
   closed = 0;
   private chunks: { ins: number; data: Buffer } | null = null;
+  private waitingStarted: () => void = () => undefined;
+  /** Resolves when a request reaches the user (options.hang) and stays unanswered. */
+  readonly waiting = new Promise<void>((resolve) => { this.waitingStarted = resolve; });
+
+  private unanswered(): Promise<Buffer> {
+    this.waitingStarted();
+    return new Promise<Buffer>(() => undefined);
+  }
 
   constructor(readonly keys: Map<string, SimKey>, readonly options: SimOptions = {}) {
     super();
@@ -77,6 +88,7 @@ export class SolanaAppSim extends Transport {
       const { path } = this.readPath(data, 0);
       const key = this.keys.get(path);
       if (!key) return sw(0x6a84);
+      if (p1 === 1 && this.options.hang?.has(0x05)) return this.unanswered();
       if (p1 === 1 && this.options.reject?.has(0x05)) return sw(0x6985);
       return Buffer.concat([Buffer.from(key.publicKey), sw(0x9000)]);
     }
@@ -100,6 +112,7 @@ export class SolanaAppSim extends Transport {
     } else if (this.options.needsBlindSigning && this.options.blindSigningEnabled === false) {
       return sw(0x6808);
     }
+    if (this.options.hang?.has(ins)) return this.unanswered();
     if (this.options.reject?.has(ins)) return sw(0x6985);
     this.signed.push({ ins, path, message: Buffer.from(message) });
     const signature = await signBytes(key.keys.privateKey, message);
@@ -190,13 +203,16 @@ export class FakeHidLedger {
     incoming.data.push(...payload);
     if (incoming.data.length < incoming.length) return;
     this.incoming = null;
-    const response = await this.app.answer(Uint8Array.from(incoming.data.slice(0, incoming.length)));
-    const framed = [response.length >> 8, response.length & 0xff, ...response];
-    for (let at = 0, seq = 0; at < framed.length; at += 59, seq++) {
-      const frame = new Uint8Array(64);
-      frame.set([incoming.channel >> 8, incoming.channel & 0xff, 0x05, seq >> 8, seq & 0xff]);
-      frame.set(framed.slice(at, at + 59), 5);
-      setTimeout(() => { for (const listener of [...this.listeners]) listener({ data: new DataView(frame.buffer), device: this }); }, 0);
-    }
+    // As a real device: the write completes at once, the answer comes as input
+    // reports when the app has one (never, while a request waits for the user).
+    void this.app.answer(Uint8Array.from(incoming.data.slice(0, incoming.length))).then((response) => {
+      const framed = [response.length >> 8, response.length & 0xff, ...response];
+      for (let at = 0, seq = 0; at < framed.length; at += 59, seq++) {
+        const frame = new Uint8Array(64);
+        frame.set([incoming.channel >> 8, incoming.channel & 0xff, 0x05, seq >> 8, seq & 0xff]);
+        frame.set(framed.slice(at, at + 59), 5);
+        setTimeout(() => { for (const listener of [...this.listeners]) listener({ data: new DataView(frame.buffer), device: this }); }, 0);
+      }
+    });
   }
 }

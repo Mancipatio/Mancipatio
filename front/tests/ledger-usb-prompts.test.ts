@@ -75,8 +75,8 @@ describe("ledgerUsbPrompts", () => {
 
   it("shows a confirm-on-device notice until the device answers", () => {
     view();
-    const hide = ledgerUsbPrompts.confirmOnDevice({ kind: "transaction", hash: "abc" });
-    expect(ledgerUsbPromptSnapshot()).toEqual({ kind: "confirm", info: { kind: "transaction", hash: "abc" } });
+    const hide = ledgerUsbPrompts.confirmOnDevice({ kind: "transaction", hash: "abc", message: "AQID" });
+    expect(ledgerUsbPromptSnapshot()).toEqual({ kind: "confirm", info: { kind: "transaction", hash: "abc", message: "AQID" } });
     hide();
     expect(ledgerUsbPromptSnapshot()).toBeNull();
   });

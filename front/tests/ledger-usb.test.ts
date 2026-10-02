@@ -44,6 +44,9 @@ import {
   type LedgerUsbPrompts,
 } from "@/lib/ledger-usb";
 import { solanaAppDevice } from "@/lib/ledger-usb-webhid";
+import { accountErrorMessage } from "@/lib/account-client";
+import { classifyApplicationReadError } from "@/lib/apply-read-state";
+import { inspectTransactionMessage } from "@/scripts/ops/inspect-tx";
 import { createSignedRequest, siwsMessage } from "@/lib/siws-client";
 import { offchainEnvelopeBytes, OffchainMessageLimitError } from "@/lib/siws-offchain";
 import { onSigningEvent, preferOffchainEnvelope, resetSigningMode, signingTarget } from "@/lib/siws-signing";
@@ -304,7 +307,7 @@ describe("Ledger (USB): SIWS messages", () => {
     expect(old.requests[0].app).toEqual({ version: "1.7.2", blindSigningEnabled: true, signsMessages: false });
     const error = await createSignedRequest(old.session, "test.write", {}).catch((e) => e);
     expect(error).toBeInstanceOf(LedgerUsbError);
-    expect(error).toMatchObject({ reason: "outdated_app", message: expect.stringMatching(/1\.7\.2.*1\.8\.0 or newer/) });
+    expect(error).toMatchObject({ reason: "outdated_app", message: expect.stringMatching(/1\.7\.2.*the latest version \(1\.8\.0 at the very least\)/) });
     expect(old.sentApdus(0x07)).toEqual([]);
     // The per-send wallet check passes it through (not its generic message).
     const fetch = vi.fn();
@@ -314,11 +317,55 @@ describe("Ledger (USB): SIWS messages", () => {
     expect(policyError).toMatchObject({ reason: "outdated_app" });
     expect(fetch).not.toHaveBeenCalled();
 
-    // A device that reports a new version but parses only the legacy header refuses the format (0x6a81).
+    // A device that reports a new version but parses only the legacy header
+    // refuses the format (0x6a81): the advice names its version and "the
+    // latest", never "1.8.0 or newer", which it already is.
     const legacy = await connected({ legacyOffchain: true });
-    await expect(createSignedRequest(legacy.session, "test.write", {})).rejects.toMatchObject({
-      reason: "outdated_app", message: expect.stringMatching(/Update the Solana app to 1\.8\.0 or newer/),
+    const legacyError = await createSignedRequest(legacy.session, "test.write", {}).catch((e) => e);
+    expect(legacyError).toMatchObject({
+      reason: "outdated_app", message: expect.stringMatching(/Solana app 1\.16\.0 refused the request format\. Update it to the latest version in Ledger Live/),
     });
+    expect(legacyError.message).not.toMatch(/1\.8\.0/);
+  });
+
+  it("refuses before the device signs when this browser cannot verify ed25519 signatures", async () => {
+    const h = await connected();
+    const importKey = vi.spyOn(globalThis.crypto.subtle, "importKey")
+      .mockRejectedValue(Object.assign(new Error("Unrecognized name."), { name: "NotSupportedError" }));
+    try {
+      await expect(createSignedRequest(h.session, "test.write", {})).rejects.toMatchObject({
+        name: "LedgerUsbError", reason: "unsupported", message: expect.stringMatching(/cannot check the Ledger's signatures/),
+      });
+      const transfer = await signTransactionMessageWithSigners(pipe(
+        createTransactionMessage({ version: 0 }),
+        (m) => setTransactionMessageFeePayerSigner(createWalletTransactionSigner(h.session).signer, m),
+        (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: getBase58Decoder().decode(new Uint8Array(32).fill(3)) as Blockhash, lastValidBlockHeight: BigInt(1) }, m),
+      )).catch((e) => e);
+      expect(findLedgerUsbError(transfer)).toMatchObject({ reason: "unsupported" });
+    } finally {
+      importKey.mockRestore();
+    }
+    // Nothing reached the device's signing instructions.
+    expect(h.sentApdus(0x07)).toEqual([]);
+    expect(h.sentApdus(0x06)).toEqual([]);
+  });
+
+  it("every account and /apply screen shows the Ledger's own words, not a generic fallback", async () => {
+    const h = await connected();
+    h.device.options = { locked: true };
+    const locked = await createSignedRequest(h.session, "test.write", {}).catch((e) => e);
+    expect(locked).toBeInstanceOf(LedgerUsbError);
+    expect(accountErrorMessage(locked, "The wallet could not be linked.")).toBe(locked.message);
+    expect(accountErrorMessage(locked, "fallback")).toMatch(/Your Ledger is locked/);
+    expect(classifyApplicationReadError(locked)).toMatchObject({ kind: "hardware_wallet", message: locked.message });
+    // "busy" says "reject any request on the device": still not "the signature was cancelled".
+    const busy = ledgerUsbError(Object.assign(new Error("x"), { name: "TransportRaceCondition" }));
+    expect(accountErrorMessage(busy, "fallback")).toMatch(/^The Ledger is busy/);
+    expect(classifyApplicationReadError(busy)).toMatchObject({ kind: "hardware_wallet", message: expect.stringMatching(/^The Ledger is busy/) });
+    // Wrapped (a cause chain) as well.
+    expect(accountErrorMessage(new Error("wrapped", { cause: locked }), "fallback")).toBe(locked.message);
+    // A rejection on the device stays the standard "cancelled".
+    expect(accountErrorMessage(ledgerRejection(), "fallback")).toMatch(/signature was cancelled/);
   });
 
   it("returns the standard user rejection when the request is rejected on the device, without a second prompt", async () => {
@@ -385,7 +432,14 @@ describe("Ledger (USB): transactions", () => {
     const [onDevice] = h.signedApdus(0x06);
     expect(onDevice.path).toBe(CHOSEN);
     expect(new Uint8Array(onDevice.message)).toEqual(new Uint8Array(signed.messageBytes));
-    expect(h.confirmations).toEqual([{ kind: "transaction", hash: sha256base58(new Uint8Array(signed.messageBytes)) }]);
+    const messageBytes = new Uint8Array(signed.messageBytes);
+    expect(h.confirmations).toEqual([{ kind: "transaction", hash: sha256base58(messageBytes), message: Buffer.from(messageBytes).toString("base64") }]);
+    // The copied message is the independent check: ops:inspect-tx decodes it
+    // and prints the hash the device shows, from the bytes alone.
+    const [confirmation] = h.confirmations as Extract<LedgerConfirmInfo, { kind: "transaction" }>[];
+    const inspected = inspectTransactionMessage(confirmation.message);
+    expect(inspected.hash).toBe(sha256base58(new Uint8Array(onDevice.message)));
+    expect(inspected.lines).toContain(`  #1 Memo: "manci"`);
   });
 
   it("says how to turn on blind signing when the Solana app needs it, also through the send error copy", async () => {
@@ -443,5 +497,15 @@ describe("Ledger (USB): error mapping", () => {
 
   it("names the transaction case for a transaction the app cannot parse", () => {
     expect(ledgerUsbError(Object.assign(new Error("x"), { statusCode: 0x6a80 }), "transaction")).toMatchObject({ reason: "unsupported_transaction" });
+  });
+
+  it("a refused message format names the app version, and says 1.8.0 only to an app older than that", () => {
+    for (const code of [0x6a80, 0x6a81, 0x6a82, 0x6a83]) {
+      const newer = ledgerUsbError(status(code), "message", "1.9.0") as LedgerUsbError;
+      expect(newer).toMatchObject({ reason: "outdated_app", message: expect.stringMatching(/Solana app 1\.9\.0 refused.*Update it to the latest version in Ledger Live/) });
+      expect(newer.message).not.toMatch(/1\.8\.0/);
+    }
+    expect(ledgerUsbError(status(0x6a81), "message", "1.7.2")).toMatchObject({ message: expect.stringMatching(/Solana app 1\.7\.2 refused.*latest version \(1\.8\.0 at the very least\)/) });
+    expect(ledgerUsbError(status(0x6a81))).toMatchObject({ reason: "outdated_app", message: expect.stringMatching(/^The Ledger's Solana app refused.*latest version in Ledger Live/) });
   });
 });

@@ -73,6 +73,10 @@ export function WalletButton() {
   };
   // Never straight to the Ledger's USB chooser: with no other wallet the list
   // still explains the choice (and that a wallet extension is missing).
+  // Deliberate trade-off: where WebHID exists (desktop Chrome, Edge), one
+  // wallet extension plus "Ledger (USB)" is two connectors, so the button
+  // opens the list (one click more than before) and the Ledger route stays
+  // visible. A silent reconnect after a reload needs no click either way.
   const only = conn.connectors.length === 1 && conn.connectors[0].id !== LEDGER_USB_CONNECTOR_ID ? conn.connectors[0] : null;
 
   return (

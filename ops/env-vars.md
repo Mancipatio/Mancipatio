@@ -98,7 +98,9 @@ explicitly on or off.
 `NEXT_PUBLIC_FEATURE_LEDGER_USB` is the exception: the "Ledger (USB)" wallet
 (`lib/ledger-usb.ts`) is **on on every network unless the variable reads as
 off**. It lets a Ledger sign directly over WebHID (Chrome or Edge on a
-computer, Solana app 1.8.0 or newer, "Blind signing" on for transactions), the
+computer, the latest Solana app, 1.8.0 at the very least, "Blind signing" on
+for transactions, each one checked with `npm run ops:inspect-tx` as in
+`ops/runbook-mainnet.md` §5), the
 way in for a Ledger account whose wallet app cannot sign messages (Phantom,
 Solflare or Jupiter with a Ledger), which every transaction's wallet check
 needs. `false` hides the wallet and sets `hid=()` in the Permissions-Policy
