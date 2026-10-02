@@ -42,10 +42,10 @@ async function send(w: World, extra: ChainEnv, signer: ChainEnv, options: { ledg
 }
 
 /** One chain:bootstrap cycle by the deployer (dry run, then the reviewed send). */
-async function cycle(w: World) {
+async function cycle(w: World, lines: string[] = []) {
   const plan = await runTool("bootstrap", env(w), bootstrapTool, deps(w));
   expect(plan.error ?? null).toBeNull();
-  const sent = await runTool("bootstrap", sendEnv(w, plan.planDigest as string), bootstrapTool, deps(w));
+  const sent = await runTool("bootstrap", sendEnv(w, plan.planDigest as string), bootstrapTool, deps(w, lines));
   expect(sent.error ?? null).toBeNull();
   return (sent.steps as { id: string }[]).map((s) => s.id);
 }
@@ -145,8 +145,11 @@ describe("chain:accept: the bootstrap order on the CLI (runbook §5)", () => {
     async () => {
       const w = await companyWorld();
       const admin = w.keys.admins[0];
-      expect(await cycle(w)).toEqual(["S1", "S2", "S2b", `S3:${admin}`, "S4", "S4b"]);
-      // chain:bootstrap names the CLI path next to each operator-front action.
+      const sendLines: string[] = [];
+      expect(await cycle(w, sendLines)).toEqual(["S1", "S2", "S2b", `S3:${admin}`, "S4", "S4b"]);
+      // chain:bootstrap names the CLI path next to each operator-front action, after a send too.
+      // The reviewed plan (A3, X3, X2), then the same three after the send.
+      expect(sendLines.filter((line) => line.includes("npm run chain:accept"))).toHaveLength(6);
       const lines: string[] = [];
       await runTool("bootstrap", env(w), bootstrapTool, deps(w, lines));
       const text = lines.join("\n");

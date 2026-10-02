@@ -1299,6 +1299,12 @@ export function bootstrapWindowLine(state: BootstrapState): string | null {
     : `bootstrap window: closed (${formatPauseFlags(state.platform.pauseFlags)}, ${time}): add_admin runs 48 hours after its propose_admin and X1 48 hours after S5, each within 14 days`;
 }
 
+/** The chain:accept command of a role step the key signs itself (the CLI path for a Ledger that cannot sign SIWS). */
+function logAcceptCommand(ctx: ToolContext, action: ExternalAction) {
+  const op = roleStepOp(action.id);
+  if (op) ctx.log(`  or with that key's Ledger on the CLI: CHAIN_ACCEPT_OP=${op} CHAIN_ACCEPT_SIGNER=${action.key} npm run chain:accept`);
+}
+
 function printPlan(ctx: ToolContext, plan: BootstrapPlan, simulations: Map<string, string>, state?: BootstrapState) {
   const window = state ? bootstrapWindowLine(state) : null;
   if (window) ctx.log(window);
@@ -1311,8 +1317,7 @@ function printPlan(ctx: ToolContext, plan: BootstrapPlan, simulations: Map<strin
   for (const blocked of plan.blocked) ctx.log(`${blocked.id.padEnd(11)} waiting: ${blocked.reason}`);
   for (const action of plan.awaiting) {
     ctx.log(`ACTION REQUIRED ${action.id}: ${action.role} ${action.key} — ${action.action} on ${action.page} (operator front)`);
-    const op = roleStepOp(action.id);
-    if (op) ctx.log(`  or with that key's Ledger on the CLI: CHAIN_ACCEPT_OP=${op} CHAIN_ACCEPT_SIGNER=${action.key} npm run chain:accept`);
+    logAcceptCommand(ctx, action);
   }
   if (plan.handover.reason) ctx.log(`S7 pending: ${plan.handover.reason}`);
   for (const note of plan.notes) ctx.log(`note: ${note}`);
@@ -1485,6 +1490,7 @@ export async function bootstrapTool(ctx: ToolContext): Promise<ToolStatus> {
   evidence.next = { steps: next.steps.map((s) => s.id), awaiting: next.awaiting, blocked: next.blocked, handover: next.handover };
   for (const action of next.awaiting) {
     ctx.log(`ACTION REQUIRED ${action.id}: ${action.role} ${action.key} — ${action.action} on ${action.page}`);
+    logAcceptCommand(ctx, action);
   }
   const handedOver = IDL_PROGRAMS.every((name) => after.ua[name] === map.squads.vault);
   return handedOver && !next.awaiting.length ? "completed" : "awaiting";
