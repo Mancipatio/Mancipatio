@@ -23,7 +23,10 @@
  * instruction, front/scripts/chain signs it) must be clean, as for every other
  * sending tool (or CHAIN_EMERGENCY_DIRTY_OK=1, recorded), and the live
  * canonical IDL must define the instruction exactly as front/idl does (or
- * CHAIN_EMERGENCY_IDL_UNCHECKED=1, recorded).
+ * CHAIN_EMERGENCY_IDL_UNCHECKED=1, recorded). An unpause while the bootstrap
+ * window is open would close it for good: it needs
+ * CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1 (recorded); the bootstrap closes it with
+ * chain:accept (S5c).
  */
 import {
   createNoopSigner,
@@ -73,6 +76,7 @@ import {
   RESUME_EVERYTHING_MASK,
   describePausedAreas,
   formatPauseFlags,
+  isBootstrapOpen,
 } from "@/lib/pause-flags";
 import { fetchRawAccounts, hasDiscriminator } from "./accounts";
 import type { ToolContext, ToolStatus } from "./context";
@@ -206,6 +210,24 @@ export function assertPayoutModulesClearAllowed(req: EmergencyRequest, network: 
   if (confirm !== req.signer) {
     throw new ChainGateError(
       "CHAIN_PAUSE_BITS: clearing payout-modules (0x40) on mainnet switches on Startup raises, yield routing, Rights-Token issuances and milestones (D2: an owner decision after a vote of at least 7 days, never an emergency step). With that decision recorded, set CHAIN_ENABLE_PAYOUT_MODULES=<the signing super admin> (recorded)",
+    );
+  }
+  return true;
+}
+
+/**
+ * An unpause while the bootstrap window is open (bit 7) closes it for good
+ * (any clear does): from then on every Admin grant (A3) and super admin
+ * rotation (X1) waits 48 hours, and before X1 the super admin is still the
+ * deployer. The bootstrap closes the window itself, with chain:accept (S5c)
+ * once its role steps landed; here that clear needs
+ * CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1 (recorded). True when the override was used.
+ */
+export function assertBootstrapCloseAllowed(req: EmergencyRequest, state: EmergencyState, env: ToolContext["env"]): boolean {
+  if (req.op !== "unpause" || !state.platform || !isBootstrapOpen(state.platform.pauseFlags)) return false;
+  if (env.CHAIN_EMERGENCY_CLOSE_BOOTSTRAP?.trim() !== "1") {
+    throw new ChainGateError(
+      `The bootstrap window is open (${formatPauseFlags(state.platform.pauseFlags)}): any clear closes it for good, and every later Admin grant and super admin rotation waits 48 hours. The bootstrap closes it with chain:accept (CHAIN_ACCEPT_OP=close-bootstrap-window, S5c) once X1 and every A3 landed (runbook §5); to clear anyway set CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1 (recorded)`,
     );
   }
   return true;
@@ -490,12 +512,22 @@ export function compareIdlInstruction(probe: IdlProbe, instruction: string): Idl
   }
 }
 
+/** The checkout a mainnet chain:emergency run comes from (its refusals name it). */
+export const LIVE_RELEASE_CHECKOUT = "the live Release tag";
+
 /**
  * The live canonical IDL must define `instruction` exactly as front/idl does.
  * On mainnet anything else refuses, unless `override` names a variable set
  * to 1 (recorded); elsewhere it is recorded (`idlUnchecked`) and warned.
+ * `checkout` names the checkout the refusal sends the operator to.
  */
-export async function checkInstructionIdl(ctx: ToolContext, program: ProgramName, instruction: string, override: string | null): Promise<IdlCheck> {
+export async function checkInstructionIdl(
+  ctx: ToolContext,
+  program: ProgramName,
+  instruction: string,
+  override: string | null,
+  checkout: string = LIVE_RELEASE_CHECKOUT,
+): Promise<IdlCheck> {
   const source = { label: "head" as const, bytes: readLocalIdl(ctx.frontDir)[program] };
   const probe = await probeIdl(ctx.rpc, program, source);
   const check = compareIdlInstruction(probe, instruction);
@@ -504,7 +536,7 @@ export async function checkInstructionIdl(ctx: ToolContext, program: ProgramName
   const text = `the live canonical IDL of ${program} ${check === "differs" ? "defines" : "cannot confirm"} ${instruction} ${check === "differs" ? "differently from" : "against"} front/idl (${check})`;
   const overridden = override !== null && ctx.env[override]?.trim() === "1";
   if (ctx.config.network === "mainnet" && !overridden) {
-    throw new ChainGateError(`${text}; run the checkout of the live Release tag${override ? `, or set ${override}=1 (recorded)` : ""}`);
+    throw new ChainGateError(`${text}; run the checkout of ${checkout}${override ? `, or set ${override}=1 (recorded)` : ""}`);
   }
   ctx.evidence.idlUnchecked = true;
   ctx.log(`warning: ${text}`);
@@ -517,13 +549,14 @@ export async function checkInstructionIdl(ctx: ToolContext, program: ProgramName
  * The mainnet source guard of the other sending tools, for the role-key
  * tools that need no Release: the guarded source (front/lib builds the
  * instruction, front/scripts/chain signs it) must be clean. `override` names
- * the variable that waives it (recorded in the evidence), or null for none.
+ * the variable that waives it (recorded in the evidence), or null for none;
+ * `checkout` names the checkout the refusal sends the operator to.
  */
-export function guardMainnetSource(ctx: ToolContext, override: string | null): void {
+export function guardMainnetSource(ctx: ToolContext, override: string | null, checkout: string = LIVE_RELEASE_CHECKOUT): void {
   if (ctx.config.network !== "mainnet") return;
   const dirty = (ctx.deps.sourceDirty ?? dirtySourcePaths)(ctx.root);
   if (!dirty.length) return;
-  const text = `The working tree has uncommitted changes under ${SOURCE_INTEGRITY_PATHS.join(", ")} (${dirty.length} paths): run from a clean checkout of the live Release tag`;
+  const text = `The working tree has uncommitted changes under ${SOURCE_INTEGRITY_PATHS.join(", ")} (${dirty.length} paths): run from a clean checkout of ${checkout}`;
   if (override === null || ctx.env[override]?.trim() !== "1") {
     throw new ChainGateError(override ? `${text}, or set ${override}=1 (recorded)` : text);
   }
@@ -573,6 +606,10 @@ export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
   ctx.log(`op        ${req.op}: ${draft.summary}`);
   ctx.log(`signer    ${req.signer} (${draft.role}, checked on-chain at finalized)`);
   for (const note of draft.notes) ctx.log(`note: ${note}`);
+  if (!draft.noop && assertBootstrapCloseAllowed(req, state, ctx.env)) {
+    evidence.closeBootstrapOverride = true;
+    ctx.log("warning: CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1: this clear closes the bootstrap window for good (recorded in the evidence)");
+  }
 
   // The live canonical IDL must define the instruction as front/idl does.
   ctx.phase = "idl";

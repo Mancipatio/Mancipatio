@@ -35,7 +35,9 @@
  * the same pipeline as the other tools. On mainnet the guarded source must be
  * clean and the live canonical IDL must define the instruction exactly as
  * front/idl does, without the overrides chain:emergency has (nothing here is
- * an incident).
+ * an incident). The live Release tag (v1.0.0-rc.1) predates this tool, so a
+ * mainnet run comes from the reviewed commit that has it, whose program,
+ * front/idl and front/lib equal that tag (runbook §5, "Which checkout").
  */
 import { createNoopSigner, isAddress, type Address } from "@solana/kit";
 import { getAdminSize } from "@/lib/generated/asset_registry";
@@ -66,6 +68,12 @@ import {
 } from "./tx";
 
 export const ACCEPT_OPS = Object.keys(ROLE_STEP_OPS) as RoleStepOp[];
+
+/**
+ * Where a mainnet chain:accept run comes from (its source and IDL refusals
+ * name it): not the live Release tag, which predates the tool.
+ */
+export const ACCEPT_CHECKOUT = "the reviewed chain:accept commit whose program, front/idl and front/lib equal the live Release tag (runbook §5, Which checkout)";
 
 export type AcceptRequest = { op: RoleStepOp; signer: Address };
 
@@ -195,7 +203,8 @@ export async function acceptTool(ctx: ToolContext): Promise<ToolStatus> {
   evidence.step = target.stepId;
   evidence.role = target.role;
   // The mainnet source guard of the other sending tools, with no override.
-  guardMainnetSource(ctx, null);
+  guardMainnetSource(ctx, null, ACCEPT_CHECKOUT);
+  ctx.log(`source    commit ${typeof evidence.headCommit === "string" ? evidence.headCommit : "unknown"} (compare with the reviewed chain:accept commit, runbook §5)`);
 
   ctx.phase = "probe";
   const state = await probeBootstrapState(ctx.rpc, map);
@@ -210,7 +219,7 @@ export async function acceptTool(ctx: ToolContext): Promise<ToolStatus> {
   }
 
   ctx.phase = "idl";
-  await checkInstructionIdl(ctx, target.program, target.instruction, null);
+  await checkInstructionIdl(ctx, target.program, target.instruction, null, ACCEPT_CHECKOUT);
 
   if (draft.noop) {
     ctx.log(`nothing to do: ${draft.noop}`);

@@ -169,9 +169,14 @@ describe("chain:emergency pause (ops-qa-8)", () => {
     expect(byAdmin.error).toMatch(/Only the super admin clears pause bits/);
     const stranger = await dry(w, { CHAIN_EMERGENCY_OP: "pause", CHAIN_EMERGENCY_SIGNER: key(9), CHAIN_PAUSE_BITS: "all" });
     expect(stranger.error).toMatch(/neither the super admin nor an Admin/);
+    // 0xff: the bootstrap window is open, and any clear closes it for good.
     const op = { CHAIN_EMERGENCY_OP: "unpause", CHAIN_EMERGENCY_SIGNER: w.keys.superAdmin, CHAIN_PAUSE_BITS: "all" };
-    const sent = await send(w, op, { CHAIN_KEYPAIR: w.pairs.superAdmin.path });
+    const closing = await dry(w, op);
+    expect(closing.error).toMatch(/^The bootstrap window is open \(0xff\): any clear closes it for good.*CHAIN_ACCEPT_OP=close-bootstrap-window.*set CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1 \(recorded\)$/);
+    expect(w.chain.calls).not.toContain("simulateTransaction");
+    const sent = await send(w, { ...op, CHAIN_EMERGENCY_CLOSE_BOOTSTRAP: "1" }, { CHAIN_KEYPAIR: w.pairs.superAdmin.path });
     expect(sent.error ?? null).toBeNull();
+    expect(sent.closeBootstrapOverride).toBe(true);
     expect(await platformFlags(w)).toBe(0x40);
     // Off mainnet the super admin may switch the payout modules on, alone.
     const payout = await send(w, { ...op, CHAIN_PAUSE_BITS: "payout-modules" }, { CHAIN_KEYPAIR: w.pairs.superAdmin.path });

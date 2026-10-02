@@ -1249,6 +1249,12 @@ export async function planRoleStep(
     done.set(def.id, def.skip(state) ? "skipped" : "awaiting");
   }
   const base = { id, title: target.title, signerRole: target.signerRole };
+  // S5c and S6 read the Platform's pause flags: without a Platform their skip
+  // ("the bootstrap window is closed", "not paused") would record a step that
+  // never ran as done.
+  if (!state.platform && (id === "S5c" || id === "S6")) {
+    throw new ChainPlanError(`${id} cannot run: the Platform does not exist yet (S1 of chain:bootstrap cycle 1 creates it)`);
+  }
   const already = target.skip(state);
   if (already) return { ...base, step: null, noop: already };
   const waits = waitingOn(target.waitsFor, done);

@@ -3,6 +3,7 @@ import path from "node:path";
 import { createKeyPairSignerFromBytes, createNoopSigner, getAddressEncoder, signBytes, type Address } from "@solana/kit";
 import { describe, expect, it } from "vitest";
 import {
+  findAdminRecordPda,
   findPendingAdminPda,
   getPendingAdminDecoder,
   getPendingAdminEncoder,
@@ -10,7 +11,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { getProposeBlocklistAuthorityInstructionAsync } from "@/lib/generated/transfer_hook";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
-import { acceptTarget, acceptTool, readAcceptRequest } from "@/scripts/chain/lib/accept";
+import { ACCEPT_CHECKOUT, acceptTarget, acceptTool, readAcceptRequest } from "@/scripts/chain/lib/accept";
 import { bootstrapTool, planRoleStep, probeBootstrapState, roleStepOp } from "@/scripts/chain/lib/bootstrap-plan";
 import { runTool } from "@/scripts/chain/lib/context";
 import { emergencyTool } from "@/scripts/chain/lib/emergency";
@@ -50,13 +51,22 @@ async function cycle(w: World, lines: string[] = []) {
   return (sent.steps as { id: string }[]).map((s) => s.id);
 }
 
-/** A Ledger stand-in that signs with a test keypair file and records its calls. */
-function fakeLedger(file: string, calls: string[]): () => Promise<LedgerDevice> {
+/**
+ * A Ledger stand-in that signs with a test keypair file and records its calls.
+ * `onAddress` runs once, when the tool reads the device's key: after the plan,
+ * before the send re-probes (the chain moving while the device is open).
+ */
+function fakeLedger(file: string, calls: string[], onAddress?: () => void): () => Promise<LedgerDevice> {
   return async () => {
     const signer = await createKeyPairSignerFromBytes(new Uint8Array(JSON.parse(fs.readFileSync(file, "utf8"))));
+    let moved = false;
     return {
       getPublicKey: async (p) => {
         calls.push(`address ${p}`);
+        if (onAddress && !moved) {
+          moved = true;
+          onAddress();
+        }
         return new Uint8Array(getAddressEncoder().encode(signer.address));
       },
       signMessage: async (p, message) => {
@@ -305,7 +315,7 @@ describe("chain:accept refusals", () => {
     expect(w.chain.calls.filter((c) => c === "sendTransaction")).toHaveLength(6);
   });
 
-  it("a send whose window closed after the dry run is refused at its re-check", async () => {
+  it("a send started after the window closed is refused when it plans, before the signer is loaded", async () => {
     const w = await world();
     await cycle(w);
     const extra = op("accept-blocklist-authority", w.keys.blocklistAuthority);
@@ -319,7 +329,85 @@ describe("chain:accept refusals", () => {
       deps(w),
     );
     expect(late.error).toMatch(/X3 cannot run now: the proposal expired/);
+    expect(late.journal).toBeUndefined();
     expect(w.chain.calls.filter((c) => c === "sendTransaction")).toHaveLength(6);
+  });
+
+  it("a window that closes while the Ledger is open is refused at the finalized re-check (X3:window-open), before the device signs", async () => {
+    const w = await world();
+    await cycle(w);
+    const calls: string[] = [];
+    // The device answers with its key after the send planned; meanwhile the 14 days run out.
+    const late = await send(w, op("accept-blocklist-authority", w.keys.blocklistAuthority), { CHAIN_SIGNER: "usb://ledger?key=0" }, {
+      ledger: fakeLedger(w.pairs.blocklistAuthority.path, calls, () => {
+        w.chain.now += 1_209_600 + 60;
+      }),
+    });
+    expect(late.status).toBe("failed");
+    expect(late.error).toBe("state diverged from reviewed plan at X3: X3:window-open");
+    expect(calls).toEqual(["address 44'/501'/0'", "close"]);
+    expect(w.chain.calls.filter((c) => c === "sendTransaction")).toHaveLength(6);
+    // A refused re-check leaves no signature behind, so the lock is released.
+    expect(fs.readdirSync(path.join(w.dir, "state"))).toEqual([]);
+  });
+
+  it(
+    "a step it waits for that stops holding while the Ledger is open is refused at the re-check (A3:<key>:landed for X1 and S6)",
+    async () => {
+      const w = await companyWorld();
+      const admin = w.keys.admins[0];
+      const [record] = await findAdminRecordPda({ authority: admin });
+      const company = { CHAIN_SIGNER: "usb://ledger?key=0" };
+      const device = () => fakeLedger(w.pairs.superAdmin.path, []);
+      let saved: ReturnType<typeof w.chain.get>;
+      /** The second Admin's record disappears (as a remove_admin would) while the device is open. */
+      const removing = (calls: string[]) =>
+        fakeLedger(w.pairs.superAdmin.path, calls, () => {
+          saved = w.chain.get(record);
+          w.chain.accounts.delete(record);
+        });
+      const ok = (result: Record<string, unknown>) => expect(result.error ?? null).toBeNull();
+      await cycle(w);
+      ok(await send(w, op("add-admin", admin), { CHAIN_KEYPAIR: w.pairs.admin.path }));
+      expect(await cycle(w)).toEqual(["S5"]);
+
+      const x1calls: string[] = [];
+      const x1 = await send(w, op("accept-platform-admin", w.company), company, { ledger: removing(x1calls) });
+      expect(x1.error).toBe(`state diverged from reviewed plan at X1: A3:${admin}:landed`);
+      expect(x1calls).toEqual(["address 44'/501'/0'", "close"]);
+      w.chain.set(record, saved!);
+      ok(await send(w, op("accept-platform-admin", w.company), company, { ledger: device() }));
+      ok(await send(w, op("accept-blocklist-authority", w.company), company, { ledger: device() }));
+      ok(await send(w, op("accept-kyc-registry-authority", w.company), company, { ledger: device() }));
+      ok(await send(w, op("close-bootstrap-window", w.company), company, { ledger: device() }));
+      const sent = w.chain.calls.filter((c) => c === "sendTransaction").length;
+
+      const s6calls: string[] = [];
+      const s6 = await send(w, op("first-unpause", w.company), company, { ledger: removing(s6calls) });
+      // S6 waits for the grant's propose (S3) and its execution (A3): neither holds without the record.
+      expect(s6.error).toBe(`state diverged from reviewed plan at S6: S3:${admin}:landed; A3:${admin}:landed`);
+      expect(s6calls).toEqual(["address 44'/501'/0'", "close"]);
+      expect(w.chain.calls.filter((c) => c === "sendTransaction")).toHaveLength(sent);
+      expect(await platformFlags(w)).toBe(0x7f);
+      w.chain.set(record, saved!);
+      ok(await send(w, op("first-unpause", w.company), company, { ledger: device() }));
+      expect(await platformFlags(w)).toBe(0x7e);
+    },
+    ORDER_TIMEOUT_MS,
+  );
+
+  it("S5c and S6 before S1 (no Platform yet) are refused, not recorded as done", async () => {
+    const w = await companyWorld();
+    for (const [name, id] of [
+      ["close-bootstrap-window", "S5c"],
+      ["first-unpause", "S6"],
+    ]) {
+      const early = await dry(w, op(name, w.company));
+      expect(early.status).toBe("failed");
+      expect(early.noop).toBeUndefined();
+      expect(early.error).toBe(`${id} cannot run: the Platform does not exist yet (S1 of chain:bootstrap cycle 1 creates it)`);
+    }
+    expect(w.chain.calls).not.toContain("simulateTransaction");
   });
 
   it("the role step plan refuses a signer the step does not name and an underfunded key", async () => {
@@ -373,14 +461,22 @@ describe("chain:accept digest and signer", () => {
     expect(w.chain.calls.filter((c) => c === "sendTransaction")).toHaveLength(6);
   });
 
-  it("chain:emergency can clear 0x80 or the pilot bits too, but without the role map or the order: chain:accept is the bootstrap path", async () => {
+  it("chain:emergency clears while the bootstrap window is open only with CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1 (recorded), and without the order: chain:accept is the bootstrap path", async () => {
     const w = await companyWorld();
     await cycle(w);
+    const simulations = () => w.chain.calls.filter((c) => c === "simulateTransaction").length;
+    const before = simulations();
     // Before X1 the deployer is still the super admin; an emergency clear by it
     // would close the window early (then every A3 and X1 waits 48 hours).
-    const early = await runTool("emergency", env(w, { CHAIN_EMERGENCY_OP: "unpause", CHAIN_EMERGENCY_SIGNER: w.keys.deployer, CHAIN_PAUSE_BITS: "0x80" }), emergencyTool, deps(w));
-    expect(early.error ?? null).toBeNull();
-    expect(early.simulation).toMatch(/simulated ok/);
+    const unpause = { CHAIN_EMERGENCY_OP: "unpause", CHAIN_EMERGENCY_SIGNER: w.keys.deployer, CHAIN_PAUSE_BITS: "0x80" };
+    const early = await runTool("emergency", env(w, unpause), emergencyTool, deps(w));
+    expect(early.status).toBe("failed");
+    expect(early.error).toMatch(/^The bootstrap window is open \(0xff\): any clear closes it for good.*CHAIN_ACCEPT_OP=close-bootstrap-window, S5c.*set CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1 \(recorded\)$/);
+    expect(simulations()).toBe(before);
+    const forced = await runTool("emergency", env(w, { ...unpause, CHAIN_EMERGENCY_CLOSE_BOOTSTRAP: "1" }), emergencyTool, deps(w));
+    expect(forced.error ?? null).toBeNull();
+    expect(forced.closeBootstrapOverride).toBe(true);
+    expect(forced.simulation).toMatch(/simulated ok/);
     const refused = await dry(w, op("close-bootstrap-window", w.company));
     expect(refused.error).toMatch(/S5c waits for A3:.*, X1/);
   });
@@ -408,11 +504,14 @@ describe("chain:accept on mainnet", () => {
     const dirty = [" M front/scripts/chain/lib/accept.ts"];
     const opts = { ...deps(w), home: w.dir };
     const refused = await runTool("accept", mainnetEnv(w, mapFile, { ...extra, CHAIN_EMERGENCY_DIRTY_OK: "1" }), acceptTool, { ...opts, sourceDirty: () => dirty });
-    expect(refused.error).toMatch(/uncommitted changes under front\/idl, front\/lib, front\/scripts\/chain.* \(1 paths\): run from a clean checkout of the live Release tag$/);
+    // The live Release tag predates chain:accept: the refusals name the reviewed commit instead.
+    expect(refused.error).toMatch(/uncommitted changes under front\/idl, front\/lib, front\/scripts\/chain.* \(1 paths\): run from a clean checkout of the reviewed chain:accept commit/);
+    expect(String(refused.error).endsWith(`: run from a clean checkout of ${ACCEPT_CHECKOUT}`)).toBe(true);
     expect(refused.sourceDirtyOverride).toBeUndefined();
     const clean = { ...opts, sourceDirty: () => [] };
     const noIdl = await runTool("accept", mainnetEnv(w, mapFile, { ...extra, CHAIN_EMERGENCY_IDL_UNCHECKED: "1" }), acceptTool, clean);
-    expect(noIdl.error).toMatch(/cannot confirm add_admin against front\/idl \(no-canonical-idl\); run the checkout of the live Release tag$/);
+    expect(noIdl.error).toMatch(/cannot confirm add_admin against front\/idl \(no-canonical-idl\); run the checkout of the reviewed chain:accept commit/);
+    expect(String(noIdl.error).endsWith(`; run the checkout of ${ACCEPT_CHECKOUT}`)).toBe(true);
     await seedIdl(w, REGISTRY, localIdl("asset_registry"));
     const plan = await runTool("accept", mainnetEnv(w, mapFile, extra), acceptTool, clean);
     expect(plan.error ?? null).toBeNull();
