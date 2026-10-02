@@ -14,8 +14,10 @@
 //      the market is disorderly: nothing is written);
 //   4. the official anchor is the ECB euro reference rate for USD (one USDC is
 //      taken as one USD): no usable ECB rate (ECB_UNAVAILABLE, ECB_STALE), or a
-//      median more than FX_MAX_ECB_DEVIATION (2 %) away from 1 / (USD per EUR)
-//      — a USDC depeg or a broken feed — ECB_DEVIATION: nothing is written;
+//      median further from 1 / (USD per EUR) than ecbTolerance(age of the fix)
+//      (2.5 % for a fix up to a day old, one point more per further day, at
+//      most 5 %) — a USDC depeg, a large EUR/USD move since the fix or a
+//      broken feed — ECB_DEVIATION: nothing is written;
 //   5. otherwise the median, rounded to 10 decimals (numeric(20,10)), becomes
 //      the automatic rate with a max age of FX_AUTO_MAX_AGE_SECONDS (15 min).
 // A refusal keeps the previous automatic rate until it expires; then the
@@ -29,8 +31,6 @@ export const FX_AUTO_MAX_AGE_SECONDS = 15 * 60;
 export const FX_AUTO_MIN_SOURCES = 2;
 /** Refuse when (max − min) / median of the market answers exceeds this. */
 export const FX_MAX_SPREAD = 0.01;
-/** Refuse when |median − ECB| / ECB exceeds this (USDC ≈ USD). */
-export const FX_MAX_ECB_DEVIATION = 0.02;
 /** The ECB publishes on TARGET working days around 16:00 CET; Easter is the longest gap. */
 export const FX_ECB_MAX_AGE_DAYS = 6;
 /** A market answer outside these bounds (EUR per USDC) is not a quote. */
@@ -140,6 +140,17 @@ export const FX_SOURCES: readonly FxSource[] = Object.freeze([
 
 export type EcbReference = { date: string; usdPerEur: number };
 
+/** An ECB date and USD rate as text, checked; throws FxParseError. */
+function ecbReference(date: unknown, usdPerEurText: unknown): EcbReference {
+  if (typeof date !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(date) || !Number.isFinite(Date.parse(`${date}T00:00:00Z`))) {
+    throw new FxParseError("PARSE_ERROR");
+  }
+  const usdPerEur = decimal(usdPerEurText);
+  // EUR per USD must itself be a sane quote.
+  if (1 / usdPerEur < FX_QUOTE_BOUNDS.min || 1 / usdPerEur > FX_QUOTE_BOUNDS.max) throw new FxParseError("OUT_OF_RANGE");
+  return { date, usdPerEur };
+}
+
 /**
  * The USD reference rate of the ECB's daily XML (`<Cube time='YYYY-MM-DD'>`
  * with `<Cube currency='USD' rate='1.1225'/>`). Throws FxParseError.
@@ -148,11 +159,47 @@ export function parseEcbDailyXml(xml: string): EcbReference {
   if (typeof xml !== "string" || xml.length > 64 * 1024) throw new FxParseError("PARSE_ERROR");
   const time = /<Cube\s+time=['"](\d{4}-\d{2}-\d{2})['"]\s*>/.exec(xml);
   const usd = /<Cube\s+currency=['"]USD['"]\s+rate=['"]([0-9.]{1,20})['"]\s*\/>/.exec(xml);
-  if (!time || !usd || !Number.isFinite(Date.parse(`${time[1]}T00:00:00Z`))) throw new FxParseError("PARSE_ERROR");
-  const usdPerEur = decimal(usd[1]);
-  // EUR per USD must itself be a sane quote.
-  if (1 / usdPerEur < FX_QUOTE_BOUNDS.min || 1 / usdPerEur > FX_QUOTE_BOUNDS.max) throw new FxParseError("OUT_OF_RANGE");
-  return { date: time[1], usdPerEur };
+  if (!time || !usd) throw new FxParseError("PARSE_ERROR");
+  return ecbReference(time[1], usd[1]);
+}
+
+/** Age in days of the ECB fix of `date` at `now`, counted from 00:00Z of that date. */
+export function ecbAgeDays(date: string, now: number): number {
+  return (now - Date.parse(`${date}T00:00:00Z`)) / 86_400_000;
+}
+
+/** Whether a fix that old is an anchor at all (else ECB_STALE). A date more than a day ahead of us is as unusable as an old one. */
+function ecbUsable(ageDays: number): boolean {
+  return Number.isFinite(ageDays) && ageDays <= FX_ECB_MAX_AGE_DAYS && ageDays >= -1;
+}
+
+/**
+ * The band around the ECB anchor for a fix `ageDays` old: refuse when
+ * |median − ECB| / ECB exceeds it. 2.5 % for a fix up to a day old, one
+ * point more per further day, at most 5 %. The fix is published once a
+ * TARGET working day, so on an ordinary day it is up to ~1.6 days old when
+ * the next one appears, 3.6 over a weekend and 5.6 at Easter, and EUR/USD
+ * keeps moving meanwhile: a fixed band would page an ordinary move as a
+ * depeg.
+ */
+export function ecbTolerance(ageDays: number): number {
+  return Math.min(0.05, 0.025 + 0.01 * Math.max(0, ageDays - 1));
+}
+
+/**
+ * The ECB anchor an accepted run stored with its rate (fx_auto_rates.quotes,
+ * `ecb: { date, usd_per_eur }`, lib/server/fx-refresh.ts): checked exactly
+ * like a fetched one, and null unless it parses and is still within
+ * FX_ECB_MAX_AGE_DAYS at `now`.
+ */
+export function storedEcbReference(quotes: unknown, now: number): EcbReference | null {
+  try {
+    const ecb = object(object(quotes).ecb);
+    const ref = ecbReference(ecb.date, ecb.usd_per_eur);
+    return ecbUsable(ecbAgeDays(ref.date, now)) ? ref : null;
+  } catch {
+    return null;
+  }
 }
 
 export type FxQuote = { source: FxSourceId; rate: number } | { source: FxSourceId; error: FxSourceError };
@@ -169,6 +216,8 @@ export type FxAggregate = {
   ecbRate: number | null;
   /** |median − ECB| / ECB, in basis points. */
   ecbDeviationBps: number | null;
+  /** The band the deviation was judged against (ecbTolerance), in basis points. */
+  ecbToleranceBps: number | null;
   used: FxSourceId[];
 };
 
@@ -192,7 +241,8 @@ export function aggregateFx(quotes: readonly FxQuote[], ecb: EcbReference | null
     "rate" in q && Number.isFinite(q.rate) && q.rate >= FX_QUOTE_BOUNDS.min && q.rate <= FX_QUOTE_BOUNDS.max);
   const used = usable.map((q) => q.source);
   const refuse = (code: FxRefusalCode, extra: Partial<FxAggregate> = {}): FxAggregate => ({
-    ok: false, rate: null, code, median: null, spreadBps: null, ecbRate: null, ecbDeviationBps: null, used, ...extra,
+    ok: false, rate: null, code, median: null, spreadBps: null, ecbRate: null, ecbDeviationBps: null, ecbToleranceBps: null, used,
+    ...extra,
   });
   if (usable.length < FX_AUTO_MIN_SOURCES) return refuse("TOO_FEW_SOURCES");
   const rates = usable.map((q) => q.rate);
@@ -201,16 +251,13 @@ export function aggregateFx(quotes: readonly FxQuote[], ecb: EcbReference | null
   const measured = { median: mid, spreadBps: bps(spread) };
   if (spread > FX_MAX_SPREAD) return refuse("SOURCE_DIVERGENCE", measured);
   if (!ecb) return refuse("ECB_UNAVAILABLE", measured);
-  const ecbDay = Date.parse(`${ecb.date}T00:00:00Z`);
-  const ecbAgeDays = (now - ecbDay) / 86_400_000;
-  // A date more than a day ahead of us is as unusable as an old one.
-  if (!Number.isFinite(ecbAgeDays) || ecbAgeDays > FX_ECB_MAX_AGE_DAYS || ecbAgeDays < -1) {
-    return refuse("ECB_STALE", measured);
-  }
+  const ageDays = ecbAgeDays(ecb.date, now);
+  if (!ecbUsable(ageDays)) return refuse("ECB_STALE", measured);
   const ecbRate = 1 / ecb.usdPerEur;
   const deviation = Math.abs(mid - ecbRate) / ecbRate;
-  const anchored = { ...measured, ecbRate, ecbDeviationBps: bps(deviation) };
-  if (deviation > FX_MAX_ECB_DEVIATION) return refuse("ECB_DEVIATION", anchored);
+  const tolerance = ecbTolerance(ageDays);
+  const anchored = { ...measured, ecbRate, ecbDeviationBps: bps(deviation), ecbToleranceBps: bps(tolerance) };
+  if (deviation > tolerance) return refuse("ECB_DEVIATION", anchored);
   return { ok: true, rate: rateText(mid), code: null, ...anchored, used };
 }
 

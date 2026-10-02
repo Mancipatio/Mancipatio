@@ -2,15 +2,16 @@
 //   - lib/fx-auto.ts parses the four public USDC/EUR sources and the ECB
 //     daily XML (fixtures: real answers saved on 2026-10-02 in
 //     tests/fixtures/fx/), and aggregates them: the median, refused on fewer
-//     than two sources, on a spread above 1 % or 2 % away from the ECB;
+//     than two sources, on a spread above 1 % or further from the ECB than
+//     the band for the fix's age (ecbTolerance: 2.5 % to 5 %);
 //   - lib/fx-effective.ts picks the rate that counts (the same rule as SQL
 //     public.fx_effective_rate, tests/fx-auto-rates.postgres.test.ts).
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  FX_SOURCES, FxParseError, aggregateFx, autoFxMint, autoSourceText, bookMid, median, parseEcbDailyXml, rateText,
-  type FxQuote, type FxSourceId,
+  FX_SOURCES, FxParseError, aggregateFx, autoFxMint, autoSourceText, bookMid, ecbAgeDays, ecbTolerance, median, parseEcbDailyXml,
+  rateText, storedEcbReference, type FxQuote, type FxSourceId,
 } from "@/lib/fx-auto";
 import { fxRowFresh, resolveFxRate, resolveFxRates, type FxAutoRow, type FxManualRow } from "@/lib/fx-effective";
 import { USDC } from "@/lib/payment-mints";
@@ -140,13 +141,67 @@ describe("aggregation", () => {
       .toMatchObject({ ok: false, code: "ECB_STALE" });
   });
 
-  it("refuses a median more than 2 % away from the ECB rate (a USDC depeg or broken sources)", () => {
-    // ECB: 0.8909 EUR per USD; a USDC at 0.97 USD is 0.8642 EUR (−3 %).
+  it("refuses a median further from the ECB rate than the band (a USDC depeg, a large EUR/USD move or broken sources)", () => {
+    // ECB: 0.8909 EUR per USD, fixed today (0.86 days old: a 2.5 % band); a USDC at 0.97 USD is 0.8642 EUR (−3 %).
     const depeg = aggregateFx(quotes(0.8642, 0.8645, 0.864), ECB, NOW);
-    expect(depeg).toMatchObject({ ok: false, code: "ECB_DEVIATION", rate: null });
+    expect(depeg).toMatchObject({ ok: false, code: "ECB_DEVIATION", rate: null, ecbToleranceBps: 250 });
     expect(depeg.ecbDeviationBps).toBe(299);
-    // 1.9 % away is accepted.
-    expect(aggregateFx(quotes(0.874, 0.8741), ECB, NOW).ok).toBe(true);
+    // 1.9 % away is accepted, and the band it was judged against is recorded.
+    expect(aggregateFx(quotes(0.874, 0.8741), ECB, NOW)).toMatchObject({ ok: true, ecbToleranceBps: 250 });
+  });
+
+  it("the ECB band grows with the age of the fix: 2.5 % up to a day, one point per further day, at most 5 %", () => {
+    expect(ecbTolerance(0)).toBe(0.025);
+    expect(ecbTolerance(0.6)).toBe(0.025);
+    expect(ecbTolerance(1)).toBe(0.025);
+    expect(ecbTolerance(1.5)).toBeCloseTo(0.03, 12);
+    // An ordinary day: yesterday's fix just before today's (16:00 CET) is ~1.6 days old.
+    expect(ecbTolerance(1.6)).toBeCloseTo(0.031, 12);
+    // A weekend (Friday's fix on Monday afternoon) and Easter: capped.
+    expect(ecbTolerance(3.6)).toBe(0.05);
+    expect(ecbTolerance(5.6)).toBe(0.05);
+    // A fix dated up to a day ahead (ECB_STALE beyond) gets the base band.
+    expect(ecbTolerance(-0.5)).toBe(0.025);
+    // The age is the ECB_STALE one: from 00:00Z of the fix's date.
+    expect(ecbAgeDays("2026-10-02", Date.parse("2026-10-03T12:00:00Z"))).toBe(1.5);
+  });
+
+  it("refuses just above the band and accepts just below it, at every age", () => {
+    // 1 / 1.25 = 0.8 EUR per USD: the deviations below are exact fractions of 0.8.
+    const anchor = (date: string) => ({ date, usdPerEur: 1.25 });
+    const judge = (deviation: number, date: string, now: number) => aggregateFx(quotes(0.8 * (1 + deviation), 0.8 * (1 + deviation)), anchor(date), now);
+    const cases: Array<[string, string, string, number]> = [
+      // [label, fix date, now, band]
+      ["0.6 days", "2026-10-02", "2026-10-02T14:24:00Z", 0.025],
+      ["1.5 days", "2026-10-01", "2026-10-02T12:00:00Z", 0.03],
+      ["3.6 days (weekend)", "2026-09-25", "2026-09-28T14:24:00Z", 0.05],
+      ["5.6 days (Easter)", "2026-09-25", "2026-09-30T14:24:00Z", 0.05],
+    ];
+    for (const [label, date, at, band] of cases) {
+      const now = Date.parse(at);
+      expect(judge(band - 0.001, date, now), label).toMatchObject({ ok: true, ecbToleranceBps: Math.round(band * 10_000) });
+      expect(judge(-(band - 0.001), date, now).ok, label).toBe(true);
+      expect(judge(band + 0.001, date, now), label).toMatchObject({ ok: false, code: "ECB_DEVIATION",
+        ecbToleranceBps: Math.round(band * 10_000) });
+      expect(judge(-(band + 0.001), date, now).code, label).toBe("ECB_DEVIATION");
+    }
+    // The old fixed 2 % band refused an ordinary 2.8 % EUR/USD move against a 1.5-day-old fix; the band accepts it.
+    expect(judge(0.028, "2026-10-01", Date.parse("2026-10-02T12:00:00Z")).ok).toBe(true);
+  });
+
+  it("the anchor a run stored with its rate: parsed like a fetched one, only while within the ECB_STALE limit", () => {
+    const quotesOf = (ecb: unknown) => ({ v: 1, ecb });
+    expect(storedEcbReference(quotesOf({ date: "2026-10-02", usd_per_eur: "1.1225", eur_per_usd: "0.8908685969" }), NOW))
+      .toEqual({ date: "2026-10-02", usdPerEur: 1.1225 });
+    // Older than 6 days, or a day ahead: no anchor.
+    expect(storedEcbReference(quotesOf({ date: "2026-09-25", usd_per_eur: "1.1225" }), NOW)).toBeNull();
+    expect(storedEcbReference(quotesOf({ date: "2026-10-04", usd_per_eur: "1.1225" }), NOW)).toBeNull();
+    // Not in the stored shape, or not a sane rate.
+    for (const bad of [null, {}, quotesOf(null), quotesOf({ date: "2026-10-02" }), quotesOf({ date: "2.10.2026", usd_per_eur: "1.1225" }),
+      quotesOf({ date: "2026-10-02", usd_per_eur: 1.1225 }), quotesOf({ date: "2026-10-02", usd_per_eur: "9" }),
+      quotesOf({ date: "2026-10-02", usd_per_eur: "1e0" })]) {
+      expect(storedEcbReference(bad, NOW), JSON.stringify(bad)).toBeNull();
+    }
   });
 
   it("names its sources and the anchor in the fx_rates source text (at most 200 characters)", () => {

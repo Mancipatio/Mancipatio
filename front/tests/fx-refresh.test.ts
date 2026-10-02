@@ -109,14 +109,14 @@ describe("runFxRefresh", () => {
   it("records the median of the four sources with the ECB anchor, 15 minutes valid", async () => {
     const result = await run();
     expect(result).toMatchObject({ status: "accepted", network: "devnet", paymentMint: DEVNET_USDC, rate: "0.88895",
-      ecbDate: "2026-10-02", spreadBps: 1, ecbDeviationBps: 22 });
+      ecbDate: "2026-10-02", spreadBps: 1, ecbDeviationBps: 22, ecbToleranceBps: 250 });
     expect(refused).toEqual([]);
     expect(written).toHaveLength(1);
     expect(written[0]).toMatchObject({
       p_network: "devnet", p_payment_mint: DEVNET_USDC, p_eur_per_token: "0.88895", p_decimals: 6, p_max_age_seconds: 900,
       p_source: "auto: median of kraken, coinbase, bitstamp, bitvavo (ECB 2026-10-02: 1.1225 USD/EUR)",
       p_quotes: {
-        v: 1, median: "0.88895", spread_bps: 1, ecb_deviation_bps: 22,
+        v: 1, median: "0.88895", spread_bps: 1, ecb_deviation_bps: 22, ecb_tolerance_bps: 250,
         ecb: { date: "2026-10-02", usd_per_eur: "1.1225", eur_per_usd: "0.8908685969" },
         sources: { kraken: { rate: "0.88895" }, coinbase: { rate: "0.88895" }, bitstamp: { rate: "0.88898" }, bitvavo: { rate: "0.88885" } },
       },
@@ -171,7 +171,7 @@ describe("runFxRefresh", () => {
       [FX_SOURCES[0].url]: () => json({ error: [], result: { USDCEUR: { a: ["0.8642"], b: ["0.8640"] } } }),
     };
     expect(await run()).toMatchObject({ status: "refused", code: "ECB_DEVIATION" });
-    expect(refused[0].p_quotes).toMatchObject({ ecb_deviation_bps: 300 });
+    expect(refused[0].p_quotes).toMatchObject({ ecb_deviation_bps: 300, ecb_tolerance_bps: 250 });
     overrides[FX_SOURCES[0].url] = () => json({ error: [], result: { USDCEUR: { a: ["0.8892"], b: ["0.8890"] } } });
     expect(await run({ now: () => NOW + 60_000 })).toMatchObject({ status: "refused", code: "SOURCE_DIVERGENCE" });
     expect(written).toEqual([]);
@@ -186,6 +186,61 @@ describe("runFxRefresh", () => {
     expect(await run({ now: () => NOW + 20 * 60_000 })).toMatchObject({ status: "accepted" });
     clearFxCaches();
     expect(await run({ now: () => NOW + 21 * 60_000 })).toMatchObject({ status: "refused", code: "ECB_UNAVAILABLE" });
+  });
+
+  it("a new instance whose ECB fetch fails anchors on the ECB rate the last accepted run stored, while it is usable", async () => {
+    overrides[ECB_DAILY_XML_URL] = () => new Response("", { status: 503 });
+    const stored = (ecb: Record<string, unknown>) => {
+      db.ref!.tables.fx_auto_rates = [{ network: "devnet", payment_mint: DEVNET_USDC, eur_per_token: "0.889", decimals: 6, source: "auto",
+        quotes: { v: 1, ecb }, as_of: new Date(NOW - 20 * 60_000).toISOString(), max_age: "00:15:00" }];
+    };
+    stored({ date: "2026-10-02", usd_per_eur: "1.1225", eur_per_usd: "0.8908685969" });
+    expect(await run()).toMatchObject({ status: "accepted", ecbDate: "2026-10-02", ecbDeviationBps: 22 });
+    expect(written[0].p_quotes).toMatchObject({ ecb: { date: "2026-10-02", usd_per_eur: "1.1225", stored: true } });
+    expect(fetched).toContain(ECB_DAILY_XML_URL);
+    // Not cached: the next run asks the ECB again.
+    fetched.length = 0;
+    await run({ now: () => NOW + 60_000 });
+    expect(fetched).toContain(ECB_DAILY_XML_URL);
+    // Past the ECB_STALE limit, an unparseable anchor or an unreadable table: no anchor.
+    stored({ date: "2026-09-25", usd_per_eur: "1.1225" });
+    expect(await run({ now: () => NOW + 120_000 })).toMatchObject({ status: "refused", code: "ECB_UNAVAILABLE" });
+    stored({ date: "2026-10-02", usd_per_eur: "a lot" });
+    expect(await run({ now: () => NOW + 180_000 })).toMatchObject({ status: "refused", code: "ECB_UNAVAILABLE" });
+    db.ref!.failReads.add("fx_auto_rates");
+    stored({ date: "2026-10-02", usd_per_eur: "1.1225" });
+    expect(await run({ now: () => NOW + 240_000 })).toMatchObject({ status: "refused", code: "ECB_UNAVAILABLE" });
+  });
+
+  it("decimals still out when the run's budget ends refuse the run, which is still recorded (never failed)", async () => {
+    // A hanging chain read must neither hold the run past its budget nor cost the recording.
+    const signals: Record<string, AbortSignal> = {};
+    const client = db.ref!.client as { rpc: (name: string, args?: Record<string, unknown>) => { abortSignal: (s: AbortSignal) => unknown } };
+    const rpc = client.rpc;
+    client.rpc = (name, args) => {
+      const builder = rpc(name, args);
+      const abortSignal = builder.abortSignal;
+      builder.abortSignal = (signal) => { signals[name] = signal; return abortSignal(signal); };
+      return builder;
+    };
+    const budget = AbortSignal.timeout(200);
+    const started = Date.now();
+    const result = await run({ signal: budget, readDecimals: () => new Promise<number>(() => {}) });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result).toMatchObject({ status: "refused", code: "DECIMALS_UNAVAILABLE" });
+    expect(refused).toHaveLength(1);
+    expect(budget.aborted).toBe(true);
+    // The recording has its own bound, not the (spent) run budget.
+    expect(signals.record_fx_auto_refusal.aborted).toBe(false);
+    // A late answer is kept for the next run.
+    clearFxCaches();
+    let answer: (d: number) => void = () => {};
+    const late = run({ signal: AbortSignal.timeout(100), readDecimals: () => new Promise<number>((resolve) => { answer = resolve; }) });
+    expect(await late).toMatchObject({ status: "refused", code: "DECIMALS_UNAVAILABLE" });
+    answer(6);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(await run({ now: () => NOW + 60_000, readDecimals: async () => { throw new Error("not asked again"); } }))
+      .toMatchObject({ status: "accepted" });
   });
 
   it("reads the mint's decimals from chain once per process; unreadable decimals refuse the run", async () => {

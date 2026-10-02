@@ -16,13 +16,19 @@
 //      without asking anyone, and a run whose recording fails still holds
 //      its slot (record_fx_auto_* enforce the same window again);
 //   2. in parallel, every market source (FX_SOURCES), the ECB reference
-//      (cached for ECB_CACHE_MS: it changes once a working day) and the
-//      mint's decimals from chain (cached for the process: they never change);
-//      each request has its own timeout and a body cap;
+//      (cached for ECB_CACHE_MS: it changes once a working day; with nothing
+//      cached and the ECB not answering, the anchor the last accepted run
+//      stored, while still usable) and the mint's decimals from chain
+//      (cached for the process: they never change); each request has its own
+//      timeout and a body cap, and the whole step ends with the run's budget
+//      (FX_RUN_BUDGET_MS: a source still out is TIMEOUT, decimals still out
+//      are DECIMALS_UNAVAILABLE);
 //   3. lib/fx-auto.ts aggregateFx decides; record_fx_auto_rate writes the rate
 //      (fx_auto_rates + an "accepted" observation), record_fx_auto_refusal
 //      writes the refusal code (the previous automatic rate stays until it
-//      expires, then the manual rate applies).
+//      expires, then the manual rate applies). The recording has its own
+//      bound (FX_RECORD_TIMEOUT_MS) and is not cut by the run's budget, so a
+//      decision the database recorded is never answered as failed (503).
 // Only public prices, fixed codes and counts are stored or logged; the run
 // carries no secret (the sources need no key) and logs no URL or message.
 import "server-only";
@@ -39,6 +45,7 @@ import {
   autoSourceText,
   parseEcbDailyXml,
   rateText,
+  storedEcbReference,
   type EcbReference,
   type FxQuote,
   type FxRefusalCode,
@@ -53,8 +60,10 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 export const FX_FETCH_TIMEOUT_MS = 5_000;
 export const FX_MAX_BODY_BYTES = 64 * 1024;
 export const ECB_CACHE_MS = 15 * 60_000;
-/** The whole run (the route's maxDuration is 30 s; the scheduler waits 25 s). */
+/** Claim, sources, anchor and decimals (the route's maxDuration is 30 s; the scheduler waits 25 s). */
 export const FX_RUN_BUDGET_MS = 15_000;
+/** The recording after it, outside that budget: at most FX_RUN_BUDGET_MS + this in all. */
+export const FX_RECORD_TIMEOUT_MS = 5_000;
 
 type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
@@ -64,6 +73,7 @@ export type FxRefreshResult =
   | {
       status: "accepted"; network: Network; paymentMint: string; rate: string; asOf: string | null;
       sources: Record<FxSourceId, FxSourceOutcome>; ecbDate: string; spreadBps: number; ecbDeviationBps: number;
+      ecbToleranceBps: number;
     }
   | { status: "refused"; network: Network; paymentMint: string; code: FxRefusalCode; sources: Record<FxSourceId, FxSourceOutcome> }
   | { status: "skipped"; network: Network; reason: "NO_AUTO_MINT" | "THROTTLED" }
@@ -157,31 +167,56 @@ export function clearFxCaches() {
   decimalsCache.clear();
 }
 
-async function ecbReference(fetchImpl: Fetch, signal: AbortSignal, now: number): Promise<EcbReference | null> {
-  if (ecbCache && now - ecbCache.at < ECB_CACHE_MS) return ecbCache.ref;
+type Anchor = { ref: EcbReference; stored: boolean };
+
+/**
+ * The ECB anchor: the cached one while younger than ECB_CACHE_MS, else a
+ * fresh fetch; if the ECB does not answer, the cached one whatever its age
+ * (aggregateFx judges its date), and with nothing cached (a new instance)
+ * the anchor the last accepted run stored with its rate, if it parses and
+ * passes the ECB_STALE limit (`stored`: never cached, so the next run asks
+ * the ECB again).
+ */
+async function ecbAnchor(
+  fetchImpl: Fetch, signal: AbortSignal, now: number, storedQuotes: () => Promise<unknown>,
+): Promise<Anchor | null> {
+  if (ecbCache && now - ecbCache.at < ECB_CACHE_MS) return { ref: ecbCache.ref, stored: false };
   try {
     const ref = parseEcbDailyXml(await fetchText(fetchImpl, ECB_DAILY_XML_URL, "application/xml, text/xml", signal));
     ecbCache = { at: now, ref };
-    return ref;
+    return { ref, stored: false };
   } catch {
-    // An older cached reference is still an anchor; aggregateFx judges its date.
-    return ecbCache?.ref ?? null;
+    if (ecbCache) return { ref: ecbCache.ref, stored: false };
+    const ref = storedEcbReference(await storedQuotes().catch(() => null), now);
+    return ref ? { ref, stored: true } : null;
   }
 }
 
+/** `promise`, or null as soon as `signal` aborts (the run's budget); a rejection is null too. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T | null> {
+  return new Promise((resolve) => {
+    if (signal.aborted) return resolve(null);
+    const onAbort = () => resolve(null);
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener("abort", onAbort); resolve(value); },
+      () => { signal.removeEventListener("abort", onAbort); resolve(null); },
+    );
+  });
+}
+
+/** The mint's decimals; null when unreadable or still out when the run's budget ends (a late answer is cached for the next run). */
 async function mintDecimals(
-  mint: string, network: Network, read: (mint: string, network: Network) => Promise<number>,
+  mint: string, network: Network, read: (mint: string, network: Network) => Promise<number>, signal: AbortSignal,
 ): Promise<number | null> {
   const cached = decimalsCache.get(mint);
   if (cached !== undefined) return cached;
-  try {
-    const decimals = await read(mint, network);
+  const reading = Promise.resolve().then(() => read(mint, network)).then((decimals) => {
     if (!Number.isInteger(decimals) || decimals < 0 || decimals > 18) return null;
     decimalsCache.set(mint, decimals);
     return decimals;
-  } catch {
-    return null;
-  }
+  });
+  return untilAborted(reading, signal);
 }
 
 /** Before 0080: the function (PGRST202) or a table behind it (42P01, PGRST205) does not exist. */
@@ -217,12 +252,18 @@ export async function runFxRefresh(opts: {
       return { status: "skipped", network, reason: "THROTTLED" };
     }
 
-    // 2. The sources, the anchor and the decimals, in parallel.
-    const [quotes, ecb, decimals] = await Promise.all([
+    // 2. The sources, the anchor and the decimals, in parallel, within the run's budget.
+    const storedQuotes = async () => {
+      const { data, error } = await sb.from("fx_auto_rates").select("quotes").eq("network", network).eq("payment_mint", mint)
+        .abortSignal(AbortSignal.any([signal, AbortSignal.timeout(5_000)])).maybeSingle();
+      return error ? null : (data as { quotes?: unknown } | null)?.quotes ?? null;
+    };
+    const [quotes, anchor, decimals] = await Promise.all([
       Promise.all(FX_SOURCES.map((source) => quote(fetchImpl, source, signal))),
-      ecbReference(fetchImpl, signal, now()),
-      mintDecimals(mint, network, opts.readDecimals ?? chainDecimals),
+      ecbAnchor(fetchImpl, signal, now(), storedQuotes),
+      mintDecimals(mint, network, opts.readDecimals ?? chainDecimals, signal),
     ]);
+    const ecb = anchor?.ref ?? null;
     const sources = Object.fromEntries(quotes.map((q) => [q.source, "rate" in q ? { rate: rateText(q.rate) } : { error: q.error }])) as
       Record<FxSourceId, FxSourceOutcome>;
     const result = aggregateFx(quotes, ecb, now());
@@ -231,11 +272,18 @@ export async function runFxRefresh(opts: {
       sources,
       median: result.median === null ? null : rateText(result.median),
       spread_bps: result.spreadBps,
-      ecb: ecb ? { date: ecb.date, usd_per_eur: String(ecb.usdPerEur), eur_per_usd: rateText(1 / ecb.usdPerEur) } : null,
+      ecb: ecb ? {
+        date: ecb.date, usd_per_eur: String(ecb.usdPerEur), eur_per_usd: rateText(1 / ecb.usdPerEur),
+        ...(anchor?.stored ? { stored: true } : {}),
+      } : null,
       ecb_deviation_bps: result.ecbDeviationBps,
+      ecb_tolerance_bps: result.ecbToleranceBps,
     };
     const code: FxRefusalCode | null = !result.ok ? result.code : decimals === null ? "DECIMALS_UNAVAILABLE" : null;
-    const dbSignal = AbortSignal.any([signal, AbortSignal.timeout(5_000)]);
+    // Not the run's budget: a write the database committed must not be
+    // reported as failed because the budget ran out while its answer was on
+    // the way.
+    const dbSignal = AbortSignal.timeout(FX_RECORD_TIMEOUT_MS);
 
     // 3. Record the rate or the refusal.
     if (code !== null || !result.rate || !ecb || decimals === null) {
@@ -258,6 +306,7 @@ export async function runFxRefresh(opts: {
     return {
       status: "accepted", network, paymentMint: mint, rate: result.rate, asOf: written.as_of ?? null, sources,
       ecbDate: ecb.date, spreadBps: result.spreadBps ?? 0, ecbDeviationBps: result.ecbDeviationBps ?? 0,
+      ecbToleranceBps: result.ecbToleranceBps ?? 0,
     };
   } catch {
     console.error("[fx] automatic rate run failed");
