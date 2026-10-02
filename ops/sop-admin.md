@@ -122,8 +122,9 @@ Who: the super admin. Page: `/admin/limits` → payment token rates.
 
 1. Since migration 0080 the USDC → EUR rate is automatic (runbook §15
    "Automatic EUR rate"): the median of four public USDC/EUR markets,
-   checked against the ECB reference rate, renewed every minute and valid
-   15 minutes. The page shows which rate counts (Automatic, Manual, Manual
+   checked against the ECB reference rate (within 2.5 %, widening to at most
+   5 % as the ECB fix ages over a weekend or holiday), renewed every minute
+   and valid 15 minutes. The page shows which rate counts (Automatic, Manual, Manual
    override), the sources, the ECB anchor and the last run. The method is a
    rate source like any other: the lawyer accepts it **[legal: source]**.
 2. Every week (and at once when `fx:auto-stale` or `fx:fallback` fires),
@@ -132,12 +133,16 @@ Who: the super admin. Page: `/admin/limits` → payment token rates.
    automatic rate is missing or out of date.
 3. Tick "Override the automatic rate" only on purpose (a feed you distrust,
    a depeg decided with the owner); save the rate again unticked to end it.
-   `/api/health` warns while an override counts.
+   `/api/health` warns while an override counts, and the page warns before
+   saving when the override is more than 2 % away from the automatic rate.
+   An override keeps counting after its own maximum age (shown "Out of
+   date"): approvals then refuse until you renew it or save it unticked.
 4. `/api/health` fails when no rate is fresh (`fx:stale`; `fx:auto-stale`
    high) and warns from 80 % of the maximum age of a manual rate that
    counts, and while the automatic rate counts but the manual fallback is
    missing or out of date (`fallback_missing` / `fallback_stale`). Before
-   the first sale a missing rate only warns.
+   the first sale a missing or out-of-date rate only warns
+   (`missing_before_first_sale` / `stale_before_first_sale`).
 5. EURC or any other mint is added in code first (with its address checked
    against the issuer's published address), never on this page alone.
 

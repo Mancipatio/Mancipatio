@@ -352,9 +352,10 @@ sign in). The public sees only Vercel's sign-in wall. pg_cron reaches
 the retry and alarm schedulers read from the Vault secret
 `mancipatio_vercel_bypass_mainnet` and send as `x-vercel-protection-bypass`;
 the external monitor sends the same header. Maintenance stays **off** the
-whole time. `/api/health` reports a missing FX row as a warning
-(`missing_before_first_sale`) until the first sale approval or sale exists,
-so the FX row is seeded after the bootstrap (D10), as D16 wants. Why not the
+whole time. `/api/health` reports a missing or stale FX row as a warning
+(`missing_before_first_sale` / `stale_before_first_sale`) until the first
+sale approval or sale exists, so the FX row is seeded after the bootstrap
+(D10), as D16 wants. Why not the
 alternatives: (b) a pre-launch mode that admits allowlisted wallets is new
 code in every gate; (c) moving the alarm gate after step 8 leaves the
 bootstrap (every authority change, the loader) unalarmed. Keep the window
@@ -366,13 +367,13 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D1 | Accounts: Supabase Pro with PITR (mainnet project), Vercel Pro with the mainnet project, Helius paid plan (RPC and webhook), SMTP sender, external monitor, age backup key (G10) | owner | §14 step 1 |
 | D2 | Mainnet database: 0001–0075 and later, identity, preflights, schema backup, pg_cron and http, the Vault secret `mancipatio_retry_worker_mainnet`, retention | operator | §14 mainnet steps 1–6 |
 | D3 | Right before D4, devnet releases `www.manci.io`: the three devnet cron jobs disabled, devnet `NEXT_PUBLIC_SITE_URL=https://devnet.manci.io` and a redeploy. Devnet is out of service until it moves to `devnet.manci.io` (DNS at GoDaddy, the devnet project, the schedulers re-installed), last by the owner's order of 2026-10-02: at any time after D4, nothing in D5–D12 depends on it | owner + operator | §18 R; later §18 A–C |
-| D4 | Mainnet Vercel project: env (§18 E list; every variable and build guard in `ops/env-vars.md`, a mainnet build refuses without `SENTRY_DSN`, `ALERT_WEBHOOK_URL`, `HEALTH_TOKEN`, the Turnstile keys, `SESSION_SECRET` and `NEXT_PUBLIC_SITE_URL`), Deployment Protection *All Deployments* + Vercel Authentication, a *Protection Bypass for Automation* secret stored in the Vault as `mancipatio_vercel_bypass_mainnet` (paste it in the Supabase Vault UI, never on a command line), `www.manci.io` and `manci.io` attached (§18 D), production READY on the release commit. Check: an anonymous `curl -I https://www.manci.io/` is refused by Vercel; with the bypass header `/api/health` answers `ok:true` (at most `paymentFx` `missing_before_first_sale`) | owner + operator | §18 D, §14 step 10 |
+| D4 | Mainnet Vercel project: env (§18 E list; every variable and build guard in `ops/env-vars.md`, a mainnet build refuses without `SENTRY_DSN`, `ALERT_WEBHOOK_URL`, `HEALTH_TOKEN`, the Turnstile keys, `SESSION_SECRET` and `NEXT_PUBLIC_SITE_URL`), Deployment Protection *All Deployments* + Vercel Authentication, a *Protection Bypass for Automation* secret stored in the Vault as `mancipatio_vercel_bypass_mainnet` (paste it in the Supabase Vault UI, never on a command line), `www.manci.io` and `manci.io` attached (§18 D), production READY on the release commit. Check: an anonymous `curl -I https://www.manci.io/` is refused by Vercel; with the bypass header `/api/health` answers `ok:true` (at most `paymentFx` `missing_before_first_sale` or `stale_before_first_sale`) | owner + operator | §18 D, §14 step 10 |
 | D5 | Retry scheduler installed and enabled; edge function, Helius webhook with all four addresses, signed test delivery 202; `HEALTH_TOKEN`; external monitor on `/api/health/alarms` with the bypass header | operator | §14 steps 7, 9, 10 |
 | D6 | Alarm scheduler installed, proven (a `high` test alert delivered by email AND by the webhook, §15 Mainnet project step 2) and enabled; `/api/health/alarms` 200 through the bypass. **The §15 gate holds**. Then the deployment smoke (§14 step 11) through the bypass: `MANCIPATIO_VERCEL_BYPASS_FILE=<file with the line VERCEL_AUTOMATION_BYPASS_SECRET=…>` (a file, never the value on a command line) | operator | §15 Mainnet project, §14 step 11 |
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, the operator keys that can sign SIWS onboarded on the protected site, the `chain:accept` checkout for a Ledger that cannot | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps (on the protected site, or `chain:accept` for a Ledger that cannot sign SIWS) → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
-| D10 | Operator: the fx scheduler installed, proven and enabled (§15 "Automatic EUR rate", 0080). Super admin on `/admin/limits`: the automatic USDC rate shows as current, the manual USDC fallback (kind `rate`, max age ≤ 7 days) is seeded, and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
+| D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied before the front that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
 | D11 | **Talas 7 go-live**: first, Privacy clause 11 checked against the chain and the role map (§17, "State on 2026-10-02"); then Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
@@ -1061,7 +1062,13 @@ source paths are clean (see "Safety rules").
   that same checkout, then `idl-update` (step 9.6). The pre-snapshot
   (`CHAIN_SNAPSHOT_DIR/<program>-idl-pre.json`) is evidence only; no tool
   path uploads it.
-- Front: Vercel Instant Rollback.
+- Front: Vercel Instant Rollback. To a deployment older than the automatic
+  EUR rate (PR #53, migration 0080): first the fx off switch (§15 "Automatic
+  EUR rate": `scripts/ops/fx-auto-off.sql` disables `mancipatio-fx-<network>`
+  and deletes the network's `fx_auto_rates` rows; the old front has no
+  `/api/internal/fx`), and make sure the manual USDC row on `/admin/limits`
+  is fresh: the old front reads only `fx_rates` (health, alarms, the admin
+  page), and with the automatic rows gone the ledger counts that row too.
 
 ## 11. Incidents
 
@@ -1453,7 +1460,8 @@ so a leak is catastrophic: keep that window short.
   code the attacker could have written.
 
 **Vercel down or a bad deploy.** Chain state is safe. A bad deploy: Vercel
-Instant Rollback. An outage: operators use the local operator front
+Instant Rollback (to a deployment older than PR #53: the fx off switch and a
+fresh manual USDC row first, §10). An outage: operators use the local operator front
 (`next dev`, §0) or `chain:emergency`; post a status notice.
 - Cannot: serve users (the public site is Vercel); run the retry worker or
   the alarm checks, which pg_cron calls on Vercel (they catch up after).
@@ -1743,8 +1751,10 @@ Configuration and checks only; the front enforces the rules
 - **USDC EUR rate** (D18; automatic since 0080, §15 "Automatic EUR
   rate"): the fx job keeps an automatic rate, the median of four public
   USDC/EUR order books (Kraken, Coinbase, Bitstamp, Bitvavo), refused when
-  they disagree by more than 1 % or the median is more than 2 % away from
-  the ECB reference rate, valid 15 minutes and renewed every minute. The
+  they disagree by more than 1 % or the median is further from the ECB
+  reference rate than a band that grows with the age of the fix (2.5 % for
+  a fix up to a day old, one point per further day, at most 5 %), valid 15
+  minutes and renewed every minute. The
   manual row on `/admin/limits` (Super Admin, kind `rate`, maximum age at
   most 7 days) stays as the fallback while the automatic rate is missing or
   out of date, or, ticked as an override, counts over it: keep it seeded.
@@ -1753,7 +1763,9 @@ Configuration and checks only; the front enforces the rules
   `auto_stale` while the manual fallback counts, `manual_override` while an
   override counts, `fallback_missing` / `fallback_stale` while the
   automatic rate counts but the manual fallback behind it is missing or out
-  of date (alarm `fx:fallback`), and from 80 % of the maximum age. Set the mainnet
+  of date (alarm `fx:fallback`), and from 80 % of the maximum age. Before
+  the first sale approval or sale a missing or stale rate only warns
+  (`missing_before_first_sale` / `stale_before_first_sale`). Set the mainnet
   `platform_raise_limits` cap with at least 3 % FX headroom.
 - **Unknown payment mints on chain.** An approval or sale the ledger cannot
   count (no EUR rate) or whose mint is not allowlisted raises a
@@ -2015,15 +2027,15 @@ bash scripts/ops/maintenance.sh devnet off
 
 **C. Merge PR-B, then prove the new front serves.**
 
-1. Vercel → Deployments, Production: the deployment serving `www.manci.io`
+1. Vercel → Deployments, Production: the deployment serving `devnet.manci.io`
    is READY **on the merge commit**. READY on an older commit means the
    production build failed; fix it (usually A.1) before going on.
-2. `curl -s https://www.manci.io/api/health` returns `"ok":true`. This proves
+2. `curl -s https://devnet.manci.io/api/health` returns `"ok":true`. This proves
    the database network check passed only together with C.1: the anonymous
    answer carries no commit.
 3. When `HEALTH_TOKEN` is set on the deployment, also check the details
    (read the token with `IFS= read -rs HEALTH_TOKEN` first):
-   `curl -s -H "Authorization: Bearer $HEALTH_TOKEN" https://www.manci.io/api/health`
+   `curl -s -H "Authorization: Bearer $HEALTH_TOKEN" https://devnet.manci.io/api/health`
    shows `commit` = the merge commit's first 12 characters and
    `checks.databaseNetwork.status` = `"ok"`.
 
@@ -2035,7 +2047,7 @@ MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/retry-scheduler-status.sql
 ```
 
 Pass: the install ends with one row `mancipatio-retry-devnet | f | devnet |
-https://www.manci.io`, and the status shows that single job (one row, your
+https://devnet.manci.io`, and the status shows that single job (one row, your
 role as `username`) and the same config. Only then, and only if G6 recorded
 it active:
 `MANCI_TARGET=devnet bash scripts/db.sh -c "select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-retry-devnet'"`.
@@ -2104,7 +2116,8 @@ Preview first, then Production:
    (§15 "Automatic EUR rate", 0080); the 0008 integrations config for
    mainnet. Until the first sale approval
    `/api/health` reports the missing row as `paymentFx` warn
-   `missing_before_first_sale`, not a failure.
+   `missing_before_first_sale` (a stale one `stale_before_first_sale`), not
+   a failure.
 9. Edge function secrets and deploy, Helius webhook, a signed test delivery
    answers 202 (G3: supabase-js 2.106.2 with `sb_secret_`).
 10. Front: `NEXT_PUBLIC_SUPABASE_ANON_KEY` = `sb_publishable_…`,
@@ -2220,7 +2233,7 @@ pass); a booking the old calendar-year trigger refused books on the next
 retry run. Look for `OVER_CAP` alerts afterwards.
 
 **C. Front.** Merge, then check that the production deployment is READY on
-the merge commit and `curl -s https://www.manci.io/api/health` answers
+the merge commit and `curl -s https://devnet.manci.io/api/health` answers
 `"ok":true`. Browser settle and treasury nudges are gone
 (`/api/sale-approvals/settle` answers 410 for one release).
 
@@ -2235,7 +2248,7 @@ the merge commit and `curl -s https://www.manci.io/api/health` answers
    MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/alarm-scheduler-status.sql
    ```
    Pass: the install ends with `mancipatio-alarms-devnet | f | devnet |
-   https://www.manci.io`; the manual run is `complete` in `alarm_http_runs`
+   https://devnet.manci.io`; the manual run is `complete` in `alarm_http_runs`
    and `worker_heartbeats` shows `alarms` with a fresh `last_ok_at` (and
    `retry` from the retry worker).
 4. Test email:
@@ -2252,7 +2265,7 @@ the merge commit and `curl -s https://www.manci.io/api/health` answers
 5. Enable the job:
    `MANCI_TARGET=devnet bash scripts/db.sh -c "select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-alarms-devnet'"`.
 6. External monitor (D10): every 5 minutes on
-   `https://www.manci.io/api/health/alarms`, alert on anything but 200.
+   `https://devnet.manci.io/api/health/alarms`, alert on anything but 200.
 
 **E. 0074 (contract), at least a day after C.** It drops the anonymous read
 of `spv_issuances` and `record_spv_issuance`; the new front reads through
@@ -2303,7 +2316,9 @@ MANCI_ALLOW_MAINNET=1` and job `mancipatio-alarms-mainnet`:
 only through the Raise limits page by the super admin after bootstrap
 (D16); check the EURC mint address against Circle's published address
 before saving it. The fx scheduler (automatic USDC rate) is installed and
-enabled at D10 (§15 "Automatic EUR rate").
+enabled at D10, after the manual USDC fallback (§15 "Automatic EUR rate");
+0080 itself is applied before the mainnet front that carries it (§15
+"Apply migration 0080").
 
 ### Sanctions list (8.5, migration 0078)
 
@@ -2374,11 +2389,19 @@ the run is skipped), and:
 - takes the **median** of the usable answers (a sane, uncrossed book); fewer
   than two is `TOO_FEW_SOURCES`;
 - refuses when the answers differ by more than **1 %** of the median
-  (`SOURCE_DIVERGENCE`), or when the median is more than **2 %** away from
-  1 / (ECB USD per EUR), one USDC taken as one USD (`ECB_DEVIATION`: a depeg
-  or broken feeds); without an ECB rate younger than 6 days
-  `ECB_UNAVAILABLE` / `ECB_STALE`; without the mint's decimals from chain
-  `DECIMALS_UNAVAILABLE`;
+  (`SOURCE_DIVERGENCE`), or when the median is further from 1 / (ECB USD per
+  EUR), one USDC taken as one USD, than the **band for the fix's age**
+  (`ECB_DEVIATION`: a depeg, a large EUR/USD move since the fix, or broken
+  feeds). The ECB fixes once a TARGET working day, so the anchor is up to
+  ~1.6 days old on an ordinary day, 3.6 over a weekend and 5.6 at Easter:
+  the band is 2.5 % for a fix up to a day old (counted from 00:00 UTC of its
+  date), one point more per further day, at most 5 %
+  (`lib/fx-auto.ts` `ecbTolerance`; each run records the band it used,
+  `ecb_tolerance_bps`). Without an ECB rate younger than 6 days
+  `ECB_UNAVAILABLE` / `ECB_STALE` (a new instance whose ECB request fails
+  falls back to the anchor the last accepted run stored, while it is younger
+  than that); without the mint's decimals from chain within the run's
+  15-second budget `DECIMALS_UNAVAILABLE`;
 - otherwise writes `public.fx_auto_rates` (valid **15 minutes**, with the
   per-source quotes and the ECB anchor). Every run, accepted or refused, is a
   row of `public.fx_rate_observations` (kept 30 days). Rate limit, before
@@ -2405,8 +2428,33 @@ else the most recently observed one, which reservations refuse as
 the rate it was made at with its source (`auto: median of … (ECB <date>: …)`
 or the manual source), and booking never uses a newer one.
 
-Install, prove, enable (after 0080 and the retry scheduler; on mainnet with
-`MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1`, at §0A D10):
+#### Apply migration 0080
+
+Devnet first, mainnet second, each BEFORE that network's front deploy of
+the automatic rate (PR #53): the new front reads `fx_auto_rates` and calls
+`claim_fx_auto_run`, and its fx route answers `failed NOT_INSTALLED` without
+them. Expand only: without automatic rows every reader behaves as before.
+Run the block with `<t>` = `devnet`, later with `<t>` = `mainnet` and
+`MANCI_ALLOW_MAINNET=1` exported (`backup.sh` needs it too; its mainnet dump
+is schema-only, PITR is the restore point):
+
+```
+bash scripts/ops/backup.sh <t> pre-0080
+MANCI_TARGET=<t> bash scripts/db.sh -f supabase/migrations/0080_fx_auto_rates.sql
+MANCI_TARGET=<t> bash scripts/db.sh -c "insert into supabase_migrations.schema_migrations(version,name) values ('0080','fx_auto_rates')"
+MANCI_TARGET=<t> bash scripts/db.sh -c "select to_regprocedure('public.claim_fx_auto_run(text,text)') is not null as claim, to_regprocedure('public.fx_effective_rate(text,text)') is not null as resolver, (select count(*) from pg_constraint where conname like 'fx_%_eur_per_token_bounds') as bounds, has_table_privilege('service_role','public.fx_auto_rates','SELECT') as service_reads, has_table_privilege('service_role','public.fx_auto_rates','INSERT') as service_writes, (select count(*) from public.fx_auto_rates) as automatic_rows, (select version from supabase_migrations.schema_migrations where version='0080') as recorded"
+MANCI_TARGET=<t> bash scripts/db.sh -f scripts/preflight/supabase-readonly-identity.sql
+```
+
+Pass: `t | t | 2 | t | f | 0 | 0080`, and the identity preflight still shows
+`tables_without_guard` `[]` and `defaults_not_dynamic` `{}`. Only then
+deploy the front.
+
+#### Install, prove, enable
+
+After 0080 and the retry scheduler; on mainnet with
+`MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1`, at §0A D10, after the super
+admin has seeded the manual USDC fallback:
 
 ```
 MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-scheduler.sql
@@ -2427,21 +2475,39 @@ most 7 days on mainnet): `fx:fallback` and `/api/health`
 (`fallback_missing` / `fallback_stale`) report it while the automatic rate
 counts. Tick **Override the automatic rate** only to pin a rate on purpose
 (a feed you distrust); `/api/health` warns `manual_override` while it
-counts. A front deployed ahead of 0080 still saves a manual rate (without
-the column); only an override is refused until 0080 is applied. Off switch without a rollback: disable
-the job and run
-`delete from public.fx_auto_rates where network = public.deployment_network();`
-(the manual row counts at once).
+counts, and `/admin/limits` warns (without refusing) when the override is
+more than 2 % away from the automatic rate. An override past its own max
+age still counts (fail-closed): approvals refuse `FX_RATE_STALE` until it
+is renewed or saved unticked. A front deployed ahead of 0080 still saves a
+manual rate (without the column); only an override is refused until 0080
+is applied.
 
-The alarm worker watches the job (`fxAutoReports`; nothing before its first
-run):
+**Off switch** (no rollback needed): BOTH halves, the job disabled AND the
+network's automatic rows deleted (a disabled job alone leaves a fresh
+automatic rate counting for up to 15 minutes; deleted rows alone come back
+with the next run). One file does both in one transaction and shows the
+manual rows that count from then on:
+
+```
+MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-auto-off.sql
+```
+
+Check that the manual USDC row it lists is `fresh` (`t`); if not, refresh it
+on `/admin/limits` at once. With no automatic row and no run for 5 minutes
+the alarm worker treats the job as off: `fx-auto-stale` and the other `fx-*`
+incidents clear within about 5 minutes. Back on: install, prove and enable
+as above.
+
+The alarm worker watches the job (`fxAutoReports`; nothing while there is
+no automatic row and no run in the last 5 minutes: before the first run, or
+after the off switch):
 
 | Incident | Severity | Fails when |
 |---|---|---|
-| `fx-auto-stale:<mint>` | medium while a fresh manual rate covers it, high when nothing fresh is left | the automatic rate is past its 15 minutes |
+| `fx-auto-stale:<mint>` | high only on mainnet for a mint in use (a live approval, an open sale or a raise limit hold paid in it, as `fx-stale`) when no fresh manual rate covers it; otherwise medium on mainnet, low elsewhere (never emailed) | the automatic rate is past its 15 minutes, or there is none while the job runs (a run in the last 5 minutes) |
 | `fx-fallback:<mint>` | medium (missing: medium on mainnet, low elsewhere) | while the automatic rate counts, the manual fallback behind it is missing, past its max age, or within 2 days (at most half its max age) of it |
 | `fx-source-down:<mint>` | medium | a source gave no usable answer for 15 minutes while the job runs |
-| `fx-depeg:<mint>` | high | the newest three price verdicts since the last accepted run (`ECB_DEVIATION` / `SOURCE_DIVERGENCE`; other refusal codes are skipped) are all refusals and at least one is `ECB_DEVIATION` (fewer: hold). The two codes alternate in a real depeg, so they count together |
+| `fx-depeg:<mint>` | high | the newest three price verdicts since the last accepted run (`ECB_DEVIATION` / `SOURCE_DIVERGENCE`; other refusal codes are skipped) are all refusals and at least one is `ECB_DEVIATION`: the median deviates from the ECB reference of that date by more than the band for its age (fewer: hold). The two codes alternate in a real depeg, so they count together |
 | `fx-divergence:<mint>` | medium | the same three verdicts are all `SOURCE_DIVERGENCE` (fewer: hold; mixed with `ECB_DEVIATION`: hold, `fx-depeg` reports it) |
 | `fx-jump:<mint>` | medium | the accepted rates of the last hour moved more than 1 % (hold above 0.5 %) |
 
@@ -2467,8 +2533,8 @@ instead), and `fx-expiring` is about a manual rate only.
 | `onchain:squads-config` (`squads-config:<multisig>`, critical) | Members, threshold, time lock or config authority differ from `ALARM_SQUADS_CONFIG` (the role map). A change you approved: update the role map and `ALARM_SQUADS_CONFIG`, redeploy. Unexpected: incident (§11), tell the Squads members, pause if the upgrade authority may be lost. |
 | `onchain:squads-proposal` (`squads-proposal:<proposal>`, Approved/Executing or unreadable critical, Draft/Active high) | Compare with the proposal you expected (§9: the upgrade's buffer, hash and the members who approve). Expected: nothing to do, it clears once the proposal is final (executed, rejected or cancelled) or stale. Unexpected: incident (§11); members reject it and do not execute. |
 | `fx:expiring` (`fx-expiring:<mint>`, medium) | Refresh the EUR rate on the Raise limits page (`/admin/limits`) before its max age: past it `fx:stale` follows and the sales that need the rate stop (on mainnet `/api/health` fails for the default mint). Since 0080 only a manual rate that counts expires this way (the automatic one is renewed every minute). |
-| `fx:auto-stale` (`fx-auto-stale:<mint>`, medium / high) | The fx job stopped or every run is refused: `fx-scheduler-status.sql` (outcome, `code`, the quotes), the Vercel logs of `/api/internal/fx`. Medium: the manual fallback counts meanwhile, check that it is recent. High: no fresh rate counts and approvals refuse: refresh the manual rate on `/admin/limits` now, then fix the job. |
-| `fx:depeg` (`fx-depeg:<mint>`, high) | The USDC/EUR median is more than 2 % from the ECB rate on several venues: check a venue by hand. A real depeg: the last automatic rate counts for its 15 minutes, then the manual fallback; decide with the owner whether to pin a manual override (and at which rate) or to stop approvals. A broken ECB file or source: the status SQL shows the quotes. |
+| `fx:auto-stale` (`fx-auto-stale:<mint>`, low / medium / high) | The fx job stopped or every run is refused: `fx-scheduler-status.sql` (outcome, `code`, the quotes), the Vercel logs of `/api/internal/fx`. Medium (mainnet): the manual fallback counts meanwhile, or nothing is paid in the mint yet; check that the fallback is recent. High (mainnet, the mint in use): no fresh rate counts and approvals refuse: refresh the manual rate on `/admin/limits` now, then fix the job. Low: off mainnet. Switched off on purpose: the off switch above clears it within about 5 minutes. |
+| `fx:depeg` (`fx-depeg:<mint>`, high) | The USDC/EUR median deviates from the ECB reference of the date the summary names by more than the band (2.5 % growing to 5 % with the fix's age): a USDC depeg, a large EUR/USD move since the fix, or broken sources. Check a venue and EUR/USD by hand. A real depeg: the last automatic rate counts for its 15 minutes, then the manual fallback; decide with the owner whether to pin a manual override (and at which rate) or to stop approvals. A broken ECB file or source: the status SQL shows the quotes. |
 | `fx:fallback` (`fx-fallback:<mint>`, medium; low off mainnet when missing) | The automatic rate counts, but the manual fallback behind it is missing or (about to be) out of date: if the automatic rate stops, approvals stop 15 minutes later. Refresh the manual USDC rate on `/admin/limits` (unticked, not an override). |
 | `fx:divergence` (`fx-divergence:<mint>`, medium) | Every run is refused: the automatic rate is NOT written and, 15 minutes after the last accepted run, the manual fallback counts (`fx:auto-stale` follows; check the fallback is recent). The evidence (`sources`) shows the venue that is off. One venue wrong: remove or replace it in `front/lib/fx-auto.ts` (`FX_SOURCES`) and deploy; a disorderly market: wait, or pin a manual override with the owner. |
 | `fx:source-down` (`fx-source-down:<mint>`, medium) | One venue gives no usable answer (the evidence names it); the others carry the rate while at least two answer. If it persists, replace the source in `front/lib/fx-auto.ts`. |
@@ -2517,13 +2583,19 @@ instead), and `fx-expiring` is about a manual rate only.
   re-runnable). Keep `spv_issuances_sale_once` and the new tables.
 - 0074: `create policy "spv_issuances anon read" on public.spv_issuances for select using (true); grant select on public.spv_issuances to anon, authenticated;`
   and re-apply 0073 section 15 (`record_spv_issuance`).
-- 0080: disable `mancipatio-fx-<network>`, then either the off switch of
-  §15 "Automatic EUR rate" (delete the `fx_auto_rates` rows), or make the
-  resolver manual-only (the ledger functions keep calling it):
-  `create or replace function public.fx_effective_rate(p_network text, p_payment_mint text) returns setof public.fx_rates language sql stable security definer set search_path = '' as $$ select * from public.fx_rates where network = p_network and payment_mint = p_payment_mint $$;`
-  Tables, column and writers stay. Re-applying 0066 or 0073 (their own
-  rollbacks) restores the direct `fx_rates` reads; re-apply 0080 after
-  them to bring the automatic rate back.
+- 0080: all of it, in this order (not either/or): disable
+  `mancipatio-fx-<network>` AND delete the network's `fx_auto_rates` rows
+  (the off switch, one file:
+  `MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-auto-off.sql`),
+  then make sure the manual USDC row is fresh; optionally, only after that,
+  make the resolver manual-only (the ledger functions keep calling it):
+  `MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-manual-only.sql`
+  (a file: the function's `$$` body inside `db.sh -c "..."` would be
+  expanded by the shell; it refuses while the job is active). `fx-auto-stale`
+  clears within about 5 minutes after the job stops. Tables, column and
+  writers stay. Re-applying 0080 brings the automatic rate back (also after
+  the manual-only resolver); re-applying 0066 or 0073 (their own rollbacks)
+  restores the direct `fx_rates` reads, so re-apply 0080 after them.
 
 ### Implementation notes (where the code differs from the design text)
 
@@ -3167,9 +3239,10 @@ Other things that read the devnet origin:
   after B (with the alternative, `SMOKE_ORIGIN=<the alias>`; its SIWS case
   needs the origin the build was given in `NEXT_PUBLIC_SITE_URL`);
 - the 100-user simulator: `front/scripts/sim/lib/constants.ts`
-  `SITE_ORIGIN` stays `https://www.manci.io`. It refuses a site whose
-  `/api/health` does not report devnet, so after D it stops rather than
-  touch mainnet. Change it at C;
+  `SITE_ORIGIN` is `targets.json` `devnet.siteOrigin`,
+  `https://devnet.manci.io` (PR #54); it refuses `www.manci.io` and a site
+  whose `/api/health` does not report devnet. Between R and B there is
+  nothing to run it against;
 - `CHAIN_SITE_ORIGIN` in the devnet handover example (§19).
 
 `public/.well-known/security.txt` and the programs' security.txt name
@@ -3362,7 +3435,7 @@ as the target as well.
 ```sh
 cd front
 CHAIN_NETWORK=devnet CHAIN_RPC_URL=https://api.devnet.solana.com CHAIN_RPS=1 \
-CHAIN_ROLE_MAP=~/mancipatio-devnet/handover-company.json CHAIN_SITE_ORIGIN=https://www.manci.io \
+CHAIN_ROLE_MAP=~/mancipatio-devnet/handover-company.json CHAIN_SITE_ORIGIN=https://devnet.manci.io \
 CHAIN_OUTPUT=../docs/mainnet-readiness/handover/01-plan.json npm run chain:handover
 ```
 
