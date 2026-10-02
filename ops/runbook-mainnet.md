@@ -719,6 +719,17 @@ SA's; no grant for the SA is ever needed. With the company wallet model (§19)
 one wallet does X3, X2, X1, S5c and S6, in that order (its Admin record comes
 from X1; `admins[]` holds the second Admin, whose Ledger does A3).
 
+How a Ledger signs these steps: Phantom, Solflare and Jupiter with a Ledger
+do not sign off-chain messages, and every action first needs one (the
+wallet check before each transaction). Connect the Ledger itself instead:
+Chrome or Edge on the computer the Ledger is plugged into, Ledger unlocked
+with the Solana app open (1.8.0 or newer, "Blind signing" enabled for the
+transactions), then **Connect wallet → Ledger (USB)**, and pick the role's
+address from the list (the path is not known in advance; *Show on Ledger*
+confirms it on the device). Compare the text (messages) or the hash
+(transactions) on the device with what the page shows before approving.
+Rehearse once on devnet with the same Ledger before the mainnet steps.
+
 ## 6. Dry run again, pre-handover inventory
 
 ```sh

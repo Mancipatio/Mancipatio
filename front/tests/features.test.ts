@@ -5,10 +5,36 @@
 // the old exact-"true" rule silently kept `TRUE` off (the issuer recovery
 // panel with it); next.config.ts refuses any other value at build time.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { FEATURE_FLAG_VALUES } from "@/next.config";
-import { featureDisabledMessage, features, parseFeatureFlag } from "@/lib/features";
+import { assertBuildFeatureFlags, FEATURE_FLAG_NAMES, FEATURE_FLAG_VALUES, permissionsPolicy } from "@/next.config";
+import { featureDisabledMessage, features, LEDGER_USB_ENV, ledgerUsbWalletEnabled, parseFeatureFlag } from "@/lib/features";
 
 afterEach(() => vi.unstubAllEnvs());
+
+// The "Ledger (USB)" wallet: on everywhere (mainnet included) unless its kill
+// switch reads as off; next.config.ts denies WebHID exactly when it is off.
+describe("ledgerUsbWalletEnabled()", () => {
+  it.each(["mainnet", "devnet"])("is on by default on %s and off only for a value that reads as off", (network) => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", network);
+    for (const value of [undefined, "", "true", "1", "yes", "on", "TRUE", "ture", "enabled"]) {
+      vi.stubEnv(LEDGER_USB_ENV, value);
+      expect(ledgerUsbWalletEnabled(), String(value)).toBe(true);
+    }
+    for (const value of ["false", "0", "no", "off", " OFF "]) {
+      vi.stubEnv(LEDGER_USB_ENV, value);
+      expect(ledgerUsbWalletEnabled(), value).toBe(false);
+    }
+  });
+
+  it("agrees with the Permissions-Policy (hid) and the build guard", () => {
+    for (const value of [undefined, "", " off ", "garbage", ...FEATURE_FLAG_VALUES, ...FEATURE_FLAG_VALUES.map((v) => v.toUpperCase())]) {
+      vi.stubEnv(LEDGER_USB_ENV, value);
+      expect(permissionsPolicy(process.env).endsWith(ledgerUsbWalletEnabled() ? "hid=(self)" : "hid=()"), String(value)).toBe(true);
+    }
+    expect(FEATURE_FLAG_NAMES).toContain(LEDGER_USB_ENV);
+    expect(() => assertBuildFeatureFlags("phase-production-build", { [LEDGER_USB_ENV]: "of" })).toThrow(LEDGER_USB_ENV);
+    expect(() => assertBuildFeatureFlags("phase-production-build", { [LEDGER_USB_ENV]: "off" })).not.toThrow();
+  });
+});
 
 describe("features()", () => {
   it.each(["devnet", "testnet", "localnet"] as const)(

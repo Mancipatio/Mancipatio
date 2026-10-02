@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 // Next's own compiler for header sources (the regex that lands in
 // routes-manifest.json), so the test matches paths exactly as a deployment does.
 import { buildCustomRoute } from "next/dist/lib/build-custom-route";
@@ -28,9 +28,21 @@ describe("security headers", async () => {
       "strict-transport-security": "max-age=63072000; includeSubDomains; preload",
       "x-content-type-options": "nosniff",
       "x-frame-options": "DENY",
-      "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=()",
+      "permissions-policy": "camera=(), microphone=(), geolocation=(), payment=(), hid=(self)",
       "cross-origin-opener-policy": "same-origin-allow-popups",
     });
+  });
+
+  // WebHID for the "Ledger (USB)" wallet: this origin's own pages only, and
+  // denied when the wallet's kill switch is off (lib/features.ts).
+  it("allows WebHID for the site itself only while the Ledger (USB) wallet is on", async () => {
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_LEDGER_USB", "off");
+    try {
+      const off = (await config("phase-development-server").headers!()) as Rule[];
+      expect(headersFor(off, "/admin")["permissions-policy"]).toBe("camera=(), microphone=(), geolocation=(), payment=(), hid=()");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it("uses strict-origin-when-cross-origin site-wide and keeps no-referrer, no-store on sensitive pages", () => {

@@ -84,6 +84,24 @@ export function features(network: Network = detectNetwork()): Features {
   };
 }
 
+// ── Wallet options ──────────────────────────────────────────────────────────
+//
+// The "Ledger (USB)" wallet (lib/ledger-usb.ts) signs directly on a Ledger
+// over WebHID (Chrome, Edge): the way in for a Ledger account whose wallet app
+// cannot sign messages (Phantom, Solflare or Jupiter with a Ledger), which
+// every Manci transaction needs first. Unlike the flags above it is ON on
+// every network, mainnet included, unless NEXT_PUBLIC_FEATURE_LEDGER_USB reads
+// as off (the kill switch; same spellings and build guard). Off hides the
+// wallet, and next.config.ts then denies WebHID (Permissions-Policy hid=()).
+
+/** The kill switch behind ledgerUsbWalletEnabled (ops/env-vars.md). */
+export const LEDGER_USB_ENV = "NEXT_PUBLIC_FEATURE_LEDGER_USB";
+
+export function ledgerUsbWalletEnabled(): boolean {
+  // Literal process.env.NEXT_PUBLIC_* read so Next inlines it client-side.
+  return !killSwitchOff(process.env.NEXT_PUBLIC_FEATURE_LEDGER_USB);
+}
+
 /** User-facing sentence for a feature that is off on this network. The
  *  network is lower case ("Solana mainnet"), like the stage badge
  *  (mxStageLabel) and the rest of the marketing copy. */

@@ -5,6 +5,7 @@ import { signedFetch } from "@/lib/siws-client";
 import { MaintenanceModeError } from "@/lib/maintenance";
 import { OffchainMessageLimitError } from "@/lib/siws-offchain";
 import { HardwareWalletSigningError } from "@/lib/siws-signing";
+import { LedgerUsbError } from "@/lib/ledger-usb";
 
 export type TransactionWalletPolicy = {
   wallet: string;
@@ -62,7 +63,8 @@ export async function requestTransactionWalletPolicy(
   } catch (error) {
     assertCurrent();
     if (error instanceof TransactionWalletChangedError || error instanceof MaintenanceModeError ||
-        error instanceof HardwareWalletSigningError || error instanceof OffchainMessageLimitError) throw error;
+        error instanceof HardwareWalletSigningError || error instanceof OffchainMessageLimitError ||
+        error instanceof LedgerUsbError) throw error;
     throw new Error("We could not verify your primary transaction wallet. Approve the wallet verification and try again.");
   }
   assertCurrent();

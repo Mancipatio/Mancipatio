@@ -488,7 +488,20 @@ export const FEATURE_FLAG_NAMES = [
   "NEXT_PUBLIC_FEATURE_VESTING", "NEXT_PUBLIC_FEATURE_RIGHTS",
   "NEXT_PUBLIC_FEATURE_DISTRIBUTIONS", "NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION",
   "NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY",
+  // The "Ledger (USB)" wallet's kill switch (lib/features.ts LEDGER_USB_ENV).
+  "NEXT_PUBLIC_FEATURE_LEDGER_USB",
 ];
+
+/**
+ * The Permissions-Policy. WebHID is allowed for this origin's own pages
+ * (`hid=(self)`, never a frame) only while the "Ledger (USB)" wallet is on —
+ * lib/features.ts ledgerUsbWalletEnabled, whose kill switch this reads with
+ * the same spellings (a test keeps the two equal); otherwise it is denied.
+ */
+export function permissionsPolicy(env: Record<string, string | undefined> = process.env): string {
+  const ledgerUsbOff = ["false", "0", "no", "off"].includes(env.NEXT_PUBLIC_FEATURE_LEDGER_USB?.trim().toLowerCase() ?? "");
+  return `camera=(), microphone=(), geolocation=(), payment=(), hid=${ledgerUsbOff ? "()" : "(self)"}`;
+}
 
 /**
  * A NEXT_PUBLIC_FEATURE_* value lib/features.ts cannot read (front-app-8):
@@ -598,8 +611,9 @@ export function contentSecurityPolicy(env: Record<string, string | undefined> = 
 }
 
 // Site-wide browser hardening. The Content-Security-Policy is report-only
-// for now (contentSecurityPolicy above).
-const SECURITY_HEADERS = [
+// for now (contentSecurityPolicy above). Read per call: the Permissions-Policy
+// follows the build's env (permissionsPolicy above).
+const securityHeaders = (env: Record<string, string | undefined> = process.env) => [
   { key: "Strict-Transport-Security", value: "max-age=63072000; includeSubDomains; preload" },
   { key: "X-Content-Type-Options", value: "nosniff" },
   { key: "Referrer-Policy", value: "strict-origin-when-cross-origin" },
@@ -607,7 +621,8 @@ const SECURITY_HEADERS = [
   // Denied for every frame. The planned Sumsub WebSDK runs in an iframe and
   // needs camera and microphone for liveness checks: that integration must
   // delegate them, e.g. camera=(self "https://*.sumsub.com"), and test it.
-  { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=(), payment=()" },
+  // WebHID for the "Ledger (USB)" wallet: permissionsPolicy above.
+  { key: "Permissions-Policy", value: permissionsPolicy(env) },
   // Isolates this window from pages it did not open, but keeps the opener
   // link to popups it opens (wallet adapters that use a popup window). Google
   // sign-in is a full-page redirect and needs no opener.
@@ -646,7 +661,7 @@ const nextConfig: NextConfig = {
       { key: "Reporting-Endpoints", value: `csp="${CSP_REPORT_PATH}"` },
     ];
     return [
-      { source: "/:path*", headers: [...SECURITY_HEADERS, ...csp] },
+      { source: "/:path*", headers: [...securityHeaders(process.env), ...csp] },
       // Later rules win for the same key: these keep no-referrer.
       ...SENSITIVE_SOURCES.map((source) => ({
         source,

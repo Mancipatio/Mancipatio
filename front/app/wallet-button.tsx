@@ -3,6 +3,9 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useBalance, useWalletConnection } from "@solana/react-hooks";
 import { WALLET_CONNECT_LABEL } from "@/lib/wallet-copy";
+import { findLedgerUsbError, LEDGER_USB_CONNECTOR_ID } from "@/lib/ledger-usb";
+
+const CONNECTION_FAILED = "Connection was cancelled or could not be completed. Try again in your wallet.";
 
 const PILL =
   "rounded-full border px-3 py-1.5 text-xs font-mono transition-colors";
@@ -15,7 +18,7 @@ export function WalletButton() {
   const conn = useWalletConnection();
   const balance = useBalance(conn.wallet?.account.address);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [connectionError, setConnectionError] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
   const ref = useRef<HTMLDivElement>(null);
   const buttonRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
@@ -60,13 +63,17 @@ export function WalletButton() {
 
   const connect = (id: string) => {
     setPickerOpen(false);
-    setConnectionError(false);
+    setConnectionError(null);
     buttonRef.current?.focus();
-    conn.connect(id).catch(() => {
-      setConnectionError(true);
+    conn.connect(id).catch((error: unknown) => {
+      // The Ledger (USB) wallet says what to do (unlock, open the Solana app…).
+      setConnectionError(findLedgerUsbError(error)?.message ?? CONNECTION_FAILED);
       setPickerOpen(true);
     });
   };
+  // Never straight to the Ledger's USB chooser: with no other wallet the list
+  // still explains the choice (and that a wallet extension is missing).
+  const only = conn.connectors.length === 1 && conn.connectors[0].id !== LEDGER_USB_CONNECTOR_ID ? conn.connectors[0] : null;
 
   return (
     <div ref={ref} className="wallet-control relative inline-block">
@@ -79,9 +86,9 @@ export function WalletButton() {
         aria-controls={pickerOpen ? panelId : undefined}
         aria-haspopup="dialog"
         onClick={() => {
-          if (conn.connectors.length === 1) connect(conn.connectors[0].id);
+          if (only) connect(only.id);
           else {
-            setConnectionError(false);
+            setConnectionError(null);
             setPickerOpen((open) => !open);
           }
         }}
@@ -93,18 +100,22 @@ export function WalletButton() {
         <div id={panelId} ref={panelRef} role="dialog" aria-label={WALLET_CONNECT_LABEL}
           tabIndex={-1} className="wallet-control-panel">
           {connectionError && (
-            <p role="alert" className="wallet-control-message">
-              Connection was cancelled or could not be completed. Try again in your wallet.
-            </p>
+            <p role="alert" className="wallet-control-message">{connectionError}</p>
           )}
-          {conn.connectors.length === 0 ? (
+          {conn.connectors.every((connector) => connector.id === LEDGER_USB_CONNECTOR_ID) && (
             <p className="wallet-control-message">
               No Solana wallet detected. Enable a Solana wallet extension or open this app in your wallet&apos;s browser, then reload.
             </p>
-          ) : conn.connectors.map((connector) => (
+          )}
+          {conn.connectors.map((connector) => (
             <button key={connector.id} type="button" className="wallet-control-option"
               disabled={conn.connecting} onClick={() => connect(connector.id)}>
               {connector.name}
+              {connector.id === LEDGER_USB_CONNECTOR_ID && (
+                <span className="block text-[11px] text-slate-500">
+                  A Ledger plugged into this computer: unlock it and open the Solana app first.
+                </span>
+              )}
             </button>
           ))}
           <button type="button" className="wallet-control-option" onClick={() => {

@@ -23,6 +23,8 @@
     "ops:reconcile-bench": "vitest run --config scripts/ops/reconcile-bench.config.ts --reporter=verbose"
   },
   "dependencies": {
+    "@ledgerhq/hw-app-solana": "7.11.0",
+    "@ledgerhq/hw-transport-webhid": "6.36.0",
     "@solana-program/token-2022": "^0.7.0",
     "@solana/client": "^1.7.0",
     "@solana/kit": "^5.5.1",

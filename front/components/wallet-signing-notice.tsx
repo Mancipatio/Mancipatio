@@ -2,6 +2,8 @@
 
 import { useEffect, useState } from "react";
 import { onSigningEvent, preferOffchainEnvelope, type SigningTarget } from "@/lib/siws-signing";
+import { ledgerUsbWalletEnabled } from "@/lib/features";
+import { hasWebHid } from "@/lib/ledger-usb-webhid";
 
 type Notice = { kind: "retry" | "offer" | "enabled"; target: SigningTarget };
 
@@ -15,6 +17,8 @@ const DURATION_MS: Record<Notice["kind"], number> = { retry: 30_000, offer: 45_0
  *     offers hardware-wallet signing by hand (Ledger behind Phantom/Solflare). */
 export function WalletSigningNotice() {
   const [notice, setNotice] = useState<Notice | null>(null);
+  // Rendered only after a signing event, so this browser-only check never runs on the server.
+  const ledgerUsb = notice?.kind === "offer" && ledgerUsbWalletEnabled() && hasWebHid();
 
   useEffect(() => onSigningEvent((event) => {
     setNotice({ kind: event.type === "envelope-retry" ? "retry" : "offer", target: event.target });
@@ -53,6 +57,11 @@ export function WalletSigningNotice() {
                     If this wallet uses a Ledger through Phantom or Solflare, switch it to hardware-wallet
                     signing and try the action again. The Ledger will then show the full request.
                   </p>
+                  {ledgerUsb && (
+                    <p className="mt-1 text-xs text-slate-600">
+                      If it still fails, connect the Ledger directly: disconnect, then Connect wallet → Ledger (USB).
+                    </p>
+                  )}
                   <button
                     type="button"
                     onClick={() => {

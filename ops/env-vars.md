@@ -32,6 +32,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_STARTUP_RAISES` | Public, build | owner decision | ignored (on) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_ISSUER_ROTATION` | Public, build | **`true` recommended** (owner decision: issuer recovery = super admin + 7 days; off hides the admin recovery panel) | kill switch only (`false`) | Off on mainnet | `lib/features.ts` |
 | `NEXT_PUBLIC_FEATURE_PASSPORT_CLOSE` | Public, build | `false` until the lawyer signs off D13 | ignored (on) | Off on mainnet | `lib/features.ts` |
+| `NEXT_PUBLIC_FEATURE_LEDGER_USB` | Public, build | leave unset (on): the company Ledger signs through it | kill switch only (`false`) | **On on every network**, mainnet included | `lib/features.ts` `ledgerUsbWalletEnabled`, `next.config.ts` `permissionsPolicy` |
 | `NEXT_PUBLIC_FEATURE_SECONDARY_TRADING` | Public, build | pilot: leave unset (off); see "Pilot scope" | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_GOVERNANCE` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `NEXT_PUBLIC_FEATURE_VESTING` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
@@ -93,6 +94,15 @@ build. On mainnet a flag is off unless it reads as on. Decisions for the
 owner before the mainnet build: `ISSUER_ROTATION=true` (recommended),
 `PASSPORT_CLOSE=false` until D13, `STARTUP_RAISES` and `PAYOUT_AIRDROP`
 explicitly on or off.
+
+`NEXT_PUBLIC_FEATURE_LEDGER_USB` is the exception: the "Ledger (USB)" wallet
+(`lib/ledger-usb.ts`) is **on on every network unless the variable reads as
+off**. It lets a Ledger sign directly over WebHID (Chrome or Edge on a
+computer, Solana app 1.8.0 or newer, "Blind signing" on for transactions), the
+way in for a Ledger account whose wallet app cannot sign messages (Phantom,
+Solflare or Jupiter with a Ledger), which every transaction's wallet check
+needs. `false` hides the wallet and sets `hid=()` in the Permissions-Policy
+(on: `hid=(self)`, this origin's own pages only, never a frame).
 
 ### Pilot scope (module switches)
 

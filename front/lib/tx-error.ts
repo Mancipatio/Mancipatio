@@ -460,6 +460,25 @@ function networkRefusalText(code: number, network: string, errorName: unknown): 
   }
 }
 
+/** The first object in the error tree (causes, wrapped errors, plan results) that `match` accepts. */
+function findInErrorTree(err: unknown, match: (cursor: object) => boolean): object | null {
+  const queue: unknown[] = [err];
+  const seen = new Set<unknown>();
+  while (queue.length > 0 && seen.size < 200) {
+    const cursor = queue.shift();
+    if (cursor == null || typeof cursor !== "object" || seen.has(cursor)) continue;
+    seen.add(cursor);
+    if (match(cursor)) return cursor;
+    const obj = cursor as AnyRecord;
+    for (const key of ["cause", "error", "context", "transactionPlanResult", "plans"]) {
+      const next = obj[key];
+      if (Array.isArray(next)) queue.push(...next);
+      else if (next && typeof next === "object") queue.push(next);
+    }
+  }
+  return null;
+}
+
 /**
  * The network's pre-execution refusal anywhere in the cause chain, worded for
  * the user, with what the wallet changed while signing it when that is known
@@ -504,6 +523,11 @@ export function explainSendError(err: unknown): string {
     // (lib/proceeds-gate.ts; matched by name: that module imports this one).
     if (cursor.name === "GateAccountSetError") return cursor.message;
   }
+
+  // The Ledger (USB) wallet's failures are worded for the user (unlock, open
+  // the Solana app, enable blind signing…); the SDK may wrap them deeply.
+  const ledger = findInErrorTree(err, (cursor) => cursor instanceof Error && cursor.name === "LedgerUsbError");
+  if (ledger instanceof Error) return ledger.message;
 
   // Common case: a wallet-side rejection.
   if (typeof err === "object" && err !== null) {

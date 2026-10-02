@@ -1,11 +1,14 @@
 // Client strategy for signing a SIWS message with any wallet, including a
 // Ledger. Byte layouts, limits and the format decision: lib/siws-offchain.ts.
 //
-// How a Ledger user connects: open the Solana app on the Ledger, add the
-// Ledger to Phantom ("Add / Connect Hardware Wallet") or Solflare ("Connect
-// Ledger"), then connect Phantom/Solflare here as usual. Manci only sees the
-// Wallet Standard `solana:signMessage` feature — there is no standard
-// "sign off-chain message" feature (@solana/wallet-standard-features 1.3.0),
+// How a Ledger user connects: either directly, with the "Ledger (USB)" wallet
+// (lib/ledger-usb.ts: it wraps the text in our off-chain envelope itself, so
+// step 1 below matches "offchain-v0" with one prompt), or through Phantom
+// ("Add / Connect Hardware Wallet") or Solflare ("Connect Ledger") — which,
+// per Ledger's support article, cannot sign off-chain messages with a Ledger
+// today; the steps below are for wallet apps that can. Through a wallet app
+// Manci only sees the Wallet Standard `solana:signMessage` feature — there is
+// no standard "sign off-chain message" feature (@solana/wallet-standard-features 1.3.0),
 // no standard way to tell that an account is hardware-backed, and
 // @solana/client hands back only the signature, not the `signedMessage` bytes
 // the wallet actually signed. So the format is worked out like this:
@@ -195,8 +198,11 @@ function asUserRejection(error: unknown): unknown {
   return Object.assign(new Error("User rejected the request.", { cause: error }), { code: 4001 });
 }
 
-/** This app's own errors (e.g. the wallet changed mid-prompt) pass through. */
-const APP_ERRORS = new Set(["TransactionWalletChangedError", "AccountSessionChangedError", "MaintenanceModeError"]);
+/** This app's own errors (e.g. the wallet changed mid-prompt) pass through,
+ * and so do the Ledger (USB) wallet's (lib/ledger-usb.ts): it signs our
+ * off-chain envelope itself, so a retry could not help, and its message
+ * already says what to do on the device. */
+const APP_ERRORS = new Set(["TransactionWalletChangedError", "AccountSessionChangedError", "MaintenanceModeError", "LedgerUsbError"]);
 function isAppError(error: unknown): boolean {
   return error instanceof OffchainMessageLimitError || (error instanceof Error && APP_ERRORS.has(error.name));
 }

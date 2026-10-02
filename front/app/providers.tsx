@@ -9,6 +9,8 @@ import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 import { guardWalletConnectors } from "@/lib/guarded-wallet-connectors";
 import { walletConnectorOverrides } from "@/lib/wallet-chain";
 import { WalletSigningNotice } from "@/components/wallet-signing-notice";
+import { LedgerUsbDialogs } from "@/components/ledger-usb-dialogs";
+import { ledgerUsbConnectors } from "@/lib/ledger-usb-connector";
 import { RoleProvider } from "@/lib/auth";
 
 // NEXT_PUBLIC_SOLANA_RPC_URL wins; otherwise derived from NEXT_PUBLIC_NETWORK
@@ -19,7 +21,12 @@ const websocketEndpoint = wsUrl();
 
 // One Solana client for the whole app — network RPC + Wallet Standard discovery.
 // Wallets are told the build's chain (lib/wallet-chain), not their first one.
-const connectors = guardWalletConnectors(autoDiscover({ overrides: walletConnectorOverrides(detectNetwork()) }), () => {
+// "Ledger (USB)" (lib/ledger-usb.ts) is added where the browser has WebHID.
+const network = detectNetwork();
+const connectors = guardWalletConnectors([
+  ...autoDiscover({ overrides: walletConnectorOverrides(network) }),
+  ...ledgerUsbConnectors(network),
+], () => {
   const wallet = baseClient.store.getState().wallet;
   return wallet.status === "connected" ? wallet.session : undefined;
 });
@@ -28,7 +35,7 @@ const baseClient: SolanaClient = createClient({
   websocketEndpoint,
   walletConnectors: connectors,
 });
-const solanaClient = withVerifiedTransactions(baseClient, detectNetwork());
+const solanaClient = withVerifiedTransactions(baseClient, network);
 
 export function Providers({ children }: { children: ReactNode }) {
   return (
@@ -37,6 +44,7 @@ export function Providers({ children }: { children: ReactNode }) {
         <ToastProvider>
           {children}
           <WalletSigningNotice />
+          <LedgerUsbDialogs />
         </ToastProvider>
       </RoleProvider>
     </SolanaProvider>
