@@ -8,7 +8,8 @@ import { applyMigrations, TEST_PROJECT_REFS } from "./helpers/migrations";
 // (assert-target.sql first), after the retry scheduler whose single-row
 // worker target it uses. pg_cron, Vault and the http extension are modelled,
 // as in sanctions-scheduler.postgres.test.ts; migration 0080 is stubbed by
-// the two objects the installer checks for, plus what the status SQL reads.
+// the three objects the installer checks for (the run claim is added by the
+// first test), plus what the status SQL reads.
 const TARGETS = JSON.parse(readFileSync(join(process.cwd(), "scripts/ops/targets.json"), "utf8")) as Record<"devnet" | "mainnet", { siteOrigin: string }>;
 const ORIGIN = TARGETS.devnet.siteOrigin;
 const read = (f: string) => readFileSync(join(process.cwd(), f), "utf8").replace(/^create extension .*;$/gm, "");
@@ -16,6 +17,8 @@ const ASSERT = readFileSync(join(process.cwd(), "scripts/ops/assert-target.sql")
 const RETRY = read("scripts/ops/retry-scheduler.sql");
 const FX = read("scripts/ops/fx-scheduler.sql");
 const STATUS = read("scripts/ops/fx-scheduler-status.sql");
+const OFF = read("scripts/ops/fx-auto-off.sql");
+const MANUAL_ONLY = read("scripts/ops/fx-manual-only.sql");
 const vars = (network: string, origin: string) => ({ target_network: network, target_ref: TEST_PROJECT_REFS[network as "devnet"], target_origin: origin, bootstrap: "0" });
 const reply = (network: string, data: Record<string, unknown> = { status: "accepted", rate: "0.88895" }) => JSON.stringify({
   ok: data.status !== "failed",
@@ -75,6 +78,11 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("fx scheduler SQL 
   afterAll(() => db.close());
   beforeEach(() => db.query(`truncate extensions.mock_response; insert into extensions.mock_response(status,body) values(200,'${reply("devnet")}')`));
 
+  it("refuses to install without the whole of 0080 (the run claim too)", () => {
+    expect(() => db.query(ASSERT + "\n" + FX, vars("devnet", ORIGIN))).toThrow(/Apply migration 0080 before installing the fx scheduler/);
+    db.query("create function public.claim_fx_auto_run(text,text) returns jsonb language sql as 'select null::jsonb'");
+  });
+
   it("refuses to install before the retry scheduler's worker target exists", () => {
     expect(() => db.query(ASSERT + "\n" + FX, vars("devnet", ORIGIN))).toThrow(/Install scripts\/ops\/retry-scheduler.sql first/);
   });
@@ -106,6 +114,27 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("fx scheduler SQL 
     expect(run()).toMatchObject({ ok: false, outcome: "http_error", refresh_state: "failed", code: "DB_ERROR" });
     db.query(`update extensions.mock_response set status=401, body='{"ok":false,"error":"Unauthorized"}'`);
     expect(run()).toMatchObject({ ok: false, outcome: "http_error", refresh_state: null });
+  });
+
+  it("the off switch disables the job AND deletes this network's automatic rows; manual-only waits for it", () => {
+    const USDC = "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
+    db.query("select cron.alter_job(jobid, active := true) from cron.job where jobname = 'mancipatio-fx-devnet'");
+    db.query(`insert into public.fx_auto_rates(network,payment_mint,eur_per_token,decimals,source,quotes,as_of,max_age) values
+      ('devnet','${USDC}',0.889,6,'auto','{}',now(),'15 minutes'), ('mainnet','${USDC}',0.889,6,'auto','{}',now(),'15 minutes');
+      insert into public.fx_rates(network,payment_mint,kind,eur_per_token,decimals,source,as_of,max_age,override_auto)
+      values ('devnet','${USDC}','rate',0.9,6,'manual',now(),'7 days',false)`);
+    // The optional manual-only resolver refuses while the job still runs.
+    expect(() => db.query(ASSERT + "\n" + MANUAL_ONLY, vars("devnet", ORIGIN))).toThrow(/run scripts\/ops\/fx-auto-off.sql first/);
+    const out = db.query(ASSERT + "\n" + OFF, vars("devnet", ORIGIN));
+    expect(out).toContain("mancipatio-fx-devnet active=false|0");
+    expect(out).toMatch(/4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU\|rate\|0\.9\|.*\|t$/m);
+    expect(db.query("select string_agg(network, ',') from public.fx_auto_rates")).toBe("mainnet");
+    // Re-running is harmless.
+    expect(db.query(ASSERT + "\n" + OFF, vars("devnet", ORIGIN))).toContain("mancipatio-fx-devnet active=false|0");
+    db.query(ASSERT + "\n" + MANUAL_ONLY, vars("devnet", ORIGIN));
+    expect(db.query(`select eur_per_token||'|'||source from public.fx_effective_rate('devnet','${USDC}')`)).toBe("0.9|manual");
+    expect(() => db.query(ASSERT + "\n" + OFF, vars("mainnet", ORIGIN))).toThrow(/Target mismatch/);
+    db.query("truncate public.fx_auto_rates, public.fx_rates");
   });
 
   it("is private to its operator; the status SQL reads it", () => {

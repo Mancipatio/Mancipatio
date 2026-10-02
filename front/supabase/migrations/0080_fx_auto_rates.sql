@@ -6,8 +6,9 @@
 -- older than its max age (7 days on mainnet, D18). From 0080 a worker
 -- (POST /api/internal/fx, every minute, scripts/ops/fx-scheduler.sql) keeps
 -- an AUTOMATIC rate next to it: the median of public USDC/EUR order books,
--- refused when the sources disagree by more than 1 % or the median is more
--- than 2 % away from the ECB reference rate (lib/fx-auto.ts). The manual row
+-- refused when the sources disagree by more than 1 % or the median is
+-- further from the ECB reference rate than a band that grows with the age
+-- of the ECB fix (2.5 % to 5 %, lib/fx-auto.ts ecbTolerance). The manual row
 -- stays: the fallback while the automatic rate is stale, or a deliberate
 -- override.
 --
@@ -52,14 +53,18 @@
 --
 -- Network: the new tables default to public.deployment_network() and carry
 -- the 0071 guard (rules 1–3). Service role only: RLS on, browser roles
--- revoked; the functions run as their owner and are executable by
--- service_role.
+-- revoked, and the service role may only READ the three tables (the front
+-- reads them; every write goes through the SECURITY DEFINER functions, which
+-- run as their owner and are executable by service_role). A rate outside
+-- 0.2–5 EUR per token (FX_QUOTE_BOUNDS, lib/fx-auto.ts) is refused by a
+-- CHECK on the rate and the observations.
 --
--- Off switch (no rollback needed): disable 'mancipatio-fx-<network>' and
+-- Off switch (no rollback needed): disable 'mancipatio-fx-<network>' AND
 -- `delete from public.fx_auto_rates where network = public.deployment_network();`
--- — the manual rows count again at once. Rollback (not a migration): make
--- fx_effective_rate return the manual row only (runbook §15 "Automatic EUR
--- rate"); the tables, the column and the writers can stay.
+-- (both: scripts/ops/fx-auto-off.sql) — the manual rows count again at
+-- once. Rollback (not a migration): the off switch, then optionally make
+-- fx_effective_rate return the manual row only (scripts/ops/fx-manual-only.sql,
+-- runbook §15 "Rollback"); the tables, the column and the writers can stay.
 --
 -- Re-runnable: every statement is idempotent. Re-applying 0066 or 0073 (their
 -- rollbacks) restores their direct fx_rates reads; re-apply 0080 after them.
@@ -135,12 +140,33 @@ create table if not exists public.fx_auto_runs (
 comment on table public.fx_auto_runs is
   'The last claimed automatic EUR rate run per payment mint (0080): the rate limit taken before any outside request, written only by claim_fx_auto_run().';
 
+-- A rate is a sane quote (lib/fx-auto.ts FX_QUOTE_BOUNDS: 0.2–5 EUR per
+-- token); a refusal stores none. Added once (re-applying keeps them).
+do $$
+begin
+  if not exists (select 1 from pg_catalog.pg_constraint
+                  where conrelid = 'public.fx_auto_rates'::regclass and conname = 'fx_auto_rates_eur_per_token_bounds') then
+    alter table public.fx_auto_rates add constraint fx_auto_rates_eur_per_token_bounds
+      check (eur_per_token between 0.2 and 5);
+  end if;
+  if not exists (select 1 from pg_catalog.pg_constraint
+                  where conrelid = 'public.fx_rate_observations'::regclass and conname = 'fx_rate_observations_eur_per_token_bounds') then
+    alter table public.fx_rate_observations add constraint fx_rate_observations_eur_per_token_bounds
+      check (eur_per_token is null or eur_per_token between 0.2 and 5);
+  end if;
+end;
+$$;
+
 alter table public.fx_auto_rates enable row level security;
 alter table public.fx_rate_observations enable row level security;
 alter table public.fx_auto_runs enable row level security;
-revoke all on public.fx_auto_rates, public.fx_rate_observations, public.fx_auto_runs from public, anon, authenticated;
-revoke all on sequence public.fx_rate_observations_id_seq from public, anon, authenticated;
-grant all on public.fx_auto_rates, public.fx_rate_observations, public.fx_auto_runs to service_role;
+-- Supabase's default privileges give service_role everything on a new table:
+-- take it back, then grant reading only (the writers below are SECURITY
+-- DEFINER, so a leaked service key cannot set a rate around their checks).
+revoke all on public.fx_auto_rates, public.fx_rate_observations, public.fx_auto_runs
+  from public, anon, authenticated, service_role;
+revoke all on sequence public.fx_rate_observations_id_seq from public, anon, authenticated, service_role;
+grant select on public.fx_auto_rates, public.fx_rate_observations, public.fx_auto_runs to service_role;
 
 -- ── 4. The claim and the writers ──────────────────────────────────────────
 -- Shared checks and the per-(network, mint) lock (held to the end of the

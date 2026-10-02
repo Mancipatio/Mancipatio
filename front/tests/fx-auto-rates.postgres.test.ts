@@ -209,7 +209,24 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0080 automatic EU
     expect(floor()).toMatchObject({ fx_stale: true });
   });
 
-  it("is invisible to browser roles; the service role runs the writers and the resolver, never the internal helper", () => {
+  it("refuses a rate outside 0.2–5 EUR per token (FX_QUOTE_BOUNDS), in the rate and in the observations", () => {
+    for (const rate of ["0.19", "5.01", "7"]) {
+      expect(() => recordRate(rate), rate).toThrow(/fx_rate_observations_eur_per_token_bounds/);
+    }
+    expect(sql(`select count(*) from public.fx_auto_rates`)).toBe("0");
+    expect(recordRate("0.2")).toMatchObject({ written: true });
+    age();
+    expect(recordRate("5")).toMatchObject({ written: true });
+    expect(() => sql(`insert into public.fx_auto_rates(network,payment_mint,eur_per_token,decimals,source,quotes,as_of)
+      values ('devnet','${b58("F")}',0.1,6,'auto','{}'::jsonb,now())`)).toThrow(/fx_auto_rates_eur_per_token_bounds/);
+    // A refusal stores no rate.
+    age();
+    expect(recordRefusal("ECB_DEVIATION")).toMatchObject({ written: true });
+    expect(sql(`select count(*) from pg_constraint where conname in
+      ('fx_auto_rates_eur_per_token_bounds','fx_rate_observations_eur_per_token_bounds')`)).toBe("2");
+  });
+
+  it("is invisible to browser roles; the service role reads the tables, runs the writers and the resolver, never the internal helper", () => {
     for (const role of ["anon", "authenticated"]) {
       for (const table of ["fx_auto_rates", "fx_rate_observations", "fx_auto_runs"]) {
         expect(() => sql(`set role ${role}; select * from public.${table}`)).toThrow(/permission denied/);
@@ -225,8 +242,37 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0080 automatic EU
     expect(() => sql(`set role service_role; select public.fx_auto_may_record('devnet','${USDC}')`)).toThrow(/permission denied/);
     expect(() => sql(`set role service_role; select public.fx_auto_lock('devnet','${USDC}')`)).toThrow(/permission denied/);
     expect(sql(`set role service_role; select (public.claim_fx_auto_run('devnet','${b58("F")}'))->>'claimed'`)).toBe("true");
+    // Read only: every write goes through the SECURITY DEFINER writers (a leaked service key cannot set a rate around them).
+    for (const table of ["fx_auto_rates", "fx_rate_observations", "fx_auto_runs"]) {
+      expect(sql(`set role service_role; select count(*) >= 0 from public.${table}`)).toBe("t");
+      expect(sql(`select string_agg(privilege_type, ',' order by privilege_type) from information_schema.role_table_grants
+        where grantee = 'service_role' and table_schema = 'public' and table_name = '${table}'`), table).toBe("SELECT");
+      expect(() => sql(`set role service_role; delete from public.${table}`), table).toThrow(/permission denied/);
+      expect(() => sql(`set role service_role; update public.${table} set network = network`), table).toThrow(/permission denied/);
+    }
+    expect(() => sql(`set role service_role; insert into public.fx_auto_rates(network,payment_mint,eur_per_token,decimals,source,quotes,as_of)
+      values ('devnet','${USDC}',0.9,6,'auto','{}'::jsonb,now())`)).toThrow(/permission denied/);
+    expect(() => sql(`set role service_role; insert into public.fx_rate_observations(network,payment_mint,status,code)
+      values ('devnet','${USDC}','refused','TOO_FEW_SOURCES')`)).toThrow(/permission denied/);
+    expect(() => sql(`set role service_role; insert into public.fx_auto_runs(network,payment_mint) values ('devnet','${b58("G")}')`))
+      .toThrow(/permission denied/);
+    expect(() => sql(`set role service_role; select nextval('public.fx_rate_observations_id_seq')`)).toThrow(/permission denied/);
     expect(sql(`select count(*) from pg_trigger t join pg_class c on c.oid=t.tgrelid
       where t.tgname='manci_network_guard' and c.relname in ('fx_auto_rates','fx_rate_observations','fx_auto_runs')`)).toBe("3");
+  });
+
+  it("rollback: the manual-only resolver ignores the automatic rate everywhere; re-applying 0080 brings it back", () => {
+    manual("0.9");
+    recordRate();
+    expect(effective()).toMatchObject({ updated_by: "fx-auto" });
+    sql(readFileSync(join(process.cwd(), "scripts/ops/fx-manual-only.sql"), "utf8"));
+    expect(effective()).toMatchObject({ eur_per_token: 0.9, source: "ECB" });
+    expect(reservation(reserve(1).id)).toMatchObject({ fx_rate: 0.9, fx_source: "ECB" });
+    // Its grants are kept: the service role still resolves, the browser roles still cannot.
+    expect(sql(`set role service_role; select count(*) from public.fx_effective_rate('devnet','${USDC}')`)).toBe("1");
+    expect(() => sql(`set role anon; select * from public.fx_effective_rate('devnet','${USDC}')`)).toThrow(/permission denied/);
+    sql(readFileSync(join(MIGRATIONS_DIR, "0080_fx_auto_rates.sql"), "utf8"));
+    expect(effective()).toMatchObject({ updated_by: "fx-auto" });
   });
 
   it("re-applies cleanly, also after a 0066/0073 rollback re-run", () => {

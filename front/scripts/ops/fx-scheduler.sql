@@ -35,8 +35,11 @@ declare
   origin text := current_setting('manci.fx_origin', true);
   configured record;
 begin
+  -- The whole 0080, including the run claim the worker takes first (a front
+  -- of this PR answers failed NOT_INSTALLED without it).
   if to_regclass('public.fx_auto_rates') is null
-     or to_regprocedure('public.record_fx_auto_rate(text,text,numeric,integer,text,jsonb,integer)') is null then
+     or to_regprocedure('public.record_fx_auto_rate(text,text,numeric,integer,text,jsonb,integer)') is null
+     or to_regprocedure('public.claim_fx_auto_run(text,text)') is null then
     raise exception 'Apply migration 0080 before installing the fx scheduler';
   end if;
   if to_regprocedure('public.deployment_network()') is null then
