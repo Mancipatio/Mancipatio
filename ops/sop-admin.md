@@ -116,16 +116,27 @@ sale*.
    the issuer withdraws, the terms change, or the approving Admin's key is
    removed: an approval stays valid after its Admin record is gone.
 
-## FX rate refresh (weekly)
+## FX rate (automatic, with a manual fallback)
 
 Who: the super admin. Page: `/admin/limits` → payment token rates.
 
-1. Every week (and before any approval when the rate is older than 5 days),
-   update the USDC → EUR rate (kind `rate`, maximum age at most 7 days) from
-   the source the lawyer accepts **[legal: source]**.
-2. `/api/health` warns from 80 % of the maximum age and fails at 100 %
-   (`fx:stale` alarm). Before the first sale a missing rate only warns.
-3. EURC or any other mint is added in code first (with its address checked
+1. Since migration 0080 the USDC → EUR rate is automatic (runbook §15
+   "Automatic EUR rate"): the median of four public USDC/EUR markets,
+   checked against the ECB reference rate, renewed every minute and valid
+   15 minutes. The page shows which rate counts (Automatic, Manual, Manual
+   override), the sources, the ECB anchor and the last run. The method is a
+   rate source like any other: the lawyer accepts it **[legal: source]**.
+2. Every week (and at once when `fx:auto-stale` fires), keep the manual
+   fallback current: the USDC → EUR rate (kind `rate`, maximum age at most
+   7 days) from the source the lawyer accepts. It counts only while the
+   automatic rate is missing or out of date.
+3. Tick "Override the automatic rate" only on purpose (a feed you distrust,
+   a depeg decided with the owner); save the rate again unticked to end it.
+   `/api/health` warns while an override counts.
+4. `/api/health` fails when no rate is fresh (`fx:stale`; `fx:auto-stale`
+   high) and warns from 80 % of the maximum age of a manual rate that
+   counts. Before the first sale a missing rate only warns.
+5. EURC or any other mint is added in code first (with its address checked
    against the issuer's published address), never on this page alone.
 
 ## Blocklist and clawback
@@ -175,7 +186,7 @@ PauseFlagsPanel (per area or *Pause everything*); out of band:
 
 ## Weekly and monthly
 
-- Weekly: FX rate; alarm backlog zero; `chain:inventory` (read-only) shows no
+- Weekly: the manual FX fallback (the automatic rate shows as current); alarm backlog zero; `chain:inventory` (read-only) shows no
   unexpected Admin record, proposal or buffer; the balances of the operator
   keys above the refill lines (runbook §1).
 - Monthly: the list of Admin records against the people who should hold them

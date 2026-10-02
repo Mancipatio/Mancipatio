@@ -1,5 +1,5 @@
 // POST /api/admin-config/fx-rates — EUR rates of payment mints for the raise
-// cap (0066 fx_rates), current network.
+// cap (0066 fx_rates, 0080 fx_auto_rates), current network.
 //   read  "adminConfig.fxRatesRead"  — requireAdmin (a wallet session may authorize it)
 //   write "adminConfig.fxRatesWrite" — requireSuperAdmin; op "upsert" | "delete"
 // An EUR stablecoin is kind "eur_peg" (1 EUR per token, never stale). Any
@@ -9,17 +9,63 @@
 // Mainnet (Talas 4.2 §3.3, D18): only allowlisted payment mints, with the
 // kind the allowlist fixes (USDC is "rate"), and a rate at most 7 days old.
 // Deleting a row is always allowed.
+//
+// 0080: the network's USDC also has an AUTOMATIC rate (lib/server/fx-
+// refresh.ts, every minute). The manual row written here is the fallback
+// while the automatic rate is missing or stale, or, with `override_auto`,
+// counts over it. Every answer lists one row per mint: the rate that counts
+// (the fx_rates shape, so existing readers keep working) with `origin`
+// (auto | manual | manual_override), `fresh`, the `manual` and `auto` rows
+// behind it and the automatic job's last run (`auto_last`).
 
 import { NextResponse } from "next/server";
+import type { SupabaseClient } from "@supabase/supabase-js";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin, requireSuperAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { detectNetwork } from "@/lib/network";
+import { detectNetwork, type Network } from "@/lib/network";
 import { addressParam } from "@/lib/server/sale-capacity";
 import { assertAllowedPaymentMint, paymentMintInfo } from "@/lib/server/payment-mint";
 import { MAINNET_MAX_RATE_AGE_DAYS, paymentMintLabel, requiredFxKind } from "@/lib/payment-mints";
+import { effectiveRates, FxReadError, readFxTables } from "@/lib/server/fx-rates";
 
 const RATE_RE = /^(0|[1-9]\d{0,9})(\.\d{1,10})?$/;
+
+type AutoLast = { observed_at: string; status: string; code: string | null };
+
+/** One row per mint: the rate that counts, plus what lies behind it. */
+async function ratesView(sb: SupabaseClient, network: Network) {
+  let tables;
+  try {
+    tables = await readFxTables(sb, network);
+  } catch (err) {
+    if (err instanceof FxReadError) throw new SiwsError(500, "Could not load the rates");
+    throw err;
+  }
+  const last = new Map<string, AutoLast>();
+  if (tables.autoInstalled) {
+    const obs = await sb.from("fx_rate_observations").select("payment_mint,observed_at,status,code")
+      .eq("network", network).order("observed_at", { ascending: false }).limit(20)
+      .abortSignal(AbortSignal.timeout(8_000));
+    // The last run is informative only: an unreadable log hides it, nothing more.
+    if (!obs.error) {
+      for (const row of (obs.data ?? []) as (AutoLast & { payment_mint: string })[]) {
+        if (!last.has(row.payment_mint)) last.set(row.payment_mint, { observed_at: row.observed_at, status: row.status, code: row.code });
+      }
+    }
+  }
+  const effective = effectiveRates(tables);
+  return [...effective.entries()]
+    .sort(([a], [b]) => a.localeCompare(b))
+    .map(([mint, e]) => ({
+      ...e.row,
+      origin: e.origin,
+      fresh: e.fresh,
+      manual: tables.manual.find((r) => r.payment_mint === mint) ?? null,
+      auto: tables.auto.find((r) => r.payment_mint === mint) ?? null,
+      auto_last: last.get(mint) ?? null,
+    }));
+}
 
 export async function POST(request: Request) {
   try {
@@ -43,6 +89,11 @@ export async function POST(request: Request) {
         if (source.length < 1 || source.length > 200) throw new SiwsError(400, "source is required (at most 200 characters)");
         const maxAgeDays = typeof params.max_age_days === "number" ? params.max_age_days : 7;
         if (!Number.isInteger(maxAgeDays) || maxAgeDays < 1 || maxAgeDays > 90) throw new SiwsError(400, "max_age_days must be 1-90");
+        if (params.override_auto !== undefined && typeof params.override_auto !== "boolean") {
+          throw new SiwsError(400, "override_auto must be true or false");
+        }
+        // Only a rate can override the automatic rate; a peg needs no rate at all.
+        const overrideAuto = kind === "rate" && params.override_auto === true;
         if (network === "mainnet") {
           assertAllowedPaymentMint(network, mint);
           const required = requiredFxKind(network, mint);
@@ -55,18 +106,19 @@ export async function POST(request: Request) {
         }
         const { decimals } = await paymentMintInfo(mint, network);
         const now = new Date().toISOString();
-        const { error } = await sb.from("fx_rates").upsert({
+        const row: Record<string, unknown> = {
           network, payment_mint: mint, kind, eur_per_token: rate, decimals, source,
           as_of: now, max_age: `${maxAgeDays} days`, updated_by: wallet, updated_at: now,
-        }, { onConflict: "network,payment_mint" });
+        };
+        // Written only when sent, so a database before 0080 still takes a plain row.
+        if (typeof params.override_auto === "boolean") row.override_auto = overrideAuto;
+        const { error } = await sb.from("fx_rates").upsert(row, { onConflict: "network,payment_mint" });
         if (error) throw new SiwsError(500, "Could not save the rate");
       }
     } else {
       await requireAdmin(wallet);
     }
-    const { data, error } = await sb.from("fx_rates").select("*").eq("network", network).order("payment_mint");
-    if (error) throw new SiwsError(500, "Could not load the rates");
-    return NextResponse.json({ ok: true, data: data ?? [] }, { headers: { "Cache-Control": "no-store" } });
+    return NextResponse.json({ ok: true, data: await ratesView(sb, network) }, { headers: { "Cache-Control": "no-store" } });
   } catch (err) {
     return siwsErrorResponse(err);
   }

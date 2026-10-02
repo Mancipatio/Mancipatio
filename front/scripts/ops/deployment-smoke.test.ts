@@ -128,6 +128,8 @@ describe("deployed release: public access and SIWS boundaries", () => {
   });
   it("requires the configured worker credential", async () => {
     expect((await post("/api/internal/retry?limit=1", {})).status).toBe(401);
+    // 0080: the automatic EUR rate job takes the same credential.
+    expect((await post("/api/internal/fx", {})).status).toBe(401);
   });
   it("executes a bounded authenticated worker run", async () => {
     const secretFile = process.env.MANCIPATIO_RETRY_SECRET_FILE;

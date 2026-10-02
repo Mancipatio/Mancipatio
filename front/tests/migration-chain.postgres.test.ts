@@ -57,6 +57,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
       expect(applied).toContain("0076_offering_exemption.sql");
       expect(applied).toContain("0077_client_documents_bucket_limits.sql");
       expect(applied).toContain("0079_indexer_role_state.sql");
+      expect(applied).toContain("0080_fx_auto_rates.sql");
       // One file per migration number: migrations are applied and tracked by
       // number, so a duplicate would be ambiguous ("0063 applied").
       const numbers = applied.map((file) => file.slice(0, 4));
@@ -89,6 +90,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "distribution_plans",
         "sale_capacity_reservations",
         "fx_rates",
+        "fx_auto_rates",
+        "fx_rate_observations",
         "onchain_event_jobs",
         "spv_issuance_jobs",
         "sale_capacity_holds",

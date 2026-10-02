@@ -57,9 +57,10 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
       const dir = join(process.cwd(), "supabase/migrations");
       applyMigrations(db, { network: "devnet" });
       // Re-runnable: both files apply cleanly a second time. Re-applying 0066
-      // restores its own function bodies, so 0073 and 0074 follow again (the
-      // order a rollback-and-reapply would take).
-      for (const file of ["0066_sale_capacity.sql", "0067_sales_sale_approval.sql", "0073_spv_issuance_jobs.sql", "0074_ledger_contract.sql"])
+      // restores its own function bodies, so 0073, 0074 and 0080 follow again
+      // (the order a rollback-and-reapply would take).
+      for (const file of ["0066_sale_capacity.sql", "0067_sales_sale_approval.sql", "0073_spv_issuance_jobs.sql", "0074_ledger_contract.sql",
+        "0080_fx_auto_rates.sql"])
         sql(readFileSync(join(dir, file), "utf8"));
     } catch (error) {
       db.close();
@@ -68,7 +69,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0066 sale capacit
   }, 90_000);
   afterAll(() => db.close());
   beforeEach(() => {
-    sql(`truncate public.sale_capacity_reservations, public.fx_rates, public.spv_issuances, public.spvs,
+    sql(`truncate public.sale_capacity_reservations, public.fx_rates, public.fx_auto_rates, public.spv_issuances, public.spvs,
         public.spv_issuance_jobs, public.sale_capacity_holds cascade;
       delete from public.launch_applications;
       insert into public.spvs(id,network,name,annual_cap_eur) values

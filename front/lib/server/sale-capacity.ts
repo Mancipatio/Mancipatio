@@ -48,7 +48,8 @@ import {
   readApprovalAndSale,
   type LiveApproval,
 } from "@/lib/server/sale-capacity-chain";
-import { intervalSeconds } from "@/lib/server/health";
+import { intervalSeconds } from "@/lib/pg-interval";
+import { readEffectiveFxRate } from "@/lib/server/fx-rates";
 import { raiseSystemAlert, reportIncident, type Severity } from "@/lib/server/system-alerts";
 import { flattenInvocations, resolveAccountKeys } from "@/lib/server/tx-invocations";
 
@@ -514,11 +515,16 @@ const FX_DRIFT = 0.02;
 
 export type FxRow = { kind: string; eur_per_token: string | number; as_of: string; max_age: string };
 
+/** The rate that counts for `mint` now (0080: the automatic one while fresh, else the manual row); null when unknown or unreadable. */
 export async function fxRow(sb: SupabaseClient, mint: string, signal: AbortSignal): Promise<FxRow | null> {
-  const { data, error } = await sb.from("fx_rates").select("kind,eur_per_token,as_of,max_age")
-    .eq("network", detectNetwork()).eq("payment_mint", mint).abortSignal(AbortSignal.any([signal, AbortSignal.timeout(8_000)])).maybeSingle();
-  if (error) return null;
-  return (data as FxRow | null) ?? null;
+  try {
+    const effective = await readEffectiveFxRate(sb, detectNetwork(), mint, AbortSignal.any([signal, AbortSignal.timeout(8_000)]));
+    if (!effective) return null;
+    const { kind, eur_per_token, as_of, max_age } = effective.row;
+    return { kind, eur_per_token, as_of, max_age };
+  } catch {
+    return null;
+  }
 }
 
 export function fxStale(row: FxRow | null, now = Date.now()): boolean {

@@ -101,6 +101,8 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   // 0079 indexer mirror of the v1.0.0-rc role state
   "issuer_freezes", "pending_admins", "authority_proposals", "platform_recoveries",
   "blocklist_authority_proposals", "blocklist_recoveries",
+  // 0080 automatic EUR rate
+  "fx_auto_rates", "fx_rate_observations",
 ] as const;
 
 /** Every `network` column that defaults to public.deployment_network(). */

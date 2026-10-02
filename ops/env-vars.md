@@ -41,7 +41,7 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | Public, build | pilot: leave unset (off) | kill switch (`false`) | Off on mainnet | `lib/features.ts` `pilotModules` |
 | `SUPABASE_SERVICE_ROLE_KEY` | Secret | `sb_secret_…` of the mainnet project (runtime refuses anything else) | secret key | Server database access fails | `lib/supabase-server.ts` |
 | `SESSION_SECRET` | Secret | ≥ 32 characters, new for mainnet (guard `session-secret`) | set | Wallet and account sessions off (every read signs) | `lib/server/siws-session.ts`, account sessions |
-| `RETRY_WORKER_SECRET` | Secret | ≥ 32, new; the same value as Vault `mancipatio_retry_worker_mainnet` | set | Retry and alarm workers refuse every call | `lib/server/retry-worker.ts` |
+| `RETRY_WORKER_SECRET` | Secret | ≥ 32, new; the same value as Vault `mancipatio_retry_worker_mainnet` | set | Retry, alarm, sanctions and fx (automatic EUR rate, 0080) workers refuse every call | `lib/server/retry-worker.ts` |
 | `HELIUS_MAINNET_RPC` (or `SOLANA_MAINNET_RPC`) | Secret (key in the URL) | server key of the paid provider (guard) | — | Mainnet server fails closed | `lib/server/rpc.ts` |
 | `HELIUS_DEVNET_RPC` / `HELIUS_TESTNET_RPC` / `SOLANA_LOCALNET_RPC` | Secret | — | recommended (proves the Helius path before mainnet) | Public endpoint | `lib/server/rpc.ts` |
 | `COMPLIANCE_ALERT_EMAIL` | Public (addresses) | required (≤ 5 addresses) | `office@mancipatio.io` | `/api/health/alarms` 503 on mainnet | `lib/server/system-alerts.ts` |
