@@ -236,6 +236,25 @@ async function postEnvelope<T>(path: string, body: unknown): Promise<{ status: n
   return { status: res.status, ok: true, data: json.data as T };
 }
 
+/**
+ * POST an envelope made earlier by createSignedRequest — for a flow that asks
+ * for the signature next to another wallet prompt and sends it once the
+ * server can accept it (within SIWS_MAX_AGE_MS). Same-origin only; throws the
+ * server's error.
+ */
+export async function postSignedRequest<T = unknown>(path: string, body: SiwsRequestBody): Promise<T> {
+  if (typeof window === "undefined") {
+    throw new Error("Wallet requests must be signed from the app");
+  }
+  const destination = new URL(path, window.location.origin);
+  if (destination.origin !== window.location.origin) {
+    throw new Error("Signed requests must stay on the app origin");
+  }
+  const result = await postEnvelope<T>(path, body);
+  if (!result.ok) throw new Error(result.error);
+  return result.data as T;
+}
+
 function unsignedPayload(session: WalletSession, action: string, params: Record<string, unknown>): SiwsPayload {
   return {
     v: 2, origin: window.location.origin, network: detectNetwork(), action,

@@ -1,0 +1,344 @@
+// Chain side of "Tokenize company shares" (the rules are lib/tokenize-shares.ts).
+//
+// One transaction carries create_asset + add_share_class +
+// initialize_share_class_mint when the wallet holds the Mint permission (an
+// Admin always does): 863 B for the first real case and under 900 B at the
+// flow's longest name / symbol / asset ID, against the 1232 B packet limit
+// minus the send path's compute-budget instructions and reserve
+// (tests/tokenize-shares.test.ts measures it with the real builders). Every
+// transaction is measured and simulated here before the wallet opens.
+
+import {
+  appendTransactionMessageInstructions,
+  blockhash,
+  compileTransaction,
+  createTransactionMessage,
+  getBase64EncodedWireTransaction,
+  pipe,
+  setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash,
+  type Address,
+  type Instruction,
+  type TransactionSigner,
+} from "@solana/kit";
+import type { SolanaClient } from "@solana/client";
+import {
+  fetchAllMaybeAsset,
+  fetchMaybeAsset,
+  fetchMaybeShareClass,
+  findAssetPda,
+  findMintPda,
+  getAddShareClassInstructionAsync,
+  getCreateAssetInstructionAsync,
+  getInitializeShareClassMintInstructionAsync,
+  type Asset,
+  type ShareClass,
+} from "@/lib/generated/asset_registry";
+import {
+  fetchMaybeTransferHookConfig,
+  findConfigPda,
+  findExtraAccountMetaListPda,
+  RestrictionMode,
+  TRANSFER_HOOK_PROGRAM_ADDRESS,
+} from "@/lib/generated/transfer_hook";
+import {
+  MAX_COMPUTE_UNIT_LIMIT,
+  SEND_OVERHEAD_INSTRUCTIONS,
+  TRANSACTION_SIZE_LIMIT,
+  setComputeUnitLimitInstruction,
+  transactionSize,
+} from "@/lib/compute-budget";
+import { SEND_RESERVE_BYTES } from "@/lib/issuer-authority";
+import { startFinalityPoll } from "@/lib/finality-poll";
+import { findShareClassPda } from "@/lib/pdas";
+import {
+  CLASS_DEFAULTS,
+  CLASS_INDEX,
+  assetDefaults,
+  chooseAssetId,
+  isResumable,
+  nextTokenizeStep,
+  type AssetSnapshot,
+  type ClassSnapshot,
+  type TokenizeIntent,
+  type TokenizeStep,
+} from "@/lib/tokenize-shares";
+
+export type Rpc = SolanaClient["runtime"]["rpc"];
+
+export const TOKEN_2022_PROGRAM = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
+
+/** What a batched transaction may use: the packet limit minus the send path's reserve. */
+export const TOKENIZE_TX_LIMIT = TRANSACTION_SIZE_LIMIT - SEND_RESERVE_BYTES;
+
+export type TokenizeAddresses = { asset: Address; shareClass: Address; mint: Address };
+
+export async function tokenizeAddresses(issuer: Address, assetId: string): Promise<TokenizeAddresses> {
+  const [asset] = await findAssetPda({ issuer, assetId });
+  const shareClass = await findShareClassPda(asset, CLASS_INDEX);
+  const [mint] = await findMintPda({ shareClass });
+  return { asset, shareClass, mint };
+}
+
+export type BuildTokenizeInput = {
+  /** create: all three; add_class: class (+ mint); init_mint: the mint only. */
+  kind: "create" | "add_class" | "init_mint";
+  /** create / add_class: also initialize the mint (needs `adminRecord`). */
+  initMint: boolean;
+  signer: TransactionSigner;
+  issuer: Address;
+  assetId: string;
+  name: string;
+  symbolPrefix: string;
+  legalDocHash: Uint8Array;
+  tokens: bigint;
+  /** The issuer-permission proof (lib/issuer-permissions loadIssuerPermission). */
+  adminRecord: Address | null;
+};
+
+/** The instructions of one step, in program order. */
+export async function buildTokenizeIxs(input: BuildTokenizeInput): Promise<Instruction[]> {
+  const { asset, shareClass, mint } = await tokenizeAddresses(input.issuer, input.assetId);
+  const ixs: Instruction[] = [];
+  if (input.kind === "create") {
+    const defaults = assetDefaults();
+    ixs.push(
+      await getCreateAssetInstructionAsync({
+        authority: input.signer,
+        issuer: input.issuer,
+        asset,
+        assetId: input.assetId,
+        assetType: defaults.assetType,
+        name: input.name,
+        symbolPrefix: input.symbolPrefix,
+        legalDocHash: input.legalDocHash,
+        jurisdictionRules: defaults.jurisdictionRules,
+      }),
+    );
+  }
+  if (input.kind === "create" || input.kind === "add_class") {
+    ixs.push(
+      await getAddShareClassInstructionAsync({
+        authority: input.signer,
+        issuer: input.issuer,
+        asset,
+        shareClass,
+        classIndex: CLASS_DEFAULTS.classIndex,
+        classType: CLASS_DEFAULTS.classType,
+        rightsBitfield: CLASS_DEFAULTS.rightsBitfield,
+        liqPrefMultiplierBps: CLASS_DEFAULTS.liqPrefMultiplierBps,
+        liqSeniority: CLASS_DEFAULTS.liqSeniority,
+        votingWeight: CLASS_DEFAULTS.votingWeight,
+        maxSupply: input.tokens,
+        mintablePostLaunch: CLASS_DEFAULTS.mintablePostLaunch,
+      }),
+    );
+  }
+  if (input.kind === "init_mint" || input.initMint) {
+    if (!input.adminRecord) throw new Error("Initializing the mint needs the Mint permission.");
+    const [hookConfig] = await findConfigPda({ mint });
+    const [extraAccountMetaList] = await findExtraAccountMetaListPda({ mint });
+    ixs.push(
+      await getInitializeShareClassMintInstructionAsync({
+        authority: input.signer,
+        adminRecord: input.adminRecord,
+        issuer: input.issuer,
+        asset,
+        shareClass,
+        mint,
+        hookConfig,
+        extraAccountMetaList,
+        transferHookProgram: TRANSFER_HOOK_PROGRAM_ADDRESS,
+        tokenProgram: TOKEN_2022_PROGRAM,
+      }),
+    );
+  }
+  return ixs;
+}
+
+/** Size with the compute-budget instructions the send path adds. */
+export function tokenizeTransactionSize(feePayer: Address, ixs: readonly Instruction[]): number {
+  return transactionSize(feePayer, [...SEND_OVERHEAD_INSTRUCTIONS, ...ixs]);
+}
+
+/** Refuses a transaction that would not fit once sent. */
+export function assertTokenizeFits(feePayer: Address, ixs: readonly Instruction[]): number {
+  const size = tokenizeTransactionSize(feePayer, ixs);
+  if (size > TOKENIZE_TX_LIMIT) {
+    throw new Error(`The transaction would be ${size} bytes, over the ${TOKENIZE_TX_LIMIT}-byte limit. Shorten the name.`);
+  }
+  return size;
+}
+
+/** The unsigned transaction a simulation runs (the network replaces the blockhash). */
+export function simulationWire(feePayer: Address, ixs: readonly Instruction[]) {
+  const message = pipe(
+    createTransactionMessage({ version: 0 }),
+    (m) => setTransactionMessageFeePayer(feePayer, m),
+    (m) =>
+      setTransactionMessageLifetimeUsingBlockhash(
+        { blockhash: blockhash("11111111111111111111111111111111"), lastValidBlockHeight: BigInt(0) },
+        m,
+      ),
+    (m) => appendTransactionMessageInstructions([setComputeUnitLimitInstruction(MAX_COMPUTE_UNIT_LIMIT), ...ixs], m),
+  );
+  return getBase64EncodedWireTransaction(compileTransaction(message));
+}
+
+/**
+ * Runs the exact instructions on the network without signing, before the
+ * wallet opens. A refusal throws an Error that carries the program logs, so
+ * lib/tx-error explainSendError words it like a failed send.
+ */
+export async function simulateTokenize(
+  rpc: Rpc,
+  feePayer: Address,
+  ixs: readonly Instruction[],
+): Promise<bigint | null> {
+  const { value } = await rpc
+    .simulateTransaction(simulationWire(feePayer, ixs), {
+      encoding: "base64",
+      sigVerify: false,
+      replaceRecentBlockhash: true,
+      commitment: "confirmed",
+    })
+    .send();
+  if (value.err) {
+    throw Object.assign(
+      new Error("The network refused this transaction in a dry run, so nothing was sent to your wallet."),
+      { logs: [...(value.logs ?? [])] },
+    );
+  }
+  return value.unitsConsumed ?? null;
+}
+
+export type HookMode = "open" | "kyc-gated" | "none";
+
+export type TokenizeChainState = {
+  addresses: { asset: Address; shareClass: Address };
+  asset: Asset | null;
+  sc0: ShareClass | null;
+  /** null while class 0 has no mint (no hook config yet). */
+  hook: HookMode | null;
+};
+
+/** The asset, its class 0 and the class's transfer-hook mode, at `confirmed`. */
+export async function readTokenizeState(rpc: Rpc, assetPda: Address): Promise<TokenizeChainState> {
+  const options = { commitment: "confirmed" as const };
+  const shareClass = await findShareClassPda(assetPda, CLASS_INDEX);
+  const [asset, sc0] = await Promise.all([
+    fetchMaybeAsset(rpc, assetPda, options),
+    fetchMaybeShareClass(rpc, shareClass, options),
+  ]);
+  let hook: HookMode | null = null;
+  if (sc0.exists && sc0.data.mintInitialized) {
+    const [config] = await findConfigPda({ mint: sc0.data.mint });
+    const cfg = await fetchMaybeTransferHookConfig(rpc, config, options);
+    hook = !cfg.exists ? "none" : cfg.data.restrictionMode === RestrictionMode.KycGated ? "kyc-gated" : "open";
+  }
+  return {
+    addresses: { asset: assetPda, shareClass },
+    asset: asset.exists ? asset.data : null,
+    sc0: sc0.exists ? sc0.data : null,
+    hook,
+  };
+}
+
+export function assetSnapshot(a: Asset): AssetSnapshot {
+  return {
+    assetType: a.assetType,
+    status: a.status,
+    name: a.name,
+    symbolPrefix: a.symbolPrefix,
+    shareClassesCount: a.shareClassesCount,
+  };
+}
+
+export function classSnapshot(sc: ShareClass): ClassSnapshot {
+  return {
+    classType: sc.classType,
+    maxSupply: sc.maxSupply.__option === "Some" ? sc.maxSupply.value : null,
+    mintablePostLaunch: sc.mintablePostLaunch,
+    mintInitialized: sc.mintInitialized,
+  };
+}
+
+/**
+ * The asset ID for `intent`, checked on chain before anything is signed: one
+ * read of every candidate (base, base-2, …), class 0 of an existing one, and
+ * — only when the chain part is complete — whether its details were saved.
+ * Returns the first free ID, or an earlier unfinished asset of the same terms
+ * to continue; null when every candidate is taken.
+ */
+export async function pickTokenizeAssetId(
+  rpc: Rpc,
+  input: {
+    issuer: Address;
+    candidates: readonly string[];
+    intent: TokenizeIntent;
+    canInitMint: boolean;
+    profileSaved: (assetPda: Address) => Promise<boolean>;
+  },
+): Promise<{ assetId: string; assetPda: Address; step: TokenizeStep } | null> {
+  const pdas = await Promise.all(
+    input.candidates.map(async (assetId) => (await findAssetPda({ issuer: input.issuer, assetId }))[0]),
+  );
+  const assets = await fetchAllMaybeAsset(rpc, pdas, { commitment: "confirmed" });
+  const steps: TokenizeStep[] = [];
+  for (let i = 0; i < assets.length; i++) {
+    const a = assets[i];
+    const base = { canInitMint: input.canInitMint, intent: input.intent };
+    if (!a.exists) {
+      steps.push(nextTokenizeStep({ ...base, asset: null, sc0: null, profileSaved: false }));
+      break;
+    }
+    let sc0: ClassSnapshot | null = null;
+    if (a.data.shareClassesCount > 0) {
+      const sc = await fetchMaybeShareClass(rpc, await findShareClassPda(pdas[i], CLASS_INDEX), {
+        commitment: "confirmed",
+      });
+      sc0 = sc.exists ? classSnapshot(sc.data) : null;
+    }
+    const asset = assetSnapshot(a.data);
+    let step = nextTokenizeStep({ ...base, asset, sc0, profileSaved: true });
+    if (step.kind === "done" || step.kind === "wait_mint_permission") {
+      step = nextTokenizeStep({ ...base, asset, sc0, profileSaved: await input.profileSaved(pdas[i]) });
+    }
+    steps.push(step);
+    if (step.kind === "create" || isResumable(step)) break;
+  }
+  const chosen = chooseAssetId(input.candidates, steps);
+  if (!chosen) return null;
+  return { ...chosen, assetPda: pdas[input.candidates.indexOf(chosen.assetId)] };
+}
+
+/**
+ * Resolves true once the asset is visible at `finalized` (what the profile
+ * route checks ownership at), false after `attempts` polls or on abort.
+ */
+export function waitForFinalizedAsset(
+  rpc: Rpc,
+  assetPda: Address,
+  opts: { intervalMs?: number; attempts?: number; signal?: AbortSignal } = {},
+): Promise<boolean> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: boolean) => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const stop = startFinalityPoll(
+      async () => {
+        const a = await fetchMaybeAsset(rpc, assetPda, { commitment: "finalized" });
+        if (a.exists) finish(true);
+        return a.exists;
+      },
+      { intervalMs: opts.intervalMs ?? 4_000, attempts: opts.attempts ?? 45, onGiveUp: () => finish(false) },
+    );
+    opts.signal?.addEventListener("abort", () => {
+      stop();
+      finish(false);
+    });
+  });
+}

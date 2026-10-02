@@ -165,15 +165,33 @@ export default function MyAssetsPage() {
             Every asset registered under your issuer authority.
           </p>
         </div>
-        <button
-          type="button"
-          disabled={!verified}
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
-          title={verified ? undefined : "Verify KYB first to create assets."}
-        >
-          + Create asset
-        </button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {verified ? (
+            <Link
+              href="/issuer/assets/tokenize"
+              className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+            >
+              Tokenize company shares
+            </Link>
+          ) : (
+            <span
+              aria-disabled="true"
+              title="Verify KYB first to create assets."
+              className="cursor-not-allowed rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white opacity-50"
+            >
+              Tokenize company shares
+            </span>
+          )}
+          <button
+            type="button"
+            disabled={!verified}
+            onClick={() => setShowCreate(true)}
+            className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400 disabled:opacity-50"
+            title={verified ? undefined : "Verify KYB first to create assets."}
+          >
+            Other asset types
+          </button>
+        </div>
       </div>
 
       {!verified && me && (
@@ -345,13 +363,21 @@ function Empty({
         You haven&apos;t created any assets yet.
       </p>
       {canCreate ? (
-        <button
-          type="button"
-          onClick={onClick}
-          className="mt-4 inline-block rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          Create your first asset →
-        </button>
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+          <Link
+            href="/issuer/assets/tokenize"
+            className="inline-block rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            Tokenize company shares →
+          </Link>
+          <button
+            type="button"
+            onClick={onClick}
+            className="inline-block rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-800 hover:border-slate-400"
+          >
+            Other asset types
+          </button>
+        </div>
       ) : (
         <p className="mt-2 text-xs text-amber-700">
           Verify KYB to unlock asset creation.
