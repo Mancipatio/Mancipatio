@@ -4,10 +4,32 @@
  * the pacing limits the owner approved on 25.9.
  */
 import type { Address } from "@solana/kit";
+import { validateTargets } from "@/scripts/ops/target.mjs";
+import targets from "@/scripts/ops/targets.json";
 
-/** The one site the simulator may talk to: exactly this origin (not the apex, not a preview). */
-export const SITE_ORIGIN = "https://www.manci.io";
 export const SIM_NETWORK = "devnet" as const;
+
+/**
+ * The devnet target's siteOrigin in scripts/ops/targets.json, checked by the
+ * same rules as every ops tool (validateTargets: the "devnet" target is network
+ * devnet, its origin is https://<host> with no port or path, and no other
+ * target, mainnet included, shares it). Throws at import: no site, no sim.
+ */
+function devnetSiteOrigin(): string {
+  validateTargets(targets);
+  const { network, siteOrigin } = targets.devnet;
+  if (network !== SIM_NETWORK || typeof siteOrigin !== "string") {
+    throw new Error("scripts/ops/targets.json records no devnet siteOrigin; the simulator has no site to talk to");
+  }
+  return siteOrigin;
+}
+
+/**
+ * The one site the simulator may talk to: exactly this origin (not the apex,
+ * not a preview, never the mainnet site). Since the domain cutover of
+ * 2.10.2026 that is https://devnet.manci.io; www.manci.io is the mainnet site.
+ */
+export const SITE_ORIGIN = devnetSiteOrigin();
 
 /** Deployer key (~/.config/solana/id-devnet.json): pays the SOL funding only. */
 export const DEPLOYER = "3E8ZZJBkz82RmLSSmMZJBGuwrtkJDoCsX5UZVj26rqBr" as Address;

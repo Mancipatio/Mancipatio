@@ -198,7 +198,7 @@ export function readSimConfig(
   if (sendRaw !== null && sendRaw !== "1" && sendRaw !== "0") throw new SimGateError("SIM_SEND must be 1 or unset");
   const send = sendRaw === "1";
   if (networked && !send) {
-    throw new SimGateError(`SIM_CMD=${cmd} writes to devnet manci.io; confirm with SIM_SEND=1`);
+    throw new SimGateError(`SIM_CMD=${cmd} writes to ${SITE_ORIGIN} (devnet); confirm with SIM_SEND=1`);
   }
   if (!networked && send) throw new SimGateError(`SIM_CMD=${cmd} never sends; unset SIM_SEND`);
 
@@ -271,9 +271,10 @@ export function writePrivateFile(file: string, content: string | Uint8Array): vo
 
 /**
  * While the simulator runs only two destinations are reachable: the site
- * origin (any path) and the configured RPC endpoint (its exact origin and
- * path). Everything else (the apex domain, a preview URL, Supabase, the
- * faucet) is refused before a socket opens. Returns the restore function.
+ * origin (SITE_ORIGIN, the devnet site; any path) and the configured RPC
+ * endpoint (its exact origin and path). Everything else (the mainnet site
+ * www.manci.io, the apex domain, a preview URL, Supabase, the faucet) is
+ * refused before a socket opens. Returns the restore function.
  */
 export function simFetchAllowed(target: URL, rpcUrl: string | null, site = SITE_ORIGIN): boolean {
   if (target.origin === site) return true;
