@@ -479,6 +479,10 @@ export type BatchResult = {
  * and is thrown. A failure of a later, sync-only batch is reported, not
  * thrown: the primary already landed, and the remaining syncs can be sent
  * later ("Sync all", the payouts page).
+ * A later batch can depend on an earlier one (the syncs need the new
+ * authority on chain). `send` returns once a transaction is submitted, so the
+ * verified client waits for the previous send to be confirmed before it
+ * simulates the next (lib/verified-solana-client settlePreviousSend).
  */
 export async function sendBatches(
   batches: readonly (readonly Instruction[])[],

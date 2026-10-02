@@ -15,6 +15,21 @@ import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/co
 import { clearWalletChange } from "@/lib/wallet-changes";
 import { assertInstructionsInScope, assertInstructionsNotPaused } from "@/lib/pause-gate";
 import { assertGateAccountsUnset } from "@/lib/proceeds-gate";
+import {
+  computeUnitLimitFromSimulation,
+  PROBE_LIFETIME,
+  refusalFromSimulation,
+  simulateMessage,
+  SimulationUnavailableError,
+  waitForSignature,
+  type SimulatableMessage,
+  type SimulationVerdict,
+} from "@/lib/simulation-gate";
+
+/** A send this client made less than this long ago is waited for before the next one is simulated. */
+export const SETTLE_WINDOW_MS = 60_000;
+/** The longest the next send waits for the previous one to be confirmed. */
+export const SETTLE_TIMEOUT_MS = 30_000;
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
@@ -37,7 +52,23 @@ import { assertGateAccountsUnset } from "@/lib/proceeds-gate";
  * one SetComputeUnitPrice. A caller-set price is refused, and a transaction
  * that would no longer fit the packet limit is sent without one.
  * prepareAndSend also puts the SetComputeUnitLimit in FRONT (see
- * withLeadingComputeUnitLimit), where a wallet looks for it. */
+ * withLeadingComputeUnitLimit), where a wallet looks for it.
+ * Simulation gate (lib/simulation-gate.ts): every send and every prepared
+ * transaction is simulated exactly as it will be signed (sigVerify off, the
+ * node's blockhash) BEFORE the wallet-policy prompt and the wallet; one that
+ * would fail is refused with a SimulationRefusedError naming the step, the
+ * program and the error in plain words, and an RPC that cannot answer fails
+ * closed (SimulationUnavailableError). The same simulation sets the compute
+ * unit limit, so a send still makes one simulateTransaction call. A send
+ * made by this client in the last minute is first waited for (at most 30 s),
+ * so back-to-back dependent sends (lib/issuer-authority sendBatches) are
+ * simulated against the state the earlier one created.
+ * Not covered, on purpose: the co-signed envelopes (issuer recovery, KYC
+ * registry creation) are signed outside this client by two keys over a fixed
+ * message (fixed blockhash and compute budget), run their own live checks
+ * before each signature and are sent with RPC preflight; see
+ * signIssuerRecovery / signKycRegistryCreation. The app has no durable-nonce
+ * transactions. */
 export function withVerifiedTransactions(
   client: SolanaClient,
   network: Network,
@@ -52,6 +83,7 @@ export function withVerifiedTransactions(
     assertCurrent: () => void;
   };
   const preparedContexts = new WeakMap<TransactionPrepared, Context>();
+  const base = client.transaction;
 
   function capture(): Context {
     const current = client.store.getState().wallet;
@@ -105,49 +137,133 @@ export function withVerifiedTransactions(
    * wallet that finds no compute budget where it looks may add its own
    * (Phantom documents that it does), which the network would refuse before
    * execution. Without a limit from the caller the request instead carries a
-   * placeholder limit (the 1.4M ceiling, so the estimate itself cannot run
-   * out) that the SDK places first and re-estimates in place by simulation:
-   * the wallet gets [limit, price, ...app] (or [limit, ...app] when the price
-   * was left off for size; the bytes are the same either way), as the
-   * co-signed envelopes build it. `prepareTransaction: false` and a
-   * caller-set limit are left as they are. prepare() does not estimate, so it
-   * gets no placeholder (nothing in the app uses it).
-   * Accepted cost: the estimating simulation carries the placeholder's
-   * priority fee (1.4M × price: at most 0.00014 SOL on devnet and 0.0028 SOL
-   * at the mainnet cap); a payer below that fails the simulation, and the SDK
-   * then uses its 200k floor instead of an estimate.
+   * placeholder limit (the 1.4M ceiling, so the simulation itself cannot run
+   * out) that the SDK places first: the gate simulates [limit, price, ...app]
+   * once and replaces the placeholder with the estimate from that same
+   * simulation (withSimulatedComputeUnitLimit), so the wallet gets
+   * [limit, price, ...app] (or [limit, ...app] when the price was left off
+   * for size; the bytes are the same either way), as the co-signed envelopes
+   * build it. `prepareTransaction: false` and a caller-set limit are left as
+   * they are. prepare() gets no placeholder (nothing in the app uses it).
+   * Accepted cost: the gate's simulation carries the placeholder's priority
+   * fee (1.4M × price: at most 0.00014 SOL on devnet and 0.0028 SOL at the
+   * mainnet cap); a payer below that is refused before the wallet opens with
+   * the InsufficientFundsForFee wording (the SDK used to fall back to its 200k
+   * floor and open the wallet anyway).
    */
-  function withLeadingComputeUnitLimit(request: TransactionPrepareAndSendRequest): TransactionPrepareAndSendRequest {
+  function withLeadingComputeUnitLimit(request: TransactionPrepareAndSendRequest): { request: TransactionPrepareAndSendRequest; placeholder: boolean } {
     if (
       request.computeUnitLimit !== undefined ||
       request.prepareTransaction === false ||
       request.instructions.some((ix) => decodeComputeBudgetInstruction(ix)?.kind === "limit")
     ) {
-      return request;
+      return { request, placeholder: false };
     }
     return {
-      ...request,
-      computeUnitLimit: MAX_COMPUTE_UNIT_LIMIT,
-      prepareTransaction: { ...request.prepareTransaction, computeUnitLimitReset: true },
+      request: {
+        ...request,
+        computeUnitLimit: MAX_COMPUTE_UNIT_LIMIT,
+        prepareTransaction: { ...request.prepareTransaction, computeUnitLimitReset: true },
+      },
+      placeholder: true,
     };
   }
 
-  async function authorize(context: Context) {
+  /**
+   * The placeholder replaced by the gate's own estimate, with the SDK told
+   * not to estimate again: it keeps the limit in place and, with the message's
+   * lifetime already set, fetches no second blockhash. One simulation and one
+   * getLatestBlockhash per send, as before the gate.
+   */
+  function withSimulatedComputeUnitLimit(request: TransactionPrepareAndSendRequest, verdict: SimulationVerdict): TransactionPrepareAndSendRequest {
+    const overrides = request.prepareTransaction === false ? {} : (request.prepareTransaction ?? {});
+    return {
+      ...request,
+      computeUnitLimit: computeUnitLimitFromSimulation(verdict.unitsConsumed, overrides.computeUnitLimitMultiplier),
+      prepareTransaction: { ...overrides, computeUnitLimitReset: false },
+    };
+  }
+
+  async function writable(context: Context) {
     await assertSiteWritable();
     context.assertCurrent();
+  }
+
+  async function requestPolicy(context: Context) {
     await requestTransactionWalletPolicy(context.session, network, context.assertCurrent);
     context.assertCurrent();
   }
 
-  async function forPrepared(prepared: TransactionPrepared) {
+  // The last send this client made, so the next one can wait for it.
+  let lastSend: { rpc: Context["rpc"]; signature: string; at: number } | null = null;
+
+  function rememberSend(context: Context, signature: unknown) {
+    if (typeof signature === "string" && signature) lastSend = { rpc: context.rpc, signature, at: Date.now() };
+  }
+
+  /**
+   * sendBatches and any other flow that sends twice in a row: `prepareAndSend`
+   * returns once the transaction is submitted, not confirmed, and the next
+   * transaction's simulation would otherwise run against the state before it
+   * (before the gate, the second wallet review hid this). Waits until the
+   * previous send of the last minute is confirmed or failed, at most 30 s,
+   * then lets the simulation decide.
+   */
+  async function settlePreviousSend(context: Context) {
+    const previous = lastSend;
+    if (!previous || previous.rpc !== context.rpc || Date.now() - previous.at > SETTLE_WINDOW_MS) return;
+    await waitForSignature(context.rpc, previous.signature, { timeoutMs: SETTLE_TIMEOUT_MS });
+    context.assertCurrent();
+    if (lastSend === previous) lastSend = null;
+  }
+
+  /**
+   * The gate: one simulation of `message` (exactly what the wallet will be
+   * asked to sign, apart from the blockhash the node supplies). A failing
+   * transaction is refused here, before the policy prompt and the wallet; an
+   * RPC that cannot answer fails closed.
+   */
+  async function gate(message: SimulatableMessage, appInstructions: TransactionPrepared["instructions"], context: Context) {
+    let verdict: SimulationVerdict;
+    try {
+      verdict = await simulateMessage(context.rpc, message);
+    } catch (cause) {
+      context.assertCurrent();
+      throw new SimulationUnavailableError(network, cause);
+    }
+    context.assertCurrent();
+    if (verdict.err !== null) {
+      throw refusalFromSimulation(verdict, {
+        appInstructions,
+        messageInstructionCount: message.instructions.length,
+        network,
+      }) ?? new SimulationUnavailableError(network, verdict.err);
+    }
+    return verdict;
+  }
+
+  /** The request prepared with a probe lifetime (no blockhash round trip) and gated. */
+  async function gateRequest(request: TransactionPrepareAndSendRequest, context: Context) {
+    const { prepareTransaction: _ignored, ...rest } = request;
+    void _ignored;
+    const probe = await base.prepare(
+      guardTransactionGraph({ ...rest, lifetime: rest.lifetime ?? PROBE_LIFETIME }, context.session, context.assertCurrent),
+    );
+    context.assertCurrent();
+    return gate(probe.message as SimulatableMessage, request.instructions, context);
+  }
+
+  async function forPrepared(prepared: TransactionPrepared, options: { sends?: boolean } = {}) {
     const context = preparedContexts.get(prepared) ?? capture();
     await assertNetwork(context);
     if (!preparedContexts.has(prepared)) throw new TransactionWalletChangedError();
     checkAuthority(prepared, context);
-    await authorize(context);
+    await writable(context);
+    if (options.sends) await settlePreviousSend(context);
+    await gate(prepared.message as SimulatableMessage, prepared.instructions, context);
+    await requestPolicy(context);
     return context;
   }
-  const base = client.transaction;
   const transaction: SolanaClient["transaction"] = Object.freeze({
     prepare: async (input) => {
       const context = capture();
@@ -182,8 +298,9 @@ export function withVerifiedTransactions(
       return result;
     },
     send: async (prepared, options) => {
-      const context = await forPrepared(prepared);
+      const context = await forPrepared(prepared, { sends: true });
       const result = await base.send(prepared, options);
+      rememberSend(context, result);
       context.assertCurrent();
       return result;
     },
@@ -199,9 +316,16 @@ export function withVerifiedTransactions(
       await assertGateAccountsUnset(context.rpc, input.instructions);
       context.assertCurrent();
       // The fee is settled before the policy check's wallet prompt.
-      const request = withLeadingComputeUnitLimit(await withFee(input, context));
-      await authorize(context);
-      const result = await base.prepareAndSend(guardTransactionGraph(request, context.session, context.assertCurrent), options);
+      const { request, placeholder } = withLeadingComputeUnitLimit(await withFee(input, context));
+      // Maintenance first: nothing is simulated or offered while the site is paused.
+      await writable(context);
+      await settlePreviousSend(context);
+      // The simulation gate, before the policy prompt and the wallet.
+      const verdict = await gateRequest(request, context);
+      const tuned = placeholder ? withSimulatedComputeUnitLimit(request, verdict) : request;
+      await requestPolicy(context);
+      const result = await base.prepareAndSend(guardTransactionGraph(tuned, context.session, context.assertCurrent), options);
+      rememberSend(context, result);
       clearWalletChange();
       context.assertCurrent();
       return result;

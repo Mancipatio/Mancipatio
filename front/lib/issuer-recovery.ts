@@ -265,6 +265,12 @@ export async function signIssuerRecovery(
   // Outside the verified client and never seen by the server, so the
   // maintenance check fails closed: no fresh "off", no wallet prompt.
   await assertSiteWritable({ failClosed: true });
+  // Exempt from the verified client's simulation gate (lib/simulation-gate),
+  // on purpose: two keys sign one FIXED message (blockhash and compute budget
+  // are part of the reviewed document), so it cannot be re-prepared and
+  // simulated the way prepareAndSend does, and the second signer may sign
+  // long after the first. Its guards are the live checks right here, before
+  // each signature, and RPC preflight (skipPreflight: false) at submit.
   await assertRecoveryLive(rpc, e);
   const transaction = await compileIssuerRecovery(e);
   const signed = await signer.signTransactions([transaction]),

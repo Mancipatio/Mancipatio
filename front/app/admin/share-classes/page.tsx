@@ -56,6 +56,7 @@ import { loadKycAuthorityContext } from "@/lib/kyc-authority";
 import { configuredKycRegistry } from "@/lib/kyc-registry-pin";
 import { assertBlocklistAuthority } from "@/lib/operational-authority";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { ShareTransferPanel } from "@/components/share-transfer-panel";
 import { recordAudit } from "@/lib/supabase";
 import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
@@ -1205,6 +1206,10 @@ function ShareClassDetail({
           )}
         </div>
       )}
+
+      {/* Send to holder: the class's issuer key or an Admin sends tokens it
+          holds to one recipient wallet (shown only then). */}
+      <ShareTransferPanel sc={sc} asset={asset} scPda={scPda} onSent={onRefresh} />
 
       {!isAdmin && (
         <p className="mt-6 border-t border-slate-100 pt-5 text-xs text-slate-500">
