@@ -27,7 +27,7 @@ import { detectNetwork, type Network } from "@/lib/network";
 import { addressParam } from "@/lib/server/sale-capacity";
 import { assertAllowedPaymentMint, paymentMintInfo } from "@/lib/server/payment-mint";
 import { MAINNET_MAX_RATE_AGE_DAYS, paymentMintLabel, requiredFxKind } from "@/lib/payment-mints";
-import { effectiveRates, FxReadError, readFxTables } from "@/lib/server/fx-rates";
+import { effectiveRates, FxReadError, readFxTables, undefinedColumn } from "@/lib/server/fx-rates";
 
 const RATE_RE = /^(0|[1-9]\d{0,9})(\.\d{1,10})?$/;
 
@@ -110,9 +110,17 @@ export async function POST(request: Request) {
           network, payment_mint: mint, kind, eur_per_token: rate, decimals, source,
           as_of: now, max_age: `${maxAgeDays} days`, updated_by: wallet, updated_at: now,
         };
-        // Written only when sent, so a database before 0080 still takes a plain row.
+        // /admin/limits always sends the flag (false clears an earlier override).
         if (typeof params.override_auto === "boolean") row.override_auto = overrideAuto;
-        const { error } = await sb.from("fx_rates").upsert(row, { onConflict: "network,payment_mint" });
+        let { error } = await sb.from("fx_rates").upsert(row, { onConflict: "network,payment_mint" });
+        // A database before 0080 has no override_auto column (a front deployed
+        // ahead of the migration): a plain manual row needs none, so it is
+        // written without it; only an actual override has to wait for 0080.
+        if (error && "override_auto" in row && undefinedColumn(error)) {
+          if (overrideAuto) throw new SiwsError(409, "The automatic rate is not installed yet (migration 0080): save it without the override");
+          delete row.override_auto;
+          ({ error } = await sb.from("fx_rates").upsert(row, { onConflict: "network,payment_mint" }));
+        }
         if (error) throw new SiwsError(500, "Could not save the rate");
       }
     } else {

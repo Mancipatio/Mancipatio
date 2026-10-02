@@ -29,7 +29,8 @@ const MANUAL_COLUMNS = "network,payment_mint,kind,eur_per_token,decimals,source,
 const MANUAL_COLUMNS_0066 = "network,payment_mint,kind,eur_per_token,decimals,source,as_of,max_age,updated_by,updated_at";
 const AUTO_COLUMNS = "network,payment_mint,eur_per_token,decimals,source,quotes,as_of,max_age,updated_at";
 
-function undefinedColumn(error: unknown): boolean {
+/** PostgreSQL / PostgREST codes for a column that does not exist (yet), e.g. override_auto before 0080. */
+export function undefinedColumn(error: unknown): boolean {
   const code = (error as { code?: unknown } | null)?.code;
   return code === "42703" || code === "PGRST204";
 }

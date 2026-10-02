@@ -1751,7 +1751,9 @@ Configuration and checks only; the front enforces the rules
   `/api/health` judges the rate that counts (`checks.paymentFx.origin`):
   it fails (503, uptime alarm) when none exists or none is fresh, warns
   `auto_stale` while the manual fallback counts, `manual_override` while an
-  override counts, and from 80 % of the maximum age. Set the mainnet
+  override counts, `fallback_missing` / `fallback_stale` while the
+  automatic rate counts but the manual fallback behind it is missing or out
+  of date (alarm `fx:fallback`), and from 80 % of the maximum age. Set the mainnet
   `platform_raise_limits` cap with at least 3 % FX headroom.
 - **Unknown payment mints on chain.** An approval or sale the ledger cannot
   count (no EUR rate) or whose mint is not allowlisted raises a
@@ -2379,9 +2381,21 @@ the run is skipped), and:
   `DECIMALS_UNAVAILABLE`;
 - otherwise writes `public.fx_auto_rates` (valid **15 minutes**, with the
   per-source quotes and the ECB anchor). Every run, accepted or refused, is a
-  row of `public.fx_rate_observations` (kept 30 days). The database refuses
-  a second run within 20 seconds (rate limit), and the route checks that
-  before it asks any source.
+  row of `public.fx_rate_observations` (kept 30 days). Rate limit, before
+  any source is asked: `claim_fx_auto_run` takes the run's slot atomically
+  (per-mint lock; no observation and no other claim within 20 seconds), so
+  concurrent calls (a leaked worker secret, a runaway scheduler) answer
+  `skipped THROTTLED` without asking anyone, and a run whose recording fails
+  still holds its slot. The writers refuse a second observation within 20
+  seconds as well.
+
+A refusal is about the whole run: the median is not taken over the sources
+that agree. One venue answering a wrong but plausible price (a sane book
+more than 1 % away from the others) refuses every run (`SOURCE_DIVERGENCE`)
+until it is fixed or removed; the automatic rate then goes stale after 15
+minutes and the manual fallback counts. Only a source that does not answer
+at all (`TIMEOUT`, `HTTP_ERROR`, `PARSE_ERROR`, …) is simply left out while
+two usable ones remain.
 
 The rate that counts (`public.fx_effective_rate`; `front/lib/fx-effective.ts`
 is the same rule): an `eur_peg` row; else a manual row ticked **override**;
@@ -2409,9 +2423,12 @@ rate, its sources, the ECB anchor and the last run; `/api/health`
 `checks.paymentFx.origin` is `auto`.
 
 Keep the manual USDC row seeded as the fallback (kind `rate`, max age at
-most 7 days on mainnet). Tick **Override the automatic rate** only to pin a
-rate on purpose (a feed you distrust); `/api/health` warns
-`manual_override` while it counts. Off switch without a rollback: disable
+most 7 days on mainnet): `fx:fallback` and `/api/health`
+(`fallback_missing` / `fallback_stale`) report it while the automatic rate
+counts. Tick **Override the automatic rate** only to pin a rate on purpose
+(a feed you distrust); `/api/health` warns `manual_override` while it
+counts. A front deployed ahead of 0080 still saves a manual rate (without
+the column); only an override is refused until 0080 is applied. Off switch without a rollback: disable
 the job and run
 `delete from public.fx_auto_rates where network = public.deployment_network();`
 (the manual row counts at once).
@@ -2422,14 +2439,15 @@ run):
 | Incident | Severity | Fails when |
 |---|---|---|
 | `fx-auto-stale:<mint>` | medium while a fresh manual rate covers it, high when nothing fresh is left | the automatic rate is past its 15 minutes |
+| `fx-fallback:<mint>` | medium (missing: medium on mainnet, low elsewhere) | while the automatic rate counts, the manual fallback behind it is missing, past its max age, or within 2 days (at most half its max age) of it |
 | `fx-source-down:<mint>` | medium | a source gave no usable answer for 15 minutes while the job runs |
-| `fx-depeg:<mint>` | high | three runs in a row refused `ECB_DEVIATION` (one or two: hold) |
-| `fx-divergence:<mint>` | medium | three runs in a row refused `SOURCE_DIVERGENCE` (one or two: hold) |
+| `fx-depeg:<mint>` | high | the newest three price verdicts since the last accepted run (`ECB_DEVIATION` / `SOURCE_DIVERGENCE`; other refusal codes are skipped) are all refusals and at least one is `ECB_DEVIATION` (fewer: hold). The two codes alternate in a real depeg, so they count together |
+| `fx-divergence:<mint>` | medium | the same three verdicts are all `SOURCE_DIVERGENCE` (fewer: hold; mixed with `ECB_DEVIATION`: hold, `fx-depeg` reports it) |
 | `fx-jump:<mint>` | medium | the accepted rates of the last hour moved more than 1 % (hold above 0.5 %) |
 
 `fx-expiring` and `fx-stale` judge the rate that counts: while the automatic
-rate is fresh a stale manual row raises neither, and `fx-expiring` is about
-a manual rate only.
+rate is fresh a stale manual row raises neither (`fx-fallback` reports it
+instead), and `fx-expiring` is about a manual rate only.
 
 
 ### Responses
@@ -2451,7 +2469,9 @@ a manual rate only.
 | `fx:expiring` (`fx-expiring:<mint>`, medium) | Refresh the EUR rate on the Raise limits page (`/admin/limits`) before its max age: past it `fx:stale` follows and the sales that need the rate stop (on mainnet `/api/health` fails for the default mint). Since 0080 only a manual rate that counts expires this way (the automatic one is renewed every minute). |
 | `fx:auto-stale` (`fx-auto-stale:<mint>`, medium / high) | The fx job stopped or every run is refused: `fx-scheduler-status.sql` (outcome, `code`, the quotes), the Vercel logs of `/api/internal/fx`. Medium: the manual fallback counts meanwhile, check that it is recent. High: no fresh rate counts and approvals refuse: refresh the manual rate on `/admin/limits` now, then fix the job. |
 | `fx:depeg` (`fx-depeg:<mint>`, high) | The USDC/EUR median is more than 2 % from the ECB rate on several venues: check a venue by hand. A real depeg: the last automatic rate counts for its 15 minutes, then the manual fallback; decide with the owner whether to pin a manual override (and at which rate) or to stop approvals. A broken ECB file or source: the status SQL shows the quotes. |
-| `fx:divergence`, `fx:source-down` (medium) | One source answers wrongly or not at all (the evidence names it); the others carry the rate while at least two usable sources agree within 1 %. If it persists, replace the source in `front/lib/fx-auto.ts`. |
+| `fx:fallback` (`fx-fallback:<mint>`, medium; low off mainnet when missing) | The automatic rate counts, but the manual fallback behind it is missing or (about to be) out of date: if the automatic rate stops, approvals stop 15 minutes later. Refresh the manual USDC rate on `/admin/limits` (unticked, not an override). |
+| `fx:divergence` (`fx-divergence:<mint>`, medium) | Every run is refused: the automatic rate is NOT written and, 15 minutes after the last accepted run, the manual fallback counts (`fx:auto-stale` follows; check the fallback is recent). The evidence (`sources`) shows the venue that is off. One venue wrong: remove or replace it in `front/lib/fx-auto.ts` (`FX_SOURCES`) and deploy; a disorderly market: wait, or pin a manual override with the owner. |
+| `fx:source-down` (`fx-source-down:<mint>`, medium) | One venue gives no usable answer (the evidence names it); the others carry the rate while at least two answer. If it persists, replace the source in `front/lib/fx-auto.ts`. |
 | `fx:jump` (`fx-jump:<mint>`, medium) | The automatic rate moved more than 1 % within an hour: compare with the market (EUR/USD does move that much on central-bank days). Unexpected: pin a manual override on `/admin/limits` and investigate. |
 | `worker:alert-channel` (`alert-channel-email` or `alert-channel-webhook`, high) | That channel failed a digest; the other one delivered this alert. Fix the channel (SMTP or Resend; `ALERT_WEBHOOK_*`: §11 "SMTP down"), send a test alert, re-queue what gave up (Operations); it clears after three digests it delivers. |
 | `worker:ops-watch-config` | `ALARM_BALANCE_WATCH` or `ALARM_SQUADS_CONFIG` does not parse: correct it and redeploy (no balance or Squads watch until then). |

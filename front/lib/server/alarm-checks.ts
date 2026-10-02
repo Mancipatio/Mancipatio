@@ -95,8 +95,11 @@
 // From 0080 these three judge the rate that COUNTS (lib/fx-effective.ts):
 // the automatic one while fresh, else the manual row; fx-expiring is about
 // the manual rate only (the automatic one is renewed every minute) and the
-// automatic rate has its own five checks (fxAutoReports: fx-auto-stale,
-// fx-source-down, fx-depeg, fx-divergence, fx-jump).
+// automatic rate has its own checks (fxAutoReports: fx-auto-stale,
+// fx-fallback, fx-source-down, fx-depeg, fx-divergence, fx-jump). While the
+// automatic rate counts, fx-fallback watches the manual row behind it (the
+// one that takes over when the automatic rate stops), so it cannot expire
+// unnoticed.
 //
 // The operational watches (lib/server/ops-watch.ts: SOL balances of the
 // operational keys and the Squads multisig, when configured) read the chain,
@@ -629,20 +632,30 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
 }
 
 type FxObservation = { observed_at: string; status: string; code: string | null; eur_per_token: string | number | null; quotes: unknown };
-const FX_AUTO_CHECKS = ["fx-auto-stale", "fx-source-down", "fx-depeg", "fx-divergence", "fx-jump"] as const;
+const FX_AUTO_CHECKS = ["fx-auto-stale", "fx-fallback", "fx-source-down", "fx-depeg", "fx-divergence", "fx-jump"] as const;
 type FxAutoCheck = (typeof FX_AUTO_CHECKS)[number];
 const FX_AUTO_SEVERITY: Record<FxAutoCheck, Severity> = {
-  "fx-auto-stale": "medium", "fx-source-down": "medium", "fx-depeg": "high", "fx-divergence": "medium", "fx-jump": "medium",
+  "fx-auto-stale": "medium", "fx-fallback": "medium", "fx-source-down": "medium", "fx-depeg": "high", "fx-divergence": "medium",
+  "fx-jump": "medium",
 };
+/** The refusals that are a verdict on the market (the sources answered, the prices were refused). */
+const MARKET_REFUSALS: ReadonlySet<string> = new Set(["ECB_DEVIATION", "SOURCE_DIVERGENCE"]);
 
-/** How many of the newest observations (newest first) are refusals with `code`. */
-export function refusalStreak(observations: readonly Pick<FxObservation, "status" | "code">[], code: string): number {
-  let streak = 0;
+/**
+ * The market verdicts since the last accepted run (newest first): the codes
+ * of the refusals that judged the prices (ECB_DEVIATION, SOURCE_DIVERGENCE).
+ * Other refusals (a source or the ECB not answering, the decimals) judged
+ * nothing and are skipped, so they neither end nor extend the run of
+ * verdicts; an accepted observation ends it. In a real depeg the books lag
+ * each other, so the two codes alternate: they are judged together.
+ */
+export function marketRefusals(observations: readonly Pick<FxObservation, "status" | "code">[]): string[] {
+  const codes: string[] = [];
   for (const o of observations) {
-    if (o.status !== "refused" || o.code !== code) break;
-    streak++;
+    if (o.status !== "refused") break;
+    if (o.code && MARKET_REFUSALS.has(o.code)) codes.push(o.code);
   }
-  return streak;
+  return codes;
 }
 
 /** The market sources that answered in an observation (quotes.sources.<id>.rate). */
@@ -666,13 +679,24 @@ function answeredSources(quotes: unknown): Set<FxSourceId> {
  *                   worker stopped or every run is refused. Medium while a
  *                   fresh manual rate covers it (it counts meanwhile), high
  *                   when nothing fresh is left.
+ *   fx-fallback     while the automatic rate counts: the manual rate behind
+ *                   it, the one that takes over when the automatic rate
+ *                   stops, is past its max age or within the FX expiry
+ *                   warning of it (medium), or missing (medium on mainnet,
+ *                   where D10 keeps one; low elsewhere, never emailed). It
+ *                   passes while the manual row counts itself (a peg, an
+ *                   override, or the automatic rate is stale: fx-expiring,
+ *                   fx-stale and fx-auto-stale judge it then).
  *   fx-source-down  a market source gave no usable answer for 15 minutes
  *                   while the worker kept running (redundancy is reduced).
- *   fx-depeg        the last FX_REFUSAL_STREAK runs were refused because the
- *                   sources' median is > 2 % away from the ECB rate (a USDC
- *                   depeg, or broken sources); high. Fewer: hold.
- *   fx-divergence   the same for sources that disagree by > 1 % (a broken
- *                   source or a disorderly market); medium.
+ *   fx-depeg        the newest FX_REFUSAL_STREAK market verdicts since the
+ *                   last accepted run (marketRefusals) were all refusals and
+ *                   at least one of them found the sources' median > 2 %
+ *                   away from the ECB rate (a USDC depeg, or broken
+ *                   sources); high. Fewer verdicts: hold.
+ *   fx-divergence   the same verdicts, all of them sources that disagree by
+ *                   > 1 % (a broken source or a disorderly market); medium.
+ *                   Mixed with an ECB deviation it holds: fx-depeg reports it.
  *   fx-jump         the accepted rates of the last hour moved more than
  *                   FX_JUMP_THRESHOLD (1 %); hold above half of it.
  */
@@ -739,6 +763,35 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
     evidence: { payment_mint: mint, as_of: auto?.as_of ?? null, age_minutes: ageMinutes, last_refusal: lastCode,
       latest_status: latest?.status ?? null, manual_fallback: fallback } });
 
+  // fx-fallback: the manual rate behind a fresh automatic one.
+  const fallbackCheck = `fx-fallback:${mint}`;
+  if (!autoFresh || (manual !== null && (manual.kind === "eur_peg" || manual.override_auto))) {
+    push({ check: fallbackCheck, state: "pass", severity: "medium", category: "fx", source: "fx:fallback",
+      summary: autoFresh
+        ? `The manual EUR rate of ${label} counts by itself`
+        : `The manual EUR rate of ${label} counts now (the automatic one is out of date)`,
+      evidence: { payment_mint: mint, auto_fresh: autoFresh } });
+  } else if (manual === null) {
+    push({ check: fallbackCheck, state: "fail", severity: network === "mainnet" ? "medium" : "low", category: "fx",
+      source: "fx:fallback",
+      summary: `No manual EUR rate of ${label} backs the automatic one: if the automatic rate stops, sale approvals stop once it `
+        + "is out of date. Enter one on /admin/limits",
+      evidence: { payment_mint: mint, manual: null } });
+  } else {
+    const max = intervalSeconds(manual.max_age);
+    const asOf = Date.parse(manual.as_of);
+    const leftMs = max === null || !Number.isFinite(asOf) ? null : asOf + max * 1000 - now;
+    const window = max === null ? FX_EXPIRY_WARN_MS : Math.min(FX_EXPIRY_WARN_MS, (max * 1000) / 2);
+    const hours = leftMs === null ? null : Math.max(0, Math.floor(leftMs / 3_600_000));
+    push({ check: fallbackCheck, state: leftMs === null || leftMs <= window ? "fail" : "pass", severity: "medium", category: "fx",
+      source: "fx:fallback",
+      summary: leftMs === null || leftMs <= 0
+        ? `The manual EUR rate of ${label} behind the automatic one is past its max age: if the automatic rate stops, `
+          + "sale approvals stop. Refresh it on /admin/limits"
+        : `The manual EUR rate of ${label} behind the automatic one reaches its max age in ${hours} hour(s): refresh it on /admin/limits`,
+      evidence: { payment_mint: mint, as_of: manual.as_of, hours_left: hours } });
+  }
+
   // fx-source-down: only while the worker runs and has covered the window.
   const recent = latest !== null && now - Date.parse(latest.observed_at) < 5 * 60_000;
   const covered = observations.length > 0 && now - Date.parse(observations[observations.length - 1].observed_at) >= FX_SOURCE_DOWN_MS;
@@ -759,19 +812,34 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
       evidence: { payment_mint: mint, down, last_ok: lastOk } });
   }
 
-  // fx-depeg and fx-divergence: refusals in a row.
-  const latestQuotes = (latest?.quotes ?? {}) as Record<string, unknown>;
-  for (const [check, code] of [["fx-depeg", "ECB_DEVIATION"], ["fx-divergence", "SOURCE_DIVERGENCE"]] as const) {
-    const streak = refusalStreak(observations, code);
+  // fx-depeg and fx-divergence: the market verdicts since the last accepted run.
+  const verdicts = marketRefusals(observations);
+  const newest = verdicts.slice(0, FX_REFUSAL_STREAK);
+  const full = newest.length >= FX_REFUSAL_STREAK;
+  const deviated = newest.includes("ECB_DEVIATION");
+  const diverged = newest.includes("SOURCE_DIVERGENCE");
+  // The newest market verdict's evidence since the last accepted run (another refusal carries no judged prices).
+  const lastAccepted = observations.findIndex((o) => o.status !== "refused");
+  const verdictObs = observations.slice(0, lastAccepted === -1 ? observations.length : lastAccepted)
+    .find((o) => o.code !== null && MARKET_REFUSALS.has(o.code)) ?? latest;
+  const verdictQuotes = (verdictObs?.quotes ?? {}) as Record<string, unknown>;
+  const states: Record<"fx-depeg" | "fx-divergence", Report["state"]> = {
+    "fx-depeg": deviated ? (full ? "fail" : "hold") : "pass",
+    "fx-divergence": diverged ? (full && !deviated ? "fail" : "hold") : "pass",
+  };
+  for (const [check, code, seen] of [["fx-depeg", "ECB_DEVIATION", deviated], ["fx-divergence", "SOURCE_DIVERGENCE", diverged]] as const) {
     const what = check === "fx-depeg"
       ? `the ${label}/EUR market median is more than 2 % away from the ECB reference rate (USDC depeg or broken sources)`
       : `the ${label}/EUR sources disagree by more than 1 % (a broken source?)`;
-    push({ check: `${check}:${mint}`, state: streak >= FX_REFUSAL_STREAK ? "fail" : streak > 0 ? "hold" : "pass",
+    const times = newest.filter((c) => c === code).length;
+    push({ check: `${check}:${mint}`, state: states[check],
       severity: FX_AUTO_SEVERITY[check], category: "fx", source: `fx:${check.slice(3)}`,
-      summary: streak > 0 ? `${what}; ${streak} run(s) in a row refused` : `The ${label}/EUR sources agree with each other and with the ECB`,
-      evidence: { payment_mint: mint, refused_in_a_row: streak, median: latestQuotes.median ?? null,
-        spread_bps: latestQuotes.spread_bps ?? null, ecb: latestQuotes.ecb ?? null,
-        ecb_deviation_bps: latestQuotes.ecb_deviation_bps ?? null, sources: latestQuotes.sources ?? null } });
+      summary: seen
+        ? `${what}; ${verdicts.length} run(s) refused on the prices since the last accepted one (${times} of the newest ${newest.length})`
+        : `The ${label}/EUR sources agree with each other and with the ECB`,
+      evidence: { payment_mint: mint, refused_in_a_row: verdicts.length, recent_codes: newest, median: verdictQuotes.median ?? null,
+        spread_bps: verdictQuotes.spread_bps ?? null, ecb: verdictQuotes.ecb ?? null,
+        ecb_deviation_bps: verdictQuotes.ecb_deviation_bps ?? null, sources: verdictQuotes.sources ?? null } });
   }
 
   // fx-jump: the accepted rates of the last hour.

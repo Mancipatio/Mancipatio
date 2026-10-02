@@ -272,15 +272,31 @@ describe("GET /api/health", () => {
         m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
       };
 
-      it("a fresh automatic rate counts (origin auto), whatever the manual row says", async () => {
+      it("a fresh automatic rate counts (origin auto) with a fresh manual fallback behind it", async () => {
         mainnet();
-        m.replies.fx_rates = fx(30);
+        m.replies.fx_rates = fx(1);
         m.replies.fx_auto_rates = auto(2 * MIN);
         const { status, body } = await get();
         expect(status).toBe(200);
         expect(body.checks.paymentFx).toEqual({ status: "ok", kind: "rate", ageSeconds: 2 * MIN, maxAgeSeconds: 15 * MIN,
           origin: "auto", autoAgeSeconds: 2 * MIN });
       });
+
+      it.each([
+        ["mainnet", "stale", fx(30), "fallback_stale"],
+        ["mainnet", "missing", { data: [], error: null }, "fallback_missing"],
+        ["devnet", "stale", fx(30), "fallback_stale"],
+        ["devnet", "missing", { data: [], error: null }, "fallback_missing"],
+      ] as const)("%s: a fresh automatic rate still counts over a %s manual fallback, but warns (it could not take over)",
+        async (network, _label, reply, reason) => {
+          if (network === "mainnet") mainnet();
+          m.replies.fx_rates = reply;
+          m.replies.fx_auto_rates = auto(2 * MIN);
+          const { status, body } = await get();
+          expect(status).toBe(200);
+          expect(body.checks.paymentFx).toEqual({ status: "warn", reason, kind: "rate", ageSeconds: 2 * MIN, maxAgeSeconds: 15 * MIN,
+            origin: "auto", autoAgeSeconds: 2 * MIN });
+        });
 
       it("a stale automatic rate with a fresh manual one warns auto_stale: the manual fallback counts", async () => {
         mainnet();

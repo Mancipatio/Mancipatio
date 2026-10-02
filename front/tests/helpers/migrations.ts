@@ -102,7 +102,7 @@ export const POST_0071_DYNAMIC_DEFAULT_TABLES = [
   "issuer_freezes", "pending_admins", "authority_proposals", "platform_recoveries",
   "blocklist_authority_proposals", "blocklist_recoveries",
   // 0080 automatic EUR rate
-  "fx_auto_rates", "fx_rate_observations",
+  "fx_auto_rates", "fx_rate_observations", "fx_auto_runs",
 ] as const;
 
 /** Every `network` column that defaults to public.deployment_network(). */

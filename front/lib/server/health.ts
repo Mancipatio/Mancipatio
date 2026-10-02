@@ -40,7 +40,11 @@
 //                 row never goes stale; a network without a default mint is ok.
 //                 The rate judged is the one that COUNTS (0080,
 //                 lib/fx-effective.ts), named by `origin`:
-//                   auto            the automatic rate is fresh → ok;
+//                   auto            the automatic rate is fresh → ok, but
+//                                   warn when the manual fallback behind it
+//                                   (what counts when the automatic rate
+//                                   stops) is missing (fallback_missing) or
+//                                   past its max age (fallback_stale);
 //                   manual          with an automatic rate that went stale:
 //                                   the manual fallback counts → warn
 //                                   (auto_stale); without one (before the
@@ -66,7 +70,7 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork, type Network } from "@/lib/network";
 import { NetworkIdentityError } from "@/lib/network-identity";
 import { defaultPaymentMint } from "@/lib/payment-mints";
-import { resolveFxRate, type FxOrigin } from "@/lib/fx-effective";
+import { fxRowFresh, resolveFxRate, type FxOrigin } from "@/lib/fx-effective";
 import { intervalSeconds } from "@/lib/pg-interval";
 import { readFxTables } from "@/lib/server/fx-rates";
 import { readMaintenance } from "@/lib/server/maintenance";
@@ -311,6 +315,9 @@ async function checkPaymentFx(sb: SupabaseClient | null, network: Network, now: 
     if (origin === "manual" && auto) return { status: "warn", reason: "auto_stale", ...check };
     if (origin === "manual_override") return { status: "warn", reason: "manual_override", ...check };
     if (age >= maxAge * FX_WARN_FRACTION) return { status: "warn", reason: "expiring", ...check };
+    // The automatic rate counts: the manual row behind it takes over when it stops.
+    if (origin === "auto" && !manual) return { status: "warn", reason: "fallback_missing", ...check };
+    if (origin === "auto" && manual && !fxRowFresh(manual, now)) return { status: "warn", reason: "fallback_stale", ...check };
     return { status: "ok", ...check };
   } catch {
     return { status: bad, reason: "unavailable", ...empty };

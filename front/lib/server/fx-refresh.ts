@@ -10,9 +10,11 @@
 //
 // One run, for the network's USDC (lib/fx-auto.ts autoFxMint; nothing on
 // testnet and localnet):
-//   1. rate limit: when the newest observation is younger than
-//      FX_MIN_INTERVAL_SECONDS the run stops before any outside request
-//      (record_fx_auto_* enforce the same window under a lock);
+//   1. rate limit, before any outside request: claim_fx_auto_run takes the
+//      run's slot atomically (per-mint lock; no observation and no other
+//      claim within FX_MIN_INTERVAL_SECONDS), so concurrent calls stop here
+//      without asking anyone, and a run whose recording fails still holds
+//      its slot (record_fx_auto_* enforce the same window again);
 //   2. in parallel, every market source (FX_SOURCES), the ECB reference
 //      (cached for ECB_CACHE_MS: it changes once a working day) and the
 //      mint's decimals from chain (cached for the process: they never change);
@@ -30,7 +32,6 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import {
   ECB_DAILY_XML_URL,
   FX_AUTO_MAX_AGE_SECONDS,
-  FX_MIN_INTERVAL_SECONDS,
   FX_SOURCES,
   FxParseError,
   aggregateFx,
@@ -183,6 +184,11 @@ async function mintDecimals(
   }
 }
 
+/** Before 0080: the function (PGRST202) or a table behind it (42P01, PGRST205) does not exist. */
+function notInstalled(error: { code?: string } | null): boolean {
+  return tableMissing(error) || error?.code === "PGRST202";
+}
+
 const chainDecimals = async (mint: string, network: Network) => (await paymentMintInfo(mint as Address, network)).decimals;
 
 export async function runFxRefresh(opts: {
@@ -201,16 +207,13 @@ export async function runFxRefresh(opts: {
   const signal = opts.signal ?? AbortSignal.timeout(FX_RUN_BUDGET_MS);
   const fetchImpl = opts.fetchImpl ?? fetch;
   try {
-    // 1. Rate limit before any outside request.
-    const last = await sb.from("fx_rate_observations").select("observed_at")
-      .eq("network", network).eq("payment_mint", mint)
-      .order("observed_at", { ascending: false }).limit(1)
-      .abortSignal(AbortSignal.any([signal, AbortSignal.timeout(5_000)])).maybeSingle();
-    if (last.error) {
-      return { status: "failed", network, error: tableMissing(last.error) ? "NOT_INSTALLED" : "DB_ERROR" };
+    // 1. Rate limit before any outside request: claim the run's slot atomically.
+    const claim = await sb.rpc("claim_fx_auto_run", { p_network: network, p_payment_mint: mint })
+      .abortSignal(AbortSignal.any([signal, AbortSignal.timeout(5_000)]));
+    if (claim.error) {
+      return { status: "failed", network, error: notInstalled(claim.error) ? "NOT_INSTALLED" : "DB_ERROR" };
     }
-    const lastAt = Date.parse((last.data as { observed_at?: string } | null)?.observed_at ?? "");
-    if (Number.isFinite(lastAt) && now() - lastAt < FX_MIN_INTERVAL_SECONDS * 1000) {
+    if ((claim.data as { claimed?: unknown } | null)?.claimed !== true) {
       return { status: "skipped", network, reason: "THROTTLED" };
     }
 
@@ -236,10 +239,12 @@ export async function runFxRefresh(opts: {
 
     // 3. Record the rate or the refusal.
     if (code !== null || !result.rate || !ecb || decimals === null) {
-      const { error } = await sb.rpc("record_fx_auto_refusal", {
+      const { data, error } = await sb.rpc("record_fx_auto_refusal", {
         p_network: network, p_payment_mint: mint, p_code: code ?? "TOO_FEW_SOURCES", p_quotes: evidence,
       }).abortSignal(dbSignal);
-      if (error) return { status: "failed", network, error: tableMissing(error) || error.code === "PGRST202" ? "NOT_INSTALLED" : "DB_ERROR" };
+      if (error) return { status: "failed", network, error: notInstalled(error) ? "NOT_INSTALLED" : "DB_ERROR" };
+      // Not recorded (a concurrent run recorded within the window): nothing was decided here.
+      if ((data as { written?: unknown } | null)?.written === false) return { status: "skipped", network, reason: "THROTTLED" };
       console.warn(`[fx] automatic rate refused: ${code}`);
       return { status: "refused", network, paymentMint: mint, code: code ?? "TOO_FEW_SOURCES", sources };
     }
@@ -247,7 +252,7 @@ export async function runFxRefresh(opts: {
       p_network: network, p_payment_mint: mint, p_eur_per_token: result.rate, p_decimals: decimals,
       p_source: autoSourceText(result.used, ecb), p_quotes: evidence, p_max_age_seconds: FX_AUTO_MAX_AGE_SECONDS,
     }).abortSignal(dbSignal);
-    if (error) return { status: "failed", network, error: error.code === "PGRST202" ? "NOT_INSTALLED" : "DB_ERROR" };
+    if (error) return { status: "failed", network, error: notInstalled(error) ? "NOT_INSTALLED" : "DB_ERROR" };
     const written = (data ?? {}) as { written?: boolean; as_of?: string };
     if (written.written === false) return { status: "skipped", network, reason: "THROTTLED" };
     return {

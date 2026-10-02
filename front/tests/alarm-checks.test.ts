@@ -47,7 +47,7 @@ import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import {
   GAP_SCAN_HOOK_PAGES, GAP_SCAN_OVERDUE_MS, GAP_SCAN_PAGES, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram,
-  bootstrapOpenReport, fxAutoReports, payoutModulesReport, refusalStreak, roleChangesReport, runAlarmChecks, thresholdState,
+  bootstrapOpenReport, fxAutoReports, payoutModulesReport, marketRefusals, roleChangesReport, runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { USDC } from "@/lib/payment-mints";
@@ -624,10 +624,11 @@ describe("automatic EUR rate (0080)", () => {
   });
 
   it("all well: every check passes", async () => {
-    const by = (await reports({ fx_auto_rates: [autoRow(1)], fx_rate_observations: everyMinute(20, (m) => accepted(m)) }))!;
+    const by = (await reports({ fx_auto_rates: [autoRow(1)], fx_rates: [manualRow(1)],
+      fx_rate_observations: everyMinute(20, (m) => accepted(m)) }))!;
     expect(Object.fromEntries(Object.entries(by).map(([k, r]) => [k, `${r.state}/${r.severity}`]))).toEqual({
-      "fx-auto-stale": "pass/medium", "fx-source-down": "pass/medium", "fx-depeg": "pass/high", "fx-divergence": "pass/medium",
-      "fx-jump": "pass/medium",
+      "fx-auto-stale": "pass/medium", "fx-fallback": "pass/medium", "fx-source-down": "pass/medium", "fx-depeg": "pass/high",
+      "fx-divergence": "pass/medium", "fx-jump": "pass/medium",
     });
     expect(by["fx-auto-stale"]).toMatchObject({ check: `fx-auto-stale:${usdc}`, source: "fx:auto-stale", category: "fx" });
   });
@@ -666,13 +667,58 @@ describe("automatic EUR rate (0080)", () => {
     expect(by["fx-depeg"]).toMatchObject({ state: "hold", severity: "high" });
     by = await run(["ECB_DEVIATION", "ECB_DEVIATION", "ECB_DEVIATION"]);
     expect(by["fx-depeg"]).toMatchObject({ state: "fail", severity: "high", source: "fx:depeg",
-      summary: expect.stringMatching(/more than 2 % away from the ECB.*3 run\(s\) in a row/),
-      evidence: { refused_in_a_row: 3, ecb_deviation_bps: 300 } });
+      summary: expect.stringMatching(/more than 2 % away from the ECB.*3 run\(s\) refused on the prices/),
+      evidence: { refused_in_a_row: 3, recent_codes: ["ECB_DEVIATION", "ECB_DEVIATION", "ECB_DEVIATION"], ecb_deviation_bps: 300 } });
     expect(by["fx-divergence"].state).toBe("pass");
     by = await run(["SOURCE_DIVERGENCE", "SOURCE_DIVERGENCE", "SOURCE_DIVERGENCE", "ECB_DEVIATION"]);
     expect(by["fx-divergence"]).toMatchObject({ state: "fail", severity: "medium", source: "fx:divergence" });
     expect(by["fx-depeg"].state).toBe("pass");
-    expect(refusalStreak([{ status: "accepted", code: null }, { status: "refused", code: "ECB_DEVIATION" }], "ECB_DEVIATION")).toBe(0);
+    expect(marketRefusals([{ status: "accepted", code: null }, { status: "refused", code: "ECB_DEVIATION" }])).toEqual([]);
+  });
+
+  it("a real depeg alternates ECB_DEVIATION and SOURCE_DIVERGENCE (books lag each other): fx-depeg still fails", async () => {
+    const run = async (codes: string[]) => (await reports({ fx_auto_rates: [autoRow(5)], fx_rates: [manualRow(1)],
+      fx_rate_observations: [...codes.map((c, i) => refusedObs(i, c)), ...everyMinute(10, (m) => accepted(m + codes.length))] }))!;
+    let by = await run(["SOURCE_DIVERGENCE", "ECB_DEVIATION", "SOURCE_DIVERGENCE", "ECB_DEVIATION"]);
+    expect(by["fx-depeg"]).toMatchObject({ state: "fail", severity: "high",
+      evidence: { refused_in_a_row: 4, recent_codes: ["SOURCE_DIVERGENCE", "ECB_DEVIATION", "SOURCE_DIVERGENCE"] } });
+    // One condition, one alert: the divergence half of it holds (an open incident stays, none opens).
+    expect(by["fx-divergence"].state).toBe("hold");
+    // Refusals that judged no prices (a venue or the ECB not answering) neither end nor extend the run of verdicts.
+    by = await run(["TOO_FEW_SOURCES", "ECB_DEVIATION", "ECB_UNAVAILABLE", "SOURCE_DIVERGENCE", "ECB_DEVIATION"]);
+    expect(by["fx-depeg"]).toMatchObject({ state: "fail", evidence: { refused_in_a_row: 3 } });
+    by = await run(["TOO_FEW_SOURCES", "TOO_FEW_SOURCES", "ECB_DEVIATION", "SOURCE_DIVERGENCE"]);
+    expect(by["fx-depeg"].state).toBe("hold");
+    expect(by["fx-divergence"].state).toBe("hold");
+    expect(marketRefusals([
+      { status: "refused", code: "SOURCE_DIVERGENCE" }, { status: "refused", code: "DECIMALS_UNAVAILABLE" },
+      { status: "refused", code: "ECB_DEVIATION" }, { status: "accepted", code: null }, { status: "refused", code: "ECB_DEVIATION" },
+    ])).toEqual(["SOURCE_DIVERGENCE", "ECB_DEVIATION"]);
+  });
+
+  it("fx-fallback: while the automatic rate counts, the manual rate behind it must be there and current", async () => {
+    const observations = everyMinute(20, (m) => accepted(m));
+    const fallback = async (tables: Record<string, Record<string, unknown>[]>) =>
+      (await reports({ fx_auto_rates: [autoRow(1)], fx_rate_observations: observations, ...tables }))!["fx-fallback"];
+    expect(await fallback({ fx_rates: [manualRow(1)] })).toMatchObject({ state: "pass", check: `fx-fallback:${usdc}` });
+    // 1.6 days before the max age of a 7-day rate: within the 2-day warning.
+    expect(await fallback({ fx_rates: [manualRow(5.4)] })).toMatchObject({ state: "fail", severity: "medium", source: "fx:fallback",
+      category: "fx", summary: expect.stringMatching(/reaches its max age in 38 hour\(s\)/), evidence: { hours_left: 38 } });
+    expect(await fallback({ fx_rates: [manualRow(8)] })).toMatchObject({ state: "fail", severity: "medium",
+      summary: expect.stringMatching(/past its max age/) });
+    expect(await fallback({ fx_rates: [{ ...manualRow(1), max_age: "soon" }] })).toMatchObject({ state: "fail" });
+    // Missing: low (never emailed) off mainnet, medium on mainnet (D10 keeps one).
+    expect(await fallback({})).toMatchObject({ state: "fail", severity: "low", summary: expect.stringMatching(/No manual EUR rate/) });
+    const mainnetUsdc = USDC.mainnet!.mint;
+    const { sb } = mockSb({ fx_auto_rates: [{ ...autoRow(1), payment_mint: mainnetUsdc }], fx_rate_observations: observations });
+    const onMainnet = (await fxAutoReports(sb, "mainnet", Date.now(), AbortSignal.timeout(5_000)))!
+      .find((r) => r.check === `fx-fallback:${mainnetUsdc}`);
+    expect(onMainnet).toMatchObject({ state: "fail", severity: "medium" });
+    // The manual row counts by itself (an override, a peg) or because the automatic rate is stale: other checks judge it.
+    expect(await fallback({ fx_rates: [{ ...manualRow(8), override_auto: true }] })).toMatchObject({ state: "pass" });
+    expect(await fallback({ fx_rates: [{ ...manualRow(8), kind: "eur_peg" }] })).toMatchObject({ state: "pass" });
+    expect((await reports({ fx_auto_rates: [autoRow(20)], fx_rates: [manualRow(8)], fx_rate_observations: observations }))!["fx-fallback"])
+      .toMatchObject({ state: "pass", evidence: { auto_fresh: false } });
   });
 
   it("fx-jump: accepted rates moving more than 1 % within an hour fail, more than 0.5 % hold", async () => {
@@ -689,7 +735,7 @@ describe("automatic EUR rate (0080)", () => {
     expect(by).toEqual({ "fx-auto-stale": expect.objectContaining({ state: "pass", check: `fx-auto-stale:${usdc}` }) });
   });
 
-  it("runAlarmChecks: a fresh automatic rate counts, so a stale manual row neither expires nor goes stale for a mint in use", async () => {
+  it("runAlarmChecks: a fresh automatic rate counts, so a stale manual row neither expires nor goes stale for a mint in use (fx-fallback reports it)", async () => {
     const { sb, rpcs } = mockSb({
       worker_heartbeats: [{ last_ok_at: minutesAgo(1), last_gap_scan_at: minutesAgo(1) }],
       fx_rates: [manualRow(8)],
@@ -701,9 +747,9 @@ describe("automatic EUR rate (0080)", () => {
     expect(result.reports.length).toBe(result.expected);
     const by = Object.fromEntries(rpcs.filter((r) => r.fn === "report_incident").map((r) => [r.args.p_check, r.args.p_state]));
     expect(by).toMatchObject({ [`fx-stale:${usdc}`]: "pass", [`fx-expiring:${usdc}`]: "pass", [`fx-auto-stale:${usdc}`]: "pass",
-      [`fx-jump:${usdc}`]: "pass" });
+      [`fx-jump:${usdc}`]: "pass", [`fx-fallback:${usdc}`]: "fail" });
     // Every new source has an email label (platform format: public prices only).
-    for (const source of ["fx:auto-stale", "fx:source-down", "fx:depeg", "fx:divergence", "fx:jump"]) {
+    for (const source of ["fx:auto-stale", "fx:fallback", "fx:source-down", "fx:depeg", "fx:divergence", "fx:jump"]) {
       expect(SOURCE_LABELS[source]).toMatchObject({ format: "platform" });
     }
   });

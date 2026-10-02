@@ -126,8 +126,8 @@ Who: the super admin. Page: `/admin/limits` → payment token rates.
    15 minutes. The page shows which rate counts (Automatic, Manual, Manual
    override), the sources, the ECB anchor and the last run. The method is a
    rate source like any other: the lawyer accepts it **[legal: source]**.
-2. Every week (and at once when `fx:auto-stale` fires), keep the manual
-   fallback current: the USDC → EUR rate (kind `rate`, maximum age at most
+2. Every week (and at once when `fx:auto-stale` or `fx:fallback` fires),
+   keep the manual fallback current: the USDC → EUR rate (kind `rate`, maximum age at most
    7 days) from the source the lawyer accepts. It counts only while the
    automatic rate is missing or out of date.
 3. Tick "Override the automatic rate" only on purpose (a feed you distrust,
@@ -135,7 +135,9 @@ Who: the super admin. Page: `/admin/limits` → payment token rates.
    `/api/health` warns while an override counts.
 4. `/api/health` fails when no rate is fresh (`fx:stale`; `fx:auto-stale`
    high) and warns from 80 % of the maximum age of a manual rate that
-   counts. Before the first sale a missing rate only warns.
+   counts, and while the automatic rate counts but the manual fallback is
+   missing or out of date (`fallback_missing` / `fallback_stale`). Before
+   the first sale a missing rate only warns.
 5. EURC or any other mint is added in code first (with its address checked
    against the issuer's published address), never on this page alone.
 

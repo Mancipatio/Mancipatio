@@ -17,6 +17,8 @@ export type MemorySupabase = {
   failReads: Set<string>;
   /** The error code a failing read answers with (default XX000), e.g. 42P01 for a missing table. */
   readErrorCodes: Record<string, string>;
+  /** Columns a table does not have (an older schema): a write that sends one fails with PGRST204. */
+  missingColumns: Record<string, string[]>;
   /** Runs right before an update is applied (race simulation). */
   beforeUpdate: ((table: string) => void) | null;
   client: { from: (table: string) => unknown; rpc: (name: string, args?: Record<string, unknown>) => unknown };
@@ -32,6 +34,7 @@ export function memorySupabase(): MemorySupabase {
     failWrites: new Set(),
     failReads: new Set(),
     readErrorCodes: {},
+    missingColumns: {},
     beforeUpdate: null,
     client: { from: (table: string) => from(table), rpc: (name: string, args: Record<string, unknown> = {}) => rpc(name, args) },
     rows: (table) => (db.tables[table] ??= []),
@@ -41,6 +44,7 @@ export function memorySupabase(): MemorySupabase {
       db.failWrites.clear();
       db.failReads.clear();
       db.readErrorCodes = {};
+      db.missingColumns = {};
       db.beforeUpdate = null;
     },
   };
@@ -71,6 +75,11 @@ export function memorySupabase(): MemorySupabase {
     let head = false;
     const run = async (single: boolean) => {
       if (op !== "select" && db.failWrites.has(table)) return { data: null, error: { message: "write failed", code: "XX000" } };
+      const unknown = (db.missingColumns[table] ?? []).find((column) =>
+        (Array.isArray(payload) ? payload : payload ? [payload] : []).some((r) => column in r));
+      if (op !== "select" && op !== "delete" && unknown) {
+        return { data: null, error: { message: `Could not find the '${unknown}' column of '${table}' in the schema cache`, code: "PGRST204" } };
+      }
       if (op === "select" && db.failReads.has(table)) {
         return { data: null, error: { message: "read failed", code: db.readErrorCodes[table] ?? "XX000" } };
       }

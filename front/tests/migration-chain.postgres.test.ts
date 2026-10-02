@@ -92,6 +92,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")(
         "fx_rates",
         "fx_auto_rates",
         "fx_rate_observations",
+        "fx_auto_runs",
         "onchain_event_jobs",
         "spv_issuance_jobs",
         "sale_capacity_holds",

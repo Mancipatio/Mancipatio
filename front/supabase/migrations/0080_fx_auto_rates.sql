@@ -20,10 +20,15 @@
 --  3. fx_rate_observations: every run, accepted or refused (with its code
 --     and the quotes): the audit trail, the rate limit and what the alarm
 --     worker reads (source down, depeg, divergence, jump). Kept 30 days.
---  4. record_fx_auto_rate() / record_fx_auto_refusal(): the only writers.
---     Both serialize per (network, mint) and refuse a second observation
---     within 20 seconds (rate limit: a leaked worker secret or a runaway
---     scheduler cannot hammer the sources through us).
+--  4. claim_fx_auto_run(): the rate limit, taken BEFORE any outside
+--     request. Serialized per (network, mint); a run is claimed only when
+--     neither an observation nor another claim (fx_auto_runs) is younger
+--     than 20 seconds, so concurrent calls (a leaked worker secret, a
+--     runaway scheduler) get claimed=false and ask no source, and a run
+--     whose recording then fails still holds its 20-second slot.
+--     record_fx_auto_rate() / record_fx_auto_refusal(): the only writers of
+--     the rate and the observations, under the same lock, refusing a second
+--     observation within 20 seconds as well.
 --  5. fx_effective_rate(network, mint): the rate that counts, as an fx_rates
 --     row (lib/fx-effective.ts is the same rule for the TypeScript readers):
 --       a manual eur_peg row → it; a manual row with override_auto → it;
@@ -119,18 +124,29 @@ create index if not exists fx_rate_observations_mint_idx
 comment on table public.fx_rate_observations is
   'Every automatic EUR rate run (0080): accepted with its rate, or refused with a code (TOO_FEW_SOURCES, SOURCE_DIVERGENCE, ECB_UNAVAILABLE, ECB_STALE, ECB_DEVIATION, DECIMALS_UNAVAILABLE). Kept 30 days.';
 
+-- The last claimed run per (network, mint): claim_fx_auto_run() only.
+create table if not exists public.fx_auto_runs (
+  network text not null default public.deployment_network()
+    check (network in ('devnet','mainnet','testnet','localnet')),
+  payment_mint text not null check (payment_mint ~ '^[1-9A-HJ-NP-Za-km-z]{32,44}$'),
+  claimed_at timestamptz not null default now(),
+  primary key (network, payment_mint)
+);
+comment on table public.fx_auto_runs is
+  'The last claimed automatic EUR rate run per payment mint (0080): the rate limit taken before any outside request, written only by claim_fx_auto_run().';
+
 alter table public.fx_auto_rates enable row level security;
 alter table public.fx_rate_observations enable row level security;
-revoke all on public.fx_auto_rates, public.fx_rate_observations from public, anon, authenticated;
+alter table public.fx_auto_runs enable row level security;
+revoke all on public.fx_auto_rates, public.fx_rate_observations, public.fx_auto_runs from public, anon, authenticated;
 revoke all on sequence public.fx_rate_observations_id_seq from public, anon, authenticated;
-grant all on public.fx_auto_rates, public.fx_rate_observations to service_role;
+grant all on public.fx_auto_rates, public.fx_rate_observations, public.fx_auto_runs to service_role;
 
--- ── 4. The writers ────────────────────────────────────────────────────────
--- Shared checks and the per-(network, mint) lock and rate limit. True when a
--- run may record now; false when the last observation is younger than 20 s.
-create or replace function public.fx_auto_may_record(p_network text, p_payment_mint text)
-returns boolean language plpgsql security definer set search_path = '' as $$
-declare last_at timestamptz;
+-- ── 4. The claim and the writers ──────────────────────────────────────────
+-- Shared checks and the per-(network, mint) lock (held to the end of the
+-- calling transaction).
+create or replace function public.fx_auto_lock(p_network text, p_payment_mint text)
+returns void language plpgsql security definer set search_path = '' as $$
 begin
   if p_network is null or p_network not in ('devnet','mainnet','testnet','localnet') then
     raise exception 'INVALID_NETWORK' using errcode = 'P0001';
@@ -139,6 +155,38 @@ begin
     raise exception 'INVALID_PAYMENT_MINT' using errcode = 'P0001';
   end if;
   perform pg_catalog.pg_advisory_xact_lock(pg_catalog.hashtextextended('fx-auto:' || p_network || ':' || p_payment_mint, 0));
+end $$;
+
+-- The run's slot, before it asks any source: {claimed: true} when neither an
+-- observation nor an earlier claim is younger than 20 s; {claimed: false}
+-- (ask nothing) otherwise. The claim is not released: a run that fails to
+-- record keeps the window closed for the rest of its 20 seconds.
+create or replace function public.claim_fx_auto_run(p_network text, p_payment_mint text)
+returns jsonb language plpgsql security definer set search_path = '' as $$
+declare last_at timestamptz; claimed timestamptz;
+begin
+  perform public.fx_auto_lock(p_network, p_payment_mint);
+  select max(observed_at) into last_at from public.fx_rate_observations
+   where network = p_network and payment_mint = p_payment_mint;
+  select claimed_at into claimed from public.fx_auto_runs
+   where network = p_network and payment_mint = p_payment_mint;
+  if greatest(last_at, claimed) > now() - interval '20 seconds' then
+    return jsonb_build_object('claimed', false);
+  end if;
+  insert into public.fx_auto_runs as r (network, payment_mint, claimed_at)
+  values (p_network, p_payment_mint, now())
+  on conflict (network, payment_mint) do update set claimed_at = excluded.claimed_at;
+  return jsonb_build_object('claimed', true);
+end $$;
+
+-- The writers' rate limit, under the same lock. True when a run may record
+-- now; false when the last observation is younger than 20 s. (A run's own
+-- claim does not count here: it was taken moments earlier by that run.)
+create or replace function public.fx_auto_may_record(p_network text, p_payment_mint text)
+returns boolean language plpgsql security definer set search_path = '' as $$
+declare last_at timestamptz;
+begin
+  perform public.fx_auto_lock(p_network, p_payment_mint);
   select max(observed_at) into last_at from public.fx_rate_observations
    where network = p_network and payment_mint = p_payment_mint;
   if last_at is not null and last_at > now() - interval '20 seconds' then return false; end if;
@@ -223,7 +271,10 @@ end $$;
 comment on function public.fx_effective_rate(text, text) is
   'The EUR rate that counts for a payment mint (0080): manual eur_peg or override_auto, else a fresh automatic rate, else a fresh manual one, else the most recently observed one. lib/fx-effective.ts mirrors it.';
 
+revoke all on function public.fx_auto_lock(text, text) from public, anon, authenticated, service_role;
 revoke all on function public.fx_auto_may_record(text, text) from public, anon, authenticated, service_role;
+revoke all on function public.claim_fx_auto_run(text, text) from public, anon, authenticated;
+grant execute on function public.claim_fx_auto_run(text, text) to service_role;
 revoke all on function public.record_fx_auto_rate(text, text, numeric, integer, text, jsonb, integer) from public, anon, authenticated;
 revoke all on function public.record_fx_auto_refusal(text, text, text, jsonb) from public, anon, authenticated;
 revoke all on function public.fx_effective_rate(text, text) from public, anon, authenticated;

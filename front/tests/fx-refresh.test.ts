@@ -1,8 +1,8 @@
 // Migration 0080, the automatic EUR rate: the worker and its routes.
-//   - lib/server/fx-refresh.ts asks the four public sources and the ECB
-//     (fixtures in tests/fixtures/fx/, fetch faked), rate-limits itself
-//     before any outside request, and records the rate or the refusal code
-//     through record_fx_auto_rate / record_fx_auto_refusal;
+//   - lib/server/fx-refresh.ts claims its slot (claim_fx_auto_run) before
+//     any outside request, asks the four public sources and the ECB
+//     (fixtures in tests/fixtures/fx/, fetch faked), and records the rate or
+//     the refusal code through record_fx_auto_rate / record_fx_auto_refusal;
 //   - POST /api/internal/fx needs the retry worker's credential;
 //   - POST /api/admin-config/fx-rates lists, per mint, the rate that counts
 //     with its origin, and writes the manual override flag.
@@ -69,7 +69,12 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
 type Args = Record<string, unknown>;
 let written: Args[];
 let refused: Args[];
+let claims: Args[];
 function installRpcs() {
+  db.ref!.rpcs.claim_fx_auto_run = (args) => {
+    claims.push(args);
+    return { claimed: true };
+  };
   db.ref!.rpcs.record_fx_auto_rate = (args) => {
     written.push(args);
     return { written: true, throttled: false, as_of: new Date(NOW).toISOString() };
@@ -88,6 +93,7 @@ beforeEach(() => {
   db.ref = memorySupabase();
   written = [];
   refused = [];
+  claims = [];
   overrides = {};
   fetched.length = 0;
   chain.decimalsReads = 0;
@@ -192,24 +198,44 @@ describe("runFxRefresh", () => {
     expect(result).toMatchObject({ status: "refused", code: "DECIMALS_UNAVAILABLE" });
   });
 
-  it("rate limit: a run within 20 seconds of the last observation asks nothing outside", async () => {
-    db.ref!.rows("fx_rate_observations").push({ network: "devnet", payment_mint: DEVNET_USDC, observed_at: new Date(NOW - 10_000).toISOString() });
-    expect(await run()).toEqual({ status: "skipped", network: "devnet", reason: "THROTTLED" });
+  it("rate limit: the run claims its slot first; an unclaimed run (another one within 20 seconds) asks nothing outside", async () => {
+    await run();
+    expect(claims).toEqual([{ p_network: "devnet", p_payment_mint: DEVNET_USDC }]);
+    fetched.length = 0;
+    db.ref!.rpcs.claim_fx_auto_run = () => ({ claimed: false });
+    expect(await run({ now: () => NOW + 60_000 })).toEqual({ status: "skipped", network: "devnet", reason: "THROTTLED" });
     expect(fetched).toEqual([]);
-    // The database's own window (a concurrent run won the lock): skipped too.
-    db.ref!.tables.fx_rate_observations = [];
+    expect(written).toHaveLength(1);
+  });
+
+  it("concurrent calls: only the one that claims asks the sources", async () => {
+    let slot = true;
+    db.ref!.rpcs.claim_fx_auto_run = () => {
+      const claimed = slot;
+      slot = false;
+      return { claimed };
+    };
+    const results = await Promise.all(Array.from({ length: 5 }, () => run()));
+    expect(results.filter((r) => r.status === "accepted")).toHaveLength(1);
+    expect(results.filter((r) => r.status === "skipped" && r.reason === "THROTTLED")).toHaveLength(4);
+    expect(fetched.filter((u) => u === FX_SOURCES[0].url)).toHaveLength(1);
+  });
+
+  it("a write the database throttled after all (its own window) is skipped, never reported as decided", async () => {
     db.ref!.rpcs.record_fx_auto_rate = () => ({ written: false, throttled: true });
     expect(await run()).toEqual({ status: "skipped", network: "devnet", reason: "THROTTLED" });
+    overrides[FX_SOURCES[0].url] = () => json({ error: [], result: { USDCEUR: { a: ["0.95"], b: ["0.949"] } } });
+    db.ref!.rpcs.record_fx_auto_refusal = () => ({ written: false, throttled: true });
+    expect(await run({ now: () => NOW + 60_000 })).toEqual({ status: "skipped", network: "devnet", reason: "THROTTLED" });
   });
 
   it("before 0080, or with the database down, the run fails without asking anyone", async () => {
-    db.ref!.failReads.add("fx_rate_observations");
-    db.ref!.readErrorCodes.fx_rate_observations = "PGRST205";
+    delete db.ref!.rpcs.claim_fx_auto_run;
     expect(await run()).toEqual({ status: "failed", network: "devnet", error: "NOT_INSTALLED" });
-    db.ref!.readErrorCodes.fx_rate_observations = "08006";
+    db.ref!.rpcs.claim_fx_auto_run = () => { throw new Error("connection refused"); };
     expect(await run()).toEqual({ status: "failed", network: "devnet", error: "DB_ERROR" });
     expect(fetched).toEqual([]);
-    db.ref!.failReads.clear();
+    installRpcs();
     delete db.ref!.rpcs.record_fx_auto_rate;
     expect(await run()).toEqual({ status: "failed", network: "devnet", error: "NOT_INSTALLED" });
   });
@@ -317,5 +343,30 @@ describe("POST /api/admin-config/fx-rates (0080)", () => {
     r = await call({ ...rate, override_auto: "yes" }, "adminConfig.fxRatesWrite");
     expect(r.status).toBe(400);
     expect(r.body.error).toMatch(/override_auto/);
+  });
+
+  it("a front ahead of 0080: what /admin/limits sends (override_auto false) is saved without the column; an override waits for 0080", async () => {
+    db.ref!.missingColumns.fx_rates = ["override_auto"];
+    db.ref!.failReads.add("fx_auto_rates");
+    db.ref!.readErrorCodes.fx_auto_rates = "42P01";
+    const rate = { op: "upsert", payment_mint: DEVNET_USDC, kind: "rate", eur_per_token: "0.95", source: "Bank quote", max_age_days: 7 };
+    let r = await call({ ...rate, override_auto: false }, "adminConfig.fxRatesWrite");
+    expect(r.status).toBe(200);
+    expect(db.ref!.rows("fx_rates")).toHaveLength(1);
+    expect(db.ref!.rows("fx_rates")[0]).toMatchObject({ payment_mint: DEVNET_USDC, eur_per_token: "0.95", source: "Bank quote" });
+    expect(db.ref!.rows("fx_rates")[0]).not.toHaveProperty("override_auto");
+    expect(r.body.data![0]).toMatchObject({ origin: "manual", eur_per_token: "0.95" });
+    db.ref!.tables.fx_rates = [];
+    r = await call({ ...rate, override_auto: true }, "adminConfig.fxRatesWrite");
+    expect(r.status).toBe(409);
+    expect(r.body.error).toMatch(/0080/);
+    expect(db.ref!.rows("fx_rates")).toHaveLength(0);
+    // A peg sends no override: saved as before.
+    r = await call({ ...rate, payment_mint: PLAIN, kind: "eur_peg", override_auto: false }, "adminConfig.fxRatesWrite");
+    expect(r.status).toBe(200);
+    // Any other write error is still a 500.
+    db.ref!.failWrites.add("fx_rates");
+    r = await call({ ...rate, override_auto: false }, "adminConfig.fxRatesWrite");
+    expect(r.status).toBe(500);
   });
 });

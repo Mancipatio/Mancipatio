@@ -25,6 +25,7 @@ const recordRefusal = (code: string, mint = USDC) =>
   json(`select public.record_fx_auto_refusal('devnet','${mint}','${code}','{"v":1}'::jsonb)`);
 /** Moves every observation back, so the 20-second rate limit lets the next run record. */
 const age = (interval = "1 minute") => sql(`update public.fx_rate_observations set observed_at = observed_at - interval '${interval}'`);
+const claim = (mint = USDC, network = "devnet") => json(`select public.claim_fx_auto_run('${network}','${mint}')`);
 const effective = (mint = USDC) => {
   const out = sql(`select to_jsonb(e) from public.fx_effective_rate('devnet','${mint}') e`);
   return out ? (JSON.parse(out) as Record<string, unknown>) : null;
@@ -55,7 +56,7 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0080 automatic EU
   afterAll(() => db.close());
   beforeEach(() => {
     sql(`truncate public.sale_capacity_reservations, public.fx_rates, public.fx_auto_rates, public.fx_rate_observations,
-        public.spv_issuances, public.spvs, public.spv_issuance_jobs, public.sale_capacity_holds cascade;
+        public.fx_auto_runs, public.spv_issuances, public.spvs, public.spv_issuance_jobs, public.sale_capacity_holds cascade;
       insert into public.spvs(id,network,name,annual_cap_eur) values ('${SPV}','devnet','SPV one',3000000);
       insert into public.fx_rates(network,payment_mint,kind,eur_per_token,decimals,source,as_of) values
         ('devnet','${EURC}','eur_peg',1,6,'EURC peg',now());`);
@@ -92,6 +93,29 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0080 automatic EU
     expect(sql(`select eur_per_token from public.fx_auto_rates`)).toBe("0.8889500000");
     // Another mint has its own window.
     expect(recordRate("0.9", b58("F"))).toMatchObject({ written: true });
+  });
+
+  it("claim_fx_auto_run: one claim per 20 seconds per mint, before any source is asked; an observation closes the window too", () => {
+    expect(claim()).toEqual({ claimed: true });
+    // A concurrent call (or a leaked secret hammering the route) gets no slot, even though nothing was recorded.
+    expect(claim()).toEqual({ claimed: false });
+    expect(sql(`select count(*) from public.fx_rate_observations`)).toBe("0");
+    // The run that claimed records normally: its own claim does not throttle its write.
+    expect(recordRate()).toMatchObject({ written: true });
+    // Another mint has its own slot.
+    expect(claim(b58("F"))).toEqual({ claimed: true });
+    // 20 seconds later (claim and observation aged): claimed again.
+    sql(`update public.fx_auto_runs set claimed_at = claimed_at - interval '21 seconds'`);
+    expect(claim()).toEqual({ claimed: false });
+    age("21 seconds");
+    expect(claim()).toEqual({ claimed: true });
+    // A run whose recording failed still held its slot: the window is the claim's.
+    sql(`truncate public.fx_rate_observations; update public.fx_auto_runs set claimed_at = now() - interval '10 seconds'`);
+    expect(claim()).toEqual({ claimed: false });
+    expect(() => claim("0x12")).toThrow(/INVALID_PAYMENT_MINT/);
+    expect(() => claim(USDC, "prod")).toThrow(/INVALID_NETWORK/);
+    // The 0071 guard: a devnet project never takes a mainnet claim.
+    expect(() => claim(USDC, "mainnet")).toThrow(/mainnet/);
   });
 
   it("refuses malformed input and keeps 30 days of observations", () => {
@@ -187,19 +211,22 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0080 automatic EU
 
   it("is invisible to browser roles; the service role runs the writers and the resolver, never the internal helper", () => {
     for (const role of ["anon", "authenticated"]) {
-      for (const table of ["fx_auto_rates", "fx_rate_observations"]) {
+      for (const table of ["fx_auto_rates", "fx_rate_observations", "fx_auto_runs"]) {
         expect(() => sql(`set role ${role}; select * from public.${table}`)).toThrow(/permission denied/);
       }
       expect(() => sql(`set role ${role}; select * from public.fx_effective_rate('devnet','${USDC}')`)).toThrow(/permission denied/);
       expect(() => sql(`set role ${role}; select public.record_fx_auto_refusal('devnet','${USDC}','TOO_FEW_SOURCES','{}'::jsonb)`))
         .toThrow(/permission denied/);
+      expect(() => sql(`set role ${role}; select public.claim_fx_auto_run('devnet','${USDC}')`)).toThrow(/permission denied/);
     }
     expect(sql(`set role service_role; select (public.record_fx_auto_refusal('devnet','${USDC}','TOO_FEW_SOURCES','{}'::jsonb))->>'written'`))
       .toBe("true");
     expect(sql(`set role service_role; select count(*) from public.fx_effective_rate('devnet','${EURC}')`)).toBe("1");
     expect(() => sql(`set role service_role; select public.fx_auto_may_record('devnet','${USDC}')`)).toThrow(/permission denied/);
+    expect(() => sql(`set role service_role; select public.fx_auto_lock('devnet','${USDC}')`)).toThrow(/permission denied/);
+    expect(sql(`set role service_role; select (public.claim_fx_auto_run('devnet','${b58("F")}'))->>'claimed'`)).toBe("true");
     expect(sql(`select count(*) from pg_trigger t join pg_class c on c.oid=t.tgrelid
-      where t.tgname='manci_network_guard' and c.relname in ('fx_auto_rates','fx_rate_observations')`)).toBe("2");
+      where t.tgname='manci_network_guard' and c.relname in ('fx_auto_rates','fx_rate_observations','fx_auto_runs')`)).toBe("3");
   });
 
   it("re-applies cleanly, also after a 0066/0073 rollback re-run", () => {

@@ -37,7 +37,7 @@ export const FX_ECB_MAX_AGE_DAYS = 6;
 export const FX_QUOTE_BOUNDS = { min: 0.2, max: 5 } as const;
 /** A book wider than this (ask / bid − 1) is not a usable quote. */
 export const FX_MAX_BOOK_SPREAD = 0.02;
-/** The database refuses a second observation within this window (rate limit, 0080). */
+/** The database refuses a second run (claim_fx_auto_run) or observation within this window (rate limit, 0080). */
 export const FX_MIN_INTERVAL_SECONDS = 20;
 /** Alarm (fx-jump): accepted rates moved more than this within FX_JUMP_WINDOW_MS. */
 export const FX_JUMP_THRESHOLD = 0.01;
