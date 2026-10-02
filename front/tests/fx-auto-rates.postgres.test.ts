@@ -261,11 +261,48 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0080 automatic EU
       where t.tgname='manci_network_guard' and c.relname in ('fx_auto_rates','fx_rate_observations','fx_auto_runs')`)).toBe("3");
   });
 
+  it("the worker's path AS service_role under its SELECT-only grants: claim, accepted rate (insert and upsert), retention delete", () => {
+    // Old observations the retention (30 days, inside fx_auto_may_record) removes on an accepted run.
+    sql(`insert into public.fx_rate_observations(network,payment_mint,observed_at,status,code) values
+      ('devnet','${USDC}',now()-interval '31 days','refused','TOO_FEW_SOURCES'),
+      ('devnet','${USDC}',now()-interval '40 days','refused','ECB_STALE'),
+      ('devnet','${USDC}',now()-interval '29 days','refused','TOO_FEW_SOURCES')`);
+    const asService = (query: string) => sql(`set role service_role; ${query}`);
+    const writeRate = (rate: string) =>
+      JSON.parse(asService(`select public.record_fx_auto_rate('devnet','${USDC}',${rate},6,'auto: median of kraken, coinbase',${QUOTES},900)`));
+    expect(sql(`select has_table_privilege('service_role','public.fx_auto_rates','INSERT')
+      or has_table_privilege('service_role','public.fx_rate_observations','DELETE')`)).toBe("f");
+    expect(JSON.parse(asService(`select public.claim_fx_auto_run('devnet','${USDC}')`))).toEqual({ claimed: true });
+    expect(writeRate("0.88895")).toMatchObject({ written: true, throttled: false });
+    expect(sql(`select eur_per_token||'|'||max_age from public.fx_auto_rates where payment_mint='${USDC}'`)).toBe("0.8889500000|00:15:00");
+    expect(sql(`select string_agg(status||':'||coalesce(code,'-'),',' order by observed_at) from public.fx_rate_observations`))
+      .toBe("refused:TOO_FEW_SOURCES,accepted:-");
+    // The next accepted run upserts the same row, still as service_role.
+    age();
+    expect(writeRate("0.8891")).toMatchObject({ written: true });
+    expect(sql(`select count(*)||'|'||max(eur_per_token) from public.fx_auto_rates`)).toBe("1|0.8891000000");
+    expect(asService(`select (public.record_fx_auto_refusal('devnet','${USDC}','ECB_DEVIATION','{"v":1}'::jsonb))->>'throttled'`)).toBe("true");
+    // Directly, the same role still cannot write.
+    expect(() => asService(`delete from public.fx_rate_observations`)).toThrow(/permission denied/);
+  });
+
   it("rollback: the manual-only resolver ignores the automatic rate everywhere; re-applying 0080 brings it back", () => {
+    const MANUAL_ONLY = readFileSync(join(process.cwd(), "scripts/ops/fx-manual-only.sql"), "utf8");
+    const resolver = () => sql(`select (obj_description('public.fx_effective_rate(text,text)'::regprocedure, 'pg_proc') like 'manci:fx-manual-only%')
+      || '|' || (p.prosrc ~ 'fx_auto_rates') from pg_proc p where p.oid = 'public.fx_effective_rate(text,text)'::regprocedure`);
+    expect(resolver()).toBe("false|true");
     manual("0.9");
     recordRate();
     expect(effective()).toMatchObject({ updated_by: "fx-auto" });
-    sql(readFileSync(join(process.cwd(), "scripts/ops/fx-manual-only.sql"), "utf8"));
+    // Only after the whole off switch: the network's automatic rows are gone.
+    expect(() => sql(MANUAL_ONLY)).toThrow(/still holds this network's automatic rates: run the whole off switch/);
+    sql("delete from public.fx_auto_rates where network = 'devnet'");
+    sql(MANUAL_ONLY);
+    // The marker and the body fx-scheduler.sql refuses to install over.
+    expect(resolver()).toBe("true|false");
+    // A late automatic write changes nothing any more.
+    age();
+    recordRate();
     expect(effective()).toMatchObject({ eur_per_token: 0.9, source: "ECB" });
     expect(reservation(reserve(1).id)).toMatchObject({ fx_rate: 0.9, fx_source: "ECB" });
     // Its grants are kept: the service role still resolves, the browser roles still cannot.
@@ -273,6 +310,8 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("0080 automatic EU
     expect(() => sql(`set role anon; select * from public.fx_effective_rate('devnet','${USDC}')`)).toThrow(/permission denied/);
     sql(readFileSync(join(MIGRATIONS_DIR, "0080_fx_auto_rates.sql"), "utf8"));
     expect(effective()).toMatchObject({ updated_by: "fx-auto" });
+    // 0080 restores its own resolver and comment: the scheduler may be installed again.
+    expect(resolver()).toBe("false|true");
   });
 
   it("re-applies cleanly, also after a 0066/0073 rollback re-run", () => {

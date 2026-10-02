@@ -3,8 +3,10 @@
 -- never costs the retry or alarm workers (lib/server/fx-refresh.ts). After
 -- migration 0080 and the retry scheduler; run through db.sh, which asserts
 -- the target:
---   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-scheduler.sql
--- (mainnet also needs MANCI_ALLOW_MAINNET=1).
+--   MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/fx-scheduler.sql
+--   MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f scripts/ops/fx-scheduler.sql
+-- It refuses while public.fx_effective_rate is the manual-only resolver of
+-- scripts/ops/fx-manual-only.sql: re-apply 0080 first.
 --
 -- The worker target, its Vault secret ('mancipatio_retry_worker_<network>')
 -- and the optional Vercel bypass secret are the retry scheduler's, exactly as
@@ -41,6 +43,18 @@ begin
      or to_regprocedure('public.record_fx_auto_rate(text,text,numeric,integer,text,jsonb,integer)') is null
      or to_regprocedure('public.claim_fx_auto_run(text,text)') is null then
     raise exception 'Apply migration 0080 before installing the fx scheduler';
+  end if;
+  -- Not over the manual-only resolver (scripts/ops/fx-manual-only.sql, the
+  -- optional rollback): with it the automatic rate would be written and
+  -- never count. Its comment carries a marker, and its body does not read
+  -- fx_auto_rates; re-applying 0080 restores both.
+  if to_regprocedure('public.fx_effective_rate(text,text)') is null then
+    raise exception 'Apply migration 0080 before installing the fx scheduler (public.fx_effective_rate is missing)';
+  end if;
+  if coalesce(pg_catalog.obj_description('public.fx_effective_rate(text,text)'::regprocedure, 'pg_proc'), '') like 'manci:fx-manual-only%'
+     or (select p.prosrc !~ 'fx_auto_rates' from pg_catalog.pg_proc p
+          where p.oid = 'public.fx_effective_rate(text,text)'::regprocedure) then
+    raise exception 'public.fx_effective_rate is the manual-only resolver (scripts/ops/fx-manual-only.sql): re-apply supabase/migrations/0080_fx_auto_rates.sql first, then install the fx scheduler';
   end if;
   if to_regprocedure('public.deployment_network()') is null then
     raise exception 'Apply migration 0070 and insert the deployment identity before installing the worker';

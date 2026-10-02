@@ -1,15 +1,20 @@
 -- Rollback of the automatic EUR rate (migration 0080), runbook §15
--- "Rollback": optional, AFTER the off switch (scripts/ops/fx-auto-off.sql).
--- Through db.sh (which asserts the target first):
---   MANCI_TARGET=<t> bash scripts/db.sh -f scripts/ops/fx-manual-only.sql
--- (mainnet also needs MANCI_ALLOW_MAINNET=1).
+-- "Rollback": optional, AFTER the whole off switch (scripts/ops/fx-auto-off.sql:
+-- the job disabled AND the network's fx_auto_rates rows deleted; this file
+-- refuses otherwise). Through db.sh (which asserts the target first):
+--   MANCI_TARGET=devnet bash scripts/db.sh -f scripts/ops/fx-manual-only.sql
+--   MANCI_TARGET=mainnet MANCI_ALLOW_MAINNET=1 bash scripts/db.sh -f scripts/ops/fx-manual-only.sql
 --
 -- public.fx_effective_rate then returns the manual fx_rates row only (the
 -- 0066 behaviour), whatever fx_auto_rates holds; the five ledger functions
 -- keep calling it. The tables, the override_auto column and the writers stay,
--- and the function keeps its grants (create or replace). A file, not
--- db.sh -c "...": the shell would expand the function's $$ body.
--- Undo: re-apply supabase/migrations/0080_fx_auto_rates.sql (re-runnable).
+-- and the function keeps its grants (create or replace). Its comment starts
+-- with the marker 'manci:fx-manual-only': fx-scheduler.sql refuses to install
+-- while it is there (it also checks the body). A file, not db.sh -c "...":
+-- the shell would expand the function's $$ body.
+-- Undo (back on): re-apply supabase/migrations/0080_fx_auto_rates.sql
+-- (re-runnable; it restores the resolver and its comment), then
+-- fx-scheduler.sql, invoke_fx_refresh(), fx-scheduler-status.sql, enable.
 
 begin;
 
@@ -26,6 +31,12 @@ begin
   if running then
     raise exception 'The fx job is still active: run scripts/ops/fx-auto-off.sql first';
   end if;
+  -- The whole off switch ran: no automatic row of this network is left.
+  if to_regclass('public.fx_auto_rates') is not null then
+    if exists (select 1 from public.fx_auto_rates where network = public.deployment_network()) then
+      raise exception 'public.fx_auto_rates still holds this network''s automatic rates: run the whole off switch (scripts/ops/fx-auto-off.sql) first';
+    end if;
+  end if;
 end;
 $$;
 
@@ -34,6 +45,6 @@ returns setof public.fx_rates language sql stable security definer set search_pa
   select * from public.fx_rates where network = p_network and payment_mint = p_payment_mint
 $$;
 comment on function public.fx_effective_rate(text, text) is
-  'Manual-only (rollback of 0080, scripts/ops/fx-manual-only.sql): the fx_rates row of the mint. Re-apply 0080 to bring the automatic rate back.';
+  'manci:fx-manual-only. Rollback of 0080 (scripts/ops/fx-manual-only.sql): the fx_rates row of the mint only. Re-apply 0080 to bring the automatic rate back.';
 
 commit;
