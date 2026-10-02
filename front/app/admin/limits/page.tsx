@@ -15,7 +15,7 @@ import {
   type ReservationRow,
 } from "@/lib/sale-approvals";
 import { detectNetwork } from "@/lib/network";
-import { fxRowFresh } from "@/lib/fx-effective";
+import { fxAutoFresh, fxRowFresh, gapToFreshAuto } from "@/lib/fx-effective";
 import {
   MAINNET_MAX_RATE_AGE_DAYS,
   NOT_ALLOWED_ON_MAINNET,
@@ -86,11 +86,11 @@ function FxRatesCard() {
   const notAllowed = mainnet && typedMint.length > 0 && !isAllowedPaymentMint(network, typedMint);
   const maxAgeTooLong = mainnet && kind === "rate" && Number(maxAge) > MAINNET_MAX_RATE_AGE_DAYS;
   // An override far from the automatic rate is worth a second look (not refused: a depeg is a reason to pin one).
-  const autoNow = rates?.find((r) => r.payment_mint === typedMint)?.auto ?? null;
-  const typedRate = Number(rate.trim());
-  const overrideGap = overrideAuto && kind === "rate" && autoNow && Number(autoNow.eur_per_token) > 0 && typedRate > 0
-    ? Math.abs(typedRate - Number(autoNow.eur_per_token)) / Number(autoNow.eur_per_token)
-    : null;
+  // Only a FRESH automatic rate is compared (lib/fx-effective.ts, judged when the list was read): a stale
+  // one counts for nothing, so an override cannot be "far" from it.
+  const autoRow = rates?.find((r) => r.payment_mint === typedMint)?.auto ?? null;
+  const autoNow = autoRow && fxAutoFresh(autoRow, readAt) ? autoRow : null;
+  const overrideGap = overrideAuto && kind === "rate" ? gapToFreshAuto(rate.trim(), autoNow, readAt) : null;
 
   useEffect(() => {
     if (!conn.wallet) return;

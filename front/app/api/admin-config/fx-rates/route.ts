@@ -17,19 +17,59 @@
 // (the fx_rates shape, so existing readers keep working) with `origin`
 // (auto | manual | manual_override), `fresh`, the `manual` and `auto` rows
 // behind it and the automatic job's last run (`auto_last`).
+//
+// Every manual write (upsert or delete) is audited on the server
+// (writeServerAudit: "fx_rate_update" / "fx_rate_delete", category
+// launchpad), with the kind, rate, max age and override flag, the manual row
+// it replaced, and the automatic rate that was fresh at the time with the
+// deviation from it. As for the other ledger writes
+// (sale-approvals/treasury-revalue, spvs/record-issuance) the row is written
+// first, so a failed audit insert is logged (console.error), never answered
+// as a failed write that would invite a second submit.
 
 import { NextResponse } from "next/server";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin, requireSuperAdmin } from "@/lib/server/admin-gate";
+import { actorSourceOf, writeServerAudit } from "@/lib/server/audit";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork, type Network } from "@/lib/network";
 import { addressParam } from "@/lib/server/sale-capacity";
 import { assertAllowedPaymentMint, paymentMintInfo } from "@/lib/server/payment-mint";
 import { MAINNET_MAX_RATE_AGE_DAYS, paymentMintLabel, requiredFxKind } from "@/lib/payment-mints";
 import { effectiveRates, FxReadError, readFxTables, undefinedColumn } from "@/lib/server/fx-rates";
+import { fxAutoFresh, gapToFreshAuto, type FxAutoRow, type FxManualRow } from "@/lib/fx-effective";
 
 const RATE_RE = /^(0|[1-9]\d{0,9})(\.\d{1,10})?$/;
+
+/** What the audit event records about the rows of one mint before a manual write; null when they could not be read. */
+type Before = { manual: FxManualRow | null; auto: FxAutoRow | null; readAt: number } | null;
+
+async function rowsBefore(sb: SupabaseClient, network: Network, mint: string): Promise<Before> {
+  try {
+    const tables = await readFxTables(sb, network, { mint });
+    return { manual: tables.manual[0] ?? null, auto: tables.auto[0] ?? null, readAt: Date.now() };
+  } catch {
+    return null;
+  }
+}
+
+/** The audit metadata about the rates around a manual write (public prices only). */
+function rateContext(before: Before, written: { rate: string | null }) {
+  if (!before) return { rows_read: false };
+  const freshAuto = before.auto && fxAutoFresh(before.auto, before.readAt) ? before.auto : null;
+  const gap = written.rate === null ? null : gapToFreshAuto(written.rate, freshAuto, before.readAt);
+  return {
+    rows_read: true,
+    previous: before.manual
+      ? { kind: before.manual.kind, eur_per_token: String(before.manual.eur_per_token), max_age: before.manual.max_age,
+          as_of: before.manual.as_of, override_auto: before.manual.override_auto === true }
+      : null,
+    // The automatic rate that counted at the time (fresh), and how far the manual rate is from it.
+    auto_fresh: freshAuto ? { eur_per_token: String(freshAuto.eur_per_token), as_of: freshAuto.as_of } : null,
+    auto_deviation_pct: gap === null ? null : Math.round(gap * 10_000) / 100,
+  };
+}
 
 type AutoLast = { observed_at: string; status: string; code: string | null };
 
@@ -71,15 +111,24 @@ export async function POST(request: Request) {
   try {
     const body = (await request.clone().json().catch(() => null)) as { payload?: { action?: unknown } } | null;
     const isWrite = body?.payload?.action === "adminConfig.fxRatesWrite";
-    const { wallet, params } = await verifySigned(request, isWrite ? "adminConfig.fxRatesWrite" : "adminConfig.fxRatesRead");
+    const { wallet, params, via } = await verifySigned(request, isWrite ? "adminConfig.fxRatesWrite" : "adminConfig.fxRatesRead");
     const sb = getSupabaseAdmin();
     const network = detectNetwork();
     if (isWrite) {
       await requireSuperAdmin(wallet);
       const mint = addressParam(params.payment_mint, "payment_mint");
+      /** The server audit row of a manual write that succeeded (best effort after it: logged, never a failed answer). */
+      const audit = (ixName: "fx_rate_update" | "fx_rate_delete", reason: string, metadata: Record<string, unknown>) =>
+        writeServerAudit(sb, {
+          ix_name: ixName, category: "launchpad", actor_wallet: wallet, actor_source: actorSourceOf(via),
+          reason, target_label: mint, metadata: { network, payment_mint: mint, ...metadata },
+        }).catch(() => console.error("[api/admin-config/fx-rates] audit row not written"));
       if (params.op === "delete") {
+        const before = await rowsBefore(sb, network, mint);
         const { error } = await sb.from("fx_rates").delete().eq("network", network).eq("payment_mint", mint);
         if (error) throw new SiwsError(500, "Could not delete the rate");
+        await audit("fx_rate_delete", `Manual EUR rate of ${paymentMintLabel(mint, network)} deleted`,
+          { op: "delete", ...rateContext(before, { rate: null }) });
       } else {
         const kind = params.kind;
         if (kind !== "eur_peg" && kind !== "rate") throw new SiwsError(400, "kind must be eur_peg or rate");
@@ -105,6 +154,7 @@ export async function POST(request: Request) {
           }
         }
         const { decimals } = await paymentMintInfo(mint, network);
+        const before = await rowsBefore(sb, network, mint);
         const now = new Date().toISOString();
         const row: Record<string, unknown> = {
           network, payment_mint: mint, kind, eur_per_token: rate, decimals, source,
@@ -122,6 +172,16 @@ export async function POST(request: Request) {
           ({ error } = await sb.from("fx_rates").upsert(row, { onConflict: "network,payment_mint" }));
         }
         if (error) throw new SiwsError(500, "Could not save the rate");
+        const label = paymentMintLabel(mint, network);
+        await audit("fx_rate_update",
+          kind === "eur_peg" ? `Manual EUR peg of ${label} saved`
+            : `Manual EUR rate of ${label} saved${overrideAuto ? " as an override of the automatic rate" : ""}: ${rate} EUR`,
+          {
+            op: "upsert", kind, eur_per_token: rate, decimals, source, max_age_days: maxAgeDays, override_auto: overrideAuto,
+            // false: a database before 0080 took the row without the column (no override possible there).
+            override_column_written: "override_auto" in row,
+            ...rateContext(before, { rate: kind === "rate" ? rate : null }),
+          });
       }
     } else {
       await requireAdmin(wallet);

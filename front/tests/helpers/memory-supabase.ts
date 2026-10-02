@@ -56,7 +56,12 @@ export function memorySupabase(): MemorySupabase {
       try {
         return { data: await handler(args), error: null };
       } catch (err) {
-        return { data: null, error: { message: err instanceof Error ? err.message : String(err) } };
+        // A thrown error with a `code` (e.g. 23514) answers like PostgREST: message and SQLSTATE.
+        const code = (err as { code?: unknown } | null)?.code;
+        return {
+          data: null,
+          error: { message: err instanceof Error ? err.message : String(err), ...(typeof code === "string" ? { code } : {}) },
+        };
       }
     };
     const promise = run();

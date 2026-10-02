@@ -29,6 +29,11 @@
 //      expires, then the manual rate applies). The recording has its own
 //      bound (FX_RECORD_TIMEOUT_MS) and is not cut by the run's budget, so a
 //      decision the database recorded is never answered as failed (503).
+//      Values a CHECK of 0080 refuses (23514: the 0.2–5 EUR bounds of the
+//      rate column, say) are not a database failure: the run is recorded as
+//      refused with INVALID_FX_RATE instead (within the same recording
+//      bound), or, if even that is refused, answered failed INVALID_FX_RATE
+//      (503; the code lands in fx_http_runs).
 // Only public prices, fixed codes and counts are stored or logged; the run
 // carries no secret (the sources need no key) and logs no URL or message.
 import "server-only";
@@ -69,15 +74,18 @@ type Fetch = (input: string, init?: RequestInit) => Promise<Response>;
 
 export type FxSourceOutcome = { rate: string } | { error: FxSourceError };
 
+/** A run's refusal: the aggregation's codes, or INVALID_FX_RATE when the database refused the values it was to record. */
+export type FxRunRefusalCode = FxRefusalCode | "INVALID_FX_RATE";
+
 export type FxRefreshResult =
   | {
       status: "accepted"; network: Network; paymentMint: string; rate: string; asOf: string | null;
       sources: Record<FxSourceId, FxSourceOutcome>; ecbDate: string; spreadBps: number; ecbDeviationBps: number;
       ecbToleranceBps: number;
     }
-  | { status: "refused"; network: Network; paymentMint: string; code: FxRefusalCode; sources: Record<FxSourceId, FxSourceOutcome> }
+  | { status: "refused"; network: Network; paymentMint: string; code: FxRunRefusalCode; sources: Record<FxSourceId, FxSourceOutcome> }
   | { status: "skipped"; network: Network; reason: "NO_AUTO_MINT" | "THROTTLED" }
-  | { status: "failed"; network: Network; error: "NOT_INSTALLED" | "DB_ERROR" | "UNEXPECTED" };
+  | { status: "failed"; network: Network; error: "NOT_INSTALLED" | "DB_ERROR" | "INVALID_FX_RATE" | "UNEXPECTED" };
 
 class SourceFailure extends Error {
   constructor(readonly code: FxSourceError) {
@@ -224,6 +232,15 @@ function notInstalled(error: { code?: string } | null): boolean {
   return tableMissing(error) || error?.code === "PGRST202";
 }
 
+/**
+ * The database refused the values, not the call: a CHECK constraint (23514,
+ * e.g. fx_auto_rates_eur_per_token_bounds) or the writer's own input check
+ * (P0001 INVALID_FX_RATE).
+ */
+function invalidValues(error: { code?: string; message?: string } | null): boolean {
+  return error?.code === "23514" || (error?.code === "P0001" && error.message === "INVALID_FX_RATE");
+}
+
 const chainDecimals = async (mint: string, network: Network) => (await paymentMintInfo(mint as Address, network)).decimals;
 
 export async function runFxRefresh(opts: {
@@ -285,21 +302,32 @@ export async function runFxRefresh(opts: {
     // the way.
     const dbSignal = AbortSignal.timeout(FX_RECORD_TIMEOUT_MS);
 
-    // 3. Record the rate or the refusal.
-    if (code !== null || !result.rate || !ecb || decimals === null) {
+    /** Records a refusal: refused; skipped when throttled; failed when the database cannot take it. */
+    const refuse = async (refusal: FxRunRefusalCode, quotes: Record<string, unknown>): Promise<FxRefreshResult> => {
       const { data, error } = await sb.rpc("record_fx_auto_refusal", {
-        p_network: network, p_payment_mint: mint, p_code: code ?? "TOO_FEW_SOURCES", p_quotes: evidence,
+        p_network: network, p_payment_mint: mint, p_code: refusal, p_quotes: quotes,
       }).abortSignal(dbSignal);
+      if (error && invalidValues(error)) {
+        // The refusal itself was refused: record that once, else say so.
+        if (refusal !== "INVALID_FX_RATE") return refuse("INVALID_FX_RATE", { ...quotes, refused_code: refusal });
+        console.error("[fx] the database refused the run's values (INVALID_FX_RATE) and the refusal could not be recorded");
+        return { status: "failed", network, error: "INVALID_FX_RATE" };
+      }
       if (error) return { status: "failed", network, error: notInstalled(error) ? "NOT_INSTALLED" : "DB_ERROR" };
       // Not recorded (a concurrent run recorded within the window): nothing was decided here.
       if ((data as { written?: unknown } | null)?.written === false) return { status: "skipped", network, reason: "THROTTLED" };
-      console.warn(`[fx] automatic rate refused: ${code}`);
-      return { status: "refused", network, paymentMint: mint, code: code ?? "TOO_FEW_SOURCES", sources };
-    }
+      console.warn(`[fx] automatic rate refused: ${refusal}`);
+      return { status: "refused", network, paymentMint: mint, code: refusal, sources };
+    };
+
+    // 3. Record the rate or the refusal.
+    if (code !== null || !result.rate || !ecb || decimals === null) return await refuse(code ?? "TOO_FEW_SOURCES", evidence);
     const { data, error } = await sb.rpc("record_fx_auto_rate", {
       p_network: network, p_payment_mint: mint, p_eur_per_token: result.rate, p_decimals: decimals,
       p_source: autoSourceText(result.used, ecb), p_quotes: evidence, p_max_age_seconds: FX_AUTO_MAX_AGE_SECONDS,
     }).abortSignal(dbSignal);
+    // A rate the database's CHECKs refuse (outside 0.2–5 EUR, say) is a refusal, recorded with the rate it refused.
+    if (error && invalidValues(error)) return await refuse("INVALID_FX_RATE", { ...evidence, refused_rate: result.rate });
     if (error) return { status: "failed", network, error: notInstalled(error) ? "NOT_INSTALLED" : "DB_ERROR" };
     const written = (data ?? {}) as { written?: boolean; as_of?: string };
     if (written.written === false) return { status: "skipped", network, reason: "THROTTLED" };

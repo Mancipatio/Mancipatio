@@ -13,7 +13,7 @@ import {
   FX_SOURCES, FxParseError, aggregateFx, autoFxMint, autoSourceText, bookMid, ecbAgeDays, ecbTolerance, median, parseEcbDailyXml,
   rateText, storedEcbReference, type FxQuote, type FxSourceId,
 } from "@/lib/fx-auto";
-import { fxRowFresh, resolveFxRate, resolveFxRates, type FxAutoRow, type FxManualRow } from "@/lib/fx-effective";
+import { fxAutoFresh, fxRowFresh, gapToFreshAuto, resolveFxRate, resolveFxRates, type FxAutoRow, type FxManualRow } from "@/lib/fx-effective";
 import { USDC } from "@/lib/payment-mints";
 
 const fixture = (name: string) => readFileSync(join(process.cwd(), "tests/fixtures/fx", name), "utf8");
@@ -260,6 +260,23 @@ describe("the rate that counts (lib/fx-effective.ts = SQL fx_effective_rate)", (
     expect(fxRowFresh({ kind: "other", as_of: ago(1), max_age: "7 days" }, NOW)).toBe(false);
     expect(fxRowFresh({ kind: "rate", as_of: "never", max_age: "7 days" }, NOW)).toBe(false);
     expect(fxRowFresh({ kind: "eur_peg", as_of: "never", max_age: "soon" }, NOW)).toBe(true);
+  });
+
+  it("the override gap (/admin/limits warning, manual-rate audit) is measured only against a FRESH automatic rate", () => {
+    // Fresh: the same rule as resolveFxRate (age within max_age).
+    expect(fxAutoFresh(auto(14 * 60), NOW)).toBe(true);
+    expect(fxAutoFresh(auto(16 * 60), NOW)).toBe(false);
+    expect(gapToFreshAuto("0.95", auto(60), NOW)).toBeCloseTo(0.95 / 0.889 - 1, 10);
+    expect(gapToFreshAuto(0.889, auto(60), NOW)).toBe(0);
+    // A stale automatic rate counts for nothing: no gap, so no warning.
+    expect(gapToFreshAuto("0.5", auto(16 * 60), NOW)).toBeNull();
+    expect(resolveFxRate(manual(60, { override_auto: true }), auto(16 * 60), NOW)?.origin).toBe("manual_override");
+    // Nothing to compare: no automatic row, an empty or non-positive rate, an unreadable automatic rate.
+    expect(gapToFreshAuto("0.95", null, NOW)).toBeNull();
+    expect(gapToFreshAuto("", auto(60), NOW)).toBeNull();
+    expect(gapToFreshAuto("-1", auto(60), NOW)).toBeNull();
+    expect(gapToFreshAuto("0.95", { ...auto(60), eur_per_token: "0" }, NOW)).toBeNull();
+    expect(gapToFreshAuto("0.95", { ...auto(60), max_age: "soon" }, NOW)).toBeNull();
   });
 
   it("per mint: a mint with only a manual row, one with only an automatic row, one with both", () => {

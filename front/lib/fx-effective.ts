@@ -71,6 +71,28 @@ export function autoAsManual(auto: FxAutoRow): FxManualRow {
   };
 }
 
+/** Whether an automatic row is within its max age at `now`: the rule resolveFxRate (and SQL fx_effective_rate) applies. */
+export function fxAutoFresh(auto: Pick<FxAutoRow, "as_of" | "max_age">, now: number): boolean {
+  return fxRowFresh({ kind: "rate", as_of: auto.as_of, max_age: auto.max_age }, now);
+}
+
+/**
+ * How far a manual rate is from the automatic one, |manual − auto| / auto,
+ * counted only against a FRESH automatic rate (fxAutoFresh): null when there
+ * is none (missing or stale), or either rate is not a positive number.
+ * /admin/limits warns on an override far from it; the manual-rate audit
+ * event records it.
+ */
+export function gapToFreshAuto(
+  manualRate: number | string, auto: Pick<FxAutoRow, "eur_per_token" | "as_of" | "max_age"> | null, now: number,
+): number | null {
+  if (!auto || !fxAutoFresh(auto, now)) return null;
+  const autoRate = Number(auto.eur_per_token);
+  const rate = Number(manualRate);
+  if (!Number.isFinite(autoRate) || autoRate <= 0 || !Number.isFinite(rate) || rate <= 0) return null;
+  return Math.abs(rate - autoRate) / autoRate;
+}
+
 export function resolveFxRate(manual: FxManualRow | null, auto: FxAutoRow | null, now: number): EffectiveFx | null {
   if (manual && manual.kind === "eur_peg") return { row: manual, origin: "manual", fresh: true };
   if (manual && manual.override_auto) return { row: manual, origin: "manual_override", fresh: fxRowFresh(manual, now) };

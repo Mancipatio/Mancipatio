@@ -284,6 +284,56 @@ describe("runFxRefresh", () => {
     expect(await run({ now: () => NOW + 60_000 })).toEqual({ status: "skipped", network: "devnet", reason: "THROTTLED" });
   });
 
+  it("values the database's CHECKs refuse (23514) are a refusal, INVALID_FX_RATE, recorded where possible; never DB_ERROR", async () => {
+    const violation = (code = "23514", message = 'new row for relation "fx_auto_rates" violates check constraint "fx_auto_rates_eur_per_token_bounds"') =>
+      Object.assign(new Error(message), { code });
+    db.ref!.rpcs.record_fx_auto_rate = (args) => {
+      written.push(args);
+      throw violation();
+    };
+    // The rate is refused by the database: recorded as a refusal with the rate it refused.
+    expect(await run()).toMatchObject({ status: "refused", network: "devnet", paymentMint: DEVNET_USDC, code: "INVALID_FX_RATE" });
+    expect(written).toHaveLength(1);
+    expect(refused).toEqual([expect.objectContaining({
+      p_network: "devnet", p_payment_mint: DEVNET_USDC, p_code: "INVALID_FX_RATE",
+      p_quotes: expect.objectContaining({ refused_rate: "0.88895", median: "0.88895", ecb_tolerance_bps: 250 }),
+    })]);
+    // The writer's own input check (P0001 INVALID_FX_RATE) means the same; another P0001 does not.
+    db.ref!.rpcs.record_fx_auto_rate = () => { throw violation("P0001", "INVALID_FX_RATE"); };
+    expect(await run({ now: () => NOW + 60_000 })).toMatchObject({ status: "refused", code: "INVALID_FX_RATE" });
+    db.ref!.rpcs.record_fx_auto_rate = () => { throw violation("P0001", "INVALID_NETWORK"); };
+    expect(await run({ now: () => NOW + 120_000 })).toEqual({ status: "failed", network: "devnet", error: "DB_ERROR" });
+
+    // The refusal refused too: answered failed INVALID_FX_RATE (503, the code in fx_http_runs), not DB_ERROR.
+    db.ref!.rpcs.record_fx_auto_rate = () => { throw violation(); };
+    db.ref!.rpcs.record_fx_auto_refusal = () => { throw violation("23514", "violates check constraint"); };
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    expect(await run({ now: () => NOW + 180_000 })).toEqual({ status: "failed", network: "devnet", error: "INVALID_FX_RATE" });
+    expect(error.mock.calls.flat().join(" ")).toContain("INVALID_FX_RATE");
+
+    // A refusal (here ECB_UNAVAILABLE) whose recording a CHECK refuses is recorded once more as INVALID_FX_RATE.
+    const codes: unknown[] = [];
+    db.ref!.rpcs.record_fx_auto_refusal = (args) => {
+      codes.push(args.p_code);
+      if (args.p_code !== "INVALID_FX_RATE") throw violation();
+      return { written: true, throttled: false };
+    };
+    overrides[ECB_DAILY_XML_URL] = () => new Response("", { status: 503 });
+    clearFxCaches();
+    expect(await run({ now: () => NOW + 240_000 })).toMatchObject({ status: "refused", code: "INVALID_FX_RATE" });
+    expect(codes).toEqual(["ECB_UNAVAILABLE", "INVALID_FX_RATE"]);
+
+    // Through the route: refused is a decision (200); the unrecordable case is a 503 naming the code.
+    vi.useFakeTimers({ toFake: ["Date"], now: NOW + 300_000 });
+    vi.stubGlobal("fetch", fakeFetch);
+    vi.stubEnv("RETRY_WORKER_SECRET", SECRET);
+    db.ref!.rpcs.record_fx_auto_refusal = () => { throw violation(); };
+    const res = await internalFx(new Request("https://manci.test/api/internal/fx", { method: "POST", headers: { authorization: `Bearer ${SECRET}` } }));
+    expect(res.status).toBe(503);
+    expect(await res.json()).toMatchObject({ ok: false, data: { status: "failed", error: "INVALID_FX_RATE" } });
+    vi.useRealTimers();
+  });
+
   it("before 0080, or with the database down, the run fails without asking anyone", async () => {
     delete db.ref!.rpcs.claim_fx_auto_run;
     expect(await run()).toEqual({ status: "failed", network: "devnet", error: "NOT_INSTALLED" });
@@ -398,6 +448,48 @@ describe("POST /api/admin-config/fx-rates (0080)", () => {
     r = await call({ ...rate, override_auto: "yes" }, "adminConfig.fxRatesWrite");
     expect(r.status).toBe(400);
     expect(r.body.error).toMatch(/override_auto/);
+  });
+
+  it("audits every manual write on the server: kind, rate, max age, override, the row it replaced, the fresh automatic rate and the gap", async () => {
+    const audits = () => db.ref!.rows("audit_events");
+    const autoRow = (msAgo: number) => ({ network: "devnet", payment_mint: DEVNET_USDC, eur_per_token: "0.88895", decimals: 6,
+      source: "auto: median of kraken, coinbase", quotes: {}, as_of: iso(msAgo), max_age: "00:15:00" });
+    db.ref!.tables.fx_auto_rates = [autoRow(60_000)];
+    const rate = { op: "upsert", payment_mint: DEVNET_USDC, kind: "rate", eur_per_token: "0.95", source: "Bank quote", max_age_days: 2 };
+    expect((await call({ ...rate, override_auto: true }, "adminConfig.fxRatesWrite")).status).toBe(200);
+    expect(audits()).toEqual([expect.objectContaining({
+      network: "devnet", ix_name: "fx_rate_update", category: "launchpad", actor_wallet: signer.wallet, target_label: DEVNET_USDC,
+      status: "success", reason: expect.stringMatching(/override of the automatic rate: 0\.95 EUR$/),
+      metadata: expect.objectContaining({
+        network: "devnet", payment_mint: DEVNET_USDC, op: "upsert", kind: "rate", eur_per_token: "0.95", decimals: 6, source: "Bank quote",
+        max_age_days: 2, override_auto: true, override_column_written: true, rows_read: true, previous: null,
+        auto_fresh: { eur_per_token: "0.88895", as_of: expect.any(String) }, auto_deviation_pct: 6.87,
+        actor_verified: true, actor_source: "siws-signature",
+      }),
+    })]);
+
+    // A stale automatic rate counts for nothing: no fresh rate, no gap. The replaced manual row is recorded.
+    db.ref!.tables.fx_auto_rates = [autoRow(20 * 60_000)];
+    expect((await call({ ...rate, eur_per_token: "0.9", override_auto: false }, "adminConfig.fxRatesWrite")).status).toBe(200);
+    expect(audits()[1].metadata).toMatchObject({ eur_per_token: "0.9", override_auto: false, auto_fresh: null, auto_deviation_pct: null,
+      previous: { kind: "rate", eur_per_token: "0.95", override_auto: true, max_age: "2 days" } });
+
+    // A delete is a manual write too.
+    expect((await call({ op: "delete", payment_mint: DEVNET_USDC }, "adminConfig.fxRatesWrite")).status).toBe(200);
+    expect(audits()[2]).toMatchObject({ ix_name: "fx_rate_delete", target_label: DEVNET_USDC,
+      metadata: { op: "delete", rows_read: true, previous: { eur_per_token: "0.95" } } });
+
+    // The rate row is written first: a failed audit insert is logged, not answered as a failed write (as treasury-revalue).
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    db.ref!.failWrites.add("audit_events");
+    expect((await call({ ...rate, override_auto: false }, "adminConfig.fxRatesWrite")).status).toBe(200);
+    expect(db.ref!.rows("fx_rates").some((r) => r.eur_per_token === "0.95")).toBe(true);
+    expect(error.mock.calls.flat().join(" ")).toContain("[api/admin-config/fx-rates] audit row not written");
+    // Read-only calls write no audit row.
+    db.ref!.failWrites.clear();
+    const count = audits().length;
+    expect((await call({})).status).toBe(200);
+    expect(audits()).toHaveLength(count);
   });
 
   it("a front ahead of 0080: what /admin/limits sends (override_auto false) is saved without the column; an override waits for 0080", async () => {
