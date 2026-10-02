@@ -219,10 +219,39 @@ describe("GET /api/health", () => {
       }
     });
 
+    it.each<[string, Reply, Reply, Reply, number, Record<string, unknown>]>([
+      ["a stale manual rate, nothing counts with it yet", fx(8), { data: [], error: null }, { data: null, error: null, count: 0 }, 200,
+        { status: "warn", reason: "stale_before_first_sale", kind: "rate", origin: "manual", ageSeconds: 8 * DAY }],
+      ["a stale automatic rate, nothing counts with it yet", { data: [], error: null },
+        { data: [{ eur_per_token: "0.889", decimals: 6, source: "auto", as_of: ago(20 * 60), max_age: "00:15:00" }], error: null },
+        { data: null, error: null, count: 0 }, 200, { status: "warn", reason: "stale_before_first_sale", origin: "auto" }],
+      ["a stale manual rate, a sale approval exists", fx(8), { data: [], error: null }, { data: null, error: null, count: 1 }, 503,
+        { status: "fail", reason: "stale" }],
+      ["a stale manual rate, the approvals cannot be read", fx(8), { data: [], error: null }, { data: null, error: { code: "x", message: "y" } },
+        503, { status: "fail", reason: "stale" }],
+    ])("mainnet: %s", async (_label, manual, auto, reservations, status, expected) => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
+      m.replies.fx_rates = manual;
+      m.replies.fx_auto_rates = auto;
+      m.replies.sale_capacity_reservations = reservations;
+      m.replies.sales = { data: null, error: null, count: 0 };
+      const result = await get();
+      expect(result.body.checks.paymentFx).toMatchObject(expected);
+      expect(result.status).toBe(status);
+    });
+
     it("devnet never asks whether a sale exists", async () => {
       m.replies.fx_rates = { data: null, error: null };
       const { body } = await get();
       expect(body.checks.paymentFx).toMatchObject({ status: "warn", reason: "missing" });
+      expect(m.calls.some((c) => c.table === "sales" || c.table === "sale_capacity_reservations")).toBe(false);
+    });
+
+    it("devnet: a stale rate warns stale, without asking whether a sale exists", async () => {
+      m.replies.fx_rates = fx(8);
+      const { body } = await get();
+      expect(body.checks.paymentFx).toMatchObject({ status: "warn", reason: "stale" });
       expect(m.calls.some((c) => c.table === "sales" || c.table === "sale_capacity_reservations")).toBe(false);
     });
 

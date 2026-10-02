@@ -512,6 +512,32 @@ export async function bootstrapOpenReport(sb: SupabaseClient, network: Network, 
 type Hold = { subject: string; ref: string; code: string; payment_mint: string | null; created_at: string };
 type FxRow = { payment_mint: string; kind: string; as_of: string; max_age: string; origin: FxOrigin };
 
+/**
+ * The payment mints IN USE (fx-stale, and fx-auto-stale's severity): named by
+ * a live sale approval (reserved or consumed), an open sale or a raise
+ * limit hold. `rows` are those three reads' payment_mint columns.
+ */
+function mintsInUse(rows: readonly { payment_mint: string | null }[]): Set<string> {
+  const inUse = new Set<string>();
+  for (const r of rows) if (r.payment_mint && BASE58.test(r.payment_mint)) inUse.add(r.payment_mint);
+  return inUse;
+}
+
+/** mintsInUse for one mint, from the same three reads; null when one could not be read. */
+async function mintInUse(sb: SupabaseClient, network: Network, mint: string, signal: AbortSignal): Promise<boolean | null> {
+  const [liveRes, openSalesRes, holdsRes] = await Promise.all([
+    sb.from("sale_capacity_reservations").select("payment_mint").eq("network", network).eq("kind", "sale")
+      .in("status", ["reserved", "consumed"]).eq("payment_mint", mint).limit(1).abortSignal(dbSignal(signal)),
+    sb.from("sales").select("payment_mint").eq("network", network).eq("status", 0).eq("payment_mint", mint).limit(1)
+      .abortSignal(dbSignal(signal)),
+    sb.from("sale_capacity_holds").select("payment_mint").eq("network", network).eq("payment_mint", mint).limit(1)
+      .abortSignal(dbSignal(signal)),
+  ]);
+  if (liveRes.error || openSalesRes.error || holdsRes.error) return null;
+  return mintsInUse([...(liveRes.data ?? []), ...(openSalesRes.data ?? []), ...(holdsRes.data ?? [])] as { payment_mint: string | null }[])
+    .has(mint);
+}
+
 /** fx-stale:<mint>, fx-missing:<mint> and capacity-holds; null when they could not be read. */
 async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report[] | null> {
   const [holdsRes, fxRes, autoRes, liveRes, openSalesRes, openIncidents] = await Promise.all([
@@ -533,15 +559,11 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
   const effective = resolveFxRates((fxRes.data ?? []) as FxManualRow[], autoRes.error ? [] : (autoRes.data ?? []) as FxAutoRow[], now);
   const rates = new Map<string, FxRow>([...effective].map(([mint, e]) =>
     [mint, { payment_mint: mint, kind: e.row.kind, as_of: e.row.as_of, max_age: e.row.max_age, origin: e.origin }]));
-  const inUse = new Set<string>();
-  for (const r of [...(liveRes.data ?? []), ...(openSalesRes.data ?? [])] as { payment_mint: string | null }[]) {
-    if (r.payment_mint && BASE58.test(r.payment_mint)) inUse.add(r.payment_mint);
-  }
+  const inUse = mintsInUse([...(liveRes.data ?? []), ...(openSalesRes.data ?? []), ...holds] as { payment_mint: string | null }[]);
   const revalue = new Set<string>();
   const missing = new Set<string>();
   for (const h of holds) {
     if (!h.payment_mint || !BASE58.test(h.payment_mint)) continue;
-    inUse.add(h.payment_mint);
     if (h.code === "FX_REVALUE") revalue.add(h.payment_mint);
     if (h.code === "ADOPTION_PENDING") missing.add(h.payment_mint);
   }
@@ -640,6 +662,8 @@ const FX_AUTO_SEVERITY: Record<FxAutoCheck, Severity> = {
 };
 /** The refusals that are a verdict on the market (the sources answered, the prices were refused). */
 const MARKET_REFUSALS: ReadonlySet<string> = new Set(["ECB_DEVIATION", "SOURCE_DIVERGENCE"]);
+/** The fx job evidently runs while its latest observation is younger than this (it runs every minute). */
+export const FX_JOB_RUNNING_MS = 5 * 60_000;
 
 /**
  * The market verdicts since the last accepted run (newest first): the codes
@@ -672,13 +696,18 @@ function answeredSources(quotes: unknown): Set<FxSourceId> {
 
 /**
  * The automatic EUR rate of the network's USDC (0080, lib/fx-auto.ts);
- * null when it could not be read. Nothing is reported while the fx scheduler
- * has never run (no automatic row and no observation in the last hour), and
- * nothing before 0080 (the tables do not exist); earlier incidents then pass.
- *   fx-auto-stale   the automatic rate is past its max age (15 min): the
- *                   worker stopped or every run is refused. Medium while a
- *                   fresh manual rate covers it (it counts meanwhile), high
- *                   when nothing fresh is left.
+ * null when it could not be read. Nothing is reported while there is no
+ * automatic row and the job is not evidently running (no observation in the
+ * last FX_JOB_RUNNING_MS): before its first run, or after the off switch
+ * (job disabled, the fx_auto_rates rows deleted), which so clears within
+ * about 5 minutes; and nothing before 0080 (the tables do not exist).
+ * Earlier incidents then pass.
+ *   fx-auto-stale   the automatic rate is past its max age (15 min), or
+ *                   missing while the job runs: the worker stopped or every
+ *                   run is refused. High only on mainnet, for a mint in use
+ *                   (mintsInUse, as fx-stale) and when no fresh manual rate
+ *                   covers it (approvals of an open sale refuse); otherwise
+ *                   medium on mainnet and low elsewhere (never emailed).
  *   fx-fallback     while the automatic rate counts: the manual rate behind
  *                   it, the one that takes over when the automatic rate
  *                   stops, is past its max age or within the FX expiry
@@ -691,9 +720,11 @@ function answeredSources(quotes: unknown): Set<FxSourceId> {
  *                   while the worker kept running (redundancy is reduced).
  *   fx-depeg        the newest FX_REFUSAL_STREAK market verdicts since the
  *                   last accepted run (marketRefusals) were all refusals and
- *                   at least one of them found the sources' median > 2 %
- *                   away from the ECB rate (a USDC depeg, or broken
- *                   sources); high. Fewer verdicts: hold.
+ *                   at least one of them found the sources' median further
+ *                   from the ECB reference than its tolerance (ecbTolerance:
+ *                   2.5 % growing with the fix's age, at most 5 %): a USDC
+ *                   depeg, a large EUR/USD move since the fix, or broken
+ *                   sources; high. Fewer verdicts: hold.
  *   fx-divergence   the same verdicts, all of them sources that disagree by
  *                   > 1 % (a broken source or a disorderly market); medium.
  *                   Mixed with an ECB deviation it holds: fx-depeg reports it.
@@ -738,7 +769,14 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
   const observations = ((obsRes.data ?? []) as FxObservation[])
     .filter((o) => Number.isFinite(Date.parse(o.observed_at)))
     .sort((a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at));
-  if (!auto && observations.length === 0) return passOpen(new Set());
+  const latest = observations[0] ?? null;
+  const running = latest !== null && now - Date.parse(latest.observed_at) < FX_JOB_RUNNING_MS;
+  // No automatic row: a job that never ran, or the off switch. Only a job
+  // that evidently runs (and has never been accepted) is watched.
+  if (!auto && !running) return passOpen(new Set());
+  // fx-auto-stale pages (high) only on mainnet, for a mint in use (not asked elsewhere).
+  const inUse = network === "mainnet" ? await mintInUse(sb, network, mint, signal) : undefined;
+  if (inUse === null) return null;
 
   const label = paymentMintLabel(mint, network);
   const reported = new Set<string>();
@@ -746,7 +784,6 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
     reports.push(r);
     reported.add(r.check);
   };
-  const latest = observations[0] ?? null;
   const lastCode = observations.find((o) => o.status === "refused")?.code ?? null;
 
   // fx-auto-stale
@@ -754,14 +791,15 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
   const fallback = manual !== null && (manual.kind === "eur_peg" || fxRowFresh(manual, now));
   const ageMinutes = auto ? Math.max(0, Math.floor((now - Date.parse(auto.as_of)) / 60_000)) : null;
   const why = latest?.status === "refused" ? ` (runs refused: ${latest.code})` : latest ? "" : " (the fx job has not run in the last hour)";
-  push({ check: `fx-auto-stale:${mint}`, state: autoFresh ? "pass" : "fail", severity: !autoFresh && !fallback ? "high" : "medium",
+  const staleSeverity: Severity = network !== "mainnet" ? "low" : !autoFresh && !fallback && inUse === true ? "high" : "medium";
+  push({ check: `fx-auto-stale:${mint}`, state: autoFresh ? "pass" : "fail", severity: staleSeverity,
     category: "fx", source: "fx:auto-stale",
     summary: autoFresh
       ? `The automatic EUR rate of ${label} is current`
       : `The automatic EUR rate of ${label} is ${ageMinutes === null ? "missing" : `${ageMinutes} minute(s) old`}${why}; ${
         fallback ? "the manual rate on /admin/limits counts meanwhile" : "no fresh manual rate covers it"}`,
     evidence: { payment_mint: mint, as_of: auto?.as_of ?? null, age_minutes: ageMinutes, last_refusal: lastCode,
-      latest_status: latest?.status ?? null, manual_fallback: fallback } });
+      latest_status: latest?.status ?? null, manual_fallback: fallback, in_use: inUse ?? null } });
 
   // fx-fallback: the manual rate behind a fresh automatic one.
   const fallbackCheck = `fx-fallback:${mint}`;
@@ -793,9 +831,8 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
   }
 
   // fx-source-down: only while the worker runs and has covered the window.
-  const recent = latest !== null && now - Date.parse(latest.observed_at) < 5 * 60_000;
   const covered = observations.length > 0 && now - Date.parse(observations[observations.length - 1].observed_at) >= FX_SOURCE_DOWN_MS;
-  if (recent && covered) {
+  if (running && covered) {
     const lastOk: Partial<Record<FxSourceId, string>> = {};
     for (const o of observations) {
       for (const id of answeredSources(o.quotes)) lastOk[id] ??= o.observed_at;
@@ -818,18 +855,24 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
   const full = newest.length >= FX_REFUSAL_STREAK;
   const deviated = newest.includes("ECB_DEVIATION");
   const diverged = newest.includes("SOURCE_DIVERGENCE");
-  // The newest market verdict's evidence since the last accepted run (another refusal carries no judged prices).
+  // Each check's evidence: its own newest verdict since the last accepted
+  // run, else the newest market verdict (another refusal carries no judged
+  // prices).
   const lastAccepted = observations.findIndex((o) => o.status !== "refused");
-  const verdictObs = observations.slice(0, lastAccepted === -1 ? observations.length : lastAccepted)
-    .find((o) => o.code !== null && MARKET_REFUSALS.has(o.code)) ?? latest;
-  const verdictQuotes = (verdictObs?.quotes ?? {}) as Record<string, unknown>;
+  const sinceAccepted = observations.slice(0, lastAccepted === -1 ? observations.length : lastAccepted);
+  const verdictObs = sinceAccepted.find((o) => o.code !== null && MARKET_REFUSALS.has(o.code)) ?? latest;
   const states: Record<"fx-depeg" | "fx-divergence", Report["state"]> = {
     "fx-depeg": deviated ? (full ? "fail" : "hold") : "pass",
     "fx-divergence": diverged ? (full && !deviated ? "fail" : "hold") : "pass",
   };
   for (const [check, code, seen] of [["fx-depeg", "ECB_DEVIATION", deviated], ["fx-divergence", "SOURCE_DIVERGENCE", diverged]] as const) {
+    const verdictQuotes = ((sinceAccepted.find((o) => o.code === code) ?? verdictObs)?.quotes ?? {}) as Record<string, unknown>;
+    const ecbDate = (verdictQuotes.ecb as { date?: unknown } | null | undefined)?.date;
+    const toleranceBps = verdictQuotes.ecb_tolerance_bps;
     const what = check === "fx-depeg"
-      ? `the ${label}/EUR market median is more than 2 % away from the ECB reference rate (USDC depeg or broken sources)`
+      ? `the ${label}/EUR market median deviates from the ECB reference of ${typeof ecbDate === "string" ? ecbDate : "the last fix"} `
+        + `by more than the tolerance${typeof toleranceBps === "number" ? ` (${(toleranceBps / 100).toFixed(2)} %)` : ""}`
+        + " — a USDC depeg, a large EUR/USD move since the fix, or broken sources"
       : `the ${label}/EUR sources disagree by more than 1 % (a broken source?)`;
     const times = newest.filter((c) => c === code).length;
     push({ check: `${check}:${mint}`, state: states[check],
@@ -839,7 +882,8 @@ export async function fxAutoReports(sb: SupabaseClient, network: Network, now: n
         : `The ${label}/EUR sources agree with each other and with the ECB`,
       evidence: { payment_mint: mint, refused_in_a_row: verdicts.length, recent_codes: newest, median: verdictQuotes.median ?? null,
         spread_bps: verdictQuotes.spread_bps ?? null, ecb: verdictQuotes.ecb ?? null,
-        ecb_deviation_bps: verdictQuotes.ecb_deviation_bps ?? null, sources: verdictQuotes.sources ?? null } });
+        ecb_deviation_bps: verdictQuotes.ecb_deviation_bps ?? null, ecb_tolerance_bps: verdictQuotes.ecb_tolerance_bps ?? null,
+        sources: verdictQuotes.sources ?? null } });
   }
 
   // fx-jump: the accepted rates of the last hour.

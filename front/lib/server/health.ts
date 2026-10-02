@@ -31,10 +31,11 @@
 //   paymentFx     the EUR rate of the network's default payment mint (USDC)
 //                 that sale approvals count the raise cap with (Talas 4.2
 //                 §3.6, D18). Mainnet: missing, unreadable or past its max
-//                 age → fail; at ≥ 80 % of its max age → warn. A missing row
-//                 before the first sale approval and the first sale only
-//                 warns (missing_before_first_sale): on launch day the super
-//                 admin seeds it after the bootstrap (Talas 8.2), and nothing
+//                 age → fail; at ≥ 80 % of its max age → warn. A missing or
+//                 stale rate before the first sale approval and the first
+//                 sale only warns (missing_before_first_sale,
+//                 stale_before_first_sale): on launch day the super admin
+//                 seeds it after the bootstrap (Talas 8.2), and nothing
 //                 counts with it until then; if that cannot be read, fail.
 //                 Other networks: the same conditions only warn. An eur_peg
 //                 row never goes stale; a network without a default mint is ok.
@@ -51,7 +52,8 @@
 //                                   fx scheduler runs) as before;
 //                   manual_override the Super Admin pinned the manual rate
 //                                   → warn (manual_override);
-//                 nothing fresh → stale; neither row → missing.
+//                 nothing fresh → stale; neither row → missing (on mainnet
+//                 before the first sale: the *_before_first_sale warnings).
 //   databaseNetwork  the database's public.deployment_network() (migration
 //                 0070) must serve this deployment: equal networks, or both
 //                 non-mainnet (a testnet front may use the devnet project,
@@ -92,7 +94,13 @@ export type IndexerCheck = Check & {
 export type RpcCheck = Check & { slot: number | null; latencyMs: number | null };
 export type QueueCheck = Check & { pending: number | null; oldestPendingAgeSeconds: number | null };
 export type MaintenanceCheck = Check & { enabled: boolean | null };
-export type PaymentFxCheck = Check & {
+/** Why paymentFx is not ok (the fixed codes the report may carry). */
+export type PaymentFxReason =
+  | FailureReason
+  | "missing" | "missing_before_first_sale" | "stale" | "stale_before_first_sale" | "invalid"
+  | "auto_stale" | "manual_override" | "expiring" | "fallback_missing" | "fallback_stale";
+export type PaymentFxCheck = Omit<Check, "reason"> & {
+  reason?: PaymentFxReason;
   kind: "rate" | "eur_peg" | null;
   ageSeconds: number | null;
   maxAgeSeconds: number | null;
@@ -310,7 +318,13 @@ async function checkPaymentFx(sb: SupabaseClient | null, network: Network, now: 
       return { status: bad, reason: "invalid", kind: null, ageSeconds: age, maxAgeSeconds: maxAge, origin, autoAgeSeconds };
     }
     const check = { kind: "rate" as const, ageSeconds: age, maxAgeSeconds: Math.round(maxAge), origin, autoAgeSeconds };
-    if (age >= maxAge) return { status: bad, reason: "stale", ...check };
+    if (age >= maxAge) {
+      // As a missing one: nothing counted with it yet, so nothing is affected.
+      if (bad === "fail" && (await rateNotYetUsed(sb, network))) {
+        return { status: "warn", reason: "stale_before_first_sale", ...check };
+      }
+      return { status: bad, reason: "stale", ...check };
+    }
     // The automatic rate exists but is stale: the manual fallback counts.
     if (origin === "manual" && auto) return { status: "warn", reason: "auto_stale", ...check };
     if (origin === "manual_override") return { status: "warn", reason: "manual_override", ...check };
