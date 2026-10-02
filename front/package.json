@@ -19,6 +19,7 @@
     "chain:e2e": "vitest run --config scripts/chain/e2e.config.ts --reporter=verbose",
     "chain:handover": "vitest run --config scripts/chain/handover.config.ts --reporter=verbose",
     "chain:emergency": "vitest run --config scripts/chain/emergency.config.ts --reporter=verbose",
+    "chain:accept": "vitest run --config scripts/chain/accept.config.ts --reporter=verbose",
     "sim": "vitest run --config scripts/sim/sim.config.ts --reporter=verbose",
     "ops:reconcile-bench": "vitest run --config scripts/ops/reconcile-bench.config.ts --reporter=verbose"
   },

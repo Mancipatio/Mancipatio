@@ -64,7 +64,10 @@ export class ChainRpcError extends Error {
   }
 }
 
-export type ChainTool = "bootstrap" | "idl" | "inventory" | "squads-export" | "e2e" | "handover" | "emergency";
+export type ChainTool = "bootstrap" | "idl" | "inventory" | "squads-export" | "e2e" | "handover" | "emergency" | "accept";
+
+/** The tools that sign with a role key itself (a Ledger via CHAIN_SIGNER, or its keypair file). */
+export const ROLE_KEY_TOOLS: readonly ChainTool[] = ["emergency", "accept"];
 
 /** The text a runner may print or store for `error`. */
 export function publicErrorMessage(
@@ -154,6 +157,7 @@ export const DEFAULT_DEADLINE_MIN: Record<ChainTool, number> = {
   e2e: 230,
   handover: 20,
   emergency: 15,
+  accept: 15,
 };
 /** The runner's own vitest timeout is 4 h; the internal deadline stays below it. */
 export const MAX_DEADLINE_MIN = 230;
@@ -184,7 +188,7 @@ export type ChainConfig = {
   releaseDir: string | null;
   send: boolean;
   keypairPath: string | null;
-  /** chain:emergency only: a Ledger signer URL (`usb://ledger?key=N`) instead of CHAIN_KEYPAIR. */
+  /** chain:emergency and chain:accept only: a Ledger signer URL (`usb://ledger?key=N`) instead of CHAIN_KEYPAIR. */
   signerUrl: string | null;
   confirmPlan: string | null;
   cuPrice: bigint | null;
@@ -321,13 +325,14 @@ export function readChainConfig(
   assertOutputPath(output, root, "CHAIN_OUTPUT");
 
   const roleMapPath = nonEmpty(env, "CHAIN_ROLE_MAP");
-  if ((tool === "bootstrap" || tool === "squads-export" || tool === "handover") && !roleMapPath) {
+  if ((tool === "bootstrap" || tool === "squads-export" || tool === "handover" || tool === "accept") && !roleMapPath) {
     throw new ChainGateError(`CHAIN_ROLE_MAP is required for ${tool}`);
   }
   const releaseDir = nonEmpty(env, "CHAIN_RELEASE_DIR");
-  // The read-only tools, and the out-of-band emergency tool (it checks the
-  // live canonical IDL of the instruction it sends instead), need no Release.
-  const releaseOptional = tool === "inventory" || tool === "handover" || tool === "emergency";
+  // The read-only tools, and the role-key tools (emergency, accept: they
+  // check the live canonical IDL of the instruction they send instead), need
+  // no Release.
+  const releaseOptional = tool === "inventory" || tool === "handover" || ROLE_KEY_TOOLS.includes(tool);
   if (network === "mainnet" && !releaseOptional && !releaseDir) {
     throw new ChainGateError(`CHAIN_RELEASE_DIR is required for a mainnet ${tool} run`);
   }
@@ -342,11 +347,11 @@ export function readChainConfig(
   const signerUrl = nonEmpty(env, "CHAIN_SIGNER");
   const confirmPlan = nonEmpty(env, "CHAIN_CONFIRM_PLAN");
   if (signerUrl !== null) {
-    if (tool !== "emergency") throw new ChainGateError("CHAIN_SIGNER (a Ledger) is read by chain:emergency only");
+    if (!ROLE_KEY_TOOLS.includes(tool)) throw new ChainGateError("CHAIN_SIGNER (a Ledger) is read by chain:emergency and chain:accept only");
     ledgerDerivationPath(signerUrl);
     if (keypairPath) throw new ChainGateError("Set one signer: CHAIN_KEYPAIR or CHAIN_SIGNER, not both");
   }
-  if (tool === "emergency") {
+  if (ROLE_KEY_TOOLS.includes(tool)) {
     if (send && ((!keypairPath && !signerUrl) || !confirmPlan)) {
       throw new ChainGateError("Send mode needs CHAIN_SEND=1, CHAIN_CONFIRM_PLAN and one signer: CHAIN_KEYPAIR or CHAIN_SIGNER");
     }

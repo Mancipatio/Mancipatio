@@ -57,7 +57,7 @@ export type ToolDeps = {
   signalHandlers?: boolean;
   /** Pre-aborted or externally controlled signal (tests). */
   signal?: AbortSignal;
-  /** chain:emergency with CHAIN_SIGNER: opens the Ledger (tests inject a device). */
+  /** chain:emergency / chain:accept with CHAIN_SIGNER: opens the Ledger (tests inject a device). */
   ledger?: LedgerOpener;
   /** The mainnet source guard's `git status` (tests inject the tree state). */
   sourceDirty?: (root: string) => string[];

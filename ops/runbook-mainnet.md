@@ -25,6 +25,7 @@ The tools live in `front/scripts/chain/` and run from `front/`:
 | `npm run chain:squads-export` | Unsigned vault transactions for the Squads Transaction Builder (also the upgrade authority's veto and recoveries, and the incident build, §11) | never |
 | `npm run chain:handover` | Ordered plan to move live roles to new keys, with each step's timelock (§19) | never |
 | `npm run chain:emergency` | Out-of-band pause, unpause, blocklist, hook mode and an issuer proceeds freeze with a Ledger or a keypair, no front and no database (§11) | only with `CHAIN_SEND=1` |
+| `npm run chain:accept` | The bootstrap steps a role key signs itself (A3, X3, X2, X1, S5c, S6) with that key's Ledger or keypair, no front, no SIWS (§5) | only with `CHAIN_SEND=1` |
 
 Every run writes one evidence file (`CHAIN_OUTPUT`, schema
 `mancipatio-chain-<tool>-v1`) even when it fails or is interrupted. Its
@@ -40,13 +41,13 @@ writes `<CHAIN_OUTPUT>.journal.jsonl`.
 | `CHAIN_RPC_URL` | https only (localnet may use http on a loopback host), no `user:pass@`. Never printed; evidence keeps the hostname only. Use the dedicated RPC. |
 | `CHAIN_GENESIS_HASH` | Required on localnet (`solana genesis-hash`). Elsewhere, if set, it must equal the cluster's hash. |
 | `CHAIN_OUTPUT` | Required. Must not exist. Inside the repository it must be git-ignored (for example `docs/…`); outside the repository anything goes. |
-| `CHAIN_ROLE_MAP` | Required for bootstrap and squads-export, and for IDL send/prepare-export. Its sha256 goes into the plan digest. For handover it is the target (a handover target or a role map, §19). |
+| `CHAIN_ROLE_MAP` | Required for bootstrap, accept and squads-export, and for IDL send/prepare-export. Its sha256 goes into the plan digest. For handover it is the target (a handover target or a role map, §19). |
 | `CHAIN_RELEASE_DIR` | Required on mainnet for bootstrap, idl and squads-export. `SHA256SUMS` is verified first. |
 | `CHAIN_SEND=1`, `CHAIN_KEYPAIR`, `CHAIN_CONFIRM_PLAN` | Send mode needs all three. Without `CHAIN_SEND` every tool is a dry run. |
-| `CHAIN_SIGNER` | chain:emergency only, instead of `CHAIN_KEYPAIR`: `usb://ledger`, `usb://ledger?key=<n>` or `usb://ledger?key=<n>/<m>` (the Solana CLI's derivation paths). |
+| `CHAIN_SIGNER` | chain:emergency and chain:accept only, instead of `CHAIN_KEYPAIR`: `usb://ledger`, `usb://ledger?key=<n>` or `usb://ledger?key=<n>/<m>` (the Solana CLI's derivation paths). |
 | `CHAIN_CU_PRICE` | Micro-lamports per CU. Required when sending on mainnet; at most 2,000,000. |
 | `CHAIN_RPS` | Requests per second, default 2, at most 20. On the public devnet RPC use `1`: its `getProgramAccounts` limit fails an inventory at 2 (observed 2026-09-24). |
-| `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10. |
+| `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10, emergency 15, accept 15. |
 | `CHAIN_REHEARSAL_SIGNERS` | localnet/devnet only: `superAdmin=<file>,blocklistAuthority=<file>,kycAuthority=<file>`, so the CLI signs X1/X2/X3/S6 in a rehearsal. |
 | `CHAIN_RECOVER=1` | Resolves a leftover lock (see "Crash recovery"). Sends nothing. |
 | `CHAIN_STATE_DIR` | Lock directory; default `~/.mancipatio/chain`. Refused on mainnet unless it is the default (the lock only excludes runs that share its directory). |
@@ -61,7 +62,9 @@ mainnet only); `CHAIN_SITE_ORIGIN` (handover, wording only);
 `CHAIN_EMERGENCY_OP`, `CHAIN_EMERGENCY_SIGNER`, `CHAIN_PAUSE_BITS`,
 `CHAIN_WALLET`, `CHAIN_CONFIRM_WALLET`, `CHAIN_MINT`, `CHAIN_HOOK_MODE`,
 `CHAIN_KYC_REGISTRY`, `CHAIN_ISSUER`, `CHAIN_FREEZE_REASON_SHA256`,
-`CHAIN_EMERGENCY_IDL_UNCHECKED=1` (emergency, §11).
+`CHAIN_EMERGENCY_IDL_UNCHECKED=1`, `CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1`
+(emergency, §11); `CHAIN_ACCEPT_OP`,
+`CHAIN_ACCEPT_SIGNER` (accept, §5).
 
 The runners never read `.env*` files. Export the variables in the shell, for
 example from a small `set -a; . ~/mancipatio-mainnet/chain.env; set +a` file
@@ -92,12 +95,17 @@ that lives outside the repository and holds no keypair bytes.
   Release `.so` must equal the live ProgramData before a bootstrap or IDL
   send. In practice every mainnet `chain:idl`, `chain:bootstrap` and
   `chain:squads-export` run happens in a clean checkout of the tag whose
-  Release is `CHAIN_RELEASE_DIR`.
+  Release is `CHAIN_RELEASE_DIR`. `chain:accept` is not in v1.0.0-rc.1: it
+  runs from its own clean checkout of the reviewed commit that has it, whose
+  `program`, `front/idl` and `front/lib` equal the live tag (§5, "Which
+  checkout").
 - Hot keys: the deployer (bootstrap, IDL before handover) and the
   bufferWriter (buffers after handover). The deployment tools refuse any
-  other key, and never load a Ledger key on mainnet. The one exception is
-  chain:emergency (§11): it signs with the role key itself (a Ledger or that
-  key's file), after checking on-chain that the key holds the role.
+  other key, and never load a Ledger key on mainnet. The two exceptions
+  sign with the role key itself (a Ledger or that key's file):
+  chain:emergency (§11), after checking on-chain that the key holds the
+  role, and chain:accept (§5), after checking that the key is the role
+  map's key for the step and that the chain holds a live proposal to it.
 
 ## 0. Preflight
 
@@ -252,6 +260,14 @@ these; the owner signs them off in the launch-day record (§0A, D0).
       never deployed outside an incident.
 - [ ] **Dedicated RPC** and `CHAIN_CU_PRICE` decided (check recent
       prioritization fees).
+- [ ] **`chain:accept` checkout**, when a role key is a Ledger used through
+      Phantom, Solflare or Jupiter (§5, "Which checkout"): a second clean
+      checkout, next to the Release tag's, of the reviewed commit that has
+      `chain:accept`; `git diff --quiet v1.0.0-rc.1 HEAD -- program front/idl
+      front/lib` exits 0 there; `npm ci` in its `front/` and the Ledger
+      packages installed in that checkout
+      (`cd front/scripts/chain/ledger && npm ci --ignore-scripts`; an install
+      in the tag's checkout does not count).
 - [ ] **Operator CLI ≥ 4.0 for an SBPF v3 Release** (v0.0.0-rc.2 on; its
       hashes.txt says `arch: v3`): `solana --version` prints
       `solana-cli 4.2.x` (the train of the verifiable-build image) on the
@@ -284,10 +300,26 @@ these; the owner signs them off in the launch-day record (§0A, D0).
     maintenance, keeps the public out);
   - fallback if Vercel is unavailable: a local `next dev` on the operator
     machine with the same settings;
-  - each operator key (the SA, BA and KYC Ledgers, or the company wallet,
-    and the break-glass successor of §11) connects once, signs SIWS and the
-    ToS (the `/issuer/*` TosGate) and becomes primary of its own account;
-    none may already be a secondary wallet of another account;
+  - each operator key whose wallet can sign an off-chain message (the SA,
+    BA and KYC keys, or the company wallet, and the break-glass successor of
+    §11) connects once, signs SIWS and the ToS (the `/issuer/*` TosGate) and
+    becomes primary of its own account; none may already be a secondary
+    wallet of another account;
+  - a Ledger used through Phantom, Solflare or Jupiter cannot sign SIWS (an
+    off-chain message), so it skips the item above: its bootstrap steps go
+    through `chain:accept` (§5) and its incident steps through
+    `chain:emergency` (§11), and neither needs an account on the front;
+  - **known limitation, to resolve before D10** (the bootstrap, D9, is not
+    blocked): after the bootstrap such a key still cannot use the operator
+    front, because the front asks for SIWS before every transaction
+    (`front/lib/transaction-wallet-policy.ts`). With the company model that
+    key is the SA, the KYC authority and the BA at once, so D10 (the SA on
+    `/admin/limits` and `/admin/platform`), KYC passports (`/admin/kyc`), the
+    other `/admin/*` work and every rotation (§11) wait until the front signs
+    with the Ledger directly (open PR #49, "Ledger (USB) wallet", not merged
+    on 2026-10-02) or the role moves to a key that can sign SIWS (a handover,
+    §19). The same holds for a break-glass successor that is such a Ledger.
+    The owner decides which path, and records it in the launch-day record;
   - fund the keys per the §1 operational budget, each address taken from
     the role map or its device, never from a transaction history (§1,
     "Addresses");
@@ -338,8 +370,8 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D5 | Retry scheduler installed and enabled; edge function, Helius webhook with all four addresses, signed test delivery 202; `HEALTH_TOKEN`; external monitor on `/api/health/alarms` with the bypass header | operator | §14 steps 7, 9, 10 |
 | D6 | Alarm scheduler installed, proven (a `high` test alert delivered by email AND by the webhook, §15 Mainnet project step 2) and enabled; `/api/health/alarms` 200 through the bypass. **The §15 gate holds**. Then the deployment smoke (§14 step 11) through the bypass: `MANCIPATIO_VERCEL_BYPASS_FILE=<file with the line VERCEL_AUTOMATION_BYPASS_SECRET=…>` (a file, never the value on a command line) | operator | §15 Mainnet project, §14 step 11 |
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
-| D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, operator keys onboarded on the protected site | owner + operator | §0 |
-| D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps on the protected site → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
+| D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, the operator keys that can sign SIWS onboarded on the protected site, the `chain:accept` checkout for a Ledger that cannot | owner + operator | §0 |
+| D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps (on the protected site, or `chain:accept` for a Ledger that cannot sign SIWS) → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
 | D10 | Super admin on `/admin/limits`: the USDC EUR rate (kind `rate`, max age ≤ 7 days) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
 | D11 | **Talas 7 go-live**: Deployment Protection back to *Standard Protection* (production domains public), delete the Vault secret `mancipatio_vercel_bypass_mainnet` and the bypass secret in Vercel (or rotate it), monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
@@ -672,12 +704,20 @@ CHAIN_OUTPUT=$E/04b-bootstrap-send.json CHAIN_SEND=1 CHAIN_KEYPAIR="$K/deployer.
 ```
 
 It ends with `status: awaiting` and the Ledger actions. The Platform is 0xFF
-(fully paused, bootstrap window open).
+(fully paused, bootstrap window open). When `chain:bootstrap` runs from a
+checkout that has `chain:accept` (§5, "Which checkout"), it follows each
+ACTION REQUIRED line of a step a role key signs itself (A3, X3, X2, X1, S5c,
+S6) with its `chain:accept` command (§5, the CLI path for a Ledger). From the
+v1.0.0-rc.1 tag's checkout it does not (that code predates the tool): take
+the command from the §5 table.
 
-## 5. Ledger steps (operator front)
+## 5. Ledger steps (operator front, or `chain:accept` on the CLI)
 
-The plan's ACTION REQUIRED lines name the same pages (a test checks that
-each page exists and performs its action). In this order:
+A Ledger used through Phantom or Solflare cannot sign SIWS, so it cannot use
+these pages at all: it takes the same steps on the CLI with `chain:accept`
+(end of this section). The plan's ACTION REQUIRED lines name the same pages
+(a test checks that each page exists and performs its action). In this
+order:
 
 - **A3** (each `admins[]` key): the Admin's own Ledger takes the role on
   `/account/roles` → Waiting for your acceptance → Admin (`add_admin` is
@@ -718,6 +758,95 @@ each page exists and performs its action). In this order:
 SA's; no grant for the SA is ever needed. With the company wallet model (§19)
 one wallet does X3, X2, X1, S5c and S6, in that order (its Admin record comes
 from X1; `admins[]` holds the second Admin, whose Ledger does A3).
+
+### CLI path: `chain:accept` (a Ledger behind Phantom or Solflare)
+
+**Why.** The operator front asks a wallet for a SIWS message signature
+before it lets it send any transaction (`front/lib/transaction-wallet-policy.ts`),
+and a Ledger used through Phantom, Solflare or Jupiter cannot sign an
+off-chain message (Ledger support: "Unable to sign off-chain messages with
+Ledger Solana wallet created in third-party wallets"; supabase/auth#2277;
+the published `@solana/wallet-adapter-ledger` 0.9.30 has no `signMessage`).
+The Ledger Solana app does sign transactions (blind signing for our
+programs), so `chain:accept` signs each of these steps on the device
+directly, with the pinned Ledger packages, the device setup and the hash
+check of `chain:emergency` (§11: "Setup, once per operator machine" and
+"Compare the hash before approving").
+
+Every run reads the role map and the chain at finalized and refuses before
+any signature: a `CHAIN_ACCEPT_SIGNER` that is not the role map's key for
+the step; a missing, foreign, stale or expired proposal (`chain:bootstrap`
+then proposes it again); a step out of order (A3 before X1, X1 before S5c,
+every role step and S5c before S6, as the bootstrap plan orders them; S5c
+and S6 before the Platform exists); a step already done is `completed` with
+nothing to do. The dry run simulates,
+prints the step's `requires` lines and the plan digest (the role map's
+sha256 is in it); the send needs that digest and re-checks the `requires`
+lines at finalized right before the device signs. On mainnet the checkout
+must be clean and the live canonical IDL must define the instruction exactly
+as `front/idl` does (no overrides, unlike `chain:emergency`), and
+`CHAIN_CU_PRICE` is required. The role key pays the fee; A3 and X1 also pay
+an Admin record (73 B plus the 128 B overhead: 1,021,080 lamports, about
+0.00102 SOL, at mainnet's 5,080 lamports/B, §1). The tool reads the rent at
+run time (`getMinimumBalanceForRentExemption`) and refuses an underfunded
+key with the amount; a localnet rehearsal, still at 6,960 lamports/B (§1),
+asks 1,398,960 for the record and 1,403,960 with the fee.
+
+**Which checkout.** The live Release tag v1.0.0-rc.1 predates `chain:accept`:
+its `front/package.json` has no such script (`npm run chain:accept` there
+fails with "Missing script"), and its `chain:bootstrap` prints no
+`chain:accept` lines. Run the tool from a second clean checkout (for example
+`~/mancipatio-mainnet/checkout-accept`, next to the tag's) of the reviewed
+commit that has it: the commit that merged it to main, or a later reviewed
+commit or ops tag for which the check below still holds. There:
+
+```sh
+git diff --quiet v1.0.0-rc.1 HEAD -- program front/idl front/lib && echo "same as the live tag"
+git rev-parse HEAD                                  # the commit the evidence records (headCommit)
+(cd front && npm ci)                                # the runner's own dependencies, as in the tag's checkout
+(cd front/scripts/chain/ledger && npm ci --ignore-scripts)   # the Ledger packages (§11), in THIS checkout
+```
+
+The diff must be empty: the program, the IDL and the instruction builders
+are then exactly the live Release's, and only the tooling differs. The
+mainnet guards hold as for any sending tool (a clean `front/idl`,
+`front/lib`, `front/scripts/chain` and package files; the live canonical IDL
+of the instruction), but they cannot tell which commit this is: the tool
+prints `source    commit <HEAD>` and the evidence keeps it, so compare it
+with the reviewed commit before the send. A Ledger install in the tag's
+checkout does not count for this one.
+
+```sh
+cd front     # the chain:accept checkout above (clean, Ledger packages installed)
+export CHAIN_NETWORK=mainnet CHAIN_ALLOW_MAINNET=1 CHAIN_RPC_URL="$MAINNET_RPC" \
+  CHAIN_ROLE_MAP=~/mancipatio-mainnet/role-map.json CHAIN_CU_PRICE="$CU_PRICE"
+# 1. dry run: role key, order, window, IDL, simulation; prints the plan digest
+CHAIN_OUTPUT=$E/05-a3-plan.json CHAIN_ACCEPT_OP=add-admin CHAIN_ACCEPT_SIGNER=<admins[0]> \
+  npm run chain:accept
+# 2. send: the device must answer with CHAIN_ACCEPT_SIGNER at that path; compare
+#    the message hash the tool prints with the device screen before approving
+CHAIN_OUTPUT=$E/05-a3-send.json CHAIN_ACCEPT_OP=add-admin CHAIN_ACCEPT_SIGNER=<admins[0]> \
+  CHAIN_SEND=1 CHAIN_CONFIRM_PLAN=<digest> CHAIN_SIGNER='usb://ledger?key=<n>' npm run chain:accept
+```
+
+| Order | Step | `CHAIN_ACCEPT_OP` | `CHAIN_ACCEPT_SIGNER` (role map) | Waits for |
+|---|---|---|---|---|
+| 1 | A3 | `add-admin` | each `admins[]` key, its own Ledger | its S3 (cycle 1) |
+| 2 | X3 | `accept-blocklist-authority` | `blocklistAuthority` | S2b (cycle 1) |
+| 3 | X2 | `accept-kyc-registry-authority` | `kyc.authority` | S4b (cycle 1) |
+| – | cycle 2 | `npm run chain:bootstrap` (deployer, §5 above) | | S5 |
+| 4 | X1 | `accept-platform-admin` | `superAdmin` | S5 and every A3 |
+| 5 | S5c | `close-bootstrap-window` | `superAdmin` | X1 and every A3 |
+| 6 | S6 | `first-unpause` (clears exactly `unpauseMask`) | `superAdmin` | every role step, X1, S5c |
+
+With the company model (§19) rows 2 to 6 are the company Ledger and row 1
+the second Admin's Ledger. Each send ends with a `next:` line (the next
+`chain:accept` command, or the deployer's cycle). `<n>` is the account
+index of the key on the device: the tool reads the key at that path first
+and refuses, naming the key it found, when it is not `CHAIN_ACCEPT_SIGNER`;
+a key the wallet derived at `44'/501'/<n>'/0'` is `usb://ledger?key=<n>/0`.
+Rehearse once with the physical Ledger before mainnet (a devnet or localnet
+role map whose keys are on that device). After S6, §6 as usual.
 
 ## 6. Dry run again, pre-handover inventory
 
@@ -971,8 +1100,12 @@ source paths are clean (see "Safety rules").
   `/admin/platform` and `/admin/kyc`, which need SIWS, so the front (Vercel,
   or the local `next dev` of §0) and the mainnet Supabase must work.
   `chain:emergency` pauses, blocks and switches hook modes without them, but
-  it cannot rotate a role (follow-up: add propose/accept of the SA, BA and
-  KYC authority to `chain:emergency`, same digest and Ledger path). If a role
+  it cannot rotate a role. `chain:accept` (§5) covers only the bootstrap's
+  own accepts to the role map's keys; a rotation to a successor has no CLI
+  path yet (follow-up: its propose and the successor's accept on the CLI,
+  same digest and Ledger path), so a role key that is a Ledger behind
+  Phantom, Solflare or Jupiter cannot rotate at all until the §0 known
+  limitation is resolved. If a role
   key is compromised while the front or the database is down, the rotation
   waits for them; meanwhile the attacker can propose and accept the BA or
   KYC role to itself (no timelock), after which only the recovery below
@@ -1068,7 +1201,7 @@ CHAIN_OUTPUT=$E/inc-1-send.json CHAIN_EMERGENCY_OP=pause CHAIN_EMERGENCY_SIGNER=
 | `CHAIN_EMERGENCY_OP` | Inputs | Signer (checked on-chain) | Notes |
 |---|---|---|---|
 | `pause` | `CHAIN_PAUSE_BITS`: `all` (0x7f), or names from `onboarding`, `primary`, `secondary`, `custody-entry`, `distributions`, `issuer-proceeds`, `payout-modules`, or an integer | any Admin or the SA | nothing to do when every bit is already set |
-| `unpause` | `CHAIN_PAUSE_BITS` (`all` = the six emergency areas and bit 7, never the payout modules; `payout-modules` only on its own, and on mainnet only with `CHAIN_ENABLE_PAYOUT_MODULES=<the signing SA>`, the recorded D2 owner decision after a vote of at least 7 days, never an incident step) | the SA only | the program refuses anyone else, and a clear mask mixing 0x40 with other bits (6154); the tool refuses a mainnet clear of 0x40 without the override, and `chain:squads-export` `registry-ix set_pause_flags` without `"confirmPayoutModules": "<multisig>"` |
+| `unpause` | `CHAIN_PAUSE_BITS` (`all` = the six emergency areas and bit 7, never the payout modules; `payout-modules` only on its own, and on mainnet only with `CHAIN_ENABLE_PAYOUT_MODULES=<the signing SA>`, the recorded D2 owner decision after a vote of at least 7 days, never an incident step) | the SA only | the program refuses anyone else, and a clear mask mixing 0x40 with other bits (6154); the tool refuses a mainnet clear of 0x40 without the override, and `chain:squads-export` `registry-ix set_pause_flags` without `"confirmPayoutModules": "<multisig>"`. While the bootstrap window is open (bit 7, before S5c) any clear closes it for good and puts every later A3 and X1 behind 48 hours: the tool refuses it without `CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1` (recorded as `closeBootstrapOverride`); the bootstrap closes the window with `chain:accept` (S5c, §5) |
 | `block`, `unblock` | `CHAIN_WALLET` | the BA | an off-curve wallet (an escrow PDA) needs `CHAIN_CONFIRM_WALLET=<same>`: blocking it stops exits from it |
 | `hook-mode` | `CHAIN_MINT`, `CHAIN_HOOK_MODE=open` or `kyc-gated`, `CHAIN_KYC_REGISTRY` (kyc-gated only, a live registry) | the BA | Open lets any wallet receive the class; KycGated only live passports of that registry |
 | `freeze-issuer` | `CHAIN_ISSUER` (the Issuer PDA), `CHAIN_FREEZE_REASON_SHA256` (sha256 of the trimmed case-file reason, as `/admin/issuers` hashes it: `printf %s "<reason>" \| shasum -a 256`) | any Admin or the SA | D1: stops that issuer's sales and proceeds exits (6143); a second freeze is a no-op; only the SA lifts it, never this tool (§11 "Issuer proceeds freeze") |
@@ -1083,7 +1216,8 @@ CHAIN_OUTPUT=$E/inc-1-send.json CHAIN_EMERGENCY_OP=pause CHAIN_EMERGENCY_SIGNER=
   through `overrides`) and the integrity of every tarball in
   `package-lock.json`, both under the mainnet source guard. Install them
   there, from the checkout of the Release tag:
-  `cd front/scripts/chain/ledger && npm ci --ignore-scripts`.
+  `cd front/scripts/chain/ledger && npm ci --ignore-scripts`; for
+  `chain:accept` again in its own checkout (§5, "Which checkout").
   `--ignore-scripts` runs no install-time code on the machine that holds the
   role keys (node-hid 3 ships its prebuilt binaries inside the checked
   tarball). The install lands in a git-ignored `node_modules` there, and the
@@ -1545,6 +1679,32 @@ tracked).
   on the operator front, `chain:emergency` with a physical Ledger (the
   Ledger path is tested against a stand-in device only), and a
   `chain:handover` executed end to end (plan the devnet handover, §19).
+
+### Rehearsal record (2026-10-02, `chain:accept`, localnet only)
+
+Agave 4.2.2 with mainnet's feature set, Release v1.0.0-rc.1 loaded at the
+real program IDs (`--upgradeable-program`, then `program extend` to
+`programDataMaxLen`), a Squads 1-of-1 and a role map of exactly the mainnet
+shape (company model, one more Admin, `unpauseMask` 1), throwaway keys; the
+role keys signed with their files (`CHAIN_KEYPAIR`). Evidence:
+`~/mancipatio-mainnet/evidence/rehearsal-2026-10-02/T2-localnet-accept/`.
+
+- §3 IDL init (80 transactions, in-sync), §4 cycle 1, then on the CLI:
+  A3 (the second Admin's key) → X3 → X2 → cycle 2 (S5) → X1 → S5c (0xff →
+  0x7f) → S6 (0x7f → 0x7e, exactly `unpauseMask`) with `chain:accept`;
+  `chain:bootstrap` then planned only S7; `pre-handover` inventory 0
+  blockers; S7; `handed-over` inventory 0 blockers.
+- Refused before any signature, as expected: X1 before A3, X3 by a key that
+  is not the role map's BA, S6 before X1 and S5c.
+- Not rehearsed: a physical Ledger with `chain:accept` (the Ledger path is
+  tested against a stand-in device only; check the account path of the key
+  the wallet created before mainnet), and mainnet itself.
+- Despite `--bind-address 127.0.0.1` the validator listened on every
+  interface for RPC (`*:18899`), RPC PubSub (`*:18900`) and the faucet
+  (`*:19900`); only gossip stayed on 127.0.0.1 (`01-listen-sockets.txt`).
+  Harmless with throwaway keys, but the next rehearsal also passes
+  `--rpc-bind-address 127.0.0.1` (not yet verified to cover all three) or
+  firewalls those ports, and records the listening sockets again.
 
 ## 13. App priority fee and payment tokens (Talas 4.2)
 
