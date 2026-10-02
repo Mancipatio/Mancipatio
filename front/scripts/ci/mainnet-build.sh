@@ -36,10 +36,11 @@
 #     and Privacy Policy, a one-line acceptance summary and the risk warning
 #     marked "counsel". Without a licence the fixture also takes the form a
 #     BVI-style record can take (no short name and no tax ID, each stated as
-#     { notAssigned }: the committed mainnet record states its short name so,
-#     and its tax ID once the owner confirms), which must pass; a tax ID left
-#     null (as committed until then) must not. It never leaves this checkout; the committed slots
-#     stay as they are, and tests/legal-slots.test.ts checks those. The
+#     { notAssigned }, as the committed mainnet record states both), which
+#     must pass; a tax ID left null must not. It never leaves this checkout;
+#     the committed slots stay as they are: before the fixture is written,
+#     the config must load with them (and the licence waiver), and
+#     tests/legal-slots.test.ts checks their content. The
 #     fixture avoids the words the guard treats as drafts (placeholder, TODO,
 #     TBD, devnet, ...).
 # A run killed where no trap fires (SIGKILL, OOM) leaves the fixture in those
@@ -127,9 +128,9 @@ const append = (file, code) =>
   fs.writeFileSync(file, `${fs.readFileSync(path.join(orig, file), "utf8")}\n${HEADER}\n${code}\n`);
 
 // no-licence: no short name and no tax ID, each stated on purpose as
-// { notAssigned } (the form of the committed mainnet record once its owner
-// confirms the tax ID). incomplete-operator: the tax ID is simply left out
-// (null, as committed until that confirmation), which the guard refuses.
+// { notAssigned } (the form of the committed mainnet record since the owner
+// confirmed the tax ID on 2026-10-02). incomplete-operator: the tax ID is
+// simply left out (null), which the guard refuses.
 const exempt = variant === "no-licence";
 const operator = {
   legalName: "CI Fixture d.o.o. Beograd",
@@ -237,6 +238,12 @@ expect_refusal "NEXT_PUBLIC_KYC_REGISTRY is not set" "${PLACEHOLDERS[@]}" NEXT_P
 # not in the slot, the build is refused; then the fixture, one defect at a time.
 if grep -q '^export const MAINNET_TERMS: LegalDocument | null = null;$' lib/legal/mainnet-copy.ts; then
   expect_refusal "the operator and legal slots are not complete" "${PLACEHOLDERS[@]}"
+else
+  # The committed slots (counsel's texts, approved 2026-10-02) pass with
+  # counsel's licence waiver, as committed (no licence recorded): drop the
+  # waiver here if a licence is ever recorded.
+  expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
+    "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
 fi
 write_legal_fixture incomplete-operator
 expect_refusal "operator\.taxId \(tax identification number, .*\) is not set" "${PLACEHOLDERS[@]}"

@@ -4,7 +4,7 @@
     "projectRef": "gvnckuzmuwozlcohtuhx",
     "poolerHost": "aws-0-eu-west-1.pooler.supabase.com",
     "poolerPort": 5432,
-    "siteOrigin": "https://www.manci.io",
+    "siteOrigin": "https://devnet.manci.io",
     "backupAgeRecipient": null
   },
   "mainnet": {
@@ -12,7 +12,7 @@
     "projectRef": "nyltnheatubqmtdanlrr",
     "poolerHost": "aws-1-eu-west-1.pooler.supabase.com",
     "poolerPort": 5432,
-    "siteOrigin": null,
+    "siteOrigin": "https://www.manci.io",
     "backupAgeRecipient": null
   }
 }

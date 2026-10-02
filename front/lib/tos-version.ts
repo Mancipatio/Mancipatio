@@ -8,7 +8,9 @@
 // Devnet, testnet and localnet show the devnet pilot's Terms
 // (app/(marketing)/legal/terms/devnet-terms.tsx): bump DEVNET_TOS_VERSION when
 // that text changes materially. Mainnet shows counsel's Terms
-// (lib/legal/mainnet-copy.ts), whose own `version` is the one accepted there.
+// (lib/legal/mainnet-copy.ts), whose own `version` is the one accepted there:
+// 2026-10-02, the Terms counsel approved (the acceptance dialog shows
+// "v2026-10-02", /legal/terms "Last updated: 2026-10-02").
 
 import { detectNetwork, type Network } from "@/lib/network";
 import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";
@@ -17,16 +19,17 @@ import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";
 export const DEVNET_TOS_VERSION = "2026-07-18";
 
 /**
- * Mainnet before counsel's Terms are in the slot. A mainnet build refuses to
- * ship without them (lib/legal/readiness.ts), so only a local mainnet
- * `next dev` (the operator front) ever asks for this version.
+ * The Terms version in force on `network`. On mainnet it is counsel's Terms'
+ * own version, with no fallback: a mainnet build without those Terms is
+ * refused (lib/legal/readiness.ts), and a mainnet runtime without them fails
+ * here rather than ask wallets to accept a version that was never published.
  */
-export const MAINNET_TOS_UNPUBLISHED = "mainnet-unpublished";
-
-/** The Terms version in force on `network`. */
 export function tosVersionFor(network: Network): string {
   if (network !== "mainnet") return DEVNET_TOS_VERSION;
-  return MAINNET_TERMS?.version ?? MAINNET_TOS_UNPUBLISHED;
+  if (!MAINNET_TERMS) {
+    throw new Error("No mainnet Terms of Service in lib/legal/mainnet-copy.ts: there is no version to accept on mainnet");
+  }
+  return MAINNET_TERMS.version;
 }
 
 /** The Terms version of THIS build (NEXT_PUBLIC_NETWORK, inlined at build time). */

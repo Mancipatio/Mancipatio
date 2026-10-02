@@ -9,7 +9,11 @@ import { applyMigrations, TEST_PROJECT_REFS } from "./helpers/migrations";
 // native HTTP and cron interfaces are modelled; the actual transport is
 // checked separately against the installed Supabase http extension and the
 // live worker.
-const ORIGINS = { devnet: "https://www.manci.io", mainnet: "https://mainnet.manci.test" } as const;
+// The site origins the installs take from scripts/ops/targets.json (db.sh
+// passes the target's siteOrigin as target_origin): devnet.manci.io and, for
+// mainnet, www.manci.io since the domain cutover (runbook §18 C and D).
+const TARGETS = JSON.parse(readFileSync(join(process.cwd(), "scripts/ops/targets.json"), "utf8")) as Record<"devnet" | "mainnet", { siteOrigin: string }>;
+const ORIGINS = { devnet: TARGETS.devnet.siteOrigin, mainnet: TARGETS.mainnet.siteOrigin } as const;
 type Net = keyof typeof ORIGINS;
 const other = (network: Net): Net => (network === "devnet" ? "mainnet" : "devnet");
 const ASSERT = readFileSync(join(process.cwd(), "scripts/ops/assert-target.sql"), "utf8");
