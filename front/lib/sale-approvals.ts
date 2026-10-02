@@ -153,6 +153,7 @@ export type FxRateView = FxRate & {
       sources?: Record<string, { rate?: string; error?: string }>;
       median?: string | null; spread_bps?: number | null;
       ecb?: { date: string; usd_per_eur: string; eur_per_usd: string } | null; ecb_deviation_bps?: number | null;
+      ecb_tolerance_bps?: number | null;
     };
   } | null;
   auto_last?: { observed_at: string; status: string; code: string | null } | null;
