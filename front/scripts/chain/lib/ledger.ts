@@ -1,5 +1,6 @@
 /**
- * Ledger signing for `chain:emergency` (Talas 8.2). The Solana CLI cannot sign
+ * Ledger signing for `chain:emergency` (Talas 8.2) and `chain:accept` (the
+ * bootstrap steps a role key signs itself). The Solana CLI cannot sign
  * an arbitrary program instruction with `usb://ledger`, so the tool talks to
  * the Ledger Solana app itself through Ledger's Node packages. They are not
  * dependencies of the app (no native module reaches CI or Vercel) and never

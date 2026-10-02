@@ -490,21 +490,67 @@ export function compareIdlInstruction(probe: IdlProbe, instruction: string): Idl
   }
 }
 
-// ── Tool ─────────────────────────────────────────────────────────────────────
+/**
+ * The live canonical IDL must define `instruction` exactly as front/idl does.
+ * On mainnet anything else refuses, unless `override` names a variable set
+ * to 1 (recorded); elsewhere it is recorded (`idlUnchecked`) and warned.
+ */
+export async function checkInstructionIdl(ctx: ToolContext, program: ProgramName, instruction: string, override: string | null): Promise<IdlCheck> {
+  const source = { label: "head" as const, bytes: readLocalIdl(ctx.frontDir)[program] };
+  const probe = await probeIdl(ctx.rpc, program, source);
+  const check = compareIdlInstruction(probe, instruction);
+  ctx.evidence.idl = { ...idlProbeEvidence(probe), instruction, check };
+  if (check === "match") return check;
+  const text = `the live canonical IDL of ${program} ${check === "differs" ? "defines" : "cannot confirm"} ${instruction} ${check === "differs" ? "differently from" : "against"} front/idl (${check})`;
+  const overridden = override !== null && ctx.env[override]?.trim() === "1";
+  if (ctx.config.network === "mainnet" && !overridden) {
+    throw new ChainGateError(`${text}; run the checkout of the live Release tag${override ? `, or set ${override}=1 (recorded)` : ""}`);
+  }
+  ctx.evidence.idlUnchecked = true;
+  ctx.log(`warning: ${text}`);
+  return check;
+}
 
-async function loadSigner(ctx: ToolContext, req: EmergencyRequest, role: string): Promise<{ signer: TransactionSigner; device: LedgerDevice | null }> {
+// ── Signer and source guard (shared with chain:accept) ───────────────────────
+
+/**
+ * The mainnet source guard of the other sending tools, for the role-key
+ * tools that need no Release: the guarded source (front/lib builds the
+ * instruction, front/scripts/chain signs it) must be clean. `override` names
+ * the variable that waives it (recorded in the evidence), or null for none.
+ */
+export function guardMainnetSource(ctx: ToolContext, override: string | null): void {
+  if (ctx.config.network !== "mainnet") return;
+  const dirty = (ctx.deps.sourceDirty ?? dirtySourcePaths)(ctx.root);
+  if (!dirty.length) return;
+  const text = `The working tree has uncommitted changes under ${SOURCE_INTEGRITY_PATHS.join(", ")} (${dirty.length} paths): run from a clean checkout of the live Release tag`;
+  if (override === null || ctx.env[override]?.trim() !== "1") {
+    throw new ChainGateError(override ? `${text}, or set ${override}=1 (recorded)` : text);
+  }
+  ctx.evidence.sourceDirtyOverride = dirty;
+  ctx.log(`warning: ${override}=1: the guarded source has ${dirty.length} uncommitted paths (recorded in the evidence)`);
+}
+
+/**
+ * The signer of a role-key tool: a noop signer in a dry run; in a send, the
+ * keypair file (CHAIN_KEYPAIR) or the Ledger (CHAIN_SIGNER), whose key at the
+ * derivation path must be `expected` before anything is signed.
+ */
+export async function loadRoleSigner(ctx: ToolContext, expected: Address, role: string): Promise<{ signer: TransactionSigner; device: LedgerDevice | null }> {
   const { config } = ctx;
-  if (!config.send) return { signer: createNoopSigner(req.signer), device: null };
-  if (config.keypairPath) return { signer: await loadHotSigner(config.keypairPath, req.signer, role), device: null };
+  if (!config.send) return { signer: createNoopSigner(expected), device: null };
+  if (config.keypairPath) return { signer: await loadHotSigner(config.keypairPath, expected, role), device: null };
   const device = await (ctx.deps.ledger ?? openNodeHidLedger)();
   try {
-    const signer = await ledgerSigner({ device, path: ledgerDerivationPath(config.signerUrl!), expected: req.signer, log: ctx.log });
+    const signer = await ledgerSigner({ device, path: ledgerDerivationPath(config.signerUrl!), expected, log: ctx.log });
     return { signer, device };
   } catch (error) {
     await device.close().catch(() => {});
     throw error;
   }
 }
+
+// ── Tool ─────────────────────────────────────────────────────────────────────
 
 export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
   const { config, evidence } = ctx;
@@ -517,18 +563,7 @@ export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
   }
   // The mainnet source guard of the other sending tools: the IDL check below
   // covers one instruction definition, not the code that builds and signs it.
-  if (config.network === "mainnet") {
-    const dirty = (ctx.deps.sourceDirty ?? dirtySourcePaths)(ctx.root);
-    if (dirty.length) {
-      if (ctx.env.CHAIN_EMERGENCY_DIRTY_OK?.trim() !== "1") {
-        throw new ChainGateError(
-          `The working tree has uncommitted changes under ${SOURCE_INTEGRITY_PATHS.join(", ")} (${dirty.length} paths): run from a clean checkout of the live Release tag, or set CHAIN_EMERGENCY_DIRTY_OK=1 (recorded)`,
-        );
-      }
-      evidence.sourceDirtyOverride = dirty;
-      ctx.log(`warning: CHAIN_EMERGENCY_DIRTY_OK=1: the guarded source has ${dirty.length} uncommitted paths (recorded in the evidence)`);
-    }
-  }
+  guardMainnetSource(ctx, "CHAIN_EMERGENCY_DIRTY_OK");
 
   ctx.phase = "probe";
   const state = await probeEmergencyState(ctx.rpc, req);
@@ -541,19 +576,7 @@ export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
 
   // The live canonical IDL must define the instruction as front/idl does.
   ctx.phase = "idl";
-  const source = { label: "head" as const, bytes: readLocalIdl(ctx.frontDir)[draft.program] };
-  const probe = await probeIdl(ctx.rpc, draft.program, source);
-  const idlCheck = compareIdlInstruction(probe, draft.instruction);
-  evidence.idl = { ...idlProbeEvidence(probe), instruction: draft.instruction, check: idlCheck };
-  if (idlCheck !== "match") {
-    const text = `the live canonical IDL of ${draft.program} ${idlCheck === "differs" ? "defines" : "cannot confirm"} ${draft.instruction} ${idlCheck === "differs" ? "differently from" : "against"} front/idl (${idlCheck})`;
-    const unchecked = ctx.env.CHAIN_EMERGENCY_IDL_UNCHECKED?.trim() === "1";
-    if (config.network === "mainnet" && !unchecked) {
-      throw new ChainGateError(`${text}; run the checkout of the live Release tag, or set CHAIN_EMERGENCY_IDL_UNCHECKED=1 (recorded)`);
-    }
-    evidence.idlUnchecked = true;
-    ctx.log(`warning: ${text}`);
-  }
+  await checkInstructionIdl(ctx, draft.program, draft.instruction, "CHAIN_EMERGENCY_IDL_UNCHECKED");
 
   if (draft.noop) {
     ctx.log(`nothing to do: ${draft.noop}`);
@@ -588,7 +611,7 @@ export async function emergencyTool(ctx: ToolContext): Promise<ToolStatus> {
   if (config.confirmPlan !== digest) throw new ChainPlanError("CHAIN_CONFIRM_PLAN does not match the recomputed plan digest");
 
   ctx.phase = "signers";
-  const { signer, device } = await loadSigner(ctx, req, draft.role);
+  const { signer, device } = await loadRoleSigner(ctx, req.signer, draft.role);
   try {
     const plan = await planEmergency(req, state, signer);
     const again = planDigest({ network: config.network, genesis: config.expectedGenesis, roleMapSha256: null, releaseSha256Sums: null, steps: [plan.step!] });

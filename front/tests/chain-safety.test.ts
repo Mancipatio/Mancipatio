@@ -125,8 +125,21 @@ describe("environment gates (runner contract §3.1)", () => {
       /not both/,
     );
     refuse(() => config("emergency", base({ CHAIN_SIGNER: "usb://ledger" })), /CHAIN_SIGNER is only read in send mode/);
-    refuse(() => config("bootstrap", base({ CHAIN_ROLE_MAP: "m", CHAIN_SIGNER: "usb://ledger" })), /read by chain:emergency only/);
+    refuse(() => config("bootstrap", base({ CHAIN_ROLE_MAP: "m", CHAIN_SIGNER: "usb://ledger" })), /read by chain:emergency and chain:accept only/);
     refuse(() => config("emergency", base({ CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d", CHAIN_SIGNER: "usb://trezor" })), /CHAIN_SIGNER must be usb:\/\/ledger/);
+  });
+
+  it("chain:accept: the role map is required, no Release, one signer like chain:emergency (a keypair or a Ledger URL)", () => {
+    refuse(() => config("accept", base()), /CHAIN_ROLE_MAP is required for accept/);
+    const mainnet = { CHAIN_NETWORK: "mainnet", CHAIN_ALLOW_MAINNET: "1", CHAIN_ROLE_MAP: "m.json" };
+    expect(config("accept", base(mainnet)).releaseDir).toBeNull();
+    refuse(() => config("accept", base({ CHAIN_NETWORK: "mainnet", CHAIN_ROLE_MAP: "m.json" })), /CHAIN_ALLOW_MAINNET=1/);
+    const ledger = config("accept", base({ CHAIN_ROLE_MAP: "m.json", CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d", CHAIN_SIGNER: "usb://ledger?key=1" }));
+    expect(ledger).toMatchObject({ send: true, keypairPath: null, signerUrl: "usb://ledger?key=1" });
+    refuse(() => config("accept", base({ CHAIN_ROLE_MAP: "m.json", CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d" })), /one signer: CHAIN_KEYPAIR or CHAIN_SIGNER/);
+    refuse(() => config("accept", base({ CHAIN_ROLE_MAP: "m.json", CHAIN_SIGNER: "usb://ledger" })), /CHAIN_SIGNER is only read in send mode/);
+    // Sending on mainnet needs a priority fee, like every chain tool.
+    refuse(() => config("accept", base({ ...mainnet, CHAIN_SEND: "1", CHAIN_CONFIRM_PLAN: "d", CHAIN_SIGNER: "usb://ledger" })), /CHAIN_CU_PRICE is required/);
   });
 
   it("maps Solana CLI Ledger URLs to the hardened derivation path", () => {

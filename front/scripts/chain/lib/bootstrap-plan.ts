@@ -14,6 +14,10 @@
  * remove the temp grant, S5 propose SA, S5c close the bootstrap window, S6
  * unpause, S7 ProgramData SetAuthority → vault.
  *
+ * The steps a role key signs itself (A3, X3, X2, X1, S5c, S6) are external
+ * here: the operator front runs them, or `chain:accept` with that key's
+ * Ledger (planRoleStep below plans one of them from these same definitions).
+ *
  * v1.0.0-rc (design 8.3 §5.4, §6): a fresh Platform is 0xFF — every pause
  * bit plus the one-way bootstrap marker (bit 7). While bit 7 is set the 48 h
  * timelocks of `add_admin` and `accept_platform_admin` are waived, and ANY
@@ -412,7 +416,8 @@ type StepDef = {
   signer: TransactionSigner | null;
   skip: (p: BootstrapState) => string | null;
   stop?: (p: BootstrapState) => string | null;
-  gate?: (done: Map<string, Outcome>, p: BootstrapState) => string | null;
+  /** Steps that must have landed (or be planned before it) first. */
+  waitsFor?: string[];
   /** Its proposal's window (timelock, expiry) or a pending recovery refuses it for now. */
   timelock?: (p: BootstrapState) => string | null;
   preconditions: (p: BootstrapState) => Precondition<BootstrapState>[];
@@ -425,6 +430,12 @@ type StepDef = {
 };
 
 const pre = (label: string, holds: (s: BootstrapState) => boolean): Precondition<BootstrapState> => ({ label, holds });
+
+/** "waits for A3:…, X1" while a step it waits for neither landed nor is planned before it, else null. */
+function waitingOn(ids: string[] | undefined, done: Map<string, Outcome>): string | null {
+  const open = (ids ?? []).filter((id) => done.has(id) && done.get(id) !== "included" && done.get(id) !== "skipped");
+  return open.length ? `waits for ${open.join(", ")}` : null;
+}
 const bitmapsEqual = (a: Uint8Array, b: Uint8Array) => Buffer.from(a).equals(Buffer.from(b));
 export const SIGNATURE_FEE = BigInt(5000);
 export const FEE_MARGIN = BigInt(10_000_000);
@@ -454,10 +465,6 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
   const executions = [...map.admins.map((a) => `A3:${a}`), ...(map.kyc.tempAdminGrant ? ["A3k"] : [])];
   /** Every role step but the super admin rotation: none may follow the first unpause (§5.4). */
   const roleSteps = [...grants, ...tempGrant, "X3", "X2", ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])];
-  const waitsFor = (ids: string[]) => (done: Map<string, Outcome>) => {
-    const open = ids.filter((id) => done.has(id) && done.get(id) !== "included" && done.get(id) !== "skipped");
-    return open.length ? `waits for ${open.join(", ")}` : null;
-  };
   /** propose_admin (the platform admin) then add_admin (the new key itself signs). */
   const grantSteps = (id: string, admin: Address, label: string, executor: TransactionSigner | null): StepDef[] => [
     {
@@ -821,7 +828,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signer: d,
       skip: (p) => (((p.platform?.pauseFlags ?? 0) & unpauseMask) === 0 ? "not paused" : null),
       // Any clear closes the bootstrap window: every role step lands first (§5.4).
-      gate: waitsFor(roleSteps),
+      waitsFor: roleSteps,
       preconditions: (p) => {
         const flags = p.platform?.pauseFlags ?? 0;
         return [
@@ -851,7 +858,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
             : null,
       // Every Admin grant executes before X1: the accept makes their proposer
       // stale, and a closed bootstrap window would add the 48 h.
-      gate: waitsFor([...cycleOne, ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])]),
+      waitsFor: [...cycleOne, ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])],
       preconditions: (p) => {
         const proposed = p.platformProposed;
         return [
@@ -875,7 +882,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signer: deployerIsSa ? null : signers.rehearsal.superAdmin ?? null,
       skip: (p) => (p.platform?.admin === SA ? "SA accepted" : null),
       // The accept makes every grant the deployer staged stale (6152): they execute first.
-      gate: waitsFor([...executions, ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])]),
+      waitsFor: [...executions, ...(map.kyc.tempAdminGrant ? ["S3r", "S3r.cancel"] : [])],
       timelock: (p) =>
         p.recoveryPending.platform
           ? "a super admin recovery by the upgrade authority is pending: accept_platform_admin is refused (6155) until it is cancelled or executed"
@@ -906,7 +913,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signerRole: deployerIsSa ? "deployer" : "superAdmin",
       signer: saSigner,
       skip: (p) => (!p.platform || !isBootstrapOpen(p.platform.pauseFlags) ? "the bootstrap window is closed" : null),
-      gate: waitsFor([...executions, "X1"]),
+      waitsFor: [...executions, "X1"],
       preconditions: () => [
         pre(`platform.admin=${SA}`, (s) => s.platform?.admin === SA),
         pre("platform.bootstrapOpen", (s) => Boolean(s.platform && isBootstrapOpen(s.platform.pauseFlags))),
@@ -932,7 +939,7 @@ function stepDefinitions(map: RoleMap, signers: BootstrapSigners, rpc: ChainRpc)
       signer: saSigner,
       skip: (p) => (((p.platform?.pauseFlags ?? 0) & unpauseMask) === 0 ? "not paused" : null),
       // The first unpause follows every role step, X1 and the explicit close (§5.4, K1.3).
-      gate: waitsFor([...roleSteps, "X1", "S5c"]),
+      waitsFor: [...roleSteps, "X1", "S5c"],
       preconditions: (p) => {
         const flags = p.platform?.pauseFlags ?? 0;
         return [
@@ -1021,7 +1028,7 @@ export async function planBootstrap(
       done.set(def.id, "skipped");
       continue;
     }
-    const gate = def.gate?.(done, p) ?? def.timelock?.(p);
+    const gate = waitingOn(def.waitsFor, done) ?? def.timelock?.(p);
     if (gate) {
       plan.blocked.push({ id: def.id, reason: gate });
       done.set(def.id, "blocked");
@@ -1152,6 +1159,135 @@ export async function planBootstrap(
   return plan;
 }
 
+// ── Role steps on the CLI (chain:accept) ─────────────────────────────────────
+
+/**
+ * The bootstrap steps a role key signs itself, by the `chain:accept` op that
+ * runs each one with that key's Ledger (the operator front does the same on
+ * its pages, behind SIWS).
+ */
+export const ROLE_STEP_OPS = {
+  "add-admin": "A3",
+  "accept-blocklist-authority": "X3",
+  "accept-kyc-registry-authority": "X2",
+  "accept-platform-admin": "X1",
+  "close-bootstrap-window": "S5c",
+  "first-unpause": "S6",
+} as const;
+export type RoleStepOp = keyof typeof ROLE_STEP_OPS;
+
+/** The `chain:accept` op of a role step id (`A3:<key>`, `A3k`, X3, X2, X1, S5c, S6), or null. */
+export function roleStepOp(id: string): RoleStepOp | null {
+  const base = id === "A3k" || id.startsWith("A3:") ? "A3" : id;
+  const entry = Object.entries(ROLE_STEP_OPS).find(([, step]) => step === base);
+  return entry ? (entry[0] as RoleStepOp) : null;
+}
+
+export type RoleStepPlan = {
+  id: string;
+  title: string;
+  signerRole: string;
+  /** null: the step's effect is already on chain (`noop` says so). */
+  step: PlanStep<BootstrapState> | null;
+  noop: string | null;
+};
+
+/** What the chain holds instead of the proposal a role step accepts (for its refusal). */
+function missingProposal(id: string, state: BootstrapState, map: RoleMap): string | null {
+  const names = (proposed: Address | null | undefined, live: string, proposer: string) =>
+    proposed ? `the pending proposal names ${proposed}, not this key` : `no live ${live} proposal (${proposer} proposes it)`;
+  if (id === "X3") return names(state.blocklist?.proposed, "blocklist authority", "S2b of chain:bootstrap");
+  if (id === "X2") return names(state.registryProposed, "KYC registry authority", "S4b of chain:bootstrap");
+  if (id === "X1") return names(state.platformProposed, "super admin", "S5 of chain:bootstrap cycle 2");
+  if (id === "A3k" || id.startsWith("A3:")) {
+    return "no live Admin grant for this key (S3 of chain:bootstrap proposes it; a grant staged by an earlier super admin is stale, 6152)";
+  }
+  if ((id === "S5c" || id === "S6") && state.platform && state.platform.admin !== map.superAdmin) {
+    return `the super admin is still ${state.platform.admin}: X1 comes first`;
+  }
+  return null;
+}
+
+/**
+ * Plans ONE bootstrap step that a role key signs itself (`chain:accept`),
+ * from the same step definitions as `chain:bootstrap`: its skip, the steps it
+ * waits for, its proposal window and its preconditions, judged against the
+ * chain alone (nothing is planned before it here). Refuses (ChainPlanError)
+ * whatever the bootstrap plan would hold back. The steps it waits for and its
+ * window become preconditions of the step, so the send re-checks them at
+ * finalized right before it signs.
+ */
+export async function planRoleStep(
+  state: BootstrapState,
+  map: RoleMap,
+  id: string,
+  signer: TransactionSigner,
+  rpc: ChainRpc,
+): Promise<RoleStepPlan> {
+  for (const name of IDL_PROGRAMS) {
+    if (!state.deployed[name]) throw new ChainPlanError(`${name} is not deployed as a loader-v3 program`);
+  }
+  const key = signer.address;
+  const rehearsal: BootstrapSigners["rehearsal"] = {};
+  if (map.superAdmin === key) rehearsal.superAdmin = signer;
+  if (map.blocklistAuthority === key) rehearsal.blocklistAuthority = signer;
+  if (map.kyc.authority === key) rehearsal.kycAuthority = signer;
+  if (map.admins.includes(key)) rehearsal.admin = signer;
+  const signers: BootstrapSigners = { deployer: map.deployer === key ? signer : createNoopSigner(map.deployer), rehearsal };
+  const defs = stepDefinitions(map, signers, rpc).filter((def) => def.applies);
+  const target = defs.find((def) => def.id === id);
+  if (!target) throw new ChainPlanError(`${id} is not a step of this role map's bootstrap`);
+  const stops = defs.flatMap((def) => {
+    const stop = def.stop?.(state);
+    return stop ? [`${def.id}: ${stop}`] : [];
+  });
+  if (stops.length) throw new ChainPlanError(`the bootstrap plan stops (${stops.join("; ")}); resolve that with chain:bootstrap first`);
+
+  const done = new Map<string, Outcome>();
+  for (const def of defs) {
+    if (def === target) break;
+    done.set(def.id, def.skip(state) ? "skipped" : "awaiting");
+  }
+  const base = { id, title: target.title, signerRole: target.signerRole };
+  const already = target.skip(state);
+  if (already) return { ...base, step: null, noop: already };
+  const waits = waitingOn(target.waitsFor, done);
+  if (waits) throw new ChainPlanError(`${id} ${waits}: each of them lands first (the order of runbook §5)`);
+  const timelock = target.timelock?.(state);
+  if (timelock) throw new ChainPlanError(`${id} cannot run now: ${timelock}`);
+  const preconditions = target.preconditions(state);
+  const failing = preconditions.filter((c) => !c.holds(state));
+  if (failing.length) {
+    const why = missingProposal(id, state, map);
+    throw new ChainPlanError(`${id} cannot run: ${failing.map((c) => c.label).join(", ")} does not hold${why ? ` (${why})` : ""}`);
+  }
+  if (target.signer?.address !== key) {
+    throw new ChainPlanError(`${id} is signed by the ${target.signerRole}, not by ${key}`);
+  }
+  const byId = new Map(defs.map((def) => [def.id, def]));
+  const landed = (target.waitsFor ?? [])
+    .filter((wait) => byId.has(wait))
+    .map((wait) => pre(`${wait}:landed`, (s) => byId.get(wait)!.skip(s) !== null));
+  const window = target.timelock ? [pre(`${id}:window-open`, (s) => target.timelock!(s) === null)] : [];
+  return {
+    ...base,
+    noop: null,
+    step: {
+      id,
+      title: target.title,
+      signer,
+      signerRole: target.signerRole,
+      ixs: await target.build(state, signer),
+      preconditions: [...preconditions, ...landed, ...window],
+      simulate: "now",
+      idempotency: "replay-safe",
+      required: "finalized",
+      skip: (s) => target.skip(s) !== null,
+      postCheck: target.postCheck,
+    },
+  };
+}
+
 // ── Tool ────────────────────────────────────────────────────────────────────
 
 /** One line on the bootstrap window (bit 7) and what it means for the timelocks. */
@@ -1175,6 +1311,8 @@ function printPlan(ctx: ToolContext, plan: BootstrapPlan, simulations: Map<strin
   for (const blocked of plan.blocked) ctx.log(`${blocked.id.padEnd(11)} waiting: ${blocked.reason}`);
   for (const action of plan.awaiting) {
     ctx.log(`ACTION REQUIRED ${action.id}: ${action.role} ${action.key} — ${action.action} on ${action.page} (operator front)`);
+    const op = roleStepOp(action.id);
+    if (op) ctx.log(`  or with that key's Ledger on the CLI: CHAIN_ACCEPT_OP=${op} CHAIN_ACCEPT_SIGNER=${action.key} npm run chain:accept`);
   }
   if (plan.handover.reason) ctx.log(`S7 pending: ${plan.handover.reason}`);
   for (const note of plan.notes) ctx.log(`note: ${note}`);
