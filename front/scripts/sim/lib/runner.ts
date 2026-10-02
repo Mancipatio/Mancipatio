@@ -3,7 +3,8 @@
  *
  * pilot / wave / watch, in order:
  *   config gates (devnet only) → sim dir git-ignored → fetch guard (only
- *   https://www.manci.io and the RPC URL) → the site's /api/health reports
+ *   SITE_ORIGIN, https://devnet.manci.io, and the RPC URL; never the mainnet
+ *   site https://www.manci.io) → the site's /api/health reports
  *   devnet → the e2e addresses and the genesis-pinned RPC → state.json and
  *   the journals → every inflight signature resolved → (pilot/wave) market
  *   setup and funding as the CLI Admin / deployer → the scheduler.

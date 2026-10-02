@@ -44,7 +44,7 @@ describe("payload and signature", () => {
     const signer = await generateKeyPairSigner();
     const a = buildPayload({ action: "clients.me", wallet: signer.address, params: {} });
     const b = buildPayload({ action: "clients.me", wallet: signer.address, params: {} });
-    expect(a).toMatchObject({ v: 2, origin: "https://www.manci.io", network: "devnet", action: "clients.me", wallet: signer.address, params: {} });
+    expect(a).toMatchObject({ v: 2, origin: "https://devnet.manci.io", network: "devnet", action: "clients.me", wallet: signer.address, params: {} });
     expect(a.nonce).toMatch(NONCE_V4);
     expect(a.nonce).not.toBe(b.nonce);
     expect(Math.abs(Date.parse(a.ts) - Date.now())).toBeLessThan(5_000);

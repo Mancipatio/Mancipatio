@@ -1,6 +1,8 @@
 // The simulator's safety gates (scripts/sim/lib/safety.ts): devnet only,
-// the exact origin, SIM_SEND, the two-origin fetch guard, STOP/PAUSE, the
-// git-ignored private directory and the journal redaction.
+// the exact origin (the devnet target's siteOrigin in scripts/ops/targets.json,
+// https://devnet.manci.io; www.manci.io is the mainnet site), SIM_SEND, the
+// two-origin fetch guard, STOP/PAUSE, the git-ignored private directory and
+// the journal redaction.
 import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
@@ -10,7 +12,7 @@ import type { Address } from "@solana/kit";
 import { CLUSTER_GENESIS_HASHES } from "@/lib/network-identity";
 import { acquireLock, lockPath, readLock, releaseLock } from "@/scripts/chain/lib/journal";
 import { loadHotSigner } from "@/scripts/chain/lib/safety";
-import { CLI_ADMIN, DEPLOYER, E2E_PAYMENT_MINT } from "@/scripts/sim/lib/constants";
+import { CLI_ADMIN, DEPLOYER, E2E_PAYMENT_MINT, SITE_ORIGIN } from "@/scripts/sim/lib/constants";
 import { userSigner } from "@/scripts/sim/lib/identity";
 import { SimJournal } from "@/scripts/sim/lib/journal";
 import { readE2eState } from "@/scripts/sim/lib/setup";
@@ -32,6 +34,34 @@ const ROOT = fs.mkdtempSync(path.join(os.tmpdir(), "sim-safety-"));
 const RPC = "https://devnet.helius-rpc.com/?api-key=test";
 const base = { CHAIN_NETWORK: "devnet", CHAIN_RPC_URL: RPC, SIM_SEND: "1" };
 const read = (env: Record<string, string | undefined>) => readSimConfig(env, { root: ROOT, home: ROOT });
+
+/** The tracked file, read independently of the JSON import constants.ts uses. */
+const TARGETS = JSON.parse(fs.readFileSync(new URL("../scripts/ops/targets.json", import.meta.url), "utf8"));
+
+describe("site origin", () => {
+  it("is the devnet target's siteOrigin in scripts/ops/targets.json (devnet.manci.io), never the mainnet site", () => {
+    expect(SITE_ORIGIN).toBe(TARGETS.devnet.siteOrigin);
+    expect(SITE_ORIGIN).toBe("https://devnet.manci.io");
+    expect(SITE_ORIGIN).not.toBe(TARGETS.mainnet.siteOrigin);
+    expect(SITE_ORIGIN).not.toBe("https://www.manci.io");
+  });
+
+  it.each([
+    ["no devnet siteOrigin", { siteOrigin: null }, /records no devnet siteOrigin/],
+    ["the mainnet site as devnet's", { siteOrigin: TARGETS.mainnet.siteOrigin }, /share a siteOrigin/],
+    ["an origin with a path", { siteOrigin: "https://devnet.manci.io/app" }, /siteOrigin must be https/],
+    ["a devnet target on another network", { network: "mainnet" }, /must have network "devnet"/],
+  ])("refuses to load when targets.json has %s", async (_label, patch, message) => {
+    vi.resetModules();
+    vi.doMock("@/scripts/ops/targets.json", () => ({ default: { ...TARGETS, devnet: { ...TARGETS.devnet, ...patch } } }));
+    try {
+      await expect(import("@/scripts/sim/lib/constants")).rejects.toThrow(message);
+    } finally {
+      vi.doUnmock("@/scripts/ops/targets.json");
+      vi.resetModules();
+    }
+  });
+});
 
 describe("config gates", () => {
   it("runs plan and report offline, without keys or RPC", () => {
@@ -55,7 +85,8 @@ describe("config gates", () => {
     ["mainnet even with the flag", { SIM_CMD: "pilot", ...base, CHAIN_NETWORK: "mainnet", CHAIN_ALLOW_MAINNET: "1" }, /never runs on mainnet/],
     ["CHAIN_ALLOW_MAINNET on devnet", { SIM_CMD: "pilot", ...base, CHAIN_ALLOW_MAINNET: "1" }, /never runs on mainnet/],
     ["a conflicting NEXT_PUBLIC_NETWORK", { SIM_CMD: "pilot", ...base, NEXT_PUBLIC_NETWORK: "mainnet" }, /conflicts/],
-    ["the apex origin", { SIM_CMD: "pilot", ...base, SIM_SITE: "https://manci.io" }, /exactly https:\/\/www\.manci\.io/],
+    ["the apex origin", { SIM_CMD: "pilot", ...base, SIM_SITE: "https://manci.io" }, /exactly https:\/\/devnet\.manci\.io/],
+    ["the mainnet site", { SIM_CMD: "pilot", ...base, SIM_SITE: "https://www.manci.io" }, /exactly https:\/\/devnet\.manci\.io/],
     ["a preview origin", { SIM_CMD: "pilot", ...base, SIM_SITE: "https://front-git-x.vercel.app" }, /exactly/],
     ["a pilot without SIM_SEND", { SIM_CMD: "pilot", CHAIN_NETWORK: "devnet", CHAIN_RPC_URL: RPC }, /SIM_SEND=1/],
     ["plan with SIM_SEND", { SIM_CMD: "plan", SIM_SEND: "1" }, /never sends/],
@@ -127,12 +158,14 @@ describe("fetch guard", () => {
   });
 
   it.each([
-    ["https://www.manci.io/api/clients/me", true],
-    ["https://www.manci.io/", true],
+    ["https://devnet.manci.io/api/clients/me", true],
+    ["https://devnet.manci.io/", true],
     ["https://devnet.helius-rpc.com/?api-key=test", true],
+    ["https://www.manci.io/api/clients/me", false],
+    ["https://www.manci.io/api/health", false],
     ["https://manci.io/api/clients/me", false],
-    ["http://www.manci.io/api/clients/me", false],
-    ["https://www.manci.io.evil.example/", false],
+    ["http://devnet.manci.io/api/clients/me", false],
+    ["https://devnet.manci.io.evil.example/", false],
     ["https://front-git-sim.vercel.app/api/auth/session", false],
     ["https://gvnckuzmuwozlcohtuhx.supabase.co/storage/v1/upload", false],
     ["https://api.devnet.solana.com/", false],
@@ -148,10 +181,11 @@ describe("fetch guard", () => {
       return new Response("ok");
     }) as typeof fetch;
     const restore = installSimFetchGuard(RPC);
-    await expect(fetch("https://manci.io/")).rejects.toThrow(/only https:\/\/www\.manci\.io/);
+    await expect(fetch("https://manci.io/")).rejects.toThrow(/only https:\/\/devnet\.manci\.io/);
+    await expect(fetch("https://www.manci.io/api/health")).rejects.toThrow(/refused/);
     await expect(fetch("https://example.com/")).rejects.toThrow(/refused/);
-    await fetch("https://www.manci.io/api/health");
-    expect(calls).toEqual(["https://www.manci.io/api/health"]);
+    await fetch("https://devnet.manci.io/api/health");
+    expect(calls).toEqual(["https://devnet.manci.io/api/health"]);
     restore();
     await fetch("https://example.com/");
     expect(calls).toHaveLength(2);

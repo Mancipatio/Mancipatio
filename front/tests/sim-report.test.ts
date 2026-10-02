@@ -168,7 +168,7 @@ describe("owner queue with the owner actor (SIM_OWNER=1)", () => {
       awaitingOwner: true,
       stage: "await.dossier",
       ownerTask: "KYC SIM-006: reject",
-      data: { owner: { attempts: 3, handedBack: { task: "KYC dossier https://www.manci.io/admin/clients/c6", reason: "clients.status answered 409: Approve every uploaded document first", at, attempts: 3 } } },
+      data: { owner: { attempts: 3, handedBack: { task: "KYC dossier https://devnet.manci.io/admin/clients/c6", reason: "clients.status answered 409: Approve every uploaded document first", at, attempts: 3 } } },
     };
     state.users.u037 = { ...newUserState(plans[36], "W37"), awaitingOwner: true, stage: "await.dossier", data: { clientId: "c37" } };
     state.users.u005 = { ...newUserState(plans[4], "W5"), terminal: "done", data: { clientId: "c-5" } };
@@ -181,7 +181,7 @@ describe("owner queue with the owner actor (SIM_OWNER=1)", () => {
     expect(text).toContain("u001 [K/kyc, pilot, review=approve] [owner actor: next] wallet W1: KYC SIM-001: approve");
     expect(text).toMatch(/## Needs the super admin \/ KYC provider wallet \(CekAgg cannot sign these\)\npassport u002 .*request r-2 \(in review\).*\nissuer KYB u004 /);
     expect(text).toContain(
-      "## Handed back by the owner actor (decide by hand)\nu006 [K/kyc-reject-doc] KYC dossier https://www.manci.io/admin/clients/c6: clients.status answered 409: Approve every uploaded document first (after 3 attempts)",
+      "## Handed back by the owner actor (decide by hand)\nu006 [K/kyc-reject-doc] KYC dossier https://devnet.manci.io/admin/clients/c6: clients.status answered 409: Approve every uploaded document first (after 3 attempts)",
     );
     expect(text).toContain("## Decided by the owner actor (information)\nu002 [I/buyer-kyc, review=approve]: 2026-09-25T10:00:00Z passport request r-2 marked in review");
     expect(text).toContain("u037 [K/kyc] review=leave: /admin/clients/c37 — leave it");
@@ -221,9 +221,9 @@ describe("owner queue with the owner actor (SIM_OWNER=1)", () => {
     const state = newState("q00003", "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG");
     const plans = buildRoster();
     const at = "2026-09-25T10:00:00.000Z";
-    const handedBack = { task: "KYC dossier https://www.manci.io/admin/clients/c2", reason: "clients.status answered 409", at, attempts: 0, kind: "dossier" as const };
+    const handedBack = { task: "KYC dossier https://devnet.manci.io/admin/clients/c2", reason: "clients.status answered 409", at, attempts: 0, kind: "dossier" as const };
     state.users.u002 = { ...newUserState(plans[1], "W2"), awaitingOwner: true, stage: "await.dossier", data: { owner: { attempts: 0, handedBack } } };
-    expect(renderOwnerQueue(state, [], { owner: view() })).toContain("u002 [I/buyer-kyc] KYC dossier https://www.manci.io/admin/clients/c2: clients.status answered 409 (after 0 attempts)");
+    expect(renderOwnerQueue(state, [], { owner: view() })).toContain("u002 [I/buyer-kyc] KYC dossier https://devnet.manci.io/admin/clients/c2: clients.status answered 409 (after 0 attempts)");
     // The owner verified it by hand: the buyer waits for its passport now, the dossier hand-back is over.
     state.users.u002.stage = "await.passport";
     expect(renderOwnerQueue(state, [], { owner: view() })).toMatch(/## Handed back by the owner actor \(decide by hand\)\n\(none\)/);
@@ -355,7 +355,7 @@ describe("site preflight", () => {
   it("accepts a healthy devnet site, read from /api/health", async () => {
     const urls: string[] = [];
     await expect(assertDevnetSite(health(DEVNET, { urls }))).resolves.toBeUndefined();
-    expect(urls).toEqual(["https://www.manci.io/api/health"]);
+    expect(urls).toEqual(["https://devnet.manci.io/api/health"]);
   });
 
   it("refuses a site that does not report devnet", async () => {
@@ -379,6 +379,6 @@ describe("site preflight", () => {
     const down = (async () => {
       throw new Error("ECONNREFUSED 1.2.3.4");
     }) as unknown as typeof fetch;
-    await expect(assertDevnetSite(down)).rejects.toThrow(/^https:\/\/www\.manci\.io is unreachable$/);
+    await expect(assertDevnetSite(down)).rejects.toThrow(/^https:\/\/devnet\.manci\.io is unreachable$/);
   });
 });
