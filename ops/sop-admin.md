@@ -116,16 +116,48 @@ sale*.
    the issuer withdraws, the terms change, or the approving Admin's key is
    removed: an approval stays valid after its Admin record is gone.
 
-## FX rate refresh (weekly)
+## FX rate (automatic, with a manual fallback)
 
 Who: the super admin. Page: `/admin/limits` → payment token rates.
 
-1. Every week (and before any approval when the rate is older than 5 days),
-   update the USDC → EUR rate (kind `rate`, maximum age at most 7 days) from
-   the source the lawyer accepts **[legal: source]**.
-2. `/api/health` warns from 80 % of the maximum age and fails at 100 %
-   (`fx:stale` alarm). Before the first sale a missing rate only warns.
-3. EURC or any other mint is added in code first (with its address checked
+1. Since migration 0080 the USDC → EUR rate is automatic (runbook §15
+   "Automatic EUR rate"): the median of four public USDC/EUR markets,
+   checked against the ECB reference rate (within 2.5 %, widening to at most
+   5 % as the ECB fix ages over a weekend or holiday), renewed every minute
+   and valid 15 minutes. The page shows which rate counts (Automatic, Manual, Manual
+   override), the sources, the ECB anchor and the last run. The method is a
+   rate source like any other: the lawyer accepts it **[legal: source]**.
+2. Every week (and at once when `fx:auto-stale` or `fx:fallback` fires),
+   keep the manual fallback current: the USDC → EUR rate (kind `rate`, maximum age at most
+   7 days) from the source the lawyer accepts. It counts only while the
+   automatic rate is missing or out of date.
+3. Tick "Override the automatic rate" only on purpose (a feed you distrust,
+   a depeg decided with the owner); save the rate again unticked to end it.
+   `/api/health` warns while an override counts, and the page warns before
+   saving when the override is more than 2 % away from a current automatic
+   rate (an out-of-date automatic rate raises no warning). An override
+   keeps counting after its own maximum age (shown "Out of date"):
+   approvals then refuse until you renew it or save it unticked. Every save
+   or delete of a manual rate is in the audit log (`/admin/audit`,
+   `fx_rate_update` / `fx_rate_delete`), with the automatic rate that was
+   current and the gap to it.
+4. On mainnet `/api/health` fails when no rate is fresh (`stale`,
+   `missing`), except before the first sale approval and the first sale:
+   then a missing or out-of-date rate only warns
+   (`missing_before_first_sale` / `stale_before_first_sale`). Off mainnet it
+   only warns. It also warns from 80 % of the maximum age of a manual rate
+   that counts, and while the automatic rate counts but the manual
+   fallback is missing or out of date (`fallback_missing` /
+   `fallback_stale`). The alarm `fx:auto-stale` is high only on mainnet,
+   for a mint in use (a live approval, an open sale or a raise limit hold
+   paid in it) that no fresh manual rate covers; otherwise it is medium on
+   mainnet and low elsewhere.
+5. Before the off switch of the automatic rate (runbook §15 "Off switch",
+   and before an Instant Rollback to a front without it, §10) the manual
+   USDC rate must be fresh: refresh it here first. The off switch itself
+   raises `fx:auto-stale` for a few minutes; it clears after about 10
+   minutes.
+6. EURC or any other mint is added in code first (with its address checked
    against the issuer's published address), never on this page alone.
 
 ## Blocklist and clawback
@@ -175,7 +207,7 @@ PauseFlagsPanel (per area or *Pause everything*); out of band:
 
 ## Weekly and monthly
 
-- Weekly: FX rate; alarm backlog zero; `chain:inventory` (read-only) shows no
+- Weekly: the manual FX fallback (the automatic rate shows as current); alarm backlog zero; `chain:inventory` (read-only) shows no
   unexpected Admin record, proposal or buffer; the balances of the operator
   keys above the refill lines (runbook §1).
 - Monthly: the list of Admin records against the people who should hold them

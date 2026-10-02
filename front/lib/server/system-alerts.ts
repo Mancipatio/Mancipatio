@@ -92,6 +92,13 @@ export const SOURCE_LABELS: Record<string, { label: string; format: "platform" |
   "fx:missing": { label: "EUR rate missing for an on-chain fact", format: "platform" },
   "fx:stale": { label: "EUR rate out of date", format: "platform" },
   "fx:expiring": { label: "EUR rate about to expire", format: "platform" },
+  // 0080: the automatic rate (public market prices only).
+  "fx:auto-stale": { label: "Automatic EUR rate out of date", format: "platform" },
+  "fx:fallback": { label: "Manual EUR fallback rate missing or out of date", format: "platform" },
+  "fx:source-down": { label: "EUR rate source not answering", format: "platform" },
+  "fx:depeg": { label: "USDC away from the ECB EUR rate (depeg?)", format: "platform" },
+  "fx:divergence": { label: "EUR rate sources disagree", format: "platform" },
+  "fx:jump": { label: "EUR rate moved sharply", format: "platform" },
   "onchain:low-balance": { label: "Operational key low on SOL", format: "platform" },
   "onchain:squads-config": { label: "Squads multisig configuration changed", format: "platform" },
   "onchain:squads-proposal": { label: "Squads multisig proposal open", format: "platform" },

@@ -92,6 +92,14 @@
 // /admin/limits, so the reminder comes before sales stop. Past the max age it
 // passes: fx-stale reports a mint in use from then on (and /api/health the
 // default mint on mainnet), so one condition is never two alerts.
+// From 0080 these three judge the rate that COUNTS (lib/fx-effective.ts):
+// the automatic one while fresh, else the manual row; fx-expiring is about
+// the manual rate only (the automatic one is renewed every minute) and the
+// automatic rate has its own checks (fxAutoReports: fx-auto-stale,
+// fx-fallback, fx-source-down, fx-depeg, fx-divergence, fx-jump). While the
+// automatic rate counts, fx-fallback watches the manual row behind it (the
+// one that takes over when the automatic rate stops), so it cannot expire
+// unnoticed.
 //
 // The operational watches (lib/server/ops-watch.ts: SOL balances of the
 // operational keys and the Squads multisig, when configured) read the chain,
@@ -107,7 +115,12 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import { detectNetwork, type Network } from "@/lib/network";
-import { defaultPaymentMint } from "@/lib/payment-mints";
+import { defaultPaymentMint, paymentMintLabel } from "@/lib/payment-mints";
+import {
+  FX_JUMP_THRESHOLD, FX_JUMP_WINDOW_MS, FX_REFUSAL_STREAK, FX_SOURCE_DOWN_MS, FX_SOURCES, autoFxMint, type FxSourceId,
+} from "@/lib/fx-auto";
+import { fxRowFresh, resolveFxRates, type FxAutoRow, type FxManualRow, type FxOrigin } from "@/lib/fx-effective";
+import { tableMissing } from "@/lib/server/fx-rates";
 import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, type QueueTable } from "@/lib/server/health";
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
@@ -497,13 +510,40 @@ export async function bootstrapOpenReport(sb: SupabaseClient, network: Network, 
 }
 
 type Hold = { subject: string; ref: string; code: string; payment_mint: string | null; created_at: string };
-type FxRow = { payment_mint: string; kind: string; as_of: string; max_age: string };
+type FxRow = { payment_mint: string; kind: string; as_of: string; max_age: string; origin: FxOrigin };
+
+/**
+ * The payment mints IN USE (fx-stale, and fx-auto-stale's severity): named by
+ * a live sale approval (reserved or consumed), an open sale or a raise
+ * limit hold. `rows` are those three reads' payment_mint columns.
+ */
+function mintsInUse(rows: readonly { payment_mint: string | null }[]): Set<string> {
+  const inUse = new Set<string>();
+  for (const r of rows) if (r.payment_mint && BASE58.test(r.payment_mint)) inUse.add(r.payment_mint);
+  return inUse;
+}
+
+/** mintsInUse for one mint, from the same three reads; null when one could not be read. */
+async function mintInUse(sb: SupabaseClient, network: Network, mint: string, signal: AbortSignal): Promise<boolean | null> {
+  const [liveRes, openSalesRes, holdsRes] = await Promise.all([
+    sb.from("sale_capacity_reservations").select("payment_mint").eq("network", network).eq("kind", "sale")
+      .in("status", ["reserved", "consumed"]).eq("payment_mint", mint).limit(1).abortSignal(dbSignal(signal)),
+    sb.from("sales").select("payment_mint").eq("network", network).eq("status", 0).eq("payment_mint", mint).limit(1)
+      .abortSignal(dbSignal(signal)),
+    sb.from("sale_capacity_holds").select("payment_mint").eq("network", network).eq("payment_mint", mint).limit(1)
+      .abortSignal(dbSignal(signal)),
+  ]);
+  if (liveRes.error || openSalesRes.error || holdsRes.error) return null;
+  return mintsInUse([...(liveRes.data ?? []), ...(openSalesRes.data ?? []), ...(holdsRes.data ?? [])] as { payment_mint: string | null }[])
+    .has(mint);
+}
 
 /** fx-stale:<mint>, fx-missing:<mint> and capacity-holds; null when they could not be read. */
 async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report[] | null> {
-  const [holdsRes, fxRes, liveRes, openSalesRes, openIncidents] = await Promise.all([
+  const [holdsRes, fxRes, autoRes, liveRes, openSalesRes, openIncidents] = await Promise.all([
     sb.from("sale_capacity_holds").select("subject,ref,code,payment_mint,created_at").eq("network", network).limit(500).abortSignal(dbSignal(signal)),
-    sb.from("fx_rates").select("payment_mint,kind,as_of,max_age").eq("network", network).abortSignal(dbSignal(signal)),
+    sb.from("fx_rates").select("*").eq("network", network).abortSignal(dbSignal(signal)),
+    sb.from("fx_auto_rates").select("payment_mint,eur_per_token,decimals,source,as_of,max_age").eq("network", network).abortSignal(dbSignal(signal)),
     sb.from("sale_capacity_reservations").select("payment_mint").eq("network", network).eq("kind", "sale")
       .in("status", ["reserved", "consumed"]).limit(1000).abortSignal(dbSignal(signal)),
     sb.from("sales").select("payment_mint").eq("network", network).eq("status", 0).limit(1000).abortSignal(dbSignal(signal)),
@@ -511,17 +551,19 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
       .like("check_key", "fx-%").abortSignal(dbSignal(signal)),
   ]);
   if (holdsRes.error || fxRes.error || liveRes.error || openSalesRes.error) return null;
+  // Before 0080 there is no automatic table: the manual rows alone count.
+  if (autoRes.error && !tableMissing(autoRes.error)) return null;
   const holds = (holdsRes.data ?? []) as Hold[];
-  const rates = new Map(((fxRes.data ?? []) as FxRow[]).map((r) => [r.payment_mint, r]));
-  const inUse = new Set<string>();
-  for (const r of [...(liveRes.data ?? []), ...(openSalesRes.data ?? [])] as { payment_mint: string | null }[]) {
-    if (r.payment_mint && BASE58.test(r.payment_mint)) inUse.add(r.payment_mint);
-  }
+  // The rate that COUNTS per mint (0080, lib/fx-effective.ts): the automatic
+  // one while fresh, else the manual row. `origin` tells them apart.
+  const effective = resolveFxRates((fxRes.data ?? []) as FxManualRow[], autoRes.error ? [] : (autoRes.data ?? []) as FxAutoRow[], now);
+  const rates = new Map<string, FxRow>([...effective].map(([mint, e]) =>
+    [mint, { payment_mint: mint, kind: e.row.kind, as_of: e.row.as_of, max_age: e.row.max_age, origin: e.origin }]));
+  const inUse = mintsInUse([...(liveRes.data ?? []), ...(openSalesRes.data ?? []), ...holds] as { payment_mint: string | null }[]);
   const revalue = new Set<string>();
   const missing = new Set<string>();
   for (const h of holds) {
     if (!h.payment_mint || !BASE58.test(h.payment_mint)) continue;
-    inUse.add(h.payment_mint);
     if (h.code === "FX_REVALUE") revalue.add(h.payment_mint);
     if (h.code === "ADOPTION_PENDING") missing.add(h.payment_mint);
   }
@@ -540,7 +582,8 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
   const left = (r: FxRow) => {
     const max = intervalSeconds(r.max_age);
     const asOf = Date.parse(r.as_of);
-    if (r.kind !== "rate" || max === null || !Number.isFinite(asOf)) return null;
+    // An automatic rate is renewed every minute; fxAutoReports watches it.
+    if (r.kind !== "rate" || r.origin === "auto" || max === null || !Number.isFinite(asOf)) return null;
     return { ms: asOf + max * 1000 - now, window: Math.min(FX_EXPIRY_WARN_MS, (max * 1000) / 2) };
   };
   // Within the warning window and not yet expired (past the max age is fx-stale's).
@@ -551,6 +594,13 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
   for (const mint of expiryTracked) {
     const row = rates.get(mint);
     const l = row ? left(row) : null;
+    if (row && !l && row.origin === "auto") {
+      // The automatic rate counts: nothing to refresh by hand.
+      reports.push({ check: `fx-expiring:${mint}`, state: "pass", severity: "medium", category: "fx", source: "fx:expiring",
+        summary: `The EUR rate of ${mint} is the automatic one`, evidence: { payment_mint: mint, as_of: row.as_of, origin: "auto" } });
+      reported.add(`fx-expiring:${mint}`);
+      continue;
+    }
     if (!row || !l) continue;
     const hours = Math.max(0, Math.floor(l.ms / 3_600_000));
     reports.push({ check: `fx-expiring:${mint}`, state: expiring(row) ? "fail" : "pass", severity: "medium", category: "fx",
@@ -601,6 +651,255 @@ async function fxAndHolds(sb: SupabaseClient, network: Network, now: number, sig
     summary: `${holds.length} raise limit hold(s): new raises of those subjects are blocked`,
     evidence: { codes: byCode, subjects: [...new Set(holds.map((h) => h.subject))].slice(0, 20) } });
   return reports;
+}
+
+type FxObservation = { observed_at: string; status: string; code: string | null; eur_per_token: string | number | null; quotes: unknown };
+const FX_AUTO_CHECKS = ["fx-auto-stale", "fx-fallback", "fx-source-down", "fx-depeg", "fx-divergence", "fx-jump"] as const;
+type FxAutoCheck = (typeof FX_AUTO_CHECKS)[number];
+const FX_AUTO_SEVERITY: Record<FxAutoCheck, Severity> = {
+  "fx-auto-stale": "medium", "fx-fallback": "medium", "fx-source-down": "medium", "fx-depeg": "high", "fx-divergence": "medium",
+  "fx-jump": "medium",
+};
+/** The refusals that are a verdict on the market (the sources answered, the prices were refused). */
+const MARKET_REFUSALS: ReadonlySet<string> = new Set(["ECB_DEVIATION", "SOURCE_DIVERGENCE"]);
+/** The fx job evidently runs while its latest observation is younger than this (it runs every minute). */
+export const FX_JOB_RUNNING_MS = 5 * 60_000;
+
+/**
+ * The market verdicts since the last accepted run (newest first): the codes
+ * of the refusals that judged the prices (ECB_DEVIATION, SOURCE_DIVERGENCE).
+ * Other refusals (a source or the ECB not answering, the decimals) judged
+ * nothing and are skipped, so they neither end nor extend the run of
+ * verdicts; an accepted observation ends it. In a real depeg the books lag
+ * each other, so the two codes alternate: they are judged together.
+ */
+export function marketRefusals(observations: readonly Pick<FxObservation, "status" | "code">[]): string[] {
+  const codes: string[] = [];
+  for (const o of observations) {
+    if (o.status !== "refused") break;
+    if (o.code && MARKET_REFUSALS.has(o.code)) codes.push(o.code);
+  }
+  return codes;
+}
+
+/** The market sources that answered in an observation (quotes.sources.<id>.rate). */
+function answeredSources(quotes: unknown): Set<FxSourceId> {
+  const sources = (quotes as { sources?: Record<string, unknown> } | null)?.sources;
+  const answered = new Set<FxSourceId>();
+  if (!sources || typeof sources !== "object") return answered;
+  for (const { id } of FX_SOURCES) {
+    const entry = sources[id] as { rate?: unknown } | undefined;
+    if (entry && typeof entry.rate === "string") answered.add(id);
+  }
+  return answered;
+}
+
+/**
+ * The automatic EUR rate of the network's USDC (0080, lib/fx-auto.ts);
+ * null when it could not be read. Nothing is reported while there is no
+ * automatic row and the job is not evidently running (no observation in the
+ * last FX_JOB_RUNNING_MS): before its first run, or after the off switch
+ * (job disabled, the fx_auto_rates rows deleted); and nothing before 0080
+ * (the tables do not exist). Earlier incidents then pass. Right after the
+ * off switch the job still ran within FX_JOB_RUNNING_MS, so fx-auto-stale
+ * fails for those minutes; with the incident hysteresis (3 passes, 5
+ * minutes) it clears about 10 minutes after the last run.
+ *   fx-auto-stale   the automatic rate is past its max age (15 min), or
+ *                   missing while the job runs: the worker stopped or every
+ *                   run is refused. High only on mainnet, for a mint in use
+ *                   (mintsInUse, as fx-stale) and when no fresh manual rate
+ *                   covers it (approvals of an open sale refuse); otherwise
+ *                   medium on mainnet and low elsewhere (never emailed).
+ *   fx-fallback     while the automatic rate counts: the manual rate behind
+ *                   it, the one that takes over when the automatic rate
+ *                   stops, is past its max age or within the FX expiry
+ *                   warning of it (medium), or missing (medium on mainnet,
+ *                   where D10 keeps one; low elsewhere, never emailed). It
+ *                   passes while the manual row counts itself (a peg, an
+ *                   override, or the automatic rate is stale: fx-expiring,
+ *                   fx-stale and fx-auto-stale judge it then).
+ *   fx-source-down  a market source gave no usable answer for 15 minutes
+ *                   while the worker kept running (redundancy is reduced).
+ *   fx-depeg        the newest FX_REFUSAL_STREAK market verdicts since the
+ *                   last accepted run (marketRefusals) were all refusals and
+ *                   at least one of them found the sources' median further
+ *                   from the ECB reference than its tolerance (ecbTolerance:
+ *                   2.5 % growing with the fix's age, at most 5 %): a USDC
+ *                   depeg, a large EUR/USD move since the fix, or broken
+ *                   sources; high. Fewer verdicts: hold.
+ *   fx-divergence   the same verdicts, all of them sources that disagree by
+ *                   > 1 % (a broken source or a disorderly market); medium.
+ *                   Mixed with an ECB deviation it holds: fx-depeg reports it.
+ *   fx-jump         the accepted rates of the last hour moved more than
+ *                   FX_JUMP_THRESHOLD (1 %); hold above half of it.
+ */
+export async function fxAutoReports(sb: SupabaseClient, network: Network, now: number, signal: AbortSignal): Promise<Report[] | null> {
+  const mint = autoFxMint(network);
+  const since = new Date(now - FX_JUMP_WINDOW_MS).toISOString();
+  const openRes = await sb.from("alarm_incidents").select("check_key").eq("network", network).is("cleared_at", null)
+    .not("last_fail_at", "is", null).like("check_key", "fx-%").abortSignal(dbSignal(signal));
+  const open = openRes.error ? [] : ((openRes.data ?? []) as { check_key: string }[]).map((r) => r.check_key)
+    .filter((key) => (FX_AUTO_CHECKS as readonly string[]).includes(key.split(":")[0]));
+  const reports: Report[] = [];
+  /** Earlier incidents not reported in this run: their condition is gone. */
+  const passOpen = (reported: Set<string>) => {
+    for (const key of open) {
+      if (reported.has(key)) continue;
+      const kind = key.split(":")[0] as FxAutoCheck;
+      reports.push({ check: key, state: "pass", severity: FX_AUTO_SEVERITY[kind], category: "fx", source: `fx:${kind.slice(3)}`,
+        summary: `${kind} recovered`, evidence: {} });
+    }
+    return reports;
+  };
+  if (!mint) return passOpen(new Set());
+  const [autoRes, manualRes, obsRes] = await Promise.all([
+    sb.from("fx_auto_rates").select("payment_mint,eur_per_token,decimals,source,as_of,max_age")
+      .eq("network", network).eq("payment_mint", mint).abortSignal(dbSignal(signal)).maybeSingle(),
+    sb.from("fx_rates").select("*").eq("network", network).eq("payment_mint", mint).abortSignal(dbSignal(signal)).maybeSingle(),
+    sb.from("fx_rate_observations").select("observed_at,status,code,eur_per_token,quotes")
+      .eq("network", network).eq("payment_mint", mint).gte("observed_at", since)
+      .order("observed_at", { ascending: false }).limit(200).abortSignal(dbSignal(signal)),
+  ]);
+  if (autoRes.error || obsRes.error) {
+    // Before 0080: nothing to watch.
+    if (tableMissing(autoRes.error) || tableMissing(obsRes.error)) return passOpen(new Set());
+    return null;
+  }
+  if (manualRes.error) return null;
+  const auto = (autoRes.data ?? null) as FxAutoRow | null;
+  const manual = (manualRes.data ?? null) as FxManualRow | null;
+  const observations = ((obsRes.data ?? []) as FxObservation[])
+    .filter((o) => Number.isFinite(Date.parse(o.observed_at)))
+    .sort((a, b) => Date.parse(b.observed_at) - Date.parse(a.observed_at));
+  const latest = observations[0] ?? null;
+  const running = latest !== null && now - Date.parse(latest.observed_at) < FX_JOB_RUNNING_MS;
+  // No automatic row: a job that never ran, or the off switch. Only a job
+  // that evidently runs (and has never been accepted) is watched.
+  if (!auto && !running) return passOpen(new Set());
+  // fx-auto-stale pages (high) only on mainnet, for a mint in use (not asked elsewhere).
+  const inUse = network === "mainnet" ? await mintInUse(sb, network, mint, signal) : undefined;
+  if (inUse === null) return null;
+
+  const label = paymentMintLabel(mint, network);
+  const reported = new Set<string>();
+  const push = (r: Report) => {
+    reports.push(r);
+    reported.add(r.check);
+  };
+  const lastCode = observations.find((o) => o.status === "refused")?.code ?? null;
+
+  // fx-auto-stale
+  const autoFresh = auto !== null && fxRowFresh({ kind: "rate", as_of: auto.as_of, max_age: auto.max_age }, now);
+  const fallback = manual !== null && (manual.kind === "eur_peg" || fxRowFresh(manual, now));
+  const ageMinutes = auto ? Math.max(0, Math.floor((now - Date.parse(auto.as_of)) / 60_000)) : null;
+  const why = latest?.status === "refused" ? ` (runs refused: ${latest.code})` : latest ? "" : " (the fx job has not run in the last hour)";
+  const staleSeverity: Severity = network !== "mainnet" ? "low" : !autoFresh && !fallback && inUse === true ? "high" : "medium";
+  push({ check: `fx-auto-stale:${mint}`, state: autoFresh ? "pass" : "fail", severity: staleSeverity,
+    category: "fx", source: "fx:auto-stale",
+    summary: autoFresh
+      ? `The automatic EUR rate of ${label} is current`
+      : `The automatic EUR rate of ${label} is ${ageMinutes === null ? "missing" : `${ageMinutes} minute(s) old`}${why}; ${
+        fallback ? "the manual rate on /admin/limits counts meanwhile" : "no fresh manual rate covers it"}`,
+    evidence: { payment_mint: mint, as_of: auto?.as_of ?? null, age_minutes: ageMinutes, last_refusal: lastCode,
+      latest_status: latest?.status ?? null, manual_fallback: fallback, in_use: inUse ?? null } });
+
+  // fx-fallback: the manual rate behind a fresh automatic one.
+  const fallbackCheck = `fx-fallback:${mint}`;
+  if (!autoFresh || (manual !== null && (manual.kind === "eur_peg" || manual.override_auto))) {
+    push({ check: fallbackCheck, state: "pass", severity: "medium", category: "fx", source: "fx:fallback",
+      summary: autoFresh
+        ? `The manual EUR rate of ${label} counts by itself`
+        : `The manual EUR rate of ${label} counts now (the automatic one is out of date)`,
+      evidence: { payment_mint: mint, auto_fresh: autoFresh } });
+  } else if (manual === null) {
+    push({ check: fallbackCheck, state: "fail", severity: network === "mainnet" ? "medium" : "low", category: "fx",
+      source: "fx:fallback",
+      summary: `No manual EUR rate of ${label} backs the automatic one: if the automatic rate stops, sale approvals stop once it `
+        + "is out of date. Enter one on /admin/limits",
+      evidence: { payment_mint: mint, manual: null } });
+  } else {
+    const max = intervalSeconds(manual.max_age);
+    const asOf = Date.parse(manual.as_of);
+    const leftMs = max === null || !Number.isFinite(asOf) ? null : asOf + max * 1000 - now;
+    const window = max === null ? FX_EXPIRY_WARN_MS : Math.min(FX_EXPIRY_WARN_MS, (max * 1000) / 2);
+    const hours = leftMs === null ? null : Math.max(0, Math.floor(leftMs / 3_600_000));
+    push({ check: fallbackCheck, state: leftMs === null || leftMs <= window ? "fail" : "pass", severity: "medium", category: "fx",
+      source: "fx:fallback",
+      summary: leftMs === null || leftMs <= 0
+        ? `The manual EUR rate of ${label} behind the automatic one is past its max age: if the automatic rate stops, `
+          + "sale approvals stop. Refresh it on /admin/limits"
+        : `The manual EUR rate of ${label} behind the automatic one reaches its max age in ${hours} hour(s): refresh it on /admin/limits`,
+      evidence: { payment_mint: mint, as_of: manual.as_of, hours_left: hours } });
+  }
+
+  // fx-source-down: only while the worker runs and has covered the window.
+  const covered = observations.length > 0 && now - Date.parse(observations[observations.length - 1].observed_at) >= FX_SOURCE_DOWN_MS;
+  if (running && covered) {
+    const lastOk: Partial<Record<FxSourceId, string>> = {};
+    for (const o of observations) {
+      for (const id of answeredSources(o.quotes)) lastOk[id] ??= o.observed_at;
+    }
+    const down = FX_SOURCES.map((s) => s.id).filter((id) => {
+      const at = lastOk[id];
+      return at === undefined || now - Date.parse(at) >= FX_SOURCE_DOWN_MS;
+    });
+    push({ check: `fx-source-down:${mint}`, state: down.length ? "fail" : "pass", severity: "medium", category: "fx",
+      source: "fx:source-down",
+      summary: down.length
+        ? `EUR rate source(s) without a usable answer for ${FX_SOURCE_DOWN_MS / 60_000} minutes: ${down.join(", ")}`
+        : "Every EUR rate source answers",
+      evidence: { payment_mint: mint, down, last_ok: lastOk } });
+  }
+
+  // fx-depeg and fx-divergence: the market verdicts since the last accepted run.
+  const verdicts = marketRefusals(observations);
+  const newest = verdicts.slice(0, FX_REFUSAL_STREAK);
+  const full = newest.length >= FX_REFUSAL_STREAK;
+  const deviated = newest.includes("ECB_DEVIATION");
+  const diverged = newest.includes("SOURCE_DIVERGENCE");
+  // Each check's evidence: its own newest verdict since the last accepted
+  // run, else the newest market verdict (another refusal carries no judged
+  // prices).
+  const lastAccepted = observations.findIndex((o) => o.status !== "refused");
+  const sinceAccepted = observations.slice(0, lastAccepted === -1 ? observations.length : lastAccepted);
+  const verdictObs = sinceAccepted.find((o) => o.code !== null && MARKET_REFUSALS.has(o.code)) ?? latest;
+  const states: Record<"fx-depeg" | "fx-divergence", Report["state"]> = {
+    "fx-depeg": deviated ? (full ? "fail" : "hold") : "pass",
+    "fx-divergence": diverged ? (full && !deviated ? "fail" : "hold") : "pass",
+  };
+  for (const [check, code, seen] of [["fx-depeg", "ECB_DEVIATION", deviated], ["fx-divergence", "SOURCE_DIVERGENCE", diverged]] as const) {
+    const verdictQuotes = ((sinceAccepted.find((o) => o.code === code) ?? verdictObs)?.quotes ?? {}) as Record<string, unknown>;
+    const ecbDate = (verdictQuotes.ecb as { date?: unknown } | null | undefined)?.date;
+    const toleranceBps = verdictQuotes.ecb_tolerance_bps;
+    const what = check === "fx-depeg"
+      ? `the ${label}/EUR market median deviates from the ECB reference of ${typeof ecbDate === "string" ? ecbDate : "the last fix"} `
+        + `by more than the tolerance${typeof toleranceBps === "number" ? ` (${(toleranceBps / 100).toFixed(2)} %)` : ""}`
+        + " — a USDC depeg, a large EUR/USD move since the fix, or broken sources"
+      : `the ${label}/EUR sources disagree by more than 1 % (a broken source?)`;
+    const times = newest.filter((c) => c === code).length;
+    push({ check: `${check}:${mint}`, state: states[check],
+      severity: FX_AUTO_SEVERITY[check], category: "fx", source: `fx:${check.slice(3)}`,
+      summary: seen
+        ? `${what}; ${verdicts.length} run(s) refused on the prices since the last accepted one (${times} of the newest ${newest.length})`
+        : `The ${label}/EUR sources agree with each other and with the ECB`,
+      evidence: { payment_mint: mint, refused_in_a_row: verdicts.length, recent_codes: newest, median: verdictQuotes.median ?? null,
+        spread_bps: verdictQuotes.spread_bps ?? null, ecb: verdictQuotes.ecb ?? null,
+        ecb_deviation_bps: verdictQuotes.ecb_deviation_bps ?? null, ecb_tolerance_bps: verdictQuotes.ecb_tolerance_bps ?? null,
+        sources: verdictQuotes.sources ?? null } });
+  }
+
+  // fx-jump: the accepted rates of the last hour.
+  const accepted = observations.filter((o) => o.status === "accepted").map((o) => Number(o.eur_per_token))
+    .filter((r) => Number.isFinite(r) && r > 0);
+  const low = accepted.length ? Math.min(...accepted) : null;
+  const high = accepted.length ? Math.max(...accepted) : null;
+  const move = low !== null && high !== null && accepted.length >= 2 ? (high - low) / low : 0;
+  push({ check: `fx-jump:${mint}`, state: thresholdState(move, FX_JUMP_THRESHOLD, FX_JUMP_THRESHOLD / 2), severity: "medium",
+    category: "fx", source: "fx:jump",
+    summary: `The automatic ${label}/EUR rate moved ${(move * 100).toFixed(2)} % within ${FX_JUMP_WINDOW_MS / 60_000} minutes`,
+    evidence: { payment_mint: mint, move_bps: Math.round(move * 10_000), min: low, max: high, accepted_runs: accepted.length } });
+
+  return passOpen(reported);
 }
 
 /**
@@ -787,6 +1086,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => eventInvalid(sb, network, now, signal));
   await collect(() => retryHeartbeat(sb, network, now, signal));
   await collect(() => fxAndHolds(sb, network, now, signal));
+  await collect(() => fxAutoReports(sb, network, now, signal));
   await collect(() => indexerFreshness(sb, network, now, signal));
   await collect(() => sanctionsListReport(sb, network, now, signal));
   await collect(() => roleChangesReport(sb, network, now, signal));

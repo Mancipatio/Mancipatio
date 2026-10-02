@@ -138,6 +138,25 @@ export type MyApproval = {
 export type FxRate = {
   network: string; payment_mint: string; kind: "eur_peg" | "rate"; eur_per_token: number | string; decimals: number;
   source: string; as_of: string; max_age: string; updated_by: string | null; updated_at: string;
+  /** 0080: the manual rate counts over the automatic one. */
+  override_auto?: boolean | null;
+};
+
+/** One payment token on /admin/limits (0080): the rate that counts, and the manual and automatic rates behind it. */
+export type FxRateView = FxRate & {
+  origin?: "auto" | "manual" | "manual_override";
+  fresh?: boolean;
+  manual?: FxRate | null;
+  auto?: {
+    payment_mint: string; eur_per_token: number | string; decimals: number; source: string; as_of: string; max_age: string;
+    quotes?: {
+      sources?: Record<string, { rate?: string; error?: string }>;
+      median?: string | null; spread_bps?: number | null;
+      ecb?: { date: string; usd_per_eur: string; eur_per_usd: string } | null; ecb_deviation_bps?: number | null;
+      ecb_tolerance_bps?: number | null;
+    };
+  } | null;
+  auto_last?: { observed_at: string; status: string; code: string | null } | null;
 };
 
 type Session = WalletSession | null | undefined;
@@ -210,13 +229,15 @@ export const revalueTreasuryMint = (session: Session, reservationId: string, amo
     { reservation_id: reservationId, amount_eur: amountEur, reason });
 
 export const readFxRates = (session: Session) =>
-  signedFetch<FxRate[]>(session, "/api/admin-config/fx-rates", "adminConfig.fxRatesRead", {});
+  signedFetch<FxRateView[]>(session, "/api/admin-config/fx-rates", "adminConfig.fxRatesRead", {});
 
 export const writeFxRate = (
   session: Session,
-  input: { op: "upsert"; payment_mint: string; kind: "eur_peg" | "rate"; eur_per_token?: string; source: string; max_age_days?: number }
-    | { op: "delete"; payment_mint: string },
-) => signedFetch<FxRate[]>(session, "/api/admin-config/fx-rates", "adminConfig.fxRatesWrite", input);
+  input: {
+    op: "upsert"; payment_mint: string; kind: "eur_peg" | "rate"; eur_per_token?: string; source: string; max_age_days?: number;
+    override_auto?: boolean;
+  } | { op: "delete"; payment_mint: string },
+) => signedFetch<FxRateView[]>(session, "/api/admin-config/fx-rates", "adminConfig.fxRatesWrite", input);
 
 /** EUR value (rounded up to cents) of `baseUnits` at a rate — display only; the server computes the counted value. */
 export function eurValue(baseUnits: bigint, rate: FxRate | null): number | null {

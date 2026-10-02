@@ -11,10 +11,11 @@ import {
   readFxRates,
   revalueTreasuryMint,
   writeFxRate,
-  type FxRate,
+  type FxRateView,
   type ReservationRow,
 } from "@/lib/sale-approvals";
 import { detectNetwork } from "@/lib/network";
+import { fxAutoFresh, fxRowFresh, gapToFreshAuto } from "@/lib/fx-effective";
 import {
   MAINNET_MAX_RATE_AGE_DAYS,
   NOT_ALLOWED_ON_MAINNET,
@@ -47,18 +48,26 @@ export default function RaiseLimitsPage() {
 }
 
 /**
- * EUR rates of the payment tokens sales may use (0066 fx_rates). A sale
- * approval reserves its maximum raise in EUR at the rate here, and the sale is
- * booked at that same locked rate. EUR stablecoins are pegged 1:1; any other
- * token needs a rate that is refused once older than its maximum age.
- * Admins read; only the Super Admin changes them.
+ * EUR rates of the payment tokens sales may use. A sale approval reserves its
+ * maximum raise in EUR at the rate that counts, and the sale is booked at that
+ * same locked rate. EUR stablecoins are pegged 1:1. The network's USDC has an
+ * AUTOMATIC rate (0080: the median of public USDC/EUR order books, checked
+ * against the ECB, renewed every minute); the manual rate entered here is the
+ * fallback while it is missing or out of date, or, ticked as an override,
+ * counts over it. Admins read; only the Super Admin changes the manual rates.
  */
 function FxRatesCard() {
   const conn = useWalletConnection();
   const { isSuperAdmin } = useRole();
   const toast = useToast();
   const network = detectNetwork();
-  const [rates, setRates] = useState<FxRate[] | null>(null);
+  const [rates, setRatesState] = useState<FxRateView[] | null>(null);
+  // When the list was read: what "out of date" is judged against (not the render time).
+  const [readAt, setReadAt] = useState(0);
+  const setRates = useCallback((next: FxRateView[]) => {
+    setRatesState(next);
+    setReadAt(Date.now());
+  }, []);
   const [error, setError] = useState<string | null>(null);
   // The network's USDC is prefilled; it is a "rate" token everywhere.
   const [mint, setMint] = useState(() => defaultPaymentMint(network) ?? "");
@@ -66,6 +75,7 @@ function FxRatesCard() {
   const [rate, setRate] = useState("");
   const [source, setSource] = useState("");
   const [maxAge, setMaxAge] = useState(String(MAINNET_MAX_RATE_AGE_DAYS));
+  const [overrideAuto, setOverrideAuto] = useState(false);
   const [saving, setSaving] = useState(false);
   // Mainnet (D18): only allowlisted mints, the kind the allowlist fixes, a
   // rate at most 7 days old. The server enforces the same rules.
@@ -75,6 +85,12 @@ function FxRatesCard() {
   const kind = fixedKind ?? chosenKind;
   const notAllowed = mainnet && typedMint.length > 0 && !isAllowedPaymentMint(network, typedMint);
   const maxAgeTooLong = mainnet && kind === "rate" && Number(maxAge) > MAINNET_MAX_RATE_AGE_DAYS;
+  // An override far from the automatic rate is worth a second look (not refused: a depeg is a reason to pin one).
+  // Only a FRESH automatic rate is compared (lib/fx-effective.ts, judged when the list was read): a stale
+  // one counts for nothing, so an override cannot be "far" from it.
+  const autoRow = rates?.find((r) => r.payment_mint === typedMint)?.auto ?? null;
+  const autoNow = autoRow && fxAutoFresh(autoRow, readAt) ? autoRow : null;
+  const overrideGap = overrideAuto && kind === "rate" ? gapToFreshAuto(rate.trim(), autoNow, readAt) : null;
 
   useEffect(() => {
     if (!conn.wallet) return;
@@ -83,7 +99,7 @@ function FxRatesCard() {
       .then((r) => { if (!cancelled) setRates(r); })
       .catch((e) => { if (!cancelled) setError(e instanceof Error ? e.message : "Could not load the rates"); });
     return () => { cancelled = true; };
-  }, [conn.wallet]);
+  }, [conn.wallet, setRates]);
 
   async function save(event: FormEvent) {
     event.preventDefault();
@@ -100,10 +116,10 @@ function FxRatesCard() {
     try {
       setRates(await writeFxRate(conn.wallet, {
         op: "upsert", payment_mint: typedMint, kind, source: source.trim(),
-        ...(kind === "rate" ? { eur_per_token: rate.trim(), max_age_days: Number(maxAge) } : {}),
+        ...(kind === "rate" ? { eur_per_token: rate.trim(), max_age_days: Number(maxAge), override_auto: overrideAuto } : {}),
       }));
-      toast.show({ kind: "success", title: "EUR rate saved" });
-      setMint(""); setRate(""); setSource("");
+      toast.show({ kind: "success", title: overrideAuto && kind === "rate" ? "Manual override saved" : "Manual EUR rate saved" });
+      setMint(""); setRate(""); setSource(""); setOverrideAuto(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not save the rate");
     } finally {
@@ -114,7 +130,7 @@ function FxRatesCard() {
   async function remove(paymentMint: string) {
     try {
       setRates(await writeFxRate(conn.wallet, { op: "delete", payment_mint: paymentMint }));
-      toast.show({ kind: "success", title: "EUR rate removed" });
+      toast.show({ kind: "success", title: "Manual EUR rate removed" });
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not remove the rate");
     }
@@ -124,8 +140,10 @@ function FxRatesCard() {
     <div className="mt-6 max-w-3xl rounded-xl border border-slate-200 bg-white p-6 shadow-card">
       <p className="text-sm font-medium text-slate-800">Payment tokens and EUR rates</p>
       <p className="mt-0.5 text-xs text-slate-500">
-        Sale approvals count their maximum raise in EUR at these rates against the rolling 12-month limit (per SPV,
-        or per issuer without one), and closed sales are booked at the rate locked when they were approved.
+        Sale approvals count their maximum raise in EUR at the rate that counts against the rolling 12-month limit (per
+        SPV, or per issuer without one), and closed sales are booked at the rate locked when they were approved. The
+        network&apos;s USDC is priced automatically every minute (median of public USDC/EUR markets, checked against the ECB
+        reference rate); a manual rate is the fallback while the automatic one is missing or out of date.
       </p>
       {error && <p className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-800" role="alert">{error}</p>}
       {rates === null && !error ? (
@@ -133,34 +151,18 @@ function FxRatesCard() {
       ) : rates && rates.length === 0 ? (
         <p className="mt-3 text-sm text-slate-500">No payment token configured: no sale can be approved yet.</p>
       ) : (
-        <table className="mt-3 w-full text-left text-xs">
-          <thead className="text-slate-500">
-            <tr><th className="py-1">Mint</th><th>Rate</th><th>Source</th><th>As of</th><th /></tr>
-          </thead>
-          <tbody className="divide-y divide-slate-100 text-slate-700">
-            {(rates ?? []).map((r) => (
-              <tr key={r.payment_mint}>
-                <td className="py-1.5">
-                  {paymentMintLabel(r.payment_mint, network)}{" "}
-                  <span className="font-mono">{r.payment_mint.slice(0, 6)}…{r.payment_mint.slice(-4)}</span> ({r.decimals} dec.)
-                </td>
-                <td>{r.kind === "eur_peg" ? "EUR 1:1" : `${Number(r.eur_per_token)} EUR · max age ${r.max_age}`}</td>
-                <td>{r.source}</td>
-                <td>{new Date(r.as_of).toLocaleString("en-GB")}</td>
-                <td className="text-right">
-                  {isSuperAdmin && (
-                    <button type="button" onClick={() => void remove(r.payment_mint)} className="text-red-700 hover:underline">
-                      Remove
-                    </button>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <ul className="mt-3 divide-y divide-slate-100">
+          {(rates ?? []).map((r) => (
+            <FxRateItem key={r.payment_mint} rate={r} network={network} readAt={readAt} canRemove={isSuperAdmin}
+              onRemove={(m) => void remove(m)} />
+          ))}
+        </ul>
       )}
       {isSuperAdmin && (
         <form onSubmit={(e) => void save(e)} className="mt-5 grid gap-3 border-t border-slate-100 pt-4 sm:grid-cols-2">
+          <p className="text-xs font-medium text-slate-700 sm:col-span-2">
+            Manual rate <span className="font-normal text-slate-500">(fallback, or an override of the automatic rate)</span>
+          </p>
           <label className="text-xs text-slate-600 sm:col-span-2">Payment mint
             <input value={mint} onChange={(e) => setMint(e.target.value)} required
               className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 font-mono text-xs" />
@@ -192,20 +194,133 @@ function FxRatesCard() {
                   className="mt-1 w-full rounded-md border border-slate-300 px-2 py-1.5 text-sm" />
                 {mainnet && (
                   <span className={`mt-1 block text-[11px] ${maxAgeTooLong ? "text-red-700" : "text-slate-500"}`}>
-                    At most {MAINNET_MAX_RATE_AGE_DAYS} days on mainnet; refresh the rate weekly.
+                    At most {MAINNET_MAX_RATE_AGE_DAYS} days on mainnet.
                   </span>
                 )}</label>
+              <label className="flex items-start gap-2 text-xs text-slate-600 sm:col-span-2">
+                <input type="checkbox" checked={overrideAuto} onChange={(e) => setOverrideAuto(e.target.checked)} className="mt-0.5" />
+                <span>
+                  <span className="font-medium text-slate-800">Override the automatic rate.</span> This manual rate then counts even while
+                  the automatic one is current, and still counts once past its own maximum age: approvals then refuse it as out of
+                  date until you renew it or save it unticked. Leave unticked to keep it as the fallback only.
+                </span>
+              </label>
+              {overrideGap !== null && overrideGap > OVERRIDE_WARN_GAP && autoNow && (
+                <p className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[11px] text-amber-900 sm:col-span-2" role="status">
+                  This override is {(overrideGap * 100).toFixed(2)} % away from the automatic rate ({Number(autoNow.eur_per_token)} EUR,{" "}
+                  {ageText(autoNow.as_of)}). Check the rate before saving; it will count instead of the automatic one.
+                </p>
+              )}
             </>
           )}
           <div className="sm:col-span-2">
             <button disabled={saving || notAllowed || maxAgeTooLong} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50">
-              {saving ? "Saving…" : "Save rate"}
+              {saving ? "Saving…" : overrideAuto && kind === "rate" ? "Save manual override" : "Save manual rate"}
             </button>
             <span className="ml-3 text-xs text-slate-500">Decimals are read from the mint on-chain.</span>
           </div>
         </form>
       )}
     </div>
+  );
+}
+
+/** /admin/limits warns (without refusing) when an override differs from the automatic rate by more than this. */
+const OVERRIDE_WARN_GAP = 0.02;
+
+const ORIGIN_LABELS: Record<NonNullable<FxRateView["origin"]>, { text: string; tone: string }> = {
+  auto: { text: "Automatic", tone: "bg-emerald-50 text-emerald-800 border-emerald-200" },
+  manual: { text: "Manual", tone: "bg-amber-50 text-amber-800 border-amber-200" },
+  manual_override: { text: "Manual override", tone: "bg-violet-50 text-violet-800 border-violet-200" },
+};
+
+function ageText(iso: string): string {
+  const seconds = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+  if (!Number.isFinite(seconds)) return "";
+  if (seconds < 120) return `${seconds} s ago`;
+  if (seconds < 7_200) return `${Math.round(seconds / 60)} min ago`;
+  if (seconds < 172_800) return `${Math.round(seconds / 3_600)} h ago`;
+  return `${Math.round(seconds / 86_400)} days ago`;
+}
+
+function FxRateItem({ rate: r, network, readAt, canRemove, onRemove }: {
+  rate: FxRateView; network: ReturnType<typeof detectNetwork>; readAt: number; canRemove: boolean; onRemove: (mint: string) => void;
+}) {
+  const origin = r.origin ? ORIGIN_LABELS[r.origin] : null;
+  const manual = r.manual ?? (r.origin === undefined ? r : null);
+  const auto = r.auto ?? null;
+  const sources = auto?.quotes?.sources ?? {};
+  const ecb = auto?.quotes?.ecb ?? null;
+  // An expired manual row: an override still counts (approvals refuse it), a fallback could not take over.
+  const manualStale = manual !== null && manual.kind === "rate" && !fxRowFresh(manual, readAt);
+  return (
+    <li className="py-3 text-xs text-slate-700">
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="font-medium text-slate-900">{paymentMintLabel(r.payment_mint, network)}</span>
+        <span className="font-mono text-slate-500">{r.payment_mint.slice(0, 6)}…{r.payment_mint.slice(-4)}</span>
+        <span className="text-slate-500">({r.decimals} dec.)</span>
+      </div>
+      <div className="mt-1.5 flex flex-wrap items-center gap-2">
+        <span className="text-slate-500">Counts now:</span>
+        <span className="font-medium text-slate-900">{r.kind === "eur_peg" ? "EUR 1:1" : `${Number(r.eur_per_token)} EUR`}</span>
+        {origin && r.kind !== "eur_peg" && (
+          <span className={`rounded border px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${origin.tone}`}>{origin.text}</span>
+        )}
+        {r.fresh === false && (
+          <span className="rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-800">
+            Out of date: approvals refuse it
+          </span>
+        )}
+        <span className="text-slate-500">as of {new Date(r.as_of).toLocaleString("en-GB")}</span>
+      </div>
+      {(auto || r.auto_last) && (
+        <div className="mt-2 rounded-md border border-slate-100 bg-slate-50 px-3 py-2">
+          <p className="font-medium text-slate-800">
+            Automatic{auto ? `: ${Number(auto.eur_per_token)} EUR, ${ageText(auto.as_of)} (valid ${auto.max_age})` : ": no accepted rate yet"}
+          </p>
+          {Object.keys(sources).length > 0 && (
+            <p className="mt-0.5 text-slate-600">
+              Sources:{" "}
+              {Object.entries(sources).map(([id, q], i) => (
+                <span key={id}>{i > 0 && " · "}{id} {q.rate ?? <span className="text-red-700">{q.error ?? "no answer"}</span>}</span>
+              ))}
+              {auto?.quotes?.spread_bps != null && <> · spread {(auto.quotes.spread_bps / 100).toFixed(2)} %</>}
+            </p>
+          )}
+          {ecb && (
+            <p className="mt-0.5 text-slate-600">
+              ECB anchor {ecb.date}: {ecb.usd_per_eur} USD per EUR ({ecb.eur_per_usd} EUR per USD)
+              {auto?.quotes?.ecb_deviation_bps != null && <>, median {(auto.quotes.ecb_deviation_bps / 100).toFixed(2)} % away</>}
+              {auto?.quotes?.ecb_tolerance_bps != null && <> (allowed {(auto.quotes.ecb_tolerance_bps / 100).toFixed(2)} %)</>}
+            </p>
+          )}
+          {r.auto_last && (
+            <p className={`mt-0.5 ${r.auto_last.status === "accepted" ? "text-slate-500" : "text-red-700"}`}>
+              Last run {ageText(r.auto_last.observed_at)}: {r.auto_last.status}{r.auto_last.code ? ` (${r.auto_last.code})` : ""}
+            </p>
+          )}
+        </div>
+      )}
+      {manual ? (
+        <div className="mt-2 flex flex-wrap items-center gap-2">
+          <span className="text-slate-500">{manual.override_auto ? "Manual override:" : "Manual fallback:"}</span>
+          <span>{manual.kind === "eur_peg" ? "EUR 1:1" : `${Number(manual.eur_per_token)} EUR · max age ${manual.max_age}`}</span>
+          <span className="text-slate-500">{manual.source} · {new Date(manual.as_of).toLocaleString("en-GB")}</span>
+          {manualStale && (
+            <span className="rounded border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-red-800">
+              {manual.override_auto ? "Out of date: approvals refuse it until renewed or unticked" : "Out of date: it cannot take over"}
+            </span>
+          )}
+          {canRemove && (
+            <button type="button" onClick={() => onRemove(r.payment_mint)} className="ml-auto text-red-700 hover:underline">
+              Remove manual rate
+            </button>
+          )}
+        </div>
+      ) : (
+        r.kind !== "eur_peg" && <p className="mt-2 text-slate-500">No manual fallback: if the automatic rate stops, approvals refuse.</p>
+      )}
+    </li>
   );
 }
 
