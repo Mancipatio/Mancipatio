@@ -201,6 +201,27 @@ these; the owner signs them off in the launch-day record (§0A, D0).
       permissions in the role map. `chain:inventory` must show the decode
       matching (finding code `squads` absent). **EXTERNAL #4** (layout) must be
       closed by the rehearsal dump.
+      A closed pilot may start from a 1-of-1 multisig (threshold 1, one
+      member with initiate, vote and execute) under
+      `acknowledgedSingleKeyUpgradeAuthority` = the multisig (§19). The
+      operator can create it without the Squads app: one Squads v4
+      `multisig_create_v2` with a fresh create key, `config_authority` and
+      `rent_collector` none, time lock 0, the member a Ledger that is neither
+      the company wallet nor a hot key, and the deployer as the payer only
+      (never a member, D19). The create key fixes the multisig address and
+      stays secret until the create lands (whoever holds it can create the
+      multisig at that address first, with other members); afterwards check
+      the account at finalized against the intent. On 2026-10-02 the program
+      config's `multisig_creation_fee` was 0 and the create cost the deployer
+      0.0015 SOL (165 B of rent and two signatures); Squads can change the
+      fee, so read it again right before the send.
+      The role map validator needs the real `squads.multisig` and
+      `squads.vault` (addresses, the vault equal to
+      `PDA(["multisig", multisig, "vault", vaultIndex])`) before any tool
+      loads the map, so the first preflight `chain:inventory` already needs
+      them: take both from the create's dry run (the same create key gives
+      the same address). Until the create lands that inventory reports
+      `squads` (multisig account not found); after it the finding is gone.
 - [ ] **Role map** (`front/scripts/chain/role-map.example.json` shows the
       shape with separate keys, `role-map.company.example.json` the company
       wallet model of §19): `network: mainnet`, the mainnet genesis hash,
@@ -267,7 +288,9 @@ these; the owner signs them off in the launch-day record (§0A, D0).
     and the break-glass successor of §11) connects once, signs SIWS and the
     ToS (the `/issuer/*` TosGate) and becomes primary of its own account;
     none may already be a secondary wallet of another account;
-  - fund the keys per the §1 operational budget;
+  - fund the keys per the §1 operational budget, each address taken from
+    the role map or its device, never from a transaction history (§1,
+    "Addresses");
   - **no public mainnet front until step 8** (Talas 7, §0A D11).
 - [ ] 3.1 merged (the `kycProvider` layout gate, the D17 default; mainnet hides
       Initialize Platform and BlocklistBootstrap on `/issuer/authority` and
@@ -373,20 +396,57 @@ which step to wait for (2,575, 1,322 or 696) and until which date; the
 operational budget below gives the deployer figure for each. If Agave 4.4
 slips past that date, re-decide between deploying at 5,080 (about 17.5 SOL
 more locked for good, with no instruction to recover it) and waiting.
+(Release v1.0.0-rc.1 was deployed at 5,080 on 2026-10-02, with the owner's
+go; the last column below is what that deploy measured.)
 
-| Item | SOL at 5,080 |
-|---|---|
-| Registry ProgramData (3 MiB) | ≈ 15.98 |
-| Hook ProgramData (768 KiB) | ≈ 4.00 |
-| Registry deploy buffer (transient) | ≈ 12.55 |
-| Hook deploy buffer (transient) | ≈ 1.98 |
-| IDL metadata (both programs) | ≈ 0.26 |
-| IDL update buffer (transient) | ≈ 0.24 |
-| Bootstrap PDAs | < 0.05 |
+| Item | SOL at 5,080 | Mainnet 2026-10-02 (rc.1) |
+|---|---|---|
+| Registry ProgramData (3 MiB) | ≈ 15.98 | 15.981 |
+| Hook ProgramData (768 KiB) | ≈ 4.00 | 3.996 |
+| Program accounts (36 B each) | ≈ 0.002 | 0.0017 |
+| IDL metadata (both programs) | ≈ 0.31 | 0.3076 (registry 54,672 B, hook 5,614 B) |
+| Bootstrap PDAs (cycle 1) | < 0.01 | not yet (localnet: 7 PDAs, 855 B, 0.009 at 5,080) |
+| Fees (about 2,720 buffer writes, 2 deploys, 80 IDL steps) | 0.02–0.03 | ≈ 0.016 at 200,000 µL/CU |
+| Registry deploy buffer (transient) | ≈ 11.27 (rc.1 `.so`, 2,217,968 B) | 11.268, returned by its deploy |
+| Hook deploy buffer (transient) | ≈ 1.98 (rc.1 `.so`, 389,432 B) | 1.979, returned by its deploy |
 
-The sum of every row is ≈ 35.1 SOL, an upper bound for the deployer's peak:
-**fund 40**. About 20.3 SOL stays locked. `chain:bootstrap` refuses a cycle
-the deployer cannot pay for (P0).
+The deployer's peak is the **largest** balance it needs at one time, not
+the sum of the rows. Loader-v3 `DeployWithMaxDataLen` first moves the
+buffer's lamports to the payer and only then charges the ProgramData rent,
+and each buffer is smaller than its ProgramData, so a buffer row never adds
+to its ProgramData row. Proven twice on 2026-10-02: on localnet a payer left
+with less than the ProgramData rent after `write-buffer` still deployed
+(rehearsal B, probe 04d; evidence in
+`~/mancipatio-mainnet/evidence/rehearsal-2026-10-02/B-localnet/`, not
+tracked), and on mainnet the deployer held 8.41 SOL after the registry
+`write-buffer`, against 15.98 SOL of ProgramData rent, and the deploy
+succeeded. The peak is therefore what stays locked plus the fees:
+mainnet spent about 20.30 SOL (the Squads create, both deploys and the IDL
+init), and the projection with bootstrap cycle 1 at the 2,000,000 µL/CU cap
+is ≈ 20.33. **Fund ≥ 21** (peak ≈ 20.33 plus margin). The IDL init writes
+straight into the canonical metadata account and uses no IDL buffer (one
+exists only for an IDL update, §9.6, paid by the bufferWriter).
+`chain:bootstrap` refuses a cycle the deployer cannot pay for (P0). On
+2026-10-02 the deployer started with 23.69 SOL, kept 3.39 after §3 and sent
+1 SOL to the company wallet, 0.2 to the Squads member and 0.2 to the second
+Admin before §4 (1.99 left; cycle 1 needs about 0.02).
+
+Two limits on that margin:
+
+- After the registry `write-buffer` the deployer has little left (8.4 SOL
+  on 2026-10-02, about 5.7 when funded with 21). An interrupted
+  `write-buffer` must be resumed with the **same** `--buffer` keypair: the
+  CLI writes only the missing chunks (rehearsal B, probe 05). A second
+  buffer does not fit: it needs another 11.27 SOL while the first one still
+  holds its rent. Close an abandoned buffer only with
+  `msol program close <BUFFER>` (§2; its rent comes back, minus the fee),
+  never `close <PROGRAM_ID>`, which shuts the program for good.
+- Before it sends, solana-cli 4.2.2 checks that the payer holds the buffer
+  rent plus every write's fee priced at the 1,400,000 CU placeholder (the
+  real limit is set later from a simulation, so this amount is not spent):
+  for the registry 2,311 × (5,000 + 1.4 × CU price) lamports, 0.66 SOL at
+  200,000 µL/CU and 6.5 SOL at the 2,000,000 cap. With 21 SOL keep
+  `CU_PRICE` below about 1,700,000 µL/CU.
 
 ### Operational budget per key
 
@@ -399,7 +459,7 @@ as its thresholds (`ALARM_BALANCE_WATCH`, §15 Configuration).
 
 | Key | What it pays | At 5,080 | At 2,575 | At 1,322 | At 696 | Fund | Refill below |
 |---|---|---|---|---|---|---|---|
-| deployer | ProgramData (locked), deploy buffers, IDL, bootstrap PDAs (peak) | 35.1 (20.3 locked) | 17.8 (10.3) | 9.2 (5.3) | 4.9 (2.8) | peak + 5 | — (drained after §8) |
+| deployer | ProgramData and program accounts, IDL, bootstrap PDAs (all locked); each deploy buffer comes back at its deploy, so the peak is the locked sum plus fees | 20.3 (all locked) | 10.3 | 5.3 | 2.8 | peak + margin (≥ 21 at 5,080) | — (drained after §8) |
 | bufferWriter | both upgrade buffers (≈ 14.53 / 7.36 / 3.78 / 1.99), the IDL buffer (≈ 0.24 / 0.12 / 0.06 / 0.03), `solana program extend`; the buffer rent returns as the spill after the Squads execute | 14.8 | 7.5 | 3.9 | 2.1 | right before an upgrade, then drain | — |
 | company wallet or KYC key | each passport (KycEntry 120 B): 0.00126 / 0.00064 / 0.00033 / 0.00017 SOL, so about 1.26 / 0.64 / 0.33 / 0.17 SOL per 1,000 passports; returned when a passport is closed | 1.3 per 1,000 | 0.64 | 0.33 | 0.17 | 2 | 0.5 |
 | company wallet or SA | Admin records (0.00102 at 5,080), proposal PDAs (0.00135, refunded to the acceptor), KYB, treasury and pause fees | 0.05 | 0.03 | 0.02 | 0.01 | 0.2 | 0.05 |
@@ -412,26 +472,107 @@ The company wallet holds several rows at once: fund it with the sum
 (about 3 SOL at 5,080 for the pilot) and keep the sum of the refill lines
 (0.5 + 0.05 + 0.1 + 0.02 = 0.67 SOL; its `ALARM_BALANCE_WATCH` threshold).
 
+### Addresses: from the role map or the device, never from a history
+
+Address poisoning reached the company wallet 18 seconds after its first
+funding. On 2026-10-02, 67 slots after the deployer's transfer to it (slot
+452669395), `8vKzHsb57uKJZfQtQAVjqvVdFET9NziuwFanD3sa8ezV`, an address with
+the deployer's first four and last four characters (`8vKzGepf…8ezV`), sent
+the company wallet 1,000 lamports (slot 452669462), so that the look-alike
+sits in the wallet's history next to the real sender. Take every address for
+a transfer or a role (funding the keys, draining the deployer in §8, a
+handover target in §19) only from the role map or read it on the signing
+device itself, never from an explorer, a wallet's activity list or an
+earlier transaction, and compare it in full, not by its ends. Send nothing
+to such an address.
+
 ## 2. Deploy (hook first)
 
 Never `deploy` without `--buffer` (D7). Buffer keypairs are generated outside
 the repository and never logged (`--silent`; a seed phrase in a log is a
 leak).
 
+**The RPC URL stays off the command line.** The chain tools never print it,
+but solana-cli 4.2.2 and solana-verify 0.5.1 print the whole RPC URL, the
+provider's `api-key` included, in some error messages (the TPU client's
+leader-schedule timeout, for example, prints the websocket URL), and a
+command-line argument shows in `ps` and in the shell history. So the URL
+lives only in a CLI config file outside the repository (mode 600), written
+without echoing it, and every `solana` call against mainnet goes through a
+wrapper that reads that file and redacts the output:
+
+```sh
+# the config file; printf is a shell builtin, so the URL is in no process's argv
+( umask 077; set -a; . ~/mancipatio-mainnet/chain.env; set +a
+  printf 'json_rpc_url: "%s"\nwebsocket_url: ""\nkeypair_path: %s\ncommitment: confirmed\n' \
+    "$MAINNET_RPC" "$HOME/mancipatio-mainnet/keys/deployer.json" \
+    > ~/mancipatio-mainnet/solana-mainnet.yml )
+
+# the wrapper, `msol` below (on PATH, or call it by its path)
+cat > ~/mancipatio-mainnet/tools/msol <<'EOF'
+#!/bin/bash
+# solana 4.2.2 against mainnet: the URL only from the config file, api-key redacted
+set -o pipefail
+"$HOME/mancipatio-mainnet/tools/agave-4.2.2/solana-release/bin/solana" \
+  -C "$HOME/mancipatio-mainnet/solana-mainnet.yml" "$@" 2>&1 \
+  | sed -u -E 's/(api-key=)[A-Za-z0-9_-]+/\1REDACTED/g'
+exit "${PIPESTATUS[0]}"
+EOF
+chmod 700 ~/mancipatio-mainnet/tools/msol
+```
+
+The wrapper returns the CLI's exit status (`PIPESTATUS[0]` in bash). An
+interactive zsh has no `PIPESTATUS` (the expansion is just empty): when the
+operator pipes `msol` into `tee`, read the status as `${pipestatus[1]}`
+(zsh arrays start at 1). `solana-verify` takes the same config file with
+`-c`; where it needs the RPC (§8 `export-pda-tx`), give it `-c` instead of
+`--url` and pass its stderr through the same `sed`. `solana-verify
+get-executable-hash` of a local file needs no RPC at all, which is how the
+hash check below works.
+
+**Sending.** `write-buffer` sends the write transactions over TPU (QUIC,
+straight to the next leaders), while the buffer creation and the deploy go
+through the RPC; writes that do not land are re-signed and sent again up to
+`--max-sign-attempts` times (default 5, each round about one blockhash
+lifetime). Use `--max-sign-attempts 30` for `write-buffer` and `deploy`.
+If TPU sending fails (the TPU client cannot start, or writes keep
+expiring), run the same command again with the **same** `--buffer` plus
+`--use-rpc --max-sign-attempts 60`: everything then goes through
+`sendTransaction`, which a Helius Developer plan limits to 5 per second
+while the CLI schedules about 100 per second, so expect 429 answers and more
+rounds.
+
 ```sh
 R=~/mancipatio-mainnet/release-vX
 K=~/mancipatio-mainnet/keys           # deployer.json, program keypairs, buffer keypairs
 E=~/mancipatio-mainnet/evidence       # one new CHAIN_OUTPUT per run (never overwritten)
-solana --version   # an SBPF v3 Release (hashes.txt `arch: v3`) needs solana-cli 4.x (§0)
+msol --version   # an SBPF v3 Release (hashes.txt `arch: v3`) needs solana-cli 4.x (§0)
 solana-keygen new --no-bip39-passphrase --silent -o "$K/buffer-transfer_hook.json"
-solana program write-buffer "$R/transfer_hook.so" \
+msol program write-buffer "$R/transfer_hook.so" \
   --buffer "$K/buffer-transfer_hook.json" --keypair "$K/deployer.json" \
-  --url "$MAINNET_RPC" --with-compute-unit-price "$CU_PRICE"
-solana program deploy --program-id "$K/transfer_hook-keypair.json" \
-  --buffer "$(solana-keygen pubkey "$K/buffer-transfer_hook.json")" \
+  --with-compute-unit-price "$CU_PRICE" --max-sign-attempts 30
+# before the deploy: the buffer holds exactly the Release bytes, and the deployer holds the buffer
+BUF=$(solana-keygen pubkey "$K/buffer-transfer_hook.json")
+msol program show "$BUF"                                        # Authority: the deployer
+msol program dump "$BUF" "$E/02-transfer_hook-buffer.so"
+shasum -a 256 "$R/transfer_hook.so" "$E/02-transfer_hook-buffer.so"   # equal (same size too)
+msol program deploy --program-id "$K/transfer_hook-keypair.json" \
+  --buffer "$BUF" \
   --upgrade-authority "$K/deployer.json" --keypair "$K/deployer.json" \
-  --max-len 786432 --url "$MAINNET_RPC" --with-compute-unit-price "$CU_PRICE"
+  --max-len 786432 --with-compute-unit-price "$CU_PRICE" --max-sign-attempts 30
 # then the same for asset_registry with --max-len 3145728
+```
+
+Hash check: the live code must equal the Release (`solana-verify` hashes a
+local dump, so no RPC URL reaches it):
+
+```sh
+for p in transfer_hook asset_registry; do
+  msol program dump "$(solana-keygen pubkey "$K/$p-keypair.json")" "$E/02-$p-onchain.so"
+  solana-verify get-executable-hash "$E/02-$p-onchain.so"
+done
+grep -E '^(transfer_hook|asset_registry):' "$R/hashes.txt"   # the same two hashes; never an -incident line
+msol program show --buffers                                  # empty: each deploy closed its buffer
 ```
 
 Check against the Release:
@@ -447,12 +588,32 @@ npm run chain:inventory
 At this point (phase `in-progress`, IDL not yet initialized, bootstrap not
 yet run) expect exactly:
 
-- info: `deployer-ua` (both programs);
+- info: `deployer-ua` (both programs), `sbpf` for each program (the Release
+  `.so` is SBPF v3, with the SIMD-0500 state) and `rent` (lamports per byte
+  and the SIMD-0437 steps);
 - warnings: `platform-missing`, `blocklist-missing`, `idl` for both programs
   (status `init`), `kyc-registry` (the registry does not exist yet),
   `admin-missing` for every `admins[]` key, and `kyc-pin` if
   `NEXT_PUBLIC_KYC_REGISTRY` is exported in the shell;
+- with the company wallet model (§19) also the warnings `ba-is-sa` (the
+  blocklist authority is the super admin) and `role-overlap` (the
+  acknowledged overlap, with its consequences); the evidence's
+  `roleMapWarnings` repeat the overlap and, for a 1-of-1 multisig, add
+  `SINGLE-KEY UPGRADE AUTHORITY (acknowledged)`;
 - no `release-bytes`, `capacity`, `squads`, `buffer` or blocker.
+
+After §3 the two `idl` warnings are gone and the rest stays until §4.
+
+**Measured (2026-10-02, Release v1.0.0-rc.1, solana-cli 4.2.2).** With
+`--with-compute-unit-price` the CLI writes 960 B per transaction (1,012 B
+without): 406 writes for the hook and 2,311 for the registry, plus one
+buffer creation each (the CLI source, and the counts of rehearsal B). On
+mainnet, at 200,000 µL/CU over TPU, the hook buffer took 7 s and the
+registry buffer 27 s, without errors; each deploy was one transaction (two
+signatures) of 1–2 s. Both buffer dumps equalled their
+`.so`, both live hashes equalled `hashes.txt`, no buffer was left, and the
+inventory showed 0 blockers and 12 findings: exactly the set above for the
+company model with one `admins[]` key.
 
 ## 3. IDL init
 
@@ -470,6 +631,13 @@ CHAIN_OUTPUT=$E/03d-idl-check.json npm run chain:idl                         # b
 The send verifies after a finalized re-fetch: canonical, Utf8/Zlib/Json/Direct,
 trimmed, and inflated bytes equal to the Release IDL. No extra metadata
 authority is set (D6: the vault, as UA, runs IDL changes through Squads).
+
+The init writes straight into each canonical metadata account (fund,
+allocate, extend, write, initialize), with no IDL buffer. On mainnet
+(2026-10-02, rc.1) it was 80 transactions for both programs and took about
+7.5 minutes (455 s): every step waits for its confirmation, at the tool's
+`CHAIN_RPS` request rate. A `chain:inventory` afterwards shows the §2 set
+without the two `idl` warnings (10 findings on 2026-10-02).
 
 ## 4. Bootstrap cycle 1
 
@@ -648,7 +816,9 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   `/admin/platform` shows exactly those three areas and the payout modules
   paused (`0x5c`) **before the first sale opens** (D10).
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
-- Drain the deployer to the treasury or cold storage.
+- Drain the deployer to the treasury or cold storage (the destination from
+  the role map or its device, never from a transaction history: §1,
+  "Addresses").
 - Other vault actions check their inputs against the role map:
   `registry-ix` targets (`propose_admin` → `admins[]`, never the vault;
   `propose_platform_admin` and `propose_platform_recovery` → the SA or the
@@ -684,17 +854,18 @@ source paths are clean (see "Safety rules").
    keypairs outside the repository (D7; `--silent`, so no seed phrase reaches
    a log), and hands them to the vault:
    ```sh
-   solana --version   # an SBPF v3 Release (hashes.txt `arch: v3`) needs solana-cli 4.x (§0)
+   msol --version   # the §2 wrapper; an SBPF v3 Release (hashes.txt `arch: v3`) needs solana-cli 4.x (§0)
    for p in transfer_hook asset_registry; do
      solana-keygen new --no-bip39-passphrase --silent -o "$K/upgrade-buffer-$p.json"
-     solana program write-buffer "$R2/$p.so" \
+     msol program write-buffer "$R2/$p.so" \
        --buffer "$K/upgrade-buffer-$p.json" --keypair "$K/bufferWriter.json" \
-       --url "$MAINNET_RPC" --with-compute-unit-price "$CU_PRICE"
-     solana program set-buffer-authority "$(solana-keygen pubkey "$K/upgrade-buffer-$p.json")" \
-       --new-buffer-authority <vault> --keypair "$K/bufferWriter.json" --url "$MAINNET_RPC"
+       --with-compute-unit-price "$CU_PRICE" --max-sign-attempts 30
+     msol program set-buffer-authority "$(solana-keygen pubkey "$K/upgrade-buffer-$p.json")" \
+       --new-buffer-authority <vault> --keypair "$K/bufferWriter.json"
    done
    ```
-   A failed write is resumed with the same `--buffer` keypair. The export
+   A failed write is resumed with the same `--buffer` keypair (§2,
+   "Sending", for the `--use-rpc` fallback). The export
    reads at finalized: wait until the `set-buffer-authority` is finalized
    (about 15–30 s), or it refuses with "buffer authority is <bufferWriter>,
    not the vault".
@@ -705,8 +876,8 @@ source paths are clean (see "Safety rules").
    abandoned (feature `ExtendProgCheckedWi11BeDe1eted…`, inactive). The
    unchecked ExtendProgram needs no authority, so the bufferWriter pays:
    ```sh
-   solana program extend <program id> <bytes> --keypair "$K/bufferWriter.json" \
-     --url "$MAINNET_RPC" --with-compute-unit-price "$CU_PRICE"
+   msol program extend <program id> <bytes> --keypair "$K/bufferWriter.json" \
+     --with-compute-unit-price "$CU_PRICE"
    ```
    `<bytes>` is at least 10240 (SIMD-0431, active on mainnet and enforced
    on-chain) unless it reaches the maximum size. Anyone can extend any
