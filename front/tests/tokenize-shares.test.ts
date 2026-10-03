@@ -25,22 +25,29 @@ import {
   canonicalProfileHashInput,
   checklistItems,
   chooseAssetId,
+  classHasFlowTerms,
   companyShortName,
   deriveSymbolPrefix,
+  deriveTokenCompany,
   deriveTokenName,
+  detailsSaved,
   draftKey,
+  duplicateConfirmationKey,
   formatCents,
   formatE6,
   formatPercent,
   formatTokens,
   granularityById,
   hasTokenizeFields,
+  isFlowToken,
   isResumable,
   legalDocProblem,
   legalDocRequired,
   looksLikeTokenizeAsset,
   mintNamePreview,
   mintSymbolPreview,
+  namedPercentE4,
+  needsDuplicateConfirmation,
   nextTokenizeStep,
   parseDraft,
   parsePercent,
@@ -51,12 +58,14 @@ import {
   resolveCompany,
   resolveJurisdiction,
   resumePrefill,
+  shareFigures,
   summaryText,
   toAsciiUpper,
+  tokenNameFor,
   tokensFor,
   truncateUtf8,
   utf8Bytes,
-  validateNameOverride,
+  validateCompanyOverride,
   validateSymbolOverride,
   type AssetSnapshot,
   type ClassSnapshot,
@@ -241,7 +250,9 @@ describe("company → token name, symbol and asset ID", () => {
         const short = companyShortName(company);
         const name = deriveTokenName(short, percent(p));
         expect(utf8Bytes(name), `${company} ${p}`).toBeLessThanOrEqual(MAX_TOKEN_NAME_BYTES);
-        expect(validateNameOverride(name)).toBeNull();
+        expect(name).toBe(tokenNameFor(deriveTokenCompany(short, percent(p)), percent(p)));
+        expect(validateCompanyOverride(deriveTokenCompany(short, percent(p)), percent(p))).toBeNull();
+        expect(namedPercentE4(name)).toBe(percent(p));
         expect(mintNamePreview(name).endsWith(" · Class 0")).toBe(true);
         expect(utf8Bytes(mintNamePreview(name))).toBeLessThanOrEqual(32);
         const prefix = deriveSymbolPrefix(short, "MANCI-5-2026");
@@ -262,10 +273,14 @@ describe("company → token name, symbol and asset ID", () => {
     expect(deriveSymbolPrefix("--", "")).toBe("SHARE");
   });
 
-  it("validates the Advanced overrides by bytes, live", () => {
-    expect(validateNameOverride("Mancipatio 5%")).toBeNull();
-    expect(validateNameOverride("Đurđević Šećer 5%")).toMatch(/22 bytes — the limit is 21/);
-    expect(validateNameOverride("   ")).toBe("Enter a name.");
+  it("validates the Advanced overrides by bytes, live (the name counted with its percent)", () => {
+    expect(validateCompanyOverride("Mancipatio", percent("5"))).toBeNull();
+    expect(validateCompanyOverride("Đurđević Šećer", percent("5"))).toMatch(/“Đurđević Šećer 5%” is 22 bytes — the limit is 21/);
+    // The same company part fits a shorter percent and not a longer one.
+    expect(validateCompanyOverride("Mancipatio Group", percent("5"))).toBeNull();
+    expect(validateCompanyOverride("Mancipatio Group", percent("12.5"))).toMatch(/22 bytes/);
+    expect(validateCompanyOverride("   ", percent("5"))).toBe("Enter the company name.");
+    expect(validateCompanyOverride("Bad\u0007Name", percent("5"))).toBe("Remove control characters.");
     expect(validateSymbolOverride("MANCI")).toBeNull();
     expect(validateSymbolOverride("manci")).toMatch(/capital letters/);
     expect(validateSymbolOverride("ABCDEFGHIJ")).toMatch(/At most 9/);
@@ -286,6 +301,37 @@ describe("company → token name, symbol and asset ID", () => {
     expect(percentFromName("Mancipatio 5%")).toBe("5");
     expect(percentFromName("Mancipatio 2.5%")).toBe("2.5");
     expect(percentFromName("Series A")).toBeNull();
+    expect(namedPercentE4("Mancipatio 2.50%")).toBe(percent("2.5"));
+    expect(namedPercentE4("Mancipatio")).toBeNull();
+  });
+
+  it("Advanced edits only the company: the name's percent always follows the share entered", () => {
+    // Review: an override fixed at "Mancipatio 5%" while the share became 6 %
+    // signed `name: "Mancipatio 5%"` with `maxSupply: 6000`. The percent is
+    // now generated, so the same company text gives "… 6%" for 6 %.
+    expect(tokenNameFor("Mancipatio", percent("5"))).toBe("Mancipatio 5%");
+    expect(tokenNameFor("Mancipatio", percent("6"))).toBe("Mancipatio 6%");
+    expect(tokenNameFor("  Acme   Holding ", percent("2.5"))).toBe("Acme Holding 2.5%");
+    for (const p of ["5", "6", "0.0001", "12.3456", "100"]) {
+      for (const company of ["Mancipatio", "Đurđević", "Acme Holding"]) {
+        expect(namedPercentE4(tokenNameFor(company, percent(p))), `${company} ${p}`).toBe(percent(p));
+      }
+    }
+    // A typed percent is refused: the share is added for the issuer.
+    expect(validateCompanyOverride("Mancipatio 5%", percent("6"))).toMatch(/Leave out the percent/);
+    expect(validateCompanyOverride("Mancipatio 5 %", percent("5"))).toMatch(/Leave out the percent/);
+    // The automatic company part re-fits when the percent gets longer.
+    expect(deriveTokenCompany("Mancipatio Group", percent("5"))).toBe("Mancipatio Group");
+    expect(deriveTokenCompany("Mancipatio Group", percent("12.5"))).toBe("Mancipatio");
+  });
+
+  it("the flow signs only a name that states the entered share", () => {
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).not.toContain("nameOverride ?? autoName");
+    expect(flow).toContain("tokenNameFor(companyPart, figures.p4)");
+    const guard = flow.indexOf("namedPercentE4(intent.name) !== figures.p4");
+    expect(guard).toBeGreaterThan(-1);
+    expect(guard).toBeLessThan(flow.indexOf("tx.send("));
   });
 });
 
@@ -293,17 +339,56 @@ describe("asset ID choice (uniqueness against existing assets)", () => {
   const create: TokenizeStep = { kind: "create", initMint: true };
   const ids = candidateAssetIds("MANCI-5PCT");
   it("takes the first free ID", () => {
-    expect(chooseAssetId(ids, [create])).toEqual({ assetId: "MANCI-5PCT", step: create });
+    expect(chooseAssetId(ids, [create])).toEqual({ assetId: "MANCI-5PCT", step: create, skipped: [] });
     expect(chooseAssetId(ids, [{ kind: "done" }, create])?.assetId).toBe("MANCI-5PCT-2");
-    expect(
-      chooseAssetId(ids, [{ kind: "conflict", reason: "x" }, { kind: "blocked", reason: "y" }, create])?.assetId,
-    ).toBe("MANCI-5PCT-3");
+    const third = chooseAssetId(ids, [{ kind: "conflict", reason: "x" }, { kind: "blocked", reason: "y" }, create]);
+    expect(third?.assetId).toBe("MANCI-5PCT-3");
+    expect(third?.skipped.map((s) => s.assetId)).toEqual(["MANCI-5PCT", "MANCI-5PCT-2"]);
   });
   it("continues an unfinished asset of the same terms instead of creating another", () => {
-    expect(chooseAssetId(ids, [{ kind: "save_profile" }])).toEqual({ assetId: "MANCI-5PCT", step: { kind: "save_profile" } });
-    expect(chooseAssetId(ids, [{ kind: "done" }, { kind: "add_class", initMint: false }])?.assetId).toBe("MANCI-5PCT-2");
+    expect(chooseAssetId(ids, [{ kind: "save_profile" }])).toEqual({
+      assetId: "MANCI-5PCT",
+      step: { kind: "save_profile" },
+      skipped: [],
+    });
+    const later = chooseAssetId(ids, [{ kind: "done" }, { kind: "add_class", initMint: false }])!;
+    expect(later.assetId).toBe("MANCI-5PCT-2");
+    // Continuing never makes a new asset, so it needs no duplicate confirmation.
+    expect(needsDuplicateConfirmation(later)).toBe(false);
     expect(isResumable({ kind: "wait_mint_permission" })).toBe(true);
     expect(isResumable({ kind: "done" })).toBe(false);
+  });
+  it("a finished, conflicting or blocked base is never suffixed past silently", () => {
+    // Review: a 'done' MANCI-5PCT went straight to the wallet as MANCI-5PCT-2.
+    const free = chooseAssetId(ids, [create])!;
+    expect(needsDuplicateConfirmation(free)).toBe(false);
+    for (const existing of [
+      { kind: "done" },
+      { kind: "conflict", reason: "Class 0 of this asset is capped at a different number of tokens." },
+      { kind: "blocked", reason: "Contact the operator." },
+    ] as TokenizeStep[]) {
+      const next = chooseAssetId(ids, [existing, create])!;
+      expect(next.assetId).toBe("MANCI-5PCT-2");
+      expect(next.skipped).toEqual([{ assetId: "MANCI-5PCT", step: existing }]);
+      expect(needsDuplicateConfirmation(next)).toBe(true);
+    }
+  });
+  it("a confirmation holds only for the ID, name, symbol and cap it was given for", () => {
+    const intent = { name: "Mancipatio 5%", symbolPrefix: "MANCI", tokens: B(5_000) };
+    const key = duplicateConfirmationKey("MANCI-5PCT-2", intent);
+    expect(duplicateConfirmationKey("MANCI-5PCT-2", { ...intent })).toBe(key);
+    expect(duplicateConfirmationKey("MANCI-5PCT-3", intent)).not.toBe(key);
+    expect(duplicateConfirmationKey("MANCI-5PCT-2", { ...intent, name: "Mancipatio 6%" })).not.toBe(key);
+    expect(duplicateConfirmationKey("MANCI-5PCT-2", { ...intent, symbolPrefix: "MANC" })).not.toBe(key);
+    expect(duplicateConfirmationKey("MANCI-5PCT-2", { ...intent, tokens: B(500) })).not.toBe(key);
+  });
+  it("the flow stops before the wallet when another token would be created next to an existing one", () => {
+    const flow = src("components/tokenize-shares-flow.tsx");
+    const check = flow.indexOf("needsDuplicateConfirmation(picked) && confirmedKey !== key");
+    expect(check).toBeGreaterThan(-1);
+    expect(check).toBeLessThan(flow.indexOf("buildTokenizeIxs({"));
+    expect(check).toBeLessThan(flow.indexOf("tx.send("));
+    expect(flow).toContain("Create another {props.pct} % token ({prompt.assetId})");
   });
   it("gives up when every candidate is taken", () => {
     expect(chooseAssetId(ids, ids.map(() => ({ kind: "done" }) as TokenizeStep))).toBeNull();
@@ -325,6 +410,10 @@ describe("resume decision table (R1–R9)", () => {
     maxSupply: B(5_000),
     mintablePostLaunch: false,
     mintInitialized: true,
+    rightsBitfield: CLASS_DEFAULTS.rightsBitfield,
+    liqPrefMultiplierBps: CLASS_DEFAULTS.liqPrefMultiplierBps,
+    liqSeniority: CLASS_DEFAULTS.liqSeniority,
+    votingWeight: CLASS_DEFAULTS.votingWeight,
     ...over,
   });
   const step = (over: Partial<Parameters<typeof nextTokenizeStep>[0]>) =>
@@ -359,6 +448,18 @@ describe("resume decision table (R1–R9)", () => {
     expect(step({ asset: asset({ shareClassesCount: 2 }) }).kind).toBe("conflict");
     expect(step({ sc0: null }).kind).toBe("conflict");
   });
+  it("R5: class 0 with other rights, liquidation preference, seniority or voting weight → conflict", () => {
+    // Review: a generic-modal "Acme Seed 10%" (1.5x, non-voting, Common,
+    // capped) was offered as an unfinished token and its profile rewritten.
+    const acme = { intent: null, asset: asset({ name: "Acme Seed 10%" }), profileSaved: false };
+    expect(step({ ...acme, sc0: sc({ liqPrefMultiplierBps: 15_000 }) }).kind).toBe("conflict");
+    expect(step({ ...acme, sc0: sc({ rightsBitfield: 2 | 32 }) }).kind).toBe("conflict");
+    expect(step({ ...acme, sc0: sc({ liqSeniority: 1 }) }).kind).toBe("conflict");
+    expect(step({ ...acme, sc0: sc({ votingWeight: 0 }) }).kind).toBe("conflict");
+    expect(step({ ...acme, sc0: sc() })).toEqual({ kind: "save_profile" });
+    expect(classHasFlowTerms(sc())).toBe(true);
+    expect(classHasFlowTerms(sc({ liqPrefMultiplierBps: 15_000 }))).toBe(false);
+  });
   it("R6: class ready, no mint, permission → initialize the mint (before the profile)", () => {
     expect(step({ sc0: sc({ mintInitialized: false }) })).toEqual({ kind: "init_mint" });
     expect(step({ sc0: sc({ mintInitialized: false }), profileSaved: false })).toEqual({ kind: "init_mint" });
@@ -381,6 +482,28 @@ describe("resume decision table (R1–R9)", () => {
     expect(looksLikeTokenizeAsset({ assetType: AssetType.Equity, name: "Mancipatio 5%" })).toBe(true);
     expect(looksLikeTokenizeAsset({ assetType: AssetType.Equity, name: "Series A" })).toBe(false);
     expect(looksLikeTokenizeAsset({ assetType: AssetType.Debt, name: "Bond 5%" })).toBe(false);
+  });
+  it("the flow and the checklist count 'details saved' the same way", () => {
+    const flowToken = isFlowToken(asset(), sc());
+    expect(flowToken).toBe(true);
+    expect(isFlowToken(asset(), null)).toBe(true);
+    expect(isFlowToken(asset({ name: "Series A" }), sc())).toBe(false);
+    expect(isFlowToken(asset(), sc({ liqPrefMultiplierBps: 15_000 }))).toBe(false);
+    expect(isFlowToken(asset(), sc({ maxSupply: null }))).toBe(false);
+    // Review: a profile filled in by hand (no fields.tokenize) showed "✓ Details
+    // saved" on the checklist while the flow still listed the token as unfinished.
+    const handWritten = { fields: { other: 1 } };
+    expect(detailsSaved(flowToken, handWritten)).toBe(false);
+    expect(step({ profileSaved: detailsSaved(flowToken, handWritten) }).kind).toBe("save_profile");
+    expect(detailsSaved(flowToken, { fields: { tokenize: { v: 1 } } })).toBe(true);
+    expect(detailsSaved(flowToken, null)).toBe(false);
+    // Any other asset: a profile row is enough.
+    expect(detailsSaved(false, handWritten)).toBe(true);
+    expect(detailsSaved(false, null)).toBe(false);
+    const checklist = src("components/tokenize-checklist.tsx");
+    expect(checklist).toContain("profileSaved: detailsSaved(tokenizeLike, profile)");
+    expect(src("components/asset-detail.tsx")).toContain("profile={profile}");
+    expect(src("components/tokenize-shares-flow.tsx")).toContain("profile={resume.profile}");
   });
 });
 
@@ -488,6 +611,58 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
     expect(row.fields).toMatchObject({ other: 1, tokenize: { price_total: null, price_currency: null } });
   });
 
+  it("an existing profile without tokenize keeps website, summary and every other filled column", () => {
+    // Review: resume "Save details" replaced a hand-written website with the
+    // issuer profile's (or null), and the summary and display name with generated text.
+    const existing = {
+      category: "equity" as const,
+      display_name: "Mancipatio — seed round",
+      summary: "Our own summary.",
+      description: "Our own description.",
+      website: "https://mancipatio.example",
+      jurisdiction: "040",
+      legal_doc_sha256: "cd".repeat(32),
+      has_voting: false,
+      convertible: null,
+      liquidation_pref_bps: null,
+      share_price: 12,
+      fields: { other: 1 },
+    };
+    const row = buildProfileRow({ ...base, website: null, description: "typed", existing });
+    expect(row).not.toHaveProperty("display_name");
+    expect(row).not.toHaveProperty("summary");
+    expect(row).not.toHaveProperty("description");
+    expect(row).not.toHaveProperty("website");
+    expect(row).not.toHaveProperty("jurisdiction");
+    expect(row).not.toHaveProperty("legal_doc_sha256");
+    expect(row).not.toHaveProperty("has_voting");
+    expect(row).not.toHaveProperty("share_price");
+    expect(row).not.toHaveProperty("status");
+    // Only the empty columns are filled, and the figures are added.
+    expect(row.convertible).toBe(false);
+    expect(row.liquidation_pref_bps).toBe(10_000);
+    expect(row.fields).toMatchObject({ other: 1, tokenize: { percent: "5", tokens: "5000" } });
+    // A blank existing column counts as empty; a blank generated value never clears one.
+    const blank = buildProfileRow({ ...base, website: null, existing: { ...existing, website: " ", summary: null } });
+    expect(blank).not.toHaveProperty("website");
+    expect(blank.summary).toMatch(/^5,000 tokens = 5 % of Mancipatio d\.o\.o\./);
+    // The category of an existing row is kept.
+    expect(buildProfileRow({ ...base, existing: { ...existing, category: "startup" as never } }).category).toBe("startup");
+  });
+
+  it("the equity columns follow class 0 on chain, not the flow's defaults", () => {
+    const row = buildProfileRow({ ...base, classTerms: { rightsBitfield: 2 | 4 | 8, liqPrefMultiplierBps: 15_000 } });
+    expect(row.has_voting).toBe(false);
+    expect(row.convertible).toBe(true);
+    expect(row.liquidation_pref_bps).toBe(15_000);
+    const defaults = buildProfileRow(base);
+    expect(defaults.has_voting).toBe(true);
+    expect(defaults.convertible).toBe(false);
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).toContain("classTerms: resume.chain.sc0 ?? CLASS_DEFAULTS");
+    expect(flow).not.toContain("resume.profile?.description || null");
+  });
+
   it("summary leaves an unknown country out", () => {
     expect(summaryText({ companyName: "X", jurisdiction: null, p4: B(10), tokens: B(1) })).toBe(
       "1 tokens = 0.001 % of X. Only verified (KYC) wallets can hold them.",
@@ -568,6 +743,66 @@ describe("resume prefill", () => {
     expect(resumePrefill({ assetName: "Mancipatio 5%", cap: B(500), tokenize: null, draft: null })).toEqual({ percent: "5", granularity: "0.01" });
     expect(resumePrefill({ assetName: "Mancipatio 5%", cap: null, tokenize: null, draft: null })).toEqual({ percent: "5", granularity: undefined });
     expect(resumePrefill({ assetName: "Series A", cap: B(7), tokenize: null, draft: null })).toEqual({});
+  });
+});
+
+describe("share figures (new and resumed tokens)", () => {
+  const fig = (over: Partial<Parameters<typeof shareFigures>[0]>) =>
+    shareFigures({ cap: null, namedP4: null, granularity: g(DEFAULT_GRANULARITY), percentInput: "", ...over });
+
+  it("a new token: the typed percent at the chosen size", () => {
+    expect(fig({ percentInput: "5" })).toEqual({ ok: true, p4: percent("5"), tokens: B(5_000), warning: null });
+    expect(fig({ percentInput: "0.0005" }).ok).toBe(false);
+    expect(fig({ percentInput: "" }).ok).toBe(false);
+  });
+
+  it("a resumed class whose name fits the cap: the matching token size is enforced", () => {
+    const named = { cap: B(5_000), namedP4: percent("5") };
+    expect(fig({ ...named, granularity: g("0.001") })).toEqual({ ok: true, p4: percent("5"), tokens: B(5_000), warning: null });
+    const wrong = fig({ ...named, granularity: g("0.01") });
+    expect(wrong.ok).toBe(false);
+    expect(!wrong.ok && wrong.error).toMatch(/named for 5 %\. Choose the matching token size/);
+    expect(wrong.warning).toBeNull();
+  });
+
+  it("a name that fits the cap at no token size warns and falls back to the cap (never blocked for good)", () => {
+    // Review: "Mancipatio 5%" with maxSupply 6000 is 60 / 6 / 0.6 %, never 5 %,
+    // so 'Save details' stayed disabled at every token size.
+    const stuck = { cap: B(6_000), namedP4: percent("5") };
+    const expected = { "0.01": "60", "0.001": "6", "0.0001": "0.6" } as const;
+    for (const size of GRANULARITIES) {
+      const r = fig({ ...stuck, granularity: size });
+      expect(r.ok, size.id).toBe(true);
+      expect(r.ok && formatPercent(r.p4)).toBe(expected[size.id]);
+      expect(r.ok && r.tokens).toBe(B(6_000));
+      expect(r.warning).toMatch(/name says 5 %, but its 6,000 tokens are not 5 % at any token size/);
+    }
+    // Nothing recorded the size, so it is not defaulted (resumePrefill finds no match).
+    expect(resumePrefill({ assetName: "Mancipatio 5%", cap: B(6_000), tokenize: null, draft: null }).granularity).toBeUndefined();
+    const unchosen = fig({ ...stuck, granularity: null });
+    expect(unchosen.ok).toBe(false);
+    expect(!unchosen.ok && unchosen.error).toMatch(/Choose the token size these 6,000 tokens were created with/);
+    expect(unchosen.warning).not.toBeNull();
+  });
+
+  it("a name without a percent and no draft: the token size must be chosen, not defaulted to 0.001 %", () => {
+    // Review: resumed in another browser, the default size could save a wrong percent.
+    expect(resumePrefill({ assetName: "Mancipatio Seed", cap: B(5_000), tokenize: null, draft: null })).toEqual({});
+    const r = fig({ cap: B(5_000), namedP4: null, granularity: null });
+    expect(r.ok).toBe(false);
+    expect(fig({ cap: B(5_000), namedP4: null, granularity: g("0.01") })).toMatchObject({ ok: true, p4: percent("50") });
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).toContain("(resumeAssetPda && fixedTokens !== null ? null : DEFAULT_GRANULARITY)");
+  });
+
+  it("a resumed asset without a class: the typed percent must be the one in the name", () => {
+    expect(fig({ namedP4: percent("5"), percentInput: "6" }).ok).toBe(false);
+    expect(fig({ namedP4: percent("5"), percentInput: "5" })).toMatchObject({ ok: true, tokens: B(5_000) });
+  });
+
+  it("more than 100 % at a size is refused", () => {
+    const r = fig({ cap: B(20_000), granularity: g("0.01") });
+    expect(!r.ok && r.error).toMatch(/more than 100 %/);
   });
 });
 

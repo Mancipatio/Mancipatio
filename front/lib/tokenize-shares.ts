@@ -19,7 +19,7 @@ import {
   AssetType,
   ShareClassType,
 } from "@/lib/generated/asset_registry";
-import type { NewAssetProfile } from "@/lib/asset-profiles";
+import type { AssetProfile, NewAssetProfile } from "@/lib/asset-profiles";
 import { countryName } from "@/lib/countries";
 import { JURISDICTION_BITMAP_BYTES } from "@/lib/jurisdiction-bitmap";
 import type { Network } from "@/lib/network";
@@ -263,18 +263,35 @@ export function toAsciiUpper(s: string): string {
   return out.normalize("NFD").replace(/[̀-ͯ]/g, "");
 }
 
-/** The token name: "<Company short> <pct>%", at most 21 bytes, whole words when it must shrink. */
-export function deriveTokenName(shortName: string, p4: bigint): string {
+function cleanCompanyPart(company: string): string {
+  return company.normalize("NFC").replace(/\s+/g, " ").trim();
+}
+
+/**
+ * The token name: "<company> <pct>%". The percent is always generated from
+ * the share entered, so the on-chain name (which becomes the mint name and
+ * cannot change once the asset is active) states the same share as the cap.
+ */
+export function tokenNameFor(company: string, p4: bigint): string {
+  const c = cleanCompanyPart(company);
   const suffix = `${formatPercent(p4)}%`;
-  const budget = MAX_TOKEN_NAME_BYTES - utf8Bytes(suffix) - 1;
-  let company = shortName.trim();
-  if (utf8Bytes(company) > budget) {
-    const cut = truncateUtf8(company, Math.max(budget, 0));
-    const atWordEnd = /\s/.test(company.charAt(cut.length));
-    const lastSpace = cut.lastIndexOf(" ");
-    company = (atWordEnd || lastSpace <= 0 ? cut : cut.slice(0, lastSpace)).trimEnd();
-  }
-  return company ? `${company} ${suffix}` : suffix;
+  return c ? `${c} ${suffix}` : suffix;
+}
+
+/** The company part of the automatic name: whole words, shortened so the name stays within 21 bytes. */
+export function deriveTokenCompany(shortName: string, p4: bigint): string {
+  const budget = MAX_TOKEN_NAME_BYTES - utf8Bytes(`${formatPercent(p4)}%`) - 1;
+  const company = cleanCompanyPart(shortName);
+  if (utf8Bytes(company) <= budget) return company;
+  const cut = truncateUtf8(company, Math.max(budget, 0));
+  const atWordEnd = /\s/.test(company.charAt(cut.length));
+  const lastSpace = cut.lastIndexOf(" ");
+  return (atWordEnd || lastSpace <= 0 ? cut : cut.slice(0, lastSpace)).trimEnd();
+}
+
+/** The automatic token name: "<Company short> <pct>%", at most 21 bytes. */
+export function deriveTokenName(shortName: string, p4: bigint): string {
+  return tokenNameFor(deriveTokenCompany(shortName, p4), p4);
 }
 
 /** The symbol prefix: the first 5 ASCII letters/digits of the company (≥ 2), else of the legal ID. */
@@ -286,14 +303,19 @@ export function deriveSymbolPrefix(shortName: string, legalId: string): string {
   return "SHARE";
 }
 
-/** Advanced: a typed token name. Null when valid. */
-export function validateNameOverride(name: string): string | null {
-  const s = name.trim();
-  if (!s) return "Enter a name.";
-  if (/[\u0000-\u001f\u007f]/.test(s)) return "Remove control characters.";
-  const bytes = utf8Bytes(s);
+/**
+ * Advanced: the company part of the token name (the "<pct>%" after it is
+ * generated, never typed). Null when valid.
+ */
+export function validateCompanyOverride(company: string, p4: bigint): string | null {
+  const s = cleanCompanyPart(company);
+  if (!s) return "Enter the company name.";
+  if (/[\u0000-\u001f\u007f]/.test(company)) return "Remove control characters.";
+  if (s.includes("%")) return "Leave out the percent — it is added from the share you entered.";
+  const name = tokenNameFor(s, p4);
+  const bytes = utf8Bytes(name);
   if (bytes > MAX_TOKEN_NAME_BYTES) {
-    return `${bytes} bytes — the limit is ${MAX_TOKEN_NAME_BYTES} (letters like š, ć or đ count as 2).`;
+    return `“${name}” is ${bytes} bytes — the limit is ${MAX_TOKEN_NAME_BYTES} (letters like š, ć or đ count as 2). Shorten the company name.`;
   }
   return null;
 }
@@ -326,8 +348,15 @@ export function candidateAssetIds(base: string, count = ASSET_ID_CANDIDATES): st
 
 /** The share a tokenize-flow name ends with ("Mancipatio 5%" → "5"), or null. */
 export function percentFromName(name: string): string | null {
-  const m = /\s(\d{1,3}(?:\.\d{1,4})?)%$/.exec(name);
+  const m = /(?:^|\s)(\d{1,3}(?:\.\d{1,4})?)%$/.exec(name);
   return m ? m[1] : null;
+}
+
+/** The share a name states, as p4 ("Mancipatio 2.50%" → 25 000), or null. */
+export function namedPercentE4(name: string): bigint | null {
+  const pct = percentFromName(name);
+  const parsed = pct ? parsePercent(pct) : null;
+  return parsed?.ok ? parsed.value : null;
 }
 
 // ── Company and jurisdiction ────────────────────────────────────────────────
@@ -482,11 +511,46 @@ export function canonicalProfileHashInput(input: {
   });
 }
 
+/** RIGHT_VOTE / RIGHT_CONVERTIBLE (program constants.rs). */
+const RIGHT_VOTE = 1 << 0;
+const RIGHT_CONVERTIBLE = 1 << 3;
+
+/** The class terms the equity profile columns describe (read from class 0 on chain). */
+export type ClassTerms = { rightsBitfield: number; liqPrefMultiplierBps: number };
+
+/** A profile row that is already stored (only the columns this flow writes matter). */
+export type ExistingProfile = Partial<
+  Pick<
+    AssetProfile,
+    | "category"
+    | "display_name"
+    | "summary"
+    | "description"
+    | "website"
+    | "jurisdiction"
+    | "legal_doc_sha256"
+    | "has_voting"
+    | "convertible"
+    | "liquidation_pref_bps"
+    | "share_price"
+  >
+> & { fields?: Record<string, unknown> | null };
+
+function isBlank(v: unknown): boolean {
+  return v === null || v === undefined || (typeof v === "string" && v.trim() === "");
+}
+
 /**
  * The asset_profiles row this flow writes (POST /api/profiles/upsert). The
  * percent figures go in `fields.tokenize` (jsonb, private — never in the
- * public projection), so no migration is needed. An existing row keeps its
- * other `fields` keys and its publication status.
+ * public projection), so no migration is needed. The equity columns describe
+ * class 0 as it is on chain (`classTerms`), not the flow's defaults.
+ *
+ * An existing row is never overwritten: it keeps its category, its status,
+ * its other `fields` keys and every column that already has a value (the
+ * issuer may have written the asset page by hand); only `fields.tokenize` is
+ * added and empty columns are filled. The upsert route leaves columns the
+ * row does not name untouched.
  */
 export function buildProfileRow(input: {
   assetPda: string;
@@ -499,17 +563,12 @@ export function buildProfileRow(input: {
   figures: TokenizeFigures;
   legalDocHex: string;
   legalDocSource: LegalDocSource;
-  existing?: { fields?: Record<string, unknown> | null } | null;
+  classTerms?: ClassTerms;
+  existing?: ExistingProfile | null;
 }): NewAssetProfile {
-  const { figures } = input;
-  const fields: Record<string, unknown> = {
-    ...(input.existing?.fields ?? {}),
-    tokenize: tokenizeFields(input),
-  };
-  const row: NewAssetProfile = {
-    asset_pda: input.assetPda,
-    category: "equity",
-    issuer_pda: input.issuerPda,
+  const { figures, existing } = input;
+  const terms = input.classTerms ?? CLASS_DEFAULTS;
+  const generated: Partial<NewAssetProfile> = {
     display_name: displayNameFor(input.companyName, figures.p4),
     summary: summaryText({
       companyName: input.companyName,
@@ -521,16 +580,26 @@ export function buildProfileRow(input: {
     website: input.website?.trim() || null,
     jurisdiction: input.jurisdiction,
     legal_doc_sha256: input.legalDocHex,
-    has_voting: true,
-    convertible: false,
-    liquidation_pref_bps: CLASS_DEFAULTS.liqPrefMultiplierBps,
-    fields,
+    has_voting: (terms.rightsBitfield & RIGHT_VOTE) !== 0,
+    convertible: (terms.rightsBitfield & RIGHT_CONVERTIBLE) !== 0,
+    liquidation_pref_bps: terms.liqPrefMultiplierBps,
   };
   if (figures.priceCents !== null) {
     // "Share price (USD)" of the equity profile: the price of one token.
-    row.share_price = Number(formatE6(perTokenPriceE6(figures.priceCents, figures.tokens)));
+    generated.share_price = Number(formatE6(perTokenPriceE6(figures.priceCents, figures.tokens)));
   }
-  if (!input.existing) row.status = "draft";
+  const row: NewAssetProfile = {
+    asset_pda: input.assetPda,
+    category: existing?.category ?? "equity",
+    issuer_pda: input.issuerPda,
+    fields: { ...(existing?.fields ?? {}), tokenize: tokenizeFields(input) },
+  };
+  for (const [key, value] of Object.entries(generated) as [keyof ExistingProfile, unknown][]) {
+    if (existing && !isBlank(existing[key])) continue;
+    if (existing && isBlank(value)) continue;
+    (row as Record<string, unknown>)[key] = value;
+  }
+  if (!existing) row.status = "draft";
   return row;
 }
 
@@ -556,7 +625,21 @@ export type ClassSnapshot = {
   maxSupply: bigint | null;
   mintablePostLaunch: boolean;
   mintInitialized: boolean;
+  rightsBitfield: number;
+  liqPrefMultiplierBps: number;
+  liqSeniority: number;
+  votingWeight: number;
 };
+
+/** Whether class 0 carries the economic terms this flow creates (rights, 1× preference, seniority, voting weight). */
+export function classHasFlowTerms(sc: ClassSnapshot): boolean {
+  return (
+    sc.rightsBitfield === CLASS_DEFAULTS.rightsBitfield &&
+    sc.liqPrefMultiplierBps === CLASS_DEFAULTS.liqPrefMultiplierBps &&
+    sc.liqSeniority === CLASS_DEFAULTS.liqSeniority &&
+    sc.votingWeight === CLASS_DEFAULTS.votingWeight
+  );
+}
 
 /** What the person asked for; null when resuming an asset without the form. */
 export type TokenizeIntent = { name: string; symbolPrefix: string; tokens: bigint };
@@ -615,6 +698,13 @@ export function nextTokenizeStep(input: {
   if (sc0.classType !== ShareClassType.Common || sc0.mintablePostLaunch || sc0.maxSupply === null) {
     return { kind: "conflict", reason: "Class 0 of this asset is not a capped Common class." };
   }
+  if (!classHasFlowTerms(sc0)) {
+    return {
+      kind: "conflict",
+      reason:
+        "Class 0 of this asset has other rights, liquidation preference or voting weight than this screen creates. Manage it on its asset page.",
+    };
+  }
   if (intent && sc0.maxSupply !== intent.tokens) {
     return { kind: "conflict", reason: "Class 0 of this asset is capped at a different number of tokens." };
   }
@@ -634,27 +724,82 @@ export function isResumable(step: TokenizeStep): boolean {
   );
 }
 
+export type AssetIdChoice = {
+  assetId: string;
+  step: TokenizeStep;
+  /** Existing assets under the earlier IDs (finished, other terms or blocked), in order. */
+  skipped: { assetId: string; step: TokenizeStep }[];
+};
+
 /**
  * The asset ID to use: candidates in order, `steps[i]` the nextTokenizeStep
  * decision for candidates[i] ("create" when no asset exists there). The first
  * free ID is created, unless an earlier existing one can be resumed; a
- * finished, conflicting or blocked asset is skipped (suffixed past). Null when
- * every candidate is taken.
+ * finished, conflicting or blocked asset is passed over and reported in
+ * `skipped`, so the issuer confirms before a second token is made
+ * (needsDuplicateConfirmation). Null when every candidate is taken.
  */
 export function chooseAssetId(
   candidates: readonly string[],
   steps: readonly TokenizeStep[],
-): { assetId: string; step: TokenizeStep } | null {
+): AssetIdChoice | null {
+  const skipped: AssetIdChoice["skipped"] = [];
   for (let i = 0; i < candidates.length && i < steps.length; i++) {
     const step = steps[i];
-    if (step.kind === "create" || isResumable(step)) return { assetId: candidates[i], step };
+    if (step.kind === "create" || isResumable(step)) return { assetId: candidates[i], step, skipped };
+    skipped.push({ assetId: candidates[i], step });
   }
   return null;
+}
+
+/**
+ * A new asset under a suffixed ID ("-2", "-3"…) while the issuer already has
+ * an asset under the base ID: asset accounts cannot be closed, so the flow
+ * stops and asks before the wallet opens.
+ */
+export function needsDuplicateConfirmation(choice: Pick<AssetIdChoice, "step" | "skipped">): boolean {
+  return choice.step.kind === "create" && choice.skipped.length > 0;
+}
+
+/** What a duplicate confirmation is bound to: the same ID and the same name, symbol and cap. */
+export function duplicateConfirmationKey(assetId: string, intent: TokenizeIntent): string {
+  return JSON.stringify([assetId, intent.name, intent.symbolPrefix, intent.tokens.toString()]);
 }
 
 /** A name the flow derives ("<company> <pct>%") — used to offer "Continue". */
 export function looksLikeTokenizeAsset(asset: Pick<AssetSnapshot, "assetType" | "name">): boolean {
   return asset.assetType === AssetType.Equity && percentFromName(asset.name) !== null;
+}
+
+/**
+ * A token the flow can continue: a "<company> <pct>%" equity asset whose
+ * class 0 (when it exists) has the flow's terms. Others are managed on the
+ * share-class screen and the asset page's own profile form.
+ */
+export function isFlowToken(
+  asset: Pick<AssetSnapshot, "assetType" | "name">,
+  sc0: ClassSnapshot | null,
+): boolean {
+  return (
+    looksLikeTokenizeAsset(asset) &&
+    (sc0 === null ||
+      (sc0.classType === ShareClassType.Common &&
+        sc0.maxSupply !== null &&
+        !sc0.mintablePostLaunch &&
+        classHasFlowTerms(sc0)))
+  );
+}
+
+/**
+ * "Details saved", counted the same way by the flow and the checklist: a flow
+ * token needs the figures this flow writes (`fields.tokenize`); any other
+ * asset just a profile row.
+ */
+export function detailsSaved(
+  flowToken: boolean,
+  profile: { fields?: Record<string, unknown> | null } | null | undefined,
+): boolean {
+  return flowToken ? hasTokenizeFields(profile) : !!profile;
 }
 
 // ── Checklist after creation ────────────────────────────────────────────────
@@ -734,6 +879,74 @@ export function resumePrefill(input: {
   const match =
     named.ok && cap !== null ? GRANULARITIES.find((g) => percentForTokens(cap, g) === named.value) : undefined;
   return { percent: fromName, granularity: match?.id };
+}
+
+export type ShareFigures = (
+  | { ok: true; p4: bigint; tokens: bigint }
+  | { ok: false; error: string }
+) & { warning: string | null };
+
+/**
+ * The share and token count the screen works with — of a new token (no cap,
+ * no name yet) or of a resumed one.
+ *
+ * With class 0 on chain (`cap`), the cap is the truth and the token size
+ * decides the percent. The token size must be chosen explicitly when nothing
+ * recorded it (no draft, no saved figures, no name that fits the cap), so a
+ * default never puts a wrong percent on the asset page. The percent in the
+ * name is enforced only when some token size reconciles it with the cap;
+ * when none does, the name is ignored with a warning instead of blocking the
+ * save for good.
+ *
+ * Without a class yet, the typed percent becomes the cap, and on a resumed
+ * asset it must be the one the name states.
+ */
+export function shareFigures(input: {
+  cap: bigint | null;
+  namedP4: bigint | null;
+  granularity: Granularity | null;
+  percentInput: string;
+}): ShareFigures {
+  const { cap, namedP4, granularity } = input;
+  if (cap !== null) {
+    const nameFits = namedP4 !== null && GRANULARITIES.some((g) => percentForTokens(cap, g) === namedP4);
+    const warning =
+      namedP4 !== null && !nameFits
+        ? `The token's name says ${formatPercent(namedP4)} %, but its ${formatTokens(cap)} tokens are not ${formatPercent(namedP4)} % at any token size. The figures below come from the token count — check them before saving.`
+        : null;
+    if (!granularity) {
+      return { ok: false, error: `Choose the token size these ${formatTokens(cap)} tokens were created with.`, warning };
+    }
+    const p4 = percentForTokens(cap, granularity);
+    if (p4 > HUNDRED_PERCENT_E4) {
+      return {
+        ok: false,
+        error: `${formatTokens(cap)} tokens at ${granularityLabel(granularity.id)} would be more than 100 %. Choose a smaller token.`,
+        warning,
+      };
+    }
+    if (nameFits && p4 !== namedP4) {
+      return {
+        ok: false,
+        error: `At ${granularityLabel(granularity.id)} these ${formatTokens(cap)} tokens are ${formatPercent(p4)} %, but the token is named for ${formatPercent(namedP4)} %. Choose the matching token size.`,
+        warning,
+      };
+    }
+    return { ok: true, p4, tokens: cap, warning };
+  }
+  const p = parsePercent(input.percentInput);
+  if (!p.ok) return { ok: false, error: p.error, warning: null };
+  if (namedP4 !== null && p.value !== namedP4) {
+    return {
+      ok: false,
+      error: `The token is named for ${formatPercent(namedP4)} %; enter ${formatPercent(namedP4)}.`,
+      warning: null,
+    };
+  }
+  if (!granularity) return { ok: false, error: "Choose the token size.", warning: null };
+  const t = tokensFor(p.value, granularity);
+  if (!t.ok) return { ok: false, error: t.error, warning: null };
+  return { ok: true, p4: p.value, tokens: t.value, warning: null };
 }
 
 export function draftKey(network: string, assetPda: string): string {

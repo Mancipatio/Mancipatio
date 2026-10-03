@@ -32,6 +32,7 @@ import {
   getCreateAssetInstructionAsync,
   getInitializeShareClassMintInstructionAsync,
   type Asset,
+  type AssetStatus,
   type ShareClass,
 } from "@/lib/generated/asset_registry";
 import {
@@ -260,15 +261,38 @@ export function classSnapshot(sc: ShareClass): ClassSnapshot {
     maxSupply: sc.maxSupply.__option === "Some" ? sc.maxSupply.value : null,
     mintablePostLaunch: sc.mintablePostLaunch,
     mintInitialized: sc.mintInitialized,
+    rightsBitfield: sc.rightsBitfield,
+    liqPrefMultiplierBps: sc.liqPrefMultiplierBps,
+    liqSeniority: sc.liqSeniority,
+    votingWeight: sc.votingWeight,
   };
 }
+
+/** An existing asset under one of the earlier candidate IDs, shown before a second token is made. */
+export type ExistingTokenizeAsset = {
+  assetId: string;
+  assetPda: Address;
+  name: string;
+  symbolPrefix: string;
+  status: AssetStatus;
+  step: TokenizeStep;
+};
+
+export type TokenizeAssetPick = {
+  assetId: string;
+  assetPda: Address;
+  step: TokenizeStep;
+  /** Existing assets passed over (see needsDuplicateConfirmation). */
+  skipped: ExistingTokenizeAsset[];
+};
 
 /**
  * The asset ID for `intent`, checked on chain before anything is signed: one
  * read of every candidate (base, base-2, …), class 0 of an existing one, and
  * — only when the chain part is complete — whether its details were saved.
  * Returns the first free ID, or an earlier unfinished asset of the same terms
- * to continue; null when every candidate is taken.
+ * to continue; null when every candidate is taken. Existing assets passed
+ * over come back in `skipped`, so the caller asks before creating another.
  */
 export async function pickTokenizeAssetId(
   rpc: Rpc,
@@ -279,7 +303,7 @@ export async function pickTokenizeAssetId(
     canInitMint: boolean;
     profileSaved: (assetPda: Address) => Promise<boolean>;
   },
-): Promise<{ assetId: string; assetPda: Address; step: TokenizeStep } | null> {
+): Promise<TokenizeAssetPick | null> {
   const pdas = await Promise.all(
     input.candidates.map(async (assetId) => (await findAssetPda({ issuer: input.issuer, assetId }))[0]),
   );
@@ -309,7 +333,20 @@ export async function pickTokenizeAssetId(
   }
   const chosen = chooseAssetId(input.candidates, steps);
   if (!chosen) return null;
-  return { ...chosen, assetPda: pdas[input.candidates.indexOf(chosen.assetId)] };
+  const skipped = chosen.skipped.map(({ assetId, step }): ExistingTokenizeAsset => {
+    const i = input.candidates.indexOf(assetId);
+    const a = assets[i];
+    if (!a.exists) throw new Error(`Asset ${assetId} was reported as existing but is missing.`);
+    return {
+      assetId,
+      assetPda: pdas[i],
+      name: a.data.name,
+      symbolPrefix: a.data.symbolPrefix,
+      status: a.data.status,
+      step,
+    };
+  });
+  return { assetId: chosen.assetId, step: chosen.step, skipped, assetPda: pdas[input.candidates.indexOf(chosen.assetId)] };
 }
 
 /**

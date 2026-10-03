@@ -18,13 +18,19 @@ import { usePauseFlags } from "@/lib/use-pause-flags";
 import { isPaused, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import {
   checklistItems,
+  detailsSaved,
   formatTokens,
-  looksLikeTokenizeAsset,
+  isFlowToken,
   mintSymbolPreview,
   type ChecklistId,
   type ChecklistState,
 } from "@/lib/tokenize-shares";
-import { readTokenizeState, type TokenizeChainState } from "@/lib/tokenize-shares-chain";
+import {
+  assetSnapshot,
+  classSnapshot,
+  readTokenizeState,
+  type TokenizeChainState,
+} from "@/lib/tokenize-shares-chain";
 import { TreasuryMintPanel } from "@/components/treasury-mint-panel";
 import { LockSupplyButton } from "@/components/lock-supply-button";
 import { SkeletonCard } from "@/components/skeleton";
@@ -43,14 +49,14 @@ const linkClass = "font-medium text-slate-800 underline decoration-slate-300 und
 export function TokenizeChecklist({
   assetPda,
   issuerAuthority,
-  profileSaved,
+  profile,
   refreshKey = 0,
 }: {
   assetPda: Address;
   /** The asset's issuer authority (the treasury); minting needs it connected. */
   issuerAuthority: string | null;
-  /** The off-chain profile exists. */
-  profileSaved: boolean;
+  /** The stored off-chain profile, or null. "Details saved" is counted as the flow counts it (detailsSaved). */
+  profile: { fields?: Record<string, unknown> | null } | null;
   /** Bump to re-read the chain. */
   refreshKey?: number;
 }) {
@@ -108,10 +114,14 @@ export function TokenizeChecklist({
   const maxSupply = sc0?.maxSupply.__option === "Some" ? sc0.maxSupply.value : null;
   const circulating = sc0?.circulatingSupply ?? BigInt(0);
   const primaryPaused = flags !== null && isPaused(flags, PAUSE_PRIMARY);
+  // A token from the tokenize flow continues there (and needs the flow's
+  // figures saved); any other equity asset on the share-class screen and its
+  // own profile form.
+  const tokenizeLike = isFlowToken(assetSnapshot(asset), sc0 ? classSnapshot(sc0) : null);
   const items = checklistItems({
     classExists: !!sc0,
     mintInitialized: !!sc0?.mintInitialized,
-    profileSaved,
+    profileSaved: detailsSaved(tokenizeLike, profile),
     kycGated: hook === null ? null : hook === "kyc-gated",
     active: asset.status === AssetStatus.Active,
     circulating,
@@ -120,9 +130,6 @@ export function TokenizeChecklist({
     primaryPaused,
   });
   const byId = Object.fromEntries(items.map((i) => [i.id, i.state])) as Record<ChecklistId, ChecklistState>;
-  // A token from the tokenize flow continues there; any other equity asset on
-  // the share-class screen and its own profile form.
-  const tokenizeLike = looksLikeTokenizeAsset(asset);
   const resumeHref = tokenizeLike ? `/issuer/assets/tokenize?asset=${assetPda}` : "/issuer/share-classes";
   const remaining = maxSupply !== null && maxSupply > circulating ? maxSupply - circulating : null;
 
@@ -158,7 +165,9 @@ export function TokenizeChecklist({
         if (s === "done") return "Name, summary and figures are saved for the asset page.";
         return tokenizeLike ? (
           <>
-            The description of the token is not saved yet.{" "}
+            {profile
+              ? "The token's figures (share, tokens, price) are not saved yet; the asset page text stays as it is."
+              : "The description of the token is not saved yet."}{" "}
             <Link href={resumeHref} className={linkClass}>Save details (1 wallet signature) →</Link>
           </>
         ) : (

@@ -461,7 +461,7 @@ export function AssetDetail({
         <TokenizeChecklist
           assetPda={id as Address}
           issuerAuthority={issuer ? issuer.authority.toString() : null}
-          profileSaved={profile !== null}
+          profile={profile}
         />
       )}
 
