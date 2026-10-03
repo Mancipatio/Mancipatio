@@ -335,22 +335,35 @@ export async function recordSanctionsHit(
 }
 
 /**
+ * Screens the wallets and raises the compliance alert of every hit (once per
+ * wallet); returns the wallets that matched. THROWS SiwsError(503) on
+ * mainnet when a provider cannot answer (screenWallets). The gate below
+ * refuses on any hit; "Send to wallets" (/api/compliance/screen-recipients)
+ * blocks only the rows that matched.
+ */
+export async function screenAndRaiseHits(sb: SupabaseClient, input: ScreeningInput): Promise<Set<string>> {
+  const network = detectNetwork();
+  const { hits } = await screenWallets(sb, input.wallets.map((w) => w.wallet), { network });
+  const raised = new Set<string>();
+  for (const { wallet, role } of input.wallets) {
+    const matches = hits.get(wallet);
+    if (!matches || raised.has(wallet)) continue;
+    raised.add(wallet);
+    await raiseSanctionsHit(sb, wallet, matches, { route: input.route, role, txSignature: input.txSignature }, network);
+  }
+  return raised;
+}
+
+/**
  * The route gate: refuses (403) when any screened wallet is on a sanctions
  * list, after raising its compliance alert; refuses (503) on mainnet when a
  * provider cannot answer. The signer's own hit says so; a counterparty's
  * gets the generic copy, which does not reveal their status.
  */
 export async function requireSanctionsClear(sb: SupabaseClient, input: ScreeningInput): Promise<void> {
-  const network = detectNetwork();
-  const { hits } = await screenWallets(sb, input.wallets.map((w) => w.wallet), { network });
+  const hits = await screenAndRaiseHits(sb, input);
   if (hits.size === 0) return;
-  let selfHit = false;
-  for (const { wallet, role } of input.wallets) {
-    const matches = hits.get(wallet);
-    if (!matches) continue;
-    if (role === "self") selfHit = true;
-    await raiseSanctionsHit(sb, wallet, matches, { route: input.route, role, txSignature: input.txSignature }, network);
-  }
+  const selfHit = input.wallets.some((w) => w.role === "self" && hits.has(w.wallet));
   throw new SiwsError(403, selfHit ? SCREENING_SELF_HIT : SCREENING_COUNTERPARTY_HIT);
 }
 
