@@ -456,7 +456,7 @@ export function AssetDetail({
       </div>
 
       {/* An issuer's equity token: what is done and what comes next
-          (operator KYC-only + activation, minting, lock). */}
+          (operator activation, minting, lock — no KYC-only step). */}
       {variant === "issuer" && category === "equity" && asset.shareClassesCount > 0 && (
         <TokenizeChecklist
           assetPda={id as Address}

@@ -486,9 +486,18 @@ function ShareClassActions({
                   Mint permission required
                 </p>
                 <p className="mt-1 text-[13px]">
-                  The Super Admin can grant this issuer the Mint capability.
-                  Your issuer wallet then initializes and mints its own class;
-                  no global admin role is required.
+                  The Super Admin can grant this issuer the Mint capability;
+                  your issuer wallet then creates this class&apos;s token mint.
+                  Minting units into the treasury needs a Manci Admin issuer
+                  key (on{" "}
+                  <Link href="/admin/share-classes" className="font-medium underline">
+                    Admin → Share classes
+                  </Link>
+                  ); other issuers issue units through an approved sale (
+                  <Link href="/issuer/launchpad" className="font-medium underline">
+                    My sales
+                  </Link>
+                  ).
                 </p>
               </>
             ) : (

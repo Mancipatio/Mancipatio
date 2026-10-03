@@ -10,7 +10,12 @@
 //     the program measures UTF-8 bytes, and š, ć, č, ž, đ are two bytes each;
 //   * the resume decision: which step comes next for an asset that may already
 //     exist, so a failed second signature continues instead of duplicating;
-//   * the off-chain profile row and the operator checklist.
+//   * the off-chain profile row and the checklist after creation.
+//
+// Owner decision 2026-10-03: share tokens are bearer instruments. Anyone may
+// buy, hold and transfer them (the transfer hook's Open mode); KYC is asked
+// only when a token is converted into the company share itself (custody
+// conversion). So the flow never asks the operator for KYC-only.
 // Chain side (instructions, size, simulation, reads): lib/tokenize-shares-chain.ts.
 // Screen: components/tokenize-shares-flow.tsx, app/issuer/assets/tokenize.
 
@@ -119,9 +124,11 @@ export function formatTokens(n: bigint): string {
 
 // ── Price (optional) ────────────────────────────────────────────────────────
 //
-// The equity profile's money columns are USD (lib/asset-types.tsx "Share
-// price (USD)"), so the optional price is asked in USD and labelled so. Held
-// in cents; the per-token figure is rounded half-up to 6 decimals with BigInt.
+// The optional price is for the whole stake, asked in USD and held in cents.
+// It is private: it is kept, as entered, in `fields.tokenize` only and never
+// in the public `share_price` column (that column reads as the price of a
+// share, and the public sale carries the real price). The per-token figure
+// on the preview is rounded half-up to 6 decimals with BigInt.
 
 export const PRICE_CURRENCY = "USD";
 /** $1 trillion: far above any real stake, low enough to stay exact as a JSON number. */
@@ -361,14 +368,23 @@ export function namedPercentE4(name: string): bigint | null {
 
 // ── Company and jurisdiction ────────────────────────────────────────────────
 
-export type CompanySource = "issuer_profile" | "client" | "legal_id";
+export type CompanySource = "kyb" | "issuer_profile" | "client" | "legal_id";
 
-/** Company name: the issuer's profile, then its client record, then the on-chain legal ID. */
+/**
+ * Company name, most trusted first: the client record once its company
+ * verification (KYB) is approved — compliance reviewed that name — then the
+ * issuer's own profile (the issuer edits it freely), then the client record
+ * under review, then the on-chain legal ID.
+ */
 export function resolveCompany(input: {
   profileName?: string | null;
   clientName?: string | null;
+  /** The client's company verification (KYB) is approved. */
+  clientKybVerified?: boolean;
   legalId: string;
 }): { name: string; source: CompanySource } {
+  const reviewed = input.clientKybVerified ? input.clientName?.trim() : null;
+  if (reviewed) return { name: reviewed, source: "kyb" };
   const profile = input.profileName?.trim();
   if (profile) return { name: profile, source: "issuer_profile" };
   const client = input.clientName?.trim();
@@ -430,6 +446,40 @@ export function legalDocProblem(
   return null;
 }
 
+export const WEBSITE_MAX_CHARS = 300;
+
+/** Advanced: an optional website for the asset page (http/https). Null when valid; empty is valid. */
+export function validateWebsite(input: string): string | null {
+  const s = input.trim();
+  if (!s) return null;
+  if (s.length > WEBSITE_MAX_CHARS) return `At most ${WEBSITE_MAX_CHARS} characters.`;
+  try {
+    const u = new URL(s);
+    if (u.protocol === "https:" || u.protocol === "http:") return null;
+  } catch {
+    /* not a URL */
+  }
+  return "Enter a full address, e.g. https://example.com.";
+}
+
+/**
+ * What create() re-checks right before it builds the transaction (the
+ * disabled button is not enough: state can change while the page is open).
+ * The first refusal, or null.
+ */
+export function tokenizeCreateBlocker(input: {
+  network: Network;
+  file: { name: string; type: string; size: number } | null;
+  /** The issuer's on-chain KYB status is Verified (read fresh). */
+  kybVerified: boolean;
+  /** pausedFlowFor(flags, CreateAsset) on fresh flags: the onboarding pause, or null. */
+  onboardingPaused: string | null;
+}): string | null {
+  if (!input.kybVerified) return "Your company's KYB must be verified first.";
+  if (input.onboardingPaused) return input.onboardingPaused;
+  return legalDocProblem(input.file, input.network);
+}
+
 // ── Off-chain profile ───────────────────────────────────────────────────────
 
 export type LegalDocSource = "file" | "canonical" | "chain";
@@ -455,9 +505,8 @@ export function tokenizeFields(input: {
     percent_e4: figures.p4.toString(),
     granularity_percent: figures.granularity,
     tokens: figures.tokens.toString(),
+    // The price as entered: the whole stake, with its currency label.
     price_total: figures.priceCents === null ? null : formatCents(figures.priceCents),
-    price_per_token:
-      figures.priceCents === null ? null : formatE6(perTokenPriceE6(figures.priceCents, figures.tokens)),
     price_currency: figures.priceCents === null ? null : PRICE_CURRENCY,
     company_name: input.companyName,
     company_source: input.companySource,
@@ -469,6 +518,14 @@ export function displayNameFor(companyName: string, p4: bigint): string {
   return `${companyName} · ${formatPercent(p4)} %`;
 }
 
+/**
+ * What a holder may do with the token, in plain words: the Preview line and
+ * the public summary say the same (owner decision 2026-10-03: Open tokens,
+ * KYC only at conversion).
+ */
+export const OPEN_TOKEN_NOTE = "Anyone can hold and transfer it. KYC is needed only to convert it into company shares.";
+const OPEN_TOKENS_NOTE = "Anyone can hold and transfer them. KYC is needed only to convert them into company shares.";
+
 /** The plain-words listing line. */
 export function summaryText(input: {
   companyName: string;
@@ -478,7 +535,7 @@ export function summaryText(input: {
 }): string {
   const country = input.jurisdiction ? countryName(input.jurisdiction) : null;
   const where = country && country !== "—" ? ` (${country})` : "";
-  return `${formatTokens(input.tokens)} tokens = ${formatPercent(input.p4)} % of ${input.companyName}${where}. Only verified (KYC) wallets can hold them.`;
+  return `${formatTokens(input.tokens)} tokens = ${formatPercent(input.p4)} % of ${input.companyName}${where}. ${OPEN_TOKENS_NOTE}`;
 }
 
 /**
@@ -532,7 +589,6 @@ export type ExistingProfile = Partial<
     | "has_voting"
     | "convertible"
     | "liquidation_pref_bps"
-    | "share_price"
   >
 > & { fields?: Record<string, unknown> | null };
 
@@ -542,9 +598,10 @@ function isBlank(v: unknown): boolean {
 
 /**
  * The asset_profiles row this flow writes (POST /api/profiles/upsert). The
- * percent figures go in `fields.tokenize` (jsonb, private — never in the
- * public projection), so no migration is needed. The equity columns describe
- * class 0 as it is on chain (`classTerms`), not the flow's defaults.
+ * percent figures and the optional price go in `fields.tokenize` (jsonb,
+ * private — never in the public projection), so no migration is needed;
+ * `share_price` is never written. The equity columns describe class 0 as it
+ * is on chain (`classTerms`), not the flow's defaults.
  *
  * An existing row is never overwritten: it keeps its category, its status,
  * its other `fields` keys and every column that already has a value (the
@@ -584,10 +641,6 @@ export function buildProfileRow(input: {
     convertible: (terms.rightsBitfield & RIGHT_CONVERTIBLE) !== 0,
     liquidation_pref_bps: terms.liqPrefMultiplierBps,
   };
-  if (figures.priceCents !== null) {
-    // "Share price (USD)" of the equity profile: the price of one token.
-    generated.share_price = Number(formatE6(perTokenPriceE6(figures.priceCents, figures.tokens)));
-  }
   const row: NewAssetProfile = {
     asset_pda: input.assetPda,
     category: existing?.category ?? "equity",
@@ -803,38 +856,88 @@ export function detailsSaved(
 }
 
 // ── Checklist after creation ────────────────────────────────────────────────
+//
+// No KYC-only step (owner decision 2026-10-03): tokenized shares stay in the
+// transfer hook's Open mode. Minting waits only for the operator's activation
+// and for Primary issuance (pause bit 0x02) to be open.
 
-export type ChecklistId = "created" | "details" | "kyc" | "activate" | "mint" | "lock";
+export type ChecklistId = "created" | "details" | "activate" | "mint" | "lock";
 export type ChecklistState = "done" | "todo" | "blocked";
 export type ChecklistItem = { id: ChecklistId; state: ChecklistState };
 
-export function checklistItems(input: {
+export type ChecklistInput = {
   classExists: boolean;
   mintInitialized: boolean;
   profileSaved: boolean;
-  /** null while there is no mint (and so no hook config). */
-  kycGated: boolean | null;
   active: boolean;
   circulating: bigint;
   maxSupply: bigint | null;
   supplyLocked: boolean;
   primaryPaused: boolean;
-}): ChecklistItem[] {
+};
+
+function allMinted(input: Pick<ChecklistInput, "supplyLocked" | "circulating" | "maxSupply">): boolean {
+  return input.supplyLocked || (input.maxSupply !== null && input.circulating >= input.maxSupply);
+}
+
+export function checklistItems(input: ChecklistInput): ChecklistItem[] {
   const created = input.classExists && input.mintInitialized;
-  const kyc = input.kycGated === true;
-  const minted =
-    input.supplyLocked || (input.maxSupply !== null && input.circulating >= input.maxSupply);
+  const minted = allMinted(input);
   return [
     { id: "created", state: created ? "done" : "todo" },
     { id: "details", state: input.profileSaved ? "done" : "todo" },
-    { id: "kyc", state: kyc ? "done" : input.mintInitialized ? "todo" : "blocked" },
     { id: "activate", state: input.active ? "done" : input.classExists ? "todo" : "blocked" },
     {
       id: "mint",
-      state: minted ? "done" : created && kyc && input.active && !input.primaryPaused ? "todo" : "blocked",
+      state: minted ? "done" : created && input.active && !input.primaryPaused ? "todo" : "blocked",
     },
     { id: "lock", state: input.supplyLocked ? "done" : minted ? "todo" : "blocked" },
   ];
+}
+
+/** Shown on the mint step whenever pause bit 0x02 is set, whatever else it waits for. */
+export const PRIMARY_PAUSED_NOTE =
+  "Minting is paused platform-wide; the super admin reopens Primary issuance for the mint and closes it again right after.";
+
+/** A class made KYC-only elsewhere: said, never required. */
+export const KYC_GATED_NOTE = "KYC-only: holders need a KYC passport.";
+
+/**
+ * Why the mint step cannot be taken yet, or null when it can (or is done):
+ * what it still waits for, and the 0x02 note as soon as the bit is set.
+ */
+export function mintWaitText(input: ChecklistInput): string | null {
+  if (allMinted(input)) return null;
+  const after = [
+    !input.classExists || !input.mintInitialized ? "the token mint exists" : null,
+    !input.active ? "the operator activates the asset" : null,
+  ].filter((p): p is string => !!p);
+  const parts = [
+    after.length > 0 ? `After ${after.join(" and ")}.` : null,
+    input.primaryPaused ? PRIMARY_PAUSED_NOTE : null,
+  ].filter((p): p is string => !!p);
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+/**
+ * The mint step once done. "in the treasury" only while the issuer treasury
+ * holds the whole minted supply (`treasuryUnits`: its balance, or null when
+ * unknown); otherwise the tokens are just minted.
+ */
+export function mintDoneText(input: {
+  circulating: bigint;
+  maxSupply: bigint | null;
+  supplyLocked: boolean;
+  treasuryUnits: bigint | null;
+}): string {
+  if (input.supplyLocked && input.maxSupply !== null && input.circulating < input.maxSupply) {
+    return `${formatTokens(input.circulating)} tokens minted; supply locked.`;
+  }
+  const inTreasury =
+    input.treasuryUnits !== null && input.circulating > BigInt(0) && input.treasuryUnits >= input.circulating;
+  return inTreasury
+    ? `All ${formatTokens(input.circulating)} tokens are in the treasury.`
+    : `All ${formatTokens(input.circulating)} tokens are minted.`;
 }
 
 // ── Local draft (resume after a failed second signature) ────────────────────
@@ -845,6 +948,8 @@ export type TokenizeDraft = {
   granularity: GranularityId;
   price: string;
   description: string;
+  /** Advanced → Website (absent in drafts saved before it existed). */
+  website?: string;
   legalDocSource: LegalDocSource;
   savedAt: string;
 };
@@ -859,10 +964,16 @@ export function resumePrefill(input: {
   cap: bigint | null;
   tokenize: Record<string, unknown> | null;
   draft: TokenizeDraft | null;
-}): { percent?: string; granularity?: GranularityId; price?: string; description?: string } {
+}): { percent?: string; granularity?: GranularityId; price?: string; description?: string; website?: string } {
   const { draft, tokenize } = input;
   if (draft) {
-    return { percent: draft.percent, granularity: draft.granularity, price: draft.price, description: draft.description };
+    return {
+      percent: draft.percent,
+      granularity: draft.granularity,
+      price: draft.price,
+      description: draft.description,
+      ...(draft.website ? { website: draft.website } : {}),
+    };
   }
   if (tokenize) {
     const g = granularityById(String(tokenize.granularity_percent));
@@ -964,6 +1075,7 @@ export function parseDraft(raw: string | null): TokenizeDraft | null {
       !granularityById(d.granularity) ||
       typeof d.price !== "string" ||
       typeof d.description !== "string" ||
+      (d.website !== undefined && typeof d.website !== "string") ||
       (d.legalDocSource !== "file" && d.legalDocSource !== "canonical" && d.legalDocSource !== "chain")
     ) {
       return null;

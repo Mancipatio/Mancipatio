@@ -2,6 +2,11 @@
 // exact percent math, byte-limited names for non-ASCII company names, the
 // asset-ID suffixing, the resume decision table, the mainnet legal-document
 // rule, the profile row and the size of the batched transaction.
+//
+// Round 2 (owner decision 2026-10-03): the tokens are Open bearer instruments
+// — no KYC-only step, KYC only at conversion; the price stays private; no
+// private website or unreviewed company name reaches the public page; create()
+// re-checks its preconditions.
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { generateKeyPairSigner, getBase64Encoder, type Address } from "@solana/kit";
@@ -14,10 +19,14 @@ import {
   DEFAULT_GRANULARITY,
   GRANULARITIES,
   HUNDRED_PERCENT_E4,
+  KYC_GATED_NOTE,
   LEGAL_DOC_MAX_BYTES,
   MAX_ASSET_ID_BYTES,
   MAX_SYMBOL_PREFIX_BYTES,
   MAX_TOKEN_NAME_BYTES,
+  OPEN_TOKEN_NOTE,
+  PRIMARY_PAUSED_NOTE,
+  WEBSITE_MAX_CHARS,
   assetDefaults,
   baseAssetId,
   buildProfileRow,
@@ -44,8 +53,10 @@ import {
   legalDocProblem,
   legalDocRequired,
   looksLikeTokenizeAsset,
+  mintDoneText,
   mintNamePreview,
   mintSymbolPreview,
+  mintWaitText,
   namedPercentE4,
   needsDuplicateConfirmation,
   nextTokenizeStep,
@@ -62,11 +73,13 @@ import {
   summaryText,
   toAsciiUpper,
   tokenNameFor,
+  tokenizeCreateBlocker,
   tokensFor,
   truncateUtf8,
   utf8Bytes,
   validateCompanyOverride,
   validateSymbolOverride,
+  validateWebsite,
   type AssetSnapshot,
   type ClassSnapshot,
   type TokenizeStep,
@@ -528,9 +541,23 @@ describe("legal document", () => {
 });
 
 describe("company and jurisdiction sources", () => {
-  it("prefers the issuer profile, then the client record, then the on-chain legal ID", () => {
+  it("prefers the reviewed KYB name, then the issuer profile, then the client record, then the legal ID", () => {
+    // Round 2: compliance reviewed the client record's name of an approved
+    // KYB; the issuer edits its own profile name freely.
+    expect(
+      resolveCompany({ profileName: "Edited Name Ltd", clientName: "Mancipatio d.o.o.", clientKybVerified: true, legalId: "L" }),
+    ).toEqual({ name: "Mancipatio d.o.o.", source: "kyb" });
+    // A KYB still under review does not outrank the profile.
+    expect(
+      resolveCompany({ profileName: "Mancipatio d.o.o.", clientName: "X", clientKybVerified: false, legalId: "MANCI-5-2026" }),
+    ).toEqual({ name: "Mancipatio d.o.o.", source: "issuer_profile" });
     expect(resolveCompany({ profileName: "Mancipatio d.o.o.", clientName: "X", legalId: "MANCI-5-2026" })).toEqual({
       name: "Mancipatio d.o.o.",
+      source: "issuer_profile",
+    });
+    // A verified KYB without a name falls back as before.
+    expect(resolveCompany({ profileName: "P", clientName: "  ", clientKybVerified: true, legalId: "L" })).toEqual({
+      name: "P",
       source: "issuer_profile",
     });
     expect(resolveCompany({ profileName: " ", clientName: "Client d.o.o.", legalId: "L" })).toEqual({
@@ -538,6 +565,12 @@ describe("company and jurisdiction sources", () => {
       source: "client",
     });
     expect(resolveCompany({ legalId: "MANCI-5-2026" })).toEqual({ name: "MANCI-5-2026", source: "legal_id" });
+  });
+
+  it("the flow reads the KYB decision before it names the company", () => {
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).toContain('clientKybVerified = eligibility?.kybStatus === "verified"');
+    expect(flow).toContain("resolveCompany({ profileName, clientName, clientKybVerified, legalId })");
   });
   it("formats the on-chain ISO numeric code, else takes the client's", () => {
     expect(resolveJurisdiction(688)).toBe("688");
@@ -566,10 +599,12 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
     const row = buildProfileRow(base);
     expect(row.display_name).toBe("Mancipatio d.o.o. · 5 %");
     expect(row.summary).toBe(
-      "5,000 tokens = 5 % of Mancipatio d.o.o. (Serbia). Only verified (KYC) wallets can hold them.",
+      "5,000 tokens = 5 % of Mancipatio d.o.o. (Serbia). Anyone can hold and transfer them. KYC is needed only to convert them into company shares.",
     );
+    expect(row.summary).not.toMatch(/Only verified|KYC\) wallets/);
     expect(row.status).toBe("draft");
-    expect(row.share_price).toBe(10);
+    // Round 2: the price is private — never the public share_price column.
+    expect(row).not.toHaveProperty("share_price");
     expect(row.has_voting).toBe(true);
     expect(row.convertible).toBe(false);
     expect(row.liquidation_pref_bps).toBe(10_000);
@@ -581,7 +616,6 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
         granularity_percent: "0.001",
         tokens: "5000",
         price_total: "50000",
-        price_per_token: "10",
         price_currency: "USD",
         company_name: "Mancipatio d.o.o.",
         company_source: "issuer_profile",
@@ -598,6 +632,40 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
     expect(Object.getPrototypeOf(row.fields)).toBe(Object.prototype);
     expect(() => JSON.stringify(row)).not.toThrow();
     expect(JSON.stringify(row).length).toBeLessThan(50_000);
+  });
+
+  it("the price is kept as entered (whole stake + currency) in fields.tokenize only", () => {
+    for (const priceCents of [B(5_000_000), B(1), null]) {
+      const row = buildProfileRow({ ...base, figures: { ...figures, priceCents } });
+      expect(row).not.toHaveProperty("share_price");
+      expect(row.fields).toMatchObject({
+        tokenize: {
+          price_total: priceCents === null ? null : formatCents(priceCents),
+          price_currency: priceCents === null ? null : "USD",
+        },
+      });
+      expect((row.fields as { tokenize: object }).tokenize).not.toHaveProperty("price_per_token");
+    }
+    // Nothing in the flow writes it either.
+    expect(src("lib/tokenize-shares.ts")).not.toMatch(/generated\.share_price|share_price\s*=/);
+    expect(src("components/tokenize-shares-flow.tsx")).not.toContain("share_price");
+  });
+
+  it("the website is only what the issuer typed: the private issuer profile's is never copied", () => {
+    expect(buildProfileRow({ ...base, website: null }).website).toBeNull();
+    expect(buildProfileRow({ ...base, website: "  " }).website).toBeNull();
+    expect(buildProfileRow({ ...base, website: "https://manci.io" }).website).toBe("https://manci.io");
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).not.toContain("ctx.website");
+    expect(flow).not.toMatch(/p\?\.website/);
+    expect(flow).toContain("website: website.trim() || null");
+    expect(validateWebsite("")).toBeNull();
+    expect(validateWebsite("  ")).toBeNull();
+    expect(validateWebsite("https://manci.io")).toBeNull();
+    expect(validateWebsite("http://example.com/x")).toBeNull();
+    expect(validateWebsite("manci.io")).toMatch(/full address/);
+    expect(validateWebsite("javascript:alert(1)")).toMatch(/full address/);
+    expect(validateWebsite(`https://a.io/${"x".repeat(WEBSITE_MAX_CHARS)}`)).toMatch(/At most/);
   });
 
   it("keeps an existing row's status and other fields; no price → no share_price", () => {
@@ -665,8 +733,22 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
 
   it("summary leaves an unknown country out", () => {
     expect(summaryText({ companyName: "X", jurisdiction: null, p4: B(10), tokens: B(1) })).toBe(
-      "1 tokens = 0.001 % of X. Only verified (KYC) wallets can hold them.",
+      "1 tokens = 0.001 % of X. Anyone can hold and transfer them. KYC is needed only to convert them into company shares.",
     );
+  });
+
+  it("the Preview says what the stored summary says: Open, KYC only at conversion", () => {
+    expect(OPEN_TOKEN_NOTE).toBe("Anyone can hold and transfer it. KYC is needed only to convert it into company shares.");
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).toContain("<li>{OPEN_TOKEN_NOTE}</li>");
+    expect(flow).toContain("Next: the operator activates the asset → then the tokens are minted.");
+    for (const file of ["components/tokenize-shares-flow.tsx", "components/tokenize-checklist.tsx", "lib/tokenize-shares.ts"]) {
+      const text = src(file);
+      expect(text, file).not.toContain("Only verified (KYC)");
+      expect(text, file).not.toContain("turns on KYC-only");
+      expect(text, file).not.toContain("Set KYC-only");
+    }
+    expect(src("components/treasury-mint-panel.tsx")).not.toContain("receiver-KYC gated");
   });
 
   it("the canonical hash input matches the Create-asset modal's field set and order", () => {
@@ -696,12 +778,11 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
   });
 });
 
-describe("operator checklist", () => {
+describe("checklist after creation (no KYC-only step)", () => {
   const fresh: Parameters<typeof checklistItems>[0] = {
     classExists: true,
     mintInitialized: true,
     profileSaved: true,
-    kycGated: false,
     active: false,
     circulating: B(0),
     maxSupply: B(5_000),
@@ -711,20 +792,90 @@ describe("operator checklist", () => {
   const states = (over: Partial<typeof fresh> = {}) =>
     Object.fromEntries(checklistItems({ ...fresh, ...over }).map((i) => [i.id, i.state]));
 
-  it("right after creation: operator steps open, minting blocked", () => {
-    expect(states()).toEqual({ created: "done", details: "done", kyc: "todo", activate: "todo", mint: "blocked", lock: "blocked" });
+  it("right after creation: activation open, minting blocked; there is no KYC-only step", () => {
+    expect(states()).toEqual({ created: "done", details: "done", activate: "todo", mint: "blocked", lock: "blocked" });
+    expect(checklistItems(fresh).map((i) => i.id)).toEqual(["created", "details", "activate", "mint", "lock"]);
   });
-  it("minting opens only after KYC-only and activation, and not while 0x02 is set", () => {
-    expect(states({ kycGated: true }).mint).toBe("blocked");
-    expect(states({ kycGated: true, active: true }).mint).toBe("todo");
-    expect(states({ kycGated: true, active: true, primaryPaused: true }).mint).toBe("blocked");
+  it("minting is gated only by activation and pause bit 0x02", () => {
+    expect(states({ active: true }).mint).toBe("todo");
+    expect(states({ active: true, primaryPaused: true }).mint).toBe("blocked");
+    expect(states({ active: false }).mint).toBe("blocked");
+    expect(states({ active: true, mintInitialized: false }).mint).toBe("blocked");
   });
   it("lock after the full supply; done once locked", () => {
-    expect(states({ kycGated: true, active: true, circulating: B(5_000) })).toMatchObject({ mint: "done", lock: "todo" });
-    expect(states({ kycGated: true, active: true, circulating: B(5_000), supplyLocked: true }).lock).toBe("done");
+    expect(states({ active: true, circulating: B(5_000) })).toMatchObject({ mint: "done", lock: "todo" });
+    expect(states({ active: true, circulating: B(5_000), supplyLocked: true }).lock).toBe("done");
   });
-  it("without a mint the hook step waits", () => {
-    expect(states({ mintInitialized: false, kycGated: null })).toMatchObject({ created: "todo", kyc: "blocked" });
+  it("without a mint creation is still to do", () => {
+    expect(states({ mintInitialized: false })).toMatchObject({ created: "todo", activate: "todo", mint: "blocked" });
+    expect(states({ classExists: false, mintInitialized: false })).toMatchObject({ activate: "blocked", mint: "blocked" });
+  });
+  it("the 0x02 note shows as soon as the bit is set, before or after activation", () => {
+    expect(PRIMARY_PAUSED_NOTE).toBe(
+      "Minting is paused platform-wide; the super admin reopens Primary issuance for the mint and closes it again right after.",
+    );
+    expect(mintWaitText({ ...fresh, primaryPaused: true })).toBe(
+      `After the operator activates the asset. ${PRIMARY_PAUSED_NOTE}`,
+    );
+    expect(mintWaitText({ ...fresh, active: true, primaryPaused: true })).toBe(PRIMARY_PAUSED_NOTE);
+    expect(mintWaitText({ ...fresh, mintInitialized: false, primaryPaused: true })).toContain(PRIMARY_PAUSED_NOTE);
+    expect(mintWaitText({ ...fresh, active: true, mintInitialized: false })).toBe("After the token mint exists.");
+    expect(mintWaitText(fresh)).toBe("After the operator activates the asset.");
+    expect(mintWaitText({ ...fresh, active: true })).toBeNull();
+    // Done: nothing to wait for, paused or not.
+    expect(mintWaitText({ ...fresh, active: true, circulating: B(5_000), primaryPaused: true })).toBeNull();
+    for (const over of [{}, { active: true }, { primaryPaused: true }]) {
+      expect(mintWaitText({ ...fresh, ...over }) ?? "").not.toMatch(/KYC/);
+    }
+  });
+  it("'Mint' done says 'in the treasury' only while the treasury holds the minted supply", () => {
+    const done = { circulating: B(5_000), maxSupply: B(5_000), supplyLocked: false };
+    expect(mintDoneText({ ...done, treasuryUnits: B(5_000) })).toBe("All 5,000 tokens are in the treasury.");
+    expect(mintDoneText({ ...done, treasuryUnits: B(4_000) })).toBe("All 5,000 tokens are minted.");
+    expect(mintDoneText({ ...done, treasuryUnits: null })).toBe("All 5,000 tokens are minted.");
+    expect(mintDoneText({ ...done, supplyLocked: true, circulating: B(3_000), treasuryUnits: B(3_000) })).toBe(
+      "3,000 tokens minted; supply locked.",
+    );
+  });
+  it("the checklist reads the hook mode but only says KYC-only, never requires it", () => {
+    expect(KYC_GATED_NOTE).toMatch(/^KYC-only: holders need a KYC passport/);
+    const checklist = src("components/tokenize-checklist.tsx");
+    expect(checklist).toContain('hook === "kyc-gated" && <p');
+    expect(checklist).not.toContain("Operator: KYC-only");
+    expect(checklist).not.toMatch(/kycGated:/);
+    expect(checklist).toContain("mintWaitText(facts)");
+    expect(checklist).toContain("mintDoneText(");
+  });
+});
+
+describe("create() re-checks its preconditions before building the transaction", () => {
+  const pdf = { name: "statut.pdf", type: "application/pdf", size: 1000 };
+  const ok = { network: "mainnet" as const, file: pdf, kybVerified: true, onboardingPaused: null };
+  it("refuses an unverified KYB, the onboarding pause and a missing mainnet legal document", () => {
+    expect(tokenizeCreateBlocker(ok)).toBeNull();
+    expect(tokenizeCreateBlocker({ ...ok, kybVerified: false })).toBe("Your company's KYB must be verified first.");
+    expect(tokenizeCreateBlocker({ ...ok, onboardingPaused: "Onboarding is paused." })).toBe("Onboarding is paused.");
+    expect(tokenizeCreateBlocker({ ...ok, file: null })).toMatch(/required on mainnet/);
+    expect(tokenizeCreateBlocker({ ...ok, file: { ...pdf, name: "x.docx", type: "application/msword" } })).toBe(
+      "Choose a PDF file.",
+    );
+    // Off mainnet the document stays optional.
+    expect(tokenizeCreateBlocker({ ...ok, network: "devnet", file: null })).toBeNull();
+    // KYB first, then the pause, then the document.
+    expect(tokenizeCreateBlocker({ network: "mainnet", file: null, kybVerified: false, onboardingPaused: "P" })).toMatch(/KYB/);
+    expect(tokenizeCreateBlocker({ network: "mainnet", file: null, kybVerified: true, onboardingPaused: "P" })).toBe("P");
+  });
+  it("create() reads the KYB and the pause flags fresh and refuses before any build or send", () => {
+    const flow = src("components/tokenize-shares-flow.tsx");
+    const body = flow.slice(flow.indexOf("async function create("), flow.indexOf("// ── Continue an unfinished token ──"));
+    const guard = body.indexOf("if (blocker) throw new Error(blocker);");
+    expect(guard).toBeGreaterThan(-1);
+    expect(body.indexOf("issuerKybVerified(rpc, ctx.issuerPda)")).toBeLessThan(guard);
+    expect(body.indexOf("readPauseFlags(rpc)")).toBeLessThan(guard);
+    expect(body).toContain("pausedFlowFor(flagsNow, AssetRegistryInstruction.CreateAsset)");
+    for (const later of ["pickTokenizeAssetId(", "buildTokenizeIxs({", "simulateTokenize(", "tx.send("]) {
+      expect(body.indexOf(later), later).toBeGreaterThan(guard);
+    }
   });
 });
 
@@ -811,6 +962,14 @@ describe("local draft", () => {
     const d = { v: 1, percent: "5", granularity: "0.001", price: "", description: "", legalDocSource: "file", savedAt: "x" };
     expect(parseDraft(JSON.stringify(d))).toEqual(d);
     expect(parseDraft(JSON.stringify({ ...d, granularity: "0.5" }))).toBeNull();
+    // Advanced → Website rides along; drafts saved before it still parse.
+    expect(parseDraft(JSON.stringify({ ...d, website: "https://manci.io" }))).toEqual({ ...d, website: "https://manci.io" });
+    expect(parseDraft(JSON.stringify({ ...d, website: 5 }))).toBeNull();
+    const withWebsite = parseDraft(JSON.stringify({ ...d, website: "https://manci.io" }));
+    expect(resumePrefill({ assetName: "Mancipatio 5%", cap: B(5_000), tokenize: null, draft: withWebsite })).toMatchObject({
+      website: "https://manci.io",
+    });
+    expect(resumePrefill({ assetName: "Mancipatio 5%", cap: B(5_000), tokenize: null, draft: parseDraft(JSON.stringify(d)) })).not.toHaveProperty("website");
     expect(parseDraft("{")).toBeNull();
     expect(parseDraft(null)).toBeNull();
     expect(draftKey("mainnet", "Abc")).toBe("mancipatio:tokenize:v1:mainnet:Abc");
@@ -906,6 +1065,14 @@ describe("surfaces", () => {
     expect(page).toContain("const [confirmUncapped, setConfirmUncapped] = useState(false);");
     expect(page).toContain("No cap: more units can be minted later (unlimited supply)");
     expect(page).toContain("(uncappedNeedsConfirm && !confirmUncapped)");
+    // Round 2: the "Mint permission required" branch no longer promises that
+    // the issuer mints its own class; treasury minting needs an Admin key.
+    const required = page.slice(page.indexOf("Mint permission required"), page.indexOf("Mint ready"));
+    expect(required).not.toContain("mints its own class");
+    expect(required).not.toContain("no global admin role is required");
+    expect(required).toContain("Manci Admin issuer");
+    expect(required).toContain("approved sale");
+    expect(page).not.toMatch(/KYC-only|KycGated/);
   });
 
   it("the admin page mints through the shared TreasuryMintPanel (one copy of the logic)", () => {

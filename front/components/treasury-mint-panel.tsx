@@ -238,8 +238,8 @@ export function TreasuryMintPanel({
               .
             </p>
             <p className="mt-2 text-xs text-slate-600">
-              Units stay in the treasury until they are sold through a sale
-              (receiver-KYC gated) or transferred out under the transfer hook.
+              Units stay in the treasury until they are sold through an
+              approved sale or transferred out under the transfer hook.
             </p>
             <p className="mt-2 text-xs text-slate-600">
               The mint counts <strong>€{mintEur || "0"}</strong> against the

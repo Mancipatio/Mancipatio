@@ -4,7 +4,12 @@
 // request 2026-10-03). The issuer types the share of the company and attaches
 // the legal document; the price is optional. Name, symbol, asset ID, class
 // terms and the asset page text are derived (lib/tokenize-shares.ts) and shown
-// in a preview; "Advanced" overrides name, symbol and description only.
+// in a preview; "Advanced" overrides name and symbol and adds a description
+// and a website (nothing private is copied to the public asset page).
+//
+// Owner decision 2026-10-03: the tokens are bearer instruments — anyone may
+// buy, hold and transfer them (the hook's Open mode), and KYC is asked only
+// when a token is converted into the company share. No KYC-only step.
 //
 // Two wallet prompts: one transaction (create_asset + add_share_class +
 // initialize_share_class_mint when the key may create the mint; measured and
@@ -45,7 +50,8 @@ import {
 } from "@/lib/asset-profiles";
 import { loadIssuerPermission, ISSUER_CAPABILITIES } from "@/lib/issuer-permissions";
 import { usePauseFlags } from "@/lib/use-pause-flags";
-import { pausedFlowFor } from "@/lib/pause-gate";
+import { pausedFlowFor, readPauseFlags } from "@/lib/pause-gate";
+import { checkApplyEligibility } from "@/lib/launchpad";
 import { createSignedRequest, postSignedRequest, type SiwsRequestBody } from "@/lib/siws-client";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
@@ -58,6 +64,7 @@ import {
   DEFAULT_GRANULARITY,
   GRANULARITIES,
   MAX_TOKEN_NAME_BYTES,
+  OPEN_TOKEN_NOTE,
   baseAssetId,
   buildProfileRow,
   candidateAssetIds,
@@ -93,10 +100,12 @@ import {
   shareFigures,
   summaryText,
   tokenNameFor,
+  tokenizeCreateBlocker,
   tokenizeFields,
   utf8Bytes,
   validateCompanyOverride,
   validateSymbolOverride,
+  validateWebsite,
   type CompanySource,
   type GranularityId,
   type LegalDocSource,
@@ -111,6 +120,7 @@ import {
   assetSnapshot,
   buildTokenizeIxs,
   classSnapshot,
+  issuerKybVerified,
   pickTokenizeAssetId,
   readTokenizeState,
   simulateTokenize,
@@ -129,7 +139,6 @@ type IssuerContext = {
   issuerPda: Address;
   legalId: string;
   company: { name: string; source: CompanySource };
-  website: string | null;
   jurisdiction: string | null;
   canInitMint: boolean;
   /** Unfinished tokens of this issuer (for "Continue"). */
@@ -226,6 +235,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
   const [companyOverride, setCompanyOverride] = useState<string | null>(null);
   const [symbolOverride, setSymbolOverride] = useState<string | null>(null);
   const [descriptionEdit, setDescription] = useState<string | null>(null);
+  const [websiteEdit, setWebsite] = useState<string | null>(null);
   const [duplicate, setDuplicate] = useState<DuplicatePrompt | null>(null);
   const prefill = resume?.prefill;
   const resumeSc0 = resume?.chain.sc0 ?? null;
@@ -238,6 +248,9 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
     granularityEdit ?? prefill?.granularity ?? (resumeAssetPda && fixedTokens !== null ? null : DEFAULT_GRANULARITY);
   const priceInput = priceEdit ?? prefill?.price ?? "";
   const description = descriptionEdit ?? prefill?.description ?? "";
+  // Only what the issuer types here reaches the public asset page: the
+  // issuer profile's website is private and never copied.
+  const website = websiteEdit ?? prefill?.website ?? "";
 
   // ── Load the issuer, its company data, permission and unfinished tokens ──
   const loadContext = useCallback(async () => {
@@ -253,25 +266,28 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       }
       const [issuerPda] = await findIssuerPda({ legalEntityId: issuer.legalEntityId });
       const legalId = fromBytes32(issuer.legalEntityId);
+      // The company name compliance reviewed (the client record of an
+      // approved KYB) comes first; the issuer-editable profile name after it.
       let profileName: string | null = null;
-      let website: string | null = null;
       try {
         const p = await getIssuerProfile(session, issuerPda);
         profileName = p?.company_name ?? null;
-        website = p?.website ?? null;
       } catch {
         /* fall back to the client record or the legal ID */
       }
       let clientName: string | null = null;
       let clientJurisdiction: string | null = null;
-      if (!profileName?.trim() || !resolveJurisdiction(issuer.jurisdiction)) {
-        try {
-          const c = await getMyClient(session);
-          clientName = c?.company_name ?? null;
-          clientJurisdiction = c?.jurisdiction ?? null;
-        } catch {
-          /* optional */
-        }
+      try {
+        const c = await getMyClient(session);
+        clientName = c?.company_name ?? null;
+        clientJurisdiction = c?.jurisdiction ?? null;
+      } catch {
+        /* optional */
+      }
+      let clientKybVerified = false;
+      if (clientName?.trim()) {
+        const eligibility = await checkApplyEligibility(wallet.toString());
+        clientKybVerified = eligibility?.kybStatus === "verified";
       }
       let canInitMint = false;
       try {
@@ -316,8 +332,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         issuer,
         issuerPda,
         legalId,
-        company: resolveCompany({ profileName, clientName, legalId }),
-        website,
+        company: resolveCompany({ profileName, clientName, clientKybVerified, legalId }),
         jurisdiction: resolveJurisdiction(issuer.jurisdiction, clientJurisdiction),
         canInitMint,
         unfinished,
@@ -385,6 +400,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
   const nameError =
     !resumeAsset && companyOverride !== null && figures.ok ? validateCompanyOverride(companyOverride, figures.p4) : null;
   const symbolError = !resumeAsset && symbolOverride !== null ? validateSymbolOverride(symbolOverride) : null;
+  const websiteError = validateWebsite(website);
   const docProblem = legalDocProblem(file ? { name: file.name, type: file.type, size: file.size } : null, network);
   const onboardingPaused = pausedFlowFor(flags, AssetRegistryInstruction.CreateAsset);
   const verified = ctx?.issuer.kybStatus === 1;
@@ -392,13 +408,8 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
   const pctLabel = figures.ok ? formatPercent(figures.p4) : fixedTokens !== null ? "…" : percentInput.trim() || "…";
   const assetIdPreview = figures.ok && !symbolError ? baseAssetId(symbolPrefix, figures.p4) : "—";
 
-  function figuresFor(p4: bigint, tokens: bigint, g: GranularityId, keepPrice = false): TokenizeFigures {
-    return {
-      p4,
-      granularity: g,
-      tokens,
-      priceCents: !keepPrice && price.ok ? price.value : null,
-    };
+  function figuresFor(p4: bigint, tokens: bigint, g: GranularityId): TokenizeFigures {
+    return { p4, granularity: g, tokens, priceCents: price.ok ? price.value : null };
   }
 
   /** Signs the details (one prompt), waits for finality, then posts them. */
@@ -444,6 +455,20 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
     const session = conn.wallet;
     setWorking("Checking the chain…");
     try {
+      // Re-checked here, not only through the disabled button: the KYB, the
+      // onboarding pause (0x01) and the mainnet legal document, read fresh.
+      const [kybVerified, flagsNow] = await Promise.all([
+        issuerKybVerified(rpc, ctx.issuerPda),
+        readPauseFlags(rpc),
+      ]);
+      const blocker = tokenizeCreateBlocker({
+        network,
+        file: file ? { name: file.name, type: file.type, size: file.size } : null,
+        kybVerified,
+        onboardingPaused: pausedFlowFor(flagsNow, AssetRegistryInstruction.CreateAsset),
+      });
+      if (blocker) throw new Error(blocker);
+      if (websiteError) throw new Error(`Website: ${websiteError}`);
       const signer = walletSigner(session);
       const permission = await loadIssuerPermission(rpc, ctx.issuerPda, wallet);
       const canInitMint = (permission.capabilities & ISSUER_CAPABILITIES.Mint) !== 0;
@@ -499,7 +524,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
               displayName: displayNameFor(ctx.company.name, figs.p4),
               summary: summaryText({ companyName: ctx.company.name, jurisdiction: ctx.jurisdiction, p4: figs.p4, tokens: figs.tokens }),
               description: description.trim(),
-              website: ctx.website ?? "",
+              website: website.trim(),
               jurisdiction: ctx.jurisdiction,
               fields: tokenizeFields({ figures: figs, companyName: ctx.company.name, companySource: ctx.company.source, legalDocSource }),
             }),
@@ -512,7 +537,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         companyName: ctx.company.name,
         companySource: ctx.company.source,
         jurisdiction: ctx.jurisdiction,
-        website: ctx.website,
+        website: website.trim() || null,
         description: description.trim() || null,
         figures: figs,
         legalDocHex: toHex(legalDocHash),
@@ -541,6 +566,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         granularity: granularity.id,
         price: priceInput.trim(),
         description: description.trim(),
+        website: website.trim(),
         legalDocSource,
         savedAt: new Date().toISOString(),
       });
@@ -572,17 +598,16 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
 
   async function continueResume() {
     if (!ctx || !resume || !resume.chain.asset || !resumeStep || !conn.wallet || !wallet) return;
-    // An asset page that already shows a share price keeps it (ResumeView asks for none then).
-    const keepPrice = resume.profile?.share_price != null;
-    if (!figures.ok || !granularity || (!price.ok && !keepPrice)) return;
+    const profileMissing = !hasTokenizeFields(resume.profile);
+    // The price is asked (and needed) only while the figures are missing.
+    if (!figures.ok || !granularity || (profileMissing && !price.ok)) return;
     const rpc = client.runtime.rpc;
     const asset = resume.chain.asset;
-    const profileMissing = !hasTokenizeFields(resume.profile);
     const chainStep = resumeStep.kind === "add_class" || resumeStep.kind === "init_mint";
     const total = (chainStep ? 1 : 0) + (profileMissing ? 1 : 0);
     setWorking("Checking the chain…");
     try {
-      const figs = figuresFor(figures.p4, figures.tokens, granularity.id, keepPrice);
+      const figs = figuresFor(figures.p4, figures.tokens, granularity.id);
       const legalDocSource: LegalDocSource = resume.draft?.legalDocSource ?? "chain";
       // An existing profile is completed, never overwritten (buildProfileRow);
       // the equity columns follow class 0 as it is on chain.
@@ -592,7 +617,8 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         companyName: ctx.company.name,
         companySource: ctx.company.source,
         jurisdiction: ctx.jurisdiction,
-        website: ctx.website,
+        // From this browser's draft (Advanced → Website, checked before the token was created).
+        website: websiteError ? null : website.trim() || null,
         description: description.trim() || null,
         figures: figs,
         legalDocHex: toHex(asset.legalDocHash),
@@ -628,6 +654,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
           granularity: granularity.id,
           price: priceInput.trim(),
           description: description.trim(),
+          website: website.trim(),
           legalDocSource,
           savedAt: new Date().toISOString(),
         });
@@ -751,6 +778,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
     price.ok ? null : price.error,
     nameError ? `Name: ${nameError}` : null,
     symbolError ? `Symbol: ${symbolError}` : null,
+    websiteError ? `Website: ${websiteError}` : null,
   ].filter((p): p is string => !!p);
   const canSubmit = problems.length === 0 && working === null && !tx.isSending;
   // The duplicate prompt holds only while the name, symbol and cap it was raised for are unchanged.
@@ -876,6 +904,9 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
                 />
               </div>
               {!price.ok && <p className="mt-1 text-[12px] text-red-700">{price.error}</p>}
+              <p className="mt-1 text-[11px] text-slate-400">
+                Kept private with the token&apos;s figures; the public price is set by the sale.
+              </p>
             </div>
           </div>
 
@@ -893,11 +924,12 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
                     {formatTokens(figures.tokens)} tokens = {formatPercent(figures.p4)} % of {ctx.company.name}
                     {country && country !== "—" ? ` (${country})` : ""}
                   </li>
-                  <li>Only verified (KYC) wallets can hold it — once the operator turns on KYC-only</li>
+                  <li>{OPEN_TOKEN_NOTE}</li>
                   <li>Supply capped at {formatTokens(figures.tokens)} — locked for good after minting</li>
                   {price.ok && price.value !== null && (
                     <li>
                       Price ${formatCents(price.value)} for the {formatPercent(figures.p4)} % · ${perToken} per token
+                      (private)
                     </li>
                   )}
                 </ul>
@@ -920,7 +952,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
               aria-expanded={advancedOpen}
               className="text-sm font-medium text-slate-600 hover:text-slate-900"
             >
-              {advancedOpen ? "▾" : "▸"} Advanced (name, symbol, description)
+              {advancedOpen ? "▾" : "▸"} Advanced (name, symbol, description, website)
             </button>
             {advancedOpen && (
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -962,6 +994,18 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
                     placeholder="Shown on the asset page (optional)"
                     className={`${inputClass} mt-1`}
                   />
+                </label>
+                <label className="block sm:col-span-2">
+                  <span className={labelClass}>Website</span>
+                  <input
+                    value={website}
+                    type="url"
+                    inputMode="url"
+                    onChange={(e) => setWebsite(e.target.value)}
+                    placeholder="https://… (optional, shown on the asset page)"
+                    className={`${inputClass} mt-1`}
+                  />
+                  {websiteError && <span className="mt-1 block text-[11px] text-red-700">{websiteError}</span>}
                 </label>
                 {(companyOverride !== null || symbolOverride !== null) && (
                   <button
@@ -1006,7 +1050,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
               <p className="mt-2 text-right text-[12px] text-amber-700">{problems[0]}</p>
             )}
             <p className="mt-2 text-right text-[12px] text-slate-500">
-              Next: the operator turns on KYC-only and activates the asset → then the tokens are minted.
+              Next: the operator activates the asset → then the tokens are minted.
             </p>
             {!ctx.canInitMint && (
               <p className="mt-1 text-right text-[11px] text-slate-400">
@@ -1154,10 +1198,10 @@ function ResumeView(props: {
         ? "Create the token mint"
         : "Save details";
   // An asset page profile written elsewhere (Product profile form): saving
-  // only completes it, and a share price already on it is kept.
+  // only completes it. The price is private (fields.tokenize), so it is asked
+  // whenever the figures are missing.
   const existingProfile = profileMissing && resume.profile !== null;
-  const keptPrice = resume.profile?.share_price ?? null;
-  const askPrice = profileMissing && keptPrice === null;
+  const askPrice = profileMissing;
   const blocked = props.figuresError ?? (askPrice ? props.priceError : null);
 
   if (!asset) {
@@ -1236,7 +1280,7 @@ function ResumeView(props: {
             {existingProfile && (
               <p className="text-[12px] text-slate-600">
                 This token already has an asset page profile. Saving keeps its text, website and status and only
-                fills in what is empty{keptPrice !== null ? `; its share price ($${keptPrice} per token) stays` : ""}.
+                fills in what is empty.
               </p>
             )}
             {askPrice && (

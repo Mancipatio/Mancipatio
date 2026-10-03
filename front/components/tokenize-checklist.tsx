@@ -1,10 +1,15 @@
 "use client";
 
 // What happens after "Create token": the steps of a tokenized stake, read
-// from chain (lib/tokenize-shares checklistItems). The operator's steps link
-// to their admin screens for a wallet that holds the role; an Admin issuer key
-// mints and locks right here, through the same components /admin/share-classes
-// uses.
+// from chain (lib/tokenize-shares checklistItems). The operator's step
+// (activation) links to its admin screen for a wallet that holds the role; an
+// Admin issuer key mints and locks right here, through the same components
+// /admin/share-classes uses.
+//
+// No KYC-only step (owner decision 2026-10-03): the tokens are bearer
+// instruments in the hook's Open mode, and KYC is asked only when a token is
+// converted into the company share. A class made KYC-only elsewhere is only
+// said, never required.
 
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
@@ -17,18 +22,23 @@ import { loadIssuerPermission, ISSUER_CAPABILITIES } from "@/lib/issuer-permissi
 import { usePauseFlags } from "@/lib/use-pause-flags";
 import { isPaused, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import {
+  KYC_GATED_NOTE,
   checklistItems,
   detailsSaved,
   formatTokens,
   isFlowToken,
+  mintDoneText,
   mintSymbolPreview,
+  mintWaitText,
   type ChecklistId,
+  type ChecklistInput,
   type ChecklistState,
 } from "@/lib/tokenize-shares";
 import {
   assetSnapshot,
   classSnapshot,
   readTokenizeState,
+  readTreasuryUnits,
   type TokenizeChainState,
 } from "@/lib/tokenize-shares-chain";
 import { TreasuryMintPanel } from "@/components/treasury-mint-panel";
@@ -38,7 +48,6 @@ import { SkeletonCard } from "@/components/skeleton";
 const TITLES: Record<ChecklistId, string> = {
   created: "Token created",
   details: "Details saved",
-  kyc: "Operator: KYC-only",
   activate: "Operator: activate",
   mint: "Mint the tokens",
   lock: "Lock supply (one-way)",
@@ -63,9 +72,11 @@ export function TokenizeChecklist({
   const client = useSolanaClient();
   const conn = useWalletConnection();
   const wallet = conn.wallet?.account.address?.toString() ?? null;
-  const { isAdmin, isBlocklistAuthority } = useRole();
+  const { isAdmin } = useRole();
   const flags = usePauseFlags();
   const [state, setState] = useState<TokenizeChainState | null>(null);
+  /** The issuer treasury's balance of the mint (for the "Mint" done text), or null. */
+  const [treasuryUnits, setTreasuryUnits] = useState<bigint | null>(null);
   const [failed, setFailed] = useState(false);
   const [permission, setPermission] = useState<{ globalAdmin: boolean; canMint: boolean }>({
     globalAdmin: false,
@@ -77,7 +88,13 @@ export function TokenizeChecklist({
   const load = useCallback(async () => {
     try {
       const next = await readTokenizeState(client.runtime.rpc, assetPda);
+      const sc = next.sc0;
+      const treasury =
+        sc?.mintInitialized && sc.circulatingSupply > BigInt(0) && issuerAuthority
+          ? await readTreasuryUnits(client.runtime.rpc, issuerAuthority as Address, sc.mint)
+          : null;
       setState(next);
+      setTreasuryUnits(treasury);
       setFailed(false);
       if (next.asset && isIssuerAuthority && wallet) {
         try {
@@ -90,7 +107,7 @@ export function TokenizeChecklist({
     } catch {
       setFailed(true);
     }
-  }, [client, assetPda, isIssuerAuthority, wallet]);
+  }, [client, assetPda, issuerAuthority, isIssuerAuthority, wallet]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -118,17 +135,17 @@ export function TokenizeChecklist({
   // figures saved); any other equity asset on the share-class screen and its
   // own profile form.
   const tokenizeLike = isFlowToken(assetSnapshot(asset), sc0 ? classSnapshot(sc0) : null);
-  const items = checklistItems({
+  const facts: ChecklistInput = {
     classExists: !!sc0,
     mintInitialized: !!sc0?.mintInitialized,
     profileSaved: detailsSaved(tokenizeLike, profile),
-    kycGated: hook === null ? null : hook === "kyc-gated",
     active: asset.status === AssetStatus.Active,
     circulating,
     maxSupply,
     supplyLocked: !!sc0?.supplyLocked,
     primaryPaused,
-  });
+  };
+  const items = checklistItems(facts);
   const byId = Object.fromEntries(items.map((i) => [i.id, i.state])) as Record<ChecklistId, ChecklistState>;
   const resumeHref = tokenizeLike ? `/issuer/assets/tokenize?asset=${assetPda}` : "/issuer/share-classes";
   const remaining = maxSupply !== null && maxSupply > circulating ? maxSupply - circulating : null;
@@ -173,19 +190,6 @@ export function TokenizeChecklist({
         ) : (
           "No product profile yet — add one with Edit under Product profile."
         );
-      case "kyc":
-        if (s === "done") return "Only wallets with a valid KYC passport can receive the token.";
-        if (s === "blocked") return "After the token mint exists.";
-        return (
-          <>
-            {hook === "none"
-              ? "This mint has no transfer-hook config — the operator must sort it out. "
-              : "Every new token starts open to any wallet; the operator turns on KYC-only so only verified wallets can hold it. "}
-            {isBlocklistAuthority && (
-              <Link href="/admin/share-classes" className={linkClass}>Set KYC-only on Admin → Share classes →</Link>
-            )}
-          </>
-        );
       case "activate":
         if (s === "done") return "The asset is active.";
         if (s === "blocked") return "After the share class exists.";
@@ -195,14 +199,13 @@ export function TokenizeChecklist({
             {isAdmin && <Link href="/admin/assets" className={linkClass}>Activate on Admin → Assets →</Link>}
           </>
         );
-      case "mint":
-        if (s === "done") return sc0?.supplyLocked && maxSupply !== null && circulating < maxSupply
-          ? `${formatTokens(circulating)} tokens minted; supply locked.`
-          : `All ${formatTokens(circulating)} tokens are in the treasury.`;
-        if (byId.kyc !== "done" || byId.activate !== "done") return "After KYC-only and activation.";
-        if (primaryPaused) {
-          return "Waiting for the super admin to reopen Primary issuance (pause bit 0x02) on Admin → Platform.";
+      case "mint": {
+        if (s === "done") {
+          return mintDoneText({ circulating, maxSupply, supplyLocked: !!sc0?.supplyLocked, treasuryUnits });
         }
+        // What it waits for, and the 0x02 note as soon as the bit is set.
+        const wait = mintWaitText(facts);
+        if (wait) return wait;
         return isIssuerAuthority && permission.globalAdmin ? (
           `Mint ${remaining !== null ? formatTokens(remaining) : "the"} tokens into your treasury. The EUR value counts against the raise limit; give a reason of at least 5 characters.`
         ) : (
@@ -211,6 +214,7 @@ export function TokenizeChecklist({
             <Link href="/issuer/launchpad" className={linkClass}>My sales →</Link>
           </>
         );
+      }
       case "lock":
         if (s === "done") return "Supply is locked for good — no more tokens can be minted.";
         if (s === "blocked") return "After all tokens are minted.";
@@ -258,6 +262,12 @@ export function TokenizeChecklist({
           </li>
         ))}
       </ol>
+      {hook === "kyc-gated" && <p className="mt-4 text-[13px] text-slate-600">{KYC_GATED_NOTE}</p>}
+      {hook === "none" && (
+        <p className="mt-4 text-[13px] text-slate-600">
+          This mint has no transfer-hook config — the operator must sort it out.
+        </p>
+      )}
     </section>
   );
 }

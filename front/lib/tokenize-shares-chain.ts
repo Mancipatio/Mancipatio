@@ -22,9 +22,12 @@ import {
   type TransactionSigner,
 } from "@solana/kit";
 import type { SolanaClient } from "@solana/client";
+import { fetchMaybeToken, findAssociatedTokenPda } from "@solana-program/token-2022";
 import {
+  KybStatus,
   fetchAllMaybeAsset,
   fetchMaybeAsset,
+  fetchMaybeIssuer,
   fetchMaybeShareClass,
   findAssetPda,
   findMintPda,
@@ -243,6 +246,28 @@ export async function readTokenizeState(rpc: Rpc, assetPda: Address): Promise<To
     sc0: sc0.exists ? sc0.data : null,
     hook,
   };
+}
+
+/**
+ * The issuer treasury's balance of `mint` (the issuer authority's Token-2022
+ * account, where mint_to_treasury puts units), or null when there is no such
+ * account or it cannot be read.
+ */
+export async function readTreasuryUnits(rpc: Rpc, owner: Address, mint: Address): Promise<bigint | null> {
+  try {
+    const [ata] = await findAssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_2022_PROGRAM });
+    const account = await fetchMaybeToken(rpc, ata, { commitment: "confirmed" });
+    if (!account.exists || account.data.mint !== mint || account.data.owner !== owner) return null;
+    return account.data.amount;
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the issuer's KYB is Verified on chain right now (create() re-checks it before signing). */
+export async function issuerKybVerified(rpc: Rpc, issuerPda: Address): Promise<boolean> {
+  const issuer = await fetchMaybeIssuer(rpc, issuerPda, { commitment: "confirmed" });
+  return issuer.exists && issuer.data.kybStatus === KybStatus.Verified;
 }
 
 export function assetSnapshot(a: Asset): AssetSnapshot {
