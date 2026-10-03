@@ -137,8 +137,8 @@ export async function buildShareTransfer(input: ShareTransferInput): Promise<Sha
 export type RecipientKind =
   | "wallet" // system-owned, no data
   | "new-wallet" // no account yet (no SOL): still a wallet address
-  | "pda" // off the ed25519 curve: no one can sign for it
-  | "token-account" // owned by a token program: the buyer pasted a token account
+  | "pda" // off the ed25519 curve: a program address (only its program signs), not a personal wallet
+  | "token-account" // owned by a token program: the buyer pasted a token account (often their ATA, itself a PDA)
   | "program" // executable
   | "program-owned" // owned by another program
   | "system-data"; // system-owned with data (a nonce account)
@@ -214,11 +214,18 @@ function readTokenAccount(account: MaybeEncodedAccount, mint: Address) {
   }
 }
 
+/**
+ * The owner program first: an associated token account is itself off the
+ * curve, so a pasted ATA must read as a token account (the fix the sender can
+ * act on), not as a generic program address. Then the curve, then the rest.
+ */
 function classifyRecipient(recipient: Address, account: MaybeEncodedAccount): RecipientKind {
+  if (account.exists) {
+    if (account.programAddress === TOKEN_2022 || account.programAddress === TOKEN_CLASSIC) return "token-account";
+    if (account.executable) return "program";
+  }
   if (isOffCurveAddress(recipient)) return "pda";
   if (!account.exists) return "new-wallet";
-  if (account.executable) return "program";
-  if (account.programAddress === TOKEN_2022 || account.programAddress === TOKEN_CLASSIC) return "token-account";
   if (account.programAddress !== SYSTEM_PROGRAM) return "program-owned";
   return account.data.length > 0 ? "system-data" : "wallet";
 }
@@ -360,18 +367,29 @@ export function parseTokenAmount(raw: string | bigint): bigint | null {
   return amount > U64_MAX ? null : amount;
 }
 
-/** The share of the company `amount` tokens are, as "100" or "33.33", when the total is known. */
+/**
+ * The share of the company `amount` tokens are, as "100", "33.33", "< 0.01"
+ * or "> 99.99", when the total is known. Only an amount equal to the total
+ * reads "100" and only 0 reads "0": a partial amount that rounds to either
+ * end is shown as "< 0.01" or "> 99.99", never as all or nothing.
+ */
 export function ownershipPercent(amount: bigint, totalShares: number | null | undefined): string | null {
   if (!totalShares || !Number.isFinite(totalShares) || totalShares <= 0) return null;
   const percent = (Number(amount) / totalShares) * 100;
   if (!Number.isFinite(percent)) return null;
+  const whole = Number.isSafeInteger(totalShares) ? amount === BigInt(totalShares) : Number(amount) === totalShares;
+  if (amount <= BigInt(0) || whole || percent > 100) return percent.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  if (percent < 0.01) return "< 0.01";
+  if (percent > 99.99) return "> 99.99";
+  // Strictly inside [0.01, 99.99]: two decimals can no longer round to "0" or "100".
   return percent.toLocaleString("en-US", { maximumFractionDigits: 2 });
 }
 
-/** "Send 5,000 tokens (= 100 % of ACME d.o.o.) to 8xYz…AbCd." */
+/** "Send 5,000 tokens (= 100 % of ACME d.o.o.) to 8xYz…AbCd." ("(< 0.01 % of …)" for a bound). */
 export function shareTransferSummary(input: { amount: bigint; recipient: string; percent?: string | null; company?: string | null }): string {
   const tokens = `${formatTokens(input.amount)} ${input.amount === BigInt(1) ? "token" : "tokens"}`;
-  const share = input.percent && input.company ? ` (= ${input.percent} % of ${input.company})` : "";
+  const relation = input.percent && /^[<>]/.test(input.percent) ? "" : "= ";
+  const share = input.percent && input.company ? ` (${relation}${input.percent} % of ${input.company})` : "";
   return `Send ${tokens}${share} to ${shortAddress(input.recipient)}.`;
 }
 
@@ -383,7 +401,7 @@ const RECIPIENT_KIND_TEXT: Record<RecipientKind, { ok: boolean; text: string }> 
   },
   pda: {
     ok: false,
-    text: "That address is a program address (PDA), not a wallet: no one could ever move the tokens. Ask the recipient for their wallet address.",
+    text: "This is a program address, not a personal wallet; sending here is not supported in this screen.",
   },
   "token-account": {
     ok: false,

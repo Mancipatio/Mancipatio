@@ -3,8 +3,9 @@
 // What happens after "Create token": the steps of a tokenized stake, read
 // from chain (lib/tokenize-shares checklistItems). The operator's step
 // (activation) links to its admin screen for a wallet that holds the role; an
-// Admin issuer key mints and locks right here, through the same components
-// /admin/share-classes uses.
+// Admin issuer key mints and locks right here, and an issuer authority or
+// Admin holding minted tokens sends them to a wallet, through the same
+// components /admin/share-classes uses.
 //
 // No KYC-only step (owner decision 2026-10-03): the tokens are bearer
 // instruments in the hook's Open mode, and KYC is asked only when a token is
@@ -43,6 +44,7 @@ import {
 } from "@/lib/tokenize-shares-chain";
 import { TreasuryMintPanel } from "@/components/treasury-mint-panel";
 import { LockSupplyButton } from "@/components/lock-supply-button";
+import { ShareTransferPanel } from "@/components/share-transfer-panel";
 import { SkeletonCard } from "@/components/skeleton";
 
 const TITLES: Record<ChecklistId, string> = {
@@ -252,6 +254,17 @@ export function TokenizeChecklist({
                     defaultUnits={remaining !== null ? remaining.toString() : undefined}
                   />
                 </div>
+              )}
+              {/* After Mint: an issuer authority or Admin wallet holding tokens
+                  sends them on (the panel shows only then, read live). */}
+              {item.id === "mint" && sc0?.mintInitialized && (
+                <ShareTransferPanel
+                  sc={sc0}
+                  asset={asset}
+                  scPda={state.addresses.shareClass}
+                  onSent={load}
+                  title="Send tokens to a wallet"
+                />
               )}
               {item.id === "lock" && item.state === "todo" && isAdmin && (
                 <div className="mt-2">

@@ -24,7 +24,7 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import { recordAudit } from "@/lib/supabase";
+import { recordAudit, type AuditStatus } from "@/lib/supabase";
 import { getAssetProfile } from "@/lib/asset-profiles";
 import { walletSigner } from "@/lib/wallet-signer";
 import { detectNetwork } from "@/lib/network";
@@ -49,8 +49,10 @@ export type ShareTransferPanelProps = {
   asset: Asset | undefined;
   /** The ShareClass PDA (audit target). */
   scPda: Address | null;
-  /** Called once a send is confirmed (refresh the page's own data). */
+  /** Called once a send has settled on the network (refresh the page's own data). */
   onSent?: () => void | Promise<void>;
+  /** The panel's heading ("Send to holder" on the share-class screens). */
+  title?: string;
 };
 
 /** Read for one wallet and one mint (`key`), so a switched class or wallet never shows another's balance. */
@@ -66,7 +68,7 @@ type Preflight =
 /** About 0.002 SOL: a Token-2022 account with ImmutableOwner and the transfer-hook extension. */
 const ACCOUNT_RENT_NOTE = "about 0.002 SOL rent, paid by you";
 
-export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPanelProps) {
+export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to holder" }: ShareTransferPanelProps) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
@@ -85,10 +87,13 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPa
   const [amountTouched, setAmountTouched] = useState(false);
   const [preflight, setPreflight] = useState<Preflight | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  /** Between the wallet's signature and the network's answer: no second send. */
+  const [confirming, setConfirming] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
 
   // Who may send and what this wallet holds, read live (the table rows come
-  // from the indexer mirror, which can lag).
+  // from the indexer mirror, which can lag); read again when the class's
+  // supply changes, so a treasury mint on the same screen shows the panel.
   useEffect(() => {
     if (!wallet || !issuer || !sc.mintInitialized) return;
     let cancelled = false;
@@ -121,7 +126,7 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPa
     };
     // amountTouched is read once per load on purpose: typing must not reload the chain.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [wallet, issuer, sc.mint, sc.mintInitialized, rpc, refreshKey]);
+  }, [wallet, issuer, sc.mint, sc.mintInitialized, sc.circulatingSupply, rpc, refreshKey]);
 
   const visible =
     !!wallet &&
@@ -212,10 +217,36 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPa
   if (!visible || !treasury) return null;
 
   async function send(reason: string) {
-    if (!session || !wallet || !ready || ready.verdict.amount === null || ready.facts.decimals === null) return;
+    if (confirming || !session || !wallet || !ready || ready.verdict.amount === null || ready.facts.decimals === null) return;
     const { facts, verdict } = ready;
     const amount = verdict.amount!;
-    const pendingId = toast.showPending(`Sending ${formatTokens(amount)} ${amount === BigInt(1) ? "token" : "tokens"}…`);
+    const tokens = `${formatTokens(amount)} ${amount === BigInt(1) ? "token" : "tokens"}`;
+    const metadata: Record<string, unknown> = {
+      mint: sc.mint.toString(),
+      to: facts.recipient.toString(),
+      amount: amount.toString(),
+      decimals: 0,
+      recipient_token_account: facts.recipientTokenAccount.toString(),
+      hook_mode: facts.hook.kind,
+      kyc_registry: facts.passport?.registry.toString() ?? null,
+      passport_expiry: verdict.passportExpiry !== null ? new Date(Number(verdict.passportExpiry) * 1000).toISOString() : null,
+      percent,
+    };
+    const audit = (status: AuditStatus, sig: string | null, extra: Record<string, unknown> = {}) =>
+      void recordAudit({
+        ix_name: "share_class_transfer",
+        category: "share-class",
+        actor_wallet: wallet.toString(),
+        reason,
+        target_label: (scPda ?? sc.mint).toString(),
+        ...(sig ? { tx_signature: sig } : {}),
+        status,
+        metadata: { ...metadata, ...extra },
+      });
+
+    // 1. The wallet signs and the network takes the transaction.
+    let pendingId = toast.showPending(`Sending ${tokens}…`);
+    let sig: string;
     try {
       const signer = walletSigner(session);
       const built = await buildShareTransfer({
@@ -226,40 +257,55 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPa
         decimals: facts.decimals!,
         hookConfig: facts.hookConfig,
       });
-      const sig = await tx.send({ instructions: built.instructions, feePayer: signer });
-      toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Tokens sent", description: summary ?? undefined });
-      void recordAudit({
-        ix_name: "share_class_transfer",
-        category: "share-class",
-        actor_wallet: wallet.toString(),
-        reason,
-        target_label: (scPda ?? sc.mint).toString(),
-        tx_signature: sig,
-        metadata: {
-          mint: sc.mint.toString(),
-          to: facts.recipient.toString(),
-          amount: amount.toString(),
-          decimals: 0,
-          recipient_token_account: built.destinationTokenAccount.toString(),
-          hook_mode: facts.hook.kind,
-          kyc_registry: facts.passport?.registry.toString() ?? null,
-          passport_expiry: verdict.passportExpiry !== null ? new Date(Number(verdict.passportExpiry) * 1000).toISOString() : null,
-          percent,
-        },
-      });
-      setConfirmOpen(false);
-      setRecipientInput("");
-      setAmountTouched(false);
-      const outcome = await waitForSignature(rpc, sig, { timeoutMs: 45_000 });
-      if (outcome === "failed") {
-        toast.showError("The transfer failed on the network", "Your wallet sent it, but the network refused it. Balances are unchanged; open the explorer link for details.");
-      }
-      setRefreshKey((k) => k + 1);
-      await onSent?.();
+      sig = await tx.send({ instructions: built.instructions, feePayer: signer });
     } catch (err) {
       toast.dismiss(pendingId);
-      toast.showError("Tokens not sent", explainSendError(err));
+      const message = explainSendError(err);
+      toast.showError("Tokens not sent", message);
+      audit("failed", null, { error: message });
+      return;
+    }
+
+    // 2. Only the network's confirmation makes it "sent": the success toast
+    //    and the audit row wait for it (tx.send returns on submission).
+    setConfirming(true);
+    setConfirmOpen(false);
+    toast.dismiss(pendingId);
+    pendingId = toast.showPending(`Confirming ${tokens} on the network…`);
+    try {
+      const outcome = await waitForSignature(rpc, sig, { timeoutMs: 45_000 });
+      toast.dismiss(pendingId);
+      if (outcome === "confirmed") {
+        toast.showTx(sig, { title: "Tokens sent", description: summary ?? undefined });
+        audit("success", sig);
+        setRecipientInput("");
+        setAmountTouched(false);
+      } else if (outcome === "failed") {
+        toast.show({
+          kind: "error",
+          title: "The transfer failed on the network",
+          description: "Your wallet sent it, but the network refused it. Balances are unchanged; open the explorer link for details.",
+          signature: sig,
+        });
+        audit("failed", sig, { error: "refused by the network" });
+      } else {
+        toast.show({
+          kind: "error",
+          title: "Not confirmed yet",
+          description:
+            "The network has not confirmed the transfer yet. Check the explorer link before sending again; the balance here is read again now.",
+          signature: sig,
+        });
+        audit("pending", sig, { confirmation: outcome });
+      }
+      setRefreshKey((k) => k + 1);
+      try {
+        await onSent?.();
+      } catch {
+        // The page's own refresh; the send has already settled and been reported.
+      }
+    } finally {
+      setConfirming(false);
     }
   }
 
@@ -273,7 +319,7 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPa
   return (
     <div className="mt-6 space-y-3 border-t border-slate-100 pt-5">
       <div className="flex items-center justify-between gap-4">
-        <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Send to holder</p>
+        <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">{title}</p>
         <span className="text-xs text-slate-500">
           You hold <span className="font-mono text-slate-800">{formatTokens(treasury.balance)}</span>
         </span>
@@ -353,11 +399,11 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPa
 
       <button
         type="button"
-        disabled={!ready || tx.isSending}
+        disabled={!ready || tx.isSending || confirming}
         onClick={() => setConfirmOpen(true)}
         className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
       >
-        {tx.isSending ? "Sending…" : "Send tokens"}
+        {tx.isSending ? "Sending…" : confirming ? "Confirming…" : "Send tokens"}
       </button>
 
       <ConfirmModal

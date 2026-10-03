@@ -151,7 +151,7 @@ describe("shareTransferChecks", () => {
 
   it("only a wallet may receive: PDA, token account, program, program-owned and nonce accounts are refused", () => {
     for (const [kind, pattern] of [
-      ["pda", /program address \(PDA\), not a wallet/],
+      ["pda", /^This is a program address, not a personal wallet; sending here is not supported in this screen\.$/],
       ["token-account", /token account, not a wallet/],
       ["program", /a program, not a wallet/],
       ["program-owned", /belongs to a program/],
@@ -212,8 +212,21 @@ describe("the summary before signing", () => {
     expect(shareTransferSummary({ amount: BigInt(1), recipient: RECIPIENT })).toBe("Send 1 token to 7Np4…T4K2.");
     expect(ownershipPercent(BigInt(1), 3)).toBe("33.33");
     expect(ownershipPercent(BigInt(1), null)).toBeNull();
+    expect(shareTransferSummary({ amount: BigInt(1), recipient: RECIPIENT, percent: ownershipPercent(BigInt(1), 1_000_000), company: "Mancipatio d.o.o." }))
+      .toBe("Send 1 token (< 0.01 % of Mancipatio d.o.o.) to 7Np4…T4K2.");
     expect(ownershipPercent(BigInt(1), 0)).toBeNull();
     expect(formatExpiryDate(EXPIRY)).toBe("3 October 2027");
+  });
+
+  it("never shows 100 % or 0 % for a partial amount", () => {
+    expect(ownershipPercent(BigInt(5_000), 5_000)).toBe("100");
+    expect(ownershipPercent(BigInt(0), 5_000)).toBe("0");
+    expect(ownershipPercent(BigInt(999_999), 1_000_000)).toBe("> 99.99");
+    expect(ownershipPercent(BigInt(19_999), 20_000)).toBe("> 99.99"); // 99.995 would round to "100"
+    expect(ownershipPercent(BigInt(1), 1_000_000)).toBe("< 0.01");
+    expect(ownershipPercent(BigInt(1), 20_000)).toBe("< 0.01"); // 0.005 would round to "0.01", still a bound
+    expect(ownershipPercent(BigInt(1), 10_000)).toBe("0.01");
+    expect(ownershipPercent(BigInt(9_999), 10_000)).toBe("99.99");
   });
 });
 
@@ -331,6 +344,10 @@ describe("loadShareTransferFacts", () => {
     const [pda] = await findConfigPda({ mint: MINT });
     expect(await kindOf(pda, null)).toBe("pda");
     expect(await kindOf(wallet, { owner: TOKEN_2022, data: new Uint8Array(165) })).toBe("token-account");
+    // A pasted associated token account is off the curve too: the owner program decides first.
+    const ata = await tokenAccountOf(wallet, MINT);
+    expect(await kindOf(ata, { owner: TOKEN_2022, data: new Uint8Array(165) })).toBe("token-account");
+    expect(await kindOf(pda, { owner: TRANSFER_HOOK_PROGRAM_ADDRESS, data: new Uint8Array(8) })).toBe("pda");
     expect(await kindOf(wallet, { owner: "BPFLoaderUpgradeab1e11111111111111111111111" as Address, data: new Uint8Array(36), executable: true })).toBe("program");
     expect(await kindOf(wallet, { owner: ASSET_REGISTRY_PROGRAM_ADDRESS, data: new Uint8Array(8) })).toBe("program-owned");
     expect(await kindOf(wallet, { owner: SYSTEM, data: new Uint8Array(80) })).toBe("system-data");
