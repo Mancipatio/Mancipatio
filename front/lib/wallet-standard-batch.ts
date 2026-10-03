@@ -31,6 +31,48 @@ export class BatchSigningUnsupportedError extends Error {
   }
 }
 
+// ── "Sign each transaction separately", remembered per wallet app + address ──
+// A Ledger behind Phantom or Solflare confirms every transaction of a batch on
+// the device, which can outlast the batch's one blockhash; one prompt per
+// transaction gives each its own. Chosen by hand (or after a batch outlasted
+// its blockhash) and kept in this browser, like lib/siws-signing's memory.
+
+const SEPARATE_KEY = "manci:sign-separately:v1";
+const SEPARATE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** The wallet app and address a choice applies to (lib/siws-signing signingTarget). */
+export type SeparateSigningTarget = { connectorId: string; wallet: string };
+
+function readSeparate(): Record<string, number> {
+  try {
+    const raw = typeof window !== "undefined" ? window.localStorage.getItem(SEPARATE_KEY) : null;
+    const parsed: unknown = raw ? JSON.parse(raw) : null;
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? (parsed as Record<string, number>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** Whether this wallet app + address signs a distribution one transaction per prompt. */
+export function signsSeparately(target: SeparateSigningTarget): boolean {
+  const expires = readSeparate()[`${target.connectorId}|${target.wallet}`];
+  return typeof expires === "number" && expires > Date.now();
+}
+
+/** Remember (30 days) or forget "sign each transaction separately" for this wallet app + address. */
+export function rememberSignsSeparately(target: SeparateSigningTarget, on: boolean): void {
+  const now = Date.now();
+  const next = Object.fromEntries(Object.entries(readSeparate()).filter(([, expires]) => typeof expires === "number" && expires > now));
+  const key = `${target.connectorId}|${target.wallet}`;
+  if (on) next[key] = now + SEPARATE_TTL_MS;
+  else delete next[key];
+  try {
+    window.localStorage.setItem(SEPARATE_KEY, JSON.stringify(next));
+  } catch {
+    /* storage blocked: the choice applies to this page only */
+  }
+}
+
 /** The connector id `@solana/client` derives for a Wallet Standard wallet (deriveConnectorId, 1.7.0). */
 export function connectorIdOf(wallet: Pick<Wallet, "name">): string {
   return `wallet-standard:${wallet.name.toLowerCase().replace(/[^a-z0-9]+/g, "-")}`;

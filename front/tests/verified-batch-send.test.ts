@@ -77,7 +77,7 @@ vi.mock("@/lib/wallet-standard-batch", async (original) => {
   };
 });
 
-import { getBatchSender, withVerifiedTransactions, type BatchSigned } from "@/lib/verified-solana-client";
+import { getBatchSender, SignedTransactionChangedError, withVerifiedTransactions, type BatchSigned } from "@/lib/verified-solana-client";
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { SimulationRefusedError } from "@/lib/simulation-gate";
 import { signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
@@ -106,7 +106,7 @@ function session(): WalletSession {
   };
 }
 
-function fixture() {
+function fixture(opts: { heightAfterSigning?: number } = {}) {
   const current = session();
   let blockhashes = 0;
   const sent: string[] = [];
@@ -136,6 +136,13 @@ function fixture() {
         blockhashes += 1;
         events.push("blockhash");
         return { value: { blockhash: blockhash("4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"), lastValidBlockHeight: BigInt(1_000 + blockhashes) } };
+      },
+    }),
+    // Read once the wallet returns a batch: its blockhash must still have room to land.
+    getBlockHeight: (o: { commitment: string }) => ({
+      send: async () => {
+        events.push(`height:${o.commitment}`);
+        return BigInt(opts.heightAfterSigning ?? 900);
       },
     }),
     sendTransaction: (wire: string) => ({
@@ -203,7 +210,8 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
     expect(events.indexOf("authorize")).toBeLessThan(events.indexOf("wallet.batch(3)"));
     expect(events.lastIndexOf("simulate")).toBeLessThan(events.indexOf("wallet.batch(3)"));
     expect(events.indexOf("journal")).toBeLessThan(events.indexOf("send"));
-    expect(events.slice(events.indexOf("journal"))).toEqual(["journal", "send", "send", "send"]);
+    // The block height is read after the wallet returned, before the journal.
+    expect(events.slice(events.indexOf("wallet.batch(3)"))).toEqual(["wallet.batch(3)", "height:confirmed", "journal", "send", "send", "send"]);
     expect(events).not.toContain("settle");
     // One shared blockhash; each journalled signature and its last valid block height.
     expect(f.blockhashes()).toBe(1);
@@ -252,6 +260,69 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
     expect(result.mode).toBe("per-transaction");
     expect(result.fallbackReason).toMatch(/transaction 2/);
     expect(f.sign).toHaveBeenCalledTimes(2);
+  });
+
+  it("a batch that outlasted its blockhash (a Ledger confirming each) is never journalled or sent: fresh-blockhash signing one by one", async () => {
+    // The batch's blockhash is valid up to 1001; 980 + the margin is past it.
+    const f = fixture({ heightAfterSigning: 980 });
+    const journal: BatchSigned[][] = [];
+    const result = await f.sender.prepareAndSendAll(requests(2), { onSigned: (signed) => void journal.push([...signed]) });
+    expect(result).toMatchObject({ mode: "per-transaction", prompts: 2 });
+    expect(result.fallbackReason).toMatch(/took too long/);
+    expect(f.sign).toHaveBeenCalledTimes(2);
+    // Only the per-transaction signatures were journalled, each with its own fresh blockhash.
+    expect(journal.map((j) => j.map((s) => s.lastValidBlockHeight.toString()))).toEqual([["1002"], ["1003"]]);
+    expect(f.sent).toHaveLength(2);
+  });
+
+  describe("per transaction: every returned message is compared with the one built", () => {
+    const changedBlockhash = async (prepared: TransactionPrepared) => {
+      events.push("wallet.single");
+      const swapped = setTransactionMessageLifetimeUsingBlockhash(
+        { blockhash: blockhash("GHtXQBsoZHVnNFa9YevAzFr17DJjgHXk3ycTKD5xD3Zi"), lastValidBlockHeight: BigInt(9_999) },
+        prepared.message as Parameters<typeof setTransactionMessageLifetimeUsingBlockhash>[1],
+      );
+      const tx = compileTransaction(swapped as unknown as Parameters<typeof compileTransaction>[0]);
+      return { ...tx, signatures: { [WALLET]: new Uint8Array(64).fill(7) } } as never;
+    };
+
+    it("a wallet that swapped the blockhash: refused before the journal, nothing sent", async () => {
+      const f = fixture();
+      f.sign.mockImplementationOnce(changedBlockhash);
+      const onSigned = vi.fn();
+      const error = await f.sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(SignedTransactionChangedError);
+      expect((error as Error).message).toMatch(/replaced its blockhash .*transaction 1 of 2.*not sent/);
+      expect(onSigned).not.toHaveBeenCalled();
+      expect(f.sent).toHaveLength(0);
+    });
+
+    it("after the batch fell back on a changed message, a changed one-by-one signature is refused too", async () => {
+      const f = fixture();
+      wallet.mode = "change";
+      f.sign.mockImplementation(changedBlockhash);
+      await expect(f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} })).rejects.toBeInstanceOf(SignedTransactionChangedError);
+      expect(f.sent).toHaveLength(0);
+    });
+
+    it("once some were sent, a changed one stops the run there: the rest are reported unsent", async () => {
+      const f = fixture();
+      f.sign.mockImplementationOnce(async (prepared: TransactionPrepared) => {
+        const tx = compileTransaction(prepared.message as Parameters<typeof compileTransaction>[0]);
+        return { ...tx, signatures: { [WALLET]: new Uint8Array(64).fill(9) } };
+      });
+      f.sign.mockImplementationOnce(changedBlockhash);
+      const signed: number[] = [];
+      const result = await f.sender.prepareAndSendAll(requests(3), {
+        mode: "per-transaction",
+        onSigned: (s) => void signed.push(...s.map((x) => x.index)),
+      });
+      expect(signed).toEqual([0]);
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, false, false]);
+      expect(result.outcomes[1].error).toBeInstanceOf(SignedTransactionChangedError);
+      expect(f.sign).toHaveBeenCalledTimes(2);
+      expect(f.sent).toHaveLength(1);
+    });
   });
 
   it("a refusal is the user's answer: nothing is signed one by one and nothing is sent", async () => {

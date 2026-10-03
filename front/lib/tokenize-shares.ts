@@ -709,8 +709,12 @@ export type ClassSnapshot = {
 // (it can never be minted) and no mint, with class 0's `convertible_to` set
 // to it — in the same transaction (949 B for the real name, 1027 B at the
 // program's maxima, under the 1200 B limit), no extra signature.
-// set_convertible_to needs the CONVERSION permission (an Admin key has it);
-// without it the marker is left out and offered later (add_marker).
+// add_share_class needs only the issuer authority (a Draft asset, KYB
+// verified), so class 1 is ALWAYS added while the asset is a draft: once the
+// operator activates it, class 1 can never be added and holders could never
+// convert. Only set_convertible_to needs the CONVERSION permission (an Admin
+// key has it); without it class 0 stays unlinked, and the link is offered
+// later (add_marker) once the Super Admin grants Conversion — in any status.
 
 export const MARKER_CLASS_INDEX = 1;
 
@@ -757,12 +761,22 @@ export function conversionMarkerState(input: {
   return target === input.sc1Pda ? "linked" : "foreign";
 }
 
-/** What a chain step carries for the marker: add class 1 and link it, only link it, or nothing. */
-export type MarkerAction = "add_and_link" | "link" | null;
+/**
+ * What a chain step carries for the marker: add class 1 and link class 0 to
+ * it, only add it (no CONVERSION permission yet), only link it, or nothing.
+ */
+export type MarkerAction = "add_and_link" | "add" | "link" | null;
+
+/** Whether the marker action includes set_convertible_to (needs the CONVERSION permission's proof). */
+export function markerLinks(action: MarkerAction): boolean {
+  return action === "add_and_link" || action === "link";
+}
 
 /**
- * The marker instructions a step should carry. Only with the CONVERSION
- * permission (set_convertible_to); class 1 can only be added to a Draft.
+ * The marker instructions a step should carry. Class 1 is added whenever it
+ * is missing and the asset is a Draft (add_share_class needs only the
+ * issuer authority, and only a Draft accepts it); class 0 is linked to it
+ * only with the CONVERSION permission (set_convertible_to, any status).
  */
 export function markerAction(input: {
   step: TokenizeStep;
@@ -770,12 +784,12 @@ export function markerAction(input: {
   draft: boolean;
   canConvert: boolean;
 }): MarkerAction {
-  if (!input.canConvert) return null;
+  const add = input.canConvert ? "add_and_link" : "add";
   const { kind } = input.step;
-  if (kind === "create" || kind === "add_class") return "add_and_link";
+  if (kind === "create" || kind === "add_class") return add;
   if (kind === "init_mint" || kind === "add_marker") {
-    if (input.marker === "none" && input.draft) return "add_and_link";
-    if (input.marker === "unlinked") return "link";
+    if (input.marker === "none" && input.draft) return add;
+    if (input.marker === "unlinked" && input.canConvert) return "link";
   }
   return null;
 }
@@ -800,7 +814,7 @@ export type TokenizeStep =
   | { kind: "add_class"; initMint: boolean }
   /** R6: class ready, mint missing, this wallet may create it. */
   | { kind: "init_mint" }
-  /** C2: the conversion marker is missing (a Draft) or unlinked, and this wallet may add it. */
+  /** C2: class 1 is missing on a Draft (any issuer key adds it), or unlinked and this wallet may link it. */
   | { kind: "add_marker" }
   /** R8: on chain is complete as far as this wallet can go; the details are not saved. */
   | { kind: "save_profile" }
@@ -817,8 +831,9 @@ export type TokenizeStep =
  * The next step for one asset ID (the R1–R9 decision table). Chain steps come
  * before the profile, except that a mint waiting for the Super Admin does not
  * hold the profile back. A second class is accepted only when it is the
- * conversion marker (C2); a missing or unlinked marker is offered as its own
- * step when this wallet may set it (`canConvert`).
+ * conversion marker (C2). A marker missing on a Draft is always offered as
+ * its own step (it can never be added once the asset is active); an
+ * unlinked one only when this wallet may link it (`canConvert`).
  */
 export function nextTokenizeStep(input: {
   asset: AssetSnapshot | null;
@@ -867,8 +882,8 @@ export function nextTokenizeStep(input: {
     return { kind: "conflict", reason: "Class 0 of this asset is capped at a different number of tokens." };
   }
   if (!sc0.mintInitialized && input.canInitMint) return { kind: "init_mint" };
-  const markerMissing = (marker === "none" && asset.status === AssetStatus.Draft) || marker === "unlinked";
-  if (markerMissing && input.canConvert) return { kind: "add_marker" };
+  const markerMissing = (marker === "none" && asset.status === AssetStatus.Draft) || (marker === "unlinked" && input.canConvert);
+  if (markerMissing) return { kind: "add_marker" };
   if (!input.profileSaved) return { kind: "save_profile" };
   if (!sc0.mintInitialized) return { kind: "wait_mint_permission" };
   return { kind: "done" };

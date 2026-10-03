@@ -14,6 +14,7 @@ import {
   listJournals,
   newJournal,
   parseJournal,
+  priorReceipts,
   readJournal,
   rowStates,
   shortRunId,
@@ -26,6 +27,7 @@ import {
   type RawTransaction,
 } from "@/lib/distribution-journal";
 import { evaluateRun, distributionAuditRow } from "@/lib/distribution-run";
+import { recentTreasuryTransfers } from "@/lib/distribution-chain";
 
 const MINT = "HRcahPjAhX9ssiY5WvNJxHmy5vuDL7Q6GF6J5gNGjgwC";
 const SENDER = "6AnFbinF7X12mACTVEGfjWZyzYGAShEscAB5UgV3vHsP";
@@ -255,6 +257,50 @@ describe("evaluateRun (reopening a run)", () => {
     const backstop = await evaluateRun(rpc, base(), { source: SOURCE as Address, destinations: dest, now: new Date("2026-10-03T10:05:00Z") });
     expect(backstop.states.get(C)).toEqual({ state: "done", signature: SIG("5"), via: "backstop" });
     expect(backstop.journal.finishedAt).toBe("2026-10-03T10:05:00.000Z");
+    // The expired transaction itself is asked for first (not found), then the one backstop transfer decoded.
+    expect(calls.getTransaction).toBe(2);
+  });
+
+  it("a confirmed transaction stays confirmed when a later lookup finds nothing (pruned or lagging node, a run reopened days later)", async () => {
+    const j = withTx(base(), { signature: SIG("1"), lastValidBlockHeight: "1000", rows: [A, B2], status: "confirmed", at: "x" });
+    const { rpc, calls } = fakeRpc({ statuses: { [SIG("2")]: { err: null, confirmationStatus: "finalized" } }, height: 5_000 });
+    const r = await evaluateRun(rpc, j, { source: SOURCE as Address, destinations: dest });
+    expect(r.states.get(A)).toEqual({ state: "done", signature: SIG("1"), via: "journal" });
+    expect(r.states.get(B2)).toMatchObject({ state: "done" });
+    expect(r.journal.txs.find((t) => t.signature === SIG("1"))?.status).toBe("confirmed");
+    expect(calls.getTransaction).toBe(0);
+    // The pure pieces agree: the stored status wins over a fresh "expired".
+    const expired = new Map([[SIG("1"), "expired" as const]]);
+    expect(rowStates(j, expired, dest).get(A)).toMatchObject({ state: "done" });
+    expect(withOutcomes(j, expired).txs.find((t) => t.signature === SIG("1"))?.status).toBe("confirmed");
+  });
+
+  it("no status past the expiry height, but the node has the transaction: confirmed (or failed), never sent again", async () => {
+    const statuses = { [SIG("1")]: { err: null, confirmationStatus: "finalized" }, [SIG("2")]: null };
+    const ok: RawTransaction = { blockTime: 1, meta: { err: null }, transaction: { message: { accountKeys: [], instructions: [] } } };
+    const landed = await evaluateRun(fakeRpc({ statuses, height: 1001, txs: { [SIG("2")]: ok } }).rpc, base(), { source: SOURCE as Address, destinations: dest });
+    expect(landed.states.get(C)).toEqual({ state: "done", signature: SIG("2"), via: "journal" });
+    expect(landed.journal.txs[1].status).toBe("confirmed");
+    const failed = await evaluateRun(
+      fakeRpc({ statuses, height: 1001, txs: { [SIG("2")]: { ...ok, meta: { err: { InstructionError: [0, "x"] } } } } }).rpc,
+      base(),
+      { source: SOURCE as Address, destinations: dest, backstop: false },
+    );
+    expect(failed.journal.txs[1].status).toBe("failed");
+    expect(failed.states.get(C)).toEqual({ state: "todo" });
+  });
+
+  it("the backstop counts the run's own signature in the treasury's history as landed (no status, no transaction on this node)", async () => {
+    const statuses = { [SIG("1")]: { err: null, confirmationStatus: "finalized" }, [SIG("2")]: null };
+    const { rpc, calls } = fakeRpc({
+      statuses,
+      height: 1001,
+      history: [{ signature: SIG("2"), blockTime: Date.parse("2026-10-03T10:01:00Z") / 1000 }],
+    });
+    const r = await evaluateRun(rpc, base(), { source: SOURCE as Address, destinations: dest });
+    expect(r.states.get(C)).toEqual({ state: "done", signature: SIG("2"), via: "journal" });
+    expect(r.journal.txs[1].status).toBe("confirmed");
+    // Only the lookup of the expired transaction itself: the run's own signature is not decoded.
     expect(calls.getTransaction).toBe(1);
   });
 
@@ -278,6 +324,74 @@ describe("evaluateRun (reopening a run)", () => {
     const expired = await evaluateRun(fakeRpc({ statuses: { ...confirmedRows, [SIG("7")]: null }, height: 600 }).rpc, j, { source: SOURCE as Address, destinations: dest });
     expect(expired.mint).toBe("expired");
     expect(expired.journal.mintTx?.status).toBe("expired");
+    // A mint stored as confirmed stays confirmed (never created twice).
+    const stored = { ...j, mintTx: { ...j.mintTx, status: "confirmed" as const } };
+    const later = await evaluateRun(fakeRpc({ statuses: { ...confirmedRows, [SIG("7")]: null }, height: 600 }).rpc, stored, { source: SOURCE as Address, destinations: dest });
+    expect(later.mint).toBe("confirmed");
+    expect(later.journal.mintTx?.status).toBe("confirmed");
+  });
+});
+
+describe("paid before (priorReceipts): any run, any browser", () => {
+  const dest = new Map([[A, "dA"], [B2, "dB"], [C, "dC"]]);
+  const none = new Map<string, bigint>();
+
+  it("another run of this browser, a transfer in the treasury's history, a balance: each counts; the current run's own does not", () => {
+    let other = newJournal({ runId: "old", network: "devnet", mint: MINT, sender: SENDER, rows });
+    other = withTx(other, { signature: SIG("1"), lastValidBlockHeight: "1", rows: [A], status: "confirmed", at: "x" });
+    other = withTx(other, { signature: SIG("2"), lastValidBlockHeight: "1", rows: [B2], status: "expired", at: "x" });
+    let current = newJournal({ runId: "now", network: "devnet", mint: MINT, sender: SENDER, rows });
+    current = withTx(current, { signature: SIG("3"), lastValidBlockHeight: "1", rows: [C], status: "sent", at: "x" });
+    const history = [
+      { signature: SIG("3"), destination: "dC", amount: n(7), blockTime: 5 }, // this run's own transfer
+      { signature: SIG("4"), destination: "dB", amount: n(50), blockTime: 4 }, // from another browser
+    ];
+    const found = priorReceipts({ rows, runId: "now", journals: [other, current], history, destinations: dest, balances: new Map([[C, n(3)]]) });
+    expect(found.get(A)).toEqual([{ via: "run", runId: "old" }]);
+    // The expired transaction of the other run paid nothing; the chain shows B2 was paid anyway.
+    expect(found.get(B2)).toEqual([{ via: "chain", signature: SIG("4"), amount: n(50), blockTime: 4 }]);
+    expect(found.get(C)).toEqual([{ via: "balance", amount: n(3) }]);
+  });
+
+  it("the same list pasted in another browser (no journal here): every row the treasury paid is flagged", () => {
+    const history = rows.map((r, i) => ({ signature: SIG(String(i + 5)), destination: dest.get(r.wallet)!, amount: r.amount, blockTime: 1 }));
+    const found = priorReceipts({ rows, runId: "fresh", journals: [], history, destinations: dest, balances: none });
+    expect([...found.keys()]).toEqual([A, B2, C]);
+    expect(priorReceipts({ rows, runId: "fresh", journals: [], history: [], destinations: dest, balances: none }).size).toBe(0);
+  });
+
+  it("the treasury history scan reports the run's own landed signatures and decodes the rest", async () => {
+    const decoded: string[] = [];
+    const transfer = (dst: string, amount: number): RawTransaction => {
+      const b = new Uint8Array(10);
+      b[0] = 12;
+      new DataView(b.buffer).setBigUint64(1, BigInt(amount), true);
+      return {
+        blockTime: 10,
+        meta: { err: null },
+        transaction: { message: { accountKeys: [SENDER, SOURCE, MINT, dst, TOKEN_2022], instructions: [{ programIdIndex: 4, accounts: [1, 2, 3, 0], data: getBase58Decoder().decode(b) }] } },
+      };
+    };
+    const rpc = {
+      getSignaturesForAddress: () => ({
+        send: async () => [
+          { signature: SIG("1"), blockTime: BigInt(10), err: null },
+          { signature: SIG("2"), blockTime: BigInt(9), err: { InstructionError: [0, "x"] } },
+          { signature: SIG("3"), blockTime: BigInt(8), err: null },
+          { signature: SIG("4"), blockTime: BigInt(1), err: null }, // before sinceSec
+        ],
+      }),
+      getTransaction: (sig: string) => ({
+        send: async () => {
+          decoded.push(sig);
+          return sig === SIG("3") ? transfer("dB", 50) : null;
+        },
+      }),
+    } as unknown as Parameters<typeof recentTreasuryTransfers>[0];
+    const r = await recentTreasuryTransfers(rpc, { source: SOURCE as Address, mint: MINT as Address, sinceSec: 5, skip: new Set([SIG("1"), SIG("2")]) });
+    expect([...r.landed]).toEqual([SIG("1")]);
+    expect(decoded).toEqual([SIG("3")]);
+    expect(r.transfers).toEqual([{ signature: SIG("3"), destination: "dB", amount: n(50), blockTime: 10 }]);
   });
 });
 

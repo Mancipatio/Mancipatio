@@ -84,7 +84,10 @@ export type BatchSender = {
    * caller's journal written, and every transaction sent right away with
    * preflight. Falls back to one prompt per transaction when the wallet
    * cannot sign them together (no feature, fewer outputs, a changed message,
-   * any error but the user's refusal); a refusal stops everything.
+   * any error but the user's refusal) or when signing outlasted the shared
+   * blockhash (BATCH_EXPIRY_MARGIN_BLOCKS); a refusal stops everything. Each
+   * transaction signed on its own is compared with the one built too, and a
+   * changed one is refused (SignedTransactionChangedError), never sent.
    */
   prepareAndSendAll(requests: readonly TransactionPrepareAndSendRequest[], options: BatchSendOptions): Promise<BatchSendResult>;
 };
@@ -103,6 +106,43 @@ function sameBytes(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
 }
 
 /**
+ * A transaction signed on its own (prepareAndSendAll's per-transaction path)
+ * whose message is not the one built: it is never journalled or broadcast.
+ * The journal's expiry height belongs to the blockhash Manci built with; a
+ * wallet that swapped the blockhash (or added a fee or an instruction) would
+ * make the resume declare the transaction expired while it can still land,
+ * and its rows would be sent twice.
+ */
+export class SignedTransactionChangedError extends Error {
+  constructor(readonly change: string) {
+    super(
+      `${change.charAt(0).toUpperCase()}${change.slice(1)}, so it was not sent. A distribution sends only the transactions Manci built and saved, so that nothing is ever sent twice. Turn off the wallet's own changes (for example its priority fee setting) or use another wallet, then continue the run.`,
+    );
+    this.name = "SignedTransactionChangedError";
+  }
+}
+
+/**
+ * One signed copy checked against what was built: the same message bytes
+ * (the change is noted) and a 64-byte signature for every signer the message
+ * names. Throws BatchSigningUnsupportedError.
+ */
+function checkSigned(original: Transaction, signed: Transaction, label: string): Transaction {
+  if (!sameBytes(signed.messageBytes, original.messageBytes)) {
+    const change = describeWalletChange(original.messageBytes, signed.messageBytes) ?? "the wallet changed the transaction";
+    noteWalletChange(change);
+    throw new BatchSigningUnsupportedError(`${change} (${label})`);
+  }
+  for (const signer of Object.keys(original.signatures)) {
+    const signature = signed.signatures[signer as keyof typeof signed.signatures];
+    if (!signature || signature.length !== 64) {
+      throw new BatchSigningUnsupportedError(`${label} came back without its signature`);
+    }
+  }
+  return signed;
+}
+
+/**
  * The wallet's signed copies checked against what was built: the same
  * message bytes (a wallet that changed one — a fee, a blockhash — makes the
  * batch fall back, the change noted), and a 64-byte signature for every
@@ -118,20 +158,37 @@ export function verifySignedBatch(built: readonly Transaction[], signedBytes: re
     } catch (cause) {
       throw new BatchSigningUnsupportedError(`transaction ${i + 1} came back unreadable`, cause);
     }
-    if (!sameBytes(signed.messageBytes, original.messageBytes)) {
-      const change = describeWalletChange(original.messageBytes, signed.messageBytes) ?? "the wallet changed the transaction";
-      noteWalletChange(change);
-      throw new BatchSigningUnsupportedError(`${change} (transaction ${i + 1})`);
-    }
-    for (const signer of Object.keys(original.signatures)) {
-      const signature = signed.signatures[signer as keyof typeof signed.signatures];
-      if (!signature || signature.length !== 64) {
-        throw new BatchSigningUnsupportedError(`transaction ${i + 1} came back without its signature`);
-      }
-    }
-    return signed;
+    return checkSigned(original, signed, `transaction ${i + 1}`);
   });
 }
+
+/**
+ * The same check for one transaction signed on its own, where nothing is
+ * left to fall back to: a changed message (or a missing signature) is
+ * refused with SignedTransactionChangedError.
+ */
+export function verifySignedTransaction(original: Transaction, signed: Transaction, label: string): Transaction {
+  try {
+    return checkSigned(original, signed, label);
+  } catch (err) {
+    if (!(err instanceof BatchSigningUnsupportedError)) throw err;
+    const change = describeWalletChange(original.messageBytes, signed.messageBytes);
+    throw new SignedTransactionChangedError(change ? `${change} (${label})` : `the wallet returned ${label} without its signature`);
+  }
+}
+
+/**
+ * Blocks before the shared blockhash's last valid block height that a batch
+ * must still have when the wallet hands it back: broadcasting up to 8
+ * transactions and landing them takes a few seconds (~0.4 s per block). A
+ * Ledger confirming each transaction on the device can take longer than the
+ * blockhash lives; the batch then falls back to one prompt per transaction
+ * with a fresh blockhash each, before anything is journalled or sent.
+ */
+export const BATCH_EXPIRY_MARGIN_BLOCKS = BigInt(30);
+
+/** The fallback reason (in BatchSendResult.fallbackReason) when signing outlasted the shared blockhash. */
+export const SIGNING_TOO_SLOW = "signing took too long: the transactions would expire before they land";
 
 /** The transaction id: the fee payer's (first) signature, base58. */
 export function transactionId(tx: Transaction): string {
@@ -517,6 +574,14 @@ export function withVerifiedTransactions(
           assertCurrent: context.assertCurrent,
         });
         const signed = verifySignedBatch(built, signedBytes);
+        // Signing N transactions can outlast the one blockhash (a Ledger confirms
+        // each on the device): nothing is journalled or sent then, and the batch
+        // falls back to fresh-blockhash signing one by one.
+        const height = BigInt(await context.rpc.getBlockHeight({ commitment: "confirmed" }).send());
+        context.assertCurrent();
+        if (height + BATCH_EXPIRY_MARGIN_BLOCKS >= lifetime.lastValidBlockHeight) {
+          throw new BatchSigningUnsupportedError(SIGNING_TOO_SLOW);
+        }
         const journal = signed.map((tx, index) => ({
           index,
           signature: transactionId(tx),
@@ -554,7 +619,13 @@ export function withVerifiedTransactions(
       try {
         options.onPrompt?.({ mode: "per-transaction", index, count: tuned.length });
         prompts += 1;
-        signed = await base.sign(p);
+        // The SDK keeps the wallet's message bytes: compared with the one built
+        // (S6), so the journal's expiry height is that of the signed blockhash.
+        signed = verifySignedTransaction(
+          compileTransaction(p.message),
+          await base.sign(p),
+          `transaction ${index + 1} of ${tuned.length}`,
+        );
         context.assertCurrent();
       } catch (error) {
         // Nothing sent yet: the caller sees the wallet's own error.

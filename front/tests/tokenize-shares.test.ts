@@ -61,6 +61,7 @@ import {
   legalDocRequired,
   looksLikeTokenizeAsset,
   markerAction,
+  markerLinks,
   mintNamePreview,
   mintSymbolPreview,
   namedPercentE4,
@@ -423,7 +424,8 @@ describe("resume decision table (R1–R9)", () => {
     status: AssetStatus.Draft,
     name: "Mancipatio 5%",
     symbolPrefix: "MANCI",
-    shareClassesCount: 1,
+    // Class 0 and the conversion class (C2), linked: what the flow makes.
+    shareClassesCount: 2,
     ...over,
   });
   const sc = (over: Partial<ClassSnapshot> = {}): ClassSnapshot => ({
@@ -438,7 +440,7 @@ describe("resume decision table (R1–R9)", () => {
     ...over,
   });
   const step = (over: Partial<Parameters<typeof nextTokenizeStep>[0]>) =>
-    nextTokenizeStep({ asset: asset(), sc0: sc(), profileSaved: true, canInitMint: true, intent, ...over });
+    nextTokenizeStep({ asset: asset(), sc0: sc(), profileSaved: true, canInitMint: true, intent, marker: "linked", ...over });
 
   it("R1: no asset → create, with the mint only when allowed", () => {
     expect(step({ asset: null, sc0: null })).toEqual({ kind: "create", initMint: true });
@@ -466,8 +468,19 @@ describe("resume decision table (R1–R9)", () => {
     expect(step({ sc0: sc({ maxSupply: null }) }).kind).toBe("conflict");
     expect(step({ sc0: sc({ maxSupply: B(500) }) }).kind).toBe("conflict");
     expect(step({ sc0: sc({ mintablePostLaunch: true }) }).kind).toBe("conflict");
-    expect(step({ asset: asset({ shareClassesCount: 2 }) }).kind).toBe("conflict");
+    expect(step({ asset: asset({ shareClassesCount: 3 }), marker: undefined }).kind).toBe("conflict");
+    expect(step({ asset: asset({ shareClassesCount: 2 }), marker: undefined }).kind).toBe("conflict");
     expect(step({ sc0: null }).kind).toBe("conflict");
+  });
+  it("C2: a draft without the conversion class gets it before the details, the mint wait and done — with or without Conversion", () => {
+    const one = { asset: asset({ shareClassesCount: 1 }), marker: "none" as const };
+    expect(step({ ...one }).kind).toBe("add_marker");
+    expect(step({ ...one, profileSaved: false }).kind).toBe("add_marker");
+    expect(step({ ...one, sc0: sc({ mintInitialized: false }), canInitMint: false }).kind).toBe("add_marker");
+    // The mint step carries it when this key may create the mint.
+    expect(step({ ...one, sc0: sc({ mintInitialized: false }) }).kind).toBe("init_mint");
+    // Active: it can no longer be added.
+    expect(step({ ...one, asset: asset({ shareClassesCount: 1, status: AssetStatus.Active }) }).kind).toBe("done");
   });
   it("R5: class 0 with other rights, liquidation preference, seniority or voting weight → conflict", () => {
     // Review: a generic-modal "Acme Seed 10%" (1.5x, non-voting, Common,
@@ -592,36 +605,60 @@ describe("conversion marker (C2): class 1 capped at 0 that class 0 converts into
     expect(step({ marker: "unlinked", canConvert: true }).kind).toBe("add_marker");
     expect(step({ marker: "unlinked", canConvert: true, asset: asset({ status: AssetStatus.Active }) }).kind).toBe("add_marker");
     expect(step({ marker: "unlinked", canConvert: false }).kind).toBe("done");
-    // A Draft without the marker: offered as one separate transaction (existing Draft assets).
+    // A Draft without the marker: offered as one separate transaction (existing Draft assets) —
+    // also without Conversion: add_share_class needs only the issuer key, and only a Draft takes it.
     const one = asset({ shareClassesCount: 1 });
     expect(step({ asset: one, marker: "none", canConvert: true }).kind).toBe("add_marker");
-    expect(step({ asset: one, marker: "none", canConvert: false }).kind).toBe("done");
+    expect(step({ asset: one, marker: "none", canConvert: false }).kind).toBe("add_marker");
+    expect(step({ asset: one, marker: "none", canConvert: false, profileSaved: false }).kind).toBe("add_marker");
     // Active: class 1 can no longer be added; nothing to offer.
     expect(step({ asset: asset({ shareClassesCount: 1, status: AssetStatus.Active }), marker: "none", canConvert: true }).kind).toBe("done");
     expect(isResumable({ kind: "add_marker" })).toBe(true);
   });
 
-  it("markerAction: the marker rides in the create transaction, or alone, only with the Conversion permission", () => {
+  it("markerAction: class 1 always rides along while the asset is a draft; the link only with the Conversion permission", () => {
     expect(markerAction({ step: { kind: "create", initMint: true }, marker: "none", draft: true, canConvert: true })).toBe("add_and_link");
     expect(markerAction({ step: { kind: "add_class", initMint: false }, marker: "none", draft: true, canConvert: true })).toBe("add_and_link");
-    expect(markerAction({ step: { kind: "create", initMint: true }, marker: "none", draft: true, canConvert: false })).toBeNull();
+    // Without Conversion, class 1 is still added: once the asset is active it never could be.
+    expect(markerAction({ step: { kind: "create", initMint: true }, marker: "none", draft: true, canConvert: false })).toBe("add");
+    expect(markerAction({ step: { kind: "add_class", initMint: false }, marker: "none", draft: true, canConvert: false })).toBe("add");
+    expect(markerAction({ step: { kind: "init_mint" }, marker: "none", draft: true, canConvert: false })).toBe("add");
+    expect(markerAction({ step: { kind: "add_marker" }, marker: "none", draft: true, canConvert: false })).toBe("add");
     expect(markerAction({ step: { kind: "init_mint" }, marker: "none", draft: true, canConvert: true })).toBe("add_and_link");
     expect(markerAction({ step: { kind: "init_mint" }, marker: "linked", draft: true, canConvert: true })).toBeNull();
     expect(markerAction({ step: { kind: "add_marker" }, marker: "unlinked", draft: false, canConvert: true })).toBe("link");
+    expect(markerAction({ step: { kind: "add_marker" }, marker: "unlinked", draft: true, canConvert: false })).toBeNull();
     expect(markerAction({ step: { kind: "add_marker" }, marker: "none", draft: false, canConvert: true })).toBeNull();
     expect(markerAction({ step: { kind: "save_profile" }, marker: "none", draft: true, canConvert: true })).toBeNull();
+    expect([markerLinks("add_and_link"), markerLinks("link"), markerLinks("add"), markerLinks(null)]).toEqual([true, true, false, false]);
   });
 
-  async function build(kind: "create" | "add_class" | "init_mint" | "add_marker", name = "Mancipatio 5%", assetId = "MANCI-5PCT", symbol = "MANCI", markerAct: "add_and_link" | "link" | null = "add_and_link", initMint = true) {
+  async function build(kind: "create" | "add_class" | "init_mint" | "add_marker", name = "Mancipatio 5%", assetId = "MANCI-5PCT", symbol = "MANCI", markerAct: "add_and_link" | "add" | "link" | null = "add_and_link", initMint = true, withAdminRecord = true) {
     const signer = await generateKeyPairSigner();
     const issuer = (await generateKeyPairSigner()).address as Address;
-    const adminRecord = (await generateKeyPairSigner()).address as Address;
+    const adminRecord = withAdminRecord ? ((await generateKeyPairSigner()).address as Address) : null;
     const ixs = await buildTokenizeIxs({
       kind, initMint, signer, issuer, assetId, name, symbolPrefix: symbol,
       legalDocHash: new Uint8Array(32).fill(7), tokens: B(5_000), adminRecord, marker: markerAct,
     });
     return { signer, ixs, issuer };
   }
+
+  it("without Conversion (and without Mint), the create transaction still adds class 1 — and needs no permission proof", async () => {
+    const bare = await build("create", undefined, undefined, undefined, "add", false, false);
+    // create_asset, add_share_class(0), add_share_class(1): no set_convertible_to, no mint.
+    expect(bare.ixs).toHaveLength(3);
+    expect(bare.ixs[2].data![8]).toBe(1);
+    expect(tokenizeTransactionSize(bare.signer.address, bare.ixs)).toBeLessThanOrEqual(TOKENIZE_TX_LIMIT);
+    // With Mint: the mint follows class 1, still no link.
+    const withMint = await build("create", undefined, undefined, undefined, "add", true);
+    expect(withMint.ixs).toHaveLength(4);
+    expect(tokenizeTransactionSize(withMint.signer.address, withMint.ixs)).toBeLessThan(949);
+    // An existing Draft: class 1 alone, one instruction, no proof needed.
+    expect((await build("add_marker", undefined, undefined, undefined, "add", false, false)).ixs).toHaveLength(1);
+    // Linking without the proof is refused before anything is signed.
+    await expect(build("add_marker", undefined, undefined, undefined, "link", false, false)).rejects.toThrow(/Conversion permission/);
+  });
 
   it("fits in the existing create transaction: 949 B real case, 983 B at the flow's longest name, 1027 B at the program's maxima (≤ 1200 B)", async () => {
     const real = await build("create");

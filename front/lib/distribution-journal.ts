@@ -11,15 +11,21 @@
 // signature and last valid block height are known before the network can
 // see it. On reopen each journalled transaction is asked for
 // (getSignatureStatuses with history) and decided:
-//   confirmed / finalized → its rows are done, never sent again;
+//   confirmed / finalized → its rows are done, never sent again (a status
+//                           stored as confirmed is final: a later lookup
+//                           that finds nothing never undoes it);
 //   failed               → nothing moved, its rows are sent again;
 //   unknown and the finalized block height is past its last valid block
-//   height                → it can never land, its rows are sent again;
+//   height, and getTransaction finds nothing either
+//                         → it can never land, its rows are sent again;
 //   otherwise            → still pending: wait, send nothing.
 // The backstop: the treasury token account's signatures since the run
 // started, decoded for transfer_checked (only the treasury's owner can move
-// it), mark rows done when the journal missed them. Recipients' balances are
-// never used for this (they move freely). No Memo instruction is needed.
+// it), mark rows done when the journal missed them; a journalled signature
+// found there without an error counts as landed. Recipients' balances never
+// mark a row done (they move freely); the panel shows them and asks before
+// sending to a wallet that already holds or received tokens. No Memo
+// instruction is needed.
 //
 // Pure and node-safe (the storage is passed in): tests/distribution-journal.test.ts.
 import { getBase58Encoder, type Address } from "@solana/kit";
@@ -214,13 +220,18 @@ export function withTx(journal: DistributionJournal, tx: JournalTx): Distributio
   return { ...journal, txs: [...txs, tx] };
 }
 
-/** The journal with the statuses of `outcomes` applied. */
+/**
+ * The journal with the statuses of `outcomes` applied. A transaction stored
+ * as confirmed stays confirmed: a later lookup that finds nothing (a pruned
+ * or lagging node, a run reopened days later) never turns it back into
+ * expired or failed, which would send its rows again.
+ */
 export function withOutcomes(journal: DistributionJournal, outcomes: ReadonlyMap<string, TxOutcome>): DistributionJournal {
   return {
     ...journal,
     txs: journal.txs.map((t) => {
       const o = outcomes.get(t.signature);
-      if (!o || o === "pending") return t;
+      if (!o || o === "pending" || t.status === "confirmed") return t;
       return { ...t, status: o };
     }),
   };
@@ -257,7 +268,9 @@ export type TreasuryTransfer = { signature: string; destination: string; amount:
  * (or, the backstop, a confirmed transfer of exactly its amount to its token
  * account since the run started that the journal does not explain); pending
  * while a journalled transaction may still land; otherwise still to send.
- * `destinationOf(wallet)` is the wallet's token account for the mint.
+ * A transaction stored as confirmed is final, whatever a later lookup says
+ * (see withOutcomes). `destinationOf(wallet)` is the wallet's token account
+ * for the mint.
  */
 export function rowStates(
   journal: Pick<DistributionJournal, "rows" | "txs">,
@@ -268,7 +281,9 @@ export function rowStates(
   const states = new Map<string, RowState>();
   for (const r of journal.rows) states.set(r.wallet, { state: "todo" });
   const outcomeOf = (t: JournalTx): TxOutcome =>
-    outcomes.get(t.signature) ?? (t.status === "confirmed" ? "confirmed" : t.status === "failed" || t.status === "expired" ? t.status : "pending");
+    t.status === "confirmed"
+      ? "confirmed"
+      : (outcomes.get(t.signature) ?? (t.status === "failed" || t.status === "expired" ? t.status : "pending"));
   for (const t of journal.txs) {
     const o = outcomeOf(t);
     for (const wallet of t.rows) {
@@ -294,6 +309,63 @@ export function rowStates(
     }
   }
   return states;
+}
+
+// ── Wallets paid before (any run, any browser) ──────────────────────────────
+
+/** Why a wallet of a list counts as already paid. */
+export type PriorReceipt =
+  /** Another run of this browser's journals sent it tokens (confirmed, or sent and not decided). */
+  | { via: "run"; runId: string }
+  /** A transfer out of the treasury to its token account, in the treasury's recent history (any browser). */
+  | { via: "chain"; signature: string; amount: bigint; blockTime: number | null }
+  /** Its token account already holds tokens of this mint. */
+  | { via: "balance"; amount: bigint };
+
+/**
+ * The wallets of `rows` that already received tokens of this mint from this
+ * sender outside the current run: paid by another run of this browser, by a
+ * transfer in the treasury's recent history (which covers another browser,
+ * cleared site data or an edited list), or holding tokens already. This
+ * never marks a row done — only the run's own journal and backstop do — it
+ * makes the panel ask before such a wallet is paid again. The current run's
+ * own signatures are left out (its journal decides them).
+ */
+export function priorReceipts(input: {
+  rows: readonly { wallet: string }[];
+  runId: string | null;
+  journals: readonly Pick<DistributionJournal, "runId" | "txs">[];
+  /** recentTreasuryTransfers of the treasury token account, newest first. */
+  history: readonly TreasuryTransfer[];
+  /** Each row's token account for the mint, by wallet. */
+  destinations: ReadonlyMap<string, string>;
+  /** Each row's current balance of the mint, by wallet (0 or missing: none). */
+  balances: ReadonlyMap<string, bigint>;
+}): Map<string, PriorReceipt[]> {
+  const own = new Set(input.journals.find((j) => j.runId === input.runId)?.txs.map((t) => t.signature) ?? []);
+  const byRun = new Map<string, string>();
+  for (const other of input.journals) {
+    if (other.runId === input.runId) continue;
+    for (const t of other.txs) {
+      if (t.status !== "confirmed" && t.status !== "sent") continue;
+      for (const w of t.rows) if (!byRun.has(w)) byRun.set(w, other.runId);
+    }
+  }
+  const byDestination = new Map<string, TreasuryTransfer>();
+  for (const t of input.history) if (!own.has(t.signature) && !byDestination.has(t.destination)) byDestination.set(t.destination, t);
+  const out = new Map<string, PriorReceipt[]>();
+  for (const { wallet } of input.rows) {
+    const found: PriorReceipt[] = [];
+    const runId = byRun.get(wallet);
+    if (runId) found.push({ via: "run", runId });
+    const destination = input.destinations.get(wallet);
+    const transfer = destination ? byDestination.get(destination) : undefined;
+    if (transfer) found.push({ via: "chain", signature: transfer.signature, amount: transfer.amount, blockTime: transfer.blockTime });
+    const balance = input.balances.get(wallet) ?? BigInt(0);
+    if (balance > BigInt(0)) found.push({ via: "balance", amount: balance });
+    if (found.length > 0) out.set(wallet, found);
+  }
+  return out;
 }
 
 export function countStates(states: ReadonlyMap<string, RowState>): { done: number; pending: number; todo: number } {

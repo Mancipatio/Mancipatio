@@ -3,12 +3,14 @@
 //
 // evaluateRun asks the network about every journalled transaction
 // (getSignatureStatuses with history, ≤ 256 per call) and the FINALIZED
-// block height, decides each one (lib/distribution-journal txOutcome), adds
-// the backstop — the treasury token account's transfers since the run
-// started that the journal does not explain — and returns every row's state
-// with the journal updated. A row whose transfer is confirmed is never sent
-// again; a pending one is waited for; only failed or expired ones go back on
-// the list.
+// block height, decides each one (lib/distribution-journal txOutcome; one
+// stored as confirmed stays confirmed, one that looks expired is looked up
+// with getTransaction first), adds the backstop — the treasury token
+// account's transfers since the run started that the journal does not
+// explain, and the run's own signatures found there, which landed — and
+// returns every row's state with the journal updated. A row whose transfer
+// is confirmed is never sent again; a pending one is waited for; only failed
+// or expired ones go back on the list.
 //
 // Node-safe (rpc and audit are passed in): tests/distribution-journal.test.ts.
 import type {
@@ -70,28 +72,61 @@ export async function evaluateRun(
   const height = signatures.length > 0 ? BigInt(await rpc.getBlockHeight({ commitment: "finalized" }).send()) : BigInt(0);
   const outcomes = new Map<string, TxOutcome>();
   journal.txs.forEach((t, i) => outcomes.set(t.signature, txOutcome(statuses[i], BigInt(t.lastValidBlockHeight), height)));
-  const mint = journal.mintTx
-    ? txOutcome(statuses[journal.txs.length], BigInt(journal.mintTx.lastValidBlockHeight), height)
-    : null;
+  // A mint stored as confirmed is final, like a transfer (withOutcomes).
+  let mint: TxOutcome | null = !journal.mintTx
+    ? null
+    : journal.mintTx.status === "confirmed"
+      ? "confirmed"
+      : txOutcome(statuses[journal.txs.length], BigInt(journal.mintTx.lastValidBlockHeight), height);
+
+  // "Expired" means the status lookup found nothing past the expiry height. A
+  // node that keeps no status history (or lags) answers that for a
+  // transaction that landed, so the transaction itself is asked for first.
+  const newlyExpired = [
+    ...journal.txs.filter((t) => outcomes.get(t.signature) === "expired" && (t.status === "signed" || t.status === "sent")).map((t) => t.signature),
+    ...(journal.mintTx && mint === "expired" && journal.mintTx.status === "sent" ? [journal.mintTx.signature] : []),
+  ];
+  const found = await Promise.all(newlyExpired.map((signature) => landedOutcome(rpc, signature)));
+  newlyExpired.forEach((signature, i) => {
+    const o = found[i];
+    if (!o) return;
+    if (journal.mintTx?.signature === signature) mint = o;
+    else outcomes.set(signature, o);
+  });
 
   let states = rowStates(journal, outcomes, input.destinations);
   const unexplained = [...states.values()].some((s) => s.state === "todo");
   let backstop: TreasuryTransfer[] = [];
   if (input.backstop !== false && unexplained && (journal.txs.length > 0 || journal.mintTx)) {
-    backstop = await recentTreasuryTransfers(rpc, {
+    const history = await recentTreasuryTransfers(rpc, {
       source: input.source,
       mint: journal.mint as Address,
       sinceSec: Math.floor(Date.parse(journal.createdAt) / 1000) - BACKSTOP_SKEW_SEC,
-      // The run's own transactions (its mint too) are explained already.
+      // The run's own transactions (its mint too) are explained already…
       skip: new Set(signatures),
     });
+    backstop = history.transfers;
+    // …and one the treasury's history holds without an error landed, whatever its status lookup said.
+    for (const signature of history.landed) {
+      if (outcomes.has(signature) && outcomes.get(signature) !== "failed") outcomes.set(signature, "confirmed");
+      if (journal.mintTx?.signature === signature && mint !== "failed") mint = "confirmed";
+    }
     states = rowStates(journal, outcomes, input.destinations, backstop);
   }
   let next = withOutcomes(journal, outcomes);
-  if (next.mintTx && mint && mint !== "pending") next = { ...next, mintTx: { ...next.mintTx, status: mint } };
+  if (next.mintTx && mint && mint !== "pending" && next.mintTx.status !== "confirmed") next = { ...next, mintTx: { ...next.mintTx, status: mint } };
   const allDone = [...states.values()].every((s) => s.state === "done");
   if (allDone && !next.finishedAt) next = { ...next, finishedAt: (input.now ?? new Date()).toISOString() };
   return { journal: next, states, outcomes, mint };
+}
+
+/** The transaction itself (getTransaction): confirmed or failed when the node has it, null when not. */
+async function landedOutcome(rpc: RunRpc, signature: string): Promise<"confirmed" | "failed" | null> {
+  const tx = await rpc
+    .getTransaction(signature as Signature, { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 })
+    .send();
+  if (!tx) return null;
+  return tx.meta?.err ? "failed" : "confirmed";
 }
 
 /** One audit row per distribution transaction (pending on send, then success or failed). */

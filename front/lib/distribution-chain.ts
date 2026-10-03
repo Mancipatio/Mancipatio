@@ -88,27 +88,54 @@ export async function readLamports(rpc: Rpc<GetBalanceApi>, owner: Address): Pro
   return BigInt(value);
 }
 
+/** getTransaction calls of one history scan in flight at once. */
+const HISTORY_CONCURRENCY = 6;
+
+export type TreasuryHistory = {
+  /** Transfers out of the treasury, newest first. */
+  transfers: TreasuryTransfer[];
+  /** Signatures of `skip` (a run's own) the treasury's history holds without an error: they landed. */
+  landed: Set<string>;
+};
+
 /**
  * Transfers out of the treasury token account since `sinceSec` (the resume
- * backstop): its signatures, newest first, back to that time (at most
- * `limit`), each transaction decoded for transfer_checked from `source`.
+ * backstop; 0 for "any time"): its signatures, newest first, back to that
+ * time (at most `limit`), each transaction decoded for transfer_checked from
+ * `source`. A signature of `skip` is not decoded (the journal explains it),
+ * but it is reported in `landed` when the history holds it without an
+ * error: the proof it landed even when a status lookup no longer finds it.
  */
 export async function recentTreasuryTransfers(
   rpc: Rpc<GetSignaturesForAddressApi & GetTransactionApi>,
   input: { source: Address; mint: Address; sinceSec: number; limit?: number; skip?: ReadonlySet<string> },
-): Promise<TreasuryTransfer[]> {
+): Promise<TreasuryHistory> {
   const signatures = await rpc
     .getSignaturesForAddress(input.source, { limit: input.limit ?? 100, commitment: "confirmed" })
     .send();
-  const out: TreasuryTransfer[] = [];
+  const landed = new Set<string>();
+  const decode: string[] = [];
   for (const s of signatures) {
     if (s.blockTime !== null && Number(s.blockTime) < input.sinceSec) break;
-    if (s.err || input.skip?.has(s.signature)) continue;
-    const tx = await rpc
-      .getTransaction(s.signature as Signature, { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 })
-      .send();
-    if (!tx) continue;
-    out.push(...transfersFromTransaction(tx as unknown as RawTransaction, { signature: s.signature, source: input.source, mint: input.mint }));
+    if (s.err) continue;
+    if (input.skip?.has(s.signature)) landed.add(s.signature);
+    else decode.push(s.signature);
   }
-  return out;
+  const decoded: TreasuryTransfer[][] = new Array(decode.length);
+  for (let i = 0; i < decode.length; i += HISTORY_CONCURRENCY) {
+    const chunk = decode.slice(i, i + HISTORY_CONCURRENCY);
+    const txs = await Promise.all(
+      chunk.map((signature) =>
+        rpc
+          .getTransaction(signature as Signature, { commitment: "confirmed", encoding: "json", maxSupportedTransactionVersion: 0 })
+          .send(),
+      ),
+    );
+    txs.forEach((tx, k) => {
+      decoded[i + k] = tx
+        ? transfersFromTransaction(tx as unknown as RawTransaction, { signature: chunk[k], source: input.source, mint: input.mint })
+        : [];
+    });
+  }
+  return { transfers: decoded.flat(), landed };
 }

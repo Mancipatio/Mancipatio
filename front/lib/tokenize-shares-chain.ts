@@ -69,6 +69,7 @@ import {
   chooseAssetId,
   conversionMarkerState,
   isResumable,
+  markerLinks,
   nextTokenizeStep,
   type AssetSnapshot,
   type ClassSnapshot,
@@ -110,7 +111,8 @@ export type BuildTokenizeInput = {
   adminRecord: Address | null;
   /**
    * The conversion marker (markerAction): add class 1 and link class 0 to it,
-   * or only link it. Needs `adminRecord` with the CONVERSION capability.
+   * only add it, or only link it. Linking needs `adminRecord` with the
+   * CONVERSION capability; adding needs only the issuer authority.
    */
   marker?: MarkerAction;
 };
@@ -156,7 +158,7 @@ export async function buildTokenizeIxs(input: BuildTokenizeInput): Promise<Instr
   }
   const markerClass = await findShareClassPda(asset, MARKER_CLASS_INDEX);
   // Class 1 right after class 0 (add_share_class takes the next index).
-  if (marker === "add_and_link") {
+  if (marker === "add_and_link" || marker === "add") {
     ixs.push(
       await getAddShareClassInstructionAsync({
         authority: input.signer,
@@ -193,7 +195,7 @@ export async function buildTokenizeIxs(input: BuildTokenizeInput): Promise<Instr
       }),
     );
   }
-  if (marker !== null) {
+  if (markerLinks(marker)) {
     if (!input.adminRecord) throw new Error("Linking the conversion target needs the Conversion permission.");
     ixs.push(
       getSetConvertibleToInstruction({

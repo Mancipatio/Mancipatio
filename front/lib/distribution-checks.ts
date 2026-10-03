@@ -61,6 +61,8 @@ export type DistributionRowFacts = {
   recipientTokenAccount: Address;
   recipientTokenAccountExists: boolean;
   recipientTokenAccountFrozen: boolean;
+  /** Tokens of the mint the recipient already holds (shown, and asked about before paying it again). */
+  recipientBalance: bigint;
   recipientKind: DistributionRecipientKind;
   recipientBlocked: boolean;
   passport: PassportFacts | null;
@@ -166,6 +168,7 @@ export async function loadDistributionFacts(
       recipientTokenAccount: r.ata,
       recipientTokenAccountExists: ataAccount.exists,
       recipientTokenAccountFrozen: holding?.frozen ?? false,
+      recipientBalance: holding?.amount ?? BigInt(0),
       recipientKind: classifyDistributionRecipient(r.recipient, walletAccount),
       recipientBlocked: liveBlockEntry(blockAccount, r.recipient) !== null,
       passport: passports.get(r.recipient) ?? null,

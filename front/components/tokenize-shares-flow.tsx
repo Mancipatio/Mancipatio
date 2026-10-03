@@ -13,8 +13,8 @@
 //
 // Two wallet prompts: one transaction (create_asset + add_share_class +
 // initialize_share_class_mint when the key may create the mint, and the
-// conversion marker — class 1 capped at 0 + set_convertible_to — when it may
-// set it; measured and simulated before the wallet opens), then one message
+// conversion marker — class 1 capped at 0, always, + set_convertible_to when
+// the key holds Conversion; measured and simulated before the wallet opens), then one message
 // signature for the details. The details are posted once the asset is finalized, which is what
 // the profile route checks ownership at. A flow that stops half-way is
 // continued from /issuer/assets/tokenize?asset=<pda> (or the "Continue" list)
@@ -92,6 +92,7 @@ import {
   legalDocRequired,
   looksLikeTokenizeAsset,
   markerAction,
+  markerLinks,
   mintNamePreview,
   mintSymbolPreview,
   namedPercentE4,
@@ -565,7 +566,8 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         legalDocSource,
         existing: null,
       });
-      // The conversion marker rides in the same transaction when this key may set it (C2).
+      // The conversion marker rides in the same transaction (C2): class 1 always (only a draft
+      // takes it), the link to it when this key holds Conversion.
       const marker = markerAction({ step: picked.step, marker: "none", draft: true, canConvert });
       const ixs = await buildTokenizeIxs({
         kind: "create",
@@ -577,7 +579,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         symbolPrefix,
         legalDocHash,
         tokens: figures.tokens,
-        adminRecord: canInitMint || marker ? permission.proof : null,
+        adminRecord: canInitMint || markerLinks(marker) ? permission.proof : null,
         marker,
       });
       assertTokenizeFits(signer.address, ixs);
@@ -660,16 +662,17 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         if (resumeStep.kind === "init_mint" && !canInitMint) {
           throw new Error("This issuer key has no Mint permission yet; the Super Admin grants it.");
         }
-        if (resumeStep.kind === "add_marker" && !canConvert) {
-          throw new Error("This issuer key has no Conversion permission; the Super Admin grants it.");
-        }
-        // The marker (C2) rides along when it is missing and this key may set it.
+        // The marker (C2) rides along: class 1 while it is missing on a draft (any issuer
+        // key), the link to it when this key holds Conversion.
         const marker = markerAction({
           step: resumeStep,
           marker: resume.chain.marker,
           draft: asset.status === AssetStatus.Draft,
           canConvert,
         });
+        if (resumeStep.kind === "add_marker" && marker === null) {
+          throw new Error("This issuer key has no Conversion permission; the Super Admin grants it.");
+        }
         const ixs = await buildTokenizeIxs({
           kind: resumeStep.kind,
           initMint: canInitMint,
@@ -680,7 +683,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
           symbolPrefix: asset.symbolPrefix,
           legalDocHash: Uint8Array.from(asset.legalDocHash),
           tokens: figures.tokens,
-          adminRecord: canInitMint || marker ? permission.proof : null,
+          adminRecord: canInitMint || markerLinks(marker) ? permission.proof : null,
           marker,
         });
         assertTokenizeFits(signer.address, ixs);
@@ -701,7 +704,9 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
             ? { doing: "add the share class", done: "Share class added" }
             : resumeStep.kind === "init_mint"
               ? { doing: "create the token mint", done: "Token mint created" }
-              : { doing: "set the conversion target", done: "Conversion target set" };
+              : marker === "add"
+                ? { doing: "add the conversion class", done: "Conversion class added" }
+                : { doing: "set the conversion target", done: "Conversion target set" };
         setWorking(`Confirm in your wallet (1 of ${total}): ${what.doing}`);
         const sig = await tx.send({ instructions: ixs, feePayer: signer });
         toast.showTx(sig, { title: what.done });
@@ -808,6 +813,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
             onContinue={() => void continueResume()}
             refreshKey={refreshKey}
             issuerAuthority={ctx.issuer.authority.toString()}
+            canConvert={ctx.canConvert}
           />
         ) : null}
       </>
@@ -1102,6 +1108,12 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
                 grants it (one more signature).
               </p>
             )}
+            {!ctx.canConvert && (
+              <p className="mt-1 text-right text-[11px] text-slate-400">
+                Your issuer key has no Conversion permission yet: the conversion class is created with the token,
+                and the conversion link is set once the Super Admin grants Conversion (one more signature).
+              </p>
+            )}
           </div>
         </div>
       </section>
@@ -1228,6 +1240,8 @@ function ResumeView(props: {
   onContinue: () => void;
   refreshKey: number;
   issuerAuthority: string;
+  /** The key holds the Conversion permission (links class 0 to the marker). */
+  canConvert: boolean;
 }) {
   const { resume, step } = props;
   const asset = resume.chain.asset;
@@ -1235,13 +1249,17 @@ function ResumeView(props: {
   const chainStep = step.kind === "add_class" || step.kind === "init_mint" || step.kind === "add_marker";
   const actionable = chainStep || step.kind === "save_profile";
   const total = (chainStep ? 1 : 0) + (profileMissing ? 1 : 0);
+  // Class 1 is added now (only a draft takes it); class 0 is linked to it only with Conversion.
+  const addsMarkerOnly = step.kind === "add_marker" && resume.chain.marker === "none" && !props.canConvert;
   const label =
     step.kind === "add_class"
       ? "Add the share class"
       : step.kind === "init_mint"
         ? "Create the token mint"
         : step.kind === "add_marker"
-          ? "Set the conversion target"
+          ? addsMarkerOnly
+            ? "Add the conversion class"
+            : "Set the conversion target"
           : "Save details";
   // An asset page profile written elsewhere (Product profile form): saving
   // only completes it. The price is private (fields.tokenize), so it is asked
@@ -1283,9 +1301,9 @@ function ResumeView(props: {
         )}
         {step.kind === "add_marker" && (
           <p className="mt-4 rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-sm text-slate-700">
-            Holders convert a token into the company share itself (KYC at that point). That needs a conversion
-            target on chain — a second class that can never be minted, which class 0 converts into: one
-            transaction, nothing else changes.
+            {addsMarkerOnly
+              ? "Holders convert a token into the company share itself (KYC at that point). That needs a conversion target on chain — a second class that can never be minted — and it can only be added while the asset is a draft, so it is added now: one transaction, nothing else changes. Class 0 is linked to it once the Super Admin gives this issuer the Conversion permission."
+              : "Holders convert a token into the company share itself (KYC at that point). That needs a conversion target on chain — a second class that can never be minted, which class 0 converts into: one transaction, nothing else changes."}
           </p>
         )}
         {step.kind === "wait_mint_permission" && (

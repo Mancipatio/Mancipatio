@@ -68,7 +68,7 @@ function stubRpc(accounts: Map<string, Stored>, calls: Address[][]) {
   } as unknown as Parameters<typeof loadDistributionFacts>[0];
 }
 
-async function world(opts: { mode?: RestrictionMode; blocked?: Address[]; frozen?: Address[]; existing?: Address[]; accounts?: [Address, Stored][]; passports?: Address[] } = {}) {
+async function world(opts: { mode?: RestrictionMode; blocked?: Address[]; frozen?: Address[]; existing?: Address[]; holding?: [Address, number][]; accounts?: [Address, Stored][]; passports?: Address[] } = {}) {
   const accounts = new Map<string, Stored>();
   const [config] = await findConfigPda({ mint: MINT });
   accounts.set(config, {
@@ -96,6 +96,7 @@ async function world(opts: { mode?: RestrictionMode; blocked?: Address[]; frozen
   });
   accounts.set(await tokenAccountOf(SENDER, MINT), token(SENDER, 1_000));
   for (const w of opts.existing ?? []) accounts.set(await tokenAccountOf(w, MINT), token(w, 0, (opts.frozen ?? []).includes(w)));
+  for (const [w, amount] of opts.holding ?? []) accounts.set(await tokenAccountOf(w, MINT), token(w, amount));
   for (const w of opts.blocked ?? []) {
     accounts.set(await findBlockEntryPda(w), {
       owner: TRANSFER_HOOK_PROGRAM_ADDRESS,
@@ -149,6 +150,16 @@ describe("loadDistributionFacts", () => {
     const pass = (w: Address) => distributionRowChecks(facts, { wallet: w, amount: BigInt(1) }, { nowSec: NOW, screening: "clear" });
     expect(pass(ok).ok).toBe(true);
     expect(pass(none).checks.find((c) => c.id === "passport")?.ok).toBe(false);
+  });
+
+  it("keeps each recipient's balance of the mint (the panel asks before paying a holder again)", async () => {
+    const [holder, empty, fresh] = await wallets(3);
+    const facts = await loadDistributionFacts(stubRpc(await world({ holding: [[holder, 40]], existing: [empty] }), []), {
+      mint: MINT, sender: SENDER, recipients: [holder, empty, fresh],
+    });
+    expect(facts.rows.get(holder)?.recipientBalance).toBe(BigInt(40));
+    expect(facts.rows.get(empty)?.recipientBalance).toBe(BigInt(0));
+    expect(facts.rows.get(fresh)).toMatchObject({ recipientBalance: BigInt(0), recipientTokenAccountExists: false });
   });
 });
 

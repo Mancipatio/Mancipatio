@@ -27,8 +27,17 @@
 // The run journal (lib/distribution-journal) is written after signing and
 // before broadcasting; reopening the page re-reads it against the network
 // (lib/distribution-run evaluateRun), so a confirmed row is never sent twice.
+// Beyond the run: a wallet this browser's other runs paid, one the
+// treasury's recent history shows a transfer to (any browser, cleared site
+// data, an edited list) or one that already holds tokens is not paid again
+// until the issuer removes it or ticks "send to these wallets again"
+// (priorReceipts; read again right before the send).
+// A Ledger (remembered by lib/siws-signing) or a wallet set to "sign each
+// transaction separately" (remembered per wallet) gets one prompt per
+// transaction, each with a fresh blockhash; a batch that outlasted its
+// blockhash falls back to that before anything is journalled or sent.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createNoopSigner, type Address } from "@solana/kit";
 import type { TransactionPrepareAndSendRequest } from "@solana/client";
 import { useSendTransaction, useSolanaClient, useWalletConnection } from "@solana/react-hooks";
@@ -45,7 +54,9 @@ import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { usePauseFlags } from "@/lib/use-pause-flags";
 import { screenRecipients } from "@/lib/compliance";
 import { listSaleReservations, readFxRates, freshUsdcEurRate, reservedTreasuryUnits } from "@/lib/sale-approvals";
-import { getBatchSender } from "@/lib/verified-solana-client";
+import { getBatchSender, SIGNING_TOO_SLOW } from "@/lib/verified-solana-client";
+import { rememberSignsSeparately, signsSeparately } from "@/lib/wallet-standard-batch";
+import { signingTarget, signsOffchainEnvelopes } from "@/lib/siws-signing";
 import { simulateInstructions, waitForSignature } from "@/lib/simulation-gate";
 import { formatTokens, parsePrice, perTokenPriceE6, primaryPausedNote, formatE6 } from "@/lib/tokenize-shares";
 import type { HookMode } from "@/lib/tokenize-shares-chain";
@@ -64,7 +75,7 @@ import {
   type RowVerdict,
 } from "@/lib/distribution-checks";
 import { supplyVerdict, type SupplyFacts } from "@/lib/distribution-supply";
-import { listOpenSales, openSaleRemaining, readLamports, readPlatformPause } from "@/lib/distribution-chain";
+import { listOpenSales, openSaleRemaining, readLamports, readPlatformPause, recentTreasuryTransfers } from "@/lib/distribution-chain";
 import {
   MAX_TRANSACTIONS_PER_PROMPT,
   lamportsNeeded,
@@ -81,12 +92,15 @@ import {
   distributionRunId,
   listJournals,
   newJournal,
+  priorReceipts,
   readJournal,
   shortRunId,
   withTx,
   writeJournal,
   type DistributionJournal,
+  type PriorReceipt,
   type RowState,
+  type TreasuryTransfer,
 } from "@/lib/distribution-journal";
 import { distributionAuditRow, evaluateRun } from "@/lib/distribution-run";
 import { parseUsdPerToken, runTreasuryMint, treasuryMintEur } from "@/lib/treasury-mint";
@@ -112,6 +126,23 @@ type Checked =
   | { key: string; state: "done"; facts: DistributionFacts; nowSec: number };
 
 type Resume = { runId: string; states: Map<string, RowState>; mint: "pending" | null };
+
+/** The treasury's recent transfers (the "paid before" check), per wallet, mint and refresh. */
+type History = { key: string; state: "error"; text: string } | { key: string; state: "done"; transfers: TreasuryTransfer[] };
+
+/** How many of the treasury token account's latest signatures the "paid before" check reads (any time). */
+const PRIOR_HISTORY_LIMIT = 100;
+
+function priorText(found: readonly PriorReceipt[]): string {
+  const parts = found.map((p) =>
+    p.via === "run"
+      ? `sent in run ${shortRunId(p.runId)}`
+      : p.via === "chain"
+        ? `received ${formatTokens(p.amount)}${p.blockTime !== null ? ` on ${new Date(p.blockTime * 1000).toLocaleDateString("en-GB")}` : ""} (tx ${p.signature.slice(0, 8)}…)`
+        : `holds ${formatTokens(p.amount)} already`,
+  );
+  return `Paid before: ${parts.join(" · ")}`;
+}
 
 const textareaClass =
   "w-full rounded-lg border border-slate-300 px-3 py-2 font-mono text-xs leading-relaxed focus:border-slate-400 focus:outline-none";
@@ -149,9 +180,30 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const [working, setWorking] = useState<string | null>(null);
   const [dropped, setDropped] = useState<DroppedRow[]>([]);
   const [problem, setProblem] = useState<string | null>(null);
-  const [perTransaction, setPerTransaction] = useState(false);
+  const [separateChoice, setSeparateChoice] = useState<{ key: string; on: boolean } | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [refreshKey, setRefreshKey] = useState(0);
+  const [history, setHistory] = useState<History | null>(null);
+  const [historyRetry, setHistoryRetry] = useState(0);
+  /** The exact set of repeated wallets the issuer chose to pay again (bound to the run and the set). */
+  const [sendAgainKey, setSendAgainKey] = useState<string | null>(null);
+
+  // ── One prompt per transaction: a Ledger (lib/siws-signing's memory) or the remembered choice ──
+  const targetKey = session && wallet ? `${signingTarget(session).connectorId}|${wallet}` : null;
+  const { hardware, storedSeparate } = useMemo(() => {
+    if (!session || !targetKey) return { hardware: false, storedSeparate: false };
+    const target = signingTarget(session);
+    return { hardware: signsOffchainEnvelopes(target), storedSeparate: signsSeparately(target) };
+  }, [session, targetKey]);
+  const signSeparately = hardware || (separateChoice && separateChoice.key === targetKey ? separateChoice.on : storedSeparate);
+  const chooseSeparate = useCallback(
+    (on: boolean) => {
+      if (!session || !targetKey) return;
+      rememberSignsSeparately(signingTarget(session), on);
+      setSeparateChoice({ key: targetKey, on });
+    },
+    [session, targetKey],
+  );
 
   const parsed = useMemo(() => parseRecipients(text), [text]);
   const figures = useMemo(() => companyFiguresFrom(tokenize), [tokenize]);
@@ -173,6 +225,28 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
     // eslint-disable-next-line react-hooks/set-state-in-effect
     loadJournals();
   }, [loadJournals, refreshKey]);
+
+  // ── The treasury's recent transfers (any browser): read once a list is typed, again after each send ──
+  const historyKey = wallet ? `${wallet}|${sc.mint}|${refreshKey}|${historyRetry}` : "";
+  const historyLoaded = useRef<string | null>(null);
+  useEffect(() => {
+    // Once per key (the answer is stored under its key; a stale one is never read).
+    if (!wallet || !clean || historyLoaded.current === historyKey) return;
+    historyLoaded.current = historyKey;
+    void (async () => {
+      try {
+        const { transfers } = await recentTreasuryTransfers(rpc, {
+          source: await tokenAccountOf(wallet, sc.mint),
+          mint: sc.mint,
+          sinceSec: 0,
+          limit: PRIOR_HISTORY_LIMIT,
+        });
+        setHistory({ key: historyKey, state: "done", transfers });
+      } catch (err) {
+        setHistory({ key: historyKey, state: "error", text: `Could not read your treasury's earlier transfers: ${errorText(err)}` });
+      }
+    })();
+  }, [wallet, clean, historyKey, rpc, sc.mint]);
 
   // ── The run id of the list as typed ──
   useEffect(() => {
@@ -334,16 +408,29 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const approvals = transactions === null ? null : Math.ceil(transactions / MAX_TRANSACTIONS_PER_PROMPT);
 
   const previous = journal?.finishedAt ? journal : null;
-  // Wallets an earlier, different list of this browser already paid: said, not blocked (another list is a decision).
-  const sentBefore = useMemo(() => {
-    const out = new Map<string, string>();
-    for (const other of journals) {
-      if (other.runId === runId) continue;
-      for (const t of other.txs) if (t.status === "confirmed" || t.status === "sent") for (const w of t.rows) out.set(w, other.runId);
-    }
-    return out;
-  }, [journals, runId]);
-  const repeated = toSend.filter((r) => sentBefore.has(r.wallet));
+  // Wallets paid before outside this run (this browser's other runs, the treasury's recent
+  // history from any browser, a balance they hold): not paid again until removed or confirmed.
+  const historyNow = history && history.key === historyKey ? history : null;
+  const historyReady = historyNow?.state === "done";
+  const prior = facts
+    ? priorReceipts({
+        rows: parsed.rows,
+        runId,
+        journals,
+        history: historyNow?.state === "done" ? historyNow.transfers : [],
+        destinations: new Map(parsed.rows.map((r) => [r.wallet as string, facts.rows.get(r.wallet)?.recipientTokenAccount ?? ""])),
+        balances: new Map(parsed.rows.map((r) => [r.wallet as string, facts.rows.get(r.wallet)?.recipientBalance ?? BigInt(0)])),
+      })
+    : new Map<string, PriorReceipt[]>();
+  const repeated = toSend.filter((r) => prior.has(r.wallet));
+  const repeatedKey = repeated.length > 0 ? `${runId}|${repeated.map((r) => r.wallet).sort().join(",")}` : null;
+  const sendAgain = repeatedKey !== null && sendAgainKey === repeatedKey;
+  function removeRepeated() {
+    const drop = new Set<string>(repeated.map((r) => r.wallet));
+    setText(rowsText(parsed.rows.filter((r) => !drop.has(r.wallet))));
+    setNonce(null);
+    setProblem(null);
+  }
   // A journalled run of this list must be read back from the network before anything is sent again.
   const resumeReady = !journal || resume?.runId === journal.runId;
   const unfinished = journals.filter((j) => !j.finishedAt && j.runId !== runId);
@@ -353,12 +440,16 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const blockers = [
     !clean ? null : !facts ? (current?.state === "error" ? current.text : "Checking…") : null,
     !resumeReady ? "Reading this list's earlier run from the network…" : null,
+    clean && !historyReady ? (historyNow?.state === "error" ? historyNow.text : "Checking your treasury's earlier transfers…") : null,
     classProblem,
     previous ? "This exact list was already sent." : null,
     pendingRows.length > 0 ? "Some rows are still waiting for the network." : null,
     resume?.mint === "pending" ? "The tokens this run created are still waiting for the network." : null,
     blockedRows.length > 0 ? `${blockedRows.length} ${blockedRows.length === 1 ? "row does" : "rows do"} not pass the checks — remove ${blockedRows.length === 1 ? "it" : "them"} from the list.` : null,
     vaultRows.length > 0 && !vaultConfirmed ? "Confirm the program addresses below." : null,
+    repeated.length > 0 && !sendAgain
+      ? `${repeated.length} ${repeated.length === 1 ? "wallet was" : "wallets were"} paid before — remove ${repeated.length === 1 ? "it" : "them"} or confirm below that ${repeated.length === 1 ? "it gets" : "they get"} tokens again.`
+      : null,
     supplyNow.problem,
     shortfall > BigInt(0) && !canCreate ? "Creating tokens needs an Admin issuer key; this wallet can send only what the treasury holds." : null,
     shortfall > BigInt(0) && canCreate && valueE6 === null ? "Enter the value per token (USD) for the tokens to create." : null,
@@ -419,6 +510,36 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         .map((r) => distributionRowChecks(fresh, r, { nowSec: Math.floor(Date.now() / 1000), screening: "clear", vaultConfirmed }))
         .find((v) => !v.ok);
       if (freshFail) throw new Error(`${shortAddress(freshFail.wallet)}: ${freshFail.problem}`);
+
+      // 2b. Paid before, read again now (another browser may have sent since the page loaded):
+      //     only the wallets the issuer chose to pay again go out.
+      setWorking("Checking your treasury's earlier transfers…");
+      const { transfers: freshHistory } = await recentTreasuryTransfers(rpc, {
+        source: fresh.senderTokenAccount,
+        mint: sc.mint,
+        sinceSec: 0,
+        limit: PRIOR_HISTORY_LIMIT,
+      });
+      const priorNow = priorReceipts({
+        rows: toSend,
+        runId,
+        journals: listJournals(store, { network, mint: sc.mint, sender: actor }),
+        history: freshHistory,
+        destinations: new Map(toSend.map((r) => [r.wallet as string, fresh.rows.get(r.wallet)?.recipientTokenAccount ?? ""])),
+        balances: new Map(toSend.map((r) => [r.wallet as string, fresh.rows.get(r.wallet)?.recipientBalance ?? BigInt(0)])),
+      });
+      const confirmedAgain = new Set<string>(sendAgain ? repeated.map((r) => r.wallet) : []);
+      const unconfirmed = toSend.filter((r) => priorNow.has(r.wallet) && !confirmedAgain.has(r.wallet));
+      if (unconfirmed.length > 0) {
+        setHistory({ key: historyKey, state: "done", transfers: freshHistory });
+        setProblem(
+          `${unconfirmed.length} ${unconfirmed.length === 1 ? "wallet of this list was" : "wallets of this list were"} paid before (${unconfirmed
+            .slice(0, 3)
+            .map((r) => shortAddress(r.wallet))
+            .join(", ")}${unconfirmed.length > 3 ? ", …" : ""}): this list may have been sent already, from this browser or another one. Nothing was sent; remove ${unconfirmed.length === 1 ? "it" : "them"} or confirm sending again.`,
+        );
+        return;
+      }
 
       // 3. The journal: this run's, or a new one.
       let j = readJournal(store, network, runId) ?? newJournal({ runId, network, mint: sc.mint, sender: actor, rows: parsed.rows, nonce });
@@ -541,10 +662,12 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       const rowsOf = (t: PackedTransaction) => t.index.map((e) => ({ wallet: e.row, amount: amounts.get(e.row) ?? BigInt(0) }));
       const sent: { signature: string; rows: { wallet: string; amount: bigint }[] }[] = [];
       const groups = promptGroups(plan.transactions);
+      // A Ledger or the remembered choice: one prompt per transaction (a fresh blockhash each).
+      let mode: "auto" | "per-transaction" = signSeparately ? "per-transaction" : "auto";
       for (const [g, group] of groups.entries()) {
         const requests: TransactionPrepareAndSendRequest[] = group.map((t) => ({ instructions: t.instructions, feePayer: signer }));
         const result = await sender.prepareAndSendAll(requests, {
-          mode: perTransaction ? "per-transaction" : "auto",
+          mode,
           onPrompt: (p) =>
             setWorking(
               p.mode === "batch"
@@ -575,6 +698,10 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         writeJournal(store, j);
         sent.push(...groupSent);
         if (result.fallbackReason) console.warn(`[distribution] ${result.fallbackReason}`);
+        // Once a group fell back, the rest go one by one too; a batch that outlasted its
+        // blockhash (a hardware wallet) is remembered for this wallet.
+        if (result.mode === "per-transaction") mode = "per-transaction";
+        if (result.fallbackReason?.includes(SIGNING_TOO_SLOW)) chooseSeparate(true);
         // One audit row per transaction, written one after another (the audit route's burst limit).
         for (const s of groupSent) {
           await recordAudit(distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: "pending", rows: s.rows }));
@@ -707,6 +834,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
                   verdict={verdicts.get(r.wallet) ?? null}
                   state={stateOf(r.wallet)}
                   dropped={dropped.find((d) => d.row === r.wallet)?.reason ?? null}
+                  previously={prior.has(r.wallet) ? priorText(prior.get(r.wallet)!) : null}
                   checking={!facts}
                 />
               ))}
@@ -730,13 +858,37 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       )}
 
       {classProblem && <p className="text-[13px] text-red-700">{classProblem}</p>}
-      {repeated.length > 0 && (
+      {historyNow?.state === "error" && (
         <p className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-900">
-          {repeated.length} of these {repeated.length === 1 ? "wallet" : "wallets"} already received tokens in an earlier run from this
-          browser ({repeated.slice(0, 5).map((r) => shortAddress(r.wallet)).join(", ")}{repeated.length > 5 ? ", …" : ""}). This list is
-          different, so {repeated.length === 1 ? "it is" : "they are"} sent again — remove {repeated.length === 1 ? "it" : "them"} if that is not
-          intended.
+          {historyNow.text}{" "}
+          <button type="button" onClick={() => setHistoryRetry((r) => r + 1)} className="font-medium underline">
+            Try again
+          </button>
         </p>
+      )}
+      {repeated.length > 0 && (
+        <div className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-900">
+          <p>
+            {repeated.length} of these {repeated.length === 1 ? "wallet was" : "wallets were"} paid before — by another run, a
+            transfer from your treasury (from any browser) or tokens {repeated.length === 1 ? "it holds" : "they hold"} already (marked
+            below). If this list was sent before, sending it again pays {repeated.length === 1 ? "it" : "them"} twice.
+          </p>
+          <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1">
+            <button type="button" onClick={removeRepeated} className="font-medium underline">
+              Remove {repeated.length === 1 ? "it" : `these ${repeated.length}`} from the list
+            </button>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={sendAgain}
+                onChange={(e) => setSendAgainKey(e.target.checked ? repeatedKey : null)}
+              />
+              <span>
+                Send to {repeated.length === 1 ? "this wallet" : `these ${repeated.length} wallets`} again
+              </span>
+            </label>
+          </div>
+        </div>
       )}
       {hook === "kyc-gated" && (
         <p className="text-[12px] text-amber-800">
@@ -818,19 +970,42 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       {ready && (
         <p className="text-[12px] text-slate-500">
           Wallet prompts: {shortfall > BigInt(0) ? "1 message + 1 transaction to create the tokens, then " : ""}
-          {approvals === null
-            ? "one approval for the transfers"
-            : `${approvals === 1 ? "one approval" : `${approvals} approvals`} for ${transactions} ${transactions === 1 ? "transaction" : "transactions"}`}
-          {" "}(a Ledger confirms each transaction on the device; a wallet that cannot sign them together asks once per transaction).
+          {signSeparately
+            ? transactions === null
+              ? "one approval per transaction"
+              : `${transactions} ${transactions === 1 ? "approval" : "approvals"}, one per transaction`
+            : approvals === null
+              ? "one approval for the transfers"
+              : `${approvals === 1 ? "one approval" : `${approvals} approvals`} for ${transactions} ${transactions === 1 ? "transaction" : "transactions"}`}
+          {signSeparately
+            ? " (each with a fresh blockhash, so a Ledger has time to confirm it on the device)."
+            : " (a wallet that cannot sign them together, or takes too long, asks once per transaction)."}
           {newAccounts > 0 && ` ${newAccounts} new token ${newAccounts === 1 ? "account" : "accounts"}: about ${formatLamportsAsSol(lamportsNeeded({ newAccounts, transactions: 0 }))} SOL rent, paid by you.`}
         </p>
+      )}
+      {clean && toSend.length > 0 && (
+        <label className="flex items-start gap-2 text-[12px] text-slate-600">
+          <input
+            type="checkbox"
+            checked={signSeparately}
+            disabled={hardware || busy}
+            onChange={(e) => chooseSeparate(e.target.checked)}
+            className="mt-0.5"
+          />
+          <span>
+            Sign each transaction separately
+            {hardware
+              ? " — this wallet signs with a hardware device (Ledger), so each transaction gets its own approval."
+              : " (use it with a Ledger: confirming several transactions on the device can outlast their blockhash). Remembered for this wallet."}
+          </span>
+        </label>
       )}
 
       {problem && (
         <div role="alert" className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-800">
           <p>{problem}</p>
-          {!perTransaction && /wallet/i.test(problem) && (
-            <button type="button" onClick={() => setPerTransaction(true)} className="mt-1 text-[12px] font-medium underline">
+          {!signSeparately && /wallet/i.test(problem) && (
+            <button type="button" onClick={() => chooseSeparate(true)} className="mt-1 text-[12px] font-medium underline">
               Sign each transaction separately next time
             </button>
           )}
@@ -871,7 +1046,15 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
                 and Primary issuance is closed again in the same transaction (unless a sale needs it open).
               </li>
             )}
+            {repeated.length > 0 && (
+              <li className="text-amber-900">
+                Paid again: {repeated.length} {repeated.length === 1 ? "wallet" : "wallets"} that already received tokens (
+                {repeated.slice(0, 8).map((r) => shortAddress(r.wallet)).join(", ")}
+                {repeated.length > 8 ? ", …" : ""}).
+              </li>
+            )}
             {newAccounts > 0 && <li>{newAccounts} recipients get a token account (about 0.002 SOL rent each, paid by you).</li>}
+            {signSeparately && <li>One wallet approval per transaction.</li>}
             <li>Every recipient is screened against the sanctions lists first; payment, if any, is handled outside Manci.</li>
             <li>The run is saved in this browser, so it can continue after a refresh without sending anything twice.</li>
           </ul>
@@ -887,18 +1070,21 @@ function Row(props: {
   verdict: RowVerdict | null;
   state: RowState;
   dropped: string | null;
+  /** Paid before outside this run (priorReceipts), in words. */
+  previously: string | null;
   checking: boolean;
 }) {
   const { row, verdict, state } = props;
-  let status: { tone: "ok" | "bad" | "wait" | "muted"; text: string };
+  let status: { tone: "ok" | "bad" | "wait" | "warn" | "muted"; text: string };
   if (state.state === "done") status = { tone: "ok", text: "Sent ✓" };
   else if (state.state === "pending") status = { tone: "wait", text: "Waiting for the network" };
   else if (props.dropped) status = { tone: "bad", text: props.dropped };
   else if (props.checking || !verdict) status = { tone: "muted", text: "Checking…" };
   else if (verdict.checks.some((c) => !c.ok)) status = { tone: "bad", text: verdict.problem ?? "Does not pass the checks." };
+  else if (props.previously) status = { tone: "warn", text: props.previously };
   else if (!verdict.ok) status = { tone: "muted", text: verdict.problem ?? "Ready" };
   else status = { tone: "ok", text: verdict.createsAccount ? "Ready · new token account" : "Ready" };
-  const tone = { ok: "text-emerald-800", bad: "text-red-700", wait: "text-slate-700", muted: "text-slate-500" }[status.tone];
+  const tone = { ok: "text-emerald-800", bad: "text-red-700", wait: "text-slate-700", warn: "text-amber-800", muted: "text-slate-500" }[status.tone];
   return (
     <tr className="border-b border-slate-50 last:border-0">
       <td className="px-3 py-1.5 font-mono" title={row.wallet}>

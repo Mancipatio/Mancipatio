@@ -38,6 +38,7 @@ import {
 import { getPrivateAssetProfiles as getAssetProfiles, type AssetProfile } from "@/lib/asset-profiles";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { assetActivationBlock, type AssetActivationBlock } from "@/lib/admin-badge-rules";
+import { looksLikeTokenizeAsset } from "@/lib/tokenize-shares";
 
 // "ready": drafts an admin can activate now — the Assets menu count.
 type StatusFilter = "all" | "ready" | "draft" | "active" | "frozen" | "wound-down";
@@ -47,6 +48,14 @@ const ACTIVATION_BLOCK_HINT: Record<Exclude<AssetActivationBlock, "notDraft">, s
   issuerNotVerified: "The issuer's KYB is not verified yet — verify it on /admin/issuers first",
   noShareClasses: "The asset has no share class yet — the issuer adds one before it can be activated",
 };
+
+/**
+ * A tokenize-flow token with only class 0: its conversion class (C2) can be
+ * added only while it is a draft, so activating it now rules out conversion.
+ */
+function missingConversionClass(asset: Asset): boolean {
+  return asset.status === AssetStatus.Draft && asset.shareClassesCount === 1 && looksLikeTokenizeAsset(asset);
+}
 
 function activationBlockOf(asset: Asset, issuer: Issuer | undefined): AssetActivationBlock | null {
   return assetActivationBlock({
@@ -553,6 +562,14 @@ function AssetsOps() {
             </span>{" "}
             ({activateTarget?.asset.assetId ?? ""})? The asset leaves Draft and
             becomes operational — share classes can be minted and traded.
+            {activateTarget && missingConversionClass(activateTarget.asset) && (
+              <span className="mt-2 block rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5 text-[13px] text-amber-900">
+                This token has no conversion class yet. Classes can only be added
+                while the asset is a draft, so once it is active its holders can
+                never convert it into company shares. Ask the issuer to finish it
+                on its tokenize page first (one signature with the issuer key).
+              </span>
+            )}
           </>
         }
         confirmLabel="Activate"

@@ -89,9 +89,10 @@ export function TokenizeChecklist({
   const [state, setState] = useState<TokenizeChainState | null>(null);
   const [extras, setExtras] = useState<ChainExtras | null>(null);
   const [failed, setFailed] = useState(false);
-  const [permission, setPermission] = useState<{ globalAdmin: boolean; canMint: boolean }>({
+  const [permission, setPermission] = useState<{ globalAdmin: boolean; canMint: boolean; canConvert: boolean }>({
     globalAdmin: false,
     canMint: false,
+    canConvert: false,
   });
 
   const isIssuerAuthority = !!wallet && wallet === issuerAuthority;
@@ -119,9 +120,13 @@ export function TokenizeChecklist({
       if (next.asset && isIssuerAuthority && wallet) {
         try {
           const p = await loadIssuerPermission(rpc, next.asset.issuer, wallet as Address);
-          setPermission({ globalAdmin: p.globalAdmin, canMint: (p.capabilities & ISSUER_CAPABILITIES.Mint) !== 0 });
+          setPermission({
+            globalAdmin: p.globalAdmin,
+            canMint: (p.capabilities & ISSUER_CAPABILITIES.Mint) !== 0,
+            canConvert: (p.capabilities & ISSUER_CAPABILITIES.Conversion) !== 0,
+          });
         } catch {
-          setPermission({ globalAdmin: false, canMint: false });
+          setPermission({ globalAdmin: false, canMint: false, canConvert: false });
         }
       }
     } catch {
@@ -287,16 +292,25 @@ export function TokenizeChecklist({
           This mint has no transfer-hook config — the operator must sort it out.
         </p>
       )}
-      {/* C2: holders can ask to convert only when class 0 has an on-chain conversion target. */}
+      {/* C2: holders can ask to convert only when class 0 has an on-chain conversion target.
+          Class 1 is added by the issuer key while the asset is a draft; the link needs Conversion. */}
       {tokenizeLike && sc0?.mintInitialized && (state.marker === "none" || state.marker === "unlinked") && (
         <p className="mt-2 text-[12px] text-slate-500">
           {state.marker === "none" && asset.status !== AssetStatus.Draft ? (
-            "Conversion into company shares is not set up for this token: its conversion target can only be added while the asset is a draft. Contact the operator."
-          ) : (
+            "Conversion into company shares is not available for this token: its conversion class can only be added while the asset is a draft, and the asset is already active."
+          ) : state.marker === "none" ? (
+            <>
+              Conversion into company shares is not set up yet; its conversion class can only be added while the asset is a
+              draft:{" "}
+              <Link href={resumeHref} className={linkClass}>add it now (1 wallet signature) →</Link>
+            </>
+          ) : isIssuerAuthority && permission.canConvert ? (
             <>
               Conversion into company shares is not set up yet:{" "}
               <Link href={resumeHref} className={linkClass}>set the conversion target (1 wallet signature) →</Link>
             </>
+          ) : (
+            "Conversion into company shares is not set up yet: the conversion target is set once the Super Admin gives this issuer the Conversion permission (then 1 wallet signature)."
           )}
         </p>
       )}
