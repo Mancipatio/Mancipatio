@@ -19,11 +19,18 @@
 // the profile route checks ownership at. A flow that stops half-way is
 // continued from /issuer/assets/tokenize?asset=<pda> (or the "Continue" list)
 // instead of creating a second asset.
+//
+// Every chain transaction is audited once the network decided: one
+// audit_events row per registry instruction it carried (create_asset, the
+// classes, the mint, set_convertible_to; lib/tokenize-shares-chain
+// tokenizeAuditRows). The profile's `convertible` follows the conversion
+// target (class 0's convertible_to, or the marker link the step sets); a
+// later link corrects saved details with one more signature.
 
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { isAddress, type Address } from "@solana/kit";
+import { isAddress, type Address, type Instruction } from "@solana/kit";
 import {
   useSendTransaction,
   useSolanaClient,
@@ -59,6 +66,8 @@ import { createSignedRequest, postSignedRequest, type SiwsRequestBody } from "@/
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { useToast } from "@/lib/toast";
+import { recordAudit } from "@/lib/supabase";
+import { waitForSignature } from "@/lib/simulation-gate";
 import { WalletRequired } from "@/components/wallet-required";
 import { SkeletonCard } from "@/components/skeleton";
 import { TokenizeChecklist } from "@/components/tokenize-checklist";
@@ -75,6 +84,8 @@ import {
   candidateAssetIds,
   canonicalProfileHashInput,
   companyShortName,
+  convertibleAfter,
+  convertiblePatch,
   deriveSymbolPrefix,
   deriveTokenCompany,
   displayNameFor,
@@ -117,6 +128,7 @@ import {
   type CompanySource,
   type GranularityId,
   type LegalDocSource,
+  type MarkerAction,
   type ShareFigures,
   type TokenizeDraft,
   type TokenizeFigures,
@@ -126,6 +138,7 @@ import {
 import {
   assertTokenizeFits,
   assetSnapshot,
+  auditTokenizeOutcome,
   buildTokenizeIxs,
   classSnapshot,
   issuerKybVerified,
@@ -133,8 +146,10 @@ import {
   pickTokenizeAssetId,
   readTokenizeState,
   simulateTokenize,
+  tokenizeAuditRows,
   waitForFinalizedAsset,
   type ExistingTokenizeAsset,
+  type TokenizeAuditStep,
   type TokenizeChainState,
 } from "@/lib/tokenize-shares-chain";
 
@@ -553,6 +568,9 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
           ),
         );
       }
+      // The conversion marker rides in the same transaction (C2): class 1 always (only a draft
+      // takes it), the link to it when this key holds Conversion.
+      const marker = markerAction({ step: picked.step, marker: "none", draft: true, canConvert });
       const row = buildProfileRow({
         assetPda: picked.assetPda,
         issuerPda: ctx.issuerPda,
@@ -564,11 +582,10 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         figures: figs,
         legalDocHex: toHex(legalDocHash),
         legalDocSource,
+        // Convertible when this transaction links class 0 to the marker (set_convertible_to).
+        convertible: convertibleAfter({ sc0ConvertibleTo: null, marker }),
         existing: null,
       });
-      // The conversion marker rides in the same transaction (C2): class 1 always (only a draft
-      // takes it), the link to it when this key holds Conversion.
-      const marker = markerAction({ step: picked.step, marker: "none", draft: true, canConvert });
       const ixs = await buildTokenizeIxs({
         kind: "create",
         initMint: canInitMint,
@@ -599,6 +616,13 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       setWorking("Confirm in your wallet (1 of 2): create the token");
       const sig = await tx.send({ instructions: ixs, feePayer: signer });
       toast.showTx(sig, { title: "Token created" });
+      // One audit row per instruction (create_asset, the classes, the mint, set_convertible_to),
+      // written once the network decided; in the background, the details prompt does not wait.
+      void auditTokenizeOutcome({
+        rows: tokenizeAuditRows(ixs, { actor: wallet.toString(), signature: sig, name: intent.name, step: "create" }),
+        wait: () => waitForSignature(rpc, sig, { timeoutMs: 60_000 }),
+        record: recordAudit,
+      });
       await saveDetails(picked.assetPda, row, "2 of 2");
       router.replace(`/issuer/assets/tokenize?asset=${picked.assetPda}`);
     } catch (err) {
@@ -632,28 +656,18 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
     const rpc = client.runtime.rpc;
     const asset = resume.chain.asset;
     const chainStep = resumeStep.kind === "add_class" || resumeStep.kind === "init_mint" || resumeStep.kind === "add_marker";
-    const total = (chainStep ? 1 : 0) + (profileMissing ? 1 : 0);
     setWorking("Checking the chain…");
     try {
       const figs = figuresFor(figures.p4, figures.tokens, granularity.id);
       const legalDocSource: LegalDocSource = resume.draft?.legalDocSource ?? "chain";
-      // An existing profile is completed, never overwritten (buildProfileRow);
-      // the equity columns follow class 0 as it is on chain.
-      const row = buildProfileRow({
-        assetPda: resume.assetPda,
-        issuerPda: ctx.issuerPda,
-        companyName: ctx.company.name,
-        companySource: ctx.company.source,
-        jurisdiction: ctx.jurisdiction,
-        // From this browser's draft (Advanced → Website, checked before the token was created).
-        website: websiteError ? null : website.trim() || null,
-        description: description.trim() || null,
-        figures: figs,
-        legalDocHex: toHex(asset.legalDocHash),
-        legalDocSource,
-        classTerms: resume.chain.sc0 ?? CLASS_DEFAULTS,
-        existing: resume.profile,
-      });
+      // The chain step is prepared first: the marker it carries decides whether class 0 converts.
+      let chainTx: {
+        step: TokenizeAuditStep;
+        ixs: Instruction[];
+        signer: ReturnType<typeof walletSigner>;
+        what: { doing: string; done: string };
+      } | null = null;
+      let marker: MarkerAction = null;
       if (chainStep) {
         const signer = walletSigner(conn.wallet);
         const permission = await loadIssuerPermission(rpc, ctx.issuerPda, wallet);
@@ -664,7 +678,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
         }
         // The marker (C2) rides along: class 1 while it is missing on a draft (any issuer
         // key), the link to it when this key holds Conversion.
-        const marker = markerAction({
+        marker = markerAction({
           step: resumeStep,
           marker: resume.chain.marker,
           draft: asset.status === AssetStatus.Draft,
@@ -707,11 +721,47 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
               : marker === "add"
                 ? { doing: "add the conversion class", done: "Conversion class added" }
                 : { doing: "set the conversion target", done: "Conversion target set" };
-        setWorking(`Confirm in your wallet (1 of ${total}): ${what.doing}`);
-        const sig = await tx.send({ instructions: ixs, feePayer: signer });
-        toast.showTx(sig, { title: what.done });
+        chainTx = { step: resumeStep.kind, ixs, signer, what };
+      }
+      const sc0 = resume.chain.sc0;
+      const convertible = convertibleAfter({
+        sc0ConvertibleTo: sc0 && sc0.convertibleTo.__option === "Some" ? sc0.convertibleTo.value : null,
+        marker,
+      });
+      // An existing profile is completed, never overwritten (buildProfileRow);
+      // the equity columns follow class 0 as it is on chain (and the link this step sets).
+      const row = buildProfileRow({
+        assetPda: resume.assetPda,
+        issuerPda: ctx.issuerPda,
+        companyName: ctx.company.name,
+        companySource: ctx.company.source,
+        jurisdiction: ctx.jurisdiction,
+        // From this browser's draft (Advanced → Website, checked before the token was created).
+        website: websiteError ? null : website.trim() || null,
+        description: description.trim() || null,
+        figures: figs,
+        legalDocHex: toHex(asset.legalDocHash),
+        legalDocSource,
+        classTerms: resume.chain.sc0 ?? CLASS_DEFAULTS,
+        convertible,
+        existing: resume.profile,
+      });
+      // Saved details that say "not convertible" are corrected when this step links the marker.
+      const patch = profileMissing || !markerLinks(marker) ? null : convertiblePatch(resume.assetPda, resume.profile, convertible);
+      const total = (chainTx ? 1 : 0) + (profileMissing || patch ? 1 : 0);
+      if (chainTx) {
+        const { ixs: sent, step } = chainTx;
+        setWorking(`Confirm in your wallet (1 of ${total}): ${chainTx.what.doing}`);
+        const sig = await tx.send({ instructions: sent, feePayer: chainTx.signer });
+        toast.showTx(sig, { title: chainTx.what.done });
+        void auditTokenizeOutcome({
+          rows: tokenizeAuditRows(sent, { actor: wallet.toString(), signature: sig, name: asset.name, step }),
+          wait: () => waitForSignature(rpc, sig, { timeoutMs: 60_000 }),
+          record: recordAudit,
+        });
       }
       if (profileMissing) await saveDetails(resume.assetPda, row, `${total} of ${total}`);
+      else if (patch) await saveDetails(resume.assetPda, patch, `${total} of ${total}`);
       setRefreshKey((k) => k + 1);
       await loadResume();
       await loadContext();

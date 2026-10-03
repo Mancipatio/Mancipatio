@@ -580,9 +580,8 @@ export function canonicalProfileHashInput(input: {
   });
 }
 
-/** RIGHT_VOTE / RIGHT_CONVERTIBLE (program constants.rs). */
+/** RIGHT_VOTE (program constants.rs). */
 const RIGHT_VOTE = 1 << 0;
-const RIGHT_CONVERTIBLE = 1 << 3;
 
 /** The class terms the equity profile columns describe (read from class 0 on chain). */
 export type ClassTerms = { rightsBitfield: number; liqPrefMultiplierBps: number };
@@ -620,6 +619,12 @@ function isBlank(v: unknown): boolean {
  * issuer may have written the asset page by hand); only `fields.tokenize` is
  * added and empty columns are filled. The upsert route leaves columns the
  * row does not name untouched.
+ *
+ * `convertible` says whether a holder can convert: class 0 has an on-chain
+ * conversion target (`convertible_to`, what the conversion route checks), or
+ * the transaction this row follows sets it (the marker link). The
+ * RIGHT_CONVERTIBLE bit is not that (the flow never sets it), so it is not
+ * read here.
  */
 export function buildProfileRow(input: {
   assetPda: string;
@@ -633,6 +638,8 @@ export function buildProfileRow(input: {
   legalDocHex: string;
   legalDocSource: LegalDocSource;
   classTerms?: ClassTerms;
+  /** Class 0 converts: `convertible_to` set on chain or by this step (convertibleAfter). Default false. */
+  convertible?: boolean;
   existing?: ExistingProfile | null;
 }): NewAssetProfile {
   const { figures, existing } = input;
@@ -650,7 +657,7 @@ export function buildProfileRow(input: {
     jurisdiction: input.jurisdiction,
     legal_doc_sha256: input.legalDocHex,
     has_voting: (terms.rightsBitfield & RIGHT_VOTE) !== 0,
-    convertible: (terms.rightsBitfield & RIGHT_CONVERTIBLE) !== 0,
+    convertible: input.convertible ?? false,
     liquidation_pref_bps: terms.liqPrefMultiplierBps,
   };
   const row: NewAssetProfile = {
@@ -770,6 +777,30 @@ export type MarkerAction = "add_and_link" | "add" | "link" | null;
 /** Whether the marker action includes set_convertible_to (needs the CONVERSION permission's proof). */
 export function markerLinks(action: MarkerAction): boolean {
   return action === "add_and_link" || action === "link";
+}
+
+/**
+ * Whether class 0 converts once a step lands: it already has a conversion
+ * target on chain (`convertible_to`), or the step sets one (the marker
+ * link). What asset_profiles.convertible records (buildProfileRow).
+ */
+export function convertibleAfter(input: { sc0ConvertibleTo: string | null; marker: MarkerAction }): boolean {
+  return input.sc0ConvertibleTo !== null || markerLinks(input.marker);
+}
+
+/**
+ * The profile patch that brings a SAVED profile's `convertible` in line with
+ * the chain once a later step links the marker (a key that gained the
+ * Conversion permission), or null when it already says so. Only the column
+ * and the category the route requires: the upsert leaves the rest untouched.
+ */
+export function convertiblePatch(
+  assetPda: string,
+  existing: Pick<ExistingProfile, "category" | "convertible"> | null | undefined,
+  convertible: boolean,
+): NewAssetProfile | null {
+  if (!existing || existing.convertible === convertible) return null;
+  return { asset_pda: assetPda, category: existing.category ?? "equity", convertible };
 }
 
 /**

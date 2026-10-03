@@ -255,6 +255,30 @@ describe("/api/profiles/upsert — the offering exemption", () => {
   });
 });
 
+describe("/api/profiles/upsert — created_by (rehearsal P3: tokenize profiles had none)", () => {
+  const call = async (profile: Record<string, unknown>) => {
+    state.params = { profile: { asset_pda: ASSET, category: "equity", ...profile } };
+    const res = await upsertRoute(new Request("https://www.manci.io/api/profiles/upsert", { method: "POST", body: "{}" }));
+    return { status: res.status, body: await res.json() };
+  };
+
+  it("stamps the verified wallet on a new row, never a value the patch carries", async () => {
+    state.admin = false;
+    expect((await call({ display_name: "Acme", created_by: "Forged1111111111111111111111111111111111111" })).status).toBe(200);
+    expect(state.upserts[0].created_by).toBe(state.wallet);
+    expect(state.selects.find((s) => s.table === "asset_profiles")?.columns).toMatch(/,created_by$/);
+  });
+
+  it("first writer wins: a stored created_by is kept; a legacy row without one gets this writer", async () => {
+    state.profile = { fields: {}, created_by: "Issuer1111111111111111111111111111111111111" };
+    expect((await call({ display_name: "Acme" })).status).toBe(200);
+    expect(state.upserts[0].created_by).toBe("Issuer1111111111111111111111111111111111111");
+    state.profile = { fields: {}, created_by: null };
+    expect((await call({ display_name: "Acme" })).status).toBe(200);
+    expect(state.upserts[1].created_by).toBe(state.wallet);
+  });
+});
+
 describe("/api/profiles/upsert — a public-sale request is the sale-requests routes' alone", () => {
   const call = async (profile: Record<string, unknown>) => {
     state.params = { profile: { asset_pda: ASSET, category: "equity", ...profile } };

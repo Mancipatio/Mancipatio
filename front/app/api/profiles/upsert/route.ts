@@ -90,9 +90,13 @@ function changesSscApproval(
  */
 const EXEMPTION_FIELDS = new Set(["offering_exemption_ref", "offering_exemption_reason"]);
 
-/** Server-controlled fields — silently stripped from any patch. */
+/**
+ * Server-controlled fields — silently stripped from any patch. `created_by`
+ * is stamped from the verified wallet like the issuer profile's: first
+ * writer wins (kept once set; a row without one gets this writer).
+ */
 const STRIPPED_FIELDS = new Set([
-  "network", "created_at", "updated_at", "whitepaper_version_id", "ssc_decision_version_id", "whitepaper_published_at",
+  "network", "created_by", "created_at", "updated_at", "whitepaper_version_id", "ssc_decision_version_id", "whitepaper_published_at",
   "offering_exemption_recorded_by", "offering_exemption_recorded_at",
 ]);
 
@@ -234,10 +238,12 @@ export async function POST(request: Request) {
     }
 
     const sb = getSupabaseAdmin();
-    const current = await sb.from("asset_profiles").select("fields,whitepaper_path,whitepaper_sha256,whitepaper_status,whitepaper_version_id,whitepaper_published_at,ssc_decision_ref,ssc_decision_doc_path,ssc_decision_doc_sha256,ssc_decision_version_id")
+    const current = await sb.from("asset_profiles").select("fields,whitepaper_path,whitepaper_sha256,whitepaper_status,whitepaper_version_id,whitepaper_published_at,ssc_decision_ref,ssc_decision_doc_path,ssc_decision_doc_sha256,ssc_decision_version_id,created_by")
       .eq("asset_pda",assetPda).eq("network",detectNetwork()).maybeSingle();
     if(current.error) throw new SiwsError(503,"Current document version unavailable");
     const existing = current.data;
+    // created_by: first writer wins (see STRIPPED_FIELDS).
+    cleaned.created_by = (typeof existing?.created_by === "string" && existing.created_by) || wallet;
     // The public-sale request is the sale-requests routes' alone (see header).
     if (isPlainObject(cleaned.fields)) {
       const storedFields: unknown = existing?.fields;

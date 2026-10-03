@@ -40,6 +40,8 @@ import {
   closeText,
   conversionMarkerState,
   companyShortName,
+  convertibleAfter,
+  convertiblePatch,
   deriveSymbolPrefix,
   deriveTokenCompany,
   deriveTokenName,
@@ -96,10 +98,13 @@ import {
 } from "@/lib/tokenize-shares";
 import {
   TOKENIZE_TX_LIMIT,
+  auditTokenizeOutcome,
   buildTokenizeIxs,
   simulationWire,
+  tokenizeAuditRows,
   tokenizeTransactionSize,
 } from "@/lib/tokenize-shares-chain";
+import type { AuditInput } from "@/lib/supabase";
 
 const B = (n: number | string) => BigInt(n);
 const g = (id: string) => granularityById(id)!;
@@ -699,6 +704,79 @@ describe("conversion marker (C2): class 1 capped at 0 that class 0 converts into
     expect((await build("init_mint")).ixs).toHaveLength(3);
   });
 
+  it("audits every instruction the tokenize transaction carried, read from the instructions (rehearsal P2)", async () => {
+    const { ixs, signer, issuer } = await build("create");
+    const rows = tokenizeAuditRows(ixs, { actor: signer.address, signature: "S".repeat(88), name: "Mancipatio 5%", step: "create" });
+    expect(rows.map((r) => r.ix_name)).toEqual([
+      "create_asset", "add_share_class", "add_share_class", "initialize_share_class_mint", "set_convertible_to",
+    ]);
+    const [create, add0, add1, init, link] = rows;
+    for (const r of rows) {
+      expect(r).toMatchObject({ actor_wallet: signer.address, tx_signature: "S".repeat(88), status: "success", reason: "Tokenize company shares: Mancipatio 5%" });
+      expect(r.metadata).toMatchObject({ flow: "tokenize-shares", step: "create" });
+    }
+    expect(create).toMatchObject({ category: "assets", target_label: ixs[0].accounts![3].address });
+    expect(create.metadata).toMatchObject({ issuer, asset_id: "MANCI-5PCT", name: "Mancipatio 5%", symbol_prefix: "MANCI", legal_doc_sha256: "07".repeat(32) });
+    expect(add0).toMatchObject({ category: "share-class", target_label: ixs[1].accounts![4].address });
+    expect(add0.metadata).toMatchObject({ class_index: 0, max_supply: "5000" });
+    expect(add0.metadata).not.toHaveProperty("conversion_marker");
+    expect(add1.target_label).toBe(ixs[2].accounts![4].address);
+    expect(add1.metadata).toMatchObject({ class_index: 1, max_supply: "0", conversion_marker: true });
+    expect(init.metadata).toMatchObject({ mint: expect.any(String) });
+    // set_convertible_to: class 0 → class 1, the shape /admin/share-classes writes.
+    expect(link).toMatchObject({ category: "share-class", target_label: add0.target_label });
+    expect(link.metadata).toMatchObject({ target_share_class: add1.target_label });
+    // The conversion-marker step on an existing Draft: class 1 and the link only.
+    const marker = await build("add_marker");
+    expect(tokenizeAuditRows(marker.ixs, { actor: marker.signer.address, signature: "T".repeat(88), name: "X 5%", step: "add_marker" }).map((r) => r.ix_name))
+      .toEqual(["add_share_class", "set_convertible_to"]);
+    const linkOnly = await build("add_marker", undefined, undefined, undefined, "link");
+    expect(tokenizeAuditRows(linkOnly.ixs, { actor: linkOnly.signer.address, signature: "U".repeat(88), name: "X 5%", step: "add_marker" }).map((r) => r.ix_name))
+      .toEqual(["set_convertible_to"]);
+    // Anything else in a transaction (compute budget, another program) is not a registry row.
+    expect(tokenizeAuditRows([{ programAddress: "ComputeBudget111111111111111111111111111111" as Address, data: new Uint8Array([2]) }], {
+      actor: signer.address, signature: "V".repeat(88), name: "X", step: "create",
+    })).toEqual([]);
+  });
+
+  it("writes the audit rows once the network decided, one after another, with the outcome", async () => {
+    const { ixs, signer } = await build("create");
+    const rows = tokenizeAuditRows(ixs, { actor: signer.address, signature: "S".repeat(88), name: "Mancipatio 5%", step: "create" });
+    for (const [outcome, status, extra] of [
+      ["confirmed", "success", {}],
+      ["failed", "failed", { error: "refused by the network" }],
+      ["timeout", "pending", { confirmation: "timeout" }],
+    ] as const) {
+      const written: AuditInput[] = [];
+      let waited = false;
+      const result = await auditTokenizeOutcome({
+        rows,
+        wait: async () => {
+          waited = true;
+          expect(written).toEqual([]);
+          return outcome;
+        },
+        record: async (row) => {
+          expect(waited).toBe(true);
+          written.push(row);
+          return "id";
+        },
+      });
+      expect(result).toBe(outcome);
+      expect(written.map((r) => r.ix_name)).toEqual(rows.map((r) => r.ix_name));
+      for (const r of written) {
+        expect(r.status).toBe(status);
+        expect(r.metadata).toMatchObject(extra);
+      }
+    }
+    // The flow writes them after the transaction for the create and every resumed chain step.
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow.match(/void auditTokenizeOutcome\(\{/g)).toHaveLength(2);
+    expect(flow).toContain('tokenizeAuditRows(ixs, { actor: wallet.toString(), signature: sig, name: intent.name, step: "create" })');
+    expect(flow).toContain("tokenizeAuditRows(sent, { actor: wallet.toString(), signature: sig, name: asset.name, step })");
+    expect(flow.match(/wait: \(\) => waitForSignature\(rpc, sig, \{ timeoutMs: 60_000 \}\)/g)).toHaveLength(2);
+  });
+
   it("the conversion route's requirement is what the marker sets: an on-chain convertible_to", () => {
     const route = src("app/api/conversion/create/route.ts");
     expect(route).toContain("if (!facts.convertibleTo) {");
@@ -911,7 +989,6 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
   it("the equity columns follow class 0 on chain, not the flow's defaults", () => {
     const row = buildProfileRow({ ...base, classTerms: { rightsBitfield: 2 | 4 | 8, liqPrefMultiplierBps: 15_000 } });
     expect(row.has_voting).toBe(false);
-    expect(row.convertible).toBe(true);
     expect(row.liquidation_pref_bps).toBe(15_000);
     const defaults = buildProfileRow(base);
     expect(defaults.has_voting).toBe(true);
@@ -919,6 +996,35 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
     const flow = src("components/tokenize-shares-flow.tsx");
     expect(flow).toContain("classTerms: resume.chain.sc0 ?? CLASS_DEFAULTS");
     expect(flow).not.toContain("resume.profile?.description || null");
+  });
+
+  it("convertible follows the conversion target (convertible_to / the marker link), not RIGHT_CONVERTIBLE (rehearsal P3)", () => {
+    // The rehearsal: class 0 linked to the marker on chain, the profile said false.
+    expect(buildProfileRow({ ...base, convertible: true }).convertible).toBe(true);
+    // The RIGHT_CONVERTIBLE bit alone (the flow never sets it) is not a conversion target.
+    expect(buildProfileRow({ ...base, classTerms: { rightsBitfield: 8, liqPrefMultiplierBps: 10_000 } }).convertible).toBe(false);
+    expect(src("lib/tokenize-shares.ts")).not.toContain("RIGHT_CONVERTIBLE)");
+    // What the step leaves on chain: an existing target, or the link this step sets.
+    expect(convertibleAfter({ sc0ConvertibleTo: null, marker: null })).toBe(false);
+    expect(convertibleAfter({ sc0ConvertibleTo: null, marker: "add" })).toBe(false);
+    expect(convertibleAfter({ sc0ConvertibleTo: null, marker: "add_and_link" })).toBe(true);
+    expect(convertibleAfter({ sc0ConvertibleTo: null, marker: "link" })).toBe(true);
+    expect(convertibleAfter({ sc0ConvertibleTo: "Mark1111111111111111111111111111111111111111", marker: null })).toBe(true);
+    // Both paths of the flow pass it.
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).toContain("convertible: convertibleAfter({ sc0ConvertibleTo: null, marker })");
+    expect(flow).toMatch(/const convertible = convertibleAfter\(\{\s*sc0ConvertibleTo: sc0 && sc0\.convertibleTo\.__option === "Some"/);
+  });
+
+  it("a saved profile is corrected when a later step links the marker (one patch, only when it differs)", () => {
+    const asset = "11111111111111111111111111111111";
+    expect(convertiblePatch(asset, { category: "equity", convertible: false }, true)).toEqual({ asset_pda: asset, category: "equity", convertible: true });
+    expect(convertiblePatch(asset, { convertible: null }, true)).toEqual({ asset_pda: asset, category: "equity", convertible: true });
+    expect(convertiblePatch(asset, { category: "equity", convertible: true }, true)).toBeNull();
+    expect(convertiblePatch(asset, null, true)).toBeNull();
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).toContain("const patch = profileMissing || !markerLinks(marker) ? null : convertiblePatch(resume.assetPda, resume.profile, convertible);");
+    expect(flow).toContain("else if (patch) await saveDetails(resume.assetPda, patch, `${total} of ${total}`);");
   });
 
   it("summary leaves an unknown country out", () => {
