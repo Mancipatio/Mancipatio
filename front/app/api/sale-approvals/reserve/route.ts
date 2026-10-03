@@ -12,11 +12,15 @@
 // max_price_per_unit (u64 decimal strings, payment-mint base units),
 // raise_type ("mature" | "startup"), expires_at (unix seconds, <= 90 days),
 // cliff_months / vesting_months (0/0 for mature; startup: the application's).
+//
+// An archived asset, or an asset of an archived issuer, gets no new approval
+// (409, lib/server/archive requireNotArchived): unarchive it first.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin, requireSuperAdmin } from "@/lib/server/admin-gate";
 import { requireFeature } from "@/lib/server/feature-gate";
+import { requireNotArchived } from "@/lib/server/archive";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import {
@@ -104,6 +108,8 @@ export async function POST(request: Request) {
     // and a sale id that has never been used or approved.
     const chain = await shareClassChain(shareClass);
     if (!chain.issuerVerified) throw new SiwsError(409, "The issuer is not KYB-verified");
+    // No new approval for an archived asset or an asset of an archived issuer (lib/server/archive).
+    await requireNotArchived(sb, chain.asset, chain.issuer);
     if (application) {
       const wallets = await applicantWallets(sb, application.applicant_wallet);
       if (!wallets.includes(chain.authority)) {

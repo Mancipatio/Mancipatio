@@ -37,6 +37,7 @@ import {
   utcDate,
 } from "@/lib/server/sale-capacity";
 import { subjectSpvId, shareClassChain } from "../_lib";
+import { requireNotArchived } from "@/lib/server/archive";
 
 const SIG_RE = /^[1-9A-HJ-NP-Za-km-z]{64,96}$/;
 
@@ -79,6 +80,9 @@ export async function POST(request: Request) {
     if (chain.authority !== wallet) {
       throw new SiwsError(409, "Only the issuer's own (Admin) key can mint into its treasury");
     }
+    // No new tokens of an archived asset (or of an archived issuer's): unarchive it first.
+    // Booking (above) stays open: it records a mint already on chain.
+    await requireNotArchived(sb, chain.asset, chain.issuer);
     const spvId = await subjectSpvId(sb, chain.asset, chain.issuer);
     const snapshot = {
       v: 1, kind: "treasury_mint", network, share_class: shareClass, asset: chain.asset, issuer: chain.issuer,

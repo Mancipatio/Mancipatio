@@ -42,6 +42,9 @@ import { syncSaleIfNeeded } from "@/lib/issuer-authority";
 import { useChainClock } from "@/lib/use-chain-clock";
 import { ManualSaleApprovals } from "@/app/admin/applications/sale-approvals";
 import { PublicSaleRequests } from "./public-sale-requests";
+import { ArchivedPill, ShowArchivedToggle } from "@/components/archived-filter";
+import { useArchivedSet } from "@/lib/archive-client";
+import { isWithdrawn } from "@/lib/archive";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { saleExpiredOpen } from "@/lib/admin-badge-rules";
 
@@ -146,6 +149,30 @@ function SalesOps() {
     return m;
   }, [data, assetPdaMap]);
 
+  // Sales of archived assets (lib/archive.ts) are hidden unless "Show
+  // archived" — except a sale still open: closing it is still an admin's job.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedSet = useArchivedSet();
+  const mintToAssetPda = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const sc of data?.shareClasses ?? []) m.set(sc.mint.toString(), sc.asset.toString());
+    return m;
+  }, [data]);
+  const saleArchived = useCallback(
+    (sale: Sale) =>
+      archivedSet !== null &&
+      isWithdrawn(
+        archivedSet,
+        mintToAssetPda.get(sale.mint.toString()),
+        shareClassToAsset.get(sale.mint.toString())?.issuer.toString(),
+      ),
+    [archivedSet, mintToAssetPda, shareClassToAsset],
+  );
+  const archivedCount = useMemo(
+    () => (data?.sales ?? []).filter((s) => saleArchived(s) && lifecycleOf(s) === "closed").length,
+    [data, saleArchived],
+  );
+
   const rows = useMemo(() => {
     if (!data) return [];
     const q = query.trim().toLowerCase();
@@ -153,10 +180,12 @@ function SalesOps() {
       .map((sale, i) => ({
         sale,
         asset: shareClassToAsset.get(sale.mint.toString()),
+        archived: saleArchived(sale),
         originalIndex: i,
       }))
-      .filter(({ sale, asset }) => {
+      .filter(({ sale, asset, archived }) => {
         const lc = lifecycleOf(sale);
+        if (archived && !showArchived && lc === "closed") return false;
         if (status !== "all" && lc !== status) return false;
         if (!q) return true;
         return (
@@ -167,7 +196,7 @@ function SalesOps() {
         );
       })
       .sort((a, b) => Number(b.sale.saleId - a.sale.saleId));
-  }, [data, shareClassToAsset, query, status]);
+  }, [data, shareClassToAsset, query, status, saleArchived, showArchived]);
 
   const selectedRow = useMemo(() => {
     if (selectedIdx === null) return null;
@@ -211,6 +240,7 @@ function SalesOps() {
             </button>
           ))}
         </div>
+        <ShowArchivedToggle checked={showArchived} onChange={setShowArchived} count={archivedCount} />
         <button
           type="button"
           onClick={() => setShowOpen(true)}
@@ -255,7 +285,7 @@ function SalesOps() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map(({ sale, asset, originalIndex }) => {
+              {rows.map(({ sale, asset, archived, originalIndex }) => {
                 const lc = lifecycleOf(sale);
                 const isSelected = selectedIdx === originalIndex;
                 const pctSold =
@@ -271,11 +301,12 @@ function SalesOps() {
                     }
                     className={`cursor-pointer transition-colors ${
                       isSelected ? "bg-slate-50" : "hover:bg-slate-50/60"
-                    }`}
+                    } ${archived ? "opacity-60" : ""}`}
                   >
                     <td className="px-4 py-3">
                       <p className="font-medium text-slate-900">
                         {asset?.name || "(asset unknown)"}
+                        {archived && <ArchivedPill />}
                       </p>
                       <p className="mt-0.5 text-xs text-slate-500">
                         sale #{String(sale.saleId)} · {asset?.assetId ?? "—"}

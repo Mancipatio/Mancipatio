@@ -25,6 +25,7 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "applications.adminList",
   "applications.capacity",
   "applications.mine",
+  "archive.check",
   "audit.list",
   "clients.adminDetail",
   "clients.adminList",

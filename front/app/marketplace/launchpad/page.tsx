@@ -21,6 +21,7 @@ import { fmtMoney } from "@/lib/format";
 import { formatPaymentTotal } from "@/lib/commitment-totals";
 import { Badge, EmptyState, Grid, PageHeader, Section } from "@/components/mx";
 import { listAssetProfiles } from "@/lib/asset-profiles";
+import { withoutArchived } from "@/lib/archive-client";
 import { SSC_NOT_APPROVED_LABEL, sscApprovalRef } from "@/lib/whitepaper-approval";
 import { detectNetwork } from "@/lib/network";
 
@@ -61,7 +62,8 @@ export default function PublicLaunchpadPage() {
     try {
       // 1. On-chain sales + off-chain published listings, in parallel
       const [network, listings] = await Promise.all([
-        loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
+        // Archived issuers and assets are not offered (lib/archive.ts).
+        loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)).then(withoutArchived),
         listPublishedListings(),
       ]);
 

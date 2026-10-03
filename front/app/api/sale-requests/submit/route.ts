@@ -16,6 +16,11 @@
 // sale's document route requires before anyone can buy. An SSC-approved
 // whitepaper is never replaced here (the operator manages that one).
 //
+// An archived asset (or an asset of an archived issuer) is refused (409):
+// publishing the profile here would silently take the archive back, which
+// only /api/archive/set does (with its reason and audit event). The write
+// itself is conditional on the row not being archived meanwhile.
+//
 // Params: share_class, price_per_unit (USDC base units), tokens,
 // duration_days (30 | 90 | 365), document { path, sha256 }.
 // Client wrapper: submitSaleRequest() in lib/sale-requests.ts.
@@ -39,6 +44,7 @@ import {
   storedRequest,
 } from "@/lib/server/sale-requests";
 import { assertAllowedPaymentMint, shareClassChain } from "@/app/api/sale-approvals/_lib";
+import { ARCHIVED_ASSET_REFUSAL, requireNotArchived } from "@/lib/server/archive";
 
 export async function POST(request: Request) {
   try {
@@ -58,13 +64,15 @@ export async function POST(request: Request) {
     const chain = await shareClassChain(shareClass);
     if (chain.authority !== wallet) throw new SiwsError(403, "Only the issuer's key may request a sale of its tokens");
     if (!chain.issuerVerified) throw new SiwsError(409, "The issuer is not KYB-verified");
+    const sb = getSupabaseAdmin();
+    // An archived asset is not offered again through a request (see header).
+    await requireNotArchived(sb, chain.asset, chain.issuer);
     const usdc = USDC[network]?.mint;
     if (!usdc) throw new SiwsError(409, "There is no USDC on this network, so no public sale can be requested");
     assertAllowedPaymentMint(network, usdc);
     const path = assetDocumentPath(document.path, chain.asset);
     const version = await requireDocumentVersion("documents", path, document.sha256);
 
-    const sb = getSupabaseAdmin();
     const facts = await readSaleRoom(sb, shareClass, chain.asset);
     if (!facts.assetActive) throw new SiwsError(409, "The asset is not active yet: the operator activates it first");
     if (!facts.mintInitialized) throw new SiwsError(409, "The share class has no token mint yet");
@@ -109,7 +117,7 @@ export async function POST(request: Request) {
       requested_at: now,
     };
     const sameDocument = profile.whitepaper_path === version.path && !!profile.whitepaper_published_at;
-    const { error } = await sb
+    const { data: written, error } = await sb
       .from("asset_profiles")
       .update({
         fields: fieldsWithRequest(profile.fields, saleRequest),
@@ -122,11 +130,15 @@ export async function POST(request: Request) {
         status: "published",
       })
       .eq("network", network)
-      .eq("asset_pda", chain.asset);
+      .eq("asset_pda", chain.asset)
+      // Archived since the check above: never published back.
+      .neq("status", "archived")
+      .select("asset_pda");
     if (error) {
       console.error("[api/sale-requests/submit] write failed:", error.message);
       throw new SiwsError(500, "Could not save the request");
     }
+    if (!Array.isArray(written) || written.length === 0) throw new SiwsError(409, ARCHIVED_ASSET_REFUSAL);
 
     try {
       await writeServerAudit(sb, {

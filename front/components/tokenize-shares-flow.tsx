@@ -40,10 +40,12 @@ import {
   AssetRegistryInstruction,
   AssetStatus,
   AssetType,
+  fetchMaybeAsset,
   findAssetPda,
   findIssuerPda,
   type Issuer,
 } from "@/lib/generated/asset_registry";
+import { fetchArchivedSet } from "@/lib/archive-client";
 import { findShareClassPda } from "@/lib/pdas";
 import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
@@ -76,12 +78,13 @@ import {
   DEFAULT_GRANULARITY,
   GRANULARITIES,
   MARKER_CLASS_INDEX,
+  MAX_ASSET_ID_BYTES,
   MAX_TOKEN_NAME_BYTES,
   NEXT_STEP_LINE,
   OPEN_TOKEN_NOTE,
   baseAssetId,
   buildProfileRow,
-  candidateAssetIds,
+  assetIdCandidates,
   canonicalProfileHashInput,
   companyShortName,
   convertibleAfter,
@@ -122,6 +125,7 @@ import {
   tokenizeCreateBlocker,
   tokenizeFields,
   utf8Bytes,
+  validateCustomAssetId,
   validateCompanyOverride,
   validateSymbolOverride,
   validateWebsite,
@@ -262,6 +266,9 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
   const [symbolOverride, setSymbolOverride] = useState<string | null>(null);
   const [descriptionEdit, setDescription] = useState<string | null>(null);
   const [websiteEdit, setWebsite] = useState<string | null>(null);
+  // Advanced → Asset ID: null = the automatic one (base, base-2, …).
+  const [customAssetId, setCustomAssetId] = useState<string | null>(null);
+  const [idCheck, setIdCheck] = useState<{ id: string; state: "checking" | "free" | "taken" | "error"; name?: string; archived?: boolean } | null>(null);
   const [duplicate, setDuplicate] = useState<DuplicatePrompt | null>(null);
   const prefill = resume?.prefill;
   const resumeSc0 = resume?.chain.sc0 ?? null;
@@ -335,7 +342,11 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       const rows = await Promise.all(
         mine.map(async (a) => ({ asset: a, pda: (await findAssetPda({ issuer: a.issuer, assetId: a.assetId }))[0] })),
       );
-      const candidates = rows.filter((r) => looksLikeTokenizeAsset(r.asset) || readDraft(r.pda) !== null);
+      // Archived tokens (lib/archive.ts) are not offered to continue.
+      const archived = await fetchArchivedSet({ fresh: true });
+      const candidates = rows.filter(
+        (r) => !archived.assets.has(r.pda.toString()) && (looksLikeTokenizeAsset(r.asset) || readDraft(r.pda) !== null),
+      );
       if (candidates.length > 0) {
         // Unreadable profiles: offer only the chain steps, never a "save details" guess.
         let profiles: Map<string, AssetProfile> | null = null;
@@ -394,6 +405,10 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       const assetPda = resumeAssetPda as Address;
       const chain = await readTokenizeState(client.runtime.rpc, assetPda);
       const profile = await getPrivateAssetProfile(conn.wallet, assetPda);
+      if (profile?.status === "archived") {
+        setResumeError("This token is archived. Unarchive it first (My assets → Show archived), or start a new one.");
+        return;
+      }
       const draft = readDraft(assetPda);
       const prefill = resumePrefill({
         assetName: chain.asset?.name ?? null,
@@ -441,7 +456,43 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
   const verified = ctx?.issuer.kybStatus === 1;
   const country = ctx?.jurisdiction ? countryName(ctx.jurisdiction) : null;
   const pctLabel = figures.ok ? formatPercent(figures.p4) : fixedTokens !== null ? "…" : percentInput.trim() || "…";
-  const assetIdPreview = figures.ok && !symbolError ? baseAssetId(symbolPrefix, figures.p4) : "—";
+  const customIdError = !resumeAsset && customAssetId !== null ? validateCustomAssetId(customAssetId) : null;
+  const customIdValue = !resumeAsset && customAssetId !== null && !customIdError ? customAssetId.trim() : null;
+  const customIdTaken =
+    customIdValue !== null && idCheck?.id === customIdValue && idCheck.state === "taken"
+      ? `Asset ID ${customIdValue} is already used on chain${idCheck.name ? ` (“${idCheck.name}”${idCheck.archived ? ", archived" : ""})` : ""} — choose another.`
+      : null;
+  const assetIdPreview = customIdValue ?? (figures.ok && !symbolError ? baseAssetId(symbolPrefix, figures.p4) : "—");
+
+  // Live check of a typed asset ID: the issuer + ID PDA must not exist yet.
+  const issuerForCheck = ctx?.issuerPda ?? null;
+  useEffect(() => {
+    if (!customIdValue || !issuerForCheck) return;
+    let cancelled = false;
+    const id = customIdValue;
+    const timer = setTimeout(() => {
+      setIdCheck({ id, state: "checking" });
+      void (async () => {
+        try {
+          const [pda] = await findAssetPda({ issuer: issuerForCheck, assetId: id });
+          const [existing, archived] = await Promise.all([
+            fetchMaybeAsset(client.runtime.rpc, pda, { commitment: "confirmed" }),
+            fetchArchivedSet(),
+          ]);
+          if (cancelled) return;
+          setIdCheck(existing.exists
+            ? { id, state: "taken", name: existing.data.name, archived: archived.assets.has(pda.toString()) }
+            : { id, state: "free" });
+        } catch {
+          if (!cancelled) setIdCheck({ id, state: "error" });
+        }
+      })();
+    }, 400);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [customIdValue, issuerForCheck, client]);
 
   function figuresFor(p4: bigint, tokens: bigint, g: GranularityId): TokenizeFigures {
     return { p4, granularity: g, tokens, priceCents: price.ok ? price.value : null };
@@ -514,16 +565,23 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
       if (namedPercentE4(intent.name) !== figures.p4) {
         throw new Error(`The token name must end with ${formatPercent(figures.p4)}%, the share you entered.`);
       }
+      if (customIdError) throw new Error(`Asset ID: ${customIdError}`);
+      const archived = await fetchArchivedSet({ fresh: true });
       const picked = await pickTokenizeAssetId(rpc, {
         issuer: ctx.issuerPda,
-        candidates: candidateAssetIds(baseAssetId(symbolPrefix, figures.p4)),
+        candidates: assetIdCandidates(customIdValue, baseAssetId(symbolPrefix, figures.p4)),
+        archived: archived.assets,
         intent,
         canInitMint,
         canConvert,
         profileSaved: async (pda) => hasTokenizeFields(await getPrivateAssetProfile(session, pda)),
       });
       if (!picked) {
-        throw new Error("Every asset ID for this share is already taken. Change the symbol under Advanced.");
+        throw new Error(
+          customIdValue
+            ? `Asset ID ${customIdValue} is already used on chain. Choose another under Advanced.`
+            : "Every asset ID for this share is already taken. Change the symbol or type an asset ID under Advanced.",
+        );
       }
       // Another token for the same share: asset accounts cannot be closed, so
       // stop before the wallet opens and show what exists (DuplicatePrompt).
@@ -879,6 +937,8 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
     nameError ? `Name: ${nameError}` : null,
     symbolError ? `Symbol: ${symbolError}` : null,
     websiteError ? `Website: ${websiteError}` : null,
+    customIdError ? `Asset ID: ${customIdError}` : null,
+    customIdTaken,
   ].filter((p): p is string => !!p);
   const canSubmit = problems.length === 0 && working === null && !tx.isSending;
   // The duplicate prompt holds only while the name, symbol and cap it was raised for are unchanged.
@@ -1052,7 +1112,7 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
               aria-expanded={advancedOpen}
               className="text-sm font-medium text-slate-600 hover:text-slate-900"
             >
-              {advancedOpen ? "▾" : "▸"} Advanced (name, symbol, description, website)
+              {advancedOpen ? "▾" : "▸"} Advanced (name, symbol, asset ID, description, website)
             </button>
             {advancedOpen && (
               <div className="mt-3 grid gap-3 sm:grid-cols-2">
@@ -1086,6 +1146,35 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
                   </span>
                 </label>
                 <label className="block sm:col-span-2">
+                  <span className={labelClass}>Asset ID</span>
+                  <input
+                    value={customAssetId ?? ""}
+                    onChange={(e) => {
+                      const v = e.target.value.toUpperCase().replace(/\s/g, "");
+                      setCustomAssetId(v ? v : null);
+                    }}
+                    placeholder={figures.ok && !symbolError ? `${baseAssetId(symbolPrefix, figures.p4)} (automatic)` : "automatic"}
+                    maxLength={MAX_ASSET_ID_BYTES}
+                    className={`${inputClass} mt-1 font-mono`}
+                  />
+                  <span
+                    className={`mt-1 block text-[11px] ${
+                      customIdError || customIdTaken ? "text-red-700" : idCheck?.state === "free" && idCheck.id === customIdValue ? "text-emerald-700" : "text-slate-400"
+                    }`}
+                    aria-live="polite"
+                  >
+                    {customAssetId === null
+                      ? "Leave empty for the automatic ID. Type one (e.g. MANCI-2026) to start clean: it is used as is, never with a “-2”."
+                      : customIdError ??
+                        customIdTaken ??
+                        (idCheck?.id !== customIdValue || idCheck.state === "checking"
+                          ? "Checking the chain…"
+                          : idCheck.state === "free"
+                            ? "Free on chain — this will be the asset ID (permanent)."
+                            : "Could not check the chain now; it is checked again before anything is signed.")}
+                  </span>
+                </label>
+                <label className="block sm:col-span-2">
                   <span className={labelClass}>Description</span>
                   <textarea
                     value={description}
@@ -1107,12 +1196,13 @@ export function TokenizeSharesFlow({ resumeAssetPda }: { resumeAssetPda: string 
                   />
                   {websiteError && <span className="mt-1 block text-[11px] text-red-700">{websiteError}</span>}
                 </label>
-                {(companyOverride !== null || symbolOverride !== null) && (
+                {(companyOverride !== null || symbolOverride !== null || customAssetId !== null) && (
                   <button
                     type="button"
                     onClick={() => {
                       setCompanyOverride(null);
                       setSymbolOverride(null);
+                      setCustomAssetId(null);
                     }}
                     className="justify-self-start text-xs text-slate-500 underline hover:text-slate-800"
                   >
@@ -1245,7 +1335,7 @@ function DuplicateTokenPrompt(props: {
       <p className="mt-2 text-[12px] text-amber-800">
         A new token gets the asset ID <span className="font-mono">{prompt.assetId}</span>
         {sameNameAndSymbol
-          ? ` and the same name and symbol (${props.symbol}); to tell them apart, change the symbol under Advanced.`
+          ? ` and the same name and symbol (${props.symbol}); to tell them apart, change the symbol or type your own asset ID under Advanced. A test token you do not use can be archived (My assets → Archive) so it stops showing up.`
           : "."}{" "}
         Tokens cannot be deleted.
       </p>

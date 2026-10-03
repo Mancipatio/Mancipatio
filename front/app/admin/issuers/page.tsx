@@ -58,6 +58,8 @@ import { IssuerRecoveryPanel } from "./issuer-recovery-panel";
 import { IssuerFreezePanel } from "./issuer-freeze-panel";
 import { IssuerRowGroup, reviewScrollOptions } from "./issuer-row";
 import { recoveryPathFor } from "@/lib/issuer-recovery";
+import { ArchiveDialog } from "@/components/archive-dialog";
+import { useArchivedSet } from "@/lib/archive-client";
 import { RequireRole } from "@/components/require-role";
 import {
   getIssuerProfile,
@@ -233,9 +235,40 @@ function IssuersOps() {
     [data, issuers],
   );
 
+  // Archived issuers are hidden unless "Show archived" (the open one stays).
+  const archivedSet = useArchivedSet();
+  const [showArchived, setShowArchived] = useState(false);
+  const [issuerPdas, setIssuerPdas] = useState<Map<string, string>>(new Map());
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const m = new Map<string, string>();
+      for (const i of issuers) {
+        const [pda] = await findIssuerPda({ legalEntityId: i.legalEntityId });
+        m.set(issuerLegalId(i), pda.toString());
+      }
+      if (!cancelled) setIssuerPdas(m);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [issuers]);
+  const archivedLegalIds = useMemo(() => {
+    const out = new Set<string>();
+    if (!archivedSet) return out;
+    for (const [legalId, pda] of issuerPdas) if (archivedSet.issuers.has(pda)) out.add(legalId);
+    return out;
+  }, [archivedSet, issuerPdas]);
+
   const filtered = useMemo(
-    () => filterIssuers(issuers, { query, status, keep: openReview }),
-    [issuers, query, status, openReview],
+    () =>
+      filterIssuers(issuers, { query, status, keep: openReview }).filter(
+        (i) =>
+          showArchived ||
+          !archivedLegalIds.has(issuerLegalId(i)) ||
+          issuerLegalId(i) === openReview?.legalId,
+      ),
+    [issuers, query, status, openReview, showArchived, archivedLegalIds],
   );
 
   const selectedVisible =
@@ -307,6 +340,10 @@ function IssuersOps() {
             );
           })}
         </div>
+        <label className="inline-flex items-center gap-1.5 text-xs text-slate-600" title="Archived issuers are hidden from every list until shown here">
+          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+          Show archived{archivedLegalIds.size ? ` (${archivedLegalIds.size})` : ""}
+        </label>
         <button
           type="button"
           onClick={() => setShowAdd(true)}
@@ -458,6 +495,9 @@ function IssuerDetail({
   const [pfWebsite, setPfWebsite] = useState("");
   const [pfSaving, setPfSaving] = useState(false);
   const legalId = issuerLegalId(issuer);
+  const archivedSet = useArchivedSet();
+  const [archiveOpen, setArchiveOpen] = useState(false);
+  const issuerArchived = !!issuerPda && !!archivedSet?.issuers.has(issuerPda.toString());
 
   useEffect(() => {
     let cancelled = false;
@@ -701,16 +741,44 @@ function IssuerDetail({
           </p>
           <h3 className="mt-1 text-lg font-semibold text-slate-900">
             {legalId}
+            {issuerArchived && (
+              <span className="ml-2 inline-flex rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 align-middle text-[10px] font-semibold uppercase text-slate-600">
+                Archived
+              </span>
+            )}
           </h3>
         </div>
-        <button
-          type="button"
-          onClick={onClose}
-          className="text-xs text-slate-400 hover:text-slate-700"
-        >
-          Close ✕
-        </button>
+        <div className="flex items-center gap-3">
+          {isSuperAdmin && issuerPda && archivedSet?.issuerArchiveAvailable && (
+            <button
+              type="button"
+              onClick={() => setArchiveOpen(true)}
+              className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
+              title="Hide this issuer and all its assets from the lists (the on-chain record stays)"
+            >
+              {issuerArchived ? "Unarchive issuer" : "Archive issuer"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            className="text-xs text-slate-400 hover:text-slate-700"
+          >
+            Close ✕
+          </button>
+        </div>
       </div>
+      {archiveOpen && issuerPda && (
+        <ArchiveDialog
+          open
+          kind="issuer"
+          pda={issuerPda.toString()}
+          label={profile?.company_name || legalId}
+          mode={issuerArchived ? "unarchive" : "archive"}
+          onClose={() => setArchiveOpen(false)}
+          onDone={() => undefined}
+        />
+      )}
 
       {/* The KYB decision comes first: it is what a pending row is opened for. */}
       {pending && (

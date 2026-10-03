@@ -108,6 +108,9 @@ import {
   type ClassRestriction,
 } from "@/lib/sale-page";
 import { formatPercent } from "@/lib/tokenize-shares";
+import { fetchArchivedSet } from "@/lib/archive-client";
+import { hideArchived } from "@/lib/archive";
+import { WithdrawnNotice } from "@/components/withdrawn-notice";
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 /** Returns the URL only when it is a safe http(s) link, otherwise null.
@@ -154,6 +157,8 @@ export default function DealPage({
   const pauseFlags = usePauseFlags();
 
   const [sale, setSale] = useState<Sale | null | "not_found">(null);
+  // The sale's asset (or its issuer) is archived: the page says withdrawn (lib/archive.ts).
+  const [withdrawnAsset, setWithdrawnAsset] = useState<string | null>(null);
   const [listing, setListing] = useState<LaunchListing | null>(null);
   const [app, setApp] = useState<PublicApplication | null>(null);
   const [updates, setUpdates] = useState<LaunchUpdate[]>([]);
@@ -278,6 +283,11 @@ export default function DealPage({
         const saleClass = matchedSale
           ? network.shareClasses.find((sc) => sc.mint.toString() === matchedSale!.mint.toString())
           : undefined;
+        if (matchedSale && saleClass) {
+          const visible = await hideArchived(network, await fetchArchivedSet());
+          if (cancelled) return;
+          setWithdrawnAsset(visible.sales.includes(matchedSale) ? null : saleClass.asset.toString());
+        }
         const fetchedProfile = saleClass
           ? await getAssetProfile(saleClass.asset.toString()).catch(() => null)
           : null;
@@ -504,6 +514,8 @@ export default function DealPage({
       </section>
     );
   }
+
+  if (withdrawnAsset) return <WithdrawnNotice address={withdrawnAsset} />;
 
   if (sale === "not_found") {
     return (

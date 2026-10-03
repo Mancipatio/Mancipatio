@@ -17,30 +17,21 @@ import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 
-export function LockSupplyButton({
-  scPda,
-  onRefresh,
-  disabled = false,
-  label = "Lock supply",
-  requireZeroConfirm = false,
-}: {
-  scPda: Address | null;
-  onRefresh: () => Promise<void>;
-  disabled?: boolean;
-  label?: string;
-  /** Nothing was created yet: the lock fixes the supply at 0, confirmed with a tick. */
-  requireZeroConfirm?: boolean;
-}) {
+/**
+ * lock_supply on one class, signed by the connected wallet (an Admin record
+ * holder: lock_supply.rs). The app's sender runs the simulation gate first
+ * (lib/verified-solana-client), so a lock that would fail never reaches the
+ * wallet. Returns the signature, or null after a toast explained the failure.
+ * Shared by LockSupplyButton and the archive dialog's "lock at 0" (A2).
+ */
+export function useLockSupply() {
   const conn = useWalletConnection();
   const tx = useSendTransaction();
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
-  const [confirmLock, setConfirmLock] = useState(false);
-  const [zeroConfirmed, setZeroConfirmed] = useState(false);
 
-  async function lockSupply(reason: string) {
-    if (!wallet || !conn.wallet || !scPda) return;
-    if (requireZeroConfirm && !zeroConfirmed) return;
+  async function lock(scPda: Address, reason: string, opts: { atZero?: boolean; context?: string } = {}): Promise<string | null> {
+    if (!wallet || !conn.wallet) return null;
     const pendingId = toast.showPending("Locking supply…", reason);
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
@@ -58,10 +49,9 @@ export function LockSupplyButton({
         reason,
         target_label: scPda.toString(),
         tx_signature: sig,
-        metadata: requireZeroConfirm ? { locked_at_zero: true } : undefined,
+        metadata: opts.atZero || opts.context ? { ...(opts.atZero ? { locked_at_zero: true } : {}), ...(opts.context ? { context: opts.context } : {}) } : undefined,
       });
-      setConfirmLock(false);
-      await onRefresh();
+      return sig;
     } catch (err) {
       toast.dismiss(pendingId);
       const message = explainSendError(err);
@@ -73,16 +63,47 @@ export function LockSupplyButton({
         reason,
         target_label: scPda.toString(),
         status: "failed",
-        metadata: { error: message },
+        metadata: { error: message, ...(opts.context ? { context: opts.context } : {}) },
       });
+      return null;
     }
+  }
+
+  return { lock, busy: tx.isSending, ready: !!wallet && !!conn.wallet };
+}
+
+export function LockSupplyButton({
+  scPda,
+  onRefresh,
+  disabled = false,
+  label = "Lock supply",
+  requireZeroConfirm = false,
+}: {
+  scPda: Address | null;
+  onRefresh: () => Promise<void>;
+  disabled?: boolean;
+  label?: string;
+  /** Nothing was created yet: the lock fixes the supply at 0, confirmed with a tick. */
+  requireZeroConfirm?: boolean;
+}) {
+  const { lock, busy } = useLockSupply();
+  const [confirmLock, setConfirmLock] = useState(false);
+  const [zeroConfirmed, setZeroConfirmed] = useState(false);
+
+  async function lockSupply(reason: string) {
+    if (!scPda) return;
+    if (requireZeroConfirm && !zeroConfirmed) return;
+    const sig = await lock(scPda, reason, { atZero: requireZeroConfirm });
+    if (!sig) return;
+    setConfirmLock(false);
+    await onRefresh();
   }
 
   return (
     <>
       <button
         type="button"
-        disabled={tx.isSending || disabled || !scPda}
+        disabled={busy || disabled || !scPda}
         onClick={() => {
           setZeroConfirmed(false);
           setConfirmLock(true);
@@ -127,7 +148,7 @@ export function LockSupplyButton({
           </>
         }
         confirmDisabled={requireZeroConfirm && !zeroConfirmed}
-        busy={tx.isSending}
+        busy={busy}
       />
     </>
   );

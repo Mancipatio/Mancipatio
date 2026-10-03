@@ -416,8 +416,14 @@ export async function pickTokenizeAssetId(
     /** The wallet holds the CONVERSION permission (the marker step). */
     canConvert?: boolean;
     profileSaved: (assetPda: Address) => Promise<boolean>;
+    /**
+     * Archived asset PDAs (lib/archive.ts): taken IDs the flow passes over
+     * silently — never resumed, never shown in the duplicate prompt.
+     */
+    archived?: ReadonlySet<string>;
   },
 ): Promise<TokenizeAssetPick | null> {
+  const archived = input.archived ?? new Set<string>();
   const pdas = await Promise.all(
     input.candidates.map(async (assetId) => (await findAssetPda({ issuer: input.issuer, assetId }))[0]),
   );
@@ -429,6 +435,10 @@ export async function pickTokenizeAssetId(
     if (!a.exists) {
       steps.push(nextTokenizeStep({ ...base, asset: null, sc0: null, profileSaved: false }));
       break;
+    }
+    if (archived.has(pdas[i].toString())) {
+      steps.push({ kind: "blocked", reason: "archived" });
+      continue;
     }
     let sc0: ShareClass | null = null;
     let sc1: ShareClass | null = null;
@@ -453,7 +463,7 @@ export async function pickTokenizeAssetId(
   }
   const chosen = chooseAssetId(input.candidates, steps);
   if (!chosen) return null;
-  const skipped = chosen.skipped.map(({ assetId, step }): ExistingTokenizeAsset => {
+  const skipped = chosen.skipped.filter(({ assetId }) => !archived.has(pdas[input.candidates.indexOf(assetId)].toString())).map(({ assetId, step }): ExistingTokenizeAsset => {
     const i = input.candidates.indexOf(assetId);
     const a = assets[i];
     if (!a.exists) throw new Error(`Asset ${assetId} was reported as existing but is missing.`);

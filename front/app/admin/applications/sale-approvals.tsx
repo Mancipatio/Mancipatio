@@ -25,6 +25,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { withoutArchived } from "@/lib/archive-client";
 import { findShareClassPda } from "@/lib/pdas";
 import { detectNetwork } from "@/lib/network";
 import { defaultPaymentMint, paymentMintLabel } from "@/lib/payment-mints";
@@ -405,15 +406,18 @@ export function ApproveSaleModal({
     void (async () => {
       try {
         const data = await loadNetworkPreferIndexer(() => loadNetwork(rpc));
+        // Archived assets (and assets of an archived issuer) are not offered:
+        // they get no new approval (the reserve route refuses them too).
+        const offered = await withoutArchived(data);
         const owners = new Set([applicantWallet, linkedIssuer].filter(Boolean) as string[]);
         const out: ClassOption[] = [];
-        for (const issuer of data.issuers) {
+        for (const issuer of offered.issuers) {
           if (applicantWallet !== null && !owners.has(issuer.authority.toString())) continue;
           const [issuerPda] = await findIssuerPda({ legalEntityId: issuer.legalEntityId });
-          for (const asset of data.assets) {
+          for (const asset of offered.assets) {
             if (asset.issuer !== issuerPda) continue;
             const [apda] = await findAssetPda({ issuer: asset.issuer, assetId: asset.assetId });
-            for (const sc of data.shareClasses) {
+            for (const sc of offered.shareClasses) {
               if (sc.asset !== apda || !sc.mintInitialized) continue;
               const pda = await findShareClassPda(apda, sc.classIndex);
               out.push({ pda, label: `${asset.name} · class #${sc.classIndex}`, sc });

@@ -4,6 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { readPdas } from "@/lib/server/profile-read";
 import { CATEGORY_SLUGS } from "@/lib/asset-types";
+import { readArchivedIssuers } from "@/lib/server/archive";
 import { PUBLIC_ASSET_PROFILE_FIELDS, PUBLIC_TOKENIZE_SELECT, projectPublicAssetProfile } from "@/lib/profile-public";
 
 export async function POST(request: Request) {
@@ -22,7 +23,11 @@ export async function POST(request: Request) {
     if (params.category !== undefined) query = query.eq("category", params.category);
     const { data, error } = await query;
     if (error) throw new SiwsError(503, "Published profiles unavailable — try again");
-    const rows = (data ?? []).map((row) => projectPublicAssetProfile(row as unknown as Record<string, unknown>)).filter((row) => row !== null);
+    // An archived issuer's assets are withdrawn with it (lib/archive.ts); an
+    // archived asset is already out (status 'archived' is not 'published').
+    const archivedIssuers = await readArchivedIssuers(getSupabaseAdmin());
+    const rows = (data ?? []).map((row) => projectPublicAssetProfile(row as unknown as Record<string, unknown>))
+      .filter((row): row is NonNullable<typeof row> => row !== null && !archivedIssuers.has(String(row.issuer_pda ?? "")));
     // Preserve the public legal-entity label without exposing SPV bookkeeping,
     // client linkage, internal IDs or notes through a browser-wide table read.
     const visible = new Set(rows.map((row) => row.asset_pda));

@@ -53,6 +53,9 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { LockSupplyButton } from "@/components/lock-supply-button";
 import { ShareTransferPanel } from "@/components/share-transfer-panel";
 import { TreasuryMintPanel } from "@/components/treasury-mint-panel";
+import { ArchivedPill, ShowArchivedToggle } from "@/components/archived-filter";
+import { useArchivedSet } from "@/lib/archive-client";
+import { isWithdrawn } from "@/lib/archive";
 import { recordAudit } from "@/lib/supabase";
 import { SkeletonCard, SkeletonTable } from "@/components/skeleton";
 import { RequireRole } from "@/components/require-role";
@@ -144,6 +147,9 @@ function ShareClassesOps() {
   const [status, setStatus] = useState<StatusFilter>("all");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
   const [showAdd, setShowAdd] = useState(false);
+  // Classes of archived assets (lib/archive.ts) are hidden unless this is on.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedSet = useArchivedSet();
 
   const refresh = useCallback(async () => {
     try {
@@ -186,9 +192,13 @@ function ShareClassesOps() {
     return data.shareClasses
       .map((sc, i) => {
         const asset = assetPdaMap.get(sc.asset.toString());
-        return { sc, asset, originalIndex: i };
+        const archived =
+          archivedSet !== null &&
+          isWithdrawn(archivedSet, sc.asset.toString(), asset?.issuer.toString());
+        return { sc, asset, archived, originalIndex: i };
       })
-      .filter(({ sc, asset }) => {
+      .filter(({ sc, asset, archived }) => {
+        if (archived && !showArchived) return false;
         if (status !== "all" && statusOf(sc) !== status) return false;
         if (!q) return true;
         return (
@@ -204,7 +214,14 @@ function ShareClassesOps() {
         const cmp = an.localeCompare(bn);
         return cmp !== 0 ? cmp : a.sc.classIndex - b.sc.classIndex;
       });
-  }, [data, assetPdaMap, query, status]);
+  }, [data, assetPdaMap, query, status, archivedSet, showArchived]);
+
+  const archivedCount = useMemo(() => {
+    if (!data || !archivedSet) return 0;
+    return data.shareClasses.filter((sc) =>
+      isWithdrawn(archivedSet, sc.asset.toString(), assetPdaMap.get(sc.asset.toString())?.issuer.toString()),
+    ).length;
+  }, [data, archivedSet, assetPdaMap]);
 
   const selectedRow = useMemo(() => {
     if (!data || selectedIdx === null) return null;
@@ -245,6 +262,7 @@ function ShareClassesOps() {
             </button>
           ))}
         </div>
+        <ShowArchivedToggle checked={showArchived} onChange={setShowArchived} count={archivedCount} />
         {isAdmin && (
           <button
             type="button"
@@ -293,7 +311,7 @@ function ShareClassesOps() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map(({ sc, asset, originalIndex }) => {
+              {rows.map(({ sc, asset, archived, originalIndex }) => {
                 const s = statusOf(sc);
                 const isSelected = originalIndex === selectedIdx;
                 return (
@@ -304,11 +322,12 @@ function ShareClassesOps() {
                     }
                     className={`cursor-pointer transition-colors ${
                       isSelected ? "bg-slate-50" : "hover:bg-slate-50/60"
-                    }`}
+                    } ${archived ? "opacity-60" : ""}`}
                   >
                     <td className="px-4 py-3">
                       <p className="font-medium text-slate-900">
                         {asset?.name || "(asset unknown)"}
+                        {archived && <ArchivedPill />}
                       </p>
                       <p className="mt-0.5 text-xs text-slate-500">
                         #{sc.classIndex} · {asset?.assetId ?? "—"}

@@ -369,3 +369,40 @@ describe("/api/profiles/upsert — the SSC approval on mainnet (review 8.1 #6)",
     expect(state.upserts[0]).toMatchObject({ whitepaper_status: "ssc_approved", ssc_decision_ref: "5/0-01/26" });
   });
 });
+
+describe("/api/profiles/upsert — archive is its own route (lib/archive.ts)", () => {
+  const call = async (profile: Record<string, unknown>) => {
+    state.params = { profile: { asset_pda: ASSET, category: "equity", ...profile } };
+    const res = await upsertRoute(new Request("https://www.manci.io/api/profiles/upsert", { method: "POST", body: "{}" }));
+    return { status: res.status, body: await res.json() };
+  };
+  const record = { reason: "test asset with a test legal PDF", archived_by: "x", archived_at: "2026-10-03T00:00:00Z" };
+
+  it("an archived profile takes no write (unarchive first), from the issuer or an admin", async () => {
+    state.profile = { status: "archived", fields: { archive: record } };
+    for (const admin of [false, true]) {
+      state.admin = admin;
+      const res = await call({ display_name: "Renamed" });
+      expect(res.status).toBe(409);
+      expect(res.body.error).toMatch(/archived — unarchive it first/);
+    }
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("a patch cannot set status \"archived\" (no reason, no audit) — the Archive action does", async () => {
+    state.profile = { status: "draft", fields: {} };
+    const res = await call({ status: "archived" });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/Archive action/);
+    expect(state.upserts).toHaveLength(0);
+  });
+
+  it("fields.archive is never written by a patch and a stored one is kept", async () => {
+    state.profile = { status: "draft", fields: { archive: record, tokenize: { tokens: "1" } } };
+    expect((await call({ fields: { tokenize: { tokens: "2" }, archive: { reason: "forged" } } })).status).toBe(200);
+    expect(state.upserts[0].fields).toEqual({ tokenize: { tokens: "2" }, archive: record });
+    state.profile = { status: "draft", fields: {} };
+    expect((await call({ fields: { archive: { reason: "forged" } } })).status).toBe(200);
+    expect(state.upserts[1].fields).toEqual({});
+  });
+});

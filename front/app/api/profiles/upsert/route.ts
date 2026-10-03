@@ -22,6 +22,10 @@
 //     admin-only too, and recording one needs the SUPER admin; the server
 //     stamps offering_exemption_recorded_by / _at and writes an audit event.
 //
+// Archive (lib/archive.ts, /api/archive/set): a patch can neither set status
+// "archived" nor write to an archived profile (409: unarchive first), and
+// `fields.archive` is the archive route's alone (kept like sale_request).
+//
 // `fields.sale_request` (a public-sale request, lib/server/sale-requests) is
 // written only by /api/sale-requests/*: a patch never sets it, and a patch
 // that writes `fields` keeps the stored request (the tokenize flow's "Save
@@ -39,6 +43,7 @@ import { detectNetwork } from "@/lib/network";
 import { requireDocumentVersion } from "@/lib/server/document-versions";
 import { requireProfileOwner } from "@/lib/server/profile-read";
 import { protectSaleRequest } from "@/lib/server/sale-requests";
+import { protectArchive } from "@/lib/archive";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const WHITEPAPER_STATUSES = new Set([
@@ -238,16 +243,24 @@ export async function POST(request: Request) {
     }
 
     const sb = getSupabaseAdmin();
-    const current = await sb.from("asset_profiles").select("fields,whitepaper_path,whitepaper_sha256,whitepaper_status,whitepaper_version_id,whitepaper_published_at,ssc_decision_ref,ssc_decision_doc_path,ssc_decision_doc_sha256,ssc_decision_version_id,created_by")
+    const current = await sb.from("asset_profiles").select("fields,status,whitepaper_path,whitepaper_sha256,whitepaper_status,whitepaper_version_id,whitepaper_published_at,ssc_decision_ref,ssc_decision_doc_path,ssc_decision_doc_sha256,ssc_decision_version_id,created_by")
       .eq("asset_pda",assetPda).eq("network",detectNetwork()).maybeSingle();
     if(current.error) throw new SiwsError(503,"Current document version unavailable");
     const existing = current.data;
+    // Archive is its own route (it records who, when and why).
+    if (existing?.status === "archived") {
+      throw new SiwsError(409, "This asset is archived — unarchive it first (Admin → Assets → Unarchive)");
+    }
+    if (cleaned.status === "archived") {
+      throw new SiwsError(400, "Archive an asset with its Archive action: it asks for the reason and writes the audit log");
+    }
     // created_by: first writer wins (see STRIPPED_FIELDS).
     cleaned.created_by = (typeof existing?.created_by === "string" && existing.created_by) || wallet;
     // The public-sale request is the sale-requests routes' alone (see header).
     if (isPlainObject(cleaned.fields)) {
       const storedFields: unknown = existing?.fields;
-      cleaned.fields = protectSaleRequest(cleaned.fields, isPlainObject(storedFields) ? storedFields : null);
+      const stored = isPlainObject(storedFields) ? storedFields : null;
+      cleaned.fields = protectArchive(protectSaleRequest(cleaned.fields, stored), stored);
     }
     const changedFile = cleaned.whitepaper_path !== undefined && cleaned.whitepaper_path !== existing?.whitepaper_path;
     if(changedFile && existing?.whitepaper_status === "ssc_approved" && (!admin || !cleaned.ssc_decision_ref)) {

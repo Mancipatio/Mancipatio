@@ -16,6 +16,8 @@ import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL, toBytes32 } from "@/lib/forma
 import { SkeletonCard } from "@/components/skeleton";
 import { visibleClassCount } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
+import { fetchArchivedSet } from "@/lib/archive-client";
+import { WithdrawnNotice } from "@/components/withdrawn-notice";
 
 const KYB_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -35,6 +37,8 @@ export default function IssuerProfilePage({
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [myAssets, setMyAssets] = useState<AddressedAsset<Asset>[]>([]);
+  // Archived issuer (lib/archive.ts): its PDA, shown as withdrawn.
+  const [withdrawn, setWithdrawn] = useState<string | null>(null);
   // Conversion targets (a class capped at 0) are not counted as share classes.
   const conversionTargets = useConversionTargets(data?.shareClasses);
 
@@ -45,8 +49,8 @@ export default function IssuerProfilePage({
         const network = await loadNetworkPreferIndexer(() =>
           loadNetwork(client.runtime.rpc),
         );
+        const archived = await fetchArchivedSet();
         if (cancelled) return;
-        setData(network);
 
         // Find this issuer + derive PDA so we can filter assets.
         const issuer = network.issuers.find(
@@ -56,21 +60,23 @@ export default function IssuerProfilePage({
           const [pda] = await findIssuerPda({
             legalEntityId: issuer.legalEntityId,
           });
-          const mine = await withAssetAddresses(
+          const mine = (await withAssetAddresses(
             network.assets.filter((a) => a.issuer.toString() === pda.toString()),
-          );
+          )).filter((a) => !archived.assets.has(a.address));
           if (cancelled) return;
+          setWithdrawn(archived.issuers.has(pda.toString()) ? pda.toString() : null);
           setMyAssets(mine);
         } else {
           // Re-derive PDA from the URL slug as a fallback.
           const [pda] = await findIssuerPda({
             legalEntityId: toBytes32(legalId),
           });
-          const mine = await withAssetAddresses(
+          const mine = (await withAssetAddresses(
             network.assets.filter((a) => a.issuer.toString() === pda.toString()),
-          );
+          )).filter((a) => !archived.assets.has(a.address));
           if (!cancelled) setMyAssets(mine);
         }
+        if (!cancelled) setData(network);
       } catch {
         if (!cancelled) setFailed(true);
       }
@@ -96,6 +102,8 @@ export default function IssuerProfilePage({
       </section>
     );
   }
+
+  if (withdrawn) return <WithdrawnNotice kind="issuer" address={withdrawn} />;
 
   const issuer: Issuer | undefined = data.issuers.find(
     (i) => fromBytes32(i.legalEntityId) === legalId,
