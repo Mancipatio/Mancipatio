@@ -68,9 +68,9 @@ describe("pilotModules()", () => {
     }
   });
 
-  it("names the module and says 'pilot' on mainnet", () => {
+  it("names the module and says 'not available' on mainnet", () => {
     expect(moduleDisabledMessage("secondaryTrading", "mainnet")).toBe(
-      "Secondary trading (OTC deals, offers and the resell board): not available in the pilot on Solana mainnet.",
+      "Secondary trading (OTC deals, offers and the resell board): not available on Solana mainnet.",
     );
     expect(moduleDisabledMessage("custodyDelivery", "devnet")).toBe("Physical delivery: switched off on Solana devnet.");
   });
@@ -96,7 +96,7 @@ describe("lib/pilot-scope.ts (menu, tabs and page notices)", () => {
     const state = moduleRouteState("/portfolio/rights", "mainnet")!;
     expect(state).toMatchObject({ disabled: false, off: ["rights"] });
     expect(navHrefVisible("/portfolio/rights", "mainnet")).toBe(true);
-    expect(moduleNoticeText(state, "mainnet")).toBe("Rights-Token issuances: not available in the pilot on Solana mainnet.");
+    expect(moduleNoticeText(state, "mainnet")).toBe("Rights-Token issuances: not available on Solana mainnet.");
   });
 
   it("the distributions and rights pages are in the map; /issuer/vesting does not swallow /issuer/vesting-series", () => {

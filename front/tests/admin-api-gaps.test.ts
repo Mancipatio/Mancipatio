@@ -242,7 +242,7 @@ describe("G2: otc.adminUpdate created only for this request's Open deal at final
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
     const refused = await flip();
     expect(refused.status).toBe(403);
-    expect(refused.body.error).toMatch(/not available in the pilot/);
+    expect(refused.body.error).toMatch(/not available on Solana mainnet/);
     expect(request().status).toBe("requested");
     expect((await call(otcAdminUpdate, { id: REQUEST_ID, status: "cancelled", decide: true })).status).toBe(200);
   });

@@ -113,8 +113,8 @@ on; on devnet, testnet and localnet it is on unless it reads as off**
 | Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type ConversionPending | `/portfolio/conversion`, `/admin/custody` (with delivery) |
 | Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | `open_custody_vault` of type DeliveryEscrow | `/portfolio/delivery`, `/admin/custody` (with conversion) |
 
-Off means: the entry routes answer 403 with "…: not available in the pilot
-on Solana mainnet." before any database, screening or chain work, the
+Off means: the entry routes answer 403 with "…: not available on Solana
+mainnet." before any database, screening or chain work, the
 navigation, section tabs and marketplace cards hide the module, and its
 pages carry that notice (`lib/pilot-scope.ts`, rendered by `AppShell`) and
 hide their entry buttons ("+ Create offer", "Fund escrow", "+ Create

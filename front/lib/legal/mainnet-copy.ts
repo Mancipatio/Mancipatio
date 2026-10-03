@@ -3,17 +3,35 @@
 // a mainnet build renders these instead, through
 // components/legal/legal-document.tsx.
 //
-// What is here: counsel's mainnet Terms of Service, Privacy Policy and the
-// acceptance-dialog summary. The owner stated on 2026-10-02 that counsel
-// approved the drafts of 2026-09-30 (the mainnet kit's 05-mainnet-copy.draft.ts
-// and 06-privacy.draft.ts, outside the repository); they are transferred
-// verbatim, with three changes the owner decided the same day: both documents
-// are dated 2026-10-02 (version and lastUpdated), and clause 11 of the
-// Privacy Policy states which keys a hardware wallet holds instead of "hardware
-// wallets for the keys that control the platform" (one company hardware
-// wallet: super administrator, KYC authority, Blocklist Authority, treasury;
-// a multisig whose member is a separate hardware wallet: the programs' upgrade
-// authority; a second administrator: a software wallet).
+// What is here: the mainnet Terms of Service, Privacy Policy and the
+// acceptance-dialog summary.
+//
+// Version 2026-10-03 (THIS TEXT): written by engineering from the owner's
+// decisions D1-D7 of 2026-10-03, whose model counsel approved: units of an
+// open class are bearer instruments that need no identity verification to
+// buy, hold or transfer; buying needs only a wallet linked to the Service
+// (connected and signed in, the Terms in force accepted, sanctions screening
+// passed); buying outside the Service is not supported and may lead to the
+// blocklist and clawback; public primary sales, each approved by the
+// Operator; issuers may also transfer units from their treasury directly;
+// KYC only to convert into company shares (where the issuer offers it) and
+// for physical delivery. THE EXACT WORDING IS A DRAFT UNTIL COUNSEL CONFIRMS
+// IT: do not fast-forward release/mainnet to a commit that carries it before
+// then (MAINNET_LEGAL_COPY_APPROVED=true is already set in production and is
+// not bound to a version). If counsel confirms on a later day, change
+// `version` and `lastUpdated` of both documents to that day.
+//
+// Version 2026-10-02 (the previous one): the owner stated on 2026-10-02 that
+// counsel approved the drafts of 2026-09-30 (the mainnet kit's
+// 05-mainnet-copy.draft.ts and 06-privacy.draft.ts, outside the repository);
+// they were transferred verbatim, with three changes the owner decided the
+// same day: both documents dated 2026-10-02 (version and lastUpdated), and
+// clause 11 of the Privacy Policy stating which keys a hardware wallet holds
+// instead of "hardware wallets for the keys that control the platform" (one
+// company hardware wallet: super administrator, KYC authority, Blocklist
+// Authority, treasury; a multisig whose member is a separate hardware wallet:
+// the programs' upgrade authority; a second administrator: a software
+// wallet). Clause 11 is unchanged in 2026-10-03.
 //
 // Changing a text:
 //   - Each document is a LegalDocument (lib/legal/document.ts): plain
@@ -35,10 +53,10 @@
 
 import type { LegalDocument } from "./document";
 
-/** Counsel's mainnet Terms of Service (approved 2026-10-02). */
+/** The mainnet Terms of Service, version 2026-10-03 (owner's decisions D1-D7; draft until counsel confirms the wording). */
 export const MAINNET_TERMS: LegalDocument | null = {
-  version: "2026-10-02",
-  lastUpdated: "2026-10-02",
+  version: "2026-10-03",
+  lastUpdated: "2026-10-03",
   lede:
     "These Terms govern your use of the Manci tokenization platform on Solana mainnet: the website, its applications and the on-chain programs you use through them.",
   clauses: [
@@ -60,21 +78,22 @@ export const MAINNET_TERMS: LegalDocument | null = {
       ],
     },
     {
-      title: "2. The closed pilot",
+      title: "2. Scope of the Service",
       blocks: [
-        { kind: "paragraph", text: "The Service currently runs as a closed pilot. During the pilot:" },
+        { kind: "paragraph", text: "The Service currently offers the following:" },
         {
           kind: "list",
           items: [
-            "Only persons the Operator has invited, whose identity it has verified and to whose wallet it has issued an investor passport (clause 6), can buy. The share classes offered in the pilot are KYC-gated: only wallets holding a live passport can buy or receive them.",
-            "Only primary sales are available. Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises and their payout vaults, conversion into company shares, physical delivery, distributions, vesting, governance and Rights-Token issuances are switched off, and the pages that carry them say so.",
-            "The Operator approves each sale individually and keeps the amount each issuer may raise low.",
+            "Primary sales of share-class tokens, open to the public: no invitation is needed. The Operator approves each sale (clause 7). To buy, you need a wallet linked to the Service as clause 7 describes. Buying, holding and transferring units of an open class need no identity verification (clause 6).",
+            "Direct transfers by an issuer of units from its treasury to wallets it chooses (clause 7).",
+            "Conversion of tokens into company shares, where the issuer offers it. Conversion requires identity verification (clause 6).",
+            "Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises and their payout vaults, physical delivery, distributions, vesting, governance and Rights-Token issuances are switched off, and the pages that carry them say so.",
             "The on-chain programs have been through internal security reviews and automated testing only. No independent external audit has been completed.",
           ],
         },
         {
           kind: "paragraph",
-          text: "The Operator may end the pilot, change its scope or switch further features on. Where a change affects your rights or obligations under these Terms, the Operator first publishes a new version of the Terms (clause 20).",
+          text: "The Operator may change the scope of the Service or switch further features on. Where a change affects your rights or obligations under these Terms, the Operator first publishes a new version of the Terms (clause 20).",
         },
       ],
     },
@@ -130,7 +149,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Identity verification (KYC) is required to buy or receive a KYC-gated share class, which includes every class offered in the pilot, to convert tokens into company shares, and to take delivery of a physical good. On a class that is not KYC-gated (an open class), buying and trading need no identity verification, but the Service refuses a client profile that compliance has suspended. Issuers must pass verification of the legal entity (KYB) before they can issue.",
+          text: "Identity verification (KYC) is required to convert tokens into company shares, where the issuer offers conversion, and to take delivery of a physical good, where delivery is offered. Buying, holding and transferring units of an open class (a class that is not KYC-gated) need no identity verification. The Operator can make a class KYC-gated (clause 8); buying or receiving units of such a class then requires a live investor passport. Issuers must pass verification of the legal entity (KYB) before they can issue.",
         },
         {
           kind: "paragraph",
@@ -147,19 +166,31 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "A sale opens only after the Operator has approved it for that share class. The approval fixes the payment token, a price range, the most the sale may raise and the latest start date; within it, the issuer sets the price, the quantity and the dates. A sale runs for at most one year.",
+          text: "A sale opens only after the Operator has approved it for that share class. The approval fixes the payment token, a price range, the most the sale may raise and the latest start date; within it, the issuer sets the price, the quantity and the dates. Primary sales are open to the public; no invitation is needed. The issuer chooses how long a sale runs, up to 365 days (for example 30 or 90 days).",
         },
         {
           kind: "paragraph",
-          text: "The Operator applies an annual limit to the amount each issuer may raise through the Service, counted over the preceding twelve months, and does not approve a sale beyond it.",
+          text: "You can buy only through the Service. Before each purchase, your wallet must be connected to the Service and signed in, by signing the message the Service asks for; it must have accepted the version of these Terms in force; and it must pass the sanctions screening described in clause 10. Nothing more is required to buy units of an open class: in particular, you need no identity verification and no investor passport. You must still meet the conditions of clause 3 and confirm the offering document and the risk warning described below.",
         },
         {
           kind: "paragraph",
-          text: "You pay in USDC. When your purchase is confirmed, the price moves from your wallet into the sale's escrow and the units are minted to your wallet in the same transaction; when the sale closes, the issuer receives the proceeds. A confirmed purchase cannot be cancelled, and for the sales offered in the pilot the programs have no instruction that refunds its price to you. Any claim for your money back is a claim against the issuer under the offering document.",
+          text: "Buying in any other way, for example by sending a purchase transaction to the on-chain programs directly or through other software, is not supported. The Operator monitors purchases on the blockchain. Where a purchase was made outside the Service, the Operator may place the buyer's wallet on the blocklist and move its units into quarantine under clause 9. Units moved into quarantine are never returned, and the programs do not refund the price paid for them.",
+        },
+        {
+          kind: "paragraph",
+          text: "The Operator limits the amount each issuer may raise through the Service to at most EUR 3,000,000 over any period of twelve months, counting its sales, including sales approved but not yet closed, and the units it mints to its treasury, and does not approve a sale beyond it.",
+        },
+        {
+          kind: "paragraph",
+          text: "You pay in USDC. When your purchase is confirmed, the price moves from your wallet into the sale's escrow and the units are minted to your wallet in the same transaction; when the sale closes, the issuer receives the proceeds. A confirmed purchase is final: it cannot be cancelled, and for the sales the Service currently offers (clause 2) the programs have no instruction that refunds its price to you. Any claim for your money back is a claim against the issuer under the offering document.",
         },
         {
           kind: "paragraph",
           text: "Before you buy, the Service shows you the offering document and a risk warning that you must confirm.",
+        },
+        {
+          kind: "paragraph",
+          text: "An issuer may also transfer units from its treasury directly to wallets it chooses. Such a transfer is the issuer's own act, not a primary sale through the Service: the Operator does not approve it, and the Service processes no payment for it, records no offering document for it and shows no risk warning for it. Any rights in respect of units received this way are against the issuer. Those units are subject to clauses 8 and 9 like any other units.",
         },
       ],
     },
@@ -170,7 +201,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
         {
           kind: "list",
           items: [
-            "a wallet on the sanctions blocklist cannot send tokens, except into the burn-only quarantine described in clause 9;",
+            "a wallet on the blocklist cannot send tokens, except into the burn-only quarantine described in clause 9;",
             "on a KYC-gated class, the receiving wallet must hold a live passport from a permitted jurisdiction.",
           ],
         },
@@ -192,7 +223,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
           items: [
             "Emergency pause. Any administrator can pause one or more areas of platform-mediated activity: onboarding, primary sales, trading through Manci, custody entry, distributions and payouts to issuers. Only the super administrator can resume them. A pause never blocks exits: cancellations, expiries, refunds, claims and custody returns keep working.",
             "Issuer proceeds freeze. Any administrator can freeze the proceeds of one issuer: its sales, withdrawals and payouts to it stop, and only the super administrator can lift the freeze. While it lasts, money that buyers have already paid into that issuer's sale stays locked in the sale's escrow: it is neither paid to the issuer nor refunded to buyers, who keep the units they bought.",
-            "Blocklist. The Blocklist Authority can add any wallet, including a program escrow, to the sanctions blocklist, and can remove it.",
+            "Blocklist. The Blocklist Authority can add any wallet, including a program escrow, to the blocklist, for example after a sanctions match or a purchase made outside the Service (clause 7), and can remove it.",
             "Clawback. An administrator can move a holder's units, without the holder's signature, into a quarantine vault of the same share class from which they can only be burned: on any class, when the holder's wallet is on the blocklist; on a KYC-gated class, when the holder's passport was revoked, or expired at least 30 days earlier. Units moved into quarantine are never returned on-chain, including when the wallet is later removed from the blocklist.",
             "Share-class mode. The Blocklist Authority can switch a class between open and KYC-gated transfers (clause 8).",
             "Permitted jurisdictions. The Operator's KYC authority can change at any time, with immediate effect, which jurisdictions' passports KYC-gated classes accept. A holder whose jurisdiction is no longer permitted cannot buy or receive further units of such a class.",
@@ -202,7 +233,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "During the pilot, one key of the Operator holds the super administrator, administrator, Blocklist Authority and KYC authority roles together; a second key holds the administrator role only, and a separate key controls the upgrade authority of both programs. The Operator uses these powers to comply with the law, sanctions and orders of courts and authorities, to protect users and the Service, and in the other cases these Terms describe.",
+          text: "Currently, one key of the Operator holds the super administrator, administrator, Blocklist Authority and KYC authority roles together; a second key holds the administrator role only, and a separate key controls the upgrade authority of both programs. The Operator uses these powers to comply with the law, sanctions and orders of courts and authorities, to protect users and the Service, to act on purchases made outside the Service (clause 7), and in the other cases these Terms describe.",
         },
       ],
     },
@@ -211,7 +242,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "The Operator screens wallets against sanctions lists. The Service refuses a wallet that matches, and the match is reported to the Operator's compliance function. This screening cannot stop in advance a purchase sent directly to the programs; the Operator screens such a purchase afterwards and may then blocklist the wallet and claw back its units (clause 9). If the Operator cannot check the list, the Service refuses the request rather than letting it through.",
+          text: "The Operator screens wallets against sanctions lists, and the Service screens your wallet before each purchase. The Service refuses a wallet that matches, and the match is reported to the Operator's compliance function. A purchase sent directly to the programs bypasses this screening and is not supported (clause 7); the Operator screens such a purchase afterwards and may blocklist the wallet and claw back its units (clause 9), whether or not the screening finds a match. If the Operator cannot check the list, the Service refuses the request rather than letting it through.",
         },
         {
           kind: "paragraph",
@@ -237,7 +268,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid: there is no exchange listing and no guaranteed buyer. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment. Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
+          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid: there is no exchange listing and no guaranteed buyer. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment. Conversion into company shares is available only where the issuer offers it, and only after identity verification. Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
         },
         {
           kind: "paragraph",
@@ -278,6 +309,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
             "breaking any law or sanctions, or helping anyone else to do so;",
             "hiding your location or identity, using another person's identity or wallet, or acting for a person who is not eligible under clause 3;",
             "money laundering, terrorist financing, fraud or market manipulation;",
+            "buying in a primary sale other than through the Service (clause 7);",
             "interfering with the Service or the on-chain programs, or exploiting a defect in them instead of reporting it to the security contact published on the Security page;",
             "scraping, overloading or attacking the Service.",
           ],
@@ -328,7 +360,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "The Privacy Policy describes how the Operator processes personal data. The Service records your wallet address with each acceptance of these Terms. Information written to the Solana blockchain, including your passport (clause 6) and your transactions, is public and cannot be deleted.",
+          text: "The Privacy Policy describes how the Operator processes personal data. The Service records your wallet address with each acceptance of these Terms. Information written to the Solana blockchain, including your passport, if one is issued (clause 6), and your transactions, is public and cannot be deleted.",
         },
       ],
     },
@@ -371,10 +403,10 @@ export const MAINNET_TERMS: LegalDocument | null = {
   ],
 };
 
-/** Counsel's mainnet Privacy Policy (approved 2026-10-02). */
+/** The mainnet Privacy Policy, version 2026-10-03 (owner's decisions D1-D7; draft until counsel confirms the wording). */
 export const MAINNET_PRIVACY: LegalDocument | null = {
-  version: "2026-10-02",
-  lastUpdated: "2026-10-02",
+  version: "2026-10-03",
+  lastUpdated: "2026-10-03",
   lede:
     "This Privacy Policy explains what personal data we collect when you use Manci, why we use it, who receives it, how long we keep it and which rights you have. It also explains what becomes public on the Solana blockchain when you use the platform, which no one can delete.",
   clauses: [
@@ -387,7 +419,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "Some features described below are offered only to invited participants, or not at all times. Where a feature is not offered to you, we do not collect the data it needs.",
+          text: "Some features described below are available only where an issuer offers them, or not at all times. Where a feature is not offered to you, we do not collect the data it needs. You do not need to verify your identity to buy or hold tokens of an open class (a class that is not KYC-gated under our Terms).",
         },
       ],
     },
@@ -426,15 +458,15 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
           items: [
             "Wallet and sign-in data: the public addresses of the wallets you connect, the messages you sign to prove that you control them, and short-lived one-time values we keep so that a signed message cannot be reused.",
             "Account data: the display name you choose, your email address and whether you have confirmed it, and, if you sign in with or link a Google account, that account's identifier and email address. We ask Google only for your account identifier and email address.",
-            "Identity verification (KYC) data, when we ask you to verify: your full legal name, date of birth, nationality, country of residence, address, city and postal code, your email address and, optionally, your phone number, and the documents we request, such as a passport or national identity card, proof of address, a photograph of your face, evidence of the source of your funds and bank statements.",
+            "Identity verification (KYC) data, when you verify, for example to convert tokens into company shares: your full legal name, date of birth, nationality, country of residence, address, city and postal code, your email address and, optionally, your phone number, and the documents we request, such as a passport or national identity card, proof of address, a photograph of your face, evidence of the source of your funds and bank statements.",
             "Company verification (KYB) data, when you act for a company: its name, registration number, country, registered address and website, your role, your name, country of residence, address and contact details, a copy of your passport or identity card, and corporate documents such as the certificate of incorporation or a registry extract, board resolutions and a description of the company's ownership and beneficial owners.",
             "Verification records: the status and history of our verification decisions and their dates, the documents we requested and their review status, notes our staff add to your file, and a log of each time our staff open or export your documents.",
             "Investor passport requests: the wallet, the jurisdiction you state, any note you add, and the outcome.",
-            "Transaction records: your purchases (wallet, sale, amount and transaction reference), each acceptance of our Terms (wallet, version and time) and, if you raise funds, the fundraising limits and sale approvals that apply to you. We also copy the platform's public on-chain transactions into our database to show your portfolio and history.",
+            "Transaction records: your purchases (wallet, sale, amount and transaction reference), including purchases made outside the platform that we see on the blockchain, each acceptance of our Terms (wallet, version and time) and, if you raise funds, the fundraising limits and sale approvals that apply to you. We also copy the platform's public on-chain transactions into our database to show your portfolio and history.",
             "Issuer applications: when you apply to raise funds, information about the company (for example its valuation, revenue, existing investors and plans), the founder's name, email address, social media profiles and statement, pitch materials, and the history of our review.",
             "Requests you make where these services are offered: contact details and notes for converting tokens into shares, a delivery address and contact details for the delivery of goods, requests for over-the-counter trades, and contact details you add to a resale listing, which the resale board shows publicly.",
             "Messages: your name, email address, company and message when you use the contact form or write to us.",
-            "Sanctions screening results: when a wallet uses certain features, we check it against public sanctions lists, currently the list of Specially Designated Nationals published by the United States Treasury. A match creates an internal compliance record with the wallet, the list and the details of the match.",
+            "Sanctions screening results: before each purchase through the platform, when a wallet uses certain other features, and afterwards for each purchase we see on the blockchain, we check the wallet against public sanctions lists, currently the list of Specially Designated Nationals published by the United States Treasury. A match creates an internal compliance record with the wallet, the list and the details of the match.",
             "Technical data: your IP address and the country derived from it, which we use while handling a request to limit abuse, to run a bot check and to refuse access from countries where the service is not offered. We store the IP address only as a one-way hash in short-lived abuse counters. Our hosting provider keeps request and error logs, which include IP addresses and can include other identifiers contained in error messages, such as email or wallet addresses. The error reports we send to our error-monitoring provider have identifiers such as email and wallet addresses removed as far as we can detect them.",
           ],
         },
@@ -451,7 +483,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
           kind: "list",
           items: [
             "To create and run your account, let you sign in and provide the features you use: to perform our agreement with you.",
-            "To verify the identity of investors and issuers, keep records of that verification, screen wallets against sanctions lists and prevent money laundering, terrorist financing and fraud: to comply with our legal obligations and, where no specific law requires a step, for our legitimate interest in keeping the platform lawful and safe.",
+            "To verify the identity of investors and issuers, keep records of that verification, screen wallets against sanctions lists, monitor purchases made outside the platform, and prevent money laundering, terrorist financing and fraud: to comply with our legal obligations and, where no specific law requires a step, for our legitimate interest in keeping the platform lawful and safe.",
             "To issue, renew and revoke investor passports and to apply the transfer rules of the tokens you hold: to perform our agreement with you and to comply with our legal obligations.",
             "To review applications from issuers and decide on them: to take the steps you ask for before entering into an agreement.",
             "To secure the platform, limit abuse, refuse access from countries where the service is not offered, and find and fix errors: our legitimate interest in a secure and lawful service.",
@@ -471,7 +503,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Our staff make verification decisions. Some checks run automatically: a request from a wallet that appears on a sanctions list we screen against, or from a country where the service is not offered, is refused automatically, and an expired verification or passport automatically stops the features that require it. If you believe such a refusal is wrong, contact us and a person will review it.",
+          text: "Our staff make verification decisions. Some checks run automatically: a request from a wallet that appears on a sanctions list we screen against, or from a country where the service is not offered, is refused automatically, and an expired verification or passport automatically stops the features that require it. If you believe such a refusal is wrong, contact us and a person will review it. When a purchase made outside the platform comes from a wallet that appears on a sanctions list we screen against, an alert is raised automatically; whether to blocklist a wallet that bought outside the platform and move its tokens is decided by our staff.",
         },
       ],
     },
@@ -618,11 +650,11 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
   ],
 };
 
-/** Counsel's summary for the Terms acceptance dialog (components/tos-gate.tsx; approved 2026-10-02). */
+/** The summary for the Terms acceptance dialog (components/tos-gate.tsx), version 2026-10-03 (draft until counsel confirms the wording). */
 export const MAINNET_TOS_GATE_POINTS: string[] | null = [
-  "Manci is a closed pilot: only invited buyers whose identity the Operator has verified can buy, and only primary sales are available.",
+  "You can buy only on the Manci site, with this wallet signed in, these Terms accepted and sanctions screening passed. Buying an open class needs no identity verification; converting tokens into company shares does.",
   "Tokens are bearer instruments held in your own wallet. A lost key or a confirmed transaction cannot be reversed, and a confirmed purchase is not refunded.",
-  "Without your signature, the Operator can pause platform flows, freeze an issuer's proceeds, blocklist wallets, and move the tokens of blocklisted holders, or, on a KYC-gated class, of holders whose passport was revoked or has been expired for at least 30 days, into a burn-only quarantine.",
+  "Without your signature, the Operator can pause platform flows, freeze an issuer's proceeds, blocklist wallets (for example after a sanctions match or a purchase made outside the Manci site), and move the tokens of blocklisted holders, or, on a KYC-gated class, of holders whose passport was revoked or has been expired for at least 30 days, into a burn-only quarantine.",
   "The on-chain programs have had internal security reviews only, and no independent external audit. You can lose all of the money you commit, and no investor protection scheme covers it.",
   "Your acceptance is recorded against your wallet address and this version of the Terms.",
 ];
