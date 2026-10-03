@@ -1,12 +1,15 @@
 // POST /api/clients/raise-limits — admin sets or clears a per-client
 // ("case by case") override of the annual raise cap and/or max equity %.
 // Signed ("clients.raiseLimits") + requireAdmin. Null fields fall back to
-// the platform defaults; clear=true removes the override entirely.
+// the platform defaults; clear=true removes the override entirely. On
+// mainnet the cap cannot exceed the Terms' EUR 3,000,000 (lib/raise-cap.ts).
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
+import { detectNetwork } from "@/lib/network";
+import { maxRaiseCapEur } from "@/lib/raise-cap";
 import { assertUuid, fetchClientOr404, insertNote, optString } from "../_helpers";
 
 function optAmount(v: unknown, field: string, min: number, max: number): number | null {
@@ -30,7 +33,7 @@ export async function POST(request: Request) {
       await insertNote(sb, clientId, wallet, "Raise limit override removed — platform defaults apply.", "system");
       return NextResponse.json({ ok: true, data: { override: null } });
     }
-    const cap = optAmount(params.annual_raise_cap_eur, "Annual raise cap", 1, 1_000_000_000_000);
+    const cap = optAmount(params.annual_raise_cap_eur, "Annual raise cap", 1, maxRaiseCapEur(detectNetwork()));
     const equity = optAmount(params.max_equity_percent, "Max equity %", 0.01, 100);
     if (cap === null && equity === null) throw new SiwsError(400, "Set a cap, a max equity %, or clear the override");
     const note = optString(params, "note", 1000);

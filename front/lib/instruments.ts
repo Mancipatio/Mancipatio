@@ -135,7 +135,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
     blurb: "Convertible into real shares in the company.",
     ctas: [APPLY, COMPARE],
     whatItIs: [
-      "Holders buy a token carrying a documented right to become a shareholder, at a time they choose, through the standard legal share-transfer procedure. Where structured that way, the token can also carry dividend or revenue payments.",
+      "Holders buy a token that can carry a documented right to become a shareholder: where the issuer offers conversion and it is available, at a time they choose, through the standard legal share-transfer procedure. Where structured that way, the token can also carry dividend or revenue payments.",
     ],
     whoItsFor: [
       "An early-stage company raising without setting a valuation",
@@ -157,7 +157,7 @@ const INSTRUMENTS: Record<CategorySlug, InstrumentContent> = {
       {
         heading: "Becoming a shareholder",
         points: [
-          "Holders can convert at a time of their choosing",
+          "Where the issuer offers conversion and it is available, holders can convert at a time of their choosing",
           "Buying the token needs no identity verification unless the class is KYC-gated (then the receiving wallet needs an investor passport); converting into shares requires it (KYC)",
           "Conversion goes through the standard legal share-transfer procedure",
           "If the company or its founders fail to facilitate the transfer, holders have legal recourse",

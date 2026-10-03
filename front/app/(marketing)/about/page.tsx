@@ -13,6 +13,7 @@ import {
   TextLink,
 } from "@/components/mx";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { modulesFact } from "@/lib/module-facts";
 import { securityReviewFact } from "@/lib/legal/audit";
 import { SecurityAuditReportLink } from "@/components/legal/security-review";
 import {
@@ -61,7 +62,8 @@ function operatorFacts(operator: Operator): string[] {
 
 /** Short, checkable statements only — the dark band's whole value. The stage
  *  lines follow the build's network (NEXT_PUBLIC_NETWORK); the security line
- *  follows lib/legal/audit.ts (no external audit is claimed before one exists). */
+ *  follows lib/legal/audit.ts (no external audit is claimed before one exists);
+ *  the modules line follows the module switches (modulesFact). */
 const WHERE_THINGS_STAND = [
   isTestNetwork(NETWORK)
     ? `${MX_NETWORK_STAGE_LABEL} — nothing is issued live yet`
@@ -70,7 +72,7 @@ const WHERE_THINGS_STAND = [
   `Two on-chain programs, deployed on Solana ${NETWORK}`,
   securityReviewFact(),
   "Asset registry, Token-2022 mints and program-owned custody",
-  "Launchpad, OTC settlement, governance and vesting shipped",
+  modulesFact(NETWORK),
   "Issuer applications are open and read by a person",
 ];
 

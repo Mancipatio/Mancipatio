@@ -239,10 +239,15 @@ expect_refusal "NEXT_PUBLIC_KYC_REGISTRY is not set" "${PLACEHOLDERS[@]}" NEXT_P
 if grep -q '^export const MAINNET_TERMS: LegalDocument | null = null;$' lib/legal/mainnet-copy.ts; then
   expect_refusal "the operator and legal slots are not complete" "${PLACEHOLDERS[@]}"
 else
-  # The committed slots (version 2026-10-03 of the legal texts) pass with
-  # counsel's licence waiver, as committed (no licence recorded): drop the
-  # waiver here if a licence is ever recorded.
-  expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
+  # The committed slots (version 2026-10-03 of the legal texts) are held
+  # until counsel confirms the wording: the risk warning's status is "draft"
+  # (lib/legal/risk-warning.ts), the one refusal with counsel's licence
+  # waiver (no licence recorded). In the commit that records counsel's
+  # confirmation the status becomes "counsel" and this case goes back to
+  #   expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
+  #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
+  # (drop the waiver there if a licence is ever recorded).
+  expect_refusal "Purchase risk warning: still engineering's draft" \
     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
 fi
 write_legal_fixture incomplete-operator

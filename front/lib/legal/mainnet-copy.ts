@@ -11,15 +11,29 @@
 // open class are bearer instruments that need no identity verification to
 // buy, hold or transfer; buying needs only a wallet linked to the Service
 // (connected and signed in, the Terms in force accepted, sanctions screening
-// passed); buying outside the Service is not supported and may lead to the
-// blocklist and clawback; public primary sales, each approved by the
-// Operator; issuers may also transfer units from their treasury directly;
-// KYC only to convert into company shares (where the issuer offers it) and
-// for physical delivery. THE EXACT WORDING IS A DRAFT UNTIL COUNSEL CONFIRMS
-// IT: do not fast-forward release/mainnet to a commit that carries it before
-// then (MAINNET_LEGAL_COPY_APPROVED=true is already set in production and is
-// not bound to a version). If counsel confirms on a later day, change
-// `version` and `lastUpdated` of both documents to that day.
+// passed); buying in a primary sale outside the Service is not supported and
+// may lead to the blocklist and clawback; public primary sales, each
+// approved by the Operator; issuers may also transfer units from their
+// treasury directly; KYC only to convert into company shares (where the
+// issuer offers it, once switched on) and for physical delivery.
+//
+// THE EXACT WORDING IS A DRAFT UNTIL COUNSEL CONFIRMS IT. The hold is in
+// code, not only here: PURCHASE_RISK_WARNING.status is "draft"
+// (lib/legal/risk-warning.ts), so a mainnet build refuses this version
+// (lib/legal/readiness.ts), although MAINNET_LEGAL_COPY_APPROVED=true is
+// already set in production and is not bound to a version. When counsel
+// confirms, set the status to "counsel" in the commit that records the
+// confirmation, together with the expectations that follow it
+// (tests/legal-slots.test.ts, scripts/ci/mainnet-build.sh). If that is on a
+// later day, change `version` and `lastUpdated` of both documents to that day.
+//
+// Review of 2026-10-03 (PR #57): conversion into company shares is worded as
+// not available yet (its module and on-chain custody entry are off on
+// mainnet); "buying outside the Service" covers a purchase in a primary sale
+// only, never units received by an issuer's direct transfer or from another
+// wallet; the EUR 3,000,000 limit applies per issuer or, where it issues
+// through an SPV, per SPV, as 0066 counts it, and the admin routes refuse a
+// higher limit on mainnet (lib/raise-cap.ts).
 //
 // Version 2026-10-02 (the previous one): the owner stated on 2026-10-02 that
 // counsel approved the drafts of 2026-09-30 (the mainnet kit's
@@ -86,10 +100,19 @@ export const MAINNET_TERMS: LegalDocument | null = {
           items: [
             "Primary sales of share-class tokens, open to the public: no invitation is needed. The Operator approves each sale (clause 7). To buy, you need a wallet linked to the Service as clause 7 describes. Buying, holding and transferring units of an open class need no identity verification (clause 6).",
             "Direct transfers by an issuer of units from its treasury to wallets it chooses (clause 7).",
-            "Conversion of tokens into company shares, where the issuer offers it. Conversion requires identity verification (clause 6).",
-            "Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises and their payout vaults, physical delivery, distributions, vesting, governance and Rights-Token issuances are switched off, and the pages that carry them say so.",
-            "The on-chain programs have been through internal security reviews and automated testing only. No independent external audit has been completed.",
           ],
+        },
+        { kind: "paragraph", text: "The following are not available at present, and the pages that carry them say so:" },
+        {
+          kind: "list",
+          items: [
+            "Conversion of tokens into company shares. Once the Operator switches it on, it will be available where the issuer offers it, and it will require identity verification (clause 6).",
+            "Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises and their payout vaults, physical delivery, distributions, vesting, governance and Rights-Token issuances, which are switched off.",
+          ],
+        },
+        {
+          kind: "paragraph",
+          text: "The on-chain programs have been through internal security reviews and automated testing only. No independent external audit has been completed.",
         },
         {
           kind: "paragraph",
@@ -170,15 +193,15 @@ export const MAINNET_TERMS: LegalDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "You can buy only through the Service. Before each purchase, your wallet must be connected to the Service and signed in, by signing the message the Service asks for; it must have accepted the version of these Terms in force; and it must pass the sanctions screening described in clause 10. Nothing more is required to buy units of an open class: in particular, you need no identity verification and no investor passport. You must still meet the conditions of clause 3 and confirm the offering document and the risk warning described below.",
+          text: "You can buy units in a primary sale only through the Service. Before each purchase, your wallet must be connected to the Service and signed in, by signing the message the Service asks for; it must have accepted the version of these Terms in force; and it must pass the sanctions screening described in clause 10. Nothing more is required to buy units of an open class: in particular, you need no identity verification and no investor passport. You must still meet the conditions of clause 3 and confirm the offering document and the risk warning described below.",
         },
         {
           kind: "paragraph",
-          text: "Buying in any other way, for example by sending a purchase transaction to the on-chain programs directly or through other software, is not supported. The Operator monitors purchases on the blockchain. Where a purchase was made outside the Service, the Operator may place the buyer's wallet on the blocklist and move its units into quarantine under clause 9. Units moved into quarantine are never returned, and the programs do not refund the price paid for them.",
+          text: "Buying units in a primary sale in any other way, for example by sending a purchase transaction to the on-chain programs directly or through other software, is not supported. The Operator monitors purchases on the blockchain. Where a purchase in a primary sale was made other than through the Service, the Operator may place the buyer's wallet on the blocklist and move its units into quarantine under clause 9. Units moved into quarantine are never returned, and the programs do not refund the price paid for them. Units you receive through an issuer's direct transfer (described below) or by a transfer from another wallet (clause 8) are not a purchase in a primary sale.",
         },
         {
           kind: "paragraph",
-          text: "The Operator limits the amount each issuer may raise through the Service to at most EUR 3,000,000 over any period of twelve months, counting its sales, including sales approved but not yet closed, and the units it mints to its treasury, and does not approve a sale beyond it.",
+          text: "The Operator limits the amount each issuer may raise through the Service to at most EUR 3,000,000 over any period of twelve months; where an issuer issues through a special purpose vehicle, the limit applies to that vehicle. The Operator counts the issuer's sales, including sales approved but not yet closed, and the units it mints to its treasury, and does not approve a sale beyond the limit.",
         },
         {
           kind: "paragraph",
@@ -223,7 +246,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
           items: [
             "Emergency pause. Any administrator can pause one or more areas of platform-mediated activity: onboarding, primary sales, trading through Manci, custody entry, distributions and payouts to issuers. Only the super administrator can resume them. A pause never blocks exits: cancellations, expiries, refunds, claims and custody returns keep working.",
             "Issuer proceeds freeze. Any administrator can freeze the proceeds of one issuer: its sales, withdrawals and payouts to it stop, and only the super administrator can lift the freeze. While it lasts, money that buyers have already paid into that issuer's sale stays locked in the sale's escrow: it is neither paid to the issuer nor refunded to buyers, who keep the units they bought.",
-            "Blocklist. The Blocklist Authority can add any wallet, including a program escrow, to the blocklist, for example after a sanctions match or a purchase made outside the Service (clause 7), and can remove it.",
+            "Blocklist. The Blocklist Authority can add any wallet, including a program escrow, to the blocklist, for example after a sanctions match or a purchase in a primary sale made other than through the Service (clause 7), and can remove it.",
             "Clawback. An administrator can move a holder's units, without the holder's signature, into a quarantine vault of the same share class from which they can only be burned: on any class, when the holder's wallet is on the blocklist; on a KYC-gated class, when the holder's passport was revoked, or expired at least 30 days earlier. Units moved into quarantine are never returned on-chain, including when the wallet is later removed from the blocklist.",
             "Share-class mode. The Blocklist Authority can switch a class between open and KYC-gated transfers (clause 8).",
             "Permitted jurisdictions. The Operator's KYC authority can change at any time, with immediate effect, which jurisdictions' passports KYC-gated classes accept. A holder whose jurisdiction is no longer permitted cannot buy or receive further units of such a class.",
@@ -233,7 +256,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "Currently, one key of the Operator holds the super administrator, administrator, Blocklist Authority and KYC authority roles together; a second key holds the administrator role only, and a separate key controls the upgrade authority of both programs. The Operator uses these powers to comply with the law, sanctions and orders of courts and authorities, to protect users and the Service, to act on purchases made outside the Service (clause 7), and in the other cases these Terms describe.",
+          text: "Currently, one key of the Operator holds the super administrator, administrator, Blocklist Authority and KYC authority roles together; a second key holds the administrator role only, and a separate key controls the upgrade authority of both programs. The Operator uses these powers to comply with the law, sanctions and orders of courts and authorities, to protect users and the Service, to act on purchases in a primary sale made other than through the Service (clause 7), and in the other cases these Terms describe.",
         },
       ],
     },
@@ -242,7 +265,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "The Operator screens wallets against sanctions lists, and the Service screens your wallet before each purchase. The Service refuses a wallet that matches, and the match is reported to the Operator's compliance function. A purchase sent directly to the programs bypasses this screening and is not supported (clause 7); the Operator screens such a purchase afterwards and may blocklist the wallet and claw back its units (clause 9), whether or not the screening finds a match. If the Operator cannot check the list, the Service refuses the request rather than letting it through.",
+          text: "The Operator screens wallets against sanctions lists, and the Service screens your wallet before each purchase. The Service refuses a wallet that matches, and the match is reported to the Operator's compliance function. A purchase in a primary sale sent directly to the programs bypasses this screening and is not supported (clause 7); the Operator screens such a purchase afterwards and may blocklist the wallet and claw back its units (clause 9), whether or not the screening finds a match. If the Operator cannot check the list, the Service refuses the request rather than letting it through.",
         },
         {
           kind: "paragraph",
@@ -268,7 +291,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid: there is no exchange listing and no guaranteed buyer. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment. Conversion into company shares is available only where the issuer offers it, and only after identity verification. Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
+          text: "Tokenized instruments carry risk, including the total loss of the money you commit. They are illiquid: there is no exchange listing and no guaranteed buyer. Distributions, conversion and redemption depend on the issuer performing, and a claim against an issuer is not a payment. Conversion into company shares is not available yet (clause 2); once it is, it will be available only where the issuer offers it, and only after identity verification. Software, including the on-chain programs, the Service and the Solana network, can fail. The value and availability of USDC depend on its issuer.",
         },
         {
           kind: "paragraph",
@@ -462,7 +485,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
             "Company verification (KYB) data, when you act for a company: its name, registration number, country, registered address and website, your role, your name, country of residence, address and contact details, a copy of your passport or identity card, and corporate documents such as the certificate of incorporation or a registry extract, board resolutions and a description of the company's ownership and beneficial owners.",
             "Verification records: the status and history of our verification decisions and their dates, the documents we requested and their review status, notes our staff add to your file, and a log of each time our staff open or export your documents.",
             "Investor passport requests: the wallet, the jurisdiction you state, any note you add, and the outcome.",
-            "Transaction records: your purchases (wallet, sale, amount and transaction reference), including purchases made outside the platform that we see on the blockchain, each acceptance of our Terms (wallet, version and time) and, if you raise funds, the fundraising limits and sale approvals that apply to you. We also copy the platform's public on-chain transactions into our database to show your portfolio and history.",
+            "Transaction records: your purchases (wallet, sale, amount and transaction reference), including purchases in a primary sale made outside the platform that we see on the blockchain, each acceptance of our Terms (wallet, version and time) and, if you raise funds, the fundraising limits and sale approvals that apply to you. We also copy the platform's public on-chain transactions into our database to show your portfolio and history.",
             "Issuer applications: when you apply to raise funds, information about the company (for example its valuation, revenue, existing investors and plans), the founder's name, email address, social media profiles and statement, pitch materials, and the history of our review.",
             "Requests you make where these services are offered: contact details and notes for converting tokens into shares, a delivery address and contact details for the delivery of goods, requests for over-the-counter trades, and contact details you add to a resale listing, which the resale board shows publicly.",
             "Messages: your name, email address, company and message when you use the contact form or write to us.",
@@ -483,7 +506,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
           kind: "list",
           items: [
             "To create and run your account, let you sign in and provide the features you use: to perform our agreement with you.",
-            "To verify the identity of investors and issuers, keep records of that verification, screen wallets against sanctions lists, monitor purchases made outside the platform, and prevent money laundering, terrorist financing and fraud: to comply with our legal obligations and, where no specific law requires a step, for our legitimate interest in keeping the platform lawful and safe.",
+            "To verify the identity of investors and issuers, keep records of that verification, screen wallets against sanctions lists, monitor purchases in primary sales made outside the platform, and prevent money laundering, terrorist financing and fraud: to comply with our legal obligations and, where no specific law requires a step, for our legitimate interest in keeping the platform lawful and safe.",
             "To issue, renew and revoke investor passports and to apply the transfer rules of the tokens you hold: to perform our agreement with you and to comply with our legal obligations.",
             "To review applications from issuers and decide on them: to take the steps you ask for before entering into an agreement.",
             "To secure the platform, limit abuse, refuse access from countries where the service is not offered, and find and fix errors: our legitimate interest in a secure and lawful service.",
@@ -503,7 +526,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Our staff make verification decisions. Some checks run automatically: a request from a wallet that appears on a sanctions list we screen against, or from a country where the service is not offered, is refused automatically, and an expired verification or passport automatically stops the features that require it. If you believe such a refusal is wrong, contact us and a person will review it. When a purchase made outside the platform comes from a wallet that appears on a sanctions list we screen against, an alert is raised automatically; whether to blocklist a wallet that bought outside the platform and move its tokens is decided by our staff.",
+          text: "Our staff make verification decisions. Some checks run automatically: a request from a wallet that appears on a sanctions list we screen against, or from a country where the service is not offered, is refused automatically, and an expired verification or passport automatically stops the features that require it. If you believe such a refusal is wrong, contact us and a person will review it. When a purchase in a primary sale made outside the platform comes from a wallet that appears on a sanctions list we screen against, an alert is raised automatically; whether to blocklist a wallet that bought in a primary sale outside the platform and move its tokens is decided by our staff.",
         },
       ],
     },
@@ -652,9 +675,9 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
 
 /** The summary for the Terms acceptance dialog (components/tos-gate.tsx), version 2026-10-03 (draft until counsel confirms the wording). */
 export const MAINNET_TOS_GATE_POINTS: string[] | null = [
-  "You can buy only on the Manci site, with this wallet signed in, these Terms accepted and sanctions screening passed. Buying an open class needs no identity verification; converting tokens into company shares does.",
+  "You can buy in a primary sale only on the Manci site, with this wallet signed in, these Terms accepted and sanctions screening passed. Buying an open class needs no identity verification; converting tokens into company shares does.",
   "Tokens are bearer instruments held in your own wallet. A lost key or a confirmed transaction cannot be reversed, and a confirmed purchase is not refunded.",
-  "Without your signature, the Operator can pause platform flows, freeze an issuer's proceeds, blocklist wallets (for example after a sanctions match or a purchase made outside the Manci site), and move the tokens of blocklisted holders, or, on a KYC-gated class, of holders whose passport was revoked or has been expired for at least 30 days, into a burn-only quarantine.",
+  "Without your signature, the Operator can pause platform flows, freeze an issuer's proceeds, blocklist wallets (for example after a sanctions match or a purchase in a primary sale made outside the Manci site), and move the tokens of blocklisted holders, or, on a KYC-gated class, of holders whose passport was revoked or has been expired for at least 30 days, into a burn-only quarantine.",
   "The on-chain programs have had internal security reviews only, and no independent external audit. You can lose all of the money you commit, and no investor protection scheme covers it.",
   "Your acceptance is recorded against your wallet address and this version of the Terms.",
 ];
