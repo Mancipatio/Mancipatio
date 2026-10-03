@@ -526,6 +526,18 @@ export function displayNameFor(companyName: string, p4: bigint): string {
 export const OPEN_TOKEN_NOTE = "Anyone can hold and transfer it. KYC is needed only to convert it into company shares.";
 const OPEN_TOKENS_NOTE = "Anyone can hold and transfer them. KYC is needed only to convert them into company shares.";
 
+/**
+ * The Preview's supply line: the cap is fixed now, but no token exists until
+ * it is sent or sold (Distribute creates only what a list needs; a sale's
+ * `buy` mints at purchase), so a public sale stays possible.
+ */
+export function supplyCapLine(tokens: bigint): string {
+  return `Supply capped at ${formatTokens(tokens)} — tokens are created only when you send or sell them`;
+}
+
+/** What follows "Create token". */
+export const NEXT_STEP_LINE = "Next: the operator activates the asset → then choose how to distribute the tokens.";
+
 /** The plain-words listing line. */
 export function summaryText(input: {
   companyName: string;
@@ -682,7 +694,91 @@ export type ClassSnapshot = {
   liqPrefMultiplierBps: number;
   liqSeniority: number;
   votingWeight: number;
+  /** The share class (address) this one converts into, or null. */
+  convertibleTo?: string | null;
 };
+
+// ── Conversion marker (C2) ──────────────────────────────────────────────────
+//
+// A holder may convert a token into the company share itself (custody
+// conversion, KYC at that point). The request route refuses a class without
+// an ON-CHAIN conversion target (app/api/conversion/create/route.ts:86,
+// `convertible_to`), and set_convertible_to needs a target class of the same
+// asset, which add_share_class creates only while the asset is a Draft. So
+// the token is created with a marker: class 1, Common, no rights, capped at 0
+// (it can never be minted) and no mint, with class 0's `convertible_to` set
+// to it — in the same transaction (949 B for the real name, 1027 B at the
+// program's maxima, under the 1200 B limit), no extra signature.
+// set_convertible_to needs the CONVERSION permission (an Admin key has it);
+// without it the marker is left out and offered later (add_marker).
+
+export const MARKER_CLASS_INDEX = 1;
+
+/** The marker class's terms: a target only, never minted. */
+export const MARKER_DEFAULTS = {
+  classIndex: MARKER_CLASS_INDEX,
+  classType: ShareClassType.Common,
+  rightsBitfield: 0,
+  liqPrefMultiplierBps: 10_000,
+  liqSeniority: 0,
+  votingWeight: 0,
+  maxSupply: BigInt(0),
+  mintablePostLaunch: false,
+} as const;
+
+/** Whether class 1 has the marker's shape: Common, capped at 0, no mint, not dilutable. */
+export function isMarkerClass(sc1: ClassSnapshot): boolean {
+  return (
+    sc1.classType === ShareClassType.Common &&
+    sc1.maxSupply === BigInt(0) &&
+    !sc1.mintInitialized &&
+    !sc1.mintablePostLaunch
+  );
+}
+
+/**
+ * none: no class 1 yet; linked: class 1 is the marker and class 0 converts
+ * into it; unlinked: class 1 is the marker but class 0 has no target yet;
+ * foreign: another class 1 (or more classes), or class 0 converts elsewhere.
+ */
+export type MarkerState = "none" | "linked" | "unlinked" | "foreign";
+
+export function conversionMarkerState(input: {
+  shareClassesCount: number;
+  sc0: ClassSnapshot | null;
+  sc1: ClassSnapshot | null;
+  /** The address class 1 has (its PDA). */
+  sc1Pda: string | null;
+}): MarkerState {
+  if (input.shareClassesCount <= 1) return "none";
+  if (input.shareClassesCount > 2 || !input.sc1 || !isMarkerClass(input.sc1)) return "foreign";
+  const target = input.sc0?.convertibleTo ?? null;
+  if (target === null) return "unlinked";
+  return target === input.sc1Pda ? "linked" : "foreign";
+}
+
+/** What a chain step carries for the marker: add class 1 and link it, only link it, or nothing. */
+export type MarkerAction = "add_and_link" | "link" | null;
+
+/**
+ * The marker instructions a step should carry. Only with the CONVERSION
+ * permission (set_convertible_to); class 1 can only be added to a Draft.
+ */
+export function markerAction(input: {
+  step: TokenizeStep;
+  marker: MarkerState;
+  draft: boolean;
+  canConvert: boolean;
+}): MarkerAction {
+  if (!input.canConvert) return null;
+  const { kind } = input.step;
+  if (kind === "create" || kind === "add_class") return "add_and_link";
+  if (kind === "init_mint" || kind === "add_marker") {
+    if (input.marker === "none" && input.draft) return "add_and_link";
+    if (input.marker === "unlinked") return "link";
+  }
+  return null;
+}
 
 /** Whether class 0 carries the economic terms this flow creates (rights, 1× preference, seniority, voting weight). */
 export function classHasFlowTerms(sc: ClassSnapshot): boolean {
@@ -704,6 +800,8 @@ export type TokenizeStep =
   | { kind: "add_class"; initMint: boolean }
   /** R6: class ready, mint missing, this wallet may create it. */
   | { kind: "init_mint" }
+  /** C2: the conversion marker is missing (a Draft) or unlinked, and this wallet may add it. */
+  | { kind: "add_marker" }
   /** R8: on chain is complete as far as this wallet can go; the details are not saved. */
   | { kind: "save_profile" }
   /** R7: the mint needs the Mint permission the Super Admin grants. */
@@ -718,7 +816,9 @@ export type TokenizeStep =
 /**
  * The next step for one asset ID (the R1–R9 decision table). Chain steps come
  * before the profile, except that a mint waiting for the Super Admin does not
- * hold the profile back.
+ * hold the profile back. A second class is accepted only when it is the
+ * conversion marker (C2); a missing or unlinked marker is offered as its own
+ * step when this wallet may set it (`canConvert`).
  */
 export function nextTokenizeStep(input: {
   asset: AssetSnapshot | null;
@@ -726,6 +826,10 @@ export function nextTokenizeStep(input: {
   profileSaved: boolean;
   canInitMint: boolean;
   intent: TokenizeIntent | null;
+  /** conversionMarkerState of the asset (default: none with one class, foreign with more). */
+  marker?: MarkerState;
+  /** The wallet holds the CONVERSION permission (set_convertible_to). */
+  canConvert?: boolean;
 }): TokenizeStep {
   const { asset, sc0, intent } = input;
   if (!asset) return { kind: "create", initMint: input.canInitMint };
@@ -745,7 +849,8 @@ export function nextTokenizeStep(input: {
       reason: "This asset is already active but has no share class, and classes can only be added to a draft. Contact the operator.",
     };
   }
-  if (asset.shareClassesCount > 1 || !sc0) {
+  const marker = input.marker ?? (asset.shareClassesCount > 1 ? "foreign" : "none");
+  if (marker === "foreign" || !sc0) {
     return { kind: "conflict", reason: "This asset has share classes the flow did not create." };
   }
   if (sc0.classType !== ShareClassType.Common || sc0.mintablePostLaunch || sc0.maxSupply === null) {
@@ -762,6 +867,8 @@ export function nextTokenizeStep(input: {
     return { kind: "conflict", reason: "Class 0 of this asset is capped at a different number of tokens." };
   }
   if (!sc0.mintInitialized && input.canInitMint) return { kind: "init_mint" };
+  const markerMissing = (marker === "none" && asset.status === AssetStatus.Draft) || marker === "unlinked";
+  if (markerMissing && input.canConvert) return { kind: "add_marker" };
   if (!input.profileSaved) return { kind: "save_profile" };
   if (!sc0.mintInitialized) return { kind: "wait_mint_permission" };
   return { kind: "done" };
@@ -772,6 +879,7 @@ export function isResumable(step: TokenizeStep): boolean {
   return (
     step.kind === "add_class" ||
     step.kind === "init_mint" ||
+    step.kind === "add_marker" ||
     step.kind === "save_profile" ||
     step.kind === "wait_mint_permission"
   );
@@ -857,87 +965,105 @@ export function detailsSaved(
 
 // ── Checklist after creation ────────────────────────────────────────────────
 //
-// No KYC-only step (owner decision 2026-10-03): tokenized shares stay in the
-// transfer hook's Open mode. Minting waits only for the operator's activation
-// and for Primary issuance (pause bit 0x02) to be open.
+// created → details → activate → distribute → close (design §1.3). No
+// KYC-only step (owner decision 2026-10-03): tokenized shares stay in the
+// transfer hook's Open mode. Nothing is minted up front: Distribute creates
+// only what a list needs (and a later public sale mints at purchase), so it
+// waits for the operator's activation, the issuer's KYB and a readable hook,
+// not for pause bit 0x02 (that state shows inside the panel). Close is the
+// old one-way lock, optional, after the last distribution.
 
-export type ChecklistId = "created" | "details" | "activate" | "mint" | "lock";
+export type ChecklistId = "created" | "details" | "activate" | "distribute" | "close";
 export type ChecklistState = "done" | "todo" | "blocked";
 export type ChecklistItem = { id: ChecklistId; state: ChecklistState };
+
+export type HookModeFact = "open" | "kyc-gated" | "none";
 
 export type ChecklistInput = {
   classExists: boolean;
   mintInitialized: boolean;
   profileSaved: boolean;
   active: boolean;
-  circulating: bigint;
+  /** The issuer's KYB is Verified on chain. */
+  issuerVerified: boolean;
+  /** The class's transfer-hook mode; null while there is no mint. */
+  hookMode: HookModeFact | null;
   maxSupply: bigint | null;
+  /** Every token ever created (burns never lower it). */
+  lifetimeMinted: bigint;
+  /** The issuer treasury's balance; null when unknown. */
+  treasuryBalance: bigint | null;
   supplyLocked: boolean;
-  primaryPaused: boolean;
+  /** Open sales of this class (Close waits for them); null when they could not be read. */
+  openSalesOfClass: number | null;
 };
 
-function allMinted(input: Pick<ChecklistInput, "supplyLocked" | "circulating" | "maxSupply">): boolean {
-  return input.supplyLocked || (input.maxSupply !== null && input.circulating >= input.maxSupply);
+/** Everything that can exist was created and has left the treasury. */
+function allDistributed(input: ChecklistInput): boolean {
+  if (input.treasuryBalance === null || input.treasuryBalance > BigInt(0)) return false;
+  return input.supplyLocked || (input.maxSupply !== null && input.lifetimeMinted >= input.maxSupply);
 }
 
 export function checklistItems(input: ChecklistInput): ChecklistItem[] {
   const created = input.classExists && input.mintInitialized;
-  const minted = allMinted(input);
+  const canDistribute =
+    created && input.active && input.issuerVerified && (input.hookMode === "open" || input.hookMode === "kyc-gated");
   return [
     { id: "created", state: created ? "done" : "todo" },
     { id: "details", state: input.profileSaved ? "done" : "todo" },
     { id: "activate", state: input.active ? "done" : input.classExists ? "todo" : "blocked" },
+    { id: "distribute", state: allDistributed(input) ? "done" : canDistribute ? "todo" : "blocked" },
     {
-      id: "mint",
-      state: minted ? "done" : created && input.active && !input.primaryPaused ? "todo" : "blocked",
+      id: "close",
+      state: input.supplyLocked ? "done" : created && input.active && input.openSalesOfClass === 0 ? "todo" : "blocked",
     },
-    { id: "lock", state: input.supplyLocked ? "done" : minted ? "todo" : "blocked" },
   ];
 }
 
-/** Shown on the mint step whenever pause bit 0x02 is set, whatever else it waits for. */
-export const PRIMARY_PAUSED_NOTE =
-  "Minting is paused platform-wide; the super admin reopens Primary issuance for the mint and closes it again right after.";
+/** The class line under the checklist: an Open class is open to any wallet. */
+export const OPEN_CLASS_LINE = "Open to any wallet ✓";
+
+/** Shown in the Distribute panel while pause bit 0x02 is set and a list needs tokens created. */
+export function primaryPausedNote(superAdmin: string | null): string {
+  const who = superAdmin ? `the super admin (${superAdmin.slice(0, 4)}…${superAdmin.slice(-4)})` : "the super admin";
+  return `Creating tokens is paused platform-wide (Primary issuance, bit 0x02). Only ${who} can reopen it; the send then closes it again in the same transaction. Tokens already in your treasury can be sent meanwhile.`;
+}
 
 /** A class made KYC-only elsewhere: said, never required. */
 export const KYC_GATED_NOTE = "KYC-only: holders need a KYC passport.";
 
-/**
- * Why the mint step cannot be taken yet, or null when it can (or is done):
- * what it still waits for, and the 0x02 note as soon as the bit is set.
- */
-export function mintWaitText(input: ChecklistInput): string | null {
-  if (allMinted(input)) return null;
+/** Why Distribute cannot be used yet, or null when it can (or is done). */
+export function distributeWaitText(input: ChecklistInput): string | null {
+  if (allDistributed(input)) return null;
   const after = [
     !input.classExists || !input.mintInitialized ? "the token mint exists" : null,
     !input.active ? "the operator activates the asset" : null,
+    !input.issuerVerified ? "your company's KYB is verified" : null,
   ].filter((p): p is string => !!p);
-  const parts = [
-    after.length > 0 ? `After ${after.join(" and ")}.` : null,
-    input.primaryPaused ? PRIMARY_PAUSED_NOTE : null,
-  ].filter((p): p is string => !!p);
-  return parts.length > 0 ? parts.join(" ") : null;
+  if (after.length > 0) return `After ${after.join(" and ")}.`;
+  if (input.hookMode === "none") return "This mint has no transfer-hook config — the operator must sort it out.";
+  return null;
 }
 
-/**
- * The mint step once done. "in the treasury" only while the issuer treasury
- * holds the whole minted supply (`treasuryUnits`: its balance, or null when
- * unknown); otherwise the tokens are just minted.
- */
-export function mintDoneText(input: {
-  circulating: bigint;
-  maxSupply: bigint | null;
-  supplyLocked: boolean;
-  treasuryUnits: bigint | null;
-}): string {
-  if (input.supplyLocked && input.maxSupply !== null && input.circulating < input.maxSupply) {
-    return `${formatTokens(input.circulating)} tokens minted; supply locked.`;
+/** Distribute once done. */
+export function distributeDoneText(input: Pick<ChecklistInput, "lifetimeMinted" | "supplyLocked">): string {
+  return input.supplyLocked
+    ? `${formatTokens(input.lifetimeMinted)} tokens created and sent; supply locked.`
+    : `All ${formatTokens(input.lifetimeMinted)} tokens are created and sent.`;
+}
+
+/** The Close step in words (`isAdmin`: this wallet may lock). */
+export function closeText(input: ChecklistInput, isAdmin: boolean): string {
+  const [, , , , close] = checklistItems(input);
+  if (close.state === "done") return "Supply is locked for good — no more tokens can be created.";
+  if (close.state === "blocked") {
+    if (!input.classExists || !input.mintInitialized || !input.active) return "After the asset is active.";
+    if (input.openSalesOfClass === null) return "Could not check this class's sales; refresh before locking.";
+    return "Not while a sale of this class is open.";
   }
-  const inTreasury =
-    input.treasuryUnits !== null && input.circulating > BigInt(0) && input.treasuryUnits >= input.circulating;
-  return inTreasury
-    ? `All ${formatTokens(input.circulating)} tokens are in the treasury.`
-    : `All ${formatTokens(input.circulating)} tokens are minted.`;
+  return isAdmin
+    ? "Optional, after the last distribution: locks the supply for good. Nobody can create more tokens afterwards, not even the Super Admin."
+    : "Optional, after the last distribution: the operator can lock the supply for good.";
 }
 
 // ── Local draft (resume after a failed second signature) ────────────────────

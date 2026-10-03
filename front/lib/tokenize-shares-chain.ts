@@ -5,7 +5,11 @@
 // Admin always does): 863 B for the first real case and under 900 B at the
 // flow's longest name / symbol / asset ID, against the 1232 B packet limit
 // minus the send path's compute-budget instructions and reserve
-// (tests/tokenize-shares.test.ts measures it with the real builders). Every
+// (tests/tokenize-shares.test.ts measures it with the real builders). With
+// the CONVERSION permission it also carries the conversion marker (C2:
+// add_share_class(1, capped at 0, no mint) + set_convertible_to(0 → 1)):
+// 949 B for the real case, 983 B at the flow's longest name and 1027 B at
+// the program's maxima — still one transaction and one signature. Every
 // transaction is measured and simulated here before the wallet opens.
 
 import {
@@ -34,6 +38,7 @@ import {
   getAddShareClassInstructionAsync,
   getCreateAssetInstructionAsync,
   getInitializeShareClassMintInstructionAsync,
+  getSetConvertibleToInstruction,
   type Asset,
   type AssetStatus,
   type ShareClass,
@@ -58,12 +63,17 @@ import { findShareClassPda } from "@/lib/pdas";
 import {
   CLASS_DEFAULTS,
   CLASS_INDEX,
+  MARKER_CLASS_INDEX,
+  MARKER_DEFAULTS,
   assetDefaults,
   chooseAssetId,
+  conversionMarkerState,
   isResumable,
   nextTokenizeStep,
   type AssetSnapshot,
   type ClassSnapshot,
+  type MarkerAction,
+  type MarkerState,
   type TokenizeIntent,
   type TokenizeStep,
 } from "@/lib/tokenize-shares";
@@ -85,8 +95,8 @@ export async function tokenizeAddresses(issuer: Address, assetId: string): Promi
 }
 
 export type BuildTokenizeInput = {
-  /** create: all three; add_class: class (+ mint); init_mint: the mint only. */
-  kind: "create" | "add_class" | "init_mint";
+  /** create: all three; add_class: class (+ mint); init_mint: the mint only; add_marker: the marker only. */
+  kind: "create" | "add_class" | "init_mint" | "add_marker";
   /** create / add_class: also initialize the mint (needs `adminRecord`). */
   initMint: boolean;
   signer: TransactionSigner;
@@ -98,11 +108,17 @@ export type BuildTokenizeInput = {
   tokens: bigint;
   /** The issuer-permission proof (lib/issuer-permissions loadIssuerPermission). */
   adminRecord: Address | null;
+  /**
+   * The conversion marker (markerAction): add class 1 and link class 0 to it,
+   * or only link it. Needs `adminRecord` with the CONVERSION capability.
+   */
+  marker?: MarkerAction;
 };
 
 /** The instructions of one step, in program order. */
 export async function buildTokenizeIxs(input: BuildTokenizeInput): Promise<Instruction[]> {
   const { asset, shareClass, mint } = await tokenizeAddresses(input.issuer, input.assetId);
+  const marker = input.marker ?? null;
   const ixs: Instruction[] = [];
   if (input.kind === "create") {
     const defaults = assetDefaults();
@@ -138,7 +154,27 @@ export async function buildTokenizeIxs(input: BuildTokenizeInput): Promise<Instr
       }),
     );
   }
-  if (input.kind === "init_mint" || input.initMint) {
+  const markerClass = await findShareClassPda(asset, MARKER_CLASS_INDEX);
+  // Class 1 right after class 0 (add_share_class takes the next index).
+  if (marker === "add_and_link") {
+    ixs.push(
+      await getAddShareClassInstructionAsync({
+        authority: input.signer,
+        issuer: input.issuer,
+        asset,
+        shareClass: markerClass,
+        classIndex: MARKER_DEFAULTS.classIndex,
+        classType: MARKER_DEFAULTS.classType,
+        rightsBitfield: MARKER_DEFAULTS.rightsBitfield,
+        liqPrefMultiplierBps: MARKER_DEFAULTS.liqPrefMultiplierBps,
+        liqSeniority: MARKER_DEFAULTS.liqSeniority,
+        votingWeight: MARKER_DEFAULTS.votingWeight,
+        maxSupply: MARKER_DEFAULTS.maxSupply,
+        mintablePostLaunch: MARKER_DEFAULTS.mintablePostLaunch,
+      }),
+    );
+  }
+  if (input.kind === "init_mint" || (input.kind !== "add_marker" && input.initMint)) {
     if (!input.adminRecord) throw new Error("Initializing the mint needs the Mint permission.");
     const [hookConfig] = await findConfigPda({ mint });
     const [extraAccountMetaList] = await findExtraAccountMetaListPda({ mint });
@@ -157,6 +193,20 @@ export async function buildTokenizeIxs(input: BuildTokenizeInput): Promise<Instr
       }),
     );
   }
+  if (marker !== null) {
+    if (!input.adminRecord) throw new Error("Linking the conversion target needs the Conversion permission.");
+    ixs.push(
+      getSetConvertibleToInstruction({
+        authority: input.signer,
+        adminRecord: input.adminRecord,
+        issuer: input.issuer,
+        asset,
+        shareClass,
+        targetShareClass: markerClass,
+      }),
+    );
+  }
+  if (input.kind === "add_marker" && marker === null) throw new Error("No conversion marker to add.");
   return ixs;
 }
 
@@ -219,20 +269,35 @@ export async function simulateTokenize(
 export type HookMode = "open" | "kyc-gated" | "none";
 
 export type TokenizeChainState = {
-  addresses: { asset: Address; shareClass: Address };
+  addresses: { asset: Address; shareClass: Address; markerClass: Address };
   asset: Asset | null;
   sc0: ShareClass | null;
+  /** Class 1 (the conversion marker when the flow made it), or null. */
+  sc1: ShareClass | null;
+  marker: MarkerState;
   /** null while class 0 has no mint (no hook config yet). */
   hook: HookMode | null;
 };
 
-/** The asset, its class 0 and the class's transfer-hook mode, at `confirmed`. */
+/** The marker state from the chain accounts (class 1's address is its PDA). */
+export function markerStateOf(asset: Asset | null, sc0: ShareClass | null, sc1: ShareClass | null, markerClass: Address): MarkerState {
+  return conversionMarkerState({
+    shareClassesCount: asset?.shareClassesCount ?? 0,
+    sc0: sc0 ? classSnapshot(sc0) : null,
+    sc1: sc1 ? classSnapshot(sc1) : null,
+    sc1Pda: markerClass,
+  });
+}
+
+/** The asset, its classes 0 and 1 and class 0's transfer-hook mode, at `confirmed`. */
 export async function readTokenizeState(rpc: Rpc, assetPda: Address): Promise<TokenizeChainState> {
   const options = { commitment: "confirmed" as const };
   const shareClass = await findShareClassPda(assetPda, CLASS_INDEX);
-  const [asset, sc0] = await Promise.all([
+  const markerClass = await findShareClassPda(assetPda, MARKER_CLASS_INDEX);
+  const [asset, sc0, sc1] = await Promise.all([
     fetchMaybeAsset(rpc, assetPda, options),
     fetchMaybeShareClass(rpc, shareClass, options),
+    fetchMaybeShareClass(rpc, markerClass, options),
   ]);
   let hook: HookMode | null = null;
   if (sc0.exists && sc0.data.mintInitialized) {
@@ -240,10 +305,15 @@ export async function readTokenizeState(rpc: Rpc, assetPda: Address): Promise<To
     const cfg = await fetchMaybeTransferHookConfig(rpc, config, options);
     hook = !cfg.exists ? "none" : cfg.data.restrictionMode === RestrictionMode.KycGated ? "kyc-gated" : "open";
   }
+  const a = asset.exists ? asset.data : null;
+  const c0 = sc0.exists ? sc0.data : null;
+  const c1 = sc1.exists ? sc1.data : null;
   return {
-    addresses: { asset: assetPda, shareClass },
-    asset: asset.exists ? asset.data : null,
-    sc0: sc0.exists ? sc0.data : null,
+    addresses: { asset: assetPda, shareClass, markerClass },
+    asset: a,
+    sc0: c0,
+    sc1: c1,
+    marker: markerStateOf(a, c0, c1, markerClass),
     hook,
   };
 }
@@ -290,6 +360,7 @@ export function classSnapshot(sc: ShareClass): ClassSnapshot {
     liqPrefMultiplierBps: sc.liqPrefMultiplierBps,
     liqSeniority: sc.liqSeniority,
     votingWeight: sc.votingWeight,
+    convertibleTo: sc.convertibleTo.__option === "Some" ? sc.convertibleTo.value.toString() : null,
   };
 }
 
@@ -326,6 +397,8 @@ export async function pickTokenizeAssetId(
     candidates: readonly string[];
     intent: TokenizeIntent;
     canInitMint: boolean;
+    /** The wallet holds the CONVERSION permission (the marker step). */
+    canConvert?: boolean;
     profileSaved: (assetPda: Address) => Promise<boolean>;
   },
 ): Promise<TokenizeAssetPick | null> {
@@ -336,22 +409,28 @@ export async function pickTokenizeAssetId(
   const steps: TokenizeStep[] = [];
   for (let i = 0; i < assets.length; i++) {
     const a = assets[i];
-    const base = { canInitMint: input.canInitMint, intent: input.intent };
+    const base = { canInitMint: input.canInitMint, intent: input.intent, canConvert: input.canConvert ?? false };
     if (!a.exists) {
       steps.push(nextTokenizeStep({ ...base, asset: null, sc0: null, profileSaved: false }));
       break;
     }
-    let sc0: ClassSnapshot | null = null;
+    let sc0: ShareClass | null = null;
+    let sc1: ShareClass | null = null;
+    const markerClass = await findShareClassPda(pdas[i], MARKER_CLASS_INDEX);
     if (a.data.shareClassesCount > 0) {
-      const sc = await fetchMaybeShareClass(rpc, await findShareClassPda(pdas[i], CLASS_INDEX), {
-        commitment: "confirmed",
-      });
-      sc0 = sc.exists ? classSnapshot(sc.data) : null;
+      const [c0, c1] = await Promise.all([
+        fetchMaybeShareClass(rpc, await findShareClassPda(pdas[i], CLASS_INDEX), { commitment: "confirmed" }),
+        a.data.shareClassesCount > 1 ? fetchMaybeShareClass(rpc, markerClass, { commitment: "confirmed" }) : null,
+      ]);
+      sc0 = c0.exists ? c0.data : null;
+      sc1 = c1?.exists ? c1.data : null;
     }
+    const marker = markerStateOf(a.data, sc0, sc1, markerClass);
     const asset = assetSnapshot(a.data);
-    let step = nextTokenizeStep({ ...base, asset, sc0, profileSaved: true });
+    const snapshot = sc0 ? classSnapshot(sc0) : null;
+    let step = nextTokenizeStep({ ...base, asset, sc0: snapshot, marker, profileSaved: true });
     if (step.kind === "done" || step.kind === "wait_mint_permission") {
-      step = nextTokenizeStep({ ...base, asset, sc0, profileSaved: await input.profileSaved(pdas[i]) });
+      step = nextTokenizeStep({ ...base, asset, sc0: snapshot, marker, profileSaved: await input.profileSaved(pdas[i]) });
     }
     steps.push(step);
     if (step.kind === "create" || isResumable(step)) break;

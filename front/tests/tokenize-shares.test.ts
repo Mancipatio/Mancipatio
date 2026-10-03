@@ -21,11 +21,13 @@ import {
   HUNDRED_PERCENT_E4,
   KYC_GATED_NOTE,
   LEGAL_DOC_MAX_BYTES,
+  MARKER_DEFAULTS,
   MAX_ASSET_ID_BYTES,
   MAX_SYMBOL_PREFIX_BYTES,
   MAX_TOKEN_NAME_BYTES,
+  NEXT_STEP_LINE,
+  OPEN_CLASS_LINE,
   OPEN_TOKEN_NOTE,
-  PRIMARY_PAUSED_NOTE,
   WEBSITE_MAX_CHARS,
   assetDefaults,
   baseAssetId,
@@ -35,11 +37,15 @@ import {
   checklistItems,
   chooseAssetId,
   classHasFlowTerms,
+  closeText,
+  conversionMarkerState,
   companyShortName,
   deriveSymbolPrefix,
   deriveTokenCompany,
   deriveTokenName,
   detailsSaved,
+  distributeDoneText,
+  distributeWaitText,
   draftKey,
   duplicateConfirmationKey,
   formatCents,
@@ -49,14 +55,14 @@ import {
   granularityById,
   hasTokenizeFields,
   isFlowToken,
+  isMarkerClass,
   isResumable,
   legalDocProblem,
   legalDocRequired,
   looksLikeTokenizeAsset,
-  mintDoneText,
+  markerAction,
   mintNamePreview,
   mintSymbolPreview,
-  mintWaitText,
   namedPercentE4,
   needsDuplicateConfirmation,
   nextTokenizeStep,
@@ -66,11 +72,13 @@ import {
   percentForTokens,
   percentFromName,
   perTokenPriceE6,
+  primaryPausedNote,
   resolveCompany,
   resolveJurisdiction,
   resumePrefill,
   shareFigures,
   summaryText,
+  supplyCapLine,
   toAsciiUpper,
   tokenNameFor,
   tokenizeCreateBlocker,
@@ -520,6 +528,150 @@ describe("resume decision table (R1–R9)", () => {
   });
 });
 
+describe("conversion marker (C2): class 1 capped at 0 that class 0 converts into", () => {
+  const intent = { name: "Mancipatio 5%", symbolPrefix: "MANCI", tokens: B(5_000) };
+  const MARKER_PDA = "Mark1111111111111111111111111111111111111111";
+  const asset = (over: Partial<AssetSnapshot> = {}): AssetSnapshot => ({
+    assetType: AssetType.Equity,
+    status: AssetStatus.Draft,
+    name: "Mancipatio 5%",
+    symbolPrefix: "MANCI",
+    shareClassesCount: 2,
+    ...over,
+  });
+  const sc0 = (over: Partial<ClassSnapshot> = {}): ClassSnapshot => ({
+    classType: ShareClassType.Common,
+    maxSupply: B(5_000),
+    mintablePostLaunch: false,
+    mintInitialized: true,
+    rightsBitfield: CLASS_DEFAULTS.rightsBitfield,
+    liqPrefMultiplierBps: CLASS_DEFAULTS.liqPrefMultiplierBps,
+    liqSeniority: CLASS_DEFAULTS.liqSeniority,
+    votingWeight: CLASS_DEFAULTS.votingWeight,
+    convertibleTo: MARKER_PDA,
+    ...over,
+  });
+  const marker = (over: Partial<ClassSnapshot> = {}): ClassSnapshot => ({
+    classType: MARKER_DEFAULTS.classType,
+    maxSupply: MARKER_DEFAULTS.maxSupply,
+    mintablePostLaunch: false,
+    mintInitialized: false,
+    rightsBitfield: 0,
+    liqPrefMultiplierBps: 10_000,
+    liqSeniority: 0,
+    votingWeight: 0,
+    convertibleTo: null,
+    ...over,
+  });
+  const state = (count: number, c0: ClassSnapshot | null, c1: ClassSnapshot | null) =>
+    conversionMarkerState({ shareClassesCount: count, sc0: c0, sc1: c1, sc1Pda: MARKER_PDA });
+
+  it("reads the marker's shape and link", () => {
+    expect(isMarkerClass(marker())).toBe(true);
+    expect(isMarkerClass(marker({ maxSupply: B(1) }))).toBe(false);
+    expect(isMarkerClass(marker({ mintInitialized: true }))).toBe(false);
+    expect(isMarkerClass(marker({ maxSupply: null }))).toBe(false);
+    expect(state(1, sc0({ convertibleTo: null }), null)).toBe("none");
+    expect(state(2, sc0(), marker())).toBe("linked");
+    expect(state(2, sc0({ convertibleTo: null }), marker())).toBe("unlinked");
+    expect(state(2, sc0({ convertibleTo: "Other111111111111111111111111111111111111111" }), marker())).toBe("foreign");
+    expect(state(2, sc0(), marker({ maxSupply: B(100) }))).toBe("foreign");
+    expect(state(3, sc0(), marker())).toBe("foreign");
+  });
+
+  it("nextTokenizeStep accepts the marker instead of 'conflict' (the review's C2 blocker)", () => {
+    const step = (over: Partial<Parameters<typeof nextTokenizeStep>[0]>) =>
+      nextTokenizeStep({ asset: asset(), sc0: sc0(), profileSaved: true, canInitMint: true, intent, ...over });
+    // Before: shareClassesCount > 1 was always a conflict; it still is without the marker state.
+    expect(step({}).kind).toBe("conflict");
+    expect(step({ marker: "linked" }).kind).toBe("done");
+    expect(step({ marker: "linked", profileSaved: false }).kind).toBe("save_profile");
+    expect(step({ marker: "linked", sc0: sc0({ mintInitialized: false }) }).kind).toBe("init_mint");
+    expect(step({ marker: "foreign" }).kind).toBe("conflict");
+    // Unlinked: linked by whoever may (set_convertible_to has no status check), Draft or Active.
+    expect(step({ marker: "unlinked", canConvert: true }).kind).toBe("add_marker");
+    expect(step({ marker: "unlinked", canConvert: true, asset: asset({ status: AssetStatus.Active }) }).kind).toBe("add_marker");
+    expect(step({ marker: "unlinked", canConvert: false }).kind).toBe("done");
+    // A Draft without the marker: offered as one separate transaction (existing Draft assets).
+    const one = asset({ shareClassesCount: 1 });
+    expect(step({ asset: one, marker: "none", canConvert: true }).kind).toBe("add_marker");
+    expect(step({ asset: one, marker: "none", canConvert: false }).kind).toBe("done");
+    // Active: class 1 can no longer be added; nothing to offer.
+    expect(step({ asset: asset({ shareClassesCount: 1, status: AssetStatus.Active }), marker: "none", canConvert: true }).kind).toBe("done");
+    expect(isResumable({ kind: "add_marker" })).toBe(true);
+  });
+
+  it("markerAction: the marker rides in the create transaction, or alone, only with the Conversion permission", () => {
+    expect(markerAction({ step: { kind: "create", initMint: true }, marker: "none", draft: true, canConvert: true })).toBe("add_and_link");
+    expect(markerAction({ step: { kind: "add_class", initMint: false }, marker: "none", draft: true, canConvert: true })).toBe("add_and_link");
+    expect(markerAction({ step: { kind: "create", initMint: true }, marker: "none", draft: true, canConvert: false })).toBeNull();
+    expect(markerAction({ step: { kind: "init_mint" }, marker: "none", draft: true, canConvert: true })).toBe("add_and_link");
+    expect(markerAction({ step: { kind: "init_mint" }, marker: "linked", draft: true, canConvert: true })).toBeNull();
+    expect(markerAction({ step: { kind: "add_marker" }, marker: "unlinked", draft: false, canConvert: true })).toBe("link");
+    expect(markerAction({ step: { kind: "add_marker" }, marker: "none", draft: false, canConvert: true })).toBeNull();
+    expect(markerAction({ step: { kind: "save_profile" }, marker: "none", draft: true, canConvert: true })).toBeNull();
+  });
+
+  async function build(kind: "create" | "add_class" | "init_mint" | "add_marker", name = "Mancipatio 5%", assetId = "MANCI-5PCT", symbol = "MANCI", markerAct: "add_and_link" | "link" | null = "add_and_link", initMint = true) {
+    const signer = await generateKeyPairSigner();
+    const issuer = (await generateKeyPairSigner()).address as Address;
+    const adminRecord = (await generateKeyPairSigner()).address as Address;
+    const ixs = await buildTokenizeIxs({
+      kind, initMint, signer, issuer, assetId, name, symbolPrefix: symbol,
+      legalDocHash: new Uint8Array(32).fill(7), tokens: B(5_000), adminRecord, marker: markerAct,
+    });
+    return { signer, ixs, issuer };
+  }
+
+  it("fits in the existing create transaction: 949 B real case, 983 B at the flow's longest name, 1027 B at the program's maxima (≤ 1200 B)", async () => {
+    const real = await build("create");
+    expect(real.ixs).toHaveLength(5);
+    const size = tokenizeTransactionSize(real.signer.address, real.ixs);
+    expect(size).toBe(949);
+    const longest = await build("create", "Đurđević Šeće 5%", "A".repeat(32), "ABCDEFGHI");
+    expect(tokenizeTransactionSize(longest.signer.address, longest.ixs)).toBe(983);
+    const max = await build("create", "N".repeat(64), "A".repeat(32), "ABCDEFGHIJ");
+    expect(tokenizeTransactionSize(max.signer.address, max.ixs)).toBe(1027);
+    // Without the marker it is the 863 B transaction of before.
+    const plain = await build("create", "Mancipatio 5%", "MANCI-5PCT", "MANCI", null);
+    expect(tokenizeTransactionSize(plain.signer.address, plain.ixs)).toBe(863);
+  });
+
+  it("orders the instructions as the program needs them and targets class 1", async () => {
+    const { ixs } = await build("create");
+    // create_asset, add_share_class(0), add_share_class(1), initialize_share_class_mint, set_convertible_to.
+    const [, add0, add1, init, link] = ixs;
+    expect(Array.from(add0.data!.slice(0, 8))).toEqual(Array.from(add1.data!.slice(0, 8)));
+    expect(add0.data![8]).toBe(0);
+    expect(add1.data![8]).toBe(1);
+    // set_convertible_to: [authority, admin record, issuer, asset, share_class (class 0, writable), target (class 1)].
+    // add_share_class: [authority, platform, issuer, asset, share_class, system].
+    expect(link.accounts![4].address).toBe(add0.accounts![4].address);
+    expect(link.accounts![5].address).toBe(add1.accounts![4].address);
+    expect(init.accounts!.some((a) => a.address === add0.accounts![4].address)).toBe(true);
+  });
+
+  it("an existing Draft gets the pair as one separate transaction; a link alone is one instruction", async () => {
+    const pair = await build("add_marker");
+    expect(pair.ixs).toHaveLength(2);
+    expect(tokenizeTransactionSize(pair.signer.address, pair.ixs)).toBeLessThanOrEqual(TOKENIZE_TX_LIMIT);
+    expect((await build("add_marker", undefined, undefined, undefined, "link")).ixs).toHaveLength(1);
+    await expect(build("add_marker", undefined, undefined, undefined, null)).rejects.toThrow(/No conversion marker/);
+    // The mint step carries the pair when the marker is still missing.
+    expect((await build("init_mint")).ixs).toHaveLength(3);
+  });
+
+  it("the conversion route's requirement is what the marker sets: an on-chain convertible_to", () => {
+    const route = src("app/api/conversion/create/route.ts");
+    expect(route).toContain("if (!facts.convertibleTo) {");
+    expect(src("lib/server/token-holdings.ts")).toContain('shareClass.data.convertibleTo.__option === "Some"');
+    const flow = src("components/tokenize-shares-flow.tsx");
+    expect(flow).toContain('markerAction({ step: picked.step, marker: "none", draft: true, canConvert })');
+    expect(flow).toContain("canConvert: ctx.canConvert");
+    expect(flow).toContain("marker: resume.chain.marker");
+  });
+});
+
 describe("legal document", () => {
   const pdf = { name: "statut.pdf", type: "application/pdf", size: 1000 };
   it("is required on mainnet only", () => {
@@ -741,7 +893,12 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
     expect(OPEN_TOKEN_NOTE).toBe("Anyone can hold and transfer it. KYC is needed only to convert it into company shares.");
     const flow = src("components/tokenize-shares-flow.tsx");
     expect(flow).toContain("<li>{OPEN_TOKEN_NOTE}</li>");
-    expect(flow).toContain("Next: the operator activates the asset → then the tokens are minted.");
+    // Nothing is minted up front: tokens are created when they are sent or sold (design §1).
+    expect(supplyCapLine(B(5_000))).toBe("Supply capped at 5,000 — tokens are created only when you send or sell them");
+    expect(flow).toContain("<li>{supplyCapLine(figures.tokens)}</li>");
+    expect(flow).not.toContain("locked for good after minting");
+    expect(NEXT_STEP_LINE).toBe("Next: the operator activates the asset → then choose how to distribute the tokens.");
+    expect(flow).toContain("{NEXT_STEP_LINE}");
     for (const file of ["components/tokenize-shares-flow.tsx", "components/tokenize-checklist.tsx", "lib/tokenize-shares.ts"]) {
       const text = src(file);
       expect(text, file).not.toContain("Only verified (KYC)");
@@ -778,73 +935,92 @@ describe("profile row (no migration: figures in fields.tokenize)", () => {
   });
 });
 
-describe("checklist after creation (no KYC-only step)", () => {
+describe("checklist after creation: created → details → activate → distribute → close", () => {
   const fresh: Parameters<typeof checklistItems>[0] = {
     classExists: true,
     mintInitialized: true,
     profileSaved: true,
     active: false,
-    circulating: B(0),
+    issuerVerified: true,
+    hookMode: "open",
     maxSupply: B(5_000),
+    lifetimeMinted: B(0),
+    treasuryBalance: B(0),
     supplyLocked: false,
-    primaryPaused: false,
+    openSalesOfClass: 0,
   };
   const states = (over: Partial<typeof fresh> = {}) =>
     Object.fromEntries(checklistItems({ ...fresh, ...over }).map((i) => [i.id, i.state]));
 
-  it("right after creation: activation open, minting blocked; there is no KYC-only step", () => {
-    expect(states()).toEqual({ created: "done", details: "done", activate: "todo", mint: "blocked", lock: "blocked" });
-    expect(checklistItems(fresh).map((i) => i.id)).toEqual(["created", "details", "activate", "mint", "lock"]);
+  it("right after creation: activation open, distribution waits; there is no KYC-only or mint step", () => {
+    expect(states()).toEqual({ created: "done", details: "done", activate: "todo", distribute: "blocked", close: "blocked" });
+    expect(checklistItems(fresh).map((i) => i.id)).toEqual(["created", "details", "activate", "distribute", "close"]);
   });
-  it("minting is gated only by activation and pause bit 0x02", () => {
-    expect(states({ active: true }).mint).toBe("todo");
-    expect(states({ active: true, primaryPaused: true }).mint).toBe("blocked");
-    expect(states({ active: false }).mint).toBe("blocked");
-    expect(states({ active: true, mintInitialized: false }).mint).toBe("blocked");
+  it("Distribute opens with activation, the issuer's KYB and a readable hook — not with pause bit 0x02", () => {
+    expect(states({ active: true }).distribute).toBe("todo");
+    expect(states({ active: true, hookMode: "kyc-gated" }).distribute).toBe("todo");
+    expect(states({ active: true, hookMode: "none" }).distribute).toBe("blocked");
+    expect(states({ active: true, issuerVerified: false }).distribute).toBe("blocked");
+    expect(states({ active: true, mintInitialized: false }).distribute).toBe("blocked");
+    expect(Object.keys(fresh)).not.toContain("primaryPaused");
   });
-  it("lock after the full supply; done once locked", () => {
-    expect(states({ active: true, circulating: B(5_000) })).toMatchObject({ mint: "done", lock: "todo" });
-    expect(states({ active: true, circulating: B(5_000), supplyLocked: true }).lock).toBe("done");
+  it("Distribute is done only when everything that can exist was created and left the treasury", () => {
+    const all = { active: true, lifetimeMinted: B(5_000) };
+    expect(states({ ...all, treasuryBalance: B(0) }).distribute).toBe("done");
+    expect(states({ ...all, treasuryBalance: B(1) }).distribute).toBe("todo");
+    expect(states({ ...all, treasuryBalance: null }).distribute).toBe("todo");
+    // Part created, the rest still possible: still to do.
+    expect(states({ active: true, lifetimeMinted: B(3_000), treasuryBalance: B(0) }).distribute).toBe("todo");
+    // Locked after a partial distribution with an empty treasury: done.
+    expect(states({ active: true, lifetimeMinted: B(3_000), treasuryBalance: B(0), supplyLocked: true }).distribute).toBe("done");
+    expect(distributeDoneText({ lifetimeMinted: B(5_000), supplyLocked: false })).toBe("All 5,000 tokens are created and sent.");
+    expect(distributeDoneText({ lifetimeMinted: B(3_000), supplyLocked: true })).toBe("3,000 tokens created and sent; supply locked.");
+  });
+  it("Close is the optional one-way lock: after activation, never while a sale of the class is open", () => {
+    expect(states({ active: true }).close).toBe("todo");
+    expect(states({ active: true, openSalesOfClass: 1 }).close).toBe("blocked");
+    expect(states({ active: true, openSalesOfClass: null }).close).toBe("blocked");
+    expect(states({ active: true, supplyLocked: true }).close).toBe("done");
+    expect(closeText({ ...fresh, active: true }, true)).toMatch(/^Optional, after the last distribution: locks the supply for good/);
+    expect(closeText({ ...fresh, active: true }, false)).toMatch(/after the last distribution: the operator can lock/);
+    expect(closeText({ ...fresh, active: true, openSalesOfClass: 2 }, true)).toBe("Not while a sale of this class is open.");
+    expect(closeText({ ...fresh, active: true, openSalesOfClass: null }, true)).toMatch(/Could not check this class's sales/);
+    expect(closeText(fresh, true)).toBe("After the asset is active.");
   });
   it("without a mint creation is still to do", () => {
-    expect(states({ mintInitialized: false })).toMatchObject({ created: "todo", activate: "todo", mint: "blocked" });
-    expect(states({ classExists: false, mintInitialized: false })).toMatchObject({ activate: "blocked", mint: "blocked" });
+    expect(states({ mintInitialized: false })).toMatchObject({ created: "todo", activate: "todo", distribute: "blocked" });
+    expect(states({ classExists: false, mintInitialized: false })).toMatchObject({ activate: "blocked", distribute: "blocked" });
   });
-  it("the 0x02 note shows as soon as the bit is set, before or after activation", () => {
-    expect(PRIMARY_PAUSED_NOTE).toBe(
-      "Minting is paused platform-wide; the super admin reopens Primary issuance for the mint and closes it again right after.",
+  it("says what Distribute waits for; the 0x02 note belongs to the panel and names who must act", () => {
+    expect(distributeWaitText(fresh)).toBe("After the operator activates the asset.");
+    expect(distributeWaitText({ ...fresh, active: true, mintInitialized: false })).toBe("After the token mint exists.");
+    expect(distributeWaitText({ ...fresh, issuerVerified: false })).toBe(
+      "After the operator activates the asset and your company's KYB is verified.",
     );
-    expect(mintWaitText({ ...fresh, primaryPaused: true })).toBe(
-      `After the operator activates the asset. ${PRIMARY_PAUSED_NOTE}`,
+    expect(distributeWaitText({ ...fresh, active: true, hookMode: "none" })).toMatch(/no transfer-hook config/);
+    expect(distributeWaitText({ ...fresh, active: true })).toBeNull();
+    for (const over of [{}, { active: true }]) expect(distributeWaitText({ ...fresh, ...over }) ?? "").not.toMatch(/KYC-only|0x02/);
+    expect(primaryPausedNote("8TEmAbCdEfGhIjKlMnOpQrStUvWxYz1234567890abc")).toMatch(
+      /^Creating tokens is paused platform-wide \(Primary issuance, bit 0x02\)\. Only the super admin \(8TEm…0abc\) can reopen it;/,
     );
-    expect(mintWaitText({ ...fresh, active: true, primaryPaused: true })).toBe(PRIMARY_PAUSED_NOTE);
-    expect(mintWaitText({ ...fresh, mintInitialized: false, primaryPaused: true })).toContain(PRIMARY_PAUSED_NOTE);
-    expect(mintWaitText({ ...fresh, active: true, mintInitialized: false })).toBe("After the token mint exists.");
-    expect(mintWaitText(fresh)).toBe("After the operator activates the asset.");
-    expect(mintWaitText({ ...fresh, active: true })).toBeNull();
-    // Done: nothing to wait for, paused or not.
-    expect(mintWaitText({ ...fresh, active: true, circulating: B(5_000), primaryPaused: true })).toBeNull();
-    for (const over of [{}, { active: true }, { primaryPaused: true }]) {
-      expect(mintWaitText({ ...fresh, ...over }) ?? "").not.toMatch(/KYC/);
-    }
+    expect(primaryPausedNote(null)).toContain("Only the super admin can reopen it");
   });
-  it("'Mint' done says 'in the treasury' only while the treasury holds the minted supply", () => {
-    const done = { circulating: B(5_000), maxSupply: B(5_000), supplyLocked: false };
-    expect(mintDoneText({ ...done, treasuryUnits: B(5_000) })).toBe("All 5,000 tokens are in the treasury.");
-    expect(mintDoneText({ ...done, treasuryUnits: B(4_000) })).toBe("All 5,000 tokens are minted.");
-    expect(mintDoneText({ ...done, treasuryUnits: null })).toBe("All 5,000 tokens are minted.");
-    expect(mintDoneText({ ...done, supplyLocked: true, circulating: B(3_000), treasuryUnits: B(3_000) })).toBe(
-      "3,000 tokens minted; supply locked.",
-    );
-  });
-  it("the checklist reads the hook mode but only says KYC-only, never requires it", () => {
+  it("the checklist counts from lifetime_minted, hosts Distribute and Close, and says Open or KYC-only", () => {
     expect(KYC_GATED_NOTE).toMatch(/^KYC-only: holders need a KYC passport/);
+    expect(OPEN_CLASS_LINE).toBe("Open to any wallet ✓");
     const checklist = src("components/tokenize-checklist.tsx");
     expect(checklist).toContain('hook === "kyc-gated" && <p');
+    expect(checklist).toContain('hook === "open" && <p');
     expect(checklist).not.toContain("Operator: KYC-only");
     expect(checklist).not.toMatch(/kycGated:/);
-    expect(checklist).toContain("mintWaitText(facts)");
-    expect(checklist).toContain("mintDoneText(");
+    expect(checklist).toContain("distributeWaitText(facts)");
+    expect(checklist).toContain("<DistributeCard");
+    expect(checklist).toContain("<LockSupplyButton");
+    // Review: remaining used to be maxSupply − circulating, which a conversion burn reopens.
+    expect(checklist).toContain("remainingFromLifetime(maxSupply, lifetimeMinted)");
+    expect(checklist).not.toMatch(/maxSupply\s*-\s*circulating/);
+    expect(checklist).not.toContain("defaultUnits");
+    expect(checklist).not.toContain("<TreasuryMintPanel");
   });
 });
 
@@ -1075,15 +1251,22 @@ describe("surfaces", () => {
     expect(page).not.toMatch(/KYC-only|KycGated/);
   });
 
-  it("the admin page mints through the shared TreasuryMintPanel (one copy of the logic)", () => {
+  it("one copy of the treasury mint: the admin panel and Send to wallets both run lib/treasury-mint", () => {
     const page = src("app/admin/share-classes/page.tsx");
     expect(page).toContain("<TreasuryMintPanel");
     expect(page).not.toContain("reserveTreasuryMint(");
-    const panel = src("components/treasury-mint-panel.tsx");
-    expect(panel.indexOf("reserveTreasuryMint(")).toBeGreaterThan(-1);
-    expect(panel.indexOf("reserveTreasuryMint(")).toBeLessThan(panel.indexOf("getMintToTreasuryInstructionAsync("));
-    expect(panel).toContain("reasonMinLength={5}");
-    expect(panel).toContain("releaseWhenExpired(");
+    const lib = src("lib/treasury-mint.ts");
+    expect(lib.indexOf("reserveTreasuryMint(")).toBeGreaterThan(-1);
+    expect(lib.indexOf("reserveTreasuryMint(")).toBeLessThan(lib.indexOf("buildTreasuryMintIxs({"));
+    expect(lib).toContain("releaseWhenExpired(");
+    expect(lib).toContain("TREASURY_MINT_REASON_MIN = 5");
+    for (const file of ["components/treasury-mint-panel.tsx", "components/send-to-wallets-panel.tsx"]) {
+      const text = src(file);
+      expect(text, file).toContain("runTreasuryMint({");
+      expect(text, file).not.toContain("reserveTreasuryMint(");
+      expect(text, file).not.toContain("getMintToTreasuryInstructionAsync(");
+    }
+    expect(src("components/treasury-mint-panel.tsx")).toContain("reasonMinLength={TREASURY_MINT_REASON_MIN}");
   });
 
   it("issuer entry points lead to the one-screen flow; the generic modal stays as 'Other asset types'", () => {
