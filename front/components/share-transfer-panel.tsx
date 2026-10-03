@@ -153,7 +153,8 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent }: ShareTransferPa
 
   const recipient = recipientInput.trim();
   const validRecipient = recipient && isAddress(recipient) ? (recipient as Address) : null;
-  const preflightKey = `${recipient}|${amountInput.trim()}|${refreshKey}`;
+  // A result is shown only for the inputs, wallet and class it was computed for.
+  const preflightKey = `${wallet ?? ""}|${sc.mint}|${recipient}|${amountInput.trim()}|${refreshKey}`;
 
   // The checks and the test run, a moment after the inputs settle.
   useEffect(() => {
