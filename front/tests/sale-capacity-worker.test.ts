@@ -243,6 +243,53 @@ describe("reconcileSaleCapacity — review follow-ups", () => {
     expect(touch?.args).toMatchObject({ last_error: expect.stringMatching(/Worker: rpc down/), updated_at: expect.any(String) });
   });
 
+  it("clears a stale last_error on a row that only waits for its sale (rehearsal P4), only while unchanged", async () => {
+    const reservationUpdates = () =>
+      state.calls.filter((c) => c.kind === "update" && c.target === "sale_capacity_reservations").map((c) => c.args);
+    // Consumed, the sale still Open: pending until it closes, nothing wrong.
+    state.rows = [row({ status: "consumed", last_error: "Worker: rpc down" })];
+    state.finalizedSale = sale({ status: SaleStatus.Open });
+    expect(await reconcileSaleCapacity(5)).toMatchObject({ pending: 1 });
+    expect(reservationUpdates()).toEqual([
+      { last_error: null, updated_at: expect.any(String) },
+      { updated_at: expect.any(String) },
+    ]);
+    // Approved, confirmed and not opened yet: the same.
+    state.calls = [];
+    state.rows = [row({ chain_confirmed_at: OLD, last_error: "Adopted the on-chain approval (adopted_terms, source orphan-scan)" })];
+    state.approval = approval();
+    expect(await reconcileSaleCapacity(5)).toMatchObject({ pending: 1 });
+    expect(reservationUpdates()[0]).toEqual({ last_error: null, updated_at: expect.any(String) });
+    // Nothing to clear: only the rotation.
+    state.calls = [];
+    state.rows = [row({ chain_confirmed_at: OLD, last_error: null })];
+    await reconcileSaleCapacity(5);
+    expect(reservationUpdates()).toEqual([{ updated_at: expect.any(String) }]);
+  });
+
+  it("keeps last_error on a row that is pending for a reason (another approval, a grown sale, a lagging read)", async () => {
+    const cleared = () =>
+      state.calls.some((c) => c.kind === "update" && c.target === "sale_capacity_reservations" && (c.args as { last_error?: unknown }).last_error === null);
+    // The sale id was opened with another approval: an alert, not a wait.
+    state.rows = [row({ chain_confirmed_at: OLD, last_error: "Worker: rpc down" })];
+    state.confirmedSale = sale({ saleApproval: SC });
+    await reconcileSaleCapacity(5);
+    expect(cleared()).toBe(false);
+    // The ledger grew the reservation to the sale's size: its note stays.
+    state.calls = [];
+    state.confirmedSale = sale({ status: SaleStatus.Open });
+    state.finalizedSale = sale({ status: SaleStatus.Open, totalForSale: BigInt(200_000) });
+    state.rpc.consume_sale_reservation = row({ status: "consumed", grew: true, last_error: "The sale (gross 2000000) is larger" });
+    await reconcileSaleCapacity(5);
+    expect(cleared()).toBe(false);
+    // The finalized sale is not readable yet.
+    state.calls = [];
+    state.rows = [row({ status: "consumed", last_error: "Worker: rpc down" })];
+    state.finalizedSale = null;
+    await reconcileSaleCapacity(5);
+    expect(cleared()).toBe(false);
+  });
+
   it("raises a repeated alert only once (same last_error)", async () => {
     state.rows = [row({ chain_confirmed_at: OLD, last_error: "A sale exists for this id but consumed a different approval" })];
     state.confirmedSale = sale({ saleApproval: SC });
