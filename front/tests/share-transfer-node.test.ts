@@ -9,7 +9,21 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const ROOT = process.cwd();
-const ENTRY_POINTS = ["lib/share-transfer.ts", "lib/simulation-gate.ts", "lib/program-errors.ts", "lib/extra-account-metas.ts"];
+const ENTRY_POINTS = [
+  "lib/share-transfer.ts",
+  "lib/simulation-gate.ts",
+  "lib/program-errors.ts",
+  "lib/extra-account-metas.ts",
+  // "Send to wallets": the rehearsal script runs the same parsing, checks, packing and resume decisions.
+  "lib/distribution-rows.ts",
+  "lib/distribution-supply.ts",
+  "lib/distribution-checks.ts",
+  "lib/distribution-plan.ts",
+  "lib/distribution-journal.ts",
+  "lib/distribution-chain.ts",
+  "lib/distribution-run.ts",
+  "lib/send-outcome.ts",
+];
 const FORBIDDEN_MODULES = ["lib/supabase", "lib/passport", "lib/siws-client", "lib/toast", "lib/auth"];
 const FORBIDDEN_PACKAGES = [/^react($|\/|-dom)/, /^next($|\/)/, /^@solana\/react-hooks/];
 
@@ -27,7 +41,8 @@ function resolve(from: string, spec: string): string | null {
 function importsOf(file: string): string[] {
   const source = readFileSync(join(ROOT, file), "utf8");
   const specs: string[] = [];
-  for (const match of source.matchAll(/(?:import|export)\s[^;]*?from\s+"([^"]+)"/g)) specs.push(match[1]);
+  // Type-only imports are erased at runtime: they load nothing.
+  for (const match of source.matchAll(/(?:import|export)\s(?!type\s)[^;]*?from\s+"([^"]+)"/g)) specs.push(match[1]);
   for (const match of source.matchAll(/import\(\s*"([^"]+)"\s*\)/g)) specs.push(match[1]);
   return specs;
 }
@@ -62,6 +77,16 @@ describe("node-safe modules", () => {
     expect(typeof gate.simulateMessage).toBe("function");
     expect(typeof errors.classifyFailure).toBe("function");
     expect(typeof metas.resolveExtraAccountMetas).toBe("function");
+    const rows = await import("@/lib/distribution-rows");
+    const checks = await import("@/lib/distribution-checks");
+    const plan = await import("@/lib/distribution-plan");
+    const journal = await import("@/lib/distribution-journal");
+    const run = await import("@/lib/distribution-run");
+    expect(typeof rows.parseRecipients).toBe("function");
+    expect(typeof checks.loadDistributionFacts).toBe("function");
+    expect(typeof plan.planWithSimulation).toBe("function");
+    expect(typeof journal.rowStates).toBe("function");
+    expect(typeof run.evaluateRun).toBe("function");
   });
 
   it("pull in no React, Next, wallet-UI or browser-session module, at any depth", () => {

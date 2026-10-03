@@ -39,6 +39,9 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   // The caller screens its OWN wallet before a buy (8.5); its only write is
   // the compliance alert of a hit, one per wallet while open.
   "compliance.screenWallet",
+  // The sender of a distribution screens its recipients (Send to wallets):
+  // addresses in, matching addresses out; its only write is the alert of a hit.
+  "compliance.screenRecipients",
   "conversion.adminList",
   "conversion.listMine",
   "delivery.adminList",

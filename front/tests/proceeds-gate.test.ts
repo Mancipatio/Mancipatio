@@ -63,6 +63,7 @@ describe("gate accounts", () => {
 
   it("the verified client runs it before any wallet prompt, next to the pause gate", () => {
     const src = fs.readFileSync(path.join(__dirname, "..", "lib", "verified-solana-client.ts"), "utf8");
-    expect(src.match(/await assertGateAccountsUnset\(context\.rpc, input\.instructions\);/g)).toHaveLength(2);
+    // prepare, prepareAndSend and prepareAndSendAll (once per transaction of a batch).
+    expect(src.match(/await assertGateAccountsUnset\(context\.rpc, input\.instructions\);/g)).toHaveLength(3);
   });
 });

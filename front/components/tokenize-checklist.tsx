@@ -1,11 +1,12 @@
 "use client";
 
-// What happens after "Create token": the steps of a tokenized stake, read
-// from chain (lib/tokenize-shares checklistItems). The operator's step
-// (activation) links to its admin screen for a wallet that holds the role; an
-// Admin issuer key mints and locks right here, and an issuer authority or
-// Admin holding minted tokens sends them to a wallet, through the same
-// components /admin/share-classes uses.
+// What happens after "Create token": created → details → activate →
+// distribute → close (lib/tokenize-shares checklistItems), read from chain.
+// The operator's step (activation) links to its admin screen for a wallet
+// that holds the role. Distribute hosts the ways tokens reach holders —
+// "Send to wallets" now (components/distribute-card); nothing is minted up
+// front, so a public sale stays possible. Close is the old one-way lock,
+// optional, Admin only, after the last distribution.
 //
 // No KYC-only step (owner decision 2026-10-03): the tokens are bearer
 // instruments in the hook's Open mode, and KYC is asked only when a token is
@@ -20,17 +21,17 @@ import { AssetStatus } from "@/lib/generated/asset_registry";
 import { ASSET_STATUS_LABEL } from "@/lib/format";
 import { useRole } from "@/lib/auth";
 import { loadIssuerPermission, ISSUER_CAPABILITIES } from "@/lib/issuer-permissions";
-import { usePauseFlags } from "@/lib/use-pause-flags";
-import { isPaused, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import {
   KYC_GATED_NOTE,
+  OPEN_CLASS_LINE,
   checklistItems,
+  closeText,
   detailsSaved,
+  distributeDoneText,
+  distributeWaitText,
   formatTokens,
   isFlowToken,
-  mintDoneText,
   mintSymbolPreview,
-  mintWaitText,
   type ChecklistId,
   type ChecklistInput,
   type ChecklistState,
@@ -38,24 +39,34 @@ import {
 import {
   assetSnapshot,
   classSnapshot,
+  issuerKybVerified,
   readTokenizeState,
   readTreasuryUnits,
   type TokenizeChainState,
 } from "@/lib/tokenize-shares-chain";
-import { TreasuryMintPanel } from "@/components/treasury-mint-panel";
+import { listOpenSales, openSaleRemaining } from "@/lib/distribution-chain";
+import { remainingFromLifetime } from "@/lib/distribution-supply";
 import { LockSupplyButton } from "@/components/lock-supply-button";
-import { ShareTransferPanel } from "@/components/share-transfer-panel";
+import { DistributeCard } from "@/components/distribute-card";
 import { SkeletonCard } from "@/components/skeleton";
 
 const TITLES: Record<ChecklistId, string> = {
   created: "Token created",
   details: "Details saved",
   activate: "Operator: activate",
-  mint: "Mint the tokens",
-  lock: "Lock supply (one-way)",
+  distribute: "Distribute",
+  close: "Close (optional, one-way)",
 };
 
 const linkClass = "font-medium text-slate-800 underline decoration-slate-300 underline-offset-2 hover:text-slate-950";
+
+type ChainExtras = {
+  issuerVerified: boolean;
+  /** The issuer treasury's balance of the mint; null when unknown. */
+  treasuryBalance: bigint | null;
+  /** Open sales of class 0; null when they could not be read. */
+  openSales: { count: number; remaining: bigint } | null;
+};
 
 export function TokenizeChecklist({
   assetPda,
@@ -64,9 +75,9 @@ export function TokenizeChecklist({
   refreshKey = 0,
 }: {
   assetPda: Address;
-  /** The asset's issuer authority (the treasury); minting needs it connected. */
+  /** The asset's issuer authority (the treasury); distributing needs it connected. */
   issuerAuthority: string | null;
-  /** The stored off-chain profile, or null. "Details saved" is counted as the flow counts it (detailsSaved). */
+  /** The stored (private) off-chain profile, or null. "Details saved" is counted as the flow counts it (detailsSaved). */
   profile: { fields?: Record<string, unknown> | null } | null;
   /** Bump to re-read the chain. */
   refreshKey?: number;
@@ -75,35 +86,47 @@ export function TokenizeChecklist({
   const conn = useWalletConnection();
   const wallet = conn.wallet?.account.address?.toString() ?? null;
   const { isAdmin } = useRole();
-  const flags = usePauseFlags();
   const [state, setState] = useState<TokenizeChainState | null>(null);
-  /** The issuer treasury's balance of the mint (for the "Mint" done text), or null. */
-  const [treasuryUnits, setTreasuryUnits] = useState<bigint | null>(null);
+  const [extras, setExtras] = useState<ChainExtras | null>(null);
   const [failed, setFailed] = useState(false);
-  const [permission, setPermission] = useState<{ globalAdmin: boolean; canMint: boolean }>({
+  const [permission, setPermission] = useState<{ globalAdmin: boolean; canMint: boolean; canConvert: boolean }>({
     globalAdmin: false,
     canMint: false,
+    canConvert: false,
   });
 
   const isIssuerAuthority = !!wallet && wallet === issuerAuthority;
 
   const load = useCallback(async () => {
+    const rpc = client.runtime.rpc;
     try {
-      const next = await readTokenizeState(client.runtime.rpc, assetPda);
+      const next = await readTokenizeState(rpc, assetPda);
       const sc = next.sc0;
-      const treasury =
-        sc?.mintInitialized && sc.circulatingSupply > BigInt(0) && issuerAuthority
-          ? await readTreasuryUnits(client.runtime.rpc, issuerAuthority as Address, sc.mint)
-          : null;
+      const [issuerVerified, treasuryBalance, openSales] = await Promise.all([
+        next.asset ? issuerKybVerified(rpc, next.asset.issuer).catch(() => false) : Promise.resolve(false),
+        sc?.mintInitialized && issuerAuthority
+          ? // null: no treasury account yet, or unreadable — never read as "empty" (Distribute would show done).
+            readTreasuryUnits(rpc, issuerAuthority as Address, sc.mint)
+          : Promise.resolve(null),
+        sc
+          ? listOpenSales(rpc, { shareClass: next.addresses.shareClass })
+              .then((sales) => ({ count: sales.length, remaining: openSaleRemaining(sales) }))
+              .catch(() => null)
+          : Promise.resolve({ count: 0, remaining: BigInt(0) }),
+      ]);
       setState(next);
-      setTreasuryUnits(treasury);
+      setExtras({ issuerVerified, treasuryBalance, openSales });
       setFailed(false);
       if (next.asset && isIssuerAuthority && wallet) {
         try {
-          const p = await loadIssuerPermission(client.runtime.rpc, next.asset.issuer, wallet as Address);
-          setPermission({ globalAdmin: p.globalAdmin, canMint: (p.capabilities & ISSUER_CAPABILITIES.Mint) !== 0 });
+          const p = await loadIssuerPermission(rpc, next.asset.issuer, wallet as Address);
+          setPermission({
+            globalAdmin: p.globalAdmin,
+            canMint: (p.capabilities & ISSUER_CAPABILITIES.Mint) !== 0,
+            canConvert: (p.capabilities & ISSUER_CAPABILITIES.Conversion) !== 0,
+          });
         } catch {
-          setPermission({ globalAdmin: false, canMint: false });
+          setPermission({ globalAdmin: false, canMint: false, canConvert: false });
         }
       }
     } catch {
@@ -126,13 +149,12 @@ export function TokenizeChecklist({
       </section>
     );
   }
-  if (!state) return <SkeletonCard className="mt-6" rows={4} />;
+  if (!state || !extras) return <SkeletonCard className="mt-6" rows={4} />;
   const { asset, sc0, hook } = state;
   if (!asset) return null;
 
   const maxSupply = sc0?.maxSupply.__option === "Some" ? sc0.maxSupply.value : null;
-  const circulating = sc0?.circulatingSupply ?? BigInt(0);
-  const primaryPaused = flags !== null && isPaused(flags, PAUSE_PRIMARY);
+  const lifetimeMinted = sc0?.lifetimeMinted ?? BigInt(0);
   // A token from the tokenize flow continues there (and needs the flow's
   // figures saved); any other equity asset on the share-class screen and its
   // own profile form.
@@ -142,15 +164,24 @@ export function TokenizeChecklist({
     mintInitialized: !!sc0?.mintInitialized,
     profileSaved: detailsSaved(tokenizeLike, profile),
     active: asset.status === AssetStatus.Active,
-    circulating,
+    issuerVerified: extras.issuerVerified,
+    hookMode: hook,
     maxSupply,
+    lifetimeMinted,
+    treasuryBalance: extras.treasuryBalance,
     supplyLocked: !!sc0?.supplyLocked,
-    primaryPaused,
+    openSalesOfClass: extras.openSales?.count ?? null,
   };
   const items = checklistItems(facts);
   const byId = Object.fromEntries(items.map((i) => [i.id, i.state])) as Record<ChecklistId, ChecklistState>;
   const resumeHref = tokenizeLike ? `/issuer/assets/tokenize?asset=${assetPda}` : "/issuer/share-classes";
-  const remaining = maxSupply !== null && maxSupply > circulating ? maxSupply - circulating : null;
+  // Counted from lifetime_minted: a conversion burn never makes room to re-issue.
+  const notCreated = remainingFromLifetime(maxSupply, lifetimeMinted);
+  const inTreasury = extras.treasuryBalance;
+  const tokenize =
+    profile?.fields && typeof profile.fields.tokenize === "object" && profile.fields.tokenize !== null
+      ? (profile.fields.tokenize as Record<string, unknown>)
+      : null;
 
   function detail(id: ChecklistId): ReactNode {
     const s = byId[id];
@@ -201,28 +232,17 @@ export function TokenizeChecklist({
             {isAdmin && <Link href="/admin/assets" className={linkClass}>Activate on Admin → Assets →</Link>}
           </>
         );
-      case "mint": {
-        if (s === "done") {
-          return mintDoneText({ circulating, maxSupply, supplyLocked: !!sc0?.supplyLocked, treasuryUnits });
-        }
-        // What it waits for, and the 0x02 note as soon as the bit is set.
-        const wait = mintWaitText(facts);
+      case "distribute": {
+        if (s === "done") return distributeDoneText(facts);
+        const wait = distributeWaitText(facts);
         if (wait) return wait;
-        return isIssuerAuthority && permission.globalAdmin ? (
-          `Mint ${remaining !== null ? formatTokens(remaining) : "the"} tokens into your treasury. The EUR value counts against the raise limit; give a reason of at least 5 characters.`
-        ) : (
-          <>
-            Units reach investors through an approved sale:{" "}
-            <Link href="/issuer/launchpad" className={linkClass}>My sales →</Link>
-          </>
-        );
+        const pool = notCreated !== null ? `${formatTokens(notCreated)} not created yet` : "no cap";
+        return isIssuerAuthority
+          ? `Choose how the tokens reach their holders. ${inTreasury !== null ? `${formatTokens(inTreasury)} in your treasury, ` : ""}${pool}.`
+          : "The issuer's wallet distributes the tokens; connect it to send them.";
       }
-      case "lock":
-        if (s === "done") return "Supply is locked for good — no more tokens can be minted.";
-        if (s === "blocked") return "After all tokens are minted.";
-        return isAdmin
-          ? "Locks the supply for good. Nobody can mint more afterwards, not even the Super Admin."
-          : "The operator locks the supply after minting — it is one-way.";
+      case "close":
+        return closeText(facts, isAdmin);
     }
   }
 
@@ -240,33 +260,23 @@ export function TokenizeChecklist({
             <StateIcon state={item.state} />
             <div className="min-w-0 flex-1">
               <p className={`text-sm font-medium ${item.state === "blocked" ? "text-slate-400" : "text-slate-900"}`}>
-                {item.id === "mint" && maxSupply !== null ? `Mint ${formatTokens(maxSupply)} tokens` : TITLES[item.id]}
+                {TITLES[item.id]}
               </p>
               <p className="mt-0.5 text-[13px] leading-relaxed text-slate-600">{detail(item.id)}</p>
-              {item.id === "mint" && item.state === "todo" && isIssuerAuthority && permission.globalAdmin && sc0 && (
-                <div className="mt-2">
-                  <TreasuryMintPanel
-                    sc={sc0}
-                    scPda={state.addresses.shareClass}
-                    issuerPda={asset.issuer}
-                    isIssuerAuthority={isIssuerAuthority}
-                    onRefresh={load}
-                    defaultUnits={remaining !== null ? remaining.toString() : undefined}
-                  />
-                </div>
-              )}
-              {/* After Mint: an issuer authority or Admin wallet holding tokens
-                  sends them on (the panel shows only then, read live). */}
-              {item.id === "mint" && sc0?.mintInitialized && (
-                <ShareTransferPanel
-                  sc={sc0}
+              {item.id === "distribute" && item.state === "todo" && isIssuerAuthority && sc0 && (
+                <DistributeCard
                   asset={asset}
+                  sc={sc0}
                   scPda={state.addresses.shareClass}
-                  onSent={load}
-                  title="Send tokens to a wallet"
+                  hook={hook}
+                  tokenize={tokenize}
+                  treasuryBalance={extras.treasuryBalance}
+                  openSaleRemaining={extras.openSales?.remaining ?? null}
+                  canCreate={permission.globalAdmin}
+                  onRefresh={load}
                 />
               )}
-              {item.id === "lock" && item.state === "todo" && isAdmin && (
+              {item.id === "close" && item.state === "todo" && isAdmin && (
                 <div className="mt-2">
                   <LockSupplyButton scPda={state.addresses.shareClass} onRefresh={load} />
                 </div>
@@ -275,10 +285,33 @@ export function TokenizeChecklist({
           </li>
         ))}
       </ol>
-      {hook === "kyc-gated" && <p className="mt-4 text-[13px] text-slate-600">{KYC_GATED_NOTE}</p>}
+      {hook === "open" && <p className="mt-4 text-[13px] text-emerald-800">{OPEN_CLASS_LINE}</p>}
+      {hook === "kyc-gated" && <p className="mt-4 text-[13px] text-amber-800">{KYC_GATED_NOTE}</p>}
       {hook === "none" && (
         <p className="mt-4 text-[13px] text-slate-600">
           This mint has no transfer-hook config — the operator must sort it out.
+        </p>
+      )}
+      {/* C2: holders can ask to convert only when class 0 has an on-chain conversion target.
+          Class 1 is added by the issuer key while the asset is a draft; the link needs Conversion. */}
+      {tokenizeLike && sc0?.mintInitialized && (state.marker === "none" || state.marker === "unlinked") && (
+        <p className="mt-2 text-[12px] text-slate-500">
+          {state.marker === "none" && asset.status !== AssetStatus.Draft ? (
+            "Conversion into company shares is not available for this token: its conversion class can only be added while the asset is a draft, and the asset is already active."
+          ) : state.marker === "none" ? (
+            <>
+              Conversion into company shares is not set up yet; its conversion class can only be added while the asset is a
+              draft:{" "}
+              <Link href={resumeHref} className={linkClass}>add it now (1 wallet signature) →</Link>
+            </>
+          ) : isIssuerAuthority && permission.canConvert ? (
+            <>
+              Conversion into company shares is not set up yet:{" "}
+              <Link href={resumeHref} className={linkClass}>set the conversion target (1 wallet signature) →</Link>
+            </>
+          ) : (
+            "Conversion into company shares is not set up yet: the conversion target is set once the Super Admin gives this issuer the Conversion permission (then 1 wallet signature)."
+          )}
         </p>
       )}
     </section>

@@ -1,7 +1,7 @@
 "use client";
 
 import type { WalletSession } from "@solana/client";
-import { signedFetch } from "@/lib/siws-client";
+import { signedFetch, type SignedFetchInteractive } from "@/lib/siws-client";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 
 export type AlertSeverity = "low" | "medium" | "high" | "critical";
@@ -189,6 +189,38 @@ export async function refreshSanctionsList(session: WalletSession | null | undef
  */
 export async function screenOwnWallet(session: WalletSession | null | undefined): Promise<void> {
   await signedFetch<{ clear: boolean }>(session, "/api/compliance/screen-wallet", "compliance.screenWallet", {});
+}
+
+/** Most wallets one /api/compliance/screen-recipients request may carry. */
+export const SCREEN_RECIPIENTS_CHUNK = 100;
+
+/**
+ * The issuer screens the recipients of a distribution ("Send to wallets")
+ * against the sanctions lists before anything is signed (a session read).
+ * Returns the wallets that matched (each gets its compliance alert; the
+ * answer names no list). Throws while the screen is unavailable on mainnet
+ * (503) or the caller may not send this class: the caller sends nothing.
+ * `interactive: false` asks only within an existing wallet session.
+ */
+export async function screenRecipients(
+  session: WalletSession | null | undefined,
+  input: { shareClass: string; wallets: readonly string[] },
+  opts: { interactive?: SignedFetchInteractive } = {},
+): Promise<Set<string>> {
+  const unique = [...new Set(input.wallets)];
+  const blocked = new Set<string>();
+  for (let i = 0; i < unique.length; i += SCREEN_RECIPIENTS_CHUNK) {
+    const data = await signedFetch<{ blocked: string[] }>(
+      session,
+      "/api/compliance/screen-recipients",
+      "compliance.screenRecipients",
+      { share_class: input.shareClass, wallets: unique.slice(i, i + SCREEN_RECIPIENTS_CHUNK) },
+      opts,
+    );
+    if (!data || !Array.isArray(data.blocked)) throw new Error("Malformed screening response");
+    for (const w of data.blocked) blocked.add(w);
+  }
+  return blocked;
 }
 
 /** A compliance alert raised by the wallet screen (lib/server/sanctions.ts). */

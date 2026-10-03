@@ -25,7 +25,8 @@ import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import { recordAudit, type AuditStatus } from "@/lib/supabase";
-import { getAssetProfile } from "@/lib/asset-profiles";
+import { getPrivateAssetProfile } from "@/lib/asset-profiles";
+import { companyFiguresFrom, percentOfCompany, type CompanyFigures } from "@/lib/distribution-rows";
 import { walletSigner } from "@/lib/wallet-signer";
 import { detectNetwork } from "@/lib/network";
 import {
@@ -33,7 +34,6 @@ import {
   formatExpiryDate,
   formatTokens,
   loadShareTransferFacts,
-  ownershipPercent,
   shareTransferChecks,
   shareTransferSummary,
   tokenAccountOf,
@@ -42,6 +42,7 @@ import {
   type ShareTransferVerdict,
 } from "@/lib/share-transfer";
 import { simulateInstructions, waitForSignature } from "@/lib/simulation-gate";
+import { confirmThenReport } from "@/lib/send-outcome";
 
 export type ShareTransferPanelProps = {
   sc: ShareClass;
@@ -53,6 +54,12 @@ export type ShareTransferPanelProps = {
   onSent?: () => void | Promise<void>;
   /** The panel's heading ("Send to holder" on the share-class screens). */
   title?: string;
+  /**
+   * The tokenize flow's figures (`fields.tokenize` of the private profile)
+   * when the page has them; otherwise the panel reads them within an
+   * existing wallet session (no prompt). Without them no percent is shown.
+   */
+  tokenize?: Record<string, unknown> | null;
 };
 
 /** Read for one wallet and one mint (`key`), so a switched class or wallet never shows another's balance. */
@@ -68,7 +75,7 @@ type Preflight =
 /** About 0.002 SOL: a Token-2022 account with ImmutableOwner and the transfer-hook extension. */
 const ACCOUNT_RENT_NOTE = "about 0.002 SOL rent, paid by you";
 
-export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to holder" }: ShareTransferPanelProps) {
+export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to holder", tokenize }: ShareTransferPanelProps) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
@@ -81,7 +88,7 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to 
   const [network] = useState(() => detectNetwork());
 
   const [treasury, setTreasury] = useState<Treasury | null>(null);
-  const [profile, setProfile] = useState<{ company: string | null; totalShares: number | null } | null>(null);
+  const [profile, setProfile] = useState<{ company: string | null; figures: CompanyFigures | null } | null>(null);
   const [recipientInput, setRecipientInput] = useState("");
   const [amountInput, setAmountInput] = useState("");
   const [amountTouched, setAmountTouched] = useState(false);
@@ -137,16 +144,28 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to 
     treasury.balance > BigInt(0) &&
     (isAdmin || treasury.issuerAuthority === wallet.toString());
 
-  // The company and its total shares, for "= P % of <company>" (published profile only, no signature).
+  // The company and the tokenize figures, for "= P % of <company>": one token
+  // is a fixed share of the company (fields.tokenize: tokens, token size,
+  // percent), never the public `total_shares` column. Read within an existing
+  // wallet session only (no prompt); without it no percent is shown.
   useEffect(() => {
     if (!visible) return;
+    if (tokenize !== undefined) {
+      const company = typeof tokenize?.company_name === "string" ? tokenize.company_name : null;
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setProfile({ company, figures: companyFiguresFrom(tokenize) });
+      return;
+    }
     let cancelled = false;
     void (async () => {
       try {
-        const row = await getAssetProfile(sc.asset.toString());
+        const row = session ? await getPrivateAssetProfile(session, sc.asset.toString(), { interactive: false }) : null;
         if (cancelled) return;
-        const total = row?.total_shares === null || row?.total_shares === undefined ? null : Number(row.total_shares);
-        setProfile(row ? { company: row.spv_name ?? row.display_name ?? null, totalShares: total } : null);
+        const t = row?.fields?.tokenize;
+        const company = typeof (t as Record<string, unknown> | undefined)?.company_name === "string"
+          ? String((t as Record<string, unknown>).company_name)
+          : (row?.display_name ?? null);
+        setProfile(row ? { company, figures: companyFiguresFrom(t) } : null);
       } catch {
         if (!cancelled) setProfile(null);
       }
@@ -154,7 +173,7 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to 
     return () => {
       cancelled = true;
     };
-  }, [visible, sc.asset]);
+  }, [visible, sc.asset, session, tokenize]);
 
   const recipient = recipientInput.trim();
   const validRecipient = recipient && isAddress(recipient) ? (recipient as Address) : null;
@@ -204,7 +223,7 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to 
 
   const current = preflight && preflight.key === preflightKey ? preflight : null;
   const ready = current?.state === "done" && current.verdict.ok && current.testRun.state === "passed" ? current : null;
-  const percent = ready && ready.verdict.amount !== null ? ownershipPercent(ready.verdict.amount, profile?.totalShares) : null;
+  const percent = ready && ready.verdict.amount !== null ? percentOfCompany(ready.verdict.amount, profile?.figures ?? null) : null;
   const company = profile?.company ?? asset?.name ?? null;
   const summary = useMemo(
     () =>
@@ -266,44 +285,48 @@ export function ShareTransferPanel({ sc, asset, scPda, onSent, title = "Send to 
       return;
     }
 
-    // 2. Only the network's confirmation makes it "sent": the success toast
-    //    and the audit row wait for it (tx.send returns on submission).
+    // 2. Only the network's confirmation makes it "sent": the success toast,
+    //    the audit row and the refresh wait for it (tx.send returns on
+    //    submission) — lib/send-outcome confirmThenReport keeps that order.
     setConfirming(true);
     setConfirmOpen(false);
     toast.dismiss(pendingId);
     pendingId = toast.showPending(`Confirming ${tokens} on the network…`);
     try {
-      const outcome = await waitForSignature(rpc, sig, { timeoutMs: 45_000 });
-      toast.dismiss(pendingId);
-      if (outcome === "confirmed") {
-        toast.showTx(sig, { title: "Tokens sent", description: summary ?? undefined });
-        audit("success", sig);
-        setRecipientInput("");
-        setAmountTouched(false);
-      } else if (outcome === "failed") {
-        toast.show({
-          kind: "error",
-          title: "The transfer failed on the network",
-          description: "Your wallet sent it, but the network refused it. Balances are unchanged; open the explorer link for details.",
-          signature: sig,
-        });
-        audit("failed", sig, { error: "refused by the network" });
-      } else {
-        toast.show({
-          kind: "error",
-          title: "Not confirmed yet",
-          description:
-            "The network has not confirmed the transfer yet. Check the explorer link before sending again; the balance here is read again now.",
-          signature: sig,
-        });
-        audit("pending", sig, { confirmation: outcome });
-      }
-      setRefreshKey((k) => k + 1);
-      try {
-        await onSent?.();
-      } catch {
-        // The page's own refresh; the send has already settled and been reported.
-      }
+      await confirmThenReport(() => waitForSignature(rpc, sig, { timeoutMs: 45_000 }), {
+        confirmed: () => {
+          toast.dismiss(pendingId);
+          toast.showTx(sig, { title: "Tokens sent", description: summary ?? undefined });
+          audit("success", sig);
+          setRecipientInput("");
+          setAmountTouched(false);
+        },
+        failed: () => {
+          toast.dismiss(pendingId);
+          toast.show({
+            kind: "error",
+            title: "The transfer failed on the network",
+            description: "Your wallet sent it, but the network refused it. Balances are unchanged; open the explorer link for details.",
+            signature: sig,
+          });
+          audit("failed", sig, { error: "refused by the network" });
+        },
+        unconfirmed: (outcome) => {
+          toast.dismiss(pendingId);
+          toast.show({
+            kind: "error",
+            title: "Not confirmed yet",
+            description:
+              "The network has not confirmed the transfer yet. Check the explorer link before sending again; the balance here is read again now.",
+            signature: sig,
+          });
+          audit("pending", sig, { confirmation: outcome });
+        },
+        settled: async () => {
+          setRefreshKey((k) => k + 1);
+          await onSent?.();
+        },
+      });
     } finally {
       setConfirming(false);
     }
