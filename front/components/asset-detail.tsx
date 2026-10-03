@@ -25,6 +25,8 @@ import { listSpvs, spvCapacity, type SpvCapacity, type SpvRow } from "@/lib/spvs
 import { signedUpload } from "@/lib/storage-client";
 import { SkeletonCard } from "@/components/skeleton";
 import { TokenizeChecklist } from "@/components/tokenize-checklist";
+import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
+import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useToast } from "@/lib/toast";
 import { COUNTRIES, countryName } from "@/lib/countries";
 import {
@@ -1281,6 +1283,8 @@ function ShareClassesBlock({
         .sort((a, b) => a.classIndex - b.classIndex),
     [data, assetPda],
   );
+  // The conversion marker (C2) is labelled for what it is, not "pending mint".
+  const conversionTargets = useConversionTargets(linked);
 
   return (
     <section className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-card">
@@ -1327,11 +1331,13 @@ function ShareClassesBlock({
                       : "—"}
                   </td>
                   <td className="px-3 py-2 text-xs">
-                    {sc.supplyLocked
-                      ? "locked"
-                      : sc.mintInitialized
-                        ? "active"
-                        : "pending mint"}
+                    {conversionTargets.has(classKey(sc))
+                      ? CONVERSION_TARGET_LABEL
+                      : sc.supplyLocked
+                        ? "locked"
+                        : sc.mintInitialized
+                          ? "active"
+                          : "pending mint"}
                   </td>
                 </tr>
               ))}

@@ -15,6 +15,12 @@
 // runs: on mainnet a list that cannot answer refuses the whole request
 // (503), so nothing is sent unscreened.
 //
+// Rate-limited like the other screened routes: an in-memory burst per IP
+// before the signature is checked, then a limit per wallet shared by every
+// instance (lib/server/shared-rate-limit). The panel's background screen
+// ignores a refusal (the send screens again), so the limits only cost a
+// flood.
+//
 // Params: share_class (address), wallets (1–100 addresses).
 // Client wrapper: screenRecipients() in lib/compliance.ts.
 
@@ -25,14 +31,31 @@ import { screenAndRaiseHits } from "@/lib/server/sanctions";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { addressParam } from "@/lib/server/sale-capacity";
+import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
+import { clientIpOf, ipRateLimitKey, rateLimited } from "@/app/api/clients/_helpers";
 import { shareClassChain } from "@/app/api/sale-approvals/_lib";
 
 /** Most recipients one request may carry (the client wrapper chunks). */
 const MAX_SCREEN_RECIPIENTS = 100;
+/** Per IP and instance: a list typed and sent screens a handful of times a minute. */
+const SCREEN_RECIPIENTS_BURST_LIMIT = 30;
+const SCREEN_RECIPIENTS_BURST_WINDOW_MS = 60_000;
+/** Per wallet, shared by every instance. */
+const SCREEN_RECIPIENTS_SHARED_LIMIT = 60;
+const SCREEN_RECIPIENTS_SHARED_WINDOW_SECONDS = 600;
 
 export async function POST(request: Request) {
   try {
+    if (rateLimited(`screen-recipients:${ipRateLimitKey(clientIpOf(request))}`, SCREEN_RECIPIENTS_BURST_LIMIT, SCREEN_RECIPIENTS_BURST_WINDOW_MS)) {
+      throw new SiwsError(429, "Too many screening requests — wait a minute and try again");
+    }
     const { wallet, params } = await verifySigned(request, "compliance.screenRecipients");
+    if (
+      (await consumeSharedRateLimit(`screen-recipients:wallet:${wallet}`, SCREEN_RECIPIENTS_SHARED_LIMIT, SCREEN_RECIPIENTS_SHARED_WINDOW_SECONDS)) ===
+      "limited"
+    ) {
+      throw new SiwsError(429, "Too many screening requests — wait a few minutes and try again");
+    }
     const shareClass = addressParam(params.share_class, "share_class");
     const raw = params.wallets;
     if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_SCREEN_RECIPIENTS) {

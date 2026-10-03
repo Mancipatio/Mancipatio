@@ -19,7 +19,7 @@ import type { Address } from "@solana/kit";
 import { useWalletConnection } from "@solana/react-hooks";
 import type { Asset, ShareClass } from "@/lib/generated/asset_registry";
 import { formatTokens } from "@/lib/tokenize-shares";
-import { allocation, type SupplyFacts } from "@/lib/distribution-supply";
+import { allocation, approximateFigures, type AllocationFigure, type SupplyFacts } from "@/lib/distribution-supply";
 import { listSaleReservations, reservedTreasuryUnits } from "@/lib/sale-approvals";
 import type { HookMode } from "@/lib/tokenize-shares-chain";
 import { SendToWalletsPanel } from "@/components/send-to-wallets-panel";
@@ -89,20 +89,26 @@ export function DistributeCard({
     [sc, openSaleRemaining, reserved, treasuryBalance],
   );
   const a = allocation(supply);
-  const approximate = reserved === null || openSaleRemaining === null || treasuryBalance === null;
+  // "(approximate)" only next to the figures an unread input affects.
+  const approx = new Set<AllocationFigure>(
+    approximateFigures({ treasury: treasuryBalance !== null, openSales: openSaleRemaining !== null, reservations: reserved !== null }),
+  );
+  const approxNote = (f: AllocationFigure) => (approx.has(f) ? <span className="text-slate-400"> (approximate)</span> : null);
 
   return (
     <div className="mt-3 rounded-lg border border-slate-200 bg-slate-50/60 p-4">
       <p className="text-[12px] text-slate-600" aria-label="Allocation of the supply">
-        In treasury <Figure n={a.inTreasury} /> · Sent <Figure n={a.out} />
-        {a.onSale > BigInt(0) && (
+        In treasury <Figure n={a.inTreasury} />
+        {approxNote("inTreasury")} · Sent <Figure n={a.out} />
+        {approxNote("out")}
+        {(a.onSale > BigInt(0) || approx.has("onSale")) && (
           <>
             {" "}· On sale <Figure n={a.onSale} />
+            {approxNote("onSale")}
           </>
         )}{" "}
-        · Not created {a.notCreated === null ? "—" : <Figure n={a.notCreated} />} · Cap{" "}
-        {a.cap === null ? "none" : <Figure n={a.cap} />}
-        {approximate && <span className="text-slate-400"> (approximate)</span>}
+        · Not created {a.notCreated === null ? "—" : <Figure n={a.notCreated} />}
+        {approxNote("notCreated")} · Cap {a.cap === null ? "none" : <Figure n={a.cap} />}
       </p>
 
       {MODES.length > 1 && (

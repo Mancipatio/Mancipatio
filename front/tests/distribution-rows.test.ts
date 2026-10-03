@@ -3,6 +3,7 @@
 // company from the tokenize figures (never the public total_shares).
 import { describe, expect, it } from "vitest";
 import {
+  AMBIGUOUS_AMOUNT,
   MAX_DISTRIBUTION_ROWS,
   companyFiguresFrom,
   normalizedRows,
@@ -51,18 +52,67 @@ describe("parseRecipients", () => {
   });
 
   it("refuses what it cannot read, line by line", () => {
-    const parsed = parseRecipients([`${A}`, `${A} 1.5`, `${A} 1,000`, `${A} 0`, `notawallet 5`, `${A} 10 extra`, `${A} -3`].join("\n"));
+    const parsed = parseRecipients([`${A}`, `${A} 1.5`, `${A},1,000`, `${A} 0`, `notawallet 5`, `${A} ${B2} 10`, `${A} -3`].join("\n"));
     expect(parsed.errors).toEqual([
       { line: 1, text: "Write the wallet address and the number of tokens on the same line." },
       { line: 2, text: "Share tokens are whole: use a whole number of tokens." },
-      { line: 3, text: "Use one wallet and one whole number per line (no thousands separators or extra columns)." },
+      { line: 3, text: AMBIGUOUS_AMOUNT },
       { line: 4, text: "Send at least 1 token, or remove the line." },
       { line: 5, text: "Not a valid Solana wallet address." },
-      { line: 6, text: "Use one wallet and one whole number per line (no thousands separators or extra columns)." },
+      { line: 6, text: 'Two different wallet addresses on one line: keep only the recipient\'s column, or add a header row naming it "wallet".' },
       { line: 7, text: "The amount must be a whole number of tokens (digits only)." },
     ]);
     expect(parsed.rows).toEqual([]);
     expect(parseRecipients(`${A} 18446744073709551616`).errors[0].text).toMatch(/whole number/);
+  });
+
+  it("tolerates extra columns: the line's wallet and the number after it", () => {
+    const parsed = parseRecipients(
+      [`Alice,${A},100,Seed round`, `${B2};250;note;7`, `${C}\t5\t2026-10-01`, `"Bob","${A}","20","x"`].join("\n"),
+    );
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.rows.map((r) => [r.wallet, r.amount])).toEqual([
+      [A, n(120)],
+      [B2, n(250)],
+      [C, n(5)],
+    ]);
+    // A wallet with a text column after it and the amount before it (the old "amount wallet" order).
+    expect(parseRecipients(`7 ${A} founder`).rows.map((r) => r.amount)).toEqual([n(7)]);
+  });
+
+  it("reads thousands separators that cannot be misread, and refuses the ones that can", () => {
+    const ok = parseRecipients(
+      [`"${A}","1,000"`, `${B2};"12,500"`, `${C}\t1,000,000`, `${A} 1'000`, `${B2} "2 000"`].join("\n"),
+    );
+    expect(ok.errors).toEqual([]);
+    expect(ok.rows.map((r) => [r.wallet, r.amount])).toEqual([
+      [A, n(2_000)],
+      [B2, n(14_500)],
+      [C, n(1_000_000)],
+    ]);
+    // Unquoted in a comma (or space) line: "1" and "000" could be two columns — never read as 1.
+    expect(parseRecipients(`${A},1,000`).errors).toEqual([{ line: 1, text: AMBIGUOUS_AMOUNT }]);
+    expect(parseRecipients(`${A} 1 000`).errors).toEqual([{ line: 1, text: AMBIGUOUS_AMOUNT }]);
+    expect(parseRecipients(`${A},100,250`).errors).toEqual([{ line: 1, text: AMBIGUOUS_AMOUNT }]);
+    // A decimal (in either notation) is still not a whole number of tokens.
+    expect(parseRecipients(`${A};1,5`).errors[0].text).toMatch(/whole/);
+    expect(parseRecipients(`${A} 1.000`).errors[0].text).toMatch(/whole/);
+  });
+
+  it("reads the columns a header row names, in any order and with extra columns", () => {
+    const parsed = parseRecipients([`name,tokens,note,Wallet`, `Alice,"1,000",seed,${A}`, `Bob,25,,${B2}`].join("\n"));
+    expect(parsed.header).toBe(true);
+    expect(parsed.errors).toEqual([]);
+    expect(parsed.rows.map((r) => [r.wallet, r.amount])).toEqual([
+      [A, n(1_000)],
+      [B2, n(25)],
+    ]);
+    // Under a header, an unquoted thousands separator shifts the columns: refused, never misread.
+    expect(parseRecipients(`wallet,amount\n${A},1,000`).errors[0].text).toMatch(/more columns than the header row/);
+    // A header naming neither column is skipped; the lines are read by position.
+    const plain = parseRecipients(`Recipients list\n${A} 3`);
+    expect(plain.header).toBe(true);
+    expect(plain.rows.map((r) => r.amount)).toEqual([n(3)]);
   });
 
   it(`caps a run at ${MAX_DISTRIBUTION_ROWS} wallets`, async () => {

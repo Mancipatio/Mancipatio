@@ -123,3 +123,21 @@ export function allocation(f: SupplyFacts): Allocation {
 export function remainingFromLifetime(maxSupply: bigint | null, lifetimeMinted: bigint): bigint | null {
   return maxSupply === null ? null : max0(maxSupply - lifetimeMinted);
 }
+
+/** A figure of the allocation line. */
+export type AllocationFigure = "inTreasury" | "out" | "onSale" | "notCreated";
+
+/**
+ * The figures of the allocation line an unknown input makes approximate —
+ * only those: an unread treasury balance affects "in treasury" and "sent",
+ * unread Open sales "on sale" and "not created", unread reservations (and
+ * approvals not yet opened) "not created" only. Everything known: none (a
+ * fresh token whose treasury has no account yet holds an exact 0).
+ */
+export function approximateFigures(known: { treasury: boolean; openSales: boolean; reservations: boolean }): AllocationFigure[] {
+  const out: AllocationFigure[] = [];
+  if (!known.treasury) out.push("inTreasury", "out");
+  if (!known.openSales) out.push("onSale");
+  if (!known.openSales || !known.reservations) out.push("notCreated");
+  return out;
+}

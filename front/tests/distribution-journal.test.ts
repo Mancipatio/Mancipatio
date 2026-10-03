@@ -8,7 +8,9 @@ import { getBase58Decoder, type Address } from "@solana/kit";
 import {
   JOURNAL_PREFIX,
   assertJournalWritable,
+  auditsDue,
   countStates,
+  dismissJournal,
   distributionRunId,
   journalKey,
   listJournals,
@@ -20,6 +22,8 @@ import {
   shortRunId,
   transfersFromTransaction,
   txOutcome,
+  unfinishedJournals,
+  withAudited,
   withOutcomes,
   withTx,
   writeJournal,
@@ -392,6 +396,57 @@ describe("paid before (priorReceipts): any run, any browser", () => {
     expect([...r.landed]).toEqual([SIG("1")]);
     expect(decoded).toEqual([SIG("3")]);
     expect(r.transfers).toEqual([{ signature: SIG("3"), destination: "dB", amount: n(50), blockTime: 10 }]);
+  });
+});
+
+describe("unfinished runs: dismissible once nothing waits for the network", () => {
+  const rowsAB = [{ wallet: A, amount: n(1) }, { wallet: B2, amount: n(2) }];
+  it("a dismissed or finished run is no longer offered; the journal itself stays (the paid-before check reads it)", () => {
+    const a = newJournal({ runId: "a", network: "devnet", mint: MINT, sender: SENDER, rows: rowsAB });
+    const b = { ...newJournal({ runId: "b", network: "devnet", mint: MINT, sender: SENDER, rows: rowsAB }), dismissedAt: "2026-10-03T10:00:00Z" };
+    const c = { ...newJournal({ runId: "c", network: "devnet", mint: MINT, sender: SENDER, rows: rowsAB }), finishedAt: "2026-10-03T10:00:00Z" };
+    expect(unfinishedJournals([a, b, c], null).map((j) => j.runId)).toEqual(["a"]);
+    // The list typed now is the current run, not an "unfinished" banner.
+    expect(unfinishedJournals([a, b, c], "a")).toEqual([]);
+    // Old journals (no field) and a re-sent run (null) count as not dismissed; the field survives storage.
+    const store = memoryStore();
+    writeJournal(store, b);
+    expect(readJournal(store, "devnet", "b")?.dismissedAt).toBe("2026-10-03T10:00:00Z");
+  });
+
+  it("refuses to dismiss while a transaction or the mint may still land", () => {
+    const j = newJournal({ runId: "r", network: "devnet", mint: MINT, sender: SENDER, rows: rowsAB });
+    const now = new Date("2026-10-03T12:00:00Z");
+    const pending = dismissJournal(j, { states: new Map([[A, { state: "pending", signature: SIG("1") }]]), mint: null }, now);
+    expect(pending).toMatchObject({ problem: expect.stringMatching(/still waiting for the network/) });
+    expect(dismissJournal(j, { states: new Map(), mint: "pending" }, now)).toMatchObject({ problem: expect.any(String) });
+    const ok = dismissJournal(j, { states: new Map([[A, { state: "todo" }], [B2, { state: "done", signature: SIG("2"), via: "journal" }]]), mint: "expired" }, now);
+    expect(ok).toEqual({ journal: { ...j, dismissedAt: now.toISOString() } });
+  });
+});
+
+describe("audit reconciliation on resume", () => {
+  it("owes the final row of every decided transaction and mint not yet marked final; pending and expired owe nothing yet", () => {
+    let j = newJournal({ runId: "r", network: "devnet", mint: MINT, sender: SENDER, rows });
+    j = withTx(j, { signature: SIG("1"), lastValidBlockHeight: "1", rows: [A], status: "confirmed", at: "x", audited: "pending" });
+    j = withTx(j, { signature: SIG("2"), lastValidBlockHeight: "1", rows: [B2], status: "failed", at: "x" });
+    j = withTx(j, { signature: SIG("3"), lastValidBlockHeight: "1", rows: [C], status: "confirmed", at: "x", audited: "final" });
+    j = withTx(j, { signature: SIG("4"), lastValidBlockHeight: "1", rows: [C], status: "sent", at: "x", audited: "pending" });
+    j = withTx(j, { signature: SIG("5"), lastValidBlockHeight: "1", rows: [C], status: "expired", at: "x", audited: "pending" });
+    j = { ...j, mintTx: { signature: SIG("6"), lastValidBlockHeight: "1", amount: "10", reservationId: "res", status: "confirmed", audited: "pending" } };
+    expect(auditsDue(j)).toEqual([
+      { kind: "tx", signature: SIG("1"), rows: [A], status: "success" },
+      { kind: "tx", signature: SIG("2"), rows: [B2], status: "failed" },
+      { kind: "mint", signature: SIG("6"), amount: "10", reservationId: "res", status: "success" },
+    ]);
+    // Once written they are marked final and never written twice; "pending" marks never downgrade a final one.
+    const marked = withAudited(j, new Set([SIG("1"), SIG("2"), SIG("6")]));
+    expect(auditsDue(marked)).toEqual([]);
+    expect(withAudited(marked, new Set([SIG("1")]), "pending").txs.find((t) => t.signature === SIG("1"))?.audited).toBe("final");
+    // The marks survive storage (old journals without them parse as before).
+    const store = memoryStore();
+    writeJournal(store, marked);
+    expect(auditsDue(readJournal(store, "devnet", "r")!)).toEqual([]);
   });
 });
 

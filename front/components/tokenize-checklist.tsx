@@ -31,6 +31,7 @@ import {
   distributeWaitText,
   formatTokens,
   isFlowToken,
+  lockAtZeroOffered,
   mintSymbolPreview,
   type ChecklistId,
   type ChecklistInput,
@@ -41,10 +42,11 @@ import {
   classSnapshot,
   issuerKybVerified,
   readTokenizeState,
-  readTreasuryUnits,
+  readTreasuryBalance,
   type TokenizeChainState,
 } from "@/lib/tokenize-shares-chain";
 import { listOpenSales, openSaleRemaining } from "@/lib/distribution-chain";
+import { isApprovalLive, listShareClassSaleApprovals, type SaleApprovalAccount } from "@/lib/sale-approvals";
 import { remainingFromLifetime } from "@/lib/distribution-supply";
 import { LockSupplyButton } from "@/components/lock-supply-button";
 import { DistributeCard } from "@/components/distribute-card";
@@ -66,6 +68,8 @@ type ChainExtras = {
   treasuryBalance: bigint | null;
   /** Open sales of class 0; null when they could not be read. */
   openSales: { count: number; remaining: bigint } | null;
+  /** Live sale approvals of class 0 not opened yet (open_sale closes them); null when they could not be read. */
+  approvals: SaleApprovalAccount[] | null;
 };
 
 export function TokenizeChecklist({
@@ -102,20 +106,25 @@ export function TokenizeChecklist({
     try {
       const next = await readTokenizeState(rpc, assetPda);
       const sc = next.sc0;
-      const [issuerVerified, treasuryBalance, openSales] = await Promise.all([
+      const [issuerVerified, treasuryBalance, openSales, approvals] = await Promise.all([
         next.asset ? issuerKybVerified(rpc, next.asset.issuer).catch(() => false) : Promise.resolve(false),
         sc?.mintInitialized && issuerAuthority
-          ? // null: no treasury account yet, or unreadable — never read as "empty" (Distribute would show done).
-            readTreasuryUnits(rpc, issuerAuthority as Address, sc.mint)
+          ? // 0 when the treasury has no token account yet (exact); null only when unreadable.
+            readTreasuryBalance(rpc, issuerAuthority as Address, sc.mint)
           : Promise.resolve(null),
         sc
           ? listOpenSales(rpc, { shareClass: next.addresses.shareClass })
               .then((sales) => ({ count: sales.length, remaining: openSaleRemaining(sales) }))
               .catch(() => null)
           : Promise.resolve({ count: 0, remaining: BigInt(0) }),
+        sc
+          ? listShareClassSaleApprovals(rpc, next.addresses.shareClass)
+              .then((rows) => rows.filter((a) => isApprovalLive(a)))
+              .catch(() => null)
+          : Promise.resolve([]),
       ]);
       setState(next);
-      setExtras({ issuerVerified, treasuryBalance, openSales });
+      setExtras({ issuerVerified, treasuryBalance, openSales, approvals });
       setFailed(false);
       if (next.asset && isIssuerAuthority && wallet) {
         try {
@@ -171,6 +180,8 @@ export function TokenizeChecklist({
     treasuryBalance: extras.treasuryBalance,
     supplyLocked: !!sc0?.supplyLocked,
     openSalesOfClass: extras.openSales?.count ?? null,
+    // An approval not opened yet: unreadable approvals count as one (never lock past a sale on its way).
+    pendingSaleOfClass: extras.approvals === null ? true : extras.approvals.length > 0,
   };
   const items = checklistItems(facts);
   const byId = Object.fromEntries(items.map((i) => [i.id, i.state])) as Record<ChecklistId, ChecklistState>;
@@ -279,6 +290,11 @@ export function TokenizeChecklist({
               {item.id === "close" && item.state === "todo" && isAdmin && (
                 <div className="mt-2">
                   <LockSupplyButton scPda={state.addresses.shareClass} onRefresh={load} />
+                </div>
+              )}
+              {item.id === "close" && item.state === "blocked" && isAdmin && lockAtZeroOffered(facts) && (
+                <div className="mt-2">
+                  <LockSupplyButton scPda={state.addresses.shareClass} onRefresh={load} label="Lock at 0…" requireZeroConfirm />
                 </div>
               )}
             </div>

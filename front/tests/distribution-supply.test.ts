@@ -8,6 +8,7 @@ import { getSaleEncoder, RaiseType, SaleStatus } from "@/lib/generated/asset_reg
 import {
   LIFETIME_COUNTER_VERSION,
   allocation,
+  approximateFigures,
   creationBlocker,
   remainingFromLifetime,
   roomToCreate,
@@ -30,6 +31,15 @@ const facts = (over: Partial<SupplyFacts> = {}): SupplyFacts => ({
   reservedUnminted: n(0),
   treasuryBalance: n(0),
   ...over,
+});
+
+describe("(approximate) only where an input is unknown", () => {
+  it("names only the figures an unread input affects", () => {
+    expect(approximateFigures({ treasury: true, openSales: true, reservations: true })).toEqual([]);
+    expect(approximateFigures({ treasury: false, openSales: true, reservations: true })).toEqual(["inTreasury", "out"]);
+    expect(approximateFigures({ treasury: true, openSales: true, reservations: false })).toEqual(["notCreated"]);
+    expect(approximateFigures({ treasury: true, openSales: false, reservations: true })).toEqual(["onSale", "notCreated"]);
+  });
 });
 
 describe("room to create", () => {

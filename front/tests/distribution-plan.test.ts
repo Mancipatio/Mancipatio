@@ -10,14 +10,17 @@ import {
   MAX_TRANSACTIONS_PER_PROMPT,
   TOKEN_ACCOUNT_RENT_LAMPORTS,
   lamportsNeeded,
+  nextPromptMode,
   packRows,
   planWithSimulation,
   promptGroups,
   rowForInstruction,
   rowInstructions,
   sentSize,
+  solBeforeMint,
   type RowInstructions,
 } from "@/lib/distribution-plan";
+import { refusalFromSimulation } from "@/lib/simulation-gate";
 
 const MINT = "HRcahPjAhX9ssiY5WvNJxHmy5vuDL7Q6GF6J5gNGjgwC" as Address;
 const REGISTRY = "5MofiJNCoCRkNg1f2Yd7368WkjiNxkZZmUTaQo7xLhku" as Address;
@@ -158,6 +161,29 @@ describe("planWithSimulation", () => {
     expect(calls).toBe(3);
   });
 
+  it("a dropped row's reason is the refusal in plain words, never 'Step N of M'", async () => {
+    const list = await rows(2);
+    const bad = list[1];
+    const plan = await planWithSimulation(list, {
+      feePayer: sender.address,
+      simulate: async (instructions) => {
+        const at = instructions.indexOf(bad.instructions[bad.instructions.length - 1]);
+        return at >= 0
+          ? { instructionIndex: at, detail: `Step ${at + 1} of 4 (transfer) was refused by Token-2022: The account is frozen.`, message: "x", reason: "The account is frozen." }
+          : null;
+      },
+    });
+    expect(plan.dropped).toEqual([{ row: bad.row, reason: "The account is frozen." }]);
+    // The gate itself carries both: the detail says where, the reason only what.
+    const refusal = refusalFromSimulation(
+      { err: { InstructionError: [1, { Custom: 17 }] }, logs: [], unitsConsumed: null },
+      { appInstructions: [{ programAddress: "11111111111111111111111111111111" }, { programAddress: "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" }] },
+    );
+    expect(refusal?.detail).toMatch(/^Step 2 of 2/);
+    expect(refusal?.reason).not.toMatch(/Step \d+ of \d+/);
+    expect(refusal?.reason.length).toBeGreaterThan(0);
+  });
+
   it("a refusal no row explains (the fee payer cannot pay) fails the whole plan", async () => {
     await expect(
       planWithSimulation(await rows(2), {
@@ -184,6 +210,19 @@ describe("prompts and SOL", () => {
   it(`groups up to ${MAX_TRANSACTIONS_PER_PROMPT} transactions per wallet approval`, () => {
     expect(promptGroups([1, 2, 3]).map((g) => g.length)).toEqual([3]);
     expect(promptGroups(Array.from({ length: 17 }, (_, i) => i)).map((g) => g.length)).toEqual([8, 8, 1]);
+  });
+
+  it("checks SOL before the shortfall is created: the transfers, the mint's fee and a missing treasury account", () => {
+    const transfers = lamportsNeeded({ newAccounts: 3, transactions: 2 });
+    expect(solBeforeMint({ newAccounts: 3, transactions: 2, treasuryAccountMissing: false })).toBe(transfers + BigInt(5_000));
+    expect(solBeforeMint({ newAccounts: 3, transactions: 2, treasuryAccountMissing: true })).toBe(transfers + BigInt(5_000) + TOKEN_ACCOUNT_RENT_LAMPORTS);
+  });
+
+  it("after a batch fell back to one prompt per transaction, the later groups go one by one too", () => {
+    expect(nextPromptMode("auto", { mode: "batch" })).toBe("auto");
+    expect(nextPromptMode("auto", { mode: "per-transaction" })).toBe("per-transaction");
+    // Never back to a batch once fallen back (or chosen).
+    expect(nextPromptMode("per-transaction", { mode: "batch" })).toBe("per-transaction");
   });
 
   it("needs the rent of every new token account plus each transaction's fees", () => {

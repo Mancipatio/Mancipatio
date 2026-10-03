@@ -1011,12 +1011,38 @@ export type ChecklistInput = {
   supplyLocked: boolean;
   /** Open sales of this class (Close waits for them); null when they could not be read. */
   openSalesOfClass: number | null;
+  /**
+   * A sale of this class on its way: a live approval not opened yet, or a
+   * public-sale request waiting for the operator (Close waits for it too).
+   * Absent or null: none known.
+   */
+  pendingSaleOfClass?: boolean | null;
 };
 
 /** Everything that can exist was created and has left the treasury. */
 function allDistributed(input: ChecklistInput): boolean {
   if (input.treasuryBalance === null || input.treasuryBalance > BigInt(0)) return false;
   return input.supplyLocked || (input.maxSupply !== null && input.lifetimeMinted >= input.maxSupply);
+}
+
+/**
+ * Whether the lock could run now if something had been distributed: the
+ * class exists, the asset is active, no sale of the class is open or on its
+ * way. Close itself also waits for the first distribution (lockAtZeroOffered).
+ */
+function lockable(input: ChecklistInput): boolean {
+  const created = input.classExists && input.mintInitialized;
+  return created && input.active && input.openSalesOfClass === 0 && input.pendingSaleOfClass !== true;
+}
+
+/**
+ * Nothing was created yet and the lock could otherwise run: Close stays
+ * waiting (locking now fixes the supply at 0 — no token could ever be
+ * created or sold), and an Admin may still lock at 0 with an explicit
+ * confirmation.
+ */
+export function lockAtZeroOffered(input: ChecklistInput): boolean {
+  return !input.supplyLocked && lockable(input) && input.lifetimeMinted === BigInt(0);
 }
 
 export function checklistItems(input: ChecklistInput): ChecklistItem[] {
@@ -1030,7 +1056,8 @@ export function checklistItems(input: ChecklistInput): ChecklistItem[] {
     { id: "distribute", state: allDistributed(input) ? "done" : canDistribute ? "todo" : "blocked" },
     {
       id: "close",
-      state: input.supplyLocked ? "done" : created && input.active && input.openSalesOfClass === 0 ? "todo" : "blocked",
+      // Only after something was distributed: a lock at 0 is offered apart, with its own confirmation.
+      state: input.supplyLocked ? "done" : lockable(input) && input.lifetimeMinted > BigInt(0) ? "todo" : "blocked",
     },
   ];
 }
@@ -1074,7 +1101,11 @@ export function closeText(input: ChecklistInput, isAdmin: boolean): string {
   if (close.state === "blocked") {
     if (!input.classExists || !input.mintInitialized || !input.active) return "After the asset is active.";
     if (input.openSalesOfClass === null) return "Could not check this class's sales; refresh before locking.";
-    return "Not while a sale of this class is open.";
+    if (input.openSalesOfClass > 0) return "Not while a sale of this class is open.";
+    if (input.pendingSaleOfClass === true) return "Not while a sale of this class is approved or requested and not opened yet.";
+    return isAdmin
+      ? "After the first distribution. Locking now would fix the supply at 0 — no token could ever be created or sold; it needs an explicit confirmation."
+      : "After the first distribution: the operator can then lock the supply for good.";
   }
   return isAdmin
     ? "Optional, after the last distribution: locks the supply for good. Nobody can create more tokens afterwards, not even the Super Admin."
