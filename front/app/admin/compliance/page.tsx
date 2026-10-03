@@ -12,6 +12,7 @@ import {
   createAlert,
   getSanctionsStatus,
   isScreeningHit,
+  isUnlinkedBuy,
   listAlertsPage,
   refreshSanctionsList,
   resolveAlert,
@@ -21,6 +22,7 @@ import {
   type ComplianceAlert,
   type SanctionsListStatus,
   type SanctionsStatus,
+  unlinkedBuyMints,
 } from "@/lib/compliance";
 import { listClients, type ClientRow } from "@/lib/clients";
 import { useToast } from "@/lib/toast";
@@ -83,9 +85,10 @@ export default function CompliancePage() {
         <p className="mt-1.5 text-[13px] leading-relaxed text-slate-600">
           Wallet screening hits against the OFAC SDN list (checked when a
           wallet commits, buys, trades, lists, applies for or is issued a
-          passport, or verifies; the list is refreshed daily), manually tagged
-          events and system alarms. Resolve each alert with a written reason —
-          it lands in the audit timeline of the linked client.
+          passport, or verifies; the list is refreshed daily), buys by wallets
+          not linked to the platform (no acceptance of the Terms in force),
+          manually tagged events and system alarms. Resolve each alert with a
+          written reason — it lands in the audit timeline of the linked client.
         </p>
       </div>
       <RequireRole role="admin">
@@ -619,7 +622,67 @@ function AlertDetail({
           </p>
         </div>
       )}
+
+      {isUnlinkedBuy(alert) && alert.wallet && (
+        <UnlinkedBuyProposal wallet={alert.wallet} mints={unlinkedBuyMints(alert)} />
+      )}
     </section>
+  );
+}
+
+/**
+ * D2 (2026-10-03): a buy by a wallet not linked to the platform. Buying an
+ * Open class needs no KYC but a wallet signed in on the site with the Terms
+ * in force accepted; a buy made by calling the program directly is not
+ * supported. The links prepare the existing flows (blocklist, then the
+ * clawback panel with the holder and share class filled in); nothing is sent
+ * from this page.
+ */
+function UnlinkedBuyProposal({ wallet, mints }: { wallet: string; mints: string[] }) {
+  return (
+    <div className="mt-4 rounded-lg border border-orange-200 bg-orange-50 p-4 text-sm text-orange-950" data-unlinked-buy-proposal>
+      <p className="text-[11px] font-semibold uppercase tracking-wider text-orange-800">
+        Buy outside the platform: block and claw back if compliance decides
+      </p>
+      <p className="mt-1">
+        Buying needs a wallet linked to the platform: signed in on the site,
+        the Terms in force accepted, the sanctions screen passed. This wallet
+        bought without an acceptance by 2 minutes after the buy, so the buy
+        did not come through the site. Check the evidence first
+        (<span className="font-mono text-xs">via_cpi</span>,{" "}
+        <span className="font-mono text-xs">purchase_recorded</span>,{" "}
+        <span className="font-mono text-xs">terms_accepted</span>). If you
+        block, do it at once: the units move without KYC, and units moved out
+        before the block stay out of reach. The BlocklistAuthority signs the
+        blocklist entry, then an Admin claws back each share class. Nothing
+        is sent from this page.
+      </p>
+      <ul className="mt-2 space-y-1">
+        <li>
+          <Link
+            href={`/admin/blocklist?wallet=${encodeURIComponent(wallet)}`}
+            className="font-medium text-orange-900 underline-offset-2 hover:underline"
+          >
+            Prepare the blocklist entry for {wallet.slice(0, 6)}…{wallet.slice(-4)} →
+          </Link>
+        </li>
+        {mints.map((mint) => (
+          <li key={mint}>
+            <Link
+              href={`/admin/kyc?holder=${encodeURIComponent(wallet)}&mint=${encodeURIComponent(mint)}#clawback`}
+              className="font-medium text-orange-900 underline-offset-2 hover:underline"
+            >
+              Claw back {mint.slice(0, 6)}…{mint.slice(-4)} (after the block) →
+            </Link>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-xs text-orange-900/80">
+        Runbook §15 &ldquo;Buys by wallets not linked to the platform&rdquo;.
+        Resolve the alert with the reason and the signatures; that also lifts
+        the passport block on this wallet.
+      </p>
+    </div>
   );
 }
 

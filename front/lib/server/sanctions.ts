@@ -31,7 +31,10 @@
 // that never touches the site). Compliance then blocklists and claws back
 // (runbook). A wallet on the OFAC list but not yet on the on-chain
 // blocklist passes the program even after 8.3, so the after-the-fact
-// screen stays.
+// screen stays. Since D2 (2026-10-03) a buy also needs the platform link (the
+// Terms in force accepted): the pre-check requires it after a clear screen,
+// and the same alarm job flags a buyer without it (lib/server/
+// onchain-link-check.ts, a separate alert from a sanctions hit).
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";

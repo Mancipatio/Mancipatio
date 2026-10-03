@@ -40,6 +40,7 @@ import { refuseSuspendedClient } from "@/lib/server/kyc-gate";
 import { POST as internalRefresh } from "@/app/api/internal/sanctions/route";
 import { POST as screenWalletRoute } from "@/app/api/compliance/screen-wallet/route";
 import { SESSION_READ_ACTIONS } from "@/lib/siws-session";
+import { TOS_VERSION } from "@/lib/tos-version";
 
 const FIXTURE = readFileSync(join(process.cwd(), "tests/fixtures/ofac-sdn-sample.xml"), "utf8");
 const LISTED = "6t3xLqAFPZoE4mzWzxabrKxK8cGoHxAmaCj3MigJpWh5";
@@ -206,16 +207,39 @@ describe("POST /api/compliance/screen-wallet (the buyer's own pre-check before a
     return { status: res.status, body: (await res.json()) as { error?: string } };
   };
 
+  const accepted = (wallet: string) =>
+    db.ref!.rows("tos_acceptances").push({ id: `tos-${wallet}`, wallet, version: TOS_VERSION, created_at: new Date(NOW - 60_000).toISOString() });
+
   it("answers clear, refuses a listed buyer with the alert raised, and fails closed on mainnet", async () => {
     expect(SESSION_READ_ACTIONS.has("compliance.screenWallet")).toBe(true);
     loadList();
+    accepted(CLEAN);
     expect((await post(CLEAN)).status).toBe(200);
+    // Screened first: a listed wallet is refused and reported with or without an acceptance.
     const hit = await post(LISTED);
     expect(hit).toEqual({ status: 403, body: { ok: false, error: SCREENING_SELF_HIT } });
     expect(db.ref!.rows("compliance_alerts")).toEqual([expect.objectContaining({ p_wallet: LISTED })]);
     db.ref!.tables.sanctions_list_state = [];
     clearSanctionsCache();
     expect((await post(CLEAN)).status).toBe(503);
+  });
+
+  it("D2: a clear wallet still needs the Terms in force accepted on mainnet (409; 503 when unreadable); devnet does not ask", async () => {
+    loadList();
+    const refused = await post(CLEAN);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toContain(`Accept the current Terms of Service (v${TOS_VERSION}) with this wallet before buying`);
+    db.ref!.failReads.add("tos_acceptances");
+    expect((await post(CLEAN)).status).toBe(503);
+    db.ref!.failReads.clear();
+    accepted(CLEAN);
+    expect((await post(CLEAN)).status).toBe(200);
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
+    db.ref!.tables.tos_acceptances = [];
+    expect((await post(CLEAN)).status).toBe(200);
+    vi.stubEnv("TOS_SERVER_GATE", "enforce");
+    expect((await post(CLEAN)).status).toBe(409);
+    expect(db.ref!.rows("compliance_alerts")).toEqual([]);
   });
 });
 

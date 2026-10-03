@@ -830,7 +830,9 @@ export default function DealPage({
         );
       // Sanctions screen of the buyer BEFORE the buy (8.5): an Open-class buy
       // mints without the transfer hook, so this is the last point where a
-      // listed wallet is stopped before it pays. Throws with the reason.
+      // listed wallet is stopped before it pays. The same call checks the
+      // platform link on the server (D2: the Terms in force accepted by this
+      // wallet; enforced on mainnet). Throws with the reason.
       await screenOwnWallet(conn.wallet);
       const signer = walletSigner(conn.wallet);
       const plan = await buildDocumentedPurchase(client.runtime.rpc, {

@@ -9,8 +9,10 @@
 //     signs. Open or KYC-gated mints.
 //   * passport  — clawback_from_holder: KYC-gated mint, passport revoked or
 //     expired (KYC provider + Admin).
-// Regulatory path: sanctions, court order, compliance breach — every action
-// is reason + audit-logged.
+// Regulatory path: sanctions, court order, compliance breach, a buy outside
+// the platform (D2) — every action is reason + audit-logged. The alert of a
+// buy outside the platform (/admin/compliance) links here with ?holder= and
+// ?mint=: both are filled in, nothing runs by itself.
 
 import { useCallback, useEffect, useState } from "react";
 import Link from "next/link";
@@ -19,7 +21,7 @@ import {
   useSolanaClient,
   useWalletConnection,
 } from "@solana/react-hooks";
-import { address, type Address } from "@solana/kit";
+import { address, isAddress, type Address } from "@solana/kit";
 import { findAssociatedTokenPda } from "@solana-program/token-2022";
 import {
   ASSET_REGISTRY_PROGRAM_ADDRESS,
@@ -120,6 +122,33 @@ export function ClawbackPanel() {
       }
     })();
   }, [client]);
+
+  // A buy outside the platform links here from /admin/compliance with
+  // ?holder=<wallet>&mint=<share-class mint>#clawback (D2): the holder and
+  // the share class are filled in, once; the Admin still runs the preflight,
+  // checks the amount and signs (nothing runs or is sent by itself).
+  const [proposedMint, setProposedMint] = useState("");
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const proposedHolder = params.get("holder")?.trim() ?? "";
+    const mint = params.get("mint")?.trim() ?? "";
+    if (!isAddress(proposedHolder)) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHolder(proposedHolder);
+    if (isAddress(mint)) setProposedMint(mint);
+    if (window.location.hash === "#clawback") {
+      document.getElementById("clawback")?.scrollIntoView({ block: "start" });
+    }
+  }, []);
+  useEffect(() => {
+    if (!proposedMint || classes === null) return;
+    // Once the classes are loaded: select the proposed one if it is listed.
+    if (classes.some((c) => c.mint.toString() === proposedMint)) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSelected((current) => current || proposedMint);
+    }
+    setProposedMint("");
+  }, [proposedMint, classes]);
 
   /** On-chain scan for custody vaults of the selected share class. */
   const loadVaults = useCallback(
@@ -381,7 +410,7 @@ export function ClawbackPanel() {
       : null;
 
   return (
-    <section className="mt-8 rounded-xl border border-slate-200 bg-white p-5 shadow-card">
+    <section id="clawback" className="mt-8 scroll-mt-4 rounded-xl border border-slate-200 bg-white p-5 shadow-card">
       <p className="text-xs font-semibold uppercase tracking-widest text-slate-500">
         Clawback
       </p>

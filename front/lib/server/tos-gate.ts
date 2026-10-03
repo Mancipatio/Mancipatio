@@ -1,6 +1,8 @@
 // SERVER-ONLY — Terms-of-Service acceptance on the signed write routes a buyer
 // or seller uses (pravo-compliance-9): /api/launchpad/commit, /api/otc/create
-// and /api/resell/create.
+// and /api/resell/create, and the sale page's pre-buy check
+// /api/compliance/screen-wallet (D2, 2026-10-03: buying needs a wallet linked
+// to the platform, i.e. signed in with the Terms in force accepted).
 //
 // The <TosGate /> interstitial is a client-side screen: a script can call these
 // routes without ever seeing it. So on MAINNET these routes also require a
@@ -12,8 +14,11 @@
 // Test networks keep today's behaviour (no server check) unless the server
 // variable TOS_SERVER_GATE is exactly "enforce" — for rehearsing the mainnet
 // behaviour on devnet. Direct on-chain purchases (the Mature buy) bypass every
-// route; binding the Terms version into the purchase memo is the separate
-// next step.
+// route: they are not supported (D2) and are detected after the fact — the
+// alarm worker raises a compliance alert for a buyer without an acceptance of
+// the Terms in force by 2 minutes after the buy
+// (lib/server/onchain-link-check.ts), and the Operator may blocklist the
+// wallet and claw back its units.
 
 import "server-only";
 
