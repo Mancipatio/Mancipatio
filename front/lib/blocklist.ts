@@ -94,7 +94,7 @@ function hasPrefix(data: ArrayLike<number>, prefix: ArrayLike<number>): boolean 
  * discriminator, and naming `holder` — anything else (closed, foreign-owned,
  * malformed) means "not blocked".
  */
-function liveEntry(account: MaybeEncodedAccount, holder: Address): LiveBlockEntry | null {
+export function liveBlockEntry(account: MaybeEncodedAccount, holder: Address): LiveBlockEntry | null {
   if (!account.exists) return null;
   if (account.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS) return null;
   const data = account.data;
@@ -115,7 +115,7 @@ export async function fetchBlockEntry(
   holder: Address,
 ): Promise<LiveBlockEntry | null> {
   const [pda] = await findBlockEntryPda({ wallet: holder });
-  return liveEntry(await fetchEncodedAccount(rpc, pda), holder);
+  return liveBlockEntry(await fetchEncodedAccount(rpc, pda), holder);
 }
 
 /** getMultipleAccounts accepts at most 100 addresses. */
@@ -140,7 +140,7 @@ export async function fetchBlockEntries(
     const accounts = await fetchEncodedAccounts(rpc, pdas.slice(i, i + BLOCK_ENTRY_CHUNK));
     accounts.forEach((account, j) => {
       const holder = unique[i + j];
-      const live = liveEntry(account, holder);
+      const live = liveBlockEntry(account, holder);
       if (live) out.set(holder, live);
     });
   }

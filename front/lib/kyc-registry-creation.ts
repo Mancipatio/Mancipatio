@@ -406,6 +406,12 @@ export async function signKycRegistryCreation(
   }
   // Sent outside the verified client: the maintenance check fails closed.
   await assertSiteWritable({ failClosed: true });
+  // Exempt from the verified client's simulation gate (lib/simulation-gate),
+  // on purpose: the KYC authority and the Admin co-signer sign one FIXED
+  // message (blockhash and compute budget are in the document), possibly far
+  // apart in time, so it is not re-prepared and simulated per signature. Its
+  // guards are the live checks right here, before each signature, and RPC
+  // preflight (skipPreflight: false) at submit.
   const pinned = opts.pinned !== undefined ? opts.pinned : configuredKycRegistry();
   await assertCreationLive(rpc, e, pinned);
   const transaction = await compileKycRegistryCreation(e);

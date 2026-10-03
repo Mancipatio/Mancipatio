@@ -7,6 +7,20 @@ import { withVerifiedTransactions } from "@/lib/verified-solana-client";
 import { invalidateTransactionWalletPolicy, requestTransactionWalletPolicy } from "@/lib/transaction-wallet-policy";
 import { guardWalletSession } from "@/lib/guarded-wallet-connectors";
 
+// The simulation gate (lib/simulation-gate) is covered by
+// tests/simulation-gate.test.ts and tests/wallet-send-order.test.ts. A fake
+// client without simulateTransaction on its RPC simulates successfully; an
+// RPC that has one is really asked.
+vi.mock("@/lib/simulation-gate", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@/lib/simulation-gate")>();
+  return {
+    ...original,
+    simulateMessage: vi.fn(async (...args: Parameters<typeof original.simulateMessage>) =>
+      typeof (args[0] as { simulateTransaction?: unknown }).simulateTransaction === "function"
+        ? original.simulateMessage(...args)
+        : { err: null, logs: [], unitsConsumed: 1_000 }),
+  };
+});
 const remote = vi.hoisted(() => ({ signedFetch: vi.fn() }));
 vi.mock("@/lib/siws-client", () => ({ signedFetch: remote.signedFetch }));
 

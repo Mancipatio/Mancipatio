@@ -42,6 +42,7 @@ import { fromBytes32 } from "@/lib/format";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { ConfirmModal } from "@/components/confirm-modal";
+import { ShareTransferPanel } from "@/components/share-transfer-panel";
 import { SkeletonTable } from "@/components/skeleton";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
@@ -596,6 +597,9 @@ function ShareClassActions({
           </p>
         )}
       </div>
+
+      {/* Send to holder: tokens this issuer key holds, to one recipient wallet. */}
+      <ShareTransferPanel sc={sc} asset={asset} scPda={scPda} onSent={onRefresh} />
 
       <IssuerOperatingActions
         issuer={issuerPda}

@@ -157,13 +157,28 @@ export async function hookTransferMetas(
   mint: Address,
   accounts: HookTransferAccounts,
 ): Promise<HookTransferMeta[]> {
+  return hookTransferMetasFor(await loadHookConfig(rpc, mint), mint, accounts);
+}
+
+/** The part of a mint's TransferHookConfig that decides its tail. */
+export type HookTailConfig = Pick<TransferHookConfig, "restrictionMode" | "kycRegistry">;
+
+/**
+ * hookTransferMetas for an ALREADY-READ hook config (null = no config, the
+ * Open tail): pure, no RPC. Node scripts (the devnet rehearsal) and
+ * lib/share-transfer build the same tail from the config they read.
+ */
+export async function hookTransferMetasFor(
+  config: HookTailConfig | null,
+  mint: Address,
+  accounts: HookTransferAccounts,
+): Promise<HookTransferMeta[]> {
   const { sourceOwner, destOwner } = accounts;
 
   const blockEntry = await findBlockEntryPda(sourceOwner);
   const extraMetas = await findExtraMetasPda(mint);
   const openTail = [ro(blockEntry), ro(extraMetas), ro(TRANSFER_HOOK_PROGRAM)];
 
-  const config = await loadHookConfig(rpc, mint);
   if (!config || config.restrictionMode !== RestrictionMode.KycGated) {
     return openTail;
   }

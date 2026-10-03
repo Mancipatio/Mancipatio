@@ -50,6 +50,8 @@ import { guardWalletSession } from "@/lib/guarded-wallet-connectors";
 import { clearWalletChange, recentWalletChange } from "@/lib/wallet-changes";
 import { explainSendError } from "@/lib/tx-error";
 import { setComputeUnitLimitInstruction } from "@/lib/compute-budget";
+import { requestTransactionWalletPolicy } from "@/lib/transaction-wallet-policy";
+import { SimulationRefusedError } from "@/lib/simulation-gate";
 
 const WALLET = address("6AnFbinF7X12mACTVEGfjWZyzYGAShEscAB5UgV3vHsP");
 const PROGRAM = address("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
@@ -106,15 +108,23 @@ function fakeWallet(signed: SignInput[], mode: WalletMode = {}): Wallet {
   } as unknown as Wallet;
 }
 
-function fakeRpc(unitsConsumed: bigint, simulationErr: unknown = null, preflightErr: unknown = null) {
+function fakeRpc(unitsConsumed: bigint, simulationErr: unknown = null, preflightErr: unknown = null, simulationLogs: string[] = []) {
   const simulated: string[] = [];
+  const simulateConfigs: unknown[] = [];
   const sent: string[] = [];
+  const blockhashes = { count: 0 };
   const rpc = {
-    getLatestBlockhash: () => ({ send: async () => ({ value: { blockhash: BLOCKHASH, lastValidBlockHeight: BigInt(100) } }) }),
-    simulateTransaction: (wire: string) => ({
+    getLatestBlockhash: () => ({
+      send: async () => {
+        blockhashes.count += 1;
+        return { value: { blockhash: BLOCKHASH, lastValidBlockHeight: BigInt(100) } };
+      },
+    }),
+    simulateTransaction: (wire: string, config: unknown) => ({
       send: async () => {
         simulated.push(wire);
-        return { value: { unitsConsumed, err: simulationErr, logs: [] } };
+        simulateConfigs.push(config);
+        return { value: { unitsConsumed, err: simulationErr, logs: simulationLogs } };
       },
     }),
     sendTransaction: (wire: string) => ({
@@ -132,7 +142,7 @@ function fakeRpc(unitsConsumed: bigint, simulationErr: unknown = null, preflight
       },
     }),
   };
-  return { rpc, simulated, sent };
+  return { rpc, simulated, simulateConfigs, sent, blockhashes };
 }
 
 function instructionsOf(wire: string): string[] {
@@ -146,7 +156,7 @@ function instructionsOf(wire: string): string[] {
   });
 }
 
-type Setup = { withOverrides?: boolean; wallet?: WalletMode; simulationErr?: unknown; preflightErr?: unknown };
+type Setup = { withOverrides?: boolean; wallet?: WalletMode; simulationErr?: unknown; simulationLogs?: string[]; preflightErr?: unknown };
 
 async function setup(unitsConsumed: bigint, options: Setup = {}) {
   const signed: SignInput[] = [];
@@ -157,7 +167,7 @@ async function setup(unitsConsumed: bigint, options: Setup = {}) {
   );
   // As in app/providers: every session is the guarded one.
   const session: WalletSession = guardWalletSession(await connector.connect(), () => session);
-  const { rpc, simulated, sent } = fakeRpc(unitsConsumed, options.simulationErr, options.preflightErr);
+  const { rpc, simulated, simulateConfigs, sent, blockhashes } = fakeRpc(unitsConsumed, options.simulationErr, options.preflightErr, options.simulationLogs);
   const runtime = { rpc, rpcSubscriptions: {} } as unknown as SolanaClient["runtime"];
   const transaction = createTransactionHelper(runtime, () => "confirmed");
   const client = {
@@ -176,11 +186,12 @@ async function setup(unitsConsumed: bigint, options: Setup = {}) {
   };
   // What useSendTransaction passes: the session as authority, our signer as fee payer.
   const send = () => guarded.transaction.prepareAndSend({ instructions: [ix], feePayer: signer, authority: session });
-  return { send, signed, simulated, sent };
+  return { send, signed, simulated, simulateConfigs, sent, blockhashes };
 }
 
 beforeEach(() => {
   resetPriorityFeeCache();
+  vi.mocked(requestTransactionWalletPolicy).mockClear();
   vi.stubEnv("NEXT_PUBLIC_NETWORK", "devnet");
   vi.stubGlobal("window", { dispatchEvent: () => true });
   vi.stubGlobal(
@@ -224,6 +235,16 @@ describe("what the wallet is handed on a send", () => {
     expect(instructionsOf(f.simulated[0])).toEqual(["limit:1400000", "price:5000", PROGRAM]);
     // ceil(300_000 × 1.1)
     expect(instructionsOf(f.sent[0])).toEqual(["limit:330000", "price:5000", PROGRAM]);
+  });
+
+  it("the gate is that one simulation: unsigned, at the node's blockhash, and one blockhash fetch for the send", async () => {
+    const f = await setup(BigInt(300_000));
+    await f.send();
+    expect(f.simulateConfigs).toEqual([
+      { encoding: "base64", sigVerify: false, replaceRecentBlockhash: true, commitment: "confirmed" },
+    ]);
+    expect(f.blockhashes.count).toBe(1);
+    expect(f.signed).toHaveLength(1);
   });
 
   it("sends the message the wallet signed, and nothing is noted when it is unchanged", async () => {
@@ -284,9 +305,37 @@ describe("what the wallet is handed on a send", () => {
     expect(instructionsOf(handed)).toEqual(["limit:200000", "price:5000", PROGRAM]);
   });
 
-  it("a failed estimate falls back to the SDK's 200k floor, still in front", async () => {
+  // Before the gate, a failed estimate fell back to the SDK's 200k floor and
+  // the wallet opened anyway; a payer that cannot cover the placeholder's fee
+  // is now refused before the wallet.
+  it("InsufficientFundsForFee is refused before the wallet", async () => {
     const f = await setup(BigInt(0), { simulationErr: "InsufficientFundsForFee" });
-    await f.send();
-    expect(instructionsOf(f.sent[0])).toEqual(["limit:200000", "price:5000", PROGRAM]);
+    const failure = await f.send().then(() => null, (err: unknown) => err);
+    expect(failure).toBeInstanceOf(SimulationRefusedError);
+    expect(f.signed).toHaveLength(0);
+    expect(f.sent).toHaveLength(0);
+    expect(requestTransactionWalletPolicy).not.toHaveBeenCalled();
+    expect(explainSendError(failure)).toBe(
+      "This transaction would fail, so your wallet was not opened. The paying wallet does not have enough SOL on devnet for the network fee (InsufficientFundsForFee).",
+    );
+  });
+
+  it("an instruction the program refuses never reaches the wallet, and the refusal names it", async () => {
+    const logs = [
+      `Program ${PROGRAM} invoke [1]`,
+      "Program log: AnchorError caused by account: platform. Error Code: PartyBlocklisted. Error Number: 6144. Error Message: A party is blocklisted.",
+      `Program ${PROGRAM} failed: custom program error: 0x1800`,
+    ];
+    const f = await setup(BigInt(5_000), { simulationErr: { InstructionError: [2, { Custom: BigInt(6144) }] }, simulationLogs: logs });
+    const failure = await f.send().then(() => null, (err: unknown) => err);
+    expect(failure).toBeInstanceOf(SimulationRefusedError);
+    expect(f.signed).toHaveLength(0);
+    expect(f.sent).toHaveLength(0);
+    expect(requestTransactionWalletPolicy).not.toHaveBeenCalled();
+    // [limit, price, app]: message index 2 is the app's only step.
+    expect((failure as SimulationRefusedError).instructionIndex).toBe(0);
+    expect(explainSendError(failure)).toMatch(
+      /^This transaction would fail, so your wallet was not opened\. Step 1 of 1 \(.+\) was refused by the Manci registry program: A wallet in this transaction .+ \(PartyBlocklisted\)\.$/,
+    );
   });
 });
