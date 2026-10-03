@@ -26,6 +26,7 @@ The tools live in `front/scripts/chain/` and run from `front/`:
 | `npm run chain:handover` | Ordered plan to move live roles to new keys, with each step's timelock (§19) | never |
 | `npm run chain:emergency` | Out-of-band pause, unpause, blocklist, hook mode and an issuer proceeds freeze with a Ledger or a keypair, no front and no database (§11) | only with `CHAIN_SEND=1` |
 | `npm run chain:accept` | The bootstrap steps a role key signs itself (A3, X3, X2, X1, S5c, S6) with that key's Ledger or keypair, no front, no SIWS (§5) | only with `CHAIN_SEND=1` |
+| `npm run chain:direct-buy` | **Devnet only** (refused on every other cluster, whatever `CHAIN_ALLOW_MAINNET` says): buys units of an Open sale by calling the program directly with a test key, no sign-in and no Terms, to verify the off-platform buy alarm (§15, "Buys by wallets not linked to the platform") | only with `CHAIN_SEND=1` |
 
 Every run writes one evidence file (`CHAIN_OUTPUT`, schema
 `mancipatio-chain-<tool>-v1`) even when it fails or is interrupted. Its
@@ -47,7 +48,7 @@ writes `<CHAIN_OUTPUT>.journal.jsonl`.
 | `CHAIN_SIGNER` | chain:emergency and chain:accept only, instead of `CHAIN_KEYPAIR`: `usb://ledger`, `usb://ledger?key=<n>` or `usb://ledger?key=<n>/<m>` (the Solana CLI's derivation paths). |
 | `CHAIN_CU_PRICE` | Micro-lamports per CU. Required when sending on mainnet; at most 2,000,000. |
 | `CHAIN_RPS` | Requests per second, default 2, at most 20. On the public devnet RPC use `1`: its `getProgramAccounts` limit fails an inventory at 2 (observed 2026-09-24). |
-| `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10, emergency 15, accept 15. |
+| `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10, emergency 15, accept 15, direct-buy 10. |
 | `CHAIN_REHEARSAL_SIGNERS` | localnet/devnet only: `superAdmin=<file>,blocklistAuthority=<file>,kycAuthority=<file>`, so the CLI signs X1/X2/X3/S6 in a rehearsal. |
 | `CHAIN_RECOVER=1` | Resolves a leftover lock (see "Crash recovery"). Sends nothing. |
 | `CHAIN_STATE_DIR` | Lock directory; default `~/.mancipatio/chain`. Refused on mainnet unless it is the default (the lock only excludes runs that share its directory). |
@@ -64,7 +65,8 @@ mainnet only); `CHAIN_SITE_ORIGIN` (handover, wording only);
 `CHAIN_KYC_REGISTRY`, `CHAIN_ISSUER`, `CHAIN_FREEZE_REASON_SHA256`,
 `CHAIN_EMERGENCY_IDL_UNCHECKED=1`, `CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1`
 (emergency, §11); `CHAIN_ACCEPT_OP`,
-`CHAIN_ACCEPT_SIGNER` (accept, §5).
+`CHAIN_ACCEPT_SIGNER` (accept, §5); `CHAIN_BUY_SALE`, `CHAIN_BUY_UNITS`,
+`CHAIN_BUY_BUYER`, `CHAIN_BUY_TERMS` (direct-buy, devnet only, §15).
 
 The runners never read `.env*` files. Export the variables in the shell, for
 example from a small `set -a; . ~/mancipatio-mainnet/chain.env; set +a` file
@@ -2390,6 +2392,37 @@ UN lists, batch rescreening of existing holders, risk scoring; those need a
 provider (Chainalysis, TRM, …) plugged into `SANCTIONS_PROVIDERS`, and
 counsel decides whether the pilot needs them.
 
+**Distribution recipients ("Send to wallets", rehearsal 2026-10-03, no
+migration).** The issuer's direct transfers never pass a server, so the
+panel screens every recipient (`/api/compliance/screen-recipients`) and the
+server now **records each screen**: one `audit_events` row, category
+`compliance` (server-only: the unsigned `/api/audit` refuses it, so no
+browser can forge one), `ix_name = 'sanctions_screening'`, the share class
+as `target_label`, with each wallet's result (`clear`, `hit`, or
+`unscreened` off mainnet while the list could not answer), the list
+publication used (`list_version`: source, publish date, SHA-256 prefix of
+the file) and the run. A record that cannot be written refuses the screen
+(503). Right before signing, `/api/compliance/distribution-evidence` checks
+that **every** recipient of the run has a screening of that share class
+from the last **15 minutes** whose latest result is clear (`unscreened`
+passes only where the screen is not enforced), else 409 and the panel
+signs nothing; it writes one `distribution_screening_evidence` row (the
+evidence id). The panel takes the evidence again at plan time when it is
+older than 10 minutes, signs no group with a row whose evidence is older
+than 15, and every `share_class_distribution` audit row carries it per
+recipient (`metadata.recipients[].screening`: screening id, time, list
+version, result, evidence id; `screening_complete`). A sender who sends
+outside the site is not stopped by this; the alarm worker does not screen
+plain transfers either. Queries:
+- one wallet's screenings: `select created_at, actor_wallet, target_label,
+  metadata->>'list_version' as list_version, metadata->'results'->>'<wallet>'
+  as result from audit_events where category = 'compliance' and ix_name =
+  'sanctions_screening' and metadata->'results' ? '<wallet>' order by
+  created_at desc;`
+- a run's evidence: `select created_at, metadata->'recipients' from
+  audit_events where ix_name = 'distribution_screening_evidence' and
+  metadata->>'run_id' = '<run id>';`
+
 ### Buys by wallets not linked to the platform (D2, 2026-10-03)
 
 Buying share tokens of an Open class needs no KYC, but it needs a wallet
@@ -2474,6 +2507,39 @@ accepted the Terms raises nothing; a script buy from a fresh wallet shows
 above; the same wallet accepting at T + 60 s on a second buy raises nothing;
 `select signature, status, last_error, attempts from onchain_event_jobs where
 last_error = 'LINK_GRACE';` shows nothing pending for longer than 4 minutes.
+
+The script buy is `npm run chain:direct-buy` (from `front/`, **devnet
+only**: `CHAIN_NETWORK` must be `devnet`, any other cluster is refused
+before `CHAIN_ALLOW_MAINNET` is read, and the RPC is pinned to the devnet
+genesis). It builds the sale page's own instructions
+(`lib/purchase-builder`: the buyer's two token accounts, then `buy` with its
+gate accounts and receiver tail) and sends them with a test key, without the
+site's sign-in, Terms gate, sanctions pre-check or purchase record:
+
+1. Make a fresh test key that has never signed in on the devnet site
+   (`solana-keygen new --no-bip39-passphrase -o /tmp/direct-buy.json`,
+   outside the repository), fund it with devnet SOL and with the sale's
+   payment mint (devnet USDC or the test mint), at least
+   `units × price_per_unit` base units.
+2. Optional, for the exact sale-page transaction (with the document
+   acceptance memo): save `GET https://<devnet site>/api/launchpad/terms?sale=<sale>`
+   to a file and set `CHAIN_BUY_TERMS` to it. Without it the buy is sent
+   bare, as a script would; the alarm treats both alike.
+3. Dry run (nothing is signed or sent; it probes the sale, builds, simulates
+   and prints the plan digest):
+   `CHAIN_NETWORK=devnet CHAIN_RPC_URL=<devnet RPC> CHAIN_OUTPUT=/tmp/direct-buy-1.json
+   CHAIN_BUY_SALE=<sale PDA> CHAIN_BUY_UNITS=1 CHAIN_BUY_BUYER=<test key address>
+   npm run chain:direct-buy`. Status `awaiting`.
+4. Send: the same variables with a new `CHAIN_OUTPUT`, plus `CHAIN_SEND=1`,
+   `CHAIN_CONFIRM_PLAN=<digest>` and `CHAIN_KEYPAIR=/tmp/direct-buy.json`
+   (it must be `CHAIN_BUY_BUYER`). The evidence file records
+   `buySignature`; the transaction is waited for until finalized.
+5. Expect, with the alarm cron enabled: the buy's job shows `LINK_GRACE`,
+   then within about 3 minutes one open `onchain:unlinked-buy` alert
+   (medium on devnet) for the test key in `/admin/compliance`, with
+   `purchase_recorded: false` and `terms_accepted: null` in its evidence;
+   the Operations query above lists it. Resolve it with the reason "devnet
+   verification of the off-platform buy alarm".
 
 ### Automatic EUR rate (0080)
 
