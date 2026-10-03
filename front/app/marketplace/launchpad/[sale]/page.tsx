@@ -89,8 +89,25 @@ import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { InfoBox, YieldSplit } from "@/components/launchpad/primitives";
 import { SkeletonCard } from "@/components/skeleton";
-import { PurchaseRiskWarning } from "@/components/legal/purchase-risk-warning";
-import { SSC_NOT_APPROVED_LABEL } from "@/lib/whitepaper-approval";
+import {
+  SaleAcceptances,
+  SaleDocumentsSection,
+  SalePageLayout,
+  SaleRiskWarningSection,
+  SoldProgress,
+} from "@/components/launchpad/sale-sections";
+import { SaleOverview } from "@/components/launchpad/sale-overview";
+import {
+  SALE_RISK_WARNING_ANCHOR,
+  buyCardTitle,
+  companyOfTokenizedName,
+  purchaseAcceptanceComplete,
+  saleKind,
+  saleTermsFootnote,
+  tokenSummaryLines,
+  type ClassRestriction,
+} from "@/lib/sale-page";
+import { formatPercent } from "@/lib/tokenize-shares";
 
 // ── helpers ─────────────────────────────────────────────────────────────────
 /** Returns the URL only when it is a safe http(s) link, otherwise null.
@@ -173,6 +190,8 @@ export default function DealPage({
   const [recordingPurchase, setRecordingPurchase] = useState(false);
   // The asset's public profile: the sale's name when it has no application, and one token's share of the company.
   const [assetProfile, setAssetProfile] = useState<PublicAssetProfile | null>(null);
+  // The sale's class cap: a tokenized class is capped at exactly its tokenized tokens (the token summary).
+  const [saleClassCap, setSaleClassCap] = useState<bigint | null>(null);
   const [documentTerms, setDocumentTerms] = useState<SaleDocumentTerms | null>(
     null,
   );
@@ -262,7 +281,14 @@ export default function DealPage({
         const fetchedProfile = saleClass
           ? await getAssetProfile(saleClass.asset.toString()).catch(() => null)
           : null;
-        if (!cancelled) setAssetProfile(fetchedProfile);
+        if (!cancelled) {
+          setAssetProfile(fetchedProfile);
+          setSaleClassCap(
+            saleClass && saleClass.maxSupply.__option === "Some"
+              ? saleClass.maxSupply.value
+              : null,
+          );
+        }
         const fetchedApp = fetchedListing?.application_id
           ? await getPublicApplication(fetchedListing.application_id)
           : null;
@@ -559,6 +585,42 @@ export default function DealPage({
       ? Number(onChainCostBaseUnits) / 10 ** paymentDecimals
       : 0;
 
+  // ── what is sold (lib/sale-page) ──────────────────────────────────────────
+  // A tokenized share class sells TOKENS ("Buy tokens", "Sold"); its "% of"
+  // figures name the company, not the token's "<company> · 10 %" listing name.
+  const kind = saleKind({ settlesOnChain, tokenPercentE4 });
+  const tokenized = kind === "tokenized";
+  const holdingCompany = tokenized ? companyOfTokenizedName(companyName) : companyName;
+  const restriction: ClassRestriction = !eligibilityChecked
+    ? null
+    : !eligibility.gated
+      ? "open"
+      : eligibility.unverified
+        ? null
+        : "kyc-gated";
+  const tokenSummary = tokenized
+    ? tokenSummaryLines({
+        company: holdingCompany,
+        profileSummary: assetProfile?.summary,
+        capTokens: saleClassCap,
+        tokenPercentE4,
+        restriction,
+      })
+    : [];
+  const termsFootnote = saleTermsFootnote({
+    minTicket: app?.min_ticket,
+    structure: app?.raise_structure,
+  });
+  // The investment document served for THIS sale (the buyer accepts exactly it).
+  const documentsForSale =
+    documentTerms?.sale === salePubkey ? documentTerms : null;
+  const acceptanceComplete = purchaseAcceptanceComplete({
+    salePubkey,
+    documentSale: documentTerms?.sale,
+    acceptedTerms,
+    acceptedRisk,
+  });
+
   // ── sale availability guard ────────────────────────────────────────────────
   // A sale only accepts commitments while it is on-chain Open, within its
   // [startTs, endTs] window, and not sold out.
@@ -611,9 +673,7 @@ export default function DealPage({
     !issuerFrozen &&
     !!walletAddress &&
     purchaseRecovery.ready &&
-    documentTerms?.sale === salePubkey &&
-    acceptedTerms &&
-    acceptedRisk &&
+    acceptanceComplete &&
     !pendingPurchase &&
     saleOpen &&
     parsed > 0 &&
@@ -643,7 +703,11 @@ export default function DealPage({
           </div>
 
           <h2 className="mb-3 text-2xl font-semibold tracking-tight text-mx-ink">
-            {settledOnChain ? "Shares are yours." : "You're in."}
+            {settledOnChain
+              ? tokenized
+                ? "Tokens are yours."
+                : "Shares are yours."
+              : "You're in."}
           </h2>
 
           <p className="mb-8 text-[15px] leading-relaxed text-mx-ink-faint">
@@ -651,7 +715,8 @@ export default function DealPage({
               <>
                 You bought{" "}
                 <strong className="text-mx-ink">
-                  {settledUnits.toLocaleString()} share units
+                  {settledUnits.toLocaleString()}{" "}
+                  {tokenized ? "tokens" : "share units"}
                 </strong>{" "}
                 for{" "}
                 <strong className="text-mx-ink">
@@ -711,37 +776,43 @@ export default function DealPage({
             </div>
           )}
 
-          {/* Summary box */}
-          <div className="mb-8 overflow-hidden rounded-[3px] border border-mx-rule bg-white">
-            <div className="flex items-center justify-around divide-x divide-mx-rule px-4 py-5">
-              <div className="flex-1 px-3 text-center">
-                <p className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
-                  Structure
-                </p>
-                <p className="text-[15px] font-semibold text-mx-ink">
-                  {app?.raise_structure ?? "—"}
-                </p>
-              </div>
-              {impliedVal > 0 && (
-                <div className="flex-1 px-3 text-center">
-                  <p className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
-                    Valuation
-                  </p>
-                  <p className="text-[15px] font-semibold text-mx-ink">
-                    {fmtMoney(impliedVal)}
-                  </p>
-                </div>
-              )}
-              <div className="flex-1 px-3 text-center">
-                <p className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
-                  Min ticket
-                </p>
-                <p className="text-[15px] font-semibold text-mx-ink">
-                  {app?.min_ticket ?? "—"}
-                </p>
+          {/* Summary box — only the terms the application states */}
+          {(app?.raise_structure || impliedVal > 0 || app?.min_ticket) && (
+            <div className="mb-8 overflow-hidden rounded-[3px] border border-mx-rule bg-white">
+              <div className="flex items-center justify-around divide-x divide-mx-rule px-4 py-5">
+                {app?.raise_structure && (
+                  <div className="flex-1 px-3 text-center">
+                    <p className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
+                      Structure
+                    </p>
+                    <p className="text-[15px] font-semibold text-mx-ink">
+                      {app.raise_structure}
+                    </p>
+                  </div>
+                )}
+                {impliedVal > 0 && (
+                  <div className="flex-1 px-3 text-center">
+                    <p className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
+                      Valuation
+                    </p>
+                    <p className="text-[15px] font-semibold text-mx-ink">
+                      {fmtMoney(impliedVal)}
+                    </p>
+                  </div>
+                )}
+                {app?.min_ticket && (
+                  <div className="flex-1 px-3 text-center">
+                    <p className="mb-1.5 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
+                      Min ticket
+                    </p>
+                    <p className="text-[15px] font-semibold text-mx-ink">
+                      {app.min_ticket}
+                    </p>
+                  </div>
+                )}
               </div>
             </div>
-          </div>
+          )}
 
           <Link
             href="/marketplace/launchpad"
@@ -1028,260 +1099,533 @@ export default function DealPage({
     }
   }
 
-  return (
-    <section>
-      {/* Back link */}
-      <Link
-        href="/marketplace/launchpad"
-        className="text-xs text-mx-ink-faint underline-offset-2 hover:underline"
-      >
-        ← All raises
-      </Link>
+  // Brings a full text of the main column into view from the buy card (the
+  // documents and the risk warning sit above the tabs, whatever tab is open).
+  function showFullText(anchor: string) {
+    document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  }
 
-      {/* 2-column grid */}
-      <div className="mt-6 grid gap-8 lg:grid-cols-[1fr_360px]">
-        {/* ═══ LEFT COLUMN ═══ */}
-        <div>
-          {/* Company header */}
-          <div className="mb-8">
-            <div className="flex items-center gap-4">
-              {/* Logo */}
-              <div
-                className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-[3px] text-2xl font-bold text-mx-paper"
-                style={
-                  listing?.logo_gradient
-                    ? { background: listing.logo_gradient }
-                    : { background: "var(--mx-indigo)" }
-                }
-              >
-                {listing?.logo_letter ?? companyName[0] ?? "?"}
-              </div>
+  // ── company header ─────────────────────────────────────────────────────────
+  const header = (
+    <div>
+      <div className="flex items-center gap-4">
+        {/* Logo */}
+        <div
+          className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded-[3px] text-2xl font-bold text-mx-paper"
+          style={
+            listing?.logo_gradient
+              ? { background: listing.logo_gradient }
+              : { background: "var(--mx-indigo)" }
+          }
+        >
+          {listing?.logo_letter ?? companyName[0] ?? "?"}
+        </div>
 
-              <div className="min-w-0 flex-1">
-                {/* Name + badges row */}
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="text-2xl font-semibold leading-tight text-mx-ink">
-                    {companyName}
-                  </h1>
-                  {app?.category && (
-                    <span className="inline-flex rounded-full border border-mx-indigo bg-mx-indigo-soft px-2.5 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wide text-mx-indigo">
-                      {app.category}
-                    </span>
-                  )}
-                  {app?.stage && (
-                    <span className="inline-flex rounded-full border border-mx-rule bg-mx-paper px-2.5 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wide text-mx-ink-soft">
-                      {app.stage}
-                    </span>
-                  )}
-                </div>
-
-                {/* One-liner */}
-                {app?.one_liner && (
-                  <p className="mt-1 text-sm leading-relaxed text-mx-ink-faint">
-                    {app.one_liner}
-                  </p>
-                )}
-              </div>
-            </div>
-
-            {/* External links row */}
-            {(() => {
-              const websiteUrl = safeHttpUrl(app?.website);
-              const twitterUrl = app?.founder_twitter
-                ? app.founder_twitter.startsWith("@")
-                  ? `https://x.com/${app.founder_twitter.slice(1)}`
-                  : safeHttpUrl(app.founder_twitter)
-                : null;
-              const deckUrl = safeHttpUrl(app?.pitch_deck);
-              if (!websiteUrl && !twitterUrl && !deckUrl) return null;
-              return (
-                <div className="mt-4 flex flex-wrap gap-2">
-                  {websiteUrl && (
-                    <a
-                      href={websiteUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded-[3px] border border-mx-rule px-2.5 py-1 font-mono text-[11px] text-mx-ink-faint transition-colors hover:border-mx-rule-strong hover:text-mx-ink-soft"
-                    >
-                      ↗ Website
-                    </a>
-                  )}
-                  {twitterUrl && (
-                    <a
-                      href={twitterUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded-[3px] border border-mx-rule px-2.5 py-1 font-mono text-[11px] text-mx-ink-faint transition-colors hover:border-mx-rule-strong hover:text-mx-ink-soft"
-                    >
-                      𝕏 {app?.founder_twitter}
-                    </a>
-                  )}
-                  {deckUrl && (
-                    <a
-                      href={deckUrl}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="inline-flex items-center gap-1 rounded-[3px] border border-mx-indigo bg-mx-indigo-soft px-2.5 py-1 font-mono text-[11px] text-mx-indigo transition-colors hover:bg-mx-indigo-soft"
-                    >
-                      Pitch deck ↗
-                    </a>
-                  )}
-                </div>
-              );
-            })()}
+        <div className="min-w-0 flex-1">
+          {/* Name + badges row */}
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-semibold leading-tight text-mx-ink">
+              {companyName}
+            </h1>
+            {app?.category && (
+              <span className="inline-flex rounded-full border border-mx-indigo bg-mx-indigo-soft px-2.5 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wide text-mx-indigo">
+                {app.category}
+              </span>
+            )}
+            {app?.stage && (
+              <span className="inline-flex rounded-full border border-mx-rule bg-mx-paper px-2.5 py-0.5 font-mono text-[11px] font-medium uppercase tracking-wide text-mx-ink-soft">
+                {app.stage}
+              </span>
+            )}
           </div>
 
-          {/* Tab bar */}
-          <div className="flex border-b border-mx-rule">
-            {tabs.map((tab) => {
-              const active = activeTab === tab.id;
+          {/* One-liner */}
+          {app?.one_liner && (
+            <p className="mt-1 text-sm leading-relaxed text-mx-ink-faint">
+              {app.one_liner}
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* External links row */}
+      {(() => {
+        const websiteUrl = safeHttpUrl(app?.website);
+        const twitterUrl = app?.founder_twitter
+          ? app.founder_twitter.startsWith("@")
+            ? `https://x.com/${app.founder_twitter.slice(1)}`
+            : safeHttpUrl(app.founder_twitter)
+          : null;
+        const deckUrl = safeHttpUrl(app?.pitch_deck);
+        if (!websiteUrl && !twitterUrl && !deckUrl) return null;
+        return (
+          <div className="mt-4 flex flex-wrap gap-2">
+            {websiteUrl && (
+              <a
+                href={websiteUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-[3px] border border-mx-rule px-2.5 py-1 font-mono text-[11px] text-mx-ink-faint transition-colors hover:border-mx-rule-strong hover:text-mx-ink-soft"
+              >
+                ↗ Website
+              </a>
+            )}
+            {twitterUrl && (
+              <a
+                href={twitterUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-[3px] border border-mx-rule px-2.5 py-1 font-mono text-[11px] text-mx-ink-faint transition-colors hover:border-mx-rule-strong hover:text-mx-ink-soft"
+              >
+                𝕏 {app?.founder_twitter}
+              </a>
+            )}
+            {deckUrl && (
+              <a
+                href={deckUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 rounded-[3px] border border-mx-indigo bg-mx-indigo-soft px-2.5 py-1 font-mono text-[11px] text-mx-indigo transition-colors hover:bg-mx-indigo-soft"
+              >
+                Pitch deck ↗
+              </a>
+            )}
+          </div>
+        );
+      })()}
+    </div>
+  );
+
+  // ── buy card (first: right column on a wide screen, under the header on a phone) ──
+  const buy = (
+    <>
+      {pendingPurchase && (
+        <div
+          className="rounded-[3px] border border-amber-200 bg-amber-50 p-4 text-sm"
+          role="status"
+        >
+          <p className="font-semibold">Purchase sent · recording pending</p>
+          <p className="mt-1">
+            Update this payment record without buying again.
+          </p>
+          <a
+            className="mt-2 block underline"
+            href={explorerTxUrl(
+              pendingPurchase.signature,
+              pendingPurchase.network,
+            )}
+            target="_blank"
+            rel="noreferrer"
+          >
+            View transaction
+          </a>
+          <button
+            className="mt-3 rounded border border-amber-300 px-3 py-2 disabled:opacity-50"
+            disabled={recordingPurchase}
+            onClick={() => void retryPurchaseRecord()}
+          >
+            {recordingPurchase ? "Verifying…" : "Retry recording"}
+          </button>
+        </div>
+      )}
+
+      {/* Startup raise disclosure — shown before the commit panel */}
+      {isStartup && (
+        <InfoBox>
+          <p className="mb-1.5 font-semibold text-mx-indigo">
+            Startup raise disclosure
+          </p>
+          <p>
+            Startup raises settle through an escrowed payout vault: revenue
+            routed through the vault is split 1/3 founder · 1/3 investor
+            pool · 1/3 platform. Proceeds unlock monthly against posted
+            progress updates; investors can freeze and vote after 3 missed
+            updates.
+          </p>
+        </InfoBox>
+      )}
+
+      {/* Buy / commit card */}
+      <div data-sale-buy-card="" className="rounded-[3px] border border-mx-rule bg-white p-5">
+        <div className="mb-4 flex items-center justify-between gap-2">
+          <h2 className="text-[15px] font-semibold text-mx-ink">
+            {buyCardTitle(kind)}
+          </h2>
+          {settlesOnChain ? (
+            <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
+              On-chain
+            </span>
+          ) : (
+            <span className="inline-flex items-center gap-1 rounded-full border border-mx-rule bg-mx-paper px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-mx-ink-soft">
+              Soft commit
+            </span>
+          )}
+        </div>
+
+        {/* Price per token (Mature path) */}
+        {settlesOnChain && (
+          <div className="mb-3 flex items-baseline justify-between gap-2">
+            <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-ink-faint">
+              Price per token
+            </span>
+            <span className="text-[18px] font-bold text-mx-ink">
+              {pricePerToken}
+            </span>
+          </div>
+        )}
+
+        {/* Sale-closed notice */}
+        {!saleOpen && (
+          <div className="mb-4 rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
+            <p className="text-[13px] font-semibold text-mx-ink-soft">
+              Not accepting {settlesOnChain ? "buys" : "commitments"}
+            </p>
+            <p className="mt-1 text-[12px] leading-relaxed text-mx-ink-faint">
+              {closedReason}
+            </p>
+          </div>
+        )}
+
+        {/* Amount input */}
+        <div className="relative mb-3">
+          <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-lg font-semibold text-mx-ink-faint">
+            {settlesOnChain ? "◈" : "$"}
+          </span>
+          <input
+            type="text"
+            inputMode="decimal"
+            aria-label={settlesOnChain ? "Number of tokens" : "Amount (USD)"}
+            value={amount}
+            onChange={(e) => {
+              // A number of tokens (whole) for an on-chain buy; dollars for a commitment.
+              if (settlesOnChain) {
+                setAmount(e.target.value.replace(/\D/g, ""));
+                return;
+              }
+              const v = e.target.value.replace(/[^0-9.]/g, "");
+              // collapse to a single decimal point
+              const parts = v.split(".");
+              setAmount(
+                parts.length > 2
+                  ? `${parts[0]}.${parts.slice(1).join("")}`
+                  : v,
+              );
+            }}
+            placeholder="0"
+            className="w-full rounded-[3px] border border-mx-rule bg-white py-3.5 pl-8 pr-4 text-[22px] font-semibold text-mx-ink placeholder:text-mx-ink-faint focus:border-mx-indigo focus:outline-none focus:ring-2 focus:ring-mx-indigo-soft"
+          />
+        </div>
+
+        {/* Max for a buy, dollar presets for a commitment */}
+        {settlesOnChain ? (
+          <div className="mb-4 flex flex-wrap items-center justify-between gap-1.5">
+            <span className="text-[11px] text-mx-ink-faint">Tokens</span>
+            {remainingUnits > BigInt(0) && (
+              <button
+                type="button"
+                onClick={() => setAmount(remainingUnits.toString())}
+                className="rounded-[3px] border border-mx-rule px-2.5 py-1 font-mono text-[11px] font-medium text-mx-ink-faint hover:border-mx-rule-strong hover:text-mx-ink-soft"
+              >
+                Max {Number(remainingUnits).toLocaleString()}
+              </button>
+            )}
+          </div>
+        ) : (
+          <div className="mb-4 flex flex-wrap gap-1.5">
+            {["500", "1000", "2500", "5000", "10000"].map((preset) => {
+              const isActive = amount === preset;
               return (
                 <button
-                  key={tab.id}
+                  key={preset}
                   type="button"
-                  onClick={() => setActiveTab(tab.id)}
-                  className={`px-4 py-3 text-[13px] font-medium transition-colors ${
-                    active
-                      ? "-mb-px border-b-2 border-mx-indigo text-foreground"
-                      : "text-mx-ink-faint hover:text-mx-ink-soft"
+                  onClick={() => setAmount(preset)}
+                  className={`rounded-[3px] border px-2.5 py-1 font-mono text-[11px] font-medium transition-colors ${
+                    isActive
+                      ? "border-mx-indigo bg-mx-indigo-soft text-mx-indigo"
+                      : "border-mx-rule text-mx-ink-faint hover:border-mx-rule-strong hover:text-mx-ink-soft"
                   }`}
                 >
-                  {tab.label}
+                  $
+                  {Number(preset).toLocaleString()}
                 </button>
               );
             })}
           </div>
+        )}
 
-          {/* ── Tab content ── */}
-          <div className="mt-6">
-            {/* Overview */}
-            {activeTab === "overview" && (
-              <OverviewTab listing={listing} app={app} />
-            )}
-
-            {/* Deal terms */}
-            {activeTab === "terms" && (
-              <TermsTab
-                sale={saleData}
-                app={app}
-                isStartup={isStartup}
-                dLeft={dLeft}
-              />
-            )}
-
-            {/* Founder */}
-            {activeTab === "founder" && <FounderTab app={app} />}
-
-            {/* Updates */}
-            {activeTab === "updates" && <UpdatesTab updates={updates} />}
-          </div>
-        </div>
-
-        {/* ═══ RIGHT COLUMN: invest panel ═══ */}
-        <aside className="lg:sticky lg:top-20 space-y-4 self-start">
-          <div className="rounded-[3px] border border-mx-rule bg-white p-4 text-sm">
-            <p className="font-semibold">Investment documents</p>
-            {documentTerms?.sale === salePubkey ? (
-              <>
-                {/* ZDI art. 17(3): during the offering, say clearly whether
-                    the whitepaper is approved. Approval needs the recorded
-                    decision reference; anything else is "not approved".
-                    "Verified" below is the file's fingerprint only. */}
-                {documentTerms.sscDecisionRef ? (
-                  <p className="mt-2 inline-flex rounded-full border border-emerald-200 bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700">
-                    Approved by the Serbian Securities Commission · {documentTerms.sscDecisionRef}
-                  </p>
-                ) : (
-                  <p className="mt-2 inline-flex rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-semibold text-amber-800">
-                    {SSC_NOT_APPROVED_LABEL}
-                  </p>
-                )}
-                <a
-                  className="mt-2 block underline"
-                  href={documentTerms.url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Read the document (fingerprint verified) ↗
-                </a>
-                <p className="mt-2 break-all text-xs text-mx-ink-faint">
-                  SHA-256: {documentTerms.sha256}
-                </p>
-                <label className="mt-3 flex items-start gap-2">
-                  <input
-                    type="checkbox"
-                    checked={acceptedTerms}
-                    onChange={(e) => setAcceptedTerms(e.target.checked)}
-                    className="mt-1 accent-emerald-800"
-                  />
-                  <span>
-                    I have read and accept this document version and its stated
-                    risks and rights.{" "}
-                    {documentTerms.sscDecisionRef
-                      ? `Status: approved by the Serbian Securities Commission (${documentTerms.sscDecisionRef}).`
-                      : `Status: ${SSC_NOT_APPROVED_LABEL}.`}
+        {/* On-chain token breakdown (Mature path) */}
+        {settlesOnChain &&
+          parsed > 0 &&
+          paymentDecimals !== null &&
+          onChainUnits > BigInt(0) && (
+            <div className="mb-4 space-y-2">
+              <div className="flex items-center justify-between rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
+                <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-ink-faint">
+                  Tokens
+                </span>
+                <span className="text-right text-[16px] font-bold text-mx-ink">
+                  {Number(onChainUnits).toLocaleString()}
+                  {quote?.percent && (
+                    <span className="ml-1.5 text-[12px] font-medium text-mx-ink-soft">
+                      = {quote.percent} % of {holdingCompany}
+                    </span>
+                  )}
+                </span>
+              </div>
+              <div className="flex items-center justify-between rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
+                <div>
+                  <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-ink-faint">
+                    You pay
                   </span>
-                </label>
-                <PurchaseRiskWarning
-                  className="mt-3"
-                  acknowledged={acceptedRisk}
-                  onAcknowledgedChange={setAcceptedRisk}
-                />
-              </>
-            ) : (
-              <p className="mt-2 text-mx-ink-faint">
-                {documentError ?? "Loading the verified document…"}
-              </p>
-            )}
-          </div>
-          {pendingPurchase && (
-            <div
-              className="rounded-[3px] border border-amber-200 bg-amber-50 p-4 text-sm"
-              role="status"
-            >
-              <p className="font-semibold">Purchase sent · recording pending</p>
-              <p className="mt-1">
-                Update this payment record without buying again.
-              </p>
-              <a
-                className="mt-2 block underline"
-                href={explorerTxUrl(
-                  pendingPurchase.signature,
-                  pendingPurchase.network,
-                )}
-                target="_blank"
-                rel="noreferrer"
-              >
-                View transaction
-              </a>
-              <button
-                className="mt-3 rounded border border-amber-300 px-3 py-2 disabled:opacity-50"
-                disabled={recordingPurchase}
-                onClick={() => void retryPurchaseRecord()}
-              >
-                {recordingPurchase ? "Verifying…" : "Retry recording"}
-              </button>
+                  <p className="mt-0.5 text-[10px] text-mx-ink-faint">
+                    {pricePerToken} per token
+                  </p>
+                </div>
+                <span className="text-[16px] font-bold text-mx-ink">
+                  {formattedPayment}
+                </span>
+              </div>
             </div>
           )}
-          {/* 1) Raise progress card */}
-          <div className="rounded-[3px] border border-mx-rule bg-white p-6">
-            <p className="mb-2 text-xs text-mx-ink-faint">
-              {isStartup
-                ? agg.unverifiedPledged !== null
-                  ? "Pledged by verified investors · not paid"
-                  : "Pledged commitments · not paid"
-                : "Verified payments · payment token units"}
+
+        {/* Equity calculator */}
+        {isStartup && parsed > 0 && (
+          <div className="mb-4 space-y-2">
+            {/* Your equity */}
+            <div className="flex items-center justify-between rounded-[3px] border border-mx-indigo bg-mx-indigo-soft px-4 py-3">
+              <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-indigo">
+                Your equity
+              </span>
+              <span className="text-[16px] font-bold text-mx-indigo">
+                {app
+                  ? `~${yourEquity(equityOffered, parsed, target).toFixed(3)}%`
+                  : "—"}
+              </span>
+            </div>
+
+            {/* Yield bonus — startup with app only */}
+            {isStartup && app && (
+              <div className="flex items-center justify-between rounded-[3px] border border-emerald-100 bg-emerald-50 px-4 py-3">
+                <div>
+                  <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-emerald-600">
+                    Yield bonus
+                  </span>
+                  <p className="mt-0.5 text-[10px] text-emerald-500">
+                    Your 33% share · {saleData.vestingMonths}mo vest
+                  </p>
+                </div>
+                <span className="text-[16px] font-bold text-emerald-700">
+                  +
+                  {fmtMoney(
+                    investorYieldShare(
+                      target,
+                      saleData.vestingMonths,
+                      parsed,
+                    ),
+                  )}
+                </span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Below-minimum notice */}
+        {belowMin && (
+          <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
+            <p className="text-[12px] font-semibold text-amber-800">
+              Minimum ticket is {app?.min_ticket}.
             </p>
-            <div className="mb-4 flex items-baseline justify-between">
+          </div>
+        )}
+
+        {/* On-chain amount-too-small notice (Mature path) */}
+        {onChainBelowOneUnit && !belowMin && (
+          <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
+            <p className="text-[12px] font-semibold text-amber-800">
+              Increase your amount — it doesn&apos;t cover one whole share
+              token at {pricePerToken} each.
+            </p>
+          </div>
+        )}
+
+        {/* On-chain over-remaining notice (Mature path) */}
+        {onChainOverRemaining && (
+          <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
+            <p className="text-[12px] font-semibold text-amber-800">
+              Only {Number(remainingUnits).toLocaleString()} tokens remain — lower the
+              amount.
+            </p>
+          </div>
+        )}
+
+        {/* Eligibility gate notice */}
+        {!!walletAddress && eligibility.gated && !eligibility.eligible && (
+          <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-3">
+            <p className="text-[13px] font-semibold text-amber-800">
+              {eligibility.unverified
+                ? "Could not check this class's transfer rules"
+                : "KYC-gated class — investor passport required"}
+            </p>
+            <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
+              {eligibility.reason}
+            </p>
+            {!eligibility.unverified && (
+              <>
+                <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
+                  Most classes can be bought without identity
+                  verification. The platform made this one KYC-gated, so
+                  buying and receiving it requires an approved investor
+                  passport for your wallet.
+                </p>
+                <Link
+                  href="/portfolio"
+                  className="mt-2 inline-flex items-center gap-1 rounded-[3px] border border-amber-300 bg-white px-2.5 py-1 font-mono text-[11px] font-semibold text-amber-800 transition-colors hover:bg-amber-50"
+                >
+                  View investor passport →
+                </Link>
+              </>
+            )}
+          </div>
+        )}
+
+        {/* Eligible badge — gated deal, user is approved */}
+        {eligibility.gated && eligibility.eligible && (
+          <div className="mb-4 flex items-center gap-2 rounded-[3px] border border-emerald-200 bg-emerald-50 px-3 py-2">
+            <span className="h-2 w-2 rounded-full bg-emerald-500" />
+            <p className="text-[12px] font-semibold text-emerald-700">
+              Eligible — your investor passport is verified
+            </p>
+          </div>
+        )}
+
+        {buyPaused && (
+          <p role="status" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
+            {buyPaused}
+          </p>
+        )}
+        {issuerFrozen && (
+          <ProceedsFrozenNotice className="mb-3" closed="this sale takes no purchases" />
+        )}
+
+        {/* The acceptances, directly above the button (full texts: main column) */}
+        <SaleAcceptances
+          terms={documentsForSale}
+          error={documentError}
+          acceptedTerms={acceptedTerms}
+          onAcceptedTermsChange={setAcceptedTerms}
+          acceptedRisk={acceptedRisk}
+          onAcceptedRiskChange={setAcceptedRisk}
+          onReadRisk={() => showFullText(SALE_RISK_WARNING_ANCHOR)}
+        />
+
+        {/* Commit / Buy button */}
+        {!walletAddress ? (
+          <WalletRequired />
+        ) : (
+          <button
+            type="button"
+            disabled={!canCommit}
+            onClick={() => {
+              if (canCommit) {
+                setCommittedAmount(parsed);
+                setShowConfirm(true);
+              }
+            }}
+            className={`w-full rounded-[3px] py-3.5 text-[14px] font-semibold transition-all ${
+              canCommit
+                ? "bg-mx-ink text-mx-paper hover:opacity-90 active:scale-[0.98]"
+                : "cursor-default bg-mx-indigo-soft text-mx-ink-faint"
+            }`}
+          >
+            {!saleOpen
+              ? startupUnavailable
+                ? "Not available"
+                : "Sale closed"
+              : eligibility.gated && !eligibility.eligible
+                ? eligibility.unverified
+                  ? "Eligibility check failed"
+                  : "Investor passport required"
+                : belowMin
+                  ? `Minimum ${app?.min_ticket}`
+                  : settlesOnChain && parsed > 0 && paymentDecimals === null
+                    ? "Loading price…"
+                    : onChainBelowOneUnit
+                      ? "Amount too small"
+                      : onChainOverRemaining
+                        ? "Exceeds units left"
+                        : parsed > 0 && (!acceptedTerms || !acceptedRisk)
+                          ? "Accept the document and risk warning"
+                        : parsed > 0
+                          ? settlesOnChain
+                            ? `Buy ${Number(onChainUnits).toLocaleString()} tokens · ${formattedPayment}`
+                            : `Commit ${fmtExact(parsed)}`
+                          : "Enter an amount"}
+          </button>
+        )}
+
+        {/* Disclaimer */}
+        <p className="mt-3 text-center text-[11px] leading-relaxed text-mx-ink-faint">
+          {settlesOnChain ? (
+            <>
+              Settles on-chain now: payment tokens debited, share tokens
+              minted to your wallet.
+            </>
+          ) : (
+            <>
+              Non-binding intent — this raise settles off-chain through its
+              vesting schedule.
+            </>
+          )}
+          {termsFootnote && (
+            <>
+              <br />
+              {termsFootnote}
+            </>
+          )}
+        </p>
+
+        {/* Progress, compact under the button */}
+        {settlesOnChain ? (
+          <SoldProgress
+            sold={saleData.sold}
+            total={saleData.totalForSale}
+            buyers={agg.available ? agg.backers : null}
+            daysLeft={dLeft}
+            verifiedPayments={
+              agg.available
+                ? `${formatPaymentTotal(agg.settled)} ${paymentLabel}`
+                : null
+            }
+            notes={
+              <>
+                {!agg.available && (
+                  <p className="mt-1 text-xs text-amber-800">
+                    Payment totals are temporarily unavailable.
+                  </p>
+                )}
+                {agg.available && agg.unverified > 0 && (
+                  <p className="mt-1 text-xs text-amber-800">
+                    Historical payment records awaiting verification are excluded.
+                  </p>
+                )}
+              </>
+            }
+          />
+        ) : (
+          <div data-sale-progress="" className="mt-5 border-t border-mx-rule pt-4">
+            <p className="mb-2 text-xs text-mx-ink-faint">
+              {agg.unverifiedPledged !== null
+                ? "Pledged by verified investors · not paid"
+                : "Pledged commitments · not paid"}
+            </p>
+            <div className="mb-3 flex items-baseline justify-between">
               <div>
-                <span className="text-[26px] font-bold text-mx-indigo">
+                <span className="text-[22px] font-bold text-mx-indigo">
                   {!agg.available
                     ? "Unavailable"
-                    : isStartup
-                      ? fmtMoney(agg.pledged + agg.confirmed)
-                      : `${formatPaymentTotal(agg.settled)} tokens`}
+                    : fmtMoney(agg.pledged + agg.confirmed)}
                 </span>
-                {isStartup && target > 0 && (
+                {target > 0 && (
                   <span className="ml-2 text-sm text-mx-ink-faint">
                     of {fmtMoney(target)}
                   </span>
@@ -1292,9 +1636,7 @@ export default function DealPage({
                   pct >= 90 ? "text-emerald-600" : "text-mx-ink-soft"
                 }`}
               >
-                {agg.available
-                  ? `${pct}% ${isStartup ? "pledged" : "sold"}`
-                  : "Awaiting totals"}
+                {agg.available ? `${pct}% pledged` : "Awaiting totals"}
               </span>
             </div>
 
@@ -1307,7 +1649,6 @@ export default function DealPage({
                 wallets without a live verification are not counted above
                 (commitment_totals, migration 0062) — shown here instead. */}
             {agg.available &&
-              isStartup &&
               agg.unverifiedPledgers !== null &&
               agg.unverifiedPledgers > 0 && (
                 <p className="mb-2 text-xs text-mx-ink-faint">
@@ -1328,7 +1669,7 @@ export default function DealPage({
               <div className="h-1.5 overflow-hidden rounded-full bg-mx-indigo-soft">
                 <div
                   className={`h-full rounded-full transition-all duration-700 ${
-                    pct >= 90 ? "bg-emerald-500" : "bg-mx-indigo-soft"
+                    pct >= 90 ? "bg-emerald-500" : "bg-mx-indigo"
                   }`}
                   style={{ width: `${pct}%` }}
                 />
@@ -1336,21 +1677,15 @@ export default function DealPage({
             )}
 
             {/* Stats footer */}
-            <div className="mt-5 flex items-center justify-between border-t border-mx-rule pt-4">
+            <div className="mt-4 flex items-center justify-between">
               <div className="text-center">
                 <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
-                  {isStartup
-                    ? agg.unverifiedPledged !== null
-                      ? "Verified pledgers"
-                      : "Pledgers"
-                    : "Buyers"}
+                  {agg.unverifiedPledged !== null
+                    ? "Verified pledgers"
+                    : "Pledgers"}
                 </p>
                 <p className="mt-1 text-[15px] font-semibold text-mx-ink">
-                  {!agg.available
-                    ? "—"
-                    : isStartup
-                      ? agg.pledgers
-                      : agg.backers}
+                  {!agg.available ? "—" : agg.pledgers}
                 </p>
               </div>
               {equityOffered > 0 && (
@@ -1377,339 +1712,96 @@ export default function DealPage({
               </div>
             </div>
           </div>
-
-          {/* 2) Payout health card — startup only, best-effort */}
-          {isStartup && vault && <PayoutHealthCard vault={vault} />}
-
-          {/* 2b) Startup raise disclosure — shown before the commit panel */}
-          {isStartup && (
-            <InfoBox>
-              <p className="mb-1.5 font-semibold text-mx-indigo">
-                Startup raise disclosure
-              </p>
-              <p>
-                Startup raises settle through an escrowed payout vault: revenue
-                routed through the vault is split 1/3 founder · 1/3 investor
-                pool · 1/3 platform. Proceeds unlock monthly against posted
-                progress updates; investors can freeze and vote after 3 missed
-                updates.
-              </p>
-            </InfoBox>
-          )}
-
-          {/* 3) Commit panel */}
-          <div className="rounded-[3px] border border-mx-rule bg-white p-6">
-            <div className="mb-4 flex items-center justify-between gap-2">
-              <p className="text-[15px] font-semibold text-mx-ink">
-                {settlesOnChain ? "Buy shares" : "Back this company"}
-              </p>
-              {settlesOnChain ? (
-                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-200 bg-emerald-50 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-emerald-700">
-                  On-chain
-                </span>
-              ) : (
-                <span className="inline-flex items-center gap-1 rounded-full border border-mx-rule bg-mx-paper px-2 py-0.5 font-mono text-[10px] font-semibold uppercase tracking-wide text-mx-ink-soft">
-                  Soft commit
-                </span>
-              )}
-            </div>
-
-            {/* Sale-closed notice */}
-            {!saleOpen && (
-              <div className="mb-4 rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
-                <p className="text-[13px] font-semibold text-mx-ink-soft">
-                  Not accepting {settlesOnChain ? "buys" : "commitments"}
-                </p>
-                <p className="mt-1 text-[12px] leading-relaxed text-mx-ink-faint">
-                  {closedReason}
-                </p>
-              </div>
-            )}
-
-            {/* Amount input */}
-            <div className="relative mb-3">
-              <span className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-lg font-semibold text-mx-ink-faint">
-                {settlesOnChain ? "◈" : "$"}
-              </span>
-              <input
-                type="text"
-                inputMode="decimal"
-                value={amount}
-                onChange={(e) => {
-                  // A number of tokens (whole) for an on-chain buy; dollars for a commitment.
-                  if (settlesOnChain) {
-                    setAmount(e.target.value.replace(/\D/g, ""));
-                    return;
-                  }
-                  const v = e.target.value.replace(/[^0-9.]/g, "");
-                  // collapse to a single decimal point
-                  const parts = v.split(".");
-                  setAmount(
-                    parts.length > 2
-                      ? `${parts[0]}.${parts.slice(1).join("")}`
-                      : v,
-                  );
-                }}
-                placeholder="0"
-                className="w-full rounded-[3px] border border-mx-rule bg-white py-3.5 pl-8 pr-4 text-[22px] font-semibold text-mx-ink placeholder:text-mx-ink-faint focus:border-mx-indigo focus:outline-none focus:ring-2 focus:ring-mx-indigo-soft"
-              />
-            </div>
-
-            {/* Preset buttons: all that is left for a buy, dollar amounts for a commitment */}
-            {settlesOnChain ? (
-              <div className="mb-4 flex flex-wrap items-center gap-1.5">
-                <span className="text-[11px] text-mx-ink-faint">Tokens · {pricePerToken} each</span>
-                {remainingUnits > BigInt(0) && (
-                  <button
-                    type="button"
-                    onClick={() => setAmount(remainingUnits.toString())}
-                    className="rounded-[3px] border border-mx-rule px-2.5 py-1 font-mono text-[11px] font-medium text-mx-ink-faint hover:border-mx-rule-strong hover:text-mx-ink-soft"
-                  >
-                    Max {Number(remainingUnits).toLocaleString()}
-                  </button>
-                )}
-              </div>
-            ) : (
-            <div className="mb-4 flex flex-wrap gap-1.5">
-              {["500", "1000", "2500", "5000", "10000"].map((preset) => {
-                const isActive = amount === preset;
-                return (
-                  <button
-                    key={preset}
-                    type="button"
-                    onClick={() => setAmount(preset)}
-                    className={`rounded-[3px] border px-2.5 py-1 font-mono text-[11px] font-medium transition-colors ${
-                      isActive
-                        ? "border-mx-indigo bg-mx-indigo-soft text-mx-indigo"
-                        : "border-mx-rule text-mx-ink-faint hover:border-mx-rule-strong hover:text-mx-ink-soft"
-                    }`}
-                  >
-                    $
-                    {Number(preset).toLocaleString()}
-                  </button>
-                );
-              })}
-            </div>
-            )}
-
-            {/* On-chain share-unit breakdown (Mature path) */}
-            {settlesOnChain &&
-              parsed > 0 &&
-              paymentDecimals !== null &&
-              onChainUnits > BigInt(0) && (
-                <div className="mb-4 space-y-2">
-                  <div className="flex items-center justify-between rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
-                    <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-ink-faint">
-                      Tokens
-                    </span>
-                    <span className="text-[16px] font-bold text-mx-ink">
-                      {Number(onChainUnits).toLocaleString()}
-                      {quote?.percent && (
-                        <span className="ml-1.5 text-[12px] font-medium text-mx-ink-soft">
-                          = {quote.percent} % of {companyName}
-                        </span>
-                      )}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
-                    <div>
-                      <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-ink-faint">
-                        You pay
-                      </span>
-                      <p className="mt-0.5 text-[10px] text-mx-ink-faint">
-                        {pricePerToken} per token
-                      </p>
-                    </div>
-                    <span className="text-[16px] font-bold text-mx-ink">
-                      {formattedPayment}
-                    </span>
-                  </div>
-                </div>
-              )}
-
-            {/* Equity calculator */}
-            {isStartup && parsed > 0 && (
-              <div className="mb-4 space-y-2">
-                {/* Your equity */}
-                <div className="flex items-center justify-between rounded-[3px] border border-mx-indigo bg-mx-indigo-soft px-4 py-3">
-                  <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-indigo">
-                    Your equity
-                  </span>
-                  <span className="text-[16px] font-bold text-mx-indigo">
-                    {app
-                      ? `~${yourEquity(equityOffered, parsed, target).toFixed(3)}%`
-                      : "—"}
-                  </span>
-                </div>
-
-                {/* Yield bonus — startup with app only */}
-                {isStartup && app && (
-                  <div className="flex items-center justify-between rounded-[3px] border border-emerald-100 bg-emerald-50 px-4 py-3">
-                    <div>
-                      <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-emerald-600">
-                        Yield bonus
-                      </span>
-                      <p className="mt-0.5 text-[10px] text-emerald-500">
-                        Your 33% share · {saleData.vestingMonths}mo vest
-                      </p>
-                    </div>
-                    <span className="text-[16px] font-bold text-emerald-700">
-                      +
-                      {fmtMoney(
-                        investorYieldShare(
-                          target,
-                          saleData.vestingMonths,
-                          parsed,
-                        ),
-                      )}
-                    </span>
-                  </div>
-                )}
-              </div>
-            )}
-
-            {/* Below-minimum notice */}
-            {belowMin && (
-              <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
-                <p className="text-[12px] font-semibold text-amber-800">
-                  Minimum ticket is {app?.min_ticket}.
-                </p>
-              </div>
-            )}
-
-            {/* On-chain amount-too-small notice (Mature path) */}
-            {onChainBelowOneUnit && !belowMin && (
-              <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
-                <p className="text-[12px] font-semibold text-amber-800">
-                  Increase your amount — it doesn&apos;t cover one whole share
-                  token at {pricePerToken} each.
-                </p>
-              </div>
-            )}
-
-            {/* On-chain over-remaining notice (Mature path) */}
-            {onChainOverRemaining && (
-              <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
-                <p className="text-[12px] font-semibold text-amber-800">
-                  Only {Number(remainingUnits).toLocaleString()} tokens remain — lower the
-                  amount.
-                </p>
-              </div>
-            )}
-
-            {/* Eligibility gate notice */}
-            {!!walletAddress && eligibility.gated && !eligibility.eligible && (
-              <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-3">
-                <p className="text-[13px] font-semibold text-amber-800">
-                  {eligibility.unverified
-                    ? "Could not check this class's transfer rules"
-                    : "KYC-gated class — investor passport required"}
-                </p>
-                <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
-                  {eligibility.reason}
-                </p>
-                {!eligibility.unverified && (
-                  <>
-                    <p className="mt-1 text-[12px] leading-relaxed text-amber-700">
-                      Most classes can be bought without identity
-                      verification. The platform made this one KYC-gated, so
-                      buying and receiving it requires an approved investor
-                      passport for your wallet.
-                    </p>
-                    <Link
-                      href="/portfolio"
-                      className="mt-2 inline-flex items-center gap-1 rounded-[3px] border border-amber-300 bg-white px-2.5 py-1 font-mono text-[11px] font-semibold text-amber-800 transition-colors hover:bg-amber-50"
-                    >
-                      View investor passport →
-                    </Link>
-                  </>
-                )}
-              </div>
-            )}
-
-            {/* Eligible badge — gated deal, user is approved */}
-            {eligibility.gated && eligibility.eligible && (
-              <div className="mb-4 flex items-center gap-2 rounded-[3px] border border-emerald-200 bg-emerald-50 px-3 py-2">
-                <span className="h-2 w-2 rounded-full bg-emerald-500" />
-                <p className="text-[12px] font-semibold text-emerald-700">
-                  Eligible — your investor passport is verified
-                </p>
-              </div>
-            )}
-
-            {buyPaused && (
-              <p role="status" className="mb-3 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900">
-                {buyPaused}
-              </p>
-            )}
-            {issuerFrozen && (
-              <ProceedsFrozenNotice className="mb-3" closed="this sale takes no purchases" />
-            )}
-            {/* Commit / Buy button */}
-            {!walletAddress ? (
-              <WalletRequired />
-            ) : (
-              <button
-                type="button"
-                disabled={!canCommit}
-                onClick={() => {
-                  if (canCommit) {
-                    setCommittedAmount(parsed);
-                    setShowConfirm(true);
-                  }
-                }}
-                className={`w-full rounded-[3px] py-3.5 text-[14px] font-semibold transition-all ${
-                  canCommit
-                    ? "bg-mx-ink text-mx-paper hover:opacity-90 active:scale-[0.98]"
-                    : "cursor-default bg-mx-indigo-soft text-mx-ink-faint"
-                }`}
-              >
-                {!saleOpen
-                  ? startupUnavailable
-                    ? "Not available"
-                    : "Sale closed"
-                  : eligibility.gated && !eligibility.eligible
-                    ? eligibility.unverified
-                      ? "Eligibility check failed"
-                      : "Investor passport required"
-                    : belowMin
-                      ? `Minimum ${app?.min_ticket}`
-                      : settlesOnChain && parsed > 0 && paymentDecimals === null
-                        ? "Loading price…"
-                        : onChainBelowOneUnit
-                          ? "Amount too small"
-                          : onChainOverRemaining
-                            ? "Exceeds units left"
-                            : parsed > 0 && (!acceptedTerms || !acceptedRisk)
-                              ? "Accept the document and risk warning"
-                            : parsed > 0
-                              ? settlesOnChain
-                                ? `Buy ${Number(onChainUnits).toLocaleString()} tokens · ${formattedPayment}`
-                                : `Commit ${fmtExact(parsed)}`
-                              : "Enter an amount"}
-              </button>
-            )}
-
-            {/* Disclaimer */}
-            <p className="mt-3 text-center text-[11px] leading-relaxed text-mx-ink-faint">
-              {settlesOnChain ? (
-                <>
-                  Settles on-chain now: payment tokens debited, share tokens
-                  minted to your wallet.
-                </>
-              ) : (
-                <>
-                  Non-binding intent — this raise settles off-chain through its
-                  vesting schedule.
-                </>
-              )}
-              <br />
-              Min ticket: {app?.min_ticket ?? "—"} · Structure:{" "}
-              {app?.raise_structure ?? "—"}
-            </p>
-          </div>
-        </aside>
+        )}
       </div>
+
+      {/* Payout health card — startup only, best-effort */}
+      {isStartup && vault && <PayoutHealthCard vault={vault} />}
+    </>
+  );
+
+  // ── main column: the documents and the risk warning (always on the page,
+  // whatever tab is open), then the tabs ──
+  const main = (
+    <div>
+      <div className="mb-8 space-y-4">
+        <SaleDocumentsSection terms={documentsForSale} error={documentError} />
+        <SaleRiskWarningSection />
+      </div>
+
+      {/* Tab bar */}
+      <div className="flex border-b border-mx-rule">
+        {tabs.map((tab) => {
+          const active = activeTab === tab.id;
+          return (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => setActiveTab(tab.id)}
+              className={`px-4 py-3 text-[13px] font-medium transition-colors ${
+                active
+                  ? "-mb-px border-b-2 border-mx-indigo text-foreground"
+                  : "text-mx-ink-faint hover:text-mx-ink-soft"
+              }`}
+            >
+              {tab.label}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* ── Tab content ── */}
+      <div className="mt-6">
+        {/* Overview */}
+        {activeTab === "overview" && (
+          <SaleOverview
+            listing={listing}
+            app={app}
+            company={holdingCompany}
+            tokenSummary={tokenSummary}
+            about={tokenized ? assetProfile?.description : null}
+          />
+        )}
+
+        {/* Deal terms */}
+        {activeTab === "terms" && (
+          <TermsTab
+            sale={saleData}
+            app={app}
+            isStartup={isStartup}
+            dLeft={dLeft}
+            tokenized={
+              tokenized
+                ? {
+                    pricePerToken,
+                    oneToken: tokenPercentE4 !== null ? `${formatPercent(tokenPercentE4)} % of ${holdingCompany}` : "—",
+                    summary: tokenSummary,
+                  }
+                : null
+            }
+          />
+        )}
+
+        {/* Founder */}
+        {activeTab === "founder" && <FounderTab app={app} />}
+
+        {/* Updates */}
+        {activeTab === "updates" && <UpdatesTab updates={updates} />}
+      </div>
+    </div>
+  );
+
+  return (
+    <section>
+      {/* Back link */}
+      <Link
+        href="/marketplace/launchpad"
+        className="text-xs text-mx-ink-faint underline-offset-2 hover:underline"
+      >
+        ← All raises
+      </Link>
+
+      <SalePageLayout header={header} buy={buy} main={main} />
 
       {/* ── Confirm modal ── */}
       <ConfirmModal
@@ -1740,7 +1832,9 @@ export default function DealPage({
               {settlesOnChain ? (
                 <>
                   You&apos;re about to{" "}
-                  <strong className="text-mx-ink">buy shares on-chain</strong>{" "}
+                  <strong className="text-mx-ink">
+                    {tokenized ? "buy tokens on-chain" : "buy shares on-chain"}
+                  </strong>{" "}
                   in <strong className="text-mx-ink">{companyName}</strong>.
                   Your payment token will be debited and share tokens minted to
                   your wallet. Review the details below.
@@ -1763,14 +1857,16 @@ export default function DealPage({
                     { label: "Company", value: companyName },
                     {
                       label: "Tokens",
-                      value: `${Number(onChainUnits).toLocaleString()}${quote?.percent ? ` (= ${quote.percent} % of ${companyName})` : ""}`,
+                      value: `${Number(onChainUnits).toLocaleString()}${quote?.percent ? ` (= ${quote.percent} % of ${holdingCompany})` : ""}`,
                     },
                     { label: "You pay", value: formattedPayment },
                     {
                       label: "Payment mint",
                       value: saleData.paymentMint,
                     },
-                    { label: "Structure", value: app?.raise_structure ?? "—" },
+                    ...(app?.raise_structure
+                      ? [{ label: "Structure", value: app.raise_structure }]
+                      : []),
                   ]
                 : [
                     { label: "Company", value: companyName },
@@ -1896,95 +1992,76 @@ function PayoutHealthCard({ vault }: { vault: PayoutVault }) {
   );
 }
 
-// ── Overview tab ─────────────────────────────────────────────────────────────
-function OverviewTab({
-  listing,
-  app,
-}: {
-  listing: LaunchListing | null;
-  app: PublicApplication | null;
-}) {
-  const problem = listing?.problem ?? app?.problem_or_why;
-  const whyNow = listing?.why_now;
-  const traction = listing?.traction ?? {};
-  const tractionEntries = Object.entries(traction);
-  const investors = app?.existing_investors ?? listing?.existing_investors;
-
-  return (
-    <div className="space-y-8">
-      {/* The problem */}
-      <section>
-        <h2 className="mb-3 text-[15px] font-semibold text-mx-ink">
-          The problem
-        </h2>
-        {problem ? (
-          <p className="text-sm leading-relaxed text-mx-ink-soft">{problem}</p>
-        ) : (
-          <p className="text-sm text-mx-ink-faint">—</p>
-        )}
-      </section>
-
-      {/* Why now */}
-      <section>
-        <h2 className="mb-3 text-[15px] font-semibold text-mx-ink">Why now</h2>
-        {whyNow ? (
-          <p className="text-sm leading-relaxed text-mx-ink-soft">{whyNow}</p>
-        ) : (
-          <p className="text-sm text-mx-ink-faint">—</p>
-        )}
-      </section>
-
-      {/* Traction */}
-      {tractionEntries.length > 0 && (
-        <section>
-          <h2 className="mb-3 text-[15px] font-semibold text-mx-ink">
-            Traction
-          </h2>
-          <div className="grid grid-cols-3 gap-3">
-            {tractionEntries.map(([key, value]) => (
-              <div
-                key={key}
-                className="rounded-[3px] border border-mx-rule bg-white p-4 text-center"
-              >
-                <p className="font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
-                  {key}
-                </p>
-                <p className="mt-1.5 text-xl font-semibold text-mx-indigo">
-                  {value}
-                </p>
-              </div>
-            ))}
-          </div>
-        </section>
-      )}
-
-      {/* Notable investors */}
-      {investors && (
-        <section>
-          <InfoBox>
-            <p className="mb-1 font-mono text-[10px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
-              Notable investors
-            </p>
-            <p className="font-medium text-mx-ink">{investors}</p>
-          </InfoBox>
-        </section>
-      )}
-    </div>
-  );
-}
-
 // ── Terms tab ────────────────────────────────────────────────────────────────
 function TermsTab({
   sale,
   app,
   isStartup,
   dLeft,
+  tokenized = null,
 }: {
   sale: Sale;
   app: PublicApplication | null;
   isStartup: boolean;
   dLeft: number;
+  /** A tokenized share class: its token terms replace the application's (it has none). */
+  tokenized?: { pricePerToken: string; oneToken: string; summary: readonly string[] } | null;
 }) {
+  // What the buyer receives, held to the mainnet Terms (lib/deal-terms-copy.ts):
+  // a tokenized share class gets the share-class-token wording, a Startup
+  // raise its SAFE wording.
+  const network = detectNetwork();
+  const buying = whatYouAreBuying({
+    isStartup,
+    structure: app?.raise_structure,
+    conversionAvailable: moduleEnabled("custodyConversion", network),
+    network,
+  });
+
+  if (tokenized) {
+    const tokenRows: { label: string; value: string }[] = [
+      { label: "Price per token", value: tokenized.pricePerToken },
+      { label: "One token", value: tokenized.oneToken },
+      { label: "Tokens for sale", value: Number(sale.totalForSale).toLocaleString() },
+      { label: "Sold", value: Number(sale.sold).toLocaleString() },
+      { label: "Time remaining", value: dLeft === 0 ? "—" : `${dLeft} days` },
+    ];
+    return (
+      <div className="space-y-5">
+        <div className="overflow-hidden rounded-[3px] border border-mx-rule bg-white">
+          {tokenRows.map((row, i) => (
+            <div
+              key={row.label}
+              className={`flex items-center justify-between px-5 py-4 ${
+                i < tokenRows.length - 1 ? "border-b border-mx-rule" : ""
+              }`}
+            >
+              <p className="text-sm text-mx-ink-faint">{row.label}</p>
+              <p className="text-[15px] font-semibold text-mx-ink">{row.value}</p>
+            </div>
+          ))}
+        </div>
+        {/* What you're buying */}
+        <InfoBox>
+          <p className="mb-1.5 font-semibold text-mx-indigo">
+            What you&apos;re buying
+          </p>
+          <p>
+            <strong className="text-mx-ink">{buying.lead}</strong> {buying.body}
+          </p>
+        </InfoBox>
+        {tokenized.summary.length > 0 && (
+          <InfoBox>
+            <p className="mb-1.5 font-semibold text-mx-indigo">The tokens</p>
+            {tokenized.summary.map((line) => (
+              <p key={line}>{line}</p>
+            ))}
+          </InfoBox>
+        )}
+      </div>
+    );
+  }
+
   type TermRow = {
     label: string;
     value: string;
@@ -2049,15 +2126,6 @@ function TermsTab({
       value: dLeft === 0 ? "—" : `${dLeft} days`,
     },
   ];
-
-  // What the buyer receives, held to the mainnet Terms (lib/deal-terms-copy.ts).
-  const network = detectNetwork();
-  const buying = whatYouAreBuying({
-    isStartup,
-    structure: app?.raise_structure,
-    conversionAvailable: moduleEnabled("custodyConversion", network),
-    network,
-  });
 
   return (
     <div className="space-y-5">

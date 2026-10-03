@@ -18,6 +18,7 @@ import {
   type Platform,
 } from "@/lib/generated/asset_registry";
 import { PauseFlagsPanel } from "@/components/pause-flags-panel";
+import { EMERGENCY_PAUSE_ANCHOR } from "@/lib/distribute-guidance";
 import { pauseStatus } from "@/lib/pause-flags";
 import { protocolTreasuryError } from "@/lib/protocol-treasury";
 import {
@@ -214,7 +215,7 @@ export default function AdminPage() {
                   /admin/admins).
                 </p>
               )}
-            <div className="mt-6">
+            <div id={EMERGENCY_PAUSE_ANCHOR} className="mt-6 scroll-mt-24">
               <PauseFlagsPanel platform={platform} onChanged={refresh} />
             </div>
             {platform.admin === walletAddress ? (

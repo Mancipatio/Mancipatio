@@ -28,6 +28,8 @@ import { approvalUnits } from "@/lib/public-sale";
 import type { HookMode } from "@/lib/tokenize-shares-chain";
 import { SendToWalletsPanel } from "@/components/send-to-wallets-panel";
 import { PublicSalePanel } from "@/components/public-sale-panel";
+import { PrimaryReopenLink } from "@/components/primary-reopen-link";
+import { APPROVED_SALE_HOLDS_ROOM, BOTH_MODE_STEPS, roomHeldByApprovedSale } from "@/lib/distribute-guidance";
 
 export type DistributionMode = "wallets" | "sale" | "both";
 
@@ -167,6 +169,7 @@ export function DistributeCard({
         · Not created {a.notCreated === null ? "—" : <Figure n={a.notCreated} />}
         {approxNote("notCreated")} · Cap {a.cap === null ? "none" : <Figure n={a.cap} />}
       </p>
+      {roomHeldByApprovedSale(supply) && <p className="mt-1 text-[12px] text-amber-800">{APPROVED_SALE_HOLDS_ROOM}</p>}
 
       <div role="tablist" className="mt-3 flex gap-2">
         {DISTRIBUTION_MODES.map((m) => (
@@ -189,11 +192,22 @@ export function DistributeCard({
       {mode === "sale" && salePanel}
       {mode === "both" && (
         <>
-          <p className="mt-3 text-[12px] text-slate-600">
-            A list of wallets gets its tokens directly; a public sale offers the rest. Order: 1. request the sale and wait for the
-            operator&apos;s approval; 2. send to the wallets (tokens the treasury lacks are created first, never out of the approved
-            sale&apos;s share, and Primary issuance stays open for it); 3. open the sale.
-          </p>
+          <div className="mt-3 text-[12px] text-slate-600" aria-label="Order">
+            <p>A list of wallets gets its tokens directly; a public sale offers the rest. Order:</p>
+            <ol className="mt-1 list-decimal space-y-0.5 pl-5">
+              {BOTH_MODE_STEPS.map((step, i) => (
+                <li key={step}>
+                  {step}
+                  {i === 1 && (
+                    <>
+                      {" "}
+                      <PrimaryReopenLink publicSale />
+                    </>
+                  )}
+                </li>
+              ))}
+            </ol>
+          </div>
           <section aria-label="Public sale" className="mt-3 border-t border-slate-200 pt-3">
             <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Public sale (the rest)</p>
             {salePanel}
