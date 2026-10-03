@@ -166,8 +166,12 @@ Who: the BA blocks and unblocks (`/admin/blocklist`); an Admin claws back
 (`/admin/kyc` → clawback panel). Out of band: `chain:emergency block` /
 `unblock` (runbook §11).
 
-1. Block on a sanctions hit, a court or authority order, or a confirmed theft
-   **[legal: triggers]**. Record the reason and the evidence.
+1. Block on a sanctions hit, a court or authority order, a confirmed theft,
+   or a buy outside the platform (D2: an `onchain:unlinked-buy` alert, when
+   compliance decides; runbook §15 "Buys by wallets not linked to the
+   platform") **[legal: triggers]**. Record the reason and the evidence.
+   The alert's links prepare the blocklist entry and the clawback (holder
+   and share class filled in); nothing is sent from the alert.
 2. Blocking is sender-side: the wallet can still receive. Clawback moves its
    units into a quarantine vault for the issuer's burn-and-attest flow.
 3. Blocking a program account (an escrow) stops exits from it: the tools ask

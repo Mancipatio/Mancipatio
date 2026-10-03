@@ -78,6 +78,8 @@ export const SOURCE_LABELS: Record<string, { label: string; format: "platform" |
   "onchain:payout-modules": { label: "Payout modules switched on (mainnet)", format: "platform" },
   "onchain:bootstrap-open": { label: "Bootstrap window open on a live platform (timelocks waived)", format: "platform" },
   "onchain:frozen-issuer-activity": { label: "Frozen issuer's wallet active on chain", format: "minimal" },
+  // D2 (2026-10-03): an AML row with the buyer as subject (lib/server/onchain-link-check.ts).
+  "onchain:unlinked-buy": { label: "Buy by a wallet not linked to the platform", format: "minimal" },
   "indexer:queue-lag": { label: "Indexer queue is lagging", format: "platform" },
   "indexer:degraded": { label: "Indexer is degraded", format: "platform" },
   "indexer:gap": { label: "Transactions missing from the index", format: "platform" },

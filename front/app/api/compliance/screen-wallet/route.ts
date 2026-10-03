@@ -15,20 +15,33 @@
 // worker, which screens the signer of every finalized buy the indexer sees
 // (lib/server/onchain-screening.ts).
 //
+// It also checks the platform link (D2, 2026-10-03): buying needs a wallet
+// signed in on the site with the Terms in force accepted. After a clear
+// screen (a listed wallet is reported even without an acceptance), the
+// recorded acceptance is required where the server gate is enforced (mainnet;
+// devnet with TOS_SERVER_GATE=enforce): no row → 409 with "accept the Terms",
+// an unreadable table → 503 (lib/server/tos-gate.ts). The Terms gate on the
+// marketplace normally records it before the sale page opens. A buy without
+// it (a script) is caught after the fact by the alarm worker
+// (lib/server/onchain-link-check.ts).
+//
 // Client wrapper: screenOwnWallet() in lib/compliance.ts.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse } from "@/lib/server/siws";
 import { requireSanctionsClear } from "@/lib/server/sanctions";
+import { requireAcceptedTos } from "@/lib/server/tos-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
 export async function POST(request: Request) {
   try {
     const { wallet } = await verifySigned(request, "compliance.screenWallet");
-    await requireSanctionsClear(getSupabaseAdmin(), {
+    const sb = getSupabaseAdmin();
+    await requireSanctionsClear(sb, {
       route: "launchpad buy (pre-check)",
       wallets: [{ wallet, role: "self" }],
     });
+    await requireAcceptedTos(sb, wallet, "buying");
     return NextResponse.json({ ok: true, data: { clear: true } }, { headers: { "Cache-Control": "private, no-store" } });
   } catch (err) {
     return siwsErrorResponse(err);

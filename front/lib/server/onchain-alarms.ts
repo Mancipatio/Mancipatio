@@ -18,6 +18,10 @@
 // pending (SANCTIONS_UNAVAILABLE) until it can. A trade or transfer is also
 // matched against the authority wallets of frozen issuers
 // (lib/server/frozen-issuer-activity.ts, D1 / O-9): a hit is a high alert.
+// Last, every buy is checked for its platform link (D2, 2026-10-03,
+// lib/server/onchain-link-check.ts): a buyer without the Terms in force
+// accepted by 2 minutes after the buy raises a compliance alert with the
+// wallet as subject; while those 2 minutes run the job waits (LINK_GRACE).
 
 import "server-only";
 import {
@@ -127,6 +131,7 @@ import {
 } from "@/lib/pause-flags";
 import { USDC } from "@/lib/payment-mints";
 import { decodeRegistryEvent, type EventValue } from "@/lib/server/onchain-events";
+import { checkUnlinkedBuys } from "@/lib/server/onchain-link-check";
 import { screenTransactionParties } from "@/lib/server/onchain-screening";
 import {
   frozenIssuerActivity,
@@ -869,8 +874,22 @@ export async function processEventJob(
   }
   if (screened === "retry") return retry("SANCTIONS_UNAVAILABLE", backoff(job.attempts));
   if (signal.aborted || Date.now() >= deadlineMs) return "pending";
+  // D2: a buy by a wallet not linked to the platform (no acceptance of the
+  // Terms in force by 2 minutes after the buy). Within those 2 minutes the
+  // job waits and decides once on its next run; everything above repeats
+  // idempotently then. A read or write that fails retries, never decides.
+  let linkCheck: Awaited<ReturnType<typeof checkUnlinkedBuys>>;
+  try {
+    linkCheck = await checkUnlinkedBuys(sb, {
+      network: job.network as Network, signature: job.signature, tx, jobCreatedAt: job.created_at, now: Date.now(), signal,
+    });
+  } catch {
+    return retry("DB_UNAVAILABLE", backoff(job.attempts));
+  }
+  if ("retryAt" in linkCheck) return retry("LINK_GRACE", Math.max(5_000, linkCheck.retryAt - Date.now()));
+  if (signal.aborted || Date.now() >= deadlineMs) return "pending";
   await writeJob(sb, job, {
-    status: "complete", alerts: result.alarms.length + frozenAlerts + screened.hits, attempts: job.attempts + 1,
+    status: "complete", alerts: result.alarms.length + frozenAlerts + screened.hits + linkCheck.alerts, attempts: job.attempts + 1,
     last_error: result.issues.length ? result.issues[0] : null,
   }, signal);
   return "complete";

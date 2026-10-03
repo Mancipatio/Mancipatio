@@ -195,3 +195,25 @@ export async function screenOwnWallet(session: WalletSession | null | undefined)
 export function isScreeningHit(alert: Pick<ComplianceAlert, "evidence" | "wallet">): boolean {
   return !!alert.wallet && (alert.evidence as { screening?: unknown } | null)?.screening === "wallet-address";
 }
+
+// ── Buys by wallets not linked to the platform (D2, 2026-10-03) ─────────────
+
+/** The source of the alarm worker's alert (lib/server/onchain-link-check.ts). */
+export const UNLINKED_BUY_SOURCE = "onchain:unlinked-buy";
+
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** A buy by a wallet without the Terms in force accepted (the wallet is the subject). */
+export function isUnlinkedBuy(alert: Pick<ComplianceAlert, "source" | "wallet">): boolean {
+  return alert.source === UNLINKED_BUY_SOURCE && !!alert.wallet && BASE58_ADDRESS.test(alert.wallet);
+}
+
+/** The share-class mints the alert's buys name (evidence.buys[].mint), each once; junk is dropped. */
+export function unlinkedBuyMints(alert: Pick<ComplianceAlert, "evidence">): string[] {
+  const buys = (alert.evidence as { buys?: unknown } | null)?.buys;
+  if (!Array.isArray(buys)) return [];
+  const mints = buys
+    .map((b) => (b && typeof b === "object" ? (b as { mint?: unknown }).mint : null))
+    .filter((m): m is string => typeof m === "string" && BASE58_ADDRESS.test(m));
+  return [...new Set(mints)];
+}

@@ -2390,6 +2390,79 @@ UN lists, batch rescreening of existing holders, risk scoring; those need a
 provider (Chainalysis, TRM, …) plugged into `SANCTIONS_PROVIDERS`, and
 counsel decides whether the pilot needs them.
 
+### Buys by wallets not linked to the platform (D2, 2026-10-03)
+
+Buying share tokens of an Open class needs no KYC, but it needs a wallet
+linked to the platform: connected and signed in on the site, the Terms in
+force accepted (a `tos_acceptances` row for the wallet and that version,
+written by the signed `/api/tos/accept`) and the sanctions screen passed.
+The site enforces this before the wallet opens: the Terms gate on the
+marketplace (fails closed on mainnet) and the sale page's pre-check
+`compliance/screen-wallet` (sanctions first, then the recorded acceptance:
+409 without it, 503 when it cannot be read, on mainnet; on devnet only with
+`TOS_SERVER_GATE=enforce`). The program cannot: an Open-class `buy` needs
+only the buyer's signature, and no program change is planned for it. A buy
+made by calling the program directly is not supported, and it is detected
+after the fact (`front/lib/server/onchain-link-check.ts`, no migration):
+
+- The alarm worker checks every finalized `buy` the indexer delivers,
+  top-level or through another program, Open or KYC-gated. If the buyer has
+  no acceptance of the Terms version in force, recorded by 2 minutes after
+  the buy's block time, it opens one alert per transaction and buyer:
+  source `onchain:unlinked-buy`, **high** on mainnet (medium elsewhere),
+  the wallet as subject, the transaction attached, AML (no system
+  category). The evidence lists each buy's sale, share class, mint and
+  units, plus `via_cpi`, `purchase_recorded`, `account_linked`,
+  `terms_version_required` and `terms_accepted` (the wallet's latest
+  acceptance, if any). The email shows the label and the time only.
+- The 2 minutes cover a wallet that accepts the Terms right after buying,
+  and clock skew. Until then the job waits
+  (`onchain_event_jobs.last_error = 'LINK_GRACE'`), then decides once; it
+  never stays pending long enough to trip the `event-queue` lag check (5
+  minutes). A purchase record alone does not clear the alert. A read or
+  write that fails retries the job (`DB_UNAVAILABLE`), never decides.
+- The version in force is the deployed one, except for a buy before its
+  date or before anyone had accepted it (the minutes before a Terms update
+  was deployed, a gap-scan buy processed after it): then any version the
+  wallet accepted counts, and `terms_version_required` says `any`.
+- An open alert blocks passport issuance for that wallet until it is
+  resolved (so it is reviewed before a passport for conversion, D3).
+
+Response:
+1. Open the alert in `/admin/compliance`. `via_cpi` true, or no purchase
+   record: the buy did not come through the site. `purchase_recorded` true
+   without an acceptance: a site buy whose acceptance was not recorded
+   (devnet: the Terms gate fails open when the database is unreachable).
+   Ask the holder to accept the Terms and resolve with that reason. A
+   KYC-gated class's buyer holds a passport: usually resolve with the
+   reason too.
+2. Decide whether to block **[legal: counsel's criteria]**. Open-class
+   units are bearer instruments and move without KYC: if you block, do it
+   at once. Units moved out before the block stay out of reach.
+3. Block: "Prepare the blocklist entry" opens `/admin/blocklist` with the
+   wallet filled in; the BlocklistAuthority reviews and signs
+   `add_to_blocklist` (out of band: `chain:emergency` `block`, §11).
+4. Claw back: "Claw back <mint>" opens `/admin/kyc` with the holder and the
+   share class filled in (one link per mint the buys name). An Admin runs
+   the preflight (path `clawback_blocklisted_holder`; the panel opens the
+   class's quarantine vault if it is missing), checks the amount and signs.
+5. Resolve the alert with the reason and the signatures (this also lifts
+   the passport block). Record it in the case file.
+
+Expected false positives: issuer or Operator wallets that buy without having
+accepted the Terms (have them accept first); on devnet, a site buy while the
+Terms gate failed open (no server check there unless
+`TOS_SERVER_GATE=enforce`). On mainnet the pre-check refuses a site buy
+without the current version, also from a sale page opened before a Terms
+update.
+
+Devnet verification (the alarm cron enabled): a UI buy by a wallet that
+accepted the Terms raises nothing; a script buy from a fresh wallet shows
+`LINK_GRACE`, then within about 3 minutes a medium alert with the evidence
+above; the same wallet accepting at T + 60 s on a second buy raises nothing;
+`select signature, status, last_error, attempts from onchain_event_jobs where
+last_error = 'LINK_GRACE';` shows nothing pending for longer than 4 minutes.
+
 ### Automatic EUR rate (0080)
 
 The EUR value of USDC that sale approvals, adoptions, the treasury floor and
@@ -2635,6 +2708,7 @@ instead), and `fx-expiring` is about a manual rate only.
 | `onchain:role-change-pending` (`role-change-pending`, high) | The "timelock running" incident: a staged Admin grant, Super Admin rotation or upgrade-authority recovery is live (the evidence counts each kind and names the next eta). Expected: nothing to do, it clears once each one is executed, cancelled or expired. Otherwise as the row above. |
 | `onchain:issuer-freeze` (critical) | A freeze: confirm it with the Admin who froze (the reason's SHA-256 is in the evidence and on `/admin/issuers`; the text is in the audit log); follow the freeze SOP (O-9). An unfreeze: only the Super Admin can; confirm the decision. |
 | `onchain:frozen-issuer-activity` (high) | A frozen issuer's authority wallet traded or moved units (the evidence names the issuer, its role and the instructions). Check the transaction and decide at once whether the BA blocks the wallet (§11 "Issuer proceeds freeze", O-9); record the decision in the freeze's case file. |
+| `onchain:unlinked-buy` (high on mainnet, wallet as subject, AML) | A buy by a wallet without the Terms in force accepted by 2 minutes after it (D2). Follow §15 "Buys by wallets not linked to the platform": check the evidence, decide **[legal]**, block (BlocklistAuthority), claw back (Admin), resolve with the reason. |
 | `onchain:bootstrap-open` (`bootstrap-open`, critical, mainnet) | Bit 0x80 is open while an emergency area is clear: add_admin and the Super Admin rotation run without their 48 hours (typically a rollback to rc.x that unpaused, §10). Or it is still open, every area paused, 72 hours after the Platform's first indexed transaction (`initialize_platform`; the evidence has `opened_at` and `hours_open`): Day D is over and S5c was forgotten (K1.11). Either way the SA closes it at once on `/admin/platform` ("Close bootstrap window", `set_pause_flags(0, 0x80)`); then review every Admin grant and rotation since the rollback or since Day D (§11). The half of the rule that needs the role map (bit 7 still open once the final SA holds the platform, sooner than 72 hours) is checked by `chain:inventory` only. |
 | `onchain:payout-modules` (`payout-modules`, critical, mainnet) and `onchain:pause` "Payout modules switched ON" | Bit 0x40 must stay set on mainnet (D2). Unexpected: set it again (`set_pause_flags(0x40, 0)`, any Admin) and treat the Super Admin key as compromised, §11. |
 | Admin actions that move money or tokens: `onchain:vault-vote`, `onchain:yield-route`, `onchain:milestone`, `onchain:proposal`, `onchain:supply-lock`, `onchain:custody-vault`, `onchain:sale-approval` | Compare with the signer matrix and the admin decision behind it (the request or approval on the admin pages). A short voting window (critical or high) is checked with the issuer. Unexpected: that Admin key is compromised, §11 ("An Admin key compromised or lost"). |
@@ -2649,6 +2723,8 @@ instead), and `fx-expiring` is about a manual rate only.
   `select public.clear_capacity_hold(public.deployment_network(), '<subject>', '<ref>');`
   then resolve the related alerts.
 - Delivery is at-least-once: a digest that timed out may arrive twice.
+- Buys by wallets not linked to the platform (D2), newest first:
+  `select created_at, severity, wallet, tx_signature, status, notify_state, evidence->'buys' from compliance_alerts where source = 'onchain:unlinked-buy' order by created_at desc limit 20;`
 
 ### Rollback
 

@@ -16,6 +16,11 @@
 // with backoff until the list is usable): a buy is never "screened" against
 // a stale list. Off mainnet an unusable list is not enforced (the routes'
 // rule), so the job completes.
+//
+// The same job then checks each buyer's platform link (D2, 2026-10-03:
+// lib/server/onchain-link-check.ts): a buy whose signer had not accepted the
+// Terms in force by 2 minutes after it was made outside the site, and raises
+// its own alert (onchain:unlinked-buy), clean list or not.
 
 import "server-only";
 

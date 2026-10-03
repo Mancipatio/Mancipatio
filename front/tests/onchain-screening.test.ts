@@ -44,6 +44,7 @@ import { SCREENED_ENTRIES, screenedParties } from "@/lib/server/onchain-screenin
 import { clearSanctionsCache } from "@/lib/server/sanctions";
 import { enqueuePurchase } from "@/lib/server/purchase-records";
 import { POST as recordPurchase } from "@/app/api/launchpad/record-purchase/route";
+import { tosVersionFor } from "@/lib/tos-version";
 import { buildTx, type Ix } from "./helpers/chain-tx";
 
 const R = ASSET_REGISTRY_PROGRAM_ADDRESS;
@@ -121,8 +122,16 @@ describe("screenedParties", () => {
 });
 
 describe("the alarm worker screens a buy nobody recorded", () => {
+  // Both buyers accepted the Terms before the buy, so the platform-link check
+  // (D2, lib/server/onchain-link-check.ts, tests/onchain-link-check.test.ts)
+  // adds no alert of its own here.
+  beforeEach(() => {
+    for (const wallet of [LISTED, CLEAN]) {
+      db.ref!.rows("tos_acceptances").push({ wallet, version: tosVersionFor("mainnet"), created_at: new Date(NOW - 86_400_000).toISOString() });
+    }
+  });
   const buyBy = (signer: string) => {
-    state.txs[SIG] = buildTx({ signature: SIG, instructions: [{ ix: ix(BUY_DISCRIMINATOR, signer) }], logs: null }).tx;
+    state.txs[SIG] = buildTx({ signature: SIG, instructions: [{ ix: ix(BUY_DISCRIMINATOR, signer) }], logs: null, blockTime: NOW / 1000 }).tx;
   };
 
   it("a listed buyer raises one critical alert with the transaction; the job completes", async () => {
