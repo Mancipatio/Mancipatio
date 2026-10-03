@@ -587,7 +587,7 @@ describe("role-change-pending and payout-modules", () => {
     const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
     const reads: string[] = [];
     // A precise fake: each read answers by its table and filters (open = status 0, closed = status 1).
-    const sb = (t: { flags?: number | null; platformAt?: string; open?: number; alerts?: Record<string, unknown>[]; closedAt?: string | null; broken?: string }) => ({
+    const sb = (t: { flags?: number | null; platformAt?: string; open?: number; openRows?: Record<string, unknown>[]; alerts?: Record<string, unknown>[]; closedAt?: string | null; broken?: string }) => ({
       from: (table: string) => {
         const eqs: Record<string, unknown> = {};
         const b: Record<string, unknown> = {};
@@ -597,7 +597,7 @@ describe("role-change-pending and payout-modules", () => {
           if (t.broken === table) return { data: null, error: { code: "08006" } };
           reads.push(`${table}${eqs.status !== undefined ? `:status=${eqs.status}` : ""}`);
           if (table === "platforms") return { data: t.flags === null ? null : { pause_flags: t.flags ?? 0x7c, updated_at: t.platformAt ?? ago(500) }, error: null };
-          if (table === "sales" && eqs.status === 0) return { data: Array.from({ length: t.open ?? 0 }, (_, i) => ({ pda: `s${i}` })), error: null };
+          if (table === "sales" && eqs.status === 0) return { data: t.openRows ?? Array.from({ length: t.open ?? 0 }, (_, i) => ({ pda: `s${i}` })), error: null };
           if (table === "sales" && eqs.status === 1) return { data: t.closedAt ? [{ updated_at: t.closedAt }] : [], error: null };
           if (table === "compliance_alerts") return { data: t.alerts ?? [], error: null };
           return { data: [], error: null };
@@ -629,6 +629,21 @@ describe("role-change-pending and payout-modules", () => {
     // Neither known: the Platform mirror's own update time.
     expect(await run({ flags: 0x7c, platformAt: ago(20) })).toMatchObject({ state: "hold" });
     expect(await run({ flags: 0x7c, platformAt: ago(90) })).toMatchObject({ state: "fail" });
+    // An Open sale counts only while it can take a buy. One that ended is waiting to be closed (close_sale does not
+    // need 0x02): idle since its end; numeric columns arrive as numbers or digit strings.
+    const nowSec = Math.floor(now / 1000);
+    const sale = (over: Record<string, unknown>) => ({ pda: "s", end_ts: nowSec + 86_400, sold: "10", total_for_sale: "100", updated_at: ago(500), ...over });
+    expect(await run({ flags: 0x7c, openRows: [sale({})] })).toMatchObject({ state: "pass" });
+    const ended = await run({ flags: 0x7c, openRows: [sale({ end_ts: nowSec - 30 * 60 })], alerts: cleared(600) });
+    expect(ended).toMatchObject({ state: "hold", evidence: { minutes_idle: 30, open_sales_not_taking_buys: 1 }, summary: expect.stringMatching(/no sale taking buys \(1 Open sale ended or sold out/) });
+    expect(await run({ flags: 0x7c, openRows: [sale({ end_ts: String(nowSec - 2 * 3600) })], alerts: cleared(600) })).toMatchObject({ state: "fail", evidence: { minutes_idle: 120 } });
+    // Ended only by our clock, inside the chain-clock margin: it may still take a buy.
+    expect(await run({ flags: 0x7c, openRows: [sale({ end_ts: nowSec - 60 })], alerts: cleared(600) })).toMatchObject({ state: "pass" });
+    // Sold out: idle since its last update (the last buy); one live sale among idle ones still passes.
+    expect(await run({ flags: 0x7c, openRows: [sale({ sold: 100, updated_at: ago(90) })], alerts: cleared(600) })).toMatchObject({ state: "fail", evidence: { minutes_idle: 90 } });
+    expect(await run({ flags: 0x7c, openRows: [sale({ sold: 100, updated_at: ago(90) }), sale({ pda: "s2" })] })).toMatchObject({ state: "pass" });
+    // A mirrored row whose columns cannot be read counts as a sale taking buys (the columns are NOT NULL; as before this check).
+    expect(await run({ flags: 0x7c, openRows: [sale({ end_ts: null })] })).toMatchObject({ state: "pass" });
     // No Platform mirrored: hold; unreadable: the check could not run.
     expect(await run({ flags: null })).toMatchObject({ state: "hold" });
     expect(await run({ flags: 0x7c, broken: "sales" })).toBeNull();

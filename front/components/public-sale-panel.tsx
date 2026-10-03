@@ -43,6 +43,7 @@ import { formatTokens } from "@/lib/tokenize-shares";
 import { shortAddress } from "@/lib/share-transfer";
 import { roomToCreate, type SupplyFacts } from "@/lib/distribution-supply";
 import { listOpenSales, openSaleRemaining, readPlatformPause } from "@/lib/distribution-chain";
+import { liveSales } from "@/lib/sale-liveness";
 import {
   isApprovalLive,
   listSaleReservations,
@@ -93,7 +94,7 @@ type ChainView = {
   /** USDC in the open sale's proceeds escrow. */
   proceeds: bigint | null;
   approvals: SaleApprovalAccount[];
-  /** Open sales of every issuer other than this class's open one. */
+  /** Open sales of every issuer other than this class's open one that can still take a buy (lib/sale-liveness). */
   otherOpenSales: number;
   flags: number | null;
   superAdmin: string | null;
@@ -168,7 +169,10 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
           openSale,
           proceeds,
           approvals: approvals.filter((a) => isApprovalLive(a)).sort((a, b) => (b.saleId > a.saleId ? 1 : b.saleId < a.saleId ? -1 : 0)),
-          otherOpenSales: all.filter((s) => s.address !== openSale?.address).length,
+          otherOpenSales: liveSales(
+            all.filter((s) => s.address !== openSale?.address),
+            Math.floor(Date.now() / 1000),
+          ).length,
           flags: platform?.flags ?? null,
           superAdmin: platform?.superAdmin.toString() ?? null,
         });
@@ -230,7 +234,8 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
   const primaryOpen = flags !== null && !isPaused(flags, PAUSE_PRIMARY);
   const proceedsPaused = flags !== null && isPaused(flags, PAUSE_ISSUER_PROCEEDS);
   const superAdminText = chain?.superAdmin ? `the super admin (${shortAddress(chain.superAdmin as Address)})` : "the super admin";
-  const approval = chain?.approvals[0] ?? null;
+  // The approval the operator reserved for this request when it is live, else the class's newest live one.
+  const approval = chain?.approvals.find((a) => a.address === row?.reservation?.approval_pda) ?? chain?.approvals[0] ?? null;
   const busy = working !== null || tx.isSending;
 
   const formProblem =
@@ -408,7 +413,15 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
       ]);
       if (!platform) throw new Error("Could not read the platform's pause flags; nothing was sent. Try again.");
       if (!saleNow.exists) throw new Error("The sale could not be read.");
-      const flow = closeFlowStep({ flags: platform.flags, saleOpen: true, otherOpenSales: all.filter((s) => s.address !== openSaleNow.address).length });
+      const flow = closeFlowStep({
+        flags: platform.flags,
+        saleOpen: true,
+        // Another sale that ended or sold out does not need Primary issuance: only one that can still take a buy.
+        otherOpenSales: liveSales(
+          all.filter((s) => s.address !== openSaleNow.address),
+          Math.floor(Date.now() / 1000),
+        ).length,
+      });
       if (flow.step === "clear-proceeds") throw new Error(`Proceeds are paused (0x20): ${superAdminText} clears it first.`);
       let destination: ProceedsAccount | null = null;
       if (useOther) {

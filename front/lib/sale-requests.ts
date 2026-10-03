@@ -11,8 +11,13 @@ export type SaleRequestRow = {
   asset: string;
   display_name: string | null;
   request: SaleRequest | null;
-  /** From the raise-cap ledger: the operator approved it, its sale opened, or closed (null: none yet). */
+  /**
+   * From the raise-cap ledger: the operator approved it, its sale opened (also
+   * as soon as the reserved sale's account exists on chain), or closed (null: none yet).
+   */
   outcome: "approved" | "opened" | "closed" | null;
+  /** The reservation behind `outcome`: the approval reserved for this request (any other live one of the class is a stray). */
+  reservation?: { approval_pda: string | null; sale_pda: string | null; sale_id: string | null } | null;
   /** Pending list only: the offering clearance (mainnet; test networks are always cleared). */
   clearance?: OfferingClearance;
 };

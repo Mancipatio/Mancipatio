@@ -12,8 +12,11 @@
 //                           (lib/whitepaper-approval offeringClearance: an
 //                           SSC-approved whitepaper or a recorded offering
 //                           exemption; the reserve route refuses without it).
-// Each row carries `outcome` (lib/server/sale-requests requestOutcomes):
-// approved / opened / closed from the raise-cap ledger, or null.
+// Each row carries `outcome` (lib/server/sale-requests requestStates):
+// approved / opened / closed from the raise-cap ledger (opened as soon as the
+// reserved sale's account exists on chain), or null; and `reservation`: the
+// approval and sale the operator reserved for it (the pre-clear check's
+// "this approval" — any other live approval of the class is a stray).
 // Client wrapper: listSaleRequests() in lib/sale-requests.ts.
 
 import { NextResponse } from "next/server";
@@ -27,7 +30,7 @@ import type { SaleRequest } from "@/lib/public-sale";
 import {
   REQUEST_PROFILE_COLUMNS,
   readRequestProfile,
-  requestOutcomes,
+  requestStates,
   storedRequest,
   type RequestProfileRow,
 } from "@/lib/server/sale-requests";
@@ -53,7 +56,7 @@ export async function POST(request: Request) {
       const rows = ((data ?? []) as unknown as (RequestProfileRow & OfferingClearanceProfile)[])
         .map((row) => ({ row, request: storedRequest(row) }))
         .filter((r): r is { row: RequestProfileRow & OfferingClearanceProfile; request: SaleRequest } => r.request?.status === "requested");
-      const outcomes = await requestOutcomes(sb, rows.map((r) => r.request));
+      const states = await requestStates(sb, rows.map((r) => r.request));
       return NextResponse.json(
         {
           ok: true,
@@ -62,7 +65,8 @@ export async function POST(request: Request) {
               asset: row.asset_pda,
               display_name: row.display_name,
               request: saleRequest,
-              outcome: outcomes.get(saleRequest.id) ?? null,
+              outcome: states.get(saleRequest.id)?.outcome ?? null,
+              reservation: states.get(saleRequest.id)?.reservation ?? null,
               clearance: offeringClearance(network === "mainnet" ? row : null, network),
             }))
             .filter((r) => r.outcome === null || r.outcome === "approved"),
@@ -78,9 +82,20 @@ export async function POST(request: Request) {
     const row = await readRequestProfile(sb, chain.asset);
     const stored = storedRequest(row);
     const saleRequest = stored?.share_class === shareClass ? stored : null;
-    const outcome = saleRequest?.status === "requested" ? ((await requestOutcomes(sb, [saleRequest])).get(saleRequest.id) ?? null) : null;
+    const state = saleRequest?.status === "requested" ? ((await requestStates(sb, [saleRequest])).get(saleRequest.id) ?? null) : null;
     return NextResponse.json(
-      { ok: true, data: [{ asset: chain.asset, display_name: row?.display_name ?? null, request: saleRequest, outcome }] },
+      {
+        ok: true,
+        data: [
+          {
+            asset: chain.asset,
+            display_name: row?.display_name ?? null,
+            request: saleRequest,
+            outcome: state?.outcome ?? null,
+            reservation: state?.reservation ?? null,
+          },
+        ],
+      },
       { headers: { "Cache-Control": "private, no-store" } },
     );
   } catch (err) {

@@ -24,6 +24,7 @@ import {
   publicSaleReason,
   publicSaleStage,
   repauseMask,
+  repausePlan,
   saleEndTs,
   saleReferencePriceE6,
   tokenizePricePerTokenE6,
@@ -33,6 +34,7 @@ import {
   usdcToBaseUnits,
   type SaleRequest,
 } from "@/lib/public-sale";
+import { liveSales, saleBuyState } from "@/lib/sale-liveness";
 
 const n = (v: number | string) => BigInt(v);
 const NOW = 1_790_000_000;
@@ -208,19 +210,69 @@ describe("request → approval prefill", () => {
   });
 });
 
+describe("whether an Open sale can still take a buy (lib/sale-liveness, buy.rs)", () => {
+  const sale = (over: Partial<{ endTs: bigint; sold: bigint; totalForSale: bigint }> = {}) => ({
+    endTs: n(NOW + DAY),
+    sold: n(10),
+    totalForSale: n(100),
+    ...over,
+  });
+
+  it("live until its end (judged a chain-clock margin late), while tokens are left and the issuer is not frozen", () => {
+    expect(saleBuyState(sale(), NOW)).toBe("live");
+    // No end (legacy devnet sales): live.
+    expect(saleBuyState(sale({ endTs: n(0) }), NOW)).toBe("live");
+    // Just past its end on our clock: the chain's may lag, so still live within the margin.
+    expect(saleBuyState(sale({ endTs: n(NOW - 60) }), NOW)).toBe("live");
+    expect(saleBuyState(sale({ endTs: n(NOW - CHAIN_CLOCK_MARGIN_SECONDS - 1) }), NOW)).toBe("ended");
+    expect(saleBuyState(sale({ sold: n(100) }), NOW)).toBe("sold-out");
+    expect(saleBuyState(sale(), NOW, true)).toBe("frozen");
+    // A freeze that could not be read never relaxes anything.
+    expect(saleBuyState(sale(), NOW, null)).toBe("live");
+    // Ended and sold out are final; they win over a freeze.
+    expect(saleBuyState(sale({ endTs: n(NOW - DAY) }), NOW, true)).toBe("ended");
+    expect(liveSales([sale(), sale({ sold: n(100) }), sale({ endTs: n(NOW - DAY) })], NOW)).toHaveLength(1);
+  });
+});
+
 describe("pre-clear check (before the super admin clears 0x02)", () => {
   const approval = (address: Address, expiresAt: number) => ({ address, shareClass: SC as Address, expiresAt: n(expiresAt) });
+  const open = (over: Partial<{ endTs: bigint; sold: bigint; totalForSale: bigint; frozen: boolean | null }> = {}) => ({
+    address: B,
+    shareClass: "Other",
+    endTs: n(NOW + 30 * DAY),
+    sold: n(10),
+    totalForSale: n(100),
+    ...over,
+  });
 
   it("clear: no other Open sale and no live approval but this one", () => {
     const r = preClearCheck({ openSales: [], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW });
-    expect(r).toMatchObject({ clear: true, problems: [], thisApprovalLive: true, otherOpenSales: [], strayApprovals: [] });
+    expect(r).toMatchObject({ clear: true, problems: [], thisApprovalLive: true, otherOpenSales: [], idleOpenSales: [], strayApprovals: [] });
   });
 
-  it("another issuer's Open sale blocks the clear (buys would resume in it)", () => {
-    const r = preClearCheck({ openSales: [{ address: B, shareClass: "Other" }], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW });
+  it("another issuer's Open sale that can still take a buy blocks the clear (buys would resume in it)", () => {
+    const r = preClearCheck({ openSales: [open()], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW });
     expect(r.clear).toBe(false);
     expect(r.otherOpenSales).toHaveLength(1);
-    expect(r.problems[0]).toMatch(/other sale is Open.*Freeze its issuer/);
+    expect(r.problems[0]).toMatch(/other sale is Open and can still take buys.*Freeze its issuer/);
+    // A freeze that could not be read does not count as one.
+    expect(preClearCheck({ openSales: [open({ frozen: null })], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW }).clear).toBe(false);
+  });
+
+  it("freezing the other issuer clears the way: a frozen issuer's sale takes no buy (IssuerProceedsFrozen)", () => {
+    const r = preClearCheck({ openSales: [open({ frozen: true })], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW });
+    expect(r).toMatchObject({ clear: true, otherOpenSales: [], idleOpenSales: [{ address: B, state: "frozen" }] });
+  });
+
+  it("an Open sale that ended or sold out (not closed yet) is listed but does not block", () => {
+    const ended = preClearCheck({ openSales: [open({ endTs: n(NOW - DAY) })], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW });
+    expect(ended).toMatchObject({ clear: true, idleOpenSales: [{ address: B, state: "ended" }] });
+    const soldOut = preClearCheck({ openSales: [open({ sold: n(100) })], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW });
+    expect(soldOut).toMatchObject({ clear: true, idleOpenSales: [{ address: B, state: "sold-out" }] });
+    // Ended only by our clock, inside the chain-clock margin: it may still take a buy.
+    const edge = preClearCheck({ openSales: [open({ endTs: n(NOW - 60) })], approvals: [approval(A, NOW + DAY)], thisApproval: A, nowSec: NOW });
+    expect(edge.clear).toBe(false);
   });
 
   it("a stray live approval blocks the clear; an expired one cannot be opened and does not", () => {
@@ -257,5 +309,22 @@ describe("End and collect: order", () => {
     expect(closeFlowStep({ flags: PAUSE_FLAGS_ALL, saleOpen: false, otherOpenSales: 0 })).toEqual({ step: "done" });
     expect(repauseMask(collecting, 2)).toBe(PAUSE_ISSUER_PROCEEDS);
     expect(repauseMask(PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY, 0)).toBe(PAUSE_PRIMARY);
+  });
+
+  it("/admin/launchpad: 0x02 again once no Open sale can take a buy, live approvals or not; 0x20 only once none is Open", () => {
+    const collecting = PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY & ~PAUSE_ISSUER_PROCEEDS;
+    // Nothing Open: both bits, and no warning without approvals.
+    expect(repausePlan({ flags: collecting, openSales: 0, liveSales: 0, liveApprovals: 0 })).toEqual({ mask: 0x22, warning: null });
+    // Live approvals waiting: 0x02 is still offered (the super admin reopens it after the pre-clear check), with a warning.
+    const waiting = repausePlan({ flags: collecting, openSales: 0, liveSales: 0, liveApprovals: 2 });
+    expect(waiting.mask).toBe(0x22);
+    expect(waiting.warning).toMatch(/2 live approvals wait to be opened.*pre-clear check/);
+    expect(repausePlan({ flags: PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY, openSales: 0, liveSales: 0, liveApprovals: 1 }).mask).toBe(PAUSE_PRIMARY);
+    // Only Open sales that ended or sold out: 0x02 (they take no buy), but 0x20 stays clear for their close.
+    expect(repausePlan({ flags: collecting, openSales: 1, liveSales: 0, liveApprovals: 1 }).mask).toBe(PAUSE_PRIMARY);
+    // A sale that can still take a buy needs both open.
+    expect(repausePlan({ flags: collecting, openSales: 2, liveSales: 1, liveApprovals: 0 })).toEqual({ mask: 0, warning: null });
+    // Nothing clear: nothing to set, no warning.
+    expect(repausePlan({ flags: PAUSE_FLAGS_ALL, openSales: 0, liveSales: 0, liveApprovals: 3 })).toEqual({ mask: 0, warning: null });
   });
 });

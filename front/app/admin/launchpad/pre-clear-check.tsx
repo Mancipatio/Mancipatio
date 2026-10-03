@@ -2,20 +2,24 @@
 
 // The pre-clear check (design §4), right before the super admin reopens
 // Primary issuance (clears 0x02) for an approved public sale. 0x02 is
-// global: while it is clear, buys resume in every Open sale, every live
-// SaleApproval (up to 90 days old) can be opened and an Admin issuer key can
-// mint into its treasury — nothing on chain ties the clear to one sale. So:
-//   · other issuers' Open sales must be 0 — or their issuer frozen
-//     (IssuerFreeze: any Admin sets it, only the super admin lifts it; it
-//     also stops that issuer's close_sale);
+// global: while it is clear, buys resume in every Open sale that can still
+// take one, every live SaleApproval (up to 90 days old) can be opened and an
+// Admin issuer key can mint into its treasury — nothing on chain ties the
+// clear to one sale. So:
+//   · Open sales that can still take a buy must be 0. One that ended or sold
+//     out cannot (it only waits to be closed), nor one whose issuer is frozen
+//     (IssuerFreeze, read at finalized: any Admin sets it, only the super
+//     admin lifts it; it also stops that issuer's close_sale) — those are
+//     listed and do not block (lib/sale-liveness);
 //   · live approvals must be 0 except this one — "Revoke" closes a stray one
 //     (revoke_sale_approval, any Admin; the rent returns to its approver)
 //     and releases its raise-limit reservation.
 // "Reopen primary issuance" runs the whole check again inside the click,
 // right before signing (lib/public-sale preClearCheck), and refuses unless it
-// is clean. After the clear, the 1-hour "0x02 open with no sale Open" alarm
-// (lib/server/alarm-checks primaryIdleReport) and the approve_sale alarm are
-// the backstops.
+// is clean. Once 0x02 is open and the sale is not opened yet, any Admin can
+// close it again from here. After the clear, the 1-hour "0x02 open with no
+// sale taking buys" alarm (lib/server/alarm-checks primaryIdleReport) and the
+// approve_sale alarm are the backstops.
 
 import { useCallback, useEffect, useState } from "react";
 import type { Address } from "@solana/kit";
@@ -31,12 +35,14 @@ import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
 import { recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
-import { isPaused, PAUSE_PRIMARY, pauseAuditMetadata } from "@/lib/pause-flags";
+import { formatPauseFlags, isPaused, PAUSE_PRIMARY, pauseAuditMetadata } from "@/lib/pause-flags";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { shortAddress } from "@/lib/share-transfer";
 import { listOpenSales, readPlatformPause, type OpenSale } from "@/lib/distribution-chain";
 import { listAllSaleApprovals, listSaleReservations, releaseSaleApproval, type SaleApprovalAccount } from "@/lib/sale-approvals";
 import { preClearCheck, type PreClearResult } from "@/lib/public-sale";
+import { liveSales, SALE_BUY_STATE_LABEL } from "@/lib/sale-liveness";
+import { loadIssuerFreeze } from "@/lib/issuer-freeze";
 import { IssuerFreezePanel } from "@/app/admin/issuers/issuer-freeze-panel";
 
 type Snapshot = {
@@ -47,29 +53,48 @@ type Snapshot = {
   approvals: SaleApprovalAccount[];
   /** Issuer PDA of each other Open sale (for IssuerFreeze), by sale address. */
   issuers: Map<string, Address | null>;
+  /** Whether that issuer is frozen (finalized), by sale address; null when it could not be read. */
+  frozen: Map<string, boolean | null>;
 };
 
 type Rpc = ReturnType<typeof useSolanaClient>["runtime"]["rpc"];
 
-/** Everything the check reads, fresh. `thisSale`: an Open sale this clear is for (excluded from "other"). */
+/**
+ * Everything the check reads, fresh: every Open sale with its issuer and that
+ * issuer's freeze (an unread freeze counts as not frozen: it never relaxes
+ * the check), every SaleApproval and the Platform.
+ */
 async function readSnapshot(rpc: Rpc, thisApproval: Address | null): Promise<Snapshot> {
   const [sales, approvals, platform] = await Promise.all([listOpenSales(rpc), listAllSaleApprovals(rpc), readPlatformPause(rpc)]);
   if (!platform) throw new Error("Could not read the platform's pause flags.");
-  const nowSec = Math.floor(Date.now() / 1000);
-  const result = preClearCheck({ openSales: sales, approvals, thisApproval, nowSec });
   const issuers = new Map<string, Address | null>();
+  const frozen = new Map<string, boolean | null>();
   await Promise.all(
     sales.map(async (s) => {
+      let issuer: Address | null = null;
       try {
         const sc = await fetchMaybeShareClass(rpc, s.shareClass, { commitment: "confirmed" });
         const asset = sc.exists ? await fetchMaybeAsset(rpc, sc.data.asset, { commitment: "confirmed" }) : null;
-        issuers.set(s.address, asset?.exists ? asset.data.issuer : null);
+        issuer = asset?.exists ? asset.data.issuer : null;
       } catch {
-        issuers.set(s.address, null);
+        issuer = null;
+      }
+      issuers.set(s.address, issuer);
+      try {
+        frozen.set(s.address, issuer ? (await loadIssuerFreeze(rpc, issuer)) !== null : null);
+      } catch {
+        frozen.set(s.address, null);
       }
     }),
   );
-  return { result, flags: platform.flags, superAdmin: platform.superAdmin.toString(), sales, approvals, issuers };
+  const nowSec = Math.floor(Date.now() / 1000);
+  const result = preClearCheck({
+    openSales: sales.map((s) => ({ ...s, frozen: frozen.get(s.address) ?? null })),
+    approvals,
+    thisApproval,
+    nowSec,
+  });
+  return { result, flags: platform.flags, superAdmin: platform.superAdmin.toString(), sales, approvals, issuers, frozen };
 }
 
 export function PreClearCheck({ thisApproval, label, onChanged }: { thisApproval: Address | null; label: string; onChanged?: () => void }) {
@@ -152,14 +177,61 @@ export function PreClearCheck({ thisApproval, label, onChanged }: { thisApproval
         ix_name: "set_pause_flags",
         category: "platform",
         actor_wallet: wallet.toString(),
-        reason: `Reopened Primary issuance for ${label} after the pre-clear check (other Open sales 0, stray approvals 0)`,
+        reason: `Reopened Primary issuance for ${label} after the pre-clear check (Open sales taking buys 0, stray approvals 0)`,
         target_label: "Reopen primary issuance",
         tx_signature: sig,
         status: "success",
-        metadata: { ...pauseAuditMetadata(0, PAUSE_PRIMARY, fresh.flags), pre_clear: { approval: thisApproval, other_open_sales: 0, stray_approvals: 0 } },
+        metadata: {
+          ...pauseAuditMetadata(0, PAUSE_PRIMARY, fresh.flags),
+          pre_clear: {
+            approval: thisApproval,
+            other_open_sales: 0,
+            stray_approvals: 0,
+            // Open sales that cannot take a buy (ended, sold out, issuer frozen): a frozen one resumes if its freeze is lifted.
+            idle_open_sales: fresh.result.idleOpenSales.map((s) => ({ sale: s.address, state: s.state })),
+          },
+        },
       });
     } catch (err) {
       toast.showError("Primary issuance not reopened", explainSendError(err));
+    } finally {
+      setWorking(null);
+      await load();
+      onChanged?.();
+    }
+  }
+
+  async function closePrimary() {
+    if (!session || !wallet) return;
+    setWorking("Checking again right before signing…");
+    try {
+      const fresh = await readSnapshot(rpc, thisApproval);
+      setSnap(fresh);
+      if (isPaused(fresh.flags, PAUSE_PRIMARY)) throw new Error("Primary issuance is already closed.");
+      const live = liveSales(fresh.sales, Math.floor(Date.now() / 1000));
+      if (live.length > 0) {
+        throw new Error(
+          `${live.length} Open ${live.length === 1 ? "sale" : "sales"} can still take buys and ${live.length === 1 ? "needs" : "need"} Primary issuance; pause from /admin/platform if this is an emergency.`,
+        );
+      }
+      setWorking("Confirm in your wallet: close Primary issuance again (set 0x02)");
+      const signer = walletSigner(session);
+      const ix = await getSetPauseFlagsInstructionAsync({ authority: signer, setMask: PAUSE_PRIMARY, clearMask: 0 });
+      const sig = await tx.send({ instructions: [ix], feePayer: signer });
+      clearPauseFlagsCache();
+      toast.showTx(sig, { title: "Primary issuance closed again" });
+      void recordAudit({
+        ix_name: "set_pause_flags",
+        category: "platform",
+        actor_wallet: wallet.toString(),
+        reason: `Closed Primary issuance again before ${label} was opened (no sale taking buys)`,
+        target_label: `Close ${formatPauseFlags(PAUSE_PRIMARY)} again`,
+        tx_signature: sig,
+        status: "success",
+        metadata: { ...pauseAuditMetadata(PAUSE_PRIMARY, 0, fresh.flags), pre_clear: { approval: thisApproval } },
+      });
+    } catch (err) {
+      toast.showError("Primary issuance not closed", explainSendError(err));
     } finally {
       setWorking(null);
       await load();
@@ -184,16 +256,29 @@ export function PreClearCheck({ thisApproval, label, onChanged }: { thisApproval
 
   return (
     <div className="mt-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-700" aria-label="Pre-clear check">
-      <p className="font-semibold text-slate-800">Pre-clear check (Primary issuance is platform-wide)</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-semibold text-slate-800">Pre-clear check (Primary issuance is platform-wide)</p>
+        <button type="button" disabled={busy} onClick={() => void load()} className="text-slate-500 underline hover:text-slate-800 disabled:opacity-50">
+          Run again
+        </button>
+      </div>
       <ul className="mt-1 space-y-1">
         <li className={result.otherOpenSales.length === 0 ? "text-emerald-800" : "text-red-700"}>
-          {result.otherOpenSales.length === 0 ? "✓" : "✗"} Other Open sales: {result.otherOpenSales.length}
+          {result.otherOpenSales.length === 0 ? "✓" : "✗"} Open sales that can still take buys: {result.otherOpenSales.length}
+          {result.idleOpenSales.length > 0 ? ` (and ${result.idleOpenSales.length} Open that cannot)` : ""}
         </li>
         {snap.sales.map((s) => {
           const issuer = snap.issuers.get(s.address) ?? null;
+          const idle = result.idleOpenSales.find((x) => x.address === s.address);
+          const frozen = snap.frozen.get(s.address);
           return (
             <li key={s.address} className="ml-4">
-              Sale <span className="font-mono">{shortAddress(s.address)}</span> · {s.sold.toString()} / {s.totalForSale.toString()} sold
+              Sale <span className="font-mono">{shortAddress(s.address)}</span> · {s.sold.toString()} / {s.totalForSale.toString()} sold ·{" "}
+              {idle ? (
+                <span className="text-slate-500">{SALE_BUY_STATE_LABEL[idle.state]}</span>
+              ) : (
+                <span className="text-red-700">can take buys{frozen === null ? " (freeze state unreadable)" : ""}</span>
+              )}
               {issuer && isAdmin && (
                 <div className="mt-1">
                   <IssuerFreezePanel issuer={issuer} label={`issuer of sale ${shortAddress(s.address)}`} />
@@ -238,10 +323,22 @@ export function PreClearCheck({ thisApproval, label, onChanged }: { thisApproval
         </div>
       )}
       {primaryOpen && (
-        <p className="mt-2 text-slate-600">
-          Open: the issuer can open the sale now. Set it again once the sale closes (or if it is not opened within the hour —
-          the alarm fires after an hour with no sale Open).
-        </p>
+        <div className="mt-2 flex flex-wrap items-center gap-3">
+          <p className="text-slate-600">
+            Open: the issuer can open the sale now. If it is not opened within the hour (the alarm fires after an hour with no sale
+            taking buys), close it again; the super admin reopens it after this check.
+          </p>
+          {isAdmin && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => void closePrimary()}
+              className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-800 hover:border-slate-400 disabled:opacity-50"
+            >
+              Close Primary issuance again (0x02)
+            </button>
+          )}
+        </div>
       )}
       {working && (
         <p className="mt-1 text-slate-600" aria-live="polite">

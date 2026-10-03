@@ -31,7 +31,14 @@ import { transfersFromTransaction, type RawTransaction, type TreasuryTransfer } 
 export const SALE_SHARE_CLASS_OFFSET = 8;
 export const SALE_STATUS_OFFSET = 216;
 
-export type OpenSale = { address: Address; shareClass: Address; totalForSale: bigint; sold: bigint };
+export type OpenSale = {
+  address: Address;
+  shareClass: Address;
+  totalForSale: bigint;
+  sold: bigint;
+  /** Unix seconds; 0 = no end (lib/sale-liveness: an ended sale takes no buy). */
+  endTs: bigint;
+};
 
 function b64ToBytes(b64: string): Uint8Array {
   const bin = atob(b64);
@@ -64,13 +71,19 @@ export async function listOpenSales(rpc: Rpc<GetProgramAccountsApi>, opts: { sha
     const sale = decoder.decode(b64ToBytes((r.account.data as readonly [string, string])[0]));
     if (sale.status !== SaleStatus.Open) continue;
     if (opts.shareClass && sale.shareClass !== opts.shareClass) continue;
-    sales.push({ address: r.pubkey, shareClass: sale.shareClass, totalForSale: BigInt(sale.totalForSale), sold: BigInt(sale.sold) });
+    sales.push({
+      address: r.pubkey,
+      shareClass: sale.shareClass,
+      totalForSale: BigInt(sale.totalForSale),
+      sold: BigInt(sale.sold),
+      endTs: BigInt(sale.endTs),
+    });
   }
   return sales;
 }
 
 /** Σ(total_for_sale − sold) of the Open sales of one class: tokens `buy` will still mint. */
-export function openSaleRemaining(sales: readonly OpenSale[]): bigint {
+export function openSaleRemaining<T extends Pick<OpenSale, "totalForSale" | "sold">>(sales: readonly T[]): bigint {
   return sales.reduce((sum, s) => sum + (s.totalForSale > s.sold ? s.totalForSale - s.sold : BigInt(0)), BigInt(0));
 }
 

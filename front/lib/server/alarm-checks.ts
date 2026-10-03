@@ -126,6 +126,7 @@ import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDa
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
 import { EMERGENCY_PAUSE_BITS, PAUSE_PAYOUT_MODULES, PAUSE_PRIMARY, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags } from "@/lib/pause-flags";
+import { saleBuyState } from "@/lib/sale-liveness";
 import { listProblem, SANCTIONS_MAX_LIST_AGE_MS } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
@@ -446,22 +447,36 @@ export async function payoutModulesReport(sb: SupabaseClient, network: Network, 
     evidence: { pause_flags: flags } };
 }
 
-/** primary-open-idle: how long Primary issuance (0x02) may stay open with no sale Open before it fails. */
+/** primary-open-idle: how long Primary issuance (0x02) may stay open with no sale taking buys before it fails. */
 export const PRIMARY_IDLE_MAX_MS = 60 * 60 * 1000;
+
+/** A mirrored u64/i64 column (numeric / bigint: a number or a digit string) as a bigint, or null when unreadable. */
+function mirrorBigint(value: unknown): bigint | null {
+  if (typeof value === "number" && Number.isSafeInteger(value)) return BigInt(value);
+  if (typeof value === "string" && /^-?\d+$/.test(value)) return BigInt(value);
+  return null;
+}
+
+type MirroredOpenSale = { pda?: string; end_ts?: unknown; sold?: unknown; total_for_sale?: unknown; updated_at?: string | null };
 
 /**
  * primary-open-idle (Distribute → Public sale, design §4; high on mainnet,
  * low elsewhere): Primary issuance (bit 0x02) is global — while it is clear,
- * buys resume in every Open sale, every live SaleApproval can be opened and
- * an Admin issuer key can mint into its treasury — so it is cleared only for
- * a sale's window. Clear with NO sale Open for more than an hour fails (the
- * sale closed and nobody set it again, or it was cleared and never used).
- * "Clear since" is the newest of: the last indexed set_pause_flags that
- * cleared 0x02 (the onchain:pause alert's evidence.clear_mask), the last
- * sale that closed (its mirror row's updated_at) and, when neither is known,
- * the Platform mirror row's updated_at. Hold within the hour, pass while 0x02
- * is set or a sale is Open; hold while no Platform is mirrored; null when the
- * mirror cannot be read.
+ * buys resume in every Open sale that can take one, every live SaleApproval
+ * can be opened and an Admin issuer key can mint into its treasury — so it
+ * is cleared only for a sale's window. Clear with NO sale able to take a buy
+ * for more than an hour fails (the sale closed and nobody set it again, it
+ * was cleared and never used, or the sale ended or sold out and is only
+ * waiting to be closed: close_sale does not need 0x02). A mirrored Open sale
+ * counts only while it can take a buy (lib/sale-liveness: not past end_ts,
+ * not sold out; a row that cannot be read counts as live). "Clear since" is
+ * the newest of: the last indexed set_pause_flags that cleared 0x02 (the
+ * onchain:pause alert's evidence.clear_mask), the last sale that closed (its
+ * mirror row's updated_at), the end of an Open sale that ended and the last
+ * update of one that sold out and, when none is known, the Platform mirror
+ * row's updated_at. Hold within the hour, pass while 0x02 is set or a sale
+ * can take a buy; hold while no Platform is mirrored; null when the mirror
+ * cannot be read.
  */
 export async function primaryIdleReport(sb: SupabaseClient, network: Network, signal: AbortSignal, now = Date.now()): Promise<Report | null> {
   const base = {
@@ -479,10 +494,26 @@ export async function primaryIdleReport(sb: SupabaseClient, network: Network, si
   if ((flags & PAUSE_PRIMARY) !== 0) {
     return { ...base, state: "pass", summary: "Primary issuance is closed (0x02 set)", evidence: { pause_flags: flags } };
   }
-  const open = await sb.from("sales").select("pda").eq("network", network).eq("status", 0).limit(1).abortSignal(dbSignal(signal));
+  const open = await sb.from("sales").select("pda,end_ts,sold,total_for_sale,updated_at").eq("network", network).eq("status", 0)
+    .limit(500).abortSignal(dbSignal(signal));
   if (open.error) return null;
-  if ((open.data ?? []).length > 0) {
-    return { ...base, state: "pass", summary: "Primary issuance is open for a sale that is Open", evidence: { pause_flags: flags } };
+  const nowSec = Math.floor(now / 1000);
+  // Since when each Open sale that cannot take a buy stopped taking them (ms), or null for one that still can.
+  const stoppedAt = ((open.data ?? []) as MirroredOpenSale[]).map((s) => {
+    const endTs = mirrorBigint(s.end_ts);
+    const sold = mirrorBigint(s.sold);
+    const total = mirrorBigint(s.total_for_sale);
+    if (endTs === null || sold === null || total === null) return null;
+    const state = saleBuyState({ endTs, sold, totalForSale: total }, nowSec);
+    if (state === "ended") return Number(endTs) * 1000;
+    if (state === "sold-out") {
+      const at = Date.parse(s.updated_at ?? "");
+      return Number.isFinite(at) ? at : now;
+    }
+    return null;
+  });
+  if (stoppedAt.some((t) => t === null)) {
+    return { ...base, state: "pass", summary: "Primary issuance is open for a sale that can take buys", evidence: { pause_flags: flags } };
   }
   const [clears, closed] = await Promise.all([
     sb.from("compliance_alerts").select("created_at,evidence").eq("network", network).eq("source", "onchain:pause")
@@ -496,17 +527,26 @@ export async function primaryIdleReport(sb: SupabaseClient, network: Network, si
     .map((a) => Date.parse(a.created_at ?? ""))
     .find((t) => Number.isFinite(t));
   const lastClose = Date.parse(((closed.data ?? [])[0] as { updated_at?: string } | undefined)?.updated_at ?? "");
-  const known = [lastClear, lastClose].filter((t): t is number => typeof t === "number" && Number.isFinite(t));
+  const known = [lastClear, lastClose, ...stoppedAt].filter((t): t is number => typeof t === "number" && Number.isFinite(t));
   const fallback = Date.parse(row?.updated_at ?? "");
   const since = known.length > 0 ? Math.max(...known) : Number.isFinite(fallback) ? fallback : null;
   const minutes = since === null ? null : Math.max(0, Math.floor((now - since) / 60_000));
-  const evidence = { pause_flags: flags, open_since: since === null ? null : new Date(since).toISOString(), minutes_idle: minutes };
+  const waiting = stoppedAt.length;
+  const evidence = {
+    pause_flags: flags,
+    open_since: since === null ? null : new Date(since).toISOString(),
+    minutes_idle: minutes,
+    open_sales_not_taking_buys: waiting,
+  };
+  const idle = waiting > 0
+    ? `no sale taking buys (${waiting} Open ${waiting === 1 ? "sale" : "sales"} ended or sold out, waiting to be closed)`
+    : "no sale Open";
   if (since === null || now - since > PRIMARY_IDLE_MAX_MS) {
     return { ...base, state: "fail", evidence,
-      summary: `Primary issuance (0x02) is open with no sale Open${minutes === null ? "" : ` for ${minutes} minutes`}: buys, sale openings and treasury mints are possible platform-wide. Any Admin sets 0x02 again (/admin/platform or /admin/launchpad)` };
+      summary: `Primary issuance (0x02) is open with ${idle}${minutes === null ? "" : ` for ${minutes} minutes`}: buys, sale openings and treasury mints are possible platform-wide. Any Admin sets 0x02 again (/admin/platform or /admin/launchpad)` };
   }
   return { ...base, state: "hold", evidence,
-    summary: `Primary issuance (0x02) is open with no sale Open for ${minutes} minutes (fails after ${PRIMARY_IDLE_MAX_MS / 60_000})` };
+    summary: `Primary issuance (0x02) is open with ${idle} for ${minutes} minutes (fails after ${PRIMARY_IDLE_MAX_MS / 60_000})` };
 }
 
 /** Day D (runbook §0A, §4-§5) runs inside the bootstrap window: bootstrap-open fails once it is older than this (K1.11). */

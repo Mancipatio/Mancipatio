@@ -12,12 +12,20 @@
 //              approve_sale needs. "Approve sale" opens the approval modal
 //              prefilled from the request (reserve → approve_sale → confirm:
 //              nothing to type); "Decline" records a reason.
-//   Approved   the pre-clear check and "Reopen primary issuance" (super
-//              admin), then the issuer opens the sale from its asset page.
+//   Approved   the approval reserved for THIS request (the ledger's
+//              reservation, never just the class's newest approval: one an
+//              Admin key signed directly is a stray), the pre-clear check and
+//              "Reopen primary issuance" (super admin), then the issuer opens
+//              the sale from its asset page. Once the class has an Open sale,
+//              or the reserved approval is gone, neither "Approve sale" nor
+//              "Decline" is offered (the request leaves the list as soon as
+//              the server sees its sale on chain).
 //   Proceeds   every Open sale with Primary issuance and issuer proceeds
 //              (0x02 / 0x20): the super admin clears 0x20 when an issuer
-//              ends its sale; once no sale is Open any Admin sets 0x20 and
-//              0x02 again in one transaction.
+//              ends its sale; once no Open sale can take a buy any Admin sets
+//              0x02 again (with live approvals waiting too: the super admin
+//              reopens it after the pre-clear check), and 0x20 with it once
+//              no sale is Open at all.
 
 import { useCallback, useEffect, useState } from "react";
 import type { Address } from "@solana/kit";
@@ -42,7 +50,8 @@ import {
   type Capacity,
   type SaleApprovalAccount,
 } from "@/lib/sale-approvals";
-import { approvalPrefill, formatUsdc, maxGrossRaise, repauseMask, type ApprovalPrefill } from "@/lib/public-sale";
+import { approvalPrefill, formatUsdc, maxGrossRaise, repausePlan, type ApprovalPrefill } from "@/lib/public-sale";
+import { liveSales, saleBuyState, SALE_BUY_STATE_LABEL } from "@/lib/sale-liveness";
 import { decideSaleRequest, listSaleRequests, type SaleRequestRow } from "@/lib/sale-requests";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ApproveSaleModal } from "@/app/admin/applications/sale-approvals";
@@ -67,6 +76,8 @@ export function PublicSaleRequests() {
   const [error, setError] = useState<string | null>(null);
   const [needsSignIn, setNeedsSignIn] = useState(false);
   const [approvals, setApprovals] = useState<Map<string, SaleApprovalAccount[]>>(new Map());
+  /** Open sales by share class (null: not read). */
+  const [openByClass, setOpenByClass] = useState<Map<string, OpenSale[]> | null>(null);
   const [capacity, setCapacity] = useState<Map<string, Capacity | string>>(new Map());
   const [hasAdminRecord, setHasAdminRecord] = useState<boolean | null>(null);
   const [approve, setApprove] = useState<ApprovalPrefill | null>(null);
@@ -83,12 +94,13 @@ export function PublicSaleRequests() {
         setNeedsSignIn(false);
         const byClass = new Map<string, SaleApprovalAccount[]>();
         const caps = new Map<string, Capacity | string>();
+        const openSales = await listOpenSales(rpc).catch(() => null);
         await Promise.all(
           data.map(async (r) => {
             if (!r.request) return;
             const sc = r.request.share_class;
             try {
-              // Newest first: the approval this request got; any other live one is a stray for the pre-clear check.
+              // Newest first. The one this request got is its reservation's approval; any other live one is a stray.
               byClass.set(
                 sc,
                 (await listShareClassSaleApprovals(rpc, sc as Address))
@@ -107,6 +119,13 @@ export function PublicSaleRequests() {
         );
         setApprovals(byClass);
         setCapacity(caps);
+        if (openSales) {
+          const open = new Map<string, OpenSale[]>();
+          for (const s of openSales) open.set(s.shareClass, [...(open.get(s.shareClass) ?? []), s]);
+          setOpenByClass(open);
+        } else {
+          setOpenByClass(null);
+        }
       } catch (err) {
         if (!interactive) setNeedsSignIn(true);
         else setError(err instanceof Error ? err.message : String(err));
@@ -184,7 +203,12 @@ export function PublicSaleRequests() {
           const r = row.request;
           if (!r) return null;
           const live = approvals.get(r.share_class) ?? [];
-          const thisApproval = live[0] ?? null;
+          // The approval reserved for THIS request (the ledger), never just the class's newest live one.
+          const reserved = row.outcome === "approved" ? (row.reservation ?? null) : null;
+          const thisApproval = reserved?.approval_pda ? (live.find((a) => a.address === reserved.approval_pda) ?? null) : null;
+          const classStrays = live.filter((a) => a.address !== thisApproval?.address);
+          const classOpen = openByClass?.get(r.share_class) ?? [];
+          const ownOpen = reserved?.sale_pda ? classOpen.find((s) => s.address === reserved.sale_pda) : undefined;
           const cap = capacity.get(r.share_class);
           const gross = maxGrossRaise(BigInt(r.tokens), BigInt(r.price_per_unit));
           const url = documentUrl(r.document.path);
@@ -225,19 +249,59 @@ export function PublicSaleRequests() {
                 Raise limit:{" "}
                 {cap === undefined ? "…" : typeof cap === "string" ? cap : `${eur(cap.remaining)} left of ${eur(cap.cap)} (rolling 12 months)`}
               </p>
-              {thisApproval ? (
+              {ownOpen ? (
+                <p className="mt-1 text-emerald-800">
+                  Opened: sale{" "}
+                  <a href={`/marketplace/launchpad/${ownOpen.address}`} className="font-mono underline">
+                    {shortAddress(ownOpen.address)}
+                  </a>{" "}
+                  is Open. The request leaves this list once the server sees it (Refresh).
+                </p>
+              ) : thisApproval ? (
                 <>
                   <p className="mt-1 text-emerald-800">
                     Approved: sale #{thisApproval.saleId.toString()}, open by {new Date(Number(thisApproval.expiresAt) * 1000).toLocaleDateString("en-GB")}.
                   </p>
+                  {classStrays.length > 0 && (
+                    <p className="mt-1 text-red-700">
+                      {classStrays.length} other live {classStrays.length === 1 ? "approval" : "approvals"} of this class{" "}
+                      {classStrays.length === 1 ? "was" : "were"} not reserved for this request (sale #
+                      {classStrays.map((a) => a.saleId.toString()).join(", #")}): {classStrays.length === 1 ? "a stray" : "strays"} to revoke
+                      below.
+                    </p>
+                  )}
                   <PreClearCheck
                     thisApproval={thisApproval.address}
                     label={`the public sale of ${row.display_name ?? shortAddress(row.asset as Address)}`}
                     onChanged={() => setRefreshKey((k) => k + 1)}
                   />
                 </>
+              ) : reserved ? (
+                <p className="mt-1 text-amber-800">
+                  Approved{reserved.sale_id ? ` (sale #${reserved.sale_id})` : ""}, but its approval is no longer on chain: opened,
+                  expired or revoked. The ledger catches up within minutes (Refresh); nothing to approve again meanwhile.
+                </p>
+              ) : classOpen.length > 0 ? (
+                <div className="mt-2 flex flex-wrap items-center gap-3">
+                  <span className="text-amber-800">
+                    A sale of this class is Open ({shortAddress(classOpen[0].address)}): no second sale is approved while it runs.
+                  </span>
+                  {role.isAdmin && (
+                    <button type="button" onClick={() => setDecline(row)} className="text-red-700 underline">
+                      Decline
+                    </button>
+                  )}
+                </div>
               ) : (
                 <div className="mt-2 flex flex-wrap gap-3">
+                  {live.length > 0 && (
+                    <p className="w-full text-red-700">
+                      {live.length} live {live.length === 1 ? "approval" : "approvals"} of this class (sale #
+                      {live.map((a) => a.saleId.toString()).join(", #")}) {live.length === 1 ? "was" : "were"} not reserved for this request
+                      (e.g. approve_sale signed directly by an Admin key): the pre-clear check counts {live.length === 1 ? "it" : "them"} as{" "}
+                      {live.length === 1 ? "a stray" : "strays"} to revoke.
+                    </p>
+                  )}
                   {role.isSuperAdmin ? (
                     <button
                       type="button"
@@ -296,9 +360,12 @@ export function PublicSaleRequests() {
 
 /**
  * Every Open sale with the two platform bits a sale's end turns on: the super
- * admin clears issuer proceeds (0x20) so an issuer can end and collect; once
- * no sale is Open, any Admin sets 0x20 and Primary issuance (0x02) again in
- * one transaction (an issuer whose key is an Admin does it in its close).
+ * admin clears issuer proceeds (0x20) so an issuer can end and collect. Once
+ * no Open sale can take a buy (ended or sold out ones only wait to be
+ * closed; lib/sale-liveness), any Admin sets Primary issuance (0x02) again —
+ * also while approvals wait to be opened (said next to the button) — and,
+ * once no sale is Open at all, 0x20 with it in one transaction (an issuer
+ * whose key is an Admin does it in its close). lib/public-sale repausePlan.
  */
 function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
   const client = useSolanaClient();
@@ -309,7 +376,7 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
   const rpc = client.runtime.rpc;
   const session = conn.wallet;
   const wallet = session?.account.address ?? null;
-  const [state, setState] = useState<{ sales: OpenSale[]; flags: number; superAdmin: string; liveApprovals: number } | null>(null);
+  const [state, setState] = useState<{ sales: OpenSale[]; flags: number; superAdmin: string; liveApprovals: number; nowSec: number } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
@@ -325,6 +392,7 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
             flags: platform.flags,
             superAdmin: platform.superAdmin.toString(),
             liveApprovals: approvals.filter((a) => isApprovalLive(a)).length,
+            nowSec: Math.floor(Date.now() / 1000),
           });
           setError(null);
         }
@@ -343,7 +411,13 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
       // Read again right before signing: a sale may have opened or closed since.
       const [sales, platform] = await Promise.all([listOpenSales(rpc), readPlatformPause(rpc)]);
       if (!platform) throw new Error("Could not read the platform's pause flags.");
-      if (setMask !== 0 && sales.length > 0) throw new Error("A sale is Open: it needs Primary issuance and proceeds open until it closes.");
+      const nowSec = Math.floor(Date.now() / 1000);
+      if ((setMask & PAUSE_PRIMARY) !== 0 && liveSales(sales, nowSec).length > 0) {
+        throw new Error("A sale is Open and can still take buys: it needs Primary issuance until it ends or closes.");
+      }
+      if ((setMask & PAUSE_ISSUER_PROCEEDS) !== 0 && sales.length > 0) {
+        throw new Error("A sale is Open: its issuer needs issuer proceeds (0x20) clear to close it.");
+      }
       const signer = walletSigner(session);
       const ix = await getSetPauseFlagsInstructionAsync({ authority: signer, setMask, clearMask });
       const sig = await tx.send({ instructions: [ix], feePayer: signer });
@@ -368,8 +442,15 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
 
   if (error) return <p className="mt-3 text-xs text-amber-700">Open sales unavailable: {error}</p>;
   if (!state) return null;
-  // With no sale Open: 0x20 again, and 0x02 unless an approved sale waits to be opened (its window).
-  const repause = state.sales.length === 0 ? repauseMask(state.flags, 0) & (state.liveApprovals > 0 ? ~PAUSE_PRIMARY : 0xff) : 0;
+  // 0x02 once no Open sale can take a buy (approvals waiting or not: the safe default is closed); 0x20 once none is Open.
+  const { nowSec } = state;
+  const plan = repausePlan({
+    flags: state.flags,
+    openSales: state.sales.length,
+    liveSales: liveSales(state.sales, nowSec).length,
+    liveApprovals: state.liveApprovals,
+  });
+  const repause = plan.mask;
   return (
     <div className="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-700">
       <p className="font-semibold text-slate-800">Open sales and proceeds</p>
@@ -378,14 +459,18 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
         {state.liveApprovals} live {state.liveApprovals === 1 ? "approval" : "approvals"} not opened
       </p>
       <ul className="mt-1 space-y-0.5">
-        {state.sales.map((s) => (
-          <li key={s.address}>
-            <a href={`/marketplace/launchpad/${s.address}`} className="font-mono underline">
-              {shortAddress(s.address)}
-            </a>{" "}
-            · {s.sold.toString()} / {s.totalForSale.toString()} sold
-          </li>
-        ))}
+        {state.sales.map((s) => {
+          const buy = saleBuyState(s, nowSec);
+          return (
+            <li key={s.address}>
+              <a href={`/marketplace/launchpad/${s.address}`} className="font-mono underline">
+                {shortAddress(s.address)}
+              </a>{" "}
+              · {s.sold.toString()} / {s.totalForSale.toString()} sold
+              {buy !== "live" && <span className="text-slate-500"> · {SALE_BUY_STATE_LABEL[buy]}</span>}
+            </li>
+          );
+        })}
       </ul>
       <div className="mt-2 flex flex-wrap gap-3">
         {state.sales.length > 0 && isPaused(state.flags, PAUSE_ISSUER_PROCEEDS) && isSuperAdmin && (
@@ -405,13 +490,16 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
           <button
             type="button"
             disabled={tx.isSending}
-            onClick={() => void setFlags(repause, 0, `Close ${formatPauseFlags(repause)} again (no sale Open)`)}
+            onClick={() =>
+              void setFlags(repause, 0, `Close ${formatPauseFlags(repause)} again (${state.sales.length === 0 ? "no sale Open" : "no sale taking buys"})`)
+            }
             className="rounded-md border border-slate-300 px-3 py-1.5 text-xs font-medium text-slate-800 hover:border-slate-400 disabled:opacity-50"
           >
-            Close {formatPauseFlags(repause)} again (no sale is Open)
+            Close {formatPauseFlags(repause)} again ({state.sales.length === 0 ? "no sale is Open" : "no sale can take buys"})
           </button>
         )}
       </div>
+      {repause !== 0 && plan.warning && <p className="mt-1 text-amber-800">{plan.warning}</p>}
     </div>
   );
 }

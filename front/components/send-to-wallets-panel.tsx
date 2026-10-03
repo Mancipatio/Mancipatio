@@ -84,6 +84,7 @@ import {
 } from "@/lib/distribution-checks";
 import { supplyVerdict, type SupplyFacts } from "@/lib/distribution-supply";
 import { listOpenSales, openSaleRemaining, readLamports, readPlatformPause, recentTreasuryTransfers } from "@/lib/distribution-chain";
+import { liveSales, nowSeconds } from "@/lib/sale-liveness";
 import {
   MAX_TRANSACTIONS_PER_PROMPT,
   lamportsNeeded,
@@ -704,9 +705,10 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         // Never below the class's sale price: the ledger refuses a mint valued under it (TREASURY_VALUE_BELOW_FLOOR).
         const mintValueE6 = treasuryValueE6(valueE6, saleReferencePriceE6(reservations)) ?? valueE6;
         const amountEur = treasuryMintEur({ units: short, usdPerTokenE6: mintValueE6, eurPerUsdc });
-        // Close Primary issuance again in the same transaction unless a sale needs it open: one Open (of any
-        // issuer), or this class's approved sale waiting to be opened ("Both": the sale opens after the sends).
-        const repause = (await listOpenSales(rpc)).length === 0 && liveApprovals.length === 0;
+        // Close Primary issuance again in the same transaction unless a sale needs it open: one Open that can
+        // still take a buy (of any issuer; an ended or sold-out one only waits to be closed), or this class's
+        // approved sale waiting to be opened ("Both": the sale opens after the sends).
+        const repause = liveSales(await listOpenSales(rpc), nowSeconds()).length === 0 && liveApprovals.length === 0;
         // The send path's pause gate reads the flags again, not its 10 s cache.
         clearPauseFlagsCache();
         const minted = await runTreasuryMint({

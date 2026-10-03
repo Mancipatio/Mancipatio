@@ -228,6 +228,31 @@ describe("POST /api/sale-requests/list", () => {
     expect((await call(list, ADMIN, { pending: true })).body.data).toEqual([]);
   });
 
+  it("each row names the reservation made for it (the pre-clear check's own approval); its sale on chain makes it opened at once", async () => {
+    await call(submit, ISSUER, terms());
+    const at = new Date(Date.parse(storedRequest()!.requested_at) + 1000).toISOString();
+    const APPROVAL = "9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin";
+    db.ref!.rows("sale_capacity_reservations").push({
+      network: "devnet", kind: "sale", share_class_pda: SHARE_CLASS, status: "reserved", release_reason: null, created_at: at,
+      approval_pda: APPROVAL, sale_pda: SALE, sale_id: 3,
+    });
+    const reservation = { approval_pda: APPROVAL, sale_pda: SALE, sale_id: "3" };
+    expect((await call(list, ADMIN, { pending: true })).body.data).toEqual([expect.objectContaining({ outcome: "approved", reservation })]);
+    expect((await call(list, ISSUER, { share_class: SHARE_CLASS })).body.data).toEqual([expect.objectContaining({ outcome: "approved", reservation })]);
+    // A Sale of another class at that address is not this one.
+    state.sale = { shareClass: OTHER, authority: ISSUER };
+    expect((await call(list, ADMIN, { pending: true })).body.data).toEqual([expect.objectContaining({ outcome: "approved" })]);
+    // open_sale ran (the Sale account exists) but the retry worker has not consumed the reservation yet: opened, off the
+    // operator's list — "Approve sale" is never offered for it again.
+    state.sale = { shareClass: SHARE_CLASS, authority: ISSUER };
+    expect((await call(list, ADMIN, { pending: true })).body.data).toEqual([]);
+    expect((await call(list, ISSUER, { share_class: SHARE_CLASS })).body.data).toEqual([expect.objectContaining({ outcome: "opened" })]);
+    // A chain read that fails leaves it approved (the admin row then offers neither Approve nor Decline while the approval is gone).
+    const { fetchMaybeSale } = await import("@/lib/generated/asset_registry");
+    vi.mocked(fetchMaybeSale).mockRejectedValueOnce(new Error("rpc down"));
+    expect((await call(list, ADMIN, { pending: true })).body.data).toEqual([expect.objectContaining({ outcome: "approved", reservation })]);
+  });
+
   it("mainnet: an offering not cleared is said in the operator's list (the reserve refuses it)", async () => {
     await call(submit, ISSUER, terms());
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");

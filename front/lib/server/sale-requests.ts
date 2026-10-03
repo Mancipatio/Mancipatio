@@ -16,7 +16,7 @@ import "server-only";
 
 import type { Address } from "@solana/kit";
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { AssetStatus, fetchMaybeAsset, fetchMaybeShareClass } from "@/lib/generated/asset_registry";
+import { AssetStatus, fetchMaybeAsset, fetchMaybeSale, fetchMaybeShareClass } from "@/lib/generated/asset_registry";
 import { listOpenSales, openSaleRemaining } from "@/lib/distribution-chain";
 import { roomToCreate } from "@/lib/distribution-supply";
 import { approvalUnits, parseSaleRequest, type SaleRequest } from "@/lib/public-sale";
@@ -156,39 +156,99 @@ export function protectSaleRequest(
  * What became of a "requested" request, read from the raise-cap ledger (the
  * operator's reserve step writes a sale reservation; it is consumed when the
  * sale opens, booked or released as closed_unsold when it closes):
- * the newest sale reservation of the class made since the request.
+ * the newest sale reservation of the class made since the request. A
+ * reservation still "reserved" whose Sale account already exists on chain
+ * (open_sale ran; the retry worker has not consumed it yet) reads as
+ * "opened" — so the operator's list drops the request as soon as its sale
+ * opens, and never offers "Approve sale" for it again.
  */
 export type RequestOutcome = "approved" | "opened" | "closed" | null;
 
-type ReservationOutcomeRow = { share_class_pda: string; status: string; release_reason: string | null; created_at: string };
+/** The reservation the operator made for a request: its approval (the pre-clear check's "this one") and sale. */
+export type RequestReservation = { approval_pda: string | null; sale_pda: string | null; sale_id: string | null };
+
+type ReservationOutcomeRow = {
+  share_class_pda: string;
+  status: string;
+  release_reason: string | null;
+  created_at: string;
+  approval_pda?: string | null;
+  sale_pda?: string | null;
+  sale_id?: string | number | null;
+};
+
+/** The newest sale reservation of the request's class made since the request (released ones skipped unless closed_unsold). */
+function requestReservationRow(
+  request: Pick<SaleRequest, "share_class" | "requested_at">,
+  rows: readonly ReservationOutcomeRow[],
+): ReservationOutcomeRow | null {
+  const since = Date.parse(request.requested_at);
+  return (
+    rows
+      .filter((r) => r.share_class_pda === request.share_class && Date.parse(r.created_at) >= since)
+      .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
+      .find((r) => r.status !== "released" || r.release_reason === "closed_unsold") ?? null
+  );
+}
 
 export function outcomeOf(request: Pick<SaleRequest, "share_class" | "requested_at">, rows: readonly ReservationOutcomeRow[]): RequestOutcome {
-  const since = Date.parse(request.requested_at);
-  const newest = rows
-    .filter((r) => r.share_class_pda === request.share_class && Date.parse(r.created_at) >= since)
-    .sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))
-    .find((r) => r.status !== "released" || r.release_reason === "closed_unsold");
+  const newest = requestReservationRow(request, rows);
   if (!newest) return null;
   if (newest.status === "reserved") return "approved";
   if (newest.status === "consumed") return "opened";
   return "closed";
 }
 
-/** The outcome of each request (one ledger read for all of them). */
-export async function requestOutcomes(sb: SupabaseClient, requests: readonly SaleRequest[]): Promise<Map<string, RequestOutcome>> {
-  const out = new Map<string, RequestOutcome>();
+export type RequestState = { outcome: RequestOutcome; reservation: RequestReservation | null };
+
+/** Whether a Sale account of `shareClass` exists at `sale` (confirmed); null when the chain could not be read. */
+async function saleOpened(sale: string, shareClass: string): Promise<boolean | null> {
+  try {
+    const found = await fetchMaybeSale(getServerRpc(), sale as Address, { commitment: "confirmed", abortSignal: AbortSignal.timeout(8_000) });
+    return found.exists && found.data.shareClass === shareClass;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The outcome and the reservation of each request (one ledger read for all
+ * of them, and one Sale read per request still "approved" with a sale
+ * address; a chain read that fails leaves it "approved").
+ */
+export async function requestStates(sb: SupabaseClient, requests: readonly SaleRequest[]): Promise<Map<string, RequestState>> {
+  const out = new Map<string, RequestState>();
   if (requests.length === 0) return out;
   const oldest = requests.reduce((min, r) => (r.requested_at < min ? r.requested_at : min), requests[0].requested_at);
   const { data, error } = await sb
     .from("sale_capacity_reservations")
-    .select("share_class_pda,status,release_reason,created_at")
+    .select("share_class_pda,status,release_reason,created_at,approval_pda,sale_pda,sale_id")
     .eq("network", detectNetwork())
     .eq("kind", "sale")
     .in("share_class_pda", [...new Set(requests.map((r) => r.share_class))])
     .gte("created_at", oldest);
   if (error) throw new SiwsError(503, "Could not read the sale approvals of the requests");
-  for (const r of requests) out.set(r.id, outcomeOf(r, (data ?? []) as ReservationOutcomeRow[]));
+  const rows = (data ?? []) as ReservationOutcomeRow[];
+  await Promise.all(
+    requests.map(async (r) => {
+      const row = requestReservationRow(r, rows);
+      let outcome = outcomeOf(r, rows);
+      if (outcome === "approved" && row?.sale_pda && (await saleOpened(row.sale_pda, r.share_class)) === true) outcome = "opened";
+      out.set(r.id, {
+        outcome,
+        reservation: row
+          ? { approval_pda: row.approval_pda ?? null, sale_pda: row.sale_pda ?? null, sale_id: row.sale_id === null || row.sale_id === undefined ? null : String(row.sale_id) }
+          : null,
+      });
+    }),
+  );
   return out;
+}
+
+/** The outcome of each request (lib/server/sale-requests requestStates). */
+export async function requestOutcomes(sb: SupabaseClient, requests: readonly SaleRequest[]): Promise<Map<string, RequestOutcome>> {
+  const states = await requestStates(sb, requests);
+  return new Map([...states].map(([id, state]) => [id, state.outcome]));
 }
 
 /** A request still waiting for the operator: "requested" and not yet approved, opened or closed. */
