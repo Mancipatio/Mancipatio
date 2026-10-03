@@ -37,6 +37,15 @@
 // passport issuance until compliance resolves it), high on mainnet and
 // medium elsewhere, emailed as label and time only. A read or write that
 // fails is never a verdict: the function throws and the job retries.
+//
+// Anyone can make such buys in any number (fresh wallets, several buyer
+// signers in one transaction), so the rows are coalesced for the outbox
+// (unlinkedBuyNotify): only a row with no open alert for its wallet and no
+// other unlinked-buy row still pending is emailed; the rest are written with
+// notify_state 'skipped' (open, on /admin/compliance, blocking the passport
+// like any other). A burst therefore puts about one row per digest into the
+// outbox and never holds back other high alerts; the digest also reads
+// critical rows before high ones (system-alerts notifyPendingAlerts).
 
 import "server-only";
 
@@ -197,12 +206,27 @@ const DB_TIMEOUT_MS = 8_000;
 const dbSignal = (signal: AbortSignal) => AbortSignal.any([signal, AbortSignal.timeout(DB_TIMEOUT_MS)]);
 
 /**
+ * Whether a new row is emailed. `pending`: it enters the outbox. `skipped`:
+ * another row's email covers it (`alert_id`): the wallet already has an open
+ * or escalated unlinked-buy alert (`wallet-alert-open`; compliance has the
+ * case), or another unlinked-buy row is still pending in the outbox
+ * (`alert-pending`; its digest line points to /admin/compliance, where this
+ * row is listed too). The email names no wallet, so nothing is lost.
+ */
+export type UnlinkedBuyNotify =
+  | { state: "pending" }
+  | { state: "skipped"; reason: "wallet-alert-open" | "alert-pending"; alert_id: string };
+
+const PENDING: UnlinkedBuyNotify = { state: "pending" };
+
+/**
  * Pure: the compliance_alerts row of one (transaction, buyer). An AML row
  * (no system category: it names a wallet), emailed through the 0072 outbox
- * (notify_state pending), idempotent on (network, dedup_key) (0072's unique
- * index; the key fits compliance_alerts_dedup_key_format).
+ * (notify_state pending) unless another row's email covers it (skipped, the
+ * covering row in evidence.not_emailed), idempotent on (network, dedup_key)
+ * (0072's unique index; the key fits compliance_alerts_dedup_key_format).
  */
-export function unlinkedBuyAlertRow(alert: UnlinkedBuyAlert, nowIso: string) {
+export function unlinkedBuyAlertRow(alert: UnlinkedBuyAlert, nowIso: string, notify: UnlinkedBuyNotify = PENDING) {
   return {
     network: alert.network,
     client_id: alert.clientId,
@@ -210,29 +234,59 @@ export function unlinkedBuyAlertRow(alert: UnlinkedBuyAlert, nowIso: string) {
     source: UNLINKED_BUY_SOURCE,
     severity: alert.severity,
     confidence: 100,
-    evidence: alert.evidence,
+    evidence: notify.state === "pending"
+      ? alert.evidence
+      : { ...alert.evidence, not_emailed: { reason: notify.reason, alert_id: notify.alert_id } },
     summary: alert.summary.slice(0, 500),
     status: "open",
     tx_signature: alert.signature,
     dedup_key: unlinkedBuyDedupKey(alert.signature, alert.buyer),
     category: null,
-    notify_state: "pending",
+    notify_state: notify.state,
     next_notify_at: nowIso,
   };
 }
 
 /**
+ * Whether a new unlinked-buy row of `wallet` is emailed (UnlinkedBuyNotify).
+ * At most one such row is pending in the outbox at a time, so a burst (any
+ * number of fresh wallets) adds about one row per digest and never holds
+ * back other alerts. Not atomic: jobs running concurrently (the alarm
+ * worker's CONCURRENCY) may each insert one pending row. THROWS when a read
+ * fails (the job retries).
+ */
+export async function unlinkedBuyNotify(
+  sb: SupabaseClient, network: Network, wallet: string, signal: AbortSignal,
+): Promise<UnlinkedBuyNotify> {
+  const alerts = () => sb.from("compliance_alerts").select("id").eq("network", network).eq("source", UNLINKED_BUY_SOURCE);
+  const [open, pending] = await Promise.all([
+    alerts().eq("wallet", wallet).in("status", ["open", "escalated"]).limit(1).abortSignal(dbSignal(signal)),
+    alerts().eq("notify_state", "pending").limit(1).abortSignal(dbSignal(signal)),
+  ]);
+  if (open.error || pending.error) throw new Error("Compliance alerts unavailable");
+  const first = (res: { data: unknown }) => ((res.data ?? []) as { id?: unknown }[])[0]?.id;
+  const openId = first(open);
+  if (typeof openId === "string") return { state: "skipped", reason: "wallet-alert-open", alert_id: openId };
+  const pendingId = first(pending);
+  if (typeof pendingId === "string") return { state: "skipped", reason: "alert-pending", alert_id: pendingId };
+  return PENDING;
+}
+
+/**
  * Opens the alert of one (transaction, buyer), idempotent on (network,
  * dedup_key): an existing row, or a concurrent insert's unique violation
- * (23505), is "already raised". Returns whether a row was inserted; THROWS
- * on any other database error (the job retries).
+ * (23505), is "already raised". A new row is emailed only when no other
+ * row's email covers it (unlinkedBuyNotify). Returns whether a row was
+ * inserted; THROWS on any other database error (the job retries).
  */
 export async function raiseUnlinkedBuyAlert(sb: SupabaseClient, alert: UnlinkedBuyAlert, signal: AbortSignal): Promise<boolean> {
-  const row = unlinkedBuyAlertRow(alert, new Date().toISOString());
+  const dedupKey = unlinkedBuyDedupKey(alert.signature, alert.buyer);
   const existing = await sb.from("compliance_alerts").select("id")
-    .eq("network", alert.network).eq("dedup_key", row.dedup_key).limit(1).abortSignal(dbSignal(signal));
+    .eq("network", alert.network).eq("dedup_key", dedupKey).limit(1).abortSignal(dbSignal(signal));
   if (existing.error) throw new Error("Compliance alerts unavailable");
   if ((existing.data ?? []).length > 0) return false;
+  const notify = await unlinkedBuyNotify(sb, alert.network, alert.buyer, signal);
+  const row = unlinkedBuyAlertRow(alert, new Date().toISOString(), notify);
   const { error } = await sb.from("compliance_alerts").insert(row).abortSignal(dbSignal(signal));
   if (!error) return true;
   if (error.code === "23505") return false;

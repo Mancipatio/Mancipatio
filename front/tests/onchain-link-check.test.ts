@@ -52,6 +52,14 @@ const MINT = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
 const OTHER_MINT = "8yY7nAbZip1FPakFXDh5sTsxhXnxKdSMo4D8Zybf6GbQ";
 const SQUADS = "SQDS4ep65T869zMMBKyuUq6aD6EgTu8psMjkvj52pCf";
 const SIG = "5".repeat(88);
+const SIG2 = "6".repeat(88);
+const SIG3 = "7".repeat(88);
+/** Wallets that never accepted the Terms (fresh). */
+const FRESH = [
+  "8JouJg4GTs3S9dXjv8HC1CqLS8uaTqz7ahE2hUCf9E4e",
+  "F8bsGKzgjHcr6q4NP286XtUYbR7joxkRjcvC2qAxgd7y",
+  "4fBwaTZ2dewX6xbwjJKqdHLftveU9xwFJyFBsYt5Z2p8",
+];
 const CURRENT = tosVersionFor("mainnet");
 const OLD = DEVNET_TOS_VERSION;
 /** The buy's block time: after the current mainnet version's date. */
@@ -74,6 +82,11 @@ const accept = (wallet: string, version: string, createdAt: string) =>
   db.ref!.rows("tos_acceptances").push({ id: `tos-${wallet}-${version}`, wallet, version, created_at: createdAt, source: "wallet-gate" });
 const setTx = (instructions: { ix: Ix; inner?: Ix[] }[], blockTime: number | null = T / 1000, err?: unknown) => {
   state.txs[SIG] = buildTx({ signature: SIG, instructions, logs: null, blockTime, ...(err ? { err } : {}) }).tx;
+};
+/** Another finalized transaction (one buy per wallet, at T) and its job, replacing the queued one. */
+const nextTx = (signature: string, buyers: string[]) => {
+  state.txs[signature] = buildTx({ signature, instructions: buyers.map((b) => ({ ix: buyIx(b) })), logs: null, blockTime: T / 1000 }).tx;
+  db.ref!.rows("onchain_event_jobs")[0] = { ...job({ signature }) };
 };
 const run = (over: Partial<EventJob> = {}, sb: unknown = db.ref!.client) =>
   processEventJob(job(over), signal(), Date.now() + 5_000, sb as never);
@@ -305,6 +318,82 @@ describe("processEventJob: the platform link of every buy (D2)", () => {
     };
     expect(await run({}, conflicting)).toBe("complete");
     expect(jobRow()).toMatchObject({ status: "complete", alerts: 1 });
+  });
+
+  it("one email per wallet: a later unlinked buy while the wallet's alert is open is recorded, not emailed", async () => {
+    setTx([{ ix: buyIx(BUYER) }]);
+    afterGrace();
+    expect(await run()).toBe("complete");
+    const first = alerts()[0];
+    expect(first).toMatchObject({ notify_state: "pending" });
+    expect(first.evidence).not.toHaveProperty("not_emailed");
+    // The digest went out; compliance has not resolved the alert yet.
+    first.notify_state = "sent";
+
+    nextTx(SIG2, [BUYER]);
+    expect(await run({ signature: SIG2 })).toBe("complete");
+    expect(alerts()).toHaveLength(2);
+    const second = alerts()[1];
+    expect(second).toMatchObject({ wallet: BUYER, status: "open", tx_signature: SIG2, notify_state: "skipped", severity: "high" });
+    expect(second.evidence).toMatchObject({ buys_total: 1, not_emailed: { reason: "wallet-alert-open", alert_id: first.id } });
+
+    // Resolved: the wallet's next unlinked buy is emailed again.
+    first.status = "resolved";
+    second.status = "resolved";
+    nextTx(SIG3, [BUYER]);
+    expect(await run({ signature: SIG3 })).toBe("complete");
+    expect(alerts()[2]).toMatchObject({ tx_signature: SIG3, notify_state: "pending" });
+  });
+
+  it("a burst (fresh wallets, several buyers in one transaction) keeps one unlinked-buy row in the outbox", async () => {
+    const wallets = [BUYER, SECOND, FRESH[0]];
+    setTx(wallets.map((w) => ({ ix: buyIx(w) })));
+    afterGrace();
+    expect(await run()).toBe("complete");
+    expect(jobRow()).toMatchObject({ status: "complete", alerts: 3 });
+    // Every buyer has its own open alert (the passport gate); one is emailed.
+    expect(alerts().map((a) => [a.wallet, a.status, a.notify_state])).toEqual([
+      [wallets[0], "open", "pending"], [wallets[1], "open", "skipped"], [wallets[2], "open", "skipped"],
+    ]);
+    expect(alerts()[1].evidence).toMatchObject({ not_emailed: { reason: "alert-pending", alert_id: alerts()[0].id } });
+
+    // Another fresh wallet in another transaction while that row is still pending: not emailed either.
+    nextTx(SIG2, [FRESH[1]]);
+    expect(await run({ signature: SIG2 })).toBe("complete");
+    expect(alerts()[3]).toMatchObject({ wallet: FRESH[1], notify_state: "skipped" });
+
+    // Once the digest has gone out, the next fresh wallet's row is emailed.
+    alerts()[0].notify_state = "sent";
+    nextTx(SIG3, [FRESH[2]]);
+    expect(await run({ signature: SIG3 })).toBe("complete");
+    expect(alerts()[4]).toMatchObject({ wallet: FRESH[2], notify_state: "pending" });
+    expect(alerts()[4].evidence).not.toHaveProperty("not_emailed");
+  });
+
+  it("the outbox check fails closed: an unreadable alert table retries, nothing is inserted unemailed", async () => {
+    setTx([{ ix: buyIx(BUYER) }]);
+    afterGrace();
+    const base = db.ref!.client;
+    let reads = 0;
+    // The dedup lookup answers; the coalescing reads fail.
+    const flaky = {
+      rpc: base.rpc,
+      from: (table: string) => {
+        if (table !== "compliance_alerts") return base.from(table);
+        const builder = base.from(table) as Record<string, unknown>;
+        return { ...builder, select: (...args: unknown[]) => {
+          reads++;
+          if (reads === 1) return (builder.select as (...a: unknown[]) => unknown)(...args);
+          const failing: Record<string, unknown> = {};
+          for (const m of ["eq", "in", "limit"]) failing[m] = () => failing;
+          failing.abortSignal = async () => ({ data: null, error: { code: "XX000", message: "down" } });
+          return failing;
+        } };
+      },
+    };
+    expect(await run({}, flaky)).toBe("pending");
+    expect(jobRow()).toMatchObject({ status: "pending", last_error: "DB_UNAVAILABLE" });
+    expect(alerts()).toHaveLength(0);
   });
 
   it("never decides on an error: an unreadable acceptance table or a failed insert retries (DB_UNAVAILABLE)", async () => {

@@ -11,7 +11,9 @@ import { applyMigrations, SUPABASE_PLATFORM_SQL } from "./helpers/migrations";
 vi.mock("server-only", () => ({}));
 
 import { ASSET_REGISTRY_PROGRAM_ADDRESS, getBuyInstructionDataEncoder } from "@/lib/generated/asset_registry";
-import { buysOf, unlinkedBuyAlertRow, unlinkedBuySeverity, unlinkedBuySummary } from "@/lib/server/onchain-link-check";
+import {
+  buysOf, unlinkedBuyAlertRow, unlinkedBuySeverity, unlinkedBuySummary, type UnlinkedBuyNotify,
+} from "@/lib/server/onchain-link-check";
 import { buildTx } from "./helpers/chain-tx";
 
 const db = new LocalPostgres();
@@ -23,17 +25,17 @@ const MINT = "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2";
 const SIG = "5".repeat(88);
 
 /** The exact row raiseUnlinkedBuyAlert inserts, for a realistic buy. */
-function row() {
-  const { tx } = buildTx({ signature: SIG, instructions: [{ ix: {
+function row(signature: string = SIG, notify?: UnlinkedBuyNotify) {
+  const { tx } = buildTx({ signature, instructions: [{ ix: {
     program: ASSET_REGISTRY_PROGRAM_ADDRESS, accounts: [BUYER, SALE, CLASS, MINT],
     data: new Uint8Array(getBuyInstructionDataEncoder().encode({ amount: BigInt(250) })),
   } }] });
   const [{ buys }] = buysOf(tx);
   return unlinkedBuyAlertRow({
-    network: "devnet", signature: SIG, buyer: BUYER, clientId: null, severity: unlinkedBuySeverity("devnet"),
+    network: "devnet", signature, buyer: BUYER, clientId: null, severity: unlinkedBuySeverity("devnet"),
     summary: unlinkedBuySummary(BUYER, buys, "2026-07-18"),
     evidence: { check: "platform-link (D2)", buyer: BUYER, buys, buys_total: 1, terms_accepted: null, purchase_recorded: false },
-  }, new Date().toISOString());
+  }, new Date().toISOString(), notify);
 }
 /** INSERT of a JS row through jsonb_populate_record: only its own columns, the rest keep their defaults. */
 function insert(values: Record<string, unknown>) {
@@ -75,6 +77,18 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("off-platform buy 
     expect(q(`select count(*) from public.compliance_alerts where dedup_key = '${row().dedup_key}'`)).toBe("1");
   });
 
+  it("a coalesced row (skipped: another row's email covers it) passes the constraints, opens for the wallet, stays out of the outbox", () => {
+    const first = q(`select id from public.compliance_alerts where dedup_key = '${row().dedup_key}'`);
+    const id = insert(row("6".repeat(88), { state: "skipped", reason: "wallet-alert-open", alert_id: first }));
+    expect(q(`select status||'|'||notify_state||'|'||(evidence->'not_emailed'->>'reason')||'|'||(evidence->'not_emailed'->>'alert_id')
+              from public.compliance_alerts where id = '${id}'`)).toBe(`open|skipped|wallet-alert-open|${first}`);
+    expect(q(`select count(*) from public.compliance_alerts where network = 'devnet' and wallet = '${BUYER}'
+              and status in ('open', 'escalated')`)).toBe("2");
+    // The outbox (notifyPendingAlerts) reads pending rows only.
+    expect(q(`select count(*) from public.compliance_alerts where network = 'devnet' and notify_state = 'pending'
+              and source = 'onchain:unlinked-buy'`)).toBe("0");
+  });
+
   it("every column the check reads exists", () => {
     for (const sql of [
       `select wallet, version, created_at from public.tos_acceptances where wallet in ('${BUYER}')`,
@@ -83,6 +97,10 @@ describe.skipIf(process.env.RUN_LOCAL_POSTGRES_TESTS !== "1")("off-platform buy 
       `select wallet from public.account_wallets where network = 'devnet' and wallet = '${BUYER}' limit 1`,
       `select id from public.clients where network = 'devnet' and wallet = '${BUYER}' order by created_at limit 1`,
       `select id from public.compliance_alerts where network = 'devnet' and dedup_key = '${row().dedup_key}' limit 1`,
+      `select id from public.compliance_alerts where network = 'devnet' and source = 'onchain:unlinked-buy' and wallet = '${BUYER}'
+         and status in ('open', 'escalated') limit 1`,
+      `select id from public.compliance_alerts where network = 'devnet' and source = 'onchain:unlinked-buy'
+         and notify_state = 'pending' limit 1`,
     ]) expect(() => q(sql), sql).not.toThrow();
   });
 });

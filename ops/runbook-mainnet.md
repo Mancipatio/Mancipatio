@@ -2415,6 +2415,18 @@ after the fact (`front/lib/server/onchain-link-check.ts`, no migration):
   units, plus `via_cpi`, `purchase_recorded`, `account_linked`,
   `terms_version_required` and `terms_accepted` (the wallet's latest
   acceptance, if any). The email shows the label and the time only.
+- Anyone can make such buys in any number (fresh wallets, several buyers in
+  one transaction), so the email is coalesced: a row is emailed only when
+  its wallet has no open or escalated `onchain:unlinked-buy` alert and no
+  other `onchain:unlinked-buy` row is still pending in the outbox. The rest
+  are written with `notify_state = 'skipped'` and
+  `evidence.not_emailed = {reason, alert_id}` (`wallet-alert-open` or
+  `alert-pending`, and the row whose email covers it). They are open alerts
+  like any other: listed in `/admin/compliance`, blocking the passport.
+  One email can therefore stand for many buys: review every open
+  `onchain:unlinked-buy` row (Operations query below), not only the one
+  the email names. A burst puts about one row per digest into the outbox,
+  so it never holds back other alerts.
 - The 2 minutes cover a wallet that accepts the Terms right after buying,
   and clock skew. Until then the job waits
   (`onchain_event_jobs.last_error = 'LINK_GRACE'`), then decides once; it
@@ -2806,7 +2818,9 @@ instead), and `fx-expiring` is about a manual rate only.
 - Minimal-format on-chain alarms (holder or issuer related) carry only their
   own evidence fields, never the decoded arguments (no holder wallet or
   amount in clawback evidence).
-- The digest reads critical and high rows first, then fills the rest.
+- The digest reads critical rows first, then high, then fills the rest
+  (oldest first within each): a backlog of high rows never holds back a
+  newer critical one.
 - `report_incident` reopens only an alert the system resolved; a person's
   resolution or dismissal stays, and a refail opens a new alert.
 - `FX_LOCK_DRIFT` runs in `bookingFlags`, i.e. on every booking path;
