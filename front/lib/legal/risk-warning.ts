@@ -40,7 +40,7 @@ export const NO_INVESTOR_PROTECTION =
   "Digital asset transactions are not covered by deposit insurance or by any investor protection or compensation scheme.";
 
 export const PURCHASE_RISK_WARNING: RiskWarning = {
-  status: "draft",
+  status: "counsel",
   title: "Risk warning",
   points: [
     "You can lose part or all of the money you commit.",

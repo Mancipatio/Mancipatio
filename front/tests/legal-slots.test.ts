@@ -449,7 +449,7 @@ describe("mainnetLegalProblems", () => {
     ]);
   });
 
-  it("mainnet legal slots report (what a mainnet build refuses today)", () => {
+  it("mainnet legal slots report (complete since counsel confirmed 2026-10-03)", () => {
     // No licence is recorded, on counsel's written opinion that none is
     // needed: a mainnet build sets MAINNET_LICENSE_NOT_REQUIRED=true.
     const problems = mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, MAINNET_LEGAL_SLOTS);
@@ -465,11 +465,11 @@ describe("mainnetLegalProblems", () => {
     // until counsel confirms its wording: the risk warning's status is
     // "draft", the one refusal. In the commit that records counsel's
     // confirmation the status becomes "counsel" and this expects [] again.
-    expect(problems).toEqual([expect.stringMatching(/^Purchase risk warning: still engineering's draft/)]);
-    // Without counsel's waiver the licence is refused too.
+    // Counsel confirmed the exact 2026-10-03 wording (owner, 2026-10-03): complete.
+    expect(problems).toEqual([]);
+    // Without counsel's waiver the licence is refused.
     expect(mainnetLegalProblems({}, MAINNET_LEGAL_SLOTS)).toEqual([
       expect.stringMatching(/^operator\.licence is not recorded/),
-      expect.stringMatching(/^Purchase risk warning: still engineering's draft/),
     ]);
     // Everything else is complete: with counsel's status the slots pass.
     expect(
@@ -482,7 +482,7 @@ describe("mainnetLegalProblems", () => {
 });
 
 describe("assertBuildMainnetLegal (next.config.ts)", () => {
-  it("refuses a mainnet production build of the slots committed today until counsel confirms the 2026-10-03 wording", () => {
+  it("builds the slots committed today (counsel confirmed the 2026-10-03 wording) and still refuses a draft risk warning", () => {
     const env = { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "true" };
     const refusal = (vars: Record<string, string>, slots = MAINNET_LEGAL_SLOTS) => {
       try {
@@ -492,13 +492,11 @@ describe("assertBuildMainnetLegal (next.config.ts)", () => {
       }
       return "";
     };
-    // With counsel's licence waiver: the risk warning's "draft" status is the one refusal.
-    const held = refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" });
-    expect(held).toMatch(/^Refusing a mainnet build: the operator and legal slots are not complete/);
-    expect(held).toContain("Purchase risk warning: still engineering's draft");
-    for (const settled of ["operator.", "Terms of Service:", "Privacy Policy:", "Terms acceptance dialog:"]) {
-      expect(held, settled).not.toContain(settled);
-    }
+    // Counsel confirmed the 2026-10-03 wording: with the licence waiver the committed slots build.
+    expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" })).toBe("");
+    // A draft risk warning would still be refused.
+    const draft = { ...MAINNET_LEGAL_SLOTS, riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "draft" as const } };
+    expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" }, draft)).toContain("Purchase risk warning: still engineering's draft");
     // Counsel's status (the commit that records the confirmation) lets it through.
     const confirmed = { ...MAINNET_LEGAL_SLOTS, riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "counsel" as const } };
     expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" }, confirmed)).toBe("");
@@ -633,9 +631,8 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
     expect(text).not.toContain("hardware wallets for the keys that control the platform");
   });
 
-  it("the purchase risk warning is held as a draft until counsel confirms points 3, 4, 7 and 10", () => {
-    // "counsel" again in the commit that records counsel's confirmation.
-    expect(PURCHASE_RISK_WARNING.status).toBe("draft");
+  it("the purchase risk warning carries counsel's status (confirmed 2026-10-03)", () => {
+    expect(PURCHASE_RISK_WARNING.status).toBe("counsel");
     expect(PURCHASE_RISK_WARNING.points).toHaveLength(10);
     expect(PURCHASE_RISK_WARNING.points[1]).toBe(NO_INVESTOR_PROTECTION);
     expect(forbiddenMainnetPhrases([PURCHASE_RISK_WARNING.title, ...PURCHASE_RISK_WARNING.points, PURCHASE_RISK_WARNING.acknowledgement].join("\n"))).toEqual([]);

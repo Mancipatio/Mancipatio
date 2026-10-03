@@ -247,7 +247,8 @@ else
   #   expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
   #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
   # (drop the waiver there if a licence is ever recorded).
-  expect_refusal "Purchase risk warning: still engineering's draft" \
+  # Counsel confirmed the 2026-10-03 wording (owner, 2026-10-03).
+  expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
 fi
 write_legal_fixture incomplete-operator
