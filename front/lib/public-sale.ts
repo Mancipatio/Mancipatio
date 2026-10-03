@@ -22,14 +22,14 @@
 //   buyers   the sale page;
 //   end      super admin clears 0x20 → issuer "End and collect" (close_sale
 //            to the issuer's USDC account; an Admin issuer key sets 0x20 and,
-//            with no other sale open, 0x02 again in the same transaction) →
-//            otherwise any Admin re-pauses.
+//            unless another Open sale can still take a buy, 0x02 again in
+//            the same transaction) → otherwise any Admin re-pauses.
 //
 // Pure and node-safe: tests/public-sale.test.ts.
 import type { Address, ReadonlyUint8Array } from "@solana/kit";
 import { CHAIN_CLOCK_MARGIN_SECONDS, MAX_SALE_DURATION_SECONDS } from "@/lib/deadline-bounds";
 import { PAUSE_ISSUER_PROCEEDS, PAUSE_PRIMARY } from "@/lib/pause-flags";
-import { saleBuyState, type SaleBuyState, type SaleBuyWindow } from "@/lib/sale-liveness";
+import { freezeUnread, isLiveSale, liveSales, saleBuyState, type SaleBuyState, type SaleWithFreeze } from "@/lib/sale-liveness";
 import { fromBaseUnits, toBaseUnits } from "@/lib/sale-approvals";
 import { companyFiguresFrom } from "@/lib/distribution-rows";
 import { parsePrice, perTokenPriceE6 } from "@/lib/tokenize-shares";
@@ -285,7 +285,7 @@ export function publicSaleStage(input: {
 type SaleRef = { address: Address | string; shareClass: Address | string };
 type ApprovalRef = { address: Address | string; shareClass: Address | string; expiresAt: bigint };
 /** An Open sale as the check reads it: its end and supply, and whether its issuer is frozen (null: not read). */
-export type PreClearSale = SaleRef & SaleBuyWindow & { frozen?: boolean | null };
+export type PreClearSale = SaleRef & SaleWithFreeze;
 
 export type PreClearResult = {
   /** Open sales that can still take a buy: buys resume in them the moment 0x02 is clear. */
@@ -309,9 +309,10 @@ export type PreClearResult = {
  * approvals 0 except the one this sale uses. An Open sale that ended, sold
  * out or whose issuer is frozen takes no buy (lib/sale-liveness) and does
  * not block — so freezing another issuer is a way through; lifting that
- * freeze while 0x02 is clear resumes its buys. Expired approvals cannot be
- * opened (open_sale refuses them) and do not count. Run again right before
- * signing.
+ * freeze while 0x02 is clear resumes its buys. A freeze that could not be
+ * read counts as none (the "pre-clear" FreezePolicy): the check never passes
+ * on an unknown. Expired approvals cannot be opened (open_sale refuses them)
+ * and do not count. Run again right before signing.
  */
 export function preClearCheck(input: {
   openSales: readonly PreClearSale[];
@@ -324,9 +325,12 @@ export function preClearCheck(input: {
   const otherOpenSales: SaleRef[] = [];
   const idleOpenSales: PreClearResult["idleOpenSales"] = [];
   for (const s of input.openSales) {
-    const state = saleBuyState(s, now, s.frozen ?? null);
-    if (state === "live") otherOpenSales.push({ address: s.address, shareClass: s.shareClass });
-    else idleOpenSales.push({ address: s.address, shareClass: s.shareClass, state });
+    if (isLiveSale(s, now, "pre-clear")) {
+      otherOpenSales.push({ address: s.address, shareClass: s.shareClass });
+      continue;
+    }
+    const state = saleBuyState(s, now, s.frozen);
+    if (state !== "live") idleOpenSales.push({ address: s.address, shareClass: s.shareClass, state });
   }
   const strayApprovals = live.filter((a) => a.address !== input.thisApproval);
   const thisApprovalLive = input.thisApproval !== null && live.some((a) => a.address === input.thisApproval);
@@ -347,12 +351,18 @@ export function preClearCheck(input: {
 }
 
 // ── Ending a sale ───────────────────────────────────────────────────────────
+//
+// Every rule below that sets 0x02 again counts the Open sales that can still
+// take a buy with the "re-pause" FreezePolicy (lib/sale-liveness): a frozen
+// issuer's sale takes none, and a freeze that could not be read never hides
+// the offer (closing Primary issuance is always safe). Its callers pass every
+// Open sale with its issuer's freeze (lib/open-sales-chain).
 
 /**
  * The bits to set again once the sale closed: 0x20 (issuer proceeds) when
  * clear, and 0x02 (Primary issuance) when clear and no other sale can still
- * take a buy (`otherOpenSales`: Open sales that are live — lib/sale-liveness;
- * one that ended or sold out does not need 0x02). 0 when nothing is left to set.
+ * take a buy (`otherOpenSales`: how many Open sales are live). 0 when nothing
+ * is left to set.
  */
 export function repauseMask(flags: number, otherOpenSales: number): number {
   let mask = 0;
@@ -373,40 +383,87 @@ export type CloseStep =
 /**
  * "End and collect", in order: 0x20 cleared (super admin) → close_sale
  * (issuer) → 0x20 and 0x02 set again (any Admin; the issuer's own close
- * transaction when its key is an Admin). `otherOpenSales`: Open sales other
- * than this one, of any issuer, that can still take a buy (lib/sale-liveness).
+ * transaction when its key is an Admin). `otherSales`: the Open sales other
+ * than this one, of every issuer, with their issuers' freezes; 0x02 is set
+ * again unless one of them can still take a buy.
  */
-export function closeFlowStep(input: { flags: number; saleOpen: boolean; otherOpenSales: number }): CloseStep {
+export function closeFlowStep(input: {
+  flags: number;
+  saleOpen: boolean;
+  otherSales: readonly SaleWithFreeze[];
+  nowSec: number | bigint;
+}): CloseStep {
+  const otherLive = liveSales(input.otherSales, input.nowSec, "re-pause").length;
   if (input.saleOpen) {
     if ((input.flags & PAUSE_ISSUER_PROCEEDS) !== 0) return { step: "clear-proceeds" };
-    return { step: "close", repause: PAUSE_ISSUER_PROCEEDS | (input.otherOpenSales === 0 ? PAUSE_PRIMARY : 0) };
+    return { step: "close", repause: PAUSE_ISSUER_PROCEEDS | (otherLive === 0 ? PAUSE_PRIMARY : 0) };
   }
-  const repause = repauseMask(input.flags, input.otherOpenSales);
+  const repause = repauseMask(input.flags, otherLive);
   return repause !== 0 ? { step: "repause", repause } : { step: "done" };
 }
 
 export type RepausePlan = {
   /** The bits any Admin may set again now (0: none). */
   mask: number;
-  /** Said next to the button: what setting 0x02 again means for approvals waiting to be opened. */
+  /** Said next to the button: what setting 0x02 again means for approvals waiting and for sales whose freeze is unread. */
   warning: string | null;
 };
 
+/** Said wherever 0x02 is offered to be set again although some issuers' freezes could not be read (null: none). */
+export function freezeUnreadWarning(unread: number): string | null {
+  if (unread === 0) return null;
+  const one = unread === 1;
+  return `The freeze of ${one ? "the issuer of 1 Open sale" : `the issuers of ${unread} Open sales`} could not be read: ${one ? "it" : "they"} may still take buys, and closing Primary issuance stops ${one ? "it" : "them"} until the super admin reopens it.`;
+}
+
 /**
- * What /admin/launchpad offers to set again. 0x02 whenever no Open sale can
- * still take a buy — the safe default is closed, and a live approval waiting
- * to be opened is no reason to keep it open (the super admin reopens it after
- * the pre-clear check; a window left open from an earlier sale would let it
- * be opened unchecked). 0x20 only when no sale is Open at all: an Open sale
- * that ended or sold out still needs 0x20 clear to be closed.
+ * What /admin/launchpad offers to set again (`sales`: every Open sale with
+ * its issuer's freeze). 0x02 whenever no Open sale can still take a buy — the
+ * safe default is closed, and a live approval waiting to be opened is no
+ * reason to keep it open (the super admin reopens it after the pre-clear
+ * check; a window left open from an earlier sale would let it be opened
+ * unchecked). 0x20 only when no sale is Open at all: an Open sale that ended,
+ * sold out or whose issuer is frozen still needs 0x20 clear to be closed.
  */
-export function repausePlan(input: { flags: number; openSales: number; liveSales: number; liveApprovals: number }): RepausePlan {
-  if (input.liveSales > 0) return { mask: 0, warning: null };
+export function repausePlan(input: {
+  flags: number;
+  sales: readonly SaleWithFreeze[];
+  nowSec: number | bigint;
+  liveApprovals: number;
+}): RepausePlan {
+  if (liveSales(input.sales, input.nowSec, "re-pause").length > 0) return { mask: 0, warning: null };
   const all = repauseMask(input.flags, 0);
-  const mask = input.openSales > 0 ? all & PAUSE_PRIMARY : all;
-  const warning =
-    (mask & PAUSE_PRIMARY) !== 0 && input.liveApprovals > 0
-      ? `${input.liveApprovals} live ${input.liveApprovals === 1 ? "approval waits" : "approvals wait"} to be opened: with Primary issuance closed, the super admin reopens it after the pre-clear check before ${input.liveApprovals === 1 ? "it" : "any of them"} can be opened.`
+  const mask = input.sales.length > 0 ? all & PAUSE_PRIMARY : all;
+  if ((mask & PAUSE_PRIMARY) === 0) return { mask, warning: null };
+  const n = input.liveApprovals;
+  const approvals =
+    n > 0
+      ? `${n} live ${n === 1 ? "approval waits" : "approvals wait"} to be opened: with Primary issuance closed, the super admin reopens it after the pre-clear check before ${n === 1 ? "it" : "any of them"} can be opened.`
       : null;
-  return { mask, warning };
+  const unread = freezeUnreadWarning(freezeUnread(input.sales, input.nowSec).length);
+  const warning = [approvals, unread].filter((w): w is string => w !== null).join(" ");
+  return { mask, warning: warning || null };
+}
+
+/**
+ * Why setting 0x02 again right now is refused (null: it is not): an Open sale
+ * that can still take a buy needs it until it ends or closes, or its issuer
+ * is frozen. The guard of /admin/launchpad's re-pause and of the pre-clear
+ * panel's "Close Primary issuance again", read again right before signing.
+ */
+export function primaryCloseRefusal(sales: readonly SaleWithFreeze[], nowSec: number | bigint): string | null {
+  const live = liveSales(sales, nowSec, "re-pause").length;
+  if (live === 0) return null;
+  const one = live === 1;
+  return `${live} Open ${one ? "sale" : "sales"} can still take buys and ${one ? "needs" : "need"} Primary issuance until ${one ? "it ends or closes" : "they end or close"} (or ${one ? "its issuer is" : "their issuers are"} frozen); pause from /admin/platform if this is an emergency.`;
+}
+
+/**
+ * "Send to wallets": whether the treasury mint closes Primary issuance again
+ * in its own transaction — yes unless an Open sale of any issuer can still
+ * take a buy, or this class has an approved sale waiting to be opened
+ * ("Both": the sale opens after the sends).
+ */
+export function mintRepausesPrimary(input: { sales: readonly SaleWithFreeze[]; nowSec: number | bigint; classLiveApprovals: number }): boolean {
+  return liveSales(input.sales, input.nowSec, "re-pause").length === 0 && input.classLiveApprovals === 0;
 }

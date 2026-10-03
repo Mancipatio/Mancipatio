@@ -61,7 +61,7 @@ import {
   readFxRates,
   reservedTreasuryUnits,
 } from "@/lib/sale-approvals";
-import { approvalUnits, saleReferencePriceE6, treasuryValueE6 } from "@/lib/public-sale";
+import { approvalUnits, mintRepausesPrimary, saleReferencePriceE6, treasuryValueE6 } from "@/lib/public-sale";
 import { getBatchSender, SIGNING_TOO_SLOW } from "@/lib/verified-solana-client";
 import { rememberSignsSeparately, signsSeparately } from "@/lib/wallet-standard-batch";
 import { signingTarget, signsOffchainEnvelopes } from "@/lib/siws-signing";
@@ -84,7 +84,8 @@ import {
 } from "@/lib/distribution-checks";
 import { supplyVerdict, type SupplyFacts } from "@/lib/distribution-supply";
 import { listOpenSales, openSaleRemaining, readLamports, readPlatformPause, recentTreasuryTransfers } from "@/lib/distribution-chain";
-import { liveSales, nowSeconds } from "@/lib/sale-liveness";
+import { nowSeconds } from "@/lib/sale-liveness";
+import { listOpenSalesWithFreezes } from "@/lib/open-sales-chain";
 import {
   MAX_TRANSACTIONS_PER_PROMPT,
   lamportsNeeded,
@@ -706,9 +707,14 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         const mintValueE6 = treasuryValueE6(valueE6, saleReferencePriceE6(reservations)) ?? valueE6;
         const amountEur = treasuryMintEur({ units: short, usdPerTokenE6: mintValueE6, eurPerUsdc });
         // Close Primary issuance again in the same transaction unless a sale needs it open: one Open that can
-        // still take a buy (of any issuer; an ended or sold-out one only waits to be closed), or this class's
-        // approved sale waiting to be opened ("Both": the sale opens after the sends).
-        const repause = liveSales(await listOpenSales(rpc), nowSeconds()).length === 0 && liveApprovals.length === 0;
+        // still take a buy (of any issuer; an ended or sold-out one only waits to be closed, a frozen issuer's
+        // takes none, an unread freeze never keeps 0x02 open), or this class's approved sale waiting to be
+        // opened ("Both": the sale opens after the sends). lib/public-sale mintRepausesPrimary.
+        const repause = mintRepausesPrimary({
+          sales: await listOpenSalesWithFreezes(rpc),
+          nowSec: nowSeconds(),
+          classLiveApprovals: liveApprovals.length,
+        });
         // The send path's pause gate reads the flags again, not its 10 s cache.
         clearPauseFlagsCache();
         const minted = await runTreasuryMint({

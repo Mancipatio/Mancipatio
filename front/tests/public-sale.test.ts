@@ -16,11 +16,14 @@ import {
   closeFlowStep,
   docMatchesLegalHash,
   formatUsdc,
+  freezeUnreadWarning,
   isSaleDuration,
   maxGrossRaise,
+  mintRepausesPrimary,
   parseSaleRequest,
   paymentAmountLabel,
   preClearCheck,
+  primaryCloseRefusal,
   publicSaleReason,
   publicSaleStage,
   repauseMask,
@@ -34,7 +37,7 @@ import {
   usdcToBaseUnits,
   type SaleRequest,
 } from "@/lib/public-sale";
-import { liveSales, saleBuyState } from "@/lib/sale-liveness";
+import { freezeUnread, isLiveSale, liveSales, saleBuyState } from "@/lib/sale-liveness";
 
 const n = (v: number | string) => BigInt(v);
 const NOW = 1_790_000_000;
@@ -227,11 +230,29 @@ describe("whether an Open sale can still take a buy (lib/sale-liveness, buy.rs)"
     expect(saleBuyState(sale({ endTs: n(NOW - CHAIN_CLOCK_MARGIN_SECONDS - 1) }), NOW)).toBe("ended");
     expect(saleBuyState(sale({ sold: n(100) }), NOW)).toBe("sold-out");
     expect(saleBuyState(sale(), NOW, true)).toBe("frozen");
-    // A freeze that could not be read never relaxes anything.
     expect(saleBuyState(sale(), NOW, null)).toBe("live");
     // Ended and sold out are final; they win over a freeze.
     expect(saleBuyState(sale({ endTs: n(NOW - DAY) }), NOW, true)).toBe("ended");
-    expect(liveSales([sale(), sale({ sold: n(100) }), sale({ endTs: n(NOW - DAY) })], NOW)).toHaveLength(1);
+  });
+
+  it("liveSales: a frozen issuer's sale never counts; an unread freeze counts by the rule's side of safety", () => {
+    const sales = [
+      { ...sale(), frozen: false },
+      { ...sale({ sold: n(100) }), frozen: false },
+      { ...sale({ endTs: n(NOW - DAY) }), frozen: false },
+      { ...sale(), frozen: true },
+      { ...sale(), frozen: null },
+      // Ended and unread: idle either way.
+      { ...sale({ endTs: n(NOW - DAY) }), frozen: null },
+    ];
+    // The pre-clear check never passes on an unknown: the unread one counts as live.
+    expect(liveSales(sales, NOW, "pre-clear")).toEqual([sales[0], sales[4]]);
+    // A re-pause offer is never hidden by an unknown: the unread one does not count.
+    expect(liveSales(sales, NOW, "re-pause")).toEqual([sales[0]]);
+    expect(isLiveSale(sales[3], NOW, "pre-clear")).toBe(false);
+    expect(isLiveSale(sales[3], NOW, "re-pause")).toBe(false);
+    // The unread ones that would otherwise take a buy (said next to a re-pause offer).
+    expect(freezeUnread(sales, NOW)).toEqual([sales[4]]);
   });
 });
 
@@ -243,6 +264,7 @@ describe("pre-clear check (before the super admin clears 0x02)", () => {
     endTs: n(NOW + 30 * DAY),
     sold: n(10),
     totalForSale: n(100),
+    frozen: false as boolean | null,
     ...over,
   });
 
@@ -294,37 +316,89 @@ describe("pre-clear check (before the super admin clears 0x02)", () => {
 });
 
 describe("End and collect: order", () => {
+  type Other = { endTs: bigint; sold: bigint; totalForSale: bigint; frozen: boolean | null };
+  const other = (over: Partial<Other> = {}): Other => ({ endTs: n(NOW + DAY), sold: n(10), totalForSale: n(100), frozen: false, ...over });
+  const step = (flags: number, saleOpen: boolean, otherSales: Other[] = []) => closeFlowStep({ flags, saleOpen, otherSales, nowSec: NOW });
+
   it("0x20 set → the super admin clears it first; then the issuer closes (re-pausing 0x20, and 0x02 with no other sale Open)", () => {
     const paused = PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY; // the sale window: 0x02 clear, 0x20 set
-    expect(closeFlowStep({ flags: paused, saleOpen: true, otherOpenSales: 0 })).toEqual({ step: "clear-proceeds" });
+    expect(step(paused, true)).toEqual({ step: "clear-proceeds" });
     const collecting = paused & ~PAUSE_ISSUER_PROCEEDS;
-    expect(closeFlowStep({ flags: collecting, saleOpen: true, otherOpenSales: 0 })).toEqual({ step: "close", repause: PAUSE_ISSUER_PROCEEDS | PAUSE_PRIMARY });
-    // Another sale still Open needs Primary issuance: only 0x20 again.
-    expect(closeFlowStep({ flags: collecting, saleOpen: true, otherOpenSales: 1 })).toEqual({ step: "close", repause: PAUSE_ISSUER_PROCEEDS });
+    expect(step(collecting, true)).toEqual({ step: "close", repause: PAUSE_ISSUER_PROCEEDS | PAUSE_PRIMARY });
+    // Another sale that can still take a buy needs Primary issuance: only 0x20 again.
+    expect(step(collecting, true, [other()])).toEqual({ step: "close", repause: PAUSE_ISSUER_PROCEEDS });
+    // Another that ended or sold out does not.
+    expect(step(collecting, true, [other({ endTs: n(NOW - DAY) }), other({ sold: n(100) })])).toEqual({ step: "close", repause: 0x22 });
+  });
+
+  it("a frozen issuer's Open sale takes no buy: closing sale A sets 0x02 again in the same transaction", () => {
+    // The super admin froze issuer B to reopen 0x02 for A; A now ends while B's sale is still marked Open.
+    const collecting = PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY & ~PAUSE_ISSUER_PROCEEDS;
+    expect(step(collecting, true, [other({ frozen: true })])).toEqual({ step: "close", repause: PAUSE_ISSUER_PROCEEDS | PAUSE_PRIMARY });
+    expect(step(collecting, false, [other({ frozen: true })])).toEqual({ step: "repause", repause: 0x22 });
+    // A freeze that could not be read never keeps 0x02 open (closing it is always safe).
+    expect(step(collecting, true, [other({ frozen: null })])).toEqual({ step: "close", repause: PAUSE_ISSUER_PROCEEDS | PAUSE_PRIMARY });
+    // A live sale beside the frozen one still needs it.
+    expect(step(collecting, true, [other({ frozen: true }), other()])).toEqual({ step: "close", repause: PAUSE_ISSUER_PROCEEDS });
   });
 
   it("after the close: whatever is still clear is set again by any Admin, then done", () => {
     const collecting = PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY & ~PAUSE_ISSUER_PROCEEDS;
-    expect(closeFlowStep({ flags: collecting, saleOpen: false, otherOpenSales: 0 })).toEqual({ step: "repause", repause: 0x22 });
-    expect(closeFlowStep({ flags: PAUSE_FLAGS_ALL, saleOpen: false, otherOpenSales: 0 })).toEqual({ step: "done" });
+    expect(step(collecting, false)).toEqual({ step: "repause", repause: 0x22 });
+    expect(step(PAUSE_FLAGS_ALL, false)).toEqual({ step: "done" });
     expect(repauseMask(collecting, 2)).toBe(PAUSE_ISSUER_PROCEEDS);
     expect(repauseMask(PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY, 0)).toBe(PAUSE_PRIMARY);
   });
 
   it("/admin/launchpad: 0x02 again once no Open sale can take a buy, live approvals or not; 0x20 only once none is Open", () => {
     const collecting = PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY & ~PAUSE_ISSUER_PROCEEDS;
+    const plan = (flags: number, sales: Other[], liveApprovals: number) => repausePlan({ flags, sales, nowSec: NOW, liveApprovals });
     // Nothing Open: both bits, and no warning without approvals.
-    expect(repausePlan({ flags: collecting, openSales: 0, liveSales: 0, liveApprovals: 0 })).toEqual({ mask: 0x22, warning: null });
+    expect(plan(collecting, [], 0)).toEqual({ mask: 0x22, warning: null });
     // Live approvals waiting: 0x02 is still offered (the super admin reopens it after the pre-clear check), with a warning.
-    const waiting = repausePlan({ flags: collecting, openSales: 0, liveSales: 0, liveApprovals: 2 });
+    const waiting = plan(collecting, [], 2);
     expect(waiting.mask).toBe(0x22);
     expect(waiting.warning).toMatch(/2 live approvals wait to be opened.*pre-clear check/);
-    expect(repausePlan({ flags: PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY, openSales: 0, liveSales: 0, liveApprovals: 1 }).mask).toBe(PAUSE_PRIMARY);
+    expect(plan(PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY, [], 1).mask).toBe(PAUSE_PRIMARY);
     // Only Open sales that ended or sold out: 0x02 (they take no buy), but 0x20 stays clear for their close.
-    expect(repausePlan({ flags: collecting, openSales: 1, liveSales: 0, liveApprovals: 1 }).mask).toBe(PAUSE_PRIMARY);
+    expect(plan(collecting, [other({ endTs: n(NOW - DAY) })], 1).mask).toBe(PAUSE_PRIMARY);
     // A sale that can still take a buy needs both open.
-    expect(repausePlan({ flags: collecting, openSales: 2, liveSales: 1, liveApprovals: 0 })).toEqual({ mask: 0, warning: null });
+    expect(plan(collecting, [other(), other({ sold: n(100) })], 0)).toEqual({ mask: 0, warning: null });
     // Nothing clear: nothing to set, no warning.
-    expect(repausePlan({ flags: PAUSE_FLAGS_ALL, openSales: 0, liveSales: 0, liveApprovals: 3 })).toEqual({ mask: 0, warning: null });
+    expect(plan(PAUSE_FLAGS_ALL, [], 3)).toEqual({ mask: 0, warning: null });
+  });
+
+  it("/admin/launchpad with a frozen issuer: its Open sale never hides the 0x02 offer (0x20 stays clear for its close)", () => {
+    const collecting = PAUSE_FLAGS_ALL & ~PAUSE_PRIMARY & ~PAUSE_ISSUER_PROCEEDS;
+    const plan = (sales: Other[], liveApprovals = 0) => repausePlan({ flags: collecting, sales, nowSec: NOW, liveApprovals });
+    // Sale A closed, issuer B frozen with its sale still Open: 0x02 is offered.
+    expect(plan([other({ frozen: true })])).toEqual({ mask: PAUSE_PRIMARY, warning: null });
+    // An unread freeze does not hide the offer either; the warning says so.
+    const unread = plan([other({ frozen: null })], 1);
+    expect(unread.mask).toBe(PAUSE_PRIMARY);
+    expect(unread.warning).toMatch(/1 live approval waits.*The freeze of the issuer of 1 Open sale could not be read: it may still take buys/);
+    expect(plan([other({ frozen: null }), other({ frozen: null })]).warning).toMatch(/^The freeze of the issuers of 2 Open sales could not be read/);
+    // A live sale beside the frozen one keeps both bits clear.
+    expect(plan([other({ frozen: true }), other()])).toEqual({ mask: 0, warning: null });
+    expect(freezeUnreadWarning(0)).toBeNull();
+  });
+
+  it("the re-pause guard (/admin/launchpad and the pre-clear panel's Close again), read right before signing", () => {
+    expect(primaryCloseRefusal([], NOW)).toBeNull();
+    expect(primaryCloseRefusal([other()], NOW)).toMatch(/^1 Open sale can still take buys and needs Primary issuance/);
+    expect(primaryCloseRefusal([other(), other()], NOW)).toMatch(/^2 Open sales can still take buys and need/);
+    // Frozen, ended, sold out or unread: nothing refuses closing 0x02.
+    expect(primaryCloseRefusal([other({ frozen: true }), other({ endTs: n(NOW - DAY) }), other({ sold: n(100) }), other({ frozen: null })], NOW)).toBeNull();
+  });
+
+  it("Send to wallets: the treasury mint closes 0x02 again unless a sale can take a buy or the class has an approval waiting", () => {
+    const repause = (sales: Other[], classLiveApprovals = 0) => mintRepausesPrimary({ sales, nowSec: NOW, classLiveApprovals });
+    expect(repause([])).toBe(true);
+    expect(repause([other()])).toBe(false);
+    // A frozen issuer's Open sale takes no buy; an unread freeze never keeps 0x02 open.
+    expect(repause([other({ frozen: true })])).toBe(true);
+    expect(repause([other({ frozen: null })])).toBe(true);
+    // "Both": this class's approved sale opens after the sends.
+    expect(repause([other({ frozen: true })], 1)).toBe(false);
   });
 });

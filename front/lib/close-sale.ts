@@ -14,7 +14,8 @@
 // One transaction: [sync the sale's issuer key?] [create the issuer's USDC
 // account?] close_sale [set_pause_flags(set 0x20 | 0x02?)?]. The re-pause
 // rides along when the signer is an Admin (any Admin may set bits): 0x20
-// always, 0x02 only when no other sale is Open (lib/public-sale closeFlowStep).
+// always, 0x02 only when no other Open sale can still take a buy — ended,
+// sold out and frozen-issuer sales take none (lib/public-sale closeFlowStep).
 import type { Address, Instruction, TransactionSigner } from "@solana/kit";
 import { fetchEncodedAccount } from "@solana/kit";
 import { findAssociatedTokenPda, getCreateAssociatedTokenIdempotentInstructionAsync, getTokenDecoder } from "@solana-program/token-2022";

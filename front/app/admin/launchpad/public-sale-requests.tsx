@@ -22,10 +22,11 @@
 //              the server sees its sale on chain).
 //   Proceeds   every Open sale with Primary issuance and issuer proceeds
 //              (0x02 / 0x20): the super admin clears 0x20 when an issuer
-//              ends its sale; once no Open sale can take a buy any Admin sets
-//              0x02 again (with live approvals waiting too: the super admin
-//              reopens it after the pre-clear check), and 0x20 with it once
-//              no sale is Open at all.
+//              ends its sale; once no Open sale can take a buy (ended, sold
+//              out or its issuer frozen; an unread freeze never hides the
+//              offer) any Admin sets 0x02 again (with live approvals waiting
+//              too: the super admin reopens it after the pre-clear check),
+//              and 0x20 with it once no sale is Open at all.
 
 import { useCallback, useEffect, useState } from "react";
 import type { Address } from "@solana/kit";
@@ -50,8 +51,9 @@ import {
   type Capacity,
   type SaleApprovalAccount,
 } from "@/lib/sale-approvals";
-import { approvalPrefill, formatUsdc, maxGrossRaise, repausePlan, type ApprovalPrefill } from "@/lib/public-sale";
-import { liveSales, saleBuyState, SALE_BUY_STATE_LABEL } from "@/lib/sale-liveness";
+import { approvalPrefill, formatUsdc, maxGrossRaise, primaryCloseRefusal, repausePlan, type ApprovalPrefill } from "@/lib/public-sale";
+import { FREEZE_UNREAD_LABEL, nowSeconds, saleBuyState, SALE_BUY_STATE_LABEL } from "@/lib/sale-liveness";
+import { listOpenSalesWithFreezes, type OpenSaleWithFreeze } from "@/lib/open-sales-chain";
 import { decideSaleRequest, listSaleRequests, type SaleRequestRow } from "@/lib/sale-requests";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ApproveSaleModal } from "@/app/admin/applications/sale-approvals";
@@ -362,10 +364,12 @@ export function PublicSaleRequests() {
  * Every Open sale with the two platform bits a sale's end turns on: the super
  * admin clears issuer proceeds (0x20) so an issuer can end and collect. Once
  * no Open sale can take a buy (ended or sold out ones only wait to be
- * closed; lib/sale-liveness), any Admin sets Primary issuance (0x02) again —
- * also while approvals wait to be opened (said next to the button) — and,
+ * closed, a frozen issuer's take none; lib/sale-liveness), any Admin sets
+ * Primary issuance (0x02) again — also while approvals wait to be opened or
+ * an issuer's freeze could not be read (both said next to the button) — and,
  * once no sale is Open at all, 0x20 with it in one transaction (an issuer
- * whose key is an Admin does it in its close). lib/public-sale repausePlan.
+ * whose key is an Admin does it in its close). lib/public-sale repausePlan;
+ * the sales and freezes come from lib/open-sales-chain.
  */
 function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
   const client = useSolanaClient();
@@ -376,7 +380,13 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
   const rpc = client.runtime.rpc;
   const session = conn.wallet;
   const wallet = session?.account.address ?? null;
-  const [state, setState] = useState<{ sales: OpenSale[]; flags: number; superAdmin: string; liveApprovals: number; nowSec: number } | null>(null);
+  const [state, setState] = useState<{
+    sales: OpenSaleWithFreeze[];
+    flags: number;
+    superAdmin: string;
+    liveApprovals: number;
+    nowSec: number;
+  } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tick, setTick] = useState(0);
 
@@ -384,7 +394,11 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
     let cancelled = false;
     void (async () => {
       try {
-        const [sales, platform, approvals] = await Promise.all([listOpenSales(rpc), readPlatformPause(rpc), listAllSaleApprovals(rpc)]);
+        const [sales, platform, approvals] = await Promise.all([
+          listOpenSalesWithFreezes(rpc),
+          readPlatformPause(rpc),
+          listAllSaleApprovals(rpc),
+        ]);
         if (!platform) throw new Error("Could not read the platform's pause flags.");
         if (!cancelled) {
           setState({
@@ -392,7 +406,7 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
             flags: platform.flags,
             superAdmin: platform.superAdmin.toString(),
             liveApprovals: approvals.filter((a) => isApprovalLive(a)).length,
-            nowSec: Math.floor(Date.now() / 1000),
+            nowSec: nowSeconds(),
           });
           setError(null);
         }
@@ -408,13 +422,11 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
   async function setFlags(setMask: number, clearMask: number, reason: string) {
     if (!session || !wallet || !state) return;
     try {
-      // Read again right before signing: a sale may have opened or closed since.
-      const [sales, platform] = await Promise.all([listOpenSales(rpc), readPlatformPause(rpc)]);
+      // Read again right before signing: a sale may have opened or closed, or an issuer been frozen or unfrozen, since.
+      const [sales, platform] = await Promise.all([listOpenSalesWithFreezes(rpc), readPlatformPause(rpc)]);
       if (!platform) throw new Error("Could not read the platform's pause flags.");
-      const nowSec = Math.floor(Date.now() / 1000);
-      if ((setMask & PAUSE_PRIMARY) !== 0 && liveSales(sales, nowSec).length > 0) {
-        throw new Error("A sale is Open and can still take buys: it needs Primary issuance until it ends or closes.");
-      }
+      const refusal = (setMask & PAUSE_PRIMARY) !== 0 ? primaryCloseRefusal(sales, nowSeconds()) : null;
+      if (refusal) throw new Error(refusal);
       if ((setMask & PAUSE_ISSUER_PROCEEDS) !== 0 && sales.length > 0) {
         throw new Error("A sale is Open: its issuer needs issuer proceeds (0x20) clear to close it.");
       }
@@ -444,12 +456,7 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
   if (!state) return null;
   // 0x02 once no Open sale can take a buy (approvals waiting or not: the safe default is closed); 0x20 once none is Open.
   const { nowSec } = state;
-  const plan = repausePlan({
-    flags: state.flags,
-    openSales: state.sales.length,
-    liveSales: liveSales(state.sales, nowSec).length,
-    liveApprovals: state.liveApprovals,
-  });
+  const plan = repausePlan({ flags: state.flags, sales: state.sales, nowSec, liveApprovals: state.liveApprovals });
   const repause = plan.mask;
   return (
     <div className="mt-4 border-t border-slate-100 pt-3 text-xs text-slate-700">
@@ -460,7 +467,7 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
       </p>
       <ul className="mt-1 space-y-0.5">
         {state.sales.map((s) => {
-          const buy = saleBuyState(s, nowSec);
+          const buy = saleBuyState(s, nowSec, s.frozen);
           return (
             <li key={s.address}>
               <a href={`/marketplace/launchpad/${s.address}`} className="font-mono underline">
@@ -468,6 +475,7 @@ function ProceedsAndPause({ refreshKey }: { refreshKey: number }) {
               </a>{" "}
               · {s.sold.toString()} / {s.totalForSale.toString()} sold
               {buy !== "live" && <span className="text-slate-500"> · {SALE_BUY_STATE_LABEL[buy]}</span>}
+              {buy === "live" && s.frozen === null && <span className="text-amber-800"> · {FREEZE_UNREAD_LABEL}</span>}
             </li>
           );
         })}

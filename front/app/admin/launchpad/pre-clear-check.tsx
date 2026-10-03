@@ -10,7 +10,10 @@
 //     out cannot (it only waits to be closed), nor one whose issuer is frozen
 //     (IssuerFreeze, read at finalized: any Admin sets it, only the super
 //     admin lifts it; it also stops that issuer's close_sale) — those are
-//     listed and do not block (lib/sale-liveness);
+//     listed and do not block (lib/sale-liveness). A freeze that could not be
+//     read counts as none here, so it blocks; "Close Primary issuance again"
+//     counts it the other way (it never hides that offer). Both read every
+//     Open sale through lib/open-sales-chain listOpenSalesWithFreezes;
 //   · live approvals must be 0 except this one — "Revoke" closes a stray one
 //     (revoke_sale_approval, any Admin; the rent returns to its approver)
 //     and releases its raise-limit reservation.
@@ -24,12 +27,7 @@
 import { useCallback, useEffect, useState } from "react";
 import type { Address } from "@solana/kit";
 import { useSendTransaction, useSolanaClient, useWalletConnection } from "@solana/react-hooks";
-import {
-  fetchMaybeAsset,
-  fetchMaybeShareClass,
-  getRevokeSaleApprovalInstructionAsync,
-  getSetPauseFlagsInstructionAsync,
-} from "@/lib/generated/asset_registry";
+import { getRevokeSaleApprovalInstructionAsync, getSetPauseFlagsInstructionAsync } from "@/lib/generated/asset_registry";
 import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
@@ -38,63 +36,36 @@ import { walletSigner } from "@/lib/wallet-signer";
 import { formatPauseFlags, isPaused, PAUSE_PRIMARY, pauseAuditMetadata } from "@/lib/pause-flags";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { shortAddress } from "@/lib/share-transfer";
-import { listOpenSales, readPlatformPause, type OpenSale } from "@/lib/distribution-chain";
+import { readPlatformPause } from "@/lib/distribution-chain";
 import { listAllSaleApprovals, listSaleReservations, releaseSaleApproval, type SaleApprovalAccount } from "@/lib/sale-approvals";
-import { preClearCheck, type PreClearResult } from "@/lib/public-sale";
-import { liveSales, SALE_BUY_STATE_LABEL } from "@/lib/sale-liveness";
-import { loadIssuerFreeze } from "@/lib/issuer-freeze";
+import { preClearCheck, primaryCloseRefusal, type PreClearResult } from "@/lib/public-sale";
+import { nowSeconds, SALE_BUY_STATE_LABEL } from "@/lib/sale-liveness";
+import { listOpenSalesWithFreezes, type OpenSaleWithFreeze } from "@/lib/open-sales-chain";
 import { IssuerFreezePanel } from "@/app/admin/issuers/issuer-freeze-panel";
 
 type Snapshot = {
   result: PreClearResult;
   flags: number;
   superAdmin: string;
-  sales: OpenSale[];
+  /** Every Open sale with its issuer and that issuer's freeze (finalized; null when it could not be read). */
+  sales: OpenSaleWithFreeze[];
   approvals: SaleApprovalAccount[];
-  /** Issuer PDA of each other Open sale (for IssuerFreeze), by sale address. */
-  issuers: Map<string, Address | null>;
-  /** Whether that issuer is frozen (finalized), by sale address; null when it could not be read. */
-  frozen: Map<string, boolean | null>;
+  nowSec: number;
 };
 
 type Rpc = ReturnType<typeof useSolanaClient>["runtime"]["rpc"];
 
 /**
- * Everything the check reads, fresh: every Open sale with its issuer and that
- * issuer's freeze (an unread freeze counts as not frozen: it never relaxes
- * the check), every SaleApproval and the Platform.
+ * Everything the check reads, fresh: every Open sale with its issuer's freeze
+ * (an unread freeze counts as not frozen: it never relaxes the check), every
+ * SaleApproval and the Platform.
  */
 async function readSnapshot(rpc: Rpc, thisApproval: Address | null): Promise<Snapshot> {
-  const [sales, approvals, platform] = await Promise.all([listOpenSales(rpc), listAllSaleApprovals(rpc), readPlatformPause(rpc)]);
+  const [sales, approvals, platform] = await Promise.all([listOpenSalesWithFreezes(rpc), listAllSaleApprovals(rpc), readPlatformPause(rpc)]);
   if (!platform) throw new Error("Could not read the platform's pause flags.");
-  const issuers = new Map<string, Address | null>();
-  const frozen = new Map<string, boolean | null>();
-  await Promise.all(
-    sales.map(async (s) => {
-      let issuer: Address | null = null;
-      try {
-        const sc = await fetchMaybeShareClass(rpc, s.shareClass, { commitment: "confirmed" });
-        const asset = sc.exists ? await fetchMaybeAsset(rpc, sc.data.asset, { commitment: "confirmed" }) : null;
-        issuer = asset?.exists ? asset.data.issuer : null;
-      } catch {
-        issuer = null;
-      }
-      issuers.set(s.address, issuer);
-      try {
-        frozen.set(s.address, issuer ? (await loadIssuerFreeze(rpc, issuer)) !== null : null);
-      } catch {
-        frozen.set(s.address, null);
-      }
-    }),
-  );
-  const nowSec = Math.floor(Date.now() / 1000);
-  const result = preClearCheck({
-    openSales: sales.map((s) => ({ ...s, frozen: frozen.get(s.address) ?? null })),
-    approvals,
-    thisApproval,
-    nowSec,
-  });
-  return { result, flags: platform.flags, superAdmin: platform.superAdmin.toString(), sales, approvals, issuers, frozen };
+  const nowSec = nowSeconds();
+  const result = preClearCheck({ openSales: sales, approvals, thisApproval, nowSec });
+  return { result, flags: platform.flags, superAdmin: platform.superAdmin.toString(), sales, approvals, nowSec };
 }
 
 export function PreClearCheck({ thisApproval, label, onChanged }: { thisApproval: Address | null; label: string; onChanged?: () => void }) {
@@ -208,12 +179,9 @@ export function PreClearCheck({ thisApproval, label, onChanged }: { thisApproval
       const fresh = await readSnapshot(rpc, thisApproval);
       setSnap(fresh);
       if (isPaused(fresh.flags, PAUSE_PRIMARY)) throw new Error("Primary issuance is already closed.");
-      const live = liveSales(fresh.sales, Math.floor(Date.now() / 1000));
-      if (live.length > 0) {
-        throw new Error(
-          `${live.length} Open ${live.length === 1 ? "sale" : "sales"} can still take buys and ${live.length === 1 ? "needs" : "need"} Primary issuance; pause from /admin/platform if this is an emergency.`,
-        );
-      }
+      // A frozen issuer's sale takes no buy; an unread freeze never blocks closing (lib/public-sale primaryCloseRefusal).
+      const refusal = primaryCloseRefusal(fresh.sales, fresh.nowSec);
+      if (refusal) throw new Error(refusal);
       setWorking("Confirm in your wallet: close Primary issuance again (set 0x02)");
       const signer = walletSigner(session);
       const ix = await getSetPauseFlagsInstructionAsync({ authority: signer, setMask: PAUSE_PRIMARY, clearMask: 0 });
@@ -268,9 +236,9 @@ export function PreClearCheck({ thisApproval, label, onChanged }: { thisApproval
           {result.idleOpenSales.length > 0 ? ` (and ${result.idleOpenSales.length} Open that cannot)` : ""}
         </li>
         {snap.sales.map((s) => {
-          const issuer = snap.issuers.get(s.address) ?? null;
+          const issuer = s.issuer;
           const idle = result.idleOpenSales.find((x) => x.address === s.address);
-          const frozen = snap.frozen.get(s.address);
+          const frozen = s.frozen;
           return (
             <li key={s.address} className="ml-4">
               Sale <span className="font-mono">{shortAddress(s.address)}</span> · {s.sold.toString()} / {s.totalForSale.toString()} sold ·{" "}

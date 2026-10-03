@@ -126,7 +126,7 @@ import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDa
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
 import { EMERGENCY_PAUSE_BITS, PAUSE_PAYOUT_MODULES, PAUSE_PRIMARY, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags } from "@/lib/pause-flags";
-import { saleBuyState } from "@/lib/sale-liveness";
+import { isLiveSale, saleBuyState } from "@/lib/sale-liveness";
 import { listProblem, SANCTIONS_MAX_LIST_AGE_MS } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
@@ -457,7 +457,70 @@ function mirrorBigint(value: unknown): bigint | null {
   return null;
 }
 
-type MirroredOpenSale = { pda?: string; end_ts?: unknown; sold?: unknown; total_for_sale?: unknown; updated_at?: string | null };
+type MirroredOpenSale = {
+  pda?: string;
+  share_class_pda?: string | null;
+  end_ts?: unknown;
+  sold?: unknown;
+  total_for_sale?: unknown;
+  updated_at?: string | null;
+};
+
+/** Mirror rows whose `column` is one of `values` (this network, 100 per read); null when a read fails. */
+async function mirrorRowsIn<T>(
+  sb: SupabaseClient, table: string, columns: string, column: string, values: readonly string[], network: Network, signal: AbortSignal,
+): Promise<T[] | null> {
+  const out: T[] = [];
+  for (let i = 0; i < values.length; i += 100) {
+    const res = await sb.from(table).select(columns).eq("network", network).in(column, values.slice(i, i + 100))
+      .abortSignal(dbSignal(signal));
+    if (res.error) return null;
+    out.push(...((res.data ?? []) as T[]));
+  }
+  return out;
+}
+
+/** A share class's issuer freeze as mirrored: frozen (null: the issuer is not in the mirror) and since when (ms). */
+type MirroredFreeze = { frozen: boolean | null; frozenAtMs: number | null };
+
+/**
+ * The freeze of each share class's issuer from the mirror (share_classes →
+ * assets → issuer_freezes, 0079: a row lives while the IssuerFreeze account
+ * does). Null when a read fails (the check could not run).
+ */
+async function mirroredClassFreezes(
+  sb: SupabaseClient, network: Network, signal: AbortSignal, shareClasses: readonly string[],
+): Promise<Map<string, MirroredFreeze> | null> {
+  const out = new Map<string, MirroredFreeze>();
+  const classes = [...new Set(shareClasses)];
+  if (classes.length === 0) return out;
+  const scRows = await mirrorRowsIn<{ pda: string; asset_pda: string | null }>(sb, "share_classes", "pda,asset_pda", "pda", classes, network, signal);
+  if (!scRows) return null;
+  const assetOf = new Map(scRows.filter((r) => r.asset_pda).map((r) => [r.pda, r.asset_pda as string]));
+  const assets = [...new Set(assetOf.values())];
+  const assetRows = assets.length
+    ? await mirrorRowsIn<{ pda: string; issuer_pda: string | null }>(sb, "assets", "pda,issuer_pda", "pda", assets, network, signal)
+    : [];
+  if (!assetRows) return null;
+  const issuerOf = new Map(assetRows.filter((r) => r.issuer_pda).map((r) => [r.pda, r.issuer_pda as string]));
+  const issuers = [...new Set(issuerOf.values())];
+  const freezeRows = issuers.length
+    ? await mirrorRowsIn<{ issuer_pda: string; frozen_at: unknown }>(sb, "issuer_freezes", "issuer_pda,frozen_at", "issuer_pda", issuers, network, signal)
+    : [];
+  if (!freezeRows) return null;
+  const frozenAt = new Map(freezeRows.map((r) => {
+    const at = mirrorBigint(r.frozen_at);
+    return [r.issuer_pda, at === null ? null : Number(at) * 1000] as const;
+  }));
+  for (const c of classes) {
+    const asset = assetOf.get(c);
+    const issuer = asset ? issuerOf.get(asset) : undefined;
+    if (issuer === undefined) out.set(c, { frozen: null, frozenAtMs: null });
+    else if (frozenAt.has(issuer)) out.set(c, { frozen: true, frozenAtMs: frozenAt.get(issuer) ?? null });
+    else out.set(c, { frozen: false, frozenAtMs: null });
+  }
+  return out;
+}
 
 /**
  * primary-open-idle (Distribute → Public sale, design §4; high on mainnet,
@@ -466,17 +529,21 @@ type MirroredOpenSale = { pda?: string; end_ts?: unknown; sold?: unknown; total_
  * can be opened and an Admin issuer key can mint into its treasury — so it
  * is cleared only for a sale's window. Clear with NO sale able to take a buy
  * for more than an hour fails (the sale closed and nobody set it again, it
- * was cleared and never used, or the sale ended or sold out and is only
- * waiting to be closed: close_sale does not need 0x02). A mirrored Open sale
- * counts only while it can take a buy (lib/sale-liveness: not past end_ts,
- * not sold out; a row that cannot be read counts as live). "Clear since" is
- * the newest of: the last indexed set_pause_flags that cleared 0x02 (the
- * onchain:pause alert's evidence.clear_mask), the last sale that closed (its
- * mirror row's updated_at), the end of an Open sale that ended and the last
- * update of one that sold out and, when none is known, the Platform mirror
- * row's updated_at. Hold within the hour, pass while 0x02 is set or a sale
- * can take a buy; hold while no Platform is mirrored; null when the mirror
- * cannot be read.
+ * was cleared and never used, or the sale ended, sold out or its issuer is
+ * frozen and it only waits: close_sale does not need 0x02). A mirrored Open
+ * sale counts only while it can take a buy (lib/sale-liveness: not past
+ * end_ts, not sold out, its issuer not frozen — the issuer_freezes mirror,
+ * through share_classes and assets; a row whose columns cannot be read
+ * counts as live). An issuer the mirror cannot resolve counts by the
+ * "re-pause" FreezePolicy, like the browser's re-pause offers: it never
+ * keeps the alarm at pass (said in the summary). "Clear since" is the newest
+ * of: the last indexed set_pause_flags that cleared 0x02 (the onchain:pause
+ * alert's evidence.clear_mask), the last sale that closed (its mirror row's
+ * updated_at), the end of an Open sale that ended, the last update of one
+ * that sold out, the freeze of a frozen issuer with an Open sale and, when
+ * none is known, the Platform mirror row's updated_at. Hold within the hour,
+ * pass while 0x02 is set or a sale can take a buy; hold while no Platform is
+ * mirrored; null when the mirror cannot be read.
  */
 export async function primaryIdleReport(sb: SupabaseClient, network: Network, signal: AbortSignal, now = Date.now()): Promise<Report | null> {
   const base = {
@@ -494,27 +561,43 @@ export async function primaryIdleReport(sb: SupabaseClient, network: Network, si
   if ((flags & PAUSE_PRIMARY) !== 0) {
     return { ...base, state: "pass", summary: "Primary issuance is closed (0x02 set)", evidence: { pause_flags: flags } };
   }
-  const open = await sb.from("sales").select("pda,end_ts,sold,total_for_sale,updated_at").eq("network", network).eq("status", 0)
-    .limit(500).abortSignal(dbSignal(signal));
+  const open = await sb.from("sales").select("pda,share_class_pda,end_ts,sold,total_for_sale,updated_at").eq("network", network)
+    .eq("status", 0).limit(500).abortSignal(dbSignal(signal));
   if (open.error) return null;
   const nowSec = Math.floor(now / 1000);
-  // Since when each Open sale that cannot take a buy stopped taking them (ms), or null for one that still can.
-  const stoppedAt = ((open.data ?? []) as MirroredOpenSale[]).map((s) => {
+  const takingBuys = { ...base, state: "pass" as const, summary: "Primary issuance is open for a sale that can take buys", evidence: { pause_flags: flags } };
+  const rows = ((open.data ?? []) as MirroredOpenSale[]).map((s) => {
     const endTs = mirrorBigint(s.end_ts);
     const sold = mirrorBigint(s.sold);
     const total = mirrorBigint(s.total_for_sale);
-    if (endTs === null || sold === null || total === null) return null;
-    const state = saleBuyState({ endTs, sold, totalForSale: total }, nowSec);
-    if (state === "ended") return Number(endTs) * 1000;
-    if (state === "sold-out") {
-      const at = Date.parse(s.updated_at ?? "");
-      return Number.isFinite(at) ? at : now;
-    }
-    return null;
+    return { s, window: endTs === null || sold === null || total === null ? null : { endTs, sold, totalForSale: total } };
   });
-  if (stoppedAt.some((t) => t === null)) {
-    return { ...base, state: "pass", summary: "Primary issuance is open for a sale that can take buys", evidence: { pause_flags: flags } };
+  // A row whose columns cannot be read counts as a sale taking buys (the columns are NOT NULL).
+  if (rows.some((r) => r.window === null)) return takingBuys;
+  // Only a sale that would take a buy by its window needs its issuer's freeze (share_classes → assets → issuer_freezes).
+  const needFreeze = rows
+    .filter((r) => r.window && saleBuyState(r.window, nowSec) === "live")
+    .map((r) => r.s.share_class_pda)
+    .filter((c): c is string => typeof c === "string" && c.length > 0);
+  const freezes = await mirroredClassFreezes(sb, network, signal, needFreeze);
+  if (!freezes) return null;
+  // Since when each Open sale that cannot take a buy stopped taking them (ms; null: not known), and why.
+  const idle: { reason: "closing" | "frozen" | "freeze-unread"; at: number | null }[] = [];
+  for (const { s, window } of rows) {
+    if (!window) continue;
+    const freeze = freezes.get(s.share_class_pda ?? "") ?? { frozen: null, frozenAtMs: null };
+    const sale = { ...window, frozen: freeze.frozen };
+    if (isLiveSale(sale, nowSec, "re-pause")) return takingBuys;
+    const state = saleBuyState(sale, nowSec, freeze.frozen);
+    if (state === "ended") idle.push({ reason: "closing", at: Number(window.endTs) * 1000 });
+    else if (state === "sold-out") {
+      const at = Date.parse(s.updated_at ?? "");
+      idle.push({ reason: "closing", at: Number.isFinite(at) ? at : now });
+    } else if (state === "frozen") idle.push({ reason: "frozen", at: freeze.frozenAtMs });
+    // Its issuer is not in the mirror: never keeps the alarm at pass, and gives no time (the clear or close does).
+    else idle.push({ reason: "freeze-unread", at: null });
   }
+  const stoppedAt = idle.map((i) => i.at);
   const [clears, closed] = await Promise.all([
     sb.from("compliance_alerts").select("created_at,evidence").eq("network", network).eq("source", "onchain:pause")
       .order("created_at", { ascending: false }).limit(20).abortSignal(dbSignal(signal)),
@@ -531,22 +614,31 @@ export async function primaryIdleReport(sb: SupabaseClient, network: Network, si
   const fallback = Date.parse(row?.updated_at ?? "");
   const since = known.length > 0 ? Math.max(...known) : Number.isFinite(fallback) ? fallback : null;
   const minutes = since === null ? null : Math.max(0, Math.floor((now - since) / 60_000));
-  const waiting = stoppedAt.length;
+  const count = (reason: (typeof idle)[number]["reason"]) => idle.filter((i) => i.reason === reason).length;
+  const closing = count("closing");
+  const frozen = count("frozen");
+  const unread = count("freeze-unread");
   const evidence = {
     pause_flags: flags,
     open_since: since === null ? null : new Date(since).toISOString(),
     minutes_idle: minutes,
-    open_sales_not_taking_buys: waiting,
+    open_sales_not_taking_buys: idle.length,
+    issuer_frozen: frozen,
+    freeze_unread: unread,
   };
-  const idle = waiting > 0
-    ? `no sale taking buys (${waiting} Open ${waiting === 1 ? "sale" : "sales"} ended or sold out, waiting to be closed)`
-    : "no sale Open";
+  const sales = (n: number) => `${n} Open ${n === 1 ? "sale" : "sales"}`;
+  const why = [
+    closing > 0 ? `${sales(closing)} ended or sold out, waiting to be closed` : null,
+    frozen > 0 ? `${sales(frozen)} of a frozen issuer` : null,
+    unread > 0 ? `${sales(unread)} whose issuer's freeze is not in the mirror` : null,
+  ].filter((w): w is string => w !== null);
+  const idleText = why.length > 0 ? `no sale taking buys (${why.join("; ")})` : "no sale Open";
   if (since === null || now - since > PRIMARY_IDLE_MAX_MS) {
     return { ...base, state: "fail", evidence,
-      summary: `Primary issuance (0x02) is open with ${idle}${minutes === null ? "" : ` for ${minutes} minutes`}: buys, sale openings and treasury mints are possible platform-wide. Any Admin sets 0x02 again (/admin/platform or /admin/launchpad)` };
+      summary: `Primary issuance (0x02) is open with ${idleText}${minutes === null ? "" : ` for ${minutes} minutes`}: buys, sale openings and treasury mints are possible platform-wide. Any Admin sets 0x02 again (/admin/platform or /admin/launchpad)` };
   }
   return { ...base, state: "hold", evidence,
-    summary: `Primary issuance (0x02) is open with ${idle} for ${minutes} minutes (fails after ${PRIMARY_IDLE_MAX_MS / 60_000})` };
+    summary: `Primary issuance (0x02) is open with ${idleText} for ${minutes} minutes (fails after ${PRIMARY_IDLE_MAX_MS / 60_000})` };
 }
 
 /** Day D (runbook §0A, §4-§5) runs inside the bootstrap window: bootstrap-open fails once it is older than this (K1.11). */

@@ -76,7 +76,8 @@ export async function POST(request: Request) {
 
     const profile = await readRequestProfile(sb, chain.asset);
     if (!profile) throw new SiwsError(409, "Save the token's details first (the asset page needs its profile), then request the sale");
-    // A request still "requested" blocks a new one until its sale opened (the ledger shows it consumed or closed).
+    // A request still "requested" blocks a new one until its sale opened (the ledger shows it consumed or closed);
+    // the Open-sale refusal above then holds the next one until that sale is closed.
     const previous = storedRequest(profile);
     if (previous?.status === "requested") {
       const outcome = (await requestOutcomes(sb, [previous])).get(previous.id) ?? null;

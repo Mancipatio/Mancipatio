@@ -20,8 +20,9 @@
 //   open       the live sale and "End and collect": once the super admin
 //              cleared 0x20, close_sale to the issuer's USDC account (another
 //              USDC account only after its owner is shown and confirmed); an
-//              Admin issuer key sets 0x20 (and 0x02, with no other sale Open)
-//              again in the same transaction.
+//              Admin issuer key sets 0x20 (and 0x02, unless another Open sale
+//              can still take a buy: lib/open-sales-chain reads every Open
+//              sale with its issuer's freeze) again in the same transaction.
 // Nothing here touches the program's rules: every step is checked again on
 // chain and by the server.
 
@@ -43,7 +44,8 @@ import { formatTokens } from "@/lib/tokenize-shares";
 import { shortAddress } from "@/lib/share-transfer";
 import { roomToCreate, type SupplyFacts } from "@/lib/distribution-supply";
 import { listOpenSales, openSaleRemaining, readPlatformPause } from "@/lib/distribution-chain";
-import { liveSales } from "@/lib/sale-liveness";
+import { listOpenSalesWithFreezes, type OpenSaleWithFreeze } from "@/lib/open-sales-chain";
+import { nowSeconds } from "@/lib/sale-liveness";
 import {
   isApprovalLive,
   listSaleReservations,
@@ -94,8 +96,10 @@ type ChainView = {
   /** USDC in the open sale's proceeds escrow. */
   proceeds: bigint | null;
   approvals: SaleApprovalAccount[];
-  /** Open sales of every issuer other than this class's open one that can still take a buy (lib/sale-liveness). */
-  otherOpenSales: number;
+  /** Open sales of every issuer other than this class's open one, with their issuers' freezes (lib/open-sales-chain). */
+  otherSales: OpenSaleWithFreeze[];
+  /** When these were read (unix seconds): what "can take a buy" is judged at. */
+  nowSec: number;
   flags: number | null;
   superAdmin: string | null;
 };
@@ -147,7 +151,7 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
         const [classSales, approvals, all, platform] = await Promise.all([
           listOpenSales(rpc, { shareClass: scPda }),
           listShareClassSaleApprovals(rpc, scPda),
-          listOpenSales(rpc),
+          listOpenSalesWithFreezes(rpc),
           readPlatformPause(rpc),
         ]);
         let openSale: ChainView["openSale"] = null;
@@ -169,10 +173,8 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
           openSale,
           proceeds,
           approvals: approvals.filter((a) => isApprovalLive(a)).sort((a, b) => (b.saleId > a.saleId ? 1 : b.saleId < a.saleId ? -1 : 0)),
-          otherOpenSales: liveSales(
-            all.filter((s) => s.address !== openSale?.address),
-            Math.floor(Date.now() / 1000),
-          ).length,
+          otherSales: all.filter((s) => s.address !== openSale?.address),
+          nowSec: nowSeconds(),
           flags: platform?.flags ?? null,
           superAdmin: platform?.superAdmin.toString() ?? null,
         });
@@ -379,7 +381,10 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
 
   // ── End and collect ──
   const openSaleNow = chain?.openSale ?? null;
-  const step = chain && openSaleNow && flags !== null ? closeFlowStep({ flags, saleOpen: true, otherOpenSales: chain.otherOpenSales }) : null;
+  const step =
+    chain && openSaleNow && flags !== null
+      ? closeFlowStep({ flags, saleOpen: true, otherSales: chain.otherSales, nowSec: chain.nowSec })
+      : null;
   const otherReady = !useOther || (other !== null && other.text === otherText.trim() && otherConfirmed);
 
   async function checkOther() {
@@ -408,7 +413,7 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
       setWorking("Checking the sale and the pause flags…");
       const [platform, all, saleNow] = await Promise.all([
         readPlatformPause(rpc),
-        listOpenSales(rpc),
+        listOpenSalesWithFreezes(rpc),
         fetchMaybeSale(rpc, openSaleNow.address, { commitment: "confirmed" }),
       ]);
       if (!platform) throw new Error("Could not read the platform's pause flags; nothing was sent. Try again.");
@@ -416,11 +421,10 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
       const flow = closeFlowStep({
         flags: platform.flags,
         saleOpen: true,
-        // Another sale that ended or sold out does not need Primary issuance: only one that can still take a buy.
-        otherOpenSales: liveSales(
-          all.filter((s) => s.address !== openSaleNow.address),
-          Math.floor(Date.now() / 1000),
-        ).length,
+        // Another sale that ended, sold out or whose issuer is frozen does not need Primary issuance: only one that can
+        // still take a buy (an unread freeze never keeps 0x02 open).
+        otherSales: all.filter((s) => s.address !== openSaleNow.address),
+        nowSec: nowSeconds(),
       });
       if (flow.step === "clear-proceeds") throw new Error(`Proceeds are paused (0x20): ${superAdminText} clears it first.`);
       let destination: ProceedsAccount | null = null;
@@ -664,7 +668,12 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
                 <p className="mt-1 text-[12px] text-slate-600">
                   Ends the sale now (no more buys) and sends all proceeds
                   {chain.proceeds !== null ? ` (${formatUsdc(chain.proceeds)} USDC)` : ""} to your USDC account
-                  {canCreate ? "; closes issuer proceeds (and Primary issuance, unless another sale is open) again in the same transaction" : ""}.
+                  {canCreate
+                    ? step?.step === "close" && (step.repause & PAUSE_PRIMARY) === 0
+                      ? "; closes issuer proceeds again in the same transaction (Primary issuance stays open: another sale can still take buys)"
+                      : "; closes issuer proceeds and Primary issuance again in the same transaction"
+                    : ""}
+                  .
                   Purchases are final: there are no refunds.
                 </p>
                 <label className="mt-2 flex items-center gap-2 text-[12px]">
