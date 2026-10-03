@@ -524,7 +524,7 @@ export function displayNameFor(companyName: string, p4: bigint): string {
  * KYC only at conversion).
  */
 export const OPEN_TOKEN_NOTE = "Anyone can hold and transfer it. KYC is needed only to convert it into company shares.";
-const OPEN_TOKENS_NOTE = "Anyone can hold and transfer them. KYC is needed only to convert them into company shares.";
+export const OPEN_TOKENS_NOTE = "Anyone can hold and transfer them. KYC is needed only to convert them into company shares.";
 
 /**
  * The Preview's supply line: the cap is fixed now, but no token exists until

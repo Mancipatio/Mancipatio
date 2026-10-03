@@ -58,6 +58,7 @@ import { decideSaleRequest, listSaleRequests, type SaleRequestRow } from "@/lib/
 import { ConfirmModal } from "@/components/confirm-modal";
 import { ApproveSaleModal } from "@/app/admin/applications/sale-approvals";
 import { PreClearCheck } from "./pre-clear-check";
+import { PUBLIC_SALE_REQUESTS_ANCHOR } from "@/lib/distribute-guidance";
 
 const eur = (n: number) => `€${n.toLocaleString("en-US", { maximumFractionDigits: 2 })}`;
 
@@ -173,7 +174,7 @@ export function PublicSaleRequests() {
   const mainnet = detectNetwork() === "mainnet";
 
   return (
-    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3">
+    <div id={PUBLIC_SALE_REQUESTS_ANCHOR} className="scroll-mt-24 rounded-lg border border-slate-200 bg-white px-4 py-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <p className="text-sm font-semibold text-slate-800">Public sale requests</p>
         <button type="button" onClick={() => setRefreshKey((k) => k + 1)} className="text-xs text-slate-500 hover:text-slate-800">

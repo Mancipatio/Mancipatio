@@ -58,6 +58,8 @@ import { USDC } from "@/lib/payment-mints";
 import { isPaused, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { usePauseFlags } from "@/lib/use-pause-flags";
+import { APPROVED_SALE_HOLDS_ROOM, roomHeldByApprovedSale } from "@/lib/distribute-guidance";
+import { PrimaryReopenLink } from "@/components/primary-reopen-link";
 import { distributionEvidence, screenRecipients } from "@/lib/compliance";
 import {
   evidenceDue,
@@ -538,6 +540,14 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const unfinished = unfinishedJournals(journals, runId);
   const busy = working !== null || tx.isSending;
   const primaryPaused = flags !== null && isPaused(flags, PAUSE_PRIMARY);
+  // An approved sale of this class not opened yet: 0x02 is reopened at its pre-clear check (else the pause panel).
+  const saleApproved = (supply.approvedUnopened ?? BigInt(0)) > BigInt(0);
+  // The room is 0 only because that approved sale holds it.
+  const roomHeld = shortfall > BigInt(0) && roomHeldByApprovedSale({ ...supply, treasuryBalance: balance });
+  const pausedBlocker =
+    shortfall > BigInt(0) && canCreate && primaryPaused
+      ? `Creating tokens is paused platform-wide (0x02); only ${superAdmin ? `the super admin (${shortAddress(superAdmin as Address)})` : "the super admin"} can reopen it.`
+      : null;
 
   const blockers = [
     !clean ? null : !facts ? (current?.state === "error" ? current.text : "Checking…") : null,
@@ -552,12 +562,10 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
     repeated.length > 0 && !sendAgain
       ? `${repeated.length} ${repeated.length === 1 ? "wallet was" : "wallets were"} paid before — remove ${repeated.length === 1 ? "it" : "them"} or confirm below that ${repeated.length === 1 ? "it gets" : "they get"} tokens again.`
       : null,
-    supplyNow.problem,
+    roomHeld && supplyNow.problem ? `${APPROVED_SALE_HOLDS_ROOM} ${supplyNow.problem}` : supplyNow.problem,
     shortfall > BigInt(0) && !canCreate ? "Creating tokens needs an Admin issuer key; this wallet can send only what the treasury holds." : null,
     shortfall > BigInt(0) && canCreate && valueE6 === null ? "Enter the value per token (USD) for the tokens to create." : null,
-    shortfall > BigInt(0) && canCreate && primaryPaused
-      ? `Creating tokens is paused platform-wide (0x02); only ${superAdmin ? `the super admin (${shortAddress(superAdmin as Address)})` : "the super admin"} can reopen it.`
-      : null,
+    pausedBlocker,
     toSend.length === 0 && clean && facts && doneRows.length > 0 ? "Every row of this list is already sent." : null,
   ].filter((p): p is string => !!p);
   const ready = clean && !!facts && blockers.length === 0 && toSend.length > 0;
@@ -1145,7 +1153,11 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
             issuance again).
             {!reservationsKnown && " The room left is checked again before they are created."}
           </p>
-          {primaryPaused && <p className="mt-1 text-[12px] text-amber-800">{primaryPausedNote(superAdmin)}</p>}
+          {primaryPaused && (
+            <p className="mt-1 text-[12px] text-amber-800">
+              {primaryPausedNote(superAdmin)} <PrimaryReopenLink publicSale={saleApproved} className="mt-1" />
+            </p>
+          )}
           {tokenizePriceE6 !== null ? (
             <p className="mt-1 text-[12px] text-slate-500">
               Valued at your tokenize price: ${formatE6(tokenizePriceE6)} per token, at today&apos;s USDC rate in EUR.
@@ -1251,7 +1263,17 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           {toSend.length > 0 ? `Send ${formatTokens(totalToSend)} tokens to ${toSend.length} ${toSend.length === 1 ? "wallet" : "wallets"}` : "Send"}
         </button>
         {working && <p className="text-sm text-slate-600" aria-live="polite">{working}</p>}
-        {!working && clean && blockers.length > 0 && <p className="text-[12px] text-amber-700">{blockers[0]}</p>}
+        {!working && clean && blockers.length > 0 && (
+          <p className="text-[12px] text-amber-700">
+            {blockers[0]}
+            {blockers[0] === pausedBlocker && (
+              <>
+                {" "}
+                <PrimaryReopenLink publicSale={saleApproved} />
+              </>
+            )}
+          </p>
+        )}
       </div>
 
       <ConfirmModal

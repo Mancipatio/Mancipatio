@@ -74,6 +74,8 @@ import { decideSaleRequest, listSaleRequests, submitSaleRequest, type SaleReques
 import { openApprovedSale, OpenSaleError } from "@/lib/open-sale";
 import { buildEndAndCollect, readProceedsAccount, type ProceedsAccount } from "@/lib/close-sale";
 import { fromBaseUnits } from "@/lib/sale-approvals";
+import { REOPEN_AT_LAUNCHPAD } from "@/lib/distribute-guidance";
+import { PrimaryReopenLink } from "@/components/primary-reopen-link";
 
 type Props = {
   asset: Asset;
@@ -591,6 +593,7 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
             Waiting for the operator: they approve the sale and reopen Primary issuance after checking that nothing else could
             open or sell meanwhile. Then you open it here (one transaction).
           </p>
+          <PrimaryReopenLink publicSale className="mt-1" />
           <button type="button" disabled={busy} onClick={() => void withdraw()} className="mt-1 text-[12px] font-medium underline disabled:opacity-50">
             Withdraw the request
           </button>
@@ -624,7 +627,7 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
           {!primaryOpen ? (
             <p className="mt-2 text-[12px] text-amber-800">
               Waiting for Primary issuance (0x02): only {superAdminText} can reopen it, after checking that nothing else could open or
-              sell meanwhile.
+              sell meanwhile. <PrimaryReopenLink publicSale className="mt-1" />
             </p>
           ) : (
             <p className="mt-2 text-[12px]">
@@ -660,7 +663,11 @@ export function PublicSalePanel({ asset, sc, scPda, tokenize, supply, canCreate,
             <p className="font-medium text-slate-900">End and collect</p>
             {step?.step === "clear-proceeds" || proceedsPaused ? (
               <p className="mt-1 text-[12px] text-amber-800">
-                Proceeds are paused platform-wide (0x20): {superAdminText} clears it when you want to end the sale (Admin → Launchpad).
+                Proceeds are paused platform-wide (0x20): {superAdminText} clears it when you want to end the sale (
+                <a href={REOPEN_AT_LAUNCHPAD.href} className="font-medium underline">
+                  Admin → Launchpad
+                </a>
+                ).
                 Buyers keep buying until then.
               </p>
             ) : (
