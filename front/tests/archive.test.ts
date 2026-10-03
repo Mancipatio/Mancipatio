@@ -211,6 +211,28 @@ describe("wiring (read from the sources)", () => {
     expect(src("app/admin/issuers/page.tsx")).toContain("showArchived ||");
   });
 
+  it("the other workspace and admin lists leave archived assets out too (review of PR #63)", () => {
+    // Issuer workspace: share classes (no second "Mancipatio 5%" after re-tokenizing).
+    expect(src("app/issuer/share-classes/page.tsx")).toContain("await withoutArchivedAssets(");
+    // Admin lists: hidden unless "Show archived"; an Open sale stays (closing it is an admin's job).
+    expect(src("app/admin/share-classes/page.tsx")).toContain("if (archived && !showArchived) return false;");
+    expect(src("app/admin/rights/page.tsx")).toContain("if (archived && !showArchived) return false;");
+    expect(src("app/admin/launchpad/page.tsx")).toContain(`if (archived && !showArchived && lc === "closed") return false;`);
+    for (const path of ["app/admin/share-classes/page.tsx", "app/admin/rights/page.tsx", "app/admin/launchpad/page.tsx"]) {
+      expect(src(path), path).toContain("<ShowArchivedToggle checked={showArchived}");
+      expect(src(path), path).toContain("{archived && <ArchivedPill />}");
+    }
+    // The approval modal never offers an archived asset's class.
+    expect(src("app/admin/applications/sale-approvals.tsx")).toContain("const offered = await withoutArchived(data);");
+  });
+
+  it("no route offers, approves or mints an archived asset again", () => {
+    expect(src("app/api/sale-requests/submit/route.ts")).toContain("await requireNotArchived(sb, chain.asset, chain.issuer);");
+    expect(src("app/api/sale-requests/submit/route.ts")).toContain(`.neq("status", "archived")`);
+    expect(src("app/api/sale-approvals/reserve/route.ts")).toContain("await requireNotArchived(sb, chain.asset, chain.issuer);");
+    expect(src("app/api/sale-approvals/treasury-mint/route.ts")).toContain("await requireNotArchived(sb, chain.asset, chain.issuer);");
+  });
+
   it("direct links say withdrawn", () => {
     for (const path of ["app/marketplace/assets/[id]/page.tsx", "app/marketplace/issuers/[id]/page.tsx", "app/marketplace/launchpad/[sale]/page.tsx"]) {
       expect(src(path), path).toContain("<WithdrawnNotice");

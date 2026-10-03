@@ -81,6 +81,36 @@ export async function readArchivedIssuers(sb: SupabaseClient): Promise<Set<strin
   }
 }
 
+export const ARCHIVED_ASSET_REFUSAL =
+  "This asset is archived: unarchive it first (Admin → Assets → Show archived → Unarchive), then try again.";
+export const ARCHIVED_ISSUER_REFUSAL =
+  "This asset's issuer is archived: unarchive the issuer first (Admin → Issuers → Show archived → Unarchive issuer), then try again.";
+
+/**
+ * Refuses (409) a write that would offer, approve or mint an archived asset,
+ * or an asset of an archived issuer: a sale request (which publishes the
+ * profile), a sale approval, a treasury mint. Only /api/archive/set takes an
+ * archive back, with its reason and audit event. Fails closed (503) when the
+ * rows cannot be read; before migration 0081 no issuer is archived.
+ */
+export async function requireNotArchived(sb: SupabaseClient, asset: string, issuer: string): Promise<void> {
+  const network = detectNetwork();
+  const [assetRow, issuerRow] = await Promise.all([
+    sb.from("asset_profiles").select("status").eq("network", network).eq("asset_pda", asset).maybeSingle(),
+    sb.from("issuer_profiles").select("archive").eq("network", network).eq("issuer_pda", issuer).maybeSingle(),
+  ]);
+  if (assetRow.error) throw new SiwsError(503, "Asset profile unavailable — try again");
+  if ((assetRow.data as { status?: unknown } | null)?.status === "archived") {
+    throw new SiwsError(409, ARCHIVED_ASSET_REFUSAL);
+  }
+  if (issuerRow.error) {
+    if (!isMissingArchiveColumn(issuerRow.error)) throw new SiwsError(503, "Issuer profile unavailable — try again");
+    return;
+  }
+  const archive = (issuerRow.data as { archive?: unknown } | null)?.archive;
+  if (archive !== null && archive !== undefined) throw new SiwsError(409, ARCHIVED_ISSUER_REFUSAL);
+}
+
 /** Non-throwing super-admin probe: 403 -> false; 503 propagates (fail closed). */
 export async function isSuperAdminWallet(wallet: string): Promise<boolean> {
   try {

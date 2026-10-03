@@ -266,6 +266,19 @@ describe("reserve", () => {
     expect(rpcCall("reserve_sale_capacity")).toMatchObject({ p_application_id: null });
   });
 
+  it("refuses an archived asset, or an asset of an archived issuer, before reserving anything (lib/server/archive)", async () => {
+    state.rows.asset_profiles = { spv_id: null, status: "archived" };
+    const archived = await call(reserveRoute, reserveParams());
+    expect(archived.status).toBe(409);
+    expect(archived.body.error).toMatch(/This asset is archived: unarchive it first/);
+    state.rows.asset_profiles = { spv_id: null, status: "published" };
+    state.rows.issuer_profiles = { archive: { reason: "Test issuer", archived_by: ADMIN, archived_at: "2026-10-03T10:00:00.000Z" } };
+    expect((await call(reserveRoute, reserveParams())).body.error).toMatch(/issuer is archived/);
+    expect(rpcCall("reserve_sale_capacity")).toBeUndefined();
+    state.rows.issuer_profiles = { archive: null };
+    expect((await call(reserveRoute, reserveParams())).status).toBe(200);
+  });
+
   it("on mainnet an issuer's own admin key cannot approve its sale", async () => {
     state.network = "mainnet";
     state.issuerAuthority = ADMIN;
@@ -480,6 +493,22 @@ function treasuryTx(amount: bigint, signature: string) {
     meta: { err: null, postTokenBalances: [{ accountIndex: 6, mint: MINT, owner: ADMIN }] },
   };
 }
+
+describe("treasury-mint reserve", () => {
+  it("no new tokens of an archived asset; reserves once it is not archived", async () => {
+    state.issuerAuthority = ADMIN;
+    const params = { share_class: state.fixtures.shareClass, amount_units: "500", amount_eur: 500, reason: "Treasury top-up for OTC" };
+    state.rows.asset_profiles = { spv_id: null, status: "archived" };
+    const refused = await call(treasuryMintRoute, params);
+    expect(refused.status).toBe(409);
+    expect(refused.body.error).toMatch(/This asset is archived/);
+    expect(rpcCall("reserve_treasury_mint_capacity")).toBeUndefined();
+    state.rows.asset_profiles = { spv_id: null, status: "published" };
+    state.rpc.reserve_treasury_mint_capacity = { id: RESERVATION_ID, amount_eur: 500, subject: "issuer:x", capacity: {} };
+    expect((await call(treasuryMintRoute, params)).status).toBe(200);
+    expect(rpcCall("reserve_treasury_mint_capacity")).toMatchObject({ p_amount_units: "500" });
+  });
+});
 
 describe("treasury-mint book with signature (manual, D11)", () => {
   const BLOCK = 1_760_000_000; // 2025-10-09

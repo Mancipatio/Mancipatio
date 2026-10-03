@@ -27,6 +27,9 @@ import {
 } from "@/lib/generated/asset_registry";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { ArchivedPill, ShowArchivedToggle } from "@/components/archived-filter";
+import { useArchivedSet } from "@/lib/archive-client";
+import { isWithdrawn } from "@/lib/archive";
 import { fromBytes32, toBytes32 } from "@/lib/format";
 import { merkleProof, merkleRoot, snapshotLeaf } from "@/lib/merkle";
 import {
@@ -135,6 +138,23 @@ function RightsOps() {
     void refresh();
   }, [refresh]);
 
+  // Issuances of archived assets (lib/archive.ts) are hidden unless this is on.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedSet = useArchivedSet();
+  const issuanceArchived = useCallback(
+    (issuance: RightsIssuance) => {
+      if (archivedSet === null) return false;
+      const sc = shareClassPdaMap.get(issuance.shareClass.toString());
+      if (!sc) return false;
+      return isWithdrawn(archivedSet, sc.asset.toString(), assetPdaMap.get(sc.asset.toString())?.issuer.toString());
+    },
+    [archivedSet, shareClassPdaMap, assetPdaMap],
+  );
+  const archivedCount = useMemo(
+    () => (data?.rightsIssuances ?? []).filter(issuanceArchived).length,
+    [data, issuanceArchived],
+  );
+
   const rows = useMemo(() => {
     if (!data) return [];
     const q = query.trim().toLowerCase();
@@ -142,9 +162,10 @@ function RightsOps() {
       .map((issuance, i) => {
         const sc = shareClassPdaMap.get(issuance.shareClass.toString());
         const asset = sc ? assetPdaMap.get(sc.asset.toString()) : undefined;
-        return { issuance, sc, asset, originalIndex: i };
+        return { issuance, sc, asset, archived: issuanceArchived(issuance), originalIndex: i };
       })
-      .filter(({ issuance, asset }) => {
+      .filter(({ issuance, asset, archived }) => {
+        if (archived && !showArchived) return false;
         if (!q) return true;
         return (
           (asset?.name ?? "").toLowerCase().includes(q) ||
@@ -152,7 +173,7 @@ function RightsOps() {
         );
       })
       .sort((a, b) => Number(b.issuance.issuanceId - a.issuance.issuanceId));
-  }, [data, assetPdaMap, shareClassPdaMap, query]);
+  }, [data, assetPdaMap, shareClassPdaMap, query, issuanceArchived, showArchived]);
 
   // Group milestones by issuance PDA.
   const milestonesByIssuance = useMemo(() => {
@@ -189,6 +210,7 @@ function RightsOps() {
           placeholder="Search by asset, issuance ID…"
           className="min-w-[280px] flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400"
         />
+        <ShowArchivedToggle checked={showArchived} onChange={setShowArchived} count={archivedCount} />
         {rightsOn && (
           <button
             type="button"
@@ -232,7 +254,7 @@ function RightsOps() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map(({ issuance, asset, originalIndex }) => {
+              {rows.map(({ issuance, asset, archived, originalIndex }) => {
                 const isSelected = selectedIdx === originalIndex;
                 return (
                   <tr
@@ -242,11 +264,12 @@ function RightsOps() {
                     }
                     className={`cursor-pointer transition-colors ${
                       isSelected ? "bg-slate-50" : "hover:bg-slate-50/60"
-                    }`}
+                    } ${archived ? "opacity-60" : ""}`}
                   >
                     <td className="px-4 py-3">
                       <p className="font-medium text-slate-900">
                         {asset?.name || "(asset unknown)"}
+                        {archived && <ArchivedPill />}
                       </p>
                       <p className="mt-0.5 text-xs text-slate-500">
                         issuance #{String(issuance.issuanceId)}

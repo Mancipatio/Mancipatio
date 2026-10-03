@@ -36,6 +36,7 @@ import {
 } from "@/lib/generated/transfer_hook";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { withoutArchivedAssets } from "@/lib/archive-client";
 import { findShareClassPda } from "@/lib/pdas";
 import { shareClassTypesForAssetType } from "@/lib/asset-types";
 import { fromBytes32 } from "@/lib/format";
@@ -111,8 +112,10 @@ export default function MyShareClassesPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const network = await loadNetworkPreferIndexer(() =>
-        loadNetwork(client.runtime.rpc),
+      // Archived assets are left out of the workspace (lib/archive.ts): no
+      // second "Mancipatio 5%" next to the re-tokenized one, no mint into it.
+      const network = await withoutArchivedAssets(
+        await loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
       );
       setData(network);
       if (wallet) {

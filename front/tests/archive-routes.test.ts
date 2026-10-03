@@ -83,7 +83,28 @@ vi.mock("@/lib/server/audit", async () => {
   };
 });
 
+// The sale-request route (an archived asset is not offered, nor published, again).
+vi.mock("@/app/api/sale-approvals/_lib", () => ({
+  shareClassChain: vi.fn(async (shareClass: string) => ({
+    shareClass, asset: ASSET, issuer: ISSUER, authority: ISSUER_KEY, issuerVerified: true,
+  })),
+  assertAllowedPaymentMint: vi.fn(),
+}));
+vi.mock("@/lib/server/document-versions", () => ({
+  requireDocumentVersion: vi.fn(async (_bucket: string, path: string, sha256: string) => ({
+    id: "10000000-0000-4000-8000-000000000001", path, sha256, verified_at: "2026-10-03T00:00:00Z",
+  })),
+}));
+vi.mock("@/lib/server/sale-requests", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/lib/server/sale-requests")>()),
+  readSaleRoom: vi.fn(async () => ({
+    room: BigInt(4_000), legalDocHash: new Uint8Array(32), assetActive: true, mintInitialized: true, openSales: 0, liveApprovals: 0,
+  })),
+}));
+
 import { POST as setRoute } from "@/app/api/archive/set/route";
+import { POST as submitSaleRequest } from "@/app/api/sale-requests/submit/route";
+import { requireNotArchived } from "@/lib/server/archive";
 import { POST as checkRoute } from "@/app/api/archive/check/route";
 import { GET as listRoute } from "@/app/api/archive/list/route";
 import { POST as publicProfiles } from "@/app/api/profiles/public/route";
@@ -291,5 +312,86 @@ describe("archive an issuer (migration 0081)", () => {
     const check = await call(checkRoute, SUPER, { kind: "issuer", pda: ISSUER });
     expect(check.body.data).toMatchObject({ available: false, canArchive: false, refusal: expect.stringMatching(/migration 0081/) });
     expect((await archive(SUPER)).status).toBe(200);
+  });
+});
+
+describe("an archived asset is not offered again (no silent unarchive)", () => {
+  const SHA = "ab".repeat(32);
+  const terms = () => ({
+    share_class: SC0, price_per_unit: "2500000", tokens: "1000", duration_days: 30,
+    document: { path: `whitepapers/${ASSET}/mainnet/${SHA}/offer.pdf`, sha256: SHA },
+  });
+  const submit = () => call(submitSaleRequest, ISSUER_KEY, terms());
+  const ISSUER_RECORD = { reason: REASON, archived_by: SUPER, archived_at: "2026-10-03T10:00:00.000Z" };
+
+  beforeEach(() => {
+    db.ref!.rows("asset_profiles").push({
+      network: "mainnet", asset_pda: ASSET, issuer_pda: ISSUER, category: "equity", status: "published", is_published: true,
+      fields: { tokenize: { tokens: "5000" } },
+      whitepaper_path: null, whitepaper_sha256: null, whitepaper_status: "none", whitepaper_published_at: null,
+    });
+  });
+
+  it("a sale request for an archived asset is refused: the row stays archived, no request, no audit, still in the archived list", async () => {
+    expect((await archive(SUPER, { confirm: true })).status).toBe(200);
+    const archived = structuredClone(profile());
+    const res = await submit();
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/This asset is archived: unarchive it first/);
+    expect(profile()).toEqual(archived);
+    expect(profile()!.fields).not.toHaveProperty("sale_request");
+    expect(state.audits.map((a) => a.ix_name)).toEqual(["asset_archive"]);
+    expect((await (await listRoute()).json()).data.assets).toEqual([ASSET]);
+
+    // Taken back by the super admin (its own audit event): the request goes through.
+    expect((await unarchive(SUPER)).status).toBe(200);
+    expect((await submit()).status).toBe(200);
+    expect(profile()).toMatchObject({ status: "published", is_published: true, fields: { sale_request: { status: "requested" } } });
+    expect(state.audits.map((a) => a.ix_name)).toEqual(["asset_archive", "asset_unarchive", "sale_request_submit"]);
+  });
+
+  it("archived between the check and the write: the conditional write publishes nothing", async () => {
+    db.ref!.beforeUpdate = (table) => {
+      if (table !== "asset_profiles") return;
+      Object.assign(profile()!, { status: "archived", is_published: false });
+      db.ref!.beforeUpdate = null;
+    };
+    const res = await submit();
+    expect(res.status).toBe(409);
+    expect(profile()).toMatchObject({ status: "archived", is_published: false });
+    expect(profile()!.fields).not.toHaveProperty("sale_request");
+    expect(state.audits).toEqual([]);
+  });
+
+  it("an asset of an archived issuer is refused; before 0081 no issuer counts as archived", async () => {
+    db.ref!.rows("issuer_profiles").push({ network: "mainnet", issuer_pda: ISSUER, archive: ISSUER_RECORD });
+    const res = await submit();
+    expect(res.status).toBe(409);
+    expect(res.body.error).toMatch(/issuer is archived: unarchive the issuer first/);
+    expect(profile()!.fields).not.toHaveProperty("sale_request");
+
+    db.ref!.failReads.add("issuer_profiles");
+    db.ref!.readErrorCodes.issuer_profiles = "42703";
+    expect((await submit()).status).toBe(200);
+  });
+
+  it("requireNotArchived (sale approvals and treasury mints use it too): 409 archived, 503 unreadable, fine otherwise", async () => {
+    const sb = db.ref!.client as never;
+    await expect(requireNotArchived(sb, ASSET, ISSUER)).resolves.toBeUndefined();
+    // An asset without a profile row is not archived.
+    await expect(requireNotArchived(sb, ASSET2, ISSUER)).resolves.toBeUndefined();
+    profile()!.status = "archived";
+    await expect(requireNotArchived(sb, ASSET, ISSUER)).rejects.toMatchObject({ status: 409 });
+    await expect(requireNotArchived(sb, ASSET2, ISSUER)).resolves.toBeUndefined();
+    db.ref!.rows("issuer_profiles").push({ network: "mainnet", issuer_pda: ISSUER, archive: ISSUER_RECORD });
+    await expect(requireNotArchived(sb, ASSET2, ISSUER)).rejects.toMatchObject({ status: 409 });
+    db.ref!.rows("issuer_profiles")[0].archive = null;
+    await expect(requireNotArchived(sb, ASSET2, ISSUER)).resolves.toBeUndefined();
+    // Fails closed: an unreadable row is a 503, never "not archived".
+    db.ref!.failReads.add("asset_profiles");
+    await expect(requireNotArchived(sb, ASSET2, ISSUER)).rejects.toMatchObject({ status: 503 });
+    db.ref!.failReads.delete("asset_profiles");
+    db.ref!.failReads.add("issuer_profiles");
+    await expect(requireNotArchived(sb, ASSET2, ISSUER)).rejects.toMatchObject({ status: 503 });
   });
 });
