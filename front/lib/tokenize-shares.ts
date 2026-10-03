@@ -353,6 +353,29 @@ export function candidateAssetIds(base: string, count = ASSET_ID_CANDIDATES): st
   return out;
 }
 
+/**
+ * Advanced: a custom asset ID (owner's request 2026-10-03 — start clean, e.g.
+ * "MANCI-2026", instead of the automatic "-2" suffix next to an archived test
+ * token). It is the asset PDA's seed: at most 32 bytes, kept to capital
+ * letters, digits, "-" and "_" so it reads the same in every explorer.
+ * Uniqueness is the chain's (the issuer + ID PDA must not exist): the form
+ * checks it live, create() again before the wallet opens. Null when valid.
+ */
+export function validateCustomAssetId(id: string): string | null {
+  const s = id.trim();
+  if (!s) return "Enter an asset ID, or clear the field to use the automatic one.";
+  if (!/^[A-Z0-9][A-Z0-9_-]*$/.test(s)) return "Use capital letters A–Z, digits, “-” and “_”, starting with a letter or digit.";
+  if (s.length < 2) return "At least 2 characters.";
+  if (utf8Bytes(s) > MAX_ASSET_ID_BYTES) return `At most ${MAX_ASSET_ID_BYTES} characters (it is the on-chain seed).`;
+  return null;
+}
+
+/** What create() tries: only the typed ID when there is one (never a "-2" of it), else base, base-2, … */
+export function assetIdCandidates(customId: string | null | undefined, base: string): string[] {
+  const s = customId?.trim();
+  return s ? [s] : candidateAssetIds(base);
+}
+
 /** The share a tokenize-flow name ends with ("Mancipatio 5%" → "5"), or null. */
 export function percentFromName(name: string): string | null {
   const m = /(?:^|\s)(\d{1,3}(?:\.\d{1,4})?)%$/.exec(name);

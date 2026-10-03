@@ -39,6 +39,10 @@ import { getPrivateAssetProfiles as getAssetProfiles, type AssetProfile } from "
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { assetActivationBlock, type AssetActivationBlock } from "@/lib/admin-badge-rules";
 import { looksLikeTokenizeAsset } from "@/lib/tokenize-shares";
+import { ArchiveDialog } from "@/components/archive-dialog";
+import { useArchivedSet } from "@/lib/archive-client";
+import { isWithdrawn } from "@/lib/archive";
+import { useRole } from "@/lib/auth";
 
 // "ready": drafts an admin can activate now — the Assets menu count.
 type StatusFilter = "all" | "ready" | "draft" | "active" | "frozen" | "wound-down";
@@ -121,6 +125,15 @@ function AssetsOps() {
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [categoryFilter, setCategoryFilter] = useState<CategoryFilter>("all");
   const [showCreate, setShowCreate] = useState(false);
+  // Archived assets (and assets of an archived issuer) are hidden unless this is on.
+  const [showArchived, setShowArchived] = useState(false);
+  const archivedSet = useArchivedSet();
+  const { isSuperAdmin } = useRole();
+  const [archiveTarget, setArchiveTarget] = useState<{
+    assetPda: string;
+    label: string;
+    mode: "archive" | "unarchive";
+  } | null>(null);
 
   const refresh = useCallback(
     async (isCancelled?: () => boolean) => {
@@ -290,9 +303,14 @@ function AssetsOps() {
           assetPda,
           profile,
           category,
+          archived:
+            profile?.status === "archived" ||
+            (archivedSet !== null && isWithdrawn(archivedSet, assetPda, asset.issuer.toString())),
+          ownArchive: profile?.status === "archived" || (!!assetPda && !!archivedSet?.assets.has(assetPda)),
         };
       })
-      .filter(({ asset, issuer, category }) => {
+      .filter(({ asset, issuer, category, archived }) => {
+        if (archived && !showArchived) return false;
         if (statusFilter === "ready") {
           if (activationBlockOf(asset, issuer) !== null) return false;
         } else if (
@@ -318,7 +336,17 @@ function AssetsOps() {
     query,
     statusFilter,
     categoryFilter,
+    archivedSet,
+    showArchived,
   ]);
+
+  const archivedCount = useMemo(() => {
+    if (!data || !archivedSet) return 0;
+    return data.assets.filter((a) => {
+      const pda = pdaMap.get(a.assetId) ?? null;
+      return profileMap.get(pda ?? "")?.status === "archived" || isWithdrawn(archivedSet, pda, a.issuer.toString());
+    }).length;
+  }, [data, archivedSet, pdaMap, profileMap]);
 
   // Drafts an admin can activate now (the Assets menu count).
   const readyCount = useMemo(
@@ -389,13 +417,19 @@ function AssetsOps() {
             ),
           )}
         </div>
-        <button
-          type="button"
-          onClick={() => setShowCreate(true)}
-          className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
-        >
-          + Create asset
-        </button>
+        <div className="flex items-center gap-3">
+          <label className="inline-flex items-center gap-1.5 text-xs text-slate-600" title="Archived assets (and assets of an archived issuer) are hidden from every list until shown here">
+            <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+            Show archived{archivedCount ? ` (${archivedCount})` : ""}
+          </label>
+          <button
+            type="button"
+            onClick={() => setShowCreate(true)}
+            className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800"
+          >
+            + Create asset
+          </button>
+        </div>
       </div>
 
       {/* Category segmented filter */}
@@ -464,7 +498,7 @@ function AssetsOps() {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
-              {rows.map(({ asset, issuer, assetPda, profile, category }) => {
+              {rows.map(({ asset, issuer, assetPda, profile, category, archived, ownArchive }) => {
                 const title = profile?.display_name || asset.name;
                 const block = activationBlockOf(asset, issuer);
                 const blockHint =
@@ -481,10 +515,17 @@ function AssetsOps() {
                 return (
                   <tr
                     key={assetPda ?? `${asset.issuer}:${asset.assetId}`}
-                    className="transition-colors hover:bg-slate-50/60"
+                    className={`transition-colors hover:bg-slate-50/60 ${archived ? "opacity-60" : ""}`}
                   >
                     <td className="px-4 py-3">
-                      <p className="font-medium text-slate-900">{title}</p>
+                      <p className="font-medium text-slate-900">
+                        {title}
+                        {archived && (
+                          <span className="ml-2 inline-flex rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
+                            {ownArchive ? "Archived" : "Issuer archived"}
+                          </span>
+                        )}
+                      </p>
                       <p className="mt-0.5 text-xs text-slate-500">
                         {asset.assetId} · {asset.symbolPrefix}
                       </p>
@@ -528,6 +569,17 @@ function AssetsOps() {
                             className="rounded-md border border-emerald-200 bg-emerald-50 px-2.5 py-1 text-xs font-medium text-emerald-700 hover:bg-emerald-100 disabled:opacity-50"
                           >
                             Activate
+                          </button>
+                        )}
+                        {isSuperAdmin && assetPda && (archived ? ownArchive : true) && (
+                          <button
+                            type="button"
+                            onClick={() =>
+                              setArchiveTarget({ assetPda, label: title, mode: ownArchive ? "unarchive" : "archive" })
+                            }
+                            className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                          >
+                            {ownArchive ? "Unarchive" : "Archive"}
                           </button>
                         )}
                         {href ? (
@@ -577,6 +629,19 @@ function AssetsOps() {
         onClose={() => setActivateTarget(null)}
         onConfirm={(reason) => activateAsset(reason)}
       />
+
+      {archiveTarget && (
+        <ArchiveDialog
+          open
+          kind="asset"
+          pda={archiveTarget.assetPda}
+          label={archiveTarget.label}
+          mode={archiveTarget.mode}
+          hasAdminRecord={hasAdminRecord}
+          onClose={() => setArchiveTarget(null)}
+          onDone={() => refresh()}
+        />
+      )}
 
       {showCreate && (
         <AssetCreateModal

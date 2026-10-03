@@ -6,6 +6,7 @@ import Link from "next/link";
 import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
+  AssetStatus,
   findAssetPda,
   findIssuerPda,
   type Issuer,
@@ -22,6 +23,8 @@ import {
   type CategorySlug,
 } from "@/lib/asset-types";
 import { getPrivateAssetProfiles as getAssetProfiles, type AssetProfile } from "@/lib/asset-profiles";
+import { ArchiveDialog } from "@/components/archive-dialog";
+import { useArchivedSet } from "@/lib/archive-client";
 
 const STATUS_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -132,10 +135,34 @@ export default function MyAssetsPage() {
     [pdaMap, profileMap],
   );
 
+  // Archived assets (lib/archive.ts) are hidden unless "Show archived".
+  const archivedSet = useArchivedSet();
+  const [showArchived, setShowArchived] = useState(false);
+  const [archiveTarget, setArchiveTarget] = useState<{ pda: string; label: string; mode: "archive" | "unarchive" } | null>(null);
+  const isArchived = useCallback(
+    (a: (typeof myAssets)[number]) => {
+      const pda = pdaMap.get(a.assetId);
+      if (!pda) return false;
+      return profileMap.get(pda)?.status === "archived" || !!archivedSet?.assets.has(pda);
+    },
+    [pdaMap, profileMap, archivedSet],
+  );
+  const archivedCount = useMemo(() => myAssets.filter(isArchived).length, [myAssets, isArchived]);
+  /** The issuer may archive its own asset while it is a Draft or was never minted (the server decides). */
+  const issuerMayArchive = useCallback(
+    (a: (typeof myAssets)[number], pda: string) => {
+      const classes = (data?.shareClasses ?? []).filter((sc) => sc.asset.toString() === pda);
+      if (classes.some((sc) => BigInt(sc.circulatingSupply) > BigInt(0))) return false;
+      return a.status === AssetStatus.Draft || classes.every((sc) => BigInt(sc.lifetimeMinted) === BigInt(0));
+    },
+    [data],
+  );
+
   const rows = useMemo(() => {
-    if (categoryFilter === "all") return myAssets;
-    return myAssets.filter((a) => categoryOf(a) === categoryFilter);
-  }, [myAssets, categoryFilter, categoryOf]);
+    const visible = showArchived ? myAssets : myAssets.filter((a) => !isArchived(a));
+    if (categoryFilter === "all") return visible;
+    return visible.filter((a) => categoryOf(a) === categoryFilter);
+  }, [myAssets, categoryFilter, categoryOf, showArchived, isArchived]);
 
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -245,6 +272,13 @@ export default function MyAssetsPage() {
             })}
           </div>
 
+          {archivedCount > 0 && (
+            <label className="mt-3 inline-flex items-center gap-1.5 text-xs text-slate-600">
+              <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} />
+              Show archived ({archivedCount})
+            </label>
+          )}
+
           {rows.length === 0 ? (
             <div className="mt-4 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
               <p className="text-sm text-slate-600">
@@ -275,10 +309,18 @@ export default function MyAssetsPage() {
                       (category && assetTypeBySlug(category)?.title) ||
                       ASSET_TYPE_LABEL[a.assetType] ||
                       "?";
+                    const archived = isArchived(a);
                     return (
-                      <tr key={`${a.issuer.toString()}:${a.assetId}`} className="text-slate-700">
+                      <tr key={`${a.issuer.toString()}:${a.assetId}`} className={`text-slate-700 ${archived ? "opacity-60" : ""}`}>
                         <td className="px-4 py-3">
-                          <p className="font-medium text-slate-900">{title}</p>
+                          <p className="font-medium text-slate-900">
+                            {title}
+                            {archived && (
+                              <span className="ml-2 inline-flex rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-[10px] font-semibold uppercase text-slate-600">
+                                Archived
+                              </span>
+                            )}
+                          </p>
                           <p className="mt-0.5 text-xs text-slate-500">
                             {a.assetId} · {a.symbolPrefix}
                           </p>
@@ -295,16 +337,28 @@ export default function MyAssetsPage() {
                           </span>
                         </td>
                         <td className="px-4 py-3 text-right">
-                          {pda ? (
-                            <Link
-                              href={`/issuer/assets/${pda}`}
-                              className="text-xs font-medium text-slate-600 underline-offset-2 hover:text-slate-900 hover:underline"
-                            >
-                              Manage →
-                            </Link>
-                          ) : (
-                            <span className="text-xs text-slate-400">…</span>
-                          )}
+                          <div className="flex items-center justify-end gap-3">
+                            {pda && (archived || issuerMayArchive(a, pda)) && (
+                              <button
+                                type="button"
+                                onClick={() => setArchiveTarget({ pda, label: title, mode: archived ? "unarchive" : "archive" })}
+                                className="rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 hover:bg-slate-100"
+                                title={archived ? undefined : "Hide this unused asset from every list (the on-chain record stays)"}
+                              >
+                                {archived ? "Unarchive" : "Archive"}
+                              </button>
+                            )}
+                            {pda ? (
+                              <Link
+                                href={`/issuer/assets/${pda}`}
+                                className="text-xs font-medium text-slate-600 underline-offset-2 hover:text-slate-900 hover:underline"
+                              >
+                                Manage →
+                              </Link>
+                            ) : (
+                              <span className="text-xs text-slate-400">…</span>
+                            )}
+                          </div>
                         </td>
                       </tr>
                     );
@@ -314,6 +368,18 @@ export default function MyAssetsPage() {
             </div>
           )}
         </>
+      )}
+
+      {archiveTarget && (
+        <ArchiveDialog
+          open
+          kind="asset"
+          pda={archiveTarget.pda}
+          label={archiveTarget.label}
+          mode={archiveTarget.mode}
+          onClose={() => setArchiveTarget(null)}
+          onDone={() => refresh()}
+        />
       )}
 
       {showCreate && legalId && (

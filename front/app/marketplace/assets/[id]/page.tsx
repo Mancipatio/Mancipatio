@@ -40,6 +40,9 @@ import {
 import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
 import { visibleClassCount, visibleClasses } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
+import { useArchivedSet } from "@/lib/archive-client";
+import { isWithdrawn } from "@/lib/archive";
+import { WithdrawnNotice } from "@/components/withdrawn-notice";
 
 export default function AssetDetailPage({
   params,
@@ -57,6 +60,7 @@ export default function AssetDetailPage({
   const [lookup, setLookup] = useState<AssetLookup<Asset> | null>(null);
   // The conversion marker (class capped at 0, the target of a conversion) is no class a buyer can hold.
   const conversionTargets = useConversionTargets(data?.shareClasses);
+  const archived = useArchivedSet();
 
   useEffect(() => {
     let cancelled = false;
@@ -147,6 +151,17 @@ export default function AssetDetailPage({
 
   const asset: Asset | undefined =
     lookup.kind === "found" ? lookup.asset : undefined;
+  // Archived (or its issuer archived): withdrawn, not shown (lib/archive.ts).
+  if (asset && lookup.kind === "found" && archived === null) {
+    return (
+      <section>
+        <SkeletonCard rows={6} />
+      </section>
+    );
+  }
+  if (asset && lookup.kind === "found" && archived && isWithdrawn(archived, lookup.address, asset.issuer.toString())) {
+    return <WithdrawnNotice address={lookup.address} />;
+  }
   if (!asset) {
     return (
       <section>

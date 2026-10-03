@@ -10,6 +10,7 @@ import { ASSET_TYPES } from "@/lib/asset-types";
 import { ASSET_STATUS_LABEL, ASSET_TYPE_LABEL } from "@/lib/format";
 import { loadNetwork } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { withoutArchived } from "@/lib/archive-client";
 import { buildMarketOverview, type MarketAssetRow, type MarketOverview as OverviewData } from "@/lib/market-overview";
 import { loadPositionsForWallet, loadSeriesByPda, positionClaimable, VestingSeriesStatus } from "@/lib/vesting-series";
 import { navHrefVisible } from "@/lib/pilot-scope";
@@ -104,7 +105,8 @@ export function MarketOverview() {
     setFailed(false);
     setVestingRevision((value) => value + 1);
     try {
-      const result = await withDeadline(loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)));
+      // Archived issuers and assets are left out (lib/archive.ts).
+      const result = await withDeadline(loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)).then(withoutArchived));
       const model = await buildMarketOverview(result, Math.floor(Date.now() / 1000));
       if (request !== generation.current) return;
       setOverview(model);

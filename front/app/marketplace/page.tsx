@@ -9,6 +9,7 @@ import {
 } from "@/lib/generated/asset_registry";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { withoutArchived } from "@/lib/archive-client";
 import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL } from "@/lib/format";
 import { assetHref, withAssetAddresses } from "@/lib/asset-links";
 import type { Asset } from "@/lib/generated/asset_registry";
@@ -42,8 +43,9 @@ export default function MarketplacePage() {
 
   const refresh = useCallback(async () => {
     try {
-      const network = await loadNetworkPreferIndexer(() =>
-        loadNetwork(client.runtime.rpc),
+      // Archived issuers and assets are not offered (lib/archive.ts).
+      const network = await withoutArchived(
+        await loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
       );
       setData(network);
     } catch {

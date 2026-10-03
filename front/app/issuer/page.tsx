@@ -7,6 +7,7 @@ import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
+import { withoutArchivedAssets } from "@/lib/archive-client";
 import { fromBytes32, KYB_LABEL } from "@/lib/format";
 import { SkeletonCard } from "@/components/skeleton";
 import {
@@ -37,8 +38,9 @@ export default function IssuerOverviewPage() {
 
   const refresh = useCallback(async () => {
     try {
-      const network = await loadNetworkPreferIndexer(() =>
-        loadNetwork(client.runtime.rpc),
+      // Archived assets are left out of the workspace (lib/archive.ts).
+      const network = await withoutArchivedAssets(
+        await loadNetworkPreferIndexer(() => loadNetwork(client.runtime.rpc)),
       );
       setData(network);
     } catch {
