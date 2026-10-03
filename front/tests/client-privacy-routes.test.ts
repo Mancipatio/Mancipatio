@@ -495,6 +495,21 @@ describe("unsigned audit breadcrumbs (/api/audit)", () => {
     expect(res.status).toBe(400);
     expect(auditRows()).toEqual([]);
   });
+
+  it("cannot forge a sanctions screening record (the server-only compliance category)", async () => {
+    const { POST } = await import("@/app/api/audit/route");
+    const res = await POST(new Request("https://manci.test/api/audit", {
+      method: "POST",
+      headers: { origin: "https://manci.test" },
+      body: JSON.stringify({
+        ix_name: "sanctions_screening", category: "compliance", actor_wallet: ADMIN, reason: "",
+        metadata: { results: { [ADMIN]: "clear" } },
+      }),
+    }));
+    expect(res.status).toBe(400);
+    expect(((await res.json()) as { error: string }).error).toMatch(/recorded by the server only/);
+    expect(auditRows()).toEqual([]);
+  });
 });
 
 describe("GDPR export (/api/clients/export)", () => {

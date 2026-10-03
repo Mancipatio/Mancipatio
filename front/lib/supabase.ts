@@ -29,6 +29,8 @@ export type AuditCategory =
   | "rights"
   /** Server-only: KYC data access and GDPR actions (lib/server/audit.ts). */
   | "kyc"
+  /** Server-only: sanctions screening records and their evidence (lib/server/screening-evidence.ts). */
+  | "compliance"
   | "other";
 
 export type AuditStatus = "success" | "failed" | "pending";
