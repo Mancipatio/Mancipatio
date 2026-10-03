@@ -39,6 +39,7 @@ import {
 } from "@/lib/generated/transfer_hook/programs";
 import {
   classifyFailure,
+  contextualErrorHint,
   customErrorName,
   describeProgram,
   failedInstructionIndex,
@@ -116,7 +117,7 @@ export function computeUnitLimitFromSimulation(unitsConsumed: number | null, mul
  */
 export async function simulateInstructions(
   rpc: SimulationRpc,
-  input: { feePayer: Address; instructions: readonly Instruction[]; network?: string },
+  input: { feePayer: Address; instructions: readonly Instruction[]; network?: string; issuerRotation?: boolean },
 ): Promise<{ verdict: SimulationVerdict; refusal: SimulationRefusedError | null }> {
   const limit = setComputeUnitLimitInstruction(MAX_COMPUTE_UNIT_LIMIT);
   const message = pipe(
@@ -132,6 +133,7 @@ export async function simulateInstructions(
       appInstructions: input.instructions,
       messageInstructionCount: input.instructions.length + 1,
       network: input.network,
+      issuerRotation: input.issuerRotation,
     }),
   };
 }
@@ -231,7 +233,12 @@ const sentence = (text: string) => (/[.!?]$/.test(text) ? text : `${text}.`);
  * `appInstructions` are the instructions the app built; the message may carry
  * `messageInstructionCount - appInstructions.length` compute-budget
  * instructions in front of them (the SDK's prefix), which the step number
- * leaves out.
+ * leaves out. A code the failing program's table does not word (the
+ * registry's 6000 / 6001, Anchor's 3012 / 2006) is explained from the
+ * account and error Anchor names in the logs (contextualErrorHint, the
+ * wording lib/tx-error gives after a failed preflight); `issuerRotation`
+ * (lib/features, passed in so this module stays free of it) adds the sale
+ * sync to a sale's Unauthorized.
  */
 export function refusalFromSimulation(
   verdict: SimulationVerdict,
@@ -239,6 +246,7 @@ export function refusalFromSimulation(
     appInstructions: readonly { programAddress: string; data?: ArrayLike<number> }[];
     messageInstructionCount?: number;
     network?: string;
+    issuerRotation?: boolean;
   },
 ): SimulationRefusedError | null {
   if (verdict.err === null || verdict.err === undefined) return null;
@@ -269,7 +277,9 @@ export function refusalFromSimulation(
     // The whole transaction was refused before any instruction ran.
     reason = (name && transactionErrorText(name, network)) ?? `The network refused it before running it (${name ?? "unknown error"}).`;
   } else {
-    const hint = failure.code !== null ? programErrorHint({ program: label, code: failure.code }) : name ? instructionErrorText(name) : null;
+    const hint =
+      (failure.code !== null ? programErrorHint({ program: label, code: failure.code }) : name ? instructionErrorText(name) : null) ??
+      contextualErrorHint(verdict.logs.join("\n"), { issuerRotation: () => context.issuerRotation === true });
     const tag = failure.code !== null ? `${name ?? "custom error"}, ${failure.code}` : (name ?? "error");
     const explained = hint ? (name && hint.includes(`(${name})`) ? hint : `${sentence(hint).slice(0, -1)} (${tag}).`) : `It failed with ${tag}.`;
     const where =

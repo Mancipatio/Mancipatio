@@ -52,7 +52,7 @@ import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { setComputeUnitLimitInstruction, setComputeUnitPriceInstruction } from "@/lib/compute-budget";
 import { PROBE_LIFETIME, SimulationRefusedError, SimulationUnavailableError } from "@/lib/simulation-gate";
-import { explainSendError } from "@/lib/tx-error";
+import { explainSendError, SALE_AUTHORITY_HINT, SALE_SYNC_SUFFIX } from "@/lib/tx-error";
 
 const WALLET = address("7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2");
 const PROGRAM = address("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
@@ -325,6 +325,25 @@ describe("the simulation gate", () => {
       "This transaction would fail, so your wallet was not opened. Step 2 of 2 (token transfer) was refused by the Manci transfer hook: " +
         "The recipient has no approved investor passport in this share class's KYC registry (ReceiverNotApproved, 6005).",
     );
+  });
+
+  it("a code the table does not word is explained by the account Anchor names, with the sale sync per the issuer-rotation flag", async () => {
+    sim.verdict = {
+      err: { InstructionError: [2, { Custom: 6001 }] },
+      logs: [
+        `Program ${PROGRAM} invoke [1]`,
+        "Program log: AnchorError caused by account: sale. Error Code: Unauthorized. Error Number: 6001. Error Message: Signer is not authorized for this action.",
+        `Program ${PROGRAM} failed: custom program error: 0x1771`,
+      ],
+      unitsConsumed: 5_000,
+    };
+    const refused = async () =>
+      explainSendError(await fixture().guarded.transaction.prepareAndSend(request()).then(() => null, (err: unknown) => err));
+    const opening = "This transaction would fail, so your wallet was not opened. Step 1 of 1 (Manci registry instruction) was refused by the Manci registry program: ";
+    // Devnet: issuer rotation is on.
+    expect(await refused()).toBe(`${opening}${SALE_AUTHORITY_HINT}${SALE_SYNC_SUFFIX}`);
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_ISSUER_ROTATION", "false");
+    expect(await refused()).toBe(`${opening}${SALE_AUTHORITY_HINT}`);
   });
 
   it("fails closed when the network cannot be asked", async () => {

@@ -7,6 +7,7 @@ import type {
 } from "@solana/client";
 import { createNetworkVerifier } from "@/lib/network-identity";
 import { detectNetwork, type Network } from "@/lib/network";
+import { features } from "@/lib/features";
 import { guardTransactionGraph } from "@/lib/transaction-session-guard";
 import { requestTransactionWalletPolicy, transactionWalletPolicyRevision, TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 import { assertSiteWritable } from "@/lib/maintenance";
@@ -237,6 +238,8 @@ export function withVerifiedTransactions(
         appInstructions,
         messageInstructionCount: message.instructions.length,
         network,
+        // A sale's Unauthorized points at the sale sync only while that UI is on.
+        issuerRotation: features(network).issuerRotation,
       }) ?? new SimulationUnavailableError(network, verdict.err);
     }
     return verdict;

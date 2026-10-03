@@ -12,7 +12,7 @@ import {
   getTransactionDecoder,
   type Instruction,
 } from "@solana/kit";
-import { LOCK_SUPPLY_DISCRIMINATOR } from "@/lib/generated/asset_registry";
+import { CLOSE_SALE_DISCRIMINATOR, LOCK_SUPPLY_DISCRIMINATOR, OPEN_SALE_DISCRIMINATOR } from "@/lib/generated/asset_registry";
 import {
   computeUnitLimitFromSimulation,
   describeInstruction,
@@ -24,7 +24,19 @@ import {
   type SimulationRpc,
   type SimulationVerdict,
 } from "@/lib/simulation-gate";
-import { classifyFailure, programErrorHint } from "@/lib/program-errors";
+import {
+  APPROVER_NOT_ADMIN_HINT,
+  classifyFailure,
+  INVALID_KYC_REGISTRY_HINT,
+  KYC_REGISTRY_NOT_AUTHORITY_HINT,
+  NO_PENDING_AUTHORITY_TRANSFER_HINT,
+  NO_SALE_APPROVAL_HINT,
+  PLATFORM_PAUSED_HINT,
+  programErrorHint,
+  SALE_APPROVAL_OTHER_ID_HINT,
+  SALE_AUTHORITY_HINT,
+  SALE_SYNC_SUFFIX,
+} from "@/lib/program-errors";
 import { explainSendError } from "@/lib/tx-error";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 
@@ -159,6 +171,102 @@ describe("refusalFromSimulation", () => {
     const refusal = refuse({ err: { InstructionError: [0, "InvalidInstructionData"] }, logs: [], unitsConsumed: 0 })!;
     expect(refusal.instructionIndex).toBeNull();
     expect(refusal.detail).toMatch(/^The compute-budget setup was refused/);
+  });
+});
+
+// The codes the registry shares with the hook or with every Anchor account
+// (6000, 6001, 3012, 2006) have no table entry: the account / Anchor name in
+// the log decides, as lib/tx-error did after a failed preflight.
+describe("refusalFromSimulation: hints named by the account or the Anchor name", () => {
+  /** A registry instruction refused at message index 2 ([limit, price, ix]), Anchor naming the account when it does. */
+  function registryRefusal(code: number, name: string, account?: string): SimulationVerdict {
+    const where = account ? `caused by account: ${account}.` : "thrown in programs/asset_registry/src/lib.rs:100.";
+    return {
+      err: { InstructionError: [2, { Custom: code }] },
+      logs: [
+        `Program ${REGISTRY_PROGRAM} invoke [1]`,
+        `Program log: AnchorError ${where} Error Code: ${name}. Error Number: ${code}. Error Message: x.`,
+        `Program ${REGISTRY_PROGRAM} failed: custom program error: 0x${code.toString(16)}`,
+      ],
+      unitsConsumed: 1,
+    };
+  }
+  const openSale = [{ programAddress: address(REGISTRY_PROGRAM), data: OPEN_SALE_DISCRIMINATOR }];
+  const closeSale = [{ programAddress: address(REGISTRY_PROGRAM), data: CLOSE_SALE_DISCRIMINATOR }];
+  const registryIx = [{ programAddress: address(REGISTRY_PROGRAM), data: new Uint8Array(8) }];
+  const refuseRegistry = (verdict: SimulationVerdict, app = registryIx, issuerRotation?: boolean) =>
+    refusalFromSimulation(verdict, { appInstructions: app, messageInstructionCount: app.length + 2, network: "devnet", issuerRotation });
+
+  it("open_sale without a live approval (sale_approval, 3012)", () => {
+    const refusal = refuseRegistry(registryRefusal(3012, "AccountNotInitialized", "sale_approval"), openSale)!;
+    expect([refusal.program, refusal.code, refusal.errorName]).toEqual(["asset_registry", 3012, "AccountNotInitialized"]);
+    expect(refusal.detail).toBe(
+      `Step 1 of 1 (open sale) was refused by the Manci registry program: ${NO_SALE_APPROVAL_HINT.slice(0, -1)} (AccountNotInitialized, 3012).`,
+    );
+    expect(explainSendError(refusal)).toBe(refusal.message);
+  });
+
+  it("open_sale with another sale id's approval (2006) or an approver no longer admin (3012)", () => {
+    expect(refuseRegistry(registryRefusal(2006, "ConstraintSeeds", "sale_approval"), openSale)!.detail).toBe(
+      `Step 1 of 1 (open sale) was refused by the Manci registry program: ${SALE_APPROVAL_OTHER_ID_HINT.slice(0, -1)} (ConstraintSeeds, 2006).`,
+    );
+    expect(refuseRegistry(registryRefusal(3012, "AccountNotInitialized", "approver_admin_record"), openSale)!.detail).toContain(
+      `${APPROVER_NOT_ADMIN_HINT.slice(0, -1)} (AccountNotInitialized, 3012).`,
+    );
+  });
+
+  it("another account's 3012 keeps the bare name and number", () => {
+    expect(refuseRegistry(registryRefusal(3012, "AccountNotInitialized", "admin_record"))!.detail).toBe(
+      "Step 1 of 1 (Manci registry instruction) was refused by the Manci registry program: It failed with AccountNotInitialized, 3012.",
+    );
+  });
+
+  it("sale Unauthorized (6001) points at the sale sync only while issuer rotation is on", () => {
+    const verdict = registryRefusal(6001, "Unauthorized", "sale");
+    const withSync = refuseRegistry(verdict, closeSale, true)!;
+    expect(withSync.detail).toBe(
+      `Step 1 of 1 (close sale) was refused by the Manci registry program: ${SALE_AUTHORITY_HINT}${SALE_SYNC_SUFFIX}`,
+    );
+    expect(withSync.errorName).toBe("Unauthorized");
+    for (const rotation of [false, undefined]) {
+      expect(refuseRegistry(verdict, closeSale, rotation)!.detail).toBe(
+        `Step 1 of 1 (close sale) was refused by the Manci registry program: ${SALE_AUTHORITY_HINT}`,
+      );
+    }
+  });
+
+  it("KYC registry Unauthorized (6001) and the missing authority transfer (3012)", () => {
+    expect(refuseRegistry(registryRefusal(6001, "Unauthorized", "kyc_registry"))!.detail).toBe(
+      `Step 1 of 1 (Manci registry instruction) was refused by the Manci registry program: ${KYC_REGISTRY_NOT_AUTHORITY_HINT.slice(0, -1)} (Unauthorized, 6001).`,
+    );
+    expect(refuseRegistry(registryRefusal(3012, "AccountNotInitialized", "transfer"))!.detail).toContain(
+      `${NO_PENDING_AUTHORITY_TRANSFER_HINT.slice(0, -1)} (AccountNotInitialized, 3012).`,
+    );
+  });
+
+  it("PlatformPaused (6000) is the registry's pause, not the hook's 6000", () => {
+    const paused = refuseRegistry(registryRefusal(6000, "PlatformPaused", "platform"))!;
+    expect(paused.detail).toBe(
+      `Step 1 of 1 (Manci registry instruction) was refused by the Manci registry program: ${PLATFORM_PAUSED_HINT.slice(0, -1)} (PlatformPaused, 6000).`,
+    );
+    // The hook's own 6000 (KycRegistryRequired) keeps the hook's wording.
+    expect(refuse(hookRefusal(6000, "KycRegistryRequired"))!.detail).toMatch(/names no KYC registry.*\(KycRegistryRequired, 6000\)\.$/);
+  });
+
+  it("registry InvalidKycRegistry (6072) gets the neutral hint; the hook's 6009 keeps its transfer wording", () => {
+    expect(refuseRegistry(registryRefusal(6072, "InvalidKycRegistry"))!.detail).toBe(
+      `Step 1 of 1 (Manci registry instruction) was refused by the Manci registry program: ${INVALID_KYC_REGISTRY_HINT}`,
+    );
+    expect(refuse(hookRefusal(6009, "InvalidKycRegistry"))!.detail).toBe(
+      "Step 2 of 2 (token transfer) was refused by the Manci transfer hook: The KYC registry in the transfer is not the one this share class's transfer hook names, or cannot be read. Reload the page and try again (InvalidKycRegistry, 6009).",
+    );
+  });
+
+  it("the hints are the ones lib/tx-error gives after a failed preflight", () => {
+    const withLogs = (logs: string[]) => Object.assign(new Error("Transaction simulation failed"), { context: { logs } });
+    expect(explainSendError(withLogs(registryRefusal(3012, "AccountNotInitialized", "sale_approval").logs))).toBe(NO_SALE_APPROVAL_HINT);
+    expect(explainSendError(withLogs(registryRefusal(6000, "PlatformPaused", "platform").logs))).toBe(PLATFORM_PAUSED_HINT);
+    expect(explainSendError(withLogs(registryRefusal(6072, "InvalidKycRegistry").logs))).toBe(INVALID_KYC_REGISTRY_HINT);
   });
 });
 

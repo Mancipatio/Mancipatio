@@ -623,6 +623,88 @@ export function programErrorHint(failure: { program: string | null; code: number
   }
 }
 
+// ── Hints named by the account or the Anchor name (moved from lib/tx-error) ───
+//
+// Codes the code tables above cannot word: the registry's 6000 / 6001 share
+// their numbers with the hook, and Anchor's own 3012 / 2006 are raised by
+// every account of every instruction. Anchor's log line names the error and,
+// for an account constraint, the account, and that decides the wording.
+
+/** User-facing text for the registry's emergency pause (PlatformPaused, 6000). */
+export const PLATFORM_PAUSED_HINT =
+  "Manci has temporarily paused this action (emergency pause). Cancels, refunds and claims still work.";
+
+/** open_sale's `sale_approval` account does not exist (AccountNotInitialized, 3012). */
+export const NO_SALE_APPROVAL_HINT =
+  "No live sale approval for this share class and sale id: it was never approved, was revoked, or was already used.";
+/** open_sale was given another sale id's approval (ConstraintSeeds, 2006). */
+export const SALE_APPROVAL_OTHER_ID_HINT = "This approval belongs to a different sale id.";
+/** open_sale's approver no longer holds an Admin record (AccountNotInitialized, 3012). */
+export const APPROVER_NOT_ADMIN_HINT =
+  "The admin who approved this sale is no longer a Manci admin, so the approval cannot be used. Ask Manci to revoke it and approve the sale again.";
+
+/** approve/revoke/rotation/jurisdictions signed by a non-authority (Unauthorized on kyc_registry). */
+export const KYC_REGISTRY_NOT_AUTHORITY_HINT =
+  "This wallet is not the KYC registry's current authority (it may have been rotated).";
+/** accept/cancel with no staged transfer (AccountNotInitialized on `transfer`). */
+export const NO_PENDING_AUTHORITY_TRANSFER_HINT = "No pending authority transfer.";
+/**
+ * Unauthorized on `sale`: close_sale / open_payout_vault by a key that is not
+ * the sale's authority snapshot, but also buy / close / open-vault with an
+ * account that does not belong to the sale (has_one mint / proceeds /
+ * share_class), so the wording stays neutral.
+ */
+export const SALE_AUTHORITY_HINT =
+  "The sale refused this transaction: this wallet is not the sale's recorded authority, or an account passed does not belong to this sale (Unauthorized).";
+/** Added to SALE_AUTHORITY_HINT only while issuer rotation (and its sync UI) is on. */
+export const SALE_SYNC_SUFFIX = " If the issuer key was rotated, sync the sale first.";
+/**
+ * InvalidKycRegistry exists in BOTH programs under the same name: the hook's
+ * 6009 (update_transfer_hook_config: the named account is not a genuine,
+ * matching registry) and asset_registry's 6072 (buy / claim / clawback: the
+ * registry passed is malformed or is not the one the mint's hook config
+ * names). The wording is neutral so it is true for either.
+ */
+export const INVALID_KYC_REGISTRY_HINT =
+  "The KYC registry account is not a Manci KycRegistry, or is not the registry expected here (the one this mint's transfer-hook config names, or the one being set). Reload and retry; if it persists, check NEXT_PUBLIC_KYC_REGISTRY (InvalidKycRegistry).";
+
+/**
+ * The hint an Anchor log line names by its error (and, for an account
+ * constraint, its account), or null. `text` is the program logs (joined, or
+ * with the error message). `issuerRotation` is read only for a sale's
+ * Unauthorized, to point at the sale sync while that UI is on (the caller
+ * passes lib/features' flag; this module stays free of it). The simulation
+ * gate falls back to this when the failing program's code table has no
+ * entry; lib/tx-error reads it first after a failed preflight.
+ */
+export function contextualErrorHint(text: string, options: { issuerRotation?: () => boolean } = {}): string | null {
+  // PlatformPaused is 6000 (0x1770) — the same number as the transfer hook's
+  // first error — so match Anchor's error name, never the bare code.
+  if (/Error Code: PlatformPaused\b/.test(text)) return PLATFORM_PAUSED_HINT;
+  // KYC registry (2C-1). Unauthorized (6001) and the hook's 6009 / 6016 share
+  // numbers with the other program, so these match Anchor's names too.
+  if (/caused by account: kyc_registry\. Error Code: Unauthorized\b/.test(text)) return KYC_REGISTRY_NOT_AUTHORITY_HINT;
+  if (/caused by account: transfer\. Error Code: AccountNotInitialized\b/.test(text)) return NO_PENDING_AUTHORITY_TRANSFER_HINT;
+  if (/caused by account: sale\. Error Code: Unauthorized\b/.test(text))
+    return SALE_AUTHORITY_HINT + (options.issuerRotation?.() ? SALE_SYNC_SUFFIX : "");
+  if (/Error Code: KycRegistryNotAllowed\b/.test(text)) return KYC_REGISTRY_NOT_ALLOWED_HINT;
+  // transfer_hook 6017–6020 share their numbers with registry codes
+  // (VaultNotExpired..SaleWindowClosed), so they match by Anchor's name.
+  // ProposalExpired / TimelockActive exist in both programs with the same
+  // meaning; the registry's recovery-pending error has its own name.
+  if (/Error Code: ProposalExpired\b/.test(text)) return PROPOSAL_EXPIRED_HINT;
+  if (/Error Code: TimelockActive\b/.test(text)) return TIMELOCK_ACTIVE_HINT;
+  if (/Error Code: InvalidRecovery\b/.test(text)) return BLOCKLIST_RECOVERY_INVALID_HINT;
+  if (/Error Code: RecoveryPending\b/.test(text)) return BLOCKLIST_RECOVERY_PENDING_HINT;
+  if (/Error Code: InvalidKycRegistry\b/.test(text)) return INVALID_KYC_REGISTRY_HINT;
+  // open_sale without a usable approval: Anchor names the account; the bare
+  // codes (3012 / 2006) are shared by every account of every instruction.
+  if (/caused by account: sale_approval\. Error Code: AccountNotInitialized\b/.test(text)) return NO_SALE_APPROVAL_HINT;
+  if (/caused by account: sale_approval\. Error Code: ConstraintSeeds\b/.test(text)) return SALE_APPROVAL_OTHER_ID_HINT;
+  if (/caused by account: approver_admin_record\. Error Code: AccountNotInitialized\b/.test(text)) return APPROVER_NOT_ADMIN_HINT;
+  return null;
+}
+
 // ── Transaction errors (the network refusing before any instruction runs) ────
 
 /** The Agave TransactionError name of each kit code 7050000 + i (kit 5.5.1). */

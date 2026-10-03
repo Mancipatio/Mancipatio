@@ -5,13 +5,9 @@ import { MaintenanceModeError } from "@/lib/maintenance";
 import { ModuleDisabledFlowError, PausedFlowError } from "@/lib/pause-gate";
 import { takeWalletChange } from "@/lib/wallet-changes";
 import {
-  BLOCKLIST_RECOVERY_INVALID_HINT,
-  BLOCKLIST_RECOVERY_PENDING_HINT,
-  KYC_REGISTRY_NOT_ALLOWED_HINT,
-  PROPOSAL_EXPIRED_HINT,
   REGISTRY_ERROR_HINTS,
-  TIMELOCK_ACTIVE_HINT,
   TRANSACTION_ERROR_NAMES,
+  contextualErrorHint,
   customErrorName,
   knownProgram,
   programErrorHint,
@@ -21,13 +17,22 @@ import {
 // The hint wording lives in lib/program-errors (shared with the simulation
 // gate); re-exported for the existing importers.
 export {
+  APPROVER_NOT_ADMIN_HINT,
   BLOCKLIST_RECOVERY_INVALID_HINT,
   BLOCKLIST_RECOVERY_PENDING_HINT,
+  INVALID_KYC_REGISTRY_HINT,
   ISSUER_PROCEEDS_FROZEN_HINT,
   KYC_REGISTRY_NOT_ALLOWED_HINT,
+  KYC_REGISTRY_NOT_AUTHORITY_HINT,
+  NO_PENDING_AUTHORITY_TRANSFER_HINT,
+  NO_SALE_APPROVAL_HINT,
   PARTY_BLOCKLISTED_HINT,
+  PLATFORM_PAUSED_HINT,
   PLATFORM_RECOVERY_PENDING_HINT,
   PROPOSAL_EXPIRED_HINT,
+  SALE_APPROVAL_OTHER_ID_HINT,
+  SALE_AUTHORITY_HINT,
+  SALE_SYNC_SUFFIX,
   TIMELOCK_ACTIVE_HINT,
 } from "@/lib/program-errors";
 
@@ -67,69 +72,12 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
   [...REGISTRY_ERROR_HINTS].map(([code, hint]) => [`0x${code.toString(16)}`, hint]),
 );
 
-/** User-facing text for the registry's emergency pause (PlatformPaused, 6000). */
-export const PLATFORM_PAUSED_HINT =
-  "Manci has temporarily paused this action (emergency pause). Cancels, refunds and claims still work.";
-
-/** open_sale's `sale_approval` account does not exist (AccountNotInitialized, 3012). */
-export const NO_SALE_APPROVAL_HINT =
-  "No live sale approval for this share class and sale id: it was never approved, was revoked, or was already used.";
-/** open_sale was given another sale id's approval (ConstraintSeeds, 2006). */
-export const SALE_APPROVAL_OTHER_ID_HINT = "This approval belongs to a different sale id.";
-/** open_sale's approver no longer holds an Admin record (AccountNotInitialized, 3012). */
-export const APPROVER_NOT_ADMIN_HINT =
-  "The admin who approved this sale is no longer a Manci admin, so the approval cannot be used. Ask Manci to revoke it and approve the sale again.";
-
-/** approve/revoke/rotation/jurisdictions signed by a non-authority (Unauthorized on kyc_registry). */
-export const KYC_REGISTRY_NOT_AUTHORITY_HINT =
-  "This wallet is not the KYC registry's current authority (it may have been rotated).";
-/** accept/cancel with no staged transfer (AccountNotInitialized on `transfer`). */
-export const NO_PENDING_AUTHORITY_TRANSFER_HINT = "No pending authority transfer.";
-/**
- * Unauthorized on `sale`: close_sale / open_payout_vault by a key that is not
- * the sale's authority snapshot, but also buy / close / open-vault with an
- * account that does not belong to the sale (has_one mint / proceeds /
- * share_class), so the wording stays neutral.
- */
-export const SALE_AUTHORITY_HINT =
-  "The sale refused this transaction: this wallet is not the sale's recorded authority, or an account passed does not belong to this sale (Unauthorized).";
-/** Added to SALE_AUTHORITY_HINT only while issuer rotation (and its sync UI) is on. */
-export const SALE_SYNC_SUFFIX = " If the issuer key was rotated, sync the sale first.";
-/**
- * InvalidKycRegistry exists in BOTH programs under the same name: the hook's
- * 6009 (update_transfer_hook_config: the named account is not a genuine,
- * matching registry) and asset_registry's 6072 (buy / claim / clawback: the
- * registry passed is malformed or is not the one the mint's hook config
- * names). The wording is neutral so it is true for either.
- */
-export const INVALID_KYC_REGISTRY_HINT =
-  "The KYC registry account is not a Manci KycRegistry, or is not the registry expected here (the one this mint's transfer-hook config names, or the one being set). Reload and retry; if it persists, check NEXT_PUBLIC_KYC_REGISTRY (InvalidKycRegistry).";
-
 function customErrorHint(text: string): string | null {
-  // PlatformPaused is 6000 (0x1770) — the same number as the transfer hook's
-  // first error — so match Anchor's error name, never the bare code.
-  if (/Error Code: PlatformPaused\b/.test(text)) return PLATFORM_PAUSED_HINT;
-  // KYC registry (2C-1). Unauthorized (6001) and the hook's 6009 / 6016 share
-  // numbers with the other program, so these match Anchor's names too.
-  if (/caused by account: kyc_registry\. Error Code: Unauthorized\b/.test(text)) return KYC_REGISTRY_NOT_AUTHORITY_HINT;
-  if (/caused by account: transfer\. Error Code: AccountNotInitialized\b/.test(text)) return NO_PENDING_AUTHORITY_TRANSFER_HINT;
-  if (/caused by account: sale\. Error Code: Unauthorized\b/.test(text))
-    return SALE_AUTHORITY_HINT + (features().issuerRotation ? SALE_SYNC_SUFFIX : "");
-  if (/Error Code: KycRegistryNotAllowed\b/.test(text)) return KYC_REGISTRY_NOT_ALLOWED_HINT;
-  // transfer_hook 6017–6020 share their numbers with registry codes
-  // (VaultNotExpired..SaleWindowClosed), so they match by Anchor's name.
-  // ProposalExpired / TimelockActive exist in both programs with the same
-  // meaning; the registry's recovery-pending error has its own name.
-  if (/Error Code: ProposalExpired\b/.test(text)) return PROPOSAL_EXPIRED_HINT;
-  if (/Error Code: TimelockActive\b/.test(text)) return TIMELOCK_ACTIVE_HINT;
-  if (/Error Code: InvalidRecovery\b/.test(text)) return BLOCKLIST_RECOVERY_INVALID_HINT;
-  if (/Error Code: RecoveryPending\b/.test(text)) return BLOCKLIST_RECOVERY_PENDING_HINT;
-  if (/Error Code: InvalidKycRegistry\b/.test(text)) return INVALID_KYC_REGISTRY_HINT;
-  // open_sale without a usable approval: Anchor names the account; the bare
-  // codes (3012 / 2006) are shared by every account of every instruction.
-  if (/caused by account: sale_approval\. Error Code: AccountNotInitialized\b/.test(text)) return NO_SALE_APPROVAL_HINT;
-  if (/caused by account: sale_approval\. Error Code: ConstraintSeeds\b/.test(text)) return SALE_APPROVAL_OTHER_ID_HINT;
-  if (/caused by account: approver_admin_record\. Error Code: AccountNotInitialized\b/.test(text)) return APPROVER_NOT_ADMIN_HINT;
+  // Named by Anchor's error (and account) in the log: lib/program-errors,
+  // shared with the simulation gate. The sale sync is pointed at only while
+  // issuer rotation is on (read only for that hint).
+  const contextual = contextualErrorHint(text, { issuerRotation: () => features().issuerRotation });
+  if (contextual) return contextual;
   // The innermost failing program's own table (a hook refusal inside a
   // Token-2022 transfer is the hook's), when that program is one we know.
   const failed = /Program (\S+) failed: custom program error:\s*(0x[0-9a-f]+)/i.exec(text);
