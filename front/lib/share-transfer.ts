@@ -180,13 +180,14 @@ export type ShareTransferFacts = {
   passport: PassportFacts | null;
 };
 
-function startsWith(data: ReadonlyUint8Array, prefix: ReadonlyUint8Array): boolean {
+export function startsWith(data: ReadonlyUint8Array, prefix: ReadonlyUint8Array): boolean {
   if (data.length < prefix.length) return false;
   for (let i = 0; i < prefix.length; i += 1) if (data[i] !== prefix[i]) return false;
   return true;
 }
 
-function readHook(account: MaybeEncodedAccount): { hook: HookState; config: HookTailConfig | null } {
+/** The class's hook mode from its config account (missing / unreadable / Open / KycGated). */
+export function readHook(account: MaybeEncodedAccount): { hook: HookState; config: HookTailConfig | null } {
   if (!account.exists) return { hook: { kind: "missing" }, config: null };
   if (account.programAddress !== TRANSFER_HOOK_PROGRAM_ADDRESS || !startsWith(account.data, getTransferHookConfigDiscriminatorBytes())) {
     return { hook: { kind: "unreadable" }, config: null };
@@ -203,7 +204,8 @@ function readHook(account: MaybeEncodedAccount): { hook: HookState; config: Hook
   }
 }
 
-function readTokenAccount(account: MaybeEncodedAccount, mint: Address) {
+/** A Token-2022 account of `mint`: its balance and frozen state, or null. */
+export function readTokenAccount(account: MaybeEncodedAccount, mint: Address) {
   if (!account.exists || account.programAddress !== TOKEN_2022) return null;
   try {
     const decoded = getTokenDecoder().decode(account.data);
@@ -219,7 +221,7 @@ function readTokenAccount(account: MaybeEncodedAccount, mint: Address) {
  * curve, so a pasted ATA must read as a token account (the fix the sender can
  * act on), not as a generic program address. Then the curve, then the rest.
  */
-function classifyRecipient(recipient: Address, account: MaybeEncodedAccount): RecipientKind {
+export function classifyRecipient(recipient: Address, account: MaybeEncodedAccount): RecipientKind {
   if (account.exists) {
     if (account.programAddress === TOKEN_2022 || account.programAddress === TOKEN_CLASSIC) return "token-account";
     if (account.executable) return "program";
@@ -228,6 +230,43 @@ function classifyRecipient(recipient: Address, account: MaybeEncodedAccount): Re
   if (!account.exists) return "new-wallet";
   if (account.programAddress !== SYSTEM_PROGRAM) return "program-owned";
   return account.data.length > 0 ? "system-data" : "wallet";
+}
+
+/**
+ * The recipient's passport facts from its KycEntry account and the class's
+ * registry account (as the hook reads them: an entry not owned by
+ * asset_registry, or empty, is "no KYC").
+ */
+export function readPassport(registry: Address, registryAccount: MaybeEncodedAccount, entryAccount: MaybeEncodedAccount): PassportFacts {
+  let registryState: PassportFacts["registryState"] = "missing";
+  let approvedJurisdictions: ArrayLike<number> | null = null;
+  let blockedJurisdictions: ArrayLike<number> | null = null;
+  if (registryAccount.exists) {
+    registryState = "unreadable";
+    if (registryAccount.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS && startsWith(registryAccount.data, getKycRegistryDiscriminatorBytes())) {
+      try {
+        const decoded = getKycRegistryDecoder().decode(registryAccount.data);
+        approvedJurisdictions = Uint8Array.from(decoded.approvedJurisdictions);
+        blockedJurisdictions = Uint8Array.from(decoded.blockedJurisdictions);
+        registryState = "ok";
+      } catch {
+        registryState = "unreadable";
+      }
+    }
+  }
+  let entry: PassportFacts["entry"] = "none";
+  if (entryAccount.exists && entryAccount.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS && entryAccount.data.length > 0) {
+    entry = "unreadable";
+    if (startsWith(entryAccount.data, getKycEntryDiscriminatorBytes())) {
+      try {
+        const decoded = getKycEntryDecoder().decode(entryAccount.data);
+        entry = { status: decoded.status, expiry: decoded.expiry, jurisdiction: decoded.jurisdiction };
+      } catch {
+        entry = "unreadable";
+      }
+    }
+  }
+  return { registry, registryState, approvedJurisdictions, blockedJurisdictions, entry };
 }
 
 /**
@@ -272,36 +311,7 @@ export async function loadShareTransferFacts(
     const registry = hook.registry;
     const [entryPda] = await findKycEntryPda({ kycRegistry: registry, holder: recipient });
     const [entryAccount, registryAccount] = await fetchEncodedAccounts(rpc, [entryPda, registry], { commitment: "confirmed" });
-    let registryState: PassportFacts["registryState"] = "missing";
-    let approvedJurisdictions: ArrayLike<number> | null = null;
-    let blockedJurisdictions: ArrayLike<number> | null = null;
-    if (registryAccount.exists) {
-      registryState = "unreadable";
-      if (registryAccount.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS && startsWith(registryAccount.data, getKycRegistryDiscriminatorBytes())) {
-        try {
-          const decoded = getKycRegistryDecoder().decode(registryAccount.data);
-          approvedJurisdictions = Uint8Array.from(decoded.approvedJurisdictions);
-          blockedJurisdictions = Uint8Array.from(decoded.blockedJurisdictions);
-          registryState = "ok";
-        } catch {
-          registryState = "unreadable";
-        }
-      }
-    }
-    let entry: PassportFacts["entry"] = "none";
-    // The hook: an entry not owned by asset_registry, or empty, is "no KYC".
-    if (entryAccount.exists && entryAccount.programAddress === ASSET_REGISTRY_PROGRAM_ADDRESS && entryAccount.data.length > 0) {
-      entry = "unreadable";
-      if (startsWith(entryAccount.data, getKycEntryDiscriminatorBytes())) {
-        try {
-          const decoded = getKycEntryDecoder().decode(entryAccount.data);
-          entry = { status: decoded.status, expiry: decoded.expiry, jurisdiction: decoded.jurisdiction };
-        } catch {
-          entry = "unreadable";
-        }
-      }
-    }
-    passport = { registry, registryState, approvedJurisdictions, blockedJurisdictions, entry };
+    passport = readPassport(registry, registryAccount, entryAccount);
   }
 
   return {
@@ -371,14 +381,16 @@ export function parseTokenAmount(raw: string | bigint): bigint | null {
  * The share of the company `amount` tokens are, as "100", "33.33", "< 0.01"
  * or "> 99.99", when the total is known. Only an amount equal to the total
  * reads "100" and only 0 reads "0": a partial amount that rounds to either
- * end is shown as "< 0.01" or "> 99.99", never as all or nothing.
+ * end is shown as "< 0.01" or "> 99.99", never as all or nothing; more than
+ * the total reads "> 100" (a bound, never an unbounded figure).
  */
 export function ownershipPercent(amount: bigint, totalShares: number | null | undefined): string | null {
   if (!totalShares || !Number.isFinite(totalShares) || totalShares <= 0) return null;
   const percent = (Number(amount) / totalShares) * 100;
   if (!Number.isFinite(percent)) return null;
   const whole = Number.isSafeInteger(totalShares) ? amount === BigInt(totalShares) : Number(amount) === totalShares;
-  if (amount <= BigInt(0) || whole || percent > 100) return percent.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  if (amount <= BigInt(0) || whole) return percent.toLocaleString("en-US", { maximumFractionDigits: 2 });
+  if (percent > 100) return "> 100";
   if (percent < 0.01) return "< 0.01";
   if (percent > 99.99) return "> 99.99";
   // Strictly inside [0.01, 99.99]: two decimals can no longer round to "0" or "100".
@@ -393,7 +405,7 @@ export function shareTransferSummary(input: { amount: bigint; recipient: string;
   return `Send ${tokens}${share} to ${shortAddress(input.recipient)}.`;
 }
 
-const RECIPIENT_KIND_TEXT: Record<RecipientKind, { ok: boolean; text: string }> = {
+export const RECIPIENT_KIND_TEXT: Record<RecipientKind, { ok: boolean; text: string }> = {
   wallet: { ok: true, text: "The recipient address is a wallet." },
   "new-wallet": {
     ok: true,
@@ -422,84 +434,84 @@ function country(code: number): string {
   return countryName(String(code).padStart(3, "0"));
 }
 
-/**
- * The checks shown before signing, in order, each in plain words. Mirrors
- * the transfer hook (`process_execute`): the sender must not be blocklisted;
- * on a KycGated class the recipient needs an Approved KycEntry in the
- * config's registry whose expiry is still ahead (expiry ≤ now, including 0,
- * is expired) and whose country is approved and not blocked. Adds what the
- * hook does not check but a sender must know: the recipient is a different
- * wallet, a real wallet (not a PDA or a token account), not blocklisted
- * itself, and the amount is a whole number the sender holds. Fails closed:
- * anything unreadable is a failed check.
- */
-export function shareTransferChecks(
-  facts: ShareTransferFacts,
-  input: { amount: string | bigint; nowSec: number },
-): ShareTransferVerdict {
-  const checks: ShareTransferCheck[] = [];
-  const add = (id: string, ok: boolean, text: string) => checks.push({ id, ok, text });
+type Check = ShareTransferCheck;
+const check = (id: string, ok: boolean, text: string): Check => ({ id, ok, text });
 
+/** The class itself: a readable hook config and a mint with 0 decimals (checked once per send or distribution). */
+export function classChecks(facts: Pick<ShareTransferFacts, "hook" | "decimals">): Check[] {
+  const checks: Check[] = [];
   if (facts.hook.kind === "missing") {
-    add("class", false, "This share class has no transfer-hook config (a legacy mint), so its tokens cannot be transferred.");
+    checks.push(check("class", false, "This share class has no transfer-hook config (a legacy mint), so its tokens cannot be transferred."));
   } else if (facts.hook.kind === "unreadable") {
-    add("class", false, "Could not read this share class's transfer-hook config. Try again.");
+    checks.push(check("class", false, "Could not read this share class's transfer-hook config. Try again."));
   }
   if (facts.decimals === null) {
-    add("mint", false, "Could not read this share class's mint. Try again.");
+    checks.push(check("mint", false, "Could not read this share class's mint. Try again."));
   } else if (facts.decimals !== 0) {
-    add("mint", false, `This mint has ${facts.decimals} decimals; only whole share tokens (0 decimals) can be sent here.`);
+    checks.push(check("mint", false, `This mint has ${facts.decimals} decimals; only whole share tokens (0 decimals) can be sent here.`));
   }
+  return checks;
+}
 
-  // The recipient.
+/** The recipient address: another wallet than the sender's, a real wallet, its token account not frozen. */
+export function recipientChecks(
+  facts: Pick<ShareTransferFacts, "recipient" | "sender" | "recipientKind" | "recipientTokenAccountFrozen">,
+  kindText: { ok: boolean; text: string } = RECIPIENT_KIND_TEXT[facts.recipientKind],
+): Check[] {
+  const checks: Check[] = [];
   if (facts.recipient === facts.sender) {
-    add("recipient-self", false, "That is your own wallet. Enter the recipient's wallet address.");
+    checks.push(check("recipient-self", false, "That is your own wallet. Enter the recipient's wallet address."));
   } else {
-    add("recipient-self", true, "The recipient is a different wallet from yours.");
+    checks.push(check("recipient-self", true, "The recipient is a different wallet from yours."));
   }
-  const kind = RECIPIENT_KIND_TEXT[facts.recipientKind];
-  add("recipient-wallet", kind.ok, kind.text);
+  checks.push(check("recipient-wallet", kindText.ok, kindText.text));
   if (facts.recipientTokenAccountFrozen) {
-    add("recipient-account", false, "The recipient's token account for this class is frozen.");
+    checks.push(check("recipient-account", false, "The recipient's token account for this class is frozen."));
   }
+  return checks;
+}
 
-  // The amount.
-  const amount = parseTokenAmount(input.amount);
-  const held = `${formatTokens(facts.senderBalance)} ${facts.senderBalance === BigInt(1) ? "token" : "tokens"}`;
-  if (amount === null) {
-    add("amount", false, "Enter the amount as a whole number of tokens (digits only).");
-  } else if (amount < BigInt(1)) {
-    add("amount", false, "Enter at least 1 token.");
-  } else if (amount > facts.senderBalance) {
-    add("amount", false, `You hold ${held} of this class, fewer than ${formatTokens(amount)}.`);
-  } else {
-    add("amount", true, `You hold ${held}; ${formatTokens(amount)} will be sent.`);
-  }
-  if (facts.senderAccountFrozen) add("sender-account", false, "Your token account for this class is frozen.");
-
-  // The blocklist (the hook checks the sender only; the recipient is our check).
-  add(
+/** The sender's own blocklist entry (the hook refuses every transfer out of a blocklisted wallet). */
+export function senderBlocklistCheck(senderBlocked: boolean): Check {
+  return check(
     "sender-blocklist",
-    !facts.senderBlocked,
-    facts.senderBlocked
+    !senderBlocked,
+    senderBlocked
       ? "Your wallet is on the Manci blocklist, so the transfer hook refuses every transfer out of it."
       : "Your wallet is not on the Manci blocklist.",
   );
-  add(
+}
+
+/** The recipient's blocklist entry: the hook checks only the sender, so this one is ours. */
+export function recipientBlocklistCheck(recipientBlocked: boolean): Check {
+  return check(
     "recipient-blocklist",
-    !facts.recipientBlocked,
-    facts.recipientBlocked
+    !recipientBlocked,
+    recipientBlocked
       ? "The recipient wallet is on the Manci blocklist. Do not send tokens to it."
       : "The recipient wallet is not on the Manci blocklist.",
   );
+}
 
-  // The passport.
+/**
+ * The passport, as the hook checks it on a KycGated class: an Approved
+ * KycEntry in the config's registry whose expiry is still ahead (expiry ≤
+ * now, including 0, is expired) and whose country is approved and not
+ * blocked. An Open class needs none.
+ */
+export function passportChecks(
+  hook: HookState,
+  passport: PassportFacts | null,
+  nowSec: number,
+): { checks: Check[]; passportExpiry: bigint | null } {
+  const checks: Check[] = [];
+  const add = (id: string, ok: boolean, text: string) => checks.push(check(id, ok, text));
   let passportExpiry: bigint | null = null;
-  if (facts.hook.kind === "open") {
+  if (hook.kind === "open") {
     add("passport", true, "Open class: no investor passport needed.");
-  } else if (facts.hook.kind === "kyc-gated") {
-    const p = facts.passport;
-    if (!facts.hook.registry || !p) {
+  } else if (hook.kind === "kyc-gated") {
+    const p = passport;
+    if (!hook.registry || !p) {
       add("passport", false, "This class is KYC-gated but names no KYC registry, so no transfer can pass. Ask the Blocklist Authority to set the registry.");
     } else if (p.registryState !== "ok") {
       add("passport", false, `Could not read this class's KYC registry (${shortAddress(p.registry)}), so the passport cannot be checked. Try again.`);
@@ -518,7 +530,7 @@ export function shareTransferChecks(
         add("passport", false, "The recipient's investor passport is marked expired. It must be renewed first.");
       } else if (expiry <= BigInt(0)) {
         add("passport", false, "The recipient's investor passport has no expiry date, which counts as expired. It must be renewed first.");
-      } else if (expiry <= BigInt(input.nowSec)) {
+      } else if (expiry <= BigInt(nowSec)) {
         add("passport", false, `The recipient's investor passport expired on ${formatExpiryDate(expiry)}. It must be renewed first.`);
       } else {
         add("passport", true, `The recipient has an approved investor passport, valid until ${formatExpiryDate(expiry)}.`);
@@ -534,6 +546,44 @@ export function shareTransferChecks(
       }
     }
   }
+  return { checks, passportExpiry };
+}
 
-  return { ok: checks.every((c) => c.ok), checks, amount, passportExpiry };
+/**
+ * The checks shown before signing, in order, each in plain words. Mirrors
+ * the transfer hook (`process_execute`): the sender must not be blocklisted;
+ * on a KycGated class the recipient needs a valid passport (passportChecks).
+ * Adds what the hook does not check but a sender must know: the recipient is
+ * a different wallet, a real wallet (not a PDA or a token account), not
+ * blocklisted itself, and the amount is a whole number the sender holds.
+ * Fails closed: anything unreadable is a failed check. "Send to wallets"
+ * (lib/distribution-checks) runs the same pieces once per class and once
+ * per row.
+ */
+export function shareTransferChecks(
+  facts: ShareTransferFacts,
+  input: { amount: string | bigint; nowSec: number },
+): ShareTransferVerdict {
+  const checks: Check[] = [...classChecks(facts), ...recipientChecks(facts)];
+
+  // The amount.
+  const amount = parseTokenAmount(input.amount);
+  const held = `${formatTokens(facts.senderBalance)} ${facts.senderBalance === BigInt(1) ? "token" : "tokens"}`;
+  if (amount === null) {
+    checks.push(check("amount", false, "Enter the amount as a whole number of tokens (digits only)."));
+  } else if (amount < BigInt(1)) {
+    checks.push(check("amount", false, "Enter at least 1 token."));
+  } else if (amount > facts.senderBalance) {
+    checks.push(check("amount", false, `You hold ${held} of this class, fewer than ${formatTokens(amount)}.`));
+  } else {
+    checks.push(check("amount", true, `You hold ${held}; ${formatTokens(amount)} will be sent.`));
+  }
+  if (facts.senderAccountFrozen) checks.push(check("sender-account", false, "Your token account for this class is frozen."));
+
+  // The blocklist (the hook checks the sender only; the recipient is our check).
+  checks.push(senderBlocklistCheck(facts.senderBlocked), recipientBlocklistCheck(facts.recipientBlocked));
+
+  const passport = passportChecks(facts.hook, facts.passport, input.nowSec);
+  checks.push(...passport.checks);
+  return { ok: checks.every((c) => c.ok), checks, amount, passportExpiry: passport.passportExpiry };
 }

@@ -13,7 +13,7 @@ import {
   getSaleApprovalDiscriminatorBytes,
   type SaleApproval,
 } from "@/lib/generated/asset_registry";
-import { signedFetch } from "@/lib/siws-client";
+import { signedFetch, type SignedFetchInteractive } from "@/lib/siws-client";
 
 type Rpc = SolanaClient["runtime"]["rpc"];
 
@@ -204,8 +204,28 @@ export const listSaleReservations = (
   session: Session,
   filter: { application_id: string } | { share_class: string } | { manual: true } | { adopted_treasury: true },
   live = false,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ) =>
-  signedFetch<ReservationRow[]>(session, "/api/sale-approvals/list", "saleApprovals.list", { ...filter, ...(live ? { live } : {}) });
+  signedFetch<ReservationRow[]>(session, "/api/sale-approvals/list", "saleApprovals.list", { ...filter, ...(live ? { live } : {}) }, opts);
+
+/**
+ * Units of a class's treasury-mint reservations still `reserved` (reserved,
+ * not yet booked — minted or not): the distribution's room subtracts them
+ * so two mints never claim the same tokens. `except` leaves out a
+ * reservation already counted elsewhere (this run's own, once its mint is
+ * confirmed and part of lifetime_minted).
+ */
+export function reservedTreasuryUnits(rows: readonly ReservationRow[], except: ReadonlySet<string> = new Set()): bigint {
+  let units = BigInt(0);
+  for (const r of rows) {
+    if (r.kind !== "treasury_mint" || r.status !== "reserved" || except.has(r.id)) continue;
+    const u = r.amount_units;
+    if (u === null || u === undefined) continue;
+    const text = String(u);
+    if (/^\d+$/.test(text)) units += BigInt(text);
+  }
+  return units;
+}
 
 export const saleCapacityFor = (session: Session, shareClass: string) =>
   signedFetch<{
@@ -230,6 +250,15 @@ export const revalueTreasuryMint = (session: Session, reservationId: string, amo
 
 export const readFxRates = (session: Session) =>
   signedFetch<FxRateView[]>(session, "/api/admin-config/fx-rates", "adminConfig.fxRatesRead", {});
+
+/** EUR per one whole USDC, from the rate that counts now; null when missing or stale (reservations refuse it). */
+export function freshUsdcEurRate(rates: readonly FxRateView[], usdcMint: string | null): number | null {
+  if (!usdcMint) return null;
+  const row = rates.find((r) => r.payment_mint === usdcMint);
+  if (!row || row.fresh === false) return null;
+  const rate = Number(row.eur_per_token);
+  return Number.isFinite(rate) && rate > 0 ? rate : null;
+}
 
 export const writeFxRate = (
   session: Session,
