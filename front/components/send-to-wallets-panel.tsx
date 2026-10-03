@@ -53,7 +53,15 @@ import { isPaused, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { usePauseFlags } from "@/lib/use-pause-flags";
 import { screenRecipients } from "@/lib/compliance";
-import { listSaleReservations, readFxRates, freshUsdcEurRate, reservedTreasuryUnits } from "@/lib/sale-approvals";
+import {
+  freshUsdcEurRate,
+  isApprovalLive,
+  listSaleReservations,
+  listShareClassSaleApprovals,
+  readFxRates,
+  reservedTreasuryUnits,
+} from "@/lib/sale-approvals";
+import { approvalUnits, mintRepausesPrimary, saleReferencePriceE6, treasuryValueE6 } from "@/lib/public-sale";
 import { getBatchSender, SIGNING_TOO_SLOW } from "@/lib/verified-solana-client";
 import { rememberSignsSeparately, signsSeparately } from "@/lib/wallet-standard-batch";
 import { signingTarget, signsOffchainEnvelopes } from "@/lib/siws-signing";
@@ -76,25 +84,34 @@ import {
 } from "@/lib/distribution-checks";
 import { supplyVerdict, type SupplyFacts } from "@/lib/distribution-supply";
 import { listOpenSales, openSaleRemaining, readLamports, readPlatformPause, recentTreasuryTransfers } from "@/lib/distribution-chain";
+import { nowSeconds } from "@/lib/sale-liveness";
+import { listOpenSalesWithFreezes } from "@/lib/open-sales-chain";
 import {
   MAX_TRANSACTIONS_PER_PROMPT,
   lamportsNeeded,
+  nextPromptMode,
   packRows,
   planWithSimulation,
   promptGroups,
   rowInstructions,
+  solBeforeMint,
   type DroppedRow,
   type PackedTransaction,
+  type PromptMode,
 } from "@/lib/distribution-plan";
 import {
   assertJournalWritable,
+  auditsDue,
   browserJournalStore,
+  dismissJournal,
   distributionRunId,
   listJournals,
   newJournal,
   priorReceipts,
   readJournal,
   shortRunId,
+  unfinishedJournals,
+  withAudited,
   withTx,
   writeJournal,
   type DistributionJournal,
@@ -117,6 +134,8 @@ type Props = {
   reservationsKnown: boolean;
   canCreate: boolean;
   onRefresh: () => Promise<void>;
+  /** "Both": told the list's total as it changes (the sale offers what the list leaves). */
+  onListTotal?: (total: bigint) => void;
 };
 
 type Checked =
@@ -126,6 +145,11 @@ type Checked =
   | { key: string; state: "done"; facts: DistributionFacts; nowSec: number };
 
 type Resume = { runId: string; states: Map<string, RowState>; mint: "pending" | null };
+
+/** The audit reason of a run (also stored in its journal). */
+function runReason(runId: string, wallets: number): string {
+  return `Distribution run ${shortRunId(runId)}: ${wallets} ${wallets === 1 ? "wallet" : "wallets"}`;
+}
 
 /** The treasury's recent transfers (the "paid before" check), per wallet, mint and refresh. */
 type History = { key: string; state: "error"; text: string } | { key: string; state: "done"; transfers: TreasuryTransfer[] };
@@ -155,7 +179,7 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, reservationsKnown, canCreate, onRefresh }: Props) {
+export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, reservationsKnown, canCreate, onRefresh, onListTotal }: Props) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
@@ -166,6 +190,8 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const [network] = useState(() => detectNetwork());
   // For the panel's own note (refreshed every 30 s); the send reads the flags fresh before creating anything.
   const flags = usePauseFlags();
+  /** Who may reopen Primary issuance (the Platform's super admin), for the 0x02 note; null until read. */
+  const [superAdmin, setSuperAdmin] = useState<string | null>(null);
 
   const [text, setText] = useState("");
   const [nonce, setNonce] = useState<string | null>(null);
@@ -187,6 +213,21 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const [historyRetry, setHistoryRetry] = useState(0);
   /** The exact set of repeated wallets the issuer chose to pay again (bound to the run and the set). */
   const [sendAgainKey, setSendAgainKey] = useState<string | null>(null);
+  /** A dismiss that was refused (the run still waits for the network), by run. */
+  const [dismissProblem, setDismissProblem] = useState<{ runId: string; text: string } | null>(null);
+
+  // The super admin named in the 0x02 note (one read; the send reads the Platform again).
+  useEffect(() => {
+    let cancelled = false;
+    void readPlatformPause(rpc)
+      .then((p) => {
+        if (!cancelled && p) setSuperAdmin(p.superAdmin.toString());
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc]);
 
   // ── One prompt per transaction: a Ledger (lib/siws-signing's memory) or the remembered choice ──
   const targetKey = session && wallet ? `${signingTarget(session).connectorId}|${wallet}` : null;
@@ -274,9 +315,53 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       const destinations = new Map<string, string>();
       for (const r of j.rows) destinations.set(r.wallet, await tokenAccountOf(r.wallet as Address, sc.mint));
       const result = await evaluateRun(rpc, j, { source: await tokenAccountOf(wallet, sc.mint), destinations });
+      // The final audit rows a session that stopped early never wrote (only its "pending" row exists).
+      let evaluated = result.journal;
+      const due = auditsDue(evaluated);
+      if (due.length > 0 && evaluated.sender === wallet.toString()) {
+        const amounts = new Map(evaluated.rows.map((r) => [r.wallet, BigInt(r.amount)]));
+        const reason = evaluated.reason ?? runReason(evaluated.runId, evaluated.rows.length);
+        const written = new Set<string>();
+        for (const d of due) {
+          const id =
+            d.kind === "tx"
+              ? await recordAudit(
+                  distributionAuditRow({
+                    actor: evaluated.sender,
+                    reason,
+                    scPda,
+                    runId: evaluated.runId,
+                    mint: evaluated.mint,
+                    signature: d.signature,
+                    status: d.status,
+                    rows: d.rows.map((w) => ({ wallet: w, amount: amounts.get(w) ?? BigInt(0) })),
+                    extra: { reconciled_on_resume: true },
+                  }),
+                )
+              : await recordAudit({
+                  ix_name: "mint_to_treasury",
+                  category: "share-class",
+                  actor_wallet: evaluated.sender,
+                  reason,
+                  target_label: scPda.toString(),
+                  tx_signature: d.signature,
+                  status: d.status,
+                  metadata: {
+                    destination: "issuer_treasury",
+                    destination_wallet: evaluated.sender,
+                    amount: d.amount,
+                    reservation_id: d.reservationId,
+                    distribution_run: evaluated.runId,
+                    reconciled_on_resume: true,
+                  },
+                });
+          if (id !== null) written.add(d.signature);
+        }
+        if (written.size > 0) evaluated = withAudited(evaluated, written);
+      }
       if (store) {
         try {
-          writeJournal(store, result.journal);
+          writeJournal(store, evaluated);
         } catch {
           /* the next send refuses without storage */
         }
@@ -285,7 +370,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       setResume(next);
       return next;
     },
-    [rpc, sc.mint, wallet],
+    [rpc, sc.mint, wallet, scPda],
   );
 
   useEffect(() => {
@@ -354,6 +439,10 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const pendingRows = parsed.rows.filter((r) => stateOf(r.wallet).state === "pending");
   const doneRows = parsed.rows.filter((r) => stateOf(r.wallet).state === "done");
   const totalToSend = toSend.reduce((sum, r) => sum + r.amount, BigInt(0));
+  // "Both": the sale panel offers what this list leaves.
+  useEffect(() => {
+    onListTotal?.(totalToSend);
+  }, [onListTotal, totalToSend]);
   const balance = facts?.senderBalance ?? supply.treasuryBalance;
   const supplyNow = supplyVerdict(totalToSend, { ...supply, treasuryBalance: balance });
   const shortfall = supplyNow.shortfall;
@@ -433,7 +522,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   }
   // A journalled run of this list must be read back from the network before anything is sent again.
   const resumeReady = !journal || resume?.runId === journal.runId;
-  const unfinished = journals.filter((j) => !j.finishedAt && j.runId !== runId);
+  const unfinished = unfinishedJournals(journals, runId);
   const busy = working !== null || tx.isSending;
   const primaryPaused = flags !== null && isPaused(flags, PAUSE_PRIMARY);
 
@@ -453,7 +542,9 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
     supplyNow.problem,
     shortfall > BigInt(0) && !canCreate ? "Creating tokens needs an Admin issuer key; this wallet can send only what the treasury holds." : null,
     shortfall > BigInt(0) && canCreate && valueE6 === null ? "Enter the value per token (USD) for the tokens to create." : null,
-    shortfall > BigInt(0) && canCreate && primaryPaused ? "Creating tokens is paused platform-wide (0x02)." : null,
+    shortfall > BigInt(0) && canCreate && primaryPaused
+      ? `Creating tokens is paused platform-wide (0x02); only ${superAdmin ? `the super admin (${shortAddress(superAdmin as Address)})` : "the super admin"} can reopen it.`
+      : null,
     toSend.length === 0 && clean && facts && doneRows.length > 0 ? "Every row of this list is already sent." : null,
   ].filter((p): p is string => !!p);
   const ready = clean && !!facts && blockers.length === 0 && toSend.length > 0;
@@ -466,7 +557,6 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
     setDropped([]);
     const sender = getBatchSender(client);
     const store = browserJournalStore();
-    const id8 = shortRunId(runId);
     const actor = wallet.toString();
     try {
       if (!sender) throw new Error("This page cannot send several transactions; reload it and try again.");
@@ -486,7 +576,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         toSend = parsed.rows.filter((r) => fresh.states.get(r.wallet)?.state === "todo");
         if (toSend.length === 0) throw new Error("Every row of this list is already sent.");
       }
-      const reason = `Distribution run ${id8}: ${toSend.length} ${toSend.length === 1 ? "wallet" : "wallets"}`;
+      const reason = runReason(runId, toSend.length);
 
       // 1. Every recipient screened (one sign-in at most: a session read).
       setWorking("Screening the recipients…");
@@ -543,21 +633,55 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
 
       // 3. The journal: this run's, or a new one.
       let j = readJournal(store, network, runId) ?? newJournal({ runId, network, mint: sc.mint, sender: actor, rows: parsed.rows, nonce });
+      j = { ...j, reason, dismissedAt: null };
       writeJournal(store, j);
 
       // 4. Create the shortfall (one message + one transaction), confirmed before anything is planned.
       const total = toSend.reduce((sum, r) => sum + r.amount, BigInt(0));
       const short = total > fresh.senderBalance ? total - fresh.senderBalance : BigInt(0);
       if (short > BigInt(0)) {
+        // 4a. SOL first: a wallet that cannot pay for the transfers never creates tokens it then cannot send.
+        setWorking("Checking your SOL for the transfers…");
+        const estimateSigner = createNoopSigner(wallet);
+        const estimated = packRows(
+          await Promise.all(
+            toSend.map((r) =>
+              rowInstructions({
+                mint: sc.mint,
+                sender: estimateSigner,
+                wallet: r.wallet,
+                amount: r.amount,
+                decimals: 0,
+                hookConfig: fresh.hookConfig,
+                accountExists: fresh.rows.get(r.wallet)?.recipientTokenAccountExists ?? false,
+              }),
+            ),
+          ),
+          { feePayer: wallet },
+        );
+        const neededFirst = solBeforeMint({
+          newAccounts: toSend.filter((r) => !(fresh.rows.get(r.wallet)?.recipientTokenAccountExists ?? false)).length,
+          transactions: estimated.length,
+          treasuryAccountMissing: !fresh.senderAccountExists,
+        });
+        const lamportsFirst = await readLamports(rpc, wallet);
+        if (lamportsFirst < neededFirst) {
+          throw new Error(
+            `Your wallet holds ${formatLamportsAsSol(lamportsFirst)} SOL; creating the tokens and sending them needs about ${formatLamportsAsSol(neededFirst)} SOL (new token accounts and fees). Nothing was created or sent.`,
+          );
+        }
         if (!canCreate) throw new Error("Creating tokens needs an Admin issuer key.");
         if (valueE6 === null) throw new Error("Enter the value per token (USD).");
         setWorking("Checking the supply and Primary issuance…");
-        const [scNow, classSales, reservations, platform] = await Promise.all([
+        const [scNow, classSales, reservations, platform, classApprovals] = await Promise.all([
           fetchMaybeShareClass(rpc, scPda, { commitment: "confirmed" }),
           listOpenSales(rpc, { shareClass: scPda }),
-          listSaleReservations(session, { share_class: scPda }, true),
+          // Every row (newest first): the reserved treasury mints and the sale reference price of the floor.
+          listSaleReservations(session, { share_class: scPda }),
           readPlatformPause(rpc),
+          listShareClassSaleApprovals(rpc, scPda),
         ]);
+        const liveApprovals = classApprovals.filter((a) => isApprovalLive(a));
         if (!scNow.exists) throw new Error("The share class could not be read.");
         if (!platform) throw new Error("Could not read the platform's pause flags; nothing was sent. Try again.");
         const verdict = supplyVerdict(total, {
@@ -569,6 +693,8 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           openSaleRemaining: openSaleRemaining(classSales),
           // This run's own earlier mint, once confirmed, is in lifetime_minted already.
           reservedUnminted: reservedTreasuryUnits(reservations, new Set(j.mintTx?.status === "confirmed" ? [j.mintTx.reservationId] : [])),
+          // A sale approved and not opened yet keeps its tokens: the top-up never eats into them.
+          approvedUnopened: liveApprovals.reduce((sum, a) => sum + approvalUnits(a), BigInt(0)),
           treasuryBalance: fresh.senderBalance,
         });
         if (verdict.problem) throw new Error(verdict.problem);
@@ -577,9 +703,18 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         if (eurPerUsdc === null) {
           throw new Error("The USDC→EUR rate is missing or out of date, so the created tokens cannot be valued. Ask the operator to refresh it on Admin → Limits.");
         }
-        const amountEur = treasuryMintEur({ units: short, usdPerTokenE6: valueE6, eurPerUsdc });
-        // Close Primary issuance again in the same transaction unless a sale (of any issuer) needs it open.
-        const repause = (await listOpenSales(rpc)).length === 0;
+        // Never below the class's sale price: the ledger refuses a mint valued under it (TREASURY_VALUE_BELOW_FLOOR).
+        const mintValueE6 = treasuryValueE6(valueE6, saleReferencePriceE6(reservations)) ?? valueE6;
+        const amountEur = treasuryMintEur({ units: short, usdPerTokenE6: mintValueE6, eurPerUsdc });
+        // Close Primary issuance again in the same transaction unless a sale needs it open: one Open that can
+        // still take a buy (of any issuer; an ended or sold-out one only waits to be closed, a frozen issuer's
+        // takes none, an unread freeze never keeps 0x02 open), or this class's approved sale waiting to be
+        // opened ("Both": the sale opens after the sends). lib/public-sale mintRepausesPrimary.
+        const repause = mintRepausesPrimary({
+          sales: await listOpenSalesWithFreezes(rpc),
+          nowSec: nowSeconds(),
+          classLiveApprovals: liveApprovals.length,
+        });
         // The send path's pause gate reads the flags again, not its 10 s cache.
         clearPauseFlagsCache();
         const minted = await runTreasuryMint({
@@ -593,7 +728,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           amountEur,
           reason,
           repause,
-          audit: { distribution_run: runId, usd_per_token_e6: valueE6.toString(), eur_per_usdc: eurPerUsdc },
+          audit: { distribution_run: runId, usd_per_token_e6: mintValueE6.toString(), eur_per_usdc: eurPerUsdc },
           onStage: (stage) =>
             setWorking(
               stage === "reserve"
@@ -616,7 +751,18 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
             writeJournal(store, j);
           },
         });
-        j = { ...j, mintTx: j.mintTx ? { ...j.mintTx, status: minted.outcome === "confirmed" ? "confirmed" : minted.outcome === "failed" ? "failed" : "sent" } : null };
+        // runTreasuryMint wrote the mint's audit row: final once decided, "pending" otherwise (a resume finishes it).
+        const mintDecided = minted.outcome === "confirmed" || minted.outcome === "failed";
+        j = {
+          ...j,
+          mintTx: j.mintTx
+            ? {
+                ...j.mintTx,
+                status: minted.outcome === "confirmed" ? "confirmed" : minted.outcome === "failed" ? "failed" : "sent",
+                audited: mintDecided ? "final" : "pending",
+              }
+            : null,
+        };
         writeJournal(store, j);
         if (minted.outcome === "failed") throw new Error("The network refused the transaction that creates the tokens; nothing was created or sent.");
         if (minted.outcome !== "confirmed") {
@@ -663,7 +809,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       const sent: { signature: string; rows: { wallet: string; amount: bigint }[] }[] = [];
       const groups = promptGroups(plan.transactions);
       // A Ledger or the remembered choice: one prompt per transaction (a fresh blockhash each).
-      let mode: "auto" | "per-transaction" = signSeparately ? "per-transaction" : "auto";
+      let mode: PromptMode = signSeparately ? "per-transaction" : "auto";
       for (const [g, group] of groups.entries()) {
         const requests: TransactionPrepareAndSendRequest[] = group.map((t) => ({ instructions: t.instructions, feePayer: signer }));
         const result = await sender.prepareAndSendAll(requests, {
@@ -700,12 +846,16 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         if (result.fallbackReason) console.warn(`[distribution] ${result.fallbackReason}`);
         // Once a group fell back, the rest go one by one too; a batch that outlasted its
         // blockhash (a hardware wallet) is remembered for this wallet.
-        if (result.mode === "per-transaction") mode = "per-transaction";
+        mode = nextPromptMode(mode, result);
         if (result.fallbackReason?.includes(SIGNING_TOO_SLOW)) chooseSeparate(true);
         // One audit row per transaction, written one after another (the audit route's burst limit).
+        const pendingAudited = new Set<string>();
         for (const s of groupSent) {
-          await recordAudit(distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: "pending", rows: s.rows }));
+          const id = await recordAudit(distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: "pending", rows: s.rows }));
+          if (id !== null) pendingAudited.add(s.signature);
         }
+        j = withAudited(j, pendingAudited, "pending");
+        writeJournal(store, j);
         const unsent = result.outcomes.find((o) => !o.sent && o.error);
         if (unsent) {
           setProblem(`Not every transaction was sent: ${explainSendError(unsent.error)} Open this page again to continue the run.`);
@@ -716,15 +866,18 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       // 8. Wait for the network, then report each transaction.
       setWorking(`Waiting for the network to confirm ${sent.length} ${sent.length === 1 ? "transaction" : "transactions"}…`);
       const outcomes = await Promise.all(sent.map((s) => waitForSignature(rpc, s.signature, { timeoutMs: 60_000 })));
+      const finalAudited = new Set<string>();
       for (const [i, s] of sent.entries()) {
         const t = j.txs.find((x) => x.signature === s.signature);
         if (t && (outcomes[i] === "confirmed" || outcomes[i] === "failed")) j = withTx(j, { ...t, status: outcomes[i] as "confirmed" | "failed" });
         if (outcomes[i] === "confirmed" || outcomes[i] === "failed") {
-          await recordAudit(
+          const id = await recordAudit(
             distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: outcomes[i] === "confirmed" ? "success" : "failed", rows: s.rows }),
           );
+          if (id !== null) finalAudited.add(s.signature);
         }
       }
+      j = withAudited(j, finalAudited);
       writeJournal(store, j);
       const confirmedRows = sent.filter((_, i) => outcomes[i] === "confirmed").reduce((n, s) => n + s.rows.length, 0);
       if (confirmedRows > 0) {
@@ -743,6 +896,27 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       loadJournals();
       setRefreshKey((k) => k + 1);
       await onRefresh().catch(() => undefined);
+    }
+  }
+
+  /** Hides an unfinished run's banner once nothing of it waits for the network (its journal stays). */
+  async function dismissRun(u: DistributionJournal) {
+    const store = browserJournalStore();
+    if (!store || !wallet) return;
+    setDismissProblem(null);
+    try {
+      const destinations = new Map<string, string>();
+      for (const r of u.rows) destinations.set(r.wallet, await tokenAccountOf(r.wallet as Address, sc.mint));
+      const result = await evaluateRun(rpc, u, { source: await tokenAccountOf(wallet, sc.mint), destinations });
+      const decided = dismissJournal(result.journal, result);
+      if ("problem" in decided) {
+        setDismissProblem({ runId: u.runId, text: decided.problem });
+        return;
+      }
+      writeJournal(store, decided.journal);
+      loadJournals();
+    } catch (err) {
+      setDismissProblem({ runId: u.runId, text: `Could not check that run on the network: ${errorText(err)}` });
     }
   }
 
@@ -771,7 +945,12 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           {u.rows.length === 1 ? "wallet" : "wallets"} (run <span className="font-mono">{shortRunId(u.runId)}</span>).{" "}
           <button type="button" onClick={() => resumeRun(u)} className="font-medium underline">
             Continue it
+          </button>{" "}
+          ·{" "}
+          <button type="button" disabled={busy} onClick={() => void dismissRun(u)} className="text-brand-800 underline disabled:opacity-50">
+            Dismiss
           </button>
+          {dismissProblem?.runId === u.runId && <span className="mt-1 block text-[12px] text-amber-800">{dismissProblem.text}</span>}
         </div>
       ))}
 
@@ -916,7 +1095,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
             issuance again).
             {!reservationsKnown && " The room left is checked again before they are created."}
           </p>
-          {primaryPaused && <p className="mt-1 text-[12px] text-amber-800">{primaryPausedNote(null)}</p>}
+          {primaryPaused && <p className="mt-1 text-[12px] text-amber-800">{primaryPausedNote(superAdmin)}</p>}
           {tokenizePriceE6 !== null ? (
             <p className="mt-1 text-[12px] text-slate-500">
               Valued at your tokenize price: ${formatE6(tokenizePriceE6)} per token, at today&apos;s USDC rate in EUR.

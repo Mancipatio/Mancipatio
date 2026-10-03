@@ -11,6 +11,8 @@
 //   room     = max_supply − lifetime_minted
 //              − Σ(total − sold) of the class's Open sales (`buy` mints them later)
 //              − Σ treasury-mint reservations still reserved and not yet minted
+//              − Σ ⌊max_gross / min price⌋ of the class's live approvals not
+//                opened yet (a sale on its way: a top-up never eats into it)
 //   sendable = treasury balance + room
 //   shortfall (what a list must create first) = max(0, total − treasury balance)
 //
@@ -35,6 +37,12 @@ export type SupplyFacts = {
   openSaleRemaining: bigint;
   /** Σ units of the class's treasury-mint reservations still `reserved` (not minted yet). */
   reservedUnminted: bigint;
+  /**
+   * Σ ⌊max_gross_raise / min_price⌋ over the class's live sale approvals not
+   * opened yet (open_sale closes an approval): what those sales may mint.
+   * Absent: none known.
+   */
+  approvedUnopened?: bigint;
   /** The issuer treasury's balance of the mint. */
   treasuryBalance: bigint;
 };
@@ -55,7 +63,7 @@ export function creationBlocker(f: Pick<SupplyFacts, "version" | "supplyLocked" 
 export function roomToCreate(f: SupplyFacts): bigint | null {
   if (creationBlocker(f)) return ZERO;
   if (f.maxSupply === null) return null;
-  return max0(f.maxSupply - f.lifetimeMinted - f.openSaleRemaining - f.reservedUnminted);
+  return max0(f.maxSupply - f.lifetimeMinted - f.openSaleRemaining - f.reservedUnminted - (f.approvedUnopened ?? ZERO));
 }
 
 /** Tokens a list may send in total: what the treasury holds plus what may still be created (null = no cap). */
@@ -92,6 +100,7 @@ export function supplyVerdict(total: bigint, f: SupplyFacts): SupplyVerdict {
         `${formatTokens(f.lifetimeMinted)} created so far` +
         (f.openSaleRemaining > ZERO ? `, ${formatTokens(f.openSaleRemaining)} on sale` : "") +
         (f.reservedUnminted > ZERO ? `, ${formatTokens(f.reservedUnminted)} reserved for a mint` : "") +
+        ((f.approvedUnopened ?? ZERO) > ZERO ? `, ${formatTokens(f.approvedUnopened ?? ZERO)} approved for a sale not opened yet` : "") +
         `), and the treasury holds ${formatTokens(f.treasuryBalance)}: the list needs ${formatTokens(total)}.`;
     }
   }
@@ -103,6 +112,8 @@ export type Allocation = {
   /** Sent or sold: created and no longer in the treasury (converted tokens included). */
   out: bigint;
   onSale: bigint;
+  /** Approved for a sale not opened yet (what those approvals may mint). */
+  approved: bigint;
   /** Still to be created (null = no cap). */
   notCreated: bigint | null;
   cap: bigint | null;
@@ -114,6 +125,7 @@ export function allocation(f: SupplyFacts): Allocation {
     inTreasury: f.treasuryBalance,
     out: max0(f.lifetimeMinted - f.treasuryBalance),
     onSale: f.openSaleRemaining,
+    approved: f.approvedUnopened ?? ZERO,
     notCreated: roomToCreate(f),
     cap: f.maxSupply,
   };
@@ -122,4 +134,22 @@ export function allocation(f: SupplyFacts): Allocation {
 /** The cap minus everything ever created: what the checklist calls "not created yet". */
 export function remainingFromLifetime(maxSupply: bigint | null, lifetimeMinted: bigint): bigint | null {
   return maxSupply === null ? null : max0(maxSupply - lifetimeMinted);
+}
+
+/** A figure of the allocation line. */
+export type AllocationFigure = "inTreasury" | "out" | "onSale" | "notCreated";
+
+/**
+ * The figures of the allocation line an unknown input makes approximate —
+ * only those: an unread treasury balance affects "in treasury" and "sent",
+ * unread Open sales "on sale" and "not created", unread reservations (and
+ * approvals not yet opened) "not created" only. Everything known: none (a
+ * fresh token whose treasury has no account yet holds an exact 0).
+ */
+export function approximateFigures(known: { treasury: boolean; openSales: boolean; reservations: boolean }): AllocationFigure[] {
+  const out: AllocationFigure[] = [];
+  if (!known.treasury) out.push("inTreasury", "out");
+  if (!known.openSales) out.push("onSale");
+  if (!known.openSales || !known.reservations) out.push("notCreated");
+  return out;
 }

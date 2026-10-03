@@ -41,6 +41,7 @@ import { features } from "@/lib/features";
 import { syncSaleIfNeeded } from "@/lib/issuer-authority";
 import { useChainClock } from "@/lib/use-chain-clock";
 import { ManualSaleApprovals } from "@/app/admin/applications/sale-approvals";
+import { PublicSaleRequests } from "./public-sale-requests";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
 import { saleExpiredOpen } from "@/lib/admin-badge-rules";
 
@@ -183,6 +184,7 @@ function SalesOps() {
 
   return (
     <div className="mt-8 space-y-6">
+      <PublicSaleRequests />
       <ManualSaleApprovals />
       <div className="flex flex-wrap items-center gap-3">
         <input

@@ -52,10 +52,12 @@ function loadList(refreshedAt = NOW - 3_600_000) {
   });
 }
 
-async function post(wallet: string, params: Record<string, unknown>) {
+async function post(wallet: string, params: Record<string, unknown>, ip?: string) {
   signer.wallet = wallet;
   signer.params = params;
-  const res = await POST(new Request("https://manci.test/api/compliance/screen-recipients", { method: "POST", body: "{}" }));
+  const res = await POST(
+    new Request("https://manci.test/api/compliance/screen-recipients", { method: "POST", body: "{}", headers: ip ? { "x-real-ip": ip } : {} }),
+  );
   return { status: res.status, body: (await res.json()) as { ok: boolean; data?: { blocked: string[] }; error?: string } };
 }
 
@@ -111,6 +113,30 @@ describe("POST /api/compliance/screen-recipients", () => {
     expect((await post(CLEAN2, { share_class: SHARE_CLASS, wallets: [CLEAN] })).status).toBe(403);
     chain.admins.add(CLEAN2);
     expect((await post(CLEAN2, { share_class: SHARE_CLASS, wallets: [CLEAN] })).status).toBe(200);
+  });
+
+  it("limits a flood: a burst per IP before the signature, then a limit per wallet shared by every instance (429)", async () => {
+    loadList();
+    // The burst: 30 per minute and IP on this instance, refused before any signature is read.
+    for (let i = 0; i < 30; i++) expect((await post(ISSUER, { share_class: SHARE_CLASS, wallets: [CLEAN] }, "203.0.113.7")).status).toBe(200);
+    const burst = await post(ISSUER, { share_class: SHARE_CLASS, wallets: [CLEAN] }, "203.0.113.7");
+    expect(burst).toMatchObject({ status: 429, body: { ok: false } });
+    // Another IP is not affected.
+    expect((await post(ISSUER, { share_class: SHARE_CLASS, wallets: [CLEAN] }, "203.0.113.8")).status).toBe(200);
+    // The shared limit per wallet (consume_account_rate_limit answers false once it is used up)…
+    const keys: string[] = [];
+    db.ref!.rpcs.consume_account_rate_limit = (args) => {
+      keys.push(String(args.p_key_hash));
+      return false;
+    };
+    expect(await post(ISSUER, { share_class: SHARE_CLASS, wallets: [CLEAN] }, "203.0.113.9")).toMatchObject({ status: 429 });
+    expect(keys).toHaveLength(1);
+    expect(keys[0]).toMatch(/^[0-9a-f]{64}$/);
+    // …and a limiter that cannot answer leaves the per-instance limit in charge (no refusal).
+    db.ref!.rpcs.consume_account_rate_limit = () => {
+      throw new Error("down");
+    };
+    expect((await post(ISSUER, { share_class: SHARE_CLASS, wallets: [CLEAN] }, "203.0.113.10")).status).toBe(200);
   });
 
   it("refuses a malformed request", async () => {

@@ -14,6 +14,8 @@ import { assetHref, withAssetAddresses } from "@/lib/asset-links";
 import type { Asset } from "@/lib/generated/asset_registry";
 import { SkeletonTable } from "@/components/skeleton";
 import { navHrefVisible } from "@/lib/pilot-scope";
+import { visibleClassCount } from "@/lib/conversion-target";
+import { useConversionTargets } from "@/lib/use-conversion-targets";
 import {
   Badge,
   Card,
@@ -62,6 +64,8 @@ export default function MarketplacePage() {
   const [assetPdaMap, setAssetPdaMap] = useState<Map<Asset, string>>(
     new Map(),
   );
+  // A conversion target (the marker class, capped at 0) is not a share class anyone can hold.
+  const conversionTargets = useConversionTargets(data?.shareClasses);
   useEffect(() => {
     let cancelled = false;
     async function load() {
@@ -109,10 +113,10 @@ export default function MarketplacePage() {
       issuers: data.issuers.length,
       verifiedIssuers: data.issuers.filter((i) => i.kybStatus === 1).length,
       assets: data.assets.length,
-      shareClasses: data.shareClasses.length,
+      shareClasses: data.shareClasses.length - conversionTargets.size,
       activeSales: data.sales.filter((s) => s.status === SaleStatus.Open).length,
     };
-  }, [data]);
+  }, [data, conversionTargets]);
 
   return (
     <>
@@ -218,7 +222,7 @@ export default function MarketplacePage() {
                     <div className="flex justify-between gap-3">
                       <dt className="text-mx-ink-faint">Share classes</dt>
                       <dd className="font-mono text-mx-ink-soft">
-                        {a.shareClassesCount}
+                        {visibleClassCount(assetPdaMap.get(a) ?? "", a.shareClassesCount, conversionTargets)}
                       </dd>
                     </div>
                     <div className="flex justify-between gap-3">

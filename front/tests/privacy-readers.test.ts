@@ -28,7 +28,7 @@ import { POST as issuerProfiles } from "@/app/api/issuer-profiles/read/route";
 import { POST as otc } from "@/app/api/otc/list/route";
 import { POST as audit } from "@/app/api/audit/list/route";
 import { POST as beneficiaries } from "@/app/api/vesting/beneficiaries/route";
-import { projectPublicAssetProfile, PUBLIC_ASSET_PROFILE_FIELDS } from "@/lib/profile-public";
+import { projectPublicAssetProfile, PUBLIC_ASSET_PROFILE_FIELDS, PUBLIC_TOKENIZE_SELECT } from "@/lib/profile-public";
 
 const WALLET = "11111111111111111111111111111111";
 const OTHER = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
@@ -58,6 +58,18 @@ describe("public profile boundary", () => {
     expect(result).toMatchObject({ display_name: "Public offer", whitepaper_status: "none", whitepaper_url: null, whitepaper_sha256: null, ssc_decision_ref: null });
     expect(result).not.toHaveProperty("fields"); expect(result).not.toHaveProperty("created_by"); expect(result).not.toHaveProperty("legal_doc_path");
   });
+  it("derives one token's share of the company from the tokenize figures, and never returns the figures themselves", () => {
+    // Only fields.tokenize is selected (PUBLIC_TOKENIZE_SELECT), never the rest of fields.
+    expect(PUBLIC_TOKENIZE_SELECT).toBe("tokenize:fields->tokenize");
+    const tokenize = { percent_e4: "50000", granularity_percent: "0.001", tokens: "5000", price_total: "50000", company_name: "Private Co" };
+    const result = projectPublicAssetProfile({ ...profile, tokenize });
+    expect(result).toMatchObject({ token_percent_e4: "10" });
+    expect(result).not.toHaveProperty("tokenize");
+    expect(JSON.stringify(result)).not.toMatch(/price_total|Private Co/);
+    // Figures that do not add up (or none) give no percent.
+    expect(projectPublicAssetProfile({ ...profile, tokenize: { ...tokenize, percent_e4: "50001" } })?.token_percent_e4).toBeNull();
+    expect(projectPublicAssetProfile(profile)?.token_percent_e4).toBeNull();
+  });
   it("only exposes published document paths under the correct asset directory", () => {
     const result = projectPublicAssetProfile({ ...profile, whitepaper_status: "ssc_approved", whitepaper_path: `whitepapers/${WALLET}/report.pdf`, ssc_decision_doc_path: `whitepapers/${OTHER}/decision.pdf`, ssc_decision_ref: "PUBLIC-1" });
     expect(result).toMatchObject({ whitepaper_path: `whitepapers/${WALLET}/report.pdf`, ssc_decision_doc_path: null, ssc_decision_ref: "PUBLIC-1" });
@@ -69,7 +81,7 @@ describe("public profile boundary", () => {
     expect(mocks.calls).toContainEqual(["eq", "network", "devnet"]);
     expect(mocks.calls).toContainEqual(["eq", "is_published", true]);
     expect(mocks.calls).toContainEqual(["eq", "status", "published"]);
-    expect(mocks.calls).toContainEqual(["select", [...PUBLIC_ASSET_PROFILE_FIELDS, "spv_id"].join(",")]);
+    expect(mocks.calls).toContainEqual(["select", [...PUBLIC_ASSET_PROFILE_FIELDS, "spv_id", PUBLIC_TOKENIZE_SELECT].join(",")]);
     expect((await res.json()).data[0]).not.toHaveProperty("fields");
     expect(mocks.verify).not.toHaveBeenCalled();
   });

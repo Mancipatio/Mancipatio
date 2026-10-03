@@ -63,6 +63,14 @@ export function shortRunId(runId: string): string {
 
 export type JournalTxStatus = "signed" | "sent" | "confirmed" | "failed" | "expired";
 
+/**
+ * Which audit row a transaction has: "pending" once sent, "final" once its
+ * success or failure row is written (in the session, or by a resume that
+ * found the outcome the session did not wait for). Absent in journals
+ * written before it existed: a resume writes their final row once.
+ */
+export type AuditMark = "pending" | "final";
+
 export type JournalTx = {
   signature: string;
   /** Decimal string (bigint). */
@@ -72,6 +80,7 @@ export type JournalTx = {
   status: JournalTxStatus;
   error?: string;
   at: string;
+  audited?: AuditMark;
 };
 
 export type JournalMint = {
@@ -80,6 +89,7 @@ export type JournalMint = {
   amount: string;
   reservationId: string;
   status: "sent" | "confirmed" | "failed" | "expired";
+  audited?: AuditMark;
 };
 
 export type DistributionJournal = {
@@ -95,6 +105,14 @@ export type DistributionJournal = {
   txs: JournalTx[];
   /** Set once every row is confirmed. */
   finishedAt: string | null;
+  /** The audit reason of the run ("Distribution run …: N wallets"); absent in older journals. */
+  reason?: string;
+  /**
+   * The issuer dismissed this unfinished run (nothing of it was waiting for
+   * the network): its banner is gone, the journal stays (the "paid before"
+   * check still reads it).
+   */
+  dismissedAt?: string | null;
 };
 
 /** What the journal needs of window.localStorage (tests pass a Map-backed one). */
@@ -212,6 +230,65 @@ export function listJournals(store: JournalStore, scope: { network: string; mint
     if (j && j.mint === scope.mint && j.sender === scope.sender && key === journalKey(j.network, j.runId)) out.push(j);
   }
   return out.sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+}
+
+/** Unfinished runs offered to continue: not finished, not dismissed, not the list typed now. */
+export function unfinishedJournals(journals: readonly DistributionJournal[], currentRunId: string | null): DistributionJournal[] {
+  return journals.filter((j) => !j.finishedAt && !j.dismissedAt && j.runId !== currentRunId);
+}
+
+/**
+ * The journal marked dismissed, or the reason it cannot be: a run with a
+ * transaction (or its mint) still waiting for the network is never hidden —
+ * it may still land, and only its journal knows.
+ */
+export function dismissJournal(
+  journal: DistributionJournal,
+  evaluation: { states: ReadonlyMap<string, RowState>; mint: TxOutcome | null },
+  now = new Date(),
+): { journal: DistributionJournal } | { problem: string } {
+  if (evaluation.mint === "pending" || [...evaluation.states.values()].some((s) => s.state === "pending")) {
+    return { problem: "Some transactions of this run are still waiting for the network; it can be dismissed once they land or expire (about 2 minutes)." };
+  }
+  return { journal: { ...journal, dismissedAt: now.toISOString() } };
+}
+
+/** An audit row the journal still owes: the final row of a decided transaction or mint. */
+export type AuditDue =
+  | { kind: "tx"; signature: string; rows: string[]; status: "success" | "failed" }
+  | { kind: "mint"; signature: string; amount: string; reservationId: string; status: "success" | "failed" };
+
+/**
+ * The final audit rows a resume writes: every transaction (and the mint)
+ * whose outcome is now decided (confirmed or failed) and whose final row
+ * was never written — the session that sent it stopped before the network
+ * answered, so only its "pending" row exists. Expired and still-pending ones
+ * owe nothing yet (an expired transaction moved nothing; its rows are sent
+ * again under a new signature).
+ */
+export function auditsDue(journal: Pick<DistributionJournal, "txs" | "mintTx">): AuditDue[] {
+  const out: AuditDue[] = [];
+  for (const t of journal.txs) {
+    if (t.audited === "final" || (t.status !== "confirmed" && t.status !== "failed")) continue;
+    out.push({ kind: "tx", signature: t.signature, rows: t.rows, status: t.status === "confirmed" ? "success" : "failed" });
+  }
+  const m = journal.mintTx;
+  if (m && m.audited !== "final" && (m.status === "confirmed" || m.status === "failed")) {
+    out.push({ kind: "mint", signature: m.signature, amount: m.amount, reservationId: m.reservationId, status: m.status === "confirmed" ? "success" : "failed" });
+  }
+  return out;
+}
+
+/** The journal with the audit rows of `signatures` marked (`mark`, "final" by default). */
+export function withAudited(journal: DistributionJournal, signatures: ReadonlySet<string>, mark: AuditMark = "final"): DistributionJournal {
+  return {
+    ...journal,
+    txs: journal.txs.map((t) => (signatures.has(t.signature) && t.audited !== "final" ? { ...t, audited: mark } : t)),
+    mintTx:
+      journal.mintTx && signatures.has(journal.mintTx.signature) && journal.mintTx.audited !== "final"
+        ? { ...journal.mintTx, audited: mark }
+        : journal.mintTx,
+  };
 }
 
 /** The journal with one transaction added or replaced (by signature). */

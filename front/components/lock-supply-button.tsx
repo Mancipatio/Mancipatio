@@ -3,7 +3,9 @@
 // Lock supply (lock_supply) behind a destructive confirmation — moved from
 // /admin/share-classes so the issuer's tokenize checklist uses the same code.
 // One-way: once locked, mint_to_treasury fails for good (unless the class is
-// mintable post-launch, which the tokenize flow never sets).
+// mintable post-launch, which the tokenize flow never sets). Before anything
+// was distributed (`requireZeroConfirm`) the lock fixes the supply at 0, so
+// the modal asks for an explicit tick first.
 
 import { useState } from "react";
 import { type Address } from "@solana/kit";
@@ -20,20 +22,25 @@ export function LockSupplyButton({
   onRefresh,
   disabled = false,
   label = "Lock supply",
+  requireZeroConfirm = false,
 }: {
   scPda: Address | null;
   onRefresh: () => Promise<void>;
   disabled?: boolean;
   label?: string;
+  /** Nothing was created yet: the lock fixes the supply at 0, confirmed with a tick. */
+  requireZeroConfirm?: boolean;
 }) {
   const conn = useWalletConnection();
   const tx = useSendTransaction();
   const toast = useToast();
   const wallet = conn.wallet?.account.address;
   const [confirmLock, setConfirmLock] = useState(false);
+  const [zeroConfirmed, setZeroConfirmed] = useState(false);
 
   async function lockSupply(reason: string) {
     if (!wallet || !conn.wallet || !scPda) return;
+    if (requireZeroConfirm && !zeroConfirmed) return;
     const pendingId = toast.showPending("Locking supply…", reason);
     try {
       const { signer } = createWalletTransactionSigner(conn.wallet);
@@ -51,6 +58,7 @@ export function LockSupplyButton({
         reason,
         target_label: scPda.toString(),
         tx_signature: sig,
+        metadata: requireZeroConfirm ? { locked_at_zero: true } : undefined,
       });
       setConfirmLock(false);
       await onRefresh();
@@ -75,7 +83,10 @@ export function LockSupplyButton({
       <button
         type="button"
         disabled={tx.isSending || disabled || !scPda}
-        onClick={() => setConfirmLock(true)}
+        onClick={() => {
+          setZeroConfirmed(false);
+          setConfirmLock(true);
+        }}
         className="rounded-lg border border-red-300 bg-red-50 px-4 py-2 text-sm font-medium text-red-900 hover:bg-red-100 disabled:opacity-50"
       >
         {label}
@@ -97,11 +108,25 @@ export function LockSupplyButton({
               </code>{" "}
               calls will succeed, even by Super Admin.
             </p>
+            {requireZeroConfirm && (
+              <label className="mt-3 flex items-start gap-2 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-[13px] text-red-900">
+                <input
+                  type="checkbox"
+                  checked={zeroConfirmed}
+                  onChange={(e) => setZeroConfirmed(e.target.checked)}
+                  className="mt-0.5"
+                />
+                <span>
+                  Lock at 0: nothing was distributed yet, so no token of this class can ever be created or sold.
+                </span>
+              </label>
+            )}
             <p className="mt-2 text-xs text-slate-500">
               Reason will be recorded in the audit log.
             </p>
           </>
         }
+        confirmDisabled={requireZeroConfirm && !zeroConfirmed}
         busy={tx.isSending}
       />
     </>

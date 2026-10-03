@@ -138,7 +138,7 @@ export type DistributionPlan = {
 /**
  * Packs, test-runs every transaction (`simulate`: the gate's own
  * simulation, null when it would succeed), drops each row a refusal points
- * at with the refusal's words, and repacks the rest — until every
+ * at with the refusal's plain words (its `reason`, else its detail), and repacks the rest — until every
  * transaction passes or `maxRounds` is spent. A refusal that is not one
  * instruction's (the fee payer cannot pay, the transaction is too large)
  * fails the whole plan: no row is to blame.
@@ -147,7 +147,9 @@ export async function planWithSimulation(
   rows: readonly RowInstructions[],
   opts: {
     feePayer: Address;
-    simulate: (instructions: readonly Instruction[]) => Promise<Pick<SimulationRefusedError, "instructionIndex" | "detail" | "message"> | null>;
+    simulate: (
+      instructions: readonly Instruction[],
+    ) => Promise<(Pick<SimulationRefusedError, "instructionIndex" | "detail" | "message"> & { reason?: string }) | null>;
     limit?: number;
     maxRounds?: number;
   },
@@ -164,7 +166,8 @@ export async function planWithSimulation(
       if (!refusal) continue;
       const row = rowForInstruction(tx, refusal.instructionIndex);
       if (row === null) throw new Error(refusal.message);
-      refused.set(row, refusal.detail);
+      // The row's reason in plain words (the refusal's hint), not where it happened in the transaction.
+      refused.set(row, refusal.reason ?? refusal.detail);
     }
     if (refused.size === 0) return { transactions, dropped };
     for (const [row, reason] of refused) dropped.push({ row, reason });
@@ -199,4 +202,40 @@ export function lamportsNeeded(input: {
     TOKEN_ACCOUNT_RENT_LAMPORTS * BigInt(input.newAccounts) +
     (BASE_FEE_LAMPORTS + priority) * BigInt(input.transactions)
   );
+}
+
+/**
+ * SOL the sender needs BEFORE the shortfall is created (checked first, so a
+ * wallet that cannot pay for the transfers never mints tokens it then
+ * cannot send): the transfers' rent and fees as lamportsNeeded counts them,
+ * plus the mint transaction's fee and, when the treasury has no token
+ * account yet, its rent (the mint creates it). `transactions` is the
+ * packing estimate of the transfers.
+ */
+export function solBeforeMint(input: {
+  newAccounts: number;
+  transactions: number;
+  treasuryAccountMissing: boolean;
+  computeUnitLimit?: number;
+  microLamportsPerUnit?: bigint;
+}): bigint {
+  return lamportsNeeded({
+    newAccounts: input.newAccounts + (input.treasuryAccountMissing ? 1 : 0),
+    transactions: input.transactions + 1,
+    computeUnitLimit: input.computeUnitLimit,
+    microLamportsPerUnit: input.microLamportsPerUnit,
+  });
+}
+
+/** How the next group of transactions is signed. */
+export type PromptMode = "auto" | "per-transaction";
+
+/**
+ * The mode for the groups after one was sent: once a group fell back to one
+ * prompt per transaction (the wallet cannot sign several, or a batch
+ * outlasted its blockhash), every later group goes one by one too — the
+ * wallet is not asked for a batch it already could not sign.
+ */
+export function nextPromptMode(mode: PromptMode, result: { mode: "batch" | "per-transaction" }): PromptMode {
+  return result.mode === "per-transaction" ? "per-transaction" : mode;
 }

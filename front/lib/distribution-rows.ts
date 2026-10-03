@@ -1,13 +1,24 @@
 // "Send to wallets" (Distribute → Send to wallets): the recipient list as the
 // issuer types or pastes it — one "wallet amount" per line, or a CSV export.
 //
-// One box, no columns to map: a line is a wallet address and a whole number
-// of tokens, in either order, separated by a comma, semicolon, tab or spaces
-// (quotes around a cell are dropped). A header row ("wallet,amount") and
-// blank or "#" lines are skipped. The same wallet twice is merged (amounts
-// added) and said so, never sent twice. Each row's share of the company comes
-// from the figures the tokenize flow recorded (`fields.tokenize`: tokens,
-// token size and percent), never from the public `total_shares` column.
+// One box, no columns to map. Each line is split on its own delimiter (tab,
+// semicolon, comma or spaces — the first that splits off a wallet address),
+// quote-aware: a quoted cell keeps its commas ("1,000"). Extra columns are
+// fine: the wallet is the line's valid address (a line with two different
+// addresses is refused: which one is the recipient?) and the amount is the
+// first number after it (or, in the "amount wallet" order, the number
+// before it). A header row ("wallet,amount,name") is skipped; when it names
+// the wallet and amount columns ("wallet"/"address"/"recipient",
+// "amount"/"tokens"/"quantity"/"shares"), those columns are read. Amounts
+// may carry thousands separators — "1,000" quoted or in a tab/semicolon
+// line, "1 000" in a comma line, "1'000" — and read as 1000. An unquoted
+// "wallet,1,000" is refused, never read as 1: whether "1" and "000" are one
+// number or two columns cannot be told (quote it, drop the separator or add
+// a header). Blank and "#" lines are skipped. The same wallet twice is
+// merged (amounts added) and said so, never sent twice. Each row's share of
+// the company comes from the figures the tokenize flow recorded
+// (`fields.tokenize`: tokens, token size and percent), never from the public
+// `total_shares` column.
 //
 // Pure and node-safe (no React, no browser API): covered by
 // tests/distribution-rows.test.ts.
@@ -40,15 +51,79 @@ export type ParsedRecipients = {
   total: bigint;
 };
 
-const SEPARATORS = /[,;\t ]+/;
-const QUOTED = /^["'“”‘’](.*)["'“”‘’]$/;
+// ── Cells ───────────────────────────────────────────────────────────────────
 
-function cells(line: string): string[] {
-  return line
-    .split(SEPARATORS)
-    .map((c) => c.trim().replace(QUOTED, "$1").trim())
-    .filter((c) => c.length > 0);
+type Delimiter = "\t" | ";" | "," | "space";
+type Cell = { text: string; quoted: boolean };
+
+const DELIMITERS: readonly Delimiter[] = ["\t", ";", ",", "space"];
+/** A cell that starts with one of these runs to the matching closing quote. */
+const QUOTES: Record<string, string> = { '"': '"', "'": "'", "“": "”", "”": "”", "‘": "’" };
+
+/**
+ * One line split on `delimiter`, quote-aware: a cell that starts with a quote
+ * runs to its closing quote ("" inside a double-quoted cell is one quote),
+ * so a quoted "1,000" stays one cell. Spaces collapse; the other delimiters
+ * keep their empty cells (a header's columns stay aligned).
+ */
+function splitLine(line: string, delimiter: Delimiter): Cell[] {
+  const out: Cell[] = [];
+  let text = "";
+  let quoted = false;
+  let closing: string | null = null;
+  const push = () => {
+    const t = text.trim();
+    if (delimiter !== "space" || t.length > 0 || quoted) out.push({ text: t, quoted });
+    text = "";
+    quoted = false;
+  };
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (closing !== null) {
+      if (ch === closing) {
+        if (ch === '"' && line[i + 1] === '"') {
+          text += '"';
+          i++;
+          continue;
+        }
+        closing = null;
+        continue;
+      }
+      text += ch;
+      continue;
+    }
+    if (QUOTES[ch] && !quoted && text.trim() === "") {
+      closing = QUOTES[ch];
+      quoted = true;
+      text = "";
+      continue;
+    }
+    if (delimiter === "space" ? /\s/.test(ch) : ch === delimiter) {
+      push();
+      continue;
+    }
+    text += ch;
+  }
+  push();
+  return out;
 }
+
+const filledCells = (cells: readonly Cell[]) => cells.filter((c) => c.text.length > 0);
+
+/** The line's delimiter: the first that splits off a wallet address, else the first that splits it at all. */
+function splitBest(line: string): { cells: Cell[]; delimiter: Delimiter } {
+  let fallback: { cells: Cell[]; delimiter: Delimiter } | null = null;
+  for (const delimiter of DELIMITERS) {
+    const cells = splitLine(line, delimiter);
+    const filled = filledCells(cells);
+    if (filled.length < 2) continue;
+    if (filled.some((c) => isAddress(c.text))) return { cells, delimiter };
+    fallback ??= { cells, delimiter };
+  }
+  return fallback ?? { cells: splitLine(line, "space"), delimiter: "space" };
+}
+
+// ── Amounts ─────────────────────────────────────────────────────────────────
 
 /** "1000" → 1000n; anything but plain digits (no separators, no decimals) → null. */
 function wholeTokens(cell: string): bigint | null {
@@ -57,65 +132,140 @@ function wholeTokens(cell: string): bigint | null {
   return n > U64_MAX ? null : n;
 }
 
-/** A line with letters but no address and no amount: "wallet,amount", "Address;Tokens". */
-function looksLikeHeader(parts: string[]): boolean {
-  return parts.length > 0 && parts.every((p) => !isAddress(p) && wholeTokens(p) === null) && parts.some((p) => /[a-z]/i.test(p));
+/** Looks like a number (an amount column), valid or not: "100", "1,000", "1.5", "-3". */
+function numberLike(text: string): boolean {
+  return /^[-+]?\d[\d.,'’   ]*$/.test(text);
+}
+
+/** Thousands separators dropped: "1,000", "1 000", "1'000", "1’000" → "1000"; anything else unchanged. */
+function withoutThousands(text: string): string {
+  return /^\d{1,3}([,'’   ]\d{3})+$/.test(text) ? text.replace(/[,'’   ]/g, "") : text;
+}
+
+function readAmount(text: string): { amount: bigint } | { error: string } {
+  const t = withoutThousands(text.trim());
+  if (/^\d+[.,]\d+$/.test(t)) return { error: "Share tokens are whole: use a whole number of tokens." };
+  const amount = wholeTokens(t);
+  if (amount === null) return { error: "The amount must be a whole number of tokens (digits only)." };
+  if (amount < BigInt(1)) return { error: "Send at least 1 token, or remove the line." };
+  return { amount };
+}
+
+/** An unquoted "wallet,1,000": one number with a separator, or two columns? */
+export const AMBIGUOUS_AMOUNT =
+  'Is this one number with a thousands separator, or two columns? Write it without the separator (1000), in quotes ("1,000"), or add a header row naming the columns.';
+
+// ── Header ──────────────────────────────────────────────────────────────────
+
+const WALLET_HEADER = /^(wallets?|address|wallet address|solana address|recipient|recipient wallet|recipient address|holder|owner|pubkey|public key|account)$/i;
+const AMOUNT_HEADER = /^(amounts?|tokens|token amount|number of tokens|quantity|qty|shares|units|count)$/i;
+
+type Columns = { wallet: number; amount: number; width: number; delimiter: Delimiter };
+
+/** A line with letters but no address and no number: "wallet,amount", "Address;Tokens;Name". */
+function looksLikeHeader(cells: readonly Cell[]): boolean {
+  const filled = filledCells(cells);
+  return (
+    filled.length > 0 &&
+    filled.every((c) => !isAddress(c.text) && !numberLike(c.text)) &&
+    filled.some((c) => /[a-z]/i.test(c.text))
+  );
+}
+
+/** The wallet and amount columns a header names, or null unless it names both. */
+function headerColumns(cells: readonly Cell[], delimiter: Delimiter): Columns | null {
+  const wallet = cells.findIndex((c) => WALLET_HEADER.test(c.text));
+  const amount = cells.findIndex((c) => AMOUNT_HEADER.test(c.text));
+  return wallet >= 0 && amount >= 0 && wallet !== amount ? { wallet, amount, width: cells.length, delimiter } : null;
+}
+
+// ── One line ────────────────────────────────────────────────────────────────
+
+type LineResult = { wallet: Address; amount: bigint } | { error: string };
+
+const ON_ONE_LINE = "Write the wallet address and the number of tokens on the same line.";
+
+/** A line under a header that names its columns: those two cells (by position when the line is not split like the header). */
+function readMapped(line: string, columns: Columns): LineResult {
+  const cells = splitLine(line, columns.delimiter);
+  if (filledCells(cells).length < 2) return readPositional(line);
+  if (columns.delimiter === "," && cells.length > columns.width) {
+    return { error: 'This line has more columns than the header row: put an amount with a thousands separator in quotes ("1,000").' };
+  }
+  const walletText = cells[columns.wallet]?.text ?? "";
+  const amountText = cells[columns.amount]?.text ?? "";
+  if (!walletText || !amountText) return { error: ON_ONE_LINE };
+  if (!isAddress(walletText)) return { error: "Not a valid Solana wallet address." };
+  const read = readAmount(amountText);
+  return "error" in read ? read : { wallet: walletText as Address, amount: read.amount };
+}
+
+/** A line without a column header: its one wallet address and the number after (or before) it. */
+function readPositional(line: string): LineResult {
+  const { cells, delimiter } = splitBest(line);
+  const filled = filledCells(cells);
+  const at = filled.findIndex((c) => isAddress(c.text));
+  if (at < 0) return { error: filled.length < 2 ? ON_ONE_LINE : "Not a valid Solana wallet address." };
+  if (filled.some((c) => isAddress(c.text) && c.text !== filled[at].text)) {
+    return { error: 'Two different wallet addresses on one line: keep only the recipient\'s column, or add a header row naming it "wallet".' };
+  }
+  // The first number after the wallet; else (the "amount wallet" order) the last one before it.
+  let k = filled.findIndex((c, i) => i > at && numberLike(c.text));
+  if (k < 0) {
+    for (let i = at - 1; i >= 0 && k < 0; i--) if (numberLike(filled[i].text)) k = i;
+  }
+  if (k < 0) return { error: ON_ONE_LINE };
+  const amount = filled[k];
+  const next = filled[k + 1];
+  // "wallet,1,000" or "wallet 1 000": never guessed.
+  if (
+    (delimiter === "," || delimiter === "space") &&
+    !amount.quoted &&
+    /^\d+$/.test(amount.text) &&
+    next !== undefined &&
+    !next.quoted &&
+    /^\d+$/.test(next.text)
+  ) {
+    return { error: AMBIGUOUS_AMOUNT };
+  }
+  const read = readAmount(amount.text);
+  return "error" in read ? read : { wallet: filled[at].text as Address, amount: read.amount };
 }
 
 export function parseRecipients(text: string): ParsedRecipients {
   const errors: ParseIssue[] = [];
   const byWallet = new Map<string, RecipientRow>();
   let header = false;
+  let columns: Columns | null = null;
   let seenContent = false;
   const lines = text.split(/\r?\n/);
   for (let i = 0; i < lines.length; i++) {
     const lineNo = i + 1;
     const raw = lines[i].trim();
     if (!raw || raw.startsWith("#")) continue;
-    const parts = cells(raw);
-    if (!seenContent && looksLikeHeader(parts)) {
+    if (!seenContent) {
+      // Only the first content line can be a header.
       seenContent = true;
-      header = true;
+      const { cells, delimiter } = splitBest(raw);
+      if (looksLikeHeader(cells)) {
+        header = true;
+        columns = headerColumns(cells, delimiter);
+        continue;
+      }
+    }
+    const result = columns ? readMapped(raw, columns) : readPositional(raw);
+    if ("error" in result) {
+      errors.push({ line: lineNo, text: result.error });
       continue;
     }
-    seenContent = true;
-    if (parts.length !== 2) {
-      errors.push({
-        line: lineNo,
-        text:
-          parts.length < 2
-            ? "Write the wallet address and the number of tokens on the same line."
-            : "Use one wallet and one whole number per line (no thousands separators or extra columns).",
-      });
-      continue;
-    }
-    const [a, b] = parts;
-    const wallet = isAddress(a) ? a : isAddress(b) ? b : null;
-    const amountCell = wallet === a ? b : a;
-    if (!wallet) {
-      errors.push({ line: lineNo, text: "Not a valid Solana wallet address." });
-      continue;
-    }
-    if (/^\d+[.,]\d+$/.test(amountCell)) {
-      errors.push({ line: lineNo, text: "Share tokens are whole: use a whole number of tokens." });
-      continue;
-    }
-    const amount = wholeTokens(amountCell);
-    if (amount === null) {
-      errors.push({ line: lineNo, text: "The amount must be a whole number of tokens (digits only)." });
-      continue;
-    }
-    if (amount < BigInt(1)) {
-      errors.push({ line: lineNo, text: "Send at least 1 token, or remove the line." });
-      continue;
-    }
+    const { wallet, amount } = result;
     const existing = byWallet.get(wallet);
     if (existing) {
       existing.amount += amount;
       existing.lines.push(lineNo);
       if (existing.amount > U64_MAX) errors.push({ line: lineNo, text: "The merged amount is too large." });
     } else {
-      byWallet.set(wallet, { wallet: wallet as Address, amount, lines: [lineNo] });
+      byWallet.set(wallet, { wallet, amount, lines: [lineNo] });
     }
   }
   const rows = [...byWallet.values()];

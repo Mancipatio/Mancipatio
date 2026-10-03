@@ -46,6 +46,7 @@ import {
   detailsSaved,
   distributeDoneText,
   distributeWaitText,
+  lockAtZeroOffered,
   draftKey,
   duplicateConfirmationKey,
   formatCents,
@@ -1008,21 +1009,39 @@ describe("checklist after creation: created → details → activate → distrib
     expect(states({ ...all, treasuryBalance: null }).distribute).toBe("todo");
     // Part created, the rest still possible: still to do.
     expect(states({ active: true, lifetimeMinted: B(3_000), treasuryBalance: B(0) }).distribute).toBe("todo");
+    // A sold-out sale still Open is not done: its proceeds are collected from Distribute.
+    expect(states({ ...all, treasuryBalance: B(0), openSalesOfClass: 1 }).distribute).toBe("todo");
     // Locked after a partial distribution with an empty treasury: done.
     expect(states({ active: true, lifetimeMinted: B(3_000), treasuryBalance: B(0), supplyLocked: true }).distribute).toBe("done");
     expect(distributeDoneText({ lifetimeMinted: B(5_000), supplyLocked: false })).toBe("All 5,000 tokens are created and sent.");
     expect(distributeDoneText({ lifetimeMinted: B(3_000), supplyLocked: true })).toBe("3,000 tokens created and sent; supply locked.");
   });
-  it("Close is the optional one-way lock: after activation, never while a sale of the class is open", () => {
-    expect(states({ active: true }).close).toBe("todo");
-    expect(states({ active: true, openSalesOfClass: 1 }).close).toBe("blocked");
-    expect(states({ active: true, openSalesOfClass: null }).close).toBe("blocked");
-    expect(states({ active: true, supplyLocked: true }).close).toBe("done");
-    expect(closeText({ ...fresh, active: true }, true)).toMatch(/^Optional, after the last distribution: locks the supply for good/);
-    expect(closeText({ ...fresh, active: true }, false)).toMatch(/after the last distribution: the operator can lock/);
-    expect(closeText({ ...fresh, active: true, openSalesOfClass: 2 }, true)).toBe("Not while a sale of this class is open.");
-    expect(closeText({ ...fresh, active: true, openSalesOfClass: null }, true)).toMatch(/Could not check this class's sales/);
+  it("Close is the optional one-way lock: after a distribution, never while a sale of the class is open or on its way", () => {
+    const sent = { active: true, lifetimeMinted: B(100) };
+    expect(states(sent).close).toBe("todo");
+    expect(states({ ...sent, openSalesOfClass: 1 }).close).toBe("blocked");
+    expect(states({ ...sent, openSalesOfClass: null }).close).toBe("blocked");
+    expect(states({ ...sent, pendingSaleOfClass: true }).close).toBe("blocked");
+    expect(states({ ...sent, supplyLocked: true }).close).toBe("done");
+    expect(closeText({ ...fresh, ...sent }, true)).toMatch(/^Optional, after the last distribution: locks the supply for good/);
+    expect(closeText({ ...fresh, ...sent }, false)).toMatch(/after the last distribution: the operator can lock/);
+    expect(closeText({ ...fresh, ...sent, openSalesOfClass: 2 }, true)).toBe("Not while a sale of this class is open.");
+    expect(closeText({ ...fresh, ...sent, pendingSaleOfClass: true }, true)).toMatch(/approved or requested and not opened yet/);
+    expect(closeText({ ...fresh, ...sent, openSalesOfClass: null }, true)).toMatch(/Could not check this class's sales/);
     expect(closeText(fresh, true)).toBe("After the asset is active.");
+  });
+  it("Close waits for the first distribution; a lock at 0 is only offered apart (explicit confirmation)", () => {
+    const nothing = { ...fresh, active: true };
+    expect(states({ active: true }).close).toBe("blocked");
+    expect(lockAtZeroOffered(nothing)).toBe(true);
+    expect(closeText(nothing, true)).toMatch(/^After the first distribution\. Locking now would fix the supply at 0/);
+    expect(closeText(nothing, false)).toMatch(/^After the first distribution: the operator can then lock/);
+    // Not offered once something was created, while a sale is open or on its way, or before activation.
+    expect(lockAtZeroOffered({ ...nothing, lifetimeMinted: B(1) })).toBe(false);
+    expect(lockAtZeroOffered({ ...nothing, openSalesOfClass: 1 })).toBe(false);
+    expect(lockAtZeroOffered({ ...nothing, pendingSaleOfClass: true })).toBe(false);
+    expect(lockAtZeroOffered(fresh)).toBe(false);
+    expect(lockAtZeroOffered({ ...nothing, supplyLocked: true })).toBe(false);
   });
   it("without a mint creation is still to do", () => {
     expect(states({ mintInitialized: false })).toMatchObject({ created: "todo", activate: "todo", distribute: "blocked" });

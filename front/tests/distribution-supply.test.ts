@@ -8,6 +8,7 @@ import { getSaleEncoder, RaiseType, SaleStatus } from "@/lib/generated/asset_reg
 import {
   LIFETIME_COUNTER_VERSION,
   allocation,
+  approximateFigures,
   creationBlocker,
   remainingFromLifetime,
   roomToCreate,
@@ -30,6 +31,15 @@ const facts = (over: Partial<SupplyFacts> = {}): SupplyFacts => ({
   reservedUnminted: n(0),
   treasuryBalance: n(0),
   ...over,
+});
+
+describe("(approximate) only where an input is unknown", () => {
+  it("names only the figures an unread input affects", () => {
+    expect(approximateFigures({ treasury: true, openSales: true, reservations: true })).toEqual([]);
+    expect(approximateFigures({ treasury: false, openSales: true, reservations: true })).toEqual(["inTreasury", "out"]);
+    expect(approximateFigures({ treasury: true, openSales: true, reservations: false })).toEqual(["notCreated"]);
+    expect(approximateFigures({ treasury: true, openSales: false, reservations: true })).toEqual(["onSale", "notCreated"]);
+  });
 });
 
 describe("room to create", () => {
@@ -79,9 +89,20 @@ describe("room to create", () => {
       inTreasury: n(200),
       out: n(1_300),
       onSale: n(300),
+      approved: n(0),
       notCreated: n(3_100),
       cap: n(5_000),
     });
+  });
+
+  it("a live approval not opened yet holds its tokens: the room (and a top-up) never eats into it", () => {
+    const f = facts({ lifetimeMinted: n(1_000), approvedUnopened: n(2_500) });
+    expect(roomToCreate(f)).toBe(n(1_500));
+    expect(allocation(f)).toMatchObject({ approved: n(2_500), notCreated: n(1_500) });
+    // A list that needs more than the room left beside the approved sale is refused, and says why.
+    const verdict = supplyVerdict(n(1_600), f);
+    expect(verdict.problem).toMatch(/2,500 approved for a sale not opened yet/);
+    expect(supplyVerdict(n(1_500), f).problem).toBeNull();
   });
 });
 

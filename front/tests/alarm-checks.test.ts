@@ -47,7 +47,7 @@ import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import {
   GAP_SCAN_HOOK_PAGES, GAP_SCAN_OVERDUE_MS, GAP_SCAN_PAGES, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram,
-  bootstrapOpenReport, fxAutoReports, payoutModulesReport, marketRefusals, roleChangesReport, runAlarmChecks, thresholdState,
+  bootstrapOpenReport, fxAutoReports, payoutModulesReport, marketRefusals, primaryIdleReport, roleChangesReport, runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { USDC } from "@/lib/payment-mints";
@@ -580,6 +580,129 @@ describe("role-change-pending and payout-modules", () => {
     expect(await report([{ block_time: at(500) }], 0x5c)).toMatchObject({ state: "pass", summary: "The bootstrap window is closed" });
     expect(reads).toEqual(["platforms:network=mainnet"]);
     expect(await report([{ block_time: at(500) }], 0xff, false, "devnet")).toMatchObject({ state: "pass" });
+  });
+
+  it("primary-open-idle: 0x02 clear with no sale Open fails after an hour (high on mainnet), holds before, passes with a sale Open", async () => {
+    const now = Date.parse("2026-10-03T12:00:00Z");
+    const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+    const reads: string[] = [];
+    // A precise fake: each read answers by its table and filters (open = status 0, closed = status 1).
+    // The mirror behind each sale's issuer: class c → asset a → issuer i, class c2 → asset a2 → issuer i2 (share_classes,
+    // assets); `freezes` are issuer_freezes rows (none by default).
+    const links = {
+      share_classes: [{ pda: "c", asset_pda: "a" }, { pda: "c2", asset_pda: "a2" }],
+      assets: [{ pda: "a", issuer_pda: "i" }, { pda: "a2", issuer_pda: "i2" }],
+    };
+    const sb = (t: {
+      flags?: number | null; platformAt?: string; open?: number; openRows?: Record<string, unknown>[]; alerts?: Record<string, unknown>[];
+      closedAt?: string | null; broken?: string; freezes?: Record<string, unknown>[]; classes?: Record<string, unknown>[];
+    }) => ({
+      from: (table: string) => {
+        const eqs: Record<string, unknown> = {};
+        const ins: Record<string, unknown[]> = {};
+        const b: Record<string, unknown> = {};
+        b.select = () => b; b.order = () => b; b.limit = () => b;
+        b.eq = (column: string, value: unknown) => { eqs[column] = value; return b; };
+        b.in = (column: string, values: unknown[]) => { ins[column] = values; return b; };
+        const within = (rows: Record<string, unknown>[]) =>
+          rows.filter((r) => Object.entries(ins).every(([column, values]) => values.includes(r[column])));
+        const rows = () => {
+          if (t.broken === table) return { data: null, error: { code: "08006" } };
+          reads.push(`${table}${eqs.status !== undefined ? `:status=${eqs.status}` : ""}`);
+          if (table === "platforms") return { data: t.flags === null ? null : { pause_flags: t.flags ?? 0x7c, updated_at: t.platformAt ?? ago(500) }, error: null };
+          if (table === "sales" && eqs.status === 0) return { data: t.openRows ?? Array.from({ length: t.open ?? 0 }, (_, i) => ({ pda: `s${i}` })), error: null };
+          if (table === "sales" && eqs.status === 1) return { data: t.closedAt ? [{ updated_at: t.closedAt }] : [], error: null };
+          if (table === "compliance_alerts") return { data: t.alerts ?? [], error: null };
+          if (table === "share_classes") return { data: within(t.classes ?? links.share_classes), error: null };
+          if (table === "assets") return { data: within(links.assets), error: null };
+          if (table === "issuer_freezes") return { data: within(t.freezes ?? []), error: null };
+          return { data: [], error: null };
+        };
+        b.abortSignal = () => ({
+          maybeSingle: async () => rows(),
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => Promise.resolve().then(rows).then(resolve, reject),
+        });
+        return b;
+      },
+    }) as never;
+    const run = (t: Parameters<typeof sb>[0], network: "mainnet" | "devnet" = "mainnet") => primaryIdleReport(sb(t), network, AbortSignal.timeout(5_000), now);
+
+    // 0x02 set: pass, nothing else read.
+    reads.length = 0;
+    expect(await run({ flags: 0x7e })).toMatchObject({ state: "pass", source: "onchain:primary-open-idle", severity: "high" });
+    expect(reads).toEqual(["platforms"]);
+    // A sale Open needs it: pass.
+    expect(await run({ flags: 0x7c, open: 1 })).toMatchObject({ state: "pass" });
+    // Cleared 30 minutes ago (the onchain:pause alert of a clear of bit 0x02), no sale Open yet: hold.
+    const cleared = (minutes: number) => [{ created_at: ago(minutes), evidence: { set_mask: 0, clear_mask: 0x02 } }];
+    expect(await run({ flags: 0x7c, alerts: cleared(30) })).toMatchObject({ state: "hold", evidence: { minutes_idle: 30 } });
+    // …and 61 minutes ago: fail, high on mainnet, low elsewhere.
+    expect(await run({ flags: 0x7c, alerts: cleared(61) })).toMatchObject({ state: "fail", severity: "high", summary: expect.stringMatching(/no sale Open for 61 minutes/) });
+    expect(await run({ flags: 0x7c, alerts: cleared(61) }, "devnet")).toMatchObject({ state: "fail", severity: "low" });
+    // A clear of another bit does not count; the last sale's close does (the newest of both wins).
+    expect(await run({ flags: 0x7c, alerts: [{ created_at: ago(5), evidence: { clear_mask: 0x20 } }, ...cleared(120)] })).toMatchObject({ state: "fail" });
+    expect(await run({ flags: 0x7c, alerts: cleared(120), closedAt: ago(10) })).toMatchObject({ state: "hold", evidence: { minutes_idle: 10 } });
+    // Neither known: the Platform mirror's own update time.
+    expect(await run({ flags: 0x7c, platformAt: ago(20) })).toMatchObject({ state: "hold" });
+    expect(await run({ flags: 0x7c, platformAt: ago(90) })).toMatchObject({ state: "fail" });
+    // An Open sale counts only while it can take a buy. One that ended is waiting to be closed (close_sale does not
+    // need 0x02): idle since its end; numeric columns arrive as numbers or digit strings.
+    const nowSec = Math.floor(now / 1000);
+    const sale = (over: Record<string, unknown>) => ({ pda: "s", share_class_pda: "c", end_ts: nowSec + 86_400, sold: "10", total_for_sale: "100", updated_at: ago(500), ...over });
+    expect(await run({ flags: 0x7c, openRows: [sale({})] })).toMatchObject({ state: "pass" });
+    const ended = await run({ flags: 0x7c, openRows: [sale({ end_ts: nowSec - 30 * 60 })], alerts: cleared(600) });
+    expect(ended).toMatchObject({ state: "hold", evidence: { minutes_idle: 30, open_sales_not_taking_buys: 1 }, summary: expect.stringMatching(/no sale taking buys \(1 Open sale ended or sold out/) });
+    expect(await run({ flags: 0x7c, openRows: [sale({ end_ts: String(nowSec - 2 * 3600) })], alerts: cleared(600) })).toMatchObject({ state: "fail", evidence: { minutes_idle: 120 } });
+    // Ended only by our clock, inside the chain-clock margin: it may still take a buy.
+    expect(await run({ flags: 0x7c, openRows: [sale({ end_ts: nowSec - 60 })], alerts: cleared(600) })).toMatchObject({ state: "pass" });
+    // Sold out: idle since its last update (the last buy); one live sale among idle ones still passes.
+    expect(await run({ flags: 0x7c, openRows: [sale({ sold: 100, updated_at: ago(90) })], alerts: cleared(600) })).toMatchObject({ state: "fail", evidence: { minutes_idle: 90 } });
+    expect(await run({ flags: 0x7c, openRows: [sale({ sold: 100, updated_at: ago(90) }), sale({ pda: "s2" })] })).toMatchObject({ state: "pass" });
+    // A mirrored row whose columns cannot be read counts as a sale taking buys (the columns are NOT NULL; as before this check).
+    expect(await run({ flags: 0x7c, openRows: [sale({ end_ts: null })] })).toMatchObject({ state: "pass" });
+    // A frozen issuer's Open sale takes no buy (buy.rs IssuerProceedsFrozen): issuer B frozen to reopen 0x02 for sale A,
+    // A closed 90 minutes ago, B's sale still Open → fail, idle since the newest of A's close and the freeze.
+    const frozenB = [{ issuer_pda: "i", frozen_at: String(nowSec - 3 * 3600) }];
+    const frozen = await run({ flags: 0x7c, openRows: [sale({})], freezes: frozenB, alerts: cleared(600), closedAt: ago(90) });
+    expect(frozen).toMatchObject({
+      state: "fail",
+      evidence: { minutes_idle: 90, open_sales_not_taking_buys: 1, issuer_frozen: 1, freeze_unread: 0 },
+      summary: expect.stringMatching(/no sale taking buys \(1 Open sale of a frozen issuer\) for 90 minutes/),
+    });
+    // …and within the hour: hold; frozen 20 minutes ago (after every clear and close): idle since the freeze.
+    expect(await run({ flags: 0x7c, openRows: [sale({})], freezes: frozenB, alerts: cleared(600), closedAt: ago(30) })).toMatchObject({ state: "hold", evidence: { minutes_idle: 30 } });
+    expect(await run({ flags: 0x7c, openRows: [sale({})], freezes: [{ issuer_pda: "i", frozen_at: nowSec - 20 * 60 }], alerts: cleared(600) }))
+      .toMatchObject({ state: "hold", evidence: { minutes_idle: 20 } });
+    // Another issuer's live sale beside the frozen one still needs 0x02: pass.
+    expect(await run({ flags: 0x7c, openRows: [sale({}), sale({ pda: "s2", share_class_pda: "c2" })], freezes: frozenB })).toMatchObject({ state: "pass" });
+    // Frozen and ended: ended wins (idle since its end).
+    expect(await run({ flags: 0x7c, openRows: [sale({ end_ts: nowSec - 2 * 3600 })], freezes: frozenB, alerts: cleared(600) }))
+      .toMatchObject({ state: "fail", evidence: { minutes_idle: 120, issuer_frozen: 0, open_sales_not_taking_buys: 1 } });
+    // An issuer the mirror cannot resolve never keeps the alarm at pass (the re-pause side of safety), said in the summary.
+    const unresolved = await run({ flags: 0x7c, openRows: [sale({ share_class_pda: "unknown" })], alerts: cleared(61) });
+    expect(unresolved).toMatchObject({
+      state: "fail",
+      evidence: { minutes_idle: 61, freeze_unread: 1 },
+      summary: expect.stringMatching(/1 Open sale whose issuer's freeze is not in the mirror/),
+    });
+    expect(await run({ flags: 0x7c, openRows: [sale({})], classes: [{ pda: "c", asset_pda: null }], alerts: cleared(30) })).toMatchObject({ state: "hold", evidence: { freeze_unread: 1 } });
+    // The freeze mirror unreadable: the check could not run (never a silent pass).
+    expect(await run({ flags: 0x7c, openRows: [sale({})], broken: "issuer_freezes" })).toBeNull();
+    expect(await run({ flags: 0x7c, openRows: [sale({})], broken: "share_classes" })).toBeNull();
+    expect(await run({ flags: 0x7c, openRows: [sale({})], broken: "assets" })).toBeNull();
+    // Only a sale that would take a buy by its window needs the freeze: an ended one reads no link.
+    reads.length = 0;
+    await run({ flags: 0x7c, openRows: [sale({ end_ts: nowSec - 2 * 3600 })], alerts: cleared(600) });
+    expect(reads.filter((r) => ["share_classes", "assets", "issuer_freezes"].includes(r))).toEqual([]);
+    // No Platform mirrored: hold; unreadable: the check could not run.
+    expect(await run({ flags: null })).toMatchObject({ state: "hold" });
+    expect(await run({ flags: 0x7c, broken: "sales" })).toBeNull();
+    expect(await run({ flags: 0x7c, broken: "compliance_alerts" })).toBeNull();
+    expect(SOURCE_LABELS["onchain:primary-open-idle"]).toMatchObject({ format: "platform" });
+    // Recorded with the other cheap checks.
+    const { sb: mock, rpcs } = mockSb(heartbeats);
+    await runAlarmChecks(mock, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(rpcs, "primary-open-idle")).toBeDefined();
   });
 
   it("roleChangesReport reads only this network's rows", async () => {

@@ -186,6 +186,8 @@ const OPENING = "This transaction would fail, so your wallet was not opened.";
  */
 export class SimulationRefusedError extends Error {
   readonly detail: string;
+  /** The refusal in plain words, without where it happened ("Step N of M …"): a distribution row's reason. */
+  readonly reason: string;
   readonly instructionIndex: number | null;
   readonly instructionCount: number;
   readonly program: string | null;
@@ -195,6 +197,7 @@ export class SimulationRefusedError extends Error {
   readonly err: unknown;
   constructor(fields: {
     detail: string;
+    reason?: string;
     instructionIndex: number | null;
     instructionCount: number;
     program: string | null;
@@ -206,6 +209,7 @@ export class SimulationRefusedError extends Error {
     super(`${OPENING} ${fields.detail}`);
     this.name = "SimulationRefusedError";
     this.detail = fields.detail;
+    this.reason = fields.reason ?? fields.detail;
     this.instructionIndex = fields.instructionIndex;
     this.instructionCount = fields.instructionCount;
     this.program = fields.program;
@@ -273,9 +277,11 @@ export function refusalFromSimulation(
   const name = failure.code !== null ? (failure.name ?? customErrorName(label, failure.code)) : failure.name;
 
   let reason: string;
+  let plain: string;
   if (messageIndex === null) {
     // The whole transaction was refused before any instruction ran.
     reason = (name && transactionErrorText(name, network)) ?? `The network refused it before running it (${name ?? "unknown error"}).`;
+    plain = reason;
   } else {
     const hint =
       (failure.code !== null ? programErrorHint({ program: label, code: failure.code }) : name ? instructionErrorText(name) : null) ??
@@ -289,9 +295,11 @@ export function refusalFromSimulation(
           ? `Step ${appIndex + 1} of ${count} (${describeInstruction(ix)})`
           : `Instruction ${messageIndex + 1}`;
     reason = `${where} was refused by ${describeProgram(program)}: ${explained}`;
+    plain = explained;
   }
   return new SimulationRefusedError({
     detail: sentence(reason),
+    reason: sentence(plain),
     instructionIndex: ix ? appIndex : null,
     instructionCount: count,
     program: label,
