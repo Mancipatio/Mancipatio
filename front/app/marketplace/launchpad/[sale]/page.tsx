@@ -66,7 +66,8 @@ import {
   UNKNOWN_COMMITMENTS,
   formatPaymentTotal,
 } from "@/lib/commitment-totals";
-import { purchaseQuote, paymentTokenLabel } from "@/lib/purchase-quote";
+import { tokenCountQuote, paymentTokenLabel } from "@/lib/purchase-quote";
+import { getAssetProfile, type PublicAssetProfile } from "@/lib/asset-profiles";
 import { tokenDecimal } from "@/lib/chain-evidence";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
 import { featureDisabledMessage, features } from "@/lib/features";
@@ -169,6 +170,8 @@ export default function DealPage({
   const pendingPurchase =
     purchaseRecovery.receipts.find((r) => r.entityId === salePubkey) ?? null;
   const [recordingPurchase, setRecordingPurchase] = useState(false);
+  // The asset's public profile: the sale's name when it has no application, and one token's share of the company.
+  const [assetProfile, setAssetProfile] = useState<PublicAssetProfile | null>(null);
   const [documentTerms, setDocumentTerms] = useState<SaleDocumentTerms | null>(
     null,
   );
@@ -252,6 +255,13 @@ export default function DealPage({
         }
         if (cancelled) return;
 
+        const saleClass = matchedSale
+          ? network.shareClasses.find((sc) => sc.mint.toString() === matchedSale!.mint.toString())
+          : undefined;
+        const fetchedProfile = saleClass
+          ? await getAssetProfile(saleClass.asset.toString()).catch(() => null)
+          : null;
+        if (!cancelled) setAssetProfile(fetchedProfile);
         const fetchedApp = fetchedListing?.application_id
           ? await getPublicApplication(fetchedListing.application_id)
           : null;
@@ -496,6 +506,7 @@ export default function DealPage({
 
   const companyName =
     app?.company_name ??
+    assetProfile?.display_name ??
     `Sale ${salePubkey.slice(0, 4)}…${salePubkey.slice(-4)}`;
 
   const isStartup = saleData.raiseType === RaiseType.Startup;
@@ -521,10 +532,20 @@ export default function DealPage({
   // mint; until it loads we cannot price a buy.
   const pricePerUnit = saleData.pricePerUnit; // bigint, payment base units / share unit
   const remainingUnits = saleData.totalForSale - saleData.sold;
+  // The buyer types a number of TOKENS (share mints have 0 decimals); the exact
+  // USDC total and the share of the company follow (lib/purchase-quote).
+  const tokenPercentE4 =
+    assetProfile?.token_percent_e4 && /^\d+$/.test(assetProfile.token_percent_e4)
+      ? BigInt(assetProfile.token_percent_e4)
+      : null;
   const quote =
     settlesOnChain && paymentDecimals !== null
-      ? purchaseQuote(amount, paymentDecimals, pricePerUnit)
+      ? tokenCountQuote(amount, pricePerUnit, remainingUnits, tokenPercentE4)
       : null;
+  const pricePerToken =
+    paymentDecimals === null
+      ? "—"
+      : `${tokenDecimal(pricePerUnit, paymentDecimals)} ${paymentLabel}`;
   const onChainUnits = quote?.units ?? BigInt(0);
   const onChainCostBaseUnits = quote?.cost ?? BigInt(0);
   const formattedPayment =
@@ -808,20 +829,20 @@ export default function DealPage({
     if (onChainUnits <= BigInt(0)) {
       toast.showError(
         "Amount too small",
-        "Your amount does not cover one whole share unit at this price.",
+        "Enter at least 1 token.",
       );
       return;
     }
     if (onChainUnits > remainingUnits) {
       toast.showError(
         "Not enough units left",
-        `Only ${String(remainingUnits)} share units remain in this sale.`,
+        `Only ${String(remainingUnits)} tokens remain in this sale.`,
       );
       return;
     }
     const units = onChainUnits;
     setCommitBusy(true);
-    const pendingId = toast.showPending(`Buying ${String(units)} share units…`);
+    const pendingId = toast.showPending(`Buying ${String(units)} tokens…`);
     try {
       assertChainRecordStorageAvailable();
       if (!acceptedTerms || !acceptedRisk || documentTerms?.sale !== salePubkey)
@@ -1414,6 +1435,11 @@ export default function DealPage({
                 inputMode="decimal"
                 value={amount}
                 onChange={(e) => {
+                  // A number of tokens (whole) for an on-chain buy; dollars for a commitment.
+                  if (settlesOnChain) {
+                    setAmount(e.target.value.replace(/\D/g, ""));
+                    return;
+                  }
                   const v = e.target.value.replace(/[^0-9.]/g, "");
                   // collapse to a single decimal point
                   const parts = v.split(".");
@@ -1428,7 +1454,21 @@ export default function DealPage({
               />
             </div>
 
-            {/* Preset buttons */}
+            {/* Preset buttons: all that is left for a buy, dollar amounts for a commitment */}
+            {settlesOnChain ? (
+              <div className="mb-4 flex flex-wrap items-center gap-1.5">
+                <span className="text-[11px] text-mx-ink-faint">Tokens · {pricePerToken} each</span>
+                {remainingUnits > BigInt(0) && (
+                  <button
+                    type="button"
+                    onClick={() => setAmount(remainingUnits.toString())}
+                    className="rounded-[3px] border border-mx-rule px-2.5 py-1 font-mono text-[11px] font-medium text-mx-ink-faint hover:border-mx-rule-strong hover:text-mx-ink-soft"
+                  >
+                    Max {Number(remainingUnits).toLocaleString()}
+                  </button>
+                )}
+              </div>
+            ) : (
             <div className="mb-4 flex flex-wrap gap-1.5">
               {["500", "1000", "2500", "5000", "10000"].map((preset) => {
                 const isActive = amount === preset;
@@ -1443,12 +1483,13 @@ export default function DealPage({
                         : "border-mx-rule text-mx-ink-faint hover:border-mx-rule-strong hover:text-mx-ink-soft"
                     }`}
                   >
-                    {settlesOnChain ? "" : "$"}
+                    $
                     {Number(preset).toLocaleString()}
                   </button>
                 );
               })}
             </div>
+            )}
 
             {/* On-chain share-unit breakdown (Mature path) */}
             {settlesOnChain &&
@@ -1458,10 +1499,15 @@ export default function DealPage({
                 <div className="mb-4 space-y-2">
                   <div className="flex items-center justify-between rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
                     <span className="font-mono text-[11px] font-semibold uppercase tracking-[0.06em] text-mx-ink-faint">
-                      Share units
+                      Tokens
                     </span>
                     <span className="text-[16px] font-bold text-mx-ink">
                       {Number(onChainUnits).toLocaleString()}
+                      {quote?.percent && (
+                        <span className="ml-1.5 text-[12px] font-medium text-mx-ink-soft">
+                          = {quote.percent} % of {companyName}
+                        </span>
+                      )}
                     </span>
                   </div>
                   <div className="flex items-center justify-between rounded-[3px] border border-mx-rule bg-mx-paper px-4 py-3">
@@ -1470,7 +1516,7 @@ export default function DealPage({
                         You pay
                       </span>
                       <p className="mt-0.5 text-[10px] text-mx-ink-faint">
-                        {String(pricePerUnit)} base units / share unit
+                        {pricePerToken} per token
                       </p>
                     </div>
                     <span className="text-[16px] font-bold text-mx-ink">
@@ -1535,7 +1581,7 @@ export default function DealPage({
               <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
                 <p className="text-[12px] font-semibold text-amber-800">
                   Increase your amount — it doesn&apos;t cover one whole share
-                  unit at {String(pricePerUnit)} base units each.
+                  token at {pricePerToken} each.
                 </p>
               </div>
             )}
@@ -1544,7 +1590,7 @@ export default function DealPage({
             {onChainOverRemaining && (
               <div className="mb-4 rounded-[3px] border border-amber-200 bg-amber-50 px-4 py-2.5">
                 <p className="text-[12px] font-semibold text-amber-800">
-                  Only {String(remainingUnits)} share units remain — lower your
+                  Only {Number(remainingUnits).toLocaleString()} tokens remain — lower the
                   amount.
                 </p>
               </div>
@@ -1637,7 +1683,7 @@ export default function DealPage({
                               ? "Accept the document and risk warning"
                             : parsed > 0
                               ? settlesOnChain
-                                ? `Buy ${Number(onChainUnits).toLocaleString()} units · ${formattedPayment}`
+                                ? `Buy ${Number(onChainUnits).toLocaleString()} tokens · ${formattedPayment}`
                                 : `Commit ${fmtExact(parsed)}`
                               : "Enter an amount"}
               </button>
@@ -1715,8 +1761,8 @@ export default function DealPage({
                 ? [
                     { label: "Company", value: companyName },
                     {
-                      label: "Share units",
-                      value: Number(onChainUnits).toLocaleString(),
+                      label: "Tokens",
+                      value: `${Number(onChainUnits).toLocaleString()}${quote?.percent ? ` (= ${quote.percent} % of ${companyName})` : ""}`,
                     },
                     { label: "You pay", value: formattedPayment },
                     {

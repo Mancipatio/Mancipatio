@@ -114,6 +114,8 @@ export default function PublicLaunchpadPage() {
         }
       }
       const decisionByAsset = new Map<string, string>();
+      // A sale without an application (a public sale from Distribute) is named after its asset.
+      const nameByAsset = new Map<string, string>();
       try {
         const profiles = await listAssetProfiles({
           pdas: Array.from(new Set(assetBySale.values())),
@@ -121,6 +123,7 @@ export default function PublicLaunchpadPage() {
         for (const profile of profiles) {
           const ref = sscApprovalRef(profile, detectNetwork());
           if (ref) decisionByAsset.set(profile.asset_pda, ref);
+          if (profile.display_name) nameByAsset.set(profile.asset_pda, profile.display_name);
         }
       } catch {
         // Unknown approval → labeled "not approved" (see above).
@@ -136,8 +139,10 @@ export default function PublicLaunchpadPage() {
             : undefined;
           const agg: CommitAggregate = aggregates[i];
 
+          const assetPda = assetBySale.get(listing.sale_pubkey);
           const company =
             app?.company_name ??
+            (assetPda ? nameByAsset.get(assetPda) : undefined) ??
             `Sale ${listing.sale_pubkey.slice(0, 4)}…${listing.sale_pubkey.slice(-4)}`;
           const category = app?.category ?? "—";
           const oneLiner = app?.one_liner ?? "";

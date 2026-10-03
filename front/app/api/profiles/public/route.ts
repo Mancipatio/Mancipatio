@@ -4,7 +4,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { readPdas } from "@/lib/server/profile-read";
 import { CATEGORY_SLUGS } from "@/lib/asset-types";
-import { PUBLIC_ASSET_PROFILE_FIELDS, projectPublicAssetProfile } from "@/lib/profile-public";
+import { PUBLIC_ASSET_PROFILE_FIELDS, PUBLIC_TOKENIZE_SELECT, projectPublicAssetProfile } from "@/lib/profile-public";
 
 export async function POST(request: Request) {
   try {
@@ -15,7 +15,7 @@ export async function POST(request: Request) {
     if (params.category !== undefined && !CATEGORY_SLUGS.includes(params.category)) throw new SiwsError(400, "Invalid category");
     const pdas = params.pdas === undefined ? null : readPdas(params.pdas);
     let query = getSupabaseAdmin().from("asset_profiles")
-      .select([...PUBLIC_ASSET_PROFILE_FIELDS, "spv_id"].join(","))
+      .select([...PUBLIC_ASSET_PROFILE_FIELDS, "spv_id", PUBLIC_TOKENIZE_SELECT].join(","))
       .eq("network", detectNetwork()).eq("is_published", true).eq("status", "published")
       .order("asset_pda", { ascending: true }).range(offset, offset + 99);
     if (pdas) query = query.in("asset_pda", pdas);
