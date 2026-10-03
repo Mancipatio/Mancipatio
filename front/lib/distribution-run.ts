@@ -32,6 +32,7 @@ import {
   type TxOutcome,
 } from "@/lib/distribution-journal";
 import { recentTreasuryTransfers } from "@/lib/distribution-chain";
+import { screeningAuditEntry, type ScreeningEvidence } from "@/lib/distribution-screening";
 
 const STATUS_CHUNK = 256;
 /** The backstop looks this far before the run's start (clock skew between the browser and block times). */
@@ -129,7 +130,14 @@ async function landedOutcome(rpc: RunRpc, signature: string): Promise<"confirmed
   return tx.meta?.err ? "failed" : "confirmed";
 }
 
-/** One audit row per distribution transaction (pending on send, then success or failed). */
+/**
+ * One audit row per distribution transaction (pending on send, then success
+ * or failed). Each recipient carries the sanctions-screening evidence the
+ * send was planned on (lib/distribution-screening: the screening record, its
+ * time, the list version, the result and the run's evidence record), or null
+ * when the run has none (a journal written before it existed);
+ * `screening_complete` says whether every recipient has it.
+ */
 export function distributionAuditRow(input: {
   actor: string;
   reason: string;
@@ -139,8 +147,14 @@ export function distributionAuditRow(input: {
   signature: string;
   status: "pending" | "success" | "failed";
   rows: readonly { wallet: string; amount: bigint }[];
+  screening?: ScreeningEvidence | null;
   extra?: Record<string, unknown>;
 }) {
+  const recipients = input.rows.map((r) => ({
+    to: r.wallet,
+    amount: r.amount.toString(),
+    screening: screeningAuditEntry(input.screening, r.wallet),
+  }));
   return {
     ix_name: "share_class_distribution",
     category: "share-class" as const,
@@ -153,8 +167,9 @@ export function distributionAuditRow(input: {
       run_id: input.runId,
       mint: input.mint,
       decimals: 0,
-      recipients: input.rows.map((r) => ({ to: r.wallet, amount: r.amount.toString() })),
+      recipients,
       total: input.rows.reduce((sum, r) => sum + r.amount, BigInt(0)).toString(),
+      screening_complete: recipients.every((r) => r.screening !== null),
       ...input.extra,
     },
   };

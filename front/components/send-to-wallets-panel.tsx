@@ -12,6 +12,12 @@
 // else one "Value per token" field) and the re-pause of Primary issuance.
 //
 // The send:
+//   0. every recipient screened again (the server records each screen) and
+//      the server's evidence that each has a clear screening from the last
+//      15 minutes (/api/compliance/distribution-evidence), taken again at plan
+//      time when older than 10; no group is signed with a row whose evidence
+//      is older than 15, and every audit row cites it per recipient
+//      (lib/distribution-screening).
 //   1. (only when the treasury holds less than the list) one message — the
 //      raise-limit reservation — and ONE transaction: [create the treasury
 //      token account, mint_to_treasury(shortfall), set_pause_flags(set 0x02)]
@@ -52,7 +58,13 @@ import { USDC } from "@/lib/payment-mints";
 import { isPaused, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { usePauseFlags } from "@/lib/use-pause-flags";
-import { screenRecipients } from "@/lib/compliance";
+import { distributionEvidence, screenRecipients } from "@/lib/compliance";
+import {
+  evidenceDue,
+  staleScreenings,
+  staleScreeningText,
+  type ScreeningEvidence,
+} from "@/lib/distribution-screening";
 import {
   freshUsdcEurRate,
   isApprovalLive,
@@ -335,6 +347,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
                     signature: d.signature,
                     status: d.status,
                     rows: d.rows.map((w) => ({ wallet: w, amount: amounts.get(w) ?? BigInt(0) })),
+                    screening: evaluated.screening ?? null,
                     extra: { reconciled_on_resume: true },
                   }),
                 )
@@ -578,18 +591,30 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       }
       const reason = runReason(runId, toSend.length);
 
-      // 1. Every recipient screened (one sign-in at most: a session read).
-      setWorking("Screening the recipients…");
-      const hits = await screenRecipients(session, { shareClass: scPda, wallets: toSend.map((r) => r.wallet) });
-      setScreening((prev) => {
-        const next = new Map(prev);
-        for (const r of toSend) next.set(r.wallet, hits.has(r.wallet) ? "hit" : "clear");
-        return next;
-      });
-      if (hits.size > 0) {
-        setProblem(`${hits.size} ${hits.size === 1 ? "wallet" : "wallets"} cannot receive tokens through Manci (marked below). Remove ${hits.size === 1 ? "it" : "them"} and send again.`);
-        return;
-      }
+      // 1. Every recipient screened (one sign-in at most: session reads), the screen recorded by the
+      //    server, then the server's evidence that each one has a fresh clear screening (P1,
+      //    lib/distribution-screening). Nothing is signed for a row without that evidence.
+      let evidence: ScreeningEvidence = {};
+      let evidenceAt = 0;
+      const screenAndRecord = async (rows: readonly RecipientRow[]): Promise<boolean> => {
+        setWorking("Screening the recipients…");
+        const wallets = rows.map((r) => r.wallet as string);
+        const hits = await screenRecipients(session, { shareClass: scPda, wallets, runId });
+        setScreening((prev) => {
+          const next = new Map(prev);
+          for (const w of wallets) next.set(w, hits.has(w) ? "hit" : "clear");
+          return next;
+        });
+        if (hits.size > 0) {
+          setProblem(`${hits.size} ${hits.size === 1 ? "wallet" : "wallets"} cannot receive tokens through Manci (marked below). Remove ${hits.size === 1 ? "it" : "them"} and send again.`);
+          return false;
+        }
+        setWorking("Recording the screening evidence…");
+        evidence = { ...evidence, ...(await distributionEvidence(session, { shareClass: scPda, runId, wallets })) };
+        evidenceAt = Date.now();
+        return true;
+      };
+      if (!(await screenAndRecord(toSend))) return;
 
       // 2. Fresh chain facts for the rows still to send.
       setWorking("Checking every wallet on the network…");
@@ -633,7 +658,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
 
       // 3. The journal: this run's, or a new one.
       let j = readJournal(store, network, runId) ?? newJournal({ runId, network, mint: sc.mint, sender: actor, rows: parsed.rows, nonce });
-      j = { ...j, reason, dismissedAt: null };
+      j = { ...j, reason, dismissedAt: null, screening: { ...(j.screening ?? {}), ...evidence } };
       writeJournal(store, j);
 
       // 4. Create the shortfall (one message + one transaction), confirmed before anything is planned.
@@ -772,7 +797,14 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         fresh = await loadDistributionFacts(rpc, { mint: sc.mint, sender: wallet, recipients: toSend.map((r) => r.wallet) });
       }
 
-      // 5. Pack and test-run every transaction; drop refused rows with their reason.
+      // 5. The evidence is the plan's: one older than SCREENING_RECAPTURE_MS (a slow mint) is taken again (evidenceDue).
+      if (evidenceDue(evidenceAt)) {
+        if (!(await screenAndRecord(toSend))) return;
+        j = { ...j, screening: { ...(j.screening ?? {}), ...evidence } };
+        writeJournal(store, j);
+      }
+
+      // 5b. Pack and test-run every transaction; drop refused rows with their reason.
       setWorking("Test-running the transfers on the network…");
       const signer = walletSigner(session);
       const rows = await Promise.all(
@@ -811,6 +843,12 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       // A Ledger or the remembered choice: one prompt per transaction (a fresh blockhash each).
       let mode: PromptMode = signSeparately ? "per-transaction" : "auto";
       for (const [g, group] of groups.entries()) {
+        // A row is signed for only with fresh clear screening evidence (a group may wait on the wallet).
+        const stale = staleScreenings(evidence, group.flatMap((t) => t.index.map((e) => e.row)));
+        if (stale.length > 0) {
+          setProblem(staleScreeningText(stale.length));
+          break;
+        }
         const requests: TransactionPrepareAndSendRequest[] = group.map((t) => ({ instructions: t.instructions, feePayer: signer }));
         const result = await sender.prepareAndSendAll(requests, {
           mode,
@@ -851,7 +889,9 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         // One audit row per transaction, written one after another (the audit route's burst limit).
         const pendingAudited = new Set<string>();
         for (const s of groupSent) {
-          const id = await recordAudit(distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: "pending", rows: s.rows }));
+          const id = await recordAudit(
+            distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: "pending", rows: s.rows, screening: evidence }),
+          );
           if (id !== null) pendingAudited.add(s.signature);
         }
         j = withAudited(j, pendingAudited, "pending");
@@ -872,7 +912,17 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         if (t && (outcomes[i] === "confirmed" || outcomes[i] === "failed")) j = withTx(j, { ...t, status: outcomes[i] as "confirmed" | "failed" });
         if (outcomes[i] === "confirmed" || outcomes[i] === "failed") {
           const id = await recordAudit(
-            distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: outcomes[i] === "confirmed" ? "success" : "failed", rows: s.rows }),
+            distributionAuditRow({
+              actor,
+              reason,
+              scPda,
+              runId,
+              mint: sc.mint,
+              signature: s.signature,
+              status: outcomes[i] === "confirmed" ? "success" : "failed",
+              rows: s.rows,
+              screening: evidence,
+            }),
           );
           if (id !== null) finalAudited.add(s.signature);
         }

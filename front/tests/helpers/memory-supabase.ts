@@ -3,8 +3,9 @@
 // the routes under test make (select / insert / update / upsert / delete,
 // eq / neq / in / not in / lt / lte / gt / gte, order / limit, single /
 // maybeSingle, `.select()` after a write, head counts) plus `rpc(name, args)`
-// through registered handlers. Filters are applied, ordering and limits are
-// not (tests keep tables small).
+// through registered handlers and opt-in per-table insert defaults
+// (`defaults`). Filters are applied, ordering and limits are not (tests keep
+// tables small).
 
 export type Row = Record<string, unknown>;
 
@@ -21,6 +22,8 @@ export type MemorySupabase = {
   missingColumns: Record<string, string[]>;
   /** Runs right before an update is applied (race simulation). */
   beforeUpdate: ((table: string) => void) | null;
+  /** Column defaults an insert fills when the row leaves them out (like `created_at default now()`), per table. */
+  defaults: Record<string, () => Row>;
   client: { from: (table: string) => unknown; rpc: (name: string, args?: Record<string, unknown>) => unknown };
   rows: (table: string) => Row[];
   reset: () => void;
@@ -36,6 +39,7 @@ export function memorySupabase(): MemorySupabase {
     readErrorCodes: {},
     missingColumns: {},
     beforeUpdate: null,
+    defaults: {},
     client: { from: (table: string) => from(table), rpc: (name: string, args: Record<string, unknown> = {}) => rpc(name, args) },
     rows: (table) => (db.tables[table] ??= []),
     reset: () => {
@@ -46,6 +50,7 @@ export function memorySupabase(): MemorySupabase {
       db.readErrorCodes = {};
       db.missingColumns = {};
       db.beforeUpdate = null;
+      db.defaults = {};
     },
   };
 
@@ -89,7 +94,11 @@ export function memorySupabase(): MemorySupabase {
         return { data: null, error: { message: "read failed", code: db.readErrorCodes[table] ?? "XX000" } };
       }
       if (op === "insert" || op === "upsert") {
-        const rows = (Array.isArray(payload) ? payload : [payload ?? {}]).map((r) => ({ id: r.id ?? `row-${nextId++}`, ...r }));
+        const rows = (Array.isArray(payload) ? payload : [payload ?? {}]).map((r) => ({
+          id: r.id ?? `row-${nextId++}`,
+          ...(db.defaults[table]?.() ?? {}),
+          ...r,
+        }));
         db.rows(table).push(...rows);
         return { data: returning ? (single ? rows[0] : rows) : null, error: null };
       }

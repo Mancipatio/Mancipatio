@@ -30,6 +30,7 @@
 // Pure and node-safe (the storage is passed in): tests/distribution-journal.test.ts.
 import { getBase58Encoder, type Address } from "@solana/kit";
 import { normalizedRows } from "@/lib/distribution-rows";
+import { parseScreeningEvidence, type ScreeningEvidence } from "@/lib/distribution-screening";
 
 export const JOURNAL_PREFIX = "mancipatio:distribution:v1:";
 const TOKEN_2022 = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
@@ -113,6 +114,12 @@ export type DistributionJournal = {
    * check still reads it).
    */
   dismissedAt?: string | null;
+  /**
+   * Each recipient's sanctions-screening evidence the send was planned on
+   * (lib/distribution-screening), so a resume's audit rows cite it too.
+   * Absent in journals written before it existed.
+   */
+  screening?: ScreeningEvidence;
 };
 
 /** What the journal needs of window.localStorage (tests pass a Map-backed one). */
@@ -175,7 +182,9 @@ export function parseJournal(raw: string | null): DistributionJournal | null {
     ) {
       return null;
     }
-    return { ...j, nonce: j.nonce ?? null, mintTx: j.mintTx ?? null, finishedAt: j.finishedAt ?? null } as DistributionJournal;
+    const journal = { ...j, nonce: j.nonce ?? null, mintTx: j.mintTx ?? null, finishedAt: j.finishedAt ?? null } as DistributionJournal;
+    if (j.screening !== undefined) journal.screening = parseScreeningEvidence(j.screening);
+    return journal;
   } catch {
     return null;
   }

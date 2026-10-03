@@ -21,14 +21,23 @@ import {
   pipe,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
+  type AccountMeta,
   type Address,
   type Instruction,
+  type ReadonlyUint8Array,
   type TransactionSigner,
 } from "@solana/kit";
 import type { SolanaClient } from "@solana/client";
 import { fetchMaybeToken, findAssociatedTokenPda } from "@solana-program/token-2022";
 import {
+  ASSET_REGISTRY_PROGRAM_ADDRESS,
+  AssetRegistryInstruction,
   KybStatus,
+  identifyAssetRegistryInstruction,
+  parseAddShareClassInstruction,
+  parseCreateAssetInstruction,
+  parseInitializeShareClassMintInstruction,
+  parseSetConvertibleToInstruction,
   fetchAllMaybeAsset,
   fetchMaybeAsset,
   fetchMaybeIssuer,
@@ -60,6 +69,9 @@ import {
 import { SEND_RESERVE_BYTES } from "@/lib/issuer-authority";
 import { startFinalityPoll } from "@/lib/finality-poll";
 import { findShareClassPda } from "@/lib/pdas";
+import { confirmThenReport } from "@/lib/send-outcome";
+import type { SignatureOutcome } from "@/lib/simulation-gate";
+import type { AuditInput } from "@/lib/supabase";
 import {
   CLASS_DEFAULTS,
   CLASS_INDEX,
@@ -485,5 +497,104 @@ export function waitForFinalizedAsset(
       stop();
       finish(false);
     });
+  });
+}
+
+// ── Audit ───────────────────────────────────────────────────────────────────
+
+/** Which tokenize step sent the transaction (the audit rows say it). */
+export type TokenizeAuditStep = "create" | "add_class" | "init_mint" | "add_marker";
+
+function bytesHex(bytes: ArrayLike<number>): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * One audit_events row per registry instruction the tokenize transaction
+ * carried, in program order, read from the instructions themselves (so the
+ * ledger names exactly what was signed): create_asset, add_share_class (class
+ * 0, and class 1 — the conversion marker), initialize_share_class_mint and
+ * set_convertible_to. They share the transaction signature; `status` is set
+ * by auditTokenizeOutcome once the network decided.
+ */
+export function tokenizeAuditRows(
+  ixs: readonly Instruction[],
+  input: { actor: string; signature: string; name: string; step: TokenizeAuditStep },
+): AuditInput[] {
+  const reason = `Tokenize company shares: ${input.name}`;
+  const rows: AuditInput[] = [];
+  for (const ix of ixs) {
+    if (ix.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS || !ix.data || !ix.accounts) continue;
+    const parsable = ix as Instruction & { accounts: readonly AccountMeta[]; data: ReadonlyUint8Array };
+    const common = { actor_wallet: input.actor, reason, tx_signature: input.signature, status: "success" as const };
+    const meta = { flow: "tokenize-shares", step: input.step };
+    switch (identifyAssetRegistryInstruction(parsable.data)) {
+      case AssetRegistryInstruction.CreateAsset: {
+        const p = parseCreateAssetInstruction(parsable);
+        rows.push({
+          ...common, ix_name: "create_asset", category: "assets", target_label: p.accounts.asset.address,
+          metadata: {
+            ...meta, issuer: p.accounts.issuer.address, asset_id: p.data.assetId, name: p.data.name,
+            symbol_prefix: p.data.symbolPrefix, legal_doc_sha256: bytesHex(p.data.legalDocHash),
+          },
+        });
+        break;
+      }
+      case AssetRegistryInstruction.AddShareClass: {
+        const p = parseAddShareClassInstruction(parsable);
+        const maxSupply = p.data.maxSupply.__option === "Some" ? p.data.maxSupply.value.toString() : null;
+        rows.push({
+          ...common, ix_name: "add_share_class", category: "share-class", target_label: p.accounts.shareClass.address,
+          metadata: {
+            ...meta, asset: p.accounts.asset.address, class_index: p.data.classIndex, max_supply: maxSupply,
+            mintable_post_launch: p.data.mintablePostLaunch,
+            ...(p.data.classIndex === MARKER_CLASS_INDEX ? { conversion_marker: true } : {}),
+          },
+        });
+        break;
+      }
+      case AssetRegistryInstruction.InitializeShareClassMint: {
+        const p = parseInitializeShareClassMintInstruction(parsable);
+        rows.push({
+          ...common, ix_name: "initialize_share_class_mint", category: "share-class", target_label: p.accounts.shareClass.address,
+          metadata: { ...meta, asset: p.accounts.asset.address, mint: p.accounts.mint.address },
+        });
+        break;
+      }
+      case AssetRegistryInstruction.SetConvertibleTo: {
+        const p = parseSetConvertibleToInstruction(parsable);
+        // The same metadata as /admin/share-classes' own set_convertible_to row.
+        rows.push({
+          ...common, ix_name: "set_convertible_to", category: "share-class", target_label: p.accounts.shareClass.address,
+          metadata: { ...meta, asset: p.accounts.asset.address, target_share_class: p.accounts.targetShareClass?.address ?? null },
+        });
+        break;
+      }
+      default:
+        break;
+    }
+  }
+  return rows;
+}
+
+/**
+ * Writes the tokenize transaction's audit rows once the network decided
+ * (lib/send-outcome: `tx.send` returns when the transaction is submitted):
+ * success, failed, or pending with the confirmation outcome when it is not
+ * confirmed in time (it may still land). One row after another (the audit
+ * route's burst limit). `record` never throws (recordAudit).
+ */
+export async function auditTokenizeOutcome(input: {
+  rows: readonly AuditInput[];
+  wait: () => Promise<SignatureOutcome>;
+  record: (row: AuditInput) => Promise<unknown>;
+}): Promise<SignatureOutcome> {
+  const write = async (status: AuditInput["status"], extra: Record<string, unknown> = {}) => {
+    for (const row of input.rows) await input.record({ ...row, status, metadata: { ...row.metadata, ...extra } });
+  };
+  return confirmThenReport(input.wait, {
+    confirmed: () => write("success"),
+    failed: () => write("failed", { error: "refused by the network" }),
+    unconfirmed: (outcome) => write("pending", { confirmation: outcome }),
   });
 }

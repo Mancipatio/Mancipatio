@@ -7,10 +7,11 @@
 // metadata.actor_verified=true plus the concrete actor_source. The server
 // stamps are applied last: caller metadata can never override them.
 //
-// Categories in SERVER_ONLY_AUDIT_CATEGORIES (currently "kyc", shown as "KYC &
-// privacy") are refused by the unsigned /api/audit route, so a "kyc" row in
-// audit_events is always a server-attributed one — "who viewed which KYC
-// document" cannot be forged by anyone holding only the public site. Rows
+// Categories in SERVER_ONLY_AUDIT_CATEGORIES ("kyc", shown as "KYC &
+// privacy", and "compliance", the sanctions screening records) are refused by
+// the unsigned /api/audit route, so a "kyc" row in audit_events is always a
+// server-attributed one — "who viewed which KYC document" cannot be forged by
+// anyone holding only the public site; nor can a screening record. Rows
 // about a dossier target its client id (kyc_document_view, kyc_data_export,
 // client_anonymize); confidential repository files target "document:<id>"
 // (confidential_document_view).
@@ -26,8 +27,13 @@ import type { AuditCategory, AuditStatus } from "@/lib/supabase";
 import { SiwsError } from "@/lib/server/siws-error";
 import { detectNetwork } from "@/lib/network";
 
-/** Categories only the server may write (refused by the unsigned /api/audit). */
-export const SERVER_ONLY_AUDIT_CATEGORIES: ReadonlySet<string> = new Set<AuditCategory>(["kyc"]);
+/**
+ * Categories only the server may write (refused by the unsigned /api/audit):
+ * "kyc", and "compliance" — the sanctions screening records a distribution's
+ * evidence cites (lib/server/screening-evidence.ts), which a forged row must
+ * never pass for.
+ */
+export const SERVER_ONLY_AUDIT_CATEGORIES: ReadonlySet<string> = new Set<AuditCategory>(["kyc", "compliance"]);
 
 /** How the route proved who the actor is. */
 export type AuditActorSource =
