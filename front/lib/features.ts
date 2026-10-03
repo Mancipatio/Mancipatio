@@ -96,8 +96,9 @@ export function featureDisabledMessage(
 
 // ── Pilot scope: one switch per product module (lansiranje-6) ─────────────
 //
-// The mainnet pilot is closed and narrow: primary sales (one issuer, Mature,
-// USDC) and nothing else. Every other module is a switch here, OFF on mainnet
+// The mainnet scope is narrow: primary sales (Mature, USDC) and nothing else
+// (Terms clause 2, lib/legal/mainnet-copy.ts). Every other module is a switch
+// here, OFF on mainnet
 // unless its NEXT_PUBLIC_FEATURE_* variable reads as on, and ON elsewhere
 // unless it reads as off (so devnet can rehearse the pilot scope). Same
 // spellings and build guard as the flags above (next.config.ts
@@ -106,7 +107,7 @@ export function featureDisabledMessage(
 //
 // Off means: the module's ENTRY routes answer 403 with moduleDisabledMessage
 // (lib/server/feature-gate.ts requireModule), the navigation hides the
-// module, and its pages say it is not available in the pilot. Exits of
+// module, and its pages say it is not available on mainnet. Exits of
 // positions that already exist (cancels, withdrawals, claims, refunds) stay
 // open, like the program's emergency pause. The program is the authority
 // for what can happen on-chain; these switches are the platform's scope.
@@ -182,6 +183,6 @@ export function moduleEnabled(name: PilotModule, network: Network = detectNetwor
 /** User-facing sentence for a module that is switched off. */
 export function moduleDisabledMessage(name: PilotModule, network: Network = detectNetwork()): string {
   return network === "mainnet"
-    ? `${PILOT_MODULE_LABELS[name]}: not available in the pilot on Solana mainnet.`
+    ? `${PILOT_MODULE_LABELS[name]}: not available on Solana mainnet.`
     : `${PILOT_MODULE_LABELS[name]}: switched off on Solana ${network}.`;
 }

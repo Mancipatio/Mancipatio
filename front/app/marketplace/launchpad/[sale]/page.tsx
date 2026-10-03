@@ -70,7 +70,8 @@ import { tokenCountQuote, paymentTokenLabel } from "@/lib/purchase-quote";
 import { getAssetProfile, type PublicAssetProfile } from "@/lib/asset-profiles";
 import { tokenDecimal } from "@/lib/chain-evidence";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
-import { featureDisabledMessage, features } from "@/lib/features";
+import { featureDisabledMessage, features, moduleEnabled } from "@/lib/features";
+import { RAISE_LIMIT_NOTE, equityOfferedNote, whatYouAreBuying } from "@/lib/deal-terms-copy";
 import {
   assertChainRecordStorageAvailable,
   type PendingChainRecord,
@@ -2003,12 +2004,12 @@ function TermsTab({
     {
       label: "Raise amount",
       value: app ? fmtMoney(app.raise_amount) : "—",
-      note: app ? "Annual equity sale, max $3M" : undefined,
+      note: app ? RAISE_LIMIT_NOTE : undefined,
     },
     {
       label: "Equity offered",
       value: app ? `${app.equity_offered}%` : "—",
-      note: app ? "Actual company ownership" : undefined,
+      note: app ? equityOfferedNote(isStartup) : undefined,
     },
     {
       label: "Implied valuation",
@@ -2049,6 +2050,15 @@ function TermsTab({
     },
   ];
 
+  // What the buyer receives, held to the mainnet Terms (lib/deal-terms-copy.ts).
+  const network = detectNetwork();
+  const buying = whatYouAreBuying({
+    isStartup,
+    structure: app?.raise_structure,
+    conversionAvailable: moduleEnabled("custodyConversion", network),
+    network,
+  });
+
   return (
     <div className="space-y-5">
       {/* Terms table */}
@@ -2079,11 +2089,7 @@ function TermsTab({
           What you&apos;re buying
         </p>
         <p>
-          This is <strong className="text-mx-ink">real equity</strong> in a real
-          company — not a token. You will receive a{" "}
-          {app?.raise_structure ?? "SAFE"} agreement granting you pro-rata
-          ownership. Founders can sell up to $3M/year of company equity through
-          this platform.
+          <strong className="text-mx-ink">{buying.lead}</strong> {buying.body}
         </p>
       </InfoBox>
 

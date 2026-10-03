@@ -82,7 +82,7 @@ export function moduleNoticeText(state: ModuleRouteState, network: Network = det
   if (state.off.length === 1) return moduleDisabledMessage(state.off[0], network);
   const labels = state.off.map((m) => PILOT_MODULE_LABELS[m]).join("; ");
   return network === "mainnet"
-    ? `${labels}: not available in the pilot on Solana mainnet.`
+    ? `${labels}: not available on Solana mainnet.`
     : `${labels}: switched off on Solana ${network}.`;
 }
 
