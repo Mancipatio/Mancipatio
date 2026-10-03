@@ -15,7 +15,7 @@ export function PilotModuleNotice({ state, gate = false }: { state: ModuleRouteS
       data-pilot-module-notice
       className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
     >
-      <strong className="font-semibold">{network === "mainnet" ? "Not available in the pilot." : "Switched off."}</strong>{" "}
+      <strong className="font-semibold">{network === "mainnet" ? "Not available." : "Switched off."}</strong>{" "}
       <span>{text}</span>
       {!gate && <span className="mt-1 block text-amber-800">{MODULE_EXITS_OPEN}</span>}
     </div>

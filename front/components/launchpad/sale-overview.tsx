@@ -1,28 +1,24 @@
 "use client";
 
-// The sale page's Overview tab: first the legal blocks (`lead`: the
-// investment documents and the risk warning, beside the buy card), then the
-// token summary of a tokenized share class (lib/sale-page tokenSummaryLines),
-// then the issuer's pitch — only the sections that have something to say (a
+// The sale page's Overview tab (the investment documents and the risk warning
+// sit above the tabs, so every tab shows them): first the token summary of a
+// tokenized share class (lib/sale-page tokenSummaryLines), then the issuer's
+// pitch — only the sections that have something to say (a
 // tokenized sale has no application, so "The problem — / Why now —" never
 // shows empty).
 
-import type { ReactNode } from "react";
 import { InfoBox } from "@/components/launchpad/primitives";
 import type { LaunchListing, PublicApplication } from "@/lib/launchpad";
 
 export function SaleOverview({
   listing,
   app,
-  lead,
   tokenSummary = [],
   about = null,
   company,
 }: {
   listing: LaunchListing | null;
   app: PublicApplication | null;
-  /** The legal blocks shown first. */
-  lead?: ReactNode;
   /** The token summary lines of a tokenized share class (empty: none). */
   tokenSummary?: readonly string[];
   /** The asset profile's description, shown when the application says nothing. */
@@ -37,8 +33,6 @@ export function SaleOverview({
 
   return (
     <div className="space-y-8">
-      {lead && <div className="space-y-4">{lead}</div>}
-
       {tokenSummary.length > 0 && (
         <section data-sale-token-summary="">
           <h2 className="mb-3 text-[15px] font-semibold text-mx-ink">The tokens</h2>

@@ -2,7 +2,7 @@
 // documents beside, the purchase at the top"): the buy card comes first in
 // the DOM (the phone order; a sticky right column on a wide screen), the two
 // acceptances sit directly above the button with links to the full texts, the
-// full documents and risk warning open the Overview, a tokenized class says
+// full documents and risk warning sit above the tabs, a tokenized class says
 // "Buy tokens" / "Sold", and empty pitch sections are hidden. Rendered to
 // static markup (no jsdom); the page source is read for the wiring.
 import fs from "node:fs";
@@ -177,7 +177,7 @@ describe("the page wiring (source)", () => {
     expect(page).toContain("await screenOwnWallet(conn.wallet);");
   });
 
-  it("renders the acceptances before the button inside the buy card, and the documents in the Overview", () => {
+  it("renders the acceptances before the button inside the buy card, and the documents above the tabs", () => {
     const buy = page.indexOf("const buy = (");
     const main = page.indexOf("const main = (");
     expect(buy).toBeGreaterThan(0);
@@ -185,8 +185,23 @@ describe("the page wiring (source)", () => {
     const card = page.slice(buy, main);
     expect(card.indexOf("<SaleAcceptances")).toBeLessThan(card.indexOf("{/* Commit / Buy button */}"));
     expect(card).not.toContain("<SaleDocumentsSection");
-    expect(page.slice(main)).toMatch(/<SaleOverview[\s\S]*?<SaleDocumentsSection[\s\S]*?<SaleRiskWarningSection/);
+    // The full documents and risk warning sit above the tab bar, outside any
+    // `activeTab === …` branch, so every tab shows them.
+    const mainColumn = page.slice(main);
+    const tabBar = mainColumn.indexOf("{/* Tab bar */}");
+    expect(tabBar).toBeGreaterThan(0);
+    expect(mainColumn.slice(0, tabBar)).toMatch(/<SaleDocumentsSection[\s\S]*?<SaleRiskWarningSection/);
+    expect(mainColumn.slice(0, tabBar)).not.toContain("activeTab");
+    expect(page.match(/<SaleDocumentsSection /g)).toHaveLength(1);
+    expect(page.match(/<SaleRiskWarningSection /g)).toHaveLength(1);
     expect(page).toContain("<SalePageLayout header={header} buy={buy} main={main} />");
+  });
+
+  it("gives a tokenized class's Deal terms the mainnet Terms wording (lib/deal-terms-copy)", () => {
+    const terms = page.slice(page.indexOf("function TermsTab("));
+    const tokenizedBranch = terms.slice(terms.indexOf("if (tokenized) {"), terms.indexOf("type TermRow"));
+    expect(terms.indexOf("whatYouAreBuying({")).toBeLessThan(terms.indexOf("if (tokenized) {"));
+    expect(tokenizedBranch).toContain("{buying.lead}</strong> {buying.body}");
   });
 
   it("no longer labels payment units as tokens, nor shows empty terms", () => {
@@ -259,7 +274,6 @@ describe("the Overview hides empty sections", () => {
     app: null,
     company: "HERC",
     tokenSummary: ["10,000 tokens = 10 % of HERC.", "1 token = 0.001 % of HERC."],
-    lead: createElement("div", { id: "lead" }, "LEAD"),
   });
 
   it("shows no empty 'The problem' / 'Why now', and the token summary instead", () => {
@@ -269,8 +283,6 @@ describe("the Overview hides empty sections", () => {
     expect(markup).not.toContain(">—<");
     expect(markup).toContain("The tokens");
     expect(markup).toContain("1 token = 0.001 % of HERC.");
-    // The legal blocks open the Overview, above everything else.
-    expect(markup.indexOf("LEAD")).toBeLessThan(markup.indexOf("The tokens"));
   });
 
   it("keeps a section that has something to say", () => {

@@ -15,6 +15,7 @@ import {
   type ReservationRow,
 } from "@/lib/sale-approvals";
 import { detectNetwork } from "@/lib/network";
+import { MAINNET_RAISE_CAP_EUR } from "@/lib/raise-cap";
 import { fxAutoFresh, fxRowFresh, gapToFreshAuto } from "@/lib/fx-effective";
 import {
   MAINNET_MAX_RATE_AGE_DAYS,
@@ -372,7 +373,7 @@ function LimitsForm() {
       {!limits && !error ? <p className="text-sm text-slate-500">Loading…</p> : (
         <>
           <label className="block text-sm font-medium text-slate-800" htmlFor="cap">Annual raise cap per applicant (EUR)</label>
-          <p className="mt-0.5 text-xs text-slate-500">Maximum total raised per person per calendar year. Legal default: €3,000,000.</p>
+          <p className="mt-0.5 text-xs text-slate-500">Maximum total raised per person per calendar year. Legal default: €3,000,000.{detectNetwork() === "mainnet" ? ` On Solana mainnet it cannot be set higher than €${MAINNET_RAISE_CAP_EUR.toLocaleString("en-US")} (Terms, clause 7), for the platform or for a single client.` : ""}</p>
           <input id="cap" inputMode="decimal" value={cap} onChange={(e) => setCap(e.target.value)} required
             className="mt-2 w-full rounded-md border border-slate-300 px-3 py-2 text-sm" />
           <label className="mt-5 block text-sm font-medium text-slate-800" htmlFor="equity">Maximum equity offered per application (%)</label>

@@ -931,7 +931,7 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   its ProgramData and System, so an extra account cannot turn into a transfer
   destination. The preconditions list each program, its PDA and each
   transfer: check them before approving. Import, approve, execute.
-- **Pilot pause mask (8.5).** For the closed pilot, *Trading through
+- **Pilot pause mask (8.5).** On mainnet (Terms clause 2), *Trading through
   Manci* (0x04), *Custody entry* (0x08) and *Distributions* (0x10) stay
   paused, flags **0x1c**, for as long as their module switches are off
   (`ops/env-vars.md`, "Pilot scope"), and the payout modules (0x40) stay
@@ -946,7 +946,14 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   (`MODULE_FLOWS` in the same file). After an incident's "Resume
   everything" (which never clears 0x40), set 0x1c again. Check:
   `/admin/platform` shows exactly those three areas and the payout modules
-  paused (`0x5c`) **before the first sale opens** (D10).
+  paused (`0x5c`) **before the first sale opens** (D10). The Terms of
+  2026-10-03 say conversion into company shares is not available yet and,
+  once the Operator switches it on, is available where the issuer offers it
+  (with KYC; clauses 2 and 12). Switching it on needs
+  `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` and clearing 0x08, and
+  on-chain 0x08 also opens delivery entry, which the Terms keep switched off
+  (its module switch stays off): put the wording of that to counsel, and
+  publish Terms that no longer say "not available yet", before either step.
 - Close leftover buffers (`chain:inventory` lists them under `buffer`).
 - Drain the deployer to the treasury or cold storage (the destination from
   the role map or its device, never from a transaction history: §1,
@@ -3324,6 +3331,54 @@ without that waiver (no licence is recorded):
   opinion on file (its reference in MAINNET-PLAN.md), then
   `MAINNET_LICENSE_NOT_REQUIRED=true`. After the review of the rendered pages
   (step 4 below), `MAINNET_LEGAL_COPY_APPROVED=true`.
+
+**State on 2026-10-03 (owner's decisions D1-D7, counsel approved the
+model; the wording is a DRAFT until counsel confirms it).** Terms, Privacy
+Policy, acceptance-dialog summary and risk warning points 3, 4, 7 and 10
+are version `2026-10-03` in `mainnet-copy.ts` / `risk-warning.ts` (PR
+"Legal: Terms v2026-10-03 draft"): open classes are bearer instruments
+bought, held and transferred with no KYC; buying needs only a wallet linked
+to the platform (connected and signed in, the Terms in force accepted,
+sanctions screening passed); a buy outside the platform is not supported
+and may lead to the blocklist and clawback (no program change); public
+primary sales, each approved by the Operator, up to 365 days, EUR 3M per
+issuer over any 12 months; issuer direct transfers from the treasury; KYC
+only for conversion (where the issuer offers it) and delivery; trading
+through Manci, Startup raises, distributions, vesting, governance, Rights
+and delivery stay off; conversion is "not available yet" until the
+Operator switches it on (§8). "Buying outside the platform" means a
+purchase in a primary sale only: units received through an issuer's direct
+transfer or from another wallet are not one. The EUR 3M limit applies per
+issuer, or per SPV where it issues through one (0066), and on mainnet the
+admin routes refuse a platform or client limit above EUR 3,000,000
+(`lib/raise-cap.ts`). The new version makes every mainnet wallet accept
+again (`TOS_VERSION`; the 2026-10-02 rows stay as history).
+- `MAINNET_LEGAL_COPY_APPROVED=true` is already set in production and is
+  not bound to a version, so the hold is in code: the risk warning's
+  `status` is `"draft"` (`lib/legal/risk-warning.ts`), and a mainnet build
+  refuses it (`Purchase risk warning: still engineering's draft`). A
+  `release/mainnet` that carries version 2026-10-03 does not build before
+  counsel has confirmed the exact text (step 4 below on a local dev
+  server). In the commit that records counsel's confirmation, set the status
+  to `"counsel"` and flip the expectations that follow it
+  (`tests/legal-slots.test.ts`: the "is held as a draft", "mainnet legal
+  slots report" and "refuses a mainnet production build" tests;
+  `scripts/ci/mainnet-build.sh`: the committed slots back to
+  `expect_config_pass`). If counsel confirms on a later day, change
+  `version` and `lastUpdated` of both documents to that day first.
+- Before that release: check that no mainnet raise limit is above EUR
+  3,000,000 (`select * from platform_raise_limits where network =
+  'mainnet'`; `select l.* from client_raise_limits l join clients c on c.id
+  = l.client_id where c.network = 'mainnet' and l.annual_raise_cap_eur >
+  3000000`; `select id, annual_cap_eur from spvs where network = 'mainnet'
+  and annual_cap_eur > 3000000`). The routes refuse new ones; rows written
+  before them are not changed.
+- Not yet enforced by code (the Terms are worded so they stay true):
+  `/api/compliance/screen-wallet` checks the signature and sanctions but
+  not the Terms acceptance (only the browser's `TosGate` does); a buy made
+  outside the platform is screened against sanctions only
+  (`lib/server/onchain-screening.ts`), nothing flags it as off-platform
+  yet, so the Terms say the Operator "monitors" rather than "detects".
 
 Written for a Serbian operator, now to be put to counsel for a BVI one.
 Whether each of these still applies with a BVI operator, and whether the

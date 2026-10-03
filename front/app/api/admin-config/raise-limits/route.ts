@@ -1,13 +1,15 @@
 // POST /api/admin-config/raise-limits — admin read ("adminConfig.raiseLimitsRead")
 // or update ("adminConfig.raiseLimitsUpdate", op "update") of the platform
 // raise limits for the active network: annual cap per applicant per calendar
-// year (EUR) and max equity % per application. Signed + requireAdmin.
+// year (EUR) and max equity % per application. Signed + requireAdmin. On
+// mainnet the cap cannot exceed the Terms' EUR 3,000,000 (lib/raise-cap.ts).
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { requireAdmin } from "@/lib/server/admin-gate";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
+import { maxRaiseCapEur } from "@/lib/raise-cap";
 
 function amount(v: unknown, field: string, min: number, max: number): number {
   if (typeof v !== "number" || !Number.isFinite(v) || v < min || v > max) {
@@ -27,7 +29,7 @@ export async function POST(request: Request) {
     if (isUpdate) {
       const row = {
         network,
-        annual_raise_cap_eur: amount(params.annual_raise_cap_eur, "Annual raise cap", 1, 1_000_000_000_000),
+        annual_raise_cap_eur: amount(params.annual_raise_cap_eur, "Annual raise cap", 1, maxRaiseCapEur(network)),
         max_equity_percent: amount(params.max_equity_percent, "Max equity %", 0.01, 100),
         updated_at: new Date().toISOString(), updated_by: wallet,
       };

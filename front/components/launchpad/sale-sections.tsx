@@ -119,7 +119,7 @@ export function SaleAcceptances({
   onAcceptedTermsChange: (value: boolean) => void;
   acceptedRisk: boolean;
   onAcceptedRiskChange: (value: boolean) => void;
-  /** Brings the full risk warning into view (the page opens the Overview first). */
+  /** Brings the full risk warning (above the page's tabs) into view. */
   onReadRisk?: () => void;
 }) {
   if (!terms) {

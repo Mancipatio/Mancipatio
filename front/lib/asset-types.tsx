@@ -97,12 +97,16 @@ const FLOW_SPV =
   "A Serbian SPV is incorporated for you if you don't already have one.";
 const FLOW_MINT =
   "Tokens are minted to the issuer's treasury and distributed from there (to you, or sold via the launchpad).";
+// The flow steps below hold on every network: trading through Manci,
+// distributions, delivery and conversion are switches (lib/features.ts) that
+// are off on mainnet (Terms clause 2), so the steps say "where" rather than
+// promising them.
 const FLOW_TRADE =
-  "Trade freely — transfer to another wallet, post on the resell board, and settle through the OTC escrow. Buying needs no identity verification unless the class is KYC-gated, in which case the receiving wallet needs an investor passport.";
+  "Transfer freely to another wallet; where trading through Manci is available, post on the resell board and settle through the OTC escrow. Buying needs no identity verification unless the class is KYC-gated, in which case the receiving wallet needs an investor passport.";
 const FLOW_PAYOUT =
-  "When a payout is due, the issuer funds it and every holder wallet automatically receives its proportionate share.";
+  "Where distributions are available, when a payout is due, the issuer funds it and every holder wallet automatically receives its proportionate share.";
 const FLOW_DELIVERY =
-  "Request delivery — complete identity verification (KYC), then deposit your tokens into escrow; they're returned if the delivery is cancelled and burned once delivery is confirmed.";
+  "Where delivery is offered, request it — complete identity verification (KYC), then deposit your tokens into escrow; they're returned if the delivery is cancelled and burned once delivery is confirmed.";
 
 export const ASSET_TYPES: AssetTypeRecord[] = [
   {
@@ -130,7 +134,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
         {
           heading: "Becoming a shareholder",
           points: [
-            "Holders can become actual shareholders at a time of their choosing",
+            "Where the issuer offers conversion and it is available, holders can become actual shareholders at a time of their choosing",
             "Conversion goes through the standard legal share-transfer procedure",
             "If the company or its founders fail to facilitate the transfer, holders have legal recourse",
           ],
@@ -155,7 +159,7 @@ export const ASSET_TYPES: AssetTypeRecord[] = [
       FLOW_SPV,
       FLOW_MINT,
       FLOW_TRADE,
-      "Register a share pledge in your favour, and convert into real shares at a time of your choosing — conversion requires identity verification (KYC) and is initiated through the platform's conversion-request flow (deposit into a conversion vault, then burn + on-chain attestation); the legal share transfer itself remains off-chain.",
+      "Register a share pledge in your favour, and, where the issuer offers conversion and it is available, convert into real shares at a time of your choosing — conversion requires identity verification (KYC) and is initiated through the platform's conversion-request flow (deposit into a conversion vault, then burn + on-chain attestation); the legal share transfer itself remains off-chain.",
     ],
   },
   {

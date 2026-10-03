@@ -70,7 +70,8 @@ import { tokenCountQuote, paymentTokenLabel } from "@/lib/purchase-quote";
 import { getAssetProfile, type PublicAssetProfile } from "@/lib/asset-profiles";
 import { tokenDecimal } from "@/lib/chain-evidence";
 import { detectNetwork, explorerTxUrl } from "@/lib/network";
-import { featureDisabledMessage, features } from "@/lib/features";
+import { featureDisabledMessage, features, moduleEnabled } from "@/lib/features";
+import { RAISE_LIMIT_NOTE, equityOfferedNote, whatYouAreBuying } from "@/lib/deal-terms-copy";
 import {
   assertChainRecordStorageAvailable,
   type PendingChainRecord,
@@ -1098,13 +1099,10 @@ export default function DealPage({
     }
   }
 
-  // Brings a full text of the main column into view from the buy card: the
-  // Overview holds it, so another open tab gives way first.
+  // Brings a full text of the main column into view from the buy card (the
+  // documents and the risk warning sit above the tabs, whatever tab is open).
   function showFullText(anchor: string) {
-    setActiveTab("overview");
-    window.requestAnimationFrame(() =>
-      document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" }),
-    );
+    document.getElementById(anchor)?.scrollIntoView({ behavior: "smooth", block: "start" });
   }
 
   // ── company header ─────────────────────────────────────────────────────────
@@ -1722,9 +1720,15 @@ export default function DealPage({
     </>
   );
 
-  // ── main column: tabs; the Overview opens with the documents and the risk warning ──
+  // ── main column: the documents and the risk warning (always on the page,
+  // whatever tab is open), then the tabs ──
   const main = (
     <div>
+      <div className="mb-8 space-y-4">
+        <SaleDocumentsSection terms={documentsForSale} error={documentError} />
+        <SaleRiskWarningSection />
+      </div>
+
       {/* Tab bar */}
       <div className="flex border-b border-mx-rule">
         {tabs.map((tab) => {
@@ -1756,12 +1760,6 @@ export default function DealPage({
             company={holdingCompany}
             tokenSummary={tokenSummary}
             about={tokenized ? assetProfile?.description : null}
-            lead={
-              <>
-                <SaleDocumentsSection terms={documentsForSale} error={documentError} />
-                <SaleRiskWarningSection />
-              </>
-            }
           />
         )}
 
@@ -2009,6 +2007,17 @@ function TermsTab({
   /** A tokenized share class: its token terms replace the application's (it has none). */
   tokenized?: { pricePerToken: string; oneToken: string; summary: readonly string[] } | null;
 }) {
+  // What the buyer receives, held to the mainnet Terms (lib/deal-terms-copy.ts):
+  // a tokenized share class gets the share-class-token wording, a Startup
+  // raise its SAFE wording.
+  const network = detectNetwork();
+  const buying = whatYouAreBuying({
+    isStartup,
+    structure: app?.raise_structure,
+    conversionAvailable: moduleEnabled("custodyConversion", network),
+    network,
+  });
+
   if (tokenized) {
     const tokenRows: { label: string; value: string }[] = [
       { label: "Price per token", value: tokenized.pricePerToken },
@@ -2032,11 +2041,18 @@ function TermsTab({
             </div>
           ))}
         </div>
+        {/* What you're buying */}
+        <InfoBox>
+          <p className="mb-1.5 font-semibold text-mx-indigo">
+            What you&apos;re buying
+          </p>
+          <p>
+            <strong className="text-mx-ink">{buying.lead}</strong> {buying.body}
+          </p>
+        </InfoBox>
         {tokenized.summary.length > 0 && (
           <InfoBox>
-            <p className="mb-1.5 font-semibold text-mx-indigo">
-              What you&apos;re buying
-            </p>
+            <p className="mb-1.5 font-semibold text-mx-indigo">The tokens</p>
             {tokenized.summary.map((line) => (
               <p key={line}>{line}</p>
             ))}
@@ -2065,12 +2081,12 @@ function TermsTab({
     {
       label: "Raise amount",
       value: app ? fmtMoney(app.raise_amount) : "—",
-      note: app ? "Annual equity sale, max $3M" : undefined,
+      note: app ? RAISE_LIMIT_NOTE : undefined,
     },
     {
       label: "Equity offered",
       value: app ? `${app.equity_offered}%` : "—",
-      note: app ? "Actual company ownership" : undefined,
+      note: app ? equityOfferedNote(isStartup) : undefined,
     },
     {
       label: "Implied valuation",
@@ -2141,11 +2157,7 @@ function TermsTab({
           What you&apos;re buying
         </p>
         <p>
-          This is <strong className="text-mx-ink">real equity</strong> in a real
-          company — not a token. You will receive a{" "}
-          {app?.raise_structure ?? "SAFE"} agreement granting you pro-rata
-          ownership. Founders can sell up to $3M/year of company equity through
-          this platform.
+          <strong className="text-mx-ink">{buying.lead}</strong> {buying.body}
         </p>
       </InfoBox>
 

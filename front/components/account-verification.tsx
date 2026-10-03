@@ -17,7 +17,7 @@ function Row({ kind, status, documents }: { kind: "kyc" | "kyb"; status: Account
     <span className="account-feature-icon">{company ? <IconBuilding size={19} /> : <IconUsers size={19} />}</span>
     <div className="verification-row-text">
       <strong>{company ? "Company verification (KYB)" : "Identity verification (KYC)"}</strong>
-      <p>{status === "verified" ? (company ? "Your company is verified for issuing and raising on Manci." : "You can convert tokens into company shares and take delivery of physical goods. To buy KYC-gated classes, request an investor passport for your wallet in Portfolio.")
+      <p>{status === "verified" ? (company ? "Your company is verified for issuing and raising on Manci." : "Your identity is verified for converting tokens into company shares and taking delivery of physical goods, where these are available. To buy KYC-gated classes, request an investor passport for your wallet in Portfolio.")
         : status === "none" ? (company ? "Needed to create a raise or issue assets as a company." : "Needed to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, or raise as an individual founder. Buying and trading other tokens does not require it.")
         : status === "more_info" ? `We need ${documents || "some"} document${documents === 1 ? "" : "s"} before we can review.`
         : status === "pending" ? "Our compliance team is reviewing your submission."
