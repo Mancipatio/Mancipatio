@@ -109,7 +109,8 @@ beforeEach(async () => {
     indexer_sync_state: { data: { status: "ready", last_slot: 412_345_000, checked_at: ago(30), completed_at: ago(3600) }, error: null },
     indexer_jobs: { data: [], error: null, count: 0 },
     purchase_evidence_jobs: { data: [], error: null, count: 0 },
-    fx_rates: { data: { kind: "rate", as_of: ago(3600), max_age: "7 days" }, error: null },
+    fx_rates: { data: [{ kind: "rate", as_of: ago(3600), max_age: "7 days" }], error: null },
+    fx_auto_rates: { data: [], error: null },
     "rpc:deployment_network": { data: "devnet", error: null },
   };
   m.maintenance.mockReset();
@@ -144,7 +145,7 @@ describe("GET /api/health", () => {
         indexerQueue: { status: "ok", pending: 0, oldestPendingAgeSeconds: null },
         purchaseQueue: { status: "ok", pending: 0, oldestPendingAgeSeconds: null },
         maintenance: { status: "ok", enabled: false },
-        paymentFx: { status: "ok", kind: "rate", ageSeconds: 3600, maxAgeSeconds: 7 * 86_400 },
+        paymentFx: { status: "ok", kind: "rate", ageSeconds: 3600, maxAgeSeconds: 7 * 86_400, origin: "manual", autoAgeSeconds: null },
         databaseNetwork: { status: "ok", network: "devnet" },
       },
     });
@@ -161,9 +162,12 @@ describe("GET /api/health", () => {
       expect(byTable[table].order).toEqual(["created_at", { ascending: true }]);
       expect(byTable[table].limit).toBe(1);
     }
-    // The network's default payment mint (devnet test USDC).
-    expect(byTable.fx_rates.filters).toEqual([["network", "devnet"], ["payment_mint", "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"]]);
-    expect(byTable.fx_rates.select).toEqual(["kind,as_of,max_age"]);
+    // The network's default payment mint (devnet test USDC): its manual row and its automatic one (0080).
+    for (const table of ["fx_rates", "fx_auto_rates"]) {
+      expect(byTable[table].filters).toEqual([["network", "devnet"], ["payment_mint", "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU"]]);
+    }
+    expect(String(byTable.fx_rates.select?.[0])).toContain("override_auto");
+    expect(String(byTable.fx_auto_rates.select?.[0])).toContain("as_of,max_age");
     for (const call of [...m.calls, ...m.dbRpc]) expect(call.signal).toBeInstanceOf(AbortSignal);
     expect(m.dbRpc.map((call) => call.table)).toEqual(["rpc:deployment_network"]);
     expect(m.rpcSignal).toBeInstanceOf(AbortSignal);
@@ -172,7 +176,7 @@ describe("GET /api/health", () => {
   describe("payment FX (Talas 4.2 §3.6)", () => {
     const DAY = 86_400;
     const MAINNET_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
-    const fx = (ageDays: number, maxAge = "7 days", kind = "rate") => ({ data: { kind, as_of: ago(ageDays * DAY), max_age: maxAge }, error: null });
+    const fx = (ageDays: number, maxAge = "7 days", kind = "rate") => ({ data: [{ kind, as_of: ago(ageDays * DAY), max_age: maxAge }], error: null });
 
     it.each<[string, Reply, number, Record<string, unknown>]>([
       ["missing", { data: null, error: null }, 503, { status: "fail", reason: "missing", kind: null }],
@@ -215,10 +219,39 @@ describe("GET /api/health", () => {
       }
     });
 
+    it.each<[string, Reply, Reply, Reply, number, Record<string, unknown>]>([
+      ["a stale manual rate, nothing counts with it yet", fx(8), { data: [], error: null }, { data: null, error: null, count: 0 }, 200,
+        { status: "warn", reason: "stale_before_first_sale", kind: "rate", origin: "manual", ageSeconds: 8 * DAY }],
+      ["a stale automatic rate, nothing counts with it yet", { data: [], error: null },
+        { data: [{ eur_per_token: "0.889", decimals: 6, source: "auto", as_of: ago(20 * 60), max_age: "00:15:00" }], error: null },
+        { data: null, error: null, count: 0 }, 200, { status: "warn", reason: "stale_before_first_sale", origin: "auto" }],
+      ["a stale manual rate, a sale approval exists", fx(8), { data: [], error: null }, { data: null, error: null, count: 1 }, 503,
+        { status: "fail", reason: "stale" }],
+      ["a stale manual rate, the approvals cannot be read", fx(8), { data: [], error: null }, { data: null, error: { code: "x", message: "y" } },
+        503, { status: "fail", reason: "stale" }],
+    ])("mainnet: %s", async (_label, manual, auto, reservations, status, expected) => {
+      vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+      m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
+      m.replies.fx_rates = manual;
+      m.replies.fx_auto_rates = auto;
+      m.replies.sale_capacity_reservations = reservations;
+      m.replies.sales = { data: null, error: null, count: 0 };
+      const result = await get();
+      expect(result.body.checks.paymentFx).toMatchObject(expected);
+      expect(result.status).toBe(status);
+    });
+
     it("devnet never asks whether a sale exists", async () => {
       m.replies.fx_rates = { data: null, error: null };
       const { body } = await get();
       expect(body.checks.paymentFx).toMatchObject({ status: "warn", reason: "missing" });
+      expect(m.calls.some((c) => c.table === "sales" || c.table === "sale_capacity_reservations")).toBe(false);
+    });
+
+    it("devnet: a stale rate warns stale, without asking whether a sale exists", async () => {
+      m.replies.fx_rates = fx(8);
+      const { body } = await get();
+      expect(body.checks.paymentFx).toMatchObject({ status: "warn", reason: "stale" });
       expect(m.calls.some((c) => c.table === "sales" || c.table === "sale_capacity_reservations")).toBe(false);
     });
 
@@ -255,8 +288,98 @@ describe("GET /api/health", () => {
     it("a network without a default payment mint has nothing to check", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "localnet");
       const { body } = await get();
-      expect(body.checks.paymentFx).toEqual({ status: "ok", kind: null, ageSeconds: null, maxAgeSeconds: null });
+      expect(body.checks.paymentFx).toEqual({ status: "ok", kind: null, ageSeconds: null, maxAgeSeconds: null, origin: null, autoAgeSeconds: null });
       expect(m.calls.find((call) => call.table === "fx_rates")).toBeUndefined();
+    });
+
+    describe("the automatic rate (0080)", () => {
+      const MIN = 60;
+      const auto = (ageSeconds: number, maxAge = "00:15:00") =>
+        ({ data: [{ eur_per_token: "0.889", decimals: 6, source: "auto: median", as_of: ago(ageSeconds), max_age: maxAge }], error: null });
+      const mainnet = () => {
+        vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+        m.replies["rpc:deployment_network"] = { data: "mainnet", error: null };
+      };
+
+      it("a fresh automatic rate counts (origin auto) with a fresh manual fallback behind it", async () => {
+        mainnet();
+        m.replies.fx_rates = fx(1);
+        m.replies.fx_auto_rates = auto(2 * MIN);
+        const { status, body } = await get();
+        expect(status).toBe(200);
+        expect(body.checks.paymentFx).toEqual({ status: "ok", kind: "rate", ageSeconds: 2 * MIN, maxAgeSeconds: 15 * MIN,
+          origin: "auto", autoAgeSeconds: 2 * MIN });
+      });
+
+      it.each([
+        ["mainnet", "stale", fx(30), "fallback_stale"],
+        ["mainnet", "missing", { data: [], error: null }, "fallback_missing"],
+        ["devnet", "stale", fx(30), "fallback_stale"],
+        ["devnet", "missing", { data: [], error: null }, "fallback_missing"],
+      ] as const)("%s: a fresh automatic rate still counts over a %s manual fallback, but warns (it could not take over)",
+        async (network, _label, reply, reason) => {
+          if (network === "mainnet") mainnet();
+          m.replies.fx_rates = reply;
+          m.replies.fx_auto_rates = auto(2 * MIN);
+          const { status, body } = await get();
+          expect(status).toBe(200);
+          expect(body.checks.paymentFx).toEqual({ status: "warn", reason, kind: "rate", ageSeconds: 2 * MIN, maxAgeSeconds: 15 * MIN,
+            origin: "auto", autoAgeSeconds: 2 * MIN });
+        });
+
+      it("a stale automatic rate with a fresh manual one warns auto_stale: the manual fallback counts", async () => {
+        mainnet();
+        m.replies.fx_rates = fx(1);
+        m.replies.fx_auto_rates = auto(20 * MIN);
+        const { status, body } = await get();
+        expect(status).toBe(200);
+        expect(body.checks.paymentFx).toMatchObject({ status: "warn", reason: "auto_stale", origin: "manual", ageSeconds: DAY,
+          autoAgeSeconds: 20 * MIN });
+      });
+
+      it("nothing fresh fails on mainnet (no rate counts) and only warns on devnet", async () => {
+        mainnet();
+        m.replies.fx_rates = { data: [], error: null };
+        m.replies.fx_auto_rates = auto(20 * MIN);
+        const result = await get();
+        expect(result.status).toBe(503);
+        expect(result.body.checks.paymentFx).toMatchObject({ status: "fail", reason: "stale", origin: "auto", autoAgeSeconds: 20 * MIN });
+      });
+
+      it("devnet: a stale automatic rate without a manual one only warns", async () => {
+        m.replies.fx_rates = { data: [], error: null };
+        m.replies.fx_auto_rates = auto(20 * MIN);
+        const result = await get();
+        expect(result.status).toBe(200);
+        expect(result.body.checks.paymentFx).toMatchObject({ status: "warn", reason: "stale", origin: "auto" });
+      });
+
+      it("a manual override counts over a fresh automatic rate and warns manual_override", async () => {
+        mainnet();
+        m.replies.fx_rates = { data: [{ kind: "rate", as_of: ago(DAY), max_age: "7 days", override_auto: true }], error: null };
+        m.replies.fx_auto_rates = auto(MIN);
+        const { status, body } = await get();
+        expect(status).toBe(200);
+        expect(body.checks.paymentFx).toMatchObject({ status: "warn", reason: "manual_override", origin: "manual_override",
+          ageSeconds: DAY, autoAgeSeconds: MIN });
+      });
+
+      it("before 0080 (no automatic table) the manual row alone is judged", async () => {
+        mainnet();
+        m.replies.fx_auto_rates = { data: null, error: { code: "PGRST205", message: "missing" } };
+        const result = await get();
+        expect(result.status).toBe(200);
+        expect(result.body.checks.paymentFx).toMatchObject({ status: "ok", origin: "manual", autoAgeSeconds: null });
+      });
+
+      it("any other error reading the automatic table is unavailable", async () => {
+        mainnet();
+        m.replies.fx_auto_rates = { data: null, error: { code: "57014", message: "timeout" } };
+        const result = await get();
+        expect(result.status).toBe(503);
+        expect(result.body.checks.paymentFx).toMatchObject({ status: "fail", reason: "unavailable" });
+        expect(JSON.stringify(result.body)).not.toMatch(/57014/);
+      });
     });
 
     it("parses Postgres intervals in both output styles", async () => {
@@ -398,7 +521,8 @@ describe("GET /api/health", () => {
     expect(a.body).toEqual(b.body);
     await get();
     expect(m.rpcCalls).toBe(1);
-    expect(m.calls).toHaveLength(4);
+    // indexer_sync_state, the two queues, fx_rates and fx_auto_rates.
+    expect(m.calls).toHaveLength(5);
     expect(m.dbRpc).toHaveLength(1);
     vi.setSystemTime(NOW + 10_000);
     await get();

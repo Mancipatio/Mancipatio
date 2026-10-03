@@ -5,6 +5,7 @@ import { WalletRequired } from "@/components/wallet-required";
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useSolanaClient, useWalletConnection } from "@solana/react-hooks";
+import type { Address } from "@solana/kit";
 import {
   findAssetPda,
   findIssuerPda,
@@ -23,6 +24,7 @@ import { shareClassKey } from "@/lib/asset-links";
 import { listSpvs, spvCapacity, type SpvCapacity, type SpvRow } from "@/lib/spvs";
 import { signedUpload } from "@/lib/storage-client";
 import { SkeletonCard } from "@/components/skeleton";
+import { TokenizeChecklist } from "@/components/tokenize-checklist";
 import { useToast } from "@/lib/toast";
 import { COUNTRIES, countryName } from "@/lib/countries";
 import {
@@ -452,6 +454,16 @@ export function AssetDetail({
           </Link>
         ))}
       </div>
+
+      {/* An issuer's equity token: what is done and what comes next
+          (operator activation, minting, lock — no KYC-only step). */}
+      {variant === "issuer" && category === "equity" && asset.shareClassesCount > 0 && (
+        <TokenizeChecklist
+          assetPda={id as Address}
+          issuerAuthority={issuer ? issuer.authority.toString() : null}
+          profile={profile}
+        />
+      )}
 
       {/* Product profile (common + category) */}
       <section className="mt-6 rounded-xl border border-slate-200 bg-white p-6 shadow-card">

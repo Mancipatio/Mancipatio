@@ -224,11 +224,19 @@ export default function IssuerOverviewPage() {
         <h2 className="text-xs font-semibold uppercase tracking-widest text-slate-500">
           Quick actions
         </h2>
-        <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <ActionCard
+            href="/issuer/assets/tokenize"
+            title="Tokenize company shares"
+            body="Turn a share of your company into tokens: enter the percent, attach the legal document, sign twice."
+            primary
+            disabled={!verified}
+            disabledHint="Verify KYB to unlock"
+          />
           <ActionCard
             href="/issuer/assets"
-            title="Create an asset"
-            body="Tokenize a company, an instrument or a real-world asset under this issuer."
+            title="Other asset types"
+            body="Revenue share, royalty, real estate, debt, commodities, physical goods or a custom equity round — the full asset form."
             disabled={!verified}
             disabledHint="Verify KYB to unlock"
           />
@@ -260,12 +268,15 @@ function ActionCard({
   href,
   title,
   body,
+  primary = false,
   disabled = false,
   disabledHint,
 }: {
   href: string;
   title: string;
   body: string;
+  /** The main action: highlighted. */
+  primary?: boolean;
   disabled?: boolean;
   disabledHint?: string;
 }) {
@@ -291,10 +302,14 @@ function ActionCard({
   return (
     <Link
       href={href}
-      className="block rounded-xl border border-slate-200 bg-white p-5 shadow-card transition-colors hover:border-slate-300"
+      className={`block rounded-xl border p-5 shadow-card transition-colors ${
+        primary
+          ? "border-slate-900 bg-slate-900 hover:bg-slate-800"
+          : "border-slate-200 bg-white hover:border-slate-300"
+      }`}
     >
-      <h3 className="text-base font-semibold text-slate-900">{title}</h3>
-      <p className="mt-2 text-sm leading-relaxed text-slate-600">{body}</p>
+      <h3 className={`text-base font-semibold ${primary ? "text-white" : "text-slate-900"}`}>{title}</h3>
+      <p className={`mt-2 text-sm leading-relaxed ${primary ? "text-slate-200" : "text-slate-600"}`}>{body}</p>
     </Link>
   );
 }

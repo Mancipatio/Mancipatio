@@ -487,19 +487,36 @@ function ShareClassActions({
                   Mint permission required
                 </p>
                 <p className="mt-1 text-[13px]">
-                  The Super Admin can grant this issuer the Mint capability.
-                  Your issuer wallet then initializes and mints its own class;
-                  no global admin role is required.
+                  The Super Admin can grant this issuer the Mint capability;
+                  your issuer wallet then creates this class&apos;s token mint.
+                  Minting units into the treasury needs a Manci Admin issuer
+                  key (on{" "}
+                  <Link href="/admin/share-classes" className="font-medium underline">
+                    Admin → Share classes
+                  </Link>
+                  ); other issuers issue units through an approved sale (
+                  <Link href="/issuer/launchpad" className="font-medium underline">
+                    My sales
+                  </Link>
+                  ).
                 </p>
               </>
             ) : (
               <>
-                <p className="font-medium text-slate-800">
-                  Mint initialized — treasury minting handled by Manci
-                </p>
+                <p className="font-medium text-slate-800">Mint ready</p>
                 <p className="mt-1 text-[13px]">
-                  The Manci team mints your allocation to the treasury and
-                  locks supply. Contact us if you need a change to the schedule.
+                  Only a Manci Admin issuer key can mint into the treasury —
+                  Admin issuers mint on{" "}
+                  <Link href="/admin/share-classes" className="font-medium underline">
+                    Admin → Share classes
+                  </Link>
+                  . Other issuers issue units through an approved sale (
+                  <Link href="/issuer/launchpad" className="font-medium underline">
+                    My sales
+                  </Link>
+                  ). Minting needs Primary issuance (pause bit 0x02) open; only
+                  the super admin can clear it. Lock supply after minting — it
+                  is one-way.
                 </p>
               </>
             )}
@@ -641,6 +658,8 @@ function AddShareClassModal({
   const [votingWeight, setVotingWeight] = useState("1");
   const [maxSupply, setMaxSupply] = useState("");
   const [mintablePostLaunch, setMintablePostLaunch] = useState(false);
+  // A blank Max supply means NO cap; it must be chosen, not left by accident.
+  const [confirmUncapped, setConfirmUncapped] = useState(false);
 
   const selectedAsset = myAssets.find((a) => a.assetId === selectedAssetId);
   const nextIndex = selectedAsset?.shareClassesCount ?? 0;
@@ -652,6 +671,7 @@ function AddShareClassModal({
   // transaction bounce.
   const isPhysical = selectedAsset?.assetType === AssetType.PhysicalGood;
   const physicalBlocked = isPhysical && nextIndex > 0;
+  const uncappedNeedsConfirm = !isPhysical && !maxSupply.trim();
 
   // Constrain the class-type choices to those sensible for the parent asset's type.
   const allowedClassTypes = useMemo(
@@ -825,9 +845,10 @@ function AddShareClassModal({
                 value={isPhysical ? "1" : maxSupply}
                 inputMode="numeric"
                 readOnly={isPhysical}
-                onChange={(e) =>
-                  setMaxSupply(e.target.value.replace(/\D/g, ""))
-                }
+                onChange={(e) => {
+                  setMaxSupply(e.target.value.replace(/\D/g, ""));
+                  setConfirmUncapped(false);
+                }}
                 className={`mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none ${
                   isPhysical ? "bg-slate-50 text-slate-500" : ""
                 }`}
@@ -838,6 +859,20 @@ function AddShareClassModal({
                 </span>
               )}
             </label>
+            {uncappedNeedsConfirm && (
+              <label className="flex items-start gap-2 rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-[13px] text-amber-900 sm:col-span-2">
+                <input
+                  type="checkbox"
+                  className="mt-0.5"
+                  checked={confirmUncapped}
+                  onChange={(e) => setConfirmUncapped(e.target.checked)}
+                />
+                <span>
+                  No cap: more units can be minted later (unlimited supply).
+                  Enter a Max supply instead to fix the number of units.
+                </span>
+              </label>
+            )}
           </div>
 
           <div>
@@ -895,7 +930,12 @@ function AddShareClassModal({
           <button
             type="button"
             onClick={() => void add()}
-            disabled={tx.isSending || !selectedAsset || physicalBlocked}
+            disabled={
+              tx.isSending ||
+              !selectedAsset ||
+              physicalBlocked ||
+              (uncappedNeedsConfirm && !confirmUncapped)
+            }
             className="rounded-md bg-slate-900 px-3 py-1.5 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
           >
             {tx.isSending ? "Sending…" : `Add class #${nextIndex}`}

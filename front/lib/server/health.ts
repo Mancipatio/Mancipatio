@@ -31,13 +31,29 @@
 //   paymentFx     the EUR rate of the network's default payment mint (USDC)
 //                 that sale approvals count the raise cap with (Talas 4.2
 //                 §3.6, D18). Mainnet: missing, unreadable or past its max
-//                 age → fail; at ≥ 80 % of its max age → warn. A missing row
-//                 before the first sale approval and the first sale only
-//                 warns (missing_before_first_sale): on launch day the super
-//                 admin seeds it after the bootstrap (Talas 8.2), and nothing
+//                 age → fail; at ≥ 80 % of its max age → warn. A missing or
+//                 stale rate before the first sale approval and the first
+//                 sale only warns (missing_before_first_sale,
+//                 stale_before_first_sale): on launch day the super admin
+//                 seeds it after the bootstrap (Talas 8.2), and nothing
 //                 counts with it until then; if that cannot be read, fail.
 //                 Other networks: the same conditions only warn. An eur_peg
 //                 row never goes stale; a network without a default mint is ok.
+//                 The rate judged is the one that COUNTS (0080,
+//                 lib/fx-effective.ts), named by `origin`:
+//                   auto            the automatic rate is fresh → ok, but
+//                                   warn when the manual fallback behind it
+//                                   (what counts when the automatic rate
+//                                   stops) is missing (fallback_missing) or
+//                                   past its max age (fallback_stale);
+//                   manual          with an automatic rate that went stale:
+//                                   the manual fallback counts → warn
+//                                   (auto_stale); without one (before the
+//                                   fx scheduler runs) as before;
+//                   manual_override the Super Admin pinned the manual rate
+//                                   → warn (manual_override);
+//                 nothing fresh → stale; neither row → missing (on mainnet
+//                 before the first sale: the *_before_first_sale warnings).
 //   databaseNetwork  the database's public.deployment_network() (migration
 //                 0070) must serve this deployment: equal networks, or both
 //                 non-mainnet (a testnet front may use the devnet project,
@@ -56,6 +72,9 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork, type Network } from "@/lib/network";
 import { NetworkIdentityError } from "@/lib/network-identity";
 import { defaultPaymentMint } from "@/lib/payment-mints";
+import { fxRowFresh, resolveFxRate, type FxOrigin } from "@/lib/fx-effective";
+import { intervalSeconds } from "@/lib/pg-interval";
+import { readFxTables } from "@/lib/server/fx-rates";
 import { readMaintenance } from "@/lib/server/maintenance";
 import { getServerRpc } from "@/lib/server/rpc";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
@@ -75,10 +94,20 @@ export type IndexerCheck = Check & {
 export type RpcCheck = Check & { slot: number | null; latencyMs: number | null };
 export type QueueCheck = Check & { pending: number | null; oldestPendingAgeSeconds: number | null };
 export type MaintenanceCheck = Check & { enabled: boolean | null };
-export type PaymentFxCheck = Check & {
+/** Why paymentFx is not ok (the fixed codes the report may carry). */
+export type PaymentFxReason =
+  | FailureReason
+  | "missing" | "missing_before_first_sale" | "stale" | "stale_before_first_sale" | "invalid"
+  | "auto_stale" | "manual_override" | "expiring" | "fallback_missing" | "fallback_stale";
+export type PaymentFxCheck = Omit<Check, "reason"> & {
+  reason?: PaymentFxReason;
   kind: "rate" | "eur_peg" | null;
   ageSeconds: number | null;
   maxAgeSeconds: number | null;
+  /** Which rate counts (0080): the automatic one, the manual fallback, or a manual override. */
+  origin: FxOrigin | null;
+  /** Age of the automatic rate; null when there is none (or before 0080). */
+  autoAgeSeconds: number | null;
 };
 export type DatabaseNetworkCheck = Check & { network: Network | null };
 
@@ -109,6 +138,8 @@ const INDEX_FRESH_SECONDS = 5 * 60;
 const CACHE_MS = 5_000;
 
 export const TIMEOUT = Symbol("timeout");
+
+export { intervalSeconds };
 
 /** Run `work` with an abort signal; resolve TIMEOUT when it takes longer than
  * `ms`. The late result (or rejection) of the abandoned work is discarded. */
@@ -232,45 +263,6 @@ async function checkMaintenance(network: Network): Promise<MaintenanceCheck> {
   }
 }
 
-const INTERVAL_UNITS: Record<string, number> = {
-  year: 365 * 86_400, years: 365 * 86_400, mon: 30 * 86_400, mons: 30 * 86_400,
-  day: 86_400, days: 86_400,
-};
-
-/**
- * Seconds in a Postgres interval as PostgREST returns it: the default
- * "postgres" style ("7 days", "1 day 12:00:00", "12:00:00", "1 mon") or ISO
- * 8601 ("P7D", "PT12H"). Months count 30 days, years 365. Null when it is
- * not a positive interval in either form.
- */
-export function intervalSeconds(value: unknown): number | null {
-  if (typeof value !== "string") return null;
-  const text = value.trim();
-  const iso = /^P(?:(\d+)Y)?(?:(\d+)M)?(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?)?$/.exec(text);
-  let total: number | null = null;
-  if (iso && text !== "P" && !text.endsWith("T")) {
-    const [, y, mo, w, d, h, mi, s] = iso.map((part) => Number(part ?? 0));
-    total = y * 365 * 86_400 + mo * 30 * 86_400 + w * 7 * 86_400 + d * 86_400 + h * 3_600 + mi * 60 + s;
-  } else {
-    const parts = text.split(/\s+/);
-    let seconds = 0;
-    let i = 0;
-    for (; i + 1 < parts.length && /^\d+$/.test(parts[i]) && INTERVAL_UNITS[parts[i + 1]] !== undefined; i += 2) {
-      seconds += Number(parts[i]) * INTERVAL_UNITS[parts[i + 1]];
-    }
-    const rest = parts.slice(i);
-    if (rest.length === 1) {
-      const clock = /^(\d+):(\d{2}):(\d{2}(?:\.\d+)?)$/.exec(rest[0]);
-      if (!clock) return null;
-      seconds += Number(clock[1]) * 3_600 + Number(clock[2]) * 60 + Number(clock[3]);
-    } else if (rest.length > 1 || i === 0) {
-      return null;
-    }
-    total = seconds;
-  }
-  return Number.isFinite(total) && total > 0 ? total : null;
-}
-
 /**
  * True only when both reads prove that nothing on `network` counts with the
  * rate yet: no sale approval reservation and no indexed sale. Any error,
@@ -294,37 +286,52 @@ async function rateNotYetUsed(sb: SupabaseClient, network: Network): Promise<boo
 }
 
 async function checkPaymentFx(sb: SupabaseClient | null, network: Network, now: number): Promise<PaymentFxCheck> {
-  const empty = { kind: null, ageSeconds: null, maxAgeSeconds: null } as const;
+  const empty = { kind: null, ageSeconds: null, maxAgeSeconds: null, origin: null, autoAgeSeconds: null } as const;
   const mint = defaultPaymentMint(network);
   if (!mint) return { status: "ok", ...empty };
   // Only a mainnet deployment is affected by a missing or stale rate (D18).
   const bad: CheckStatus = network === "mainnet" ? "fail" : "warn";
   if (!sb) return { status: bad, reason: "not_configured", ...empty };
   try {
-    const result = await bounded((signal) => sb.from("fx_rates")
-      .select("kind,as_of,max_age")
-      .eq("network", network)
-      .eq("payment_mint", mint)
-      .abortSignal(signal)
-      .maybeSingle(), HEALTH_DB_TIMEOUT_MS);
-    if (result === TIMEOUT) return { status: bad, reason: "timeout", ...empty };
-    if (result.error) return { status: bad, reason: "unavailable", ...empty };
-    const row = result.data as { kind?: unknown; as_of?: unknown; max_age?: unknown } | null;
-    if (!row) {
+    // Both the manual row and the automatic one (0080); before 0080 only the manual.
+    const tables = await bounded((signal) => readFxTables(sb, network, { mint, signal }), HEALTH_DB_TIMEOUT_MS);
+    if (tables === TIMEOUT) return { status: bad, reason: "timeout", ...empty };
+    // Both reads are filtered by the mint: at most one row each.
+    const manual = tables.manual[0] ?? null;
+    const auto = tables.auto[0] ?? null;
+    const autoAgeSeconds = auto ? ageSeconds(auto.as_of, now) : null;
+    const effective = resolveFxRate(manual, auto, now);
+    if (!effective) {
       if (bad === "fail" && (await rateNotYetUsed(sb, network))) {
         return { status: "warn", reason: "missing_before_first_sale", ...empty };
       }
       return { status: bad, reason: "missing", ...empty };
     }
-    if (row.kind === "eur_peg") return { status: "ok", kind: "eur_peg", ageSeconds: ageSeconds(row.as_of, now), maxAgeSeconds: null };
+    const row = effective.row;
+    const origin = effective.origin;
+    if (row.kind === "eur_peg") {
+      return { status: "ok", kind: "eur_peg", ageSeconds: ageSeconds(row.as_of, now), maxAgeSeconds: null, origin, autoAgeSeconds };
+    }
     const age = ageSeconds(row.as_of, now);
     const maxAge = intervalSeconds(row.max_age);
     if (row.kind !== "rate" || age === null || maxAge === null) {
-      return { status: bad, reason: "invalid", kind: null, ageSeconds: age, maxAgeSeconds: maxAge };
+      return { status: bad, reason: "invalid", kind: null, ageSeconds: age, maxAgeSeconds: maxAge, origin, autoAgeSeconds };
     }
-    const check = { kind: "rate" as const, ageSeconds: age, maxAgeSeconds: Math.round(maxAge) };
-    if (age >= maxAge) return { status: bad, reason: "stale", ...check };
+    const check = { kind: "rate" as const, ageSeconds: age, maxAgeSeconds: Math.round(maxAge), origin, autoAgeSeconds };
+    if (age >= maxAge) {
+      // As a missing one: nothing counted with it yet, so nothing is affected.
+      if (bad === "fail" && (await rateNotYetUsed(sb, network))) {
+        return { status: "warn", reason: "stale_before_first_sale", ...check };
+      }
+      return { status: bad, reason: "stale", ...check };
+    }
+    // The automatic rate exists but is stale: the manual fallback counts.
+    if (origin === "manual" && auto) return { status: "warn", reason: "auto_stale", ...check };
+    if (origin === "manual_override") return { status: "warn", reason: "manual_override", ...check };
     if (age >= maxAge * FX_WARN_FRACTION) return { status: "warn", reason: "expiring", ...check };
+    // The automatic rate counts: the manual row behind it takes over when it stops.
+    if (origin === "auto" && !manual) return { status: "warn", reason: "fallback_missing", ...check };
+    if (origin === "auto" && manual && !fxRowFresh(manual, now)) return { status: "warn", reason: "fallback_stale", ...check };
     return { status: "ok", ...check };
   } catch {
     return { status: bad, reason: "unavailable", ...empty };
