@@ -60,6 +60,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "saleApprovals.capacity",
   "saleApprovals.list",
   "saleApprovals.mine",
+  // Public-sale requests of a class (its issuer or an Admin) or waiting for the operator (Admin).
+  "saleRequests.list",
   // Rolling EUR capacity and the issuance ledger of an SPV (Talas 5.1).
   "spvs.capacity",
   "spvs.issuances",

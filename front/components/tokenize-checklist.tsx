@@ -47,6 +47,8 @@ import {
 } from "@/lib/tokenize-shares-chain";
 import { listOpenSales, openSaleRemaining } from "@/lib/distribution-chain";
 import { isApprovalLive, listShareClassSaleApprovals, type SaleApprovalAccount } from "@/lib/sale-approvals";
+import { parseSaleRequest } from "@/lib/public-sale";
+import { listSaleRequests } from "@/lib/sale-requests";
 import { remainingFromLifetime } from "@/lib/distribution-supply";
 import { LockSupplyButton } from "@/components/lock-supply-button";
 import { DistributeCard } from "@/components/distribute-card";
@@ -81,8 +83,17 @@ export function TokenizeChecklist({
   assetPda: Address;
   /** The asset's issuer authority (the treasury); distributing needs it connected. */
   issuerAuthority: string | null;
-  /** The stored (private) off-chain profile, or null. "Details saved" is counted as the flow counts it (detailsSaved). */
-  profile: { fields?: Record<string, unknown> | null } | null;
+  /**
+   * The stored (private) off-chain profile, or null. "Details saved" is counted as the flow counts it
+   * (detailsSaved); its published whitepaper is the public sale's document when the issuer picks the same file,
+   * and a public-sale request waiting for the operator (fields.sale_request) holds Close.
+   */
+  profile: {
+    fields?: Record<string, unknown> | null;
+    whitepaper_path?: string | null;
+    whitepaper_sha256?: string | null;
+    whitepaper_status?: string | null;
+  } | null;
   /** Bump to re-read the chain. */
   refreshKey?: number;
 }) {
@@ -148,6 +159,28 @@ export function TokenizeChecklist({
     void load();
   }, [load, refreshKey]);
 
+  // A public-sale request the profile shows as "requested" may already have been served (its sale opened
+  // and closed: the raise-cap ledger says so, read by the list route within an existing session). Until
+  // that is known it counts as waiting, so Close never runs past a sale on its way.
+  const shownRequest = parseSaleRequest(profile?.fields?.sale_request);
+  const requestedId = shownRequest?.status === "requested" ? shownRequest.id : null;
+  const shareClassAddress = state?.addresses.shareClass ?? null;
+  const [requestCheck, setRequestCheck] = useState<{ id: string; waiting: boolean } | null>(null);
+  useEffect(() => {
+    if (!requestedId || !conn.wallet || !shareClassAddress) return;
+    let cancelled = false;
+    void listSaleRequests(conn.wallet, { share_class: shareClassAddress }, { interactive: false })
+      .then((rows) => {
+        const row = rows[0];
+        if (!cancelled) setRequestCheck({ id: requestedId, waiting: row?.request?.status === "requested" && row.outcome === null });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [requestedId, conn.wallet, shareClassAddress, refreshKey]);
+  const requestWaiting = requestedId === null ? false : requestCheck?.id === requestedId ? requestCheck.waiting : true;
+
   if (failed) {
     return (
       <section className="mt-6 rounded-xl border border-amber-200 bg-amber-50 p-5 text-sm text-amber-900">
@@ -180,8 +213,9 @@ export function TokenizeChecklist({
     treasuryBalance: extras.treasuryBalance,
     supplyLocked: !!sc0?.supplyLocked,
     openSalesOfClass: extras.openSales?.count ?? null,
-    // An approval not opened yet: unreadable approvals count as one (never lock past a sale on its way).
-    pendingSaleOfClass: extras.approvals === null ? true : extras.approvals.length > 0,
+    // An approval not opened yet or a request waiting for the operator: unreadable approvals count as one
+    // (never lock past a sale on its way).
+    pendingSaleOfClass: extras.approvals === null || extras.approvals.length > 0 || requestWaiting,
   };
   const items = checklistItems(facts);
   const byId = Object.fromEntries(items.map((i) => [i.id, i.state])) as Record<ChecklistId, ChecklistState>;
@@ -192,6 +226,14 @@ export function TokenizeChecklist({
   const tokenize =
     profile?.fields && typeof profile.fields.tokenize === "object" && profile.fields.tokenize !== null
       ? (profile.fields.tokenize as Record<string, unknown>)
+      : null;
+  // The asset's published buyer document (a verified upload of this asset), if any.
+  const publishedDocument =
+    profile?.whitepaper_path &&
+    profile.whitepaper_sha256 &&
+    profile.whitepaper_path.startsWith(`whitepapers/${assetPda}/`) &&
+    (profile.whitepaper_status === "published" || profile.whitepaper_status === "ssc_approved")
+      ? { path: profile.whitepaper_path, sha256: profile.whitepaper_sha256 }
       : null;
 
   function detail(id: ChecklistId): ReactNode {
@@ -283,6 +325,8 @@ export function TokenizeChecklist({
                   tokenize={tokenize}
                   treasuryBalance={extras.treasuryBalance}
                   openSaleRemaining={extras.openSales?.remaining ?? null}
+                  approvals={extras.approvals}
+                  publishedDocument={publishedDocument}
                   canCreate={permission.globalAdmin}
                   onRefresh={load}
                 />

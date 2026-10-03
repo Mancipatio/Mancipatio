@@ -1009,6 +1009,8 @@ describe("checklist after creation: created → details → activate → distrib
     expect(states({ ...all, treasuryBalance: null }).distribute).toBe("todo");
     // Part created, the rest still possible: still to do.
     expect(states({ active: true, lifetimeMinted: B(3_000), treasuryBalance: B(0) }).distribute).toBe("todo");
+    // A sold-out sale still Open is not done: its proceeds are collected from Distribute.
+    expect(states({ ...all, treasuryBalance: B(0), openSalesOfClass: 1 }).distribute).toBe("todo");
     // Locked after a partial distribution with an empty treasury: done.
     expect(states({ active: true, lifetimeMinted: B(3_000), treasuryBalance: B(0), supplyLocked: true }).distribute).toBe("done");
     expect(distributeDoneText({ lifetimeMinted: B(5_000), supplyLocked: false })).toBe("All 5,000 tokens are created and sent.");

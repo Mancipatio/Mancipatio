@@ -53,7 +53,15 @@ import { isPaused, PAUSE_PRIMARY } from "@/lib/pause-flags";
 import { clearPauseFlagsCache } from "@/lib/pause-gate";
 import { usePauseFlags } from "@/lib/use-pause-flags";
 import { screenRecipients } from "@/lib/compliance";
-import { listSaleReservations, readFxRates, freshUsdcEurRate, reservedTreasuryUnits } from "@/lib/sale-approvals";
+import {
+  freshUsdcEurRate,
+  isApprovalLive,
+  listSaleReservations,
+  listShareClassSaleApprovals,
+  readFxRates,
+  reservedTreasuryUnits,
+} from "@/lib/sale-approvals";
+import { approvalUnits, saleReferencePriceE6, treasuryValueE6 } from "@/lib/public-sale";
 import { getBatchSender, SIGNING_TOO_SLOW } from "@/lib/verified-solana-client";
 import { rememberSignsSeparately, signsSeparately } from "@/lib/wallet-standard-batch";
 import { signingTarget, signsOffchainEnvelopes } from "@/lib/siws-signing";
@@ -124,6 +132,8 @@ type Props = {
   reservationsKnown: boolean;
   canCreate: boolean;
   onRefresh: () => Promise<void>;
+  /** "Both": told the list's total as it changes (the sale offers what the list leaves). */
+  onListTotal?: (total: bigint) => void;
 };
 
 type Checked =
@@ -167,7 +177,7 @@ function errorText(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, reservationsKnown, canCreate, onRefresh }: Props) {
+export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, reservationsKnown, canCreate, onRefresh, onListTotal }: Props) {
   const conn = useWalletConnection();
   const client = useSolanaClient();
   const tx = useSendTransaction();
@@ -427,6 +437,10 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
   const pendingRows = parsed.rows.filter((r) => stateOf(r.wallet).state === "pending");
   const doneRows = parsed.rows.filter((r) => stateOf(r.wallet).state === "done");
   const totalToSend = toSend.reduce((sum, r) => sum + r.amount, BigInt(0));
+  // "Both": the sale panel offers what this list leaves.
+  useEffect(() => {
+    onListTotal?.(totalToSend);
+  }, [onListTotal, totalToSend]);
   const balance = facts?.senderBalance ?? supply.treasuryBalance;
   const supplyNow = supplyVerdict(totalToSend, { ...supply, treasuryBalance: balance });
   const shortfall = supplyNow.shortfall;
@@ -657,12 +671,15 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         if (!canCreate) throw new Error("Creating tokens needs an Admin issuer key.");
         if (valueE6 === null) throw new Error("Enter the value per token (USD).");
         setWorking("Checking the supply and Primary issuance…");
-        const [scNow, classSales, reservations, platform] = await Promise.all([
+        const [scNow, classSales, reservations, platform, classApprovals] = await Promise.all([
           fetchMaybeShareClass(rpc, scPda, { commitment: "confirmed" }),
           listOpenSales(rpc, { shareClass: scPda }),
-          listSaleReservations(session, { share_class: scPda }, true),
+          // Every row (newest first): the reserved treasury mints and the sale reference price of the floor.
+          listSaleReservations(session, { share_class: scPda }),
           readPlatformPause(rpc),
+          listShareClassSaleApprovals(rpc, scPda),
         ]);
+        const liveApprovals = classApprovals.filter((a) => isApprovalLive(a));
         if (!scNow.exists) throw new Error("The share class could not be read.");
         if (!platform) throw new Error("Could not read the platform's pause flags; nothing was sent. Try again.");
         const verdict = supplyVerdict(total, {
@@ -674,6 +691,8 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           openSaleRemaining: openSaleRemaining(classSales),
           // This run's own earlier mint, once confirmed, is in lifetime_minted already.
           reservedUnminted: reservedTreasuryUnits(reservations, new Set(j.mintTx?.status === "confirmed" ? [j.mintTx.reservationId] : [])),
+          // A sale approved and not opened yet keeps its tokens: the top-up never eats into them.
+          approvedUnopened: liveApprovals.reduce((sum, a) => sum + approvalUnits(a), BigInt(0)),
           treasuryBalance: fresh.senderBalance,
         });
         if (verdict.problem) throw new Error(verdict.problem);
@@ -682,9 +701,12 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         if (eurPerUsdc === null) {
           throw new Error("The USDC→EUR rate is missing or out of date, so the created tokens cannot be valued. Ask the operator to refresh it on Admin → Limits.");
         }
-        const amountEur = treasuryMintEur({ units: short, usdPerTokenE6: valueE6, eurPerUsdc });
-        // Close Primary issuance again in the same transaction unless a sale (of any issuer) needs it open.
-        const repause = (await listOpenSales(rpc)).length === 0;
+        // Never below the class's sale price: the ledger refuses a mint valued under it (TREASURY_VALUE_BELOW_FLOOR).
+        const mintValueE6 = treasuryValueE6(valueE6, saleReferencePriceE6(reservations)) ?? valueE6;
+        const amountEur = treasuryMintEur({ units: short, usdPerTokenE6: mintValueE6, eurPerUsdc });
+        // Close Primary issuance again in the same transaction unless a sale needs it open: one Open (of any
+        // issuer), or this class's approved sale waiting to be opened ("Both": the sale opens after the sends).
+        const repause = (await listOpenSales(rpc)).length === 0 && liveApprovals.length === 0;
         // The send path's pause gate reads the flags again, not its 10 s cache.
         clearPauseFlagsCache();
         const minted = await runTreasuryMint({
@@ -698,7 +720,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           amountEur,
           reason,
           repause,
-          audit: { distribution_run: runId, usd_per_token_e6: valueE6.toString(), eur_per_usdc: eurPerUsdc },
+          audit: { distribution_run: runId, usd_per_token_e6: mintValueE6.toString(), eur_per_usdc: eurPerUsdc },
           onStage: (stage) =>
             setWorking(
               stage === "reserve"

@@ -47,7 +47,7 @@ import { ASSET_REGISTRY_PROGRAM_ADDRESS } from "@/lib/generated/asset_registry";
 import { TRANSFER_HOOK_PROGRAM_ADDRESS, findBlocklistAuthorityPda } from "@/lib/generated/transfer_hook";
 import {
   GAP_SCAN_HOOK_PAGES, GAP_SCAN_OVERDUE_MS, GAP_SCAN_PAGES, GAP_SCAN_RESERVE_MS, gapScan, gapScanOverdueState, invokesWatchedProgram,
-  bootstrapOpenReport, fxAutoReports, payoutModulesReport, marketRefusals, roleChangesReport, runAlarmChecks, thresholdState,
+  bootstrapOpenReport, fxAutoReports, payoutModulesReport, marketRefusals, primaryIdleReport, roleChangesReport, runAlarmChecks, thresholdState,
 } from "@/lib/server/alarm-checks";
 import { LOADER_V4, programDataAddresses } from "@/lib/server/onchain-alarms";
 import { USDC } from "@/lib/payment-mints";
@@ -580,6 +580,64 @@ describe("role-change-pending and payout-modules", () => {
     expect(await report([{ block_time: at(500) }], 0x5c)).toMatchObject({ state: "pass", summary: "The bootstrap window is closed" });
     expect(reads).toEqual(["platforms:network=mainnet"]);
     expect(await report([{ block_time: at(500) }], 0xff, false, "devnet")).toMatchObject({ state: "pass" });
+  });
+
+  it("primary-open-idle: 0x02 clear with no sale Open fails after an hour (high on mainnet), holds before, passes with a sale Open", async () => {
+    const now = Date.parse("2026-10-03T12:00:00Z");
+    const ago = (minutes: number) => new Date(now - minutes * 60_000).toISOString();
+    const reads: string[] = [];
+    // A precise fake: each read answers by its table and filters (open = status 0, closed = status 1).
+    const sb = (t: { flags?: number | null; platformAt?: string; open?: number; alerts?: Record<string, unknown>[]; closedAt?: string | null; broken?: string }) => ({
+      from: (table: string) => {
+        const eqs: Record<string, unknown> = {};
+        const b: Record<string, unknown> = {};
+        b.select = () => b; b.order = () => b; b.limit = () => b;
+        b.eq = (column: string, value: unknown) => { eqs[column] = value; return b; };
+        const rows = () => {
+          if (t.broken === table) return { data: null, error: { code: "08006" } };
+          reads.push(`${table}${eqs.status !== undefined ? `:status=${eqs.status}` : ""}`);
+          if (table === "platforms") return { data: t.flags === null ? null : { pause_flags: t.flags ?? 0x7c, updated_at: t.platformAt ?? ago(500) }, error: null };
+          if (table === "sales" && eqs.status === 0) return { data: Array.from({ length: t.open ?? 0 }, (_, i) => ({ pda: `s${i}` })), error: null };
+          if (table === "sales" && eqs.status === 1) return { data: t.closedAt ? [{ updated_at: t.closedAt }] : [], error: null };
+          if (table === "compliance_alerts") return { data: t.alerts ?? [], error: null };
+          return { data: [], error: null };
+        };
+        b.abortSignal = () => ({
+          maybeSingle: async () => rows(),
+          then: (resolve: (v: unknown) => unknown, reject?: (e: unknown) => unknown) => Promise.resolve().then(rows).then(resolve, reject),
+        });
+        return b;
+      },
+    }) as never;
+    const run = (t: Parameters<typeof sb>[0], network: "mainnet" | "devnet" = "mainnet") => primaryIdleReport(sb(t), network, AbortSignal.timeout(5_000), now);
+
+    // 0x02 set: pass, nothing else read.
+    reads.length = 0;
+    expect(await run({ flags: 0x7e })).toMatchObject({ state: "pass", source: "onchain:primary-open-idle", severity: "high" });
+    expect(reads).toEqual(["platforms"]);
+    // A sale Open needs it: pass.
+    expect(await run({ flags: 0x7c, open: 1 })).toMatchObject({ state: "pass" });
+    // Cleared 30 minutes ago (the onchain:pause alert of a clear of bit 0x02), no sale Open yet: hold.
+    const cleared = (minutes: number) => [{ created_at: ago(minutes), evidence: { set_mask: 0, clear_mask: 0x02 } }];
+    expect(await run({ flags: 0x7c, alerts: cleared(30) })).toMatchObject({ state: "hold", evidence: { minutes_idle: 30 } });
+    // …and 61 minutes ago: fail, high on mainnet, low elsewhere.
+    expect(await run({ flags: 0x7c, alerts: cleared(61) })).toMatchObject({ state: "fail", severity: "high", summary: expect.stringMatching(/no sale Open for 61 minutes/) });
+    expect(await run({ flags: 0x7c, alerts: cleared(61) }, "devnet")).toMatchObject({ state: "fail", severity: "low" });
+    // A clear of another bit does not count; the last sale's close does (the newest of both wins).
+    expect(await run({ flags: 0x7c, alerts: [{ created_at: ago(5), evidence: { clear_mask: 0x20 } }, ...cleared(120)] })).toMatchObject({ state: "fail" });
+    expect(await run({ flags: 0x7c, alerts: cleared(120), closedAt: ago(10) })).toMatchObject({ state: "hold", evidence: { minutes_idle: 10 } });
+    // Neither known: the Platform mirror's own update time.
+    expect(await run({ flags: 0x7c, platformAt: ago(20) })).toMatchObject({ state: "hold" });
+    expect(await run({ flags: 0x7c, platformAt: ago(90) })).toMatchObject({ state: "fail" });
+    // No Platform mirrored: hold; unreadable: the check could not run.
+    expect(await run({ flags: null })).toMatchObject({ state: "hold" });
+    expect(await run({ flags: 0x7c, broken: "sales" })).toBeNull();
+    expect(await run({ flags: 0x7c, broken: "compliance_alerts" })).toBeNull();
+    expect(SOURCE_LABELS["onchain:primary-open-idle"]).toMatchObject({ format: "platform" });
+    // Recorded with the other cheap checks.
+    const { sb: mock, rpcs } = mockSb(heartbeats);
+    await runAlarmChecks(mock, Date.now() + 10_000, AbortSignal.timeout(10_000));
+    expect(incident(rpcs, "primary-open-idle")).toBeDefined();
   });
 
   it("roleChangesReport reads only this network's rows", async () => {

@@ -109,7 +109,15 @@ export function memorySupabase(): MemorySupabase {
       const copies = matched.map((r) => ({ ...r }));
       return single ? { data: copies[0] ?? null, error: null } : { data: copies, error: null };
     };
-    const cmp = (c: string, test: (a: unknown) => boolean) => (filters.push((r) => test(r[c])), b);
+    // A JSON path ("fields->sale_request->>status") reads into the row's jsonb like PostgREST (->> as text).
+    const valueOf = (r: Row, c: string): unknown => {
+      if (!c.includes("->")) return r[c];
+      const [head, ...rest] = c.split(/->>?/);
+      let v: unknown = r[head];
+      for (const key of rest) v = v && typeof v === "object" ? (v as Record<string, unknown>)[key] : undefined;
+      return c.includes("->>") && v !== undefined && v !== null && typeof v !== "string" ? JSON.stringify(v) : v;
+    };
+    const cmp = (c: string, test: (a: unknown) => boolean) => (filters.push((r) => test(valueOf(r, c))), b);
     const b: Record<string, unknown> = {};
     Object.assign(b, {
       select: (_cols?: string, opts?: { head?: boolean }) => {

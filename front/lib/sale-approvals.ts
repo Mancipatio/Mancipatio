@@ -34,7 +34,7 @@ function b64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
-async function listApprovals(rpc: Rpc, offset: number, key: Address): Promise<SaleApprovalAccount[]> {
+async function listApprovals(rpc: Rpc, offset: number | null, key: Address | null): Promise<SaleApprovalAccount[]> {
   const discriminator = getBase58Decoder().decode(getSaleApprovalDiscriminatorBytes()) as Base58EncodedBytes;
   const rows = await rpc.getProgramAccounts(ASSET_REGISTRY_PROGRAM_ADDRESS, {
     encoding: "base64",
@@ -42,7 +42,9 @@ async function listApprovals(rpc: Rpc, offset: number, key: Address): Promise<Sa
     filters: [
       { dataSize: BigInt(SALE_APPROVAL_SIZE) },
       { memcmp: { offset: BigInt(0), bytes: discriminator, encoding: "base58" } },
-      { memcmp: { offset: BigInt(offset), bytes: key as unknown as Base58EncodedBytes, encoding: "base58" } },
+      ...(offset !== null && key !== null
+        ? [{ memcmp: { offset: BigInt(offset), bytes: key as unknown as Base58EncodedBytes, encoding: "base58" as const } }]
+        : []),
     ],
   }).send();
   const decoder = getSaleApprovalDecoder();
@@ -60,6 +62,15 @@ export function listIssuerSaleApprovals(rpc: Rpc, issuerPda: Address) {
 /** Every live approval of one share class. */
 export function listShareClassSaleApprovals(rpc: Rpc, shareClass: Address) {
   return listApprovals(rpc, SHARE_CLASS_OFFSET, shareClass);
+}
+
+/**
+ * Every SaleApproval account of every issuer (expired ones included):
+ * open_sale and revoke_sale_approval close them, so each one listed is
+ * unused. The pre-clear check reads this before 0x02 is cleared.
+ */
+export function listAllSaleApprovals(rpc: Rpc) {
+  return listApprovals(rpc, null, null);
 }
 
 export function isApprovalLive(a: Pick<SaleApproval, "expiresAt">, nowSecs = Math.floor(Date.now() / 1000)) {

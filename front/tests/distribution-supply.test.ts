@@ -89,9 +89,20 @@ describe("room to create", () => {
       inTreasury: n(200),
       out: n(1_300),
       onSale: n(300),
+      approved: n(0),
       notCreated: n(3_100),
       cap: n(5_000),
     });
+  });
+
+  it("a live approval not opened yet holds its tokens: the room (and a top-up) never eats into it", () => {
+    const f = facts({ lifetimeMinted: n(1_000), approvedUnopened: n(2_500) });
+    expect(roomToCreate(f)).toBe(n(1_500));
+    expect(allocation(f)).toMatchObject({ approved: n(2_500), notCreated: n(1_500) });
+    // A list that needs more than the room left beside the approved sale is refused, and says why.
+    const verdict = supplyVerdict(n(1_600), f);
+    expect(verdict.problem).toMatch(/2,500 approved for a sale not opened yet/);
+    expect(supplyVerdict(n(1_500), f).problem).toBeNull();
   });
 });
 

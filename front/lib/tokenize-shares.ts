@@ -1022,6 +1022,8 @@ export type ChecklistInput = {
 /** Everything that can exist was created and has left the treasury. */
 function allDistributed(input: ChecklistInput): boolean {
   if (input.treasuryBalance === null || input.treasuryBalance > BigInt(0)) return false;
+  // A sale still Open (even sold out) is not done: its proceeds are collected from Distribute.
+  if (input.openSalesOfClass !== 0) return false;
   return input.supplyLocked || (input.maxSupply !== null && input.lifetimeMinted >= input.maxSupply);
 }
 

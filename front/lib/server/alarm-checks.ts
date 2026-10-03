@@ -125,7 +125,7 @@ import { QUEUE_FAIL_SECONDS, QUEUE_WARN_SECONDS, checkQueue, intervalSeconds, ty
 import { BPF_LOADER_UPGRADEABLE, LOADER_V4, programDataAddresses, type ProgramDataAddresses } from "@/lib/server/onchain-alarms";
 import { opsWatchReports } from "@/lib/server/ops-watch";
 import { OFAC_SDN_SOURCE } from "@/lib/ofac-sdn";
-import { EMERGENCY_PAUSE_BITS, PAUSE_PAYOUT_MODULES, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags } from "@/lib/pause-flags";
+import { EMERGENCY_PAUSE_BITS, PAUSE_PAYOUT_MODULES, PAUSE_PRIMARY, PLATFORM_BOOTSTRAP_OPEN, formatPauseFlags } from "@/lib/pause-flags";
 import { listProblem, SANCTIONS_MAX_LIST_AGE_MS } from "@/lib/server/sanctions";
 import { finalizedTransaction, listFinalizedSignatures } from "@/lib/server/sale-capacity-chain";
 import { reportIncident, type AlertCategory, type IncidentState, type Severity } from "@/lib/server/system-alerts";
@@ -444,6 +444,69 @@ export async function payoutModulesReport(sb: SupabaseClient, network: Network, 
     summary: off ? "The payout modules are switched off (0x40 set)"
       : "The payout modules are switched ON on mainnet (0x40 clear): Startup raises, yield routing, Rights-Token issuances and milestones are open",
     evidence: { pause_flags: flags } };
+}
+
+/** primary-open-idle: how long Primary issuance (0x02) may stay open with no sale Open before it fails. */
+export const PRIMARY_IDLE_MAX_MS = 60 * 60 * 1000;
+
+/**
+ * primary-open-idle (Distribute → Public sale, design §4; high on mainnet,
+ * low elsewhere): Primary issuance (bit 0x02) is global — while it is clear,
+ * buys resume in every Open sale, every live SaleApproval can be opened and
+ * an Admin issuer key can mint into its treasury — so it is cleared only for
+ * a sale's window. Clear with NO sale Open for more than an hour fails (the
+ * sale closed and nobody set it again, or it was cleared and never used).
+ * "Clear since" is the newest of: the last indexed set_pause_flags that
+ * cleared 0x02 (the onchain:pause alert's evidence.clear_mask), the last
+ * sale that closed (its mirror row's updated_at) and, when neither is known,
+ * the Platform mirror row's updated_at. Hold within the hour, pass while 0x02
+ * is set or a sale is Open; hold while no Platform is mirrored; null when the
+ * mirror cannot be read.
+ */
+export async function primaryIdleReport(sb: SupabaseClient, network: Network, signal: AbortSignal, now = Date.now()): Promise<Report | null> {
+  const base = {
+    check: "primary-open-idle",
+    severity: (network === "mainnet" ? "high" : "low") as Severity,
+    category: "onchain" as const,
+    source: "onchain:primary-open-idle",
+  };
+  const platform = await sb.from("platforms").select("pause_flags,updated_at").eq("network", network)
+    .abortSignal(dbSignal(signal)).maybeSingle();
+  if (platform.error) return null;
+  const row = platform.data as { pause_flags?: number | null; updated_at?: string | null } | null;
+  const flags = row?.pause_flags;
+  if (typeof flags !== "number") return { ...base, state: "hold", summary: "No Platform is mirrored yet" };
+  if ((flags & PAUSE_PRIMARY) !== 0) {
+    return { ...base, state: "pass", summary: "Primary issuance is closed (0x02 set)", evidence: { pause_flags: flags } };
+  }
+  const open = await sb.from("sales").select("pda").eq("network", network).eq("status", 0).limit(1).abortSignal(dbSignal(signal));
+  if (open.error) return null;
+  if ((open.data ?? []).length > 0) {
+    return { ...base, state: "pass", summary: "Primary issuance is open for a sale that is Open", evidence: { pause_flags: flags } };
+  }
+  const [clears, closed] = await Promise.all([
+    sb.from("compliance_alerts").select("created_at,evidence").eq("network", network).eq("source", "onchain:pause")
+      .order("created_at", { ascending: false }).limit(20).abortSignal(dbSignal(signal)),
+    sb.from("sales").select("updated_at").eq("network", network).eq("status", 1)
+      .order("updated_at", { ascending: false }).limit(1).abortSignal(dbSignal(signal)),
+  ]);
+  if (clears.error || closed.error) return null;
+  const lastClear = ((clears.data ?? []) as { created_at?: string; evidence?: { clear_mask?: unknown } | null }[])
+    .filter((a) => (Number(a.evidence?.clear_mask ?? 0) & PAUSE_PRIMARY) !== 0)
+    .map((a) => Date.parse(a.created_at ?? ""))
+    .find((t) => Number.isFinite(t));
+  const lastClose = Date.parse(((closed.data ?? [])[0] as { updated_at?: string } | undefined)?.updated_at ?? "");
+  const known = [lastClear, lastClose].filter((t): t is number => typeof t === "number" && Number.isFinite(t));
+  const fallback = Date.parse(row?.updated_at ?? "");
+  const since = known.length > 0 ? Math.max(...known) : Number.isFinite(fallback) ? fallback : null;
+  const minutes = since === null ? null : Math.max(0, Math.floor((now - since) / 60_000));
+  const evidence = { pause_flags: flags, open_since: since === null ? null : new Date(since).toISOString(), minutes_idle: minutes };
+  if (since === null || now - since > PRIMARY_IDLE_MAX_MS) {
+    return { ...base, state: "fail", evidence,
+      summary: `Primary issuance (0x02) is open with no sale Open${minutes === null ? "" : ` for ${minutes} minutes`}: buys, sale openings and treasury mints are possible platform-wide. Any Admin sets 0x02 again (/admin/platform or /admin/launchpad)` };
+  }
+  return { ...base, state: "hold", evidence,
+    summary: `Primary issuance (0x02) is open with no sale Open for ${minutes} minutes (fails after ${PRIMARY_IDLE_MAX_MS / 60_000})` };
 }
 
 /** Day D (runbook §0A, §4-§5) runs inside the bootstrap window: bootstrap-open fails once it is older than this (K1.11). */
@@ -1092,6 +1155,7 @@ export async function runAlarmChecks(sb: SupabaseClient, deadlineMs: number, sig
   await collect(() => roleChangesReport(sb, network, now, signal));
   await collect(() => payoutModulesReport(sb, network, signal));
   await collect(() => bootstrapOpenReport(sb, network, signal, now));
+  await collect(() => primaryIdleReport(sb, network, signal, now));
   await record(cheap);
 
   // 2. The operational watches (chain reads), in parallel with the gap scan,
