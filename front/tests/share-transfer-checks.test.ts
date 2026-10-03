@@ -226,6 +226,9 @@ describe("the summary before signing", () => {
     expect(ownershipPercent(BigInt(1), 1_000_000)).toBe("< 0.01");
     expect(ownershipPercent(BigInt(1), 20_000)).toBe("< 0.01"); // 0.005 would round to "0.01", still a bound
     expect(ownershipPercent(BigInt(1), 10_000)).toBe("0.01");
+    // Review (#56): more than the total read as an unbounded figure ("200"); it is a bound now.
+    expect(ownershipPercent(BigInt(10_000), 5_000)).toBe("> 100");
+    expect(ownershipPercent(BigInt(5_001), 5_000)).toBe("> 100");
     expect(ownershipPercent(BigInt(9_999), 10_000)).toBe("99.99");
   });
 });

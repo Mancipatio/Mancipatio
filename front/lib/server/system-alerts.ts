@@ -77,7 +77,11 @@ export const SOURCE_LABELS: Record<string, { label: string; format: "platform" |
   "onchain:role-change-pending": { label: "Role change pending (timelock running)", format: "platform" },
   "onchain:payout-modules": { label: "Payout modules switched on (mainnet)", format: "platform" },
   "onchain:bootstrap-open": { label: "Bootstrap window open on a live platform (timelocks waived)", format: "platform" },
+  // Distribute → Public sale: 0x02 is cleared only for a sale's window.
+  "onchain:primary-open-idle": { label: "Primary issuance open with no sale taking buys", format: "platform" },
   "onchain:frozen-issuer-activity": { label: "Frozen issuer's wallet active on chain", format: "minimal" },
+  // D2 (2026-10-03): an AML row with the buyer as subject (lib/server/onchain-link-check.ts).
+  "onchain:unlinked-buy": { label: "Buy by a wallet not linked to the platform", format: "minimal" },
   "indexer:queue-lag": { label: "Indexer queue is lagging", format: "platform" },
   "indexer:degraded": { label: "Indexer is degraded", format: "platform" },
   "indexer:gap": { label: "Transactions missing from the index", format: "platform" },
@@ -185,6 +189,8 @@ export async function reportIncident(sb: SupabaseClient, input: IncidentInput, s
 const EMAIL_RE = /^[A-Za-z0-9._%+-]{1,64}@[A-Za-z0-9-]{1,63}(\.[A-Za-z0-9-]{1,63})+$/;
 export const MAX_RECIPIENTS = 5;
 export const DIGEST_LIMIT = 25;
+/** The order the digest fills its slots in. */
+export const DIGEST_TIERS: readonly (readonly Severity[])[] = [["critical"], ["high"], ["medium", "low"]];
 /** Below this, a digest is not started (it would be abandoned). */
 export const MIN_SEND_MS = 4_000;
 
@@ -408,7 +414,7 @@ export type NotifyResult =
   };
 
 /**
- * One digest of the due pending alerts (at most 25; critical and high first),
+ * One digest of the due pending alerts (at most 25; critical, then high, then the rest),
  * within `deadlineMs`, over every configured channel in parallel.
  * No channel configured: NOT_CONFIGURED, rows stay pending. Never selects
  * evidence. "sent" only when every channel that had rows delivered them.
@@ -421,21 +427,20 @@ export async function notifyPendingAlerts(deadlineMs: number, signal?: AbortSign
   if (!email && !webhook) return { status: "not_configured" };
   if (deadlineMs - Date.now() < MIN_SEND_MS) return { status: "deferred" };
   const network = detectNetwork();
-  // Critical and high first, then the rest of the slots: a flood of older
-  // medium rows (bootstrap, backfill, SMTP recovery) never delays a new
-  // critical alert behind it.
+  // Critical first, then high, then the rest of the slots, each oldest
+  // first: neither a flood of older medium rows (bootstrap, backfill, SMTP
+  // recovery) nor a backlog of high rows delays a new critical alert behind it.
   const due = new Date().toISOString();
   const read = (severities: readonly string[], limit: number) => sb.from("compliance_alerts")
     .select("id,created_at,source,severity,summary,tx_signature,category")
     .eq("network", network).eq("notify_state", "pending").lte("next_notify_at", due).in("severity", [...severities])
     .order("next_notify_at").limit(limit).abortSignal(dbSignal(signal));
-  const urgent = await read(["critical", "high"], DIGEST_LIMIT);
-  if (urgent.error) throw new Error("Alert outbox unavailable");
-  const rows = [...((urgent.data ?? []) as DigestRow[])];
-  if (rows.length < DIGEST_LIMIT) {
-    const rest = await read(["medium", "low"], DIGEST_LIMIT - rows.length);
-    if (rest.error) throw new Error("Alert outbox unavailable");
-    rows.push(...((rest.data ?? []) as DigestRow[]));
+  const rows: DigestRow[] = [];
+  for (const severities of DIGEST_TIERS) {
+    if (rows.length >= DIGEST_LIMIT) break;
+    const tier = await read(severities, DIGEST_LIMIT - rows.length);
+    if (tier.error) throw new Error("Alert outbox unavailable");
+    rows.push(...((tier.data ?? []) as DigestRow[]));
   }
   if (!rows.length) return { status: "none" };
   const remaining = deadlineMs - Date.now();

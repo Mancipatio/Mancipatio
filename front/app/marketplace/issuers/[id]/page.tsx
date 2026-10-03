@@ -14,6 +14,8 @@ import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { detectNetwork } from "@/lib/network";
 import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL, toBytes32 } from "@/lib/format";
 import { SkeletonCard } from "@/components/skeleton";
+import { visibleClassCount } from "@/lib/conversion-target";
+import { useConversionTargets } from "@/lib/use-conversion-targets";
 
 const KYB_BADGE: Record<number, string> = {
   0: "bg-amber-100 text-amber-800 border-amber-200",
@@ -33,6 +35,8 @@ export default function IssuerProfilePage({
   const [data, setData] = useState<NetworkData | null>(null);
   const [failed, setFailed] = useState(false);
   const [myAssets, setMyAssets] = useState<AddressedAsset<Asset>[]>([]);
+  // Conversion targets (a class capped at 0) are not counted as share classes.
+  const conversionTargets = useConversionTargets(data?.shareClasses);
 
   useEffect(() => {
     let cancelled = false;
@@ -179,8 +183,8 @@ export default function IssuerProfilePage({
                   </span>
                 </div>
                 <p className="mt-3 text-xs text-mx-ink-faint">
-                  {a.shareClassesCount} share class
-                  {a.shareClassesCount === 1 ? "" : "es"}
+                  {visibleClassCount(address, a.shareClassesCount, conversionTargets)} share class
+                  {visibleClassCount(address, a.shareClassesCount, conversionTargets) === 1 ? "" : "es"}
                 </p>
               </Link>
             ))}

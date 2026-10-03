@@ -1,41 +1,24 @@
 "use client";
 
-// Mint into the ISSUER TREASURY — moved unchanged from /admin/share-classes so
-// the issuer's "Tokenize company shares" checklist mints through the same code
-// (one copy of the raise-limit reservation, the destination binding and the
-// release on failure).
+// Mint into the ISSUER TREASURY from /admin/share-classes. The reservation,
+// the transaction, the confirmation wait, the audit row and the release on
+// failure are lib/treasury-mint (runTreasuryMint), the one copy "Send to
+// wallets" also runs; this panel only asks for the units, the EUR value and
+// the reason. The success toast and the page's refresh wait for the
+// network's confirmation (tx.send returns on submission).
 
 import { type ReactNode, useState } from "react";
 import { type Address } from "@solana/kit";
-import { createWalletTransactionSigner } from "@solana/client";
 import {
   useSendTransaction,
   useSolanaClient,
   useWalletConnection,
 } from "@solana/react-hooks";
-import {
-  findAssociatedTokenPda,
-  getCreateAssociatedTokenIdempotentInstructionAsync,
-} from "@solana-program/token-2022";
-import {
-  getMintToTreasuryInstructionAsync,
-  type ShareClass,
-} from "@/lib/generated/asset_registry";
-import {
-  resolveIssuerPermission,
-  ISSUER_CAPABILITIES,
-} from "@/lib/issuer-permissions";
+import { type ShareClass } from "@/lib/generated/asset_registry";
 import { ConfirmModal } from "@/components/confirm-modal";
-import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import {
-  releaseWhenExpired,
-  reserveTreasuryMint,
-} from "@/lib/sale-approvals";
-
-const TOKEN_2022_ADDRESS =
-  "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
+import { runTreasuryMint, TREASURY_MINT_REASON_MIN } from "@/lib/treasury-mint";
 
 export type TreasuryMintPanelProps = {
   sc: ShareClass;
@@ -68,119 +51,75 @@ export function TreasuryMintPanel({
   // Declared EUR value of a treasury mint (counted against the raise limit).
   const [mintEur, setMintEur] = useState("");
   const [confirmMint, setConfirmMint] = useState(false);
+  /** Between the wallet's signature and the network's answer: no second mint. */
+  const [confirming, setConfirming] = useState(false);
 
   // Mints into the ISSUER TREASURY — the token account owned by the signing
   // issuer authority (the connected wallet). That is the only destination the
   // program accepts from this screen; see the destination-binding note on
   // /admin/share-classes.
-  //
-  // Program package 2B: only an Admin issuer key reaches the treasury, and the
-  // mint counts against the issuer's (SPV's) rolling 12-month raise limit:
-  // its declared EUR value is reserved first (/api/sale-approvals/treasury-mint)
-  // and booked once the transaction finalizes. A failed send releases it.
   async function mintToTreasury(reason: string) {
     if (!wallet || !conn.wallet || !issuerPda || !scPda || !mintAmount.trim())
       return;
-    if (!isIssuerAuthority) return;
-    const destination = wallet;
+    if (!isIssuerAuthority || confirming) return;
     const amount = BigInt(mintAmount);
     const eurValue = Number(mintEur.replace(/[^\d.]/g, ""));
     if (!Number.isFinite(eurValue) || eurValue <= 0) {
       toast.showError("EUR value required", "Enter the EUR value this mint counts against the raise limit.");
       return;
     }
-    const pendingId = toast.showPending(
-      `Minting ${amount} units to the issuer treasury…`,
-    );
-    let reservationId: string | null = null;
-    let lastValidBlockHeight: bigint | null = null;
-    let sent = false;
+    let pendingId = toast.showPending(`Minting ${amount} units to the issuer treasury…`);
     try {
-      const reserved = await reserveTreasuryMint(conn.wallet, {
-        share_class: scPda,
-        amount_units: amount.toString(),
-        amount_eur: eurValue,
-        reason,
-      });
-      reservationId = reserved.reservation_id;
-      const { signer } = createWalletTransactionSigner(conn.wallet);
-      const mint = sc.mint;
-      const [ata] = await findAssociatedTokenPda({
-        owner: destination,
-        tokenProgram: TOKEN_2022_ADDRESS,
-        mint,
-      });
-      const createAtaIx =
-        await getCreateAssociatedTokenIdempotentInstructionAsync({
-          payer: signer,
-          owner: destination,
-          mint,
-          tokenProgram: TOKEN_2022_ADDRESS,
-        });
-      const mintIx = await getMintToTreasuryInstructionAsync({
-        authority: signer,
-        adminRecord: await resolveIssuerPermission(
-          client.runtime.rpc,
-          issuerPda,
-          signer.address,
-          ISSUER_CAPABILITIES.Mint,
-        ),
-        issuer: issuerPda,
-        asset: sc.asset,
-        shareClass: scPda,
-        destination: ata,
-        tokenProgram: TOKEN_2022_ADDRESS,
+      const result = await runTreasuryMint({
+        session: conn.wallet,
+        rpc: client.runtime.rpc,
+        send: (request) => tx.send(request),
+        sc,
+        scPda,
+        issuerPda,
         amount,
-      });
-      // A known lifetime: after a failed send the reservation is released
-      // only once this blockhash can no longer land (server-proven).
-      const lifetime = (await client.runtime.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
-      lastValidBlockHeight = lifetime.lastValidBlockHeight;
-      const sig = await tx.send({
-        lifetime,
-        prepareTransaction: { blockhashReset: false },
-        instructions: [createAtaIx, mintIx],
-        feePayer: signer,
-      });
-      sent = true;
-      toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Minted to treasury" });
-      void recordAudit({
-        ix_name: "mint_to_treasury",
-        category: "share-class",
-        actor_wallet: wallet.toString(),
+        amountEur: eurValue,
         reason,
-        target_label: scPda.toString(),
-        tx_signature: sig,
-        metadata: {
-          destination: "issuer_treasury",
-          destination_wallet: destination.toString(),
-          destination_token_account: ata.toString(),
-          amount: amount.toString(),
-          amount_eur: eurValue,
-          reservation_id: reservationId,
+        repause: false,
+        onStage: (stage) => {
+          if (stage !== "confirm") return;
+          setConfirming(true);
+          setConfirmMint(false);
+          toast.dismiss(pendingId);
+          pendingId = toast.showPending(`Confirming the mint of ${amount} units on the network…`);
         },
       });
-      // The server books it: the alarm worker sees the finalized mint and the
-      // retry worker's ledger stage books the reservation at the block date
-      // (Talas 5.1). Until then it stays counted at the reserved value.
-      setConfirmMint(false);
-      setMintAmount("");
-      setMintEur("");
-      await onRefresh();
+      toast.dismiss(pendingId);
+      // Only the network's confirmation makes it "minted"; the refresh reads it after.
+      if (result.outcome === "confirmed") {
+        toast.showTx(result.signature, { title: "Minted to treasury" });
+        setMintAmount("");
+        setMintEur("");
+      } else if (result.outcome === "failed") {
+        toast.show({
+          kind: "error",
+          title: "The mint failed on the network",
+          description: "Your wallet sent it, but the network refused it. Nothing was minted; the reservation is released by the server.",
+          signature: result.signature,
+        });
+      } else {
+        toast.show({
+          kind: "error",
+          title: "Mint not confirmed yet",
+          description: "The network has not confirmed the mint yet. Check the explorer link before minting again.",
+          signature: result.signature,
+        });
+      }
+      await onRefresh().catch(() => undefined);
     } catch (err) {
       toast.dismiss(pendingId);
-      toast.showError(
-        "Failed to mint",
-        explainSendError(err),
-      );
-      if (reservationId && !sent && lastValidBlockHeight !== null) {
-        // The mint may still land until its blockhash expires; the server
-        // releases the reservation only after that (the worker otherwise).
-        void releaseWhenExpired(conn.wallet, reservationId, lastValidBlockHeight);
-      }
+      toast.showError("Failed to mint", explainSendError(err instanceof Error && err.cause ? err.cause : err));
+    } finally {
+      setConfirming(false);
     }
   }
+
+  const busy = tx.isSending || confirming;
 
   return (
     <>
@@ -205,7 +144,7 @@ export function TreasuryMintPanel({
         <button
           type="button"
           disabled={
-            tx.isSending ||
+            busy ||
             !mintAmount.trim() ||
             !(Number(mintEur) > 0) ||
             !isIssuerAuthority
@@ -213,9 +152,9 @@ export function TreasuryMintPanel({
           onClick={() => setConfirmMint(true)}
           className="rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-900 hover:border-slate-400 disabled:opacity-50"
         >
-          Mint to treasury
+          {confirming ? "Confirming…" : "Mint to treasury"}
         </button>
-        {children?.(tx.isSending)}
+        {children?.(busy)}
       </div>
 
       <ConfirmModal
@@ -223,7 +162,7 @@ export function TreasuryMintPanel({
         onClose={() => setConfirmMint(false)}
         onConfirm={(reason) => mintToTreasury(reason)}
         // The raise-limit ledger needs 5-1000 characters (treasury-mint route).
-        reasonMinLength={5}
+        reasonMinLength={TREASURY_MINT_REASON_MIN}
         title="Mint to treasury"
         kind="info"
         confirmLabel="Mint"
@@ -251,7 +190,7 @@ export function TreasuryMintPanel({
             </p>
           </>
         }
-        busy={tx.isSending}
+        busy={busy}
       />
     </>
   );

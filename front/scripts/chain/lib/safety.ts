@@ -64,7 +64,19 @@ export class ChainRpcError extends Error {
   }
 }
 
-export type ChainTool = "bootstrap" | "idl" | "inventory" | "squads-export" | "e2e" | "handover" | "emergency" | "accept";
+export type ChainTool =
+  | "bootstrap"
+  | "idl"
+  | "inventory"
+  | "squads-export"
+  | "e2e"
+  | "handover"
+  | "emergency"
+  | "accept"
+  | "direct-buy";
+
+/** Test tools that run on devnet only, refused on every other cluster whatever CHAIN_ALLOW_MAINNET says. */
+export const DEVNET_ONLY_TOOLS: readonly ChainTool[] = ["direct-buy"];
 
 /** The tools that sign with a role key itself (a Ledger via CHAIN_SIGNER, or its keypair file). */
 export const ROLE_KEY_TOOLS: readonly ChainTool[] = ["emergency", "accept"];
@@ -158,6 +170,7 @@ export const DEFAULT_DEADLINE_MIN: Record<ChainTool, number> = {
   handover: 20,
   emergency: 15,
   accept: 15,
+  "direct-buy": 10,
 };
 /** The runner's own vitest timeout is 4 h; the internal deadline stays below it. */
 export const MAX_DEADLINE_MIN = 230;
@@ -307,6 +320,10 @@ export function readChainConfig(
   const publicNetwork = nonEmpty(env, "NEXT_PUBLIC_NETWORK");
   if (publicNetwork && publicNetwork.toLowerCase() !== network) {
     throw new ChainGateError("CHAIN_NETWORK conflicts with NEXT_PUBLIC_NETWORK");
+  }
+  // Before CHAIN_ALLOW_MAINNET is even read: no flag opens a test tool beyond devnet.
+  if (DEVNET_ONLY_TOOLS.includes(tool) && network !== "devnet") {
+    throw new ChainGateError(`chain:${tool} is a devnet test tool: it runs on devnet only, never on ${network}`);
   }
   const allowMainnet = flag(env, "CHAIN_ALLOW_MAINNET");
   if (tool === "e2e" && network !== "devnet" && network !== "localnet") {

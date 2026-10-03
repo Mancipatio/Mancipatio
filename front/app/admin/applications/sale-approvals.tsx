@@ -34,6 +34,7 @@ import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
 import { useRole } from "@/lib/auth";
 import type { LaunchApplication } from "@/lib/launchpad";
+import type { ApprovalPrefill } from "@/lib/public-sale";
 import {
   confirmSaleApproval,
   fromBaseUnits,
@@ -333,7 +334,14 @@ export function ManualSaleApprovals() {
   );
 }
 
-function ApproveSaleModal({
+/**
+ * "Approve sale": reserve → approve_sale → confirm. `prefill` (a public-sale
+ * request, lib/public-sale approvalPrefill) fixes the class, USDC, the price
+ * band (min = max = the price), the maximum raise (tokens × price), Mature
+ * with no payout schedule, 30 days and the reason — the operator only
+ * confirms.
+ */
+export function ApproveSaleModal({
   app,
   session,
   adminWallet,
@@ -341,6 +349,7 @@ function ApproveSaleModal({
   rpc,
   onClose,
   onDone,
+  prefill = null,
 }: {
   /** null: a super-admin approval without an application (reason required). */
   app: LaunchApplication | null;
@@ -350,18 +359,20 @@ function ApproveSaleModal({
   rpc: ReturnType<typeof useSolanaClient>["runtime"]["rpc"];
   onClose: () => void;
   onDone: () => void;
+  /** A public-sale request's terms (no application): everything filled in. */
+  prefill?: ApprovalPrefill | null;
 }) {
   const tx = useSendTransaction();
   const [network, setNetwork] = useState<NetworkData | null>(null);
   const [classes, setClasses] = useState<ClassOption[] | null>(null);
   const [rates, setRates] = useState<FxRate[] | null>(null);
-  const [shareClass, setShareClass] = useState("");
+  const [shareClass, setShareClass] = useState(prefill?.shareClass ?? "");
   const [saleId, setSaleId] = useState("");
   const [paymentMint, setPaymentMint] = useState("");
-  const [maxGross, setMaxGross] = useState("");
-  const [minPrice, setMinPrice] = useState("");
-  const [maxPrice, setMaxPrice] = useState("");
-  const [days, setDays] = useState("30");
+  const [maxGross, setMaxGross] = useState(prefill?.maxGross ?? "");
+  const [minPrice, setMinPrice] = useState(prefill?.minPrice ?? "");
+  const [maxPrice, setMaxPrice] = useState(prefill?.maxPrice ?? "");
+  const [days, setDays] = useState(prefill?.days ?? "30");
   const [capacity, setCapacity] = useState<Capacity | null>(null);
   const [capacityError, setCapacityError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -370,7 +381,7 @@ function ApproveSaleModal({
   const [manualType, setManualType] = useState<"mature" | "startup">("mature");
   const [manualCliff, setManualCliff] = useState("0");
   const [manualVesting, setManualVesting] = useState("12");
-  const [reason, setReason] = useState("");
+  const [reason, setReason] = useState(prefill?.reason ?? "");
   const manual = app === null;
   const raiseType = manual ? manualType : app.raise_type === "startup" ? "startup" : "mature";
   // The payout schedule the approval fixes on-chain: the application's for a
@@ -412,7 +423,9 @@ function ApproveSaleModal({
         if (cancelled) return;
         setNetwork(data);
         setClasses(out);
-        if (out[0]) setShareClass(out[0].pda);
+        // A request names its class; otherwise the first one.
+        if (prefill) setShareClass(prefill.shareClass);
+        else if (out[0]) setShareClass(out[0].pda);
       } catch {
         if (!cancelled) setClasses([]);
       }
@@ -421,8 +434,11 @@ function ApproveSaleModal({
       .then((r) => {
         if (cancelled) return;
         setRates(r);
-        // The network's USDC when it has a rate, else the first configured token.
-        const pick = r.find((x) => x.payment_mint === defaultPaymentMint(detectNetwork())) ?? r[0];
+        // The request's token (USDC), else the network's USDC when it has a rate, else the first configured token.
+        const pick =
+          (prefill ? r.find((x) => x.payment_mint === prefill.paymentMint) : undefined) ??
+          r.find((x) => x.payment_mint === defaultPaymentMint(detectNetwork())) ??
+          r[0];
         if (pick) setPaymentMint(pick.payment_mint);
       })
       .catch(() => {
@@ -431,6 +447,8 @@ function ApproveSaleModal({
     return () => {
       cancelled = true;
     };
+    // The prefill is fixed for the modal's life.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [rpc, session, applicantWallet, linkedIssuer]);
 
   // Capacity panel + the next free sale id for the chosen share class.
@@ -588,9 +606,21 @@ function ApproveSaleModal({
           </p>
         </div>
         <div className="space-y-4 px-5 py-4 text-sm">
+          {prefill && (
+            <p className="rounded-md border border-brand-200 bg-brand-50 px-3 py-2 text-xs text-brand-900">
+              Prefilled from the issuer&apos;s public-sale request <span className="font-mono">{prefill.requestId.slice(0, 8)}</span>: USDC,
+              Mature (purchases final, no payout schedule), price {prefill.minPrice} USDC, at most {prefill.maxGross} USDC, valid{" "}
+              {prefill.days} days. Change nothing unless the issuer agreed.
+            </p>
+          )}
           <label className="block">
             <span className="text-xs font-medium uppercase tracking-wide text-slate-500">Share class</span>
-            {classes === null ? (
+            {prefill ? (
+              <p className="mt-1 text-sm text-slate-800">
+                {classes?.find((c) => c.pda === prefill.shareClass)?.label ?? "Share class"}{" "}
+                <span className="break-all font-mono text-[11px] text-slate-500">{prefill.shareClass}</span>
+              </p>
+            ) : classes === null ? (
               <p className="mt-1 text-xs text-slate-400">Loading the share classes…</p>
             ) : classes.length === 0 ? (
               <>

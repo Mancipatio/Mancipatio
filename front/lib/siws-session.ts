@@ -39,6 +39,13 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   // The caller screens its OWN wallet before a buy (8.5); its only write is
   // the compliance alert of a hit, one per wallet while open.
   "compliance.screenWallet",
+  // The sender of a distribution screens its recipients (Send to wallets):
+  // addresses in, matching addresses out; its writes are the alert of a hit
+  // and the record of the screen itself (lib/server/screening-evidence.ts).
+  "compliance.screenRecipients",
+  // Before the sender signs: checks those records for the run's recipients;
+  // its only write is the evidence row that records the check.
+  "compliance.distributionEvidence",
   "conversion.adminList",
   "conversion.listMine",
   "delivery.adminList",
@@ -57,6 +64,8 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "saleApprovals.capacity",
   "saleApprovals.list",
   "saleApprovals.mine",
+  // Public-sale requests of a class (its issuer or an Admin) or waiting for the operator (Admin).
+  "saleRequests.list",
   // Rolling EUR capacity and the issuance ledger of an SPV (Talas 5.1).
   "spvs.capacity",
   "spvs.issuances",

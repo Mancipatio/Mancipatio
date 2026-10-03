@@ -3,7 +3,7 @@
 import type { WalletSession } from "@solana/client";
 import type { PublicAssetProfile } from "@/lib/profile-public";
 export type { PublicAssetProfile } from "@/lib/profile-public";
-import { signedFetch } from "@/lib/siws-client";
+import { signedFetch, type SignedFetchInteractive } from "@/lib/siws-client";
 import type { CategorySlug, FieldDef } from "@/lib/asset-types";
 
 /** Off-chain per-category product metadata for an on-chain Asset.
@@ -173,24 +173,30 @@ export async function getAssetProfiles(assetPdas: string[]): Promise<Map<string,
   return new Map((await listAssetProfiles({ pdas: assetPdas })).map((row) => [row.asset_pda, row]));
 }
 
-/** Draft/full rows require an admin or each asset's on-chain issuer signature. */
+/**
+ * Draft/full rows require an admin or each asset's on-chain issuer signature.
+ * `interactive: false` reads only within an existing wallet session (no
+ * prompt; it throws without one), for a panel's background read.
+ */
 export async function getPrivateAssetProfiles(
   session: WalletSession | null | undefined,
   assetPdas: string[],
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<Map<string, AssetProfile>> {
   const rows: AssetProfile[] = [];
   for (let offset = 0; offset < assetPdas.length; offset += 100) {
     rows.push(...await signedFetch<AssetProfile[]>(session, "/api/profiles/read", "profiles.read", {
       pdas: assetPdas.slice(offset, offset + 100),
-    }));
+    }, opts));
   }
   return new Map(rows.map((row) => [row.asset_pda, row]));
 }
 
 export async function getPrivateAssetProfile(
   session: WalletSession | null | undefined, assetPda: string,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ): Promise<AssetProfile | null> {
-  return (await getPrivateAssetProfiles(session, [assetPda])).get(assetPda) ?? null;
+  return (await getPrivateAssetProfiles(session, [assetPda], opts)).get(assetPda) ?? null;
 }
 
 /**

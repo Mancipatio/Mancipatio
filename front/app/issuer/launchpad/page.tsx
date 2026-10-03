@@ -1,12 +1,5 @@
 "use client";
 
-import { assertChainRecordStorageAvailable } from "@/lib/chain-record-recovery";
-import {
-  listSalePublications,
-  saveSalePublication,
-  clearSalePublication,
-  type PendingSalePublication,
-} from "@/lib/sale-publication-recovery";
 import { SalePublicationRecovery } from "./publication-recovery";
 import { detectNetwork } from "@/lib/network";
 import { featureDisabledMessage, features } from "@/lib/features";
@@ -24,11 +17,14 @@ import {
   findAssociatedTokenPda,
   getCreateAssociatedTokenIdempotentInstructionAsync,
 } from "@solana-program/token-2022";
+import { USDC } from "@/lib/payment-mints";
+import { roomToCreate } from "@/lib/distribution-supply";
+import { openApprovedSale, OpenSaleError } from "@/lib/open-sale";
+import { approvalUnits, paymentAmountLabel, usdcDecimalsOf } from "@/lib/public-sale";
 import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import {
   findAssetPda,
   findIssuerPda,
-  getOpenSaleInstructionAsync,
   RaiseType,
   SaleStatus,
   type Issuer,
@@ -36,16 +32,16 @@ import {
   type ShareClass,
 } from "@/lib/generated/asset_registry";
 import { buildCloseSaleInstruction, buildOpenPayoutVaultInstruction } from "@/lib/proceeds-exits";
-import { saleEndError, saleEndInputBounds } from "@/lib/deadline-bounds";
+import { saleEndInputBounds } from "@/lib/deadline-bounds";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { findSalePda, findShareClassPda } from "@/lib/pdas";
+import { formatTokens } from "@/lib/tokenize-shares";
 import { walletSigner } from "@/lib/wallet-signer";
 import { explainSendError } from "@/lib/tx-error";
 import { SkeletonTable } from "@/components/skeleton";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
-import { upsertListing } from "@/lib/launchpad";
 import { fetchPlainPaymentMintTokenProgram } from "@/lib/transaction-builders";
 import { syncSaleIfNeeded } from "@/lib/issuer-authority";
 import { useIssuerFreezes } from "@/lib/use-issuer-freeze";
@@ -55,6 +51,8 @@ import {
   listIssuerSaleApprovals,
   maxUnitsAt,
   mySaleApprovals,
+  fromBaseUnits,
+  toBaseUnits,
   type MyApproval,
   type SaleApprovalAccount,
 } from "@/lib/sale-approvals";
@@ -434,7 +432,7 @@ function LaunchpadInner() {
                       </p>
                     </td>
                     <td className="px-4 py-3 text-right font-mono">
-                      {String(s.pricePerUnit)}
+                      {paymentAmountLabel(s.pricePerUnit, s.paymentMint, USDC[detectNetwork()]?.mint)}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <p className="font-mono">
@@ -502,6 +500,7 @@ function LaunchpadInner() {
             issuerPda={issuerPda}
             scPdaMap={scPdaMap}
             approvals={approvals}
+            sales={data?.sales ?? []}
             preselectApplicationId={applicationId}
             onClose={() => setShowOpen(false)}
             onSuccess={() => {
@@ -644,6 +643,7 @@ function OpenSaleModal({
   issuerPda,
   scPdaMap,
   approvals,
+  sales,
   preselectApplicationId,
   onClose,
   onSuccess,
@@ -651,6 +651,8 @@ function OpenSaleModal({
   issuerPda: Address;
   scPdaMap: Map<string, ScMeta>;
   approvals: SaleApprovalAccount[];
+  /** Every sale on the network (the Open ones of the class count against its room). */
+  sales: Sale[];
   preselectApplicationId: string | null;
   onClose: () => void;
   onSuccess: () => void;
@@ -721,27 +723,49 @@ function OpenSaleModal({
     isStartup && !startupTermsMissing && !((vestingMonths ?? 0) > (cliffMonths ?? 0) && (vestingMonths ?? 0) > 0);
   const startupDisabled = isStartup && !STARTUP_RAISES;
 
-  const price = digits(pricePerUnit) ? BigInt(pricePerUnit.trim()) : null;
+  // USDC is entered in USDC (6 decimals); any other payment token in its base units.
+  const usdcMint = USDC[detectNetwork()]?.mint ?? null;
+  const priceDecimals = approval ? usdcDecimalsOf(approval.paymentMint, usdcMint) : null;
+  const money = (v: bigint) => (approval ? paymentAmountLabel(v, approval.paymentMint, usdcMint) : v.toString());
+  const price =
+    priceDecimals !== null
+      ? toBaseUnits(pricePerUnit, priceDecimals)
+      : digits(pricePerUnit)
+        ? BigInt(pricePerUnit.trim())
+        : null;
   const total = digits(totalForSale) ? BigInt(totalForSale.trim()) : null;
   const priceOutOfRange =
     approval !== null && price !== null && (price < approval.minPricePerUnit || price > approval.maxPricePerUnit);
   const maxUnits = approval && price !== null && price > BigInt(0) ? maxUnitsAt(approval, price) : null;
   const totalTooLarge = maxUnits !== null && total !== null && total > maxUnits;
   const totalIsZero = total !== null && total === BigInt(0);
+  // The room left in the class (the program does not check it: buys would fail late with MaxSupplyExceeded):
+  // the cap minus everything created, what Open sales may still mint and what other live approvals hold.
+  const room = selectedSc
+    ? roomToCreate({
+        maxSupply: selectedSc.maxSupply.__option === "Some" ? selectedSc.maxSupply.value : null,
+        lifetimeMinted: selectedSc.lifetimeMinted,
+        version: selectedSc.version,
+        supplyLocked: selectedSc.supplyLocked,
+        mintablePostLaunch: selectedSc.mintablePostLaunch,
+        openSaleRemaining: sales
+          .filter((s) => s.shareClass === approval?.shareClass && s.status === SaleStatus.Open)
+          .reduce((sum, s) => sum + (s.totalForSale > s.sold ? s.totalForSale - s.sold : BigInt(0)), BigInt(0)),
+        reservedUnminted: BigInt(0),
+        approvedUnopened: approvals
+          .filter((a) => a.shareClass === approval?.shareClass && a.address !== approval?.address)
+          .reduce((sum, a) => sum + approvalUnits(a), BigInt(0)),
+        treasuryBalance: BigInt(0),
+      })
+    : null;
+  const totalOverRoom = room !== null && total !== null && total > room;
 
   async function openSale() {
     if (!wallet || !conn.wallet || !approval || price === null || total === null) return;
-    if (priceOutOfRange || totalTooLarge || totalIsZero || startupDisabled || startupTermsMissing || startupTermsInvalid) return;
+    if (priceOutOfRange || totalTooLarge || totalOverRoom || totalIsZero || startupDisabled || startupTermsMissing || startupTermsInvalid) return;
     const saleId = approval.saleId;
     const pendingId = toast.showPending(`Opening sale #${saleId}…`);
-    let publication: PendingSalePublication | null = null;
-    let submittedSignature: string | null = null;
     try {
-      assertChainRecordStorageAvailable();
-      if (listSalePublications(detectNetwork(), wallet).length)
-        throw new Error(
-          "A sale opening is already pending publication. Close this dialog and use Publish existing sale, or verify that its unsent intent expired.",
-        );
       if (!meta || !selectedSc) throw new Error("The approved share class has no initialized mint");
       const [assetPda] = await findAssetPda({
         issuer: issuerPda,
@@ -750,98 +774,45 @@ function OpenSaleModal({
       const endTsBig = endTs.trim()
         ? BigInt(Math.floor(new Date(endTs).getTime() / 1000))
         : BigInt(0);
-      // v1: every sale ends, at most 365 days out (SaleDurationInvalid 6145),
-      // judged with the chain-clock margin (lib/deadline-bounds.ts).
-      const endError = saleEndError(BigInt(0), endTsBig);
-      if (endError) throw new Error(endError);
-      const signer = walletSigner(conn.wallet);
-      // The payment mint comes from the approval (classic SPL or Token-2022).
-      const paymentTokenProgram = await fetchPlainPaymentMintTokenProgram(client.runtime.rpc, approval.paymentMint);
-      // The approval's PDA is derived from (share class, sale id); its rent
-      // returns to the approving admin (approved_by).
-      const ix = await getOpenSaleInstructionAsync({
-        authority: signer,
-        issuer: issuerPda,
-        asset: assetPda,
-        shareClass: approval.shareClass,
+      // The intent is saved before the wallet opens; the end (≤ 365 days, chain-clock margin) is checked
+      // there too (lib/open-sale).
+      const result = await openApprovedSale({
+        rpc: client.runtime.rpc,
+        session: conn.wallet,
+        send: (request) => tx.send(request),
+        issuerPda,
+        assetPda,
+        approval,
         mint: selectedSc.mint,
-        paymentMint: approval.paymentMint,
-        paymentTokenProgram,
-        saleId,
         pricePerUnit: price,
         totalForSale: total,
-        startTs: BigInt(0),
         endTs: endTsBig,
-        raiseType,
         cliffMonths: cliffMonths ?? 0,
         vestingMonths: vestingMonths ?? 0,
-        approvedBy: approval.approvedBy,
-      });
-      const salePda = await findSalePda(approval.shareClass, saleId);
-      const lifetime = (
-        await client.runtime.rpc
-          .getLatestBlockhash({ commitment: "confirmed" })
-          .send()
-      ).value;
-      publication = {
-        version: 1,
-        network: detectNetwork(),
-        wallet: wallet.toString(),
-        salePda,
-        signature: null,
-        lastValidBlockHeight: lifetime.lastValidBlockHeight.toString(),
         listing: {
-          sale_pubkey: salePda,
           application_id: info?.application_id ?? null,
-          logo_letter: (
-            info?.company_name?.[0] ??
-            meta.assetName?.[0] ??
-            "•"
-          ).toUpperCase(),
-          is_published: true,
+          logo_letter: (info?.company_name?.[0] ?? meta.assetName?.[0] ?? "•").toUpperCase(),
         },
-      };
-      // Persist the intended PDA before the wallet prompt; a lost response cannot silently advance to another sale id.
-      saveSalePublication(publication);
-      const sig = await tx.send({
-        instructions: [ix],
-        feePayer: signer,
-        lifetime,
-        prepareTransaction: { blockhashReset: false },
       });
-      submittedSignature = sig;
-      publication = { ...publication, signature: sig };
-      try {
-        saveSalePublication(publication);
-      } catch {
-        toast.showError(
-          "Keep your sale receipt",
-          `Sale ${salePda}; transaction ${sig}. Publish this existing address after storage recovery.`,
-        );
-      }
       toast.dismiss(pendingId);
-      toast.showTx(sig, { title: "Sale opening submitted" });
-      try {
-        await upsertListing(conn.wallet, publication.listing);
-        clearSalePublication(publication);
-      } catch (error) {
+      toast.showTx(result.signature, { title: "Sale opening submitted" });
+      if (!result.published) {
         toast.showError(
           "Sale publication pending",
-          error instanceof Error
-            ? `${error.message} Close this dialog and use Publish existing sale; no second opening transaction is needed.`
-            : "Use Publish existing sale to retry the saved address.",
+          `${result.publishError ?? ""} Close this dialog and use Publish existing sale; no second opening transaction is needed.`,
         );
       }
       onSuccess();
     } catch (err) {
       toast.dismiss(pendingId);
+      const stage = err instanceof OpenSaleError ? err.stage : "before";
       toast.showError(
-        submittedSignature
+        stage === "submitted"
           ? "Sale submitted — publication pending"
-          : publication
+          : stage === "intent-saved"
             ? "Sale opening needs checking"
             : "Failed to open sale",
-        explainSendError(err),
+        explainSendError(err instanceof OpenSaleError && err.cause ? err.cause : err),
       );
       console.error("[open_sale]", err);
     }
@@ -900,13 +871,13 @@ function OpenSaleModal({
                 <dd className="font-mono">#{meta?.classIndex ?? "?"} · {String(approval.saleId)}</dd>
                 <dt className="text-brand-700">Payment mint</dt>
                 <dd className="break-all font-mono">{approval.paymentMint}</dd>
-                <dt className="text-brand-700">Price per unit (base units)</dt>
+                <dt className="text-brand-700">Price per unit</dt>
                 <dd className="font-mono">
-                  {String(approval.minPricePerUnit)}
-                  {approval.maxPricePerUnit !== approval.minPricePerUnit ? ` – ${approval.maxPricePerUnit}` : ""}
+                  {money(approval.minPricePerUnit)}
+                  {approval.maxPricePerUnit !== approval.minPricePerUnit ? ` – ${money(approval.maxPricePerUnit)}` : ""}
                 </dd>
-                <dt className="text-brand-700">Maximum raise (base units)</dt>
-                <dd className="font-mono">{String(approval.maxGrossRaise)}</dd>
+                <dt className="text-brand-700">Maximum raise</dt>
+                <dd className="font-mono">{money(approval.maxGrossRaise)}</dd>
                 <dt className="text-brand-700">Raise type</dt>
                 <dd>
                   {isStartup
@@ -969,21 +940,29 @@ function OpenSaleModal({
           <div className="grid gap-3 sm:grid-cols-2">
             <label className="block">
               <span className="text-xs font-medium uppercase tracking-wide text-slate-500">
-                Price per unit (payment base units)
+                {priceDecimals !== null ? "Price per unit (USDC)" : "Price per unit (payment base units)"}
               </span>
               <input
                 value={pricePerUnit}
-                inputMode="numeric"
+                inputMode={priceDecimals !== null ? "decimal" : "numeric"}
                 onChange={(e) =>
-                  setPricePerUnit(e.target.value.replace(/\D/g, ""))
+                  setPricePerUnit(
+                    priceDecimals !== null ? e.target.value.replace(/[^\d.]/g, "") : e.target.value.replace(/\D/g, ""),
+                  )
                 }
-                placeholder={approval ? String(approval.minPricePerUnit) : undefined}
+                placeholder={
+                  approval
+                    ? priceDecimals !== null
+                      ? fromBaseUnits(approval.minPricePerUnit, priceDecimals)
+                      : String(approval.minPricePerUnit)
+                    : undefined
+                }
                 aria-invalid={priceOutOfRange ? true : undefined}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
               {priceOutOfRange && approval && (
                 <span className="mt-1 block text-xs text-red-600">
-                  Must be between {String(approval.minPricePerUnit)} and {String(approval.maxPricePerUnit)}.
+                  Must be between {money(approval.minPricePerUnit)} and {money(approval.maxPricePerUnit)}.
                 </span>
               )}
             </label>
@@ -997,7 +976,7 @@ function OpenSaleModal({
                 onChange={(e) =>
                   setTotalForSale(e.target.value.replace(/\D/g, ""))
                 }
-                aria-invalid={totalTooLarge || totalIsZero ? true : undefined}
+                aria-invalid={totalTooLarge || totalOverRoom || totalIsZero ? true : undefined}
                 className="mt-1 w-full rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none"
               />
               {maxUnits !== null && !priceOutOfRange && (
@@ -1007,6 +986,12 @@ function OpenSaleModal({
               )}
               {totalIsZero && (
                 <span className="mt-1 block text-xs text-red-600">Must be at least 1.</span>
+              )}
+              {room !== null && (
+                <span className={`mt-1 block text-xs ${totalOverRoom ? "text-red-600" : "text-slate-500"}`}>
+                  {formatTokens(room)} tokens can still be created in this class (the cap minus everything created, on sale or
+                  approved).
+                </span>
               )}
             </label>
             <label className="block sm:col-span-2">
@@ -1050,6 +1035,7 @@ function OpenSaleModal({
               total === null ||
               priceOutOfRange ||
               totalTooLarge ||
+              totalOverRoom ||
               totalIsZero ||
               startupTermsMissing ||
               startupTermsInvalid ||

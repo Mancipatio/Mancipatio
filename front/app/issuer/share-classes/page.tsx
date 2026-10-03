@@ -46,6 +46,8 @@ import { ShareTransferPanel } from "@/components/share-transfer-panel";
 import { SkeletonTable } from "@/components/skeleton";
 import { recordAudit } from "@/lib/supabase";
 import { useToast } from "@/lib/toast";
+import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
+import { useConversionTargets } from "@/lib/use-conversion-targets";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -98,6 +100,8 @@ export default function MyShareClassesPage() {
   const [me, setMe] = useState<Issuer | null>(null);
   const [myAssets, setMyAssets] = useState<Asset[]>([]);
   const [assetPdaMap, setAssetPdaMap] = useState<Map<string, Asset>>(new Map());
+  // The conversion marker (C2): labelled, never offered a mint.
+  const conversionTargets = useConversionTargets(data?.shareClasses);
   const [showAdd, setShowAdd] = useState(false);
   const [selectedSc, setSelectedSc] = useState<{
     sc: ShareClass;
@@ -235,11 +239,13 @@ export default function MyShareClassesPage() {
             <tbody className="divide-y divide-slate-100">
               {rows.map((sc, i) => {
                 const asset = assetPdaMap.get(sc.asset.toString());
-                const status = sc.supplyLocked
-                  ? "Locked"
-                  : sc.mintInitialized
-                    ? "Active"
-                    : "Pending mint";
+                const status = conversionTargets.has(classKey(sc))
+                  ? CONVERSION_TARGET_LABEL
+                  : sc.supplyLocked
+                    ? "Locked"
+                    : sc.mintInitialized
+                      ? "Active"
+                      : "Pending mint";
                 const isSelected =
                   selectedSc?.sc.classIndex === sc.classIndex &&
                   selectedSc?.asset.assetId === asset?.assetId;
@@ -266,6 +272,7 @@ export default function MyShareClassesPage() {
           sc={selectedSc.sc}
           asset={selectedSc.asset}
           scPda={selectedSc.scPda as Address}
+          conversionTarget={conversionTargets.has(classKey(selectedSc.sc))}
           onRefresh={refresh}
           onClose={() => setSelectedSc(null)}
         />
@@ -349,12 +356,15 @@ function ShareClassActions({
   sc,
   asset,
   scPda,
+  conversionTarget,
   onRefresh,
   onClose,
 }: {
   sc: ShareClass;
   asset: Asset;
   scPda: Address;
+  /** The conversion marker (C2): no mint is ever created for it. */
+  conversionTarget: boolean;
   onRefresh: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -479,7 +489,16 @@ function ShareClassActions({
         {/*
           Mint initialization and treasury minting require a current issuer capability or global Admin proof; the issuer always signs.
         */}
-        {!canMint && !sc.supplyLocked && (
+        {conversionTarget && !sc.mintInitialized && (
+          <div className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
+            <p className="font-medium text-slate-800">{CONVERSION_TARGET_LABEL}</p>
+            <p className="mt-1 text-[13px]">
+              Capped at 0: holders of your token convert into this class (into the company share itself). It never holds
+              tokens, so it has no mint — creating one would break your token&apos;s setup.
+            </p>
+          </div>
+        )}
+        {!conversionTarget && !canMint && !sc.supplyLocked && (
           <div className="w-full rounded-lg border border-slate-200 bg-slate-50 px-4 py-3 text-sm text-slate-600">
             {!sc.mintInitialized ? (
               <>
@@ -523,7 +542,7 @@ function ShareClassActions({
           </div>
         )}
 
-        {canMint && !sc.mintInitialized && (
+        {!conversionTarget && canMint && !sc.mintInitialized && (
           <button
             type="button"
             disabled={tx.isSending}

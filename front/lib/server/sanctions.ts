@@ -31,7 +31,10 @@
 // that never touches the site). Compliance then blocklists and claws back
 // (runbook). A wallet on the OFAC list but not yet on the on-chain
 // blocklist passes the program even after 8.3, so the after-the-fact
-// screen stays.
+// screen stays. Since D2 (2026-10-03) a buy also needs the platform link (the
+// Terms in force accepted): the pre-check requires it after a clear screen,
+// and the same alarm job flags a buyer without it (lib/server/
+// onchain-link-check.ts, a separate alert from a sanctions hit).
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
@@ -78,7 +81,24 @@ export interface SanctionsProvider {
   readonly name: string;
   screen(wallets: readonly string[], ctx: ScreeningContext): Promise<Map<string, SanctionsMatch[]>>;
   status(ctx: ScreeningContext): Promise<ProviderStatus>;
+  /**
+   * The list publication the last `screen` answered from (the screening
+   * evidence records it: lib/server/screening-evidence.ts). Optional: a
+   * provider without it is recorded by name only.
+   */
+  listVersion?(ctx: ScreeningContext): Promise<ListVersion | null>;
 }
+
+/** Which publication of a list a screen used: what a screening record cites. */
+export type ListVersion = {
+  provider: string;
+  source: string;
+  published_on: string | null;
+  /** SHA-256 of the list file loaded (0078 sanctions_list_state.sha256). */
+  sha256: string | null;
+  refreshed_at: string | null;
+  address_count: number | null;
+};
 
 export type ProviderStatus = {
   provider: string;
@@ -96,6 +116,7 @@ export type ProviderStatus = {
 
 type ListState = {
   published_on: string | null;
+  sha256?: string | null;
   refreshed_at: string | null;
   address_count: number | null;
   last_attempt_at: string | null;
@@ -117,7 +138,7 @@ async function loadSnapshot(sb: SupabaseClient, source: string, now: number): Pr
   if (cached && now - cached.at < SANCTIONS_CACHE_MS) return cached;
   const [state, rows] = await Promise.all([
     sb.from("sanctions_list_state")
-      .select("published_on, refreshed_at, address_count, last_attempt_at, last_status, last_error")
+      .select("published_on, sha256, refreshed_at, address_count, last_attempt_at, last_status, last_error")
       .eq("source", source)
       .maybeSingle(),
     sb.from("sanctions_addresses").select("address, currency, entry_uid, entry_name, programs").eq("source", source),
@@ -168,6 +189,15 @@ export function databaseListProvider(name: string, source: string, hitList: stri
         }]);
       }
       return out;
+    },
+    async listVersion({ sb, now }) {
+      // The snapshot `screen` just used (cached for SANCTIONS_CACHE_MS).
+      const s = (await loadSnapshot(sb, source, now)).state;
+      if (!s) return null;
+      return {
+        provider: name, source, published_on: s.published_on ?? null, sha256: s.sha256 ?? null,
+        refreshed_at: s.refreshed_at ?? null, address_count: s.address_count ?? null,
+      };
     },
     async status({ sb, now }) {
       let snapshot: Snapshot;
@@ -228,6 +258,8 @@ export type ScreeningResult = {
   hits: Map<string, SanctionsMatch[]>;
   /** Providers that could not answer (only when the screen does not fail closed). */
   unavailable: { provider: string; code: UnavailableCode }[];
+  /** The list publication each answering provider screened against (a provider without listVersion: its name only). */
+  lists: ListVersion[];
 };
 
 let lastWarning = 0;
@@ -249,7 +281,8 @@ export async function screenWallets(
   const valid = [...new Set(wallets.filter((w) => typeof w === "string" && isAddress(w)))];
   const hits = new Map<string, SanctionsMatch[]>();
   const unavailable: ScreeningResult["unavailable"] = [];
-  if (valid.length === 0) return { hits, unavailable };
+  const lists: ListVersion[] = [];
+  if (valid.length === 0) return { hits, unavailable, lists };
   for (const provider of providers) {
     let found: Map<string, SanctionsMatch[]>;
     try {
@@ -268,8 +301,10 @@ export async function screenWallets(
       continue;
     }
     for (const [wallet, matches] of found) hits.set(wallet, [...(hits.get(wallet) ?? []), ...matches]);
+    const version = provider.listVersion ? await provider.listVersion({ sb, now }).catch(() => null) : null;
+    lists.push(version ?? { provider: provider.name, source: provider.name, published_on: null, sha256: null, refreshed_at: null, address_count: null });
   }
-  return { hits, unavailable };
+  return { hits, unavailable, lists };
 }
 
 export type HitContext = {
@@ -335,22 +370,47 @@ export async function recordSanctionsHit(
 }
 
 /**
+ * Screens the wallets and raises the compliance alert of every hit (once per
+ * wallet); returns the wallets that matched. THROWS SiwsError(503) on
+ * mainnet when a provider cannot answer (screenWallets). The gate below
+ * refuses on any hit; "Send to wallets" (/api/compliance/screen-recipients)
+ * blocks only the rows that matched.
+ */
+export async function screenAndRaiseHits(sb: SupabaseClient, input: ScreeningInput): Promise<Set<string>> {
+  return (await screenAndRaise(sb, input)).blocked;
+}
+
+/**
+ * screenAndRaiseHits with the whole screen: the wallets that matched, the
+ * providers that could not answer (off mainnet only) and the list versions
+ * used — what a screening record keeps (lib/server/screening-evidence.ts).
+ */
+export async function screenAndRaise(
+  sb: SupabaseClient,
+  input: ScreeningInput,
+): Promise<{ blocked: Set<string>; result: ScreeningResult }> {
+  const network = detectNetwork();
+  const result = await screenWallets(sb, input.wallets.map((w) => w.wallet), { network });
+  const raised = new Set<string>();
+  for (const { wallet, role } of input.wallets) {
+    const matches = result.hits.get(wallet);
+    if (!matches || raised.has(wallet)) continue;
+    raised.add(wallet);
+    await raiseSanctionsHit(sb, wallet, matches, { route: input.route, role, txSignature: input.txSignature }, network);
+  }
+  return { blocked: raised, result };
+}
+
+/**
  * The route gate: refuses (403) when any screened wallet is on a sanctions
  * list, after raising its compliance alert; refuses (503) on mainnet when a
  * provider cannot answer. The signer's own hit says so; a counterparty's
  * gets the generic copy, which does not reveal their status.
  */
 export async function requireSanctionsClear(sb: SupabaseClient, input: ScreeningInput): Promise<void> {
-  const network = detectNetwork();
-  const { hits } = await screenWallets(sb, input.wallets.map((w) => w.wallet), { network });
+  const hits = await screenAndRaiseHits(sb, input);
   if (hits.size === 0) return;
-  let selfHit = false;
-  for (const { wallet, role } of input.wallets) {
-    const matches = hits.get(wallet);
-    if (!matches) continue;
-    if (role === "self") selfHit = true;
-    await raiseSanctionsHit(sb, wallet, matches, { route: input.route, role, txSignature: input.txSignature }, network);
-  }
+  const selfHit = input.wallets.some((w) => w.role === "self" && hits.has(w.wallet));
   throw new SiwsError(403, selfHit ? SCREENING_SELF_HIT : SCREENING_COUNTERPARTY_HIT);
 }
 

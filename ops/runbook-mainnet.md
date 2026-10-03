@@ -26,6 +26,7 @@ The tools live in `front/scripts/chain/` and run from `front/`:
 | `npm run chain:handover` | Ordered plan to move live roles to new keys, with each step's timelock (§19) | never |
 | `npm run chain:emergency` | Out-of-band pause, unpause, blocklist, hook mode and an issuer proceeds freeze with a Ledger or a keypair, no front and no database (§11) | only with `CHAIN_SEND=1` |
 | `npm run chain:accept` | The bootstrap steps a role key signs itself (A3, X3, X2, X1, S5c, S6) with that key's Ledger or keypair, no front, no SIWS (§5) | only with `CHAIN_SEND=1` |
+| `npm run chain:direct-buy` | **Devnet only** (refused on every other cluster, whatever `CHAIN_ALLOW_MAINNET` says): buys units of an Open sale by calling the program directly with a test key, no sign-in and no Terms, to verify the off-platform buy alarm (§15, "Buys by wallets not linked to the platform") | only with `CHAIN_SEND=1` |
 
 Every run writes one evidence file (`CHAIN_OUTPUT`, schema
 `mancipatio-chain-<tool>-v1`) even when it fails or is interrupted. Its
@@ -47,7 +48,7 @@ writes `<CHAIN_OUTPUT>.journal.jsonl`.
 | `CHAIN_SIGNER` | chain:emergency and chain:accept only, instead of `CHAIN_KEYPAIR`: `usb://ledger`, `usb://ledger?key=<n>` or `usb://ledger?key=<n>/<m>` (the Solana CLI's derivation paths). |
 | `CHAIN_CU_PRICE` | Micro-lamports per CU. Required when sending on mainnet; at most 2,000,000. |
 | `CHAIN_RPS` | Requests per second, default 2, at most 20. On the public devnet RPC use `1`: its `getProgramAccounts` limit fails an inventory at 2 (observed 2026-09-24). |
-| `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10, emergency 15, accept 15. |
+| `CHAIN_DEADLINE_MIN` | Internal abort deadline. Defaults: inventory 20, bootstrap 60, idl 120, squads-export 10, emergency 15, accept 15, direct-buy 10. |
 | `CHAIN_REHEARSAL_SIGNERS` | localnet/devnet only: `superAdmin=<file>,blocklistAuthority=<file>,kycAuthority=<file>`, so the CLI signs X1/X2/X3/S6 in a rehearsal. |
 | `CHAIN_RECOVER=1` | Resolves a leftover lock (see "Crash recovery"). Sends nothing. |
 | `CHAIN_STATE_DIR` | Lock directory; default `~/.mancipatio/chain`. Refused on mainnet unless it is the default (the lock only excludes runs that share its directory). |
@@ -64,7 +65,8 @@ mainnet only); `CHAIN_SITE_ORIGIN` (handover, wording only);
 `CHAIN_KYC_REGISTRY`, `CHAIN_ISSUER`, `CHAIN_FREEZE_REASON_SHA256`,
 `CHAIN_EMERGENCY_IDL_UNCHECKED=1`, `CHAIN_EMERGENCY_CLOSE_BOOTSTRAP=1`
 (emergency, §11); `CHAIN_ACCEPT_OP`,
-`CHAIN_ACCEPT_SIGNER` (accept, §5).
+`CHAIN_ACCEPT_SIGNER` (accept, §5); `CHAIN_BUY_SALE`, `CHAIN_BUY_UNITS`,
+`CHAIN_BUY_BUYER`, `CHAIN_BUY_TERMS` (direct-buy, devnet only, §15).
 
 The runners never read `.env*` files. Export the variables in the shell, for
 example from a small `set -a; . ~/mancipatio-mainnet/chain.env; set +a` file
@@ -2397,6 +2399,155 @@ UN lists, batch rescreening of existing holders, risk scoring; those need a
 provider (Chainalysis, TRM, …) plugged into `SANCTIONS_PROVIDERS`, and
 counsel decides whether the pilot needs them.
 
+**Distribution recipients ("Send to wallets", rehearsal 2026-10-03, no
+migration).** The issuer's direct transfers never pass a server, so the
+panel screens every recipient (`/api/compliance/screen-recipients`) and the
+server now **records each screen**: one `audit_events` row, category
+`compliance` (server-only: the unsigned `/api/audit` refuses it, so no
+browser can forge one), `ix_name = 'sanctions_screening'`, the share class
+as `target_label`, with each wallet's result (`clear`, `hit`, or
+`unscreened` off mainnet while the list could not answer), the list
+publication used (`list_version`: source, publish date, SHA-256 prefix of
+the file) and the run. A record that cannot be written refuses the screen
+(503). Right before signing, `/api/compliance/distribution-evidence` checks
+that **every** recipient of the run has a screening of that share class
+from the last **15 minutes** whose latest result is clear (`unscreened`
+passes only where the screen is not enforced), else 409 and the panel
+signs nothing; it writes one `distribution_screening_evidence` row (the
+evidence id). The panel takes the evidence again at plan time when it is
+older than 10 minutes, signs no group with a row whose evidence is older
+than 15, and every `share_class_distribution` audit row carries it per
+recipient (`metadata.recipients[].screening`: screening id, time, list
+version, result, evidence id; `screening_complete`). A sender who sends
+outside the site is not stopped by this; the alarm worker does not screen
+plain transfers either. Queries:
+- one wallet's screenings: `select created_at, actor_wallet, target_label,
+  metadata->>'list_version' as list_version, metadata->'results'->>'<wallet>'
+  as result from audit_events where category = 'compliance' and ix_name =
+  'sanctions_screening' and metadata->'results' ? '<wallet>' order by
+  created_at desc;`
+- a run's evidence: `select created_at, metadata->'recipients' from
+  audit_events where ix_name = 'distribution_screening_evidence' and
+  metadata->>'run_id' = '<run id>';`
+
+### Buys by wallets not linked to the platform (D2, 2026-10-03)
+
+Buying share tokens of an Open class needs no KYC, but it needs a wallet
+linked to the platform: connected and signed in on the site, the Terms in
+force accepted (a `tos_acceptances` row for the wallet and that version,
+written by the signed `/api/tos/accept`) and the sanctions screen passed.
+The site enforces this before the wallet opens: the Terms gate on the
+marketplace (fails closed on mainnet) and the sale page's pre-check
+`compliance/screen-wallet` (sanctions first, then the recorded acceptance:
+409 without it, 503 when it cannot be read, on mainnet; on devnet only with
+`TOS_SERVER_GATE=enforce`). The program cannot: an Open-class `buy` needs
+only the buyer's signature, and no program change is planned for it. A buy
+made by calling the program directly is not supported, and it is detected
+after the fact (`front/lib/server/onchain-link-check.ts`, no migration):
+
+- The alarm worker checks every finalized `buy` the indexer delivers,
+  top-level or through another program, Open or KYC-gated. If the buyer has
+  no acceptance of the Terms version in force, recorded by 2 minutes after
+  the buy's block time, it opens one alert per transaction and buyer:
+  source `onchain:unlinked-buy`, **high** on mainnet (medium elsewhere),
+  the wallet as subject, the transaction attached, AML (no system
+  category). The evidence lists each buy's sale, share class, mint and
+  units, plus `via_cpi`, `purchase_recorded`, `account_linked`,
+  `terms_version_required` and `terms_accepted` (the wallet's latest
+  acceptance, if any). The email shows the label and the time only.
+- Anyone can make such buys in any number (fresh wallets, several buyers in
+  one transaction), so the email is coalesced: a row is emailed only when
+  its wallet has no open or escalated `onchain:unlinked-buy` alert and no
+  other `onchain:unlinked-buy` row is still pending in the outbox. The rest
+  are written with `notify_state = 'skipped'` and
+  `evidence.not_emailed = {reason, alert_id}` (`wallet-alert-open` or
+  `alert-pending`, and the row whose email covers it). They are open alerts
+  like any other: listed in `/admin/compliance`, blocking the passport.
+  One email can therefore stand for many buys: review every open
+  `onchain:unlinked-buy` row (Operations query below), not only the one
+  the email names. A burst puts about one row per digest into the outbox,
+  so it never holds back other alerts.
+- The 2 minutes cover a wallet that accepts the Terms right after buying,
+  and clock skew. Until then the job waits
+  (`onchain_event_jobs.last_error = 'LINK_GRACE'`), then decides once; it
+  never stays pending long enough to trip the `event-queue` lag check (5
+  minutes). A purchase record alone does not clear the alert. A read or
+  write that fails retries the job (`DB_UNAVAILABLE`), never decides.
+- The version in force is the deployed one, except for a buy before its
+  date or before anyone had accepted it (the minutes before a Terms update
+  was deployed, a gap-scan buy processed after it): then any version the
+  wallet accepted counts, and `terms_version_required` says `any`.
+- An open alert blocks passport issuance for that wallet until it is
+  resolved (so it is reviewed before a passport for conversion, D3).
+
+Response:
+1. Open the alert in `/admin/compliance`. `via_cpi` true, or no purchase
+   record: the buy did not come through the site. `purchase_recorded` true
+   without an acceptance: a site buy whose acceptance was not recorded
+   (devnet: the Terms gate fails open when the database is unreachable).
+   Ask the holder to accept the Terms and resolve with that reason. A
+   KYC-gated class's buyer holds a passport: usually resolve with the
+   reason too.
+2. Decide whether to block **[legal: counsel's criteria]**. Open-class
+   units are bearer instruments and move without KYC: if you block, do it
+   at once. Units moved out before the block stay out of reach.
+3. Block: "Prepare the blocklist entry" opens `/admin/blocklist` with the
+   wallet filled in; the BlocklistAuthority reviews and signs
+   `add_to_blocklist` (out of band: `chain:emergency` `block`, §11).
+4. Claw back: "Claw back <mint>" opens `/admin/kyc` with the holder and the
+   share class filled in (one link per mint the buys name). An Admin runs
+   the preflight (path `clawback_blocklisted_holder`; the panel opens the
+   class's quarantine vault if it is missing), checks the amount and signs.
+5. Resolve the alert with the reason and the signatures (this also lifts
+   the passport block). Record it in the case file.
+
+Expected false positives: issuer or Operator wallets that buy without having
+accepted the Terms (have them accept first); on devnet, a site buy while the
+Terms gate failed open (no server check there unless
+`TOS_SERVER_GATE=enforce`). On mainnet the pre-check refuses a site buy
+without the current version, also from a sale page opened before a Terms
+update.
+
+Devnet verification (the alarm cron enabled): a UI buy by a wallet that
+accepted the Terms raises nothing; a script buy from a fresh wallet shows
+`LINK_GRACE`, then within about 3 minutes a medium alert with the evidence
+above; the same wallet accepting at T + 60 s on a second buy raises nothing;
+`select signature, status, last_error, attempts from onchain_event_jobs where
+last_error = 'LINK_GRACE';` shows nothing pending for longer than 4 minutes.
+
+The script buy is `npm run chain:direct-buy` (from `front/`, **devnet
+only**: `CHAIN_NETWORK` must be `devnet`, any other cluster is refused
+before `CHAIN_ALLOW_MAINNET` is read, and the RPC is pinned to the devnet
+genesis). It builds the sale page's own instructions
+(`lib/purchase-builder`: the buyer's two token accounts, then `buy` with its
+gate accounts and receiver tail) and sends them with a test key, without the
+site's sign-in, Terms gate, sanctions pre-check or purchase record:
+
+1. Make a fresh test key that has never signed in on the devnet site
+   (`solana-keygen new --no-bip39-passphrase -o /tmp/direct-buy.json`,
+   outside the repository), fund it with devnet SOL and with the sale's
+   payment mint (devnet USDC or the test mint), at least
+   `units × price_per_unit` base units.
+2. Optional, for the exact sale-page transaction (with the document
+   acceptance memo): save `GET https://<devnet site>/api/launchpad/terms?sale=<sale>`
+   to a file and set `CHAIN_BUY_TERMS` to it. Without it the buy is sent
+   bare, as a script would; the alarm treats both alike.
+3. Dry run (nothing is signed or sent; it probes the sale, builds, simulates
+   and prints the plan digest):
+   `CHAIN_NETWORK=devnet CHAIN_RPC_URL=<devnet RPC> CHAIN_OUTPUT=/tmp/direct-buy-1.json
+   CHAIN_BUY_SALE=<sale PDA> CHAIN_BUY_UNITS=1 CHAIN_BUY_BUYER=<test key address>
+   npm run chain:direct-buy`. Status `awaiting`.
+4. Send: the same variables with a new `CHAIN_OUTPUT`, plus `CHAIN_SEND=1`,
+   `CHAIN_CONFIRM_PLAN=<digest>` and `CHAIN_KEYPAIR=/tmp/direct-buy.json`
+   (it must be `CHAIN_BUY_BUYER`). The evidence file records
+   `buySignature`; the transaction is waited for until finalized.
+5. Expect, with the alarm cron enabled: the buy's job shows `LINK_GRACE`,
+   then within about 3 minutes one open `onchain:unlinked-buy` alert
+   (medium on devnet) for the test key in `/admin/compliance`, with
+   `purchase_recorded: false` and `terms_accepted: null` in its evidence;
+   the Operations query above lists it. Resolve it with the reason "devnet
+   verification of the off-platform buy alarm".
+
 ### Automatic EUR rate (0080)
 
 The EUR value of USDC that sale approvals, adoptions, the treasury floor and
@@ -2642,6 +2793,7 @@ instead), and `fx-expiring` is about a manual rate only.
 | `onchain:role-change-pending` (`role-change-pending`, high) | The "timelock running" incident: a staged Admin grant, Super Admin rotation or upgrade-authority recovery is live (the evidence counts each kind and names the next eta). Expected: nothing to do, it clears once each one is executed, cancelled or expired. Otherwise as the row above. |
 | `onchain:issuer-freeze` (critical) | A freeze: confirm it with the Admin who froze (the reason's SHA-256 is in the evidence and on `/admin/issuers`; the text is in the audit log); follow the freeze SOP (O-9). An unfreeze: only the Super Admin can; confirm the decision. |
 | `onchain:frozen-issuer-activity` (high) | A frozen issuer's authority wallet traded or moved units (the evidence names the issuer, its role and the instructions). Check the transaction and decide at once whether the BA blocks the wallet (§11 "Issuer proceeds freeze", O-9); record the decision in the freeze's case file. |
+| `onchain:unlinked-buy` (high on mainnet, wallet as subject, AML) | A buy by a wallet without the Terms in force accepted by 2 minutes after it (D2). Follow §15 "Buys by wallets not linked to the platform": check the evidence, decide **[legal]**, block (BlocklistAuthority), claw back (Admin), resolve with the reason. |
 | `onchain:bootstrap-open` (`bootstrap-open`, critical, mainnet) | Bit 0x80 is open while an emergency area is clear: add_admin and the Super Admin rotation run without their 48 hours (typically a rollback to rc.x that unpaused, §10). Or it is still open, every area paused, 72 hours after the Platform's first indexed transaction (`initialize_platform`; the evidence has `opened_at` and `hours_open`): Day D is over and S5c was forgotten (K1.11). Either way the SA closes it at once on `/admin/platform` ("Close bootstrap window", `set_pause_flags(0, 0x80)`); then review every Admin grant and rotation since the rollback or since Day D (§11). The half of the rule that needs the role map (bit 7 still open once the final SA holds the platform, sooner than 72 hours) is checked by `chain:inventory` only. |
 | `onchain:payout-modules` (`payout-modules`, critical, mainnet) and `onchain:pause` "Payout modules switched ON" | Bit 0x40 must stay set on mainnet (D2). Unexpected: set it again (`set_pause_flags(0x40, 0)`, any Admin) and treat the Super Admin key as compromised, §11. |
 | Admin actions that move money or tokens: `onchain:vault-vote`, `onchain:yield-route`, `onchain:milestone`, `onchain:proposal`, `onchain:supply-lock`, `onchain:custody-vault`, `onchain:sale-approval` | Compare with the signer matrix and the admin decision behind it (the request or approval on the admin pages). A short voting window (critical or high) is checked with the issuer. Unexpected: that Admin key is compromised, §11 ("An Admin key compromised or lost"). |
@@ -2656,6 +2808,8 @@ instead), and `fx-expiring` is about a manual rate only.
   `select public.clear_capacity_hold(public.deployment_network(), '<subject>', '<ref>');`
   then resolve the related alerts.
 - Delivery is at-least-once: a digest that timed out may arrive twice.
+- Buys by wallets not linked to the platform (D2), newest first:
+  `select created_at, severity, wallet, tx_signature, status, notify_state, evidence->'buys' from compliance_alerts where source = 'onchain:unlinked-buy' order by created_at desc limit 20;`
 
 ### Rollback
 
@@ -2737,7 +2891,9 @@ instead), and `fx-expiring` is about a manual rate only.
 - Minimal-format on-chain alarms (holder or issuer related) carry only their
   own evidence fields, never the decoded arguments (no holder wallet or
   amount in clawback evidence).
-- The digest reads critical and high rows first, then fills the rest.
+- The digest reads critical rows first, then high, then fills the rest
+  (oldest first within each): a backlog of high rows never holds back a
+  newer critical one.
 - `report_incident` reopens only an alert the system resolved; a person's
   resolution or dismissal stays, and a refail opens a new alert.
 - `FX_LOCK_DRIFT` runs in `bookingFlags`, i.e. on every booking path;

@@ -42,7 +42,34 @@ export async function buildDocumentedPurchase(
     terms: SaleDocumentTerms;
   },
 ) {
-  const { buyer, sale, terms, amount } = input;
+  const { terms } = input;
+  const built = await buildSaleBuy(rpc, input);
+  if (terms.sale !== built.salePda || terms.asset !== built.asset)
+    throw new Error(
+      "The accepted document does not belong to this sale and asset",
+    );
+  return planDocumentedPurchase(
+    built.preparation,
+    [documentTermsMemo(terms), built.buy],
+    input.buyer,
+  );
+}
+/**
+ * The sale's `buy` exactly as the site sends it (the two token-account
+ * preparations, then `buy` with its gate accounts and the receiver tail),
+ * after verifying the sale's share class, asset and KYB-verified issuer on
+ * chain. buildDocumentedPurchase adds the document acceptance memo; the
+ * devnet-only chain:direct-buy tool sends it as a script would.
+ */
+export async function buildSaleBuy(
+  rpc: Rpc,
+  input: {
+    buyer: TransactionSigner;
+    sale: Sale;
+    amount: bigint;
+  },
+): Promise<{ preparation: Instruction[]; buy: Instruction; salePda: string; asset: string }> {
+  const { buyer, sale, amount } = input;
   const options = {
     commitment: "finalized" as const,
     abortSignal: AbortSignal.timeout(12_000),
@@ -65,10 +92,6 @@ export async function buildDocumentedPurchase(
     issuer.data.kybStatus !== KybStatus.Verified
   )
     throw new Error("The sale issuer must have verified KYB before a purchase");
-  if (terms.sale !== salePda || terms.asset !== share.data.asset)
-    throw new Error(
-      "The accepted document does not belong to this sale and asset",
-    );
   const paymentProgram = await fetchPlainPaymentMintTokenProgram(
     rpc,
     sale.paymentMint,
@@ -127,11 +150,7 @@ export async function buildDocumentedPurchase(
   });
   const tail = await kycReceiverMetas(rpc, sale.mint, buyer.address);
   const buy = { ...base, accounts: [...base.accounts, ...tail] };
-  return planDocumentedPurchase(
-    preparation,
-    [documentTermsMemo(terms), buy],
-    buyer,
-  );
+  return { preparation, buy, salePda, asset: share.data.asset };
 }
 /** Pure, tested against actual encoded v0 messages including both compute-budget instructions. */
 export function planDocumentedPurchase(

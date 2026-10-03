@@ -8,6 +8,7 @@ import squadsConfig from "@/scripts/chain/squads-export.config";
 import e2eConfig from "@/scripts/chain/e2e.config";
 import emergencyConfig from "@/scripts/chain/emergency.config";
 import acceptConfig from "@/scripts/chain/accept.config";
+import directBuyConfig from "@/scripts/chain/direct-buy.config";
 import handoverConfig from "@/scripts/chain/handover.config";
 import { runTool } from "@/scripts/chain/lib/context";
 import { inventoryTool } from "@/scripts/chain/lib/inventory";
@@ -23,6 +24,7 @@ const configs: Record<ChainTool, typeof bootstrapConfig> = {
   handover: handoverConfig,
   emergency: emergencyConfig,
   accept: acceptConfig,
+  "direct-buy": directBuyConfig,
 };
 
 describe("chain runner configs (§3.8)", () => {

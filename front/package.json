@@ -20,6 +20,7 @@
     "chain:handover": "vitest run --config scripts/chain/handover.config.ts --reporter=verbose",
     "chain:emergency": "vitest run --config scripts/chain/emergency.config.ts --reporter=verbose",
     "chain:accept": "vitest run --config scripts/chain/accept.config.ts --reporter=verbose",
+    "chain:direct-buy": "vitest run --config scripts/chain/direct-buy.config.ts --reporter=verbose",
     "sim": "vitest run --config scripts/sim/sim.config.ts --reporter=verbose",
     "ops:reconcile-bench": "vitest run --config scripts/ops/reconcile-bench.config.ts --reporter=verbose"
   },
@@ -28,7 +29,9 @@
     "@solana/client": "^1.7.0",
     "@solana/kit": "^5.5.1",
     "@solana/react-hooks": "^1.4.1",
+    "@solana/wallet-standard-features": "^1.3.0",
     "@supabase/supabase-js": "^2.106.2",
+    "@wallet-standard/app": "^1.1.0",
     "google-auth-library": "^10.9.1",
     "next": "16.3.8",
     "nodemailer": "^10.0.11",

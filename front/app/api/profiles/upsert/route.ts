@@ -22,6 +22,11 @@
 //     admin-only too, and recording one needs the SUPER admin; the server
 //     stamps offering_exemption_recorded_by / _at and writes an audit event.
 //
+// `fields.sale_request` (a public-sale request, lib/server/sale-requests) is
+// written only by /api/sale-requests/*: a patch never sets it, and a patch
+// that writes `fields` keeps the stored request (the tokenize flow's "Save
+// details" sends `fields` whole).
+//
 // Client wrapper: upsertAssetProfile() in lib/asset-profiles.ts
 // (action "profiles.upsert"). Fail closed on any RPC failure (503).
 
@@ -33,6 +38,7 @@ import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
 import { requireDocumentVersion } from "@/lib/server/document-versions";
 import { requireProfileOwner } from "@/lib/server/profile-read";
+import { protectSaleRequest } from "@/lib/server/sale-requests";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
 const WHITEPAPER_STATUSES = new Set([
@@ -84,9 +90,13 @@ function changesSscApproval(
  */
 const EXEMPTION_FIELDS = new Set(["offering_exemption_ref", "offering_exemption_reason"]);
 
-/** Server-controlled fields — silently stripped from any patch. */
+/**
+ * Server-controlled fields — silently stripped from any patch. `created_by`
+ * is stamped from the verified wallet like the issuer profile's: first
+ * writer wins (kept once set; a row without one gets this writer).
+ */
 const STRIPPED_FIELDS = new Set([
-  "network", "created_at", "updated_at", "whitepaper_version_id", "ssc_decision_version_id", "whitepaper_published_at",
+  "network", "created_by", "created_at", "updated_at", "whitepaper_version_id", "ssc_decision_version_id", "whitepaper_published_at",
   "offering_exemption_recorded_by", "offering_exemption_recorded_at",
 ]);
 
@@ -228,10 +238,17 @@ export async function POST(request: Request) {
     }
 
     const sb = getSupabaseAdmin();
-    const current = await sb.from("asset_profiles").select("whitepaper_path,whitepaper_sha256,whitepaper_status,whitepaper_version_id,whitepaper_published_at,ssc_decision_ref,ssc_decision_doc_path,ssc_decision_doc_sha256,ssc_decision_version_id")
+    const current = await sb.from("asset_profiles").select("fields,whitepaper_path,whitepaper_sha256,whitepaper_status,whitepaper_version_id,whitepaper_published_at,ssc_decision_ref,ssc_decision_doc_path,ssc_decision_doc_sha256,ssc_decision_version_id,created_by")
       .eq("asset_pda",assetPda).eq("network",detectNetwork()).maybeSingle();
     if(current.error) throw new SiwsError(503,"Current document version unavailable");
     const existing = current.data;
+    // created_by: first writer wins (see STRIPPED_FIELDS).
+    cleaned.created_by = (typeof existing?.created_by === "string" && existing.created_by) || wallet;
+    // The public-sale request is the sale-requests routes' alone (see header).
+    if (isPlainObject(cleaned.fields)) {
+      const storedFields: unknown = existing?.fields;
+      cleaned.fields = protectSaleRequest(cleaned.fields, isPlainObject(storedFields) ? storedFields : null);
+    }
     const changedFile = cleaned.whitepaper_path !== undefined && cleaned.whitepaper_path !== existing?.whitepaper_path;
     if(changedFile && existing?.whitepaper_status === "ssc_approved" && (!admin || !cleaned.ssc_decision_ref)) {
       cleaned.whitepaper_status="draft";

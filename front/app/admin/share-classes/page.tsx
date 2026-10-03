@@ -59,6 +59,8 @@ import { RequireRole } from "@/components/require-role";
 import { useRole } from "@/lib/auth";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
+import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
+import { useConversionTargets } from "@/lib/use-conversion-targets";
 
 const TOKEN_2022_ADDRESS =
   "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb" as Address;
@@ -136,6 +138,8 @@ function ShareClassesOps() {
   // ShareClass PDA (string) → ShareClass — lets the table resolve a
   // `convertible_to` target address back to a human-readable class.
   const [scByPda, setScByPda] = useState<Map<string, ShareClass>>(new Map());
+  // The conversion marker (C2): labelled, never offered a mint.
+  const conversionTargets = useConversionTargets(data?.shareClasses);
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState<StatusFilter>("all");
   const [selectedIdx, setSelectedIdx] = useState<number | null>(null);
@@ -330,11 +334,20 @@ function ShareClassesOps() {
                       <ConvertibleTargetLabel sc={sc} scByPda={scByPda} />
                     </td>
                     <td className="px-4 py-3">
-                      <span
-                        className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[s]}`}
-                      >
-                        {STATUS_LABEL[s]}
-                      </span>
+                      {conversionTargets.has(classKey(sc)) ? (
+                        <span
+                          title="Capped at 0: the class another class of this asset converts into. It never holds tokens and needs no mint."
+                          className="inline-flex rounded-full border border-slate-300 bg-slate-100 px-2 py-0.5 text-[11px] font-semibold text-slate-700"
+                        >
+                          {CONVERSION_TARGET_LABEL}
+                        </span>
+                      ) : (
+                        <span
+                          className={`inline-flex rounded-full border px-2 py-0.5 text-[11px] font-semibold ${STATUS_BADGE[s]}`}
+                        >
+                          {STATUS_LABEL[s]}
+                        </span>
+                      )}
                     </td>
                     <td className="px-4 py-3 text-right">
                       <span className="text-xs text-slate-500">
@@ -356,6 +369,7 @@ function ShareClassesOps() {
           asset={selectedRow.asset}
           allClasses={data.shareClasses}
           scByPda={scByPda}
+          conversionTarget={conversionTargets.has(classKey(selectedRow.sc))}
           onRefresh={refresh}
           onClose={() => setSelectedIdx(null)}
         />
@@ -423,6 +437,7 @@ function ShareClassDetail({
   asset,
   allClasses,
   scByPda,
+  conversionTarget,
   onRefresh,
   onClose,
 }: {
@@ -430,6 +445,8 @@ function ShareClassDetail({
   asset: Asset | undefined;
   allClasses: ShareClass[];
   scByPda: Map<string, ShareClass>;
+  /** The conversion marker (C2): no mint is ever created for it. */
+  conversionTarget: boolean;
   onRefresh: () => Promise<void>;
   onClose: () => void;
 }) {
@@ -1192,7 +1209,13 @@ function ShareClassDetail({
           Lifecycle actions
         </p>
 
-        {!sc.mintInitialized && (
+        {!sc.mintInitialized && conversionTarget && (
+          <p className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+            {CONVERSION_TARGET_LABEL}: capped at 0, the class another class of this asset converts into. It never holds
+            tokens, so it has no mint (creating one would break the issuer&apos;s tokenize flow).
+          </p>
+        )}
+        {!sc.mintInitialized && !conversionTarget && (
           <button
             type="button"
             disabled={tx.isSending}

@@ -13,7 +13,7 @@ import {
   getSaleApprovalDiscriminatorBytes,
   type SaleApproval,
 } from "@/lib/generated/asset_registry";
-import { signedFetch } from "@/lib/siws-client";
+import { signedFetch, type SignedFetchInteractive } from "@/lib/siws-client";
 
 type Rpc = SolanaClient["runtime"]["rpc"];
 
@@ -34,7 +34,7 @@ function b64ToBytes(b64: string): Uint8Array {
   return out;
 }
 
-async function listApprovals(rpc: Rpc, offset: number, key: Address): Promise<SaleApprovalAccount[]> {
+async function listApprovals(rpc: Rpc, offset: number | null, key: Address | null): Promise<SaleApprovalAccount[]> {
   const discriminator = getBase58Decoder().decode(getSaleApprovalDiscriminatorBytes()) as Base58EncodedBytes;
   const rows = await rpc.getProgramAccounts(ASSET_REGISTRY_PROGRAM_ADDRESS, {
     encoding: "base64",
@@ -42,7 +42,9 @@ async function listApprovals(rpc: Rpc, offset: number, key: Address): Promise<Sa
     filters: [
       { dataSize: BigInt(SALE_APPROVAL_SIZE) },
       { memcmp: { offset: BigInt(0), bytes: discriminator, encoding: "base58" } },
-      { memcmp: { offset: BigInt(offset), bytes: key as unknown as Base58EncodedBytes, encoding: "base58" } },
+      ...(offset !== null && key !== null
+        ? [{ memcmp: { offset: BigInt(offset), bytes: key as unknown as Base58EncodedBytes, encoding: "base58" as const } }]
+        : []),
     ],
   }).send();
   const decoder = getSaleApprovalDecoder();
@@ -60,6 +62,15 @@ export function listIssuerSaleApprovals(rpc: Rpc, issuerPda: Address) {
 /** Every live approval of one share class. */
 export function listShareClassSaleApprovals(rpc: Rpc, shareClass: Address) {
   return listApprovals(rpc, SHARE_CLASS_OFFSET, shareClass);
+}
+
+/**
+ * Every SaleApproval account of every issuer (expired ones included):
+ * open_sale and revoke_sale_approval close them, so each one listed is
+ * unused. The pre-clear check reads this before 0x02 is cleared.
+ */
+export function listAllSaleApprovals(rpc: Rpc) {
+  return listApprovals(rpc, null, null);
 }
 
 export function isApprovalLive(a: Pick<SaleApproval, "expiresAt">, nowSecs = Math.floor(Date.now() / 1000)) {
@@ -204,8 +215,28 @@ export const listSaleReservations = (
   session: Session,
   filter: { application_id: string } | { share_class: string } | { manual: true } | { adopted_treasury: true },
   live = false,
+  opts: { interactive?: SignedFetchInteractive } = {},
 ) =>
-  signedFetch<ReservationRow[]>(session, "/api/sale-approvals/list", "saleApprovals.list", { ...filter, ...(live ? { live } : {}) });
+  signedFetch<ReservationRow[]>(session, "/api/sale-approvals/list", "saleApprovals.list", { ...filter, ...(live ? { live } : {}) }, opts);
+
+/**
+ * Units of a class's treasury-mint reservations still `reserved` (reserved,
+ * not yet booked — minted or not): the distribution's room subtracts them
+ * so two mints never claim the same tokens. `except` leaves out a
+ * reservation already counted elsewhere (this run's own, once its mint is
+ * confirmed and part of lifetime_minted).
+ */
+export function reservedTreasuryUnits(rows: readonly ReservationRow[], except: ReadonlySet<string> = new Set()): bigint {
+  let units = BigInt(0);
+  for (const r of rows) {
+    if (r.kind !== "treasury_mint" || r.status !== "reserved" || except.has(r.id)) continue;
+    const u = r.amount_units;
+    if (u === null || u === undefined) continue;
+    const text = String(u);
+    if (/^\d+$/.test(text)) units += BigInt(text);
+  }
+  return units;
+}
 
 export const saleCapacityFor = (session: Session, shareClass: string) =>
   signedFetch<{
@@ -230,6 +261,15 @@ export const revalueTreasuryMint = (session: Session, reservationId: string, amo
 
 export const readFxRates = (session: Session) =>
   signedFetch<FxRateView[]>(session, "/api/admin-config/fx-rates", "adminConfig.fxRatesRead", {});
+
+/** EUR per one whole USDC, from the rate that counts now; null when missing or stale (reservations refuse it). */
+export function freshUsdcEurRate(rates: readonly FxRateView[], usdcMint: string | null): number | null {
+  if (!usdcMint) return null;
+  const row = rates.find((r) => r.payment_mint === usdcMint);
+  if (!row || row.fresh === false) return null;
+  const rate = Number(row.eur_per_token);
+  return Number.isFinite(rate) && rate > 0 ? rate : null;
+}
 
 export const writeFxRate = (
   session: Session,

@@ -3,8 +3,9 @@
 // the routes under test make (select / insert / update / upsert / delete,
 // eq / neq / in / not in / lt / lte / gt / gte, order / limit, single /
 // maybeSingle, `.select()` after a write, head counts) plus `rpc(name, args)`
-// through registered handlers. Filters are applied, ordering and limits are
-// not (tests keep tables small).
+// through registered handlers and opt-in per-table insert defaults
+// (`defaults`). Filters are applied, ordering and limits are not (tests keep
+// tables small).
 
 export type Row = Record<string, unknown>;
 
@@ -21,6 +22,8 @@ export type MemorySupabase = {
   missingColumns: Record<string, string[]>;
   /** Runs right before an update is applied (race simulation). */
   beforeUpdate: ((table: string) => void) | null;
+  /** Column defaults an insert fills when the row leaves them out (like `created_at default now()`), per table. */
+  defaults: Record<string, () => Row>;
   client: { from: (table: string) => unknown; rpc: (name: string, args?: Record<string, unknown>) => unknown };
   rows: (table: string) => Row[];
   reset: () => void;
@@ -36,6 +39,7 @@ export function memorySupabase(): MemorySupabase {
     readErrorCodes: {},
     missingColumns: {},
     beforeUpdate: null,
+    defaults: {},
     client: { from: (table: string) => from(table), rpc: (name: string, args: Record<string, unknown> = {}) => rpc(name, args) },
     rows: (table) => (db.tables[table] ??= []),
     reset: () => {
@@ -46,6 +50,7 @@ export function memorySupabase(): MemorySupabase {
       db.readErrorCodes = {};
       db.missingColumns = {};
       db.beforeUpdate = null;
+      db.defaults = {};
     },
   };
 
@@ -89,7 +94,11 @@ export function memorySupabase(): MemorySupabase {
         return { data: null, error: { message: "read failed", code: db.readErrorCodes[table] ?? "XX000" } };
       }
       if (op === "insert" || op === "upsert") {
-        const rows = (Array.isArray(payload) ? payload : [payload ?? {}]).map((r) => ({ id: r.id ?? `row-${nextId++}`, ...r }));
+        const rows = (Array.isArray(payload) ? payload : [payload ?? {}]).map((r) => ({
+          id: r.id ?? `row-${nextId++}`,
+          ...(db.defaults[table]?.() ?? {}),
+          ...r,
+        }));
         db.rows(table).push(...rows);
         return { data: returning ? (single ? rows[0] : rows) : null, error: null };
       }
@@ -109,7 +118,15 @@ export function memorySupabase(): MemorySupabase {
       const copies = matched.map((r) => ({ ...r }));
       return single ? { data: copies[0] ?? null, error: null } : { data: copies, error: null };
     };
-    const cmp = (c: string, test: (a: unknown) => boolean) => (filters.push((r) => test(r[c])), b);
+    // A JSON path ("fields->sale_request->>status") reads into the row's jsonb like PostgREST (->> as text).
+    const valueOf = (r: Row, c: string): unknown => {
+      if (!c.includes("->")) return r[c];
+      const [head, ...rest] = c.split(/->>?/);
+      let v: unknown = r[head];
+      for (const key of rest) v = v && typeof v === "object" ? (v as Record<string, unknown>)[key] : undefined;
+      return c.includes("->>") && v !== undefined && v !== null && typeof v !== "string" ? JSON.stringify(v) : v;
+    };
+    const cmp = (c: string, test: (a: unknown) => boolean) => (filters.push((r) => test(valueOf(r, c))), b);
     const b: Record<string, unknown> = {};
     Object.assign(b, {
       select: (_cols?: string, opts?: { head?: boolean }) => {

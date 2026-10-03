@@ -5,6 +5,14 @@ import type {
   TransactionPrepareRequest,
   WalletSession,
 } from "@solana/client";
+import {
+  compileTransaction,
+  getBase58Decoder,
+  getBase64EncodedWireTransaction,
+  getTransactionDecoder,
+  getTransactionEncoder,
+  type Transaction,
+} from "@solana/kit";
 import { createNetworkVerifier } from "@/lib/network-identity";
 import { detectNetwork, type Network } from "@/lib/network";
 import { features } from "@/lib/features";
@@ -13,7 +21,9 @@ import { requestTransactionWalletPolicy, transactionWalletPolicyRevision, Transa
 import { assertSiteWritable } from "@/lib/maintenance";
 import { priceForRequest } from "@/lib/priority-fee";
 import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
-import { clearWalletChange } from "@/lib/wallet-changes";
+import { clearWalletChange, describeWalletChange, noteWalletChange } from "@/lib/wallet-changes";
+import { walletChain } from "@/lib/wallet-chain";
+import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
 import { assertInstructionsInScope, assertInstructionsNotPaused } from "@/lib/pause-gate";
 import { assertGateAccountsUnset } from "@/lib/proceeds-gate";
 import {
@@ -26,6 +36,166 @@ import {
   type SimulatableMessage,
   type SimulationVerdict,
 } from "@/lib/simulation-gate";
+
+/** One signed transaction of prepareAndSendAll, before it is broadcast. */
+export type BatchSigned = { index: number; signature: string; lastValidBlockHeight: bigint };
+
+/** What became of one transaction of prepareAndSendAll. */
+export type BatchOutcome = {
+  index: number;
+  /** null when it was never signed. */
+  signature: string | null;
+  lastValidBlockHeight: bigint | null;
+  /** The node accepted it (preflight passed); it still has to be confirmed. */
+  sent: boolean;
+  error: unknown;
+};
+
+export type BatchSendOptions = {
+  /**
+   * Every transaction of the prompt, signed, BEFORE any of them is broadcast
+   * (the caller's journal: signature and last valid block height). Throwing
+   * stops the broadcast: nothing is sent.
+   */
+  onSigned: (signed: readonly BatchSigned[]) => void | Promise<void>;
+  /** "per-transaction": one prompt each from the start (after a refused batch, or by choice). */
+  mode?: "auto" | "per-transaction";
+  /** The wallet is about to be asked. */
+  onPrompt?: (info: { mode: "batch" | "per-transaction"; index: number; count: number }) => void;
+};
+
+export type BatchSendResult = {
+  outcomes: BatchOutcome[];
+  /** Wallet prompts used for the transactions (the policy check adds none within a session). */
+  prompts: number;
+  mode: "batch" | "per-transaction";
+  /** Why the one-prompt path was not used, or null. */
+  fallbackReason: string | null;
+};
+
+export type BatchSender = {
+  /**
+   * Independent transactions (no one needs another's result), every gate of
+   * prepareAndSend applied to EACH — network, maintenance, pilot scope and
+   * pause, proceeds gate, priority fee, the simulation gate — then one
+   * wallet-policy check, ONE wallet prompt for all of them (Wallet Standard
+   * `solana:signTransaction` with N inputs, one shared blockhash), each
+   * returned message compared byte for byte with the one built, the
+   * caller's journal written, and every transaction sent right away with
+   * preflight. Falls back to one prompt per transaction when the wallet
+   * cannot sign them together (no feature, fewer outputs, a changed message,
+   * any error but the user's refusal) or when signing outlasted the shared
+   * blockhash (BATCH_EXPIRY_MARGIN_BLOCKS); a refusal stops everything. Each
+   * transaction signed on its own is compared with the one built too, and a
+   * changed one is refused (SignedTransactionChangedError), never sent.
+   */
+  prepareAndSendAll(requests: readonly TransactionPrepareAndSendRequest[], options: BatchSendOptions): Promise<BatchSendResult>;
+};
+
+const batchSenders = new WeakMap<object, BatchSender>();
+
+/** The batch sender of a client made by withVerifiedTransactions (the app's), or null. */
+export function getBatchSender(client: SolanaClient): BatchSender | null {
+  return batchSenders.get(client) ?? null;
+}
+
+function sameBytes(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+/**
+ * A transaction signed on its own (prepareAndSendAll's per-transaction path)
+ * whose message is not the one built: it is never journalled or broadcast.
+ * The journal's expiry height belongs to the blockhash Manci built with; a
+ * wallet that swapped the blockhash (or added a fee or an instruction) would
+ * make the resume declare the transaction expired while it can still land,
+ * and its rows would be sent twice.
+ */
+export class SignedTransactionChangedError extends Error {
+  constructor(readonly change: string) {
+    super(
+      `${change.charAt(0).toUpperCase()}${change.slice(1)}, so it was not sent. A distribution sends only the transactions Manci built and saved, so that nothing is ever sent twice. Turn off the wallet's own changes (for example its priority fee setting) or use another wallet, then continue the run.`,
+    );
+    this.name = "SignedTransactionChangedError";
+  }
+}
+
+/**
+ * One signed copy checked against what was built: the same message bytes
+ * (the change is noted) and a 64-byte signature for every signer the message
+ * names. Throws BatchSigningUnsupportedError.
+ */
+function checkSigned(original: Transaction, signed: Transaction, label: string): Transaction {
+  if (!sameBytes(signed.messageBytes, original.messageBytes)) {
+    const change = describeWalletChange(original.messageBytes, signed.messageBytes) ?? "the wallet changed the transaction";
+    noteWalletChange(change);
+    throw new BatchSigningUnsupportedError(`${change} (${label})`);
+  }
+  for (const signer of Object.keys(original.signatures)) {
+    const signature = signed.signatures[signer as keyof typeof signed.signatures];
+    if (!signature || signature.length !== 64) {
+      throw new BatchSigningUnsupportedError(`${label} came back without its signature`);
+    }
+  }
+  return signed;
+}
+
+/**
+ * The wallet's signed copies checked against what was built: the same
+ * message bytes (a wallet that changed one — a fee, a blockhash — makes the
+ * batch fall back, the change noted), and a 64-byte signature for every
+ * signer the message names. The network verifies the signatures themselves
+ * at preflight.
+ */
+export function verifySignedBatch(built: readonly Transaction[], signedBytes: readonly Uint8Array[]): Transaction[] {
+  const decoder = getTransactionDecoder();
+  return built.map((original, i) => {
+    let signed: Transaction;
+    try {
+      signed = decoder.decode(signedBytes[i]);
+    } catch (cause) {
+      throw new BatchSigningUnsupportedError(`transaction ${i + 1} came back unreadable`, cause);
+    }
+    return checkSigned(original, signed, `transaction ${i + 1}`);
+  });
+}
+
+/**
+ * The same check for one transaction signed on its own, where nothing is
+ * left to fall back to: a changed message (or a missing signature) is
+ * refused with SignedTransactionChangedError.
+ */
+export function verifySignedTransaction(original: Transaction, signed: Transaction, label: string): Transaction {
+  try {
+    return checkSigned(original, signed, label);
+  } catch (err) {
+    if (!(err instanceof BatchSigningUnsupportedError)) throw err;
+    const change = describeWalletChange(original.messageBytes, signed.messageBytes);
+    throw new SignedTransactionChangedError(change ? `${change} (${label})` : `the wallet returned ${label} without its signature`);
+  }
+}
+
+/**
+ * Blocks before the shared blockhash's last valid block height that a batch
+ * must still have when the wallet hands it back: broadcasting up to 8
+ * transactions and landing them takes a few seconds (~0.4 s per block). A
+ * Ledger confirming each transaction on the device can take longer than the
+ * blockhash lives; the batch then falls back to one prompt per transaction
+ * with a fresh blockhash each, before anything is journalled or sent.
+ */
+export const BATCH_EXPIRY_MARGIN_BLOCKS = BigInt(30);
+
+/** The fallback reason (in BatchSendResult.fallbackReason) when signing outlasted the shared blockhash. */
+export const SIGNING_TOO_SLOW = "signing took too long: the transactions would expire before they land";
+
+/** The transaction id: the fee payer's (first) signature, base58. */
+export function transactionId(tx: Transaction): string {
+  const first = Object.values(tx.signatures)[0];
+  if (!first) throw new Error("The transaction is not signed.");
+  return getBase58Decoder().decode(first);
+}
 
 /** A send this client made less than this long ago is waited for before the next one is simulated. */
 export const SETTLE_WINDOW_MS = 60_000;
@@ -334,9 +504,156 @@ export function withVerifiedTransactions(
       return result;
     },
   });
-  return {
+
+  async function broadcast(context: Context, tx: Transaction) {
+    await context.rpc
+      .sendTransaction(getBase64EncodedWireTransaction(tx), { encoding: "base64", preflightCommitment: "confirmed", skipPreflight: false })
+      .send();
+  }
+
+  async function prepareAndSendAll(
+    requests: readonly TransactionPrepareAndSendRequest[],
+    options: BatchSendOptions,
+  ): Promise<BatchSendResult> {
+    if (requests.length === 0) return { outcomes: [], prompts: 0, mode: "batch", fallbackReason: null };
+    clearWalletChange();
+    const context = capture();
+    await assertNetwork(context);
+    // Every gate of prepareAndSend, for each transaction, before any prompt.
+    const gated: { request: TransactionPrepareAndSendRequest; placeholder: boolean }[] = [];
+    for (const input of requests) {
+      checkAuthority(input, context);
+      assertInstructionsInScope(input.instructions, network);
+      await assertInstructionsNotPaused(context.rpc, input.instructions);
+      await assertGateAccountsUnset(context.rpc, input.instructions);
+      context.assertCurrent();
+      gated.push(withLeadingComputeUnitLimit(await withFee(input, context)));
+    }
+    await writable(context);
+    // Once, before the batch (the treasury mint before it, for example). Not
+    // between the batch's own sends: they are independent and pre-signed.
+    await settlePreviousSend(context);
+    const tuned: TransactionPrepareRequest[] = [];
+    for (const { request, placeholder } of gated) {
+      const verdict = await gateRequest(request, context);
+      const { prepareTransaction: _prepared, ...rest } = placeholder ? withSimulatedComputeUnitLimit(request, verdict) : request;
+      void _prepared;
+      tuned.push(rest);
+    }
+    await requestPolicy(context);
+
+    const outcomes: BatchOutcome[] = requests.map((_, index) => ({
+      index,
+      signature: null,
+      lastValidBlockHeight: null,
+      sent: false,
+      error: null,
+    }));
+    let fallbackReason: string | null = null;
+    let lastSent: string | null = null;
+
+    if (options.mode !== "per-transaction") {
+      // One blockhash for all of them: they are signed together and sent at once.
+      const lifetime = (await context.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
+      context.assertCurrent();
+      const prepared: TransactionPrepared[] = [];
+      for (const request of tuned) {
+        const p = await base.prepare(guardTransactionGraph({ ...request, lifetime }, context.session, context.assertCurrent));
+        context.assertCurrent();
+        checkAuthority(p, context);
+        prepared.push(p);
+      }
+      const built = prepared.map((p) => compileTransaction(p.message));
+      try {
+        options.onPrompt?.({ mode: "batch", index: 0, count: built.length });
+        const signedBytes = await signTransactionsWithWallet({
+          session: context.session,
+          transactions: built.map((t) => Uint8Array.from(getTransactionEncoder().encode(t))),
+          version: prepared[0].version,
+          chain: walletChain(network),
+          assertCurrent: context.assertCurrent,
+        });
+        const signed = verifySignedBatch(built, signedBytes);
+        // Signing N transactions can outlast the one blockhash (a Ledger confirms
+        // each on the device): nothing is journalled or sent then, and the batch
+        // falls back to fresh-blockhash signing one by one.
+        const height = BigInt(await context.rpc.getBlockHeight({ commitment: "confirmed" }).send());
+        context.assertCurrent();
+        if (height + BATCH_EXPIRY_MARGIN_BLOCKS >= lifetime.lastValidBlockHeight) {
+          throw new BatchSigningUnsupportedError(SIGNING_TOO_SLOW);
+        }
+        const journal = signed.map((tx, index) => ({
+          index,
+          signature: transactionId(tx),
+          lastValidBlockHeight: lifetime.lastValidBlockHeight,
+        }));
+        // Journal first: the signatures are known before the network can see them.
+        await options.onSigned(journal);
+        for (const [index, tx] of signed.entries()) {
+          outcomes[index] = { ...outcomes[index], signature: journal[index].signature, lastValidBlockHeight: lifetime.lastValidBlockHeight };
+          try {
+            await broadcast(context, tx);
+            outcomes[index].sent = true;
+            lastSent = journal[index].signature;
+          } catch (error) {
+            outcomes[index].error = error;
+          }
+        }
+        if (lastSent) rememberSend(context, lastSent);
+        return { outcomes, prompts: 1, mode: "batch", fallbackReason: null };
+      } catch (err) {
+        if (!(err instanceof BatchSigningUnsupportedError)) throw err;
+        fallbackReason = err.message;
+      }
+    }
+
+    // One prompt per transaction (a fresh blockhash each: signing may take a while).
+    let prompts = 0;
+    for (let index = 0; index < tuned.length; index++) {
+      context.assertCurrent();
+      const lifetime = (await context.rpc.getLatestBlockhash({ commitment: "confirmed" }).send()).value;
+      const p = await base.prepare(guardTransactionGraph({ ...tuned[index], lifetime }, context.session, context.assertCurrent));
+      context.assertCurrent();
+      checkAuthority(p, context);
+      let signed: Transaction;
+      try {
+        options.onPrompt?.({ mode: "per-transaction", index, count: tuned.length });
+        prompts += 1;
+        // The SDK keeps the wallet's message bytes: compared with the one built
+        // (S6), so the journal's expiry height is that of the signed blockhash.
+        signed = verifySignedTransaction(
+          compileTransaction(p.message),
+          await base.sign(p),
+          `transaction ${index + 1} of ${tuned.length}`,
+        );
+        context.assertCurrent();
+      } catch (error) {
+        // Nothing sent yet: the caller sees the wallet's own error.
+        if (!lastSent) throw error;
+        // Some were sent: report the rest as not sent and stop (a refusal stops here).
+        for (let rest = index; rest < tuned.length; rest++) outcomes[rest].error = error;
+        break;
+      }
+      const signature = transactionId(signed);
+      await options.onSigned([{ index, signature, lastValidBlockHeight: lifetime.lastValidBlockHeight }]);
+      outcomes[index] = { ...outcomes[index], signature, lastValidBlockHeight: lifetime.lastValidBlockHeight };
+      try {
+        await broadcast(context, signed);
+        outcomes[index].sent = true;
+        lastSent = signature;
+      } catch (error) {
+        outcomes[index].error = error;
+      }
+    }
+    if (lastSent) rememberSend(context, lastSent);
+    return { outcomes, prompts, mode: "per-transaction", fallbackReason };
+  }
+
+  const verified: SolanaClient = {
     ...client,
     transaction,
     helpers: Object.freeze({ ...client.helpers, transaction }),
   };
+  batchSenders.set(verified, Object.freeze({ prepareAndSendAll }));
+  return verified;
 }

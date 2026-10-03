@@ -16,6 +16,7 @@ import {
   type ShareClass,
 } from "@/lib/generated/asset_registry";
 import { findOfferPda, findSalePda, findShareClassPda } from "@/lib/pdas";
+import { classKey, conversionTargetKeys } from "@/lib/conversion-target";
 
 export interface MarketSale {
   sale: Sale;
@@ -110,6 +111,8 @@ export async function buildMarketOverview(
     }),
   );
   const rowByAddress = new Map(rows.map((row) => [row.address, row]));
+  // A conversion target (the marker class, capped at 0) is no class anyone can hold: not listed, not counted.
+  const conversionTargets = await conversionTargetKeys(data.shareClasses);
   const classEntries = await Promise.all(
     data.shareClasses.map(async (shareClass) => {
       const address = await findShareClassPda(shareClass.asset, shareClass.classIndex);
@@ -118,6 +121,7 @@ export async function buildMarketOverview(
   );
   const classByAddress = new Map(classEntries);
   for (const [, shareClass] of classEntries) {
+    if (conversionTargets.has(classKey(shareClass))) continue;
     rowByAddress.get(shareClass.asset)?.shareClasses.push(shareClass);
   }
 
@@ -191,7 +195,7 @@ export async function buildMarketOverview(
       activeAssets: data.assets.filter((asset) => asset.status === AssetStatus.Active).length,
       issuers: data.issuers.length,
       verifiedIssuers: data.issuers.filter((issuer) => issuer.kybStatus === KybStatus.Verified).length,
-      shareClasses: data.shareClasses.length,
+      shareClasses: data.shareClasses.length - conversionTargets.size,
       availableSales: sales.length,
       fundedOffers: offers.length,
     },

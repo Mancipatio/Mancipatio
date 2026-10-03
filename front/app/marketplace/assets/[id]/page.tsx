@@ -38,6 +38,8 @@ import {
   type PublicAssetProfile,
 } from "@/lib/asset-profiles";
 import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
+import { visibleClassCount, visibleClasses } from "@/lib/conversion-target";
+import { useConversionTargets } from "@/lib/use-conversion-targets";
 
 export default function AssetDetailPage({
   params,
@@ -53,6 +55,8 @@ export default function AssetDetailPage({
   // The route param is the asset PDA (public identity). A bare assetId is
   // honoured only when unique — the program allows the same id per issuer.
   const [lookup, setLookup] = useState<AssetLookup<Asset> | null>(null);
+  // The conversion marker (class capped at 0, the target of a conversion) is no class a buyer can hold.
+  const conversionTargets = useConversionTargets(data?.shareClasses);
 
   useEffect(() => {
     let cancelled = false;
@@ -205,7 +209,7 @@ export default function AssetDetailPage({
 
       <AssetProfileBlock profile={profile} />
 
-      <ShareClassesBlock asset={asset} data={data} />
+      <ShareClassesBlock asset={asset} data={data} hidden={conversionTargets} />
 
       {/* Asset metadata */}
       <section className="mt-10">
@@ -214,7 +218,10 @@ export default function AssetDetailPage({
         </h2>
         <dl className="mt-4 grid gap-3 rounded-[3px] border border-mx-rule bg-white p-6 text-sm sm:grid-cols-2">
           <Field label="Status" value={ASSET_STATUS_LABEL[asset.status] ?? "?"} />
-          <Field label="Share classes" value={String(asset.shareClassesCount)} />
+          <Field
+            label="Share classes"
+            value={String(lookup.kind === "found" ? visibleClassCount(lookup.address, asset.shareClassesCount, conversionTargets) : asset.shareClassesCount)}
+          />
           <Field
             label="Allow P2P"
             value={asset.jurisdictionRules.allowP2p ? "Yes" : "No"}
@@ -407,9 +414,12 @@ function AssetProfileBlock({ profile }: { profile: PublicAssetProfile | null }) 
 function ShareClassesBlock({
   asset,
   data,
+  hidden,
 }: {
   asset: Asset;
   data: NetworkData;
+  /** Conversion targets (lib/conversion-target): never listed. */
+  hidden: ReadonlySet<string>;
 }) {
   // Derive this asset's PDA so we can match share classes by sc.asset.
   const [assetPda, setAssetPda] = useState<string>("");
@@ -435,8 +445,9 @@ function ShareClassesBlock({
     };
   }, [asset]);
 
-  const shareClasses = data.shareClasses.filter(
-    (sc) => sc.asset.toString() === assetPda,
+  const shareClasses = visibleClasses(
+    data.shareClasses.filter((sc) => sc.asset.toString() === assetPda),
+    hidden,
   );
   const activeSales = data.sales.filter(
     (s) =>

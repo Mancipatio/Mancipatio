@@ -1,4 +1,5 @@
 import type { AssetProfile } from "@/lib/asset-profiles";
+import { companyFiguresFrom } from "@/lib/distribution-rows";
 
 // Deliberately excludes arbitrary fields JSON, internal bookkeeping, draft
 // document paths, private contracts, storage/custody locations and contact data.
@@ -20,7 +21,24 @@ export const PUBLIC_ASSET_PROFILE_FIELDS = [
   "ssc_decision_ref", "ssc_decision_doc_path", "ssc_decision_doc_sha256", "ssc_decision_version_id",
 ] as const satisfies readonly (keyof AssetProfile)[];
 
-export type PublicAssetProfile = Pick<AssetProfile, (typeof PUBLIC_ASSET_PROFILE_FIELDS)[number]> & { spv_name: string | null };
+/**
+ * One more column the public reader selects: the tokenize flow's figures
+ * (`fields.tokenize`), read ONLY to derive `token_percent_e4` below — never
+ * returned (the rest of `fields` is never selected).
+ */
+export const PUBLIC_TOKENIZE_SELECT = "tokenize:fields->tokenize";
+
+export type PublicAssetProfile = Pick<AssetProfile, (typeof PUBLIC_ASSET_PROFILE_FIELDS)[number]> & {
+  spv_name: string | null;
+  /**
+   * The share of the company ONE token is, in 1/10,000 of a percent ("10" =
+   * 0.001 %), from the tokenize flow's figures when they are consistent
+   * (lib/distribution-rows companyFiguresFrom) — the same figure the token's
+   * name and summary already state. The buy page shows "N tokens = X % of
+   * the company" with it. null without the figures.
+   */
+  token_percent_e4: string | null;
+};
 
 const DOCUMENT_FIELDS = ["whitepaper_path", "whitepaper_url", "whitepaper_sha256", "whitepaper_version_id", "ssc_decision_version_id",
   "whitepaper_published_at", "ssc_decision_ref", "ssc_decision_doc_path",
@@ -49,5 +67,6 @@ export function projectPublicAssetProfile(row: Record<string, unknown>): PublicA
     }
   }
   out.spv_name = null;
+  out.token_percent_e4 = companyFiguresFrom(row.tokenize)?.tokenE4.toString() ?? null;
   return out as PublicAssetProfile;
 }

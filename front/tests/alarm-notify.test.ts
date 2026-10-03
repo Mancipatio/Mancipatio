@@ -123,6 +123,22 @@ describe("notifyPendingAlerts", () => {
     expect(sent[0]).toMatchObject({ id: "c1", severity: "critical" });
   });
 
+  it("critical before high: a backlog of older high rows never holds back a newer critical one", async () => {
+    // e.g. a burst of high on-chain alerts, then an admin grant (critical) a minute later.
+    const box = outbox([
+      ...Array.from({ length: 40 }, () => row({ severity: "high", source: "onchain:custody-authority" })),
+      row({ severity: "medium" }),
+      row({ severity: "critical", id: "c1", source: "onchain:admin-grant" }),
+    ]);
+    const result = await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);
+    expect(result).toMatchObject({ status: "sent", count: DIGEST_LIMIT });
+    const sent = box.finishes[0].p_rows;
+    expect(sent).toHaveLength(DIGEST_LIMIT);
+    expect(sent[0]).toEqual({ id: "c1", severity: "critical" });
+    expect(sent.slice(1).every((r) => r.severity === "high")).toBe(true);
+    expect((smtp.sent[0] as { subject: string }).subject).toBe("[Manci devnet] 1 critical, 24 high");
+  });
+
   it("sends one digest of at most 25 rows, never reading evidence, and marks them sent", async () => {
     const box = outbox(Array.from({ length: 30 }, () => row()));
     const result = await notifyPendingAlerts(Date.now() + 10_000, undefined, box.sb);

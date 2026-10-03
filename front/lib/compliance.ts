@@ -1,8 +1,9 @@
 "use client";
 
 import type { WalletSession } from "@solana/client";
-import { signedFetch } from "@/lib/siws-client";
+import { signedFetch, type SignedFetchInteractive } from "@/lib/siws-client";
 import { notifyAdminBadges } from "@/lib/admin-badges-events";
+import { parseScreeningEvidence, type ScreeningEvidence } from "@/lib/distribution-screening";
 
 export type AlertSeverity = "low" | "medium" | "high" | "critical";
 export type AlertStatus = "open" | "dismissed" | "escalated" | "resolved";
@@ -191,7 +192,96 @@ export async function screenOwnWallet(session: WalletSession | null | undefined)
   await signedFetch<{ clear: boolean }>(session, "/api/compliance/screen-wallet", "compliance.screenWallet", {});
 }
 
+/** Most wallets one /api/compliance/screen-recipients request may carry. */
+export const SCREEN_RECIPIENTS_CHUNK = 100;
+
+/**
+ * The issuer screens the recipients of a distribution ("Send to wallets")
+ * against the sanctions lists before anything is signed (a session read).
+ * Returns the wallets that matched (each gets its compliance alert; the
+ * answer names no list). The server records every screen (the evidence
+ * distributionEvidence checks); `runId` names the run it is for. Throws while
+ * the screen is unavailable on mainnet (503), the record cannot be written
+ * (503) or the caller may not send this class: the caller sends nothing.
+ * `interactive: false` asks only within an existing wallet session.
+ */
+export async function screenRecipients(
+  session: WalletSession | null | undefined,
+  input: { shareClass: string; wallets: readonly string[]; runId?: string | null },
+  opts: { interactive?: SignedFetchInteractive } = {},
+): Promise<Set<string>> {
+  const unique = [...new Set(input.wallets)];
+  const blocked = new Set<string>();
+  for (let i = 0; i < unique.length; i += SCREEN_RECIPIENTS_CHUNK) {
+    const data = await signedFetch<{ blocked: string[] }>(
+      session,
+      "/api/compliance/screen-recipients",
+      "compliance.screenRecipients",
+      {
+        share_class: input.shareClass,
+        wallets: unique.slice(i, i + SCREEN_RECIPIENTS_CHUNK),
+        ...(input.runId ? { run_id: input.runId } : {}),
+      },
+      opts,
+    );
+    if (!data || !Array.isArray(data.blocked)) throw new Error("Malformed screening response");
+    for (const w of data.blocked) blocked.add(w);
+  }
+  return blocked;
+}
+
+/**
+ * The run's screening evidence, right before the sender signs: the server
+ * checks that every recipient has a clear screening from the last 15 minutes
+ * (the records screenRecipients left) and records which one vouches for each
+ * (lib/distribution-screening.ts). Returns it per recipient. Throws (409)
+ * when a recipient has none — screen again — or the records are unavailable
+ * (503): the caller signs nothing.
+ */
+export async function distributionEvidence(
+  session: WalletSession | null | undefined,
+  input: { shareClass: string; runId: string; wallets: readonly string[] },
+): Promise<ScreeningEvidence> {
+  const unique = [...new Set(input.wallets)];
+  const evidence: ScreeningEvidence = {};
+  for (let i = 0; i < unique.length; i += SCREEN_RECIPIENTS_CHUNK) {
+    const chunk = unique.slice(i, i + SCREEN_RECIPIENTS_CHUNK);
+    const data = await signedFetch<{ evidence_id: string; recipients: unknown }>(
+      session,
+      "/api/compliance/distribution-evidence",
+      "compliance.distributionEvidence",
+      { share_class: input.shareClass, run_id: input.runId, wallets: chunk },
+    );
+    const parsed = parseScreeningEvidence(data?.recipients);
+    if (chunk.some((w) => !parsed[w])) throw new Error("Malformed screening evidence response");
+    Object.assign(evidence, parsed);
+  }
+  return evidence;
+}
+
 /** A compliance alert raised by the wallet screen (lib/server/sanctions.ts). */
 export function isScreeningHit(alert: Pick<ComplianceAlert, "evidence" | "wallet">): boolean {
   return !!alert.wallet && (alert.evidence as { screening?: unknown } | null)?.screening === "wallet-address";
+}
+
+// ── Buys by wallets not linked to the platform (D2, 2026-10-03) ─────────────
+
+/** The source of the alarm worker's alert (lib/server/onchain-link-check.ts). */
+export const UNLINKED_BUY_SOURCE = "onchain:unlinked-buy";
+
+const BASE58_ADDRESS = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
+
+/** A buy by a wallet without the Terms in force accepted (the wallet is the subject). */
+export function isUnlinkedBuy(alert: Pick<ComplianceAlert, "source" | "wallet">): boolean {
+  return alert.source === UNLINKED_BUY_SOURCE && !!alert.wallet && BASE58_ADDRESS.test(alert.wallet);
+}
+
+/** The share-class mints the alert's buys name (evidence.buys[].mint), each once; junk is dropped. */
+export function unlinkedBuyMints(alert: Pick<ComplianceAlert, "evidence">): string[] {
+  const buys = (alert.evidence as { buys?: unknown } | null)?.buys;
+  if (!Array.isArray(buys)) return [];
+  const mints = buys
+    .map((b) => (b && typeof b === "object" ? (b as { mint?: unknown }).mint : null))
+    .filter((m): m is string => typeof m === "string" && BASE58_ADDRESS.test(m));
+  return [...new Set(mints)];
 }

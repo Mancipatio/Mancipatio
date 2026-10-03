@@ -1,5 +1,5 @@
 import { describe,expect,it } from "vitest";
-import { purchaseQuote,paymentTokenLabel } from "@/lib/purchase-quote";
+import { purchaseQuote,paymentTokenLabel,tokenCountQuote } from "@/lib/purchase-quote";
 import { parseCommitmentTotals,UNKNOWN_COMMITMENTS } from "@/lib/commitment-totals";
 describe("exact purchase budget",()=>{
   it("does not round up the token budget or lose large integer precision",()=>{
@@ -15,6 +15,24 @@ describe("exact purchase budget",()=>{
     const mint="4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU";
     expect(paymentTokenLabel(mint,"devnet")).toBe("test USDC");
     expect(paymentTokenLabel(mint,"mainnet")).toBe("payment tokens");
+  });
+});
+describe("buyer enters a token count (Mature sale)",()=>{
+  it("prices whole tokens exactly and says the share of the company",()=>{
+    // 2.5 USDC per token, 0.001 % per token (tokenize figures: 5,000 tokens = 5 %).
+    expect(tokenCountQuote("100",BigInt(2_500_000),BigInt(1_000),BigInt(10))).toEqual({units:BigInt(100),cost:BigInt(250_000_000),overRemaining:false,percent:"0.1"});
+    expect(tokenCountQuote(" 1 ",BigInt(2_500_000),BigInt(1_000),null)).toEqual({units:BigInt(1),cost:BigInt(2_500_000),overRemaining:false,percent:null});
+    // Past what the sale has left: flagged, never silently cut.
+    expect(tokenCountQuote("1001",BigInt(1),BigInt(1_000),null)?.overRemaining).toBe(true);
+    // More than the whole company is a bound, never a figure.
+    expect(tokenCountQuote("100001",BigInt(1),BigInt(200_000),BigInt(10))?.percent).toBe("> 100");
+  });
+  it.each(["0","1.5","1,000","-1","abc","","18446744073709551616"])("refuses %s (whole tokens only)",input=>{
+    expect(tokenCountQuote(input,BigInt(1),BigInt(10),null)).toBeNull();
+  });
+  it("refuses a cost past u64 and a zero price",()=>{
+    expect(tokenCountQuote("18446744073709551615",BigInt(2),BigInt(1),null)).toBeNull();
+    expect(tokenCountQuote("1",BigInt(0),BigInt(1),null)).toBeNull();
   });
 });
 describe("honest aggregate states",()=>{

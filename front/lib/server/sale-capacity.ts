@@ -1236,15 +1236,29 @@ async function reconcileTreasuryMints(sb: SupabaseClient, signal: AbortSignal, c
   }
 }
 
-/** One reservation's next step from chain state; returns "complete" once nothing is left to do. */
-async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSignal): Promise<"complete" | "pending"> {
+/**
+ * What one reconcile step left: nothing to do (complete), only waiting for
+ * the sale — approved and not opened yet, or open and not closed yet —
+ * which is no error (waiting), or pending for another reason (an alert, a
+ * read that lags, a refused booking).
+ */
+export type ReconcileOutcome = "complete" | "waiting" | "pending";
+
+/** Whether a booking result only waits for its sale to close (consumed, the sale not closed, nothing refused or grown). */
+function waitsForClose(done: BookResult & { grew?: boolean }, sale: Sale): boolean {
+  return done.status === "consumed" && sale.status !== SaleStatus.Closed && !done.book_error && !done.grew;
+}
+
+/** One reservation's next step from chain state; "complete" once nothing is left to do. */
+async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSignal): Promise<ReconcileOutcome> {
   const now = Date.now();
   if (r.status === "consumed") {
     const sale = await fetchSale(r.sale_pda!, "finalized", signal);
     if (!sale) return "pending";
     // The issue date comes from the sale's ledger job (book_sale_reservation v2).
     const done = await applySale(sb, r, sale, signal);
-    return done.status === "booked" || done.status === "released" ? "complete" : "pending";
+    if (done.status === "booked" || done.status === "released") return "complete";
+    return waitsForClose(done, sale) ? "waiting" : "pending";
   }
   // reserved
   if (!r.chain_confirmed_at && now - Date.parse(r.created_at) < CONFIRM_GRACE_MS) return "pending";
@@ -1266,7 +1280,8 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
       await releaseReservation(sb, r.id, "expired", "retry-worker", signal);
       return "complete";
     }
-    return "pending";
+    // Approved, matching, not opened yet: nothing is wrong, the sale is just not open.
+    return "waiting";
   }
   // The approval account is gone: consumed by open_sale, revoked, or never created.
   if (sale) {
@@ -1278,7 +1293,8 @@ async function reconcileOne(sb: SupabaseClient, r: Reservation, signal: AbortSig
     const finalized = await fetchSale(r.sale_pda!, "finalized", signal);
     if (!finalized) return "pending";
     const done = await applySale(sb, r, finalized, signal);
-    return done.status === "booked" ? "complete" : "pending";
+    if (done.status === "booked") return "complete";
+    return waitsForClose(done, finalized) ? "waiting" : "pending";
   }
   // A late landing after this release is caught by the orphan scan (adopted back).
   await releaseReservation(sb, r.id, r.chain_confirmed_at ? "revoked" : "tx_failed", "retry-worker", signal);
@@ -1320,11 +1336,21 @@ export async function reconcileSaleCapacity(limit = 10, deadlineMs = Date.now() 
   for (const row of ((data ?? []) as Reservation[]).filter((r) => r.kind === "sale")) {
     if (signal.aborted || Date.now() >= deadlineMs) break;
     try {
-      if ((await reconcileOne(sb, row, signal)) === "complete") counts.complete++;
+      const outcome = await reconcileOne(sb, row, signal);
+      if (outcome === "complete") counts.complete++;
       else {
         counts.pending++;
+        const touched = new Date().toISOString();
+        // A row that only waits for its sale is in no error: an earlier worker
+        // error or note (its alert stays in audit_events and system_alerts) no
+        // longer describes it. Cleared only while unchanged since it was read,
+        // so a note this run wrote (SALE_GREW, an adoption) stays.
+        if (outcome === "waiting" && row.last_error) {
+          await sb.from("sale_capacity_reservations").update({ last_error: null, updated_at: touched })
+            .eq("id", row.id).eq("last_error", row.last_error).abortSignal(signal);
+        }
         // Rotate: touch the row so the next batch starts with others.
-        await sb.from("sale_capacity_reservations").update({ updated_at: new Date().toISOString() }).eq("id", row.id).abortSignal(signal);
+        await sb.from("sale_capacity_reservations").update({ updated_at: touched }).eq("id", row.id).abortSignal(signal);
       }
     } catch (err) {
       if (signal.aborted) break;
