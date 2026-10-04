@@ -335,16 +335,23 @@ export async function readTokenizeState(rpc: Rpc, assetPda: Address): Promise<To
 /**
  * The issuer treasury's balance of `mint`, exact: 0 when the treasury has no
  * token account (nothing was ever created into it, or it was emptied and
- * closed — an account can only be closed empty), null only when it cannot
- * be read or is not the owner's account of this mint.
+ * closed — an account can only be closed empty), null when it is not the
+ * owner's account of this mint. THROWS when the RPC cannot answer, so a
+ * caller can retry a 429 (lib/rpc-retry withRpcReadRetry, the tokenize
+ * checklist); readTreasuryBalance is its null-on-failure form.
  */
+export async function fetchTreasuryBalance(rpc: Rpc, owner: Address, mint: Address): Promise<bigint | null> {
+  const [ata] = await findAssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_2022_PROGRAM });
+  const account = await fetchMaybeToken(rpc, ata, { commitment: "confirmed" });
+  if (!account.exists) return BigInt(0);
+  if (account.data.mint !== mint || account.data.owner !== owner) return null;
+  return account.data.amount;
+}
+
+/** fetchTreasuryBalance, with null also when it cannot be read. */
 export async function readTreasuryBalance(rpc: Rpc, owner: Address, mint: Address): Promise<bigint | null> {
   try {
-    const [ata] = await findAssociatedTokenPda({ owner, mint, tokenProgram: TOKEN_2022_PROGRAM });
-    const account = await fetchMaybeToken(rpc, ata, { commitment: "confirmed" });
-    if (!account.exists) return BigInt(0);
-    if (account.data.mint !== mint || account.data.owner !== owner) return null;
-    return account.data.amount;
+    return await fetchTreasuryBalance(rpc, owner, mint);
   } catch {
     return null;
   }

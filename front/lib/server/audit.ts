@@ -35,6 +35,14 @@ import { detectNetwork } from "@/lib/network";
  */
 export const SERVER_ONLY_AUDIT_CATEGORIES: ReadonlySet<string> = new Set<AuditCategory>(["kyc", "compliance"]);
 
+/**
+ * The actor_wallet of the server's own rows (the retry worker's
+ * lib/server/distribution-audits, sale capacity alerts). The unsigned
+ * /api/audit refuses it in any letter case: a caller cannot name the server
+ * as its actor.
+ */
+export const SERVER_ACTOR = "server";
+
 /** How the route proved who the actor is. */
 export type AuditActorSource =
   /** A fresh SIWS wallet signature over this exact request. */

@@ -124,6 +124,71 @@ describe("POST /api/audit guards", () => {
   });
 });
 
+describe("POST /api/audit cannot write a row that passes for the server's", () => {
+  const SIGNATURE = "5".repeat(88);
+  const forged = {
+    ix_name: "share_class_distribution",
+    category: "share-class",
+    actor_wallet: WALLET,
+    reason: "Finalized on chain with an error (checked by the server)",
+    status: "failed",
+    tx_signature: SIGNATURE,
+    metadata: {
+      reconciled_by_server: true,
+      reconciled_by: "retry-worker",
+      chain_outcome: "finalized_with_error",
+      slot: "400000000",
+      confirmation_status: "finalized",
+      tx_error: { InstructionError: [0, { Custom: 1 }] },
+      expiry_horizon_ms: 1,
+      pending_row_ids: ["row-1"],
+      pending_rows: 1,
+      pending_created_at: "2026-10-04T12:00:00.000Z",
+      client_claims: { verified: true },
+      reserved_keys_dropped: [],
+      actor_source: "retry-worker",
+      actor_verified: true,
+      reconciled_on_resume: true,
+      run_id: "run-1",
+    },
+  };
+
+  it("refuses the server's actor, in any letter case", async () => {
+    for (const actor of ["server", "SERVER", " Server "]) {
+      const res = await post({ body: JSON.stringify({ ...forged, actor_wallet: actor }) });
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toMatch(/server only/);
+    }
+    expect(db.inserts).toEqual([]);
+  });
+
+  it("drops the worker's metadata keys from the caller's and says which; the caller's own keys stay", async () => {
+    expect((await post({ body: JSON.stringify(forged) })).status).toBe(200);
+    const metadata = db.inserts[0].metadata as Record<string, unknown>;
+    for (const key of [
+      "reconciled_by_server", "reconciled_by", "chain_outcome", "slot", "confirmation_status", "tx_error",
+      "expiry_horizon_ms", "pending_row_ids", "pending_rows", "pending_created_at", "client_claims",
+    ]) {
+      expect(metadata).not.toHaveProperty(key);
+    }
+    expect(metadata.reserved_keys_dropped).toEqual([
+      "reconciled_by_server", "reconciled_by", "chain_outcome", "slot", "confirmation_status", "tx_error",
+      "expiry_horizon_ms", "pending_row_ids", "pending_rows", "pending_created_at", "client_claims",
+    ]);
+    // The route's own stamps win; what the sender may legitimately say stays.
+    expect(metadata).toMatchObject({ actor_source: "client-unsigned", actor_verified: false, reconciled_on_resume: true, run_id: "run-1" });
+    expect(db.inserts[0]).not.toHaveProperty("id");
+  });
+
+  it("a row without reserved keys is stored as sent, with no reserved_keys_dropped (a caller's own is dropped too)", async () => {
+    const body = { ...event, metadata: { run_id: "run-2", reserved_keys_dropped: ["made-up"] } };
+    expect((await post({ body: JSON.stringify(body) })).status).toBe(200);
+    const metadata = db.inserts[0].metadata as Record<string, unknown>;
+    expect(metadata).toMatchObject({ run_id: "run-2", actor_source: "client-unsigned" });
+    expect(metadata).not.toHaveProperty("reserved_keys_dropped");
+  });
+});
+
 describe("recordAudit", () => {
   it("retries a 429 after each delay, then gives up with a warning; other failures are not retried", async () => {
     const statuses = [429, 429, 200];

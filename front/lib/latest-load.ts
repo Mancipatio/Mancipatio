@@ -13,6 +13,27 @@ export function createLatestGate(): { begin(): () => boolean } {
   };
 }
 
+/**
+ * createLatestGate for a load that can stop early: begin() aborts the
+ * previous load's signal and hands out a fresh one, and abort() (an unmount)
+ * aborts the current one. A load commits only while its signal is not
+ * aborted, and passes it on (lib/rpc-retry withRpcReadRetry), so a superseded
+ * or abandoned load stops retrying and waiting.
+ */
+export function createAbortableLatest(): { begin(): AbortSignal; abort(): void } {
+  let controller: AbortController | null = null;
+  return {
+    begin() {
+      controller?.abort();
+      controller = new AbortController();
+      return controller.signal;
+    },
+    abort() {
+      controller?.abort();
+    },
+  };
+}
+
 /** A loaded value tagged with the wallet it was loaded for. */
 export type ForWallet<T> = { wallet: string; value: T };
 
