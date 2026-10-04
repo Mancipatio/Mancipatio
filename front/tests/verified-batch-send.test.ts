@@ -26,6 +26,8 @@ import {
   pipe,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
+  SolanaError,
   type Address,
   type Instruction,
   type Transaction,
@@ -145,6 +147,8 @@ function fixture(
   const current = session();
   let blockhashes = 0;
   const sent: string[] = [];
+  /** The signatures of each getSignatureStatuses call, in order. */
+  const statusCalls: string[][] = [];
   const prepare = vi.fn(async (input: TransactionPrepareRequest) => {
     const lifetime = input.lifetime ?? { blockhash: blockhash("11111111111111111111111111111111"), lastValidBlockHeight: BigInt(0) };
     // As the SDK compiles it: [limit?, price?, ...app].
@@ -191,6 +195,7 @@ function fixture(
     getSignatureStatuses: (signatures: readonly string[]) => ({
       send: async () => {
         events.push("settle");
+        statusCalls.push([...signatures]);
         return { value: signatures.map((s) => (opts.status ? opts.status(s) : { err: null, confirmationStatus: "confirmed" })) };
       },
     }),
@@ -203,7 +208,7 @@ function fixture(
     store: { getState: () => ({ wallet: { status: "connected", session: current } }) },
   } as unknown as SolanaClient;
   const guarded = withVerifiedTransactions(client, "devnet");
-  return { client, guarded, sender: getBatchSender(guarded)!, prepare, sign, sent, blockhashes: () => blockhashes };
+  return { client, guarded, sender: getBatchSender(guarded)!, prepare, sign, sent, statusCalls, blockhashes: () => blockhashes };
 }
 
 const requests = (count: number) => Array.from({ length: count }, (_, i) => ({ feePayer: WALLET, instructions: [ix(i + 1)] }));
@@ -454,6 +459,97 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
       expect(result.outcomes[1].signature).not.toBeNull();
       expect(result.outcomes[2]).toMatchObject({ signature: null, error: refusal });
     });
+
+    it("a status read the RPC refused for a moment (HTTP 429) is read again: one refused read no longer stops the run", async () => {
+      let reads = 0;
+      const f = fixture({
+        status: () => {
+          if (reads++ === 0) throw new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode: 429 });
+          return { err: null, confirmationStatus: "confirmed" };
+        },
+      });
+      const result = await f.sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: () => {} });
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, true]);
+      expect(result.outcomes.every((o) => o.error === null)).toBe(true);
+      expect(f.sign).toHaveBeenCalledTimes(2);
+      // The refused read and its retry, both for transaction 1.
+      expect(f.statusCalls).toHaveLength(2);
+      expect(new Set(f.statusCalls.flat()).size).toBe(1);
+    });
+
+    it("says when it waits for the network between two prompts (not after the last one)", async () => {
+      const f = fixture();
+      const order: string[] = [];
+      await f.sender.prepareAndSendAll(requests(3), {
+        mode: "per-transaction",
+        onSigned: () => {},
+        onPrompt: (p) => order.push(`prompt:${p.index}`),
+        onWaiting: (w) => order.push(`waiting:${w.index}/${w.count}`),
+      });
+      expect(order).toEqual(["prompt:0", "waiting:0/3", "prompt:1", "waiting:1/3", "prompt:2"]);
+    });
+  });
+
+  describe("between two calls (a distribution's groups): every transaction of the previous one, and its outcome", () => {
+    it("waits for every transaction the previous batch sent, in one status read, before anything of the next call", async () => {
+      const f = fixture();
+      const first = await f.sender.prepareAndSendAll(requests(3), { onSigned: () => {} });
+      events.length = 0;
+      await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
+      expect(f.statusCalls).toEqual([first.outcomes.map((o) => o.signature)]);
+      expect(events.indexOf("settle")).toBeLessThan(events.indexOf("simulate"));
+    });
+
+    it("a previous transaction that failed, or whose status cannot be read, stops the next call before any simulation or prompt", async () => {
+      for (const status of [
+        () => ({ err: { InstructionError: [4, { Custom: 6001 }] }, confirmationStatus: "confirmed" }),
+        () => {
+          throw new Error("RPC unavailable");
+        },
+      ]) {
+        let previous: string[] = [];
+        const f = fixture({ status: (s) => (previous.includes(s) ? status() : { err: null, confirmationStatus: "confirmed" }) });
+        const first = await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
+        previous = first.outcomes.map((o) => o.signature!);
+        events.length = 0;
+        const onSigned = vi.fn();
+        const error = await f.sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned }).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(EarlierTransactionUnconfirmedError);
+        expect((error as Error).message).toMatch(/^A transaction sent just before these (failed on the network|is not confirmed yet).*so these were not signed\. Open this page again/);
+        expect(events).not.toContain("simulate");
+        expect(events).not.toContain("wallet.single");
+        expect(onSigned).not.toHaveBeenCalled();
+      }
+    });
+
+    it("the per-transaction path's last transaction is the one the next call waits for (the earlier ones were confirmed in turn)", async () => {
+      const f = fixture();
+      const first = await f.sender.prepareAndSendAll(requests(3), { mode: "per-transaction", onSigned: () => {} });
+      f.statusCalls.length = 0;
+      await f.sender.prepareAndSendAll(requests(1), { mode: "per-transaction", onSigned: () => {} });
+      expect(f.statusCalls[0]).toEqual([first.outcomes[2].signature]);
+    });
+  });
+
+  describe("onFallback: the batch was given up before the first one-by-one prompt", () => {
+    it("is called with the reason before that prompt", async () => {
+      const f = fixture();
+      wallet.mode = "fewer";
+      const order: string[] = [];
+      const result = await f.sender.prepareAndSendAll(requests(2), {
+        onSigned: () => {},
+        onPrompt: (p) => order.push(`prompt:${p.mode}:${p.index}`),
+        onFallback: (reason) => order.push(`fallback:${reason}`),
+      });
+      expect(order).toEqual(["prompt:batch:0", `fallback:${result.fallbackReason}`, "prompt:per-transaction:0", "prompt:per-transaction:1"]);
+    });
+
+    it("is not called when the batch is signed, or with 'per-transaction' from the start", async () => {
+      const onFallback = vi.fn();
+      await fixture().sender.prepareAndSendAll(requests(2), { onSigned: () => {}, onFallback });
+      await fixture().sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: () => {}, onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+    });
   });
 
   it("a refusal's advice follows what it is about: a guard is not a fee setting, and another wallet means the same account", () => {
@@ -473,7 +569,9 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
     expect(remembersSignSeparately(null)).toBe(false);
     // The panel remembers it for the wallet, and says once how to continue.
     const panel = readFileSync(join(process.cwd(), "components/send-to-wallets-panel.tsx"), "utf8");
-    expect(panel).toContain("if (remembersSignSeparately(result.fallbackReason)) chooseSeparate(true);");
+    // As soon as the batch falls back (onFallback), so a first one-by-one prompt that throws does not lose it.
+    expect(panel).toMatch(/onFallback: \(reason\) => \{\s*if \(remembersSignSeparately\(reason\)\) chooseSeparate\(true\);\s*\}/);
+    expect(panel).not.toContain("remembersSignSeparately(result.fallbackReason)");
     expect(panel).toContain('${why}${/open this page again/i.test(why) ? "" : " Open this page again to continue the run."}');
     // A transfer that landed and failed is not "not confirmed yet": nothing of it moved, and the resume sends its rows.
     expect(panel).toContain('if (outcomes.some((o) => o === "failed")) {');
@@ -709,6 +807,20 @@ describe("prepareAndSendAll: what a wallet may change", () => {
       expect(journal.flat().map((s) => s.signature)).toEqual(broadcast(f.sent).map((s) => s.id));
       expect(events.filter((e) => e === "wallet.single" || e === "send" || e === "settle").slice(0, 4)).toEqual(["wallet.single", "send", "settle", "wallet.single"]);
     }
+  });
+
+  it("guards on several: the fallback is reported (onFallback) before the first one-by-one prompt, so a refusal there still leaves it remembered", async () => {
+    const f = fixture();
+    wallet.rewrite = (bytes) => rewritten(bytes, lighthouse);
+    f.sign.mockRejectedValueOnce(Object.assign(new Error("User rejected the request."), { code: 4001 }));
+    const reasons: string[] = [];
+    await expect(
+      f.sender.prepareAndSendAll(rowRequests(2), { onSigned: () => {}, onFallback: (reason) => void reasons.push(reason) }),
+    ).rejects.toMatchObject({ code: 4001 });
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toContain(WALLET_STATE_GUARDS);
+    expect(remembersSignSeparately(reasons[0])).toBe(true);
+    expect(f.sent).toHaveLength(0);
   });
 
   // Phantom's guard on the fee payer, decoded from the mainnet transactions it

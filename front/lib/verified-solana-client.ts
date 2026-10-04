@@ -38,8 +38,9 @@ import {
   refusalFromSimulation,
   simulateMessage,
   SimulationUnavailableError,
-  waitForSignature,
+  waitForSignatures,
   type SignatureOutcome,
+  type SignatureWaitOptions,
   type SimulatableMessage,
   type SimulationVerdict,
 } from "@/lib/simulation-gate";
@@ -69,6 +70,19 @@ export type BatchSendOptions = {
   mode?: "auto" | "per-transaction";
   /** The wallet is about to be asked. */
   onPrompt?: (info: { mode: "batch" | "per-transaction"; index: number; count: number }) => void;
+  /**
+   * The one-prompt path was given up (`reason`, as BatchSendResult.fallbackReason
+   * will say) and the transactions are about to be signed one by one: called
+   * before the first of those prompts, so the caller can remember the choice
+   * (remembersSignSeparately) even when that prompt then throws.
+   */
+  onFallback?: (reason: string) => void;
+  /**
+   * Transaction `index` of the per-transaction path was sent and is waited
+   * for (at most SETTLE_TIMEOUT_MS) before the next one is signed: the wallet
+   * is not being asked anything meanwhile.
+   */
+  onWaiting?: (info: { index: number; count: number }) => void;
 };
 
 export type BatchSendResult = {
@@ -103,6 +117,12 @@ export type BatchSender = {
    * confirmed (the wallet simulates, and guards, against the state it
    * left), is compared with the one built the same way, and one changed
    * beyond that is refused (SignedTransactionChangedError), never sent.
+   * The call itself starts only once every transaction this client sent in
+   * the last minute (the previous group) is confirmed: one that failed or is
+   * not confirmed within SETTLE_TIMEOUT_MS throws
+   * EarlierTransactionUnconfirmedError before anything is simulated or
+   * signed. Status reads the RPC refuses for a moment are retried within
+   * that wait (lib/rpc-retry).
    *
    * Single sends (prepareAndSend) have no such comparison: `@solana/client`
    * broadcasts whatever message the wallet returns (the guarded session only
@@ -272,16 +292,26 @@ export function verifySignedTransaction(
  * that simulation saw it. One that failed on the network, or is not
  * confirmed within SETTLE_TIMEOUT_MS, stops the run there: the rest are not
  * signed (their outcomes carry this error) and the resume decides.
+ *
+ * The same holds across calls (a distribution's next group of transactions):
+ * prepareAndSendAll first waits for every transaction this client sent in
+ * the last minute (settlePreviousSend), and one of them failed or not
+ * confirmed stops it before anything is simulated or signed (`position`
+ * null: thrown, nothing of this call was sent).
  */
 export class EarlierTransactionUnconfirmedError extends Error {
   constructor(
-    position: string,
+    position: string | null,
     readonly outcome: Exclude<SignatureOutcome, "confirmed">,
   ) {
     super(
-      outcome === "failed"
-        ? `Transaction ${position} failed on the network (nothing of it moved), so the ones after it were not signed.`
-        : `Transaction ${position} is not confirmed yet, so the ones after it were not signed.`,
+      position === null
+        ? outcome === "failed"
+          ? "A transaction sent just before these failed on the network (nothing of it moved), so these were not signed. Open this page again to continue the run (rows already sent are not sent again)."
+          : "A transaction sent just before these is not confirmed yet, so these were not signed. Open this page again in a minute to continue the run (rows already sent are not sent again)."
+        : outcome === "failed"
+          ? `Transaction ${position} failed on the network (nothing of it moved), so the ones after it were not signed.`
+          : `Transaction ${position} is not confirmed yet, so the ones after it were not signed.`,
     );
     this.name = "EarlierTransactionUnconfirmedError";
   }
@@ -322,6 +352,13 @@ export function transactionId(tx: Transaction): string {
 export const SETTLE_WINDOW_MS = 60_000;
 /** The longest the next send waits for the previous one to be confirmed. */
 export const SETTLE_TIMEOUT_MS = 30_000;
+/**
+ * How a send is waited for: at most SETTLE_TIMEOUT_MS in all, a status read
+ * the RPC refused for a moment (HTTP 429, a 5xx, no response) retried within
+ * that time (lib/rpc-retry) instead of ending the wait as "unknown" — one
+ * refused read no longer stops a per-transaction run.
+ */
+const SETTLE_WAIT: SignatureWaitOptions = { timeoutMs: SETTLE_TIMEOUT_MS, retryReads: true };
 
 /** Both useSendTransaction and useTransactionPool use these public helpers.
  * Check the live runtime RPC before preparing, signing or sending, including
@@ -486,27 +523,37 @@ export function withVerifiedTransactions(
     context.assertCurrent();
   }
 
-  // The last send this client made, so the next one can wait for it.
-  let lastSend: { rpc: Context["rpc"]; signature: string; at: number } | null = null;
+  // The last send this client made (every transaction of it not yet known
+  // to be confirmed: a batch's all, the per-transaction path's last one), so
+  // the next one can wait for it.
+  let lastSend: { rpc: Context["rpc"]; signatures: readonly string[]; at: number } | null = null;
 
-  function rememberSend(context: Context, signature: unknown) {
-    if (typeof signature === "string" && signature) lastSend = { rpc: context.rpc, signature, at: Date.now() };
+  function rememberSend(context: Context, sent: unknown) {
+    const signatures = (Array.isArray(sent) ? sent : [sent]).filter((s): s is string => typeof s === "string" && s.length > 0);
+    if (signatures.length > 0) lastSend = { rpc: context.rpc, signatures, at: Date.now() };
   }
 
   /**
    * sendBatches and any other flow that sends twice in a row: `prepareAndSend`
    * returns once the transaction is submitted, not confirmed, and the next
    * transaction's simulation would otherwise run against the state before it
-   * (before the gate, the second wallet review hid this). Waits until the
-   * previous send of the last minute is confirmed or failed, at most 30 s,
-   * then lets the simulation decide.
+   * (before the gate, the second wallet review hid this). Waits until every
+   * transaction of the previous send of the last minute is confirmed or
+   * failed (one status read for all of them per poll, a refused read
+   * retried), at most 30 s. Returns how the previous send ended: null when
+   * there was nothing to wait for or all of it is confirmed, else the worst
+   * outcome ("failed" first), for prepareAndSendAll to act on; a single send
+   * lets the simulation decide. A send not decided yet (timeout, unreadable)
+   * is kept, so the next send waits for it again (within SETTLE_WINDOW_MS).
    */
-  async function settlePreviousSend(context: Context) {
+  async function settlePreviousSend(context: Context): Promise<Exclude<SignatureOutcome, "confirmed"> | null> {
     const previous = lastSend;
-    if (!previous || previous.rpc !== context.rpc || Date.now() - previous.at > SETTLE_WINDOW_MS) return;
-    await waitForSignature(context.rpc, previous.signature, { timeoutMs: SETTLE_TIMEOUT_MS });
+    if (!previous || previous.rpc !== context.rpc || Date.now() - previous.at > SETTLE_WINDOW_MS) return null;
+    const outcomes = await waitForSignatures(context.rpc, previous.signatures, SETTLE_WAIT);
     context.assertCurrent();
-    if (lastSend === previous) lastSend = null;
+    if (lastSend === previous && outcomes.every((o) => o === "confirmed" || o === "failed")) lastSend = null;
+    const open = outcomes.filter((o): o is Exclude<SignatureOutcome, "confirmed"> => o !== "confirmed");
+    return open.find((o) => o === "failed") ?? open[0] ?? null;
   }
 
   /**
@@ -651,11 +698,17 @@ export function withVerifiedTransactions(
       gated.push(withLeadingComputeUnitLimit(await withFee(input, context)));
     }
     await writable(context);
-    // Once, before the batch (the treasury mint before it, for example). Not
-    // between a batch's own sends: they are pre-signed, each was simulated on
-    // its own, and none carries a wallet guard (a guarded batch falls back,
-    // WALLET_STATE_GUARDS). One by one, each waits for the one before it.
-    await settlePreviousSend(context);
+    // Once, before the batch (the treasury mint, or the previous group of a
+    // distribution, before it). Not between a batch's own sends: they are
+    // pre-signed, each was simulated on its own, and none carries a wallet
+    // guard (a guarded batch falls back, WALLET_STATE_GUARDS). One by one,
+    // each waits for the one before it. Every transaction of the previous send
+    // is waited for, and its outcome counts as it does between this call's own
+    // one-by-one prompts: one that failed or is not confirmed stops this call
+    // before anything is simulated or signed (a wallet would guard against a
+    // state that is about to change; the resume decides).
+    const previous = await settlePreviousSend(context);
+    if (previous !== null) throw new EarlierTransactionUnconfirmedError(null, previous);
     const tuned: TransactionPrepareRequest[] = [];
     // What a wallet may do to each one's compute budget if it sets its own (a
     // price up to the network's cap, a limit no lower than the units the
@@ -722,22 +775,26 @@ export function withVerifiedTransactions(
         }));
         // Journal first: the signatures are known before the network can see them.
         await options.onSigned(journal);
+        const sentSignatures: string[] = [];
         for (const [index, tx] of signed.entries()) {
           outcomes[index] = { ...outcomes[index], signature: journal[index].signature, lastValidBlockHeight: lifetime.lastValidBlockHeight };
           try {
             await broadcast(context, tx);
             outcomes[index].sent = true;
-            lastSent = journal[index].signature;
+            sentSignatures.push(journal[index].signature);
           } catch (error) {
             outcomes[index].error = error;
           }
         }
-        if (lastSent) rememberSend(context, lastSent);
+        // None of them is confirmed yet: the next send waits for all of them.
+        rememberSend(context, sentSignatures);
         return { outcomes, prompts: 1, mode: "batch", fallbackReason: null };
       } catch (err) {
         if (!(err instanceof BatchSigningUnsupportedError)) throw err;
         fallbackReason = err.message;
       }
+      // Before the first one-by-one prompt, which may throw (a refusal).
+      options.onFallback?.(fallbackReason);
     }
 
     // One prompt per transaction (a fresh blockhash each: signing may take a
@@ -787,7 +844,8 @@ export function withVerifiedTransactions(
       outcomes[index].sent = true;
       lastSent = signature;
       if (index + 1 === tuned.length) break;
-      const settled = await waitForSignature(context.rpc, signature, { timeoutMs: SETTLE_TIMEOUT_MS });
+      options.onWaiting?.({ index, count: tuned.length });
+      const [settled] = await waitForSignatures(context.rpc, [signature], SETTLE_WAIT);
       context.assertCurrent();
       if (settled !== "confirmed") {
         const error = new EarlierTransactionUnconfirmedError(`${index + 1} of ${tuned.length}`, settled);
@@ -795,6 +853,7 @@ export function withVerifiedTransactions(
         break;
       }
     }
+    // The ones before it were each confirmed before the next prompt: the next send waits for this one.
     if (lastSent) rememberSend(context, lastSent);
     return { outcomes, prompts, mode: "per-transaction", fallbackReason };
   }

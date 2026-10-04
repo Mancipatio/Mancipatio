@@ -10,6 +10,8 @@ import {
   getBase64Encoder,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
+  SolanaError,
   type Instruction,
 } from "@solana/kit";
 import { CLOSE_SALE_DISCRIMINATOR, LOCK_SUPPLY_DISCRIMINATOR, OPEN_SALE_DISCRIMINATOR } from "@/lib/generated/asset_registry";
@@ -21,6 +23,7 @@ import {
   simulateMessage,
   SimulationRefusedError,
   waitForSignature,
+  waitForSignatures,
   type SimulationRpc,
   type SimulationVerdict,
 } from "@/lib/simulation-gate";
@@ -383,5 +386,84 @@ describe("waitForSignature", () => {
     expect(polled.statuses).toHaveBeenCalledTimes(3);
     const never = { getSignatureStatuses: () => ({ send: async () => ({ value: [null] }) }) } as unknown as Parameters<typeof waitForSignature>[0];
     expect(await waitForSignature(never, "s", { pollMs: 5, timeoutMs: 20 })).toBe("timeout");
+  });
+});
+
+describe("waitForSignatures", () => {
+  type Status = { err: unknown; confirmationStatus: string } | null;
+  const http = (statusCode: number) => new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode });
+  /** An RPC whose answers come from `answer(signature, read)` (read counts the calls); throwing is a failed read. */
+  function rpcOf(answer: (signature: string, read: number) => Status) {
+    const calls: string[][] = [];
+    const rpc = {
+      getSignatureStatuses: (signatures: readonly string[]) => ({
+        send: async () => {
+          calls.push([...signatures]);
+          return { value: signatures.map((s) => answer(s, calls.length)) };
+        },
+      }),
+    } as unknown as Parameters<typeof waitForSignatures>[0];
+    return { rpc, calls };
+  }
+  const confirmed: Status = { err: null, confirmationStatus: "confirmed" };
+
+  it("reads all of them in one call per poll, decides each on its own, and asks again only for the open ones", async () => {
+    const { rpc, calls } = rpcOf((s, read) =>
+      s === "a" ? confirmed : s === "b" ? { err: { InstructionError: [0, "X"] }, confirmationStatus: "processed" } : read >= 3 ? confirmed : null,
+    );
+    expect(await waitForSignatures(rpc, ["a", "b", "c"], { pollMs: 1 })).toEqual(["confirmed", "failed", "confirmed"]);
+    expect(calls).toEqual([["a", "b", "c"], ["c"], ["c"]]);
+  });
+
+  it("what the timeout leaves open is \"timeout\"; a read that fails leaves it \"unknown\"", async () => {
+    expect(await waitForSignatures(rpcOf((s) => (s === "a" ? confirmed : null)).rpc, ["a", "b"], { pollMs: 5, timeoutMs: 20 })).toEqual(["confirmed", "timeout"]);
+    const down = rpcOf(() => {
+      throw new Error("down");
+    });
+    expect(await waitForSignatures(down.rpc, ["a", "b"])).toEqual(["unknown", "unknown"]);
+    expect(down.calls).toHaveLength(1);
+  });
+
+  it("retryReads: a read refused for a moment (429, 5xx) is read again after a jittered wait, not answered \"unknown\"", async () => {
+    const waits: number[] = [];
+    const { rpc, calls } = rpcOf((_, read) => {
+      if (read === 1) throw http(429);
+      if (read === 2) throw http(503);
+      return confirmed;
+    });
+    const sleep = async (ms: number) => void waits.push(ms);
+    expect(await waitForSignatures(rpc, ["a"], { retryReads: { delaysMs: [100, 200, 400], sleep, random: () => 0.5 } })).toEqual(["confirmed"]);
+    expect(calls).toHaveLength(3);
+    expect(waits).toEqual([100, 200]);
+    // Without retryReads the same 429 ends the wait at once.
+    const once = rpcOf(() => {
+      throw http(429);
+    });
+    expect(await waitForSignature(once.rpc, "a")).toBe("unknown");
+    expect(once.calls).toHaveLength(1);
+  });
+
+  it("retryReads: anything but a transient failure, and the last retry's failure, still end the wait (\"unknown\")", async () => {
+    const sleep = async () => undefined;
+    const refused = rpcOf(() => {
+      throw new Error("Invalid params");
+    });
+    expect(await waitForSignatures(refused.rpc, ["a"], { retryReads: { sleep } })).toEqual(["unknown"]);
+    expect(refused.calls).toHaveLength(1);
+    const limited = rpcOf(() => {
+      throw http(429);
+    });
+    expect(await waitForSignatures(limited.rpc, ["a"], { retryReads: { delaysMs: [1, 1, 1], sleep } })).toEqual(["unknown"]);
+    expect(limited.calls).toHaveLength(4);
+  });
+
+  it("retryReads is bounded by the timeout: a retry's wait ends with it and no read starts after it", async () => {
+    const limited = rpcOf(() => {
+      throw http(429);
+    });
+    const started = Date.now();
+    expect(await waitForSignatures(limited.rpc, ["a"], { timeoutMs: 30, retryReads: { delaysMs: [10_000] } })).toEqual(["unknown"]);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(limited.calls).toHaveLength(1);
   });
 });

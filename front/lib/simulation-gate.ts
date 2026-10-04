@@ -29,6 +29,7 @@ import {
   type SimulateTransactionApi,
 } from "@solana/kit";
 import { MAX_COMPUTE_UNIT_LIMIT, setComputeUnitLimitInstruction } from "@/lib/compute-budget";
+import { withRpcReadRetry, type RpcReadRetryOptions } from "@/lib/rpc-retry";
 import {
   AssetRegistryInstruction,
   identifyAssetRegistryInstruction,
@@ -314,6 +315,23 @@ export function refusalFromSimulation(
 
 export type SignatureOutcome = "confirmed" | "failed" | "timeout" | "unknown";
 
+/** How waitForSignature and waitForSignatures poll. */
+export type SignatureWaitOptions = {
+  /** How long to wait in all (default 30 s). */
+  timeoutMs?: number;
+  /** Between two reads (default 0.5 s). */
+  pollMs?: number;
+  isCancelled?: () => boolean;
+  /**
+   * Retry a status read the RPC refused for a moment (HTTP 429, a 5xx, no
+   * response: lib/rpc-retry withRpcReadRetry, at most its retries per read)
+   * instead of answering "unknown" at once. Bounded by the timeout: no retry
+   * or wait starts after it, so the whole wait stays within `timeoutMs` (plus
+   * the read in flight). `true` takes the default waits; tests pass their own.
+   */
+  retryReads?: boolean | Pick<RpcReadRetryOptions, "delaysMs" | "sleep" | "random">;
+};
+
 /**
  * Polls one signature until it is confirmed (or finalized), failed, the
  * timeout passes, or the status cannot be read ("unknown": the caller goes on
@@ -322,23 +340,58 @@ export type SignatureOutcome = "confirmed" | "failed" | "timeout" | "unknown";
 export async function waitForSignature(
   rpc: Rpc<GetSignatureStatusesApi>,
   signature: string,
-  options: { timeoutMs?: number; pollMs?: number; isCancelled?: () => boolean } = {},
+  options: SignatureWaitOptions = {},
 ): Promise<SignatureOutcome> {
+  return (await waitForSignatures(rpc, [signature], options))[0];
+}
+
+type ReadStatus = { err: unknown; confirmationStatus?: string | null } | null | undefined;
+
+/**
+ * waitForSignature for several signatures at once, in one
+ * getSignatureStatuses call per poll (never one call per signature): each
+ * outcome is decided when its transaction is confirmed or failed; the rest
+ * are "timeout" once the timeout passes, or "unknown" when a read fails (after
+ * the retries `retryReads` allows) or `isCancelled` says so. In order.
+ */
+export async function waitForSignatures(
+  rpc: Rpc<GetSignatureStatusesApi>,
+  signatures: readonly string[],
+  options: SignatureWaitOptions = {},
+): Promise<SignatureOutcome[]> {
   const timeoutMs = options.timeoutMs ?? 30_000;
   const pollMs = options.pollMs ?? 500;
   const deadline = Date.now() + timeoutMs;
-  for (;;) {
-    let status: { err: unknown; confirmationStatus?: string | null } | null | undefined;
-    try {
-      const { value } = await rpc.getSignatureStatuses([signature as Signature]).send();
-      status = value[0];
-    } catch {
-      return "unknown";
+  const outcomes: (SignatureOutcome | null)[] = signatures.map(() => null);
+  const rest = (outcome: SignatureOutcome) => outcomes.map((o) => o ?? outcome);
+  const retry = options.retryReads ? (options.retryReads === true ? {} : options.retryReads) : null;
+  // The retries end with the timeout: no further read or wait starts after it.
+  const stop = retry ? new AbortController() : null;
+  const timer = stop ? setTimeout(() => stop.abort(), timeoutMs) : null;
+  try {
+    for (;;) {
+      const open = outcomes.flatMap((o, i) => (o === null ? [i] : []));
+      if (open.length === 0) return outcomes as SignatureOutcome[];
+      // The read itself is never cut off: an answer in flight at the timeout still counts.
+      const read = async (): Promise<readonly ReadStatus[]> =>
+        (await rpc.getSignatureStatuses(open.map((i) => signatures[i] as Signature)).send()).value;
+      let value: readonly ReadStatus[];
+      try {
+        value = retry && stop ? await withRpcReadRetry(read, { ...retry, signal: stop.signal }) : await read();
+      } catch {
+        return rest("unknown");
+      }
+      open.forEach((i, k) => {
+        const status = value[k];
+        if (status?.err) outcomes[i] = "failed";
+        else if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") outcomes[i] = "confirmed";
+      });
+      if (outcomes.every((o) => o !== null)) return outcomes as SignatureOutcome[];
+      if (options.isCancelled?.()) return rest("unknown");
+      if (Date.now() + pollMs > deadline) return rest("timeout");
+      await new Promise((resolve) => setTimeout(resolve, pollMs));
     }
-    if (status?.err) return "failed";
-    if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") return "confirmed";
-    if (options.isCancelled?.()) return "unknown";
-    if (Date.now() + pollMs > deadline) return "timeout";
-    await new Promise((resolve) => setTimeout(resolve, pollMs));
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }

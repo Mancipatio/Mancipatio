@@ -861,14 +861,22 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           break;
         }
         const requests: TransactionPrepareAndSendRequest[] = group.map((t) => ({ instructions: t.instructions, feePayer: signer }));
+        const groupLabel = groups.length > 1 ? ` (group ${g + 1} of ${groups.length})` : "";
         const result = await sender.prepareAndSendAll(requests, {
           mode,
           onPrompt: (p) =>
             setWorking(
               p.mode === "batch"
                 ? `Confirm in your wallet: ${p.count} ${p.count === 1 ? "transaction" : "transactions"} in one approval${groups.length > 1 ? ` (${g + 1} of ${groups.length})` : ""}`
-                : `Confirm in your wallet: transaction ${p.index + 1} of ${p.count}${groups.length > 1 ? ` (group ${g + 1} of ${groups.length})` : ""}`,
+                : `Confirm in your wallet: transaction ${p.index + 1} of ${p.count}${groupLabel}`,
             ),
+          // Between two one-by-one prompts the wallet asks nothing: the network is confirming the one just sent.
+          onWaiting: (w) => setWorking(`Waiting for transaction ${w.index + 1} of ${w.count} to confirm…${groupLabel}`),
+          // Remembered as soon as the batch falls back (a hardware wallet too slow for one blockhash, or
+          // Phantom's guards on mainnet), also when the first one-by-one prompt then throws.
+          onFallback: (reason) => {
+            if (remembersSignSeparately(reason)) chooseSeparate(true);
+          },
           onSigned: (signed) => {
             for (const s of signed) {
               j = withTx(j, {
@@ -895,9 +903,8 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         if (result.fallbackReason) console.warn(`[distribution] ${result.fallbackReason}`);
         // Once a group fell back, the rest go one by one too; a batch that outlasted its
         // blockhash (a hardware wallet) or that the wallet guarded (Phantom on mainnet) is
-        // remembered for this wallet: every batch would fall back the same way.
+        // remembered for this wallet (onFallback above): every batch would fall back the same way.
         mode = nextPromptMode(mode, result);
-        if (remembersSignSeparately(result.fallbackReason)) chooseSeparate(true);
         // One audit row per transaction, written one after another (the audit route's burst limit).
         const pendingAudited = new Set<string>();
         for (const s of groupSent) {
