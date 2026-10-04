@@ -2172,6 +2172,7 @@ Design: `docs/mainnet-readiness/design-4.4b-5.1.md` (its migrations
 | 0072 `onchain_event_jobs` | trigger on `indexer_events` | one alarm job per program transaction the indexer saw (webhook or gap scan) |
 | Alarm worker | `POST /api/internal/alarms`, cron `mancipatio-alarms-<network>` | events → `compliance_alerts` (instruction-first, Squads CPIs and ALT keys included); checks → incidents with hysteresis; one email digest per run |
 | Retry worker, stage 3 | `POST /api/internal/retry` (existing cron) | 0073 `spv_issuance_jobs`: closed sales and treasury mints booked from the finalized chain at the proven date; FX revaluations of held rows |
+| Retry worker, last stage | `POST /api/internal/retry` (existing cron) | `share_class_distribution` audit rows left `pending` (5 min to 7 days old, no final row): the final `success` / `failed` row appended from the finalized chain (`metadata.reconciled_by_server`); never "expired", a row the chain does not know ages out without an alarm; never makes the run partial (`lib/server/distribution-audits.ts`) |
 | Dead-man switch | `GET /api/health/alarms` (anonymous, 200/503) | database network, alarm heartbeat ≤ 5 min, no stuck or failed notification |
 | Automatic EUR rate (0080) | `POST /api/internal/fx`, cron `mancipatio-fx-<network>` (every minute) | the median of four public USDC/EUR order books, checked against the ECB → `fx_auto_rates` (15 min); every run in `fx_rate_observations`; the ledger reads `fx_effective_rate` (§15 "Automatic EUR rate") |
 

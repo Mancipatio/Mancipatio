@@ -3,6 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { detectNetwork, type Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDeploymentNetworkError } from "@/lib/server/deployment-network";
+import { reconcileDistributionAudits } from "@/lib/server/distribution-audits";
 import { runIndexerHeartbeat, type Freshness } from "@/lib/server/indexer-heartbeat";
 import { reconcileIndexerJobs } from "@/lib/server/indexer-sync";
 import { reconcilePurchases } from "@/lib/server/purchase-records";
@@ -19,6 +20,9 @@ export type RetryWorkerResult =
   | {
     status: "processed" | "partial"; network: Network;
     indexer: StageResult; purchases: StageResult; ledger: StageResult; capacity: StageResult;
+    /** Pending "Send to wallets" audit rows settled from the chain (lib/server/distribution-audits).
+     * Best effort, after everything else: never part of `partial`. */
+    audits: StageResult;
     /** The indexer freshness heartbeat (0075). Never part of `partial`. */
     freshness: Freshness;
   };
@@ -28,8 +32,10 @@ const LEASE_RPC_TIMEOUT_MS = 3_000;
 const HEARTBEAT_TIMEOUT_MS = 2_000;
 const RUN_BUDGET_MS = 50_000;
 /** Per-stage budgets (design §3g): indexer, purchases, the ledger (0073),
- * then the 2B capacity backstop with what is left (at most 20 s). */
-export const STAGE_BUDGETS_MS = { indexer: 15_000, purchases: 10_000, ledger: 10_000, capacity: 20_000 } as const;
+ * then the 2B capacity backstop with what is left (at most 20 s), then the
+ * distribution audit rows with what is left after that (at most 5 s; when
+ * nothing is left they wait for the next run). */
+export const STAGE_BUDGETS_MS = { indexer: 15_000, purchases: 10_000, ledger: 10_000, capacity: 20_000, audits: 5_000 } as const;
 
 /** No fallback credential, and no secret or request body enters logs/responses. */
 export function requireRetryWorkerAuthorization(authorization: string | null): void {
@@ -114,9 +120,14 @@ export async function runRetryWorker(limit = 10): Promise<RetryWorkerResult> {
     // Raise-cap reservations behind sale approvals (0066): confirm, consume,
     // release dead approvals, orphan scans. The backstop of every step.
     const capacity = await stage(reconcileSaleCapacity, limit, STAGE_BUDGETS_MS.capacity, workDeadline);
+    // Pending "Send to wallets" audit rows the browser never confirmed. Audit
+    // breadcrumbs only (the chain and the sender's journal stay the truth): a
+    // failure is reported in `audits` but never makes the run partial, so it
+    // raises no retry-worker alarm.
+    const audits = await stage(reconcileDistributionAudits, limit, STAGE_BUDGETS_MS.audits, workDeadline);
     const failed = [indexer, purchases, ledger, capacity].some((s) => s.status === "failed");
     status = failed ? "partial" : "processed";
-    return { status, network, indexer, purchases, ledger, capacity, freshness };
+    return { status, network, indexer, purchases, ledger, capacity, audits, freshness };
   } finally {
     // Best effort, bounded: the alarm worker watches this heartbeat.
     try {

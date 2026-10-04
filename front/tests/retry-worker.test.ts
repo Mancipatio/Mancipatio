@@ -1,7 +1,7 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 vi.mock("server-only", () => ({}));
 const mocks = vi.hoisted(() => ({
-  rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), ledger: vi.fn(), capacity: vi.fn(), heartbeat: vi.fn(),
+  rpc: vi.fn(), indexer: vi.fn(), purchases: vi.fn(), ledger: vi.fn(), capacity: vi.fn(), audits: vi.fn(), heartbeat: vi.fn(),
   abortSignals: [] as AbortSignal[],
 }));
 vi.mock("@/lib/supabase-server", () => ({ getSupabaseAdmin: () => ({ rpc: mocks.rpc }) }));
@@ -11,6 +11,8 @@ vi.mock("@/lib/server/indexer-heartbeat", () => ({ runIndexerHeartbeat: mocks.he
 vi.mock("@/lib/server/purchase-records", () => ({ reconcilePurchases: mocks.purchases }));
 vi.mock("@/lib/server/spv-issuance-jobs", () => ({ reconcileLedger: mocks.ledger }));
 vi.mock("@/lib/server/sale-capacity", () => ({ reconcileSaleCapacity: mocks.capacity }));
+// The distribution audit stage has its own suite (distribution-audits.test.ts).
+vi.mock("@/lib/server/distribution-audits", () => ({ reconcileDistributionAudits: mocks.audits }));
 vi.mock("@/lib/network", () => ({ detectNetwork: () => "devnet" }));
 import { POST, maxDuration } from "@/app/api/internal/retry/route";
 import { runRetryWorker, retryWorkerLimit } from "@/lib/server/retry-worker";
@@ -28,7 +30,7 @@ beforeEach(() => {
   vi.clearAllMocks(); mocks.abortSignals.length = 0;
   vi.stubEnv("RETRY_WORKER_SECRET", SECRET);
   mocks.rpc.mockImplementation(() => rpcResult());
-  for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity]) m.mockResolvedValue(COUNTS);
+  for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity, mocks.audits]) m.mockResolvedValue(COUNTS);
   mocks.heartbeat.mockResolvedValue({ status: "would_bump" });
 });
 afterEach(() => { vi.unstubAllEnvs(); vi.restoreAllMocks(); });
@@ -47,8 +49,9 @@ describe("scheduler authorization", () => {
     const response = await POST(request()); const body = await response.json();
     expect(response.status).toBe(200); expect(body.data.network).toBe("devnet");
     expect(mocks.rpc).toHaveBeenNthCalledWith(1, "acquire_retry_worker_lease", expect.objectContaining({ p_network: "devnet", p_ttl_seconds: 120 }));
-    for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity]) expect(m.mock.calls[0][0]).toBe(10);
+    for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity, mocks.audits]) expect(m.mock.calls[0][0]).toBe(10);
     expect(body.data.capacity).toEqual({ status: "processed", counts: COUNTS });
+    expect(body.data.audits).toEqual({ status: "processed", counts: COUNTS });
     expect(body.data.ledger).toEqual({ status: "processed", counts: COUNTS });
     expect(response.headers.get("Cache-Control")).toBe("private, no-store"); expect(maxDuration).toBe(60);
   });
@@ -64,15 +67,23 @@ describe("scheduler authorization", () => {
 });
 
 describe("persistent worker lease and deadlines", () => {
-  it("runs indexer, purchases, the ledger, then the raise-cap backstop; a failure is partial", async () => {
+  it("runs indexer, purchases, the ledger, the raise-cap backstop, then the audit rows; a failure is partial", async () => {
     mocks.capacity.mockRejectedValue(new Error("ledger-internal-detail"));
     const response = await POST(request()); const body = await response.json();
     expect(response.status).toBe(503); expect(body.data.capacity.status).toBe("failed");
     expect(body.data.indexer.status).toBe("processed"); expect(body.data.purchases.status).toBe("processed");
     expect(body.data.ledger.status).toBe("processed");
     expect(JSON.stringify(body)).not.toContain("ledger-internal-detail");
-    const order = [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity].map((m) => m.mock.invocationCallOrder[0]);
+    const order = [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity, mocks.audits].map((m) => m.mock.invocationCallOrder[0]);
     expect(order).toEqual([...order].sort((a, b) => a - b));
+  });
+  it("a failed audit-row stage is reported but never makes the run partial (no retry-worker alarm)", async () => {
+    mocks.audits.mockRejectedValue(new Error("https://rpc.invalid/?api-key=secret"));
+    const response = await POST(request()); const body = await response.json();
+    expect(response.status).toBe(200);
+    expect(body.data).toMatchObject({ status: "processed", capacity: { status: "processed" }, audits: { status: "failed", counts: null } });
+    expect(JSON.stringify(body)).not.toContain("api-key");
+    expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_worker: "retry", p_status: "processed" });
   });
   it("records its heartbeat (partial after a failure) before releasing the lease", async () => {
     mocks.ledger.mockRejectedValue(new Error("x"));
@@ -127,8 +138,13 @@ describe("persistent worker lease and deadlines", () => {
       expect(deadline).toBe(147_000); expect(signal).toBeInstanceOf(AbortSignal);
       now = 146_000; return COUNTS;
     });
+    // The audit rows get what is left of the 47 s (at most 5 s).
+    mocks.audits.mockImplementation(async (_limit, deadline, signal) => {
+      expect(deadline).toBe(147_000); expect(signal).toBeInstanceOf(AbortSignal);
+      now = 146_500; return COUNTS;
+    });
     expect((await runRetryWorker()).status).toBe("processed");
-    expect(mocks.capacity).toHaveBeenCalledOnce();
+    expect(mocks.capacity).toHaveBeenCalledOnce(); expect(mocks.audits).toHaveBeenCalledOnce();
     expect(now - 100_000).toBeLessThan(50_000);
   });
   it("leaves later jobs deferred when the total budget is exhausted, then releases with a fresh signal", async () => {
@@ -137,9 +153,10 @@ describe("persistent worker lease and deadlines", () => {
     const result = await runRetryWorker();
     expect(result).toMatchObject({
       status: "processed", indexer: { status: "deferred" }, purchases: { status: "deferred" },
-      ledger: { status: "deferred" }, capacity: { status: "deferred" },
+      ledger: { status: "deferred" }, capacity: { status: "deferred" }, audits: { status: "deferred" },
     });
-    expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.capacity).not.toHaveBeenCalled(); expect(mocks.rpc).toHaveBeenCalledTimes(3);
+    expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.capacity).not.toHaveBeenCalled(); expect(mocks.audits).not.toHaveBeenCalled();
+    expect(mocks.rpc).toHaveBeenCalledTimes(3);
     expect(mocks.abortSignals[2].aborted).toBe(false);
   });
   it("runs the freshness heartbeat after the job loop, inside the indexer stage (same deadline and signal)", async () => {
