@@ -2,20 +2,26 @@
 //
 // One transaction can have more than one final row: audit_events is
 // append-only, and the browser (on confirmation, or a resume of the run
-// later) and the retry worker (lib/server/distribution-audits, for a pending
-// row the browser never confirmed) each append theirs. The worker skips a
-// signature that already has a final row, but the browser cannot see the
-// worker's row (anon has no SELECT on audit_events), so a resume after it
-// still appends one. collapseDistributionFinals keeps one final row per
-// signature: the server's chain-checked row when there is one (its status
-// is the finalized chain's), else the earliest; the others are counted on
-// it (`duplicates`), never dropped silently. Pending rows and every other
-// kind of row pass through unchanged.
+// later) and the retry worker (lib/server/distribution-audits, which checks
+// every pending row's transaction on the chain) each append theirs. The
+// browser cannot see the worker's row (anon has no SELECT on audit_events),
+// so a resume after it still appends one. collapseDistributionFinals keeps
+// one final row per signature: the server's chain-checked row when there is
+// one (its status is the finalized chain's), else the earliest; the others
+// are counted on it (`duplicates`), never dropped silently. Pending rows and
+// every other kind of row pass through unchanged.
 //
-// A server row asserts only the chain status (chainChecked): its
+// Which row is the server's is decided by /api/audit/list (chain_checked,
+// lib/server/reconciled-audit: the row id derived from the signature, which
+// the unsigned /api/audit cannot write), never by the row's metadata:
+// /api/audit copies a caller's metadata, so a key like reconciled_by_server
+// proves nothing. A server row asserts only the chain status: its
 // metadata.client_claims are what the pending row reported, unverified.
 
 export const DISTRIBUTION_IX = "share_class_distribution";
+/** actor_wallet and metadata.actor_source of the retry worker's rows (lib/server/reconciled-audit). */
+const SERVER_ACTOR = "server";
+const RECONCILER = "retry-worker";
 
 export type FeedAuditRow = {
   id: string;
@@ -23,12 +29,19 @@ export type FeedAuditRow = {
   ix_name: string;
   tx_signature: string | null;
   status: string;
+  actor_wallet?: string | null;
   metadata?: Record<string, unknown> | null;
+  /** Set by /api/audit/list (lib/server/reconciled-audit isReconciledAuditRow); absent: not the server's row. */
+  chain_checked?: boolean;
 };
 
-/** A final row the retry worker appended from the chain (metadata.reconciled_by_server). */
-export function isChainChecked(row: Pick<FeedAuditRow, "metadata">): boolean {
-  return row.metadata?.reconciled_by_server === true;
+/**
+ * A final row the retry worker appended from the chain: /api/audit/list
+ * said so (chain_checked), and its actor and actor_source agree. Metadata
+ * markers alone (reconciled_by_server) never make a row chain-checked.
+ */
+export function isChainChecked(row: Pick<FeedAuditRow, "chain_checked" | "actor_wallet" | "metadata">): boolean {
+  return row.chain_checked === true && row.actor_wallet === SERVER_ACTOR && row.metadata?.actor_source === RECONCILER;
 }
 
 function isDistributionFinal(row: FeedAuditRow): row is FeedAuditRow & { tx_signature: string } {

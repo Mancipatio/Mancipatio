@@ -7,7 +7,9 @@
 // status; what the pending row reported is carried as unverified
 // client_claims. Idempotent (one server row per transaction, its id derived
 // from the signature, ON CONFLICT DO NOTHING), bounded per run, oldest first
-// with a keyset cursor, the fresh band before the backlog band.
+// with a keyset cursor, the fresh band before the backlog band. Only that
+// row settles a transaction: a final row posted to the unsigned /api/audit
+// (the browser's, or a forged one) never stops it from being written.
 //
 // The in-memory database applies order(), limit() and range() here
 // (`ordered`), so an ordering or paging bug changes which rows a run takes.
@@ -151,7 +153,7 @@ function pending(signature: string | null, minutesAgo: number, over: Partial<Row
   return row;
 }
 
-/** The browser's own final row for a signature (what the stage must skip). */
+/** The browser's own final row for a signature, via /api/audit: self-asserted, it does not settle the signature. */
 function browserFinal(signature: string, minutesAgo: number, status: "success" | "failed" = "success"): Row {
   const row: Row = { ...pending(signature, minutesAgo), status };
   audit().pop();
@@ -159,6 +161,28 @@ function browserFinal(signature: string, minutesAgo: number, status: "success" |
   audit().push(row);
   return row;
 }
+
+/** The stage's own final row for a signature (what settles it): its id is derived from the signature. */
+function serverFinal(signature: string, minutesAgo: number): Row {
+  const row: Row = {
+    id: reconciledAuditId("mainnet", signature),
+    network: "mainnet",
+    created_at: at(minutesAgo * MIN),
+    ix_name: DISTRIBUTION_AUDIT_IX,
+    category: "share-class",
+    actor_wallet: "server",
+    target_label: null,
+    tx_signature: signature,
+    reason: "Finalized on chain (checked by the server)",
+    status: "success",
+    metadata: { chain_outcome: "finalized", reconciled_by_server: true, reconciled_by: "retry-worker", actor_verified: false, actor_source: "retry-worker" },
+  };
+  audit().push(row);
+  return row;
+}
+
+/** The server's row of a signature, by its id. */
+const serverRowOf = (signature: string) => audit().find((r) => r.id === reconciledAuditId("mainnet", signature));
 
 const finalized = (slot = 400_000_000, err: unknown = null): Status => ({ slot: BigInt(slot), err, confirmationStatus: "finalized" });
 
@@ -347,17 +371,46 @@ describe("which rows a run takes", () => {
     expect(finals().map((r) => r.tx_signature).sort()).toEqual([SIG(8), SIG(9)].sort());
   });
 
-  it("skips a transaction that already has its final row (the browser's, a resume's or its own), and other networks and instructions", async () => {
+  it("skips a transaction that already has its own row (looked up by its id), and other networks and instructions", async () => {
     pending(SIG(10), 20);
-    browserFinal(SIG(10), 19);
+    serverFinal(SIG(10), 19);
     pending(SIG(11), 20);
-    browserFinal(SIG(11), 19, "failed");
+    pending(SIG(11), 19);
+    serverFinal(SIG(11), 18);
     pending(SIG(12), 20, { network: "devnet" });
     pending(SIG(13), 20, { ix_name: "mint_to_treasury" });
     const { rpc, calls } = chain({ [SIG(10)]: finalized(), [SIG(11)]: finalized(), [SIG(12)]: finalized(), [SIG(13)]: finalized() });
     expect(await run(rpc)).toEqual(ZERO);
     expect(calls).toEqual([]); // nothing left to ask the chain
     expect(store.upserts).toEqual([]);
+    // The lookup is by the ids only this stage writes, never by status or signature.
+    const lookups = store.queries.filter((q) => call(q, "select").some(([c]) => c === "id"));
+    expect(lookups.map((q) => call(q, "in"))).toEqual([[["id", [reconciledAuditId("mainnet", SIG(10)), reconciledAuditId("mainnet", SIG(11))]]]]);
+    expect(store.queries.some((q) => call(q, "in").some(([c]) => c === "status" || c === "tx_signature"))).toBe(false);
+  });
+
+  it("a final row posted to /api/audit (the browser's, or a forged one with the worker's markers) settles nothing: the server's row is still written from the chain", async () => {
+    pending(SIG(10), 20);
+    const browser = browserFinal(SIG(10), 19);
+    pending(SIG(11), 20);
+    // A forged "failed" row for a real signature, as /api/audit stored it before it refused actor "server"
+    // and dropped these keys: the worker's markers, but an id the database drew and the route's actor_source.
+    const forged = browserFinal(SIG(11), 19, "failed");
+    forged.actor_wallet = "server";
+    forged.metadata = { ...(forged.metadata as Row), reconciled_by_server: true, reconciled_by: "retry-worker", chain_outcome: "finalized_with_error" };
+    const { rpc, calls } = chain({ [SIG(10)]: finalized(), [SIG(11)]: finalized() });
+    expect(await run(rpc)).toEqual({ ...ZERO, complete: 2 });
+    expect(calls).toEqual([[SIG(10), SIG(11)]]);
+    // The chain's answer, next to the self-asserted rows (append-only: they stay as they were).
+    expect(serverRowOf(SIG(10))).toMatchObject({ status: "success", actor_wallet: "server", reason: "Finalized on chain (checked by the server)" });
+    expect(serverRowOf(SIG(11))).toMatchObject({ status: "success", actor_wallet: "server" });
+    expect(serverRowOf(SIG(11))!.metadata).toMatchObject({ chain_outcome: "finalized", actor_source: "retry-worker" });
+    expect(audit().find((r) => r.id === browser.id)).toMatchObject({ status: "success" });
+    expect(audit().find((r) => r.id === forged.id)).toMatchObject({ status: "failed" });
+    // Then the transactions are settled: the next run asks nothing.
+    const again = chain({ [SIG(10)]: finalized(), [SIG(11)]: finalized() });
+    expect(await run(again.rpc)).toEqual(ZERO);
+    expect(again.calls).toEqual([]);
   });
 
   it("reads oldest first with a keyset cursor: the fresh band (5 min to 3 h), then the backlog band (3 h to 7 days)", async () => {
@@ -402,10 +455,10 @@ describe("which rows a run takes", () => {
       const created = i >= 48 && i <= 50 ? at(126 * MIN) : at((175 - i) * MIN + 30_000);
       rows.push(pending(BIGSIG(i), 0, { created_at: created }));
     }
-    // All of them settled by the browser except five: two of the shared instant (49, the first page's last row,
+    // All of them settled by the server except five: two of the shared instant (49, the first page's last row,
     // which the second page reads again, and 50, past the boundary) and the three newest.
     const open = new Set([BIGSIG(49), BIGSIG(50), BIGSIG(117), BIGSIG(118), BIGSIG(119)]);
-    for (let i = 0; i < 120; i++) if (!open.has(BIGSIG(i))) browserFinal(BIGSIG(i), 0);
+    for (let i = 0; i < 120; i++) if (!open.has(BIGSIG(i))) serverFinal(BIGSIG(i), 0);
     const statuses: Record<string, Status> = {};
     for (const s of open) statuses[s] = finalized();
     const { rpc, calls } = chain(statuses);
@@ -420,10 +473,10 @@ describe("which rows a run takes", () => {
     expect(rows[SCAN_PAGE - 1].created_at).toBe(rows[48].created_at);
     // The second page started two rows back (48 and 49 again, skipped): it ended at row 97.
     expect(call(scans[2], "gte")).toEqual([["created_at", rows[97].created_at]]);
-    // Each new signature was looked up once (no row read twice as new).
+    // Each new signature's server row was looked up once (no row read twice as new).
     const looked = store.queries
-      .filter((q) => call(q, "in").some(([c]) => c === "tx_signature"))
-      .flatMap((q) => call(q, "in").filter(([c]) => c === "tx_signature").flatMap(([, v]) => v as string[]));
+      .filter((q) => call(q, "select").some(([c]) => c === "id"))
+      .flatMap((q) => call(q, "in").filter(([c]) => c === "id").flatMap(([, v]) => v as string[]));
     expect(looked).toHaveLength(120);
     expect(new Set(looked).size).toBe(120);
   });
@@ -433,7 +486,7 @@ describe("which rows a run takes", () => {
     const history = SCAN_PAGES * SCAN_PAGE + 100;
     for (let i = 0; i < history; i++) {
       pending(BIGSIG(i), FRESH_BAND_MS / MIN + 1 + i);
-      browserFinal(BIGSIG(i), FRESH_BAND_MS / MIN + i);
+      serverFinal(BIGSIG(i), FRESH_BAND_MS / MIN + i);
     }
     // …an unsettled row from an outage, older than all of it, and a new one.
     pending(SIG(201), FRESH_BAND_MS / MIN + history + 10);
@@ -488,8 +541,8 @@ describe("which rows a run takes", () => {
     expect(await run(rpc, 20)).toEqual({ ...ZERO, complete: 60 });
     expect(calls).toHaveLength(1);
     expect(new Set(finals().map((r) => r.tx_signature)).size).toBe(60);
-    const byId = store.queries.filter((q) => call(q, "in").some(([c]) => c === "id"));
-    expect(byId.map((q) => (call(q, "in")[0][1] as string[]).length)).toEqual([50, 10]);
+    const full = store.queries.filter((q) => call(q, "select").some(([c]) => String(c).includes("metadata")));
+    expect(full.map((q) => (call(q, "in")[0][1] as string[]).length)).toEqual([50, 10]);
   });
 
   it("counts a row without a usable signature as invalid and never sends it to the chain", async () => {

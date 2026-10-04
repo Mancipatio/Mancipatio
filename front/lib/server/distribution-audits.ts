@@ -11,17 +11,22 @@
 // the run in the same browser writes the final row (reconciled_on_resume);
 // a run nobody reopens never got one.
 //
-// This stage appends that final row from the server.
+// This stage appends the server's own final row, checked on the chain, for
+// each of those transactions: also when the browser wrote one, since
+// /api/audit is unsigned and any final row posted there (the browser's, a
+// resume's, or a forged one for a real signature) is a claim, not a fact.
 //
 // Candidates: pending share_class_distribution rows of this network, at
 // least RECONCILE_MIN_AGE_MS old (younger ones are still the browser's to
-// confirm) and at most RECONCILE_MAX_AGE_MS, whose signature has no
-// "success" / "failed" row yet (the browser's, a resume's or this stage's
-// own). They are read OLDEST FIRST with a keyset cursor on (created_at, id),
-// in two bands: the fresh band (RECONCILE_MIN_AGE_MS to FRESH_BAND_MS) first,
-// then the backlog band (FRESH_BAND_MS to RECONCILE_MAX_AGE_MS) with the
-// pages left. A pending row stays pending in the table after its final row
-// (append-only), so a single oldest-first scan of the 7-day window would
+// confirm) and at most RECONCILE_MAX_AGE_MS, whose signature has no row of
+// this stage yet. That row is looked up by its id (reconciledAuditId), which
+// /api/audit cannot write, so no self-asserted final row stops it from being
+// written (lib/server/reconciled-audit). They are read OLDEST FIRST with a
+// keyset cursor on (created_at, id), in two bands: the fresh band
+// (RECONCILE_MIN_AGE_MS to FRESH_BAND_MS) first, then the backlog band
+// (FRESH_BAND_MS to RECONCILE_MAX_AGE_MS) with the pages left. A pending row
+// stays pending in the table after its final row (append-only), so a
+// single oldest-first scan of the 7-day window would
 // spend its pages on a week of settled history before it reached a new row;
 // in the fresh band every row becomes decidable (below) and settles there,
 // and the backlog band only catches what an outage left. At most `limit` ×
@@ -57,14 +62,18 @@
 // pending row of the signature (the sender's own write at send time; a
 // pending row written later by someone who saw the signature cannot replace
 // it), and never at the top level where a reader would take it for checked.
-// metadata.reconciled_by_server marks the row; the pending rows are never
-// updated.
+// metadata.reconciled_by_server tells a human reader so, but the row is
+// recognized only by what /api/audit cannot write: its id, actor
+// SERVER_ACTOR and actor_source "retry-worker" (lib/server/reconciled-audit
+// isReconciledAuditRow; /api/audit also drops the server row's metadata keys
+// from a caller's). The pending rows are never updated.
 //
-// Duplicates: this stage skips a signature that has any final row. The
-// browser cannot see the server's row (anon has no SELECT on audit_events,
-// 0044), so a resume that comes after it still appends its own
-// (reconciled_on_resume): readers keep one final row per signature
-// (lib/audit-feed collapseDistributionFinals, the admin audit page).
+// Duplicates: a transaction the browser settled also gets this stage's row,
+// and the browser cannot see the server's row (anon has no SELECT on
+// audit_events, 0044), so a resume that comes after it still appends its own
+// (reconciled_on_resume): readers keep one final row per signature, the
+// server's when there is one (lib/audit-feed collapseDistributionFinals,
+// the admin audit page, through /api/audit/list's chain_checked).
 //
 // Idempotent and safe under concurrent runs: the retry worker's lease runs
 // one stage at a time per network, and independently of it each final row's
@@ -79,15 +88,16 @@
 // counts (lib/server/retry-worker auditStage).
 
 import "server-only";
-import { createHash } from "node:crypto";
 import { isSignature, type GetSignatureStatusesApi, type Rpc, type Signature } from "@solana/kit";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork, type Network } from "@/lib/network";
+import { SERVER_ACTOR } from "@/lib/server/audit";
+import { DISTRIBUTION_AUDIT_IX, RECONCILER, reconciledAuditId } from "@/lib/server/reconciled-audit";
 import type { RetryCounts } from "@/lib/server/retry-worker";
 import { getServerRpc } from "@/lib/server/rpc";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 
-export const DISTRIBUTION_AUDIT_IX = "share_class_distribution";
+export { DISTRIBUTION_AUDIT_IX, SERVER_ACTOR, reconciledAuditId };
 /** Younger pending rows are still the browser's to confirm (it waits 60 s, then retries its audit write). */
 export const RECONCILE_MIN_AGE_MS = 5 * 60_000;
 /** Older pending rows are no longer looked at (aged out, no alarm). */
@@ -100,16 +110,12 @@ export const FRESH_BAND_MS = 3 * 60 * 60_000;
 export const CANDIDATES_PER_LIMIT = 10;
 /** At most this many candidates per run (≤ 256 for one getSignatureStatuses call). */
 export const MAX_CANDIDATES = 200;
-/** Pending rows per page (their signatures go into one `in` filter: ~4.5 kB of URL). */
+/** Pending rows per page (the ids of their server rows go into one `in` filter: ~1.9 kB of URL). */
 export const SCAN_PAGE = 50;
 /** Pages of pending rows read per run at most, both bands together. */
 export const SCAN_PAGES = 20;
 /** Pending row ids a server row lists at most (pending_rows says how many there were). */
 export const MAX_PENDING_REFS = 10;
-
-const RECONCILER = "retry-worker";
-/** The actor of the server's own rows (lib/server/sale-capacity's alert rows use the same). */
-export const SERVER_ACTOR = "server";
 
 type StatusRpc = Rpc<GetSignatureStatusesApi>;
 
@@ -120,19 +126,6 @@ export type ChainStatus = { slot: bigint; err: unknown; confirmationStatus?: str
 export function finalAuditStatus(status: ChainStatus): "success" | "failed" | null {
   if (!status || status.confirmationStatus !== "finalized") return null;
   return status.err === null || status.err === undefined ? "success" : "failed";
-}
-
-/**
- * The id of the server's final row for one transaction: a UUID (version 8,
- * RFC 9562) from SHA-256 of the network and the signature, so a second
- * write of it is a conflict, never a second row.
- */
-export function reconciledAuditId(network: string, signature: string): string {
-  const h = createHash("sha256").update(`manci:distribution-audit:v1:${network}:${signature}`).digest();
-  h[6] = (h[6] & 0x0f) | 0x80;
-  h[8] = (h[8] & 0x3f) | 0x80;
-  const hex = h.subarray(0, 16).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
 /** What one run did (the retry worker's counts plus this stage's own). */
@@ -327,7 +320,7 @@ export async function reconcileDistributionAudits(
   const at = (msAgo: number) => new Date(nowMs - msAgo).toISOString();
   const want = Math.min(limit * CANDIDATES_PER_LIMIT, MAX_CANDIDATES);
 
-  // 1. Candidates: pending rows without a final row, oldest first, the fresh band, then the backlog band.
+  // 1. Candidates: pending rows without this stage's row, oldest first, the fresh band, then the backlog band.
   const bands = [
     { from: at(FRESH_BAND_MS), to: at(RECONCILE_MIN_AGE_MS), toInclusive: true },
     { from: at(RECONCILE_MAX_AGE_MS), to: at(FRESH_BAND_MS), toInclusive: false },
@@ -365,7 +358,7 @@ export async function reconcileDistributionAudits(
       const unseen = after ? rows.filter((r) => r.created_at !== after.created_at || r.id > after.id) : rows;
       if (rows.length > 0) cursor = rows[rows.length - 1];
 
-      // Signatures new to this run, in scan order (their final rows are looked up together).
+      // Signatures new to this run, in scan order (their server rows are looked up together).
       const newSignatures = new Map<string, ScanRow[]>();
       for (const row of unseen) {
         // As stored (/api/audit trims it): the final row and its id use the same string.
@@ -387,20 +380,23 @@ export async function reconcileDistributionAudits(
         else newSignatures.set(signature, [row]);
       }
       if (newSignatures.size > 0) {
+        // Settled = this stage's own row exists (its id, which /api/audit cannot write). A final row from
+        // /api/audit (the browser's, a resume's, or anyone's who saw the signature) is self-asserted and
+        // settles nothing: the chain-checked row is still written next to it.
+        const own = new Map<string, string>();
+        for (const signature of newSignatures.keys()) own.set(reconciledAuditId(network, signature), signature);
         const finals = await sb
           .from("audit_events")
-          .select("tx_signature")
-          .eq("network", network)
-          .eq("ix_name", DISTRIBUTION_AUDIT_IX)
-          .in("status", ["success", "failed"])
-          .in("tx_signature", [...newSignatures.keys()])
+          .select("id")
+          .in("id", [...own.keys()])
           .abortSignal(databaseSignal(signal));
         if (finals.error) {
           counts.deferred = candidates.length;
           throw new DistributionAuditError("database", counts);
         }
-        for (const r of (finals.data ?? []) as { tx_signature: string | null }[]) {
-          if (typeof r.tx_signature === "string") settled.add(r.tx_signature);
+        for (const r of (finals.data ?? []) as { id: string | null }[]) {
+          const signature = typeof r.id === "string" ? own.get(r.id.toLowerCase()) : undefined;
+          if (signature) settled.add(signature);
         }
         for (const [signature, list] of newSignatures) {
           if (settled.has(signature) || candidates.length >= want) continue;
