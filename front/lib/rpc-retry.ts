@@ -19,6 +19,12 @@
 // each ±25 % (jitter, so several reads refused together do not come back
 // together). Reads only: a send is never retried here.
 //
+// An AbortSignal (options.signal) ends it: no new attempt and no further
+// wait once it aborts (a wait in progress ends at once), and the abort's
+// reason is thrown instead of the read's own outcome. The read gets the
+// signal too, for a request that can be cancelled. The tokenize checklist
+// aborts a load that a newer load superseded or that its unmount abandoned.
+//
 // Directive-free and node-safe (sleep and random are injectable):
 // tests/rpc-retry.test.ts.
 import { isSolanaError, SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR } from "@solana/kit";
@@ -62,26 +68,59 @@ export function retryDelayMs(base: number, random: () => number = Math.random): 
 export type RpcReadRetryOptions = {
   /** The waits before each retry (default RPC_READ_RETRY_DELAYS_MS); its length bounds the retries. */
   delaysMs?: readonly number[];
-  sleep?: (ms: number) => Promise<void>;
+  /** Waits `ms`; ends early (rejects) when `signal` aborts. */
+  sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   random?: () => number;
+  /** Stops the retries: once it aborts, nothing more is read or waited for, and its reason is thrown. */
+  signal?: AbortSignal;
 };
 
-const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
+/** What an aborted signal throws (its reason, or an AbortError when it has none). */
+function abortError(signal: AbortSignal): unknown {
+  return signal.reason ?? new DOMException("The operation was aborted.", "AbortError");
+}
+
+/** setTimeout as a promise that an abort ends at once (and clears the timer). */
+export function abortableSleep(ms: number, signal?: AbortSignal): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(abortError(signal));
+      return;
+    }
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(abortError(signal!));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
 
 /**
  * `read()`, retried after a transient RPC failure (isTransientRpcError) at
  * most `delaysMs.length` times with a jittered backoff. Any other failure,
- * and the transient one of the last attempt, is thrown unchanged.
+ * and the transient one of the last attempt, is thrown unchanged. After
+ * `signal` aborts, no further read or wait starts and the abort's reason is
+ * thrown (also when the read in flight then fails).
  */
-export async function withRpcReadRetry<T>(read: () => Promise<T>, options: RpcReadRetryOptions = {}): Promise<T> {
+export async function withRpcReadRetry<T>(
+  read: (signal?: AbortSignal) => Promise<T>,
+  options: RpcReadRetryOptions = {},
+): Promise<T> {
   const delays = options.delaysMs ?? RPC_READ_RETRY_DELAYS_MS;
-  const sleep = options.sleep ?? defaultSleep;
+  const sleep = options.sleep ?? abortableSleep;
+  const signal = options.signal;
   for (let attempt = 0; ; attempt++) {
+    if (signal?.aborted) throw abortError(signal);
     try {
-      return await read();
+      return await read(signal);
     } catch (error) {
+      if (signal?.aborted) throw abortError(signal);
       if (attempt >= delays.length || !isTransientRpcError(error)) throw error;
-      await sleep(retryDelayMs(delays[attempt], options.random));
+      await sleep(retryDelayMs(delays[attempt], options.random), signal);
     }
   }
 }

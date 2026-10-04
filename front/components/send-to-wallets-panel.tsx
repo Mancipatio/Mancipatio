@@ -330,6 +330,9 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       for (const r of j.rows) destinations.set(r.wallet, await tokenAccountOf(r.wallet as Address, sc.mint));
       const result = await evaluateRun(rpc, j, { source: await tokenAccountOf(wallet, sc.mint), destinations });
       // The final audit rows a session that stopped early never wrote (only its "pending" row exists).
+      // The retry worker may have appended its own by now (lib/server/distribution-audits); this page
+      // cannot read audit_events, so that can make a second final row: readers keep one per signature
+      // (lib/audit-feed collapseDistributionFinals).
       let evaluated = result.journal;
       const due = auditsDue(evaluated);
       if (due.length > 0 && evaluated.sender === wallet.toString()) {

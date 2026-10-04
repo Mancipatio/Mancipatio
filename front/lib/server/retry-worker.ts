@@ -3,7 +3,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { detectNetwork, type Network } from "@/lib/network";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { isDeploymentNetworkError } from "@/lib/server/deployment-network";
-import { reconcileDistributionAudits } from "@/lib/server/distribution-audits";
+import { reconcileDistributionAudits, type DistributionAuditCounts } from "@/lib/server/distribution-audits";
 import { runIndexerHeartbeat, type Freshness } from "@/lib/server/indexer-heartbeat";
 import { reconcileIndexerJobs } from "@/lib/server/indexer-sync";
 import { reconcilePurchases } from "@/lib/server/purchase-records";
@@ -15,14 +15,24 @@ export class RetryWorkerError extends Error {
 }
 export type RetryCounts = { complete: number; pending: number; invalid: number };
 export type StageResult = { status: "processed"; counts: RetryCounts } | { status: "deferred" | "failed"; counts: null };
+/** Why the audit stage left rows for a later run: no time (left), or the database / the RPC did not answer. */
+export type AuditStageCode = "deadline" | "database" | "chain" | "internal";
+/** The audit stage (lib/server/distribution-audits): its counters even when it stopped early, and why it did. */
+export type AuditStageResult = {
+  status: "processed" | "deferred" | "failed";
+  /** What it did; after an early stop, what it did before (all zero when it never started). `deferred`: rows left for the next run. */
+  counts: DistributionAuditCounts;
+  /** null when nothing was left behind. */
+  code: AuditStageCode | null;
+};
 export type RetryWorkerResult =
   | { status: "busy"; network: Network }
   | {
     status: "processed" | "partial"; network: Network;
     indexer: StageResult; purchases: StageResult; ledger: StageResult; capacity: StageResult;
     /** Pending "Send to wallets" audit rows settled from the chain (lib/server/distribution-audits).
-     * Best effort, after everything else: never part of `partial`. */
-    audits: StageResult;
+     * Best effort, after everything else: never part of `partial`; a stop is logged (auditStage). */
+    audits: AuditStageResult;
     /** The indexer freshness heartbeat (0075). Never part of `partial`. */
     freshness: Freshness;
   };
@@ -68,6 +78,50 @@ export async function stage(
     // Deadline exhaustion leaves durable queue rows pending for the next run.
     return { status: signal.aborted || Date.now() >= deadline ? "deferred" : "failed", counts: null };
   }
+}
+
+const AUDIT_COUNT_KEYS = ["complete", "pending", "invalid", "expired", "deferred"] as const;
+
+/** The stage's own error (DistributionAuditError, read by shape: no RPC or database message). */
+function auditStop(error: unknown): { code: AuditStageCode; counts: DistributionAuditCounts | null } {
+  const e = (typeof error === "object" && error !== null ? error : {}) as { stageCode?: unknown; counts?: unknown };
+  const code = e.stageCode === "database" || e.stageCode === "chain" ? e.stageCode : "internal";
+  const c = e.counts as Record<string, unknown> | null | undefined;
+  const counts = c && AUDIT_COUNT_KEYS.every((k) => Number.isSafeInteger(c[k])) ? (c as DistributionAuditCounts) : null;
+  return { code, counts };
+}
+
+/**
+ * The distribution audit stage through stage(), made visible: the counters
+ * also when it stopped early (`deferred`: candidates left for the next run),
+ * a reason code, and one structured log line whenever rows were left behind
+ * (failed, deferred, or cut short by the deadline). The line carries the
+ * network, status, code and the counters only: never an error message, an
+ * RPC URL or a row.
+ */
+export async function auditStage(limit: number, workDeadline: number, network: Network): Promise<AuditStageResult> {
+  const box: { counts: DistributionAuditCounts | null; stop: ReturnType<typeof auditStop> | null } = { counts: null, stop: null };
+  const result = await stage(async (l, deadline, signal) => {
+    try {
+      box.counts = await reconcileDistributionAudits(l, deadline, signal);
+      return box.counts;
+    } catch (error) {
+      box.stop = auditStop(error);
+      throw error;
+    }
+  }, limit, STAGE_BUDGETS_MS.audits, workDeadline);
+  // The five counters only (0 when the stage did not report one).
+  const reported: Partial<Record<(typeof AUDIT_COUNT_KEYS)[number], unknown>> =
+    (result.status === "processed" ? box.counts : box.stop?.counts) ?? {};
+  const counts = Object.fromEntries(
+    AUDIT_COUNT_KEYS.map((k) => [k, Number.isSafeInteger(reported[k]) ? (reported[k] as number) : 0]),
+  ) as DistributionAuditCounts;
+  const code: AuditStageCode | null =
+    result.status === "deferred" ? "deadline"
+      : result.status === "failed" ? (box.stop?.code ?? "internal")
+        : counts.deferred > 0 ? "deadline" : null;
+  if (code !== null) console.warn(`[retry-worker] audits ${JSON.stringify({ network, status: result.status, code, ...counts })}`);
+  return { status: result.status, counts, code };
 }
 
 /** Lease errors: a database that serves another network is its own answer. */
@@ -122,9 +176,10 @@ export async function runRetryWorker(limit = 10): Promise<RetryWorkerResult> {
     const capacity = await stage(reconcileSaleCapacity, limit, STAGE_BUDGETS_MS.capacity, workDeadline);
     // Pending "Send to wallets" audit rows the browser never confirmed. Audit
     // breadcrumbs only (the chain and the sender's journal stay the truth): a
-    // failure is reported in `audits` but never makes the run partial, so it
-    // raises no retry-worker alarm.
-    const audits = await stage(reconcileDistributionAudits, limit, STAGE_BUDGETS_MS.audits, workDeadline);
+    // failure or a deferral is logged and reported in `audits` (code and
+    // counters) but never makes the run partial, so it raises no
+    // retry-worker alarm.
+    const audits = await auditStage(limit, workDeadline, network);
     const failed = [indexer, purchases, ledger, capacity].some((s) => s.status === "failed");
     status = failed ? "partial" : "processed";
     return { status, network, indexer, purchases, ledger, capacity, audits, freshness };

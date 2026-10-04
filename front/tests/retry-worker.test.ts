@@ -19,6 +19,21 @@ import { runRetryWorker, retryWorkerLimit } from "@/lib/server/retry-worker";
 
 const SECRET = "fixture-scheduler-secret-32-characters-only";
 const COUNTS = { complete: 1, pending: 2, invalid: 0 };
+/** The audit stage's counters (its own two added, zero when the stage does not report them). */
+const AUDIT_COUNTS = { ...COUNTS, expired: 0, deferred: 0 };
+const NO_AUDIT_COUNTS = { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0 };
+/** The audit stage's log lines ([retry-worker] audits {...}), parsed. */
+const auditLines = (warn: { mock: { calls: unknown[][] } }) =>
+  warn.mock.calls
+    .map((c) => String(c[0]))
+    .filter((l) => l.startsWith("[retry-worker] audits "))
+    .map((l) => JSON.parse(l.slice("[retry-worker] audits ".length)));
+/** One run's audit stage result. */
+async function auditsOfRun() {
+  const result = await runRetryWorker();
+  if (result.status === "busy") throw new Error("lease busy");
+  return result.audits;
+}
 function rpcResult(data: boolean | null = true, error: unknown = null) {
   return { abortSignal: (signal: AbortSignal) => { mocks.abortSignals.push(signal); return Promise.resolve({ data, error }); } };
 }
@@ -51,7 +66,7 @@ describe("scheduler authorization", () => {
     expect(mocks.rpc).toHaveBeenNthCalledWith(1, "acquire_retry_worker_lease", expect.objectContaining({ p_network: "devnet", p_ttl_seconds: 120 }));
     for (const m of [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity, mocks.audits]) expect(m.mock.calls[0][0]).toBe(10);
     expect(body.data.capacity).toEqual({ status: "processed", counts: COUNTS });
-    expect(body.data.audits).toEqual({ status: "processed", counts: COUNTS });
+    expect(body.data.audits).toEqual({ status: "processed", counts: AUDIT_COUNTS, code: null });
     expect(body.data.ledger).toEqual({ status: "processed", counts: COUNTS });
     expect(response.headers.get("Cache-Control")).toBe("private, no-store"); expect(maxDuration).toBe(60);
   });
@@ -77,13 +92,42 @@ describe("persistent worker lease and deadlines", () => {
     const order = [mocks.indexer, mocks.purchases, mocks.ledger, mocks.capacity, mocks.audits].map((m) => m.mock.invocationCallOrder[0]);
     expect(order).toEqual([...order].sort((a, b) => a - b));
   });
-  it("a failed audit-row stage is reported but never makes the run partial (no retry-worker alarm)", async () => {
+  it("a failed audit-row stage is reported and logged but never makes the run partial (no retry-worker alarm)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     mocks.audits.mockRejectedValue(new Error("https://rpc.invalid/?api-key=secret"));
     const response = await POST(request()); const body = await response.json();
     expect(response.status).toBe(200);
-    expect(body.data).toMatchObject({ status: "processed", capacity: { status: "processed" }, audits: { status: "failed", counts: null } });
+    expect(body.data).toMatchObject({ status: "processed", capacity: { status: "processed" } });
+    expect(body.data.audits).toEqual({ status: "failed", counts: NO_AUDIT_COUNTS, code: "internal" });
     expect(JSON.stringify(body)).not.toContain("api-key");
     expect(mocks.rpc.mock.calls[1][1]).toMatchObject({ p_worker: "retry", p_status: "processed" });
+    // One structured line: network, status, code and the counters; never the error's message.
+    expect(auditLines(warn)).toEqual([{ network: "devnet", status: "failed", code: "internal", ...NO_AUDIT_COUNTS }]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("api-key");
+  });
+  it("the audit stage's own failure says which side did not answer and how many rows wait (deferred)", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const counts = { complete: 0, pending: 0, invalid: 1, expired: 0, deferred: 7 };
+    mocks.audits.mockRejectedValue(Object.assign(new Error("Distribution audit chain status unavailable", { cause: new Error("api-key=secret") }), { stageCode: "chain", counts }));
+    const body = await (await POST(request())).json();
+    expect(body.data.audits).toEqual({ status: "failed", counts, code: "chain" });
+    expect(auditLines(warn)).toEqual([{ network: "devnet", status: "failed", code: "chain", ...counts }]);
+    expect(JSON.stringify(warn.mock.calls)).not.toContain("api-key");
+    warn.mockClear();
+    // A shape it does not know is "internal", with no counters taken from it.
+    mocks.audits.mockRejectedValue(Object.assign(new Error("x"), { stageCode: "elsewhere", counts: { complete: "1" } }));
+    expect((await (await POST(request())).json()).data.audits).toEqual({ status: "failed", counts: NO_AUDIT_COUNTS, code: "internal" });
+  });
+  it("a run the deadline cut short reports the rows it left (deferred) and logs it; a clean run logs nothing", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mocks.audits.mockResolvedValueOnce({ complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3 });
+    expect(await auditsOfRun()).toEqual({ status: "processed", counts: { complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3 }, code: "deadline" });
+    expect(auditLines(warn)).toEqual([{ network: "devnet", status: "processed", code: "deadline", complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3 }]);
+    warn.mockClear();
+    // Only the five counters are reported, whatever else a stage might return.
+    mocks.audits.mockResolvedValueOnce({ complete: 2, pending: 1, invalid: 0, expired: 1, deferred: 0, note: "not a counter" });
+    expect(await auditsOfRun()).toEqual({ status: "processed", counts: { complete: 2, pending: 1, invalid: 0, expired: 1, deferred: 0 }, code: null });
+    expect(auditLines(warn)).toEqual([]);
   });
   it("records its heartbeat (partial after a failure) before releasing the lease", async () => {
     mocks.ledger.mockRejectedValue(new Error("x"));
@@ -149,12 +193,15 @@ describe("persistent worker lease and deadlines", () => {
   });
   it("leaves later jobs deferred when the total budget is exhausted, then releases with a fresh signal", async () => {
     let now = 100_000; vi.spyOn(Date, "now").mockImplementation(() => now);
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     mocks.indexer.mockImplementation(async () => { now = 147_000; throw new Error("deadline"); });
     const result = await runRetryWorker();
     expect(result).toMatchObject({
       status: "processed", indexer: { status: "deferred" }, purchases: { status: "deferred" },
-      ledger: { status: "deferred" }, capacity: { status: "deferred" }, audits: { status: "deferred" },
+      ledger: { status: "deferred" }, capacity: { status: "deferred" },
+      audits: { status: "deferred", counts: NO_AUDIT_COUNTS, code: "deadline" },
     });
+    expect(auditLines(warn)).toEqual([{ network: "devnet", status: "deferred", code: "deadline", ...NO_AUDIT_COUNTS }]);
     expect(mocks.purchases).not.toHaveBeenCalled(); expect(mocks.capacity).not.toHaveBeenCalled(); expect(mocks.audits).not.toHaveBeenCalled();
     expect(mocks.rpc).toHaveBeenCalledTimes(3);
     expect(mocks.abortSignals[2].aborted).toBe(false);

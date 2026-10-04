@@ -16,9 +16,11 @@
 // The chain reads are retried on a rate limit, a 5xx or a network error
 // (lib/rpc-retry withRpcReadRetry: after ~0.5, 1 and 2 s): right after a send
 // the checklist re-reads at once, and a public RPC's 429 used to leave "Could
-// not read the token's state" up until "Try again". Only the latest load
-// commits (lib/latest-load), so a slower, retrying older load never
-// overwrites a newer one.
+// not read the token's state" up until "Try again". The treasury balance is
+// one of them (fetchTreasuryBalance throws for the retry; null only once it
+// still fails). Only the latest load commits, and a newer load or the
+// unmount aborts the older one (lib/latest-load createAbortableLatest): it
+// stops retrying and waiting at once and never overwrites a newer one.
 
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
@@ -47,9 +49,9 @@ import {
 import {
   assetSnapshot,
   classSnapshot,
+  fetchTreasuryBalance,
   issuerKybVerified,
   readTokenizeState,
-  readTreasuryBalance,
   type TokenizeChainState,
 } from "@/lib/tokenize-shares-chain";
 import { listOpenSales, openSaleRemaining } from "@/lib/distribution-chain";
@@ -57,7 +59,7 @@ import { isApprovalLive, listShareClassSaleApprovals, type SaleApprovalAccount }
 import { parseSaleRequest } from "@/lib/public-sale";
 import { listSaleRequests } from "@/lib/sale-requests";
 import { remainingFromLifetime } from "@/lib/distribution-supply";
-import { createLatestGate } from "@/lib/latest-load";
+import { createAbortableLatest } from "@/lib/latest-load";
 import { withRpcReadRetry } from "@/lib/rpc-retry";
 import { LockSupplyButton } from "@/components/lock-supply-button";
 import { DistributeCard } from "@/components/distribute-card";
@@ -120,28 +122,31 @@ export function TokenizeChecklist({
   });
 
   const isIssuerAuthority = !!wallet && wallet === issuerAuthority;
-  const [latest] = useState(createLatestGate);
+  const [latest] = useState(createAbortableLatest);
 
   const load = useCallback(async () => {
     const rpc = client.runtime.rpc;
-    const current = latest.begin();
+    // Aborts the previous load (its retries and waits stop); this one commits only while not aborted.
+    const signal = latest.begin();
+    const current = () => !signal.aborted;
+    const retry = { signal };
     try {
-      const next = await withRpcReadRetry(() => readTokenizeState(rpc, assetPda));
+      const next = await withRpcReadRetry(() => readTokenizeState(rpc, assetPda), retry);
       const sc = next.sc0;
       const issuer = next.asset?.issuer ?? null;
       const [issuerVerified, treasuryBalance, openSales, approvals] = await Promise.all([
-        issuer ? withRpcReadRetry(() => issuerKybVerified(rpc, issuer)).catch(() => false) : Promise.resolve(false),
+        issuer ? withRpcReadRetry(() => issuerKybVerified(rpc, issuer), retry).catch(() => false) : Promise.resolve(false),
         sc?.mintInitialized && issuerAuthority
-          ? // 0 when the treasury has no token account yet (exact); null only when unreadable.
-            readTreasuryBalance(rpc, issuerAuthority as Address, sc.mint)
+          ? // 0 when the treasury has no token account yet (exact); null when unreadable after the retries.
+            withRpcReadRetry(() => fetchTreasuryBalance(rpc, issuerAuthority as Address, sc.mint), retry).catch(() => null)
           : Promise.resolve(null),
         sc
-          ? withRpcReadRetry(() => listOpenSales(rpc, { shareClass: next.addresses.shareClass }))
+          ? withRpcReadRetry(() => listOpenSales(rpc, { shareClass: next.addresses.shareClass }), retry)
               .then((sales) => ({ count: sales.length, remaining: openSaleRemaining(sales) }))
               .catch(() => null)
           : Promise.resolve({ count: 0, remaining: BigInt(0) }),
         sc
-          ? withRpcReadRetry(() => listShareClassSaleApprovals(rpc, next.addresses.shareClass))
+          ? withRpcReadRetry(() => listShareClassSaleApprovals(rpc, next.addresses.shareClass), retry)
               .then((rows) => rows.filter((a) => isApprovalLive(a)))
               .catch(() => null)
           : Promise.resolve([]),
@@ -152,7 +157,7 @@ export function TokenizeChecklist({
       setFailed(false);
       if (issuer && isIssuerAuthority && wallet) {
         try {
-          const p = await withRpcReadRetry(() => loadIssuerPermission(rpc, issuer, wallet as Address));
+          const p = await withRpcReadRetry(() => loadIssuerPermission(rpc, issuer, wallet as Address), retry);
           if (!current()) return;
           setPermission({
             globalAdmin: p.globalAdmin,
@@ -164,7 +169,8 @@ export function TokenizeChecklist({
         }
       }
     } catch {
-      // Not a transient failure, or still failing after the last retry: the "Try again" notice below.
+      // Not a transient failure, or still failing after the last retry: the "Try again" notice below
+      // (an aborted load shows nothing: a newer one is on its way, or the checklist is gone).
       if (current()) setFailed(true);
     }
   }, [client, assetPda, issuerAuthority, isIssuerAuthority, wallet, latest]);
@@ -172,7 +178,9 @@ export function TokenizeChecklist({
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void load();
-  }, [load, refreshKey]);
+    // A re-run starts a newer load anyway; the unmount leaves nothing to commit to.
+    return () => latest.abort();
+  }, [load, refreshKey, latest]);
 
   // A public-sale request the profile shows as "requested" may already have been served (its sale opened
   // and closed: the raise-cap ledger says so, read by the list route within an existing session). Until

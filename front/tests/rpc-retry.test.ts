@@ -2,7 +2,9 @@
 // response) is retried at most three times after ~0.5, 1 and 2 s with
 // jitter; anything else, and the last failure, is thrown as it was. The
 // tokenize checklist reads through it, so its "Could not read the token's
-// state" notice shows only after the retries (mainnet, 2026-10-04).
+// state" notice shows only after the retries (mainnet, 2026-10-04). An
+// AbortSignal stops it (no further read or wait), and the checklist aborts a
+// superseded or unmounted load (lib/latest-load createAbortableLatest).
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -16,10 +18,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   RPC_READ_RETRY_DELAYS_MS,
   RPC_READ_RETRY_JITTER,
+  abortableSleep,
   isTransientRpcError,
   retryDelayMs,
   withRpcReadRetry,
 } from "@/lib/rpc-retry";
+import { createAbortableLatest } from "@/lib/latest-load";
 
 const httpError = (statusCode: number) =>
   new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode });
@@ -158,22 +162,117 @@ describe("withRpcReadRetry", () => {
   });
 });
 
+describe("withRpcReadRetry with an AbortSignal", () => {
+  it("passes the signal to the read", async () => {
+    const controller = new AbortController();
+    const read = vi.fn(async (signal?: AbortSignal) => signal);
+    await expect(withRpcReadRetry(read, { signal: controller.signal })).resolves.toBe(controller.signal);
+  });
+
+  it("reads nothing once aborted (its reason is thrown)", async () => {
+    const reason = new Error("superseded");
+    const read = vi.fn(async () => "state");
+    await expect(withRpcReadRetry(read, { signal: AbortSignal.abort(reason) })).rejects.toBe(reason);
+    expect(read).not.toHaveBeenCalled();
+  });
+
+  it("an abort during the backoff ends the wait at once: no further read", async () => {
+    vi.useFakeTimers();
+    try {
+      const controller = new AbortController();
+      const read = flaky([httpError(429), httpError(429)], "state");
+      const result = withRpcReadRetry(read, { signal: controller.signal, random: () => 0.5 });
+      const settled = result.catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(100); // inside the first ~500 ms wait
+      expect(read).toHaveBeenCalledTimes(1);
+      controller.abort();
+      const error = await settled;
+      expect(error).toBeInstanceOf(DOMException);
+      expect((error as DOMException).name).toBe("AbortError");
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(read).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0); // the backoff timer was cleared
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("an abort while a read is in flight: the read's failure is not retried, the abort is thrown", async () => {
+    const controller = new AbortController();
+    const { waits, sleep } = sleeper();
+    const read = vi.fn(async () => {
+      controller.abort();
+      throw httpError(429);
+    });
+    await expect(withRpcReadRetry(read, { signal: controller.signal, sleep })).rejects.toMatchObject({ name: "AbortError" });
+    expect(read).toHaveBeenCalledTimes(1);
+    expect(waits).toEqual([]);
+  });
+
+  it("an injected sleep that ignores the signal still stops the next read", async () => {
+    const controller = new AbortController();
+    const read = flaky([httpError(429), httpError(429)], "state");
+    const sleep = async () => controller.abort();
+    await expect(withRpcReadRetry(read, { signal: controller.signal, sleep })).rejects.toMatchObject({ name: "AbortError" });
+    expect(read).toHaveBeenCalledTimes(1);
+  });
+
+  it("abortableSleep resolves after its time, or rejects at once when aborted", async () => {
+    vi.useFakeTimers();
+    try {
+      const done = vi.fn();
+      void abortableSleep(500).then(done);
+      await vi.advanceTimersByTimeAsync(499);
+      expect(done).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toHaveBeenCalled();
+      await expect(abortableSleep(500, AbortSignal.abort())).rejects.toMatchObject({ name: "AbortError" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("createAbortableLatest", () => {
+  it("a new load aborts the previous one; abort() (the unmount) aborts the current one", () => {
+    const latest = createAbortableLatest();
+    const first = latest.begin();
+    expect(first.aborted).toBe(false);
+    const second = latest.begin();
+    expect(first.aborted).toBe(true);
+    expect(second.aborted).toBe(false);
+    latest.abort();
+    expect(second.aborted).toBe(true);
+    latest.abort(); // idempotent
+    expect(latest.begin().aborted).toBe(false);
+  });
+});
+
 describe("the tokenize checklist reads through it", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "components/tokenize-checklist.tsx"), "utf8");
 
-  it("retries the token's state, the extras and the permission; the notice stays for the last failure", () => {
-    expect(src).toContain("withRpcReadRetry(() => readTokenizeState(rpc, assetPda))");
-    expect(src).toContain("withRpcReadRetry(() => issuerKybVerified(rpc, issuer))");
-    expect(src).toContain("withRpcReadRetry(() => listOpenSales(");
-    expect(src).toContain("withRpcReadRetry(() => listShareClassSaleApprovals(");
-    expect(src).toContain("withRpcReadRetry(() => loadIssuerPermission(");
+  it("retries the token's state, the extras, the treasury balance and the permission; the notice stays for the last failure", () => {
+    expect(src).toContain("withRpcReadRetry(() => readTokenizeState(rpc, assetPda), retry)");
+    expect(src).toContain("withRpcReadRetry(() => issuerKybVerified(rpc, issuer), retry)");
+    expect(src).toContain("withRpcReadRetry(() => fetchTreasuryBalance(rpc, issuerAuthority as Address, sc.mint), retry).catch(() => null)");
+    expect(src).toContain("withRpcReadRetry(() => listOpenSales(rpc, { shareClass: next.addresses.shareClass }), retry)");
+    expect(src).toContain("withRpcReadRetry(() => listShareClassSaleApprovals(rpc, next.addresses.shareClass), retry)");
+    expect(src).toContain("withRpcReadRetry(() => loadIssuerPermission(rpc, issuer, wallet as Address), retry)");
+    // Every chain read of the load is retried with the load's signal (none outside it).
+    expect(src.match(/withRpcReadRetry\(/g)).toHaveLength(6);
+    expect(src.match(/, retry\)/g)).toHaveLength(6);
+    // The treasury read that swallows failures is gone from the checklist (it could not be retried).
+    expect(src).not.toContain("readTreasuryBalance(");
     expect(src).toContain("Could not read the token&apos;s state from the chain.");
     expect(src).toMatch(/catch \{[^}]*if \(current\(\)\) setFailed\(true\);/);
   });
 
-  it("commits only the latest load (a retrying older load never overwrites a newer one)", () => {
-    expect(src).toContain("const [latest] = useState(createLatestGate);");
-    expect(src).toContain("const current = latest.begin();");
+  it("commits only the latest load, and aborts a superseded or unmounted one (its retries stop)", () => {
+    expect(src).toContain("const [latest] = useState(createAbortableLatest);");
+    expect(src).toContain("const signal = latest.begin();");
+    expect(src).toContain("const current = () => !signal.aborted;");
+    expect(src).toContain("const retry = { signal };");
     expect(src).toMatch(/if \(!current\(\)\) return;\s*setState\(next\);/);
+    expect(src).toMatch(/void load\(\);[^}]*return \(\) => latest\.abort\(\);\s*\}, \[load, refreshKey, latest\]\);/);
   });
 });
