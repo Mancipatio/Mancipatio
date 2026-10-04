@@ -42,7 +42,14 @@ export function maintenanceNotice(message: string | null | undefined): string {
 //     no server-side job exists until the receipt is posted (a purchase
 //     recorded after maintenance began would otherwise be lost for good if the
 //     buyer switched device). Admin receipts (passport sync, plan binding)
-//     stay refused; their pages keep a retry.
+//     stay refused; their pages keep a retry. The one admin receipt let
+//     through is the Super Admin's document anchor record
+//     (admin.documentAnchorRecord), and not from this list: it is a session
+//     action (lib/siws-session.ts), so it passes with the session reads. Its
+//     only write is the audit row of an anchor the server re-reads from the
+//     chain and verifies (finalized, signed by Platform.admin alone), and no
+//     new anchor can be sent meanwhile (the send is a wallet transaction,
+//     which maintenance stops).
 const ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
   "auth.session",
   "tos.accept",
