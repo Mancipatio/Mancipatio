@@ -3366,6 +3366,12 @@ again (`TOS_VERSION`; the 2026-10-02 rows stay as history).
   `scripts/ci/mainnet-build.sh`: the committed slots back to
   `expect_config_pass`). If counsel confirms on a later day, change
   `version` and `lastUpdated` of both documents to that day first.
+- **Done on 2026-10-03:** the owner stated that counsel confirmed the exact
+  2026-10-03 wording, recorded in PR #57 (merged): the risk warning's
+  `status` is `"counsel"`, the tests and `scripts/ci/mainnet-build.sh`
+  expect the committed slots to build, and `release/mainnet` carries
+  version 2026-10-03 (live on mainnet). The `"draft"` status stays the
+  in-code hold for any later version counsel has not confirmed yet.
 - Before that release: check that no mainnet raise limit is above EUR
   3,000,000 (`select * from platform_raise_limits where network =
   'mainnet'`; `select l.* from client_raise_limits l join clients c on c.id

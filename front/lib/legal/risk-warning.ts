@@ -12,13 +12,15 @@
 // 2026-10-02: the package of drafts of 2026-09-30, the mainnet kit's
 // 05-mainnet-copy.draft.ts, outside the repository). Points 3, 4, 7 and 10
 // were changed with the Terms of 2026-10-03 (lib/legal/mainnet-copy.ts, the
-// owner's decisions D1-D7, whose model counsel approved); that wording is a
-// draft until counsel confirms it, hence `status: "draft"`: a mainnet build
-// refuses it (lib/legal/readiness.ts), and with it the Terms of 2026-10-03,
-// so release/mainnet cannot carry them before then. Set it back to
-// "counsel" in the commit that records counsel's confirmation (the header of
-// lib/legal/mainnet-copy.ts lists what else changes with it). The status is
-// read only by that mainnet build guard: devnet renders the same points.
+// owner's decisions D1-D7, whose model counsel approved). Counsel confirmed
+// that exact wording as well (the owner's statement of 2026-10-03, recorded
+// in PR #57), so the status is "counsel" and version 2026-10-03 is the one
+// release/mainnet carries. `status: "draft"` remains the hold for any later
+// wording counsel has not confirmed yet: a mainnet build refuses a draft
+// (lib/legal/readiness.ts), and with it the Terms it belongs to (the header
+// of lib/legal/mainnet-copy.ts lists what changes with a new version). The
+// status is read only by that mainnet build guard: devnet renders the same
+// points.
 // Its points about the sale's escrow and the proceeds freeze speak of a
 // primary sale only: before
 // NEXT_PUBLIC_FEATURE_SECONDARY_TRADING is switched on for mainnet, counsel

@@ -17,15 +17,18 @@
 // treasury directly; KYC only to convert into company shares (where the
 // issuer offers it, once switched on) and for physical delivery.
 //
-// THE EXACT WORDING IS A DRAFT UNTIL COUNSEL CONFIRMS IT. The hold is in
-// code, not only here: PURCHASE_RISK_WARNING.status is "draft"
-// (lib/legal/risk-warning.ts), so a mainnet build refuses this version
-// (lib/legal/readiness.ts), although MAINNET_LEGAL_COPY_APPROVED=true is
-// already set in production and is not bound to a version. When counsel
-// confirms, set the status to "counsel" in the commit that records the
-// confirmation, together with the expectations that follow it
-// (tests/legal-slots.test.ts, scripts/ci/mainnet-build.sh). If that is on a
-// later day, change `version` and `lastUpdated` of both documents to that day.
+// Counsel confirmed the exact wording on 2026-10-03 (the owner's statement,
+// recorded in PR #57): PURCHASE_RISK_WARNING.status is "counsel"
+// (lib/legal/risk-warning.ts), a mainnet build takes this version, and it is
+// the text live on mainnet. The hold for a LATER version stays in code, not
+// only here, because MAINNET_LEGAL_COPY_APPROVED=true is set in production
+// and is not bound to a version: wording counsel has not confirmed yet goes
+// in with the risk warning's status set to "draft", which a mainnet build
+// refuses (lib/legal/readiness.ts). The commit that records counsel's
+// confirmation sets it back to "counsel", together with the expectations
+// that follow it (tests/legal-slots.test.ts, scripts/ci/mainnet-build.sh);
+// if that is on a later day, `version` and `lastUpdated` of both documents
+// move to that day.
 //
 // Review of 2026-10-03 (PR #57): conversion into company shares is worded as
 // not available yet (its module and on-chain custody entry are off on
@@ -67,7 +70,7 @@
 
 import type { LegalDocument } from "./document";
 
-/** The mainnet Terms of Service, version 2026-10-03 (owner's decisions D1-D7; draft until counsel confirms the wording). */
+/** The mainnet Terms of Service, version 2026-10-03 (owner's decisions D1-D7; wording confirmed by counsel on 2026-10-03). */
 export const MAINNET_TERMS: LegalDocument | null = {
   version: "2026-10-03",
   lastUpdated: "2026-10-03",
@@ -426,7 +429,7 @@ export const MAINNET_TERMS: LegalDocument | null = {
   ],
 };
 
-/** The mainnet Privacy Policy, version 2026-10-03 (owner's decisions D1-D7; draft until counsel confirms the wording). */
+/** The mainnet Privacy Policy, version 2026-10-03 (owner's decisions D1-D7; wording confirmed by counsel on 2026-10-03). */
 export const MAINNET_PRIVACY: LegalDocument | null = {
   version: "2026-10-03",
   lastUpdated: "2026-10-03",
@@ -673,7 +676,7 @@ export const MAINNET_PRIVACY: LegalDocument | null = {
   ],
 };
 
-/** The summary for the Terms acceptance dialog (components/tos-gate.tsx), version 2026-10-03 (draft until counsel confirms the wording). */
+/** The summary for the Terms acceptance dialog (components/tos-gate.tsx), version 2026-10-03 (wording confirmed by counsel on 2026-10-03). */
 export const MAINNET_TOS_GATE_POINTS: string[] | null = [
   "You can buy in a primary sale only on the Manci site, with this wallet signed in, these Terms accepted and sanctions screening passed. Buying an open class needs no identity verification; converting tokens into company shares does.",
   "Tokens are bearer instruments held in your own wallet. A lost key or a confirmed transaction cannot be reversed, and a confirmed purchase is not refunded.",
