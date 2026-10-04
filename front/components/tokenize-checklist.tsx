@@ -12,6 +12,13 @@
 // instruments in the hook's Open mode, and KYC is asked only when a token is
 // converted into the company share. A class made KYC-only elsewhere is only
 // said, never required.
+//
+// The chain reads are retried on a rate limit, a 5xx or a network error
+// (lib/rpc-retry withRpcReadRetry: after ~0.5, 1 and 2 s): right after a send
+// the checklist re-reads at once, and a public RPC's 429 used to leave "Could
+// not read the token's state" up until "Try again". Only the latest load
+// commits (lib/latest-load), so a slower, retrying older load never
+// overwrites a newer one.
 
 import Link from "next/link";
 import { useCallback, useEffect, useState, type ReactNode } from "react";
@@ -50,6 +57,8 @@ import { isApprovalLive, listShareClassSaleApprovals, type SaleApprovalAccount }
 import { parseSaleRequest } from "@/lib/public-sale";
 import { listSaleRequests } from "@/lib/sale-requests";
 import { remainingFromLifetime } from "@/lib/distribution-supply";
+import { createLatestGate } from "@/lib/latest-load";
+import { withRpcReadRetry } from "@/lib/rpc-retry";
 import { LockSupplyButton } from "@/components/lock-supply-button";
 import { DistributeCard } from "@/components/distribute-card";
 import { SkeletonCard } from "@/components/skeleton";
@@ -111,48 +120,54 @@ export function TokenizeChecklist({
   });
 
   const isIssuerAuthority = !!wallet && wallet === issuerAuthority;
+  const [latest] = useState(createLatestGate);
 
   const load = useCallback(async () => {
     const rpc = client.runtime.rpc;
+    const current = latest.begin();
     try {
-      const next = await readTokenizeState(rpc, assetPda);
+      const next = await withRpcReadRetry(() => readTokenizeState(rpc, assetPda));
       const sc = next.sc0;
+      const issuer = next.asset?.issuer ?? null;
       const [issuerVerified, treasuryBalance, openSales, approvals] = await Promise.all([
-        next.asset ? issuerKybVerified(rpc, next.asset.issuer).catch(() => false) : Promise.resolve(false),
+        issuer ? withRpcReadRetry(() => issuerKybVerified(rpc, issuer)).catch(() => false) : Promise.resolve(false),
         sc?.mintInitialized && issuerAuthority
           ? // 0 when the treasury has no token account yet (exact); null only when unreadable.
             readTreasuryBalance(rpc, issuerAuthority as Address, sc.mint)
           : Promise.resolve(null),
         sc
-          ? listOpenSales(rpc, { shareClass: next.addresses.shareClass })
+          ? withRpcReadRetry(() => listOpenSales(rpc, { shareClass: next.addresses.shareClass }))
               .then((sales) => ({ count: sales.length, remaining: openSaleRemaining(sales) }))
               .catch(() => null)
           : Promise.resolve({ count: 0, remaining: BigInt(0) }),
         sc
-          ? listShareClassSaleApprovals(rpc, next.addresses.shareClass)
+          ? withRpcReadRetry(() => listShareClassSaleApprovals(rpc, next.addresses.shareClass))
               .then((rows) => rows.filter((a) => isApprovalLive(a)))
               .catch(() => null)
           : Promise.resolve([]),
       ]);
+      if (!current()) return;
       setState(next);
       setExtras({ issuerVerified, treasuryBalance, openSales, approvals });
       setFailed(false);
-      if (next.asset && isIssuerAuthority && wallet) {
+      if (issuer && isIssuerAuthority && wallet) {
         try {
-          const p = await loadIssuerPermission(rpc, next.asset.issuer, wallet as Address);
+          const p = await withRpcReadRetry(() => loadIssuerPermission(rpc, issuer, wallet as Address));
+          if (!current()) return;
           setPermission({
             globalAdmin: p.globalAdmin,
             canMint: (p.capabilities & ISSUER_CAPABILITIES.Mint) !== 0,
             canConvert: (p.capabilities & ISSUER_CAPABILITIES.Conversion) !== 0,
           });
         } catch {
-          setPermission({ globalAdmin: false, canMint: false, canConvert: false });
+          if (current()) setPermission({ globalAdmin: false, canMint: false, canConvert: false });
         }
       }
     } catch {
-      setFailed(true);
+      // Not a transient failure, or still failing after the last retry: the "Try again" notice below.
+      if (current()) setFailed(true);
     }
-  }, [client, assetPda, issuerAuthority, isIssuerAuthority, wallet]);
+  }, [client, assetPda, issuerAuthority, isIssuerAuthority, wallet, latest]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
