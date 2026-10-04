@@ -1,10 +1,12 @@
 // /api/admin/document-anchor (record) and /list: Super Admin only (on-chain
 // Platform.admin, after the SIWS check), the transaction read back from the
-// server RPC (finalized, else confirmed, else "not yet") and verified before
-// one server audit row "operator" / "document_anchor" is written; idempotent
-// per signature; nothing written for a wrong signer, a wrong text, an extra
-// instruction or a failed transaction. SIWS, the admin gate and the RPC are
-// mocked; Supabase is in memory and the real server audit writer is used.
+// server RPC and verified, and recorded only once finalized (confirmed or
+// unseen = "not yet") as one server audit row "operator" / "document_anchor";
+// idempotent per signature, also across instances (the row id is derived
+// from the signature, the primary key refuses a second row); nothing written
+// for a wrong signer, a wrong text, an extra instruction or a failed
+// transaction. SIWS, the admin gate and the RPC are mocked; Supabase is in
+// memory and the real server audit writer is used.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { memorySupabase } from "./helpers/memory-supabase";
 import { buildTx, type Ix } from "./helpers/chain-tx";
@@ -65,7 +67,8 @@ vi.mock("@/lib/server/rpc", () => ({
   }),
 }));
 
-import { POST as recordRoute } from "@/app/api/admin/document-anchor/route";
+import { POST as recordRoute, maxDuration } from "@/app/api/admin/document-anchor/route";
+import { documentAnchorAuditId } from "@/lib/server/document-anchor";
 import { POST as listRoute } from "@/app/api/admin/document-anchor/list/route";
 import { POST as auditRoute } from "@/app/api/audit/route";
 import { SESSION_READ_ACTIONS } from "@/lib/siws-session";
@@ -97,6 +100,8 @@ const rows = () => db.ref!.rows("audit_events");
 
 beforeEach(() => {
   db.ref = memorySupabase();
+  // audit_events.id is the table's primary key (migration 0001).
+  db.ref.uniqueIds.add("audit_events");
   state.superAdmins = new Set([SA]);
   state.txs.finalized.clear();
   state.txs.confirmed.clear();
@@ -114,7 +119,9 @@ describe("POST /api/admin/document-anchor", () => {
       reference: REFERENCE, sha256: SHA, signature: SIG, signer: SA, slot: 100, blockTime: 1_700_000_000, commitment: "finalized", duplicate: false,
     });
     expect(rows()).toHaveLength(1);
+    expect(res.body.data!.id).toBe(documentAnchorAuditId("mainnet", SIG));
     expect(rows()[0]).toMatchObject({
+      id: documentAnchorAuditId("mainnet", SIG),
       network: "mainnet",
       category: "operator",
       ix_name: "document_anchor",
@@ -140,29 +147,85 @@ describe("POST /api/admin/document-anchor", () => {
   });
 
   it("records the shape Phantom signs on mainnet: Lighthouse assertions around the memo, counted in the row", async () => {
-    const guard: Ix = { program: "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", accounts: [SA], data: new Uint8Array([5, 0, 1, 2]) };
-    state.txs.finalized.set(SIG, chainTx({ instructions: [cb(), cb(), guard, memo(), guard] }));
+    // The guards of mainnet 5RBDZ… byte for byte (kind 6 AssertAccountInfoMulti):
+    // 37 bytes on a writable account before the instruction, 26 on the fee payer after it.
+    const LIGHTHOUSE = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
+    const before: Ix = {
+      program: LIGHTHOUSE,
+      accounts: ["FJaWxqhSxjYsH8yMqc76H769vL8kapaFvEWB37yxom4Z"],
+      data: new Uint8Array([6, 4, 1, 2, 212, 151, 7, 199, 145, 164, 1, 97, 251, 49, 229, 43, 85, 240, 11, 2, 122, 221, 205, 89, 194, 119, 196, 193, 254, 167, 96, 45, 227, 160, 90, 203, 0]),
+    };
+    const after: Ix = { program: LIGHTHOUSE, accounts: [SA], data: new Uint8Array([6, 4, 3, 0, 96, 146, 99, 59, 0, 0, 0, 0, 4, 3, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0]) };
+    const limit: Ix = { program: CB, accounts: [], data: new Uint8Array([2, 64, 13, 3, 0]) };
+    const price: Ix = { program: CB, accounts: [], data: new Uint8Array([3, 160, 134, 1, 0, 0, 0, 0, 0]) };
+    state.txs.finalized.set(SIG, chainTx({ instructions: [limit, price, before, memo(), after] }));
     const res = await record();
     expect(res.status).toBe(200);
     expect(rows()[0].metadata).toMatchObject({ wallet_guard_instructions: 2 });
     // A Lighthouse MemoryWrite (0) is not a guard.
-    state.txs.finalized.set(SIG2, chainTx({ signature: SIG2, instructions: [cb(), { ...guard, data: new Uint8Array([0, 0]) }, memo()] }));
+    state.txs.finalized.set(SIG2, chainTx({ signature: SIG2, instructions: [cb(), { ...after, data: new Uint8Array([0, 0]) }, memo()] }));
     const write = await record({ signature: SIG2 });
     expect(write.status).toBe(400);
     expect(write.body.error).toMatch(/not an assertion/);
     expect(rows()).toHaveLength(1);
   });
 
-  it("falls back to confirmed, and answers 'not yet' (503) while the server RPC has neither", async () => {
-    const pending = await record();
-    expect(pending.status).toBe(503);
-    expect(pending.body.error!.startsWith(DOCUMENT_ANCHOR_NOT_YET)).toBe(true);
+  it("records only a finalized transaction: unseen or confirmed-only answers 'not yet' (503) and writes nothing", async () => {
+    const unseen = await record();
+    expect(unseen.status).toBe(503);
+    expect(unseen.body.error!.startsWith(DOCUMENT_ANCHOR_NOT_YET)).toBe(true);
     expect(rows()).toHaveLength(0);
+    // Confirmed but not finalized yet: checked, then "not yet" (the page retries).
     state.txs.confirmed.set(SIG, chainTx());
+    const confirmed = await record();
+    expect(confirmed.status).toBe(503);
+    expect(confirmed.body.error!.startsWith(DOCUMENT_ANCHOR_NOT_YET)).toBe(true);
+    expect(confirmed.body.error).toMatch(/it is confirmed/);
+    expect(rows()).toHaveLength(0);
+    state.txs.finalized.set(SIG, chainTx());
     const res = await record();
     expect(res.status).toBe(200);
-    expect(res.body.data).toMatchObject({ commitment: "confirmed" });
-    expect(state.rpcCalls).toEqual([`finalized:${SIG}`, `confirmed:${SIG}`, `finalized:${SIG}`, `confirmed:${SIG}`]);
+    expect(res.body.data).toMatchObject({ commitment: "finalized" });
+    expect(rows()[0].metadata).toMatchObject({ commitment: "finalized" });
+    expect(state.rpcCalls).toEqual([`finalized:${SIG}`, `confirmed:${SIG}`, `finalized:${SIG}`, `confirmed:${SIG}`, `finalized:${SIG}`]);
+  });
+
+  it("refuses a wrong anchor that is only confirmed at once (400), without waiting for finalized", async () => {
+    state.txs.confirmed.set(SIG, chainTx({ instructions: [cb(), memo(`${REFERENCE} sha256:${"0".repeat(64)}`)] }));
+    const res = await record();
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/memo text is not/);
+    expect(rows()).toHaveLength(0);
+  });
+
+  it("keeps one row when two instances record the same signature at once (the derived id is the primary key)", async () => {
+    state.txs.finalized.set(SIG, chainTx());
+    // Another instance inserts the same anchor between this one's re-check and its insert.
+    let raced = false;
+    db.ref!.beforeInsert = (table) => {
+      if (table !== "audit_events" || raced) return;
+      raced = true;
+      rows().push({
+        id: documentAnchorAuditId("mainnet", SIG), created_at: "2026-10-05T10:00:00Z", network: "mainnet", category: "operator",
+        ix_name: "document_anchor", actor_wallet: SA, tx_signature: SIG, metadata: { reference: REFERENCE, sha256: SHA, slot: 100, block_time: 1_700_000_000, commitment: "finalized" },
+      });
+    };
+    const res = await record();
+    expect(res.status).toBe(200);
+    expect(res.body.data).toMatchObject({ id: documentAnchorAuditId("mainnet", SIG), duplicate: true });
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("derives one row id per network and signature (a uuid)", () => {
+    const id = documentAnchorAuditId("mainnet", SIG);
+    expect(id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-8[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(documentAnchorAuditId("mainnet", SIG)).toBe(id);
+    expect(documentAnchorAuditId("devnet", SIG)).not.toBe(id);
+    expect(documentAnchorAuditId("mainnet", SIG2)).not.toBe(id);
+  });
+
+  it("allows itself a 60 s function duration (two chain reads of up to 12 s)", () => {
+    expect(maxDuration).toBe(60);
   });
 
   it("is idempotent per signature: the second call answers the same row, without a chain read", async () => {
@@ -232,7 +295,9 @@ describe("POST /api/admin/document-anchor", () => {
     db.ref!.failWrites.add("audit_events");
     const res = await record();
     expect(res.status).toBe(503);
-    expect(res.body.error).toMatch(/Audit log unavailable/);
+    expect(res.body.error).toMatch(/^Audit log unavailable — the anchor is on chain but not recorded yet/);
+    // The shared writer's wording is about releases; an anchor's is not.
+    expect(res.body.error).not.toMatch(/released/);
     expect(rows()).toHaveLength(0);
   });
 });

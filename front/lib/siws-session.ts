@@ -7,6 +7,17 @@
 // records the read itself (lib/server/audit.ts writeServerAudit, e.g. the
 // "kyc_document_view" row of clients.doc-url). Such a route must not change
 // business data while maintenance is on (lib/maintenance.ts).
+//
+// Accepted exceptions, each a record of evidence that grants nothing and
+// changes no business data, so that the caller is not asked to sign twice
+// for one step: compliance.screenWallet, compliance.screenRecipients and
+// compliance.distributionEvidence (screening records, see their entries), and
+// admin.documentAnchorRecord, whose only write is the audit row of a document
+// anchor the server first re-reads from the chain and verifies: finalized,
+// signed by the session wallet alone, that wallet being Platform.admin
+// (app/api/admin/document-anchor). Holding the Super Admin's session cookie
+// therefore only lets one record an anchor that wallet already signed. Any
+// new exception must meet the same bar and be listed here.
 
 export const SESSION_COOKIE = "manci_session";
 
@@ -19,8 +30,9 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   // Menu counts only — integers per admin page (app/api/admin/badges).
   "admin.badges",
   // The Super Admin's document anchors (app/api/admin/document-anchor). The
-  // list reads audit rows. Record's only write is the audit row of an anchor
-  // the server re-reads from the chain and verifies (signed by the Super
+  // list reads audit rows. Record WRITES (one of the accepted exceptions in
+  // the header): its only write is the audit row of an anchor the server
+  // re-reads from the chain and verifies (finalized, signed by the Super
   // Admin itself, Platform.admin checked): the transaction is the proof, the
   // row grants nothing and changes no business data, like the receipts
   // lib/maintenance.ts lets through. No second prompt after the send.

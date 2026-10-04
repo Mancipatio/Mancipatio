@@ -3,9 +3,9 @@
 // the routes under test make (select / insert / update / upsert / delete,
 // eq / neq / in / not in / lt / lte / gt / gte, order / limit, single /
 // maybeSingle, `.select()` after a write, head counts) plus `rpc(name, args)`
-// through registered handlers and opt-in per-table insert defaults
-// (`defaults`). Filters are applied, ordering and limits are not (tests keep
-// tables small).
+// through registered handlers, opt-in per-table insert defaults
+// (`defaults`) and opt-in primary-key uniqueness on `id` (`uniqueIds`).
+// Filters are applied, ordering and limits are not (tests keep tables small).
 
 export type Row = Record<string, unknown>;
 
@@ -22,6 +22,10 @@ export type MemorySupabase = {
   missingColumns: Record<string, string[]>;
   /** Runs right before an update is applied (race simulation). */
   beforeUpdate: ((table: string) => void) | null;
+  /** Runs right before an insert is applied (race simulation). */
+  beforeInsert: ((table: string) => void) | null;
+  /** Tables whose `id` is a primary key: an insert with a taken id fails with 23505 (opt-in). */
+  uniqueIds: Set<string>;
   /** Column defaults an insert fills when the row leaves them out (like `created_at default now()`), per table. */
   defaults: Record<string, () => Row>;
   client: { from: (table: string) => unknown; rpc: (name: string, args?: Record<string, unknown>) => unknown };
@@ -39,6 +43,8 @@ export function memorySupabase(): MemorySupabase {
     readErrorCodes: {},
     missingColumns: {},
     beforeUpdate: null,
+    beforeInsert: null,
+    uniqueIds: new Set(),
     defaults: {},
     client: { from: (table: string) => from(table), rpc: (name: string, args: Record<string, unknown> = {}) => rpc(name, args) },
     rows: (table) => (db.tables[table] ??= []),
@@ -50,6 +56,8 @@ export function memorySupabase(): MemorySupabase {
       db.readErrorCodes = {};
       db.missingColumns = {};
       db.beforeUpdate = null;
+      db.beforeInsert = null;
+      db.uniqueIds.clear();
       db.defaults = {};
     },
   };
@@ -94,11 +102,19 @@ export function memorySupabase(): MemorySupabase {
         return { data: null, error: { message: "read failed", code: db.readErrorCodes[table] ?? "XX000" } };
       }
       if (op === "insert" || op === "upsert") {
+        if (op === "insert") db.beforeInsert?.(table);
         const rows = (Array.isArray(payload) ? payload : [payload ?? {}]).map((r) => ({
           id: r.id ?? `row-${nextId++}`,
           ...(db.defaults[table]?.() ?? {}),
           ...r,
         }));
+        if (op === "insert" && db.uniqueIds.has(table)) {
+          const taken = new Set(db.rows(table).map((r) => r.id));
+          const clash = rows.find((r) => taken.has(r.id));
+          if (clash) {
+            return { data: null, error: { message: `duplicate key value violates unique constraint "${table}_pkey"`, code: "23505" } };
+          }
+        }
         db.rows(table).push(...rows);
         return { data: returning ? (single ? rows[0] : rows) : null, error: null };
       }

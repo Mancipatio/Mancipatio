@@ -11,16 +11,20 @@
 // the owner signed on the certificate. The only account of the memo
 // instruction is the Super Admin's wallet as a SIGNER: the Memo program fails
 // the instruction when a listed account did not sign, so the memo itself
-// proves who wrote it. The transaction carries nothing else besides the usual
-// compute budget the send path adds (lib/verified-solana-client).
+// proves who wrote it. The page adds nothing else besides the usual compute
+// budget the send path adds (lib/verified-solana-client). The wallet may add
+// Lighthouse assertions of its own (Phantom does on mainnet); the
+// verification tolerates those, and only those, within the bounds set out at
+// LIGHTHOUSE_PROGRAM_ADDRESS below.
 //
 // After confirmation the page posts the signature to
 // /api/admin/document-anchor, which re-reads the transaction from the server
-// RPC and checks it with documentAnchorEvidence below before it appends the
-// audit row (category "operator", ix_name "document_anchor").
+// RPC once it is finalized and checks it with documentAnchorEvidence below
+// before it appends the audit row (category "operator", ix_name
+// "document_anchor").
 //
-// Node-safe and pure: the builder, the parser and the verification are shared
-// by the page, the route and tests/document-anchor.test.ts.
+// Node-safe and pure: the builder and the verification are shared by the
+// page, the route and tests/document-anchor.test.ts.
 import {
   AccountRole,
   address,
@@ -41,7 +45,6 @@ export { MEMO_PROGRAM_ADDRESS };
 export const DOCUMENT_ANCHOR_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/;
 /** The fingerprint as the memo carries it: exactly 64 lowercase hex characters. */
 export const DOCUMENT_ANCHOR_SHA256_PATTERN = /^[0-9a-f]{64}$/;
-const MEMO_PATTERN = /^([A-Za-z0-9][A-Za-z0-9._:/-]{0,63}) sha256:([0-9a-f]{64})$/;
 
 /** The audit row of a recorded anchor (lib/server/audit.ts; "operator" is a server-only category). */
 export const DOCUMENT_ANCHOR_AUDIT = { category: "operator", ixName: "document_anchor" } as const;
@@ -52,24 +55,59 @@ export const DOCUMENT_ANCHOR_LIST_ACTION = "admin.documentAnchorList";
 export const DOCUMENT_ANCHOR_LIST_LIMIT = 25;
 /**
  * The start of the route's 503 while the server RPC does not show the
- * transaction as confirmed yet: the page waits a moment and posts again.
+ * transaction as finalized yet: the page waits a moment and posts again.
+ * Only a finalized transaction is recorded (a confirmed block could still be
+ * dropped on a minority fork; finalization takes about 13 s more).
  */
-export const DOCUMENT_ANCHOR_NOT_YET = "The network does not show this transaction as confirmed yet";
+export const DOCUMENT_ANCHOR_NOT_YET = "The network does not show this transaction as finalized yet";
 
 /**
  * Lighthouse, the assertion program Phantom adds to the transactions it
  * signs on mainnet (its transaction guard: an assertion reads accounts and
- * fails the transaction when they changed; it moves nothing). The Super
- * Admin's earlier mainnet transactions from this site carry one before and
- * one after the app's instruction, so the verification tolerates it next to
- * the memo and the compute budget, and counts it, but only an assertion
- * (first data byte in LIGHTHOUSE_ASSERTION_KINDS: never 0 MemoryWrite or
- * 1 MemoryClose, never an unknown one) with no inner calls. The same rule as
- * the Send to wallets check of wallet changes. Any other program is refused.
+ * fails the transaction when they changed; it moves nothing). The page never
+ * adds one; the Super Admin's earlier mainnet transactions from this site
+ * carry one before and one after the app's instruction (for example
+ * 5RBDZ…: kind 6 AssertAccountInfoMulti on a writable account and on the fee
+ * payer, no inner calls). A strict "memo and compute budget only" rule would
+ * refuse to record a real anchor, so this is a deliberate exception: the
+ * verification tolerates and counts a Lighthouse instruction next to the memo
+ * and the compute budget when
+ *   - its first data byte is in LIGHTHOUSE_ASSERTION_KINDS (never 0
+ *     MemoryWrite or 1 MemoryClose, never an unknown one),
+ *   - it made no inner calls (the node must return innerInstructions, so the
+ *     check cannot be skipped), and
+ *   - the transaction holds at most DOCUMENT_ANCHOR_MAX_WALLET_GUARDS of them.
+ * Any other program is refused. The safety does not rest on the kind list
+ * alone: the Super Admin is the only signer, so no other account can be
+ * debited, and an instruction without inner calls cannot move lamports from
+ * the System-owned wallet. The memo's evidential value does not depend on the
+ * guards at all.
+ *
+ * Lighthouse is not a dependency of this app: the kind numbers are taken from
+ * lighthouse-sdk 2.1.0 (2 AssertAccountData … 17
+ * AssertBubblegumTreeConfigAccount). On mainnet the program is immutable (its
+ * program data CJ5WEjifs4d77pEA9DpewppByFjHcAkNv3YYSuSoDk7c has no upgrade
+ * authority, read 2026-10-05), so the numbering cannot change there. PR #64
+ * (Send to wallets, not merged yet) proposes a similar, stricter rule for
+ * wallet changes; this file does not share code with it.
  */
 export const LIGHTHOUSE_PROGRAM_ADDRESS = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 /** Lighthouse instructions that only assert (lighthouse-sdk 2.1.0: 2 AssertAccountData … 17 AssertBubblegumTreeConfigAccount). */
 export const LIGHTHOUSE_ASSERTION_KINDS: ReadonlySet<number> = new Set([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
+/**
+ * The most Lighthouse assertions an anchor may carry. Phantom adds two to the
+ * Super Admin's mainnet transactions (one on a writable account, one on the
+ * fee payer); an anchor has a single writable account, so four leaves room
+ * without accepting an unbounded number of foreign instructions.
+ */
+export const DOCUMENT_ANCHOR_MAX_WALLET_GUARDS = 4;
+
+/**
+ * The largest file the panel hashes in the browser. The file is read into
+ * memory whole (lib/storage-client sha256HexOfFile); a larger one is hashed
+ * with `shasum -a 256` and its hash pasted.
+ */
+export const DOCUMENT_ANCHOR_MAX_FILE_BYTES = 256 * 1024 * 1024;
 
 /** Signatures of an anchor transaction: the Super Admin's, nothing else. */
 export const DOCUMENT_ANCHOR_SIGNATURES = 1;
@@ -105,12 +143,16 @@ export function documentAnchorReferenceError(raw: string): string | null {
 
 /**
  * A pasted SHA-256 as the memo carries it (lowercase), or null. Accepts
- * either case, surrounding spaces and an optional "sha256:" prefix; nothing
- * else (no spaces inside, no 0x, not 63 or 65 characters).
+ * either case, surrounding spaces, an optional "sha256:" prefix, and a whole
+ * `shasum -a 256` / `sha256sum` line ("<hash>  <file>", "<hash> *<file>"):
+ * the hash is the first word when whitespace follows it. Nothing else (no
+ * spaces inside the hash, no 0x, not 63 or 65 characters).
  */
 export function normalizeSha256Input(raw: string): string | null {
   const trimmed = raw.trim().replace(/^sha256:/i, "");
-  return /^[0-9a-fA-F]{64}$/.test(trimmed) ? trimmed.toLowerCase() : null;
+  const line = /^([0-9a-fA-F]{64})\s+\S/.exec(trimmed);
+  const hash = line ? line[1] : trimmed;
+  return /^[0-9a-fA-F]{64}$/.test(hash) ? hash.toLowerCase() : null;
 }
 
 /** The exact memo text. Throws DocumentAnchorError unless both parts are already canonical. */
@@ -140,25 +182,6 @@ export function documentAnchorInstruction(
   const data = documentAnchorMemoBytes(input);
   const account: AccountSignerMeta = { address: input.signer.address, role: AccountRole.READONLY_SIGNER, signer: input.signer };
   return { programAddress: address(MEMO_PROGRAM_ADDRESS), accounts: [account], data };
-}
-
-/**
- * The anchor a memo carries, or null when the bytes (or text) are not
- * exactly "<reference> sha256:<64 lowercase hex>" in valid UTF-8.
- */
-export function parseDocumentAnchorMemo(data: ReadonlyUint8Array | Uint8Array | string): DocumentAnchor | null {
-  let text: string;
-  if (typeof data === "string") {
-    text = data;
-  } else {
-    try {
-      text = new TextDecoder("utf-8", { fatal: true }).decode(data as Uint8Array);
-    } catch {
-      return null;
-    }
-  }
-  const match = MEMO_PATTERN.exec(text);
-  return match ? { reference: match[1], sha256: match[2] } : null;
 }
 
 /** The fee the Super Admin pays: one base fee plus the priority fee at `microLamportsPerUnit`. */
@@ -215,8 +238,11 @@ function safeNumber(value: number | bigint, message: string): number {
  * page says it sent. It must have succeeded, carry `signature` as its id, be
  * signed by `wallet` alone (the fee payer), and hold exactly one Memo v2
  * instruction whose only account is `wallet` and whose data is exactly the
- * expected memo text; besides it only compute-budget instructions and the
- * wallet's own Lighthouse assertions are allowed. Throws
+ * expected memo text; besides it only compute-budget instructions and at
+ * most DOCUMENT_ANCHOR_MAX_WALLET_GUARDS of the wallet's own Lighthouse
+ * assertions (no inner calls) are allowed. The node must return the inner
+ * instructions (json getTransaction returns an array, possibly empty), or
+ * the "no inner calls" checks could not be made. Throws
  * DocumentAnchorEvidenceError naming the first thing that does not match.
  */
 export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentAnchorExpectation): DocumentAnchorEvidence {
@@ -248,7 +274,8 @@ export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentA
       throw new DocumentAnchorEvidenceError(`The ${what} data cannot be read`);
     }
   };
-  const innerGroups = tx.meta.innerInstructions ?? [];
+  const innerGroups = tx.meta.innerInstructions;
+  prove(Array.isArray(innerGroups), "The node did not return the transaction's inner instructions");
   const madeInnerCalls = (index: number) =>
     innerGroups.some((group) => Number(group.index) === index && group.instructions.length > 0);
 
@@ -264,6 +291,10 @@ export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentA
         "The transaction carries a Lighthouse instruction that is not an assertion",
       );
       walletGuardInstructions += 1;
+      prove(
+        walletGuardInstructions <= DOCUMENT_ANCHOR_MAX_WALLET_GUARDS,
+        `The transaction carries more than ${DOCUMENT_ANCHOR_MAX_WALLET_GUARDS} Lighthouse instructions`,
+      );
       return;
     }
     prove(program === MEMO_PROGRAM_ADDRESS, `The transaction carries an instruction the anchor does not have (program ${program})`);
@@ -306,7 +337,7 @@ export type DocumentAnchorRecord = DocumentAnchor & {
   signer: string;
   slot: number | null;
   blockTime: number | null;
-  /** The commitment the server read it at ("finalized" or "confirmed"). */
+  /** The commitment the server read it at (the route records "finalized" only). */
   commitment: string | null;
   recordedAt: string;
 };

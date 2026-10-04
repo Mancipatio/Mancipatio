@@ -3,12 +3,17 @@
 //
 // The transaction is read from the SERVER RPC (lib/server/rpc.ts: the
 // deployment's network, genesis hash checked), finalized first and else
-// confirmed; the commitment it was found at is recorded with the row. The
-// rows are audit_events with category "operator" and ix_name
+// confirmed; the route records only a finalized one (a confirmed one is
+// checked at once, so a wrong anchor is refused without waiting, and answered
+// "not yet"). The rows are audit_events with category "operator" and ix_name
 // "document_anchor" (no table of their own, no migration); "operator" is a
-// server-only category, so /api/audit cannot write one.
+// server-only category, so /api/audit cannot write one. Each row's id is
+// derived from the network and the signature (documentAnchorAuditId), so the
+// table's primary key keeps one row per anchor even when two instances
+// record the same signature at once.
 import "server-only";
 
+import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { signature as toSignature } from "@solana/kit";
 import type { ChainTransaction } from "@/lib/chain-evidence";
@@ -27,10 +32,15 @@ export type AnchorCommitment = "finalized" | "confirmed";
 const ROW_COLUMNS = "id,created_at,actor_wallet,tx_signature,metadata";
 const READ_TIMEOUT_MS = 12_000;
 
-/** The transaction at the strongest commitment the server RPC has it at; 503 while it has none. */
-export async function fetchAnchorTransaction(
+/**
+ * The transaction at the strongest commitment the server RPC has it at
+ * (finalized, else confirmed), or null while it has neither. 503 when the
+ * RPC cannot be read. Each read waits at most READ_TIMEOUT_MS (the record
+ * route allows itself maxDuration = 60 s for the two).
+ */
+export async function readAnchorTransaction(
   signature: string,
-): Promise<{ tx: ChainTransaction; commitment: AnchorCommitment }> {
+): Promise<{ tx: ChainTransaction; commitment: AnchorCommitment } | null> {
   const rpc = getServerRpc();
   for (const commitment of ["finalized", "confirmed"] as const) {
     let tx: unknown;
@@ -43,7 +53,31 @@ export async function fetchAnchorTransaction(
     }
     if (tx) return { tx: tx as ChainTransaction, commitment };
   }
-  throw new SiwsError(503, `${DOCUMENT_ANCHOR_NOT_YET} — try again in a few seconds`);
+  return null;
+}
+
+/** The 503 the page retries on (DOCUMENT_ANCHOR_NOT_YET): `confirmed` when the node already shows it as confirmed. */
+export function anchorNotYetError(confirmed: boolean): SiwsError {
+  return new SiwsError(
+    503,
+    confirmed
+      ? `${DOCUMENT_ANCHOR_NOT_YET} (it is confirmed; finalization takes about 15 seconds) — try again in a few seconds`
+      : `${DOCUMENT_ANCHOR_NOT_YET} — try again in a few seconds`,
+  );
+}
+
+/**
+ * The audit row id of the anchor `signature` on `network`: a uuid made from
+ * SHA-256("mancipatio:document_anchor:<network>:<signature>") (version 8,
+ * RFC 9562 variant). The same anchor always gets the same id, so the primary
+ * key refuses a second row for it.
+ */
+export function documentAnchorAuditId(network: string, signature: string): string {
+  const bytes = createHash("sha256").update(`mancipatio:document_anchor:${network}:${signature}`, "utf8").digest().subarray(0, 16);
+  bytes[6] = (bytes[6] & 0x0f) | 0x80;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 type Row = { id?: unknown; created_at?: unknown; actor_wallet?: unknown; tx_signature?: unknown; metadata?: unknown };

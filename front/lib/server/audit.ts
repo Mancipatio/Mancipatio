@@ -47,6 +47,13 @@ export type AuditActorSource =
   | "siws";
 
 export type ServerAuditInput = {
+  /**
+   * The row id, when the caller derives it (a uuid): the primary key then
+   * makes the row unique, and a second insert with the same id throws
+   * ServerAuditRowExistsError instead of writing a duplicate. Leave it out
+   * for an ordinary row (the database picks the id).
+   */
+  id?: string;
   ix_name: string;
   category: AuditCategory;
   actor_wallet: string;
@@ -63,9 +70,20 @@ export function actorSourceOf(via: "signature" | "session" | undefined): AuditAc
   return via === "session" ? "siws-session" : via === "signature" ? "siws-signature" : "siws";
 }
 
+/** A row with the caller's id (ServerAuditInput.id) is already in audit_events (unique violation 23505). */
+export class ServerAuditRowExistsError extends SiwsError {
+  readonly id: string;
+  constructor(id: string) {
+    super(409, "This audit row is already recorded");
+    this.name = "ServerAuditRowExistsError";
+    this.id = id;
+  }
+}
+
 /**
  * Append one server-attributed row to audit_events and return its id.
- * THROWS SiwsError(503) when the row could not be written.
+ * THROWS SiwsError(503) when the row could not be written, and
+ * ServerAuditRowExistsError when `input.id` is given and already taken.
  */
 export async function writeServerAudit(
   sb: SupabaseClient,
@@ -78,10 +96,12 @@ export async function writeServerAudit(
     actor_source: input.actor_source,
   };
   let row: { id?: unknown } | null = null;
+  let taken = false;
   try {
     const { data, error } = await sb
       .from("audit_events")
       .insert({
+        ...(input.id !== undefined ? { id: input.id } : {}),
         network: detectNetwork(),
         ix_name: input.ix_name,
         category: input.category,
@@ -94,7 +114,9 @@ export async function writeServerAudit(
       })
       .select("id")
       .single();
-    if (error) {
+    if (error && input.id !== undefined && error.code === "23505") {
+      taken = true;
+    } else if (error) {
       console.error("[audit] server audit insert failed:", error.message);
     } else {
       row = data as { id?: unknown } | null;
@@ -105,6 +127,7 @@ export async function writeServerAudit(
       err instanceof Error ? err.message : String(err),
     );
   }
+  if (taken && input.id !== undefined) throw new ServerAuditRowExistsError(input.id);
   if (!row || typeof row.id !== "string") {
     throw new SiwsError(503, "Audit log unavailable — nothing was released; try again");
   }

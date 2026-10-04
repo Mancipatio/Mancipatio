@@ -11,8 +11,11 @@
 // network, maintenance, simulation gate, wallet check, then the wallet); the
 // page waits for the network's confirmation and then asks the server to
 // verify the transaction and record it in the audit log
-// (/api/admin/document-anchor). An anchor sent but not recorded yet is kept
-// in this browser and can be recorded again.
+// (/api/admin/document-anchor), which records only a finalized transaction.
+// An anchor sent but not recorded yet is kept in this browser and can be
+// recorded again; while it is not recorded, no other anchor can be sent from
+// this page (it would replace the one kept). The flow and the result card's
+// states live in lib/document-anchor-client.ts.
 //
 // Shown only when the connected wallet is the on-chain Super Admin
 // (Platform.admin, read by the page).
@@ -23,6 +26,7 @@ import { useSendTransaction, useSolanaClient, useWalletConnection } from "@solan
 import { ConfirmModal } from "@/components/confirm-modal";
 import {
   DOCUMENT_ANCHOR_COMPUTE_UNIT_LIMIT,
+  DOCUMENT_ANCHOR_MAX_FILE_BYTES,
   MEMO_PROGRAM_ADDRESS,
   documentAnchorFee,
   documentAnchorInstruction,
@@ -33,11 +37,16 @@ import {
   type DocumentAnchorRecord,
 } from "@/lib/document-anchor";
 import {
+  anchorBlocksNewSend,
+  anchorResultView,
   clearPendingAnchor,
+  dismissAnchorResult,
   listDocumentAnchors,
-  readPendingAnchor,
   recordDocumentAnchorWithRetry,
-  savePendingAnchor,
+  restoredAnchorResult,
+  runDocumentAnchorFlow,
+  withRecordedAnchor,
+  type AnchorResult,
   type PendingAnchor,
   type RecordedAnchor,
 } from "@/lib/document-anchor-client";
@@ -45,7 +54,7 @@ import { formatLamportsAsSol } from "@/lib/compute-budget";
 import { PRIORITY_FEE_POLICY, resolveComputeUnitPrice } from "@/lib/priority-fee";
 import { WalletSessionRequiredError, type SignedFetchInteractive } from "@/lib/siws-client";
 import { sha256HexOfFile } from "@/lib/storage-client";
-import { waitForSignature, type SignatureOutcome } from "@/lib/simulation-gate";
+import { waitForSignature } from "@/lib/simulation-gate";
 import { detectNetwork, explorerAddressUrl, explorerTxUrl, networkLabel, type Network } from "@/lib/network";
 import { explainSendError } from "@/lib/tx-error";
 import { walletSigner } from "@/lib/wallet-signer";
@@ -56,15 +65,6 @@ const INPUT =
   "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-slate-400 focus:outline-none";
 const SMALL_BTN =
   "rounded-md border border-slate-300 px-2 py-0.5 text-xs font-medium text-slate-700 hover:border-slate-400 disabled:opacity-50";
-
-type AnchorResult = {
-  anchor: PendingAnchor;
-  memo: string;
-  /** null while the network is asked; "restored" = sent earlier from this browser, status not read here. */
-  outcome: SignatureOutcome | "restored" | null;
-  record: RecordedAnchor | null;
-  recordError: string | null;
-};
 
 type AnchorList =
   | { state: "loading" }
@@ -94,18 +94,9 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
   const [price, setPrice] = useState<bigint | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [busy, setBusy] = useState<null | "sending" | "confirming" | "recording">(null);
-  const [result, setResult] = useState<AnchorResult | null>(() => {
-    const pending = readPendingAnchor(network, wallet);
-    if (!pending) return null;
-    let memo = "";
-    try {
-      memo = documentAnchorMemoText(pending);
-    } catch {
-      return null;
-    }
-    return { anchor: pending, memo, outcome: "restored", record: null, recordError: null };
-  });
+  const [result, setResult] = useState<AnchorResult | null>(() => restoredAnchorResult(network, wallet));
   const [anchors, setAnchors] = useState<AnchorList>({ state: "loading" });
+  const [refreshing, setRefreshing] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
   // The priority fee at the current rate (the send re-reads it; the same 10 s cache).
@@ -159,15 +150,36 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
       memo = null;
     }
   }
+  // A valid hash with no reference yet: say what is missing (the button is disabled).
+  const referenceMissing = reference === "" && sha256 !== null;
   const fileMatches = file !== null && file.sha256 === sha256;
   const fee = price === null ? null : documentAnchorFee(price);
   const capFee = documentAnchorFee(PRIORITY_FEE_POLICY[network].cap);
   const working = busy !== null || tx.isSending;
+  const blockedByUnrecorded = anchorBlocksNewSend(result);
+
+  async function refreshAnchors() {
+    setRefreshing(true);
+    try {
+      await loadAnchors(false);
+    } finally {
+      setRefreshing(false);
+    }
+  }
 
   async function onFile(chosen: File | undefined) {
     if (!chosen) return;
-    setHashing(true);
     setFileError(null);
+    if (chosen.size > DOCUMENT_ANCHOR_MAX_FILE_BYTES) {
+      // Hashing reads the whole file into this tab's memory.
+      setFile(null);
+      setFileError(
+        `This file is larger than ${DOCUMENT_ANCHOR_MAX_FILE_BYTES / (1024 * 1024)} MB. Hash it on your computer (shasum -a 256 <file>) and paste the hash below.`,
+      );
+      if (fileInput.current) fileInput.current.value = "";
+      return;
+    }
+    setHashing(true);
     try {
       const digest = await sha256HexOfFile(chosen);
       setFile({ name: chosen.name, size: chosen.size, sha256: digest });
@@ -188,11 +200,7 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
     try {
       const recorded = await recordDocumentAnchorWithRetry(session, pending);
       clearPendingAnchor(pending.signature);
-      setResult((r) =>
-        r && r.anchor.signature === pending.signature
-          ? { ...r, outcome: r.outcome === "restored" || r.outcome === null ? "confirmed" : r.outcome, record: recorded, recordError: null }
-          : r,
-      );
+      setResult((r) => (r && r.anchor.signature === pending.signature ? withRecordedAnchor(r, recorded) : r));
       void loadAnchors(false);
     } catch (err) {
       const text = err instanceof Error ? err.message : String(err);
@@ -203,59 +211,60 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
   }
 
   async function anchor() {
-    if (working || !memo || !sha256 || !reference) return;
+    if (working || blockedByUnrecorded || !memo || !sha256 || !reference) return;
     const input = { reference, sha256 };
     const text = memo;
     setBusy("sending");
     let pendingId = toast.showPending("Anchoring the document…", "Approve the transaction in your wallet.");
-    let signature: string;
-    try {
-      const signer = walletSigner(session);
-      const sent = await tx.send({ instructions: [documentAnchorInstruction({ ...input, signer })], feePayer: signer });
-      signature = typeof sent === "string" ? sent : String(sent ?? "");
-      if (!signature) throw new Error("The wallet returned no transaction signature.");
-    } catch (err) {
-      toast.dismiss(pendingId);
-      toast.showError("Nothing was anchored", explainSendError(err));
-      setBusy(null);
-      return;
-    }
-    const pending: PendingAnchor = { ...input, signature, network, signer: wallet };
-    savePendingAnchor(pending);
-    setConfirmOpen(false);
-    setResult({ anchor: pending, memo: text, outcome: null, record: null, recordError: null });
-    toast.dismiss(pendingId);
-    pendingId = toast.showPending("Confirming the anchor on the network…");
-    setBusy("confirming");
-    const outcome = await waitForSignature(rpc, signature, { timeoutMs: 60_000 });
-    toast.dismiss(pendingId);
-    setResult((r) => (r && r.anchor.signature === signature ? { ...r, outcome } : r));
-    if (outcome === "failed") {
-      clearPendingAnchor(signature);
-      toast.show({
-        kind: "error",
-        title: "The anchor failed on the network",
-        description: "Your wallet sent it, but the network refused it. Nothing was anchored; open the explorer link for details.",
-        signature,
-      });
-      setBusy(null);
-      return;
-    }
-    if (outcome !== "confirmed") {
-      toast.show({
-        kind: "error",
-        title: "Not confirmed yet",
-        description: "The network has not confirmed the anchor yet. Check the explorer link, then record it below. Do not send it again.",
-        signature,
-      });
-      setBusy(null);
-      return;
-    }
-    toast.showTx(signature, { title: "Document anchored" });
-    setReferenceInput("");
-    setHashInput("");
-    setFile(null);
-    await record(pending);
+    await runDocumentAnchorFlow(input, { network, signer: wallet }, {
+      send: () => {
+        const signer = walletSigner(session);
+        return tx.send({ instructions: [documentAnchorInstruction({ ...input, signer })], feePayer: signer });
+      },
+      onSendError: (err) => {
+        // Nothing was sent: the review stays open.
+        toast.dismiss(pendingId);
+        toast.showError("Nothing was anchored", explainSendError(err));
+        setBusy(null);
+      },
+      onSent: (pending: PendingAnchor) => {
+        setConfirmOpen(false);
+        setResult({ anchor: pending, memo: text, outcome: null, record: null, recordError: null });
+        toast.dismiss(pendingId);
+        pendingId = toast.showPending("Confirming the anchor on the network…");
+        setBusy("confirming");
+      },
+      wait: (signature) => waitForSignature(rpc, signature, { timeoutMs: 60_000 }),
+      onOutcome: ({ signature }, outcome) => {
+        toast.dismiss(pendingId);
+        setResult((r) => (r && r.anchor.signature === signature ? { ...r, outcome } : r));
+        if (outcome === "failed") {
+          toast.show({
+            kind: "error",
+            title: "The anchor failed on the network",
+            description: "Your wallet sent it, but the network refused it. Nothing was anchored; open the explorer link for details.",
+            signature,
+          });
+          setBusy(null);
+          return;
+        }
+        if (outcome !== "confirmed") {
+          toast.show({
+            kind: "error",
+            title: "Not confirmed yet",
+            description: "The network has not confirmed the anchor yet. Check the explorer link, then record it below. Do not send it again.",
+            signature,
+          });
+          setBusy(null);
+          return;
+        }
+        toast.showTx(signature, { title: "Document anchored" });
+        setReferenceInput("");
+        setHashInput("");
+        setFile(null);
+      },
+      record,
+    });
   }
 
   return (
@@ -276,6 +285,9 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
             placeholder="MANCI-2026-0001"
             spellCheck={false}
             autoComplete="off"
+            // Above the 64-character rule on purpose: a longer paste is shown
+            // with "at most 64 characters", never silently cut into another
+            // reference that would go on chain.
             maxLength={80}
             disabled={working}
             className={`${INPUT} font-mono`}
@@ -285,6 +297,9 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
             Up to 64 characters: letters, digits and . _ : / - (no spaces), starting with a letter or a digit.
           </span>
           {referenceError && <span className="mt-1 block text-xs text-red-600">{referenceError}</span>}
+          {referenceMissing && (
+            <span className="mt-1 block text-xs text-amber-700">Enter a reference: the memo needs one next to the hash.</span>
+          )}
         </label>
 
         <div>
@@ -308,11 +323,13 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
             </p>
           )}
           <label className="mt-3 block">
-            <span className="mb-1 block text-xs text-slate-500">…or paste its SHA-256 (64 hex characters)</span>
+            <span className="mb-1 block text-xs text-slate-500">
+              …or paste its SHA-256 (64 hex characters, or the whole <code className="font-mono">shasum -a 256</code> line)
+            </span>
             <input
               value={hashInput}
               onChange={(e) => setHashInput(e.target.value)}
-              placeholder="a2546dd318ea95b210a4eb62a45b8434…"
+              placeholder="64 hex characters"
               spellCheck={false}
               autoComplete="off"
               disabled={working}
@@ -327,6 +344,9 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
           <dl className="space-y-2 rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 text-[13px]">
             <Fact label="Memo text (exactly)">
               <code className="block break-all font-mono text-xs text-slate-900">{memo}</code>
+              <span className="mt-1 block">
+                <CopyButton text={memo} label="Copy memo" />
+              </span>
             </Fact>
             <Fact label="Signer">
               <span className="break-all font-mono text-xs text-slate-800">{wallet}</span>{" "}
@@ -344,12 +364,18 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
 
         <button
           type="button"
-          disabled={!memo || working || hashing}
+          disabled={!memo || working || hashing || blockedByUnrecorded}
           onClick={() => setConfirmOpen(true)}
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
         >
           {busy === "sending" ? "Waiting for the wallet…" : busy === "confirming" ? "Confirming…" : busy === "recording" ? "Recording…" : "Review and anchor"}
         </button>
+        {blockedByUnrecorded && !working && (
+          <p className="text-xs text-amber-700">
+            The anchor below is not recorded in the audit log yet. Record it first (or, if recording fails, forget it)
+            before you send another one.
+          </p>
+        )}
       </div>
 
       {result && (
@@ -359,7 +385,7 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
           busy={busy}
           onRecord={() => void record(result.anchor)}
           onDismiss={() => {
-            if (!result.record) clearPendingAnchor(result.anchor.signature);
+            dismissAnchorResult(result);
             setResult(null);
           }}
         />
@@ -369,8 +395,8 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
         <div className="flex items-center justify-between gap-3">
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">Recent anchors · {networkLabel(network)}</p>
           {anchors.state === "ready" && (
-            <button type="button" className={SMALL_BTN} onClick={() => void loadAnchors(false)}>
-              Refresh
+            <button type="button" className={SMALL_BTN} disabled={refreshing} onClick={() => void refreshAnchors()}>
+              {refreshing ? "Refreshing…" : "Refresh"}
             </button>
           )}
         </div>
@@ -443,21 +469,12 @@ function AnchorResultCard({
   onDismiss: () => void;
 }) {
   const { anchor, memo, outcome, record, recordError } = result;
-  const heading =
-    outcome === "failed"
-      ? "The anchor failed on the network"
-      : outcome === "confirmed"
-        ? "Anchored on chain"
-        : outcome === null
-          ? "Sent — waiting for the network"
-          : outcome === "restored"
-            ? "Sent earlier from this browser, not recorded yet"
-            : "Sent — not confirmed yet";
-  const tone = outcome === "failed" ? "border-red-200 bg-red-50" : outcome === "confirmed" ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50";
-  const canRecord = outcome !== "failed" && outcome !== null && !record;
+  const view = anchorResultView(result);
+  const tone =
+    view.tone === "failed" ? "border-red-200 bg-red-50" : view.tone === "confirmed" ? "border-emerald-200 bg-emerald-50" : "border-amber-200 bg-amber-50";
   return (
     <div className={`mt-5 rounded-lg border px-4 py-3 text-[13px] ${tone}`} role="status">
-      <p className="font-semibold text-slate-900">{heading}</p>
+      <p className="font-semibold text-slate-900">{view.heading}</p>
       <dl className="mt-2 space-y-2">
         <Fact label="Signature">
           <span className="break-all font-mono text-xs text-slate-900">{anchor.signature}</span>
@@ -470,6 +487,9 @@ function AnchorResultCard({
         </Fact>
         <Fact label="Memo">
           <code className="block break-all font-mono text-xs text-slate-900">{memo}</code>
+          <span className="mt-1 block">
+            <CopyButton text={memo} label="Copy memo" />
+          </span>
         </Fact>
       </dl>
       {record ? (
@@ -493,14 +513,14 @@ function AnchorResultCard({
         </p>
       ) : null}
       <div className="mt-3 flex flex-wrap gap-2">
-        {canRecord && (
+        {view.canRecord && (
           <button type="button" className={SMALL_BTN} disabled={busy !== null} onClick={onRecord}>
             Record in the audit log
           </button>
         )}
-        {(record || outcome === "failed" || recordError) && (
+        {view.dismissLabel && (
           <button type="button" className={SMALL_BTN} disabled={busy !== null} onClick={onDismiss}>
-            {record || outcome === "failed" ? "Done" : "Forget it"}
+            {view.dismissLabel}
           </button>
         )}
       </div>

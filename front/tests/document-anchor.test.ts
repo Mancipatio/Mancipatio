@@ -1,9 +1,10 @@
 // The document anchor (lib/document-anchor.ts): the memo text and its Memo v2
-// instruction (the Super Admin as its only, signer account), the parser, the
-// reference and hash rules, the fee shown before signing, and the
-// verification the record route runs on the transaction it reads back — the
-// builder's own compiled transaction passes it; a wrong signer, a wrong
-// text, an extra instruction or a failed transaction do not.
+// instruction (the Super Admin as its only, signer account), the reference
+// and hash rules, the fee shown before signing, and the verification the
+// record route runs on the transaction it reads back — the builder's own
+// compiled transaction and the shape Phantom signs on mainnet pass it; a
+// wrong signer, a wrong text, an extra instruction, a missing inner
+// instruction list, too many guards or a failed transaction do not.
 import {
   AccountRole,
   appendTransactionMessageInstructions,
@@ -22,6 +23,7 @@ import { describe, expect, it } from "vitest";
 import {
   BASE_FEE_LAMPORTS_PER_SIGNATURE,
   DOCUMENT_ANCHOR_COMPUTE_UNIT_LIMIT,
+  DOCUMENT_ANCHOR_MAX_WALLET_GUARDS,
   DOCUMENT_ANCHOR_REFERENCE_PATTERN,
   DocumentAnchorError,
   DocumentAnchorEvidenceError,
@@ -35,7 +37,6 @@ import {
   documentAnchorRecordFromRow,
   documentAnchorReferenceError,
   normalizeSha256Input,
-  parseDocumentAnchorMemo,
 } from "@/lib/document-anchor";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS, setComputeUnitLimitInstruction, setComputeUnitPriceInstruction } from "@/lib/compute-budget";
 import { computeUnitLimitFromSimulation } from "@/lib/simulation-gate";
@@ -158,35 +159,26 @@ describe("pasted hashes", () => {
     expect(normalizeSha256Input(`SHA256:${SHA.toUpperCase()}`)).toBe(SHA);
   });
 
+  it("takes the hash from a whole shasum -a 256 / sha256sum line", () => {
+    expect(normalizeSha256Input(`${SHA}  MANCI-2026-0001.pdf`)).toBe(SHA);
+    expect(normalizeSha256Input(`${SHA.toUpperCase()} *certificate final.pdf\n`)).toBe(SHA);
+    expect(normalizeSha256Input(`${SHA}\tfile.pdf`)).toBe(SHA);
+  });
+
   it("refuses the wrong length, non-hex, 0x and inner spaces", () => {
-    for (const bad of ["", SHA.slice(0, 63), `${SHA}a`, `0x${SHA}`, `${SHA.slice(0, 32)} ${SHA.slice(32)}`, `${SHA.slice(0, 63)}z`]) {
+    for (const bad of [
+      "",
+      SHA.slice(0, 63),
+      `${SHA}a`,
+      `0x${SHA}`,
+      `${SHA.slice(0, 32)} ${SHA.slice(32)}`,
+      `${SHA.slice(0, 63)}z`,
+      `${SHA.slice(0, 63)}  file.pdf`,
+      `${SHA}a  file.pdf`,
+      `file.pdf  ${SHA}`,
+    ]) {
       expect(normalizeSha256Input(bad)).toBeNull();
     }
-  });
-});
-
-describe("parseDocumentAnchorMemo", () => {
-  it("reads back what the builder writes (bytes or text)", () => {
-    expect(parseDocumentAnchorMemo(utf8(MEMO))).toEqual({ reference: REFERENCE, sha256: SHA });
-    expect(parseDocumentAnchorMemo(MEMO)).toEqual({ reference: REFERENCE, sha256: SHA });
-  });
-
-  it("is strict: uppercase hex, extra spaces, other memos, invalid UTF-8 are not anchors", () => {
-    for (const text of [
-      `${REFERENCE} sha256:${SHA.toUpperCase()}`,
-      `${REFERENCE}  sha256:${SHA}`,
-      `${REFERENCE} sha256:${SHA}\n`,
-      ` ${MEMO}`,
-      `${REFERENCE} SHA256:${SHA}`,
-      `${REFERENCE} sha256:${SHA.slice(1)}`,
-      `${REFERENCE} sha256:${SHA}0`,
-      `${"x".repeat(65)} sha256:${SHA}`,
-      `mancipatio:terms:00000000-0000-4000-8000-000000000000:${SHA}`,
-      SHA,
-    ]) {
-      expect(parseDocumentAnchorMemo(text)).toBeNull();
-    }
-    expect(parseDocumentAnchorMemo(new Uint8Array([0xff, 0xfe, 0x20]))).toBeNull();
   });
 });
 
@@ -210,8 +202,39 @@ describe("fee and visibility", () => {
 
 const cb = (byte: number): Ix => ({ program: COMPUTE_BUDGET_PROGRAM_ADDRESS, accounts: [], data: new Uint8Array([byte, 0, 0, 0, 0]) });
 const memoIx = (text = MEMO, accounts = [SA], program = MEMO_PROGRAM_ADDRESS): Ix => ({ program, accounts, data: utf8(text) });
-// 5 = AssertAccountInfo (Phantom's guard on the fee payer); 0 MemoryWrite, 1 MemoryClose write.
-const guard = (kind = 5): Ix => ({ program: LIGHTHOUSE, accounts: [SA], data: new Uint8Array([kind, 0, 1, 2]) });
+// Phantom's guard on the fee payer as signed on mainnet (5RBDZ…, the last
+// instruction): kind 6 AssertAccountInfoMulti, 26 bytes. Another first byte
+// swaps the kind (0 MemoryWrite and 1 MemoryClose write; 18+ are unknown).
+const PHANTOM_FEE_PAYER_GUARD = [6, 4, 3, 0, 96, 146, 99, 59, 0, 0, 0, 0, 4, 3, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+const guard = (kind = 6): Ix => ({ program: LIGHTHOUSE, accounts: [SA], data: new Uint8Array([kind, ...PHANTOM_FEE_PAYER_GUARD.slice(1)]) });
+
+// Mainnet 5RBDZ… as getTransaction (json) returns it (public RPC, read
+// 2026-10-05), with the app's asset_registry instruction swapped for the
+// anchor memo: ComputeBudget limit and price, Lighthouse kind 6 (37 bytes) on
+// a writable account, the instruction, Lighthouse kind 6 (26 bytes) on the
+// fee payer; one signer; no inner calls (an empty array).
+const WRITABLE = "FJaWxqhSxjYsH8yMqc76H769vL8kapaFvEWB37yxom4Z";
+function phantomShape(memoText = MEMO): ChainTransaction {
+  return {
+    slot: 453_356_383,
+    blockTime: 1_791_143_700,
+    transaction: {
+      signatures: [SIG],
+      message: {
+        header: { numRequiredSignatures: 1 },
+        accountKeys: [SA, WRITABLE, COMPUTE_BUDGET_PROGRAM_ADDRESS, LIGHTHOUSE, MEMO_PROGRAM_ADDRESS],
+        instructions: [
+          { programIdIndex: 2, accounts: [], data: "Fj2Eoy" },
+          { programIdIndex: 2, accounts: [], data: "3gJqkocMWaMm" },
+          { programIdIndex: 3, accounts: [1], data: "ChELNXPQQ6LCtFKJTCZT4mZvDQN7eAFB3iJDqdH4p4ziG8Mce3" },
+          { programIdIndex: 4, accounts: [0], data: getBase58Decoder().decode(utf8(memoText)) },
+          { programIdIndex: 3, accounts: [0], data: "Bgfmmp1dHLVKzg3Ho4g8nQwUtHThJxss6HV" },
+        ],
+      },
+    },
+    meta: { err: null, loadedAddresses: { writable: [], readonly: [] }, innerInstructions: [] },
+  };
+}
 const expected = { signature: SIG, wallet: SA, reference: REFERENCE, sha256: SHA };
 
 function anchorTx(
@@ -245,8 +268,29 @@ describe("documentAnchorEvidence", () => {
 
   it("tolerates the wallet's Lighthouse assertions around the memo, and counts them", () => {
     expect(LIGHTHOUSE_PROGRAM_ADDRESS).toBe(LIGHTHOUSE);
-    const evidence = documentAnchorEvidence(anchorTx({ instructions: [cb(2), cb(3), guard(), memoIx(), guard(6)] }), expected);
+    const evidence = documentAnchorEvidence(anchorTx({ instructions: [cb(2), cb(3), guard(), memoIx(), guard(10)] }), expected);
     expect(evidence.walletGuardInstructions).toBe(2);
+  });
+
+  it("accepts the shape Phantom signs on mainnet (5RBDZ…, memo swapped in), byte for byte", () => {
+    expect(documentAnchorEvidence(phantomShape(), expected)).toEqual({
+      reference: REFERENCE, sha256: SHA, memo: MEMO, signature: SIG, signer: SA, slot: 453_356_383, blockTime: 1_791_143_700, walletGuardInstructions: 2,
+    });
+    refused(phantomShape(`MANCI-2026-0002 sha256:${SHA}`), /memo text is not/);
+  });
+
+  it("refuses when the node leaves out the inner instructions (the no-inner-call checks could not be made)", () => {
+    for (const innerInstructions of [undefined, null]) {
+      const tx = phantomShape();
+      refused({ ...tx, meta: { ...tx.meta!, innerInstructions } }, /did not return the transaction's inner instructions/);
+    }
+  });
+
+  it("refuses more Lighthouse instructions than an anchor needs", () => {
+    expect(DOCUMENT_ANCHOR_MAX_WALLET_GUARDS).toBe(4);
+    const four = [guard(), guard(), memoIx(), guard(), guard()];
+    expect(documentAnchorEvidence(anchorTx({ instructions: [cb(2), ...four] }), expected).walletGuardInstructions).toBe(4);
+    refused(anchorTx({ instructions: [cb(2), ...four, guard()] }), /more than 4 Lighthouse instructions/);
   });
 
   it("refuses a Lighthouse instruction that writes, is unknown, is empty or makes inner calls", () => {
