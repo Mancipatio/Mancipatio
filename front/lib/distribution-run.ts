@@ -132,7 +132,11 @@ async function landedOutcome(rpc: RunRpc, signature: string): Promise<"confirmed
 
 /**
  * One audit row per distribution transaction (pending on send, then success
- * or failed). Each recipient carries the sanctions-screening evidence the
+ * or failed; the retry worker appends its own final row from the chain,
+ * also next to this one, lib/server/distribution-audits, carrying this
+ * row's report only as unverified client_claims; readers keep one final
+ * row per signature, the server's when there is one, lib/audit-feed). Each
+ * recipient carries the sanctions-screening evidence the
  * send was planned on (lib/distribution-screening: the screening record, its
  * time, the list version, the result and the run's evidence record), or null
  * when the run has none (a journal written before it existed);

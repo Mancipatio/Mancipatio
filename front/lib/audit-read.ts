@@ -6,6 +6,8 @@ export type PrivateAuditRow = {
   id: string; created_at: string; ix_name: string; category: AuditCategory;
   actor_wallet: string | null; target_label: string | null; tx_signature: string | null;
   reason: string | null; status: AuditStatus; metadata: Record<string, unknown> | null;
+  /** Computed by /api/audit/list: the retry worker's chain-checked row (lib/server/reconciled-audit). */
+  chain_checked?: boolean;
 };
 export async function listAuditEvents(session: WalletSession | null | undefined, page = 0): Promise<PrivateAuditRow[]> {
   return signedFetch(session, "/api/audit/list", "audit.list", { page });

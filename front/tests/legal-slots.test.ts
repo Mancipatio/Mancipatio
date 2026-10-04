@@ -92,7 +92,7 @@ const BVI: Operator = { ...OPERATORS.mainnet };
 /** The version and date of the mainnet Terms and Privacy Policy: 2026-10-03,
  *  the owner's decisions D1-D7 (open classes, public sales, platform-linked
  *  wallets, KYC at conversion). It replaced counsel's texts of 2026-10-02;
- *  its wording is a draft until counsel confirms it. */
+ *  counsel confirmed its exact wording on 2026-10-03 (PR #57). */
 const MAINNET_VERSION = "2026-10-03";
 
 /** The previous mainnet Terms version, which every wallet must accept again. */
@@ -461,11 +461,9 @@ describe("mainnetLegalProblems", () => {
     // The company (Manci International Ltd., BVI, recorded 2026-09-30, its
     // tax number stated as not assigned on the owner's written confirmation
     // of 2026-10-02) and the Terms, Privacy Policy and dialog summary are
-    // complete. Version 2026-10-03 (the owner's decisions D1-D7) is held
-    // until counsel confirms its wording: the risk warning's status is
-    // "draft", the one refusal. In the commit that records counsel's
-    // confirmation the status becomes "counsel" and this expects [] again.
-    // Counsel confirmed the exact 2026-10-03 wording (owner, 2026-10-03): complete.
+    // complete. Counsel confirmed the exact wording of version 2026-10-03
+    // (the owner's decisions D1-D7; owner, 2026-10-03, PR #57): the risk
+    // warning's status is "counsel", so nothing is refused.
     expect(problems).toEqual([]);
     // Without counsel's waiver the licence is refused.
     expect(mainnetLegalProblems({}, MAINNET_LEGAL_SLOTS)).toEqual([

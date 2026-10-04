@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWalletConnection } from "@solana/react-hooks";
 import { listAuditEvents } from "@/lib/audit-read";
+import { collapseDistributionFinals, isChainChecked } from "@/lib/audit-feed";
 import { RequireRole } from "@/components/require-role";
 import { SkeletonTable } from "@/components/skeleton";
 import {
@@ -29,6 +30,11 @@ type FeedRow = {
   status: AuditStatus;
   decoded: boolean;
   actor_verified: boolean;
+  /** The retry worker's row for a "Send to wallets" transaction: its status is the finalized chain's; the
+   * sender's claims (metadata.client_claims) are not verified by it. */
+  chain_checked: boolean;
+  /** Other final rows of the same transaction collapsed into this one (lib/audit-feed). */
+  duplicates: number;
 };
 
 const CATEGORY_LABELS: Record<AuditCategory | "all", string> = {
@@ -144,7 +150,9 @@ function AuditOps() {
 
       if (indexerR.error) throw indexerR.error;
 
-      const auditRows: FeedRow[] = auditR.map((r) => ({
+      // One final row per "Send to wallets" transaction: the browser, a resume and the retry worker can each
+      // append one (lib/audit-feed); within the loaded page the others are counted on it.
+      const auditRows: FeedRow[] = collapseDistributionFinals(auditR).map((r) => ({
         id: `audit-${r.id}`,
         source: "audit" as const,
         created_at: r.created_at,
@@ -157,6 +165,8 @@ function AuditOps() {
         status: r.status as AuditStatus,
         decoded: false,
         actor_verified: r.metadata?.actor_verified === true,
+        chain_checked: isChainChecked(r),
+        duplicates: r.duplicates,
       }));
 
       const indexerRows: FeedRow[] = (indexerR.data ?? []).map((r) => ({
@@ -172,6 +182,8 @@ function AuditOps() {
         status: "success" as AuditStatus,
         decoded: !!r.decoded,
         actor_verified: false,
+        chain_checked: false,
+        duplicates: 0,
       }));
 
       const merged = [...auditRows, ...indexerRows].sort(
@@ -340,7 +352,12 @@ function AuditOps() {
                     </p>
                   </td>
                   <td className="px-4 py-3 font-mono text-xs">
-                    {r.actor_wallet ? (
+                    {r.chain_checked ? (
+                      <span className="font-sans" title="Written by the retry worker from the finalized chain; no wallet is attributed by it">
+                        Server
+                        <span className="mt-1 block text-[10px] text-slate-500">chain check</span>
+                      </span>
+                    ) : r.actor_wallet ? (
                       <span title={r.actor_wallet}>
                         {r.actor_wallet.slice(0, 6)}…{r.actor_wallet.slice(-4)}
                         {r.source === "audit" && !r.actor_verified && <span className="mt-1 block font-sans text-[10px] text-amber-700">Unverified actor</span>}
@@ -387,6 +404,16 @@ function AuditOps() {
                     >
                       {r.status.charAt(0).toUpperCase() + r.status.slice(1)}
                     </span>
+                    {r.chain_checked && (
+                      <span className="mt-1 block text-[10px] text-slate-500">
+                        From the chain; the sender&apos;s claims are unverified
+                      </span>
+                    )}
+                    {r.duplicates > 0 && (
+                      <span className="mt-1 block text-[10px] text-slate-500">
+                        +{r.duplicates} duplicate {r.duplicates === 1 ? "report" : "reports"}
+                      </span>
+                    )}
                   </td>
                 </tr>
               ))}
