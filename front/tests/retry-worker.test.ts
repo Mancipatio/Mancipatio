@@ -19,9 +19,9 @@ import { runRetryWorker, retryWorkerLimit } from "@/lib/server/retry-worker";
 
 const SECRET = "fixture-scheduler-secret-32-characters-only";
 const COUNTS = { complete: 1, pending: 2, invalid: 0 };
-/** The audit stage's counters (its own two added, zero when the stage does not report them). */
-const AUDIT_COUNTS = { ...COUNTS, expired: 0, deferred: 0 };
-const NO_AUDIT_COUNTS = { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0 };
+/** The audit stage's counters (its own three added, zero when the stage does not report them). */
+const AUDIT_COUNTS = { ...COUNTS, expired: 0, deferred: 0, review: 0 };
+const NO_AUDIT_COUNTS = { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0, review: 0 };
 /** The audit stage's log lines ([retry-worker] audits {...}), parsed. */
 const auditLines = (warn: { mock: { calls: unknown[][] } }) =>
   warn.mock.calls
@@ -107,7 +107,7 @@ describe("persistent worker lease and deadlines", () => {
   });
   it("the audit stage's own failure says which side did not answer and how many rows wait (deferred)", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    const counts = { complete: 0, pending: 0, invalid: 1, expired: 0, deferred: 7 };
+    const counts = { complete: 0, pending: 0, invalid: 1, expired: 0, deferred: 7, review: 0 };
     mocks.audits.mockRejectedValue(Object.assign(new Error("Distribution audit chain status unavailable", { cause: new Error("api-key=secret") }), { stageCode: "chain", counts }));
     const body = await (await POST(request())).json();
     expect(body.data.audits).toEqual({ status: "failed", counts, code: "chain" });
@@ -120,14 +120,25 @@ describe("persistent worker lease and deadlines", () => {
   });
   it("a run the deadline cut short reports the rows it left (deferred) and logs it; a clean run logs nothing", async () => {
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
-    mocks.audits.mockResolvedValueOnce({ complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3 });
-    expect(await auditsOfRun()).toEqual({ status: "processed", counts: { complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3 }, code: "deadline" });
-    expect(auditLines(warn)).toEqual([{ network: "devnet", status: "processed", code: "deadline", complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3 }]);
+    mocks.audits.mockResolvedValueOnce({ complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3, review: 0 });
+    expect(await auditsOfRun()).toEqual({ status: "processed", counts: { complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3, review: 0 }, code: "deadline" });
+    expect(auditLines(warn)).toEqual([{ network: "devnet", status: "processed", code: "deadline", complete: 2, pending: 0, invalid: 0, expired: 1, deferred: 3, review: 0 }]);
     warn.mockClear();
-    // Only the five counters are reported, whatever else a stage might return.
+    // Only the six counters are reported, whatever else a stage might return (a missing one is 0).
     mocks.audits.mockResolvedValueOnce({ complete: 2, pending: 1, invalid: 0, expired: 1, deferred: 0, note: "not a counter" });
-    expect(await auditsOfRun()).toEqual({ status: "processed", counts: { complete: 2, pending: 1, invalid: 0, expired: 1, deferred: 0 }, code: null });
+    expect(await auditsOfRun()).toEqual({ status: "processed", counts: { complete: 2, pending: 1, invalid: 0, expired: 1, deferred: 0, review: 0 }, code: null });
     expect(auditLines(warn)).toEqual([]);
+  });
+  it("a transaction held for review (the chain does not know it, a browser row says success) is logged with code review", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const counts = { complete: 1, pending: 2, invalid: 0, expired: 0, deferred: 0, review: 1 };
+    mocks.audits.mockResolvedValueOnce(counts);
+    expect(await auditsOfRun()).toEqual({ status: "processed", counts, code: "review" });
+    expect(auditLines(warn)).toEqual([{ network: "devnet", status: "processed", code: "review", ...counts }]);
+    warn.mockClear();
+    // Rows left by the deadline say so first; the counters still show the review.
+    mocks.audits.mockResolvedValueOnce({ ...counts, deferred: 2 });
+    expect(await auditsOfRun()).toEqual({ status: "processed", counts: { ...counts, deferred: 2 }, code: "deadline" });
   });
   it("records its heartbeat (partial after a failure) before releasing the lease", async () => {
     mocks.ledger.mockRejectedValue(new Error("x"));
