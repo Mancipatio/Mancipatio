@@ -30,6 +30,7 @@ import { AuthorityRotation, initKey } from "./authority-rotation";
 import { RoleRecoveryNotice } from "@/components/role-recovery-notice";
 import { BlocklistBootstrap } from "./blocklist-bootstrap";
 import { PlatformInitCard } from "./platform-init-card";
+import { DocumentAnchorPanel } from "./document-anchor-panel";
 import { ConfirmModal } from "@/components/confirm-modal";
 import { recordAudit } from "@/lib/supabase";
 import { explainSendError } from "@/lib/tx-error";
@@ -256,7 +257,8 @@ export default function AdminPage() {
             ) : (
               <p className="mt-6 text-sm text-slate-500">
                 Connected wallet is not the Super Admin — only the Super Admin
-                can resume paused areas or rotate the treasury.
+                can resume paused areas, rotate the treasury or anchor a
+                document.
               </p>
             )}
             <button
@@ -268,6 +270,10 @@ export default function AdminPage() {
             </button>
           </div>
         )}
+
+        {/* Super Admin only: the panel compares the connected wallet with
+            the on-chain Platform.admin itself and renders nothing otherwise. */}
+        {platform && <DocumentAnchorPanel superAdmin={platform.admin} />}
 
         {tx.signature && (
           <p className="mt-4 text-sm text-emerald-600">

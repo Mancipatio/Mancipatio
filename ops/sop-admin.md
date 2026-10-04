@@ -209,6 +209,35 @@ PauseFlagsPanel (per area or *Pause everything*); out of band:
   recomputation tool is a follow-up]**; the Admin who funds a distribution is
   its funder (refunds and rent return to that key).
 
+## Document anchors (super admin)
+
+Page: `/admin/platform` → *Anchor a document* (shown only to the wallet that
+is the on-chain super admin, `Platform.admin`). It writes a document's SHA-256
+with a reference into one Memo v2 transaction the super admin signs, so anyone
+can check the fingerprint and the time on an explorer. The memo is exactly
+`<reference> sha256:<64 lowercase hex>`, and it is the wording a signed
+document quotes (MANCI-2026-0001: page 3 of the certificate).
+
+1. Choose the final file (it is hashed in the browser and never uploaded) or
+   paste its SHA-256; enter the reference (letters, digits, `. _ : / -`, no
+   spaces, at most 64).
+2. Compare the *Memo text (exactly)* line with the text in the signed
+   document, character for character, and check the signer and the fee. A
+   memo cannot be changed once it is on chain.
+3. *Review and anchor* → approve in the wallet. The page waits for the
+   confirmation, then the server reads the transaction back, checks the
+   signer, the memo text and that nothing else was done (the wallet's own
+   guard instructions excepted), and writes the audit row (category
+   *Operator records*, `document_anchor`). The anchor then appears under
+   *Recent anchors* with its explorer link. If the page says *not recorded*,
+   use *Record in the audit log*; never send the anchor a second time.
+
+To verify an anchor (anyone): hash the file (`shasum -a 256 <file>`, or
+`certutil -hashfile <file> SHA256` on Windows), open the signature on
+explorer.solana.com, and check that the transaction succeeded, is signed by
+the super admin key, and that its Memo instruction reads exactly
+`<reference> sha256:<that hash>`; the block time is the time of the anchor.
+
 ## Weekly and monthly
 
 - Weekly: the manual FX fallback (the automatic rate shows as current); alarm backlog zero; `chain:inventory` (read-only) shows no
