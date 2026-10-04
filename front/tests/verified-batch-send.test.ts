@@ -4,7 +4,10 @@
 // returned message compared with the one built, the journal written before
 // any broadcast, every transaction sent at once (no 30 s settle wait inside
 // the batch) — and one prompt per transaction when the wallet cannot sign
-// them together, never after the user's refusal.
+// them together or guarded any of several, never after the user's refusal,
+// each signed only once the previous one is confirmed.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { SolanaClient, TransactionPrepared, TransactionPrepareRequest, WalletSession } from "@solana/client";
 import {
@@ -15,6 +18,7 @@ import {
   compileTransaction,
   createTransactionMessage,
   decompileTransactionMessage,
+  getBase64EncodedWireTransaction,
   getBase64Encoder,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
@@ -86,10 +90,21 @@ vi.mock("@/lib/wallet-standard-batch", async (original) => {
   };
 });
 
-import { getBatchSender, SignedTransactionChangedError, transactionId, withVerifiedTransactions, type BatchSigned } from "@/lib/verified-solana-client";
+import {
+  EarlierTransactionUnconfirmedError,
+  getBatchSender,
+  remembersSignSeparately,
+  SignedTransactionChangedError,
+  SIGNING_TOO_SLOW,
+  transactionId,
+  verifySignedBatch,
+  WALLET_STATE_GUARDS,
+  withVerifiedTransactions,
+  type BatchSigned,
+} from "@/lib/verified-solana-client";
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { SimulationRefusedError } from "@/lib/simulation-gate";
-import { signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
+import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
 import { LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
 import {
   COMPUTE_BUDGET_PROGRAM_ADDRESS,
@@ -116,7 +131,17 @@ function session(): WalletSession {
   };
 }
 
-function fixture(opts: { heightAfterSigning?: number } = {}) {
+type SignatureStatus = { err: unknown; confirmationStatus: string } | null;
+
+function fixture(
+  opts: {
+    heightAfterSigning?: number;
+    /** Called with each broadcast wire transaction before it is accepted; throwing is the node refusing it. */
+    onSend?: (wire: string) => void;
+    /** The network's status of a signature (default: confirmed); throwing is an RPC that cannot answer. */
+    status?: (signature: string) => SignatureStatus;
+  } = {},
+) {
   const current = session();
   let blockhashes = 0;
   const sent: string[] = [];
@@ -158,14 +183,15 @@ function fixture(opts: { heightAfterSigning?: number } = {}) {
     sendTransaction: (wire: string) => ({
       send: async () => {
         events.push("send");
+        opts.onSend?.(wire);
         sent.push(wire);
         return "sig";
       },
     }),
-    getSignatureStatuses: () => ({
+    getSignatureStatuses: (signatures: readonly string[]) => ({
       send: async () => {
         events.push("settle");
-        return { value: [{ err: null, confirmationStatus: "confirmed" }] };
+        return { value: signatures.map((s) => (opts.status ? opts.status(s) : { err: null, confirmationStatus: "confirmed" })) };
       },
     }),
   };
@@ -373,6 +399,87 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
     expect(signTransactionsWithWallet).not.toHaveBeenCalled();
   });
 
+  describe("per transaction: the next one is signed only once the previous one is confirmed", () => {
+    // A wallet simulates a transaction when it is asked to sign it (Phantom
+    // guards the fee payer's balance as that simulation saw it).
+    const walletAndNetwork = () => events.filter((e) => e === "wallet.single" || e === "send" || e === "settle");
+
+    it("waits for each transaction before the next prompt (not after the last)", async () => {
+      const f = fixture();
+      const result = await f.sender.prepareAndSendAll(requests(3), { mode: "per-transaction", onSigned: () => {} });
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, true, true]);
+      expect(walletAndNetwork()).toEqual(["wallet.single", "send", "settle", "wallet.single", "send", "settle", "wallet.single", "send"]);
+    });
+
+    it("a previous transaction that failed on the network stops the run: the rest are not signed", async () => {
+      const f = fixture({ status: () => ({ err: { InstructionError: [4, { Custom: 6001 }] }, confirmationStatus: "confirmed" }) });
+      const signed: number[] = [];
+      const result = await f.sender.prepareAndSendAll(requests(3), { mode: "per-transaction", onSigned: (s) => void signed.push(...s.map((x) => x.index)) });
+      expect(signed).toEqual([0]);
+      expect(f.sign).toHaveBeenCalledOnce();
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, false, false]);
+      expect(result.outcomes[0].error).toBeNull();
+      expect(result.outcomes[1].error).toBeInstanceOf(EarlierTransactionUnconfirmedError);
+      expect((result.outcomes[1].error as Error).message).toBe(
+        "Transaction 1 of 3 failed on the network (nothing of it moved), so the ones after it were not signed.",
+      );
+      expect(result.outcomes[2].error).toBe(result.outcomes[1].error);
+    });
+
+    it("a previous transaction the network cannot confirm stops the run too", async () => {
+      const f = fixture({
+        status: () => {
+          throw new Error("RPC unavailable");
+        },
+      });
+      const result = await f.sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: () => {} });
+      expect(f.sign).toHaveBeenCalledOnce();
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, false]);
+      expect((result.outcomes[1].error as Error).message).toBe("Transaction 1 of 2 is not confirmed yet, so the ones after it were not signed.");
+    });
+
+    it("a transaction the node did not accept stops the run there: the next one is not signed against an unknown state", async () => {
+      let sends = 0;
+      const refusal = new Error("node refused");
+      const f = fixture({
+        onSend: () => {
+          if (sends++ === 1) throw refusal;
+        },
+      });
+      const result = await f.sender.prepareAndSendAll(requests(3), { mode: "per-transaction", onSigned: () => {} });
+      expect(f.sign).toHaveBeenCalledTimes(2);
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, false, false]);
+      // The journalled one keeps its signature (it may still land); the next was never signed.
+      expect(result.outcomes[1]).toMatchObject({ error: refusal });
+      expect(result.outcomes[1].signature).not.toBeNull();
+      expect(result.outcomes[2]).toMatchObject({ signature: null, error: refusal });
+    });
+  });
+
+  it("a refusal's advice follows what it is about: a guard is not a fee setting, and another wallet means the same account", () => {
+    const guards = new SignedTransactionChangedError("the wallet added a Lighthouse instruction Manci does not accept (Lighthouse.#16)", "guards").message;
+    expect(guards).toMatch(/^The wallet added a Lighthouse instruction Manci does not accept \(Lighthouse\.#16\), so it was not sent\./);
+    expect(guards).toMatch(/safety checks \(Lighthouse assertions, as Phantom adds\) only when it can verify them and they fit/);
+    expect(guards).toMatch(/another wallet app that holds this same account, or send the remaining recipients one at a time with “Send to holder”/);
+    expect(guards).not.toMatch(/priority fee/);
+    expect(new SignedTransactionChangedError("x", "compute-budget").message).toMatch(/Turn off the wallet's custom priority fee or use another wallet app that holds this same account/);
+    expect(new SignedTransactionChangedError("x").message).toMatch(/Use another wallet app that holds this same account and open this page again/);
+  });
+
+  it("remembers 'sign separately' for the wallet only for a fallback that every batch would repeat", () => {
+    expect(remembersSignSeparately(`One-prompt signing is not available: ${SIGNING_TOO_SLOW}`)).toBe(true);
+    expect(remembersSignSeparately(`One-prompt signing is not available: ${WALLET_STATE_GUARDS}`)).toBe(true);
+    expect(remembersSignSeparately("One-prompt signing is not available: the wallet returned 1 of 3 transactions")).toBe(false);
+    expect(remembersSignSeparately(null)).toBe(false);
+    // The panel remembers it for the wallet, and says once how to continue.
+    const panel = readFileSync(join(process.cwd(), "components/send-to-wallets-panel.tsx"), "utf8");
+    expect(panel).toContain("if (remembersSignSeparately(result.fallbackReason)) chooseSeparate(true);");
+    expect(panel).toContain('${why}${/open this page again/i.test(why) ? "" : " Open this page again to continue the run."}');
+    // A transfer that landed and failed is not "not confirmed yet": nothing of it moved, and the resume sends its rows.
+    expect(panel).toContain('if (outcomes.some((o) => o === "failed")) {');
+    expect(panel).toContain("Some transfers failed on the network: nothing of them moved");
+  });
+
   it("exists only on the app's verified client", () => {
     const f = fixture();
     expect(getBatchSender(f.guarded)).not.toBeNull();
@@ -566,22 +673,149 @@ describe("prepareAndSendAll: what a wallet may change", () => {
     return message.instructions.map((i) => String(message.staticAccounts[i.programAddressIndex]).slice(0, 4));
   };
 
-  it("batch: Phantom's Lighthouse guards around two rows are accepted; its signatures are journalled and sent, the compute budget as built", async () => {
+  it("batch: one transaction with Phantom's guards is accepted; its signature is journalled and sent, the compute budget as built", async () => {
     const f = fixture();
     wallet.rewrite = (bytes) => rewritten(bytes, lighthouse);
     const journal: BatchSigned[] = [];
-    const result = await f.sender.prepareAndSendAll(rowRequests(3), { onSigned: (s) => void journal.push(...s) });
+    const result = await f.sender.prepareAndSendAll(rowRequests(1), { onSigned: (s) => void journal.push(...s) });
     expect(result).toMatchObject({ mode: "batch", prompts: 1, fallbackReason: null });
     expect(f.sign).not.toHaveBeenCalled();
-    expect(f.sent.map(programsOf)).toEqual(Array(3).fill(["Comp", "Comp", "L2TE", "FJs1", "FJs1", "L2TE", "L2TE"]));
+    expect(f.sent.map(programsOf)).toEqual([["Comp", "Comp", "L2TE", "FJs1", "FJs1", "L2TE", "L2TE"]]);
     const sent = broadcast(f.sent);
     const built = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(wallet.calls[0][0]).messageBytes);
     const builtBudget = built.instructions
       .filter((i) => built.staticAccounts[i.programAddressIndex] === COMPUTE_BUDGET_PROGRAM_ADDRESS)
       .map((i) => decodeComputeBudgetInstruction({ programAddress: COMPUTE_BUDGET_PROGRAM_ADDRESS, data: i.data }));
-    for (const s of sent) expect(s.budget).toEqual(builtBudget);
+    expect(sent[0].budget).toEqual(builtBudget);
     expect(journal.map((j) => j.signature)).toEqual(sent.map((s) => s.id));
     expect(result.outcomes.map((o) => o.signature)).toEqual(sent.map((s) => s.id));
+  });
+
+  it("batch: several transactions, any of them with Phantom's guards, are never journalled or sent together: one prompt each", async () => {
+    for (const guarded of [[0, 1, 2], [2]]) {
+      // Every copy guarded, or only the last (a full pack has no room for a guard, a partly filled one does).
+      const f = fixture();
+      events.length = 0;
+      wallet.rewrite = (bytes, i) => (guarded.includes(i) ? rewritten(bytes, lighthouse) : bytes);
+      f.sign.mockImplementation(signWith(lighthouse));
+      const journal: BatchSigned[][] = [];
+      const result = await f.sender.prepareAndSendAll(rowRequests(3), { onSigned: (s) => void journal.push([...s]) });
+      expect(result).toMatchObject({ mode: "per-transaction", prompts: 3 });
+      expect(result.fallbackReason).toContain(WALLET_STATE_GUARDS);
+      expect(signTransactionsWithWallet).toHaveBeenCalledTimes(1);
+      vi.mocked(signTransactionsWithWallet).mockClear();
+      // Nothing of the batch: only the one-by-one signatures, each journalled before its own broadcast.
+      expect(journal.map((j) => j.map((s) => s.index))).toEqual([[0], [1], [2]]);
+      expect(journal.flat().map((s) => s.signature)).toEqual(broadcast(f.sent).map((s) => s.id));
+      expect(events.filter((e) => e === "wallet.single" || e === "send" || e === "settle").slice(0, 4)).toEqual(["wallet.single", "send", "settle", "wallet.single"]);
+    }
+  });
+
+  // Phantom's guard on the fee payer, decoded from the mainnet transactions it
+  // signed: AssertAccountInfoMulti Lamports >= floor, where floor = the
+  // balance its simulation saw - the fee - 1.1 × the rent the transaction
+  // pays - 0.005 SOL (tests/wallet-changes pins it on the fixtures). A
+  // transaction that creates 8 token accounts spends 12 338 920 lamports;
+  // another one's floor leaves it 6 231 392. Here the network lands each
+  // broadcast transaction, in order, when it is next asked about one.
+  describe("Phantom's balance guards against the network", () => {
+    const FEE = BigInt(25_000);
+    const RENT = BigInt(1_539_240) * BigInt(8);
+    const SLACK = BigInt(5_000_000);
+    const floorFor = (seen: bigint) => seen - FEE - RENT - RENT / BigInt(10) - SLACK;
+    const payerGuard = (floor: bigint): Instruction => {
+      const data = new Uint8Array(13);
+      data.set([6, 4, 1, 0]);
+      new DataView(data.buffer).setBigUint64(4, floor, true);
+      data[12] = 4;
+      return { programAddress: LIGHTHOUSE, accounts: [{ address: WALLET, role: AccountRole.READONLY }], data };
+    };
+    const floorOf = (tx: Transaction): bigint | null => {
+      const message = getCompiledTransactionMessageDecoder().decode(tx.messageBytes);
+      const guard = message.instructions.find((i) => message.staticAccounts[i.programAddressIndex] === LIGHTHOUSE && i.data?.[0] === 6);
+      return guard?.data ? new DataView(Uint8Array.from(guard.data).buffer).getBigUint64(4, true) : null;
+    };
+
+    function network(start: bigint) {
+      let balance = start;
+      const queue: Transaction[] = [];
+      const landed = new Map<string, "confirmed" | "failed">();
+      const land = () => {
+        for (const tx of queue.splice(0)) {
+          const post = balance - FEE - RENT;
+          const floor = floorOf(tx);
+          // A guard that no longer holds: the transaction fails, paying its fee only.
+          if (floor !== null && post < floor) {
+            balance -= FEE;
+            landed.set(transactionId(tx), "failed");
+          } else {
+            balance = post;
+            landed.set(transactionId(tx), "confirmed");
+          }
+        }
+      };
+      return {
+        /** What the wallet's simulation sees: every landed transaction. */
+        seen: () => balance,
+        send: (wire: string) => void queue.push(getTransactionDecoder().decode(getBase64Encoder().encode(wire))),
+        status: (signature: string): SignatureStatus => {
+          land();
+          const outcome = landed.get(signature);
+          return outcome ? { err: outcome === "failed" ? { InstructionError: [4, { Custom: 6001 }] } : null, confirmationStatus: "confirmed" } : null;
+        },
+        /** Everything sent, landed. */
+        outcomes: () => {
+          land();
+          return [...landed.values()];
+        },
+      };
+    }
+
+    function phantom() {
+      const chain = network(BigInt(2_121_150_057));
+      const f = fixture({ onSend: chain.send, status: chain.status });
+      const guarded = (bytes: Uint8Array) => rewritten(bytes, (ixs) => [...ixs, payerGuard(floorFor(chain.seen()))]);
+      wallet.rewrite = guarded;
+      let next = 100;
+      f.sign.mockImplementation(async (prepared: TransactionPrepared) => {
+        events.push("wallet.single");
+        const built = compileTransaction(prepared.message as Parameters<typeof compileTransaction>[0]);
+        return { messageBytes: guarded(Uint8Array.from(built.messageBytes)), signatures: { [WALLET]: new Uint8Array(64).fill(next++) } } as never;
+      });
+      return { chain, f };
+    }
+
+    it("the model: two transactions guarded against the same balance, landed together, fail all but the first", () => {
+      const chain = network(BigInt(2_121_150_057));
+      const floor = floorFor(chain.seen());
+      for (const fill of [1, 2]) {
+        const message = pipe(
+          createTransactionMessage({ version: 0 }),
+          (m) => setTransactionMessageFeePayer(WALLET, m),
+          (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: blockhash("4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"), lastValidBlockHeight: BigInt(1) }, m),
+          (m) => appendTransactionMessageInstructions([row(fill), payerGuard(floor)], m),
+        );
+        const tx = { ...compileTransaction(message), signatures: { [WALLET]: new Uint8Array(64).fill(fill) } } as unknown as Transaction;
+        chain.send(getBase64EncodedWireTransaction(tx));
+      }
+      expect(chain.outcomes()).toEqual(["confirmed", "failed"]);
+    });
+
+    it("a batch of three: falls back to one prompt each, each signed after the previous landed; all three confirm", async () => {
+      const { chain, f } = phantom();
+      const result = await f.sender.prepareAndSendAll(rowRequests(3), { onSigned: () => {} });
+      expect(result).toMatchObject({ mode: "per-transaction", prompts: 3 });
+      expect(result.fallbackReason).toContain(WALLET_STATE_GUARDS);
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, true, true]);
+      expect(chain.outcomes()).toEqual(["confirmed", "confirmed", "confirmed"]);
+    });
+
+    it("one prompt per transaction from the start: all three confirm", async () => {
+      const { chain, f } = phantom();
+      const result = await f.sender.prepareAndSendAll(rowRequests(3), { mode: "per-transaction", onSigned: () => {} });
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, true, true]);
+      expect(chain.outcomes()).toEqual(["confirmed", "confirmed", "confirmed"]);
+    });
   });
 
   it("per transaction (after a batch the wallet could not sign together): the guards are accepted, the wallet's signature journalled and sent", async () => {
@@ -608,10 +842,31 @@ describe("prepareAndSendAll: what a wallet may change", () => {
     expect(error).toBeInstanceOf(SignedTransactionChangedError);
     const message = (error as Error).message;
     expect(message).toMatch(/added a Lighthouse instruction \(Lighthouse\.AssertAccountInfoMulti\) that names 9xQe…VFin as writable.*transaction 1 of 2.*not sent/);
-    // Not a wallet setting: the advice is another wallet or "Send to holder", never a fee setting.
-    expect(message).toMatch(/Use another wallet .*“Send to holder”/);
-    expect(message).not.toMatch(/priority fee or use another wallet/);
+    // Not a wallet setting: the advice is another wallet app with the same account or "Send to holder", never a fee setting.
+    expect(message).toMatch(/safety checks.*another wallet app that holds this same account.*“Send to holder”/);
+    expect(message).not.toMatch(/priority fee/);
     expect(onSigned).not.toHaveBeenCalled();
     expect(f.sent).toHaveLength(0);
+  });
+
+  it("a signed copy over the network's 1232-byte packet is refused before anything is journalled", () => {
+    const built = compileTransaction(
+      pipe(
+        createTransactionMessage({ version: 0 }),
+        (m) => setTransactionMessageFeePayer(WALLET, m),
+        (m) => setTransactionMessageLifetimeUsingBlockhash({ blockhash: blockhash("4vJ9JU1bJJE96FWSJKvHsmmFADCg4gpZQff4P3bkLKi"), lastValidBlockHeight: BigInt(1) }, m),
+        (m) => appendTransactionMessageInstructions([setComputeUnitLimitInstruction(1_400_000), row(1), row(2)], m),
+      ),
+    );
+    const sign = (guards: number) => {
+      const messageBytes = rewritten(Uint8Array.from(built.messageBytes), (ixs) => [...ixs, ...Array.from({ length: guards }, () => assertion(6, WALLET))]);
+      return Uint8Array.from(getTransactionEncoder().encode({ messageBytes, signatures: { [WALLET]: new Uint8Array(64).fill(1) } } as unknown as Transaction));
+    };
+    const bounds = [{ maxComputeUnitPrice: BigInt(100_000), minComputeUnitLimit: 1_000 }];
+    expect(sign(55).length).toBeLessThanOrEqual(1232);
+    expect(verifySignedBatch([built], [sign(55)], bounds)).toHaveLength(1);
+    expect(sign(56).length).toBe(1236);
+    expect(() => verifySignedBatch([built], [sign(56)], bounds)).toThrow(BatchSigningUnsupportedError);
+    expect(() => verifySignedBatch([built], [sign(56)], bounds)).toThrow(/transaction 1 came back at 1236 bytes, over the network's 1232-byte packet limit with the 56 Lighthouse instructions the wallet added/);
   });
 });

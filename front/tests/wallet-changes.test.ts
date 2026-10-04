@@ -29,7 +29,7 @@ import {
   clearWalletChange,
   describeWalletChange,
   judgeWalletRewrite,
-  LIGHTHOUSE_GUARD_MIN_UNITS,
+  LIGHTHOUSE_GUARD_UNITS,
   LIGHTHOUSE_PROGRAM_ADDRESS,
   noteWalletChange,
   recentWalletChange,
@@ -37,7 +37,7 @@ import {
 } from "@/lib/wallet-changes";
 import { PHANTOM_SEND_TO_HOLDER_MESSAGE, PHANTOM_TREASURY_MINT_MESSAGE } from "./fixtures/phantom-mainnet-messages";
 import { guardWalletSession } from "@/lib/guarded-wallet-connectors";
-import { explainNetworkRefusal, explainSendError } from "@/lib/tx-error";
+import { explainNetworkRefusal, explainSendError, WALLET_GUARD_FAILED_HINT } from "@/lib/tx-error";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS, setComputeUnitLimitInstruction, setComputeUnitPriceInstruction } from "@/lib/compute-budget";
 import { priorityFeeCap } from "@/lib/priority-fee";
 
@@ -226,6 +226,26 @@ describe("a pre-execution refusal by the network", () => {
     });
     expect(explainNetworkRefusal(programFailure)).toBeNull();
     expect(explainSendError(programFailure)).toMatch(/Error: nope/);
+  });
+
+  it("a failed Lighthouse assertion is the wallet's safety check, never a network mismatch (its 0x1771)", () => {
+    const L2TE = LIGHTHOUSE_PROGRAM_ADDRESS;
+    const preflight = getSolanaErrorFromJsonRpcError({
+      code: -32002,
+      message: "Transaction simulation failed",
+      data: {
+        accounts: null,
+        err: { InstructionError: [4, { Custom: 6001 }] },
+        logs: [`Program ${L2TE} invoke [1]`, `Program ${L2TE} consumed 1818 of 140000 compute units`, `Program ${L2TE} failed: custom program error: 0x1771`],
+        unitsConsumed: 60_000,
+      },
+    });
+    expect(explainSendError(preflight)).toBe(WALLET_GUARD_FAILED_HINT);
+    expect(WALLET_GUARD_FAILED_HINT).toMatch(/an account it checks changed between signing and landing.*Nothing moved/);
+    // Named only in the message, without logs: still not the wrong-network hint.
+    expect(explainSendError(new Error(`Program ${L2TE} failed: custom program error: 0x1771`))).toBe(WALLET_GUARD_FAILED_HINT);
+    // Another program's 0x1771 keeps its own wording.
+    expect(explainSendError(new Error("custom program error: 0x1771"))).toMatch(/different network/);
   });
 
   it("program logs, when there are any, win over a refusal code", () => {
@@ -437,22 +457,35 @@ describe("judgeWalletRewrite: Phantom's Lighthouse guards (the real mainnet rewr
 
   const lookAlike = address("L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S91");
   const payer = (role: AccountRole) => [{ address: WALLET, role }];
-  const refusals: [string, (ixs: Instruction[]) => Instruction[], RegExp][] = [
+  /** A guard with Phantom's own kind and target and `level` as its log level (its second data byte). */
+  const logged = (level: number): Instruction => ({ ...guard(6, payer(AccountRole.READONLY)), data: Uint8Array.of(6, level, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0) });
+  // "guards": the wallet's guards themselves cannot be accepted; "transaction": anything else changed.
+  const refusals: [string, (ixs: Instruction[]) => Instruction[], RegExp, "guards" | "transaction"][] = [
     [
       "a guard naming an account the transaction does not have",
       (ixs) => [...ixs, guard(6, [{ address: NEW, role: AccountRole.READONLY }])],
       /a Lighthouse instruction \(Lighthouse\.AssertAccountInfoMulti\) that names GHtX…D3Zi as readonly, which the transaction does not/,
+      "guards",
     ],
-    ["a guard adding a signer", (ixs) => [...ixs, guard(6, [{ address: NEW, role: AccountRole.READONLY_SIGNER }])], /names GHtX…D3Zi as signer/],
-    ["a guard making a read-only account writable", (ixs) => [...ixs, guard(6, [{ address: MINT, role: AccountRole.WRITABLE }])], /changed the accounts of instruction/],
-    ["MemoryWrite", (ixs) => [...ixs, guard(0, payer(AccountRole.WRITABLE_SIGNER))], /a Lighthouse instruction Manci does not accept \(Lighthouse\.#0\)/],
-    ["MemoryClose", (ixs) => [...ixs, guard(1, payer(AccountRole.WRITABLE_SIGNER))], /does not accept \(Lighthouse\.#1\)/],
-    ["an unknown Lighthouse instruction", (ixs) => [...ixs, guard(18, payer(AccountRole.READONLY))], /does not accept \(Lighthouse\.#18\)/],
-    ["a Lighthouse instruction without data", (ixs) => [...ixs, { programAddress: LIGHTHOUSE, accounts: payer(AccountRole.READONLY) }], /does not accept \(Lighthouse\.#\?\)/],
+    ["a guard adding a signer", (ixs) => [...ixs, guard(6, [{ address: NEW, role: AccountRole.READONLY_SIGNER }])], /names GHtX…D3Zi as signer/, "guards"],
+    ["a guard making a read-only account writable", (ixs) => [...ixs, guard(6, [{ address: MINT, role: AccountRole.WRITABLE }])], /changed the accounts of instruction/, "transaction"],
+    ["MemoryWrite", (ixs) => [...ixs, guard(0, payer(AccountRole.WRITABLE_SIGNER))], /a Lighthouse instruction Manci does not accept \(Lighthouse\.#0\)/, "guards"],
+    ["MemoryClose", (ixs) => [...ixs, guard(1, payer(AccountRole.WRITABLE_SIGNER))], /does not accept \(Lighthouse\.#1\)/, "guards"],
+    // Compressed-NFT tree checks (16 calls the account-compression program): never in a Manci transaction.
+    ["AssertMerkleTreeAccount", (ixs) => [...ixs, guard(16, payer(AccountRole.READONLY))], /does not accept \(Lighthouse\.#16\)/, "guards"],
+    ["AssertBubblegumTreeConfigAccount", (ixs) => [...ixs, guard(17, payer(AccountRole.READONLY))], /does not accept \(Lighthouse\.#17\)/, "guards"],
+    ["an unknown Lighthouse instruction", (ixs) => [...ixs, guard(18, payer(AccountRole.READONLY))], /does not accept \(Lighthouse\.#18\)/, "guards"],
+    ["a Lighthouse instruction without data", (ixs) => [...ixs, { programAddress: LIGHTHOUSE, accounts: payer(AccountRole.READONLY) }], /does not accept \(Lighthouse\.#\?\)/, "guards"],
+    // These log through a call to the SPL Noop program.
+    ["an assertion logging through Noop (EncodedNoop)", (ixs) => [...ixs, logged(3)], /does not accept \(Lighthouse\.AssertAccountInfoMulti with log level 3\)/, "guards"],
+    ["an assertion logging through Noop (FailedEncodedNoop)", (ixs) => [...ixs, logged(6)], /with log level 6\)/, "guards"],
+    ["an assertion with an unknown log level", (ixs) => [...ixs, logged(7)], /with log level 7\)/, "guards"],
+    ["an assertion without a log level", (ixs) => [...ixs, { ...guard(6, payer(AccountRole.READONLY)), data: Uint8Array.of(6) }], /with log level none\)/, "guards"],
     [
       "a look-alike program address",
       (ixs) => [...ixs.filter((i) => !isGuard(i)), guard(6, payer(AccountRole.READONLY), lookAlike)],
       /changed its instructions \[.*\] → \[.*L2TE…3S91\]/,
+      "transaction",
     ],
     [
       "a guard between the app's own instructions",
@@ -461,13 +494,35 @@ describe("judgeWalletRewrite: Phantom's Lighthouse guards (the real mainnet rewr
         return [...app.slice(0, 3), guard(6, payer(AccountRole.READONLY)), ...app.slice(3)];
       },
       /put a Lighthouse instruction \(Lighthouse\.AssertAccountInfoMulti\) between the transaction's own instructions/,
+      "guards",
     ],
-    ["a guard naming the Lighthouse program itself", (ixs) => [...ixs, guard(6, [{ address: LIGHTHOUSE, role: AccountRole.READONLY }])], /names L2TE…3S95 as readonly/],
-    ["guards with any other change (one more instruction)", (ixs) => [...ixs, { programAddress: lookAlike, data: Uint8Array.of(1) }], /changed its instructions/],
+    ["a guard naming the Lighthouse program itself", (ixs) => [...ixs, guard(6, [{ address: LIGHTHOUSE, role: AccountRole.READONLY }])], /names L2TE…3S95 as readonly/, "guards"],
+    ["guards with any other change (one more instruction)", (ixs) => [...ixs, { programAddress: lookAlike, data: Uint8Array.of(1) }], /changed its instructions/, "transaction"],
   ];
 
-  it.each(refusals)("refuses %s", (_label, edit, reason) => {
-    expect(judgeEdited(edit)).toMatchObject({ kind: "refused", change: expect.stringMatching(reason), about: "transaction" });
+  it.each(refusals)("refuses %s", (_label, edit, reason, about) => {
+    expect(judgeEdited(edit)).toMatchObject({ kind: "refused", change: expect.stringMatching(reason), about });
+  });
+
+  it("accepts every log level that only logs (Silent, Plaintext, Encoded, and their Failed forms)", () => {
+    for (const level of [0, 1, 2, 4, 5]) {
+      expect(judgeEdited((ixs) => [...ixs, logged(level)])).toMatchObject({ kind: "accepted", guards: 3 });
+    }
+  });
+
+  it("Phantom's guard on the fee payer: lamports at least what it simulated, less the fee, 1.1 × the rent and 0.005 SOL", () => {
+    // Pinned on both fixtures (balances before them from the chain): the reason guarded transactions are never sent together.
+    const floor = (messageBytes: Uint8Array) => {
+      const m = getCompiledTransactionMessageDecoder().decode(messageBytes);
+      const ix = m.instructions.find((i) => m.staticAccounts[i.programAddressIndex] === LIGHTHOUSE && i.data?.[0] === 6 && i.data[3] === 0 && i.data[12] === 4);
+      return new DataView(Uint8Array.from(ix!.data!).buffer).getBigUint64(4, true);
+    };
+    const phantomFloor = (before: number, fee: number, rent: number) => BigInt(before - fee - rent - rent / 10 - 5_000_000);
+    // A new token account (1 539 240 lamports of rent) and the fee (25 000) each.
+    expect(floor(phantomSend)).toBe(BigInt(2_114_431_893));
+    expect(phantomFloor(2_121_150_057, 25_000, 1_539_240)).toBe(BigInt(2_114_431_893));
+    expect(floor(phantomMint)).toBe(BigInt(2_115_996_133));
+    expect(phantomFloor(2_122_714_297, 25_000, 1_539_240)).toBe(BigInt(2_115_996_133));
   });
 
   it("refuses a Lighthouse key that is not read-only", () => {
@@ -492,14 +547,23 @@ describe("judgeWalletRewrite: Phantom's Lighthouse guards (the real mainnet rewr
     });
   });
 
-  it("the limit must leave room for the guards, which the simulation did not run", () => {
-    const need = 200_000 - 2 * LIGHTHOUSE_GUARD_MIN_UNITS;
+  it("the limit must leave room for the guards, which the simulation did not run (7 000 CU each, the most one cost on mainnet rounded up)", () => {
+    expect(LIGHTHOUSE_GUARD_UNITS).toBe(7_000);
+    const need = 200_000 - 2 * LIGHTHOUSE_GUARD_UNITS;
     expect(judgeWalletRewrite(sendBuilt, phantomSend, { ...bounds, minComputeUnitLimit: need })).toMatchObject({ kind: "accepted" });
+    // Phantom kept Manci's compute budget: no wallet setting makes room, so it is about the guards.
     expect(judgeWalletRewrite(sendBuilt, phantomSend, { ...bounds, minComputeUnitLimit: need + 1 })).toMatchObject({
       kind: "refused",
       change: expect.stringMatching(/added 2 Lighthouse instructions .*limit of 200000 is below the 200001 the transaction needs with them/),
-      about: "compute-budget",
+      about: "guards",
     });
+    // A wallet that set its own lower limit as well: a wallet setting.
+    const ownLimit = judgeEdited((ixs) => [
+      setComputeUnitLimitInstruction(60_000),
+      setComputeUnitPriceInstruction(BigInt(100_000)),
+      ...ixs.filter((i) => !isBudget(i)),
+    ]);
+    expect(ownLimit).toMatchObject({ kind: "refused", change: expect.stringMatching(/limit of 60000 is below the 70000/), about: "compute-budget" });
   });
 
   it("Lighthouse instructions in the message Manci built are not set apart", () => {

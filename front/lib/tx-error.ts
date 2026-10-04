@@ -3,7 +3,7 @@ import { features } from "@/lib/features";
 import { detectNetwork } from "@/lib/network";
 import { MaintenanceModeError } from "@/lib/maintenance";
 import { ModuleDisabledFlowError, PausedFlowError } from "@/lib/pause-gate";
-import { takeWalletChange } from "@/lib/wallet-changes";
+import { LIGHTHOUSE_PROGRAM_ADDRESS, takeWalletChange } from "@/lib/wallet-changes";
 import {
   REGISTRY_ERROR_HINTS,
   TRANSACTION_ERROR_NAMES,
@@ -72,7 +72,18 @@ const CUSTOM_ERROR_HINTS: Record<string, string> = Object.fromEntries(
   [...REGISTRY_ERROR_HINTS].map(([code, hint]) => [`0x${code.toString(16)}`, hint]),
 );
 
+/**
+ * Lighthouse, the assertion program Phantom adds to what it signs
+ * (lib/wallet-changes), failed with 6001 AssertionFailed: an account it
+ * checks changed between the wallet's simulation and the transaction
+ * landing. Never a network mismatch, whatever 0x1771 means elsewhere.
+ */
+export const WALLET_GUARD_FAILED_HINT =
+  "The wallet's own safety check failed (a Lighthouse assertion it added while signing, AssertionFailed 6001): an account it checks changed between signing and landing, so the transaction did nothing. Nothing moved; sending it again is safe.";
+const WALLET_GUARD_FAILED = new RegExp(`Program ${LIGHTHOUSE_PROGRAM_ADDRESS} failed: custom program error: 0x1771`, "i");
+
 function customErrorHint(text: string): string | null {
+  if (WALLET_GUARD_FAILED.test(text)) return WALLET_GUARD_FAILED_HINT;
   // Named by Anchor's error (and account) in the log: lib/program-errors,
   // shared with the simulation gate. The sale sync is pointed at only while
   // issuer rotation is on (read only for that hint).

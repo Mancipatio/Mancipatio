@@ -20,7 +20,7 @@ import { guardTransactionGraph } from "@/lib/transaction-session-guard";
 import { requestTransactionWalletPolicy, transactionWalletPolicyRevision, TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 import { assertSiteWritable } from "@/lib/maintenance";
 import { priceForRequest, priorityFeeCap } from "@/lib/priority-fee";
-import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
+import { MAX_COMPUTE_UNIT_LIMIT, TRANSACTION_SIZE_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 import {
   clearWalletChange,
   judgeWalletRewrite,
@@ -39,6 +39,7 @@ import {
   simulateMessage,
   SimulationUnavailableError,
   waitForSignature,
+  type SignatureOutcome,
   type SimulatableMessage,
   type SimulationVerdict,
 } from "@/lib/simulation-gate";
@@ -81,7 +82,7 @@ export type BatchSendResult = {
 
 export type BatchSender = {
   /**
-   * Independent transactions (no one needs another's result), every gate of
+   * Transactions none of which needs another's result, every gate of
    * prepareAndSend applied to EACH — network, maintenance, pilot scope and
    * pause, proceeds gate, priority fee, the simulation gate — then one
    * wallet-policy check, ONE wallet prompt for all of them (Wallet Standard
@@ -94,11 +95,14 @@ export type BatchSender = {
    * with the wallet's own signatures, and every transaction sent right away
    * with preflight. Falls back to one prompt per transaction when the wallet
    * cannot sign them together (no feature, fewer outputs, a message changed
-   * beyond that, any error but the user's refusal) or when signing outlasted
-   * the shared blockhash (BATCH_EXPIRY_MARGIN_BLOCKS); a refusal stops
-   * everything. Each transaction signed on its own is compared with the one
-   * built the same way, and one changed beyond that is refused
-   * (SignedTransactionChangedError), never sent.
+   * beyond that, any error but the user's refusal), when signing outlasted
+   * the shared blockhash (BATCH_EXPIRY_MARGIN_BLOCKS), or when the wallet
+   * added guards to any of several (WALLET_STATE_GUARDS: each holds only
+   * against the state before the others land); a refusal stops everything.
+   * One by one, each transaction is signed only once the previous one is
+   * confirmed (the wallet simulates, and guards, against the state it
+   * left), is compared with the one built the same way, and one changed
+   * beyond that is refused (SignedTransactionChangedError), never sent.
    *
    * Single sends (prepareAndSend) have no such comparison: `@solana/client`
    * broadcasts whatever message the wallet returns (the guarded session only
@@ -131,10 +135,13 @@ export class SignedTransactionChangedError extends Error {
     readonly change: string,
     readonly about: WalletRewriteRefusal = "transaction",
   ) {
+    // The run needs the same account (checkAuthority): "another wallet" is another wallet app holding it.
     const advice =
       about === "compute-budget"
-        ? "A wallet may set its own priority fee up to Manci's cap and a compute limit no lower than the transaction needs. Turn off the wallet's custom priority fee or use another wallet, then open this page again to continue the run (rows already sent are not sent again)."
-        : "A wallet may only add its own Lighthouse guard instructions (as Phantom does) and set its priority fee within Manci's cap. Use another wallet and open this page again to continue the run (rows already sent are not sent again), or send the remaining recipients one at a time with “Send to holder” on the share-class screen instead.";
+        ? "A wallet may set its own priority fee up to Manci's cap and a compute limit no lower than the transaction needs. Turn off the wallet's custom priority fee or use another wallet app that holds this same account, then open this page again to continue the run (rows already sent are not sent again)."
+        : about === "guards"
+          ? "Manci accepts the wallet's own safety checks (Lighthouse assertions, as Phantom adds) only when it can verify them and they fit in the transaction. Open this page again to continue the run (rows already sent are not sent again) with another wallet app that holds this same account, or send the remaining recipients one at a time with “Send to holder” on the share-class screen instead."
+          : "A wallet may only add its own safety checks (Lighthouse assertions, as Phantom does) and set its priority fee within Manci's cap. Use another wallet app that holds this same account and open this page again to continue the run (rows already sent are not sent again), or send the remaining recipients one at a time with “Send to holder” on the share-class screen instead.";
     super(
       `${change.charAt(0).toUpperCase()}${change.slice(1)}, so it was not sent. A distribution sends only the transactions Manci built and saved, so that nothing is ever sent twice. ${advice}`,
     );
@@ -156,12 +163,14 @@ class SignedCopyRefused extends Error {
  * One signed copy checked against what was built: the same message, or the
  * same transaction with only Lighthouse assertions added and/or its compute
  * budget rewritten within `bounds` (judgeWalletRewrite: price at most the
- * network's cap, limit at least what the simulation consumed; the change is
- * noted either way), and a 64-byte signature for every signer the message
- * names. Returns the wallet's copy: its signature is the one journalled and
- * broadcast. Throws SignedCopyRefused.
+ * network's cap, limit at least what the simulation consumed plus room for
+ * the guards; the change is noted either way), no larger than the network's
+ * packet (TRANSACTION_SIZE_LIMIT: one larger would be journalled and never
+ * land), and a 64-byte signature for every signer the message names.
+ * Returns the wallet's copy, whose signature is the one journalled and
+ * broadcast, and how many guards the wallet added. Throws SignedCopyRefused.
  */
-function checkSigned(original: Transaction, signed: Transaction, label: string, bounds: ComputeBudgetBounds): Transaction {
+function checkSigned(original: Transaction, signed: Transaction, label: string, bounds: ComputeBudgetBounds): { tx: Transaction; guards: number } {
   const verdict = judgeWalletRewrite(original.messageBytes, signed.messageBytes, bounds);
   if (verdict.kind === "refused") {
     noteWalletChange(verdict.change);
@@ -171,22 +180,45 @@ function checkSigned(original: Transaction, signed: Transaction, label: string, 
     noteWalletChange(verdict.change);
     console.info(`[wallet] ${verdict.change} (${label}): accepted`);
   }
+  const guards = verdict.kind === "accepted" ? verdict.guards : 0;
+  const size = getTransactionEncoder().encode(signed).length;
+  if (size > TRANSACTION_SIZE_LIMIT) {
+    throw new SignedCopyRefused(
+      `${label} came back at ${size} bytes, over the network's ${TRANSACTION_SIZE_LIMIT}-byte packet limit${guards > 0 ? ` with the ${guards} Lighthouse instructions the wallet added` : ""}`,
+      guards > 0 ? "guards" : "transaction",
+    );
+  }
   for (const signer of Object.keys(original.signatures)) {
     const signature = signed.signatures[signer as keyof typeof signed.signatures];
     if (!signature || signature.length !== 64) {
       throw new SignedCopyRefused(`the wallet returned ${label} without its signature`, "transaction");
     }
   }
-  return signed;
+  return { tx: signed, guards };
 }
+
+/**
+ * The fallback reason (in BatchSendResult.fallbackReason) when the wallet
+ * added guards (Lighthouse assertions) to any transaction of a batch of
+ * several. A guard holds only against the state the wallet simulated when
+ * it signed: Phantom's floor on the fee payer's balance leaves about 0.005
+ * SOL plus 10 % of the transaction's own rent, and another transaction of
+ * the batch that creates 4 token accounts or more spends more than that, so
+ * whichever lands later fails (its fee spent, nothing moved). Nothing is
+ * journalled or sent then: the transactions are signed one by one, each
+ * once the previous one is confirmed. A batch of one keeps its guards.
+ */
+export const WALLET_STATE_GUARDS = "the wallet added safety checks that hold only while none of the other transactions has landed";
 
 /**
  * The wallet's signed copies checked against what was built (checkSigned,
  * one `bounds` per transaction): a wallet that changed anything else — a
  * blockhash, an instruction, an account — or set its price above the cap or
- * its limit below the need makes the batch fall back
- * (BatchSigningUnsupportedError), the change noted. The network verifies the
- * signatures themselves at preflight.
+ * its limit below the need, or a copy over the packet limit, makes the batch
+ * fall back (BatchSigningUnsupportedError), the change noted; so does a
+ * guard on any of several (WALLET_STATE_GUARDS), the full packs of a
+ * distribution included, which have no room for one while a partly filled
+ * one does. The network verifies the signatures themselves at preflight.
  */
 export function verifySignedBatch(
   built: readonly Transaction[],
@@ -194,7 +226,8 @@ export function verifySignedBatch(
   bounds: readonly ComputeBudgetBounds[],
 ): Transaction[] {
   const decoder = getTransactionDecoder();
-  return built.map((original, i) => {
+  let guarded = false;
+  const copies = built.map((original, i) => {
     let signed: Transaction;
     try {
       signed = decoder.decode(signedBytes[i]);
@@ -202,12 +235,16 @@ export function verifySignedBatch(
       throw new BatchSigningUnsupportedError(`transaction ${i + 1} came back unreadable`, cause);
     }
     try {
-      return checkSigned(original, signed, `transaction ${i + 1}`, bounds[i]);
+      const checked = checkSigned(original, signed, `transaction ${i + 1}`, bounds[i]);
+      if (checked.guards > 0) guarded = true;
+      return checked.tx;
     } catch (err) {
       if (err instanceof SignedCopyRefused) throw new BatchSigningUnsupportedError(err.change);
       throw err;
     }
   });
+  if (copies.length > 1 && guarded) throw new BatchSigningUnsupportedError(WALLET_STATE_GUARDS);
+  return copies;
 }
 
 /**
@@ -221,10 +258,32 @@ export function verifySignedTransaction(
   bounds: ComputeBudgetBounds,
 ): Transaction {
   try {
-    return checkSigned(original, signed, label, bounds);
+    return checkSigned(original, signed, label, bounds).tx;
   } catch (err) {
     if (err instanceof SignedCopyRefused) throw new SignedTransactionChangedError(err.change, err.about);
     throw err;
+  }
+}
+
+/**
+ * prepareAndSendAll's per-transaction path signs a transaction only once
+ * the one sent before it is confirmed: the wallet simulates a transaction
+ * when it is asked to sign it, and Phantom guards the fee payer's balance as
+ * that simulation saw it. One that failed on the network, or is not
+ * confirmed within SETTLE_TIMEOUT_MS, stops the run there: the rest are not
+ * signed (their outcomes carry this error) and the resume decides.
+ */
+export class EarlierTransactionUnconfirmedError extends Error {
+  constructor(
+    position: string,
+    readonly outcome: Exclude<SignatureOutcome, "confirmed">,
+  ) {
+    super(
+      outcome === "failed"
+        ? `Transaction ${position} failed on the network (nothing of it moved), so the ones after it were not signed.`
+        : `Transaction ${position} is not confirmed yet, so the ones after it were not signed.`,
+    );
+    this.name = "EarlierTransactionUnconfirmedError";
   }
 }
 
@@ -240,6 +299,17 @@ export const BATCH_EXPIRY_MARGIN_BLOCKS = BigInt(30);
 
 /** The fallback reason (in BatchSendResult.fallbackReason) when signing outlasted the shared blockhash. */
 export const SIGNING_TOO_SLOW = "signing took too long: the transactions would expire before they land";
+
+/**
+ * Whether a batch's fallback is remembered for the wallet app and address
+ * ("Sign each transaction separately", lib/wallet-standard-batch): the ones
+ * every later batch would repeat — signing too slow for the shared
+ * blockhash (a Ledger) or guards on each transaction (Phantom on mainnet) —
+ * so the wallet is not asked for a batch it cannot use.
+ */
+export function remembersSignSeparately(fallbackReason: string | null): boolean {
+  return fallbackReason !== null && (fallbackReason.includes(SIGNING_TOO_SLOW) || fallbackReason.includes(WALLET_STATE_GUARDS));
+}
 
 /** The transaction id: the fee payer's (first) signature, base58. */
 export function transactionId(tx: Transaction): string {
@@ -582,7 +652,9 @@ export function withVerifiedTransactions(
     }
     await writable(context);
     // Once, before the batch (the treasury mint before it, for example). Not
-    // between the batch's own sends: they are independent and pre-signed.
+    // between a batch's own sends: they are pre-signed, each was simulated on
+    // its own, and none carries a wallet guard (a guarded batch falls back,
+    // WALLET_STATE_GUARDS). One by one, each waits for the one before it.
     await settlePreviousSend(context);
     const tuned: TransactionPrepareRequest[] = [];
     // What a wallet may do to each one's compute budget if it sets its own (a
@@ -631,8 +703,9 @@ export function withVerifiedTransactions(
           chain: walletChain(network),
           assertCurrent: context.assertCurrent,
         });
-        // The wallet's copies (Lighthouse guards and a compute budget within
-        // bounds accepted): their signatures are journalled and broadcast.
+        // The wallet's copies (a compute budget within bounds accepted, and
+        // Lighthouse guards on a batch of one): their signatures are
+        // journalled and broadcast.
         const signed = verifySignedBatch(built, signedBytes, bounds);
         // Signing N transactions can outlast the one blockhash (a Ledger confirms
         // each on the device): nothing is journalled or sent then, and the batch
@@ -667,7 +740,10 @@ export function withVerifiedTransactions(
       }
     }
 
-    // One prompt per transaction (a fresh blockhash each: signing may take a while).
+    // One prompt per transaction (a fresh blockhash each: signing may take a
+    // while), each once the one before it is confirmed: the wallet simulates
+    // the next one, and Phantom guards the fee payer's balance, against the
+    // state the previous one left.
     let prompts = 0;
     for (let index = 0; index < tuned.length; index++) {
       context.assertCurrent();
@@ -702,10 +778,21 @@ export function withVerifiedTransactions(
       outcomes[index] = { ...outcomes[index], signature, lastValidBlockHeight: lifetime.lastValidBlockHeight };
       try {
         await broadcast(context, signed);
-        outcomes[index].sent = true;
-        lastSent = signature;
       } catch (error) {
-        outcomes[index].error = error;
+        // Refused, or failed in flight and still able to land: the next one
+        // is not signed against a state nobody knows. The run stops here.
+        for (let rest = index; rest < tuned.length; rest++) outcomes[rest].error = error;
+        break;
+      }
+      outcomes[index].sent = true;
+      lastSent = signature;
+      if (index + 1 === tuned.length) break;
+      const settled = await waitForSignature(context.rpc, signature, { timeoutMs: SETTLE_TIMEOUT_MS });
+      context.assertCurrent();
+      if (settled !== "confirmed") {
+        const error = new EarlierTransactionUnconfirmedError(`${index + 1} of ${tuned.length}`, settled);
+        for (let rest = index + 1; rest < tuned.length; rest++) outcomes[rest].error = error;
+        break;
       }
     }
     if (lastSent) rememberSend(context, lastSent);

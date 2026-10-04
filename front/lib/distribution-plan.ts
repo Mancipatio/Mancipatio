@@ -5,16 +5,22 @@
 // transfer_checked + the hook's account tail]. Rows are packed whole, never
 // split, up to the working limit of 1200 B (the 1232 B packet minus the
 // send path's 32 B reserve), measured WITH the two compute-budget
-// instructions the send path puts in front. Phantom on mainnet adds
-// Lighthouse assertions where they fit (the program key, 32 B, plus about
-// 17–56 B each; 2 on a one-row transfer, 8 on a tokenize of 1150 B), which
-// lib/wallet-changes judgeWalletRewrite accepts. A pack within about 50 B
-// of the packet has no room for one; that Phantom then signs it as built
-// (rather than refusing) is expected but not yet seen on a full pack.
-// Measured: 8 rows with account
+// instructions the send path puts in front. Measured: 8 rows with account
 // creation, 15 without, 3 on a KycGated class (its tail names the
 // recipient's KycEntry). No lookup table (the 64-account lock limit and the
 // create/extend/wait cost outweigh it for recipients new every time).
+//
+// Phantom on mainnet adds Lighthouse assertions to what it signs, which
+// lib/wallet-changes judgeWalletRewrite accepts: on a transfer, one on the
+// fee payer's balance and one on the sender's token account, 83 B with the
+// Lighthouse program key (the one-row "Send to holder" it signed: a 471 B
+// message became 554 B; its treasury mint took 6, 527 → 775 B). The fee
+// payer's alone takes 62 B with the key, so a pack over about 1170 B (a
+// full pack: 8 new rows are about 1196 B) has no room even for it; whether
+// Phantom then signs it unguarded is not yet seen. Guarded transactions are
+// not independent (the fee payer's guard holds only until another of them
+// lands), so they are never sent several at once: lib/verified-solana-client
+// signs them one by one, each once the previous one is confirmed.
 //
 // Each transaction carries an index table (row → its first instruction and
 // count), so a simulation refusal at instruction k names its row exactly;

@@ -114,18 +114,20 @@ export function takeWalletChange(now: number = Date.now()): string | null {
 //    as built (every Manci mainnet transaction it signed). They are set apart
 //    only when ALL of these hold: the program is exactly
 //    LIGHTHOUSE_PROGRAM_ADDRESS (look-alike addresses circulate); the first
-//    data byte is an assertion (LIGHTHOUSE_ASSERTIONS: never MemoryWrite or
-//    MemoryClose, never an unknown one); each sits before the app's first
-//    instruction or after its last, never between them; each names only
-//    accounts the built message has, in the same role; and the Lighthouse
-//    key is a read-only non-signer that no instruction names as an account.
-//    An assertion reads its accounts and fails the transaction when it does
-//    not hold; it moves nothing.
+//    data byte is an assertion that only reads its accounts
+//    (LIGHTHOUSE_ASSERTIONS: never MemoryWrite or MemoryClose, never one
+//    that calls another program, never an unknown one) and the second a log
+//    level that calls no other program (LIGHTHOUSE_LOG_LEVELS); each sits
+//    before the app's first instruction or after its last, never between
+//    them; each names only accounts the built message has, in the same
+//    role; and the Lighthouse key is a read-only non-signer that no
+//    instruction names as an account. An assertion reads its accounts and
+//    fails the transaction when it does not hold; it moves nothing.
 // 2. The compute budget (a wallet that sets its own): the price at or under
 //    Manci's cap for the network (lib/priority-fee), the limit at or above
-//    what the simulation consumed (plus LIGHTHOUSE_GUARD_MIN_UNITS per
-//    guard), and nothing else set (one limit and one price at most; no heap
-//    frame, no loaded-data limit).
+//    what the simulation consumed (plus LIGHTHOUSE_GUARD_UNITS per guard),
+//    and nothing else set (one limit and one price at most; no heap frame,
+//    no loaded-data limit).
 //
 // With those removed from both (and the Compute Budget and Lighthouse
 // program keys, where nothing else uses them), the two messages must be the
@@ -137,15 +139,29 @@ export function takeWalletChange(now: number = Date.now()): string | null {
 // preflight simulates that exact message, guards included, before it can
 // land; one that lands and fails an assertion is a failed transaction
 // (nothing moved; lib/distribution-run sends its rows again).
+//
+// A guard holds only against the state the wallet simulated when it signed.
+// Phantom's on the fee payer (its mainnet transactions): lamports at least
+// the balance it saw less the fee, 1.1 × the rent the transaction pays and
+// 0.005 SOL, so another transaction that spends more than that slack (4 new
+// token accounts or more) and lands first makes it fail. Transactions with
+// guards are therefore not independent: lib/verified-solana-client never
+// sends several of them signed together (the batch falls back to one prompt
+// per transaction) and asks for each signature only once the previous
+// transaction is confirmed.
 
 /** Lighthouse, the assertion program Phantom adds (immutable on mainnet: its program data has no upgrade authority). */
 export const LIGHTHOUSE_PROGRAM_ADDRESS = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
 
 /**
- * The Lighthouse instructions that only assert, by their first data byte
- * (lighthouse-sdk 2.1.0 LighthouseInstruction; each names its target
- * accounts read-only). 0 MemoryWrite and 1 MemoryClose write and are not
- * here. Phantom on mainnet: 6 on the fee payer, 10 on a token account.
+ * The Lighthouse instructions that only read their accounts and call no
+ * other program, by their first data byte (lighthouse-sdk 2.1.0
+ * LighthouseInstruction; each names its target accounts read-only). 0
+ * MemoryWrite and 1 MemoryClose write; 16 AssertMerkleTreeAccount (it calls
+ * the account-compression program) and 17 AssertBubblegumTreeConfigAccount
+ * check compressed-NFT trees, which no Manci transaction has. None of them
+ * is here. Phantom on mainnet: 6 on the fee payer and the accounts a
+ * transaction creates or reads, 10 on a token account.
  */
 const LIGHTHOUSE_ASSERTIONS: Record<number, string> = {
   2: "AssertAccountData",
@@ -162,17 +178,26 @@ const LIGHTHOUSE_ASSERTIONS: Record<number, string> = {
   13: "AssertUpgradeableLoaderAccount",
   14: "AssertUpgradeableLoaderAccountMulti",
   15: "AssertSysvarClock",
-  16: "AssertMerkleTreeAccount",
-  17: "AssertBubblegumTreeConfigAccount",
 };
 
 /**
- * The fewest compute units one Lighthouse assertion takes (1,002 to 6,471
- * per instruction on mainnet). The gate's simulation ran without the
- * guards, so a limit below the simulated need plus this much per guard
- * cannot be enough; the exact need is the preflight's to check.
+ * The log levels (an assertion's second data byte, lighthouse LogLevel) that
+ * only log: 0 Silent, 1 PlaintextMessage, 2 EncodedMessage, 4
+ * FailedPlaintextMessage (Phantom's), 5 FailedEncodedMessage. 3 EncodedNoop
+ * and 6 FailedEncodedNoop log through a call to the SPL Noop program.
  */
-export const LIGHTHOUSE_GUARD_MIN_UNITS = 1_000;
+const LIGHTHOUSE_LOG_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 4, 5]);
+
+/**
+ * The compute units allowed for each Lighthouse assertion: the most one cost
+ * on mainnet (6,471, an AssertTokenAccountMulti; the fee payer's
+ * AssertAccountInfoMulti 1,002 to 1,818), rounded up. The gate's simulation
+ * ran without the guards, so a limit below the simulated need plus this much
+ * per guard may run out on chain. Manci's own limit (at least 200,000 and
+ * 1.1 × the simulated need, below the 1.4M cap) leaves at least 18,000 for
+ * them: room for Phantom's two on a distribution transaction.
+ */
+export const LIGHTHOUSE_GUARD_UNITS = 7_000;
 
 /** The bounds a wallet's compute budget must stay within. */
 export type ComputeBudgetBounds = {
@@ -188,9 +213,12 @@ export type ComputeBudgetBounds = {
 /**
  * What a refusal is about, for the words the user gets: "compute-budget"
  * when only the wallet's own fee or limit is out of bounds (a wallet setting
- * can fix that), "transaction" when the wallet changed anything else.
+ * can fix that), "guards" when the Lighthouse assertions the wallet added
+ * cannot be accepted (one Manci does not accept, or more than the
+ * transaction's own limit or packet has room for: no wallet setting fixes
+ * that), "transaction" when the wallet changed anything else.
  */
-export type WalletRewriteRefusal = "compute-budget" | "transaction";
+export type WalletRewriteRefusal = "compute-budget" | "guards" | "transaction";
 
 export type WalletRewriteVerdict =
   | { kind: "identical" }
@@ -201,8 +229,11 @@ type Role = "signer-writable" | "signer" | "writable" | "readonly";
 type BudgetSettings = { limit: number | null; price: bigint | null; problem: string | null; summary: string[] };
 type Guard = {
   label: string;
-  /** Whether its first data byte is an assertion (LIGHTHOUSE_ASSERTIONS). */
-  assertion: boolean;
+  /**
+   * null when it is an assertion Manci accepts (LIGHTHOUSE_ASSERTIONS, with
+   * a log level from LIGHTHOUSE_LOG_LEVELS), else what it is, for the refusal.
+   */
+  unaccepted: string | null;
   /** How many of the app's instructions come before it. */
   position: number;
   /** Its accounts, resolved with their roles. */
@@ -310,8 +341,13 @@ function normalize(messageBytes: ReadonlyUint8Array, walletCopy = false): Normal
       const kind = ix.data?.[0];
       const name = kind === undefined ? undefined : LIGHTHOUSE_ASSERTIONS[kind];
       const label = `Lighthouse.${name ?? `#${kind ?? "?"}`}`;
+      const level = ix.data?.[1];
+      const unaccepted =
+        name === undefined ? label
+        : level === undefined || !LIGHTHOUSE_LOG_LEVELS.has(level) ? `${label} with log level ${level ?? "none"}`
+        : null;
       summary.push(label);
-      guards.push({ label, assertion: name !== undefined, position: instructions.length, accounts });
+      guards.push({ label, unaccepted, position: instructions.length, accounts });
       continue;
     }
     summary.push(short(program));
@@ -356,7 +392,7 @@ function sameAccounts(a: Map<string, Role>, b: Map<string, Role>): boolean {
 function guardProblem(built: Normalized, signed: Normalized): string | null {
   const appCount = signed.instructions.length;
   for (const guard of signed.guards) {
-    if (!guard.assertion) return `added a Lighthouse instruction Manci does not accept (${guard.label})`;
+    if (guard.unaccepted !== null) return `added a Lighthouse instruction Manci does not accept (${guard.unaccepted})`;
     if (guard.position !== 0 && guard.position !== appCount) {
       return `put a Lighthouse instruction (${guard.label}) between the transaction's own instructions`;
     }
@@ -411,7 +447,7 @@ export function judgeWalletRewrite(
   if (a.lookups !== b.lookups) parts.push("changed its address lookup tables");
   if (parts.length === 0) {
     const problem = guardProblem(a, b);
-    if (problem) parts.push(problem);
+    if (problem) return refused(`the wallet ${problem} before signing`, "guards");
   }
   if (parts.length === 0 && !sameAccounts(a.accounts, b.accounts)) parts.push("changed its accounts or their signer/writable roles");
   if (parts.length > 0) return refused(`the wallet ${parts.join(" and ")} before signing`);
@@ -429,17 +465,19 @@ export function judgeWalletRewrite(
   const guards = b.guards.length;
   const guardList = `${guards} Lighthouse instruction${guards === 1 ? "" : "s"} [${b.guards.map((g) => g.label).join(", ")}]`;
   // The simulation ran without the guards: the limit must leave room for them too.
-  const needed = bounds.minComputeUnitLimit !== null ? bounds.minComputeUnitLimit + guards * LIGHTHOUSE_GUARD_MIN_UNITS : a.budget.limit;
+  const needed = bounds.minComputeUnitLimit !== null ? bounds.minComputeUnitLimit + guards * LIGHTHOUSE_GUARD_UNITS : a.budget.limit;
   if (b.budget.limit === null) {
     if (a.budget.limit !== null) {
       return refused(`the wallet removed the compute unit limit before signing ${rewrite}`, "compute-budget");
     }
   } else if (needed !== null && b.budget.limit < needed) {
+    // A wallet that kept Manci's compute budget (Phantom) has no setting that makes room: only its guards are short of it.
+    const keptBudget = a.budget.summary.join() === b.budget.summary.join();
     return refused(
       guards > 0
         ? `the wallet added ${guardList}, and the compute unit limit of ${b.budget.limit} is below the ${needed} the transaction needs with them, before signing ${rewrite}`
         : `the wallet lowered the compute unit limit to ${b.budget.limit}, below the ${needed} this transaction needs, before signing ${rewrite}`,
-      "compute-budget",
+      guards > 0 && keptBudget ? "guards" : "compute-budget",
     );
   }
   const changes: string[] = [];
