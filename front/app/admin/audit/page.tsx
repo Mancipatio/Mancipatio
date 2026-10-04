@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWalletConnection } from "@solana/react-hooks";
 import { listAuditEvents } from "@/lib/audit-read";
-import { collapseDistributionFinals, isChainChecked } from "@/lib/audit-feed";
+import { clientClaimsOf, collapseDistributionFinals, isChainChecked, type StatusConflict } from "@/lib/audit-feed";
 import { RequireRole } from "@/components/require-role";
 import { SkeletonTable } from "@/components/skeleton";
 import {
@@ -33,8 +33,13 @@ type FeedRow = {
   /** The retry worker's row for a "Send to wallets" transaction: its status is the finalized chain's; the
    * sender's claims (metadata.client_claims) are not verified by it. */
   chain_checked: boolean;
-  /** Other final rows of the same transaction collapsed into this one (lib/audit-feed). */
+  /** Other final rows of the same transaction collapsed into this one that say the same status (lib/audit-feed). */
   duplicates: number;
+  /** Other final rows of the same transaction that say another status: shown as a conflict, not a duplicate. */
+  conflict: StatusConflict | null;
+  /** A chain-checked row's client_claims: the actor and target the sender's pending row claimed (unverified). */
+  claimed_actor: string | null;
+  claimed_target: string | null;
 };
 
 const CATEGORY_LABELS: Record<AuditCategory | "all", string> = {
@@ -151,23 +156,31 @@ function AuditOps() {
       if (indexerR.error) throw indexerR.error;
 
       // One final row per "Send to wallets" transaction: the browser, a resume and the retry worker can each
-      // append one (lib/audit-feed); within the loaded page the others are counted on it.
-      const auditRows: FeedRow[] = collapseDistributionFinals(auditR).map((r) => ({
-        id: `audit-${r.id}`,
-        source: "audit" as const,
-        created_at: r.created_at,
-        ix_name: r.ix_name,
-        category: r.category as AuditCategory,
-        actor_wallet: r.actor_wallet,
-        target_label: r.target_label,
-        tx_signature: r.tx_signature,
-        reason: r.reason,
-        status: r.status as AuditStatus,
-        decoded: false,
-        actor_verified: r.metadata?.actor_verified === true,
-        chain_checked: isChainChecked(r),
-        duplicates: r.duplicates,
-      }));
+      // append one (lib/audit-feed); within the loaded page the others are counted on it: as duplicates when
+      // they say the same status, as a status conflict when they do not. A chain-checked row also shows (and is
+      // searched by) the actor and target its sender's pending row claimed, labelled as unverified claims.
+      const auditRows: FeedRow[] = collapseDistributionFinals(auditR).map((r) => {
+        const claims = clientClaimsOf(r);
+        return {
+          id: `audit-${r.id}`,
+          source: "audit" as const,
+          created_at: r.created_at,
+          ix_name: r.ix_name,
+          category: r.category as AuditCategory,
+          actor_wallet: r.actor_wallet,
+          target_label: r.target_label,
+          tx_signature: r.tx_signature,
+          reason: r.reason,
+          status: r.status as AuditStatus,
+          decoded: false,
+          actor_verified: r.metadata?.actor_verified === true,
+          chain_checked: isChainChecked(r),
+          duplicates: r.duplicates,
+          conflict: r.conflict,
+          claimed_actor: claims?.actor ?? null,
+          claimed_target: claims?.target ?? null,
+        };
+      });
 
       const indexerRows: FeedRow[] = (indexerR.data ?? []).map((r) => ({
         id: `indexer-${r.id}`,
@@ -184,6 +197,9 @@ function AuditOps() {
         actor_verified: false,
         chain_checked: false,
         duplicates: 0,
+        conflict: null,
+        claimed_actor: null,
+        claimed_target: null,
       }));
 
       const merged = [...auditRows, ...indexerRows].sort(
@@ -214,7 +230,10 @@ function AuditOps() {
         (r.actor_wallet ?? "").toLowerCase().includes(q) ||
         (r.target_label ?? "").toLowerCase().includes(q) ||
         (r.reason ?? "").toLowerCase().includes(q) ||
-        (r.tx_signature ?? "").toLowerCase().includes(q)
+        (r.tx_signature ?? "").toLowerCase().includes(q) ||
+        // A chain-checked row is found by the actor and target its sender claimed (shown as unverified).
+        (r.claimed_actor ?? "").toLowerCase().includes(q) ||
+        (r.claimed_target ?? "").toLowerCase().includes(q)
       );
     });
   }, [rows, query, category, statusFilter, sourceFilter]);
@@ -244,7 +263,7 @@ function AuditOps() {
         <input
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search ix, wallet, target, reason, signature…"
+          placeholder="Search ix, wallet, target, reason, signature, claims…"
           className="min-w-[280px] flex-1 rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400"
         />
         <select
@@ -356,6 +375,14 @@ function AuditOps() {
                       <span className="font-sans" title="Written by the retry worker from the finalized chain; no wallet is attributed by it">
                         Server
                         <span className="mt-1 block text-[10px] text-slate-500">chain check</span>
+                        {r.claimed_actor && (
+                          <span
+                            className="mt-1 block font-mono text-[10px] text-amber-700"
+                            title={`What the sender's pending row claimed, not checked by the server: ${r.claimed_actor}`}
+                          >
+                            <span className="font-sans">Unverified claim:</span> {r.claimed_actor.slice(0, 6)}…{r.claimed_actor.slice(-4)}
+                          </span>
+                        )}
                       </span>
                     ) : r.actor_wallet ? (
                       <span title={r.actor_wallet}>
@@ -368,17 +395,22 @@ function AuditOps() {
                   </td>
                   <td
                     className="max-w-[280px] px-4 py-3 text-xs"
-                    title={r.target_label ?? r.reason ?? ""}
+                    title={r.target_label ?? (r.claimed_target ? `Unverified claim: ${r.claimed_target}` : null) ?? r.reason ?? ""}
                   >
                     {r.target_label && (
                       <p className="truncate text-slate-700">
                         {r.target_label}
                       </p>
                     )}
+                    {r.claimed_target && (
+                      <p className="truncate text-amber-700">
+                        Unverified claim: <span className="font-mono">{r.claimed_target}</span>
+                      </p>
+                    )}
                     {r.reason && (
                       <p className="line-clamp-2 text-slate-500">{r.reason}</p>
                     )}
-                    {!r.target_label && !r.reason && (
+                    {!r.target_label && !r.claimed_target && !r.reason && (
                       <span className="text-slate-400">—</span>
                     )}
                   </td>
@@ -407,6 +439,12 @@ function AuditOps() {
                     {r.chain_checked && (
                       <span className="mt-1 block text-[10px] text-slate-500">
                         From the chain; the sender&apos;s claims are unverified
+                      </span>
+                    )}
+                    {r.conflict && (
+                      <span className="mt-1 block text-[10px] font-semibold text-red-700">
+                        Status conflict: {r.conflict.chainChecked ? "the chain check says" : "this report says"} {r.conflict.status};{" "}
+                        {r.conflict.rows} other {r.conflict.rows === 1 ? "report says" : "reports say"} {r.conflict.statuses.join(" / ")}
                       </span>
                     )}
                     {r.duplicates > 0 && (
