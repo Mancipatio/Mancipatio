@@ -22,6 +22,7 @@ import {
   pipe,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
+  type Address,
   type Instruction,
   type Transaction,
 } from "@solana/kit";
@@ -59,7 +60,7 @@ vi.mock("@/lib/simulation-gate", async (original) => ({
 const wallet = vi.hoisted(() => ({
   mode: "sign" as "sign" | "fewer" | "reject" | "change",
   calls: [] as Uint8Array[][],
-  // What the wallet does to each message before signing it (Phantom on mainnet: its own compute budget).
+  // What the wallet does to each message before signing it (Phantom on mainnet: Lighthouse assertions added).
   rewrite: null as null | ((messageBytes: Uint8Array, index: number) => Uint8Array),
 }));
 vi.mock("@/lib/wallet-standard-batch", async (original) => {
@@ -89,6 +90,7 @@ import { getBatchSender, SignedTransactionChangedError, transactionId, withVerif
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { SimulationRefusedError } from "@/lib/simulation-gate";
 import { signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
+import { LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
 import {
   COMPUTE_BUDGET_PROGRAM_ADDRESS,
   decodeComputeBudgetInstruction,
@@ -378,12 +380,14 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
   });
 });
 
-// Phantom on mainnet rewrites the compute budget of every transaction it
-// signs. A distribution accepts that, and only that: the price up to the
-// network's cap (devnet here: 100 000 micro-lamports), the limit no lower
-// than the simulation consumed (120 000 here). The wallet's signature is the
-// one journalled and broadcast.
-describe("prepareAndSendAll: a wallet's compute-budget rewrite", () => {
+// What a wallet may change in a distribution's transactions, and nothing
+// else: Lighthouse assertions added before and/or after the app's
+// instructions (Phantom on mainnet, Manci's compute budget kept), and its own
+// compute budget within bounds — the price up to the network's cap (devnet
+// here: 100 000 micro-lamports), the limit no lower than the simulation
+// consumed (120 000 here). The wallet's signature is the one journalled and
+// broadcast.
+describe("prepareAndSendAll: what a wallet may change", () => {
   const SYSTEM = address("11111111111111111111111111111111");
   const OTHER = address("GHtXQBsoZHVnNFa9YevAzFr17DJjgHXk3ycTKD5xD3Zi");
   const isBudget = (i: Instruction) => i.programAddress === COMPUTE_BUDGET_PROGRAM_ADDRESS;
@@ -401,8 +405,8 @@ describe("prepareAndSendAll: a wallet's compute-budget rewrite", () => {
     );
     return Uint8Array.from(compileTransaction(next).messageBytes);
   }
-  /** Phantom-style: its own price and limit, price first, Manci's removed. */
-  const phantom = (price: bigint, units: number) => (ixs: Instruction[]) => [
+  /** A wallet that sets its own compute budget: its price and limit, price first, Manci's removed. */
+  const ownBudget = (price: bigint, units: number) => (ixs: Instruction[]) => [
     setComputeUnitPriceInstruction(price),
     setComputeUnitLimitInstruction(units),
     ...ixs.filter((i) => !isBudget(i)),
@@ -425,9 +429,9 @@ describe("prepareAndSendAll: a wallet's compute-budget rewrite", () => {
       return { id: transactionId(tx), budget };
     });
 
-  it("batch: a Phantom-style rewrite (own price ≤ cap, own limit ≥ need, reordered) is accepted; the wallet's signatures are journalled and sent", async () => {
+  it("batch: a wallet's own compute budget (price ≤ cap, limit ≥ need, reordered) is accepted; the wallet's signatures are journalled and sent", async () => {
     const f = fixture();
-    wallet.rewrite = (bytes) => rewritten(bytes, phantom(BigInt(80_000), 150_000));
+    wallet.rewrite = (bytes) => rewritten(bytes, ownBudget(BigInt(80_000), 150_000));
     const journal: BatchSigned[] = [];
     const result = await f.sender.prepareAndSendAll(requests(3), { onSigned: (s) => void journal.push(...s) });
     expect(result).toMatchObject({ mode: "batch", prompts: 1, fallbackReason: null });
@@ -444,7 +448,7 @@ describe("prepareAndSendAll: a wallet's compute-budget rewrite", () => {
   it("batch: a price at the cap and a limit at the simulated need are accepted, and so is a wallet that drops the price", async () => {
     const f = fixture();
     wallet.rewrite = (bytes, i) =>
-      rewritten(bytes, i === 0 ? phantom(BigInt(100_000), 120_000) : (ixs) => [setComputeUnitLimitInstruction(300_000), ...ixs.filter((x) => !isBudget(x))]);
+      rewritten(bytes, i === 0 ? ownBudget(BigInt(100_000), 120_000) : (ixs) => [setComputeUnitLimitInstruction(300_000), ...ixs.filter((x) => !isBudget(x))]);
     const result = await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
     expect(result).toMatchObject({ mode: "batch", fallbackReason: null });
     expect(f.sent).toHaveLength(2);
@@ -452,29 +456,31 @@ describe("prepareAndSendAll: a wallet's compute-budget rewrite", () => {
 
   it("a price above the cap: the batch falls back, and one by one it is refused with a clear reason; nothing journalled or sent", async () => {
     const f = fixture();
-    wallet.rewrite = (bytes) => rewritten(bytes, phantom(BigInt(100_001), 150_000));
-    f.sign.mockImplementation(signWith(phantom(BigInt(100_001), 150_000)));
+    wallet.rewrite = (bytes) => rewritten(bytes, ownBudget(BigInt(100_001), 150_000));
+    f.sign.mockImplementation(signWith(ownBudget(BigInt(100_001), 150_000)));
     const onSigned = vi.fn();
     const error = await f.sender.prepareAndSendAll(requests(2), { onSigned }).catch((e: unknown) => e);
     expect(error).toBeInstanceOf(SignedTransactionChangedError);
     expect((error as Error).message).toMatch(
       /raised the priority fee to 100001 micro-lamports per compute unit, above Manci's cap of 100000.*transaction 1 of 2.*not sent/,
     );
+    // A wallet setting can fix this one: the advice says so.
+    expect((error as Error).message).toMatch(/Turn off the wallet's custom priority fee or use another wallet/);
     expect(onSigned).not.toHaveBeenCalled();
     expect(f.sent).toHaveLength(0);
   });
 
   it("a limit below what the simulation consumed: the batch falls back, the reason names both", async () => {
     const f = fixture();
-    wallet.rewrite = (bytes) => rewritten(bytes, phantom(BigInt(50_000), 119_999));
+    wallet.rewrite = (bytes) => rewritten(bytes, ownBudget(BigInt(50_000), 119_999));
     const result = await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
     expect(result.mode).toBe("per-transaction");
     expect(result.fallbackReason).toMatch(/compute unit limit to 119999, below the 120000/);
   });
 
-  it("per transaction: a Phantom-style rewrite is accepted; the journal holds the wallet's signature, which is what was sent", async () => {
+  it("per transaction: a wallet's own compute budget is accepted; the journal holds the wallet's signature, which is what was sent", async () => {
     const f = fixture();
-    f.sign.mockImplementation(signWith(phantom(BigInt(90_000), 140_000)));
+    f.sign.mockImplementation(signWith(ownBudget(BigInt(90_000), 140_000)));
     const journal: BatchSigned[] = [];
     const result = await f.sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: (s) => void journal.push(...s) });
     expect(result.outcomes.map((o) => o.sent)).toEqual([true, true]);
@@ -495,7 +501,7 @@ describe("prepareAndSendAll: a wallet's compute-budget rewrite", () => {
     ],
     data: Uint8Array.of(2, 0, 0, 0, 64, 66, 15, 0, 0, 0, 0, 0),
   };
-  const fee = phantom(BigInt(80_000), 150_000);
+  const fee = ownBudget(BigInt(80_000), 150_000);
   const otherChanges: [string, (ixs: Instruction[]) => Instruction[], boolean, RegExp][] = [
     ["an extra transfer", (ixs) => [...fee(ixs), transfer], false, /changed its instructions/],
     [
@@ -525,6 +531,86 @@ describe("prepareAndSendAll: a wallet's compute-budget rewrite", () => {
     expect(signTransactionsWithWallet).toHaveBeenCalledOnce();
     expect(error).toBeInstanceOf(SignedTransactionChangedError);
     expect((error as Error).message).toMatch(reason);
+    expect(onSigned).not.toHaveBeenCalled();
+    expect(f.sent).toHaveLength(0);
+  });
+
+  // Phantom on mainnet (every Manci transaction it signed there): Manci's
+  // compute budget kept as built, Lighthouse assertions added before and
+  // after the app's instructions, the Lighthouse key read-only.
+  const LIGHTHOUSE = address(LIGHTHOUSE_PROGRAM_ADDRESS);
+  const assertion = (kind: number, target: Address, role: AccountRole = AccountRole.READONLY): Instruction => ({
+    programAddress: LIGHTHOUSE,
+    accounts: [{ address: target, role }],
+    data: Uint8Array.of(kind, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
+  });
+  const lighthouse = (ixs: Instruction[]) => [
+    ...ixs.filter(isBudget),
+    assertion(6, WALLET),
+    ...ixs.filter((i) => !isBudget(i)),
+    assertion(6, WALLET),
+    assertion(10, OTHER),
+  ];
+  /** Two rows per transaction, each naming the fee payer and a writable account (a recipient's token account). */
+  const row = (tag: number): Instruction => ({
+    programAddress: PROGRAM,
+    accounts: [
+      { address: WALLET, role: AccountRole.WRITABLE_SIGNER },
+      { address: OTHER, role: AccountRole.WRITABLE },
+    ],
+    data: Uint8Array.of(tag),
+  });
+  const rowRequests = (count: number) => Array.from({ length: count }, (_, i) => ({ feePayer: WALLET, instructions: [row(2 * i + 1), row(2 * i + 2)] }));
+  const programsOf = (wire: string) => {
+    const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(getBase64Encoder().encode(wire)).messageBytes);
+    return message.instructions.map((i) => String(message.staticAccounts[i.programAddressIndex]).slice(0, 4));
+  };
+
+  it("batch: Phantom's Lighthouse guards around two rows are accepted; its signatures are journalled and sent, the compute budget as built", async () => {
+    const f = fixture();
+    wallet.rewrite = (bytes) => rewritten(bytes, lighthouse);
+    const journal: BatchSigned[] = [];
+    const result = await f.sender.prepareAndSendAll(rowRequests(3), { onSigned: (s) => void journal.push(...s) });
+    expect(result).toMatchObject({ mode: "batch", prompts: 1, fallbackReason: null });
+    expect(f.sign).not.toHaveBeenCalled();
+    expect(f.sent.map(programsOf)).toEqual(Array(3).fill(["Comp", "Comp", "L2TE", "FJs1", "FJs1", "L2TE", "L2TE"]));
+    const sent = broadcast(f.sent);
+    const built = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(wallet.calls[0][0]).messageBytes);
+    const builtBudget = built.instructions
+      .filter((i) => built.staticAccounts[i.programAddressIndex] === COMPUTE_BUDGET_PROGRAM_ADDRESS)
+      .map((i) => decodeComputeBudgetInstruction({ programAddress: COMPUTE_BUDGET_PROGRAM_ADDRESS, data: i.data }));
+    for (const s of sent) expect(s.budget).toEqual(builtBudget);
+    expect(journal.map((j) => j.signature)).toEqual(sent.map((s) => s.id));
+    expect(result.outcomes.map((o) => o.signature)).toEqual(sent.map((s) => s.id));
+  });
+
+  it("per transaction (after a batch the wallet could not sign together): the guards are accepted, the wallet's signature journalled and sent", async () => {
+    const f = fixture();
+    wallet.mode = "fewer";
+    f.sign.mockImplementation(signWith(lighthouse));
+    const journal: BatchSigned[] = [];
+    const result = await f.sender.prepareAndSendAll(rowRequests(2), { onSigned: (s) => void journal.push(...s) });
+    expect(result).toMatchObject({ mode: "per-transaction", prompts: 2 });
+    expect(result.outcomes.map((o) => o.sent)).toEqual([true, true]);
+    expect(f.sent.map(programsOf)).toEqual(Array(2).fill(["Comp", "Comp", "L2TE", "FJs1", "FJs1", "L2TE", "L2TE"]));
+    expect(journal.map((j) => j.signature)).toEqual(broadcast(f.sent).map((s) => s.id));
+  });
+
+  it("a guard that names a new writable account: the batch falls back, one by one it is refused and nothing is journalled or sent", async () => {
+    const f = fixture();
+    const NEW = address("9xQeWvG816bUx9EPjHmaT23yvVM2ZWbrrpZb9PusVFin");
+    const edit = (ixs: Instruction[]) => [...lighthouse(ixs), assertion(6, NEW, AccountRole.WRITABLE)];
+    wallet.rewrite = (bytes) => rewritten(bytes, edit);
+    f.sign.mockImplementation(signWith(edit));
+    const onSigned = vi.fn();
+    const error = await f.sender.prepareAndSendAll(rowRequests(2), { onSigned }).catch((e: unknown) => e);
+    expect(signTransactionsWithWallet).toHaveBeenCalledOnce();
+    expect(error).toBeInstanceOf(SignedTransactionChangedError);
+    const message = (error as Error).message;
+    expect(message).toMatch(/added a Lighthouse instruction \(Lighthouse\.AssertAccountInfoMulti\) that names 9xQe…VFin as writable.*transaction 1 of 2.*not sent/);
+    // Not a wallet setting: the advice is another wallet or "Send to holder", never a fee setting.
+    expect(message).toMatch(/Use another wallet .*“Send to holder”/);
+    expect(message).not.toMatch(/priority fee or use another wallet/);
     expect(onSigned).not.toHaveBeenCalled();
     expect(f.sent).toHaveLength(0);
   });

@@ -103,23 +103,76 @@ export function takeWalletChange(now: number = Date.now()): string | null {
   return text;
 }
 
-// ── A wallet's compute-budget rewrite, accepted within bounds ────────────────
+// ── What a wallet may change in a distribution, accepted within bounds ──────
 //
-// Phantom (mainnet) rewrites the compute budget of the transactions it signs:
-// its own SetComputeUnitLimit and SetComputeUnitPrice in place of Manci's.
 // A transaction a distribution journals and broadcasts (lib/verified-solana-
-// client prepareAndSendAll) may differ from the one built in that, and only
-// in that: with every Compute Budget instruction removed from both (and the
-// Compute Budget program key, where nothing else uses it), the two messages
-// must be the same transaction — version, fee payer, blockhash, every other
-// instruction in the same order with the same program, data and accounts,
-// every account with the same signer/writable role, the same lookup tables.
-// The wallet's price must stay at or under Manci's cap for the network
-// (lib/priority-fee), its limit at or above what the simulation consumed,
-// and it may set nothing else (one limit and one price at most; no heap
-// frame, no loaded-data limit). What is journalled and broadcast is then the
-// wallet's signature over the wallet's message: the same blockhash, so the
-// same expiry height.
+// client prepareAndSendAll) may differ from the one built in two ways only.
+//
+// 1. Guard instructions. Phantom on mainnet adds Lighthouse assertions to the
+//    transactions it signs, before and/or after the app's instructions, and
+//    the Lighthouse program key with them; it leaves Manci's compute budget
+//    as built (every Manci mainnet transaction it signed). They are set apart
+//    only when ALL of these hold: the program is exactly
+//    LIGHTHOUSE_PROGRAM_ADDRESS (look-alike addresses circulate); the first
+//    data byte is an assertion (LIGHTHOUSE_ASSERTIONS: never MemoryWrite or
+//    MemoryClose, never an unknown one); each sits before the app's first
+//    instruction or after its last, never between them; each names only
+//    accounts the built message has, in the same role; and the Lighthouse
+//    key is a read-only non-signer that no instruction names as an account.
+//    An assertion reads its accounts and fails the transaction when it does
+//    not hold; it moves nothing.
+// 2. The compute budget (a wallet that sets its own): the price at or under
+//    Manci's cap for the network (lib/priority-fee), the limit at or above
+//    what the simulation consumed (plus LIGHTHOUSE_GUARD_MIN_UNITS per
+//    guard), and nothing else set (one limit and one price at most; no heap
+//    frame, no loaded-data limit).
+//
+// With those removed from both (and the Compute Budget and Lighthouse
+// program keys, where nothing else uses them), the two messages must be the
+// same transaction: version, fee payer, blockhash, every other instruction
+// in the same order with the same program, data and accounts, every account
+// with the same signer/writable role, the same lookup tables. What is
+// journalled and broadcast is then the wallet's signature over the wallet's
+// message: the same blockhash, so the same expiry height. The network's
+// preflight simulates that exact message, guards included, before it can
+// land; one that lands and fails an assertion is a failed transaction
+// (nothing moved; lib/distribution-run sends its rows again).
+
+/** Lighthouse, the assertion program Phantom adds (immutable on mainnet: its program data has no upgrade authority). */
+export const LIGHTHOUSE_PROGRAM_ADDRESS = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
+
+/**
+ * The Lighthouse instructions that only assert, by their first data byte
+ * (lighthouse-sdk 2.1.0 LighthouseInstruction; each names its target
+ * accounts read-only). 0 MemoryWrite and 1 MemoryClose write and are not
+ * here. Phantom on mainnet: 6 on the fee payer, 10 on a token account.
+ */
+const LIGHTHOUSE_ASSERTIONS: Record<number, string> = {
+  2: "AssertAccountData",
+  3: "AssertAccountDataMulti",
+  4: "AssertAccountDelta",
+  5: "AssertAccountInfo",
+  6: "AssertAccountInfoMulti",
+  7: "AssertMintAccount",
+  8: "AssertMintAccountMulti",
+  9: "AssertTokenAccount",
+  10: "AssertTokenAccountMulti",
+  11: "AssertStakeAccount",
+  12: "AssertStakeAccountMulti",
+  13: "AssertUpgradeableLoaderAccount",
+  14: "AssertUpgradeableLoaderAccountMulti",
+  15: "AssertSysvarClock",
+  16: "AssertMerkleTreeAccount",
+  17: "AssertBubblegumTreeConfigAccount",
+};
+
+/**
+ * The fewest compute units one Lighthouse assertion takes (1,002 to 6,471
+ * per instruction on mainnet). The gate's simulation ran without the
+ * guards, so a limit below the simulated need plus this much per guard
+ * cannot be enough; the exact need is the preflight's to check.
+ */
+export const LIGHTHOUSE_GUARD_MIN_UNITS = 1_000;
 
 /** The bounds a wallet's compute budget must stay within. */
 export type ComputeBudgetBounds = {
@@ -132,23 +185,49 @@ export type ComputeBudgetBounds = {
   minComputeUnitLimit: number | null;
 };
 
+/**
+ * What a refusal is about, for the words the user gets: "compute-budget"
+ * when only the wallet's own fee or limit is out of bounds (a wallet setting
+ * can fix that), "transaction" when the wallet changed anything else.
+ */
+export type WalletRewriteRefusal = "compute-budget" | "transaction";
+
 export type WalletRewriteVerdict =
   | { kind: "identical" }
-  | { kind: "compute-budget"; change: string; units: number | null; microLamports: bigint }
-  | { kind: "refused"; change: string };
+  | { kind: "accepted"; change: string; units: number | null; microLamports: bigint; guards: number }
+  | { kind: "refused"; change: string; about: WalletRewriteRefusal };
 
 type Role = "signer-writable" | "signer" | "writable" | "readonly";
 type BudgetSettings = { limit: number | null; price: bigint | null; problem: string | null; summary: string[] };
+type Guard = {
+  label: string;
+  /** Whether its first data byte is an assertion (LIGHTHOUSE_ASSERTIONS). */
+  assertion: boolean;
+  /** How many of the app's instructions come before it. */
+  position: number;
+  /** Its accounts, resolved with their roles. */
+  accounts: string[];
+};
 type Normalized = {
   version: string;
   feePayer: string;
   lifetime: string;
   lookups: string;
-  /** Every static account but the Compute Budget program (when only its instructions use it), with its role. */
+  /**
+   * Every static account but the Compute Budget program (when only its
+   * instructions use it) and, in a wallet's copy, the Lighthouse program
+   * (when only its guards use it), with its role.
+   */
   accounts: Map<string, Role>;
+  /** Every account an instruction can name, resolved with its role (static and looked up). */
+  names: Set<string>;
   /** The other instructions, in order: program, data and resolved accounts with their roles. */
   instructions: { program: string; data: string; accounts: string }[];
   budget: BudgetSettings;
+  /** The Lighthouse instructions a wallet added (a wallet's copy only), in order. */
+  guards: Guard[];
+  /** The Lighthouse program key's role when the guards were set apart, else null. */
+  guardKeyRole: Role | null;
   summary: string[];
 };
 
@@ -159,7 +238,12 @@ function hex(data: ArrayLike<number> | undefined): string {
   return out;
 }
 
-function normalize(messageBytes: ReadonlyUint8Array): Normalized {
+/**
+ * The message taken apart for judgeWalletRewrite. In a wallet's copy
+ * (`walletCopy`) Lighthouse instructions are set apart as guards; in the
+ * message Manci built they would stay ordinary instructions.
+ */
+function normalize(messageBytes: ReadonlyUint8Array, walletCopy = false): Normalized {
   const message = getCompiledTransactionMessageDecoder().decode(messageBytes);
   const { header, staticAccounts } = message;
   const signerCount = header.numSignerAccounts;
@@ -188,14 +272,18 @@ function normalize(messageBytes: ReadonlyUint8Array): Normalized {
 
   const instructions: Normalized["instructions"] = [];
   const budget: BudgetSettings = { limit: null, price: null, problem: null, summary: [] };
+  const guards: Guard[] = [];
   const summary: string[] = [];
   // Whether anything but a Compute Budget instruction names the Compute Budget program.
   let budgetKeyUsedElsewhere = false;
+  // Whether any instruction names the Lighthouse program as an account.
+  let guardKeyNamed = false;
   for (const ix of message.instructions) {
     const program = staticAccounts[ix.programAddressIndex];
     if (!program) throw new Error("program index out of range");
     const indices = ix.accountIndices ?? [];
     const accounts = indices.map(resolve);
+    if (indices.some((i) => staticAccounts[i] === LIGHTHOUSE_PROGRAM_ADDRESS)) guardKeyNamed = true;
     if (program === COMPUTE_BUDGET_PROGRAM_ADDRESS) {
       const decoded = decodeComputeBudgetInstruction({ programAddress: program, data: ix.data });
       const kind = ix.data?.[0];
@@ -217,14 +305,30 @@ function normalize(messageBytes: ReadonlyUint8Array): Normalized {
       }
       continue;
     }
-    summary.push(short(program));
     if (indices.some((i) => staticAccounts[i] === COMPUTE_BUDGET_PROGRAM_ADDRESS)) budgetKeyUsedElsewhere = true;
+    if (walletCopy && program === LIGHTHOUSE_PROGRAM_ADDRESS) {
+      const kind = ix.data?.[0];
+      const name = kind === undefined ? undefined : LIGHTHOUSE_ASSERTIONS[kind];
+      const label = `Lighthouse.${name ?? `#${kind ?? "?"}`}`;
+      summary.push(label);
+      guards.push({ label, assertion: name !== undefined, position: instructions.length, accounts });
+      continue;
+    }
+    summary.push(short(program));
     instructions.push({ program, data: hex(ix.data), accounts: accounts.join(",") });
   }
 
+  const guardKeySetApart = guards.length > 0 && !guardKeyNamed;
+  let guardKeyRole: Role | null = null;
   const accounts = new Map<string, Role>();
+  const names = new Set<string>([...writableLookups.map((a) => `${a}:writable`), ...readonlyLookups.map((a) => `${a}:readonly`)]);
   staticAccounts.forEach((account, i) => {
+    names.add(`${account}:${staticRole(i)}`);
     if (account === COMPUTE_BUDGET_PROGRAM_ADDRESS && !budgetKeyUsedElsewhere) return;
+    if (account === LIGHTHOUSE_PROGRAM_ADDRESS && guardKeySetApart) {
+      guardKeyRole = staticRole(i);
+      return;
+    }
     accounts.set(account, staticRole(i));
   });
   return {
@@ -233,8 +337,11 @@ function normalize(messageBytes: ReadonlyUint8Array): Normalized {
     lifetime: String(message.lifetimeToken),
     lookups: JSON.stringify(lookups.map((t) => [t.lookupTableAddress, [...t.writableIndexes], [...t.readonlyIndexes]])),
     accounts,
+    names,
     instructions,
     budget,
+    guards,
+    guardKeyRole,
     summary,
   };
 }
@@ -245,11 +352,32 @@ function sameAccounts(a: Map<string, Role>, b: Map<string, Role>): boolean {
   return true;
 }
 
+/** Why the guards in the wallet's copy cannot be accepted, or null when they can. */
+function guardProblem(built: Normalized, signed: Normalized): string | null {
+  const appCount = signed.instructions.length;
+  for (const guard of signed.guards) {
+    if (!guard.assertion) return `added a Lighthouse instruction Manci does not accept (${guard.label})`;
+    if (guard.position !== 0 && guard.position !== appCount) {
+      return `put a Lighthouse instruction (${guard.label}) between the transaction's own instructions`;
+    }
+    const unknown = guard.accounts.find((account) => !built.names.has(account));
+    if (unknown !== undefined) {
+      const at = unknown.lastIndexOf(":");
+      return `added a Lighthouse instruction (${guard.label}) that names ${short(unknown.slice(0, at))} as ${unknown.slice(at + 1)}, which the transaction does not`;
+    }
+  }
+  if (signed.guardKeyRole !== null && signed.guardKeyRole !== "readonly") {
+    return `gave the Lighthouse program a ${signed.guardKeyRole} role`;
+  }
+  return null;
+}
+
 /**
  * Whether the message a wallet signed (`after`) may be journalled and
  * broadcast in place of the one Manci built (`before`): identical, or the
- * same transaction with only its compute budget rewritten within `bounds`.
- * A refusal names what the wallet changed, in words for the user.
+ * same transaction with only Lighthouse assertions added and/or its compute
+ * budget rewritten within `bounds`. A refusal names what the wallet changed,
+ * in words for the user.
  */
 export function judgeWalletRewrite(
   before: ReadonlyUint8Array,
@@ -257,13 +385,14 @@ export function judgeWalletRewrite(
   bounds: ComputeBudgetBounds,
 ): WalletRewriteVerdict {
   if (sameBytes(before, after)) return { kind: "identical" };
+  const refused = (change: string, about: WalletRewriteRefusal = "transaction"): WalletRewriteVerdict => ({ kind: "refused", change, about });
   let a: Normalized;
   let b: Normalized;
   try {
     a = normalize(before);
-    b = normalize(after);
+    b = normalize(after, true);
   } catch {
-    return { kind: "refused", change: "the wallet changed the transaction before signing it" };
+    return refused("the wallet changed the transaction before signing it");
   }
 
   const parts: string[] = [];
@@ -280,34 +409,48 @@ export function judgeWalletRewrite(
     });
   }
   if (a.lookups !== b.lookups) parts.push("changed its address lookup tables");
+  if (parts.length === 0) {
+    const problem = guardProblem(a, b);
+    if (problem) parts.push(problem);
+  }
   if (parts.length === 0 && !sameAccounts(a.accounts, b.accounts)) parts.push("changed its accounts or their signer/writable roles");
-  if (parts.length > 0) return { kind: "refused", change: `the wallet ${parts.join(" and ")} before signing` };
+  if (parts.length > 0) return refused(`the wallet ${parts.join(" and ")} before signing`);
 
-  // The same transaction: only the compute budget differs.
+  // The same transaction: only guards were added and/or the compute budget differs.
   const rewrite = `[${a.budget.summary.join(", ")}] → [${b.budget.summary.join(", ")}]`;
-  if (b.budget.problem) return { kind: "refused", change: `the wallet ${b.budget.problem} before signing` };
+  if (b.budget.problem) return refused(`the wallet ${b.budget.problem} before signing`, "compute-budget");
   const price = b.budget.price ?? BigInt(0);
   if (price > bounds.maxComputeUnitPrice) {
-    return {
-      kind: "refused",
-      change: `the wallet raised the priority fee to ${price} micro-lamports per compute unit, above Manci's cap of ${bounds.maxComputeUnitPrice}, before signing ${rewrite}`,
-    };
+    return refused(
+      `the wallet raised the priority fee to ${price} micro-lamports per compute unit, above Manci's cap of ${bounds.maxComputeUnitPrice}, before signing ${rewrite}`,
+      "compute-budget",
+    );
   }
-  const needed = bounds.minComputeUnitLimit ?? a.budget.limit;
+  const guards = b.guards.length;
+  const guardList = `${guards} Lighthouse instruction${guards === 1 ? "" : "s"} [${b.guards.map((g) => g.label).join(", ")}]`;
+  // The simulation ran without the guards: the limit must leave room for them too.
+  const needed = bounds.minComputeUnitLimit !== null ? bounds.minComputeUnitLimit + guards * LIGHTHOUSE_GUARD_MIN_UNITS : a.budget.limit;
   if (b.budget.limit === null) {
     if (a.budget.limit !== null) {
-      return { kind: "refused", change: `the wallet removed the compute unit limit before signing ${rewrite}` };
+      return refused(`the wallet removed the compute unit limit before signing ${rewrite}`, "compute-budget");
     }
   } else if (needed !== null && b.budget.limit < needed) {
-    return {
-      kind: "refused",
-      change: `the wallet lowered the compute unit limit to ${b.budget.limit}, below the ${needed} this transaction needs, before signing ${rewrite}`,
-    };
+    return refused(
+      guards > 0
+        ? `the wallet added ${guardList}, and the compute unit limit of ${b.budget.limit} is below the ${needed} the transaction needs with them, before signing ${rewrite}`
+        : `the wallet lowered the compute unit limit to ${b.budget.limit}, below the ${needed} this transaction needs, before signing ${rewrite}`,
+      "compute-budget",
+    );
   }
+  const changes: string[] = [];
+  if (guards > 0) changes.push(`added ${guardList}`);
+  if (a.budget.summary.join() !== b.budget.summary.join()) changes.push(`changed its compute budget ${rewrite}`);
+  if (changes.length === 0) changes.push("reordered its accounts");
   return {
-    kind: "compute-budget",
-    change: `the wallet changed its compute budget ${rewrite} before signing`,
+    kind: "accepted",
+    change: `the wallet ${changes.join(" and ")} before signing`,
     units: b.budget.limit,
     microLamports: price,
+    guards,
   };
 }

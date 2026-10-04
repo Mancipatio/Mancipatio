@@ -21,7 +21,13 @@ import { requestTransactionWalletPolicy, transactionWalletPolicyRevision, Transa
 import { assertSiteWritable } from "@/lib/maintenance";
 import { priceForRequest, priorityFeeCap } from "@/lib/priority-fee";
 import { MAX_COMPUTE_UNIT_LIMIT, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
-import { clearWalletChange, judgeWalletRewrite, noteWalletChange, type ComputeBudgetBounds } from "@/lib/wallet-changes";
+import {
+  clearWalletChange,
+  judgeWalletRewrite,
+  noteWalletChange,
+  type ComputeBudgetBounds,
+  type WalletRewriteRefusal,
+} from "@/lib/wallet-changes";
 import { walletChain } from "@/lib/wallet-chain";
 import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
 import { assertInstructionsInScope, assertInstructionsNotPaused } from "@/lib/pause-gate";
@@ -80,23 +86,24 @@ export type BatchSender = {
    * pause, proceeds gate, priority fee, the simulation gate — then one
    * wallet-policy check, ONE wallet prompt for all of them (Wallet Standard
    * `solana:signTransaction` with N inputs, one shared blockhash), each
-   * returned message compared with the one built (identical, or only its
-   * compute budget rewritten: price up to the network's cap, limit no lower
-   * than the simulation consumed; lib/wallet-changes judgeWalletRewrite),
-   * the caller's journal written with the wallet's own signatures, and every
-   * transaction sent right away with preflight. Falls back to one prompt per
-   * transaction when the wallet cannot sign them together (no feature, fewer
-   * outputs, a message changed beyond that, any error but the user's
-   * refusal) or when signing outlasted the shared blockhash
-   * (BATCH_EXPIRY_MARGIN_BLOCKS); a refusal stops everything. Each
-   * transaction signed on its own is compared with the one built the same
-   * way, and one changed beyond that is refused
+   * returned message compared with the one built (identical, or the same
+   * transaction with only Lighthouse assertions added — Phantom on mainnet —
+   * and/or the wallet's own compute budget within bounds: price up to the
+   * network's cap, limit no lower than the simulation consumed;
+   * lib/wallet-changes judgeWalletRewrite), the caller's journal written
+   * with the wallet's own signatures, and every transaction sent right away
+   * with preflight. Falls back to one prompt per transaction when the wallet
+   * cannot sign them together (no feature, fewer outputs, a message changed
+   * beyond that, any error but the user's refusal) or when signing outlasted
+   * the shared blockhash (BATCH_EXPIRY_MARGIN_BLOCKS); a refusal stops
+   * everything. Each transaction signed on its own is compared with the one
+   * built the same way, and one changed beyond that is refused
    * (SignedTransactionChangedError), never sent.
    *
    * Single sends (prepareAndSend) have no such comparison: `@solana/client`
    * broadcasts whatever message the wallet returns (the guarded session only
    * notes the change). A distribution journals each signature before the
-   * broadcast and resumes from it, so it accepts no change but the fee.
+   * broadcast and resumes from it, so it accepts no change but those two.
    */
   prepareAndSendAll(requests: readonly TransactionPrepareAndSendRequest[], options: BatchSendOptions): Promise<BatchSendResult>;
 };
@@ -110,51 +117,64 @@ export function getBatchSender(client: SolanaClient): BatchSender | null {
 
 /**
  * A transaction signed on its own (prepareAndSendAll's per-transaction path)
- * that is not the one built, beyond a compute-budget rewrite within bounds
- * (lib/wallet-changes judgeWalletRewrite): it is never journalled or
- * broadcast. The journal's expiry height belongs to the blockhash Manci
- * built with; a wallet that swapped the blockhash (or added an instruction)
- * would make the resume declare the transaction expired while it can still
- * land, and its rows would be sent twice.
+ * that is not the one built, beyond what lib/wallet-changes
+ * judgeWalletRewrite accepts (Lighthouse assertions, a compute budget within
+ * bounds): it is never journalled or broadcast. The journal's expiry height
+ * belongs to the blockhash Manci built with; a wallet that swapped the
+ * blockhash (or added an instruction that moves anything) would make the
+ * resume declare the transaction expired while it can still land, and its
+ * rows would be sent twice. The advice follows what was refused (`about`):
+ * only a priority fee or limit out of bounds is a wallet setting.
  */
 export class SignedTransactionChangedError extends Error {
-  constructor(readonly change: string) {
+  constructor(
+    readonly change: string,
+    readonly about: WalletRewriteRefusal = "transaction",
+  ) {
+    const advice =
+      about === "compute-budget"
+        ? "A wallet may set its own priority fee up to Manci's cap and a compute limit no lower than the transaction needs. Turn off the wallet's custom priority fee or use another wallet, then open this page again to continue the run (rows already sent are not sent again)."
+        : "A wallet may only add its own Lighthouse guard instructions (as Phantom does) and set its priority fee within Manci's cap. Use another wallet and open this page again to continue the run (rows already sent are not sent again), or send the remaining recipients one at a time with “Send to holder” on the share-class screen instead.";
     super(
-      `${change.charAt(0).toUpperCase()}${change.slice(1)}, so it was not sent. A distribution sends only the transactions Manci built and saved, so that nothing is ever sent twice; a wallet may change only their priority fee (up to Manci's cap) and compute limit (no lower than the transaction needs). Turn off the wallet's own changes (for example a custom priority fee) or use another wallet, then continue the run.`,
+      `${change.charAt(0).toUpperCase()}${change.slice(1)}, so it was not sent. A distribution sends only the transactions Manci built and saved, so that nothing is ever sent twice. ${advice}`,
     );
     this.name = "SignedTransactionChangedError";
   }
 }
 
-/** A signed copy that may not be journalled or broadcast; `change` says why. */
+/** A signed copy that may not be journalled or broadcast; `change` says why, `about` what kind of change. */
 class SignedCopyRefused extends Error {
-  constructor(readonly change: string) {
+  constructor(
+    readonly change: string,
+    readonly about: WalletRewriteRefusal,
+  ) {
     super(change);
   }
 }
 
 /**
  * One signed copy checked against what was built: the same message, or the
- * same transaction with only its compute budget rewritten within `bounds`
- * (judgeWalletRewrite: price at most the network's cap, limit at least what
- * the simulation consumed; the change is noted either way), and a 64-byte
- * signature for every signer the message names. Returns the wallet's copy:
- * its signature is the one journalled and broadcast. Throws SignedCopyRefused.
+ * same transaction with only Lighthouse assertions added and/or its compute
+ * budget rewritten within `bounds` (judgeWalletRewrite: price at most the
+ * network's cap, limit at least what the simulation consumed; the change is
+ * noted either way), and a 64-byte signature for every signer the message
+ * names. Returns the wallet's copy: its signature is the one journalled and
+ * broadcast. Throws SignedCopyRefused.
  */
 function checkSigned(original: Transaction, signed: Transaction, label: string, bounds: ComputeBudgetBounds): Transaction {
   const verdict = judgeWalletRewrite(original.messageBytes, signed.messageBytes, bounds);
   if (verdict.kind === "refused") {
     noteWalletChange(verdict.change);
-    throw new SignedCopyRefused(`${verdict.change} (${label})`);
+    throw new SignedCopyRefused(`${verdict.change} (${label})`, verdict.about);
   }
-  if (verdict.kind === "compute-budget") {
+  if (verdict.kind === "accepted") {
     noteWalletChange(verdict.change);
     console.info(`[wallet] ${verdict.change} (${label}): accepted`);
   }
   for (const signer of Object.keys(original.signatures)) {
     const signature = signed.signatures[signer as keyof typeof signed.signatures];
     if (!signature || signature.length !== 64) {
-      throw new SignedCopyRefused(`the wallet returned ${label} without its signature`);
+      throw new SignedCopyRefused(`the wallet returned ${label} without its signature`, "transaction");
     }
   }
   return signed;
@@ -203,7 +223,7 @@ export function verifySignedTransaction(
   try {
     return checkSigned(original, signed, label, bounds);
   } catch (err) {
-    if (err instanceof SignedCopyRefused) throw new SignedTransactionChangedError(err.change);
+    if (err instanceof SignedCopyRefused) throw new SignedTransactionChangedError(err.change, err.about);
     throw err;
   }
 }
@@ -565,9 +585,10 @@ export function withVerifiedTransactions(
     // between the batch's own sends: they are independent and pre-signed.
     await settlePreviousSend(context);
     const tuned: TransactionPrepareRequest[] = [];
-    // What a wallet may do to each one's compute budget (Phantom on mainnet
-    // rewrites it): a price up to the network's cap, a limit no lower than
-    // the units the gate's simulation consumed.
+    // What a wallet may do to each one's compute budget if it sets its own (a
+    // price up to the network's cap, a limit no lower than the units the
+    // gate's simulation consumed, plus room for any Lighthouse guards it adds;
+    // Phantom on mainnet keeps Manci's and adds guards).
     const bounds: ComputeBudgetBounds[] = [];
     const maxComputeUnitPrice = priorityFeeCap(network);
     for (const { request, placeholder } of gated) {
@@ -610,8 +631,8 @@ export function withVerifiedTransactions(
           chain: walletChain(network),
           assertCurrent: context.assertCurrent,
         });
-        // The wallet's copies (a compute-budget rewrite within bounds accepted):
-        // their signatures are journalled and broadcast.
+        // The wallet's copies (Lighthouse guards and a compute budget within
+        // bounds accepted): their signatures are journalled and broadcast.
         const signed = verifySignedBatch(built, signedBytes, bounds);
         // Signing N transactions can outlast the one blockhash (a Ledger confirms
         // each on the device): nothing is journalled or sent then, and the batch
@@ -659,9 +680,9 @@ export function withVerifiedTransactions(
         options.onPrompt?.({ mode: "per-transaction", index, count: tuned.length });
         prompts += 1;
         // The SDK keeps the wallet's message bytes: compared with the one built
-        // (S6; a compute-budget rewrite within bounds accepted), so the journal
-        // holds the wallet's own signature and the expiry height of the signed
-        // blockhash.
+        // (S6; Lighthouse guards and a compute budget within bounds accepted),
+        // so the journal holds the wallet's own signature and the expiry height
+        // of the signed blockhash.
         signed = verifySignedTransaction(
           compileTransaction(p.message),
           await base.sign(p),
