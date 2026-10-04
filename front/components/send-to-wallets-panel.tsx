@@ -31,8 +31,10 @@
 //      client prepareAndSendAll; one per transaction when the wallet cannot
 //      sign them together; a Ledger confirms each on the device).
 // The run journal (lib/distribution-journal) is written after signing and
-// before broadcasting; reopening the page re-reads it against the network
-// (lib/distribution-run evaluateRun), so a confirmed row is never sent twice.
+// before broadcasting, and so is each transaction's "pending" audit row
+// (lib/distribution-audit-writer); reopening the page re-reads the journal
+// against the network (lib/distribution-run evaluateRun), so a confirmed row
+// is never sent twice.
 // Beyond the run: a wallet this browser's other runs paid, one the
 // treasury's recent history shows a transfer to (any browser, cleared site
 // data, an edited list) or one that already holds tokens is not paid again
@@ -134,6 +136,7 @@ import {
   type TreasuryTransfer,
 } from "@/lib/distribution-journal";
 import { distributionAuditRow, evaluateRun } from "@/lib/distribution-run";
+import { createPendingAuditWriter, type PendingAuditWriter } from "@/lib/distribution-audit-writer";
 import { parseUsdPerToken, runTreasuryMint, treasuryMintEur } from "@/lib/treasury-mint";
 import { formatLamportsAsSol } from "@/lib/compute-budget";
 import { DISTRIBUTION_GUARD_HEADROOM_UNITS } from "@/lib/wallet-changes";
@@ -583,6 +586,8 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
     const sender = getBatchSender(client);
     const store = browserJournalStore();
     const actor = wallet.toString();
+    // The run's pending audit rows (step 7), finished before the page says the send is over.
+    let pendingAudits: PendingAuditWriter | null = null;
     try {
       if (!sender) throw new Error("This page cannot send several transactions; reload it and try again.");
       assertJournalWritable(store);
@@ -847,9 +852,18 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         throw new Error(`Your wallet holds ${formatLamportsAsSol(lamports)} SOL; these transfers need about ${formatLamportsAsSol(needed)} SOL (new token accounts and fees).`);
       }
 
-      // 7. One approval per group of transactions; journal before broadcast.
+      // 7. One approval per group of transactions; journal, then the pending audit row, before broadcast.
       const amounts = new Map(toSend.map((r) => [r.wallet as string, r.amount]));
       const rowsOf = (t: PackedTransaction) => t.index.map((e) => ({ wallet: e.row, amount: amounts.get(e.row) ?? BigInt(0) }));
+      // Each transaction's "pending" audit row is written as soon as it is journalled, before it is
+      // broadcast (lib/distribution-audit-writer): a tab closed in the middle of a group (one by one,
+      // between a send and the next prompt) never leaves a landed transaction without one, and the
+      // retry worker settles from the chain only transactions that have one (lib/server/distribution-audits).
+      const audits = createPendingAuditWriter({
+        record: recordAudit,
+        base: () => ({ actor, reason, scPda, runId, mint: sc.mint, screening: evidence }),
+      });
+      pendingAudits = audits;
       const sent: { signature: string; rows: { wallet: string; amount: bigint }[] }[] = [];
       const groups = promptGroups(plan.transactions);
       // A Ledger or the remembered choice: one prompt per transaction (a fresh blockhash each).
@@ -881,7 +895,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
           onFallback: (reason) => {
             if (remembersSignSeparately(reason)) chooseSeparate(true);
           },
-          onSigned: (signed) => {
+          onSigned: async (signed) => {
             for (const s of signed) {
               j = withTx(j, {
                 signature: s.signature,
@@ -892,6 +906,9 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
               });
             }
             writeJournal(store, j);
+            setWorking(`Sending ${signed.length === 1 ? "the transaction" : `${signed.length} transactions`}…${groupLabel}`);
+            // Journalled, not yet broadcast: the pending audit row of each (waited for a few seconds at most).
+            await audits.writeSigned(signed.map((s) => ({ signature: s.signature, rows: rowsOf(group[s.index]) })));
           },
         });
         const groupSent: typeof sent = [];
@@ -909,14 +926,9 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         // blockhash (a hardware wallet) or that the wallet guarded (Phantom on mainnet) is
         // remembered for this wallet (onFallback above): every batch would fall back the same way.
         mode = nextPromptMode(mode, result);
-        // One audit row per transaction, written one after another (the audit route's burst limit).
-        const pendingAudited = new Set<string>();
-        for (const s of groupSent) {
-          const id = await recordAudit(
-            distributionAuditRow({ actor, reason, scPda, runId, mint: sc.mint, signature: s.signature, status: "pending", rows: s.rows, screening: evidence }),
-          );
-          if (id !== null) pendingAudited.add(s.signature);
-        }
+        // The pending rows written when each was journalled (one that failed is written once more):
+        // every signed transaction of the group, also one whose broadcast failed (it may still land).
+        const pendingAudited = await audits.settle(result.outcomes.flatMap((o) => (o.signature ? [o.signature] : [])));
         j = withAudited(j, pendingAudited, "pending");
         writeJournal(store, j);
         const unsent = result.outcomes.find((o) => !o.sent && o.error);
@@ -971,6 +983,8 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
     } catch (err) {
       setProblem(explainSendError(err instanceof Error && err.name === "TreasuryMintError" && err.cause ? err.cause : err));
     } finally {
+      // A pending audit row still being written (the run stopped early) is finished first.
+      if (pendingAudits) await pendingAudits.drain().catch(() => undefined);
       // Whatever happened, the rows' states come from the journal and the network again.
       const latest = store ? readJournal(store, network, runId) : null;
       if (latest) await evaluate(latest).catch(() => undefined);

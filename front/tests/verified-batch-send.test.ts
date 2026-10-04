@@ -108,6 +108,7 @@ import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { SimulationRefusedError } from "@/lib/simulation-gate";
 import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
 import { DISTRIBUTION_GUARD_HEADROOM_UNITS, LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
+import { createPendingAuditWriter, type DistributionAuditRow } from "@/lib/distribution-audit-writer";
 import {
   COMPUTE_BUDGET_PROGRAM_ADDRESS,
   decodeComputeBudgetInstruction,
@@ -488,6 +489,66 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
         onWaiting: (w) => order.push(`waiting:${w.index}/${w.count}`),
       });
       expect(order).toEqual(["prompt:0", "waiting:0/3", "prompt:1", "waiting:1/3", "prompt:2"]);
+    });
+  });
+
+  // The panel's onSigned hook (components/send-to-wallets-panel): the journal, then each transaction's
+  // pending audit row (lib/distribution-audit-writer), both before the broadcast.
+  describe("the pending audit row of each transaction, written when it is journalled (before its broadcast)", () => {
+    function auditTrail() {
+      const rows: DistributionAuditRow[] = [];
+      const audits = createPendingAuditWriter({
+        record: async (row) => {
+          events.push(`audit:${row.status}`);
+          rows.push(row);
+          return `id-${rows.length}`;
+        },
+        base: () => ({ actor: WALLET, reason: "Distribution run test: 3 wallets", scPda: PROGRAM, runId: "run-1", mint: PROGRAM, screening: null }),
+      });
+      const journal: BatchSigned[] = [];
+      const onSigned = async (signed: readonly BatchSigned[]) => {
+        journal.push(...signed);
+        events.push("journal");
+        await audits.writeSigned(signed.map((s) => ({ signature: s.signature, rows: [{ wallet: String(WALLET), amount: BigInt(s.index + 1) }] })));
+      };
+      return { rows, journal, onSigned };
+    }
+    const trail = () => events.filter((e) => ["wallet.single", "wallet.batch(3)", "journal", "audit:pending", "send", "settle"].includes(e));
+
+    it("one by one, interrupted after transaction 1 of 3 (the tab closed at the second prompt): transaction 1 still has its pending row", async () => {
+      const f = fixture();
+      const { rows, journal, onSigned } = auditTrail();
+      const sign = f.sign.getMockImplementation()!;
+      let prompts = 0;
+      f.sign.mockImplementation(async (prepared: TransactionPrepared) => {
+        // The second prompt is never answered: the tab is closed while the wallet asks.
+        if (++prompts === 2) {
+          events.push("wallet.single");
+          return new Promise<never>(() => {});
+        }
+        return sign(prepared);
+      });
+      void f.sender.prepareAndSendAll(requests(3), { mode: "per-transaction", onSigned });
+      await vi.waitFor(() => expect(prompts).toBe(2));
+      expect(journal).toHaveLength(1);
+      expect(f.sent).toHaveLength(1);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        ix_name: "share_class_distribution",
+        status: "pending",
+        tx_signature: journal[0].signature,
+        metadata: { run_id: "run-1", recipients: [{ to: String(WALLET), amount: "1", screening: null }] },
+      });
+      // Journalled, its pending row written, then broadcast and waited for; only then the second prompt.
+      expect(trail()).toEqual(["wallet.single", "journal", "audit:pending", "send", "settle", "wallet.single"]);
+    });
+
+    it("a batch: every transaction's pending row before the first of them is broadcast", async () => {
+      const f = fixture();
+      const { rows, journal, onSigned } = auditTrail();
+      await f.sender.prepareAndSendAll(requests(3), { onSigned });
+      expect(rows.map((r) => r.tx_signature)).toEqual(journal.map((s) => s.signature));
+      expect(trail()).toEqual(["wallet.batch(3)", "journal", "audit:pending", "audit:pending", "audit:pending", "send", "send", "send"]);
     });
   });
 

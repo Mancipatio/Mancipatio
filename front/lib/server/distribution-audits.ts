@@ -2,7 +2,8 @@
 // audit rows settled from the chain.
 //
 // The sender's browser appends one share_class_distribution audit row per
-// transaction as "pending" when it is sent, and a second row, "success" or
+// transaction as "pending" once it is signed and journalled, before it is
+// broadcast (lib/distribution-audit-writer), and a second row, "success" or
 // "failed", once the network decided (components/send-to-wallets-panel; the
 // ledger is append-only: a row is never updated, the final row is appended
 // next to the pending one). When the tab closes or the RPC answers 429
@@ -41,8 +42,9 @@
 //     row → "failed", "Not found on chain (expired)". This is certain: the
 //     app's sender signs with a recent blockhash (never a durable nonce; its
 //     journal keeps lastValidBlockHeight), which is valid for 150 blocks,
-//     ~60-90 s, and every pending row is written after the send, so two
-//     hours after it the transaction can no longer land. (It needs an RPC
+//     ~60-90 s, and every pending row is written after the transaction was
+//     signed (its blockhash fetched before that), so two hours after it the
+//     transaction can no longer land. (It needs an RPC
 //     that keeps transaction history for the window, as the server RPCs do:
 //     Helius on mainnet.) The sender's journal calls such a transaction
 //     "expired" and sends its rows again under a new signature;
