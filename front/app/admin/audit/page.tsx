@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWalletConnection } from "@solana/react-hooks";
 import { listAuditEvents } from "@/lib/audit-read";
-import { collapseDistributionFinals, isChainChecked } from "@/lib/audit-feed";
+import { collapseDistributionFinals, isChainChecked, isVerifiedDocumentAnchor } from "@/lib/audit-feed";
 import { RequireRole } from "@/components/require-role";
 import { SkeletonTable } from "@/components/skeleton";
 import {
@@ -33,6 +33,9 @@ type FeedRow = {
   /** The retry worker's row for a "Send to wallets" transaction: its status is the finalized chain's; the
    * sender's claims (metadata.client_claims) are not verified by it. */
   chain_checked: boolean;
+  /** A recorded document anchor: written only by the server after it verified the finalized transaction
+   * (lib/audit-feed isVerifiedDocumentAnchor; "operator" is a category the unsigned /api/audit refuses). */
+  anchor_verified: boolean;
   /** Other final rows of the same transaction collapsed into this one (lib/audit-feed). */
   duplicates: number;
 };
@@ -167,6 +170,7 @@ function AuditOps() {
         decoded: false,
         actor_verified: r.metadata?.actor_verified === true,
         chain_checked: isChainChecked(r),
+        anchor_verified: isVerifiedDocumentAnchor(r),
         duplicates: r.duplicates,
       }));
 
@@ -184,6 +188,7 @@ function AuditOps() {
         decoded: !!r.decoded,
         actor_verified: false,
         chain_checked: false,
+        anchor_verified: false,
         duplicates: 0,
       }));
 
@@ -408,6 +413,11 @@ function AuditOps() {
                     {r.chain_checked && (
                       <span className="mt-1 block text-[10px] text-slate-500">
                         From the chain; the sender&apos;s claims are unverified
+                      </span>
+                    )}
+                    {r.anchor_verified && (
+                      <span className="mt-1 block text-[10px] text-slate-500">
+                        Verified on chain (finalized)
                       </span>
                     )}
                     {r.duplicates > 0 && (

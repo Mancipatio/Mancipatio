@@ -1,4 +1,5 @@
-// Reading "Send to wallets" audit rows (share_class_distribution) for a feed.
+// Reading audit rows for a feed: "Send to wallets" rows
+// (share_class_distribution) and recorded document anchors.
 //
 // One transaction can have more than one final row: audit_events is
 // append-only, and the browser (on confirmation, or a resume of the run
@@ -17,6 +18,11 @@
 // /api/audit copies a caller's metadata, so a key like reconciled_by_server
 // proves nothing. A server row asserts only the chain status: its
 // metadata.client_claims are what the pending row reported, unverified.
+//
+// A recorded document anchor (isVerifiedDocumentAnchor) is likewise told by
+// what the unsigned /api/audit cannot write: its category, "operator".
+
+import { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor";
 
 export const DISTRIBUTION_IX = "share_class_distribution";
 /** actor_wallet and metadata.actor_source of the retry worker's rows (lib/server/reconciled-audit). */
@@ -42,6 +48,19 @@ export type FeedAuditRow = {
  */
 export function isChainChecked(row: Pick<FeedAuditRow, "chain_checked" | "actor_wallet" | "metadata">): boolean {
   return row.chain_checked === true && row.actor_wallet === SERVER_ACTOR && row.metadata?.actor_source === RECONCILER;
+}
+
+/**
+ * A recorded document anchor (app/api/admin/document-anchor): that route
+ * writes the row only after it verified the anchor's FINALIZED transaction on
+ * chain (lib/document-anchor documentAnchorEvidence). The category alone
+ * says the row is the route's: "operator" is server-only (the unsigned
+ * /api/audit refuses it, lib/server/audit SERVER_ONLY_AUDIT_CATEGORIES, and
+ * anon has no INSERT on audit_events), so no caller can post a row that
+ * passes for one.
+ */
+export function isVerifiedDocumentAnchor(row: { category?: unknown; ix_name: string }): boolean {
+  return row.category === DOCUMENT_ANCHOR_AUDIT.category && row.ix_name === DOCUMENT_ANCHOR_AUDIT.ixName;
 }
 
 function isDistributionFinal(row: FeedAuditRow): row is FeedAuditRow & { tx_signature: string } {

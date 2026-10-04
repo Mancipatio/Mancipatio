@@ -4,11 +4,13 @@
 // the earliest — and counts the others on it. Pending rows and other kinds
 // of rows pass through. The admin audit page reads through it. Which row is
 // the server's comes from /api/audit/list (chain_checked), never from the
-// metadata a caller of the unsigned /api/audit can write.
+// metadata a caller of the unsigned /api/audit can write. A recorded
+// document anchor is noted from its category, which that route refuses.
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { collapseDistributionFinals, isChainChecked, type FeedAuditRow } from "@/lib/audit-feed";
+import { collapseDistributionFinals, isChainChecked, isVerifiedDocumentAnchor, type FeedAuditRow } from "@/lib/audit-feed";
+import { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor";
 
 const SIG_A = "A".repeat(88);
 const SIG_B = "B".repeat(88);
@@ -108,6 +110,21 @@ describe("collapseDistributionFinals", () => {
   });
 });
 
+describe("isVerifiedDocumentAnchor", () => {
+  it("is the anchor route's row: category operator (server-only) and ix document_anchor", () => {
+    expect(DOCUMENT_ANCHOR_AUDIT).toEqual({ category: "operator", ixName: "document_anchor" });
+    // The category alone is enough: the unsigned /api/audit refuses it
+    // (tests/document-anchor-routes.test.ts: "the unsigned /api/audit refuses the operator category").
+    expect(isVerifiedDocumentAnchor({ category: "operator", ix_name: "document_anchor" })).toBe(true);
+    // Anything a caller of /api/audit can write is not one.
+    expect(isVerifiedDocumentAnchor({ category: "other", ix_name: "document_anchor" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ category: "platform", ix_name: "document_anchor" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ix_name: "document_anchor" })).toBe(false);
+    // Another operator row is not an anchor.
+    expect(isVerifiedDocumentAnchor({ category: "operator", ix_name: "share_class_distribution" })).toBe(false);
+  });
+});
+
 describe("the admin audit page reads through it", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "app/admin/audit/page.tsx"), "utf8");
 
@@ -118,5 +135,10 @@ describe("the admin audit page reads through it", () => {
     expect(src).toMatch(/\{r\.chain_checked \? \([\s\S]*?Server[\s\S]*?\) : r\.actor_wallet \?/);
     // The label comes from the server's flag, never from a metadata marker a caller can post.
     expect(src).not.toContain("reconciled_by_server");
+  });
+
+  it("notes a recorded document anchor as verified on chain (finalized), from its server-only category", () => {
+    expect(src).toContain("anchor_verified: isVerifiedDocumentAnchor(r),");
+    expect(src).toMatch(/\{r\.anchor_verified && \([\s\S]*?Verified on chain \(finalized\)/);
   });
 });
