@@ -58,6 +58,18 @@ export function clampComputeUnitPrice(value: bigint | null, policy: FeePolicy): 
   return value;
 }
 
+/**
+ * The highest price Manci itself would set on `network` (its policy's cap,
+ * never above MAX_COMPUTE_UNIT_PRICE). Also the most a wallet may raise the
+ * price to when it rewrites a distribution's compute budget
+ * (lib/wallet-changes judgeWalletRewrite).
+ */
+export function priorityFeeCap(network: Network): bigint {
+  const policy = PRIORITY_FEE_POLICY[network];
+  if (!policy) throw new Error(`Unknown network ${String(network)}`);
+  return policy.cap < MAX_COMPUTE_UNIT_PRICE ? policy.cap : MAX_COMPUTE_UNIT_PRICE;
+}
+
 /** How long a resolved price is reused per network. */
 export const PRICE_CACHE_MS = 10_000;
 /** How long the browser waits for /api/priority-fee before using the floor. */
