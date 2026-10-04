@@ -101,12 +101,15 @@ export async function simulateMessage(rpc: SimulationRpc, message: SimulatableMe
 /**
  * The compute-unit limit `@solana/client`'s prepareTransaction would set from
  * this estimate (1.7.0): ceil(units × multiplier), at least 200k, at most the
- * 1.4M ceiling; no estimate gives 200k.
+ * 1.4M ceiling; no estimate gives 200k. `headroom` (default 0) is added to
+ * ceil(units × multiplier) before the floor and the ceiling: Send to wallets
+ * passes DISTRIBUTION_GUARD_HEADROOM_UNITS (lib/wallet-changes), room for the
+ * guards a wallet adds after the simulation.
  */
-export function computeUnitLimitFromSimulation(unitsConsumed: number | null, multiplier = 1.1): number {
+export function computeUnitLimitFromSimulation(unitsConsumed: number | null, multiplier = 1.1, headroom = 0): number {
   const floor = 200_000;
   if (!unitsConsumed) return floor;
-  return Math.min(MAX_COMPUTE_UNIT_LIMIT, Math.max(floor, Math.ceil(unitsConsumed * multiplier)));
+  return Math.min(MAX_COMPUTE_UNIT_LIMIT, Math.max(floor, Math.ceil(unitsConsumed * multiplier) + headroom));
 }
 
 /**

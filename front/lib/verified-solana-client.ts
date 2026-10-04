@@ -83,6 +83,16 @@ export type BatchSendOptions = {
    * is not being asked anything meanwhile.
    */
   onWaiting?: (info: { index: number; count: number }) => void;
+  /**
+   * Compute units added to each transaction's limit on top of 1.1 × what the
+   * gate's simulation consumed (still at least 200,000, at most the 1.4M
+   * ceiling): room for the guards a wallet adds after that simulation. Send
+   * to wallets passes DISTRIBUTION_GUARD_HEADROOM_UNITS (lib/wallet-changes:
+   * four guards, +2,800 lamports of priority fee at most at the mainnet
+   * price). Only for a limit this sender sets (a request without its own).
+   * Default 0: the SDK's formula, as every other send.
+   */
+  computeUnitHeadroom?: number;
 };
 
 export type BatchSendResult = {
@@ -504,11 +514,15 @@ export function withVerifiedTransactions(
    * lifetime already set, fetches no second blockhash. One simulation and one
    * getLatestBlockhash per send, as before the gate.
    */
-  function withSimulatedComputeUnitLimit(request: TransactionPrepareAndSendRequest, verdict: SimulationVerdict): TransactionPrepareAndSendRequest {
+  function withSimulatedComputeUnitLimit(
+    request: TransactionPrepareAndSendRequest,
+    verdict: SimulationVerdict,
+    headroom = 0,
+  ): TransactionPrepareAndSendRequest {
     const overrides = request.prepareTransaction === false ? {} : (request.prepareTransaction ?? {});
     return {
       ...request,
-      computeUnitLimit: computeUnitLimitFromSimulation(verdict.unitsConsumed, overrides.computeUnitLimitMultiplier),
+      computeUnitLimit: computeUnitLimitFromSimulation(verdict.unitsConsumed, overrides.computeUnitLimitMultiplier, headroom),
       prepareTransaction: { ...overrides, computeUnitLimitReset: false },
     };
   }
@@ -684,6 +698,10 @@ export function withVerifiedTransactions(
     options: BatchSendOptions,
   ): Promise<BatchSendResult> {
     if (requests.length === 0) return { outcomes: [], prompts: 0, mode: "batch", fallbackReason: null };
+    const headroom = options.computeUnitHeadroom ?? 0;
+    if (!Number.isSafeInteger(headroom) || headroom < 0 || headroom > MAX_COMPUTE_UNIT_LIMIT) {
+      throw new Error(`The compute unit headroom must be an integer between 0 and ${MAX_COMPUTE_UNIT_LIMIT}`);
+    }
     clearWalletChange();
     const context = capture();
     await assertNetwork(context);
@@ -718,7 +736,7 @@ export function withVerifiedTransactions(
     const maxComputeUnitPrice = priorityFeeCap(network);
     for (const { request, placeholder } of gated) {
       const verdict = await gateRequest(request, context);
-      const { prepareTransaction: _prepared, ...rest } = placeholder ? withSimulatedComputeUnitLimit(request, verdict) : request;
+      const { prepareTransaction: _prepared, ...rest } = placeholder ? withSimulatedComputeUnitLimit(request, verdict, headroom) : request;
       void _prepared;
       tuned.push(rest);
       bounds.push({ maxComputeUnitPrice, minComputeUnitLimit: verdict.unitsConsumed || null });

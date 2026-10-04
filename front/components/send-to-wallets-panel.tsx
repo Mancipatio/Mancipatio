@@ -136,6 +136,7 @@ import {
 import { distributionAuditRow, evaluateRun } from "@/lib/distribution-run";
 import { parseUsdPerToken, runTreasuryMint, treasuryMintEur } from "@/lib/treasury-mint";
 import { formatLamportsAsSol } from "@/lib/compute-budget";
+import { DISTRIBUTION_GUARD_HEADROOM_UNITS } from "@/lib/wallet-changes";
 
 type Props = {
   asset: Asset;
@@ -864,6 +865,9 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         const groupLabel = groups.length > 1 ? ` (group ${g + 1} of ${groups.length})` : "";
         const result = await sender.prepareAndSendAll(requests, {
           mode,
+          // Room for up to four wallet guards (Phantom on mainnet) on top of 1.1 × the simulated need:
+          // at most +2,800 lamports of priority fee per transaction at the mainnet price (lib/wallet-changes).
+          computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS,
           onPrompt: (p) =>
             setWorking(
               p.mode === "batch"

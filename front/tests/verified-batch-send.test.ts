@@ -52,7 +52,7 @@ vi.mock("@/lib/network-identity", async (original) => ({
     events.push("network");
   },
 }));
-const sim = vi.hoisted(() => ({ refuseAt: -1, count: 0 }));
+const sim = vi.hoisted(() => ({ refuseAt: -1, count: 0, units: 120_000 }));
 vi.mock("@/lib/simulation-gate", async (original) => ({
   ...(await original<typeof import("@/lib/simulation-gate")>()),
   simulateMessage: vi.fn(async () => {
@@ -60,7 +60,7 @@ vi.mock("@/lib/simulation-gate", async (original) => ({
     events.push("simulate");
     return i === sim.refuseAt
       ? { err: { InstructionError: [2, { Custom: 6005 }] }, logs: [], unitsConsumed: 1_000 }
-      : { err: null, logs: [], unitsConsumed: 120_000 };
+      : { err: null, logs: [], unitsConsumed: sim.units };
   }),
 }));
 const wallet = vi.hoisted(() => ({
@@ -107,7 +107,7 @@ import {
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { SimulationRefusedError } from "@/lib/simulation-gate";
 import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
-import { LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
+import { DISTRIBUTION_GUARD_HEADROOM_UNITS, LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
 import {
   COMPUTE_BUDGET_PROGRAM_ADDRESS,
   decodeComputeBudgetInstruction,
@@ -217,6 +217,7 @@ beforeEach(() => {
   events.length = 0;
   sim.refuseAt = -1;
   sim.count = 0;
+  sim.units = 120_000;
   wallet.mode = "sign";
   wallet.calls.length = 0;
   wallet.rewrite = null;
@@ -807,6 +808,56 @@ describe("prepareAndSendAll: what a wallet may change", () => {
       expect(journal.flat().map((s) => s.signature)).toEqual(broadcast(f.sent).map((s) => s.id));
       expect(events.filter((e) => e === "wallet.single" || e === "send" || e === "settle").slice(0, 4)).toEqual(["wallet.single", "send", "settle", "wallet.single"]);
     }
+  });
+
+  describe("Send to wallets' headroom for guards (computeUnitHeadroom)", () => {
+    /** The limit the wallet was asked to sign under (the first instruction: Manci's SetComputeUnitLimit). */
+    const builtLimit = (bytes: Uint8Array) => {
+      const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(bytes).messageBytes);
+      return decodeComputeBudgetInstruction({ programAddress: COMPUTE_BUDGET_PROGRAM_ADDRESS, data: message.instructions[0].data });
+    };
+
+    it("builds max(200,000, ceil(1.1 × need) + headroom); without it, the SDK's formula", async () => {
+      sim.units = 500_000;
+      await fixture().sender.prepareAndSendAll(requests(1), { onSigned: () => {}, computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS });
+      expect(builtLimit(wallet.calls[0][0])).toEqual({ kind: "limit", units: 578_000 });
+      await fixture().sender.prepareAndSendAll(requests(1), { onSigned: () => {} });
+      expect(builtLimit(wallet.calls[1][0])).toEqual({ kind: "limit", units: 550_000 });
+      // A small transaction: the 200,000 floor already leaves the room (no extra fee).
+      sim.units = 120_000;
+      await fixture().sender.prepareAndSendAll(requests(1), { onSigned: () => {}, computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS });
+      expect(builtLimit(wallet.calls[2][0])).toEqual({ kind: "limit", units: 200_000 });
+    });
+
+    it("four guards on a 250,000-unit transaction: refused without the headroom (275,000 < 278,000), accepted with it", async () => {
+      sim.units = 250_000;
+      const fourGuards = (ixs: Instruction[]) => [...lighthouse(ixs), assertion(10, OTHER)];
+      const without = fixture();
+      wallet.rewrite = (bytes) => rewritten(bytes, fourGuards);
+      without.sign.mockImplementation(signWith(fourGuards));
+      const refused = await without.sender.prepareAndSendAll(rowRequests(1), { onSigned: () => {} }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(SignedTransactionChangedError);
+      expect((refused as Error).message).toMatch(/added 4 Lighthouse instructions .*compute unit limit of 275000 is below the 278000 the transaction needs with them/);
+      expect(without.sent).toHaveLength(0);
+
+      const withRoom = fixture();
+      const result = await withRoom.sender.prepareAndSendAll(rowRequests(1), { onSigned: () => {}, computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS });
+      expect(result).toMatchObject({ mode: "batch", prompts: 1, fallbackReason: null });
+      expect(broadcast(withRoom.sent)[0].budget[0]).toEqual({ kind: "limit", units: 303_000 });
+    });
+
+    it("refuses a headroom that is not a whole number of units within the 1.4M ceiling, before anything else", async () => {
+      for (const computeUnitHeadroom of [-1, 1.5, 1_400_001, Number.NaN]) {
+        const f = fixture();
+        await expect(f.sender.prepareAndSendAll(requests(1), { onSigned: () => {}, computeUnitHeadroom })).rejects.toThrow(/headroom must be an integer/);
+      }
+      expect(events).not.toContain("simulate");
+    });
+
+    it("the panel asks for it on every group of a distribution", () => {
+      const panel = readFileSync(join(process.cwd(), "components/send-to-wallets-panel.tsx"), "utf8");
+      expect(panel).toMatch(/sender\.prepareAndSendAll\(requests, \{[\s\S]{0,400}computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS,/);
+    });
   });
 
   it("guards on several: the fallback is reported (onFallback) before the first one-by-one prompt, so a refusal there still leaves it remembered", async () => {

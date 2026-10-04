@@ -41,6 +41,8 @@ import {
   SALE_SYNC_SUFFIX,
 } from "@/lib/program-errors";
 import { explainSendError } from "@/lib/tx-error";
+import { DISTRIBUTION_GUARD_HEADROOM_UNITS, LIGHTHOUSE_GUARD_UNITS } from "@/lib/wallet-changes";
+import { maxPriorityFeeLamports } from "@/lib/compute-budget";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 
 const HOOK = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy";
@@ -305,6 +307,25 @@ describe("computeUnitLimitFromSimulation (the SDK's formula)", () => {
     expect(computeUnitLimitFromSimulation(null)).toBe(200_000);
     expect(computeUnitLimitFromSimulation(0)).toBe(200_000);
     expect(computeUnitLimitFromSimulation(300_000, 1.2)).toBe(360_000);
+  });
+
+  it("headroom (Send to wallets: room for four wallet guards) is added before the 200k floor and the 1.4M ceiling", () => {
+    const H = DISTRIBUTION_GUARD_HEADROOM_UNITS;
+    expect(H).toBe(28_000);
+    expect(computeUnitLimitFromSimulation(300_000, 1.1, H)).toBe(358_000);
+    expect(computeUnitLimitFromSimulation(250_000, 1.1, H)).toBe(303_000);
+    // The floor already covers it below ~156k: no extra fee there.
+    expect(computeUnitLimitFromSimulation(150_000, 1.1, H)).toBe(200_000);
+    expect(computeUnitLimitFromSimulation(156_363, 1.1, H)).toBe(200_000);
+    expect(computeUnitLimitFromSimulation(156_364, 1.1, H)).toBe(200_001);
+    expect(computeUnitLimitFromSimulation(1_250_000, 1.1, H)).toBe(1_400_000);
+    expect(computeUnitLimitFromSimulation(null, 1.1, H)).toBe(200_000);
+    // Room left for guards: at least 10 % of the need plus the headroom (four at LIGHTHOUSE_GUARD_UNITS each).
+    for (const need of [160_000, 190_000, 400_000, 1_000_000]) {
+      expect(computeUnitLimitFromSimulation(need, 1.1, H) - need).toBeGreaterThanOrEqual(4 * LIGHTHOUSE_GUARD_UNITS);
+    }
+    // The fee: at most 28,000 more compute units at the mainnet price of 100,000 µlamports each = 2,800 lamports.
+    expect(maxPriorityFeeLamports(computeUnitLimitFromSimulation(300_000, 1.1, H), BigInt(100_000)) - maxPriorityFeeLamports(computeUnitLimitFromSimulation(300_000), BigInt(100_000))).toBe(BigInt(2_800));
   });
 });
 

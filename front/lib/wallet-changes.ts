@@ -194,10 +194,29 @@ const LIGHTHOUSE_LOG_LEVELS: ReadonlySet<number> = new Set([0, 1, 2, 4, 5]);
  * AssertAccountInfoMulti 1,002 to 1,818), rounded up. The gate's simulation
  * ran without the guards, so a limit below the simulated need plus this much
  * per guard may run out on chain. Manci's own limit (at least 200,000 and
- * 1.1 × the simulated need, below the 1.4M cap) leaves at least 18,000 for
- * them: room for Phantom's two on a distribution transaction.
+ * 1.1 × the simulated need, below the 1.4M cap) leaves 10 % of the need (and
+ * whatever the 200,000 floor adds) for them; a distribution's adds
+ * DISTRIBUTION_GUARD_HEADROOM_UNITS on top.
  */
 export const LIGHTHOUSE_GUARD_UNITS = 7_000;
+
+/**
+ * Compute units a "Send to wallets" transaction's limit carries on top of
+ * 1.1 × its simulated need (lib/verified-solana-client prepareAndSendAll
+ * computeUnitHeadroom): room for four wallet guards (Phantom adds two or
+ * three on mainnet) on any transaction, also a large one whose 10 % margin
+ * alone would not cover them — judgeWalletRewrite requires the need plus
+ * LIGHTHOUSE_GUARD_UNITS per guard, and refuses a copy whose limit is short
+ * of it. The limit is then max(200,000, ceil(1.1 × need) + 28,000), at most
+ * 1,400,000.
+ *
+ * Fee: the priority fee is paid on the limit, so it costs at most 28,000 ×
+ * the price more per transaction: 2,800 lamports (0.0000028 SOL) at the
+ * mainnet price of 100,000 micro-lamports per compute unit, less when the
+ * 200,000 floor already covered part of it, nothing when it covered all of
+ * it (a transaction that needs under ~156,000).
+ */
+export const DISTRIBUTION_GUARD_HEADROOM_UNITS = 4 * LIGHTHOUSE_GUARD_UNITS;
 
 /** The bounds a wallet's compute budget must stay within. */
 export type ComputeBudgetBounds = {
