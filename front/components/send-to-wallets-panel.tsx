@@ -76,7 +76,7 @@ import {
   reservedTreasuryUnits,
 } from "@/lib/sale-approvals";
 import { approvalUnits, mintRepausesPrimary, saleReferencePriceE6, treasuryValueE6 } from "@/lib/public-sale";
-import { getBatchSender, SIGNING_TOO_SLOW } from "@/lib/verified-solana-client";
+import { getBatchSender, remembersSignSeparately } from "@/lib/verified-solana-client";
 import { rememberSignsSeparately, signsSeparately } from "@/lib/wallet-standard-batch";
 import { signingTarget, signsOffchainEnvelopes } from "@/lib/siws-signing";
 import { simulateInstructions, waitForSignature } from "@/lib/simulation-gate";
@@ -891,9 +891,10 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         sent.push(...groupSent);
         if (result.fallbackReason) console.warn(`[distribution] ${result.fallbackReason}`);
         // Once a group fell back, the rest go one by one too; a batch that outlasted its
-        // blockhash (a hardware wallet) is remembered for this wallet.
+        // blockhash (a hardware wallet) or that the wallet guarded (Phantom on mainnet) is
+        // remembered for this wallet: every batch would fall back the same way.
         mode = nextPromptMode(mode, result);
-        if (result.fallbackReason?.includes(SIGNING_TOO_SLOW)) chooseSeparate(true);
+        if (remembersSignSeparately(result.fallbackReason)) chooseSeparate(true);
         // One audit row per transaction, written one after another (the audit route's burst limit).
         const pendingAudited = new Set<string>();
         for (const s of groupSent) {
@@ -906,7 +907,9 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         writeJournal(store, j);
         const unsent = result.outcomes.find((o) => !o.sent && o.error);
         if (unsent) {
-          setProblem(`Not every transaction was sent: ${explainSendError(unsent.error)} Open this page again to continue the run.`);
+          const why = explainSendError(unsent.error);
+          // A refused wallet copy already says how to continue (SignedTransactionChangedError).
+          setProblem(`Not every transaction was sent: ${why}${/open this page again/i.test(why) ? "" : " Open this page again to continue the run."}`);
           break;
         }
       }
@@ -941,7 +944,14 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       if (confirmedRows > 0) {
         toast.show({ kind: "success", title: `Tokens sent to ${confirmedRows} ${confirmedRows === 1 ? "wallet" : "wallets"}` });
       }
-      if (outcomes.some((o) => o !== "confirmed")) {
+      if (outcomes.some((o) => o === "failed")) {
+        // Landed with an error (a wallet safety check that no longer held, for one): nothing of it moved.
+        setProblem(
+          (p) =>
+            p ??
+            "Some transfers failed on the network: nothing of them moved (only the network fee was paid). Open this page again to send those rows; the run continues where it stopped and sends nothing twice.",
+        );
+      } else if (outcomes.some((o) => o !== "confirmed")) {
         setProblem((p) => p ?? "Some transfers are not confirmed yet. Open this page again in a minute; the run continues where it stopped and sends nothing twice.");
       }
     } catch (err) {
@@ -1237,7 +1247,7 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
             Sign each transaction separately
             {hardware
               ? " — this wallet signs with a hardware device (Ledger), so each transaction gets its own approval."
-              : " (use it with a Ledger: confirming several transactions on the device can outlast their blockhash). Remembered for this wallet."}
+              : " (use it with a Ledger: confirming several transactions on the device can outlast their blockhash; set by itself for a wallet that adds safety checks to each transaction, as Phantom does). Remembered for this wallet."}
           </span>
         </label>
       )}
