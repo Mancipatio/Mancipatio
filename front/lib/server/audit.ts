@@ -29,11 +29,13 @@ import { detectNetwork } from "@/lib/network";
 
 /**
  * Categories only the server may write (refused by the unsigned /api/audit):
- * "kyc", and "compliance" — the sanctions screening records a distribution's
+ * "kyc", "compliance" — the sanctions screening records a distribution's
  * evidence cites (lib/server/screening-evidence.ts), which a forged row must
- * never pass for.
+ * never pass for — and "operator": the document anchors
+ * (app/api/admin/document-anchor), each verified on chain before its row is
+ * written, so the anchor list never shows a row nobody verified.
  */
-export const SERVER_ONLY_AUDIT_CATEGORIES: ReadonlySet<string> = new Set<AuditCategory>(["kyc", "compliance"]);
+export const SERVER_ONLY_AUDIT_CATEGORIES: ReadonlySet<string> = new Set<AuditCategory>(["kyc", "compliance", "operator"]);
 
 /** How the route proved who the actor is. */
 export type AuditActorSource =

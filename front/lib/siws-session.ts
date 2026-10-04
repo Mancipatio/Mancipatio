@@ -18,6 +18,14 @@ export const SESSION_READ_ACTIONS: ReadonlySet<string> = new Set([
   "account.wallets.transaction",
   // Menu counts only — integers per admin page (app/api/admin/badges).
   "admin.badges",
+  // The Super Admin's document anchors (app/api/admin/document-anchor). The
+  // list reads audit rows. Record's only write is the audit row of an anchor
+  // the server re-reads from the chain and verifies (signed by the Super
+  // Admin itself, Platform.admin checked): the transaction is the proof, the
+  // row grants nothing and changes no business data, like the receipts
+  // lib/maintenance.ts lets through. No second prompt after the send.
+  "admin.documentAnchorList",
+  "admin.documentAnchorRecord",
   "adminConfig.fxRatesRead",
   "adminConfig.raiseLimitsRead",
   "adminConfig.read",
