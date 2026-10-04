@@ -58,16 +58,18 @@ export const DOCUMENT_ANCHOR_NOT_YET = "The network does not show this transacti
 
 /**
  * Lighthouse, the assertion program Phantom adds to the transactions it
- * signs on mainnet (its transaction guard: assertions on the wallet's
- * accounts that fail the transaction if they changed; no CPI, no writes).
- * The Super Admin's earlier mainnet transactions from this site carry one
- * before and one after the app's instruction, so the verification tolerates
- * it next to the memo and the compute budget, and counts it. Any other
- * program is refused.
+ * signs on mainnet (its transaction guard: an assertion reads accounts and
+ * fails the transaction when they changed; it moves nothing). The Super
+ * Admin's earlier mainnet transactions from this site carry one before and
+ * one after the app's instruction, so the verification tolerates it next to
+ * the memo and the compute budget, and counts it, but only an assertion
+ * (first data byte in LIGHTHOUSE_ASSERTION_KINDS: never 0 MemoryWrite or
+ * 1 MemoryClose, never an unknown one) with no inner calls. The same rule as
+ * the Send to wallets check of wallet changes. Any other program is refused.
  */
-export const WALLET_GUARD_PROGRAM_ADDRESSES: ReadonlySet<string> = new Set([
-  "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95",
-]);
+export const LIGHTHOUSE_PROGRAM_ADDRESS = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
+/** Lighthouse instructions that only assert (lighthouse-sdk 2.1.0: 2 AssertAccountData … 17 AssertBubblegumTreeConfigAccount). */
+export const LIGHTHOUSE_ASSERTION_KINDS: ReadonlySet<number> = new Set([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
 
 /** Signatures of an anchor transaction: the Super Admin's, nothing else. */
 export const DOCUMENT_ANCHOR_SIGNATURES = 1;
@@ -198,7 +200,7 @@ export type DocumentAnchorEvidence = DocumentAnchor & {
   slot: number;
   /** Unix seconds; null when the node does not know it. */
   blockTime: number | null;
-  /** Wallet-added guard instructions (WALLET_GUARD_PROGRAM_ADDRESSES) next to the memo. */
+  /** Wallet-added Lighthouse assertions next to the memo. */
   walletGuardInstructions: number;
 };
 
@@ -214,7 +216,7 @@ function safeNumber(value: number | bigint, message: string): number {
  * signed by `wallet` alone (the fee payer), and hold exactly one Memo v2
  * instruction whose only account is `wallet` and whose data is exactly the
  * expected memo text; besides it only compute-budget instructions and the
- * wallet's own guard instructions are allowed. Throws
+ * wallet's own Lighthouse assertions are allowed. Throws
  * DocumentAnchorEvidenceError naming the first thing that does not match.
  */
 export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentAnchorExpectation): DocumentAnchorEvidence {
@@ -239,12 +241,28 @@ export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentA
     return keys[n];
   };
 
+  const bytesOf = (data: string, what: string): ReadonlyUint8Array => {
+    try {
+      return getBase58Encoder().encode(data);
+    } catch {
+      throw new DocumentAnchorEvidenceError(`The ${what} data cannot be read`);
+    }
+  };
+  const innerGroups = tx.meta.innerInstructions ?? [];
+  const madeInnerCalls = (index: number) =>
+    innerGroups.some((group) => Number(group.index) === index && group.instructions.length > 0);
+
   let memoIndex = -1;
   let walletGuardInstructions = 0;
   message.instructions.forEach((ix, i) => {
     const program = keyAt(ix.programIdIndex);
     if (program === COMPUTE_BUDGET_PROGRAM_ADDRESS) return;
-    if (WALLET_GUARD_PROGRAM_ADDRESSES.has(program)) {
+    if (program === LIGHTHOUSE_PROGRAM_ADDRESS) {
+      const kind = bytesOf(ix.data, "guard instruction")[0];
+      prove(
+        kind !== undefined && LIGHTHOUSE_ASSERTION_KINDS.has(kind) && !madeInnerCalls(i),
+        "The transaction carries a Lighthouse instruction that is not an assertion",
+      );
       walletGuardInstructions += 1;
       return;
     }
@@ -260,16 +278,10 @@ export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentA
     accounts.length === 1 && accounts[0] === expected.wallet,
     "The memo is not signed by the Super Admin wallet (it must be its only account)",
   );
-  let data: ReadonlyUint8Array;
-  try {
-    data = getBase58Encoder().encode(memoIx.data);
-  } catch {
-    throw new DocumentAnchorEvidenceError("The memo data cannot be read");
-  }
+  const data = bytesOf(memoIx.data, "memo");
   const sameText = data.length === expectedBytes.length && expectedBytes.every((b, i) => data[i] === b);
   prove(sameText, "The memo text is not the expected anchor text");
-  const inner = (tx.meta.innerInstructions ?? []).filter((group) => Number(group.index) === memoIndex);
-  prove(inner.every((group) => group.instructions.length === 0), "The memo instruction made inner calls");
+  prove(!madeInnerCalls(memoIndex), "The memo instruction made inner calls");
 
   const slot = safeNumber(tx.slot, "Invalid transaction slot");
   const blockTime = tx.blockTime === undefined || tx.blockTime === null ? null : safeNumber(tx.blockTime, "Invalid block time");

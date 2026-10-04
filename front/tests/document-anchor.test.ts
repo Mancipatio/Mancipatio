@@ -26,7 +26,7 @@ import {
   DocumentAnchorError,
   DocumentAnchorEvidenceError,
   MEMO_PROGRAM_ADDRESS,
-  WALLET_GUARD_PROGRAM_ADDRESSES,
+  LIGHTHOUSE_PROGRAM_ADDRESS,
   documentAnchorEvidence,
   documentAnchorFee,
   documentAnchorInstruction,
@@ -210,17 +210,20 @@ describe("fee and visibility", () => {
 
 const cb = (byte: number): Ix => ({ program: COMPUTE_BUDGET_PROGRAM_ADDRESS, accounts: [], data: new Uint8Array([byte, 0, 0, 0, 0]) });
 const memoIx = (text = MEMO, accounts = [SA], program = MEMO_PROGRAM_ADDRESS): Ix => ({ program, accounts, data: utf8(text) });
-const guard = (): Ix => ({ program: LIGHTHOUSE, accounts: [SA], data: new Uint8Array([1, 2, 3]) });
+// 5 = AssertAccountInfo (Phantom's guard on the fee payer); 0 MemoryWrite, 1 MemoryClose write.
+const guard = (kind = 5): Ix => ({ program: LIGHTHOUSE, accounts: [SA], data: new Uint8Array([kind, 0, 1, 2]) });
 const expected = { signature: SIG, wallet: SA, reference: REFERENCE, sha256: SHA };
 
-function anchorTx(over: { payer?: string; signers?: number; instructions?: Ix[]; inner?: Ix[]; err?: unknown; blockTime?: number | null } = {}) {
+function anchorTx(
+  over: { payer?: string; signers?: number; instructions?: Ix[]; inner?: Ix[]; innerAt?: string; err?: unknown; blockTime?: number | null } = {},
+) {
   const instructions = over.instructions ?? [cb(2), cb(3), memoIx()];
-  const memoAt = instructions.findIndex((ix) => ix.program === MEMO_PROGRAM_ADDRESS);
+  const innerAt = instructions.findIndex((ix) => ix.program === (over.innerAt ?? MEMO_PROGRAM_ADDRESS));
   return buildTx({
     signature: SIG,
     payer: over.payer ?? SA,
     signers: over.signers,
-    instructions: instructions.map((ix, i) => ({ ix, inner: i === memoAt ? over.inner : undefined })),
+    instructions: instructions.map((ix, i) => ({ ix, inner: i === innerAt ? over.inner : undefined })),
     err: over.err,
     blockTime: over.blockTime,
   }).tx as unknown as ChainTransaction;
@@ -240,10 +243,24 @@ describe("documentAnchorEvidence", () => {
     expect(documentAnchorEvidence(anchorTx({ blockTime: null }), expected).blockTime).toBeNull();
   });
 
-  it("tolerates the wallet's Lighthouse guard instructions around the memo, and counts them", () => {
-    expect(WALLET_GUARD_PROGRAM_ADDRESSES.has(LIGHTHOUSE)).toBe(true);
-    const evidence = documentAnchorEvidence(anchorTx({ instructions: [cb(2), cb(3), guard(), memoIx(), guard()] }), expected);
+  it("tolerates the wallet's Lighthouse assertions around the memo, and counts them", () => {
+    expect(LIGHTHOUSE_PROGRAM_ADDRESS).toBe(LIGHTHOUSE);
+    const evidence = documentAnchorEvidence(anchorTx({ instructions: [cb(2), cb(3), guard(), memoIx(), guard(6)] }), expected);
     expect(evidence.walletGuardInstructions).toBe(2);
+  });
+
+  it("refuses a Lighthouse instruction that writes, is unknown, is empty or makes inner calls", () => {
+    for (const kind of [0, 1, 18, 255]) {
+      refused(anchorTx({ instructions: [cb(2), guard(kind), memoIx()] }), /Lighthouse instruction that is not an assertion/);
+    }
+    refused(
+      anchorTx({ instructions: [cb(2), { program: LIGHTHOUSE, accounts: [SA], data: new Uint8Array() }, memoIx()] }),
+      /Lighthouse instruction that is not an assertion/,
+    );
+    refused(
+      anchorTx({ instructions: [cb(2), guard(), memoIx()], innerAt: LIGHTHOUSE, inner: [{ program: SYSTEM, accounts: [SA], data: new Uint8Array([0]) }] }),
+      /Lighthouse instruction that is not an assertion/,
+    );
   });
 
   it("refuses a wrong signer", () => {

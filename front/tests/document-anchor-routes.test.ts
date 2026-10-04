@@ -139,6 +139,20 @@ describe("POST /api/admin/document-anchor", () => {
     });
   });
 
+  it("records the shape Phantom signs on mainnet: Lighthouse assertions around the memo, counted in the row", async () => {
+    const guard: Ix = { program: "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95", accounts: [SA], data: new Uint8Array([5, 0, 1, 2]) };
+    state.txs.finalized.set(SIG, chainTx({ instructions: [cb(), cb(), guard, memo(), guard] }));
+    const res = await record();
+    expect(res.status).toBe(200);
+    expect(rows()[0].metadata).toMatchObject({ wallet_guard_instructions: 2 });
+    // A Lighthouse MemoryWrite (0) is not a guard.
+    state.txs.finalized.set(SIG2, chainTx({ signature: SIG2, instructions: [cb(), { ...guard, data: new Uint8Array([0, 0]) }, memo()] }));
+    const write = await record({ signature: SIG2 });
+    expect(write.status).toBe(400);
+    expect(write.body.error).toMatch(/not an assertion/);
+    expect(rows()).toHaveLength(1);
+  });
+
   it("falls back to confirmed, and answers 'not yet' (503) while the server RPC has neither", async () => {
     const pending = await record();
     expect(pending.status).toBe(503);
