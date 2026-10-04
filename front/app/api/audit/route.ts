@@ -23,6 +23,13 @@
 // or a separate verified ledger) is a larger change the P1 design deferred to
 // keep recordAudit callable from ~73 sites without a wallet signature.
 //
+// Nor can a row posted here pass for the server's own: actor_wallet "server"
+// is refused, the caller never picks the row id, actor_source is always
+// overwritten, and the keys of the retry worker's chain-checked row
+// (lib/server/reconciled-audit RECONCILED_METADATA_KEYS: reconciled_by_server,
+// chain_outcome, client_claims…) are dropped from the caller's metadata
+// (metadata.reserved_keys_dropped lists them).
+//
 // Abuse guards (front-app-15), in order:
 //   1. the Origin header must be this deployment's own origin (a browser on
 //      another site cannot write here; recordAudit is a same-origin fetch);
@@ -45,7 +52,8 @@ import { NextResponse } from "next/server";
 import { SiwsError, siwsErrorResponse } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { detectNetwork } from "@/lib/network";
-import { SERVER_ONLY_AUDIT_CATEGORIES } from "@/lib/server/audit";
+import { SERVER_ACTOR, SERVER_ONLY_AUDIT_CATEGORIES } from "@/lib/server/audit";
+import { RECONCILED_METADATA_KEYS } from "@/lib/server/reconciled-audit";
 import { boundedRequest } from "@/lib/server/bounded-request";
 import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
 import { readSessionToken, sessionCookieFrom } from "@/lib/server/siws-session";
@@ -132,6 +140,10 @@ export async function POST(request: Request) {
     if (!actorWallet) {
       throw new SiwsError(400, "actor_wallet required (≤64 chars)");
     }
+    // The server's own rows (the retry worker's chain-checked rows, sale capacity alerts) name it.
+    if (actorWallet.toLowerCase() === SERVER_ACTOR) {
+      throw new SiwsError(400, "This actor is recorded by the server only");
+    }
 
     // reason may legitimately be empty ("" is used by some call sites).
     const reason =
@@ -162,6 +174,13 @@ export async function POST(request: Request) {
     } catch {
       metadata = { note: "metadata dropped — not serializable" };
     }
+    // The keys of the retry worker's chain-checked row (lib/server/reconciled-audit) are the server's to
+    // assert: a caller's are dropped, and the row says which were (reserved_keys_dropped, a stamp too).
+    const dropped = RECONCILED_METADATA_KEYS.filter((key) => Object.hasOwn(metadata, key));
+    metadata = Object.fromEntries(
+      Object.entries(metadata).filter(([key]) => !RECONCILED_METADATA_KEYS.includes(key) && key !== "reserved_keys_dropped"),
+    );
+    if (dropped.length > 0) metadata.reserved_keys_dropped = dropped;
     // Server receipt timestamp — see module doc. actor_verified=false records
     // that actor_wallet is SELF-ASSERTED (no session for it), so a forged row
     // can never masquerade in the ledger as a cryptographically attributed

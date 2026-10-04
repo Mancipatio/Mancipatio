@@ -5,7 +5,10 @@
 // maybeSingle, `.select()` after a write, head counts) plus `rpc(name, args)`
 // through registered handlers, opt-in per-table insert defaults
 // (`defaults`) and opt-in primary-key uniqueness on `id` (`uniqueIds`).
-// Filters are applied, ordering and limits are not (tests keep tables small).
+// Filters are applied; ordering and limits are not (tests keep tables small)
+// unless a test turns `ordered` on: then a select applies its order() keys
+// (ascending or not, in turn), then range() and limit(), like PostgREST, so
+// paging and ordering bugs show.
 
 export type Row = Record<string, unknown>;
 
@@ -28,6 +31,8 @@ export type MemorySupabase = {
   uniqueIds: Set<string>;
   /** Column defaults an insert fills when the row leaves them out (like `created_at default now()`), per table. */
   defaults: Record<string, () => Row>;
+  /** Selects apply order() / range() / limit() (off by default: answers keep insertion order and every match). */
+  ordered: boolean;
   client: { from: (table: string) => unknown; rpc: (name: string, args?: Record<string, unknown>) => unknown };
   rows: (table: string) => Row[];
   reset: () => void;
@@ -46,6 +51,7 @@ export function memorySupabase(): MemorySupabase {
     beforeInsert: null,
     uniqueIds: new Set(),
     defaults: {},
+    ordered: false,
     client: { from: (table: string) => from(table), rpc: (name: string, args: Record<string, unknown> = {}) => rpc(name, args) },
     rows: (table) => (db.tables[table] ??= []),
     reset: () => {
@@ -59,6 +65,7 @@ export function memorySupabase(): MemorySupabase {
       db.beforeInsert = null;
       db.uniqueIds.clear();
       db.defaults = {};
+      db.ordered = false;
     },
   };
 
@@ -91,6 +98,26 @@ export function memorySupabase(): MemorySupabase {
     let payload: Row | Row[] | null = null;
     let returning = false;
     let head = false;
+    const orders: { column: string; ascending: boolean }[] = [];
+    let offset = 0;
+    let limit: number | null = null;
+    /** order() keys in turn (PostgREST: ascending unless asked; nulls last ascending, first descending), then range/limit. */
+    const shape = (rows: Row[]): Row[] => {
+      if (!db.ordered) return rows;
+      const sorted = [...rows].sort((a, b) => {
+        for (const { column, ascending } of orders) {
+          const x = valueOf(a, column);
+          const y = valueOf(b, column);
+          if (x === y) continue;
+          if (x === null || x === undefined) return ascending ? 1 : -1;
+          if (y === null || y === undefined) return ascending ? -1 : 1;
+          const lt = (x as never) < (y as never);
+          return (lt ? -1 : 1) * (ascending ? 1 : -1);
+        }
+        return 0;
+      });
+      return sorted.slice(offset, limit === null ? undefined : offset + limit);
+    };
     const run = async (single: boolean) => {
       if (op !== "select" && db.failWrites.has(table)) return { data: null, error: { message: "write failed", code: "XX000" } };
       const unknown = (db.missingColumns[table] ?? []).find((column) =>
@@ -131,7 +158,7 @@ export function memorySupabase(): MemorySupabase {
       }
       if (head) return { data: null, error: null, count: matched.length };
       // Copies, like a real response: a later update must not change them.
-      const copies = matched.map((r) => ({ ...r }));
+      const copies = shape(matched).map((r) => ({ ...r }));
       return single ? { data: copies[0] ?? null, error: null } : { data: copies, error: null };
     };
     // A JSON path ("fields->sale_request->>status") reads into the row's jsonb like PostgREST (->> as text).
@@ -163,9 +190,12 @@ export function memorySupabase(): MemorySupabase {
         const values = value.replace(/[()]/g, "").split(",");
         return cmp(c, (a) => !values.includes(String(a)));
       },
-      order: () => b,
-      limit: () => b,
-      range: () => b,
+      order: (column: string, options?: { ascending?: boolean }) => {
+        orders.push({ column, ascending: options?.ascending ?? true });
+        return b;
+      },
+      limit: (n: number) => ((limit = n), b),
+      range: (from: number, to: number) => ((offset = from), (limit = to - from + 1), b),
       abortSignal: () => b,
       insert: (row: Row | Row[]) => ((op = "insert"), (payload = row), b),
       upsert: (row: Row | Row[]) => ((op = "upsert"), (payload = row), b),
