@@ -6,8 +6,9 @@
 // finds its own rows by it: the worker counts a transaction as settled only
 // when its row with that id exists, and the primary key keeps one anchor row
 // per signature. A row already written keeps the id it got, so the ids are
-// pinned here to literal values: a change to either derivation would make
-// the server miss its existing rows and write a second one.
+// pinned here to literal values: a change to either derivation (or to
+// lib/server/derived-uuid, which both use) would make the server miss its
+// existing rows and write a second one.
 import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 
@@ -15,6 +16,7 @@ vi.mock("server-only", () => ({}));
 
 import { reconciledAuditId } from "@/lib/server/reconciled-audit";
 import { documentAnchorAuditId } from "@/lib/server/document-anchor";
+import { uuidV8FromSha256 } from "@/lib/server/derived-uuid";
 
 // The Super Admin's mainnet transaction the anchor tests use (5RBDZ…).
 const SIG = "5RBDZNDobPiJGpQsfcvPLuSdzyUXRxBnpXNU4sFQg2ud3sTiSPyWnPrfvyN4myMYTvEUWjtYnGijuryNNrXqeDqm";
@@ -47,6 +49,20 @@ describe("derived audit row ids", () => {
       expect(reconciledAuditId(network, SIG)).toMatch(UUID_V8);
       expect(documentAnchorAuditId(network, SIG)).toMatch(UUID_V8);
       expect(reconciledAuditId(network, SIG)).not.toBe(documentAnchorAuditId(network, SIG));
+    }
+  });
+});
+
+describe("uuidV8FromSha256 (the helper both share)", () => {
+  it("gives both pinned ids from their namespaced names", () => {
+    expect(uuidV8FromSha256(`manci:distribution-audit:v1:mainnet:${SIG}`)).toBe("1b3f080d-88a9-868f-b197-6bb8d9f846b8");
+    expect(uuidV8FromSha256(`mancipatio:document_anchor:mainnet:${SIG}`)).toBe("b2cc0020-8ce8-87cb-b9f4-99ff3aecd8fd");
+  });
+
+  it("matches the reference derivation for any name (UTF-8), always a lowercase version 8 UUID", () => {
+    for (const name of ["", "a", "Ž – č · 文書", "x".repeat(1_000)]) {
+      expect(uuidV8FromSha256(name)).toBe(referenceUuid(name));
+      expect(uuidV8FromSha256(name)).toMatch(UUID_V8);
     }
   });
 });

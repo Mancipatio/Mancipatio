@@ -13,7 +13,6 @@
 // record the same signature at once.
 import "server-only";
 
-import { createHash } from "node:crypto";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { signature as toSignature } from "@solana/kit";
 import type { ChainTransaction } from "@/lib/chain-evidence";
@@ -24,6 +23,7 @@ import {
   documentAnchorRecordFromRow,
   type DocumentAnchorRecord,
 } from "@/lib/document-anchor";
+import { uuidV8FromSha256 } from "@/lib/server/derived-uuid";
 import { getServerRpc } from "@/lib/server/rpc";
 import { SiwsError } from "@/lib/server/siws-error";
 
@@ -69,15 +69,11 @@ export function anchorNotYetError(confirmed: boolean): SiwsError {
 /**
  * The audit row id of the anchor `signature` on `network`: a uuid made from
  * SHA-256("mancipatio:document_anchor:<network>:<signature>") (version 8,
- * RFC 9562 variant). The same anchor always gets the same id, so the primary
- * key refuses a second row for it.
+ * RFC 9562 variant; lib/server/derived-uuid). The same anchor always gets
+ * the same id, so the primary key refuses a second row for it.
  */
 export function documentAnchorAuditId(network: string, signature: string): string {
-  const bytes = createHash("sha256").update(`mancipatio:document_anchor:${network}:${signature}`, "utf8").digest().subarray(0, 16);
-  bytes[6] = (bytes[6] & 0x0f) | 0x80;
-  bytes[8] = (bytes[8] & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+  return uuidV8FromSha256(`mancipatio:document_anchor:${network}:${signature}`);
 }
 
 type Row = { id?: unknown; created_at?: unknown; actor_wallet?: unknown; tx_signature?: unknown; metadata?: unknown };
