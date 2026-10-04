@@ -28,7 +28,6 @@ import {
   DocumentAnchorError,
   DocumentAnchorEvidenceError,
   MEMO_PROGRAM_ADDRESS,
-  LIGHTHOUSE_PROGRAM_ADDRESS,
   documentAnchorEvidence,
   documentAnchorFee,
   documentAnchorInstruction,
@@ -39,6 +38,7 @@ import {
   normalizeSha256Input,
 } from "@/lib/document-anchor";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS, setComputeUnitLimitInstruction, setComputeUnitPriceInstruction } from "@/lib/compute-budget";
+import { LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
 import { computeUnitLimitFromSimulation } from "@/lib/simulation-gate";
 import type { ChainTransaction } from "@/lib/chain-evidence";
 import { buildTx, type Ix } from "./helpers/chain-tx";

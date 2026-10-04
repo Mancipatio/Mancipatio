@@ -15,7 +15,7 @@
 // budget the send path adds (lib/verified-solana-client). The wallet may add
 // Lighthouse assertions of its own (Phantom does on mainnet); the
 // verification tolerates those, and only those, within the bounds set out at
-// LIGHTHOUSE_PROGRAM_ADDRESS below.
+// LIGHTHOUSE_ASSERTION_KINDS below.
 //
 // After confirmation the page posts the signature to
 // /api/admin/document-anchor, which re-reads the transaction from the server
@@ -37,6 +37,7 @@ import {
 } from "@solana/kit";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS } from "@/lib/compute-budget";
 import { MEMO_PROGRAM_ADDRESS } from "@/lib/document-terms";
+import { LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
 import type { ChainTransaction } from "@/lib/chain-evidence";
 
 export { MEMO_PROGRAM_ADDRESS };
@@ -62,16 +63,21 @@ export const DOCUMENT_ANCHOR_LIST_LIMIT = 25;
 export const DOCUMENT_ANCHOR_NOT_YET = "The network does not show this transaction as finalized yet";
 
 /**
- * Lighthouse, the assertion program Phantom adds to the transactions it
- * signs on mainnet (its transaction guard: an assertion reads accounts and
- * fails the transaction when they changed; it moves nothing). The page never
- * adds one; the Super Admin's earlier mainnet transactions from this site
- * carry one before and one after the app's instruction (for example
- * 5RBDZ…: kind 6 AssertAccountInfoMulti on a writable account and on the fee
- * payer, no inner calls). A strict "memo and compute budget only" rule would
- * refuse to record a real anchor, so this is a deliberate exception: the
- * verification tolerates and counts a Lighthouse instruction next to the memo
- * and the compute budget when
+ * The Lighthouse instructions an anchor tolerates next to its memo, by their
+ * first data byte: those that only assert (lighthouse-sdk 2.1.0: 2
+ * AssertAccountData … 17 AssertBubblegumTreeConfigAccount).
+ *
+ * Lighthouse (LIGHTHOUSE_PROGRAM_ADDRESS, lib/wallet-changes) is the
+ * assertion program Phantom adds to the transactions it signs on mainnet (its
+ * transaction guard: an assertion reads accounts and fails the transaction
+ * when they changed; it moves nothing). The page never adds one; the Super
+ * Admin's earlier mainnet transactions from this site carry one before and
+ * one after the app's instruction (for example 5RBDZ…: kind 6
+ * AssertAccountInfoMulti on a writable account and on the fee payer, no inner
+ * calls). A strict "memo and compute budget only" rule would refuse to record
+ * a real anchor, so this is a deliberate exception: the verification
+ * tolerates and counts a Lighthouse instruction next to the memo and the
+ * compute budget when
  *   - its first data byte is in LIGHTHOUSE_ASSERTION_KINDS (never 0
  *     MemoryWrite or 1 MemoryClose, never an unknown one),
  *   - it made no inner calls (the node must return innerInstructions, so the
@@ -83,16 +89,28 @@ export const DOCUMENT_ANCHOR_NOT_YET = "The network does not show this transacti
  * the System-owned wallet. The memo's evidential value does not depend on the
  * guards at all.
  *
+ * Send to wallets accepts the same wallet guards under its own rules
+ * (lib/wallet-changes judgeWalletRewrite), and the two differ on purpose
+ * because they check at different moments. Send to wallets compares the
+ * message the wallet signed with the one built BEFORE it journals and
+ * broadcasts anything: there is no execution yet, so it must tell from the
+ * bytes alone that a guard calls no other program (it leaves out kinds 16
+ * and 17 and the log levels that log through the Noop program) and that it
+ * fits (its position and accounts, and the compute limit and packet room
+ * left for the guards). The anchor is a single send, which that comparison
+ * does not cover, and this verification reads the FINALIZED transaction
+ * after the fact, so it checks what actually ran instead: any inner call
+ * from any guard refuses the anchor, whatever its kind or log level (an
+ * assertion that calls another program, or a log through Noop, shows as
+ * one), and the number of guards is a fixed cap, since an anchor needs no
+ * more than Phantom's two. Only the program address is shared, so both
+ * paths agree on which program is Lighthouse.
+ *
  * Lighthouse is not a dependency of this app: the kind numbers are taken from
- * lighthouse-sdk 2.1.0 (2 AssertAccountData … 17
- * AssertBubblegumTreeConfigAccount). On mainnet the program is immutable (its
- * program data CJ5WEjifs4d77pEA9DpewppByFjHcAkNv3YYSuSoDk7c has no upgrade
- * authority, read 2026-10-05), so the numbering cannot change there. PR #64
- * (Send to wallets, not merged yet) proposes a similar, stricter rule for
- * wallet changes; this file does not share code with it.
+ * lighthouse-sdk 2.1.0. On mainnet the program is immutable (its program data
+ * CJ5WEjifs4d77pEA9DpewppByFjHcAkNv3YYSuSoDk7c has no upgrade authority, read
+ * 2026-10-05), so the numbering cannot change there.
  */
-export const LIGHTHOUSE_PROGRAM_ADDRESS = "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95";
-/** Lighthouse instructions that only assert (lighthouse-sdk 2.1.0: 2 AssertAccountData … 17 AssertBubblegumTreeConfigAccount). */
 export const LIGHTHOUSE_ASSERTION_KINDS: ReadonlySet<number> = new Set([2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
 /**
  * The most Lighthouse assertions an anchor may carry. Phantom adds two to the
