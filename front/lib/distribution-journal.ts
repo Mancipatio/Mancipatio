@@ -65,7 +65,9 @@ export function shortRunId(runId: string): string {
 export type JournalTxStatus = "signed" | "sent" | "confirmed" | "failed" | "expired";
 
 /**
- * Which audit row a transaction has: "pending" once sent, "final" once its
+ * Which audit row a transaction has: "pending" once its pending row is
+ * written (when it is journalled, before its broadcast:
+ * lib/distribution-audit-writer), "final" once its
  * success or failure row is written (in the session, or by a resume that
  * found the outcome the session did not wait for). Absent in journals
  * written before it existed: a resume writes their final row once.

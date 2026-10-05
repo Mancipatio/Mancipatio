@@ -15,8 +15,11 @@ export class RetryWorkerError extends Error {
 }
 export type RetryCounts = { complete: number; pending: number; invalid: number };
 export type StageResult = { status: "processed"; counts: RetryCounts } | { status: "deferred" | "failed"; counts: null };
-/** Why the audit stage left rows for a later run: no time (left), or the database / the RPC did not answer. */
-export type AuditStageCode = "deadline" | "database" | "chain" | "internal";
+/**
+ * Why the audit stage left rows for a later run: no time (left), the database / the RPC did not answer,
+ * or ("review") transactions the chain does not know although a browser row calls them a success.
+ */
+export type AuditStageCode = "deadline" | "database" | "chain" | "internal" | "review";
 /** The audit stage (lib/server/distribution-audits): its counters even when it stopped early, and why it did. */
 export type AuditStageResult = {
   status: "processed" | "deferred" | "failed";
@@ -80,7 +83,7 @@ export async function stage(
   }
 }
 
-const AUDIT_COUNT_KEYS = ["complete", "pending", "invalid", "expired", "deferred"] as const;
+const AUDIT_COUNT_KEYS = ["complete", "pending", "invalid", "expired", "deferred", "review"] as const;
 
 /** The stage's own error (DistributionAuditError, read by shape: no RPC or database message). */
 function auditStop(error: unknown): { code: AuditStageCode; counts: DistributionAuditCounts | null } {
@@ -95,9 +98,10 @@ function auditStop(error: unknown): { code: AuditStageCode; counts: Distribution
  * The distribution audit stage through stage(), made visible: the counters
  * also when it stopped early (`deferred`: candidates left for the next run),
  * a reason code, and one structured log line whenever rows were left behind
- * (failed, deferred, or cut short by the deadline). The line carries the
- * network, status, code and the counters only: never an error message, an
- * RPC URL or a row.
+ * (failed, deferred, cut short by the deadline, or held for review: a
+ * transaction the chain does not know although a browser row calls it a
+ * success). The line carries the network, status, code and the counters
+ * only: never an error message, an RPC URL or a row.
  */
 export async function auditStage(limit: number, workDeadline: number, network: Network): Promise<AuditStageResult> {
   const box: { counts: DistributionAuditCounts | null; stop: ReturnType<typeof auditStop> | null } = { counts: null, stop: null };
@@ -110,7 +114,7 @@ export async function auditStage(limit: number, workDeadline: number, network: N
       throw error;
     }
   }, limit, STAGE_BUDGETS_MS.audits, workDeadline);
-  // The five counters only (0 when the stage did not report one).
+  // The six counters only (0 when the stage did not report one).
   const reported: Partial<Record<(typeof AUDIT_COUNT_KEYS)[number], unknown>> =
     (result.status === "processed" ? box.counts : box.stop?.counts) ?? {};
   const counts = Object.fromEntries(
@@ -119,7 +123,8 @@ export async function auditStage(limit: number, workDeadline: number, network: N
   const code: AuditStageCode | null =
     result.status === "deferred" ? "deadline"
       : result.status === "failed" ? (box.stop?.code ?? "internal")
-        : counts.deferred > 0 ? "deadline" : null;
+        : counts.deferred > 0 ? "deadline"
+          : counts.review > 0 ? "review" : null;
   if (code !== null) console.warn(`[retry-worker] audits ${JSON.stringify({ network, status: result.status, code, ...counts })}`);
   return { status: result.status, counts, code };
 }

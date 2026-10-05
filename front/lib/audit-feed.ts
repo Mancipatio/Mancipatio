@@ -9,20 +9,28 @@
 // so a resume after it still appends one. collapseDistributionFinals keeps
 // one final row per signature: the server's chain-checked row when there is
 // one (its status is the finalized chain's), else the earliest; the others
-// are counted on it (`duplicates`), never dropped silently. Pending rows and
-// every other kind of row pass through unchanged.
+// are counted on it, never dropped silently: `duplicates` when they say the
+// same status, `conflict` when they do not (a browser row that says
+// "success" next to the chain's "failed", for one: shown as a status
+// conflict, never as one more duplicate). Pending rows and every other kind
+// of row pass through unchanged.
 //
 // Which row is the server's is decided by /api/audit/list (chain_checked,
 // lib/server/reconciled-audit: the row id derived from the signature, which
 // the unsigned /api/audit cannot write), never by the row's metadata:
 // /api/audit copies a caller's metadata, so a key like reconciled_by_server
 // proves nothing. A server row asserts only the chain status: its
-// metadata.client_claims are what the pending row reported, unverified.
+// metadata.client_claims are what the pending row reported, unverified
+// (clientClaimsOf: the claimed actor and target, which a feed shows and
+// searches labelled "unverified claim").
 //
 // A recorded document anchor (isVerifiedDocumentAnchor) is likewise told by
 // /api/audit/list (anchor_verified, lib/server/document-anchor
 // isRecordedAnchorRow: the row id derived from the signature, which only the
-// record route writes), never by the row's category or metadata alone.
+// record route writes), never by the row's category or metadata alone. An
+// anchor row is not a share_class_distribution row: collapseDistributionFinals
+// passes it through (no duplicates, no conflict) and clientClaimsOf has
+// nothing for it; a distribution row is never a verified anchor.
 
 import { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor-audit";
 
@@ -81,6 +89,32 @@ function isDistributionFinal(row: FeedAuditRow): row is FeedAuditRow & { tx_sign
   );
 }
 
+/**
+ * Final rows of one signature that do not say what the row kept for it says:
+ * `status` is the kept row's (the finalized chain's when `chainChecked`),
+ * `statuses` what the others say instead, `rows` how many of them.
+ */
+export type StatusConflict = { status: string; chainChecked: boolean; statuses: string[]; rows: number };
+
+/**
+ * What the pending row reported, as a chain-checked row carries it
+ * (metadata.client_claims, verified: false): the actor and the target it
+ * claimed. Null on any other row, or when it claimed neither.
+ */
+export function clientClaimsOf(
+  row: Pick<FeedAuditRow, "chain_checked" | "actor_wallet" | "metadata">,
+): { actor: string | null; target: string | null } | null {
+  if (!isChainChecked(row)) return null;
+  const claims = row.metadata?.client_claims;
+  if (typeof claims !== "object" || claims === null || Array.isArray(claims)) return null;
+  const { actor_wallet: actor, target_label: target } = claims as Record<string, unknown>;
+  const out = {
+    actor: typeof actor === "string" && actor.length > 0 ? actor : null,
+    target: typeof target === "string" && target.length > 0 ? target : null,
+  };
+  return out.actor === null && out.target === null ? null : out;
+}
+
 /** Whether `a` stands for its signature rather than `b`: chain-checked first, then the earliest. */
 function preferred(a: FeedAuditRow, b: FeedAuditRow): boolean {
   const ca = isChainChecked(a);
@@ -91,27 +125,39 @@ function preferred(a: FeedAuditRow, b: FeedAuditRow): boolean {
 
 /**
  * The rows in their order, with one final share_class_distribution row per
- * signature (the server's, else the earliest), `duplicates` counting the
- * other final rows of that signature (0 on every other row).
+ * signature (the server's, else the earliest): `duplicates` counts the other
+ * final rows of that signature that say the same status, `conflict` the ones
+ * that do not (null when none does; 0 and null on every other row).
  */
-export function collapseDistributionFinals<T extends FeedAuditRow>(rows: readonly T[]): (T & { duplicates: number })[] {
+export function collapseDistributionFinals<T extends FeedAuditRow>(
+  rows: readonly T[],
+): (T & { duplicates: number; conflict: StatusConflict | null })[] {
   const keep = new Map<string, T>();
-  const count = new Map<string, number>();
+  const finals = new Map<string, T[]>();
   for (const row of rows) {
     if (!isDistributionFinal(row)) continue;
     const signature = row.tx_signature;
-    count.set(signature, (count.get(signature) ?? 0) + 1);
+    finals.set(signature, [...(finals.get(signature) ?? []), row]);
     const current = keep.get(signature);
     if (!current || preferred(row, current)) keep.set(signature, row);
   }
-  const out: (T & { duplicates: number })[] = [];
+  const out: (T & { duplicates: number; conflict: StatusConflict | null })[] = [];
   for (const row of rows) {
     if (!isDistributionFinal(row)) {
-      out.push({ ...row, duplicates: 0 });
+      out.push({ ...row, duplicates: 0, conflict: null });
       continue;
     }
     if (keep.get(row.tx_signature) !== row) continue;
-    out.push({ ...row, duplicates: (count.get(row.tx_signature) ?? 1) - 1 });
+    const others = (finals.get(row.tx_signature) ?? []).filter((r) => r !== row);
+    const disagree = others.filter((r) => r.status !== row.status);
+    out.push({
+      ...row,
+      duplicates: others.length - disagree.length,
+      conflict:
+        disagree.length === 0
+          ? null
+          : { status: row.status, chainChecked: isChainChecked(row), statuses: [...new Set(disagree.map((r) => r.status))], rows: disagree.length },
+    });
   }
   return out;
 }

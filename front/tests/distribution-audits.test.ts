@@ -2,8 +2,10 @@
 // share_class_distribution row the sender's browser never confirmed (tab
 // closed, RPC 429) gets its final row from the server once the chain has
 // FINALIZED the transaction ("success", or "failed" with the transaction
-// error), or "failed", not found (expired), when the cluster does not know
-// it 2 hours after its pending row. The server row asserts only the chain
+// error), or "failed", not found (expired), only when that is certain: 6
+// hours after its pending row neither getSignatureStatuses nor getTransaction
+// (finalized) knows it in the same run, and no browser row says it was a
+// success (that conflict is held for review). The server row asserts only the chain
 // status; what the pending row reported is carried as unverified
 // client_claims. Idempotent (one server row per transaction, its id derived
 // from the signature, ON CONFLICT DO NOTHING), bounded per run, oldest first
@@ -21,10 +23,16 @@ vi.mock("server-only", () => ({}));
 
 import {
   CANDIDATES_PER_LIMIT,
+  CLAIMS_PAGE,
   DISTRIBUTION_AUDIT_IX,
   DistributionAuditError,
+  EXPIRY_CHECK_MIN_MS,
+  EXPIRY_CHECK_RESERVE_MS,
   EXPIRY_HORIZON_MS,
   FRESH_BAND_MS,
+  MAX_CLAIM_CHECKS,
+  MAX_EXPIRY_CHECKS,
+  MAX_REVIEW_CHECKS,
   RECONCILE_MAX_AGE_MS,
   RECONCILE_MIN_AGE_MS,
   SCAN_PAGE,
@@ -53,13 +61,21 @@ const HOLDER = ADDR(2);
 const MINT = ADDR(3);
 const SC = ADDR(4);
 const at = (msAgo: number, now = NOW) => new Date(now - msAgo).toISOString();
-const ZERO = { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0 };
+const ZERO = { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0, review: 0 };
+const HORIZON_MIN = EXPIRY_HORIZON_MS / MIN;
 
 type Status = { slot: bigint; err: unknown; confirmationStatus: string | null } | null;
+/**
+ * A getTransaction answer (finalized): the transaction with its meta, null when unknown; an Error is an RPC
+ * that cannot answer; "hang" never answers (only the request's abort signal ends it).
+ */
+type Tx = { slot: bigint; meta: { err: unknown } | null } | null | Error | "hang";
 
-function chain(statuses: Record<string, Status> = {}) {
+function chain(statuses: Record<string, Status> = {}, transactions: Record<string, Tx> = {}) {
   const calls: string[][] = [];
   const configs: unknown[] = [];
+  const txCalls: string[] = [];
+  const txConfigs: unknown[] = [];
   let fail: Error | null = null;
   let onSend: (() => void) | null = null;
   const rpc = {
@@ -74,8 +90,23 @@ function chain(statuses: Record<string, Status> = {}) {
         },
       };
     }),
+    getTransaction: vi.fn((signature: string, config: unknown) => {
+      txCalls.push(signature);
+      txConfigs.push(config);
+      return {
+        send: async (options?: { abortSignal?: AbortSignal }) => {
+          const tx = transactions[signature] ?? null;
+          if (tx instanceof Error) throw tx;
+          if (tx === "hang") {
+            const signal = options?.abortSignal;
+            return new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)));
+          }
+          return tx;
+        },
+      };
+    }),
   };
-  return { rpc, calls, configs, statuses, failWith: (e: Error) => void (fail = e), onSend: (f: () => void) => void (onSend = f) };
+  return { rpc, calls, configs, txCalls, txConfigs, statuses, failWith: (e: Error) => void (fail = e), onSend: (f: () => void) => void (onSend = f) };
 }
 
 type Query = { table: string; calls: [string, unknown[]][] };
@@ -311,27 +342,29 @@ describe("the server's final row: chain facts only", () => {
 });
 
 describe("what the chain decides", () => {
-  it("leaves pending what is not final yet, and what the chain does not know yet (younger than 2 hours)", async () => {
+  it("leaves pending what is not final yet, and what the chain does not know yet (younger than 6 hours: not even looked up)", async () => {
     pending(SIG(3), 10);
     pending(SIG(4), 10);
-    pending(SIG(5), 119);
-    const { rpc, calls } = chain({
+    pending(SIG(5), HORIZON_MIN - 1);
+    pending(SIG(6), 125); // 2 h: what the horizon used to be, no longer enough
+    const { rpc, calls, txCalls } = chain({
       [SIG(3)]: { slot: BigInt(9), err: null, confirmationStatus: "confirmed" },
       [SIG(4)]: { slot: BigInt(9), err: { InstructionError: [0, "Custom"] }, confirmationStatus: "processed" },
-      // SIG(5): not found, 1 h 59 min after its pending row.
+      // SIG(5): not found, 5 h 59 min after its pending row; SIG(6) 2 h 5 min after.
     });
-    expect(await run(rpc)).toEqual({ ...ZERO, pending: 3 });
-    expect(calls[0].sort()).toEqual([SIG(3), SIG(4), SIG(5)].sort());
+    expect(await run(rpc)).toEqual({ ...ZERO, pending: 4 });
+    expect(calls[0].sort()).toEqual([SIG(3), SIG(4), SIG(5), SIG(6)].sort());
+    expect(txCalls).toEqual([]);
     expect(finals()).toEqual([]);
   });
 
-  it("settles a transaction the cluster does not know 2 hours after its oldest pending row: failed, not found (expired)", async () => {
-    pending(SIG(40), EXPIRY_HORIZON_MS / MIN); // exactly 2 h: the blockhash (~60-90 s) is long gone
-    pending(SIG(41), 125);
-    pending(SIG(42), 130); // the oldest pending row of SIG(42) counts…
+  it("settles a transaction neither lookup knows 6 hours after its oldest pending row: failed, not found (expired)", async () => {
+    pending(SIG(40), HORIZON_MIN); // exactly 6 h: the blockhash (~60-90 s) is long gone
+    pending(SIG(41), HORIZON_MIN + 5);
+    pending(SIG(42), HORIZON_MIN + 10); // the oldest pending row of SIG(42) counts…
     pending(SIG(42), 30); // …not the newest
-    pending(SIG(43), 150); // found, but not finalized: never called expired
-    const { rpc } = chain({ [SIG(43)]: { slot: BigInt(9), err: null, confirmationStatus: "confirmed" } });
+    pending(SIG(43), HORIZON_MIN + 30); // found, but not finalized: never called expired
+    const { rpc, txCalls, txConfigs } = chain({ [SIG(43)]: { slot: BigInt(9), err: null, confirmationStatus: "confirmed" } });
     expect(await run(rpc)).toEqual({ ...ZERO, complete: 3, expired: 3, pending: 1 });
     for (const signature of [SIG(40), SIG(41), SIG(42)]) {
       const final = finalOf(signature)!;
@@ -341,21 +374,169 @@ describe("what the chain decides", () => {
       expect(final.metadata).not.toHaveProperty("confirmation_status");
     }
     expect(finalOf(SIG(43))).toBeUndefined();
+    // The second lookup, finalized, for the three only (oldest first).
+    expect(txCalls).toEqual([SIG(42), SIG(41), SIG(40)]);
+    for (const config of txConfigs) expect(config).toEqual({ commitment: "finalized", maxSupportedTransactionVersion: 0, encoding: "json" });
   });
 
-  it("rows that never settle hold the candidate slots for at most 2 hours, oldest first", async () => {
+  it("rows that never settle hold the candidate slots for at most 6 hours, oldest first", async () => {
     // limit 1 → 10 candidates per run: ten dropped transactions (never found) and one finalized, newer.
-    for (let i = 0; i < 10; i++) pending(SIG(60 + i), 100 + i);
+    for (let i = 0; i < 10; i++) pending(SIG(60 + i), HORIZON_MIN - 20 + i);
     pending(SIG(70), 10);
     const statuses = { [SIG(70)]: finalized() };
     const first = chain(statuses);
     expect(await run(first.rpc, 1)).toEqual({ ...ZERO, pending: 10 });
     expect(first.calls[0]).not.toContain(SIG(70));
-    // Twenty minutes later the ten are 2 h old: expired, settled; SIG(70) is next.
+    // Twenty minutes later the ten are 6 h old: expired, settled; SIG(70) is next.
     const later = NOW + 20 * MIN;
     expect(await run(chain(statuses).rpc, 1, { now: later })).toEqual({ ...ZERO, complete: 10, expired: 10 });
     expect(await run(chain(statuses).rpc, 1, { now: later + MIN })).toEqual({ ...ZERO, complete: 1 });
     expect(finalOf(SIG(70))).toMatchObject({ status: "success" });
+  });
+
+  it("a transaction getTransaction (finalized) returns after all is settled from its meta, never called expired", async () => {
+    pending(SIG(44), HORIZON_MIN + 1);
+    pending(SIG(45), HORIZON_MIN + 2);
+    const err = { InstructionError: [2, { Custom: 6001 }] };
+    const { rpc } = chain({}, { [SIG(44)]: { slot: BigInt(401_000_000), meta: { err: null } }, [SIG(45)]: { slot: BigInt(401_000_001), meta: { err } } });
+    expect(await run(rpc)).toEqual({ ...ZERO, complete: 2 });
+    expect(finalOf(SIG(44))).toMatchObject({ status: "success", reason: "Finalized on chain (checked by the server)" });
+    expect(finalOf(SIG(44))!.metadata).toMatchObject({ chain_outcome: "finalized", slot: "401000000", confirmation_status: "finalized" });
+    expect(finalOf(SIG(45))).toMatchObject({ status: "failed", reason: "Finalized on chain with an error (checked by the server)" });
+    expect(finalOf(SIG(45))!.metadata).toMatchObject({ chain_outcome: "finalized_with_error", tx_error: err });
+  });
+
+  it("a getTransaction that cannot answer (or returns no meta) leaves the row pending; the rest of the run still settles", async () => {
+    pending(SIG(46), HORIZON_MIN + 1);
+    pending(SIG(47), HORIZON_MIN + 2);
+    pending(SIG(48), 30);
+    const { rpc } = chain(
+      { [SIG(48)]: finalized() },
+      { [SIG(46)]: new Error("HTTP error (429): Too Many Requests"), [SIG(47)]: { slot: BigInt(1), meta: null } },
+    );
+    expect(await run(rpc)).toEqual({ ...ZERO, complete: 1, pending: 2 });
+    expect(finalOf(SIG(46))).toBeUndefined();
+    expect(finalOf(SIG(47))).toBeUndefined();
+    expect(finalOf(SIG(48))).toMatchObject({ status: "success" });
+  });
+
+  it("never expired over a browser row that says success: held for review (counted), checked again next run", async () => {
+    pending(SIG(50), HORIZON_MIN + 1);
+    browserFinal(SIG(50), HORIZON_MIN); // "success", self-asserted
+    pending(SIG(51), HORIZON_MIN + 1);
+    browserFinal(SIG(51), HORIZON_MIN, "failed"); // a browser "failed" row agrees with the chain: no conflict
+    pending(SIG(52), HORIZON_MIN + 1); // nobody claims anything
+    const first = chain();
+    expect(await run(first.rpc)).toEqual({ ...ZERO, complete: 2, expired: 2, pending: 1, review: 1 });
+    expect(serverRowOf(SIG(50))).toBeUndefined();
+    expect(serverRowOf(SIG(51))).toMatchObject({ status: "failed", reason: "Not found on chain (expired)" });
+    expect(serverRowOf(SIG(52))).toMatchObject({ status: "failed", reason: "Not found on chain (expired)" });
+    // The claims are looked up by signature, success rows of this network and instruction only.
+    const claims = store.queries.filter((q) => call(q, "select").some(([c]) => c === "tx_signature"));
+    expect(claims).toHaveLength(1);
+    expect(call(claims[0], "eq")).toEqual([["network", "mainnet"], ["ix_name", DISTRIBUTION_AUDIT_IX], ["status", "success"]]);
+    expect(call(claims[0], "in")).toEqual([["tx_signature", [SIG(50), SIG(51), SIG(52)]]]);
+    // Still pending for review on the next run (and found after all, it settles).
+    expect(await run(chain().rpc)).toEqual({ ...ZERO, pending: 1, review: 1 });
+    expect(await run(chain({}, { [SIG(50)]: { slot: BigInt(7), meta: { err: null } } }).rpc)).toEqual({ ...ZERO, complete: 1 });
+    expect(serverRowOf(SIG(50))).toMatchObject({ status: "success", reason: "Finalized on chain (checked by the server)" });
+  });
+
+  it("when the browser rows cannot be read, nothing is called expired", async () => {
+    pending(SIG(53), HORIZON_MIN + 1);
+    const from = store.client.from;
+    store.client.from = (table: string) => {
+      const b = from(table) as Record<string, (...args: unknown[]) => unknown>;
+      const select = b.select;
+      b.select = (...args: unknown[]) => {
+        if (args[0] !== "tx_signature") return select(...args);
+        const failing: Record<string, unknown> = {
+          then: (resolve: (v: unknown) => unknown) => resolve({ data: null, error: { message: "read failed" } }),
+        };
+        for (const m of ["eq", "in", "abortSignal"]) failing[m] = () => failing;
+        return failing;
+      };
+      return b;
+    };
+    expect(await run(chain().rpc)).toEqual({ ...ZERO, pending: 1 });
+    expect(finals()).toEqual([]);
+  });
+
+  it("looks up at most MAX_EXPIRY_CHECKS transactions with getTransaction per run, the oldest first", async () => {
+    const count = MAX_EXPIRY_CHECKS + 5;
+    for (let i = 0; i < count; i++) pending(SIG(100 + i), HORIZON_MIN + 1 + i); // SIG(100 + count - 1) is the oldest
+    const first = chain();
+    expect(await run(first.rpc, 20)).toEqual({ ...ZERO, complete: MAX_EXPIRY_CHECKS, expired: MAX_EXPIRY_CHECKS, pending: 5 });
+    expect(first.txCalls).toEqual(Array.from({ length: MAX_EXPIRY_CHECKS }, (_, i) => SIG(100 + count - 1 - i)));
+    const next = chain();
+    expect(await run(next.rpc, 20)).toEqual({ ...ZERO, complete: 5, expired: 5 });
+  });
+
+  it("rows held for review never starve a real backlog row of its lookup: the unclaimed first, at most MAX_REVIEW_CHECKS held after them", async () => {
+    // MAX_EXPIRY_CHECKS + 3 forged pairs (pending + "success" via the unsigned route), all older than five real
+    // rows of the same band: oldest first alone would give every lookup to them.
+    const held = MAX_EXPIRY_CHECKS + 3;
+    for (let i = 0; i < held; i++) {
+      pending(SIG(150 + i), HORIZON_MIN + 30 + held - i); // the fresh band too; SIG(150) is the oldest
+      browserFinal(SIG(150 + i), HORIZON_MIN);
+    }
+    for (let i = 0; i < 5; i++) pending(SIG(200 + i), HORIZON_MIN + 10 - i);
+    const first = chain();
+    expect(await run(first.rpc, 20)).toEqual({ ...ZERO, complete: 5, expired: 5, pending: held, review: held });
+    // The five real rows are looked up (and settled) although the held ones are older; then MAX_REVIEW_CHECKS of
+    // the held ones, oldest first, in the slots left. The rest stay held without a lookup this run.
+    expect(first.txCalls).toEqual([
+      ...Array.from({ length: 5 }, (_, i) => SIG(200 + i)),
+      ...Array.from({ length: MAX_REVIEW_CHECKS }, (_, i) => SIG(150 + i)),
+    ]);
+    for (let i = 0; i < 5; i++) expect(serverRowOf(SIG(200 + i))).toMatchObject({ reason: "Not found on chain (expired)" });
+    for (let i = 0; i < held; i++) expect(serverRowOf(SIG(150 + i))).toBeUndefined();
+    // The claims were read CLAIMS_PAGE signatures per query.
+    const claims = store.queries.filter((q) => call(q, "select").some(([c]) => c === "tx_signature"));
+    expect(claims.map((q) => (call(q, "in")[0][1] as string[]).length)).toEqual([CLAIMS_PAGE, held + 5 - CLAIMS_PAGE]);
+    // With no real row left, the held ones still get at most MAX_REVIEW_CHECKS lookups per run.
+    const next = chain();
+    expect(await run(next.rpc, 20)).toEqual({ ...ZERO, pending: held, review: held });
+    expect(next.txCalls).toHaveLength(MAX_REVIEW_CHECKS);
+  });
+
+  it("reads the claims of at most MAX_CLAIM_CHECKS candidates past the horizon per run (the rest wait, pending)", async () => {
+    const count = MAX_CLAIM_CHECKS + 4;
+    // Half a minute apart, all in the fresh band (6 h to 7 h): BIGSIG(0) is the oldest.
+    for (let i = 0; i < count; i++) pending(BIGSIG(i), HORIZON_MIN + 1 + (count - i) / 2);
+    const c = chain();
+    expect(await run(c.rpc, 20)).toEqual({ ...ZERO, complete: MAX_EXPIRY_CHECKS, expired: MAX_EXPIRY_CHECKS, pending: count - MAX_EXPIRY_CHECKS });
+    const claims = store.queries.filter((q) => call(q, "select").some(([s]) => s === "tx_signature"));
+    expect(claims.flatMap((q) => call(q, "in")[0][1] as string[])).toEqual(Array.from({ length: MAX_CLAIM_CHECKS }, (_, i) => BIGSIG(i)));
+  });
+
+  it("a slow lookup never costs the run the rows the statuses settled: the expiry's checks stop EXPIRY_CHECK_RESERVE_MS before the deadline", async () => {
+    pending(SIG(80), HORIZON_MIN + 1); // not found; its getTransaction never answers
+    pending(SIG(81), 30); // finalized
+    const c = chain({ [SIG(81)]: finalized() }, { [SIG(80)]: "hang" });
+    const started = Date.now();
+    const budget = EXPIRY_CHECK_RESERVE_MS + EXPIRY_CHECK_MIN_MS + 200;
+    expect(await run(c.rpc, 10, { deadline: Date.now() + budget })).toEqual({ ...ZERO, complete: 1, pending: 1 });
+    // Looked up, cut off with the reserve left, and SIG(81)'s row still written.
+    expect(c.txCalls).toEqual([SIG(80)]);
+    expect(Date.now() - started).toBeLessThan(budget);
+    expect(finalOf(SIG(81))).toMatchObject({ status: "success" });
+    expect(finalOf(SIG(80))).toBeUndefined();
+  });
+
+  it("with less than EXPIRY_CHECK_RESERVE_MS + EXPIRY_CHECK_MIN_MS left, the expiry's checks are not started (a later run does them)", async () => {
+    pending(SIG(82), HORIZON_MIN + 1);
+    pending(SIG(83), 30);
+    const c = chain({ [SIG(83)]: finalized() });
+    expect(await run(c.rpc, 10, { deadline: Date.now() + EXPIRY_CHECK_RESERVE_MS + EXPIRY_CHECK_MIN_MS / 2 })).toEqual({
+      ...ZERO,
+      complete: 1,
+      pending: 1,
+    });
+    expect(c.txCalls).toEqual([]);
+    expect(store.queries.filter((q) => call(q, "select").some(([s]) => s === "tx_signature"))).toEqual([]);
+    expect(finalOf(SIG(83))).toMatchObject({ status: "success" });
+    expect(finalOf(SIG(82))).toBeUndefined();
   });
 });
 
@@ -413,7 +594,7 @@ describe("which rows a run takes", () => {
     expect(again.calls).toEqual([]);
   });
 
-  it("reads oldest first with a keyset cursor: the fresh band (5 min to 3 h), then the backlog band (3 h to 7 days)", async () => {
+  it("reads oldest first with a keyset cursor: the fresh band (5 min to 7 h), then the backlog band (7 h to 7 days)", async () => {
     pending(SIG(20), 10);
     await run(chain().rpc);
     const [fresh, backlog] = store.scans();

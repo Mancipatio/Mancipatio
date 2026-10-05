@@ -10,6 +10,8 @@ import {
   getBase64Encoder,
   getCompiledTransactionMessageDecoder,
   getTransactionDecoder,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
+  SolanaError,
   type Instruction,
 } from "@solana/kit";
 import { CLOSE_SALE_DISCRIMINATOR, LOCK_SUPPLY_DISCRIMINATOR, OPEN_SALE_DISCRIMINATOR } from "@/lib/generated/asset_registry";
@@ -21,6 +23,8 @@ import {
   simulateMessage,
   SimulationRefusedError,
   waitForSignature,
+  waitForSignatures,
+  STATUS_READ_TIMEOUT_MS,
   type SimulationRpc,
   type SimulationVerdict,
 } from "@/lib/simulation-gate";
@@ -38,6 +42,8 @@ import {
   SALE_SYNC_SUFFIX,
 } from "@/lib/program-errors";
 import { explainSendError } from "@/lib/tx-error";
+import { DISTRIBUTION_GUARD_HEADROOM_UNITS, LIGHTHOUSE_GUARD_UNITS } from "@/lib/wallet-changes";
+import { maxPriorityFeeLamports } from "@/lib/compute-budget";
 import { COMPUTE_BUDGET_PROGRAM_ADDRESS, decodeComputeBudgetInstruction } from "@/lib/compute-budget";
 
 const HOOK = "GBDyesyTr266LqKeFq95r1DeigRyHpfw6ACWdjENHAPy";
@@ -303,6 +309,25 @@ describe("computeUnitLimitFromSimulation (the SDK's formula)", () => {
     expect(computeUnitLimitFromSimulation(0)).toBe(200_000);
     expect(computeUnitLimitFromSimulation(300_000, 1.2)).toBe(360_000);
   });
+
+  it("headroom (Send to wallets: room for four wallet guards) is added before the 200k floor and the 1.4M ceiling", () => {
+    const H = DISTRIBUTION_GUARD_HEADROOM_UNITS;
+    expect(H).toBe(28_000);
+    expect(computeUnitLimitFromSimulation(300_000, 1.1, H)).toBe(358_000);
+    expect(computeUnitLimitFromSimulation(250_000, 1.1, H)).toBe(303_000);
+    // The floor already covers it below ~156k: no extra fee there.
+    expect(computeUnitLimitFromSimulation(150_000, 1.1, H)).toBe(200_000);
+    expect(computeUnitLimitFromSimulation(156_363, 1.1, H)).toBe(200_000);
+    expect(computeUnitLimitFromSimulation(156_364, 1.1, H)).toBe(200_001);
+    expect(computeUnitLimitFromSimulation(1_250_000, 1.1, H)).toBe(1_400_000);
+    expect(computeUnitLimitFromSimulation(null, 1.1, H)).toBe(200_000);
+    // Room left for guards: at least 10 % of the need plus the headroom (four at LIGHTHOUSE_GUARD_UNITS each).
+    for (const need of [160_000, 190_000, 400_000, 1_000_000]) {
+      expect(computeUnitLimitFromSimulation(need, 1.1, H) - need).toBeGreaterThanOrEqual(4 * LIGHTHOUSE_GUARD_UNITS);
+    }
+    // The fee: at most 28,000 more compute units at the mainnet price of 100,000 µlamports each = 2,800 lamports.
+    expect(maxPriorityFeeLamports(computeUnitLimitFromSimulation(300_000, 1.1, H), BigInt(100_000)) - maxPriorityFeeLamports(computeUnitLimitFromSimulation(300_000), BigInt(100_000))).toBe(BigInt(2_800));
+  });
 });
 
 function fakeSimulationRpc(value: { err: unknown; logs?: string[] | null; unitsConsumed?: bigint }) {
@@ -383,5 +408,115 @@ describe("waitForSignature", () => {
     expect(polled.statuses).toHaveBeenCalledTimes(3);
     const never = { getSignatureStatuses: () => ({ send: async () => ({ value: [null] }) }) } as unknown as Parameters<typeof waitForSignature>[0];
     expect(await waitForSignature(never, "s", { pollMs: 5, timeoutMs: 20 })).toBe("timeout");
+  });
+});
+
+describe("waitForSignatures", () => {
+  type Status = { err: unknown; confirmationStatus: string } | null;
+  const http = (statusCode: number) => new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode });
+  /** An RPC whose answers come from `answer(signature, read)` (read counts the calls); throwing is a failed read. */
+  function rpcOf(answer: (signature: string, read: number) => Status) {
+    const calls: string[][] = [];
+    const rpc = {
+      getSignatureStatuses: (signatures: readonly string[]) => ({
+        send: async () => {
+          calls.push([...signatures]);
+          return { value: signatures.map((s) => answer(s, calls.length)) };
+        },
+      }),
+    } as unknown as Parameters<typeof waitForSignatures>[0];
+    return { rpc, calls };
+  }
+  const confirmed: Status = { err: null, confirmationStatus: "confirmed" };
+
+  it("reads all of them in one call per poll, decides each on its own, and asks again only for the open ones", async () => {
+    const { rpc, calls } = rpcOf((s, read) =>
+      s === "a" ? confirmed : s === "b" ? { err: { InstructionError: [0, "X"] }, confirmationStatus: "processed" } : read >= 3 ? confirmed : null,
+    );
+    expect(await waitForSignatures(rpc, ["a", "b", "c"], { pollMs: 1 })).toEqual(["confirmed", "failed", "confirmed"]);
+    expect(calls).toEqual([["a", "b", "c"], ["c"], ["c"]]);
+  });
+
+  it("what the timeout leaves open is \"timeout\"; a read that fails leaves it \"unknown\"", async () => {
+    expect(await waitForSignatures(rpcOf((s) => (s === "a" ? confirmed : null)).rpc, ["a", "b"], { pollMs: 5, timeoutMs: 20 })).toEqual(["confirmed", "timeout"]);
+    const down = rpcOf(() => {
+      throw new Error("down");
+    });
+    expect(await waitForSignatures(down.rpc, ["a", "b"])).toEqual(["unknown", "unknown"]);
+    expect(down.calls).toHaveLength(1);
+  });
+
+  it("retryReads: a read refused for a moment (429, 5xx) is read again after a jittered wait, not answered \"unknown\"", async () => {
+    const waits: number[] = [];
+    const { rpc, calls } = rpcOf((_, read) => {
+      if (read === 1) throw http(429);
+      if (read === 2) throw http(503);
+      return confirmed;
+    });
+    const sleep = async (ms: number) => void waits.push(ms);
+    expect(await waitForSignatures(rpc, ["a"], { retryReads: { delaysMs: [100, 200, 400], sleep, random: () => 0.5 } })).toEqual(["confirmed"]);
+    expect(calls).toHaveLength(3);
+    expect(waits).toEqual([100, 200]);
+    // Without retryReads the same 429 ends the wait at once.
+    const once = rpcOf(() => {
+      throw http(429);
+    });
+    expect(await waitForSignature(once.rpc, "a")).toBe("unknown");
+    expect(once.calls).toHaveLength(1);
+  });
+
+  it("retryReads: anything but a transient failure, and the last retry's failure, still end the wait (\"unknown\")", async () => {
+    const sleep = async () => undefined;
+    const refused = rpcOf(() => {
+      throw new Error("Invalid params");
+    });
+    expect(await waitForSignatures(refused.rpc, ["a"], { retryReads: { sleep } })).toEqual(["unknown"]);
+    expect(refused.calls).toHaveLength(1);
+    const limited = rpcOf(() => {
+      throw http(429);
+    });
+    expect(await waitForSignatures(limited.rpc, ["a"], { retryReads: { delaysMs: [1, 1, 1], sleep } })).toEqual(["unknown"]);
+    expect(limited.calls).toHaveLength(4);
+  });
+
+  it("retryReads is bounded by the timeout: a retry's wait ends with it (\"timeout\": not decided in time) and no read starts after it", async () => {
+    const limited = rpcOf(() => {
+      throw http(429);
+    });
+    const started = Date.now();
+    expect(await waitForSignatures(limited.rpc, ["a"], { timeoutMs: 30, retryReads: { delaysMs: [10_000] } })).toEqual(["timeout"]);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(limited.calls).toHaveLength(1);
+  });
+
+  it("each read carries its own cut-off (STATUS_READ_TIMEOUT_MS): a request that never answers ends as a failed read, not a hang", async () => {
+    expect(STATUS_READ_TIMEOUT_MS).toBe(10_000);
+    // The read's AbortSignal.timeout, made controllable: firing it is the 10 s passing.
+    const cutOff = new AbortController();
+    const timeouts: number[] = [];
+    const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      timeouts.push(ms);
+      return cutOff.signal;
+    });
+    try {
+      const hanging = {
+        getSignatureStatuses: () => ({
+          // Never answers; ends only when the read's own signal aborts.
+          send: (options?: { abortSignal?: AbortSignal }) =>
+            new Promise((_, reject) => options?.abortSignal?.addEventListener("abort", () => reject(options.abortSignal!.reason))),
+        }),
+      } as unknown as Parameters<typeof waitForSignatures>[0];
+      let outcome: unknown = null;
+      // The wait's own timeout (20 ms) does not cut the read off: an answer in flight still counts.
+      const waiting = waitForSignatures(hanging, ["a"], { timeoutMs: 20 }).then((o) => (outcome = o));
+      await new Promise((r) => setTimeout(r, 40));
+      expect(outcome).toBeNull();
+      expect(timeouts).toEqual([STATUS_READ_TIMEOUT_MS]);
+      cutOff.abort(new DOMException("The operation timed out.", "TimeoutError"));
+      await waiting;
+      expect(outcome).toEqual(["unknown"]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

@@ -2,7 +2,8 @@
 // audit rows settled from the chain.
 //
 // The sender's browser appends one share_class_distribution audit row per
-// transaction as "pending" when it is sent, and a second row, "success" or
+// transaction as "pending" once it is signed and journalled, before it is
+// broadcast (lib/distribution-audit-writer), and a second row, "success" or
 // "failed", once the network decided (components/send-to-wallets-panel; the
 // ledger is append-only: a row is never updated, the final row is appended
 // next to the pending one). When the tab closes or the RPC answers 429
@@ -37,18 +38,52 @@
 //   - FINALIZED without an error → "success"; FINALIZED with an error →
 //     "failed" with tx_error (the client's vocabulary: success | failed |
 //     pending, 0001's check);
-//   - NOT FOUND, EXPIRY_HORIZON_MS (2 h) or more after its oldest pending
-//     row → "failed", "Not found on chain (expired)". This is certain: the
-//     app's sender signs with a recent blockhash (never a durable nonce; its
-//     journal keeps lastValidBlockHeight), which is valid for 150 blocks,
-//     ~60-90 s, and every pending row is written after the send, so two
-//     hours after it the transaction can no longer land. (It needs an RPC
-//     that keeps transaction history for the window, as the server RPCs do:
-//     Helius on mainnet.) The sender's journal calls such a transaction
-//     "expired" and sends its rows again under a new signature;
+//   - NOT FOUND, EXPIRY_HORIZON_MS (6 h) or more after its oldest pending
+//     row → "failed", "Not found on chain (expired)", a permanent row, so
+//     only when it is certain. In the same run:
+//       1. getSignatureStatuses knows no such transaction;
+//       2. no final row posted to /api/audit (the browser's, a resume's)
+//          says "success" for that signature (read for at most
+//          MAX_CLAIM_CHECKS such candidates per run). Such a conflict is
+//          never called expired: the row stays pending for a person to
+//          review and is counted (`review`; the retry worker logs it);
+//       3. getTransaction (commitment finalized, maxSupportedTransactionVersion
+//          0) returns nothing either — one it returns is settled from its
+//          finalized meta instead ("success" or "failed" with tx_error), and
+//          one it cannot answer stays pending. At most MAX_EXPIRY_CHECKS of
+//          these lookups per run, in candidate order (oldest first within
+//          each band, the fresh band first), the unclaimed candidates first
+//          and at most MAX_REVIEW_CHECKS of those held for review after
+//          them (a claim posted to the unsigned route stays held until it
+//          ages out, and must not starve a real backlog row of its lookup);
+//          and only with time to spare: they stop EXPIRY_CHECK_RESERVE_MS
+//          before the deadline, so the rows the statuses already settled
+//          are still written in the run.
+//     The app's sender signs with a recent blockhash (never a durable nonce;
+//     its journal keeps lastValidBlockHeight), which is valid for 150
+//     blocks, ~60-90 s, and every pending row is written after the
+//     transaction was signed (its blockhash fetched before that), so long
+//     after it the transaction can no longer land. Two hours would do; the
+//     horizon is 6 h because no state is kept between runs (that would need
+//     a migration): instead of an earlier run's "not found" being required
+//     too, the transaction must have stayed unknown through 6 h of runs (the
+//     worker runs every few minutes) and to both lookups in this one. (It
+//     needs an RPC that keeps transaction history for the window, as the
+//     server RPCs do: Helius on mainnet.) The sender's journal calls such a
+//     transaction "expired" and sends its rows again under a new signature.
+//     "Certain" holds for transactions this app built. The worker never sees
+//     the transaction, only a signature in a row posted to the unsigned
+//     /api/audit: a pending row posted for a transaction someone signed with
+//     a durable nonce and has not broadcast is called expired after 6 h too,
+//     and that transaction can land later. The expired row is then wrong
+//     about the chain (never about money: it moves nothing, and its claims
+//     stay unverified); nothing settles it again (a later re-check from the
+//     chain would need state between runs). ops/runbook-mainnet.md says how
+//     to read such a row;
 //   - anything else (processed, confirmed, or not found yet) stays pending
 //     for a later run. Rows that cannot settle therefore hold the candidate
-//     slots for at most 2 hours, never for the whole window.
+//     slots for at most 6 hours, never for the whole window (a row held for
+//     review: until it ages out, RECONCILE_MAX_AGE_MS).
 //
 // The server row asserts ONLY what the server checked: the signature, its
 // chain status (status, chain_outcome, slot, confirmation_status, tx_error,
@@ -88,7 +123,7 @@
 // counts (lib/server/retry-worker auditStage).
 
 import "server-only";
-import { isSignature, type GetSignatureStatusesApi, type Rpc, type Signature } from "@solana/kit";
+import { isSignature, type GetSignatureStatusesApi, type GetTransactionApi, type Rpc, type Signature } from "@solana/kit";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { detectNetwork, type Network } from "@/lib/network";
 import { SERVER_ACTOR } from "@/lib/server/audit";
@@ -102,10 +137,37 @@ export { DISTRIBUTION_AUDIT_IX, SERVER_ACTOR, reconciledAuditId };
 export const RECONCILE_MIN_AGE_MS = 5 * 60_000;
 /** Older pending rows are no longer looked at (aged out, no alarm). */
 export const RECONCILE_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
-/** Not found this long after its oldest pending row: the blockhash (~60-90 s) has certainly expired. */
-export const EXPIRY_HORIZON_MS = 2 * 60 * 60_000;
+/**
+ * Not found this long after its oldest pending row (and by getTransaction in
+ * the same run, and no browser row says success): the blockhash (~60-90 s)
+ * has certainly expired. 6 h, not 2: no state is kept between runs, so the
+ * transaction must have stayed unknown through many of them.
+ */
+export const EXPIRY_HORIZON_MS = 6 * 60 * 60_000;
 /** The fresh band, read first: every row in it reaches EXPIRY_HORIZON_MS (decidable) before it leaves. */
-export const FRESH_BAND_MS = 3 * 60 * 60_000;
+export const FRESH_BAND_MS = 7 * 60 * 60_000;
+/**
+ * getTransaction lookups (the expiry's second check) per run at most: in
+ * candidate order (oldest first within each band, the fresh band first),
+ * the candidates no browser row calls a success first.
+ */
+export const MAX_EXPIRY_CHECKS = 20;
+/** Of MAX_EXPIRY_CHECKS, at most this many go to candidates held for review (in what the others leave). */
+export const MAX_REVIEW_CHECKS = 5;
+/** Candidates past the horizon whose success claims are read per run at most (the rest wait for a later run). */
+export const MAX_CLAIM_CHECKS = 3 * MAX_EXPIRY_CHECKS;
+/** Signatures per success-claims query (they go into one `in` filter: ~1.8 kB of URL). */
+export const CLAIMS_PAGE = 20;
+/**
+ * Kept, before the deadline, for writing what the chain already decided
+ * (the claims read and the upsert): the expiry's checks stop this long
+ * before it. They start only with at least EXPIRY_CHECK_MIN_MS more than
+ * that left, so a slow lookup never costs a run the rows the statuses had
+ * already settled.
+ */
+export const EXPIRY_CHECK_RESERVE_MS = 2_000;
+/** The least time the expiry's checks are started with (else a later run does them). */
+export const EXPIRY_CHECK_MIN_MS = 1_000;
 /** Candidates per run: the scheduler's limit (1-20) × this, at most MAX_CANDIDATES. */
 export const CANDIDATES_PER_LIMIT = 10;
 /** At most this many candidates per run (≤ 256 for one getSignatureStatuses call). */
@@ -117,7 +179,7 @@ export const SCAN_PAGES = 20;
 /** Pending row ids a server row lists at most (pending_rows says how many there were). */
 export const MAX_PENDING_REFS = 10;
 
-type StatusRpc = Rpc<GetSignatureStatusesApi>;
+type StatusRpc = Rpc<GetSignatureStatusesApi & GetTransactionApi>;
 
 /** One getSignatureStatuses entry (null: the node knows no such transaction). */
 export type ChainStatus = { slot: bigint; err: unknown; confirmationStatus?: string | null } | null;
@@ -134,10 +196,17 @@ export type DistributionAuditCounts = RetryCounts & {
   expired: number;
   /** Candidates found but not settled because the deadline, an abort or a failure came first (the next run takes them). */
   deferred: number;
+  /**
+   * Of `pending`: transactions the chain does not know past the horizon
+   * (getSignatureStatuses, and getTransaction when this run looked it up)
+   * while a final row from /api/audit says "success": never called expired,
+   * left pending for a person to review.
+   */
+  review: number;
 };
 
 export function emptyDistributionAuditCounts(): DistributionAuditCounts {
-  return { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0 };
+  return { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0, review: 0 };
 }
 
 /** The stage stopped: the database or the RPC did not answer. Carries no RPC or database message. */
@@ -294,12 +363,113 @@ function pastExpiryHorizon(c: Candidate, nowMs: number): boolean {
   return Number.isFinite(written) && nowMs - written >= EXPIRY_HORIZON_MS;
 }
 
+/** What the expiry's second and third checks found for one candidate the statuses did not know. */
+type ExpiryCheck = { candidate: Candidate; outcome: ChainOutcome | "pending" | "review" };
+
+/**
+ * The signatures (of `signatures`) that a final row from /api/audit calls a
+ * success, CLAIMS_PAGE per query (they go into the URL), the queries in
+ * parallel; null when any of them cannot be read. Never throws.
+ */
+async function successClaims(
+  sb: SupabaseClient,
+  network: Network,
+  signatures: readonly string[],
+  signal: AbortSignal,
+): Promise<Set<string> | null> {
+  if (signatures.length === 0) return new Set();
+  if (signal.aborted) return null;
+  try {
+    const pages: string[][] = [];
+    for (let i = 0; i < signatures.length; i += CLAIMS_PAGE) pages.push(signatures.slice(i, i + CLAIMS_PAGE));
+    const answers = await Promise.all(
+      pages.map((page) =>
+        sb
+          .from("audit_events")
+          .select("tx_signature")
+          .eq("network", network)
+          .eq("ix_name", DISTRIBUTION_AUDIT_IX)
+          .eq("status", "success")
+          .in("tx_signature", page)
+          .abortSignal(databaseSignal(signal)),
+      ),
+    );
+    const claimed = new Set<string>();
+    for (const { data, error } of answers) {
+      if (error) return null;
+      for (const r of (data ?? []) as { tx_signature: unknown }[]) claimed.add(String(r.tx_signature));
+    }
+    return claimed;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The expiry's checks beyond getSignatureStatuses, for candidates it did not
+ * know past the horizon (in candidate order; the first MAX_CLAIM_CHECKS of
+ * them, the rest stay "pending" for a later run). First the success rows
+ * /api/audit holds for them: a final row from /api/audit (self-asserted: the
+ * browser's, a resume's) that says success is not proof the transaction
+ * landed, but the chain's silence is not proof enough to contradict it, so
+ * such a candidate is never called expired ("review": a person looks at
+ * it). Then getTransaction (finalized; in parallel; at most
+ * MAX_EXPIRY_CHECKS lookups), for the unclaimed candidates first and for at
+ * most MAX_REVIEW_CHECKS held for review in what is left (an unsigned claim,
+ * held for days, never takes the lookups a real backlog row needs). A
+ * transaction getTransaction returns is settled from its finalized meta; one
+ * it cannot answer, or not looked up, stays as it was ("pending", or
+ * "review" when claimed); an unclaimed one it does not return is "expired".
+ * When the claims cannot be read, the lookups go to the first candidates and
+ * nothing is called expired. Never throws.
+ */
+async function expiryChecks(
+  sb: SupabaseClient,
+  rpc: StatusRpc,
+  network: Network,
+  notFound: readonly Candidate[],
+  signal: AbortSignal,
+): Promise<ExpiryCheck[]> {
+  const considered = notFound.slice(0, MAX_CLAIM_CHECKS);
+  const claimed = await successClaims(sb, network, considered.map((c) => c.signature), signal);
+  const checks: ExpiryCheck[] = [];
+  let lookups: Candidate[];
+  if (claimed === null) {
+    lookups = considered.slice(0, MAX_EXPIRY_CHECKS);
+  } else {
+    const open = considered.filter((c) => !claimed.has(c.signature)).slice(0, MAX_EXPIRY_CHECKS);
+    const held = considered.filter((c) => claimed.has(c.signature));
+    const recheck = held.slice(0, Math.min(MAX_REVIEW_CHECKS, MAX_EXPIRY_CHECKS - open.length));
+    // Held for review and not looked up in this run: still held.
+    for (const candidate of held.slice(recheck.length)) checks.push({ candidate, outcome: "review" });
+    lookups = [...open, ...recheck];
+  }
+  const notDecided = (candidate: Candidate): ExpiryCheck => ({ candidate, outcome: claimed?.has(candidate.signature) ? "review" : "pending" });
+  if (signal.aborted) return [...checks, ...lookups.map(notDecided)];
+  const looked = await Promise.all(
+    lookups.map(async (candidate): Promise<ExpiryCheck> => {
+      try {
+        const tx = await rpc
+          .getTransaction(candidate.signature as Signature, { commitment: "finalized", maxSupportedTransactionVersion: 0, encoding: "json" })
+          .send({ abortSignal: chainSignal(signal) });
+        // Found after all: finalized, so its meta decides (without one, a later run does).
+        if (tx !== null) return tx.meta ? { candidate, outcome: { kind: "finalized", slot: tx.slot, err: tx.meta.err } } : notDecided(candidate);
+        return claimed === null || claimed.has(candidate.signature) ? notDecided(candidate) : { candidate, outcome: { kind: "expired" } };
+      } catch {
+        return notDecided(candidate);
+      }
+    }),
+  );
+  return [...checks, ...looked];
+}
+
 /**
  * One run of the stage (retry worker, stage() contract): complete = final
- * rows appended (expired: those not found after the horizon), pending =
- * candidates the chain has not settled yet, invalid = pending rows without
- * a usable signature, deferred = candidates left for the next run because
- * time ran out. Throws DistributionAuditError when the database or the RPC
+ * rows appended (expired: those certainly not found after the horizon),
+ * pending = candidates the chain has not settled yet (review: those a
+ * browser row calls a success although the chain does not know them),
+ * invalid = pending rows without a usable signature, deferred = candidates
+ * left for the next run because time ran out. Throws DistributionAuditError when the database or the RPC
  * cannot answer (nothing is written for the rows not reached).
  */
 export async function reconcileDistributionAudits(
@@ -417,8 +587,9 @@ export async function reconcileDistributionAudits(
 
   // 2. The chain decides (one call: ≤ MAX_CANDIDATES signatures).
   let statuses: readonly (ChainStatus | undefined)[];
+  let rpc: StatusRpc;
   try {
-    const rpc = deps.rpc ?? getServerRpc();
+    rpc = deps.rpc ?? getServerRpc();
     const { value } = await rpc
       .getSignatureStatuses(candidates.map((c) => c.signature as Signature), { searchTransactionHistory: true })
       .send({ abortSignal: chainSignal(signal) });
@@ -428,14 +599,27 @@ export async function reconcileDistributionAudits(
     throw new DistributionAuditError("chain", counts, { cause });
   }
   const decided: { candidate: Candidate; outcome: ChainOutcome }[] = [];
+  const notFound: Candidate[] = [];
   candidates.forEach((c, i) => {
     const status = statuses[i] ?? null;
     if (finalAuditStatus(status) && status) {
       decided.push({ candidate: c, outcome: { kind: "finalized", slot: status.slot, err: status.err } });
     } else if (status === null && pastExpiryHorizon(c, nowMs)) {
-      decided.push({ candidate: c, outcome: { kind: "expired" } });
+      notFound.push(c);
     }
   });
+  // 2b. "Expired" is permanent, so only when certain (the header): getTransaction agrees, and no
+  //     browser row says success. Anything less leaves the row pending for a later run. Only with time
+  //     to spare, and stopped EXPIRY_CHECK_RESERVE_MS before the deadline: what the statuses already
+  //     settled is still written in this run (a slow lookup is a later run's).
+  const spareMs = deadlineMs - Date.now() - EXPIRY_CHECK_RESERVE_MS;
+  if (notFound.length > 0 && !signal.aborted && spareMs >= EXPIRY_CHECK_MIN_MS) {
+    const checkSignal = AbortSignal.any([signal, AbortSignal.timeout(spareMs)]);
+    for (const { candidate, outcome } of await expiryChecks(sb, rpc, network, notFound, checkSignal)) {
+      if (outcome === "review") counts.review++;
+      else if (outcome !== "pending") decided.push({ candidate, outcome });
+    }
+  }
   counts.pending = candidates.length - decided.length;
   if (decided.length === 0) return counts;
   if (signal.aborted) {

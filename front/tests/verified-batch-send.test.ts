@@ -26,6 +26,8 @@ import {
   pipe,
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
+  SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR,
+  SolanaError,
   type Address,
   type Instruction,
   type Transaction,
@@ -50,7 +52,7 @@ vi.mock("@/lib/network-identity", async (original) => ({
     events.push("network");
   },
 }));
-const sim = vi.hoisted(() => ({ refuseAt: -1, count: 0 }));
+const sim = vi.hoisted(() => ({ refuseAt: -1, count: 0, units: 120_000 }));
 vi.mock("@/lib/simulation-gate", async (original) => ({
   ...(await original<typeof import("@/lib/simulation-gate")>()),
   simulateMessage: vi.fn(async () => {
@@ -58,7 +60,7 @@ vi.mock("@/lib/simulation-gate", async (original) => ({
     events.push("simulate");
     return i === sim.refuseAt
       ? { err: { InstructionError: [2, { Custom: 6005 }] }, logs: [], unitsConsumed: 1_000 }
-      : { err: null, logs: [], unitsConsumed: 120_000 };
+      : { err: null, logs: [], unitsConsumed: sim.units };
   }),
 }));
 const wallet = vi.hoisted(() => ({
@@ -91,8 +93,11 @@ vi.mock("@/lib/wallet-standard-batch", async (original) => {
 });
 
 import {
+  BATCH_EXPIRY_MARGIN_BLOCKS,
+  BLOCKHASH_LIFETIME_BLOCKS,
   EarlierTransactionUnconfirmedError,
   getBatchSender,
+  MS_PER_BLOCK,
   remembersSignSeparately,
   SignedTransactionChangedError,
   SIGNING_TOO_SLOW,
@@ -101,11 +106,19 @@ import {
   WALLET_STATE_GUARDS,
   withVerifiedTransactions,
   type BatchSigned,
+  type BatchSignedInfo,
 } from "@/lib/verified-solana-client";
 import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { SimulationRefusedError } from "@/lib/simulation-gate";
+import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 import { BatchSigningUnsupportedError, signTransactionsWithWallet } from "@/lib/wallet-standard-batch";
-import { LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
+import { DISTRIBUTION_GUARD_HEADROOM_UNITS, LIGHTHOUSE_PROGRAM_ADDRESS } from "@/lib/wallet-changes";
+import {
+  createPendingAuditWriter,
+  journalThenPendingAudits,
+  PENDING_AUDIT_WAIT_MS,
+  type DistributionAuditRow,
+} from "@/lib/distribution-audit-writer";
 import {
   COMPUTE_BUDGET_PROGRAM_ADDRESS,
   decodeComputeBudgetInstruction,
@@ -145,6 +158,8 @@ function fixture(
   const current = session();
   let blockhashes = 0;
   const sent: string[] = [];
+  /** The signatures of each getSignatureStatuses call, in order. */
+  const statusCalls: string[][] = [];
   const prepare = vi.fn(async (input: TransactionPrepareRequest) => {
     const lifetime = input.lifetime ?? { blockhash: blockhash("11111111111111111111111111111111"), lastValidBlockHeight: BigInt(0) };
     // As the SDK compiles it: [limit?, price?, ...app].
@@ -191,6 +206,7 @@ function fixture(
     getSignatureStatuses: (signatures: readonly string[]) => ({
       send: async () => {
         events.push("settle");
+        statusCalls.push([...signatures]);
         return { value: signatures.map((s) => (opts.status ? opts.status(s) : { err: null, confirmationStatus: "confirmed" })) };
       },
     }),
@@ -203,7 +219,7 @@ function fixture(
     store: { getState: () => ({ wallet: { status: "connected", session: current } }) },
   } as unknown as SolanaClient;
   const guarded = withVerifiedTransactions(client, "devnet");
-  return { client, guarded, sender: getBatchSender(guarded)!, prepare, sign, sent, blockhashes: () => blockhashes };
+  return { client, guarded, sender: getBatchSender(guarded)!, prepare, sign, sent, statusCalls, blockhashes: () => blockhashes };
 }
 
 const requests = (count: number) => Array.from({ length: count }, (_, i) => ({ feePayer: WALLET, instructions: [ix(i + 1)] }));
@@ -212,6 +228,7 @@ beforeEach(() => {
   events.length = 0;
   sim.refuseAt = -1;
   sim.count = 0;
+  sim.units = 120_000;
   wallet.mode = "sign";
   wallet.calls.length = 0;
   wallet.rewrite = null;
@@ -454,6 +471,262 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
       expect(result.outcomes[1].signature).not.toBeNull();
       expect(result.outcomes[2]).toMatchObject({ signature: null, error: refusal });
     });
+
+    it("a status read the RPC refused for a moment (HTTP 429) is read again: one refused read no longer stops the run", async () => {
+      let reads = 0;
+      const f = fixture({
+        status: () => {
+          if (reads++ === 0) throw new SolanaError(SOLANA_ERROR__RPC__TRANSPORT_HTTP_ERROR, { headers: new Headers(), message: "HTTP", statusCode: 429 });
+          return { err: null, confirmationStatus: "confirmed" };
+        },
+      });
+      const result = await f.sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: () => {} });
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, true]);
+      expect(result.outcomes.every((o) => o.error === null)).toBe(true);
+      expect(f.sign).toHaveBeenCalledTimes(2);
+      // The refused read and its retry, both for transaction 1.
+      expect(f.statusCalls).toHaveLength(2);
+      expect(new Set(f.statusCalls.flat()).size).toBe(1);
+    });
+
+    it("says when it waits for the network between two prompts (not after the last one)", async () => {
+      const f = fixture();
+      const order: string[] = [];
+      await f.sender.prepareAndSendAll(requests(3), {
+        mode: "per-transaction",
+        onSigned: () => {},
+        onPrompt: (p) => order.push(`prompt:${p.index}`),
+        onWaiting: (w) => order.push(`waiting:${w.index}/${w.count}`),
+      });
+      expect(order).toEqual(["prompt:0", "waiting:0/3", "prompt:1", "waiting:1/3", "prompt:2"]);
+    });
+  });
+
+  // The panel's onSigned hook (components/send-to-wallets-panel, built by journalThenPendingAudits): the
+  // journal, then each transaction's pending audit row (lib/distribution-audit-writer), both before the broadcast.
+  describe("the pending audit row of each transaction, written when it is journalled (before its broadcast)", () => {
+    function auditTrail(record?: (row: DistributionAuditRow) => Promise<string | null>) {
+      const rows: DistributionAuditRow[] = [];
+      const audits = createPendingAuditWriter({
+        record:
+          record ??
+          (async (row) => {
+            events.push(`audit:${row.status}`);
+            rows.push(row);
+            return `id-${rows.length}`;
+          }),
+        base: () => ({ actor: WALLET, reason: "Distribution run test: 3 wallets", scPda: PROGRAM, runId: "run-1", mint: PROGRAM, screening: null }),
+      });
+      const journal: BatchSigned[] = [];
+      const waits: number[] = [];
+      const hook = journalThenPendingAudits({
+        journal: (signed: readonly BatchSigned[]) => {
+          journal.push(...signed);
+          events.push("journal");
+        },
+        audits,
+        rowsOf: (index) => [{ wallet: String(WALLET), amount: BigInt(index + 1) }],
+      });
+      const onSigned = (signed: readonly BatchSigned[], info: BatchSignedInfo) => {
+        waits.push(info.waitMs);
+        return hook(signed, info);
+      };
+      return { rows, journal, onSigned, waits, audits };
+    }
+    const trail = () => events.filter((e) => ["wallet.single", "wallet.batch(3)", "journal", "audit:pending", "send", "settle"].includes(e));
+
+    it("one by one, interrupted after transaction 1 of 3 (the tab closed at the second prompt): transaction 1 still has its pending row", async () => {
+      const f = fixture();
+      const { rows, journal, onSigned } = auditTrail();
+      const sign = f.sign.getMockImplementation()!;
+      let prompts = 0;
+      f.sign.mockImplementation(async (prepared: TransactionPrepared) => {
+        // The second prompt is never answered: the tab is closed while the wallet asks.
+        if (++prompts === 2) {
+          events.push("wallet.single");
+          return new Promise<never>(() => {});
+        }
+        return sign(prepared);
+      });
+      void f.sender.prepareAndSendAll(requests(3), { mode: "per-transaction", onSigned });
+      await vi.waitFor(() => expect(prompts).toBe(2));
+      expect(journal).toHaveLength(1);
+      expect(f.sent).toHaveLength(1);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        ix_name: "share_class_distribution",
+        status: "pending",
+        tx_signature: journal[0].signature,
+        metadata: { run_id: "run-1", recipients: [{ to: String(WALLET), amount: "1", screening: null }] },
+      });
+      // Journalled, its pending row written, then broadcast and waited for; only then the second prompt.
+      expect(trail()).toEqual(["wallet.single", "journal", "audit:pending", "send", "settle", "wallet.single"]);
+    });
+
+    it("a batch: every transaction's pending row before the first of them is broadcast", async () => {
+      const f = fixture();
+      const { rows, journal, onSigned } = auditTrail();
+      await f.sender.prepareAndSendAll(requests(3), { onSigned });
+      expect(rows.map((r) => r.tx_signature)).toEqual(journal.map((s) => s.signature));
+      expect(trail()).toEqual(["wallet.batch(3)", "journal", "audit:pending", "audit:pending", "audit:pending", "send", "send", "send"]);
+    });
+
+    it("the hook is told how long the blockhash can spare above the broadcast margin: a batch from the block height, one by one from the time", async () => {
+      // The batch's blockhash is valid up to 1001, the height after signing 900: 71 blocks above the 30-block margin.
+      const batch = auditTrail();
+      await fixture().sender.prepareAndSendAll(requests(3), { onSigned: batch.onSigned });
+      expect(batch.waits).toEqual([Number(BigInt(1001) - BigInt(900) - BATCH_EXPIRY_MARGIN_BLOCKS) * MS_PER_BLOCK]);
+      // One by one: no height read; the blockhash's ~150 blocks less the margin, less the time signing took.
+      const single = auditTrail();
+      await fixture().sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: single.onSigned });
+      const most = (BLOCKHASH_LIFETIME_BLOCKS - Number(BATCH_EXPIRY_MARGIN_BLOCKS)) * MS_PER_BLOCK;
+      expect(single.waits).toHaveLength(2);
+      for (const w of single.waits) {
+        expect(w).toBeLessThanOrEqual(most);
+        expect(w).toBeGreaterThan(most - 5_000);
+      }
+    });
+
+    it("a slow audit route never eats into the margin: with one block to spare the batch is broadcast at once, its rows finished after (settle)", async () => {
+      // 970 + 30 = 1000: one block (MS_PER_BLOCK) above the margin of the blockhash valid up to 1001.
+      const f = fixture({ heightAfterSigning: 970 });
+      let open: () => void = () => {};
+      const gate = new Promise<void>((resolve) => (open = resolve));
+      const written: string[] = [];
+      const { journal, onSigned, waits, audits } = auditTrail(async (row) => {
+        await gate;
+        written.push(row.tx_signature);
+        return "id";
+      });
+      const started = Date.now();
+      const result = await f.sender.prepareAndSendAll(requests(3), { onSigned });
+      expect(waits).toEqual([MS_PER_BLOCK]);
+      // Not PENDING_AUDIT_WAIT_MS (5 s): the hook's wait was capped at the one block the blockhash could spare.
+      expect(Date.now() - started).toBeLessThan(PENDING_AUDIT_WAIT_MS - 1_000);
+      expect(result.outcomes.every((o) => o.sent)).toBe(true);
+      expect(f.sent).toHaveLength(3);
+      expect(written).toEqual([]);
+      open();
+      expect(await audits.settle(journal.map((s) => s.signature))).toEqual(new Set(journal.map((s) => s.signature)));
+      expect(written).toEqual(journal.map((s) => s.signature));
+    });
+
+    it("a wallet change while the hook ran: nothing more is broadcast (a batch throws; one by one, the ones before it stay sent)", async () => {
+      const disconnect = (f: ReturnType<typeof fixture>) => {
+        (f.client as unknown as { store: { getState: () => unknown } }).store.getState = () => ({ wallet: { status: "disconnected" } });
+      };
+      const batch = fixture();
+      const error = await batch.sender.prepareAndSendAll(requests(2), { onSigned: () => disconnect(batch) }).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(TransactionWalletChangedError);
+      expect(batch.sent).toHaveLength(0);
+
+      const single = fixture();
+      const result = await single.sender.prepareAndSendAll(requests(3), {
+        mode: "per-transaction",
+        onSigned: (signed) => {
+          if (signed[0].index === 1) disconnect(single);
+        },
+      });
+      expect(result.outcomes.map((o) => o.sent)).toEqual([true, false, false]);
+      expect(result.outcomes[1].error).toBeInstanceOf(TransactionWalletChangedError);
+      expect(result.outcomes[1].signature).not.toBeNull();
+      expect(single.sent).toHaveLength(1);
+    });
+  });
+
+  describe("between two calls (a distribution's groups): every transaction of the previous one, and its outcome", () => {
+    it("waits for every transaction the previous batch sent, in one status read, before anything of the next call", async () => {
+      const f = fixture();
+      const first = await f.sender.prepareAndSendAll(requests(3), { onSigned: () => {} });
+      events.length = 0;
+      await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
+      expect(f.statusCalls).toEqual([first.outcomes.map((o) => o.signature)]);
+      expect(events.indexOf("settle")).toBeLessThan(events.indexOf("simulate"));
+    });
+
+    it("a previous transaction that failed, or whose status cannot be read, stops the next call before any simulation or prompt", async () => {
+      for (const status of [
+        () => ({ err: { InstructionError: [4, { Custom: 6001 }] }, confirmationStatus: "confirmed" }),
+        () => {
+          throw new Error("RPC unavailable");
+        },
+      ]) {
+        let previous: string[] = [];
+        const f = fixture({ status: (s) => (previous.includes(s) ? status() : { err: null, confirmationStatus: "confirmed" }) });
+        const first = await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
+        previous = first.outcomes.map((o) => o.signature!);
+        events.length = 0;
+        const onSigned = vi.fn();
+        const error = await f.sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned }).catch((e: unknown) => e);
+        expect(error).toBeInstanceOf(EarlierTransactionUnconfirmedError);
+        expect(error).toMatchObject({ position: null });
+        // What happened only: the caller (Send to wallets) adds how to go on.
+        expect((error as Error).message).toMatch(/^A transaction sent just before these (failed on the network|is not confirmed yet).*so these were not signed\.$/);
+        expect(events).not.toContain("simulate");
+        expect(events).not.toContain("wallet.single");
+        expect(onSigned).not.toHaveBeenCalled();
+      }
+    });
+
+    it("the per-transaction path's last transaction is the one the next call waits for (the earlier ones were confirmed in turn)", async () => {
+      const f = fixture();
+      const first = await f.sender.prepareAndSendAll(requests(3), { mode: "per-transaction", onSigned: () => {} });
+      f.statusCalls.length = 0;
+      await f.sender.prepareAndSendAll(requests(1), { mode: "per-transaction", onSigned: () => {} });
+      expect(f.statusCalls[0]).toEqual([first.outcomes[2].signature]);
+    });
+
+    it("onSettlingPrevious: told how many are waited for, before that wait (the page says so); not called when there is none", async () => {
+      const f = fixture();
+      const onSettlingPrevious = vi.fn(() => void events.push("settling"));
+      await f.sender.prepareAndSendAll(requests(3), { onSigned: () => {}, onSettlingPrevious });
+      expect(onSettlingPrevious).not.toHaveBeenCalled();
+      events.length = 0;
+      await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {}, onSettlingPrevious });
+      expect(onSettlingPrevious).toHaveBeenCalledExactlyOnceWith({ count: 3 });
+      expect(events.indexOf("settling")).toBeLessThan(events.indexOf("settle"));
+    });
+
+    it("a wallet change ends that wait at the next read, not after SETTLE_TIMEOUT_MS", async () => {
+      let previous: string[] = [];
+      // The previous send is never confirmed.
+      const f = fixture({ status: (s) => (previous.includes(s) ? null : { err: null, confirmationStatus: "confirmed" }) });
+      const first = await f.sender.prepareAndSendAll(requests(2), { onSigned: () => {} });
+      previous = first.outcomes.map((o) => o.signature!);
+      const started = Date.now();
+      const error = await f.sender
+        .prepareAndSendAll(requests(1), {
+          onSigned: () => {},
+          onSettlingPrevious: () => {
+            (f.client as unknown as { store: { getState: () => unknown } }).store.getState = () => ({ wallet: { status: "disconnected" } });
+          },
+        })
+        .catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(TransactionWalletChangedError);
+      expect(Date.now() - started).toBeLessThan(5_000);
+      expect(f.statusCalls).toHaveLength(1);
+    });
+  });
+
+  describe("onFallback: the batch was given up before the first one-by-one prompt", () => {
+    it("is called with the reason before that prompt", async () => {
+      const f = fixture();
+      wallet.mode = "fewer";
+      const order: string[] = [];
+      const result = await f.sender.prepareAndSendAll(requests(2), {
+        onSigned: () => {},
+        onPrompt: (p) => order.push(`prompt:${p.mode}:${p.index}`),
+        onFallback: (reason) => order.push(`fallback:${reason}`),
+      });
+      expect(order).toEqual(["prompt:batch:0", `fallback:${result.fallbackReason}`, "prompt:per-transaction:0", "prompt:per-transaction:1"]);
+    });
+
+    it("is not called when the batch is signed, or with 'per-transaction' from the start", async () => {
+      const onFallback = vi.fn();
+      await fixture().sender.prepareAndSendAll(requests(2), { onSigned: () => {}, onFallback });
+      await fixture().sender.prepareAndSendAll(requests(2), { mode: "per-transaction", onSigned: () => {}, onFallback });
+      expect(onFallback).not.toHaveBeenCalled();
+    });
   });
 
   it("a refusal's advice follows what it is about: a guard is not a fee setting, and another wallet means the same account", () => {
@@ -473,7 +746,9 @@ describe("prepareAndSendAll: one prompt for N transactions", () => {
     expect(remembersSignSeparately(null)).toBe(false);
     // The panel remembers it for the wallet, and says once how to continue.
     const panel = readFileSync(join(process.cwd(), "components/send-to-wallets-panel.tsx"), "utf8");
-    expect(panel).toContain("if (remembersSignSeparately(result.fallbackReason)) chooseSeparate(true);");
+    // As soon as the batch falls back (onFallback), so a first one-by-one prompt that throws does not lose it.
+    expect(panel).toMatch(/onFallback: \(reason\) => \{\s*if \(remembersSignSeparately\(reason\)\) chooseSeparate\(true\);\s*\}/);
+    expect(panel).not.toContain("remembersSignSeparately(result.fallbackReason)");
     expect(panel).toContain('${why}${/open this page again/i.test(why) ? "" : " Open this page again to continue the run."}');
     // A transfer that landed and failed is not "not confirmed yet": nothing of it moved, and the resume sends its rows.
     expect(panel).toContain('if (outcomes.some((o) => o === "failed")) {');
@@ -709,6 +984,70 @@ describe("prepareAndSendAll: what a wallet may change", () => {
       expect(journal.flat().map((s) => s.signature)).toEqual(broadcast(f.sent).map((s) => s.id));
       expect(events.filter((e) => e === "wallet.single" || e === "send" || e === "settle").slice(0, 4)).toEqual(["wallet.single", "send", "settle", "wallet.single"]);
     }
+  });
+
+  describe("Send to wallets' headroom for guards (computeUnitHeadroom)", () => {
+    /** The limit the wallet was asked to sign under (the first instruction: Manci's SetComputeUnitLimit). */
+    const builtLimit = (bytes: Uint8Array) => {
+      const message = getCompiledTransactionMessageDecoder().decode(getTransactionDecoder().decode(bytes).messageBytes);
+      return decodeComputeBudgetInstruction({ programAddress: COMPUTE_BUDGET_PROGRAM_ADDRESS, data: message.instructions[0].data });
+    };
+
+    it("builds max(200,000, ceil(1.1 × need) + headroom); without it, the SDK's formula", async () => {
+      sim.units = 500_000;
+      await fixture().sender.prepareAndSendAll(requests(1), { onSigned: () => {}, computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS });
+      expect(builtLimit(wallet.calls[0][0])).toEqual({ kind: "limit", units: 578_000 });
+      await fixture().sender.prepareAndSendAll(requests(1), { onSigned: () => {} });
+      expect(builtLimit(wallet.calls[1][0])).toEqual({ kind: "limit", units: 550_000 });
+      // A small transaction: the 200,000 floor already leaves the room (no extra fee).
+      sim.units = 120_000;
+      await fixture().sender.prepareAndSendAll(requests(1), { onSigned: () => {}, computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS });
+      expect(builtLimit(wallet.calls[2][0])).toEqual({ kind: "limit", units: 200_000 });
+    });
+
+    it("four guards on a 250,000-unit transaction: refused without the headroom (275,000 < 278,000), accepted with it", async () => {
+      sim.units = 250_000;
+      const fourGuards = (ixs: Instruction[]) => [...lighthouse(ixs), assertion(10, OTHER)];
+      const without = fixture();
+      wallet.rewrite = (bytes) => rewritten(bytes, fourGuards);
+      without.sign.mockImplementation(signWith(fourGuards));
+      const refused = await without.sender.prepareAndSendAll(rowRequests(1), { onSigned: () => {} }).catch((e: unknown) => e);
+      expect(refused).toBeInstanceOf(SignedTransactionChangedError);
+      expect((refused as Error).message).toMatch(/added 4 Lighthouse instructions .*compute unit limit of 275000 is below the 278000 the transaction needs with them/);
+      expect(without.sent).toHaveLength(0);
+
+      const withRoom = fixture();
+      const result = await withRoom.sender.prepareAndSendAll(rowRequests(1), { onSigned: () => {}, computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS });
+      expect(result).toMatchObject({ mode: "batch", prompts: 1, fallbackReason: null });
+      expect(broadcast(withRoom.sent)[0].budget[0]).toEqual({ kind: "limit", units: 303_000 });
+    });
+
+    it("refuses a headroom that is not a whole number of units within the 1.4M ceiling, before anything else", async () => {
+      for (const computeUnitHeadroom of [-1, 1.5, 1_400_001, Number.NaN]) {
+        const f = fixture();
+        await expect(f.sender.prepareAndSendAll(requests(1), { onSigned: () => {}, computeUnitHeadroom })).rejects.toThrow(/headroom must be an integer/);
+      }
+      expect(events).not.toContain("simulate");
+    });
+
+    it("the panel asks for it on every group of a distribution", () => {
+      const panel = readFileSync(join(process.cwd(), "components/send-to-wallets-panel.tsx"), "utf8");
+      expect(panel).toMatch(/sender\.prepareAndSendAll\(requests, \{[\s\S]{0,400}computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS,/);
+    });
+  });
+
+  it("guards on several: the fallback is reported (onFallback) before the first one-by-one prompt, so a refusal there still leaves it remembered", async () => {
+    const f = fixture();
+    wallet.rewrite = (bytes) => rewritten(bytes, lighthouse);
+    f.sign.mockRejectedValueOnce(Object.assign(new Error("User rejected the request."), { code: 4001 }));
+    const reasons: string[] = [];
+    await expect(
+      f.sender.prepareAndSendAll(rowRequests(2), { onSigned: () => {}, onFallback: (reason) => void reasons.push(reason) }),
+    ).rejects.toMatchObject({ code: 4001 });
+    expect(reasons).toHaveLength(1);
+    expect(reasons[0]).toContain(WALLET_STATE_GUARDS);
+    expect(remembersSignSeparately(reasons[0])).toBe(true);
+    expect(f.sent).toHaveLength(0);
   });
 
   // Phantom's guard on the fee payer, decoded from the mainnet transactions it
