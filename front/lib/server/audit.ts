@@ -8,13 +8,17 @@
 // stamps are applied last: caller metadata can never override them.
 //
 // Categories in SERVER_ONLY_AUDIT_CATEGORIES ("kyc", shown as "KYC &
-// privacy", and "compliance", the sanctions screening records) are refused by
-// the unsigned /api/audit route, so a "kyc" row in audit_events is always a
-// server-attributed one — "who viewed which KYC document" cannot be forged by
-// anyone holding only the public site; nor can a screening record. Rows
-// about a dossier target its client id (kyc_document_view, kyc_data_export,
-// client_anonymize); confidential repository files target "document:<id>"
-// (confidential_document_view).
+// privacy"; "compliance", the sanctions screening records; and "operator",
+// shown as "Operator records", the document anchors the Super Admin
+// records) are refused by the unsigned /api/audit route, so a "kyc" row in
+// audit_events is always a server-attributed one — "who viewed which KYC
+// document" cannot be forged by anyone holding only the public site; nor can
+// a screening record or an anchor record. Rows about a dossier target its
+// client id (kyc_document_view, kyc_data_export, client_anonymize);
+// confidential repository files target "document:<id>"
+// (confidential_document_view). A reader that labels a row as verified still
+// checks more than its category where it can (a document anchor: the row id
+// derived from its signature, lib/server/document-anchor isRecordedAnchorRow).
 //
 // writeServerAudit THROWS SiwsError(503) when the insert fails. Callers that
 // promise "access is logged" (doc-url, export) must let it propagate and hand
@@ -29,11 +33,13 @@ import { detectNetwork } from "@/lib/network";
 
 /**
  * Categories only the server may write (refused by the unsigned /api/audit):
- * "kyc", and "compliance" — the sanctions screening records a distribution's
+ * "kyc", "compliance" — the sanctions screening records a distribution's
  * evidence cites (lib/server/screening-evidence.ts), which a forged row must
- * never pass for.
+ * never pass for — and "operator": the document anchors
+ * (app/api/admin/document-anchor), each verified on chain before its row is
+ * written, so the anchor list never shows a row nobody verified.
  */
-export const SERVER_ONLY_AUDIT_CATEGORIES: ReadonlySet<string> = new Set<AuditCategory>(["kyc", "compliance"]);
+export const SERVER_ONLY_AUDIT_CATEGORIES: ReadonlySet<string> = new Set<AuditCategory>(["kyc", "compliance", "operator"]);
 
 /**
  * The actor_wallet of the server's own rows (the retry worker's
@@ -53,6 +59,13 @@ export type AuditActorSource =
   | "siws";
 
 export type ServerAuditInput = {
+  /**
+   * The row id, when the caller derives it (a uuid): the primary key then
+   * makes the row unique, and a second insert with the same id throws
+   * ServerAuditRowExistsError instead of writing a duplicate. Leave it out
+   * for an ordinary row (the database picks the id).
+   */
+  id?: string;
   ix_name: string;
   category: AuditCategory;
   actor_wallet: string;
@@ -69,9 +82,20 @@ export function actorSourceOf(via: "signature" | "session" | undefined): AuditAc
   return via === "session" ? "siws-session" : via === "signature" ? "siws-signature" : "siws";
 }
 
+/** A row with the caller's id (ServerAuditInput.id) is already in audit_events (unique violation 23505). */
+export class ServerAuditRowExistsError extends SiwsError {
+  readonly id: string;
+  constructor(id: string) {
+    super(409, "This audit row is already recorded");
+    this.name = "ServerAuditRowExistsError";
+    this.id = id;
+  }
+}
+
 /**
  * Append one server-attributed row to audit_events and return its id.
- * THROWS SiwsError(503) when the row could not be written.
+ * THROWS SiwsError(503) when the row could not be written, and
+ * ServerAuditRowExistsError when `input.id` is given and already taken.
  */
 export async function writeServerAudit(
   sb: SupabaseClient,
@@ -84,10 +108,12 @@ export async function writeServerAudit(
     actor_source: input.actor_source,
   };
   let row: { id?: unknown } | null = null;
+  let taken = false;
   try {
     const { data, error } = await sb
       .from("audit_events")
       .insert({
+        ...(input.id !== undefined ? { id: input.id } : {}),
         network: detectNetwork(),
         ix_name: input.ix_name,
         category: input.category,
@@ -100,7 +126,9 @@ export async function writeServerAudit(
       })
       .select("id")
       .single();
-    if (error) {
+    if (error && input.id !== undefined && error.code === "23505") {
+      taken = true;
+    } else if (error) {
       console.error("[audit] server audit insert failed:", error.message);
     } else {
       row = data as { id?: unknown } | null;
@@ -111,6 +139,7 @@ export async function writeServerAudit(
       err instanceof Error ? err.message : String(err),
     );
   }
+  if (taken && input.id !== undefined) throw new ServerAuditRowExistsError(input.id);
   if (!row || typeof row.id !== "string") {
     throw new SiwsError(503, "Audit log unavailable — nothing was released; try again");
   }

@@ -22,8 +22,8 @@
 
 import "server-only";
 
-import { createHash } from "node:crypto";
 import { SERVER_ACTOR } from "@/lib/server/audit";
+import { uuidV8FromSha256 } from "@/lib/server/derived-uuid";
 
 export const DISTRIBUTION_AUDIT_IX = "share_class_distribution";
 /** metadata.actor_source / reconciled_by of the worker's rows (/api/audit never writes it). */
@@ -51,15 +51,12 @@ export const RECONCILED_METADATA_KEYS: readonly string[] = [
 
 /**
  * The id of the server's final row for one transaction: a UUID (version 8,
- * RFC 9562) from SHA-256 of the network and the signature, so a second
- * write of it is a conflict, never a second row.
+ * RFC 9562) from SHA-256 of the network and the signature
+ * (lib/server/derived-uuid), so a second write of it is a conflict, never a
+ * second row.
  */
 export function reconciledAuditId(network: string, signature: string): string {
-  const h = createHash("sha256").update(`manci:distribution-audit:v1:${network}:${signature}`).digest();
-  h[6] = (h[6] & 0x0f) | 0x80;
-  h[8] = (h[8] & 0x3f) | 0x80;
-  const hex = h.subarray(0, 16).toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
+  return uuidV8FromSha256(`manci:distribution-audit:v1:${network}:${signature}`);
 }
 
 /** An audit_events row as read (every field optional: a reader selects what it needs). */

@@ -4,11 +4,15 @@
 // the earliest — and counts the others on it. Pending rows and other kinds
 // of rows pass through. The admin audit page reads through it. Which row is
 // the server's comes from /api/audit/list (chain_checked), never from the
-// metadata a caller of the unsigned /api/audit can write.
+// metadata a caller of the unsigned /api/audit can write. A recorded
+// document anchor is noted from /api/audit/list's anchor_verified (the row id
+// the record route derives), never from its category alone.
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { collapseDistributionFinals, isChainChecked, type FeedAuditRow } from "@/lib/audit-feed";
+import { collapseDistributionFinals, isChainChecked, isVerifiedDocumentAnchor, type FeedAuditRow } from "@/lib/audit-feed";
+import { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor-audit";
+import { DOCUMENT_ANCHOR_AUDIT as REEXPORTED } from "@/lib/document-anchor";
 
 const SIG_A = "A".repeat(88);
 const SIG_B = "B".repeat(88);
@@ -108,6 +112,31 @@ describe("collapseDistributionFinals", () => {
   });
 });
 
+describe("isVerifiedDocumentAnchor", () => {
+  it("is the anchor route's row: /api/audit/list said so (anchor_verified), and category and ix agree", () => {
+    expect(DOCUMENT_ANCHOR_AUDIT).toEqual({ category: "operator", ixName: "document_anchor" });
+    expect(REEXPORTED).toBe(DOCUMENT_ANCHOR_AUDIT);
+    const anchor = { category: "operator", ix_name: "document_anchor", anchor_verified: true };
+    expect(isVerifiedDocumentAnchor(anchor)).toBe(true);
+    // The category alone is not enough: the server did not find the derived id
+    // (tests/document-anchor-routes.test.ts, "/api/audit/list: anchor_verified").
+    expect(isVerifiedDocumentAnchor({ ...anchor, anchor_verified: false })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ category: "operator", ix_name: "document_anchor" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ...anchor, anchor_verified: "true" })).toBe(false);
+    // Anything else is not one, whatever the flag says.
+    expect(isVerifiedDocumentAnchor({ ...anchor, category: "other" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ...anchor, category: "platform" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ix_name: "document_anchor", anchor_verified: true })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ...anchor, ix_name: "share_class_distribution" })).toBe(false);
+  });
+
+  it("keeps the feed helper free of the anchor builder (kit, compute budget): only the constants module", () => {
+    const feed = fs.readFileSync(path.join(__dirname, "..", "lib/audit-feed.ts"), "utf8");
+    expect(feed).toContain('from "@/lib/document-anchor-audit"');
+    expect(feed).not.toContain('from "@/lib/document-anchor"');
+  });
+});
+
 describe("the admin audit page reads through it", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "app/admin/audit/page.tsx"), "utf8");
 
@@ -118,5 +147,10 @@ describe("the admin audit page reads through it", () => {
     expect(src).toMatch(/\{r\.chain_checked \? \([\s\S]*?Server[\s\S]*?\) : r\.actor_wallet \?/);
     // The label comes from the server's flag, never from a metadata marker a caller can post.
     expect(src).not.toContain("reconciled_by_server");
+  });
+
+  it("notes a recorded document anchor as verified on chain (finalized), from the server's anchor_verified", () => {
+    expect(src).toContain("anchor_verified: isVerifiedDocumentAnchor(r),");
+    expect(src).toMatch(/\{r\.anchor_verified && \([\s\S]*?Verified on chain \(finalized\)/);
   });
 });
