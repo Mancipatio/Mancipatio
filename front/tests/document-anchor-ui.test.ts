@@ -5,8 +5,9 @@
 // network and signer only) and blocks a new send. The panel's send → confirm
 // → record flow and its result card (lib/document-anchor-client.ts) are
 // driven directly: what is saved, cleared, recorded and offered after each
-// outcome. The page's recording retry: only "not yet" is retried. And the
-// browser hash of a file against known SHA-256 values.
+// outcome, what "Forget it" warns about, and a send error that may have come
+// after the broadcast. The page's recording retry: only "not yet" is retried.
+// And the browser hash of a file against known SHA-256 values.
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -42,9 +43,12 @@ vi.mock("@/lib/siws-client", async (importOriginal) => ({
 
 import { DocumentAnchorPanel } from "@/app/admin/platform/document-anchor-panel";
 import {
+  FORGET_CONFIRMED_WARNING,
+  FORGET_UNCONFIRMED_WARNING,
   RECORD_RETRY_DELAYS_MS,
   anchorBlocksNewSend,
   anchorResultView,
+  anchorSendMayHaveLanded,
   dismissAnchorResult,
   readPendingAnchor,
   recordDocumentAnchorWithRetry,
@@ -61,6 +65,7 @@ import { DOCUMENT_ANCHOR_NOT_YET } from "@/lib/document-anchor";
 import { detectNetwork, type Network } from "@/lib/network";
 import type { SignatureOutcome } from "@/lib/simulation-gate";
 import { sha256HexOfFile } from "@/lib/storage-client";
+import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 
 const render = (superAdmin: string) => renderToStaticMarkup(createElement(DocumentAnchorPanel, { superAdmin }));
 
@@ -254,10 +259,28 @@ describe("runDocumentAnchorFlow (the panel's send → confirm → record)", () =
     expect(f.recordFn).toHaveBeenCalledWith(pendingOf());
   });
 
+  it("a send error after the wallet may have sent it (wallet, account or network changed) is told apart", () => {
+    expect(anchorSendMayHaveLanded(new TransactionWalletChangedError())).toBe(true);
+    // Wrapped by the SDK hook.
+    expect(anchorSendMayHaveLanded(new Error("send failed", { cause: new TransactionWalletChangedError() }))).toBe(true);
+    // Anything else came before the broadcast or from the wallet's refusal.
+    expect(anchorSendMayHaveLanded(new Error("User rejected the request"))).toBe(false);
+    expect(anchorSendMayHaveLanded(new Error("The wallet returned no transaction signature."))).toBe(false);
+    expect(anchorSendMayHaveLanded("TransactionWalletChangedError")).toBe(false);
+    expect(anchorSendMayHaveLanded(null)).toBe(false);
+  });
+
   it("the panel wires it so: the review closes once sent, not on a send error; inputs are cleared on confirmed only", () => {
     const panel = readFileSync(join(process.cwd(), "app/admin/platform/document-anchor-panel.tsx"), "utf8");
     const onSendError = panel.slice(panel.indexOf("onSendError:"), panel.indexOf("onSent:"));
-    expect(onSendError).not.toContain("setConfirmOpen");
+    // Closed only when the anchor may be on chain (never "Nothing was anchored" then); open on any other send error.
+    const mayHaveLanded = onSendError.slice(onSendError.indexOf("if (anchorSendMayHaveLanded(err))"), onSendError.indexOf("} else {"));
+    expect(mayHaveLanded).toContain("setConfirmOpen(false)");
+    expect(mayHaveLanded).toContain("The anchor may have been sent");
+    expect(mayHaveLanded).not.toContain("Nothing was anchored");
+    const otherwise = onSendError.slice(onSendError.indexOf("} else {"));
+    expect(otherwise).toContain("Nothing was anchored");
+    expect(otherwise).not.toContain("setConfirmOpen");
     const onSent = panel.slice(panel.indexOf("onSent:"), panel.indexOf("wait:"));
     expect(onSent).toContain("setConfirmOpen(false)");
     const onOutcome = panel.slice(panel.indexOf("onOutcome:"), panel.indexOf("      record,\n"));
@@ -276,11 +299,32 @@ describe("the result card", () => {
     expect(anchorResultView(resultOf({ outcome: "timeout", recordError: "Not recorded: …" }))).toMatchObject({ canRecord: true, dismissLabel: "Forget it" });
   });
 
+  it("'Forget it' says what is lost: a confirmed anchor stays on chain unrecorded; otherwise check the explorer first", () => {
+    const confirmed = anchorResultView(resultOf({ outcome: "confirmed", recordError: "Audit log unavailable" }));
+    expect(confirmed).toMatchObject({ heading: "Anchored on chain", canRecord: true, dismissLabel: "Forget it", dismissWarning: FORGET_CONFIRMED_WARNING });
+    expect(FORGET_CONFIRMED_WARNING).toMatch(/is on chain/);
+    expect(FORGET_CONFIRMED_WARNING).toMatch(/cannot record it later/);
+    for (const outcome of ["timeout", "unknown", "restored"] as const) {
+      expect(anchorResultView(resultOf({ outcome, recordError: "Not recorded" }))).toMatchObject({
+        dismissLabel: "Forget it",
+        dismissWarning: FORGET_UNCONFIRMED_WARNING,
+      });
+    }
+    expect(FORGET_UNCONFIRMED_WARNING).toMatch(/only when the explorer does not show this transaction/);
+    // No warning without "Forget it".
+    expect(anchorResultView(resultOf({ outcome: "confirmed" })).dismissWarning).toBeNull();
+    expect(anchorResultView(resultOf({ outcome: "failed" })).dismissWarning).toBeNull();
+    expect(anchorResultView(resultOf({ outcome: "confirmed", record: recorded })).dismissWarning).toBeNull();
+    // The card shows it.
+    const panel = readFileSync(join(process.cwd(), "app/admin/platform/document-anchor-panel.tsx"), "utf8");
+    expect(panel).toContain("{view.dismissWarning && <p");
+  });
+
   it("a successful record after a timeout, an unknown status or a restore shows 'Anchored on chain' (the server read it finalized)", () => {
     for (const outcome of ["timeout", "unknown", "restored", null] as const) {
       const after = withRecordedAnchor(resultOf({ outcome, recordError: "earlier failure" }), recorded);
       expect(after).toMatchObject({ outcome: "confirmed", record: recorded, recordError: null });
-      expect(anchorResultView(after)).toEqual({ heading: "Anchored on chain", tone: "confirmed", canRecord: false, dismissLabel: "Done" });
+      expect(anchorResultView(after)).toEqual({ heading: "Anchored on chain", tone: "confirmed", canRecord: false, dismissLabel: "Done", dismissWarning: null });
       expect(anchorBlocksNewSend(after)).toBe(false);
     }
   });

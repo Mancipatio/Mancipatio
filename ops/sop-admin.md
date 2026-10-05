@@ -220,14 +220,15 @@ document quotes (MANCI-2026-0001: page 3 of the certificate).
 
 1. Choose the final file (it is hashed in the browser and never uploaded; a
    file over 256 MB is hashed with `shasum -a 256` instead) or paste its
-   SHA-256 (the whole `shasum` line is accepted); enter the reference
-   (letters, digits, `. _ : / -`, no spaces, at most 64).
+   SHA-256 (the whole `shasum` line of that one file is accepted; the output
+   for several files is refused); enter the reference (letters, digits,
+   `. _ : / -`, no spaces, never `sha256:`, at most 64).
 2. Compare the *Memo text (exactly)* line with the text in the signed
    document, character for character (*Copy memo* copies it), and check the
    signer and the fee. A memo cannot be changed once it is on chain.
 3. *Review and anchor* → approve in the wallet. The page waits for the
    confirmation, then the server reads the transaction back once it is
-   finalized (about 15 seconds later; the page keeps trying for 40 seconds),
+   finalized (about 13 seconds later; the page keeps trying for 40 seconds),
    checks the signer, the memo text and that nothing else was done (at most
    four of the wallet's own Lighthouse guard instructions excepted), and
    writes the audit row (category *Operator records*, `document_anchor`). The
@@ -236,7 +237,17 @@ document quotes (MANCI-2026-0001: page 3 of the certificate).
    anchor a second time. While an anchor is not recorded, the page does not
    let you send another one; *Forget it* (offered after a failed record)
    releases it, so use it only when the explorer does not show the
-   transaction.
+   transaction. The page keeps no other copy of the signature: once
+   forgotten, an anchor that is on chain cannot be recorded from the page
+   (the card says so when the network confirmed it).
+4. If the send ends in an error saying the wallet, account or network
+   changed, the anchor may already be on chain: open the super admin
+   wallet's transactions on the explorer before sending it again.
+5. Record every anchor before the super admin key is rotated
+   (`Platform.admin`): the server checks the super admin when it records,
+   not when the memo was signed, so after a rotation neither key can record
+   it (the memo stays on chain, unrecorded). Recording is let through during
+   maintenance; sending is not.
 
 To verify an anchor (anyone): hash the file (`shasum -a 256 <file>`, or
 `certutil -hashfile <file> SHA256` on Windows), open the signature on

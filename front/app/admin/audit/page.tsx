@@ -34,7 +34,8 @@ type FeedRow = {
    * sender's claims (metadata.client_claims) are not verified by it. */
   chain_checked: boolean;
   /** A recorded document anchor: written only by the server after it verified the finalized transaction
-   * (lib/audit-feed isVerifiedDocumentAnchor; "operator" is a category the unsigned /api/audit refuses). */
+   * (lib/audit-feed isVerifiedDocumentAnchor, from /api/audit/list's anchor_verified: the row id the record
+   * route derives from the signature, never the category alone). */
   anchor_verified: boolean;
   /** Other final rows of the same transaction collapsed into this one (lib/audit-feed). */
   duplicates: number;

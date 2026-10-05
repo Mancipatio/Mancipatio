@@ -13,8 +13,8 @@
 // payer and hold exactly one Memo v2 instruction, signed by that wallet,
 // whose text is exactly "<reference> sha256:<sha256>"; besides it only
 // compute-budget instructions and the wallet's own Lighthouse assertions
-// (at most DOCUMENT_ANCHOR_MAX_WALLET_GUARDS, no inner calls) are allowed
-// (documentAnchorEvidence). Only a FINALIZED transaction is recorded: a
+// (at most DOCUMENT_ANCHOR_MAX_WALLET_GUARDS, read-only accounts besides the
+// fee payer, no inner calls) are allowed (documentAnchorEvidence). Only a FINALIZED transaction is recorded: a
 // confirmed one is checked at once (a wrong anchor gets its 400 without
 // waiting) and answered 503 starting with DOCUMENT_ANCHOR_NOT_YET, like one
 // the node does not show at all; the page waits and posts again. Then one
@@ -29,6 +29,14 @@
 // two instances recording the same signature at once cannot both insert: the
 // primary key refuses the second, which then answers the first one's row.
 // On one instance a concurrent second request is refused at once (409, retry).
+//
+// Platform.admin is checked when the anchor is RECORDED, not at the slot it
+// was signed in. If the Super Admin key changes in between, neither key can
+// record it (the old one is no longer Platform.admin: 403; the new one is not
+// the memo's signer: 400): the memo stays on chain, unrecorded. So an anchor
+// is recorded before the Super Admin key is rotated (ops/sop-admin.md). A
+// duplicate is answered to any current Super Admin whose reference and hash
+// match, whoever recorded it; it reveals nothing the chain does not show.
 import { NextResponse } from "next/server";
 import { isSignature } from "@solana/kit";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
@@ -100,7 +108,7 @@ export async function POST(request: Request) {
       throw err;
     }
     // A confirmed block can still be dropped on a minority fork: the evidence
-    // row waits for finalized (about 13 s more; the page retries).
+    // row waits for finalized (about 13 seconds more; the page retries).
     if (commitment !== "finalized") throw anchorNotYetError(true);
 
     // Another instance may have recorded it while the chain was read.

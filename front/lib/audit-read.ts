@@ -8,6 +8,8 @@ export type PrivateAuditRow = {
   reason: string | null; status: AuditStatus; metadata: Record<string, unknown> | null;
   /** Computed by /api/audit/list: the retry worker's chain-checked row (lib/server/reconciled-audit). */
   chain_checked?: boolean;
+  /** Computed by /api/audit/list: a document anchor the record route wrote (lib/server/document-anchor). */
+  anchor_verified?: boolean;
 };
 export async function listAuditEvents(session: WalletSession | null | undefined, page = 0): Promise<PrivateAuditRow[]> {
   return signedFetch(session, "/api/audit/list", "audit.list", { page });

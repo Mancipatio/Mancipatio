@@ -4,7 +4,8 @@
 // record route runs on the transaction it reads back — the builder's own
 // compiled transaction and the shape Phantom signs on mainnet pass it; a
 // wrong signer, a wrong text, an extra instruction, a missing inner
-// instruction list, too many guards or a failed transaction do not.
+// instruction list or account roles, too many guards, a guard on a writable
+// account or a failed transaction do not.
 import {
   AccountRole,
   appendTransactionMessageInstructions,
@@ -30,6 +31,7 @@ import {
   MEMO_PROGRAM_ADDRESS,
   documentAnchorEvidence,
   documentAnchorFee,
+  documentAnchorHashInputError,
   documentAnchorInstruction,
   documentAnchorMemoText,
   documentAnchorPanelVisible,
@@ -104,6 +106,9 @@ describe("memo text and instruction", () => {
     const compiled = getCompiledTransactionMessageDecoder().decode(compileTransaction(message).messageBytes);
     expect(compiled.header.numSignerAccounts).toBe(1);
     expect(compiled.staticAccounts[0]).toBe(SA);
+    // The fee payer is the only writable account: every other key is read-only.
+    expect(compiled.header.numReadonlySignerAccounts).toBe(0);
+    expect(compiled.header.numReadonlyNonSignerAccounts).toBe(compiled.staticAccounts.length - 1);
     // The bytes the wallet signs, as getTransaction (json) returns them: the verification accepts them.
     const tx: ChainTransaction = {
       slot: 321,
@@ -111,7 +116,11 @@ describe("memo text and instruction", () => {
       transaction: {
         signatures: [SIG],
         message: {
-          header: { numRequiredSignatures: compiled.header.numSignerAccounts },
+          header: {
+            numRequiredSignatures: compiled.header.numSignerAccounts,
+            numReadonlySignedAccounts: compiled.header.numReadonlySignerAccounts,
+            numReadonlyUnsignedAccounts: compiled.header.numReadonlyNonSignerAccounts,
+          },
           accountKeys: compiled.staticAccounts,
           instructions: compiled.instructions.map((ix) => ({
             programIdIndex: ix.programAddressIndex,
@@ -148,6 +157,18 @@ describe("reference labels", () => {
       expect(DOCUMENT_ANCHOR_REFERENCE_PATTERN.test(bad)).toBe(false);
     }
   });
+
+  it("refuses 'sha256:' anywhere in it, in any letter case: the memo carries it once, before the hash", () => {
+    for (const bad of [`sha256:${SHA.slice(0, 40)}`, "SHA256:abc", "doc-sha256:1", "a/Sha256:x"]) {
+      expect(DOCUMENT_ANCHOR_REFERENCE_PATTERN.test(bad)).toBe(false);
+      expect(documentAnchorReferenceError(bad)).toMatch(/cannot contain "sha256:"/);
+      expect(() => documentAnchorMemoText({ reference: bad, sha256: SHA })).toThrow(DocumentAnchorError);
+    }
+    // "sha256" without the colon, and other colons, stay allowed.
+    for (const ok of ["sha256", "SHA256.pdf", "sha256-v1", "doc:sha-256", "MANCI:2026"]) {
+      expect(documentAnchorReferenceError(ok)).toBeNull();
+    }
+  });
 });
 
 describe("pasted hashes", () => {
@@ -163,6 +184,25 @@ describe("pasted hashes", () => {
     expect(normalizeSha256Input(`${SHA}  MANCI-2026-0001.pdf`)).toBe(SHA);
     expect(normalizeSha256Input(`${SHA.toUpperCase()} *certificate final.pdf\n`)).toBe(SHA);
     expect(normalizeSha256Input(`${SHA}\tfile.pdf`)).toBe(SHA);
+  });
+
+  it("refuses the output for several files, as lines or joined into one line by a one-line field", () => {
+    const SHA2 = "b".repeat(64);
+    for (const several of [
+      `${SHA}  a.pdf\n${SHA2}  b.pdf`,
+      `${SHA}  a.pdf\r\n${SHA2}  b.pdf\n`,
+      `${SHA}\n${SHA2}`,
+      // Pasted into the one-line field: Chrome drops the line break, Firefox makes it a space.
+      `${SHA}  a.pdf${SHA2}  b.pdf`,
+      `${SHA}  a.pdf ${SHA2}  b.pdf`,
+    ]) {
+      expect(normalizeSha256Input(several)).toBeNull();
+      expect(documentAnchorHashInputError(several)).toMatch(/^Paste one hash/);
+    }
+    expect(documentAnchorHashInputError("")).toBeNull();
+    expect(documentAnchorHashInputError("   ")).toBeNull();
+    expect(documentAnchorHashInputError(`${SHA}  a.pdf\n`)).toBeNull();
+    expect(documentAnchorHashInputError("abc")).toMatch(/64-character SHA-256/);
   });
 
   it("refuses the wrong length, non-hex, 0x and inner spaces", () => {
@@ -211,17 +251,20 @@ const guard = (kind = 6): Ix => ({ program: LIGHTHOUSE, accounts: [SA], data: ne
 // Mainnet 5RBDZ… as getTransaction (json) returns it (public RPC, read
 // 2026-10-05), with the app's asset_registry instruction swapped for the
 // anchor memo: ComputeBudget limit and price, Lighthouse kind 6 (37 bytes) on
-// a writable account, the instruction, Lighthouse kind 6 (26 bytes) on the
-// fee payer; one signer; no inner calls (an empty array).
+// an account the app's instruction wrote, the instruction, Lighthouse kind 6
+// (26 bytes) on the fee payer; one signer; no inner calls (an empty array).
+// With the memo in place nothing writes that account any more, so the header
+// is the one an anchor compiles to: the fee payer writable, every other key
+// read-only (`writableGuarded` keeps it writable, as in the original).
 const WRITABLE = "FJaWxqhSxjYsH8yMqc76H769vL8kapaFvEWB37yxom4Z";
-function phantomShape(memoText = MEMO): ChainTransaction {
+function phantomShape(memoText = MEMO, writableGuarded = false): ChainTransaction {
   return {
     slot: 453_356_383,
     blockTime: 1_791_143_700,
     transaction: {
       signatures: [SIG],
       message: {
-        header: { numRequiredSignatures: 1 },
+        header: { numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: writableGuarded ? 3 : 4 },
         accountKeys: [SA, WRITABLE, COMPUTE_BUDGET_PROGRAM_ADDRESS, LIGHTHOUSE, MEMO_PROGRAM_ADDRESS],
         instructions: [
           { programIdIndex: 2, accounts: [], data: "Fj2Eoy" },
@@ -237,19 +280,33 @@ function phantomShape(memoText = MEMO): ChainTransaction {
 }
 const expected = { signature: SIG, wallet: SA, reference: REFERENCE, sha256: SHA };
 
+/**
+ * An anchor-shaped transaction. Its header gives the roles an anchor compiles
+ * to (every signer writable, every non-signer read-only); `roles: false`
+ * leaves them out, as a node that does not return them.
+ */
 function anchorTx(
-  over: { payer?: string; signers?: number; instructions?: Ix[]; inner?: Ix[]; innerAt?: string; err?: unknown; blockTime?: number | null } = {},
+  over: {
+    payer?: string; signers?: number; instructions?: Ix[]; inner?: Ix[]; innerAt?: string; err?: unknown; blockTime?: number | null;
+    roles?: boolean; loaded?: { writable?: string[]; readonly?: string[] };
+  } = {},
 ) {
   const instructions = over.instructions ?? [cb(2), cb(3), memoIx()];
   const innerAt = instructions.findIndex((ix) => ix.program === (over.innerAt ?? MEMO_PROGRAM_ADDRESS));
-  return buildTx({
+  const tx = buildTx({
     signature: SIG,
     payer: over.payer ?? SA,
     signers: over.signers,
     instructions: instructions.map((ix, i) => ({ ix, inner: i === innerAt ? over.inner : undefined })),
     err: over.err,
     blockTime: over.blockTime,
+    loaded: over.loaded,
   }).tx as unknown as ChainTransaction;
+  if (over.roles === false) return tx;
+  const message = tx.transaction.message;
+  const signers = Number(message.header.numRequiredSignatures);
+  const header = { ...message.header, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: message.accountKeys.length - signers };
+  return { ...tx, transaction: { ...tx.transaction, message: { ...message, header } } };
 }
 
 const refused = (tx: ChainTransaction, pattern: RegExp, exp = expected) => {
@@ -284,6 +341,35 @@ describe("documentAnchorEvidence", () => {
       const tx = phantomShape();
       refused({ ...tx, meta: { ...tx.meta!, innerInstructions } }, /did not return the transaction's inner instructions/);
     }
+  });
+
+  it("refuses when the node leaves out the account roles, or they make the fee payer read-only", () => {
+    refused(anchorTx({ roles: false }), /did not return the transaction's account roles/);
+    const tx = phantomShape();
+    const withHeader = (header: ChainTransaction["transaction"]["message"]["header"]): ChainTransaction => ({
+      ...tx,
+      transaction: { ...tx.transaction, message: { ...tx.transaction.message, header } },
+    });
+    refused(withHeader({ numRequiredSignatures: 1, numReadonlySignedAccounts: 1, numReadonlyUnsignedAccounts: 4 }), /account roles/);
+    refused(withHeader({ numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: 5 }), /account roles/);
+    refused(withHeader({ numRequiredSignatures: 1, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: -1 }), /account roles/);
+  });
+
+  it("refuses a Lighthouse instruction on a writable account other than the fee payer (an assertion only reads)", () => {
+    // 5RBDZ… as signed, the guarded account still writable: not an anchor's shape.
+    refused(phantomShape(MEMO, true), /Lighthouse instruction names a writable or signing account other than the fee payer/);
+    // A loaded (lookup table) writable account.
+    refused(
+      anchorTx({ instructions: [cb(2), { ...guard(), accounts: [OTHER] }, memoIx()], loaded: { writable: [OTHER] } }),
+      /writable or signing account other than the fee payer/,
+    );
+    // The same account read-only, static or loaded, passes; so does a guard naming the fee payer.
+    expect(documentAnchorEvidence(anchorTx({ instructions: [cb(2), { ...guard(), accounts: [OTHER] }, memoIx()] }), expected).walletGuardInstructions).toBe(1);
+    expect(
+      documentAnchorEvidence(anchorTx({ instructions: [cb(2), { ...guard(), accounts: [OTHER] }, memoIx()], loaded: { readonly: [OTHER] } }), expected)
+        .walletGuardInstructions,
+    ).toBe(1);
+    expect(documentAnchorEvidence(anchorTx({ instructions: [cb(2), { ...guard(), accounts: [SA, OTHER] }, memoIx()] }), expected).walletGuardInstructions).toBe(1);
   });
 
   it("refuses more Lighthouse instructions than an anchor needs", () => {

@@ -47,9 +47,12 @@ export function maintenanceNotice(message: string | null | undefined): string {
 //     (admin.documentAnchorRecord), and not from this list: it is a session
 //     action (lib/siws-session.ts), so it passes with the session reads. Its
 //     only write is the audit row of an anchor the server re-reads from the
-//     chain and verifies (finalized, signed by Platform.admin alone), and no
-//     new anchor can be sent meanwhile (the send is a wallet transaction,
-//     which maintenance stops).
+//     chain and verifies (finalized, signed by Platform.admin alone). The
+//     site sends no new anchor meanwhile (the panel's send is a wallet
+//     transaction, which maintenance stops), but this does not stop the
+//     Super Admin from signing a matching memo elsewhere (another wallet app,
+//     a CLI) and recording it during maintenance. That is harmless: the row
+//     only records what the chain already shows, signed by Platform.admin.
 const ALLOWED_ACTIONS: ReadonlySet<string> = new Set([
   "auth.session",
   "tos.accept",

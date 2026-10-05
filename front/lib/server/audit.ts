@@ -8,13 +8,17 @@
 // stamps are applied last: caller metadata can never override them.
 //
 // Categories in SERVER_ONLY_AUDIT_CATEGORIES ("kyc", shown as "KYC &
-// privacy", and "compliance", the sanctions screening records) are refused by
-// the unsigned /api/audit route, so a "kyc" row in audit_events is always a
-// server-attributed one — "who viewed which KYC document" cannot be forged by
-// anyone holding only the public site; nor can a screening record. Rows
-// about a dossier target its client id (kyc_document_view, kyc_data_export,
-// client_anonymize); confidential repository files target "document:<id>"
-// (confidential_document_view).
+// privacy"; "compliance", the sanctions screening records; and "operator",
+// shown as "Operator records", the document anchors the Super Admin
+// records) are refused by the unsigned /api/audit route, so a "kyc" row in
+// audit_events is always a server-attributed one — "who viewed which KYC
+// document" cannot be forged by anyone holding only the public site; nor can
+// a screening record or an anchor record. Rows about a dossier target its
+// client id (kyc_document_view, kyc_data_export, client_anonymize);
+// confidential repository files target "document:<id>"
+// (confidential_document_view). A reader that labels a row as verified still
+// checks more than its category where it can (a document anchor: the row id
+// derived from its signature, lib/server/document-anchor isRecordedAnchorRow).
 //
 // writeServerAudit THROWS SiwsError(503) when the insert fails. Callers that
 // promise "access is logged" (doc-url, export) must let it propagate and hand

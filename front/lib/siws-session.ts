@@ -1,7 +1,12 @@
 // Read-only actions a wallet session may authorize without a fresh signature.
 // Shared by the client (lib/siws-client.ts) and the server (lib/server/siws.ts).
-// Anything that writes, moves value, changes identity or grants access keeps
+// Anything that moves value, changes identity or grants access keeps
 // requiring a per-request wallet signature — never add such an action here.
+// A write is added only as one of the two kinds below, and only by name: on
+// the session path the cookie alone authorizes the request (its params are
+// not signed per request), and maintenance lets session actions through
+// (lib/maintenance.ts refusedInMaintenance; it stops only the pre-send
+// policy read).
 //
 // One kind of write is part of a read and allowed: an access-log row that
 // records the read itself (lib/server/audit.ts writeServerAudit, e.g. the
@@ -15,9 +20,11 @@
 // admin.documentAnchorRecord, whose only write is the audit row of a document
 // anchor the server first re-reads from the chain and verifies: finalized,
 // signed by the session wallet alone, that wallet being Platform.admin
-// (app/api/admin/document-anchor). Holding the Super Admin's session cookie
-// therefore only lets one record an anchor that wallet already signed. Any
-// new exception must meet the same bar and be listed here.
+// (app/api/admin/document-anchor). Its params (signature, reference, hash)
+// are unsigned, but the row is written only when the chain shows exactly that
+// memo signed by the session wallet, so holding the Super Admin's session
+// cookie only lets one record an anchor that wallet already signed. Any new
+// exception must meet the same bar and be listed here.
 
 export const SESSION_COOKIE = "manci_session";
 

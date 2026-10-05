@@ -11,13 +11,23 @@
 // derived from the network and the signature (documentAnchorAuditId), so the
 // table's primary key keeps one row per anchor even when two instances
 // record the same signature at once.
+//
+// A row counts as a recorded anchor only by isRecordedAnchorRow: that id,
+// with the category, ix_name, status "success" and commitment "finalized"
+// the record route writes. The category alone would do today (no other
+// writer of "operator" exists, anon has no INSERT on audit_events), but the
+// id is what only the record route can produce: a later server writer of
+// "operator", or a devnet row from the early open anon insert policy, never
+// passes for an anchor. The anchor list, the record route's duplicate check
+// and /api/audit/list (anchor_verified, the admin audit page's "Verified on
+// chain" label) all use it.
 import "server-only";
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { signature as toSignature } from "@solana/kit";
 import type { ChainTransaction } from "@/lib/chain-evidence";
+import { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor-audit";
 import {
-  DOCUMENT_ANCHOR_AUDIT,
   DOCUMENT_ANCHOR_LIST_LIMIT,
   DOCUMENT_ANCHOR_NOT_YET,
   documentAnchorRecordFromRow,
@@ -29,7 +39,7 @@ import { SiwsError } from "@/lib/server/siws-error";
 
 export type AnchorCommitment = "finalized" | "confirmed";
 
-const ROW_COLUMNS = "id,created_at,actor_wallet,tx_signature,metadata";
+const ROW_COLUMNS = "id,created_at,category,ix_name,actor_wallet,tx_signature,status,metadata";
 const READ_TIMEOUT_MS = 12_000;
 
 /**
@@ -61,7 +71,7 @@ export function anchorNotYetError(confirmed: boolean): SiwsError {
   return new SiwsError(
     503,
     confirmed
-      ? `${DOCUMENT_ANCHOR_NOT_YET} (it is confirmed; finalization takes about 15 seconds) — try again in a few seconds`
+      ? `${DOCUMENT_ANCHOR_NOT_YET} (it is confirmed; finalization takes about 13 seconds) — try again in a few seconds`
       : `${DOCUMENT_ANCHOR_NOT_YET} — try again in a few seconds`,
   );
 }
@@ -76,7 +86,34 @@ export function documentAnchorAuditId(network: string, signature: string): strin
   return uuidV8FromSha256(`mancipatio:document_anchor:${network}:${signature}`);
 }
 
-type Row = { id?: unknown; created_at?: unknown; actor_wallet?: unknown; tx_signature?: unknown; metadata?: unknown };
+/** An audit_events row as read (every field optional: a reader selects what it needs). */
+export type AnchorRowLike = {
+  id?: unknown;
+  created_at?: unknown;
+  category?: unknown;
+  ix_name?: unknown;
+  actor_wallet?: unknown;
+  tx_signature?: unknown;
+  status?: unknown;
+  metadata?: unknown;
+};
+
+/**
+ * Whether `row` is a document anchor the record route wrote on `network`:
+ * category "operator", ix_name "document_anchor", status "success",
+ * metadata.commitment "finalized", and its id documentAnchorAuditId(network,
+ * its signature), which only that route writes (/api/audit never sends an
+ * id, so the database draws one for every row it writes).
+ */
+export function isRecordedAnchorRow(network: string, row: AnchorRowLike): boolean {
+  if (row.category !== DOCUMENT_ANCHOR_AUDIT.category || row.ix_name !== DOCUMENT_ANCHOR_AUDIT.ixName) return false;
+  if (row.status !== "success") return false;
+  if (typeof row.tx_signature !== "string" || row.tx_signature.length === 0) return false;
+  const metadata = row.metadata;
+  if (typeof metadata !== "object" || metadata === null || Array.isArray(metadata)) return false;
+  if ((metadata as Record<string, unknown>).commitment !== "finalized") return false;
+  return typeof row.id === "string" && row.id.toLowerCase() === documentAnchorAuditId(network, row.tx_signature);
+}
 
 function anchorRows(sb: SupabaseClient, network: string) {
   return sb
@@ -87,23 +124,35 @@ function anchorRows(sb: SupabaseClient, network: string) {
     .eq("ix_name", DOCUMENT_ANCHOR_AUDIT.ixName);
 }
 
-/** The recorded anchor of `signature` on `network`, or null. 503 when the log cannot be read. */
-export async function findAnchorRecord(sb: SupabaseClient, network: string, signature: string): Promise<DocumentAnchorRecord | null> {
-  const { data, error } = await anchorRows(sb, network).eq("tx_signature", signature).limit(1);
-  if (error) throw new SiwsError(503, "Audit log unavailable — try again");
-  const row = ((data ?? []) as Row[])[0];
-  return row ? documentAnchorRecordFromRow(row) : null;
+/** The view of `row` when it is a complete anchor the record route wrote on `network`, else null. */
+function recordOf(network: string, row: AnchorRowLike): DocumentAnchorRecord | null {
+  return isRecordedAnchorRow(network, row) ? documentAnchorRecordFromRow(row) : null;
 }
 
-/** The newest recorded anchors on `network` (rows that are not complete anchors are left out). */
+/**
+ * The recorded anchor of `signature` on `network`, or null. It is looked up
+ * by its derived id, so no other row with that signature can stand in for
+ * it. 503 when the log cannot be read.
+ */
+export async function findAnchorRecord(sb: SupabaseClient, network: string, signature: string): Promise<DocumentAnchorRecord | null> {
+  const { data, error } = await anchorRows(sb, network)
+    .eq("id", documentAnchorAuditId(network, signature))
+    .eq("tx_signature", signature)
+    .limit(1);
+  if (error) throw new SiwsError(503, "Audit log unavailable — try again");
+  const row = ((data ?? []) as AnchorRowLike[])[0];
+  return row ? recordOf(network, row) : null;
+}
+
+/** The newest recorded anchors on `network` (rows that are not complete anchors of the record route are left out). */
 export async function listAnchorRecords(sb: SupabaseClient, network: string): Promise<DocumentAnchorRecord[]> {
   const { data, error } = await anchorRows(sb, network)
     .order("created_at", { ascending: false })
     .order("id", { ascending: false })
     .limit(DOCUMENT_ANCHOR_LIST_LIMIT);
   if (error) throw new SiwsError(503, "Audit log unavailable — try again");
-  return ((data ?? []) as Row[]).flatMap((row) => {
-    const record = documentAnchorRecordFromRow(row);
+  return ((data ?? []) as AnchorRowLike[]).flatMap((row) => {
+    const record = recordOf(network, row);
     return record ? [record] : [];
   });
 }

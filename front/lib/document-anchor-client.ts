@@ -21,6 +21,7 @@ import {
 } from "@/lib/document-anchor";
 import type { Network } from "@/lib/network";
 import type { SignatureOutcome } from "@/lib/simulation-gate";
+import { TransactionWalletChangedError } from "@/lib/transaction-wallet-policy";
 
 export type RecordedAnchor = DocumentAnchorRecord & { duplicate: boolean };
 export type PendingAnchor = DocumentAnchor & { signature: string; network: Network; signer: string };
@@ -28,7 +29,7 @@ export type PendingAnchor = DocumentAnchor & { signature: string; network: Netwo
 /**
  * Waits before each retry while the server RPC does not show the transaction
  * as finalized yet: 40 s in all, since finalization follows the browser's
- * "confirmed" by about 13 s and the server's node can trail it.
+ * "confirmed" by about 13 seconds and the server's node can trail it.
  */
 export const RECORD_RETRY_DELAYS_MS = [2_000, 4_000, 6_000, 8_000, 10_000, 10_000];
 
@@ -174,11 +175,23 @@ export type AnchorResultView = {
   canRecord: boolean;
   /** The closing button: "Done" (nothing left to do) or "Forget it" (after a failed record), or none. */
   dismissLabel: "Done" | "Forget it" | null;
+  /** Shown next to "Forget it": what forgetting loses (the page keeps no other copy of the signature). */
+  dismissWarning: string | null;
 };
+
+/** Next to "Forget it" when the network confirmed the anchor: it IS on chain. */
+export const FORGET_CONFIRMED_WARNING =
+  "This anchor is on chain (the network confirmed it). Forgetting it leaves it out of the audit log for good: this page " +
+  "keeps no other copy of the signature and cannot record it later. Try recording it again first, and copy the " +
+  "signature before you forget it.";
+/** Next to "Forget it" otherwise: the anchor may be on chain. */
+export const FORGET_UNCONFIRMED_WARNING =
+  "Forget it only when the explorer does not show this transaction: once forgotten, this page cannot record it.";
 
 export function anchorResultView(result: AnchorResult): AnchorResultView {
   const { outcome, record, recordError } = result;
   const confirmed = outcome === "confirmed" || record !== null;
+  const dismissLabel = record || outcome === "failed" ? "Done" : recordError ? "Forget it" : null;
   const heading =
     outcome === "failed"
       ? "The anchor failed on the network"
@@ -193,23 +206,46 @@ export function anchorResultView(result: AnchorResult): AnchorResultView {
     heading,
     tone: outcome === "failed" ? "failed" : confirmed ? "confirmed" : "pending",
     canRecord: outcome !== "failed" && outcome !== null && !record,
-    dismissLabel: record || outcome === "failed" ? "Done" : recordError ? "Forget it" : null,
+    dismissLabel,
+    dismissWarning:
+      dismissLabel !== "Forget it" ? null : outcome === "confirmed" ? FORGET_CONFIRMED_WARNING : FORGET_UNCONFIRMED_WARNING,
   };
 }
 
 /**
  * Closes the card. "Done" after a record or a failed anchor; "Forget it"
- * (only offered after a record attempt failed) also forgets the pending
- * anchor kept in this browser.
+ * (only offered after a record attempt failed, with dismissWarning) also
+ * forgets the pending anchor kept in this browser.
  */
 export function dismissAnchorResult(result: AnchorResult): void {
   if (!result.record) clearPendingAnchor(result.anchor.signature);
 }
 
+/**
+ * Whether a send error may have come AFTER the wallet broadcast the anchor:
+ * the verified client (lib/verified-solana-client prepareAndSend) checks
+ * that the wallet, account and network are unchanged once more after the
+ * wallet returns, so a switch during the wallet prompt throws
+ * TransactionWalletChangedError although the memo may already be on chain,
+ * and the error carries no signature. Any other send error comes before the
+ * broadcast or from the wallet's refusal.
+ */
+export function anchorSendMayHaveLanded(err: unknown): boolean {
+  for (let cursor: unknown = err, depth = 0; cursor instanceof Error && depth < 6; cursor = cursor.cause, depth++) {
+    if (cursor instanceof TransactionWalletChangedError || cursor.name === "TransactionWalletChangedError") return true;
+  }
+  return false;
+}
+
 export type AnchorFlowHooks = {
   /** Builds, checks and sends the transaction through the wallet; resolves to its signature. */
   send: () => Promise<unknown>;
-  /** Nothing was sent (refused before or by the wallet): the review stays open. */
+  /**
+   * The send threw: nothing was sent (refused before or by the wallet), and
+   * the review stays open; unless anchorSendMayHaveLanded, when the anchor
+   * may be on chain: then the review closes and the panel says to check the
+   * explorer before sending again.
+   */
   onSendError: (err: unknown) => void;
   /** The wallet sent it: the pending anchor is saved; close the review and show the card. */
   onSent: (pending: PendingAnchor) => void;

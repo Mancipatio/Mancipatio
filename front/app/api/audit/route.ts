@@ -126,9 +126,12 @@ export async function POST(request: Request) {
     if (!ixName) throw new SiwsError(400, "ix_name required (≤120 chars)");
 
     const category = typeof b.category === "string" ? b.category : "";
-    // "kyc" rows (KYC document views, data exports, erasures) are written only
-    // by the routes that perform them, with a verified actor. Refusing the
-    // category here keeps every "kyc" row in the ledger server-attributed.
+    // The server-only categories (lib/server/audit SERVER_ONLY_AUDIT_CATEGORIES):
+    // "kyc" rows (KYC document views, data exports, erasures), "compliance"
+    // rows (sanctions screening records) and "operator" rows (document anchor
+    // records) are written only by the routes that perform them, with a
+    // verified actor. Refusing them here keeps every such row in the ledger
+    // server-attributed.
     if (SERVER_ONLY_AUDIT_CATEGORIES.has(category)) {
       throw new SiwsError(400, "This audit category is recorded by the server only");
     }

@@ -42,13 +42,19 @@ import type { ChainTransaction } from "@/lib/chain-evidence";
 
 export { MEMO_PROGRAM_ADDRESS };
 
-/** A reference label: a letter or digit first, then up to 63 of `A-Z a-z 0-9 . _ : / -`. No spaces. */
-export const DOCUMENT_ANCHOR_REFERENCE_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/;
+/**
+ * A reference label: a letter or digit first, then up to 63 of
+ * `A-Z a-z 0-9 . _ : / -`. No spaces, and no "sha256:" in any letter case
+ * anywhere in it: the memo puts "sha256:" before the hash, and a reader of
+ * the memo must find it exactly once ("sha256:abc… sha256:<hash>" could be
+ * read as either hash).
+ */
+export const DOCUMENT_ANCHOR_REFERENCE_PATTERN = /^(?![\s\S]*[Ss][Hh][Aa]256:)[A-Za-z0-9][A-Za-z0-9._:/-]{0,63}$/;
 /** The fingerprint as the memo carries it: exactly 64 lowercase hex characters. */
 export const DOCUMENT_ANCHOR_SHA256_PATTERN = /^[0-9a-f]{64}$/;
 
-/** The audit row of a recorded anchor (lib/server/audit.ts; "operator" is a server-only category). */
-export const DOCUMENT_ANCHOR_AUDIT = { category: "operator", ixName: "document_anchor" } as const;
+/** The audit row of a recorded anchor (lib/document-anchor-audit.ts; "operator" is a server-only category). */
+export { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor-audit";
 /** The signed actions of the two routes (lib/siws-session.ts lists both as session actions). */
 export const DOCUMENT_ANCHOR_RECORD_ACTION = "admin.documentAnchorRecord";
 export const DOCUMENT_ANCHOR_LIST_ACTION = "admin.documentAnchorList";
@@ -58,7 +64,7 @@ export const DOCUMENT_ANCHOR_LIST_LIMIT = 25;
  * The start of the route's 503 while the server RPC does not show the
  * transaction as finalized yet: the page waits a moment and posts again.
  * Only a finalized transaction is recorded (a confirmed block could still be
- * dropped on a minority fork; finalization takes about 13 s more).
+ * dropped on a minority fork; finalization takes about 13 seconds more).
  */
 export const DOCUMENT_ANCHOR_NOT_YET = "The network does not show this transaction as finalized yet";
 
@@ -80,14 +86,21 @@ export const DOCUMENT_ANCHOR_NOT_YET = "The network does not show this transacti
  * compute budget when
  *   - its first data byte is in LIGHTHOUSE_ASSERTION_KINDS (never 0
  *     MemoryWrite or 1 MemoryClose, never an unknown one),
+ *   - every account it names is the fee payer or a read-only, non-signer
+ *     account of the transaction (the roles come from the message header,
+ *     which the node must return; an assertion only reads, and Lighthouse
+ *     declares its targets read-only, so in an anchor only the fee payer,
+ *     writable because it pays the fee, can show up as writable),
  *   - it made no inner calls (the node must return innerInstructions, so the
  *     check cannot be skipped), and
  *   - the transaction holds at most DOCUMENT_ANCHOR_MAX_WALLET_GUARDS of them.
- * Any other program is refused. The safety does not rest on the kind list
- * alone: the Super Admin is the only signer, so no other account can be
- * debited, and an instruction without inner calls cannot move lamports from
- * the System-owned wallet. The memo's evidential value does not depend on the
- * guards at all.
+ * Any other program is refused. Compute Budget instructions pass with any
+ * data and in any number: they name no account and move nothing, and the
+ * runtime itself refuses a transaction that repeats one kind. The safety
+ * does not rest on the kind list alone: the Super Admin is the only signer,
+ * so no other account can be debited, and an instruction without inner calls
+ * cannot move lamports from the System-owned wallet. The memo's evidential
+ * value does not depend on the guards at all.
  *
  * Send to wallets accepts the same wallet guards under its own rules
  * (lib/wallet-changes judgeWalletRewrite), and the two differ on purpose
@@ -153,6 +166,7 @@ export function documentAnchorReferenceError(raw: string): string | null {
   if (raw.length > 64) return "The reference is at most 64 characters.";
   if (/\s/.test(raw)) return "The reference cannot contain spaces.";
   if (!/^[A-Za-z0-9]/.test(raw)) return "The reference starts with a letter or a digit.";
+  if (/sha256:/i.test(raw)) return 'The reference cannot contain "sha256:": the memo adds it once, before the hash.';
   if (!DOCUMENT_ANCHOR_REFERENCE_PATTERN.test(raw)) {
     return "The reference may only contain letters, digits and . _ : / -";
   }
@@ -163,14 +177,34 @@ export function documentAnchorReferenceError(raw: string): string | null {
  * A pasted SHA-256 as the memo carries it (lowercase), or null. Accepts
  * either case, surrounding spaces, an optional "sha256:" prefix, and a whole
  * `shasum -a 256` / `sha256sum` line ("<hash>  <file>", "<hash> *<file>"):
- * the hash is the first word when whitespace follows it. Nothing else (no
- * spaces inside the hash, no 0x, not 63 or 65 characters).
+ * the hash is the first word when whitespace follows it. One hash only: the
+ * output for several files (`shasum -a 256 a.pdf b.pdf`) is refused rather
+ * than read as its first hash, whether its lines arrive as lines or, pasted
+ * into a one-line field, joined (browsers drop or replace the line breaks):
+ * a second run of 64 hex characters, or a line break, refuses it. Nothing
+ * else (no spaces inside the hash, no 0x, not 63 or 65 characters).
  */
 export function normalizeSha256Input(raw: string): string | null {
-  const trimmed = raw.trim().replace(/^sha256:/i, "");
-  const line = /^([0-9a-fA-F]{64})\s+\S/.exec(trimmed);
-  const hash = line ? line[1] : trimmed;
+  const trimmed = raw.trim();
+  if (holdsSeveralHashes(trimmed)) return null;
+  const bare = trimmed.replace(/^sha256:/i, "");
+  const line = /^([0-9a-fA-F]{64})\s+\S/.exec(bare);
+  const hash = line ? line[1] : bare;
   return /^[0-9a-fA-F]{64}$/.test(hash) ? hash.toLowerCase() : null;
+}
+
+function holdsSeveralHashes(trimmed: string): boolean {
+  return /[\r\n]/.test(trimmed) || (trimmed.match(/[0-9a-fA-F]{64}/g) ?? []).length > 1;
+}
+
+/** Why a pasted hash is refused (null when it is empty or a valid one), for the panel. */
+export function documentAnchorHashInputError(raw: string): string | null {
+  const trimmed = raw.trim();
+  if (trimmed === "" || normalizeSha256Input(raw) !== null) return null;
+  if (holdsSeveralHashes(trimmed)) {
+    return "Paste one hash: this holds more than one (the output for several files?). Paste only the hash of the document you anchor.";
+  }
+  return "Paste the 64-character SHA-256 in hex, or choose the file above.";
 }
 
 /** The exact memo text. Throws DocumentAnchorError unless both parts are already canonical. */
@@ -258,9 +292,10 @@ function safeNumber(value: number | bigint, message: string): number {
  * instruction whose only account is `wallet` and whose data is exactly the
  * expected memo text; besides it only compute-budget instructions and at
  * most DOCUMENT_ANCHOR_MAX_WALLET_GUARDS of the wallet's own Lighthouse
- * assertions (no inner calls) are allowed. The node must return the inner
- * instructions (json getTransaction returns an array, possibly empty), or
- * the "no inner calls" checks could not be made. Throws
+ * assertions (read-only accounts besides the fee payer, no inner calls) are
+ * allowed. The node must return the account roles and the inner
+ * instructions (json getTransaction returns both; the inner list may be
+ * empty), or the guard checks could not be made. Throws
  * DocumentAnchorEvidenceError naming the first thing that does not match.
  */
 export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentAnchorExpectation): DocumentAnchorEvidence {
@@ -285,6 +320,30 @@ export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentA
     return keys[n];
   };
 
+  // The account roles: the static keys are the writable signers, the
+  // read-only signers, the writable non-signers and the read-only
+  // non-signers, in that order; then the loaded writable, then the loaded
+  // read-only keys. The fee payer (index 0) must be writable.
+  const staticCount = message.accountKeys.length;
+  const readonlySigned = Number(message.header.numReadonlySignedAccounts);
+  const readonlyUnsigned = Number(message.header.numReadonlyUnsignedAccounts);
+  prove(
+    Number.isSafeInteger(readonlySigned) && readonlySigned >= 0 && readonlySigned < signerCount &&
+      Number.isSafeInteger(readonlyUnsigned) && readonlyUnsigned >= 0 && readonlyUnsigned <= staticCount - signerCount,
+    "The node did not return the transaction's account roles",
+  );
+  const loadedWritable = tx.meta.loadedAddresses?.writable?.length ?? 0;
+  const isWritable = (n: number) =>
+    n < staticCount
+      ? n < signerCount - readonlySigned || (n >= signerCount && n < staticCount - readonlyUnsigned)
+      : n < staticCount + loadedWritable;
+  /** The fee payer, or an account the transaction neither writes nor has sign. */
+  const readOnlyOrFeePayer = (i: number | bigint) => {
+    keyAt(i);
+    const n = Number(i);
+    return n === 0 || (n >= signerCount && !isWritable(n));
+  };
+
   const bytesOf = (data: string, what: string): ReadonlyUint8Array => {
     try {
       return getBase58Encoder().encode(data);
@@ -307,6 +366,10 @@ export function documentAnchorEvidence(tx: ChainTransaction, expected: DocumentA
       prove(
         kind !== undefined && LIGHTHOUSE_ASSERTION_KINDS.has(kind) && !madeInnerCalls(i),
         "The transaction carries a Lighthouse instruction that is not an assertion",
+      );
+      prove(
+        ix.accounts.every(readOnlyOrFeePayer),
+        "A Lighthouse instruction names a writable or signing account other than the fee payer",
       );
       walletGuardInstructions += 1;
       prove(

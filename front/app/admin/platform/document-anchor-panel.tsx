@@ -29,6 +29,7 @@ import {
   DOCUMENT_ANCHOR_MAX_FILE_BYTES,
   MEMO_PROGRAM_ADDRESS,
   documentAnchorFee,
+  documentAnchorHashInputError,
   documentAnchorInstruction,
   documentAnchorMemoText,
   documentAnchorPanelVisible,
@@ -39,6 +40,7 @@ import {
 import {
   anchorBlocksNewSend,
   anchorResultView,
+  anchorSendMayHaveLanded,
   clearPendingAnchor,
   dismissAnchorResult,
   listDocumentAnchors,
@@ -96,6 +98,8 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
   const [busy, setBusy] = useState<null | "sending" | "confirming" | "recording">(null);
   const [result, setResult] = useState<AnchorResult | null>(() => restoredAnchorResult(network, wallet));
   const [anchors, setAnchors] = useState<AnchorList>({ state: "loading" });
+  // The last send ended in an error that may have come after the wallet sent it (anchorSendMayHaveLanded).
+  const [uncertainSend, setUncertainSend] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -140,8 +144,7 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
   const reference = referenceInput.trim();
   const referenceError = referenceInput === "" ? null : documentAnchorReferenceError(reference);
   const sha256 = normalizeSha256Input(hashInput);
-  const hashError =
-    hashInput.trim() === "" || sha256 ? null : "Paste the 64-character SHA-256 in hex, or choose the file above.";
+  const hashError = documentAnchorHashInputError(hashInput);
   let memo: string | null = null;
   if (reference && !referenceError && sha256) {
     try {
@@ -214,6 +217,7 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
     if (working || blockedByUnrecorded || !memo || !sha256 || !reference) return;
     const input = { reference, sha256 };
     const text = memo;
+    setUncertainSend(false);
     setBusy("sending");
     let pendingId = toast.showPending("Anchoring the document…", "Approve the transaction in your wallet.");
     await runDocumentAnchorFlow(input, { network, signer: wallet }, {
@@ -222,9 +226,20 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
         return tx.send({ instructions: [documentAnchorInstruction({ ...input, signer })], feePayer: signer });
       },
       onSendError: (err) => {
-        // Nothing was sent: the review stays open.
         toast.dismiss(pendingId);
-        toast.showError("Nothing was anchored", explainSendError(err));
+        if (anchorSendMayHaveLanded(err)) {
+          // The wallet may have sent it before the change was noticed: close the
+          // review so that it is not sent a second time unchecked.
+          setConfirmOpen(false);
+          setUncertainSend(true);
+          toast.showError(
+            "The anchor may have been sent",
+            `${explainSendError(err)} Check this wallet's transactions on the explorer before you send it again.`,
+          );
+        } else {
+          // Nothing was sent: the review stays open.
+          toast.showError("Nothing was anchored", explainSendError(err));
+        }
         setBusy(null);
       },
       onSent: (pending: PendingAnchor) => {
@@ -294,7 +309,8 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
             aria-invalid={referenceError ? true : undefined}
           />
           <span className="mt-1 block text-xs text-slate-500">
-            Up to 64 characters: letters, digits and . _ : / - (no spaces), starting with a letter or a digit.
+            Up to 64 characters: letters, digits and . _ : / - (no spaces, no &quot;sha256:&quot;), starting with a letter or a
+            digit.
           </span>
           {referenceError && <span className="mt-1 block text-xs text-red-600">{referenceError}</span>}
           {referenceMissing && (
@@ -370,6 +386,16 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
         >
           {busy === "sending" ? "Waiting for the wallet…" : busy === "confirming" ? "Confirming…" : busy === "recording" ? "Recording…" : "Review and anchor"}
         </button>
+        {uncertainSend && !working && (
+          <p className="text-xs text-amber-700">
+            The last send ended when the wallet, account or network changed, possibly after your wallet had already sent
+            the anchor. Check{" "}
+            <a className="underline" href={explorerAddressUrl(wallet, network)} target="_blank" rel="noreferrer">
+              this wallet&apos;s transactions
+            </a>{" "}
+            on the explorer before you send it again.
+          </p>
+        )}
         {blockedByUnrecorded && !working && (
           <p className="text-xs text-amber-700">
             The anchor below is not recorded in the audit log yet. Record it first (or, if recording fails, forget it)
@@ -524,6 +550,7 @@ function AnchorResultCard({
           </button>
         )}
       </div>
+      {view.dismissWarning && <p className="mt-2 text-xs text-amber-800">{view.dismissWarning}</p>}
     </div>
   );
 }

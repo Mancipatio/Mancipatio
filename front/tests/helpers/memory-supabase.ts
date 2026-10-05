@@ -4,7 +4,11 @@
 // eq / neq / in / not in / lt / lte / gt / gte, order / limit, single /
 // maybeSingle, `.select()` after a write, head counts) plus `rpc(name, args)`
 // through registered handlers, opt-in per-table insert defaults
-// (`defaults`) and opt-in primary-key uniqueness on `id` (`uniqueIds`).
+// (`defaults`) and opt-in primary-key uniqueness on `id` (`uniqueIds`: an
+// insert, single or batch, fails whole with 23505 when one of its ids is
+// taken or repeated within it; upserts are NOT checked and ignore
+// onConflict / ignoreDuplicates: they always append, so a test of upsert
+// conflicts needs its own stand-in).
 // Filters are applied; ordering and limits are not (tests keep tables small)
 // unless a test turns `ordered` on: then a select applies its order() keys
 // (ascending or not, in turn), then range() and limit(), like PostgREST, so
@@ -27,7 +31,7 @@ export type MemorySupabase = {
   beforeUpdate: ((table: string) => void) | null;
   /** Runs right before an insert is applied (race simulation). */
   beforeInsert: ((table: string) => void) | null;
-  /** Tables whose `id` is a primary key: an insert with a taken id fails with 23505 (opt-in). */
+  /** Tables whose `id` is a primary key: an insert with a taken or repeated id fails with 23505 (opt-in; inserts only, not upserts). */
   uniqueIds: Set<string>;
   /** Column defaults an insert fills when the row leaves them out (like `created_at default now()`), per table. */
   defaults: Record<string, () => Row>;
@@ -136,8 +140,9 @@ export function memorySupabase(): MemorySupabase {
           ...r,
         }));
         if (op === "insert" && db.uniqueIds.has(table)) {
+          // Against the table and within the batch: Postgres refuses the whole statement either way.
           const taken = new Set(db.rows(table).map((r) => r.id));
-          const clash = rows.find((r) => taken.has(r.id));
+          const clash = rows.some((r) => (taken.has(r.id) ? true : (taken.add(r.id), false)));
           if (clash) {
             return { data: null, error: { message: `duplicate key value violates unique constraint "${table}_pkey"`, code: "23505" } };
           }

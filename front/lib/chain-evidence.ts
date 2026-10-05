@@ -42,7 +42,12 @@ export type ChainTransaction = {
   transaction: {
     signatures: readonly string[];
     message: {
-      header: { numRequiredSignatures: Index };
+      header: {
+        numRequiredSignatures: Index;
+        /** The account roles (json getTransaction returns both); read by lib/document-anchor only. */
+        numReadonlySignedAccounts?: Index;
+        numReadonlyUnsignedAccounts?: Index;
+      };
       accountKeys: readonly string[];
       instructions: readonly CompiledChainInstruction[];
     };

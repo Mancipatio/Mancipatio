@@ -5,8 +5,10 @@
 // idempotent per signature, also across instances (the row id is derived
 // from the signature, the primary key refuses a second row); nothing written
 // for a wrong signer, a wrong text, an extra instruction or a failed
-// transaction. SIWS, the admin gate and the RPC are mocked; Supabase is in
-// memory and the real server audit writer is used.
+// transaction. A row counts as a recorded anchor only with the id the route
+// derives (the list, the duplicate check and /api/audit/list's
+// anchor_verified). SIWS, the admin gate and the RPC are mocked; Supabase is
+// in memory and the real server audit writer is used.
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { memorySupabase } from "./helpers/memory-supabase";
 import { buildTx, type Ix } from "./helpers/chain-tx";
@@ -33,6 +35,8 @@ const state = vi.hoisted(() => ({
   txs: { finalized: new Map<string, unknown>(), confirmed: new Map<string, unknown>() },
   rpcCalls: [] as string[],
   rpcFails: false,
+  /** When set, every chain read waits for it (a request held mid-flight). */
+  rpcGate: null as Promise<void> | null,
 }));
 
 vi.mock("@/lib/network", async (importOriginal) => ({
@@ -60,6 +64,7 @@ vi.mock("@/lib/server/rpc", () => ({
     getTransaction: (signature: string, config: { commitment: "finalized" | "confirmed" }) => ({
       send: async () => {
         state.rpcCalls.push(`${config.commitment}:${signature}`);
+        if (state.rpcGate) await state.rpcGate;
         if (state.rpcFails) throw new Error("rpc down");
         return state.txs[config.commitment].get(signature) ?? null;
       },
@@ -71,21 +76,49 @@ import { POST as recordRoute, maxDuration } from "@/app/api/admin/document-ancho
 import { documentAnchorAuditId } from "@/lib/server/document-anchor";
 import { POST as listRoute } from "@/app/api/admin/document-anchor/list/route";
 import { POST as auditRoute } from "@/app/api/audit/route";
+import { POST as auditListRoute } from "@/app/api/audit/list/route";
 import { SESSION_READ_ACTIONS } from "@/lib/siws-session";
 import { refusedInMaintenance } from "@/lib/maintenance";
-import { SERVER_ONLY_AUDIT_CATEGORIES } from "@/lib/server/audit";
-import { DOCUMENT_ANCHOR_NOT_YET } from "@/lib/document-anchor";
+import { SERVER_ONLY_AUDIT_CATEGORIES, ServerAuditRowExistsError, writeServerAudit } from "@/lib/server/audit";
+import { SiwsError } from "@/lib/server/siws-error";
+import { DOCUMENT_ANCHOR_LIST_LIMIT, DOCUMENT_ANCHOR_NOT_YET } from "@/lib/document-anchor";
+import type { SupabaseClient } from "@supabase/supabase-js";
 
 const utf8 = (text: string) => new TextEncoder().encode(text);
 const cb = (): Ix => ({ program: CB, accounts: [], data: new Uint8Array([2, 0, 0, 0, 0]) });
 const memo = (text = `${REFERENCE} sha256:${SHA}`, accounts = [SA]): Ix => ({ program: MEMO_PROGRAM, accounts, data: utf8(text) });
+/** The transaction as getTransaction (json) returns it, with the roles an anchor compiles to (the fee payer writable, every other key read-only). */
 function chainTx(over: { signature?: string; payer?: string; instructions?: Ix[]; err?: unknown } = {}) {
-  return buildTx({
+  const { tx } = buildTx({
     signature: over.signature ?? SIG,
     payer: over.payer ?? SA,
     instructions: (over.instructions ?? [cb(), memo()]).map((ix) => ({ ix })),
     err: over.err,
-  }).tx;
+  });
+  const { message } = tx.transaction;
+  const header = { ...message.header, numReadonlySignedAccounts: 0, numReadonlyUnsignedAccounts: message.accountKeys.length - 1 };
+  return { ...tx, transaction: { ...tx.transaction, message: { ...message, header } } };
+}
+
+/** An anchor row as the record route writes it (derived id, success, finalized), for rows a test puts in place. */
+function anchorRow(signature: string, over: { reference?: string; sha256?: string; created_at?: string; commitment?: string } = {}) {
+  return {
+    id: documentAnchorAuditId("mainnet", signature),
+    created_at: over.created_at ?? "2026-10-05T10:00:00.000Z",
+    network: "mainnet",
+    category: "operator",
+    ix_name: "document_anchor",
+    actor_wallet: SA,
+    tx_signature: signature,
+    status: "success",
+    metadata: {
+      reference: over.reference ?? REFERENCE,
+      sha256: over.sha256 ?? SHA,
+      slot: 100,
+      block_time: 1_700_000_000,
+      commitment: over.commitment ?? "finalized",
+    },
+  };
 }
 
 async function call(route: (r: Request) => Promise<Response>, wallet: string, params: Record<string, unknown>) {
@@ -107,6 +140,7 @@ beforeEach(() => {
   state.txs.confirmed.clear();
   state.rpcCalls = [];
   state.rpcFails = false;
+  state.rpcGate = null;
 });
 
 describe("POST /api/admin/document-anchor", () => {
@@ -205,15 +239,74 @@ describe("POST /api/admin/document-anchor", () => {
     db.ref!.beforeInsert = (table) => {
       if (table !== "audit_events" || raced) return;
       raced = true;
-      rows().push({
-        id: documentAnchorAuditId("mainnet", SIG), created_at: "2026-10-05T10:00:00Z", network: "mainnet", category: "operator",
-        ix_name: "document_anchor", actor_wallet: SA, tx_signature: SIG, metadata: { reference: REFERENCE, sha256: SHA, slot: 100, block_time: 1_700_000_000, commitment: "finalized" },
-      });
+      rows().push(anchorRow(SIG));
     };
     const res = await record();
     expect(res.status).toBe(200);
     expect(res.body.data).toMatchObject({ id: documentAnchorAuditId("mainnet", SIG), duplicate: true });
     expect(rows()).toHaveLength(1);
+  });
+
+  it("after losing that race: 409 when the winner holds another anchor, 409 'being recorded' when it is not readable as a record", async () => {
+    state.txs.finalized.set(SIG, chainTx());
+    // The other instance recorded this signature as another reference.
+    db.ref!.beforeInsert = (table) => {
+      if (table === "audit_events" && rows().length === 0) rows().push(anchorRow(SIG, { reference: "MANCI-2026-0009" }));
+    };
+    const other = await record();
+    expect(other.status).toBe(409);
+    expect(other.body.error).toMatch(/already recorded as another anchor/);
+    expect(rows()).toHaveLength(1);
+    // The id is taken, but the row is not (yet) readable as a finalized record.
+    rows().length = 0;
+    db.ref!.beforeInsert = (table) => {
+      if (table === "audit_events" && rows().length === 0) rows().push(anchorRow(SIG, { commitment: "confirmed" }));
+    };
+    const unreadable = await record();
+    expect(unreadable.status).toBe(409);
+    expect(unreadable.body.error).toMatch(/This anchor is being recorded — try again in a moment/);
+    expect(rows()).toHaveLength(1);
+  });
+
+  it("refuses a concurrent second request for the same signature on one instance (409), then records once", async () => {
+    state.txs.finalized.set(SIG, chainTx());
+    let release!: () => void;
+    state.rpcGate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const first = record();
+    // Let the first request reach its chain read (it holds the signature from then on).
+    await vi.waitFor(() => expect(state.rpcCalls).toHaveLength(1));
+    const second = await record();
+    expect(second.status).toBe(409);
+    expect(second.body.error).toMatch(/This anchor is being recorded — try again in a moment/);
+    release();
+    const done = await first;
+    expect(done.status).toBe(200);
+    expect(done.body.data).toMatchObject({ duplicate: false });
+    expect(rows()).toHaveLength(1);
+    // Released: the next request answers the row.
+    state.rpcGate = null;
+    expect((await record()).body.data).toMatchObject({ duplicate: true });
+  });
+
+  it("writeServerAudit: a unique violation without a caller id is a 503, never ServerAuditRowExistsError", async () => {
+    const conflict = {
+      from: () => ({
+        insert: () => ({
+          select: () => ({ single: async () => ({ data: null, error: { code: "23505", message: "duplicate key value" } }) }),
+        }),
+      }),
+    } as unknown as SupabaseClient;
+    const input = { ix_name: "document_anchor", category: "operator" as const, actor_wallet: SA, actor_source: "siws-session" as const, reason: "test" };
+    const withoutId = await writeServerAudit(conflict, input).catch((err: unknown) => err);
+    expect(withoutId).toBeInstanceOf(SiwsError);
+    expect(withoutId).not.toBeInstanceOf(ServerAuditRowExistsError);
+    expect((withoutId as SiwsError).status).toBe(503);
+    // With a caller id the same answer means that row exists.
+    const withId = await writeServerAudit(conflict, { ...input, id: documentAnchorAuditId("mainnet", SIG) }).catch((err: unknown) => err);
+    expect(withId).toBeInstanceOf(ServerAuditRowExistsError);
+    expect((withId as ServerAuditRowExistsError).id).toBe(documentAnchorAuditId("mainnet", SIG));
   });
 
   it("derives one row id per network and signature (a uuid)", () => {
@@ -311,6 +404,11 @@ describe("POST /api/admin/document-anchor/list", () => {
     rows().push(
       { id: "x1", network: "mainnet", category: "platform", ix_name: "document_anchor", actor_wallet: SA, tx_signature: SIG, metadata: { reference: "FORGED", sha256: SHA } },
       { id: "x2", network: "devnet", category: "operator", ix_name: "document_anchor", actor_wallet: SA, tx_signature: SIG, metadata: { reference: "DEVNET", sha256: SHA } },
+      // An operator row the record route did not write (its id is not the derived one): another server
+      // writer of the category, or an early devnet row from the open anon insert policy.
+      { ...anchorRow("sig-not-derived", { reference: "NOT-DERIVED" }), id: "6f1c1a52-0d3e-4c55-9a51-3f1f2b9f7e10" },
+      // The derived id, but not a finalized record.
+      anchorRow("sig-confirmed-only", { reference: "CONFIRMED-ONLY", commitment: "confirmed" }),
     );
     const res = await call(listRoute, SA, {});
     expect(res.status).toBe(200);
@@ -318,6 +416,67 @@ describe("POST /api/admin/document-anchor/list", () => {
     const list = res.body.data as unknown as { reference: string; signature: string }[];
     expect(list.map((r) => r.reference).sort()).toEqual(["MANCI-2026-0001", "MANCI-2026-0002"]);
     expect((await call(listRoute, ADMIN, {})).status).toBe(403);
+  });
+
+  it("is newest first (created_at, then id) and at most DOCUMENT_ANCHOR_LIST_LIMIT rows, like PostgREST", async () => {
+    expect(DOCUMENT_ANCHOR_LIST_LIMIT).toBe(25);
+    db.ref!.ordered = true;
+    // Rows the route writes get created_at from the database default (now()).
+    let clock = Date.parse("2026-10-05T12:00:00.000Z");
+    db.ref!.defaults.audit_events = () => ({ created_at: new Date((clock += 1_000)).toISOString() });
+    // 25 older anchors, put in place out of order, one minute apart.
+    const minutes = Array.from({ length: 25 }, (_, i) => i).sort((a, b) => (a % 2) - (b % 2) || b - a);
+    for (const i of minutes) {
+      rows().push(anchorRow(`sig-${i}`, { reference: `OLD-${String(i).padStart(2, "0")}`, created_at: `2026-10-05T10:${String(i).padStart(2, "0")}:00.000Z` }));
+    }
+    // Two of them at the same instant: the larger id comes first.
+    const tieA = anchorRow("sig-tie-a", { reference: "TIE-A", created_at: "2026-10-05T10:30:00.000Z" });
+    const tieB = anchorRow("sig-tie-b", { reference: "TIE-B", created_at: "2026-10-05T10:30:00.000Z" });
+    rows().push(tieA, tieB);
+    // Two recorded through the route, the newest.
+    state.txs.finalized.set(SIG, chainTx());
+    state.txs.finalized.set(SIG2, chainTx({ signature: SIG2, instructions: [cb(), memo(`MANCI-2026-0002 sha256:${"b".repeat(64)}`)] }));
+    expect((await record()).status).toBe(200);
+    expect((await record({ signature: SIG2, reference: "MANCI-2026-0002", sha256: "b".repeat(64) })).status).toBe(200);
+
+    const res = await call(listRoute, SA, {});
+    expect(res.status).toBe(200);
+    const list = (res.body.data as unknown as { reference: string }[]).map((r) => r.reference);
+    const ties = tieA.id > tieB.id ? ["TIE-A", "TIE-B"] : ["TIE-B", "TIE-A"];
+    const old = Array.from({ length: 25 }, (_, i) => `OLD-${String(24 - i).padStart(2, "0")}`);
+    expect(list).toEqual(["MANCI-2026-0002", "MANCI-2026-0001", ...ties, ...old].slice(0, DOCUMENT_ANCHOR_LIST_LIMIT));
+    expect(list).toHaveLength(DOCUMENT_ANCHOR_LIST_LIMIT);
+  });
+});
+
+describe("/api/audit/list: anchor_verified", () => {
+  it("is computed by the server: true only for the record route's own row (its derived id, success, finalized)", async () => {
+    state.txs.finalized.set(SIG, chainTx());
+    expect((await record()).status).toBe(200);
+    rows().push(
+      // The category and ix of an anchor without the derived id (a legacy anon row, another server writer).
+      { ...anchorRow("sig-not-derived"), id: "6f1c1a52-0d3e-4c55-9a51-3f1f2b9f7e10" },
+      // The derived id, but read at "confirmed" only, or not a success.
+      anchorRow("sig-confirmed-only", { commitment: "confirmed" }),
+      { ...anchorRow("sig-failed"), status: "failed" },
+      // The derived id of another network's row.
+      { ...anchorRow("sig-devnet"), id: documentAnchorAuditId("devnet", "sig-devnet") },
+      // A caller cannot smuggle the flag in: the route sets it on every row.
+      { id: "smuggled", network: "mainnet", category: "other", ix_name: "document_anchor", actor_wallet: SA, tx_signature: SIG2, status: "success", anchor_verified: true, metadata: {} },
+    );
+    const res = await call(auditListRoute, SA, {});
+    expect(res.status).toBe(200);
+    const flags = Object.fromEntries(
+      (res.body.data as unknown as { id: string; anchor_verified: boolean; chain_checked: boolean }[]).map((r) => [r.id, [r.anchor_verified, r.chain_checked]]),
+    );
+    expect(flags).toEqual({
+      [documentAnchorAuditId("mainnet", SIG)]: [true, false],
+      "6f1c1a52-0d3e-4c55-9a51-3f1f2b9f7e10": [false, false],
+      [documentAnchorAuditId("mainnet", "sig-confirmed-only")]: [false, false],
+      [documentAnchorAuditId("mainnet", "sig-failed")]: [false, false],
+      [documentAnchorAuditId("devnet", "sig-devnet")]: [false, false],
+      smuggled: [false, false],
+    });
   });
 });
 
