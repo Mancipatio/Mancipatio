@@ -31,6 +31,8 @@ export type AuditCategory =
   | "kyc"
   /** Server-only: sanctions screening records and their evidence (lib/server/screening-evidence.ts). */
   | "compliance"
+  /** Server-only: operator records the server verified on chain (document anchors, lib/document-anchor.ts). */
+  | "operator"
   | "other";
 
 export type AuditStatus = "success" | "failed" | "pending";

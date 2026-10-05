@@ -3,7 +3,13 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useWalletConnection } from "@solana/react-hooks";
 import { listAuditEvents } from "@/lib/audit-read";
-import { clientClaimsOf, collapseDistributionFinals, isChainChecked, type StatusConflict } from "@/lib/audit-feed";
+import {
+  clientClaimsOf,
+  collapseDistributionFinals,
+  isChainChecked,
+  isVerifiedDocumentAnchor,
+  type StatusConflict,
+} from "@/lib/audit-feed";
 import { RequireRole } from "@/components/require-role";
 import { SkeletonTable } from "@/components/skeleton";
 import {
@@ -33,6 +39,10 @@ type FeedRow = {
   /** The retry worker's row for a "Send to wallets" transaction: its status is the finalized chain's; the
    * sender's claims (metadata.client_claims) are not verified by it. */
   chain_checked: boolean;
+  /** A recorded document anchor: written only by the server after it verified the finalized transaction
+   * (lib/audit-feed isVerifiedDocumentAnchor, from /api/audit/list's anchor_verified: the row id the record
+   * route derives from the signature, never the category alone). */
+  anchor_verified: boolean;
   /** Other final rows of the same transaction collapsed into this one that say the same status (lib/audit-feed). */
   duplicates: number;
   /** Other final rows of the same transaction that say another status: shown as a conflict, not a duplicate. */
@@ -56,6 +66,7 @@ const CATEGORY_LABELS: Record<AuditCategory | "all", string> = {
   rights: "Rights",
   kyc: "KYC & privacy",
   compliance: "Sanctions screening",
+  operator: "Operator records",
   other: "Other",
 };
 
@@ -158,7 +169,8 @@ function AuditOps() {
       // One final row per "Send to wallets" transaction: the browser, a resume and the retry worker can each
       // append one (lib/audit-feed); within the loaded page the others are counted on it: as duplicates when
       // they say the same status, as a status conflict when they do not. A chain-checked row also shows (and is
-      // searched by) the actor and target its sender's pending row claimed, labelled as unverified claims.
+      // searched by) the actor and target its sender's pending row claimed, labelled as unverified claims. A
+      // recorded document anchor is not a distribution row: it passes through uncollapsed, with its own note.
       const auditRows: FeedRow[] = collapseDistributionFinals(auditR).map((r) => {
         const claims = clientClaimsOf(r);
         return {
@@ -175,6 +187,7 @@ function AuditOps() {
           decoded: false,
           actor_verified: r.metadata?.actor_verified === true,
           chain_checked: isChainChecked(r),
+          anchor_verified: isVerifiedDocumentAnchor(r),
           duplicates: r.duplicates,
           conflict: r.conflict,
           claimed_actor: claims?.actor ?? null,
@@ -196,6 +209,7 @@ function AuditOps() {
         decoded: !!r.decoded,
         actor_verified: false,
         chain_checked: false,
+        anchor_verified: false,
         duplicates: 0,
         conflict: null,
         claimed_actor: null,
@@ -439,6 +453,11 @@ function AuditOps() {
                     {r.chain_checked && (
                       <span className="mt-1 block text-[10px] text-slate-500">
                         From the chain; the sender&apos;s claims are unverified
+                      </span>
+                    )}
+                    {r.anchor_verified && (
+                      <span className="mt-1 block text-[10px] text-slate-500">
+                        Verified on chain (finalized)
                       </span>
                     )}
                     {r.conflict && (

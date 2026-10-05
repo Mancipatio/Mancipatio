@@ -1,4 +1,5 @@
-// Reading "Send to wallets" audit rows (share_class_distribution) for a feed.
+// Reading audit rows for a feed: "Send to wallets" rows
+// (share_class_distribution) and recorded document anchors.
 //
 // One transaction can have more than one final row: audit_events is
 // append-only, and the browser (on confirmation, or a resume of the run
@@ -22,6 +23,16 @@
 // metadata.client_claims are what the pending row reported, unverified
 // (clientClaimsOf: the claimed actor and target, which a feed shows and
 // searches labelled "unverified claim").
+//
+// A recorded document anchor (isVerifiedDocumentAnchor) is likewise told by
+// /api/audit/list (anchor_verified, lib/server/document-anchor
+// isRecordedAnchorRow: the row id derived from the signature, which only the
+// record route writes), never by the row's category or metadata alone. An
+// anchor row is not a share_class_distribution row: collapseDistributionFinals
+// passes it through (no duplicates, no conflict) and clientClaimsOf has
+// nothing for it; a distribution row is never a verified anchor.
+
+import { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor-audit";
 
 export const DISTRIBUTION_IX = "share_class_distribution";
 /** actor_wallet and metadata.actor_source of the retry worker's rows (lib/server/reconciled-audit). */
@@ -38,6 +49,8 @@ export type FeedAuditRow = {
   metadata?: Record<string, unknown> | null;
   /** Set by /api/audit/list (lib/server/reconciled-audit isReconciledAuditRow); absent: not the server's row. */
   chain_checked?: boolean;
+  /** Set by /api/audit/list (lib/server/document-anchor isRecordedAnchorRow); absent: not a recorded anchor. */
+  anchor_verified?: boolean;
 };
 
 /**
@@ -47,6 +60,24 @@ export type FeedAuditRow = {
  */
 export function isChainChecked(row: Pick<FeedAuditRow, "chain_checked" | "actor_wallet" | "metadata">): boolean {
   return row.chain_checked === true && row.actor_wallet === SERVER_ACTOR && row.metadata?.actor_source === RECONCILER;
+}
+
+/**
+ * A recorded document anchor (app/api/admin/document-anchor): that route
+ * writes the row only after it verified the anchor's FINALIZED transaction on
+ * chain (lib/document-anchor documentAnchorEvidence). /api/audit/list said so
+ * (anchor_verified: the row id is the one the route derives from the
+ * signature, status success, commitment finalized), and the category and
+ * ix_name agree. The category alone ("operator", which the unsigned
+ * /api/audit refuses) never makes a row verified: another server writer of
+ * that category, or an early devnet row, would carry it too.
+ */
+export function isVerifiedDocumentAnchor(row: { category?: unknown; ix_name: string; anchor_verified?: unknown }): boolean {
+  return (
+    row.anchor_verified === true &&
+    row.category === DOCUMENT_ANCHOR_AUDIT.category &&
+    row.ix_name === DOCUMENT_ANCHOR_AUDIT.ixName
+  );
 }
 
 function isDistributionFinal(row: FeedAuditRow): row is FeedAuditRow & { tx_signature: string } {

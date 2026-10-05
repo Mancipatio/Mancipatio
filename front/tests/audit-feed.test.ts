@@ -7,11 +7,21 @@
 // shows a chain-checked row's client_claims (actor, target) as unverified
 // claims it can be searched by. Which row is
 // the server's comes from /api/audit/list (chain_checked), never from the
-// metadata a caller of the unsigned /api/audit can write.
+// metadata a caller of the unsigned /api/audit can write. A recorded
+// document anchor is noted from /api/audit/list's anchor_verified (the row id
+// the record route derives), never from its category alone.
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { clientClaimsOf, collapseDistributionFinals, isChainChecked, type FeedAuditRow } from "@/lib/audit-feed";
+import {
+  clientClaimsOf,
+  collapseDistributionFinals,
+  isChainChecked,
+  isVerifiedDocumentAnchor,
+  type FeedAuditRow,
+} from "@/lib/audit-feed";
+import { DOCUMENT_ANCHOR_AUDIT } from "@/lib/document-anchor-audit";
+import { DOCUMENT_ANCHOR_AUDIT as REEXPORTED } from "@/lib/document-anchor";
 
 const SIG_A = "A".repeat(88);
 const SIG_B = "B".repeat(88);
@@ -153,6 +163,76 @@ describe("clientClaimsOf: what the sender's pending row claimed, on a chain-chec
   });
 });
 
+describe("isVerifiedDocumentAnchor", () => {
+  it("is the anchor route's row: /api/audit/list said so (anchor_verified), and category and ix agree", () => {
+    expect(DOCUMENT_ANCHOR_AUDIT).toEqual({ category: "operator", ixName: "document_anchor" });
+    expect(REEXPORTED).toBe(DOCUMENT_ANCHOR_AUDIT);
+    const anchor = { category: "operator", ix_name: "document_anchor", anchor_verified: true };
+    expect(isVerifiedDocumentAnchor(anchor)).toBe(true);
+    // The category alone is not enough: the server did not find the derived id
+    // (tests/document-anchor-routes.test.ts, "/api/audit/list: anchor_verified").
+    expect(isVerifiedDocumentAnchor({ ...anchor, anchor_verified: false })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ category: "operator", ix_name: "document_anchor" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ...anchor, anchor_verified: "true" })).toBe(false);
+    // Anything else is not one, whatever the flag says.
+    expect(isVerifiedDocumentAnchor({ ...anchor, category: "other" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ...anchor, category: "platform" })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ix_name: "document_anchor", anchor_verified: true })).toBe(false);
+    expect(isVerifiedDocumentAnchor({ ...anchor, ix_name: "share_class_distribution" })).toBe(false);
+  });
+
+  it("keeps the feed helper free of the anchor builder (kit, compute budget): only the constants module", () => {
+    const feed = fs.readFileSync(path.join(__dirname, "..", "lib/audit-feed.ts"), "utf8");
+    expect(feed).toContain('from "@/lib/document-anchor-audit"');
+    expect(feed).not.toContain('from "@/lib/document-anchor"');
+  });
+});
+
+describe("document anchors and distribution rows stay apart in the feed", () => {
+  /** A recorded document anchor as /api/audit/list returns it (anchor_verified computed by the server). */
+  const anchorRow = (over: Partial<FeedAuditRow> = {}) => ({
+    ...row({
+      ix_name: "document_anchor",
+      actor_wallet: "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2",
+      anchor_verified: true,
+      metadata: { actor_source: "siws-session", commitment: "finalized" },
+      ...over,
+    }),
+    category: "operator",
+  });
+
+  it("an anchor row is never collapsed, counted or conflict-marked as a distribution, and has no claims", () => {
+    // Two anchor rows on one signature, saying different statuses, next to a distribution's server row
+    // and a contradicting browser row on that same signature.
+    const first = anchorRow({ tx_signature: SIG_B });
+    const second = anchorRow({ tx_signature: SIG_B, status: "failed", anchor_verified: false });
+    const server = { ...serverRow({ tx_signature: SIG_B, status: "failed" }), category: "platform" };
+    const browser = { ...row({ tx_signature: SIG_B, status: "success" }), category: "platform" };
+    const out = collapseDistributionFinals([first, server, second, browser]);
+    expect(out.map((r) => r.id)).toEqual([first.id, server.id, second.id]);
+    expect(out[0]).toMatchObject({ duplicates: 0, conflict: null, anchor_verified: true });
+    expect(out[2]).toMatchObject({ duplicates: 0, conflict: null, status: "failed" });
+    // The distribution's conflict counts only its own browser row, never the anchors.
+    expect(out[1].conflict).toEqual({ status: "failed", chainChecked: true, statuses: ["success"], rows: 1 });
+    expect(out[1].duplicates).toBe(0);
+    expect(isVerifiedDocumentAnchor(out[0])).toBe(true);
+    expect(isVerifiedDocumentAnchor(out[2])).toBe(false);
+    expect(isChainChecked(out[0])).toBe(false);
+    expect(clientClaimsOf(out[0])).toBeNull();
+  });
+
+  it("a distribution row never gets the anchor note, whatever flag or category it carries", () => {
+    const claims = { verified: false, actor_wallet: "7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2", target_label: "ScPda1111" };
+    const server = { ...serverRow({ metadata: { actor_source: "retry-worker", client_claims: claims } }), category: "operator", anchor_verified: true };
+    const browser = { ...row({}), category: "operator", anchor_verified: true };
+    const out = collapseDistributionFinals([server, browser]);
+    expect(out.map((r) => [r.id, r.duplicates, r.conflict])).toEqual([[server.id, 1, null]]);
+    expect(isVerifiedDocumentAnchor(out[0])).toBe(false);
+    expect(isVerifiedDocumentAnchor(browser)).toBe(false);
+    expect(clientClaimsOf(out[0])).toEqual({ actor: claims.actor_wallet, target: "ScPda1111" });
+  });
+});
+
 describe("the admin audit page reads through it", () => {
   const src = fs.readFileSync(path.join(__dirname, "..", "app/admin/audit/page.tsx"), "utf8");
 
@@ -179,5 +259,20 @@ describe("the admin audit page reads through it", () => {
     expect(src).toMatch(/\{r\.claimed_target && \([\s\S]*?Unverified claim: <span className="font-mono">\{r\.claimed_target\}<\/span>/);
     expect(src).toContain('(r.claimed_actor ?? "").toLowerCase().includes(q) ||');
     expect(src).toContain('(r.claimed_target ?? "").toLowerCase().includes(q)');
+  });
+
+  it("notes a recorded document anchor as verified on chain (finalized), from the server's anchor_verified", () => {
+    expect(src).toContain("anchor_verified: isVerifiedDocumentAnchor(r),");
+    expect(src).toMatch(/\{r\.anchor_verified && \([\s\S]*?Verified on chain \(finalized\)/);
+  });
+
+  it("maps every audit row through both: the anchor flag and the conflict and claims, on the same collapsed rows", () => {
+    // One mapping of collapseDistributionFinals' rows carries all of them (an anchor row passes through it
+    // with no conflict; a distribution row is never a verified anchor: lib/audit-feed, tested above).
+    expect(src).toMatch(
+      /collapseDistributionFinals\(auditR\)\.map\(\(r\) => \{[\s\S]*?anchor_verified: isVerifiedDocumentAnchor\(r\),[\s\S]*?conflict: r\.conflict,[\s\S]*?claimed_target: claims\?\.target \?\? null,[\s\S]*?\}\);/,
+    );
+    // Indexer rows carry none of them.
+    expect(src).toMatch(/anchor_verified: false,\s*duplicates: 0,\s*conflict: null,\s*claimed_actor: null,\s*claimed_target: null,/);
   });
 });
