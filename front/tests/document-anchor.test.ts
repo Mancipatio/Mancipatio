@@ -205,6 +205,45 @@ describe("pasted hashes", () => {
     expect(documentAnchorHashInputError("abc")).toMatch(/64-character SHA-256/);
   });
 
+  it("takes a single shasum line whose file name or path holds 64 hex characters (a file named by a hash)", () => {
+    const SHA2 = "b".repeat(64);
+    for (const line of [
+      `${SHA}  ${SHA2}`,
+      `${SHA}  ${SHA2}.pdf`,
+      `${SHA} *${SHA2}.bin`,
+      `${SHA}  backups/${SHA2}/deed.pdf`,
+      `${SHA}  ${SHA2.toUpperCase()}-${SHA2}.pdf`,
+      `${SHA.toUpperCase()}  ${SHA2}\n`,
+      `sha256:${SHA}  ${SHA2}.pdf`,
+    ]) {
+      expect(normalizeSha256Input(line)).toBe(SHA);
+      expect(documentAnchorHashInputError(line)).toBeNull();
+    }
+  });
+
+  it("still refuses several hashes around a hash-named file, and two hashes not in shasum's format", () => {
+    const SHA2 = "b".repeat(64);
+    const SHA3 = "c".repeat(64);
+    for (const several of [
+      // Two lines, whatever they hold.
+      `${SHA}  ${SHA2}.pdf\n${SHA3}  b.pdf`,
+      `${SHA}  ${SHA2}\r\n`.repeat(2),
+      // Joined by a one-line field: the second line starts with "<64 hex>  " or "<64 hex> *".
+      `${SHA}  ${SHA2}.pdf${SHA3}  b.pdf`,
+      `${SHA}  ${SHA2}${SHA3}  b.pdf`,
+      `${SHA}  cafe${SHA2}  b.pdf`,
+      `${SHA} *a.bin ${SHA2} *b.bin`,
+      // Bare hashes joined: run together, or after one space or a tab (not shasum's separator).
+      `${SHA}${SHA2}`,
+      `${SHA} ${SHA2}`,
+      `${SHA}\t${SHA2}`,
+      `sha256:${SHA} ${SHA2}`,
+    ]) {
+      expect(normalizeSha256Input(several)).toBeNull();
+      expect(documentAnchorHashInputError(several)).toMatch(/^Paste one hash/);
+    }
+  });
+
   it("refuses the wrong length, non-hex, 0x and inner spaces", () => {
     for (const bad of [
       "",

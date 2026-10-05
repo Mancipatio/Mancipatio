@@ -181,8 +181,9 @@ export function documentAnchorReferenceError(raw: string): string | null {
  * output for several files (`shasum -a 256 a.pdf b.pdf`) is refused rather
  * than read as its first hash, whether its lines arrive as lines or, pasted
  * into a one-line field, joined (browsers drop or replace the line breaks):
- * a second run of 64 hex characters, or a line break, refuses it. Nothing
- * else (no spaces inside the hash, no 0x, not 63 or 65 characters).
+ * see holdsSeveralHashes. A file name may itself hold 64 hex characters (a
+ * file named by its hash, a path through one). Nothing else (no spaces
+ * inside the hash, no 0x, not 63 or 65 characters).
  */
 export function normalizeSha256Input(raw: string): string | null {
   const trimmed = raw.trim();
@@ -193,8 +194,40 @@ export function normalizeSha256Input(raw: string): string | null {
   return /^[0-9a-fA-F]{64}$/.test(hash) ? hash.toLowerCase() : null;
 }
 
+/** 64 hex characters (non-overlapping runs are counted). */
+const HEX_64 = /[0-9a-fA-F]{64}/g;
+/**
+ * The start of a `shasum -a 256` / `sha256sum` line: the hash, then two
+ * spaces (text mode) or a space and "*" (binary mode), then the file name.
+ */
+const SHASUM_LINE_START = /[0-9a-fA-F]{64}(?: {2}| \*)(?=\S)/g;
+
+/**
+ * Whether a paste holds more than one hash, counting only hashes that start
+ * an entry: any line break (multi-line input is refused whatever it holds);
+ * two hashes run together in the first word (two bare hashes joined by a
+ * one-line field); and, after the first hash, the start of another shasum
+ * line. When the paste is a strict shasum line ("<hash>  <name>" or
+ * "<hash> *<name>"), what follows the separator is the file name, so 64 hex
+ * characters inside it are part of the name (`<hash>  <other hash>.pdf`,
+ * `<hash>  dir/<other hash>/doc.pdf`); only "<64 hex>  <name>" or
+ * "<64 hex> *<name>" there starts a second line (`<hash>  a.pdf<hash2>  b.pdf`,
+ * as a one-line field joins two lines). After any other separator (one
+ * space, a tab), any 64 hex characters still count as a second hash
+ * (`<hash> <hash2>`: two bare hashes whose line break became a space).
+ */
 function holdsSeveralHashes(trimmed: string): boolean {
-  return /[\r\n]/.test(trimmed) || (trimmed.match(/[0-9a-fA-F]{64}/g) ?? []).length > 1;
+  if (/[\r\n]/.test(trimmed)) return true;
+  const bare = trimmed.replace(/^sha256:/i, "");
+  const separator = /\s+/.exec(bare);
+  const first = separator ? bare.slice(0, separator.index) : bare;
+  const rest = separator ? bare.slice(separator.index + separator[0].length) : "";
+  const firstHashes = (first.match(HEX_64) ?? []).length;
+  if (firstHashes > 1) return true;
+  if (rest === "") return false;
+  const shasumLine = /^[0-9a-fA-F]{64}$/.test(first) && /^(?: {2}| \*)\S/.test(bare.slice(64));
+  const later = (shasumLine ? rest.match(SHASUM_LINE_START) : rest.match(HEX_64)) ?? [];
+  return firstHashes + later.length > 1;
 }
 
 /** Why a pasted hash is refused (null when it is empty or a valid one), for the panel. */

@@ -220,8 +220,9 @@ document quotes (MANCI-2026-0001: page 3 of the certificate).
 
 1. Choose the final file (it is hashed in the browser and never uploaded; a
    file over 256 MB is hashed with `shasum -a 256` instead) or paste its
-   SHA-256 (the whole `shasum` line of that one file is accepted; the output
-   for several files is refused); enter the reference (letters, digits,
+   SHA-256 (the whole `shasum` line of that one file is accepted, also when
+   the file name itself holds a hash; the output for several files is
+   refused); enter the reference (letters, digits,
    `. _ : / -`, no spaces, never `sha256:`, at most 64).
 2. Compare the *Memo text (exactly)* line with the text in the signed
    document, character for character (*Copy memo* copies it), and check the
@@ -240,9 +241,18 @@ document quotes (MANCI-2026-0001: page 3 of the certificate).
    transaction. The page keeps no other copy of the signature: once
    forgotten, an anchor that is on chain cannot be recorded from the page
    (the card says so when the network confirmed it).
-4. If the send ends in an error saying the wallet, account or network
-   changed, the anchor may already be on chain: open the super admin
-   wallet's transactions on the explorer before sending it again.
+4. A send that fails says which of two things happened. *Nothing was
+   anchored*: it stopped before the wallet handed the signed transaction
+   back (a refusal, a check, a wallet or account switch during the prompt);
+   send it again when ready. *The anchor may have been sent*: it failed after
+   that (the broadcast timed out or failed, or the wallet, account or network
+   changed afterwards), so it may be on chain. The page then keeps this
+   warning (also after a reload or a wallet switch) and lets no other anchor
+   be sent until you close it: open the super admin wallet's transactions
+   (and the transaction itself, when the page shows it) on the explorer. If
+   it is there, *It is on the explorer: record it*; if not, wait two minutes
+   (a signed transaction can still land until its blockhash expires), look
+   again, then dismiss the warning and send it again.
 5. Record every anchor before the super admin key is rotated
    (`Platform.admin`): the server checks the super admin when it records,
    not when the memo was signed, so after a rotation neither key can record
