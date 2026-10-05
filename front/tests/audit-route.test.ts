@@ -30,7 +30,7 @@ vi.mock("@/lib/supabase-server", () => ({
 
 import { createHash } from "node:crypto";
 import { POST } from "@/app/api/audit/route";
-import { recordAudit } from "@/lib/supabase";
+import { AUDIT_KEEPALIVE_MAX_BYTES, recordAudit } from "@/lib/supabase";
 import { consumeSharedRateLimit } from "@/lib/server/shared-rate-limit";
 import { issueSessionToken } from "@/lib/server/siws-session";
 import { SESSION_COOKIE } from "@/lib/siws-session";
@@ -206,6 +206,38 @@ describe("recordAudit", () => {
     statuses.push(400);
     expect(await recordAudit(input, [1, 1])).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(7);
+    vi.unstubAllGlobals();
+  });
+
+  it("options: keepalive for a body within AUDIT_KEEPALIVE_MAX_BYTES only; each attempt cut off after timeoutMs (a write never hangs)", async () => {
+    const inits: RequestInit[] = [];
+    let hang = false;
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      inits.push(init);
+      if (hang) {
+        // Never answers; only the attempt's own signal ends it.
+        return new Promise<Response>((_, reject) => init.signal?.addEventListener("abort", () => reject(init.signal!.reason)));
+      }
+      return new Response(JSON.stringify({ ok: true, data: { id: "row-1" } }), { status: 200 });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const input = { ix_name: "share_class_distribution", category: "share-class" as const, actor_wallet: WALLET, reason: "" };
+    // Default: as before (no keepalive, no signal).
+    expect(await recordAudit(input)).toBe("row-1");
+    expect(inits[0]).not.toHaveProperty("keepalive");
+    expect(inits[0]).not.toHaveProperty("signal");
+    expect(await recordAudit(input, [1], { keepalive: true, timeoutMs: 5_000 })).toBe("row-1");
+    expect(inits[1]).toMatchObject({ keepalive: true });
+    expect(inits[1].signal).toBeInstanceOf(AbortSignal);
+    // A body over the keepalive cap is sent as usual (a keepalive fetch over it would be refused outright).
+    const large = { ...input, metadata: { note: "x".repeat(AUDIT_KEEPALIVE_MAX_BYTES) } };
+    expect(await recordAudit(large, [1], { keepalive: true })).toBe("row-1");
+    expect(inits[2]).not.toHaveProperty("keepalive");
+    // An attempt that never answers is given up after timeoutMs: null, not a hang.
+    hang = true;
+    const started = Date.now();
+    expect(await recordAudit(input, [1], { keepalive: true, timeoutMs: 30 })).toBeNull();
+    expect(Date.now() - started).toBeLessThan(5_000);
     vi.unstubAllGlobals();
   });
 });

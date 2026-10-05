@@ -1,8 +1,8 @@
 // The "pending" share_class_distribution audit row of each transaction of a
 // "Send to wallets" run, written as soon as the transaction is journalled,
 // BEFORE it is broadcast (components/send-to-wallets-panel, the onSigned hook
-// of lib/verified-solana-client prepareAndSendAll; batch and one-by-one
-// alike).
+// of lib/verified-solana-client prepareAndSendAll, built by
+// journalThenPendingAudits; batch and one-by-one alike).
 //
 // Why: the retry worker settles from the chain only the transactions that
 // have a pending row (lib/server/distribution-audits). The panel used to
@@ -13,16 +13,31 @@
 // a group left transactions that had landed without any audit row, and
 // nothing ever wrote one: a permanent gap in the audit trail.
 //
-// Shape and idempotency are the session's own: distributionAuditRow with
-// status "pending" and the run's screening evidence, written one after
-// another (the audit route's burst limit), never twice for a signature. The
-// broadcast waits for them at most PENDING_AUDIT_WAIT_MS (a batch keeps at
-// least 30 blocks of its blockhash when it is journalled, ~12 s; a slow
-// audit route never costs it the blockhash): the rest are written while it
-// is sent, and settle() waits for every write after the group, writes once
-// more each that failed, and says which signatures have their row (the
-// journal marks them "pending"). The final rows are unchanged: the panel
-// appends them once the network decided.
+// Shape is the session's own: distributionAuditRow with status "pending" and
+// the run's screening evidence, written one after another (the audit route's
+// burst limit), started once per signature. The broadcast waits for them at
+// most PENDING_AUDIT_WAIT_MS, and never longer than the blockhash can spare
+// above the margin the broadcast keeps (BatchSignedInfo.waitMs: a slow audit
+// route never eats into that margin): the rest are written while it is
+// sent, and settle() waits for every write after the group, writes once more
+// each that failed, and says which signatures have their row (the journal
+// marks them "pending"). The final rows are unchanged: the panel appends
+// them once the network decided.
+//
+// What it does not close: a row still being written when the tab closes is
+// delivered only if its request already left (the panel writes with
+// keepalive, so a request in flight outlives the page; one still queued
+// behind it does not), so a transaction broadcast after the wait can still
+// land without its row. A write never hangs: each attempt is cut off after
+// PENDING_AUDIT_ATTEMPT_TIMEOUT_MS (lib/supabase recordAudit), and the
+// writer itself moves on after PENDING_AUDIT_WRITE_LIMIT_MS whatever
+// `record` does, so one stuck write cannot hold up the ones after it. And a
+// write whose answer was lost (inserted, then the network dropped, or a
+// non-JSON answer) counts as failed: settle() writes it once more, leaving a
+// second pending row for that signature (/api/audit has no idempotency
+// key). Harmless: the retry worker groups pending rows by signature (one
+// server row, the oldest row's claims) and the admin feed shows the extra
+// pending row as it is.
 //
 // The rows are written after the transaction was signed, so after its
 // blockhash was fetched: the retry worker's expiry horizon (counted from the
@@ -30,7 +45,7 @@
 //
 // Node-safe (no "use client", no React): tests/distribution-audit-writer.test.ts
 // and tests/verified-batch-send.test.ts (a one-by-one run interrupted after
-// its first transaction).
+// its first transaction, through journalThenPendingAudits).
 import { distributionAuditRow } from "@/lib/distribution-run";
 
 /** One audit row as distributionAuditRow builds it. */
@@ -48,6 +63,16 @@ export type PendingAuditEntry = { signature: string; rows: readonly { wallet: st
  */
 export const PENDING_AUDIT_WAIT_MS = 5_000;
 
+/** Each attempt of a pending row's POST is given up after this long (lib/supabase recordAudit `timeoutMs`). */
+export const PENDING_AUDIT_ATTEMPT_TIMEOUT_MS = 10_000;
+
+/**
+ * The writer moves on to the next row after this long whatever `record`
+ * does (recordAudit with PENDING_AUDIT_ATTEMPT_TIMEOUT_MS ends within ~42 s:
+ * three attempts and the 429 waits). A row that answers later still counts.
+ */
+export const PENDING_AUDIT_WRITE_LIMIT_MS = 60_000;
+
 export type PendingAuditWriter = {
   /**
    * Starts the pending row of each entry not started before (one write after
@@ -56,7 +81,8 @@ export type PendingAuditWriter = {
   writeSigned(entries: readonly PendingAuditEntry[], waitMs?: number): Promise<void>;
   /**
    * Waits for every write started for `signatures`, writes once more each
-   * that did not get its row, and returns the signatures that have one.
+   * that did not get its row (a lost answer: a second row, see the header),
+   * and returns the signatures that have one.
    */
   settle(signatures: readonly string[]): Promise<Set<string>>;
   /** Waits for every write started (nothing new is written). */
@@ -69,23 +95,41 @@ export function createPendingAuditWriter(input: {
   /** Appends one row; the new row's id, or null when it was not written (lib/supabase recordAudit never throws). */
   record: (row: DistributionAuditRow) => Promise<string | null>;
   base: () => PendingAuditBase;
+  /** Default PENDING_AUDIT_WRITE_LIMIT_MS (tests pass their own). */
+  writeLimitMs?: number;
 }): PendingAuditWriter {
+  const writeLimitMs = input.writeLimitMs ?? PENDING_AUDIT_WRITE_LIMIT_MS;
   const entries = new Map<string, PendingAuditEntry>();
   const writes = new Map<string, Promise<boolean>>();
   const written = new Set<string>();
   // One write at a time, in the order they were started.
   let tail: Promise<unknown> = Promise.resolve();
 
+  async function recordOnce(entry: PendingAuditEntry): Promise<boolean> {
+    try {
+      const id = await input.record(
+        distributionAuditRow({ ...input.base(), signature: entry.signature, status: "pending", rows: entry.rows }),
+      );
+      if (id !== null) written.add(entry.signature);
+      return id !== null;
+    } catch {
+      return false;
+    }
+  }
+
   function write(entry: PendingAuditEntry): Promise<boolean> {
     const attempt = tail.then(async () => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
       try {
-        const id = await input.record(
-          distributionAuditRow({ ...input.base(), signature: entry.signature, status: "pending", rows: entry.rows }),
-        );
-        if (id !== null) written.add(entry.signature);
-        return id !== null;
-      } catch {
-        return false;
+        // A record that never answers must not hold up the rows after it.
+        return await Promise.race([
+          recordOnce(entry),
+          new Promise<boolean>((resolve) => {
+            timer = setTimeout(() => resolve(false), writeLimitMs);
+          }),
+        ]);
+      } finally {
+        clearTimeout(timer);
       }
     });
     tail = attempt;
@@ -126,5 +170,31 @@ export function createPendingAuditWriter(input: {
       await tail;
     },
     has: (signature) => written.has(signature),
+  };
+}
+
+/**
+ * prepareAndSendAll's onSigned hook for one group of a "Send to wallets" run
+ * (components/send-to-wallets-panel): the caller's journal first (`journal`,
+ * synchronous: the signatures are known before the network can see them),
+ * then `onSending`, then the pending row of each transaction (`rowsOf` its
+ * index in the group), waited for at most PENDING_AUDIT_WAIT_MS and never
+ * longer than the blockhash can spare (`info.waitMs`, lib/verified-solana-client
+ * BatchSignedInfo). Throws only what `journal` throws (nothing is sent then).
+ */
+export function journalThenPendingAudits<Signed extends { index: number; signature: string }>(input: {
+  journal: (signed: readonly Signed[]) => void;
+  audits: PendingAuditWriter;
+  rowsOf: (index: number) => PendingAuditEntry["rows"];
+  onSending?: (count: number) => void;
+}): (signed: readonly Signed[], info: { waitMs: number }) => Promise<void> {
+  return async (signed, info) => {
+    input.journal(signed);
+    input.onSending?.(signed.length);
+    const waitMs = Math.min(PENDING_AUDIT_WAIT_MS, Math.max(0, Number.isFinite(info.waitMs) ? info.waitMs : 0));
+    await input.audits.writeSigned(
+      signed.map((s) => ({ signature: s.signature, rows: input.rowsOf(s.index) })),
+      waitMs,
+    );
   };
 }

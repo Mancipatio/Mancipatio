@@ -211,10 +211,16 @@ export const LIGHTHOUSE_GUARD_UNITS = 7_000;
  * 1,400,000.
  *
  * Fee: the priority fee is paid on the limit, so it costs at most 28,000 ×
- * the price more per transaction: 2,800 lamports (0.0000028 SOL) at the
- * mainnet price of 100,000 micro-lamports per compute unit, less when the
- * 200,000 floor already covered part of it, nothing when it covered all of
- * it (a transaction that needs under ~156,000).
+ * the price more per transaction. The mainnet price comes from the oracle,
+ * between the policy's floor and cap (lib/priority-fee PRIORITY_FEE_POLICY):
+ * 2,800 lamports (0.0000028 SOL) at the floor of 100,000 micro-lamports per
+ * compute unit, up to 56,000 lamports (0.000056 SOL) at the cap of
+ * 2,000,000; less when the 200,000 floor already covered part of it,
+ * nothing when it covered all of it (a transaction that needs under
+ * ~156,000). The whole fee stays bounded by the 1.4M limit and the cap.
+ * (Send to wallets' SOL pre-check calls lib/distribution-plan lamportsNeeded
+ * without a price: base fees and rent only, no priority fee; Phantom's own
+ * fee-payer guard keeps a 5,000,000-lamport slack.)
  */
 export const DISTRIBUTION_GUARD_HEADROOM_UNITS = 4 * LIGHTHOUSE_GUARD_UNITS;
 

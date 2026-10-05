@@ -324,13 +324,16 @@ export type SignatureWaitOptions = {
   timeoutMs?: number;
   /** Between two reads (default 0.5 s). */
   pollMs?: number;
+  /** Checked after each read: true ends the wait ("unknown" for what is still open). */
   isCancelled?: () => boolean;
   /**
    * Retry a status read the RPC refused for a moment (HTTP 429, a 5xx, no
    * response: lib/rpc-retry withRpcReadRetry, at most its retries per read)
    * instead of answering "unknown" at once. Bounded by the timeout: no retry
    * or wait starts after it, so the whole wait stays within `timeoutMs` (plus
-   * the read in flight). `true` takes the default waits; tests pass their own.
+   * the read in flight, itself cut off after STATUS_READ_TIMEOUT_MS); what
+   * the timeout leaves open is "timeout". `true` takes the default waits;
+   * tests pass their own.
    */
   retryReads?: boolean | Pick<RpcReadRetryOptions, "delaysMs" | "sleep" | "random">;
 };
@@ -351,11 +354,19 @@ export async function waitForSignature(
 type ReadStatus = { err: unknown; confirmationStatus?: string | null } | null | undefined;
 
 /**
+ * The longest one status read may take: the RPC transport has no timeout of
+ * its own, so a request that never answers would hold the wait past
+ * `timeoutMs`. Cut off, it counts as a failed read ("unknown").
+ */
+export const STATUS_READ_TIMEOUT_MS = 10_000;
+
+/**
  * waitForSignature for several signatures at once, in one
  * getSignatureStatuses call per poll (never one call per signature): each
  * outcome is decided when its transaction is confirmed or failed; the rest
- * are "timeout" once the timeout passes, or "unknown" when a read fails (after
- * the retries `retryReads` allows) or `isCancelled` says so. In order.
+ * are "timeout" once the timeout passes (also during a retry's wait), or
+ * "unknown" when a read fails (after the retries `retryReads` allows, or cut
+ * off after STATUS_READ_TIMEOUT_MS) or `isCancelled` says so. In order.
  */
 export async function waitForSignatures(
   rpc: Rpc<GetSignatureStatusesApi>,
@@ -375,14 +386,20 @@ export async function waitForSignatures(
     for (;;) {
       const open = outcomes.flatMap((o, i) => (o === null ? [i] : []));
       if (open.length === 0) return outcomes as SignatureOutcome[];
-      // The read itself is never cut off: an answer in flight at the timeout still counts.
+      // The wait's timeout never cuts a read off (an answer in flight then still counts); only its own
+      // STATUS_READ_TIMEOUT_MS does. At most MAX_DISTRIBUTION_ROWS (200) transactions: one call (≤ 256).
       const read = async (): Promise<readonly ReadStatus[]> =>
-        (await rpc.getSignatureStatuses(open.map((i) => signatures[i] as Signature)).send()).value;
+        (
+          await rpc
+            .getSignatureStatuses(open.map((i) => signatures[i] as Signature))
+            .send({ abortSignal: AbortSignal.timeout(STATUS_READ_TIMEOUT_MS) })
+        ).value;
       let value: readonly ReadStatus[];
       try {
         value = retry && stop ? await withRpcReadRetry(read, { ...retry, signal: stop.signal }) : await read();
       } catch {
-        return rest("unknown");
+        // The timeout passed while a refused read waited for its retry: not decided in time.
+        return rest(stop?.signal.aborted ? "timeout" : "unknown");
       }
       open.forEach((i, k) => {
         const status = value[k];

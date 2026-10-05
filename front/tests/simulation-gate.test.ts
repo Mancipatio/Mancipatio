@@ -24,6 +24,7 @@ import {
   SimulationRefusedError,
   waitForSignature,
   waitForSignatures,
+  STATUS_READ_TIMEOUT_MS,
   type SimulationRpc,
   type SimulationVerdict,
 } from "@/lib/simulation-gate";
@@ -478,13 +479,44 @@ describe("waitForSignatures", () => {
     expect(limited.calls).toHaveLength(4);
   });
 
-  it("retryReads is bounded by the timeout: a retry's wait ends with it and no read starts after it", async () => {
+  it("retryReads is bounded by the timeout: a retry's wait ends with it (\"timeout\": not decided in time) and no read starts after it", async () => {
     const limited = rpcOf(() => {
       throw http(429);
     });
     const started = Date.now();
-    expect(await waitForSignatures(limited.rpc, ["a"], { timeoutMs: 30, retryReads: { delaysMs: [10_000] } })).toEqual(["unknown"]);
+    expect(await waitForSignatures(limited.rpc, ["a"], { timeoutMs: 30, retryReads: { delaysMs: [10_000] } })).toEqual(["timeout"]);
     expect(Date.now() - started).toBeLessThan(5_000);
     expect(limited.calls).toHaveLength(1);
+  });
+
+  it("each read carries its own cut-off (STATUS_READ_TIMEOUT_MS): a request that never answers ends as a failed read, not a hang", async () => {
+    expect(STATUS_READ_TIMEOUT_MS).toBe(10_000);
+    // The read's AbortSignal.timeout, made controllable: firing it is the 10 s passing.
+    const cutOff = new AbortController();
+    const timeouts: number[] = [];
+    const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      timeouts.push(ms);
+      return cutOff.signal;
+    });
+    try {
+      const hanging = {
+        getSignatureStatuses: () => ({
+          // Never answers; ends only when the read's own signal aborts.
+          send: (options?: { abortSignal?: AbortSignal }) =>
+            new Promise((_, reject) => options?.abortSignal?.addEventListener("abort", () => reject(options.abortSignal!.reason))),
+        }),
+      } as unknown as Parameters<typeof waitForSignatures>[0];
+      let outcome: unknown = null;
+      // The wait's own timeout (20 ms) does not cut the read off: an answer in flight still counts.
+      const waiting = waitForSignatures(hanging, ["a"], { timeoutMs: 20 }).then((o) => (outcome = o));
+      await new Promise((r) => setTimeout(r, 40));
+      expect(outcome).toBeNull();
+      expect(timeouts).toEqual([STATUS_READ_TIMEOUT_MS]);
+      cutOff.abort(new DOMException("The operation timed out.", "TimeoutError"));
+      await waiting;
+      expect(outcome).toEqual(["unknown"]);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });

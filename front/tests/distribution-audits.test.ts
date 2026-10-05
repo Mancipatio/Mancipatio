@@ -23,11 +23,16 @@ vi.mock("server-only", () => ({}));
 
 import {
   CANDIDATES_PER_LIMIT,
+  CLAIMS_PAGE,
   DISTRIBUTION_AUDIT_IX,
   DistributionAuditError,
+  EXPIRY_CHECK_MIN_MS,
+  EXPIRY_CHECK_RESERVE_MS,
   EXPIRY_HORIZON_MS,
   FRESH_BAND_MS,
+  MAX_CLAIM_CHECKS,
   MAX_EXPIRY_CHECKS,
+  MAX_REVIEW_CHECKS,
   RECONCILE_MAX_AGE_MS,
   RECONCILE_MIN_AGE_MS,
   SCAN_PAGE,
@@ -60,8 +65,11 @@ const ZERO = { complete: 0, pending: 0, invalid: 0, expired: 0, deferred: 0, rev
 const HORIZON_MIN = EXPIRY_HORIZON_MS / MIN;
 
 type Status = { slot: bigint; err: unknown; confirmationStatus: string | null } | null;
-/** A getTransaction answer (finalized): the transaction with its meta, null when unknown; an Error is an RPC that cannot answer. */
-type Tx = { slot: bigint; meta: { err: unknown } | null } | null | Error;
+/**
+ * A getTransaction answer (finalized): the transaction with its meta, null when unknown; an Error is an RPC
+ * that cannot answer; "hang" never answers (only the request's abort signal ends it).
+ */
+type Tx = { slot: bigint; meta: { err: unknown } | null } | null | Error | "hang";
 
 function chain(statuses: Record<string, Status> = {}, transactions: Record<string, Tx> = {}) {
   const calls: string[][] = [];
@@ -86,9 +94,13 @@ function chain(statuses: Record<string, Status> = {}, transactions: Record<strin
       txCalls.push(signature);
       txConfigs.push(config);
       return {
-        send: async () => {
+        send: async (options?: { abortSignal?: AbortSignal }) => {
           const tx = transactions[signature] ?? null;
           if (tx instanceof Error) throw tx;
+          if (tx === "hang") {
+            const signal = options?.abortSignal;
+            return new Promise<never>((_, reject) => signal?.addEventListener("abort", () => reject(signal.reason)));
+          }
           return tx;
         },
       };
@@ -458,6 +470,73 @@ describe("what the chain decides", () => {
     expect(first.txCalls).toEqual(Array.from({ length: MAX_EXPIRY_CHECKS }, (_, i) => SIG(100 + count - 1 - i)));
     const next = chain();
     expect(await run(next.rpc, 20)).toEqual({ ...ZERO, complete: 5, expired: 5 });
+  });
+
+  it("rows held for review never starve a real backlog row of its lookup: the unclaimed first, at most MAX_REVIEW_CHECKS held after them", async () => {
+    // MAX_EXPIRY_CHECKS + 3 forged pairs (pending + "success" via the unsigned route), all older than five real
+    // rows of the same band: oldest first alone would give every lookup to them.
+    const held = MAX_EXPIRY_CHECKS + 3;
+    for (let i = 0; i < held; i++) {
+      pending(SIG(150 + i), HORIZON_MIN + 30 + held - i); // the fresh band too; SIG(150) is the oldest
+      browserFinal(SIG(150 + i), HORIZON_MIN);
+    }
+    for (let i = 0; i < 5; i++) pending(SIG(200 + i), HORIZON_MIN + 10 - i);
+    const first = chain();
+    expect(await run(first.rpc, 20)).toEqual({ ...ZERO, complete: 5, expired: 5, pending: held, review: held });
+    // The five real rows are looked up (and settled) although the held ones are older; then MAX_REVIEW_CHECKS of
+    // the held ones, oldest first, in the slots left. The rest stay held without a lookup this run.
+    expect(first.txCalls).toEqual([
+      ...Array.from({ length: 5 }, (_, i) => SIG(200 + i)),
+      ...Array.from({ length: MAX_REVIEW_CHECKS }, (_, i) => SIG(150 + i)),
+    ]);
+    for (let i = 0; i < 5; i++) expect(serverRowOf(SIG(200 + i))).toMatchObject({ reason: "Not found on chain (expired)" });
+    for (let i = 0; i < held; i++) expect(serverRowOf(SIG(150 + i))).toBeUndefined();
+    // The claims were read CLAIMS_PAGE signatures per query.
+    const claims = store.queries.filter((q) => call(q, "select").some(([c]) => c === "tx_signature"));
+    expect(claims.map((q) => (call(q, "in")[0][1] as string[]).length)).toEqual([CLAIMS_PAGE, held + 5 - CLAIMS_PAGE]);
+    // With no real row left, the held ones still get at most MAX_REVIEW_CHECKS lookups per run.
+    const next = chain();
+    expect(await run(next.rpc, 20)).toEqual({ ...ZERO, pending: held, review: held });
+    expect(next.txCalls).toHaveLength(MAX_REVIEW_CHECKS);
+  });
+
+  it("reads the claims of at most MAX_CLAIM_CHECKS candidates past the horizon per run (the rest wait, pending)", async () => {
+    const count = MAX_CLAIM_CHECKS + 4;
+    // Half a minute apart, all in the fresh band (6 h to 7 h): BIGSIG(0) is the oldest.
+    for (let i = 0; i < count; i++) pending(BIGSIG(i), HORIZON_MIN + 1 + (count - i) / 2);
+    const c = chain();
+    expect(await run(c.rpc, 20)).toEqual({ ...ZERO, complete: MAX_EXPIRY_CHECKS, expired: MAX_EXPIRY_CHECKS, pending: count - MAX_EXPIRY_CHECKS });
+    const claims = store.queries.filter((q) => call(q, "select").some(([s]) => s === "tx_signature"));
+    expect(claims.flatMap((q) => call(q, "in")[0][1] as string[])).toEqual(Array.from({ length: MAX_CLAIM_CHECKS }, (_, i) => BIGSIG(i)));
+  });
+
+  it("a slow lookup never costs the run the rows the statuses settled: the expiry's checks stop EXPIRY_CHECK_RESERVE_MS before the deadline", async () => {
+    pending(SIG(80), HORIZON_MIN + 1); // not found; its getTransaction never answers
+    pending(SIG(81), 30); // finalized
+    const c = chain({ [SIG(81)]: finalized() }, { [SIG(80)]: "hang" });
+    const started = Date.now();
+    const budget = EXPIRY_CHECK_RESERVE_MS + EXPIRY_CHECK_MIN_MS + 200;
+    expect(await run(c.rpc, 10, { deadline: Date.now() + budget })).toEqual({ ...ZERO, complete: 1, pending: 1 });
+    // Looked up, cut off with the reserve left, and SIG(81)'s row still written.
+    expect(c.txCalls).toEqual([SIG(80)]);
+    expect(Date.now() - started).toBeLessThan(budget);
+    expect(finalOf(SIG(81))).toMatchObject({ status: "success" });
+    expect(finalOf(SIG(80))).toBeUndefined();
+  });
+
+  it("with less than EXPIRY_CHECK_RESERVE_MS + EXPIRY_CHECK_MIN_MS left, the expiry's checks are not started (a later run does them)", async () => {
+    pending(SIG(82), HORIZON_MIN + 1);
+    pending(SIG(83), 30);
+    const c = chain({ [SIG(83)]: finalized() });
+    expect(await run(c.rpc, 10, { deadline: Date.now() + EXPIRY_CHECK_RESERVE_MS + EXPIRY_CHECK_MIN_MS / 2 })).toEqual({
+      ...ZERO,
+      complete: 1,
+      pending: 1,
+    });
+    expect(c.txCalls).toEqual([]);
+    expect(store.queries.filter((q) => call(q, "select").some(([s]) => s === "tx_signature"))).toEqual([]);
+    expect(finalOf(SIG(83))).toMatchObject({ status: "success" });
+    expect(finalOf(SIG(82))).toBeUndefined();
   });
 });
 

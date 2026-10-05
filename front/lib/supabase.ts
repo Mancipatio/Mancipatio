@@ -63,19 +63,39 @@ export type AuditInput = {
 /** Waits before each retry of a rate-limited (429) audit write; a breadcrumb is never dropped on the first 429. */
 export const AUDIT_RETRY_DELAYS_MS = [2_000, 10_000];
 
+/** A keepalive request's body is capped (64 KiB for all of a page's in flight together); larger rows are sent without it. */
+export const AUDIT_KEEPALIVE_MAX_BYTES = 32 * 1024;
+
+export type RecordAuditOptions = {
+  /**
+   * `keepalive`: the request outlives the page (a tab closed right after a
+   * send still delivers its audit row). Only for a body of at most
+   * AUDIT_KEEPALIVE_MAX_BYTES; a larger one is sent as usual.
+   */
+  keepalive?: boolean;
+  /** Each attempt (the POST and its answer) is given up after this long: a write never hangs. */
+  timeoutMs?: number;
+};
+
 /**
  * Fire-and-forget audit log write.
  *
  * Never throws — admin actions must not break if the backend is unreachable.
- * Returns the new row's id, or null on failure. A 429 (the shared audit
- * limit, app/api/audit/route.ts) is retried after each of `retryDelaysMs`
- * before the row is given up and logged.
+ * Returns the new row's id, or null on failure (also when the row may have
+ * been inserted but its answer was lost: the route has no idempotency key).
+ * A 429 (the shared audit limit, app/api/audit/route.ts) is retried after
+ * each of `retryDelaysMs` before the row is given up and logged.
  *
  * Internals: POSTs to /api/audit, which inserts server-side via the service
  * role (stamping metadata.server_received_at) — the anon-key write path to
- * audit_events is gone. The exported signature is unchanged.
+ * audit_events is gone. The exported signature is unchanged (`options` is
+ * optional).
  */
-export async function recordAudit(input: AuditInput, retryDelaysMs: readonly number[] = AUDIT_RETRY_DELAYS_MS): Promise<string | null> {
+export async function recordAudit(
+  input: AuditInput,
+  retryDelaysMs: readonly number[] = AUDIT_RETRY_DELAYS_MS,
+  options: RecordAuditOptions = {},
+): Promise<string | null> {
   try {
     const body = JSON.stringify({
       ix_name: input.ix_name,
@@ -87,7 +107,18 @@ export async function recordAudit(input: AuditInput, retryDelaysMs: readonly num
       status: input.status ?? "success",
       metadata: input.metadata ?? {},
     });
-    const post = () => fetch("/api/audit", { method: "POST", headers: { "Content-Type": "application/json" }, body });
+    const keepalive = options.keepalive === true && new TextEncoder().encode(body).byteLength <= AUDIT_KEEPALIVE_MAX_BYTES;
+    const post = () => {
+      // One timeout per attempt; it also ends reading that attempt's answer (res.json below).
+      const signal = options.timeoutMs !== undefined ? AbortSignal.timeout(options.timeoutMs) : undefined;
+      return fetch("/api/audit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body,
+        ...(keepalive ? { keepalive: true } : {}),
+        ...(signal ? { signal } : {}),
+      });
+    };
     let res = await post();
     for (const delay of retryDelaysMs) {
       if (res.status !== 429) break;

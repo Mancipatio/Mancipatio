@@ -1,16 +1,26 @@
 // lib/distribution-audit-writer: a "Send to wallets" transaction's pending
 // audit row is written as soon as the transaction is journalled, before it is
-// broadcast — one write after another, never twice for a signature, the
-// broadcast held back a few seconds at most — so a tab closed in the middle
-// of a group never leaves a landed transaction without the row the retry
-// worker settles from the chain. The panel wires it into prepareAndSendAll's
-// onSigned hook (and tests/verified-batch-send runs it through a real
-// one-by-one run interrupted after its first transaction).
+// broadcast — one write after another, started once per signature (once
+// more only when the first did not get its row), the broadcast held back a
+// few seconds at most and never past what the blockhash can spare, no write
+// holding up the next for long — so a tab closed in the middle of a group
+// does not leave a landed transaction without the row the retry worker
+// settles from the chain (except a row whose request had not left yet: see
+// the module header). The panel's onSigned hook is journalThenPendingAudits
+// (tested here, and in tests/verified-batch-send through a real one-by-one
+// run interrupted after its first transaction).
 import fs from "node:fs";
 import path from "node:path";
 import { getBase58Decoder } from "@solana/kit";
 import { describe, expect, it, vi } from "vitest";
-import { createPendingAuditWriter, PENDING_AUDIT_WAIT_MS, type DistributionAuditRow } from "@/lib/distribution-audit-writer";
+import {
+  createPendingAuditWriter,
+  journalThenPendingAudits,
+  PENDING_AUDIT_ATTEMPT_TIMEOUT_MS,
+  PENDING_AUDIT_WAIT_MS,
+  PENDING_AUDIT_WRITE_LIMIT_MS,
+  type DistributionAuditRow,
+} from "@/lib/distribution-audit-writer";
 import { distributionAuditRow } from "@/lib/distribution-run";
 
 const ADDR = (n: number) => getBase58Decoder().decode(new Uint8Array(32).fill(n));
@@ -129,30 +139,154 @@ describe("createPendingAuditWriter", () => {
     await done;
     expect(writer.has(SIG(1))).toBe(true);
   });
+
+  it("a run that stops mid-group (prepareAndSendAll threw after sends): drain() finishes what was started and writes nothing again", async () => {
+    const audit = endpoint((_, call) => (call === 1 ? null : `id-${call}`));
+    const writer = createPendingAuditWriter({ record: audit.record, base });
+    await writer.writeSigned([entry(1), entry(2)]);
+    await writer.drain();
+    // SIG(1) failed and is not retried by drain (only settle() retries); the resume's evaluation decides.
+    expect(audit.record).toHaveBeenCalledTimes(2);
+    expect(writer.has(SIG(1))).toBe(false);
+    expect(writer.has(SIG(2))).toBe(true);
+  });
+
+  it("settle() covers every journalled signature, also one whose broadcast failed (it may still land)", async () => {
+    const audit = endpoint();
+    const writer = createPendingAuditWriter({ record: audit.record, base });
+    // Both journalled (their rows written before the broadcast); SIG(2)'s broadcast then failed.
+    await writer.writeSigned([entry(1), entry(2)]);
+    expect(await writer.settle([SIG(1), SIG(2)])).toEqual(new Set([SIG(1), SIG(2)]));
+    expect(audit.rows.map((r) => r.tx_signature)).toEqual([SIG(1), SIG(2)]);
+  });
+
+  it("a write whose answer was lost (the row inserted) counts as failed: settle() leaves a second pending row for it (no idempotency key)", async () => {
+    // The first POST inserts the row but its answer never arrives (recordAudit returns null).
+    const inserted: string[] = [];
+    const record = vi.fn(async (row: DistributionAuditRow) => {
+      inserted.push(row.tx_signature);
+      return record.mock.calls.length === 1 ? null : "id";
+    });
+    const writer = createPendingAuditWriter({ record, base });
+    await writer.writeSigned([entry(1)]);
+    expect(await writer.settle([SIG(1)])).toEqual(new Set([SIG(1)]));
+    // At most one more: the retry worker groups pending rows by signature (one server row, the oldest's claims).
+    expect(inserted).toEqual([SIG(1), SIG(1)]);
+    await writer.settle([SIG(1)]);
+    expect(record).toHaveBeenCalledTimes(2);
+  });
+
+  it("a record that never answers holds up the rows after it only writeLimitMs (PENDING_AUDIT_WRITE_LIMIT_MS by default)", async () => {
+    expect(PENDING_AUDIT_WRITE_LIMIT_MS).toBe(60_000);
+    expect(PENDING_AUDIT_ATTEMPT_TIMEOUT_MS).toBe(10_000);
+    const audit = endpoint((row) => (row.tx_signature === SIG(1) ? new Promise<string>(() => {}) : "id"));
+    const writer = createPendingAuditWriter({ record: audit.record, base, writeLimitMs: 20 });
+    await writer.writeSigned([entry(1), entry(2)], 1_000);
+    // SIG(1) never answered; SIG(2) was still written, after it.
+    expect(writer.has(SIG(2))).toBe(true);
+    expect(writer.has(SIG(1))).toBe(false);
+    await writer.drain();
+  });
+});
+
+describe("journalThenPendingAudits (the panel's onSigned hook)", () => {
+  const signed = (n: number, index: number) => ({ index, signature: SIG(n), lastValidBlockHeight: BigInt(1_000) });
+
+  it("the journal first, then onSending, then each transaction's pending row (its rows by index), awaited before it returns", async () => {
+    const order: string[] = [];
+    const audit = endpoint((row) => {
+      order.push(`audit:${row.tx_signature === SIG(1) ? 1 : 2}`);
+      return "id";
+    });
+    const writer = createPendingAuditWriter({ record: audit.record, base });
+    const hook = journalThenPendingAudits({
+      journal: (list) => order.push(`journal:${list.map((s) => s.index).join(",")}`),
+      audits: writer,
+      rowsOf: (index) => entry(index + 1).rows,
+      onSending: (count) => order.push(`sending:${count}`),
+    });
+    await hook([signed(1, 0), signed(2, 1)], { waitMs: 10_000 });
+    expect(order).toEqual(["journal:0,1", "sending:2", "audit:1", "audit:2"]);
+    expect(audit.rows.map((r) => r.metadata.recipients)).toEqual([
+      distributionAuditRow({ ...base(), signature: SIG(1), status: "pending", rows: entry(1).rows }).metadata.recipients,
+      distributionAuditRow({ ...base(), signature: SIG(2), status: "pending", rows: entry(2).rows }).metadata.recipients,
+    ]);
+  });
+
+  it("waits at most PENDING_AUDIT_WAIT_MS, and never longer than the blockhash can spare (info.waitMs; 0 and junk: no wait)", async () => {
+    const audit = endpoint(() => new Promise<string>(() => {}));
+    for (const [waitMs, most] of [
+      [40, 2_000],
+      [0, 1_000],
+      [-5, 1_000],
+      [Number.NaN, 1_000],
+    ] as const) {
+      const writer = createPendingAuditWriter({ record: audit.record, base, writeLimitMs: 10 });
+      const hook = journalThenPendingAudits({ journal: () => {}, audits: writer, rowsOf: () => [] });
+      const started = Date.now();
+      await hook([signed(1, 0)], { waitMs });
+      expect(Date.now() - started).toBeLessThan(most);
+    }
+    const spy = vi.spyOn(globalThis, "setTimeout");
+    try {
+      const writer = createPendingAuditWriter({ record: async () => "id", base });
+      await journalThenPendingAudits({ journal: () => {}, audits: writer, rowsOf: () => [] })([signed(1, 0)], { waitMs: 45_000 });
+      // The broadcast's wait (writeSigned's timer) is PENDING_AUDIT_WAIT_MS, not the 45 s the blockhash could spare.
+      expect(spy.mock.calls.map(([, ms]) => ms)).toContain(PENDING_AUDIT_WAIT_MS);
+      expect(spy.mock.calls.map(([, ms]) => ms)).not.toContain(45_000);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("a journal that throws stops it before any row is written (prepareAndSendAll then sends nothing)", async () => {
+    const audit = endpoint();
+    const writer = createPendingAuditWriter({ record: audit.record, base });
+    const hook = journalThenPendingAudits({
+      journal: () => {
+        throw new Error("storage full");
+      },
+      audits: writer,
+      rowsOf: () => [],
+    });
+    await expect(hook([signed(1, 0)], { waitMs: 1_000 })).rejects.toThrow("storage full");
+    expect(audit.record).not.toHaveBeenCalled();
+  });
 });
 
 describe("the panel writes each pending row when the transaction is journalled, before it is broadcast", () => {
   const panel = fs.readFileSync(path.join(__dirname, "..", "components/send-to-wallets-panel.tsx"), "utf8");
 
-  it("onSigned: the journal, then the pending rows (awaited, bounded), in both the batch and the one-by-one path", () => {
-    const hook = panel.slice(panel.indexOf("onSigned: async (signed) => {"));
+  it("onSigned is journalThenPendingAudits (tested above): the journal, the text, the group's rows, the writer", () => {
+    const hook = panel.slice(panel.indexOf("onSigned: journalThenPendingAudits({"));
     expect(hook.length).toBeLessThan(panel.length);
     const journal = hook.indexOf("writeJournal(store, j);");
-    const rows = hook.indexOf("await audits.writeSigned(signed.map((s) => ({ signature: s.signature, rows: rowsOf(group[s.index]) })));");
     expect(journal).toBeGreaterThan(-1);
-    expect(rows).toBeGreaterThan(journal);
-    // Before the hook returns (prepareAndSendAll broadcasts only after it).
-    expect(hook.slice(rows).indexOf("},")).toBeLessThan(hook.slice(rows).indexOf("});"));
+    expect(hook.indexOf("audits,")).toBeGreaterThan(journal);
+    expect(hook).toContain("rowsOf: (index) => rowsOf(group[index]),");
     expect(panel).toContain("base: () => ({ actor, reason, scPda, runId, mint: sc.mint, screening: evidence }),");
+    // keepalive and a cut-off per attempt (lib/supabase recordAudit options).
+    expect(panel).toContain("record: (row) => recordAudit(row, AUDIT_RETRY_DELAYS_MS, { keepalive: true, timeoutMs: PENDING_AUDIT_ATTEMPT_TIMEOUT_MS }),");
   });
 
   it("after the group: no second pending write, only settle() (a failed one retried once) and the journal mark", () => {
-    expect(panel).toContain("const pendingAudited = await audits.settle(result.outcomes.flatMap((o) => (o.signature ? [o.signature] : [])));");
+    expect(panel).toContain("const signedHere = result.outcomes.flatMap((o) => (o.signature ? [o.signature] : []));");
+    expect(panel).toContain("const pendingAudited = await audits.settle(signedHere);");
     expect(panel).toContain('j = withAudited(j, pendingAudited, "pending");');
     expect(panel).not.toMatch(/status: "pending", rows: s\.rows/);
     // The final rows once the network decided are unchanged.
     expect(panel).toContain('status: outcomes[i] === "confirmed" ? "success" : "failed",');
     // A run that stops early still finishes the rows being written.
     expect(panel).toContain("if (pendingAudits) await pendingAudits.drain().catch(() => undefined);");
+  });
+
+  it("the previous group unconfirmed (EarlierTransactionUnconfirmedError, position null): the groups already sent still go through step 8", () => {
+    const loop = panel.slice(panel.indexOf("result = await sender.prepareAndSendAll(requests, {"), panel.indexOf("// 8. Wait for the network"));
+    expect(loop).toContain("if (!(err instanceof EarlierTransactionUnconfirmedError) || err.position !== null) throw err;");
+    // `break` (to step 8), not a throw past it.
+    expect(loop.slice(loop.indexOf("err.position !== null) throw err;"))).toMatch(/setProblem\([\s\S]*?\);\s*break;/);
+    // Step 8: one status read for all of them per poll, refused reads retried.
+    expect(panel).toMatch(/await waitForSignatures\(\s*rpc,\s*sent\.map\(\(s\) => s\.signature\),\s*\{ timeoutMs: 60_000, retryReads: true \},?\s*\)/);
+    expect(panel).not.toContain("waitForSignature(rpc, s.signature");
   });
 });

@@ -53,7 +53,7 @@ import { fetchMaybeShareClass, type Asset, type ShareClass } from "@/lib/generat
 import { ConfirmModal } from "@/components/confirm-modal";
 import { useToast } from "@/lib/toast";
 import { explainSendError } from "@/lib/tx-error";
-import { recordAudit } from "@/lib/supabase";
+import { AUDIT_RETRY_DELAYS_MS, recordAudit } from "@/lib/supabase";
 import { walletSigner } from "@/lib/wallet-signer";
 import { detectNetwork } from "@/lib/network";
 import { USDC } from "@/lib/payment-mints";
@@ -78,10 +78,16 @@ import {
   reservedTreasuryUnits,
 } from "@/lib/sale-approvals";
 import { approvalUnits, mintRepausesPrimary, saleReferencePriceE6, treasuryValueE6 } from "@/lib/public-sale";
-import { getBatchSender, remembersSignSeparately } from "@/lib/verified-solana-client";
+import {
+  EarlierTransactionUnconfirmedError,
+  getBatchSender,
+  remembersSignSeparately,
+  type BatchSendResult,
+  type BatchSigned,
+} from "@/lib/verified-solana-client";
 import { rememberSignsSeparately, signsSeparately } from "@/lib/wallet-standard-batch";
 import { signingTarget, signsOffchainEnvelopes } from "@/lib/siws-signing";
-import { simulateInstructions, waitForSignature } from "@/lib/simulation-gate";
+import { simulateInstructions, waitForSignatures } from "@/lib/simulation-gate";
 import { formatTokens, parsePrice, perTokenPriceE6, primaryPausedNote, formatE6 } from "@/lib/tokenize-shares";
 import type { HookMode } from "@/lib/tokenize-shares-chain";
 import { shortAddress, tokenAccountOf } from "@/lib/share-transfer";
@@ -136,7 +142,12 @@ import {
   type TreasuryTransfer,
 } from "@/lib/distribution-journal";
 import { distributionAuditRow, evaluateRun } from "@/lib/distribution-run";
-import { createPendingAuditWriter, type PendingAuditWriter } from "@/lib/distribution-audit-writer";
+import {
+  createPendingAuditWriter,
+  journalThenPendingAudits,
+  PENDING_AUDIT_ATTEMPT_TIMEOUT_MS,
+  type PendingAuditWriter,
+} from "@/lib/distribution-audit-writer";
 import { parseUsdPerToken, runTreasuryMint, treasuryMintEur } from "@/lib/treasury-mint";
 import { formatLamportsAsSol } from "@/lib/compute-budget";
 import { DISTRIBUTION_GUARD_HEADROOM_UNITS } from "@/lib/wallet-changes";
@@ -857,10 +868,13 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
       const rowsOf = (t: PackedTransaction) => t.index.map((e) => ({ wallet: e.row, amount: amounts.get(e.row) ?? BigInt(0) }));
       // Each transaction's "pending" audit row is written as soon as it is journalled, before it is
       // broadcast (lib/distribution-audit-writer): a tab closed in the middle of a group (one by one,
-      // between a send and the next prompt) never leaves a landed transaction without one, and the
-      // retry worker settles from the chain only transactions that have one (lib/server/distribution-audits).
+      // between a send and the next prompt) no longer leaves a landed transaction without one (unless
+      // its row's request had not left yet: the writer's header), and the retry worker settles from the
+      // chain only transactions that have one (lib/server/distribution-audits).
       const audits = createPendingAuditWriter({
-        record: recordAudit,
+        // keepalive: a row whose request already left is delivered even when the tab closes right after;
+        // each attempt is cut off, so one stuck write never holds up the rows after it.
+        record: (row) => recordAudit(row, AUDIT_RETRY_DELAYS_MS, { keepalive: true, timeoutMs: PENDING_AUDIT_ATTEMPT_TIMEOUT_MS }),
         base: () => ({ actor, reason, scPda, runId, mint: sc.mint, screening: evidence }),
       });
       pendingAudits = audits;
@@ -877,40 +891,60 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         }
         const requests: TransactionPrepareAndSendRequest[] = group.map((t) => ({ instructions: t.instructions, feePayer: signer }));
         const groupLabel = groups.length > 1 ? ` (group ${g + 1} of ${groups.length})` : "";
-        const result = await sender.prepareAndSendAll(requests, {
-          mode,
-          // Room for up to four wallet guards (Phantom on mainnet) on top of 1.1 × the simulated need:
-          // at most +2,800 lamports of priority fee per transaction at the mainnet price (lib/wallet-changes).
-          computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS,
-          onPrompt: (p) =>
-            setWorking(
-              p.mode === "batch"
-                ? `Confirm in your wallet: ${p.count} ${p.count === 1 ? "transaction" : "transactions"} in one approval${groups.length > 1 ? ` (${g + 1} of ${groups.length})` : ""}`
-                : `Confirm in your wallet: transaction ${p.index + 1} of ${p.count}${groupLabel}`,
-            ),
-          // Between two one-by-one prompts the wallet asks nothing: the network is confirming the one just sent.
-          onWaiting: (w) => setWorking(`Waiting for transaction ${w.index + 1} of ${w.count} to confirm…${groupLabel}`),
-          // Remembered as soon as the batch falls back (a hardware wallet too slow for one blockhash, or
-          // Phantom's guards on mainnet), also when the first one-by-one prompt then throws.
-          onFallback: (reason) => {
-            if (remembersSignSeparately(reason)) chooseSeparate(true);
-          },
-          onSigned: async (signed) => {
-            for (const s of signed) {
-              j = withTx(j, {
-                signature: s.signature,
-                lastValidBlockHeight: s.lastValidBlockHeight.toString(),
-                rows: group[s.index].index.map((e) => e.row),
-                status: "signed",
-                at: new Date().toISOString(),
-              });
-            }
-            writeJournal(store, j);
-            setWorking(`Sending ${signed.length === 1 ? "the transaction" : `${signed.length} transactions`}…${groupLabel}`);
-            // Journalled, not yet broadcast: the pending audit row of each (waited for a few seconds at most).
-            await audits.writeSigned(signed.map((s) => ({ signature: s.signature, rows: rowsOf(group[s.index]) })));
-          },
-        });
+        setWorking(`Checking ${group.length === 1 ? "the transaction" : `${group.length} transactions`} before your wallet is asked…${groupLabel}`);
+        let result: BatchSendResult;
+        try {
+          result = await sender.prepareAndSendAll(requests, {
+            mode,
+            // Room for up to four wallet guards (Phantom on mainnet) on top of 1.1 × the simulated need: up to
+            // 28,000 compute units more on each limit, so up to 28,000 × the priority price more fee per transaction
+            // (2,800 lamports at the mainnet floor price, 56,000 at its cap; lib/wallet-changes).
+            computeUnitHeadroom: DISTRIBUTION_GUARD_HEADROOM_UNITS,
+            // The previous group's transactions are confirmed first (up to 30 s): the wallet is not asked meanwhile.
+            onSettlingPrevious: (p) =>
+              setWorking(`Waiting for the previous ${p.count === 1 ? "transaction" : `${p.count} transactions`} to confirm…${groupLabel}`),
+            onPrompt: (p) =>
+              setWorking(
+                p.mode === "batch"
+                  ? `Confirm in your wallet: ${p.count} ${p.count === 1 ? "transaction" : "transactions"} in one approval${groupLabel}`
+                  : `Confirm in your wallet: transaction ${p.index + 1} of ${p.count}${groupLabel}`,
+              ),
+            // Between two one-by-one prompts the wallet asks nothing: the network is confirming the one just sent.
+            onWaiting: (w) => setWorking(`Waiting for transaction ${w.index + 1} of ${w.count} to confirm…${groupLabel}`),
+            // Remembered as soon as the batch falls back (a hardware wallet too slow for one blockhash, or
+            // Phantom's guards on mainnet), also when the first one-by-one prompt then throws.
+            onFallback: (reason) => {
+              if (remembersSignSeparately(reason)) chooseSeparate(true);
+            },
+            // The journal, then (not yet broadcast) the pending audit row of each, waited for a few seconds at
+            // most and never longer than the blockhash can spare (lib/distribution-audit-writer).
+            onSigned: journalThenPendingAudits({
+              journal: (signed: readonly BatchSigned[]) => {
+                for (const s of signed) {
+                  j = withTx(j, {
+                    signature: s.signature,
+                    lastValidBlockHeight: s.lastValidBlockHeight.toString(),
+                    rows: group[s.index].index.map((e) => e.row),
+                    status: "signed",
+                    at: new Date().toISOString(),
+                  });
+                }
+                writeJournal(store, j);
+              },
+              audits,
+              rowsOf: (index) => rowsOf(group[index]),
+              onSending: (count) => setWorking(`Sending ${count === 1 ? "the transaction" : `${count} transactions`}…${groupLabel}`),
+            }),
+          });
+        } catch (err) {
+          // The previous group failed or is not confirmed yet: nothing of this group was signed. The groups
+          // already sent are still waited for and reported (step 8); the resume continues the run.
+          if (!(err instanceof EarlierTransactionUnconfirmedError) || err.position !== null) throw err;
+          setProblem(
+            `${err.message} ${err.outcome === "failed" ? "Open this page again" : "Open this page again in a minute"} to continue the run; rows already sent are not sent again.`,
+          );
+          break;
+        }
         const groupSent: typeof sent = [];
         for (const o of result.outcomes) {
           if (!o.signature) continue;
@@ -928,7 +962,11 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         mode = nextPromptMode(mode, result);
         // The pending rows written when each was journalled (one that failed is written once more):
         // every signed transaction of the group, also one whose broadcast failed (it may still land).
-        const pendingAudited = await audits.settle(result.outcomes.flatMap((o) => (o.signature ? [o.signature] : [])));
+        const signedHere = result.outcomes.flatMap((o) => (o.signature ? [o.signature] : []));
+        if (signedHere.length > 0 && !signedHere.every((s) => audits.has(s))) {
+          setWorking(`Saving the audit record of ${signedHere.length === 1 ? "the transaction" : `${signedHere.length} transactions`}…${groupLabel}`);
+        }
+        const pendingAudited = await audits.settle(signedHere);
         j = withAudited(j, pendingAudited, "pending");
         writeJournal(store, j);
         const unsent = result.outcomes.find((o) => !o.sent && o.error);
@@ -940,9 +978,14 @@ export function SendToWalletsPanel({ asset, sc, scPda, hook, tokenize, supply, r
         }
       }
 
-      // 8. Wait for the network, then report each transaction.
-      setWorking(`Waiting for the network to confirm ${sent.length} ${sent.length === 1 ? "transaction" : "transactions"}…`);
-      const outcomes = await Promise.all(sent.map((s) => waitForSignature(rpc, s.signature, { timeoutMs: 60_000 })));
+      // 8. Wait for the network, then report each transaction: one status read for all of them per poll
+      //    (never one poll loop per transaction), a read the RPC refused for a moment retried.
+      if (sent.length > 0) setWorking(`Waiting for the network to confirm ${sent.length} ${sent.length === 1 ? "transaction" : "transactions"}…`);
+      const outcomes = await waitForSignatures(
+        rpc,
+        sent.map((s) => s.signature),
+        { timeoutMs: 60_000, retryReads: true },
+      );
       const finalAudited = new Set<string>();
       for (const [i, s] of sent.entries()) {
         const t = j.txs.find((x) => x.signature === s.signature);
