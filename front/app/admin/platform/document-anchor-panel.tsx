@@ -14,8 +14,12 @@
 // (/api/admin/document-anchor), which records only a finalized transaction.
 // An anchor sent but not recorded yet is kept in this browser and can be
 // recorded again; while it is not recorded, no other anchor can be sent from
-// this page (it would replace the one kept). The flow and the result card's
-// states live in lib/document-anchor-client.ts.
+// this page (it would replace the one kept). A send that failed where it may
+// have been sent (after the wallet had the transaction) is kept too, per
+// network and wallet, and blocks a new send until the operator has checked
+// the explorer and dismisses it (or records it, when its signature is known).
+// The flow, where a failed send got, and the result card's states live in
+// lib/document-anchor-client.ts.
 //
 // Shown only when the connected wallet is the on-chain Super Admin
 // (Platform.admin, read by the page).
@@ -38,12 +42,14 @@ import {
   type DocumentAnchorRecord,
 } from "@/lib/document-anchor";
 import {
+  adoptUncertainSend,
   anchorBlocksNewSend,
   anchorResultView,
-  anchorSendMayHaveLanded,
   clearPendingAnchor,
+  clearUncertainSend,
   dismissAnchorResult,
   listDocumentAnchors,
+  readUncertainSend,
   recordDocumentAnchorWithRetry,
   restoredAnchorResult,
   runDocumentAnchorFlow,
@@ -51,6 +57,7 @@ import {
   type AnchorResult,
   type PendingAnchor,
   type RecordedAnchor,
+  type UncertainAnchorSend,
 } from "@/lib/document-anchor-client";
 import { formatLamportsAsSol } from "@/lib/compute-budget";
 import { PRIORITY_FEE_POLICY, resolveComputeUnitPrice } from "@/lib/priority-fee";
@@ -98,8 +105,8 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
   const [busy, setBusy] = useState<null | "sending" | "confirming" | "recording">(null);
   const [result, setResult] = useState<AnchorResult | null>(() => restoredAnchorResult(network, wallet));
   const [anchors, setAnchors] = useState<AnchorList>({ state: "loading" });
-  // The last send ended in an error that may have come after the wallet sent it (anchorSendMayHaveLanded).
-  const [uncertainSend, setUncertainSend] = useState(false);
+  // The last send failed where it may have been sent (kept in this browser until dismissed).
+  const [uncertain, setUncertain] = useState<UncertainAnchorSend | null>(() => readUncertainSend(network, wallet));
   const [refreshing, setRefreshing] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null);
 
@@ -160,6 +167,7 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
   const capFee = documentAnchorFee(PRIORITY_FEE_POLICY[network].cap);
   const working = busy !== null || tx.isSending;
   const blockedByUnrecorded = anchorBlocksNewSend(result);
+  const blocked = anchorBlocksNewSend(result, uncertain);
 
   async function refreshAnchors() {
     setRefreshing(true);
@@ -213,28 +221,39 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
     }
   }
 
+  /** "It is on the explorer: record it": the uncertain send becomes the card's pending anchor, recorded now. */
+  function recordUncertain(note: UncertainAnchorSend) {
+    const adopted = adoptUncertainSend(note);
+    if (!adopted) return;
+    setUncertain(null);
+    setResult(adopted);
+    void record(adopted.anchor);
+  }
+
   async function anchor() {
-    if (working || blockedByUnrecorded || !memo || !sha256 || !reference) return;
+    if (working || blocked || !memo || !sha256 || !reference) return;
     const input = { reference, sha256 };
     const text = memo;
-    setUncertainSend(false);
     setBusy("sending");
     let pendingId = toast.showPending("Anchoring the document…", "Approve the transaction in your wallet.");
     await runDocumentAnchorFlow(input, { network, signer: wallet }, {
-      send: () => {
-        const signer = walletSigner(session);
+      send: (track) => {
+        // The same tracked signer as the memo's signer and the fee payer: the
+        // flow learns from it whether the wallet handed the transaction back.
+        const signer = track(walletSigner(session));
         return tx.send({ instructions: [documentAnchorInstruction({ ...input, signer })], feePayer: signer });
       },
-      onSendError: (err) => {
+      onSendError: (err, uncertainSend) => {
         toast.dismiss(pendingId);
-        if (anchorSendMayHaveLanded(err)) {
-          // The wallet may have sent it before the change was noticed: close the
-          // review so that it is not sent a second time unchecked.
+        if (uncertainSend) {
+          // It failed after the wallet had the transaction (kept in this
+          // browser by the flow): close the review so that it is not sent a
+          // second time unchecked.
           setConfirmOpen(false);
-          setUncertainSend(true);
+          setUncertain(uncertainSend);
           toast.showError(
             "The anchor may have been sent",
-            `${explainSendError(err)} Check this wallet's transactions on the explorer before you send it again.`,
+            `${explainSendError(err)} Check the explorer for your wallet before you send it again.`,
           );
         } else {
           // Nothing was sent: the review stays open.
@@ -380,21 +399,22 @@ function AnchorForm({ session, wallet }: { session: WalletSession; wallet: strin
 
         <button
           type="button"
-          disabled={!memo || working || hashing || blockedByUnrecorded}
+          disabled={!memo || working || hashing || blocked}
           onClick={() => setConfirmOpen(true)}
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
         >
           {busy === "sending" ? "Waiting for the wallet…" : busy === "confirming" ? "Confirming…" : busy === "recording" ? "Recording…" : "Review and anchor"}
         </button>
-        {uncertainSend && !working && (
-          <p className="text-xs text-amber-700">
-            The last send ended when the wallet, account or network changed, possibly after your wallet had already sent
-            the anchor. Check{" "}
-            <a className="underline" href={explorerAddressUrl(wallet, network)} target="_blank" rel="noreferrer">
-              this wallet&apos;s transactions
-            </a>{" "}
-            on the explorer before you send it again.
-          </p>
+        {uncertain && (
+          <UncertainSendNotice
+            note={uncertain}
+            busy={working}
+            onRecord={() => recordUncertain(uncertain)}
+            onDismiss={() => {
+              clearUncertainSend(network, wallet);
+              setUncertain(null);
+            }}
+          />
         )}
         {blockedByUnrecorded && !working && (
           <p className="text-xs text-amber-700">
@@ -551,6 +571,57 @@ function AnchorResultCard({
         )}
       </div>
       {view.dismissWarning && <p className="mt-2 text-xs text-amber-800">{view.dismissWarning}</p>}
+    </div>
+  );
+}
+
+/**
+ * The last send failed where it may have been sent (kept in this browser
+ * until dismissed): where to look, and the ways out. Recording is offered
+ * only with the signature the wallet handed back.
+ */
+function UncertainSendNotice({
+  note,
+  busy,
+  onRecord,
+  onDismiss,
+}: {
+  note: UncertainAnchorSend;
+  busy: boolean;
+  onRecord: () => void;
+  onDismiss: () => void;
+}) {
+  const at = Date.parse(note.at);
+  return (
+    <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-[13px]" role="status">
+      <p className="font-semibold text-slate-900">The anchor may have been sent</p>
+      <p className="mt-1 text-xs text-amber-800">
+        The send of <span className="break-all font-mono">{note.reference}</span>
+        {Number.isNaN(at) ? "" : ` (${formatBlockTime(Math.floor(at / 1000))})`} failed after your wallet had the
+        transaction, so this page cannot tell whether it reached the network. Check the explorer for your wallet before
+        you send it again: a second send would anchor the document twice. One that is not there yet can still land for
+        about two minutes after your wallet signed it.
+      </p>
+      <p className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-xs">
+        <a className="font-medium text-slate-700 underline hover:text-slate-900" href={explorerAddressUrl(note.signer, note.network)} target="_blank" rel="noreferrer">
+          This wallet&apos;s transactions
+        </a>
+        {note.signature && (
+          <a className="font-medium text-slate-700 underline hover:text-slate-900" href={explorerTxUrl(note.signature, note.network)} target="_blank" rel="noreferrer">
+            The transaction your wallet signed
+          </a>
+        )}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {note.signature && (
+          <button type="button" className={SMALL_BTN} disabled={busy} onClick={onRecord}>
+            It is on the explorer: record it
+          </button>
+        )}
+        <button type="button" className={SMALL_BTN} disabled={busy} onClick={onDismiss}>
+          {note.signature ? "It is not there: dismiss" : "Checked: dismiss"}
+        </button>
+      </div>
     </div>
   );
 }
