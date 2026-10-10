@@ -23,21 +23,41 @@
 //     offeredModules: secondaryTrading and custodyConversion.
 //   - Privacy Policy: clauses 1, 2, 3, 4, 6, 7, 8, 10 and 11 (clause 11
 //     states the keys as they are and claims no hardware wallet).
-//   - Acceptance-dialog summary: points 1 and 3 changed, a new point on
-//     trades (now point 3).
+//   - Acceptance-dialog summary: points 1 and 4 (formerly 3) changed, and a
+//     new point 3 on trades; now 6 points.
 //   - Risk warning (lib/legal/risk-warning.ts): point 10 changed, new points
-//     11-13 on trades.
+//     11-13 on trades. It is shown before both deposits of an OTC deal (the
+//     seller's units and the buyer's price), as clause 12 says.
 // The hold, in code: PURCHASE_RISK_WARNING.status is "draft", so a mainnet
 // build refuses this version (lib/legal/readiness.ts), and the facts still
 // open are written as "[placeholder for counsel: ...]", which the same guard
 // refuses as a drafting leftover (lib/legal/document.ts). Keep this version
 // off main until counsel has confirmed the exact wording: on main it would
 // refuse every mainnet build, hotfixes included. The commit that records the
-// confirmation fills the placeholders, sets the status back to "counsel",
-// moves `version` and `lastUpdated` of both documents to the confirmation
-// day if that is later, and turns tests/legal-slots.test.ts,
-// tests/terms-modules.test.ts and scripts/ci/mainnet-build.sh back to the
-// pass expectations.
+// confirmation:
+//   - fills the placeholders and sets the risk warning's status back to
+//     "counsel";
+//   - if that is on a later day, moves `version` and `lastUpdated` of both
+//     documents to that day, with every other place that names the date:
+//     MAINNET_VERSION in tests/helpers/mainnet-legal-version.ts, the headers
+//     of this file, lib/legal/risk-warning.ts and lib/tos-version.ts, the
+//     HELD comment in scripts/ci/mainnet-build.sh and the switches note in
+//     ops/env-vars.md (`grep -rn 2026-10-10 front ops` lists them, next to
+//     comments where the date names the owner's decisions and stays);
+//   - turns tests/legal-slots.test.ts (HOLD_PROBLEMS, COUNSEL_PLACEHOLDERS,
+//     the rendered Terms page) and scripts/ci/mainnet-build.sh back to the
+//     pass expectations;
+//   - needs the code these Terms describe: the sanctions screen and the Terms
+//     check on a conversion request (app/api/conversion/create/route.ts,
+//     clauses 7B and 10) and the gate that lets an admin open a conversion
+//     escrow while physical delivery stays off (lib/pause-gate.ts, clause 2).
+//     "HOLD release preconditions" in tests/legal-slots.test.ts fails while
+//     either is missing from the branch;
+//   - re-reads, over a public RPC on the day of publication, the keys that
+//     clause 9 and clause 11 of the Privacy Policy describe (the super
+//     administrator, treasury, Blocklist Authority and KYC authority, the
+//     second administrator and the upgrade authority): the tests pin the
+//     wording, not the on-chain facts.
 //
 // Version 2026-10-03 (the previous one, live on mainnet): written by
 // engineering from the owner's decisions D1-D7 of 2026-10-03, whose model
@@ -287,13 +307,13 @@ export const MAINNET_TERMS: TermsDocument | null = {
       blocks: [
         {
           kind: "paragraph",
-          text: "Holders and buyers can trade units of a share class with each other through the Service. Trades are paid in USDC and settled by the on-chain programs, which hold the units and the payment in escrow until the trade completes. Trading takes three forms:",
+          text: "Holders and buyers can trade units of a share class with each other through the Service. Trades are paid in USDC and settled by the on-chain programs, which hold the units, and in an OTC deal also the payment, in escrow until the trade completes. Trading takes three forms:",
         },
         {
           kind: "list",
           items: [
             "Offers. A seller deposits units into the escrow of an offer at a fixed price for the whole quantity. Any wallet may take the offer: in one transaction the price goes from the taker straight to the seller, and the units go from the escrow to the taker. The seller can cancel the offer and take the units back until it is taken; if the seller set an expiry, an offer not taken by then can be closed by anyone, and the units return to the seller.",
-            "OTC deals. The buyer and the seller agree the terms between themselves, and either of them asks for an escrow through the Service, naming the other. Both parties are screened (clause 10), and an administrator then opens a deal that records both wallets, the units, the price and an expiry of at most 90 days. Each party deposits its side: the seller the units, the buyer the price. The deal settles when the second deposit arrives, in the same transaction: the units go to the buyer and the price to the seller. If an administrator cancels the deal before it settles, or it expires, each party's deposit is refunded to it; a deal in which a party's wallet has been placed on the blocklist does not expire, and an administrator cancels it.",
+            "OTC deals. The buyer and the seller agree the terms between themselves, and either of them asks for an escrow through the Service, naming the other. Both parties are screened (clause 10), and an administrator then opens a deal that records both wallets, the units, the price and an expiry of at most 90 days. Each party deposits its side: the seller the units, the buyer the price. The deal settles when the second deposit arrives, in the same transaction: the units go to the buyer and the price to the seller. If an administrator cancels the deal before it settles, or it expires, each party's deposit is refunded to it; a deal cannot expire while it holds a deposit of a party whose wallet is on the blocklist, and an administrator cancels it instead.",
             "Resell board. A holder can post a listing with the units, an asking price and contact details, which the board shows publicly. A listing is not a binding offer: a trade agreed through a listing is carried out as an OTC deal. The Operator may refuse or remove a listing.",
           ],
         },
@@ -303,7 +323,7 @@ export const MAINNET_TERMS: TermsDocument | null = {
         },
         {
           kind: "paragraph",
-          text: "Offers can also be created and taken by sending transactions to the on-chain programs directly, without the Service. The Service's checks (acceptance of these Terms, the geographic restrictions of clause 10 and payment in USDC) do not apply to such a transaction, and the Operator does not support it. The Operator screens the wallets that create or take an offer on the blockchain afterwards against sanctions lists, and may place a wallet that matches on the blocklist and move its units into quarantine (clause 9).",
+          text: "Offers can also be created and taken by sending transactions to the on-chain programs directly, without the Service, and the parties of an OTC deal can make their deposits the same way. The Service's checks (acceptance of these Terms and the geographic restrictions of clause 10, and for an offer also payment in USDC) do not apply to such a transaction, and the Operator does not support it. The Operator screens the wallets that create or take an offer on the blockchain afterwards against sanctions lists, and may place a wallet that matches on the blocklist and move its units into quarantine (clause 9). Both parties of an OTC deal are screened before an administrator opens it (clause 10), whether or not they deposit through the Service.",
         },
         {
           kind: "paragraph",

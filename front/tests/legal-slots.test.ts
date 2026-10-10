@@ -13,7 +13,7 @@ import { join } from "node:path";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { assertBuildMainnetLegal } from "@/next.config";
+import { assertBuildMainnetLegal, assertBuildMainnetModules } from "@/next.config";
 import { ControllerSection } from "@/components/legal/controller-section";
 import { OperatorCompanyDetails, OperatorContactDetails } from "@/components/legal/operator-details";
 import { SecurityAuditReportLink } from "@/components/legal/security-review";
@@ -49,12 +49,28 @@ import {
   securityReviewStatement,
 } from "@/lib/legal/audit";
 import { DEVNET_TOS_VERSION, tosVersionFor } from "@/lib/tos-version";
-import { moduleDisabledMessage, moduleEnabled } from "@/lib/features";
+import { PILOT_MODULE_ENV, moduleDisabledMessage, moduleEnabled } from "@/lib/features";
+import {
+  AssetRegistryInstruction,
+  RealizeAction,
+  VaultType,
+  getOpenCustodyVaultInstructionDataEncoder,
+} from "@/lib/generated/asset_registry";
+import { heldModule, type GateFacts } from "@/lib/pause-gate";
 import { MAINNET_RAISE_CAP_EUR, maxRaiseCapEur } from "@/lib/raise-cap";
 import { RAISE_LIMIT_NOTE, equityOfferedNote, whatYouAreBuying } from "@/lib/deal-terms-copy";
 import { modulesFact } from "@/lib/module-facts";
 import { ASSET_TYPES } from "@/lib/asset-types";
 import { INSTRUMENT_LIST } from "@/lib/instruments";
+import {
+  DELIVERY_ESCROW_MAX_DEADLINE_SECONDS,
+  DELIVERY_ESCROW_MIN_DEADLINE_SECONDS,
+  OTC_DEAL_MAX_TTL_SECONDS,
+} from "@/lib/deadline-bounds";
+import { MAINNET_VERSION, PREVIOUS_MAINNET_VERSION } from "./helpers/mainnet-legal-version";
+
+const HOUR_SECONDS = 3_600;
+const DAY_SECONDS = 86_400;
 
 const BUILD = "phase-production-build";
 const DEV = "phase-development-server";
@@ -89,16 +105,12 @@ const COMPANY: Operator = {
  *  written confirmation of that day. */
 const BVI: Operator = { ...OPERATORS.mainnet };
 
-/** The version and date of the mainnet Terms and Privacy Policy: 2026-10-10,
- *  the Terms that offer trading through Manci and conversion into company
- *  shares. It replaces 2026-10-03 (the owner's decisions D1-D7, whose exact
- *  wording counsel confirmed on 2026-10-03, PR #57) and is HELD until counsel
- *  confirms its own exact wording: the risk warning's status is "draft" and
- *  the Terms carry counsel's placeholders, so a mainnet build refuses it. */
-const MAINNET_VERSION = "2026-10-10";
-
-/** The previous mainnet Terms version, which every wallet must accept again. */
-const PREVIOUS_MAINNET_VERSION = "2026-10-03";
+// MAINNET_VERSION (tests/helpers/mainnet-legal-version.ts): the Terms that
+// offer trading through Manci and conversion into company shares. It replaces
+// PREVIOUS_MAINNET_VERSION (the owner's decisions D1-D7, whose exact wording
+// counsel confirmed on 2026-10-03, PR #57) and is HELD until counsel confirms
+// its own exact wording: the risk warning's status is "draft" and the Terms
+// carry counsel's placeholders, so a mainnet build refuses it.
 
 /** What a mainnet build refuses while version 2026-10-10 is held for counsel.
  *  The commit that records counsel's confirmation empties this list. */
@@ -482,7 +494,7 @@ describe("mainnetLegalProblems", () => {
     ]);
   });
 
-  it("mainnet legal slots report (held: version 2026-10-10 waits for counsel's exact-text confirmation)", () => {
+  it(`mainnet legal slots report (held: version ${MAINNET_VERSION} waits for counsel's exact-text confirmation)`, () => {
     // No licence is recorded, on counsel's written opinion that none is
     // needed: a mainnet build sets MAINNET_LICENSE_NOT_REQUIRED=true.
     const problems = mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, MAINNET_LEGAL_SLOTS);
@@ -520,7 +532,7 @@ describe("mainnetLegalProblems", () => {
 });
 
 describe("assertBuildMainnetLegal (next.config.ts)", () => {
-  it("refuses the slots committed today (version 2026-10-10, held for counsel) and builds them once confirmed", () => {
+  it(`refuses the slots committed today (version ${MAINNET_VERSION}, held for counsel) and builds them once confirmed`, () => {
     const env = { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "true" };
     const refusal = (vars: Record<string, string>, slots = MAINNET_LEGAL_SLOTS) => {
       try {
@@ -570,6 +582,130 @@ describe("assertBuildMainnetLegal (next.config.ts)", () => {
   });
 });
 
+// HOLD release preconditions. The held Terms claim things of the code that
+// this branch alone does not do: clauses 7B and 10 say a conversion request is
+// screened against sanctions lists and needs the Terms in force, and clause 2
+// offers conversion while physical delivery stays off, so an admin must be
+// able to open a conversion escrow with only the conversion module on. Both
+// come with the conversion gate fix (fix/conversion-module-gate). While the
+// Terms are held no mainnet build takes them, so a precondition may be open;
+// the commit that releases them (counsel's confirmation, after which the
+// slots pass) cannot go green while one is.
+
+/** `source` without its comments, so a mention in a comment counts for nothing. */
+function codeOnly(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+}
+
+/**
+ * Clauses 7B and 10 in app/api/conversion/create/route.ts: the requesting
+ * wallet is screened against the sanctions lists and must have accepted the
+ * Terms in force, both before the request is written.
+ */
+function conversionRequestChecked(source: string): boolean {
+  const code = codeOnly(source);
+  const imported =
+    /import\s*\{[^}]*\brequireSanctionsClear\b[^}]*\}\s*from\s*"@\/lib\/server\/sanctions"/.test(code) &&
+    /import\s*\{[^}]*\brequireAcceptedTos\b[^}]*\}\s*from\s*"@\/lib\/server\/tos-gate"/.test(code);
+  const screen = /await\s+requireSanctionsClear\(\s*sb\s*,\s*\{\s*route:\s*"conversion\/create"\s*,\s*wallets:\s*\[\s*\{\s*wallet\s*[,}]/.exec(code);
+  const terms = /await\s+requireAcceptedTos\(\s*sb\s*,\s*wallet\s*,/.exec(code);
+  const write = code.indexOf('.from("conversion_requests")');
+  return imported && screen !== null && terms !== null && write > 0 && screen.index < write && terms.index < write;
+}
+
+/**
+ * Clause 2 in lib/pause-gate.ts MODULE_FLOWS: an admin's conversion open (a
+ * DeliveryEscrow open the approval declares as a conversion) passes the
+ * display gate with the production flags (conversion on, delivery off), is
+ * held by custodyConversion when that is off, and an undeclared DeliveryEscrow
+ * open is still a physical delivery. Stubs the module flags; the caller
+ * unstubs them.
+ */
+function conversionOpenGatedAsConversion(): boolean {
+  const data = new Uint8Array(
+    getOpenCustodyVaultInstructionDataEncoder().encode({
+      vaultId: BigInt(1),
+      vaultType: VaultType.DeliveryEscrow,
+      realizeAction: RealizeAction.BurnAndAttest,
+      amount: BigInt(1),
+      deadline: BigInt(0),
+      metadataHash: new Uint8Array(32),
+      beneficiary: "11111111111111111111111111111111" as never,
+    }),
+  );
+  // The declared purpose (GateFacts.custodyPurpose) comes with the gate fix;
+  // cast so this compiles before it.
+  const conversion = { data, facts: { custodyPurpose: "conversion" } as unknown as GateFacts };
+  const open = AssetRegistryInstruction.OpenCustodyVault;
+  for (const name of Object.values(PILOT_MODULE_ENV)) vi.stubEnv(name, "");
+  vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+  const withProductionFlags = heldModule(open, conversion, "mainnet");
+  const delivery = heldModule(open, { data, facts: {} }, "mainnet");
+  vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "");
+  const conversionOff = heldModule(open, conversion, "mainnet");
+  return withProductionFlags === null && delivery === "custodyDelivery" && conversionOff === "custodyConversion";
+}
+
+describe("HOLD release preconditions: the code the held Terms describe is in place before a mainnet build takes them", () => {
+  afterEach(() => vi.unstubAllEnvs());
+  const CONVERSION_ROUTE = "app/api/conversion/create/route.ts";
+
+  const preconditions = (): { claim: string; met: boolean }[] => [
+    {
+      claim: `Terms clauses 7B and 10 (a conversion request is screened against sanctions lists and needs the Terms in force): ${CONVERSION_ROUTE} calls requireSanctionsClear and requireAcceptedTos before it writes the request`,
+      met: conversionRequestChecked(readFileSync(join(process.cwd(), CONVERSION_ROUTE), "utf8")),
+    },
+    {
+      claim: "Terms clause 2 (conversion offered, physical delivery not): lib/pause-gate.ts holds an admin conversion open under custodyConversion, not custodyDelivery",
+      met: conversionOpenGatedAsConversion(),
+    },
+  ];
+
+  it("the held Terms make the claims the preconditions check", () => {
+    const clause = (title: string) =>
+      legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === title)!] });
+    expect(clause("7B. Conversion into company shares")).toContain(
+      "The request is screened against sanctions lists and needs your acceptance of the version of these Terms in force.",
+    );
+    expect(clause("10. Sanctions screening and geographic restrictions")).toContain("posts a listing or requests a conversion");
+    expect(MAINNET_TERMS!.offeredModules).toContain("custodyConversion");
+    expect(MAINNET_TERMS!.offeredModules).not.toContain("custodyDelivery");
+  });
+
+  it("the conversion route check is not satisfied by a comment, a missing call or a check after the write", () => {
+    const route = (before: string[], after: string[] = []) =>
+      [
+        'import { requireSanctionsClear } from "@/lib/server/sanctions";',
+        'import { requireAcceptedTos } from "@/lib/server/tos-gate";',
+        "export async function POST() {",
+        ...before,
+        '  const { error } = await sb.from("conversion_requests").insert({});',
+        ...after,
+        "}",
+      ].join("\n");
+    const screen = '  await requireSanctionsClear(sb, { route: "conversion/create", wallets: [{ wallet, role: "self" }] });';
+    const terms = '  await requireAcceptedTos(sb, wallet, "requesting a conversion");';
+    expect(conversionRequestChecked(route([screen, terms]))).toBe(true);
+    expect(conversionRequestChecked(route([screen]))).toBe(false);
+    expect(conversionRequestChecked(route([terms]))).toBe(false);
+    expect(conversionRequestChecked(route([`  // ${screen.trim()}`, terms]))).toBe(false);
+    expect(conversionRequestChecked(route([terms], [screen]))).toBe(false);
+    expect(conversionRequestChecked(route([screen, terms]).replace('import { requireAcceptedTos } from "@/lib/server/tos-gate";', ""))).toBe(false);
+  });
+
+  it("a mainnet build takes the committed Terms only once every precondition is met", () => {
+    const released = mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, MAINNET_LEGAL_SLOTS).length === 0;
+    const open = preconditions().filter((p) => !p.met).map((p) => p.claim);
+    console.info(
+      open.length === 0
+        ? "[HOLD release] every precondition is met"
+        : `[HOLD release] ${released ? "the slots pass, but" : "held; before release"} these must be in the code:\n  - ${open.join("\n  - ")}`,
+    );
+    // Held (a mainnet build refuses the slots): nothing to enforce yet. Released: none may be open.
+    expect(released ? open : []).toEqual([]);
+  });
+});
+
 describe("next.config.ts runs the legal guard (review 8.1 #9)", () => {
   // config() stops at the mainnet Supabase guard while no mainnet project is
   // recorded, so a behavioural test cannot reach this guard through it yet;
@@ -603,7 +739,7 @@ describe("next.config.ts runs the legal guard (review 8.1 #9)", () => {
 });
 
 describe("Terms version per network", () => {
-  it("keeps the devnet version and takes the mainnet Terms' own version on mainnet (2026-10-10)", () => {
+  it(`keeps the devnet version and takes the mainnet Terms' own version on mainnet (${MAINNET_VERSION})`, () => {
     expect(DEVNET_TOS_VERSION).toBe("2026-07-18");
     for (const network of ["devnet", "testnet", "localnet"] as const) {
       expect(tosVersionFor(network)).toBe(DEVNET_TOS_VERSION);
@@ -622,7 +758,7 @@ describe("Terms version per network", () => {
       vi.resetModules();
     });
 
-    it("is 2026-10-10 on a mainnet build and the pilot's on devnet", async () => {
+    it(`is ${MAINNET_VERSION} on a mainnet build and the pilot's on devnet`, async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
       expect((await import("@/lib/tos-version")).TOS_VERSION).toBe(MAINNET_VERSION);
@@ -649,7 +785,7 @@ function visibleText(html: string): string {
     .replace(/\s+/g, " ");
 }
 
-describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through Manci and conversion, held for counsel)", () => {
+describe(`the mainnet texts (version ${MAINNET_VERSION}: ${PREVIOUS_MAINNET_VERSION} plus trading through Manci and conversion, held for counsel)`, () => {
   const NEW_CLAUSE_11 =
     "and wallet signatures for administrative actions. The keys that control the platform are currently held as follows: " +
     "one company key, a software wallet, holds the super administrator, KYC authority and Blocklist Authority roles and " +
@@ -681,7 +817,7 @@ describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through
     "21. General",
   ];
 
-  it("are in the slots, dated 2026-10-10, complete but for counsel's placeholders and free of test-network wording", () => {
+  it(`are in the slots, dated ${MAINNET_VERSION}, complete but for counsel's placeholders and free of test-network wording`, () => {
     expect(MAINNET_TERMS).not.toBeNull();
     expect(MAINNET_PRIVACY).not.toBeNull();
     // Held: the Terms carry counsel's placeholders, which the guard refuses as drafting leftovers.
@@ -753,7 +889,7 @@ describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through
     expect(powers).not.toContain("holds the administrator role only");
   });
 
-  it("the purchase risk warning is engineering's draft until counsel confirms 2026-10-10", () => {
+  it(`the purchase risk warning is engineering's draft until counsel confirms ${MAINNET_VERSION}`, () => {
     expect(PURCHASE_RISK_WARNING.status).toBe("draft");
     expect(PURCHASE_RISK_WARNING.points).toHaveLength(13);
     expect(PURCHASE_RISK_WARNING.points[1]).toBe(NO_INVESTOR_PROTECTION);
@@ -824,25 +960,50 @@ describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through
       return legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [found!] });
     };
     const trading = clause("7A. Trading through Manci");
+    // Escrow: the units always, the payment only in an OTC deal (an offer's price goes straight to the seller).
+    expect(trading).toContain("which hold the units, and in an OTC deal also the payment, in escrow until the trade completes");
+    expect(trading).not.toContain("hold the units and the payment in escrow");
     // Offers: the whole quantity at a fixed price, paid straight to the seller in the take transaction.
     expect(trading).toContain("A seller deposits units into the escrow of an offer at a fixed price for the whole quantity.");
     expect(trading).toContain("in one transaction the price goes from the taker straight to the seller");
-    // OTC deals: opened by an administrator for at most 90 days (OTC_DEAL_MAX_TTL_SECS), settled on the second deposit.
-    expect(trading).toContain("an expiry of at most 90 days");
+    // OTC deals: opened by an administrator for at most the program's cap (OTC_DEAL_MAX_TTL_SECS, which
+    // lib/deadline-bounds.ts mirrors and tests/deadline-bounds.test.ts ties to constants.rs), settled on
+    // the second deposit.
+    expect(Number.isInteger(OTC_DEAL_MAX_TTL_SECONDS / DAY_SECONDS)).toBe(true);
+    expect(trading).toContain(`an expiry of at most ${OTC_DEAL_MAX_TTL_SECONDS / DAY_SECONDS} days`);
     expect(trading).toContain("The deal settles when the second deposit arrives, in the same transaction");
+    // expire_otc_deal refuses only while it would refund a blocklisted party's own deposit (O-11).
+    expect(trading).toContain(
+      "a deal cannot expire while it holds a deposit of a party whose wallet is on the blocklist, and an administrator cancels it instead.",
+    );
     expect(trading).toContain("A listing is not a binding offer");
     // The platform link as implemented: Terms acceptance on the Service, screening of deal requests and
-    // listings, and offers sent to the programs directly screened only afterwards.
+    // listings, and offers sent to the programs directly screened only afterwards. A deal's deposits
+    // (deposit_otc_asset / deposit_otc_payment need only the deal's seller or buyer to sign) can be sent
+    // directly as well, by a party that never accepted the Terms; both parties were screened before the
+    // deal was opened (/api/otc/admin-screen).
     expect(trading).toContain("with a wallet connected to the Service that has accepted the version of these Terms in force");
-    expect(trading).toContain("Offers can also be created and taken by sending transactions to the on-chain programs directly, without the Service.");
+    expect(trading).toContain(
+      "Offers can also be created and taken by sending transactions to the on-chain programs directly, without the Service, " +
+        "and the parties of an OTC deal can make their deposits the same way.",
+    );
+    expect(trading).toContain(
+      "The Service's checks (acceptance of these Terms and the geographic restrictions of clause 10, and for an offer also payment in USDC) do not apply to such a transaction",
+    );
     expect(trading).toContain("The Operator screens the wallets that create or take an offer on the blockchain afterwards against sanctions lists");
+    expect(trading).toContain("Both parties of an OTC deal are screened before an administrator opens it (clause 10), whether or not they deposit through the Service.");
     expect(trading).toContain("Trades are paid in USDC");
     expect(trading).toContain("The Operator is not a party to any trade (clause 4).");
     expect(trading).toContain("A trade that has settled on-chain is final and cannot be reversed or refunded");
 
     const conversion = clause("7B. Conversion into company shares");
-    // The DeliveryEscrow deadline bounds (DELIVERY_ESCROW_MIN/MAX_DEADLINE_SECS).
-    expect(conversion).toContain("with a deadline between 24 hours and 365 days after opening");
+    // The DeliveryEscrow deadline bounds (DELIVERY_ESCROW_MIN/MAX_DEADLINE_SECS, mirrored in lib/deadline-bounds.ts).
+    expect(Number.isInteger(DELIVERY_ESCROW_MIN_DEADLINE_SECONDS / HOUR_SECONDS)).toBe(true);
+    expect(Number.isInteger(DELIVERY_ESCROW_MAX_DEADLINE_SECONDS / DAY_SECONDS)).toBe(true);
+    expect(conversion).toContain(
+      `with a deadline between ${DELIVERY_ESCROW_MIN_DEADLINE_SECONDS / HOUR_SECONDS} hours and ` +
+        `${DELIVERY_ESCROW_MAX_DEADLINE_SECONDS / DAY_SECONDS} days after opening`,
+    );
     expect(conversion).toContain(
       "with the signatures certified by a notary, followed by the registration of the transfer with the Serbian Business Registers Agency",
     );
@@ -894,7 +1055,21 @@ describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through
       const off = scope.blocks[offAt + 1];
       expect(off.kind === "list" ? off.items.join("\n") : "").not.toMatch(/trading through Manci|conver/i);
       expect(PURCHASE_RISK_WARNING.points[9]).toMatch(/^Converting tokens into company shares, where the issuer offers it, /);
-      // Their flags switch them on (the same build ships the flags and these Terms).
+      // The mainnet build guard reads these Terms: the production flags (both
+      // modules on) build with them, physical delivery is refused, and a
+      // module switched off again (a rollback) builds as well.
+      const flags = (trading: string, conversion: string, delivery = "") => ({
+        NEXT_PUBLIC_NETWORK: "mainnet",
+        [`${PREFIX}SECONDARY_TRADING`]: trading,
+        [`${PREFIX}CUSTODY_CONVERSION`]: conversion,
+        [`${PREFIX}CUSTODY_DELIVERY`]: delivery,
+      });
+      expect(() => assertBuildMainnetModules(BUILD, flags("true", "true"), MAINNET_TERMS)).not.toThrow();
+      expect(() => assertBuildMainnetModules(BUILD, flags("true", ""), MAINNET_TERMS)).not.toThrow();
+      expect(() => assertBuildMainnetModules(BUILD, flags("true", "true", "true"), MAINNET_TERMS)).toThrow(
+        /switches on custodyDelivery, which the mainnet Terms do not offer/,
+      );
+      // Their flags switch them on at runtime (the same build ships the flags and these Terms).
       vi.stubEnv(`${PREFIX}SECONDARY_TRADING`, "true");
       vi.stubEnv(`${PREFIX}CUSTODY_CONVERSION`, "true");
       expect(moduleEnabled("secondaryTrading", "mainnet")).toBe(true);
@@ -941,6 +1116,29 @@ describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through
       );
     });
 
+    it("clause 12: the risk warning is shown before each purchase, before an offer is taken and before either deposit into an OTC deal", () => {
+      const risks = MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!;
+      expect(legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [risks] })).toContain(
+        "the risk warning shown before each purchase, before you take an offer and before you deposit into an OTC deal",
+      );
+      // Point 13 speaks to either side of a deal.
+      expect(PURCHASE_RISK_WARNING.points[12]).toMatch(/^In an OTC deal, your deposit stays in the deal's escrow until the other side deposits\./);
+      const source = (rel: string) => readFileSync(join(process.cwd(), rel), "utf8");
+      // A primary sale: the sale page shows it in full (its checkbox is in the buy card).
+      expect(source("components/launchpad/sale-sections.tsx")).toMatch(/<PurchaseRiskWarning\s*\/>/);
+      // Taking an offer: the confirmation carries the warning with its checkbox.
+      expect(source("app/marketplace/otc/[offer]/page.tsx")).toMatch(/<PurchaseRiskWarning\s+acknowledged=\{\w+\}\s+onAcknowledgedChange=/);
+      // An OTC deal: the deposit confirmation shows it for the seller's units
+      // ("asset") and the buyer's price ("payment"), not for an expiry refund.
+      const deals = source("app/portfolio/deals/page.tsx");
+      expect(deals.match(/<PurchaseRiskWarning\b/g)).toHaveLength(1);
+      const shownWhen = /\{([^{}]*)&&\s*\(\s*<PurchaseRiskWarning\b/.exec(deals)?.[1] ?? "";
+      expect(shownWhen).toContain('confirmAction.kind === "asset"');
+      expect(shownWhen).toContain('confirmAction.kind === "payment"');
+      expect(shownWhen).not.toMatch(/expire|!==/);
+      for (const kind of ["asset", "payment", "expire"]) expect(deals).toContain(`setConfirmAction({ kind: "${kind}", row })`);
+    });
+
     it("the EUR 3,000,000 limit is the ceiling the admin routes keep on mainnet, per issuer or per SPV as 0066 counts it", () => {
       expect(MAINNET_RAISE_CAP_EUR).toBe(3_000_000);
       expect(maxRaiseCapEur("mainnet")).toBe(MAINNET_RAISE_CAP_EUR);
@@ -962,7 +1160,7 @@ describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through
       vi.resetModules();
     });
 
-    it("/legal/terms: the operator block, the 23 clauses dated 2026-10-10, governing law and the legal contact", async () => {
+    it(`/legal/terms: the operator block, the 23 clauses dated ${MAINNET_VERSION}, governing law and the legal contact`, async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
       const { default: TermsPage } = await import("@/app/(marketing)/legal/terms/page");
@@ -982,7 +1180,7 @@ describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through
       expect(text).not.toMatch(SERBIAN_LABELS);
     });
 
-    it("/legal/privacy: the controller block and the 14 clauses dated 2026-10-10, clause 11 with the keys as they are", async () => {
+    it(`/legal/privacy: the controller block and the 14 clauses dated ${MAINNET_VERSION}, clause 11 with the keys as they are`, async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
       const { default: PrivacyPage } = await import("@/app/(marketing)/legal/privacy/page");

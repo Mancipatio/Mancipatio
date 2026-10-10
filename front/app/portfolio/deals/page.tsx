@@ -597,9 +597,11 @@ export default function MyDealsPage() {
                     ? `Deposit ${formatPaymentForDisplay(confirmAction.row.deal.price, confirmAction.row.deal.paymentMint.toString(), detectNetwork())} (${String(confirmAction.row.deal.price)} base units) for ${String(confirmAction.row.deal.amount)} share units into deal #${String(confirmAction.row.deal.dealId)}. Once both legs are funded the swap settles atomically.`
                     : `Trigger the expiry of deal #${String(confirmAction.row.deal.dealId)} and refund whichever leg was deposited to its depositor.`}
               </p>
-              {/* The buyer pays here: the purchase risk warning is shown
-                  before the deposit (lib/legal/risk-warning.ts). */}
-              {confirmAction.kind === "payment" && (
+              {/* Either side deposits here, the seller the units and the
+                  buyer the price: the risk warning is shown before each
+                  deposit (Terms clause 12, lib/legal/risk-warning.ts point
+                  13), not before an expiry refund. */}
+              {(confirmAction.kind === "asset" || confirmAction.kind === "payment") && (
                 <PurchaseRiskWarning className="mt-3" />
               )}
             </>

@@ -17,6 +17,7 @@ import {
 import { TERMS_MODULES, type TermsModule } from "@/lib/legal/document";
 import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";
 import { PILOT_MODULE_ENV, PILOT_MODULES, features, parseFeatureFlag, pilotModules, type PilotModule } from "@/lib/features";
+import { MAINNET_VERSION } from "./helpers/mainnet-legal-version";
 
 const BUILD = "phase-production-build";
 const DEV = "phase-development-server";
@@ -68,8 +69,8 @@ describe("TERMS_MODULES and their flags", () => {
 });
 
 describe("MAINNET_TERMS.offeredModules (committed)", () => {
-  it("offers trading through Manci and conversion in version 2026-10-10, as clause 2 does", () => {
-    expect(MAINNET_TERMS?.version).toBe("2026-10-10");
+  it(`offers trading through Manci and conversion in version ${MAINNET_VERSION}, as clause 2 does`, () => {
+    expect(MAINNET_TERMS?.version).toBe(MAINNET_VERSION);
     expect(MAINNET_TERMS?.offeredModules).toEqual(["secondaryTrading", "custodyConversion"]);
     // Clause 2: the "currently offers" list names both modules (clauses 7A and
     // 7B); the list of what is not available names neither.

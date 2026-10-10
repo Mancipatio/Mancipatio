@@ -258,8 +258,18 @@ else
   # refusals back to
   #   expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
   #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
-  # followed by the module case against the committed Terms, which the hold
-  # does not reach (the legal guard runs first):
+  # followed by the module cases against the committed Terms, which the hold
+  # does not reach (the legal guard runs first): the flags production ships
+  # with them (trading through Manci and conversion on) pass, and the same
+  # flags with physical delivery, or any module the Terms do not offer, are
+  # refused:
+  #   expect_config_pass "the committed Terms with the production flags (trading and conversion on)" \
+  #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true \
+  #     NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true
+  #   expect_refusal 'NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY="true" switches on custodyDelivery, which the mainnet Terms do not offer' \
+  #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true \
+  #     NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true \
+  #     NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=true
   #   expect_refusal 'NEXT_PUBLIC_FEATURE_GOVERNANCE="true" switches on governance, which the mainnet Terms do not offer' \
   #     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true NEXT_PUBLIC_FEATURE_GOVERNANCE=true
   # (drop the waiver here if a licence is ever recorded). Until then

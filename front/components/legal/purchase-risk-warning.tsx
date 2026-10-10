@@ -6,9 +6,9 @@ import { PURCHASE_RISK_WARNING } from "@/lib/legal/risk-warning";
  * The purchase risk warning (lib/legal/risk-warning.ts, ZDI art. 15(2)). With
  * `onAcknowledgedChange` it carries the checkbox the buyer must tick before a
  * purchase (launchpad sale page, OTC take-offer confirmation); without it,
- * the warning alone (the OTC deal deposit confirmation, where the Deposit
- * button is the confirmation). Controlled: the page owns the acknowledged
- * state and resets it.
+ * the warning alone (the confirmation of either OTC deal deposit, where the
+ * Deposit button is the confirmation). Controlled: the page owns the
+ * acknowledged state and resets it.
  */
 export function PurchaseRiskWarning({
   acknowledged,

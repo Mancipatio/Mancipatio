@@ -1,7 +1,8 @@
 // The risk warning a buyer reads and confirms before a purchase: the
 // launchpad sale page and the OTC take-offer confirmation
-// (/marketplace/otc/[offer]) carry its checkbox; the OTC deal deposit
-// (/portfolio/deals) shows it above the Deposit button. It warns of the risk
+// (/marketplace/otc/[offer]) carry its checkbox; both deposits of an OTC deal
+// (/portfolio/deals: the seller's units and the buyer's price) show it above
+// the Deposit button. It warns of the risk
 // of partial or total loss and that digital asset transactions are not
 // covered by deposit insurance or investor protection. (The first version was
 // written against ZDI art. 15(2), for a Serbian operator; the mainnet
@@ -19,8 +20,12 @@
 // Version 2026-10-10 (THIS TEXT, HELD): with the Terms that offer trading
 // through Manci and conversion (lib/legal/mainnet-copy.ts), point 10 no
 // longer says "where conversion is available", and points 11-13 cover trades
-// through Manci (an offer taken, an OTC deal deposit), which the OTC
-// take-offer confirmation and the deal deposit show. Points 4 and 5 still
+// through Manci (an offer taken, an OTC deal deposit by either side), which
+// the OTC take-offer confirmation and both deal deposits show (Terms clause
+// 12; tests/legal-slots.test.ts checks where the pages render it). No
+// acknowledgement is asked before a conversion request or deposit yet: the
+// Terms (clauses 7B and 12) warn of the irreversible burn, and a separate
+// acknowledgement would be a new slot here. Points 4 and 5 still
 // speak of a primary sale only. Counsel has not confirmed this wording yet,
 // so the status is "draft": a mainnet build refuses a draft
 // (lib/legal/readiness.ts), and with it the Terms it belongs to (the header
