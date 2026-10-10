@@ -6,11 +6,12 @@ import {
   Section,
   TextLink,
 } from "@/components/mx";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Quick answers — Manci",
   description:
-    "Find the right guide for buying, verification, token documents, vesting and issuing on Manci.",
+    `Find the right guide for buying, verification, token documents, ${navHrefVisible("/portfolio/vesting") ? "vesting " : ""}and issuing on Manci.`,
 };
 
 const QUESTIONS = [
@@ -90,7 +91,8 @@ export default function FaqPage() {
       />
       <Section>
         <Grid cols={2}>
-          {QUESTIONS.map((item) => (
+          {/* No answer that points into a module switched off on this network (lib/pilot-scope.ts). */}
+          {QUESTIONS.filter((item) => navHrefVisible(item.href)).map((item) => (
             <Card key={item.question} title={item.question} body={item.answer}>
               <p className="mt-4">
                 <TextLink href={item.href}>{item.link} →</TextLink>

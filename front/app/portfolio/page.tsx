@@ -28,6 +28,7 @@ import { getMyOnboardingPath } from "@/lib/clients";
 import { countryName, COUNTRIES } from "@/lib/countries";
 import { FieldError, FieldHelp, FieldLabel } from "@/components/field";
 import { useToast } from "@/lib/toast";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 const CLASS_TYPE = [
   "Common",
@@ -820,7 +821,7 @@ function Empty() {
         No Manci holdings yet.
       </p>
       <p className="mt-1 text-xs text-slate-400">
-        Buy on a primary sale or take an OTC offer to see balances here.
+        Buy on a primary sale{navHrefVisible("/marketplace/otc") && " or take an OTC offer"} to see balances here.
       </p>
       <Link
         href="/marketplace/launchpad"

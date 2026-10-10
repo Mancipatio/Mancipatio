@@ -11,18 +11,20 @@ import {
   Small,
   TextLink,
 } from "@/components/mx";
+import { features } from "@/lib/features";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata: Metadata = {
   title: "Investor guide — Manci",
   description:
-    "Find an asset, review its documents, connect your wallet and use the sale, OTC and portfolio screens.",
+    `Find an asset, review its documents, connect your wallet and use the sale${navHrefVisible("/marketplace/otc") ? ", OTC" : ""} and portfolio screens.`,
 };
 
 const STEPS = [
   {
     title: "01 · Explore the market",
-    body: "Browse assets, open sales and funded OTC offers. Open an asset to review its issuer and available share classes.",
+    body: `Browse assets${navHrefVisible("/marketplace/otc") ? ", open sales and funded OTC offers" : " and open sales"}. Open an asset to review its issuer and available share classes.`,
     links: [{ label: "Explore markets", href: MX_ROUTES.home }],
   },
   {
@@ -79,7 +81,8 @@ export default function InvestorsPage() {
             <li key={step.title}>
               <Card title={step.title} body={step.body} className="h-full">
                 <div className="mt-4 flex flex-wrap gap-x-5 gap-y-2">
-                  {step.links.map((link) => (
+                  {/* No link into a module switched off on this network (lib/pilot-scope.ts). */}
+                  {step.links.filter((link) => navHrefVisible(link.href)).map((link) => (
                     <TextLink key={link.href} href={link.href}>
                       {link.label} →
                     </TextLink>
@@ -107,19 +110,21 @@ export default function InvestorsPage() {
           the saved transaction receipt to retry the record instead of repeating
           the payment.
         </Body>
-        <Body className="mt-4">
+        {features().startupRaises && <Body className="mt-4">
           Startup payout-vault entitlements follow their saved original-investor
           snapshot, even if token balances later change. Read the{" "}
           <TextLink href="/solutions/governance">
             snapshot and payout-rights guide
           </TextLink>{" "}
           for that distinction.
-        </Body>
+        </Body>}
         <ButtonRow>
           <Button href="/portfolio">Open Portfolio</Button>
-          <Button href="/portfolio/vesting" variant="ghost">
-            Check vesting
-          </Button>
+          {navHrefVisible("/portfolio/vesting") && (
+            <Button href="/portfolio/vesting" variant="ghost">
+              Check vesting
+            </Button>
+          )}
         </ButtonRow>
       </Section>
     </>

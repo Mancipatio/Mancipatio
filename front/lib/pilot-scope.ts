@@ -1,7 +1,9 @@
 // The UI half of the pilot-scope module switches (lib/features.ts
 // pilotModules): which pages and menu entries belong to which module. Pure
 // and directive-free, like lib/features.ts; AppShell reads it for the
-// navigation, the section tabs and the page notice.
+// navigation, the section tabs and the page notice, and navHrefVisible hides
+// the admin menu entries, cards, CTAs and footer links of switched-off
+// modules everywhere else (devnet shows everything: modules default on).
 //
 // A page is one of two kinds:
 //   - "gate": an entry surface only (browse and take OTC offers, vote). With
@@ -16,7 +18,14 @@
 // A route listing several modules is off only when all of them are off
 // (e.g. "Rights & claims" shows Rights-Token and distribution claims).
 
-import { moduleDisabledMessage, moduleEnabled, PILOT_MODULE_LABELS, type PilotModule } from "@/lib/features";
+import {
+  features,
+  moduleDisabledMessage,
+  moduleEnabled,
+  PILOT_MODULE_LABELS,
+  type FeatureName,
+  type PilotModule,
+} from "@/lib/features";
 import { detectNetwork, type Network } from "@/lib/network";
 
 export type ModuleRoute = {
@@ -71,9 +80,41 @@ export function moduleRouteState(path: string, network: Network = detectNetwork(
   return { route, off, disabled: off.length === route.modules.length };
 }
 
-/** False for a menu entry or tab whose page belongs to modules that are all off. */
+/**
+ * Menu-only scope: pages that are not module pages above (no notice is added
+ * to them) but whose menu entries, tabs, cards and links still follow a
+ * switch: the public guide of a module, or a page that belongs to a
+ * features() flag (lib/features.ts). An entry is hidden when every module and
+ * flag it lists is off; the page itself stays reachable by its URL.
+ */
+export type NavRoute = {
+  prefix: string;
+  modules: readonly PilotModule[];
+  features: readonly FeatureName[];
+};
+
+export const NAV_ROUTES: readonly NavRoute[] = [
+  // Startup payout vaults (startupRaises) and the push distributions listed beside them.
+  { prefix: "/issuer/payouts", modules: ["distributions"], features: ["startupRaises"] },
+  // The public guides of the modules (/docs "Platform guides", /how-it-works, /faq).
+  { prefix: "/solutions/otc", modules: ["secondaryTrading"], features: [] },
+  { prefix: "/solutions/governance", modules: ["governance"], features: [] },
+  { prefix: "/solutions/rights-vesting", modules: ["rights", "vesting", "distributions"], features: [] },
+  { prefix: "/solutions/custody", modules: ["custodyConversion", "custodyDelivery"], features: [] },
+];
+
+/**
+ * False for a menu entry, tab, card or link whose page belongs only to
+ * switched-off modules (MODULE_ROUTES, NAV_ROUTES). A query or hash in `href`
+ * is ignored ("/markets/resell?type=equity" is the resell board).
+ */
 export function navHrefVisible(href: string, network: Network = detectNetwork()): boolean {
-  return !(moduleRouteState(href, network)?.disabled ?? false);
+  const path = href.split(/[?#]/, 1)[0];
+  if (moduleRouteState(path, network)?.disabled) return false;
+  const nav = NAV_ROUTES.find((r) => matches(path, r.prefix));
+  if (!nav) return true;
+  const flags = features(network);
+  return nav.modules.some((m) => moduleEnabled(m, network)) || nav.features.some((f) => flags[f]);
 }
 
 /** The sentence a page shows for its switched-off modules ("" when none is off). */

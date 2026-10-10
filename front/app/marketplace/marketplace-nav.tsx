@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { cx } from "@/components/mx";
 
 const NAV = [
@@ -15,7 +16,7 @@ export function MarketplaceNav() {
   const path = usePathname();
   return (
     <nav className="flex gap-1 text-sm">
-      {NAV.map((item) => {
+      {NAV.filter((item) => navHrefVisible(item.href)).map((item) => {
         const active =
           item.href === "/marketplace"
             ? path === "/marketplace"

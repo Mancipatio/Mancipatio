@@ -13,13 +13,17 @@ import {
   TextLink,
   type StepItem,
 } from "@/components/mx";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { getSolution, SOLUTIONS } from "@/lib/solutions";
 
 type ToolGuide = {
   intro: string;
   appHref: string;
   appLabel: string;
-  details: { title: string; body: ReactNode }[];
+  /** The app button when appHref belongs to a module switched off on this network. */
+  appFallback?: { href: string; label: string };
+  /** `onlyIf`: the card shows only while that page's module is on (lib/pilot-scope.ts). */
+  details: { title: string; body: ReactNode; onlyIf?: string }[];
   steps?: StepItem[];
 };
 
@@ -161,6 +165,7 @@ const GUIDES: Record<string, ToolGuide> = {
       "Follow escrowed units through conversion, delivery and redemption, including their completion and return paths.",
     appHref: "/portfolio/delivery",
     appLabel: "Open delivery requests",
+    appFallback: { href: "/portfolio/conversion", label: "Open conversion requests" },
     details: [
       {
         title: "Vault types and states",
@@ -172,6 +177,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "Delivery requests",
+        onlyIf: "/portfolio/delivery",
         body: "Requesting delivery requires identity verification (KYC). Delivery deposits tokens into escrow. A completed return releases the holder’s recorded deposit; confirmed delivery burns the units. A holder’s refund may complete while the vault still contains someone else’s surplus. Review the actual request and transaction state.",
       },
       {
@@ -180,6 +186,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "Conversion requests",
+        onlyIf: "/portfolio/conversion",
         body: (
           <>
             <TextLink href="/portfolio/conversion">
@@ -213,6 +220,7 @@ const GUIDES: Record<string, ToolGuide> = {
       },
       {
         title: "After a purchase",
+        onlyIf: "/marketplace/otc",
         body: (
           <>
             Purchased units appear in Portfolio. Existing holders can use the{" "}
@@ -353,6 +361,14 @@ export default async function SolutionPage({
     body: note,
   }));
   const isVesting = slug === "rights-vesting";
+  // Pilot scope (lib/pilot-scope.ts): no button or card into a module that is
+  // switched off on this network; the guide itself stays readable.
+  const app = navHrefVisible(guide.appHref)
+    ? { href: guide.appHref, label: guide.appLabel }
+    : guide.appFallback && navHrefVisible(guide.appFallback.href)
+      ? guide.appFallback
+      : null;
+  const details = guide.details.filter((detail) => !detail.onlyIf || navHrefVisible(detail.onlyIf));
 
   return (
     <>
@@ -362,7 +378,7 @@ export default async function SolutionPage({
         lede={guide.intro}
       >
         <ButtonRow>
-          <Button href={guide.appHref}>{guide.appLabel}</Button>
+          {app && <Button href={app.href}>{app.label}</Button>}
           <TextLink href="/docs#platform-tools">All platform guides →</TextLink>
         </ButtonRow>
       </PageHeader>
@@ -387,7 +403,7 @@ export default async function SolutionPage({
       <Section id="details">
         <H2 className="mb-6">Details to check</H2>
         <Grid cols={2}>
-          {guide.details.map((detail) => (
+          {details.map((detail) => (
             <Card key={detail.title} title={detail.title} body={detail.body} />
           ))}
         </Grid>
