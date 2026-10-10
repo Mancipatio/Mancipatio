@@ -26,6 +26,7 @@ import {
   type TermValue,
 } from "@/lib/instruments";
 import { allAssetClassesOffered, assetClassOffered, MORE_ASSET_CLASSES_LATER } from "@/lib/pilot-scope";
+import { scopeEnabled } from "@/lib/features";
 
 export const metadata = {
   title: "Asset types · Manci",
@@ -43,8 +44,8 @@ function settledKeysFor(sets: readonly TermSet[]): TermKey[] {
 /** A settled answer is printed as written; "not applicable" is a dash, which
  *  the legend below explains. There is no third state on this page: a term
  *  that is not settled is dropped from the table entirely, so `undefined`
- *  cannot reach a cell — `settledTermKeys()` only returns keys every row
- *  answers. */
+ *  cannot reach a cell — `settledKeysFor()` only returns keys every row
+ *  shown answers. */
 function cell(value: TermValue | undefined): TableCell {
   if (value === undefined || isNotApplicable(value)) {
     return { value: "—", tone: "na" };
@@ -114,8 +115,12 @@ export default function InstrumentsIndexPage() {
               href={instrumentHref(instrument.slug)}
             />
           ))}
-          {/* Not a link: the classes that are not offered on this network. */}
-          {!allAssetClassesOffered() && <Card title={MORE_ASSET_CLASSES_LATER} />}
+          {/* Not a link: the classes that are not offered on this network.
+              Dashed and muted, like the overview's tile, so it does not read
+              as one more instrument card. */}
+          {!allAssetClassesOffered() && (
+            <Card title={MORE_ASSET_CLASSES_LATER} className="border-dashed bg-transparent [&>h3]:text-mx-ink-faint" />
+          )}
         </Grid>
       </Section>
 
@@ -124,9 +129,11 @@ export default function InstrumentsIndexPage() {
       <Section>
         <H2>Not sure which one fits?</H2>
         <Body className="mt-4">
-          Tell us what you have. A person reads every application and comes back
-          either way — including to say that none of these instruments is right
-          for it.
+          {/* KYC-only mode (lib/features.ts): applications are paused; the
+              contact form stays. */}
+          {scopeEnabled("issuance")
+            ? "Tell us what you have. A person reads every application and comes back either way — including to say that none of these instruments is right for it."
+            : "Tell us what you have. A person reads every message and comes back either way — including to say that none of these instruments is right for it."}
         </Body>
         <ButtonRow>
           <Button href={MX_ROUTES.apply}>Apply to issue</Button>

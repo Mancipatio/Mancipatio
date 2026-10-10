@@ -8,11 +8,16 @@
 //
 // Client wrapper: markVestingMilestonePublished() in lib/vesting.ts
 // (action "vesting.publish-milestone").
+//
+// KYC-only mode (lib/features.ts kycOnly): publishing a milestone is an
+// issuance entry for an author or issuer, 403; every admin keeps it.
 
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { requireVestingEditor } from "../_lib";
+import { scopeEnabled } from "@/lib/features";
+import { requireArea } from "@/lib/server/feature-gate";
+import { isAdminWallet, requireVestingEditor } from "../_lib";
 
 const MAX_TX_LEN = 120; // base58 signature is 87–88 chars; generous cap.
 
@@ -45,6 +50,8 @@ export async function POST(request: Request) {
       }
       publishedTx = params.published_tx;
     }
+    // KYC-only mode (lib/features.ts): a non-admin's publication is an issuance entry.
+    if (!scopeEnabled("issuance") && !(await isAdminWallet(wallet))) requireArea("issuance");
 
     const schedule = await requireVestingEditor(wallet, scheduleId);
 

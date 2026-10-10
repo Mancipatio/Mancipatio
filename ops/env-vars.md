@@ -211,9 +211,11 @@ of the marketing and marketplace pages; the portfolio overview and
 activity; exits of existing positions (cancels, reclaims, refunds, claims,
 conversion and delivery recording, purchase recovery); the whole admin
 console; and the contact form. A company's verification (KYB) is for
-raising and issuing, so `/verify` does not offer it and
-`/api/verification/submit` answers 403 to `kind=kyb`; the admin console
-keeps processing the KYB dossiers that exist.
+raising and issuing, so `/verify` does not offer a new one and
+`/api/verification/submit` answers 403 to `kind=kyb`. A KYB dossier that
+already exists keeps its row on `/account` and its choice on `/verify`
+(status and "Continue verification": the document upload stays open), and
+the admin console keeps processing it.
 
 What is paused: every pilot module, **whatever its own variable says**
 (`moduleEnabled`; `pilotModules()` still reports the variables, which the
@@ -222,7 +224,7 @@ build guards read), and the two core areas without a switch of their own:
 | Area | Entry routes that answer 403 | On-chain entries refused before the wallet (`KYC_ONLY_FLOWS`) | Pages |
 |---|---|---|---|
 | Primary sales | `launchpad/commit`, `compliance/screen-wallet`, `sale-requests/submit`, `launchpad/listing-upsert` (issuer branch; a take-down stays open) | `buy`, `open_sale`, `mint_to_treasury` | `/marketplace/launchpad` (gate), sale pages (notice: information and "Retry recording" stay, no buy form) |
-| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (every issuer key: "Send to wallets" is paused), `verification/submit` (`kind=kyb`) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
+| Issuance | `applications/submit` and `resubmit`, `issuer-profiles/upsert`, `profiles/upsert`, `storage/upload` (issuer branches; a profile Unpublish stays open), `compliance/screen-recipients` and `distribution-evidence` (a non-admin issuer's "Send to wallets"; an Admin issuer key keeps it), `vesting-series/update`, `vesting/update-status` (forward moves; completing or cancelling stays open) and `vesting/publish-milestone` (non-admins), `verification/submit` (a new `kind=kyb`) | `register_issuer`, `create_asset`, `add_share_class`, `initialize_share_class_mint` | `/apply`, `/issuer/onboarding`, `/issuer/assets/tokenize`, `/issuer/share-classes` (gate); `/issuer`, `/issuer/assets`, `/issuer/launchpad`, `/issuer/payouts` (notice, entry buttons hidden) |
 
 Also refused before the wallet: `deposit_to_custody_vault` and the vesting
 series follow-ups (`add_vesting_position`, `finalize_vesting_series`,
@@ -238,19 +240,32 @@ CTA (`navHrefVisible`, and the mx `Button` / `TextLink` through
 (`KYC_ONLY_NAV_PREFIXES`).
 
 On-chain, the program's pause flags remain the authority, and this switch
-does not change them. The pilot's 0x7E leaves 0x01 (onboarding) clear, so
-`register_issuer` (permissionless) and a KYB-verified issuer's
-`create_asset`, `add_share_class` and `initialize_share_class_mint` are then
-stopped only by this UI and client gate; a hand-built transaction passes.
-**Recommended: 0x7F** (also pause onboarding on Admin → Platform, Super
-Admin) as the on-chain enforcement of the lockdown. KYC and passports are
-unaffected: the KYC registry instructions (approve, revoke, registry
-authority) never read the pause flags. The choice is the owner's.
+does not change them. **The lockdown needs 0x7F on-chain** (every pause
+bit, set on Admin → Platform by the Super Admin, before or with the
+release). With the pilot's 0x7E, 0x01 (onboarding) is clear, and
+`register_issuer` (permissionless while 0x01 is clear) and a KYB-verified
+issuer's `create_asset`, `add_share_class` and
+`initialize_share_class_mint` are stopped only by this UI and client gate,
+which is a display gate: a hand-built transaction passes, and a new Pending
+issuer would show in the public registry counts. 0x01 stops exactly those
+four instructions and nothing else, so KYC and passports are unaffected:
+the KYC registry instructions (approve, revoke, registry authority) never
+read the pause flags.
+
+After the release (post-deploy check): Admin → Platform shows 0x7F; the
+home page shows one Equity tile, the "More asset classes coming later"
+tile, and no Primary sales tab, stat or "Create a raise"; the sidebar has
+no Primary sales and no Issuer workspace; `/marketplace/launchpad` shows
+"Paused."; `/verify`, `/login`, `/account` and `/portfolio` work;
+`/admin/kyc`, `/admin/clients` and `/admin/platform` work; `/markets/types`
+shows Equity only. `/admin/custody` leaves the admin menu while nothing
+waits there (every module reads off in the mode); open it by URL to record
+an existing conversion.
 
 Leaving KYC-only mode later:
 1. Confirm that the Terms in force offer what reopens.
 2. Clear the matching pause bits on Admin → Platform (Super Admin), e.g.
-   0x02 for primary sales (and 0x01 if it was set).
+   0x02 for primary sales and 0x01 for issuer onboarding.
 3. In Vercel Production set `NEXT_PUBLIC_FEATURE_KYC_ONLY=false` and
    Redeploy (the value is build-time).
 4. Module switches then apply as their own variables say (unset = off on

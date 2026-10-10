@@ -6,9 +6,11 @@
 // Unpublish), the admin paths, the verification (KYC) request and every
 // exit stay open. With the mode off, none of them answers that 403. SIWS,
 // the admin gate, profile ownership, the share-class chain and the database
-// are mocked; the routes and the gate run for real.
+// are mocked; the routes and the gate run for real. Last, every API route is
+// classified: gated (admin, area or module) or open for a recorded reason, so
+// a new entry route cannot stay open in the mode unnoticed.
 import { getAddressDecoder } from "@solana/kit";
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -103,27 +105,27 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllEnvs());
 
 // Pure entry routes: the gate is their first line, before the signature.
-const PRE_SIGNATURE: Array<[string, Load, string | null]> = [
-  ["launchpad/commit", () => import("@/app/api/launchpad/commit/route"), null],
-  ["compliance/screen-wallet", () => import("@/app/api/compliance/screen-wallet/route"), null],
-  ["sale-requests/submit", () => import("@/app/api/sale-requests/submit/route"), null],
-  ["applications/submit", () => import("@/app/api/applications/submit/route"), null],
-  ["applications/resubmit", () => import("@/app/api/applications/resubmit/route"), null],
-  // A vesting-series entry (requireModule("vesting")): off with every module in the mode.
-  ["vesting-series/update", () => import("@/app/api/vesting-series/update/route"), PILOT_MODULE_ENV.vesting],
+const PRE_SIGNATURE: Array<[string, Load]> = [
+  ["launchpad/commit", () => import("@/app/api/launchpad/commit/route")],
+  ["compliance/screen-wallet", () => import("@/app/api/compliance/screen-wallet/route")],
+  ["sale-requests/submit", () => import("@/app/api/sale-requests/submit/route")],
+  ["applications/submit", () => import("@/app/api/applications/submit/route")],
+  ["applications/resubmit", () => import("@/app/api/applications/resubmit/route")],
+  // The issuer's resubmission of a vesting series request: an issuance entry,
+  // a no-op while the mode is off (mainnet with vesting off included: today's).
+  ["vesting-series/update", () => import("@/app/api/vesting-series/update/route")],
 ];
 
 describe("entry routes answer 403 before the signature while the mode is on", () => {
-  it.each(PRE_SIGNATURE)("%s", async (_name, load, moduleEnv) => {
+  it.each(PRE_SIGNATURE)("%s", async (_name, load) => {
     modeOn();
     const refused = await post(load);
     expect(refused.status).toBe(403);
     expect(refused.body.error).toBe(KYC_ONLY_MESSAGE);
     expect(db.touched).toEqual([]);
 
-    // The mode off (its module on, for a module route): the signature is reached.
+    // The mode off (every module switch unset, as today): the signature is reached.
     modeOff();
-    if (moduleEnv) vi.stubEnv(moduleEnv, "true");
     expect((await post(load)).status).toBe(401);
 
     network("devnet", "");
@@ -196,20 +198,59 @@ describe("routes an admin also uses: the non-admin branch only", () => {
     expect(notKycRefusal(await post(load))).toBe(true);
   });
 
-  it("compliance/screen-recipients: every issuer key is refused (Send to wallets is paused); an admin goes on", async () => {
+  it("compliance/screen-recipients: a non-admin issuer is refused; an Admin issuer key and an admin go on", async () => {
     const load = () => import("@/app/api/compliance/screen-recipients/route");
     const params = { share_class: SALE, wallets: [RECIPIENT] };
     modeOn();
     signed(at.issuer, params);
     expect(await post(load)).toMatchObject({ status: 403, body: { error: KYC_ONLY_MESSAGE } });
-    // The operator's key as the class's issuer authority: refused too.
+    expect(db.touched).toEqual([]);
+    // The operator's key as the class's issuer authority: the admin console stays whole.
     at.authority = at.admin;
     signed(at.admin, params);
-    expect(await post(load)).toMatchObject({ status: 403, body: { error: KYC_ONLY_MESSAGE } });
+    expect(notKycRefusal(await post(load))).toBe(true);
     // An admin that is not the issuer: the admin path (requireAdmin) goes on.
     at.authority = at.issuer;
     signed(at.admin, params);
     expect(notKycRefusal(await post(load))).toBe(true);
+    modeOff();
+    signed(at.issuer, params);
+    expect(notKycRefusal(await post(load))).toBe(true);
+  });
+
+  it("vesting/update-status: an issuer's forward move is refused; completing, cancelling and the admin go on", async () => {
+    const load = () => import("@/app/api/vesting/update-status/route");
+    const SCHEDULE = "00000000-0000-4000-8000-000000000001";
+    modeOn();
+    for (const status of ["published", "live"]) {
+      signed(at.issuer, { schedule_id: SCHEDULE, status });
+      expect(await post(load), status).toMatchObject({ status: 403, body: { error: KYC_ONLY_MESSAGE } });
+    }
+    expect(db.touched).toEqual([]);
+    for (const status of ["completed", "cancelled"]) {
+      signed(at.issuer, { schedule_id: SCHEDULE, status });
+      expect(notKycRefusal(await post(load)), status).toBe(true);
+    }
+    expect(db.touched).toContain("vesting_schedules");
+    db.touched.length = 0;
+    signed(at.admin, { schedule_id: SCHEDULE, status: "live" });
+    expect(notKycRefusal(await post(load))).toBe(true);
+    expect(db.touched).toContain("vesting_schedules");
+    modeOff();
+    signed(at.issuer, { schedule_id: SCHEDULE, status: "live" });
+    expect(notKycRefusal(await post(load))).toBe(true);
+  });
+
+  it("vesting/publish-milestone: an issuer is refused; the admin goes on", async () => {
+    const load = () => import("@/app/api/vesting/publish-milestone/route");
+    const params = { schedule_id: "00000000-0000-4000-8000-000000000001", idx: 0 };
+    modeOn();
+    signed(at.issuer, params);
+    expect(await post(load)).toMatchObject({ status: 403, body: { error: KYC_ONLY_MESSAGE } });
+    expect(db.touched).toEqual([]);
+    signed(at.admin, params);
+    expect(notKycRefusal(await post(load))).toBe(true);
+    expect(db.touched).toContain("vesting_schedules");
     modeOff();
     signed(at.issuer, params);
     expect(notKycRefusal(await post(load))).toBe(true);
@@ -257,7 +298,7 @@ describe("source matrix", () => {
       ["sale-requests/submit", /requireArea\("primarySales"\)/],
       ["applications/submit", /requireArea\("issuance"\)/],
       ["applications/resubmit", /requireArea\("issuance"\)/],
-      ["vesting-series/update", /requireModule\("vesting"\)/],
+      ["vesting-series/update", /requireArea\("issuance"\)/],
     ];
     for (const [route, gate] of locked) {
       const text = source(route);
@@ -271,6 +312,8 @@ describe("source matrix", () => {
       ["profiles/upsert", 'requireArea("issuance")'],
       ["storage/upload", 'requireArea("issuance")'],
       ["verification/submit", 'if (kind === "kyb") requireArea("issuance")'],
+      ["vesting/update-status", 'requireArea("issuance")'],
+      ["vesting/publish-milestone", 'requireArea("issuance")'],
     ] as const) {
       expect(source(route), route).toContain(gate);
     }
@@ -290,5 +333,87 @@ describe("source matrix", () => {
       expect(text, route).not.toContain("requireArea(");
       expect(text, route).not.toContain("requireModule(");
     }
+  });
+});
+
+describe("every API route is classified", () => {
+  // A route is gated when its source calls an admin gate, a KYC-only area
+  // (requireArea), a module switch (requireModule) or the Send to wallets
+  // sender check (requireClassSender, which calls requireArea). A route whose
+  // admin gate is only one of its branches gates its other branch with
+  // requireArea or requireModule; the tests above pin those. Every other route
+  // is open, and must be listed here with the reason it stays open in
+  // KYC-only mode: a new non-admin entry route without a gate fails here.
+  const GATED = /\b(requireAdmin|requireSuperAdmin|requireAdminOrKycProvider|requireKycProvider|requireArea|requireModule|requireClassSender)\(/;
+  type OpenReason =
+    | "sign-in" // wallet, email or Google session
+    | "account" // the signed-in account and its wallets
+    | "terms" // Terms acceptance
+    | "verification" // the KYC request, its documents and the passport
+    | "read" // reads only
+    | "exit" // winding down an existing position
+    | "recording" // records an on-chain fact or finishes an authorized step
+    | "support" // the contact form
+    | "platform"; // health, cron, CSP reports, audit breadcrumbs, a gone route
+  const OPEN: Record<string, OpenReason> = {
+    "account/email/cancel": "account", "account/email/request": "account", "account/email/verify": "account",
+    "account/google/callback": "sign-in", "account/google/start": "sign-in", "account/google/unlink": "account",
+    "account/me": "account", "account/update": "account",
+    "account/wallets/attach": "account", "account/wallets/cancel": "account", "account/wallets/complete": "account",
+    "account/wallets/primary": "account", "account/wallets/remove": "account", "account/wallets/start": "account",
+    "account/wallets/transaction": "account",
+    "applications/capacity": "read", "applications/eligibility": "read", "applications/mine": "read", "applications/public": "read",
+    "archive/check": "read", "archive/list": "read",
+    "audit": "platform",
+    "auth/email/start": "sign-in", "auth/email/verify": "sign-in", "auth/google/start": "sign-in",
+    "auth/logout": "sign-in", "auth/me": "sign-in", "auth/session": "sign-in",
+    "clients/accept-tos": "verification", "clients/link-wallet": "verification", "clients/me": "verification",
+    "clients/onboarding-requirements": "verification", "clients/onboarding-view": "verification",
+    "conversion/cancel": "exit", "conversion/reclaim": "exit", "conversion/deposited": "recording", "conversion/list-mine": "read",
+    "delivery/cancel": "exit", "delivery/reclaim": "exit", "delivery/deposited": "recording", "delivery/list-mine": "read",
+    "csp-report": "platform", "health": "platform", "health/alarms": "platform", "maintenance": "platform", "priority-fee": "platform",
+    "internal/alarms": "platform", "internal/fx": "platform", "internal/retry": "platform", "internal/sanctions": "platform",
+    "distribution-plans/proof": "read", "payout-snapshots/proof": "read",
+    "inquiries/create": "support",
+    "issuer-profiles/read": "read", "profiles/public": "read", "profiles/read": "read",
+    "launchpad/commitment-aggregate": "read", "launchpad/terms": "read",
+    // Purchase recovery: a buy that already landed on-chain ("Retry recording").
+    "launchpad/commitment-status": "recording", "launchpad/record-purchase": "recording",
+    "passport/status": "verification", "passport/submit": "verification",
+    // Withdraw a listing or mark it matched.
+    "resell/update": "exit",
+    "sale-approvals/mine": "read",
+    // Gone (Talas 5.1): answers every call with a refusal.
+    "sale-approvals/settle": "platform",
+    // Finishes an upload that storage/upload (gated for issuers) authorized.
+    "storage/finalize": "recording",
+    "tos/accept": "terms", "tos/status": "terms",
+    "vesting-series/creation-state": "read", "vesting-series/list-mine": "read",
+    "vesting-series/mark-cancelled": "exit",
+    // Records steps whose on-chain entries the client gate refuses in the mode (KYC_ONLY_FLOWS).
+    "vesting-series/mark-created": "recording", "vesting-series/record-step": "recording",
+    "vesting/beneficiaries": "read",
+  };
+
+  function routes(dir = join(process.cwd(), "app/api"), prefix = ""): string[] {
+    return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {
+      if (entry.isDirectory()) return routes(join(dir, entry.name), prefix ? `${prefix}/${entry.name}` : entry.name);
+      return entry.name === "route.ts" && prefix ? [prefix] : [];
+    });
+  }
+
+  it("each route is gated or listed as open, never both", () => {
+    const all = routes();
+    expect(all.length).toBeGreaterThan(150);
+    const unclassified: string[] = [];
+    const listedButGated: string[] = [];
+    for (const route of all) {
+      const gated = GATED.test(readFileSync(join(process.cwd(), "app/api", route, "route.ts"), "utf8"));
+      if (!gated && !(route in OPEN)) unclassified.push(route);
+      if (gated && route in OPEN) listedButGated.push(route);
+    }
+    expect(unclassified, "new route: gate it (requireArea/requireModule/admin) or list it as open with its reason").toEqual([]);
+    expect(listedButGated, "a gated route leaves the open list").toEqual([]);
+    for (const route of Object.keys(OPEN)) expect(all, route).toContain(route);
   });
 });

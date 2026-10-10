@@ -531,10 +531,10 @@ export default function DealPage({
           ({detectNetwork()}).
         </p>
         <Link
-          href="/marketplace/launchpad"
+          href={scopeEnabled("primarySales") ? "/marketplace/launchpad" : "/marketplace"}
           className="mt-4 inline-block text-sm text-mx-ink-soft underline-offset-2 hover:underline"
         >
-          ← All raises
+          {scopeEnabled("primarySales") ? "← All raises" : "← Marketplace"}
         </Link>
       </section>
     );
@@ -1559,9 +1559,7 @@ export default function DealPage({
             }`}
           >
             {!saleOpen
-              ? salesPaused
-                ? "Paused"
-                : startupUnavailable
+              ? startupUnavailable
                 ? "Not available"
                 : "Sale closed"
               : eligibility.gated && !eligibility.eligible
@@ -1817,12 +1815,13 @@ export default function DealPage({
 
   return (
     <section>
-      {/* Back link */}
+      {/* Back link (to the marketplace while primary sales are paused: the
+          launchpad list is the KYC-only notice then). */}
       <Link
-        href="/marketplace/launchpad"
+        href={salesPaused ? "/marketplace" : "/marketplace/launchpad"}
         className="text-xs text-mx-ink-faint underline-offset-2 hover:underline"
       >
-        ← All raises
+        {salesPaused ? "← Marketplace" : "← All raises"}
       </Link>
 
       <SalePageLayout header={header} buy={buy} main={main} />

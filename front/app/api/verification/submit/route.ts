@@ -12,8 +12,9 @@
 // a wallet the account adds later files a passport request only for an
 // investor (api/account/wallets/attach).
 // Verification itself stays a compliance decision in the admin console.
-// KYC-only mode (lib/features.ts kycOnly) refuses a KYB intake (403); the
-// admin console keeps processing the KYB dossiers that exist.
+// KYC-only mode (lib/features.ts kycOnly) refuses a KYB intake (403); a KYB
+// dossier that exists is continued through the document upload
+// (/api/clients/me, /onboarding), and the admin console keeps processing it.
 
 import { NextResponse } from "next/server";
 import { siwsErrorResponse, SiwsError } from "@/lib/server/siws";

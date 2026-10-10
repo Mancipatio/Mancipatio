@@ -6,17 +6,17 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   findIssuerPda,
   SaleStatus,
+  type Asset,
+  type AssetType,
 } from "@/lib/generated/asset_registry";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { withoutArchived } from "@/lib/archive-client";
 import { ASSET_TYPE_LABEL, fromBytes32, KYB_LABEL } from "@/lib/format";
 import { assetHref, withAssetAddresses } from "@/lib/asset-links";
-import type { Asset } from "@/lib/generated/asset_registry";
 import { SkeletonTable } from "@/components/skeleton";
 import { allAssetClassesOffered, assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
 import { slugForEnum } from "@/lib/asset-types";
-import type { AssetType } from "@/lib/generated/asset_registry";
 import { visibleClassCount } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import {
@@ -122,6 +122,16 @@ export default function MarketplacePage() {
     };
   }, [data, conversionTargets]);
 
+  // Primary sales paused (KYC-only mode, lib/pilot-scope.ts): no sales count,
+  // card or link, as on the overview.
+  const salesOn = navHrefVisible("/marketplace/launchpad");
+  const statItems = [
+    { k: "Issuers", v: stats?.issuers },
+    { k: "Verified issuers", v: stats?.verifiedIssuers },
+    { k: "Assets", v: stats?.assets },
+    { k: "Share classes", v: stats?.shareClasses },
+    ...(salesOn ? [{ k: "Active sales", v: stats?.activeSales }] : []),
+  ];
   const marketCards = [
     { href: "/marketplace/launchpad", title: "Primary sales", body: "Buy share-class units directly from issuers on the launchpad." },
     { href: "/marketplace/otc", title: "OTC offers", body: "Buy from existing token holders through hook-aware OTC offers." },
@@ -140,14 +150,8 @@ export default function MarketplacePage() {
 
       {/* Live stats */}
       <Section>
-        <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-[3px] border border-mx-rule bg-mx-rule sm:grid-cols-5">
-          {[
-            { k: "Issuers", v: stats?.issuers },
-            { k: "Verified issuers", v: stats?.verifiedIssuers },
-            { k: "Assets", v: stats?.assets },
-            { k: "Share classes", v: stats?.shareClasses },
-            { k: "Active sales", v: stats?.activeSales },
-          ].map((s) => (
+        <dl className={`grid grid-cols-2 gap-px overflow-hidden rounded-[3px] border border-mx-rule bg-mx-rule ${salesOn ? "sm:grid-cols-5" : "sm:grid-cols-4"}`}>
+          {statItems.map((s) => (
             <div key={s.k} className="bg-mx-surface px-4 py-3.5">
               <dt className="text-[11px] font-semibold uppercase tracking-[0.08em] text-mx-ink-faint">
                 {s.k}

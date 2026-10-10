@@ -57,7 +57,7 @@ import {
 } from "@/lib/vesting-series";
 import { EMPTY_FORM, SeriesForm, type SeriesFormValues } from "./series-form";
 import { SeriesPanel } from "./series-panel";
-import { moduleEnabled } from "@/lib/features";
+import { scopeEnabled } from "@/lib/features";
 
 const STATUS_LABEL: Record<VestingSeriesRow["status"], string> = {
   submitted: "In review",
@@ -86,11 +86,11 @@ export default function IssuerVestingSeriesPage() {
   const [rows, setRows] = useState<VestingSeriesRow[] | null>(null);
   const [listError, setListError] = useState<string | null>(null);
   const [showForm, setShowForm] = useState(false);
-  // Pilot scope (lib/features.ts): with the vesting module off (and in
-  // KYC-only mode) this is a notice page: no new series, resubmission or
-  // on-chain creation (their routes answer 403); resuming a prepared
-  // creation's record and the panels of existing series stay.
-  const seriesOn = moduleEnabled("vesting");
+  // KYC-only mode (lib/features.ts): issuance is paused, so no new series,
+  // resubmission or on-chain creation (their routes answer 403); resuming a
+  // prepared creation's record and the panels of existing series stay. With
+  // the mode off the page is today's.
+  const entriesOn = scopeEnabled("issuance");
   const [editRow, setEditRow] = useState<VestingSeriesRow | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [creationBusy, setCreationBusy] = useState<string | null>(null);
@@ -425,7 +425,7 @@ export default function IssuerVestingSeriesPage() {
             Manci team about the Rights Token.
           </p>
         </div>
-        {seriesOn && (
+        {entriesOn && (
           <button
             type="button"
             onClick={() => {
@@ -523,7 +523,7 @@ export default function IssuerVestingSeriesPage() {
                     >
                       {STATUS_LABEL[row.status]}
                     </span>
-                    {row.status === "needs_changes" && seriesOn && (
+                    {row.status === "needs_changes" && entriesOn && (
                       <button
                         type="button"
                         onClick={() => {
@@ -535,7 +535,7 @@ export default function IssuerVestingSeriesPage() {
                         Fix & resubmit
                       </button>
                     )}
-                    {row.status === "approved" && (seriesOn || !!row.creation_prepared_at) && (
+                    {row.status === "approved" && (entriesOn || !!row.creation_prepared_at) && (
                       <button
                         type="button"
                         disabled={
@@ -597,7 +597,7 @@ export default function IssuerVestingSeriesPage() {
         )}
       </div>
 
-      {showForm && seriesOn && (
+      {showForm && entriesOn && (
         <SeriesForm
           title={
             editRow ? "Fix & resubmit vesting series" : "New vesting series"

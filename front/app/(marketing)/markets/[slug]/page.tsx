@@ -2,6 +2,7 @@ import { notFound } from "next/navigation";
 import { Button, ButtonRow, Card, Grid, PageHeader, Section, TextLink } from "@/components/mx";
 import { CATEGORY_SLUGS, assetTypeBySlug, type CategorySlug } from "@/lib/asset-types";
 import { ASSET_CLASS_NOT_OFFERED, assetClassOffered, navHrefVisible } from "@/lib/pilot-scope";
+import { indexingAllowed } from "@/lib/indexing";
 import { CategoryOffers } from "./category-offers";
 
 // All eight, offered or not (lib/asset-classes.ts): a class that is not
@@ -21,7 +22,10 @@ export async function generateMetadata({
     return { title: "Market · Manci" };
   }
   if (!assetClassOffered(record.slug)) {
-    return { title: `${record.title} · Manci`, robots: { index: false, follow: true } };
+    // A page's robots replaces the root layout's (lib/indexing.ts): only
+    // where the build allows indexing is a noindex needed; elsewhere the
+    // root's stricter policy (noindex, nofollow) stays.
+    return { title: `${record.title} · Manci`, ...(indexingAllowed() ? { robots: { index: false, follow: true } } : {}) };
   }
   return {
     title: `${record.title} · Live market · Manci`,

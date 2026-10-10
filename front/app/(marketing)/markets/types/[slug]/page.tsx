@@ -26,6 +26,7 @@ import {
   type TermSet,
 } from "@/lib/instruments";
 import { ASSET_CLASS_NOT_OFFERED, assetClassOffered } from "@/lib/pilot-scope";
+import { indexingAllowed } from "@/lib/indexing";
 
 /** Headings that contain an apostrophe live here rather than in JSX text. */
 const HEADING_WHAT_IT_IS = "What it is";
@@ -51,7 +52,10 @@ export async function generateMetadata({
     return { title: "Instrument · Manci" };
   }
   if (!assetClassOffered(instrument.slug)) {
-    return { title: `${instrument.label} · Manci`, robots: { index: false, follow: true } };
+    // A page's robots replaces the root layout's (lib/indexing.ts): only
+    // where the build allows indexing is a noindex needed; elsewhere the
+    // root's stricter policy (noindex, nofollow) stays.
+    return { title: `${instrument.label} · Manci`, ...(indexingAllowed() ? { robots: { index: false, follow: true } } : {}) };
   }
   return {
     title: `${instrument.label} · Manci`,

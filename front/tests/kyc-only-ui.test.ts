@@ -61,7 +61,7 @@ import { SiteFooter } from "@/components/mx/site-footer";
 import { DocumentationIndex } from "@/components/documentation-index";
 import { DocumentationFrame } from "@/components/documentation-frame";
 import { Button, TextLink } from "@/components/mx/button";
-import { AccountVerificationCard } from "@/components/account-verification";
+import { AccountVerificationCard, kybShown } from "@/components/account-verification";
 import { VerificationForm } from "@/components/verification-form";
 import type { AccountVerification } from "@/lib/account";
 
@@ -230,6 +230,9 @@ describe("guides, footer and shared links", () => {
     const text = textLink("/solutions/custody");
     expect(text).toContain("custody guide");
     expect(text).not.toContain("href=");
+    // A trailing link arrow goes with the link (/docs/pilot "Issuer operations →").
+    // eslint-disable-next-line react/no-children-prop
+    expect(html(createElement(TextLink, { href: "/issuer/share-classes", children: "Issuer operations →" }))).toBe("<span>Issuer operations</span>");
     network("mainnet", "off");
     expect(button("/apply")).toContain('href="/apply"');
     network("devnet");
@@ -254,6 +257,31 @@ describe("the verification request", () => {
     expect(card).not.toContain("Buying and trading tokens");
   });
 
+  it("mode on: a KYB dossier that exists keeps its row, status and 'Continue verification'; a new one is not offered", () => {
+    for (const kyb of ["pending", "more_info", "verified", "suspended", "rejected"] as const) {
+      expect(kybShown(kyb), kyb).toBe(true);
+      const card = html(createElement(AccountVerificationCard, { verification: { ...verification, kyb, documents_requested: 2 } as AccountVerification }));
+      expect(card, kyb).toContain("Company verification (KYB)");
+    }
+    const waiting = html(createElement(AccountVerificationCard, { verification: { ...verification, kyb: "more_info", documents_requested: 2 } as AccountVerification }));
+    expect(waiting).toContain("Documents needed");
+    expect(waiting).toContain("Continue verification");
+    expect(hrefs(waiting)).toContain("/verify?type=kyb");
+    for (const kyb of ["none", "expired", null, undefined] as const) {
+      expect(kybShown(kyb), String(kyb)).toBe(false);
+    }
+    const expired = html(createElement(AccountVerificationCard, { verification: { ...verification, kyb: "expired" } as AccountVerification }));
+    expect(expired).not.toContain("Company verification (KYB)");
+  });
+
+  it("mode on: the copy promises nothing about when other services open", () => {
+    nav.path = "/verify";
+    const text = html(createElement(VerificationForm)) + html(createElement(AccountVerificationCard, { verification }));
+    expect(text).toContain("Identity verification (KYC) is open. The services that require it are not available at the moment.");
+    expect(text).toContain("Identity verification is open.");
+    expect(text).not.toMatch(/open later|Open now/);
+  });
+
   it("mode off: both, as today", () => {
     network("mainnet", "off");
     nav.path = "/verify";
@@ -262,6 +290,33 @@ describe("the verification request", () => {
     expect(form).toContain("Company (KYB)");
     expect(form).toContain("COMPANY REPRESENTATIVE");
     expect(html(createElement(AccountVerificationCard, { verification }))).toContain("Company verification (KYB)");
+    for (const kyb of ["none", "expired", "more_info"] as const) expect(kybShown(kyb), kyb).toBe(true);
+  });
+});
+
+describe("the About page (its honest line and its way in)", () => {
+  const about = async () => {
+    vi.resetModules();
+    const { default: AboutPage } = await import("@/app/(marketing)/about/page");
+    return html(createElement(AboutPage));
+  };
+
+  it("mode on: issuer applications are named as paused, never as open; the way in is verification", async () => {
+    const page = await about();
+    expect(page).toContain("Sign-up and identity verification open; launchpad and issuer applications paused for now");
+    expect(page).not.toContain("Issuer applications are open");
+    expect(page).not.toContain("Issuers apply");
+    expect(page).toContain(KYC_ONLY_MESSAGE);
+    expect(hrefs(page)).toContain("/verify");
+    expect(hrefs(page)).not.toContain("/apply");
+  });
+
+  it("mode off: today's facts and the two ways in", async () => {
+    network("mainnet", "off");
+    const page = await about();
+    expect(page).toContain("Issuer applications are open and read by a person");
+    expect(page).toContain("Two ways in.");
+    expect(hrefs(page)).toContain("/apply");
   });
 });
 

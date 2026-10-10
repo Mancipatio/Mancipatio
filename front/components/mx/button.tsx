@@ -121,8 +121,11 @@ export function TextLink({
 }) {
   // KYC-only mode: no link into what it pauses (lib/pilot-scope.ts
   // kycOnlyHides; exactly today's behaviour while the mode is off). The
-  // words stay as plain text, so a sentence around the link still reads.
-  if (kycOnlyHides(href)) return <span className={className}>{children}</span>;
+  // words stay as plain text, so a sentence around the link still reads;
+  // a trailing link arrow ("Issuer operations →") goes with the link.
+  if (kycOnlyHides(href)) {
+    return <span className={className}>{typeof children === "string" ? children.replace(/\s*[→↗]$/, "") : children}</span>;
+  }
   return (
     <Link href={href} className={cx("mx-link", className)} target={target} rel={rel}>
       {children}

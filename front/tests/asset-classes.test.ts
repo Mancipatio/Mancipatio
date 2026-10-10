@@ -39,10 +39,12 @@ import { MarketOverview } from "@/components/market-overview";
 import InstrumentsIndexPage from "@/app/(marketing)/markets/types/page";
 import InstrumentPage, { generateMetadata } from "@/app/(marketing)/markets/types/[slug]/page";
 import CategoryMarketPage, { generateMetadata as categoryMetadata } from "@/app/(marketing)/markets/[slug]/page";
+import SolutionPage from "@/app/(marketing)/solutions/[slug]/page";
 
 const BUILD = "phase-production-build";
 const html = (node: ReactNode) => renderToStaticMarkup(node as never);
 const hrefs = (markup: string) => [...markup.matchAll(/href="([^"]+)"/g)].map((m) => m[1]);
+const visibleText = (markup: string) => markup.replace(/<[^>]+>/g, "").replace(/&#x27;|&#39;/g, "'").replace(/&amp;/g, "&");
 
 function network(name: "mainnet" | "devnet", classes = "", kyc = "") {
   vi.stubEnv("NEXT_PUBLIC_NETWORK", name);
@@ -118,7 +120,8 @@ describe("the overview's asset classes (components/market-overview.tsx)", () => 
     expect(buttons[0]).toContain("Equity");
     const later = markup.slice(markup.indexOf("overview-category--later"));
     expect(markup.match(/overview-category--later/g)).toHaveLength(1);
-    expect(markup).toMatch(/<div class="overview-category overview-category--later" aria-label="More asset classes coming later">/);
+    // Not a control and no ARIA name on a generic div (its text is read).
+    expect(markup).toMatch(/<div class="overview-category overview-category--later" title="More asset classes coming later">/);
     expect(later).toContain("More asset classes");
     expect(later).toContain("Coming later");
     expect(options(markup)).toEqual(["all", "0"]);
@@ -144,8 +147,14 @@ describe("the asset guides (/markets/types)", () => {
     expect(debt).toContain(ASSET_CLASS_NOT_OFFERED);
     expect(debt).not.toContain("What it is");
     expect(hrefs(debt)).toEqual(["/markets/types"]);
+    // The root layout's noindex, nofollow stays where indexing is not allowed
+    // (a page's robots would replace it); a noindex only where it is.
     const meta = await generateMetadata({ params: Promise.resolve({ slug: "debt" }) });
-    expect((meta as { robots?: { index?: boolean } }).robots?.index).toBe(false);
+    expect((meta as { robots?: unknown }).robots).toBeUndefined();
+    vi.stubEnv("NEXT_PUBLIC_ALLOW_INDEXING", "true");
+    vi.stubEnv("VERCEL_ENV", "");
+    const indexed = await generateMetadata({ params: Promise.resolve({ slug: "debt" }) });
+    expect((indexed as { robots?: unknown }).robots).toEqual({ index: false, follow: true });
     const equity = html(await InstrumentPage({ params: Promise.resolve({ slug: "equity" }) }));
     expect(equity).toContain("What it is");
     expect(equity).not.toContain(ASSET_CLASS_NOT_OFFERED);
@@ -156,13 +165,21 @@ describe("the asset guides (/markets/types)", () => {
     const debt = html(await CategoryMarketPage({ params: Promise.resolve({ slug: "debt" }) }));
     expect(debt).toContain(ASSET_CLASS_NOT_OFFERED);
     expect(hrefs(debt)).toEqual(["/marketplace"]);
-    expect(((await categoryMetadata({ params: Promise.resolve({ slug: "debt" }) })) as { robots?: { index?: boolean } }).robots?.index).toBe(false);
+    expect(((await categoryMetadata({ params: Promise.resolve({ slug: "debt" }) })) as { robots?: unknown }).robots).toBeUndefined();
+    vi.stubEnv("NEXT_PUBLIC_ALLOW_INDEXING", "true");
+    vi.stubEnv("VERCEL_ENV", "");
+    expect(((await categoryMetadata({ params: Promise.resolve({ slug: "debt" }) })) as { robots?: unknown }).robots).toEqual({ index: false, follow: true });
   });
 
   it("the index on mainnet: the equity card and rows only, then 'more asset classes coming later'", () => {
     const markup = html(createElement(InstrumentsIndexPage));
     expect(hrefs(markup).filter((href) => href.startsWith("/markets/types/"))).toEqual(["/markets/types/equity"]);
     expect(markup).toContain(MORE_ASSET_CLASSES_LATER);
+    // Not a link, and drawn apart from the instrument cards (dashed, muted).
+    expect(markup).toMatch(new RegExp(`<div class="mx-card border-dashed[^"]*"><h3 class="mx-h3">${MORE_ASSET_CLASSES_LATER}</h3></div>`));
+    // KYC-only mode (mainnet default): applications are paused, the contact form is not.
+    expect(markup).not.toContain("reads every application");
+    expect(markup).toContain("reads every message");
     const equity = INSTRUMENT_LIST.find((i) => i.slug === "equity")!;
     for (const set of equity.terms) expect(markup).toContain(set.right);
     for (const other of INSTRUMENT_LIST.filter((i) => i.slug !== "equity")) {
@@ -177,5 +194,20 @@ describe("the asset guides (/markets/types)", () => {
     expect(hrefs(markup).filter((href) => href.startsWith("/markets/types/"))).toHaveLength(8);
     expect(markup).not.toContain(MORE_ASSET_CLASSES_LATER);
     expect(markup).toContain("Real estate appears twice");
+    expect(markup).toContain("reads every application");
+  });
+});
+
+describe("the tokenization guide names the offered asset types (/solutions/tokenization)", () => {
+  const guide = async () => visibleText(html(await SolutionPage({ params: Promise.resolve({ slug: "tokenization" }) })));
+
+  it("one class: singular; several: joined with 'and' (a set, not a choice); every class: today's sentence", async () => {
+    expect(await guide()).toContain("Equity is the asset type Manci offers at the moment.");
+    network("mainnet", "equity,debt");
+    expect(await guide()).toContain("Equity and debt are the asset types Manci offers at the moment.");
+    network("mainnet", "equity,debt,royalty");
+    expect(await guide()).toContain("Equity, royalty and debt are the asset types Manci offers at the moment.");
+    network("devnet");
+    expect(await guide()).toContain("Choose equity, revenue share, royalty, real estate, debt, commodity, physical good or other.");
   });
 });

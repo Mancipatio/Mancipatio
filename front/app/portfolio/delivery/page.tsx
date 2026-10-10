@@ -716,7 +716,8 @@ export default function DeliveryPage() {
         </button>}
       </div>
 
-      {kycStatus !== undefined && !eligible && (
+      {/* The eligibility prompt only while new requests are open (requestsOpen). */}
+      {requestsOpen && kycStatus !== undefined && !eligible && (
         <div className="mt-6 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
           Delivery is available to onboarded clients only. Your wallet
           isn&apos;t linked to a KYC-verified client — contact Manci to

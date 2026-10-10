@@ -30,7 +30,8 @@ function OfferedAssetTypes() {
     return <>Choose equity, revenue share, royalty, real estate, debt, commodity, physical good or other. {terms}</>;
   }
   const offered = ASSET_TYPE_LABEL.filter((_, i) => assetClassOffered(slugForEnum(i as AssetType))).map((label) => label.toLowerCase());
-  const list = offered.length <= 1 ? offered.join("") : `${offered.slice(0, -1).join(", ")} or ${offered[offered.length - 1]}`;
+  // The subject of the sentence is the set, so "and" (the choice above says "or").
+  const list = offered.length <= 1 ? offered.join("") : `${offered.slice(0, -1).join(", ")} and ${offered[offered.length - 1]}`;
   const sentence = offered.length === 1
     ? `${list} is the asset type Manci offers at the moment.`
     : `${list} are the asset types Manci offers at the moment.`;

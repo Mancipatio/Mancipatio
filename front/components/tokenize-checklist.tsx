@@ -388,13 +388,11 @@ export function TokenizeChecklist({
           ) : state.marker === "none" ? (
             <>
               Conversion into company shares is not set up yet; its conversion class can only be added while the asset is a
-              draft:{" "}
-              {resumeOn && <Link href={resumeHref} className={linkClass}>add it now (1 wallet signature) →</Link>}
+              draft{resumeOn ? <>:{" "}<Link href={resumeHref} className={linkClass}>add it now (1 wallet signature) →</Link></> : "."}
             </>
           ) : isIssuerAuthority && permission.canConvert ? (
             <>
-              Conversion into company shares is not set up yet:{" "}
-              {resumeOn && <Link href={resumeHref} className={linkClass}>set the conversion target (1 wallet signature) →</Link>}
+              Conversion into company shares is not set up yet{resumeOn ? <>:{" "}<Link href={resumeHref} className={linkClass}>set the conversion target (1 wallet signature) →</Link></> : "."}
             </>
           ) : (
             "Conversion into company shares is not set up yet: the conversion target is set once the Super Admin gives this issuer the Conversion permission (then 1 wallet signature)."

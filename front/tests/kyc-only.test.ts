@@ -7,8 +7,11 @@
 // are replaced by it (lib/pilot-scope.ts KYC_ONLY_ROUTES), and their on-chain
 // entries are refused before the wallet opens (lib/pause-gate.ts
 // KYC_ONLY_FLOWS). Off, every code path is today's: the rest of the suite
-// runs with the mode off (vitest.config.ts test.env) and is the proof; this
-// file stubs it ("" = unset).
+// runs with the mode off (vitest.config.ts, project "default") and is the
+// proof; the KYC-path and exit suites run again with it on (project
+// "kyc-only-on"); this file stubs it ("" = unset). Last, the mode's own
+// wording is held to the mainnet Terms, as tests/legal-slots.test.ts holds
+// today's.
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -75,6 +78,8 @@ import {
 import { explainSendError } from "@/lib/tx-error";
 import { assertBuildFeatureFlags, FEATURE_FLAG_NAMES } from "@/next.config";
 import { modulesFact } from "@/lib/module-facts";
+import { legalDocumentText } from "@/lib/legal/document";
+import { MAINNET_TERMS } from "@/lib/legal/mainnet-copy";
 
 const BUILD = "phase-production-build";
 const NETWORKS_OFF_BY_DEFAULT = ["devnet", "testnet", "localnet"] as const;
@@ -178,7 +183,7 @@ describe("modules and core areas under the mode", () => {
   it("the About page names the launchpad as paused and the other modules as not available", () => {
     mode("");
     expect(modulesFact("mainnet")).toBe(
-      "Sign-up and identity verification open; launchpad paused for now; OTC settlement, governance and vesting built, not available on Solana mainnet",
+      "Sign-up and identity verification open; launchpad and issuer applications paused for now; OTC settlement, governance and vesting built, not available on Solana mainnet",
     );
   });
 });
@@ -382,5 +387,41 @@ describe("before the wallet (KYC_ONLY_FLOWS)", () => {
     mode("off");
     expect(thrown([ix(BUY_DISCRIMINATOR)], "mainnet")).toBeNull();
     expect(kycOnlyInstruction([ix(BUY_DISCRIMINATOR)], "mainnet")).toBeNull();
+  });
+});
+
+describe("the mode's wording holds under the mainnet Terms", () => {
+  const terms = () => legalDocumentText(MAINNET_TERMS!);
+  const scope = () => MAINNET_TERMS!.clauses.find((c) => c.title === "2. Scope of the Service")!;
+
+  it("primary sales are offered by the Terms and can be paused under them: their pages say 'Paused.', not 'not available'", () => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    mode("");
+    const offeredAt = scope().blocks.findIndex((b) => b.kind === "paragraph" && b.text === "The Service currently offers the following:");
+    const offered = scope().blocks[offeredAt + 1];
+    expect(offered.kind === "list" ? offered.items[0] : "").toMatch(/^Primary sales of share-class tokens/);
+    expect(terms()).toMatch(/Emergency pause\. Any administrator can pause one or more areas of platform-mediated activity: onboarding, primary sales/);
+    expect(terms()).toContain("A pause never blocks exits");
+    // The paused areas' pages carry the KYC-only state ("Paused." in components/pilot-module-notice.tsx).
+    for (const path of ["/marketplace/launchpad", "/marketplace/launchpad/S", "/apply", "/issuer/onboarding"]) {
+      expect(moduleRouteState(path, "mainnet")?.kyc, path).toBe(true);
+    }
+    // A module page is not offered by the Terms: it keeps "Not available." with the same sentence.
+    expect(moduleRouteState("/portfolio/conversion", "mainnet")?.kyc).toBe(false);
+  });
+
+  it("the one sentence: paused for what the Terms offer, not available for the rest, and no promise of a date", () => {
+    expect(terms()).toContain("The following are not available at present, and the pages that carry them say so:");
+    expect(KYC_ONLY_MESSAGE).toContain("Primary sales and issuance are paused for now");
+    expect(KYC_ONLY_MESSAGE).toContain("other services are not available at the moment");
+    expect(KYC_ONLY_MESSAGE).not.toMatch(/\b(later|soon|will|shortly)\b/i);
+  });
+
+  it("the About line names nothing as live or shipped while the mode is on", () => {
+    mode("");
+    const fact = modulesFact("mainnet");
+    expect(fact).not.toMatch(/\b(live|shipped)\b/);
+    expect(fact).toMatch(/launchpad and issuer applications paused for now/);
+    expect(fact).toMatch(/built, not available on Solana mainnet$/);
   });
 });

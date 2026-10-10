@@ -213,16 +213,20 @@ export function moduleDisabledMessage(name: PilotModule, network: Network = dete
 //     answer 403 (lib/server/feature-gate.ts requireArea), and their on-chain
 //     entries are refused before the wallet opens (lib/pause-gate.ts
 //     KYC_ONLY_FLOWS);
-//   - the verification request is KYC (a person) only: a KYB request (a
+//   - the verification request is KYC (a person) only: a new KYB request (a
 //     company that wants to raise or issue) is an issuance entry, refused by
-//     /api/verification/submit and not offered on /verify;
+//     /api/verification/submit and not offered on /verify; a KYB dossier
+//     that exists stays visible and its documents can still be uploaded
+//     (components/account-verification.tsx kybShown);
 //   - exits of existing positions, the verification request, the portfolio
 //     overview and the admin console keep working.
 // The one sentence below names what is paused (primary sales and issuance,
 // which the Terms offer) apart from what the Terms do not offer yet (every
 // other service: "not available"), so it holds under the Terms in force.
 // Off, nothing here changes anything. The program's pause flags stay the
-// on-chain authority; this is the platform's scope.
+// on-chain authority (the lockdown needs 0x7F: issuer onboarding 0x01 is
+// stopped on-chain only by its bit; ops/env-vars.md); this is the
+// platform's scope.
 
 export const KYC_ONLY_ENV = "NEXT_PUBLIC_FEATURE_KYC_ONLY";
 

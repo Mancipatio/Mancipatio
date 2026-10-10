@@ -6,16 +6,16 @@ import { detectNetwork } from "@/lib/network";
 import { NextResponse } from "next/server";
 import { verifySigned, siwsErrorResponse, SiwsError } from "@/lib/server/siws";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
-import { requireModule } from "@/lib/server/feature-gate";
+import { requireArea } from "@/lib/server/feature-gate";
 import { requireSupportedVestingMint } from "@/lib/server/vesting-mint-gate";
 import { getServerRpc } from "@/lib/server/rpc";
 import { validateSeriesForm } from "../_lib";
 
 export async function POST(request: Request) {
   try {
-    // A resubmission is a vesting-series entry, like create (lib/features.ts:
-    // off with the module, and with every module in KYC-only mode).
-    requireModule("vesting");
+    // KYC-only mode (lib/features.ts): the issuer's resubmission of a vesting
+    // series request is an issuance entry (a no-op while the mode is off).
+    requireArea("issuance");
     const { wallet, params } = await verifySigned(
       request,
       "vesting-series.update",
