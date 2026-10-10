@@ -28,6 +28,7 @@ import { TokenizeChecklist } from "@/components/tokenize-checklist";
 import { CONVERSION_TARGET_LABEL, classKey } from "@/lib/conversion-target";
 import { useConversionTargets } from "@/lib/use-conversion-targets";
 import { useToast } from "@/lib/toast";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { COUNTRIES, countryName } from "@/lib/countries";
 import {
   assetTypeBySlug,
@@ -389,8 +390,9 @@ export function AssetDetail({
   const displayName = profile?.display_name || asset.name;
   const issuerLegalId = issuer ? fromBytes32(issuer.legalEntityId) : null;
 
-  // Lifecycle shortcuts: deep-link into the management surfaces for this asset.
-  const shortcuts =
+  // Lifecycle shortcuts: deep-link into the management surfaces for this asset
+  // (none into a module switched off on this network, lib/pilot-scope.ts).
+  const shortcuts = (
     variant === "admin"
       ? [
           { href: "/admin/share-classes", label: "Share classes" },
@@ -402,7 +404,8 @@ export function AssetDetail({
           { href: "/issuer/share-classes", label: "Share classes" },
           { href: "/issuer/launchpad", label: "Launchpad" },
           { href: "/issuer/vesting", label: "Vesting" },
-        ];
+        ]
+  ).filter(({ href }) => navHrefVisible(href));
 
   return (
     <div className="mt-4">

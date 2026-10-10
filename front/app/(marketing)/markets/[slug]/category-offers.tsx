@@ -13,6 +13,7 @@ import {
 import { fieldsForCategory, type CategorySlug } from "@/lib/asset-types";
 import { assetHref } from "@/lib/asset-links";
 import { detectNetwork, isTestNetwork, networkLabel } from "@/lib/network";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 type Item = {
   profile: PublicAssetProfile;
@@ -109,6 +110,8 @@ export function CategoryOffers({
   }
 
   if (items.length === 0) {
+    // The resell board is secondary trading (lib/pilot-scope.ts).
+    const resellOn = navHrefVisible("/markets/resell");
     return (
       <div className="rounded-xl border border-dashed border-slate-300 bg-white p-10 text-center">
         <p className="text-[14px] font-medium text-slate-900">
@@ -117,14 +120,16 @@ export function CategoryOffers({
         <p className="mt-2 text-[12.5px] text-slate-500">
           {earlyLead()} No issuer has published a{" "}
           {title.toLowerCase()}{" "}
-          listing in this category yet — check the live OTC board for secondary
-          offers, or open the platform to be the first.
+          listing in this category yet —{" "}
+          {resellOn ? "check the live OTC board for secondary offers, or open the platform to be the first." : "open the platform to be the first."}
         </p>
         <div className="mt-4 flex flex-wrap justify-center gap-2">
-          <Link href={`/markets/resell?type=${slug}`} className="btn-brand">
-            Live OTC board
-          </Link>
-          <Link href="/marketplace" className="btn-ghost">
+          {resellOn && (
+            <Link href={`/markets/resell?type=${slug}`} className="btn-brand">
+              Live OTC board
+            </Link>
+          )}
+          <Link href="/marketplace" className={resellOn ? "btn-ghost" : "btn-brand"}>
             Open the platform
           </Link>
         </div>

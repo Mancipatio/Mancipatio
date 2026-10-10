@@ -4,12 +4,15 @@ import Link from "next/link";
 import { useState } from "react";
 import { DOCUMENTATION_GROUPS } from "@/lib/documentation";
 import { IconArrowUpRight, IconFile } from "@/components/icons";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export function DocumentationIndex() {
   const [query, setQuery] = useState("");
   const term = query.trim().toLowerCase();
   const words = term.split(/\s+/).filter(Boolean);
+  // The guides of modules switched off on this network are not listed (lib/pilot-scope.ts).
   const groups = DOCUMENTATION_GROUPS.map((group) => ({ ...group, topics: group.topics.filter((topic) => {
+    if (!navHrefVisible(topic.href)) return false;
     const text = `${group.title} ${topic.title} ${topic.description} ${topic.keywords ?? ""}`.toLowerCase();
     return words.every((word) => text.includes(word));
   }) })).filter((group) => group.topics.length > 0);

@@ -1,6 +1,7 @@
 import { notFound } from "next/navigation";
 import { Button, ButtonRow, Card, Grid, PageHeader, Section, TextLink } from "@/components/mx";
 import { CATEGORY_SLUGS, assetTypeBySlug, type CategorySlug } from "@/lib/asset-types";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { CategoryOffers } from "./category-offers";
 
 export async function generateStaticParams() {
@@ -37,9 +38,10 @@ export default async function CategoryMarketPage({ params }: { params: Promise<{
     <Section><CategoryOffers slug={record.slug as CategorySlug} title={record.title} /></Section>
     <Section>
       <Grid cols={2}>
-        <Card title="Holder listings" body="Find resale listings and compare the available terms.">
+        {/* The resell board is secondary trading (lib/pilot-scope.ts). */}
+        {navHrefVisible("/markets/resell") && <Card title="Holder listings" body="Find resale listings and compare the available terms.">
           <TextLink href={`/markets/resell?type=${slug}`}>Open the resell board →</TextLink>
-        </Card>
+        </Card>}
         <Card title="Understand the instrument" body="Read the category guide, then check the documents of the specific issuance.">
           <TextLink href={`/markets/types/${slug}`}>Read the asset guide →</TextLink>
         </Card>

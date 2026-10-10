@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { features } from "@/lib/features";
 
 type Item = { href: string; label: string };
@@ -21,7 +22,7 @@ export function IssuerNav() {
   const path = usePathname();
   return (
     <>
-      {NAV.map((item) => {
+      {NAV.filter((item) => navHrefVisible(item.href)).map((item) => {
         const active =
           item.href === "/issuer"
             ? path === "/issuer"

@@ -10,6 +10,7 @@ import {
   Section,
   Steps,
 } from "@/components/mx";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata = {
   title: "Issuing an asset · Manci",
@@ -44,6 +45,30 @@ const STEPS = [
   },
 ];
 
+// The guides of modules switched off on this network are left out (lib/pilot-scope.ts).
+const AFTER_ISSUANCE = [
+  {
+    href: "/solutions/otc",
+    title: "Secondary trading",
+    body: "How offers, escrow funding, settlement and cancellation work.",
+  },
+  {
+    href: "/solutions/rights-vesting",
+    title: "Vesting & claims",
+    body: "Scheduled releases, beneficiary positions and Rights-token claims.",
+  },
+  {
+    href: "/solutions/custody",
+    title: "Custody & delivery",
+    body: "Follow the asset through escrow, delivery or return.",
+  },
+  {
+    href: "/solutions/governance",
+    title: "Governance",
+    body: "Review proposals, snapshots and voting procedures.",
+  },
+].filter((card) => navHrefVisible(card.href));
+
 export default function HowItWorksPage() {
   return (
     <>
@@ -68,7 +93,8 @@ export default function HowItWorksPage() {
           </Link>
         </p>
       </Section>
-      <Section id="distributions">
+      {/* Income distributions and claims: hidden with the module switched off (lib/pilot-scope.ts). */}
+      {navHrefVisible("/portfolio/rights") && <Section id="distributions">
         <H2>Income distributions</H2>
         <Body className="mt-4">
           Where an instrument pays income, review its terms and the approved
@@ -89,32 +115,15 @@ export default function HowItWorksPage() {
             Open income & claims →
           </Link>
         </p>
-      </Section>
-      <Section>
+      </Section>}
+      {AFTER_ISSUANCE.length > 0 && <Section>
         <H2>After issuance</H2>
         <Grid cols={2} className="mt-5">
-          <Card
-            href="/solutions/otc"
-            title="Secondary trading"
-            body="How offers, escrow funding, settlement and cancellation work."
-          />
-          <Card
-            href="/solutions/rights-vesting"
-            title="Vesting & claims"
-            body="Scheduled releases, beneficiary positions and Rights-token claims."
-          />
-          <Card
-            href="/solutions/custody"
-            title="Custody & delivery"
-            body="Follow the asset through escrow, delivery or return."
-          />
-          <Card
-            href="/solutions/governance"
-            title="Governance"
-            body="Review proposals, snapshots and voting procedures."
-          />
+          {AFTER_ISSUANCE.map((card) => (
+            <Card key={card.href} href={card.href} title={card.title} body={card.body} />
+          ))}
         </Grid>
-      </Section>
+      </Section>}
     </>
   );
 }

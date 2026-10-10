@@ -14,6 +14,7 @@ import {
 } from "@/components/icons";
 import { PlatformStatusCard } from "@/components/platform-status-card";
 import { RequireRole } from "@/components/require-role";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import { NetworkDashboard } from "./network-dashboard";
 import { OperatorLanding } from "./operator-landing";
 
@@ -112,7 +113,8 @@ export default function AdminOverview() {
             </Link>
           </div>
           <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-            {SHORTCUTS.map((c) => (
+            {/* No shortcut into a module switched off on this network (lib/pilot-scope.ts). */}
+            {SHORTCUTS.filter((c) => navHrefVisible(c.href)).map((c) => (
               <Link
                 key={c.href}
                 href={c.href}

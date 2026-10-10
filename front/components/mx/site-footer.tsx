@@ -5,6 +5,7 @@ import { Disclaimer, FootNote } from "./footnote";
 import { MX_FOOTER_COLUMNS, MX_NETWORK_STAGE_LABEL, MX_ROUTES } from "./nav";
 import { Wrap } from "./section";
 import { detectNetwork } from "@/lib/network";
+import { navHrefVisible } from "@/lib/pilot-scope";
 import {
   copyrightHolder,
   licenceLine,
@@ -44,7 +45,8 @@ export function SiteFooter() {
           {MX_FOOTER_COLUMNS.map((col) => (
             <div key={col.title}>
               <h4>{col.title}</h4>
-              {col.links.map((l) => (
+              {/* No link into a module switched off on this network (lib/pilot-scope.ts). */}
+              {col.links.filter((l) => navHrefVisible(l.href)).map((l) => (
                 <Link key={l.href} href={l.href} className="mx-foot-link">
                   {l.label}
                 </Link>
