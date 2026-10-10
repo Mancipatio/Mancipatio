@@ -763,7 +763,7 @@ export default function ConversionPage() {
           eligible={eligible}
         />
       ) : (
-        <div className="mt-8 overflow-hidden rounded-xl border border-slate-200 bg-white shadow-card">
+        <div className="mt-8 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
           <table className="w-full text-sm">
             <thead className="border-b border-slate-100 bg-slate-50 text-left text-xs uppercase tracking-wider text-slate-500">
               <tr>
@@ -771,7 +771,6 @@ export default function ConversionPage() {
                 <th className="px-4 py-3 text-right font-medium">Amount</th>
                 <th className="px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3 font-medium">Transactions</th>
-                <th className="px-4 py-3 text-right font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-100">
@@ -803,6 +802,67 @@ export default function ConversionPage() {
                         ? ` Note: ${r.admin_note}`
                         : ""}
                     </p>
+                    {/* Actions sit under the status, not in a trailing column, so a
+                        holder on a phone reaches them without horizontal scrolling. */}
+                    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs empty:hidden">
+                      {r.status === "vault_opened" &&
+                        (recovery.receipts.some(
+                          (receipt) => receipt.entityId === r.id,
+                        ) ? (
+                          <span className="text-brand-700">
+                            Receipt saved — retry recording above
+                          </span>
+                        ) : r.vault_pda &&
+                          vaultStates.get(r.vault_pda) !== undefined &&
+                          vaultStates.get(r.vault_pda) !== VaultState.Active ? (
+                          <span
+                            className="text-amber-700"
+                            title="The escrow vault was closed on-chain. Depositing is disabled."
+                          >
+                            Vault closed — deposit disabled
+                          </span>
+                        ) : (
+                          <button
+                            type="button"
+                            disabled={
+                              tx.isSending || depositActionBusy || !recovery.ready
+                            }
+                            onClick={() => void deposit(r)}
+                            className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
+                          >
+                            Deposit tokens
+                          </button>
+                        ))}
+                      {r.status === "deposited" &&
+                        r.vault_pda &&
+                        vaultStates.get(r.vault_pda) === VaultState.Active &&
+                        (vaultDeadlines.get(r.vault_pda) ?? BigInt(0)) >
+                          BigInt(0) &&
+                        nowSec >= vaultDeadlines.get(r.vault_pda)! && (
+                          <button
+                            type="button"
+                            disabled={
+                              tx.isSending ||
+                              returnActionBusy ||
+                              !returnRecovery.ready
+                            }
+                            onClick={() => void reclaim(r)}
+                            className="text-brand-800 underline disabled:opacity-50"
+                          >
+                            Reclaim tokens after deadline
+                          </button>
+                        )}
+                      {r.status === "requested" && (
+                        <button
+                          type="button"
+                          disabled={tx.isSending}
+                          onClick={() => setConfirmCancel(r)}
+                          className="text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
+                        >
+                          Cancel request
+                        </button>
+                      )}
+                    </div>
                   </td>
                   <td className="px-4 py-3">
                     <div className="space-x-3 text-xs">
@@ -816,65 +876,6 @@ export default function ConversionPage() {
                         <span className="text-slate-400">—</span>
                       )}
                     </div>
-                  </td>
-                  <td className="space-x-3 px-4 py-3 text-right text-xs">
-                    {r.status === "vault_opened" &&
-                      (recovery.receipts.some(
-                        (receipt) => receipt.entityId === r.id,
-                      ) ? (
-                        <span className="text-brand-700">
-                          Receipt saved — retry recording above
-                        </span>
-                      ) : r.vault_pda &&
-                        vaultStates.get(r.vault_pda) !== undefined &&
-                        vaultStates.get(r.vault_pda) !== VaultState.Active ? (
-                        <span
-                          className="text-amber-700"
-                          title="The escrow vault was closed on-chain. Depositing is disabled."
-                        >
-                          Vault closed — deposit disabled
-                        </span>
-                      ) : (
-                        <button
-                          type="button"
-                          disabled={
-                            tx.isSending || depositActionBusy || !recovery.ready
-                          }
-                          onClick={() => void deposit(r)}
-                          className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
-                        >
-                          Deposit tokens
-                        </button>
-                      ))}
-                    {r.status === "deposited" &&
-                      r.vault_pda &&
-                      vaultStates.get(r.vault_pda) === VaultState.Active &&
-                      (vaultDeadlines.get(r.vault_pda) ?? BigInt(0)) >
-                        BigInt(0) &&
-                      nowSec >= vaultDeadlines.get(r.vault_pda)! && (
-                        <button
-                          type="button"
-                          disabled={
-                            tx.isSending ||
-                            returnActionBusy ||
-                            !returnRecovery.ready
-                          }
-                          onClick={() => void reclaim(r)}
-                          className="text-brand-800 underline disabled:opacity-50"
-                        >
-                          Reclaim tokens after deadline
-                        </button>
-                      )}
-                    {r.status === "requested" && (
-                      <button
-                        type="button"
-                        disabled={tx.isSending}
-                        onClick={() => setConfirmCancel(r)}
-                        className="text-red-700 underline-offset-2 hover:underline disabled:opacity-50"
-                      >
-                        Cancel request
-                      </button>
-                    )}
                   </td>
                 </tr>
               ))}
