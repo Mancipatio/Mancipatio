@@ -60,22 +60,31 @@
 //   - MAINNET_TERMS.version is the Terms version every wallet accepts
 //     (TOS_VERSION, lib/tos-version.ts): give any material change of the
 //     Terms a new version (every wallet then accepts again).
+//   - MAINNET_TERMS.offeredModules: the modules clause 2 offers, as names
+//     (TERMS_MODULES, lib/legal/document.ts). Keep it equal to clause 2: a
+//     mainnet build refuses a NEXT_PUBLIC_FEATURE_* module flag that is on
+//     while its module is not listed (next.config.ts
+//     assertBuildMainnetModules); a listed module may be switched off.
 //   - MAINNET_TOS_GATE_POINTS: the short summary shown in the acceptance
 //     dialog (components/tos-gate.tsx).
 //   - Then `npx vitest run tests/legal-slots.test.ts --silent=false`: the
 //     "mainnet legal slots" report must say complete. A mainnet build refuses
 //     anything else, including text that still says devnet or "no real assets".
 //
-// Directive-free and import-free apart from a type (next.config.ts loads it).
+// Directive-free and import-free apart from types (next.config.ts loads it).
 
-import type { LegalDocument } from "./document";
+import type { LegalDocument, TermsDocument } from "./document";
 
 /** The mainnet Terms of Service, version 2026-10-03 (owner's decisions D1-D7; wording confirmed by counsel on 2026-10-03). */
-export const MAINNET_TERMS: LegalDocument | null = {
+export const MAINNET_TERMS: TermsDocument | null = {
   version: "2026-10-03",
   lastUpdated: "2026-10-03",
   lede:
     "These Terms govern your use of the Manci tokenization platform on Solana mainnet: the website, its applications and the on-chain programs you use through them.",
+  // The modules clause 2 offers. It offers primary sales and an issuer's
+  // direct transfers, which have no switch, and lists every module that has
+  // one as not available: none.
+  offeredModules: [],
   clauses: [
     {
       title: "1. Acceptance and scope",

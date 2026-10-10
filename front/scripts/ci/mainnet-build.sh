@@ -8,7 +8,9 @@
 # A mainnet build is guarded by next.config.ts: MAINNET_LEGAL_COPY_APPROVED,
 # the mainnet Supabase project and publishable key, the KYC registry pin, the
 # operator and legal slots (8.1, lib/legal/readiness.ts), the RPC and the
-# operations requirements, the feature-flag spellings (8.4), counsel's
+# operations requirements, the feature-flag spellings (8.4), the module flags
+# against the modules the Terms offer (MAINNET_TERMS.offeredModules: a flag
+# that is on needs its module offered, an offered module may be off), counsel's
 # geoblock list (8.5, GEOBLOCK_COUNTRIES). This proves both
 # sides:
 #   1. the guards REFUSE: a bare mainnet build, and the placeholder set with
@@ -33,8 +35,9 @@
 #     obviously invented company ("CI Fixture d.o.o.", .invalid contacts,
 #     8-digit MB and 9-digit PIB with valid check digits, each under its
 #     name as the record carries it), a licence or none, one-clause Terms
-#     and Privacy Policy, a one-line acceptance summary and the risk warning
-#     marked "counsel". Without a licence the fixture also takes the form a
+#     (offering the modules the case names, none by default) and Privacy
+#     Policy, a one-line acceptance summary and the risk warning marked
+#     "counsel". Without a licence the fixture also takes the form a
 #     BVI-style record can take (no short name and no tax ID, each stated as
 #     { notAssigned }, as the committed mainnet record states both), which
 #     must pass; a tax ID left null must not. It never leaves this checkout;
@@ -111,14 +114,16 @@ PLACEHOLDERS=(
 # The licence waiver (MAINNET_LICENSE_NOT_REQUIRED) is not a placeholder: the
 # fixture's licence and the waiver are exclusive, so each case sets it.
 
-# write_legal_fixture <variant>: the legal slot files as committed, plus the
-# CI fixture. Variants: licence (complete, with a licence), no-licence
-# (complete, no licence: needs the waiver), and one defect each for the
-# refusal cases: incomplete-operator, devnet-copy, draft-warning.
+# write_legal_fixture <variant> [offered modules]: the legal slot files as
+# committed, plus the CI fixture. Variants: licence (complete, with a
+# licence), no-licence (complete, no licence: needs the waiver), and one
+# defect each for the refusal cases: incomplete-operator, devnet-copy,
+# draft-warning. The optional second argument is the Terms' offeredModules,
+# comma-separated (none by default).
 cat >"$WORK/legal-fixture.cjs" <<'JS'
 const fs = require("node:fs");
 const path = require("node:path");
-const [orig, variant] = process.argv.slice(2);
+const [orig, variant, offered = ""] = process.argv.slice(2);
 const VARIANTS = ["licence", "no-licence", "incomplete-operator", "devnet-copy", "draft-warning"];
 if (!VARIANTS.includes(variant)) throw new Error(`unknown legal fixture variant: ${variant}`);
 // Contains FIXTURE_MARKER (the script refuses to start on a file that holds it).
@@ -171,15 +176,18 @@ const doc = (title, text) => ({
   lastUpdated: "2026-01-01",
   clauses: [{ title: `1. ${title}`, blocks: [{ kind: "paragraph", text }] }],
 });
-const terms = doc("CI fixture",
-  variant === "devnet-copy"
-    ? "The current release runs on Solana devnet."
-    : "This text exists only in the CI mainnet build. It is not counsel's text and is never deployed.");
+const terms = {
+  ...doc("CI fixture",
+    variant === "devnet-copy"
+      ? "The current release runs on Solana devnet."
+      : "This text exists only in the CI mainnet build. It is not counsel's text and is never deployed."),
+  offeredModules: offered.split(",").map((m) => m.trim()).filter(Boolean),
+};
 const privacy = doc("CI fixture", "This text exists only in the CI mainnet build. It is not counsel's text and is never deployed.");
 fs.writeFileSync("lib/legal/mainnet-copy.ts", [
   HEADER,
-  'import type { LegalDocument } from "./document";',
-  `export const MAINNET_TERMS: LegalDocument | null = ${json(terms)};`,
+  'import type { LegalDocument, TermsDocument } from "./document";',
+  `export const MAINNET_TERMS: TermsDocument | null = ${json(terms)};`,
   `export const MAINNET_PRIVACY: LegalDocument | null = ${json(privacy)};`,
   `export const MAINNET_TOS_GATE_POINTS: string[] | null = ${json(["CI fixture: you accept the Terms of Service."])};`,
   "",
@@ -190,7 +198,7 @@ append("lib/legal/risk-warning.ts",
   "Object.assign(PURCHASE_RISK_WARNING, CI_FIXTURE_RISK_WARNING);");
 JS
 write_legal_fixture() {
-  node "$WORK/legal-fixture.cjs" "$WORK/orig" "$1"
+  node "$WORK/legal-fixture.cjs" "$WORK/orig" "$1" "${2:-}"
 }
 
 # expect_refusal <message pattern> [NAME=value ...]: the build must fail with it.
@@ -236,7 +244,7 @@ expect_refusal "NEXT_PUBLIC_KYC_REGISTRY is not set" "${PLACEHOLDERS[@]}" NEXT_P
 
 # 8.1: the operator and legal slots. As committed, while counsel's Terms are
 # not in the slot, the build is refused; then the fixture, one defect at a time.
-if grep -q '^export const MAINNET_TERMS: LegalDocument | null = null;$' lib/legal/mainnet-copy.ts; then
+if grep -q '^export const MAINNET_TERMS: TermsDocument | null = null;$' lib/legal/mainnet-copy.ts; then
   expect_refusal "the operator and legal slots are not complete" "${PLACEHOLDERS[@]}"
 else
   # The committed slots (version 2026-10-03 of the legal texts) pass with
@@ -250,6 +258,12 @@ else
   # licence is ever recorded).
   expect_config_pass "the committed legal slots, MAINNET_LICENSE_NOT_REQUIRED=true" \
     "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true
+  # The module flags are checked against the committed Terms
+  # (MAINNET_TERMS.offeredModules): they do not offer governance, so its
+  # flag on is refused (the cases after 8.4 use the fixture's Terms; change
+  # the module here if a version ever offers governance).
+  expect_refusal 'NEXT_PUBLIC_FEATURE_GOVERNANCE="true" switches on governance, which the mainnet Terms do not offer' \
+    "${PLACEHOLDERS[@]}" MAINNET_LICENSE_NOT_REQUIRED=true NEXT_PUBLIC_FEATURE_GOVERNANCE=true
 fi
 write_legal_fixture incomplete-operator
 expect_refusal "operator\.taxId \(tax identification number, .*\) is not set" "${PLACEHOLDERS[@]}"
@@ -283,6 +297,32 @@ expect_refusal "is not a flag value" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_IS
 # 8.5: the pilot-scope module switches share the flag guard; the geoblock
 # list must be set on mainnet (a list, or "none" on purpose) and well formed.
 expect_refusal "is not a flag value" "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=enabled
+# The module flags follow the Terms (assertBuildMainnetModules), one-way. The
+# fixture's Terms offer no module: a module flag that is on is refused, one
+# that is set to off passes.
+expect_refusal 'NEXT_PUBLIC_FEATURE_SECONDARY_TRADING="true" switches on secondaryTrading, which the mainnet Terms do not offer' \
+  "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true
+expect_refusal 'NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION="On" switches on custodyConversion, which the mainnet Terms do not offer' \
+  "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=On
+expect_refusal 'NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP="1" switches on payoutAirdrop' \
+  "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP=1
+expect_config_pass "module flags set to off, the Terms offer no module" "${PLACEHOLDERS[@]}" \
+  NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=false NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=0 NEXT_PUBLIC_FEATURE_STARTUP_RAISES=off
+# Terms that offer trading through Manci and conversion: both flags on pass,
+# switching one off again (a rollback) passes, a module they do not offer is
+# still refused.
+write_legal_fixture licence secondaryTrading,custodyConversion
+expect_config_pass "the Terms offer trading and conversion, both flags on" "${PLACEHOLDERS[@]}" \
+  NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true
+expect_config_pass "the Terms offer trading and conversion, trading switched off (a rollback)" "${PLACEHOLDERS[@]}" \
+  NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=false NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true
+expect_refusal 'NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY="true" switches on custodyDelivery, which the mainnet Terms do not offer' \
+  "${PLACEHOLDERS[@]}" NEXT_PUBLIC_FEATURE_SECONDARY_TRADING=true NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true \
+  NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=true
+# An offeredModules entry that is no module (a typo would offer nothing).
+write_legal_fixture licence secondaryTrade
+expect_refusal "MAINNET_TERMS\.offeredModules .* names no module: secondaryTrade" "${PLACEHOLDERS[@]}"
+write_legal_fixture licence
 expect_refusal "GEOBLOCK_COUNTRIES is not set" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=
 expect_refusal "is not an ISO 3166 country" "${PLACEHOLDERS[@]}" GEOBLOCK_COUNTRIES=Iran
 # A well-formed code that is no country blocks nothing: refused, with the fix.
