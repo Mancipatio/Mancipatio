@@ -108,11 +108,8 @@ guard as the flags above). **On mainnet a module is off unless its
 variable reads as on; on devnet, testnet and localnet it is on unless it
 reads as off** (`=false` rehearses the mainnet scope on devnet).
 
-A flag is tied to the Terms in one direction only. A flag that reads as on
-needs Terms that offer its module (`MAINNET_TERMS.offeredModules` in
-`lib/legal/mainnet-copy.ts`, once the build guard for it is on `main`). A
-module the Terms offer may still have its flag off, so switching a module
-off (rollback, incident) never waits for a Terms change. Turning trading
+Switching a module off (rollback, incident) never waits for a Terms
+change: a module the Terms offer may have its flag off. Turning trading
 through Manci off: set pause bit 0x04 first (any Admin, `/admin/platform`;
 the program then refuses direct calls too), then set the flag to `false`
 and redeploy. Conversion needs no pause step: 0x08 stays set outside its

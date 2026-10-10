@@ -23,11 +23,15 @@ the release
   `https://verify.osec.io/status/<program address>`). The hashes are the
   release's `hashes.txt`.
 - **Upgrade authority**: a Squads vault
-  (`CegfwedZiDfBAKVv4GdtNCH6cNHLUcGnxUNPJ9a7v8PQ`); upgrades follow the
-  runbook (§9).
+  (`CegfwedZiDfBAKVv4GdtNCH6cNHLUcGnxUNPJ9a7v8PQ`), currently a 1-of-1
+  multisig with no time lock, so a single key can upgrade the programs;
+  upgrades follow the runbook (§9).
 - **Devnet** runs the same program addresses with identical bytecode.
-- **Independent audit**: formal verification with Second Prover in
-  progress. No audit report has been published yet.
+- **Not audited**: the programs have had internal security reviews and
+  automated testing only; no independent external audit has been
+  completed.
+  <!-- Change this line only together with SECURITY_AUDIT in
+  front/lib/legal/audit.ts. -->
 
 Which product modules are switched on is decided per network by the Terms
 in force, the module switches and the program's pause flags

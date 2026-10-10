@@ -375,17 +375,19 @@ between D4 and D11 short: the domain shows a sign-in wall meanwhile.
 | D7 | 0075 heartbeat in `observe` (it proves nothing yet on quiet program IDs; the 24 h observation runs across D8–D12) | operator | §16 Mainnet |
 | D8 | §0 mainnet preflight: Release, attestation, program keypair backup, Squads, role map (§19 company model if chosen), cluster gates, CU price, the operator keys that can sign SIWS onboarded on the protected site, the `chain:accept` checkout for a Ledger that cannot | owner + operator | §0 |
 | D9 | §2 deploy (hook first) → §3 IDL → §4 cycle 1 → §5 operator steps (on the protected site, or `chain:accept` for a Ledger that cannot sign SIWS) → §6 pre-handover inventory → §7 S7 → §8 after handover (verify PDA, buffers, drain the deployer) | operator + role keys | §2–§8 |
-| D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied to the mainnet project before `release/mainnet` is fast-forwarded to the commit that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The pilot pause mask `0x1c` is set on `/admin/platform` (§8) and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
-| D11 | **Talas 7 go-live**: first, Privacy clause 11 checked against the chain and the role map (§17, "State on 2026-10-02"); then Deployment Protection back to *Standard Protection* (production domains public) and the anonymous checks: `curl -sI https://www.manci.io/` 200, `/api/health` `ok:true` on `mainnet`, `/api/health/alarms` 200, `/.well-known/security.txt` 200, `manci.io` and `mancipatio.io` redirect to `www`. Only then the bypass: (1) `retry-scheduler-status.sql` shows the worker origin `https://www.manci.io` (all four schedulers call that one origin from `mancipatio_ops.retry_worker_config`; a `*.vercel.app` origin stays protected and would answer 401 without the bypass); (2) delete the Vault secret `mancipatio_vercel_bypass_mainnet` (Vault UI, never on a command line) and within about 10 minutes re-run the four `*-scheduler-status.sql`: each shows new successful runs, `/api/health/alarms` stays 200; (3) revoke the bypass secret in Vercel, remove every local copy, monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce. **Rollback** (protection back on): generate a **new** *Protection Bypass for Automation* secret in Vercel, put it in the Vault as `mancipatio_vercel_bypass_mainnet`, and only then switch protection back to *All Deployments* (in the other order every scheduler call answers 401: the alarms go 503, the sanctions list and the FX rate go stale) | owner + operator | §18 D, §14 step 11 |
+| D10 | First the super admin on `/admin/limits`: the manual USDC fallback (kind `rate`, max age ≤ 7 days on mainnet) and the mainnet `platform_raise_limits` with FX headroom; the 0008 integrations config. Only then the operator installs `fx-scheduler.sql`, runs `select mancipatio_ops.invoke_fx_refresh()`, checks `fx-scheduler-status.sql` and enables `mancipatio-fx-mainnet` (§15 "Automatic EUR rate"; 0080 is applied to the mainnet project before `release/mainnet` is fast-forwarded to the commit that carries it, §15 "Apply migration 0080"): the automatic USDC rate then shows as current on `/admin/limits`, with the manual one as its fallback. `/api/health` is `ok:true` without warnings. The pilot pause mask (at launch `0x1c`: the areas the Terms in force do not offer, §8) is set on `/admin/platform`, and the sanctions list is `fresh` on `/admin/compliance` (§15 "Sanctions list"). Then the mainnet 6.4 drill: D1 (redeliver S1, no new transaction) and D3 (timed full reconcile) | super admin, then operator | §8, §13, §14 step 8, §15, §16 "6.4 drill" |
+| D11 | **Talas 7 go-live**. **Prerequisites**, each noted in the launch-day record, with the documents it rests on filed outside the repository (`~/mancipatio-mainnet/legal/`): (a) trading through Manci is live under its Terms: §20 steps 1–6 done, the Terms version that offers it verified on `/legal/terms` and `/legal/privacy` (§20 step 3) and 0x04 read back clear (§20 step 6), or the owner has recorded that trading stays off at launch; (b) the owner has recorded which entity public users contract with, and `OPERATORS.mainnet` in `front/lib/legal/operator.ts` (its comment on who users contract with, `governingLaw` and `disputeResolution`) and the Terms in force match it; (c) the public copy listed in §17 that assumes the Serbian offering regime ("Serbian SPV" on `/risks` and elsewhere, the SPV and pledge text on `/legal-structure`, the "Serbian Securities Commission" badges and labels) is dealt with: the public-pages alignment (PR #73) merged and released, or counsel's written clearance of the current copy on file; (d) counsel has reviewed the rendered pages of the Terms version in force (§17 step 4), and the launch-day record notes that review as the `MAINNET_LEGAL_COPY_APPROVED` assertion for that version (the variable is not bound to a version, so it does not carry over to a new one by itself). Then: Privacy clause 11 checked against the chain and the role map (§17, "State on 2026-10-02"); then Deployment Protection back to *Standard Protection* (production domains public) and the anonymous checks: `curl -sI https://www.manci.io/` 200, `/api/health` `ok:true` on `mainnet`, `/api/health/alarms` 200, `/.well-known/security.txt` 200, `manci.io` and `mancipatio.io` redirect to `www`. Only then the bypass: (1) `retry-scheduler-status.sql` shows the worker origin `https://www.manci.io` (the retry, alarm, sanctions and fx schedulers all call that one origin from `mancipatio_ops.retry_worker_config`; a `*.vercel.app` origin stays protected and would answer 401 without the bypass); (2) delete the Vault secret `mancipatio_vercel_bypass_mainnet` (Vault UI, never on a command line) and within about 10 minutes re-run `retry-`, `alarm-`, `sanctions-` and `fx-scheduler-status.sql`: each shows new successful runs, `/api/health/alarms` stays 200; (3) revoke the bypass secret in Vercel, remove every local copy, monitors without the header; the deployment smoke (§14 step 11) again **without** `MANCIPATIO_VERCEL_BYPASS_FILE` (it proves the site is public); announce. **Rollback** (protection back on): generate a **new** *Protection Bypass for Automation* secret in Vercel, put it in the Vault as `mancipatio_vercel_bypass_mainnet`, and only then switch protection back to *All Deployments* (in the other order every scheduler call answers 401: the alarms go 503, the sanctions list and the FX rate go stale) | owner + operator | §18 D, §14 step 11 |
 | D12 | First 24 h: `/api/priority-fee` answers `source: helius` (EXTERNAL #7), heartbeat switched `on` after its 24 h `observe`, alarms and badges reviewed | operator | §13, §16 |
 
 The first public user can arrive only after D11. A failure at any step stops
 the sequence there; nothing before D9 touches the chain.
 
-Modules beyond primary sales go live on their own sequences: trading
+Modules beyond primary sales go live on their own sequences. Trading
 through Manci (§20) is switched on before D11 (its Terms and flag in one
-build, then 0x04, so the public site opens with the Terms that describe
-it); conversion into registered ownership (§21) needs the public site,
+build, then 0x04), so the public site opens with the Terms that describe
+it: **D11 does not start until §20 step 6 has read 0x04 back clear, or the
+owner has recorded that trading stays off at launch** (D11 prerequisite
+(a)). Conversion into registered ownership (§21) needs the public site,
 because the holder signs in, submits KYC and requests the conversion on
 `www.manci.io`, so its holder-facing steps follow D11.
 
@@ -755,7 +757,8 @@ order:
   in the company example: Onboarding, Primary issuance, Issuer proceeds),
   one area at a time in the PauseFlagsPanel. Not "Resume everything": it
   clears all six emergency areas (and bit 7), which would open the areas
-  the pilot keeps closed (then set 0x1c again, §8). No tool or button ever
+  the pilot keeps closed (then set again the areas the Terms in force do
+  not offer, §8). No tool or button ever
   clears the payout modules (0x40) with anything else: the program refuses
   a clear mask that mixes 0x40 with other bits (6154), and 0x40 stays set
   on mainnet (D2). `chain:bootstrap` checks `pauseFlags & unpauseMask = 0`
@@ -938,20 +941,32 @@ pilot areas outside the mask never need it. 07c keeps reporting them as
   its ProgramData and System, so an extra account cannot turn into a transfer
   destination. The preconditions list each program, its PDA and each
   transfer: check them before approving. Import, approve, execute.
-- **Pilot pause mask (8.5).** On mainnet (Terms clause 2), *Trading through
-  Manci* (0x04), *Custody entry* (0x08) and *Distributions* (0x10) stay
-  paused, flags **0x1c**, for as long as their module switches are off
+- **Pilot pause mask (8.5).** On mainnet the areas of the modules the Terms
+  in force do not offer stay paused for as long as those modules are off
   (`ops/env-vars.md`, "Pilot scope"), and the payout modules (0x40) stay
-  off for good on mainnet (D2). With `unpauseMask: 35` (0x23) S6 already
-  left them set: the Platform reads **0x5c**. Otherwise set them on
+  off for good on mainnet (D2). At launch (Terms of 2026-10-03, clause 2)
+  that is *Trading through Manci* (0x04), *Custody entry* (0x08) and
+  *Distributions* (0x10), flags **0x1c**; with `unpauseMask: 35` (0x23) S6
+  already left them set: the Platform reads **0x5c**. Otherwise set them on
   **`/admin/platform`** → PauseFlagsPanel, one "Pause" per area (any Admin
-  may SET bits; only the Super Admin clears them). The program refuses those
-  flows, and the front says so before any wallet opens
-  (`front/lib/pause-gate.ts`). Governance, vesting-series creation and
-  custody-vault types read no pause bit of their own; the module switches
-  hide them and the wallet path refuses them before the wallet opens
-  (`MODULE_FLOWS` in the same file). After an incident's "Resume
-  everything" (which never clears 0x40), set 0x1c again. Check:
+  may SET bits; only the Super Admin clears them). Once §20 has switched
+  trading through Manci on, the module-scope mask is **0x18** (custody
+  entry and distributions; with the payout modules, **0x58**), and 0x04 is
+  set only by an incident or a rollback. 0x08 stays set as the steady
+  state: conversion clears it only for a short window per conversion
+  (§21). Primary issuance (0x02) and issuer proceeds (0x20) may change with
+  the sales (on 2026-10-10, with no sale open, the Platform read `0x7e`),
+  so a read-back checks only the bit that changed, the other bits as
+  before.
+  The program refuses those flows, and the front says so before any wallet
+  opens (`front/lib/pause-gate.ts`). Governance, vesting-series creation
+  and custody-vault types read no pause bit of their own; the module
+  switches hide them and the wallet path refuses them before the wallet
+  opens (`MODULE_FLOWS` in the same file). Never use "Resume everything"
+  on mainnet: it clears every emergency area at once, those the Terms do
+  not offer included. After an incident the super admin resumes one area
+  at a time, and the areas outside the offered modules stay set (0x08 and
+  0x10, plus 0x04 while trading through Manci is off). Launch check:
   `/admin/platform` shows exactly those three areas and the payout modules
   paused (`0x5c`) **before the first sale opens** (D10). The Terms of
   2026-10-03 say conversion into company shares is not available yet and,
@@ -3872,28 +3887,49 @@ On 2026-10-10 it read `0x7e`: every area paused except onboarding (0x01).
      `MAINNET_TERMS.offeredModules`. It is one-way: a flag that reads as on
      needs its module in `offeredModules`, while an offered module may have
      its flag off, which is what the rollback below relies on.
-2. That `main` commit (the release candidate) rehearsed on devnet through
-   the UI with Phantom: an escrow deal (a deposit by the wrong party
-   refused, the second deposit settles; on another deal an Admin cancel
-   refunds), an offer created and taken (the seller is paid in the same
-   transaction) and another offer cancelled, then 0x04 set by the devnet
-   super admin (every entry refused before the wallet opens, cancels still
-   work) and cleared again. Record whether the devnet transactions carry
-   Phantom's Lighthouse guard instructions, which it adds on mainnet. Devnet
-   renders the devnet Terms (`DEVNET_TOS_VERSION`), so the new acceptance
-   dialog is first seen in step 3 below.
-3. Program parity, right before the release: dump both programs on mainnet
+2. Counsel's signed written opinion that the services offered once this
+   module is on need no licence is on file outside the repository
+   (`~/mancipatio-mainnet/legal/`) and its reference is recorded (§17). It
+   names the operator in `OPERATORS.mainnet` and covers trading through
+   Manci: offers created and taken directly on the program, Admin-mediated
+   escrow deals and the resell board. `MAINNET_LICENSE_NOT_REQUIRED=true`
+   rests on it and is not bound to a scope, so a new module needs the
+   opinion to cover it before the build.
+3. Counsel has reviewed the rendered pages of the new version (§17 step 4,
+   on a local dev server or a Preview): `/legal/terms`, `/legal/privacy`,
+   `/risks`, the acceptance dialog and an OTC take confirmation, and, when
+   conversion ships in the same release, the conversion request and
+   deposit screens. The launch-day record notes the review:
+   `MAINNET_LEGAL_COPY_APPROVED` is not bound to a version, so it does not
+   carry over to a new one by itself.
+4. Rehearsed on devnet through the UI with Phantom, as soon as the code it
+   exercises is on `main` and in parallel with counsel's review, so that
+   what it finds can still change the Terms before counsel confirms them
+   (devnet renders the devnet Terms, `DEVNET_TOS_VERSION`, so it does not
+   wait for them, and the new acceptance dialog is first seen in step 3
+   below): an escrow deal (a deposit by the wrong party refused, the second
+   deposit settles; on another deal an Admin cancel refunds), an offer
+   created and taken (the seller is paid in the same transaction) and
+   another offer cancelled, then 0x04 set by the devnet super admin (every
+   entry refused before the wallet opens, cancels still work) and cleared
+   again. Record whether the devnet transactions carry Phantom's Lighthouse
+   guard instructions, which it adds on mainnet. Right before the release,
+   a short smoke of the release candidate on devnet: one offer created and
+   cancelled, and the 0x04 refusal.
+5. Program parity, right before the release: dump both programs on mainnet
    and on devnet (`msol program dump`, §2, or `solana program dump` against
    the public endpoints) and run `solana-verify get-executable-hash` on
    each dump; all four equal the release's `hashes.txt`.
-4. Mainnet preflight, read-only: the sanctions list `fresh` on
+6. Mainnet preflight, read-only: the sanctions list `fresh` on
    `/admin/compliance` (the OTC request, the deal screen and the resell
    listing answer 503 when it is older than 3 days) and no open high or
-   critical alert; `/api/health` and `/api/health/alarms` 200; the four
-   `*-scheduler-status.sql` show their jobs active with recent successful
-   runs; both alert channels deliver; the Admin that will create deals holds
-   SOL for their rent (§1); the Platform reads `0x7e`.
-5. No production deployment is queued on the mainnet project.
+   critical alert; `/api/health` and `/api/health/alarms` 200;
+   `retry-`, `alarm-`, `sanctions-` and `fx-scheduler-status.sql` show
+   their jobs active with recent successful runs; both alert channels
+   deliver; the Admin that will create deals holds SOL for their rent
+   (§1); the Platform has 0x04 set (record the byte: `0x7e` on 2026-10-10,
+   with no sale open).
+7. No production deployment is queued on the mainnet project.
 
 **Steps**
 
@@ -3917,8 +3953,9 @@ On 2026-10-10 it read `0x7e`: every area paused except onboarding (0x01).
    "Production – manci-mainnet" succeeded at that commit; `/api/health` and
    `/api/health/alarms` 200; `/legal/terms` and `/legal/privacy` show the new
    version; `/marketplace/otc`, `/markets/resell`, `/portfolio/offers`,
-   `/portfolio/deals` and `/admin/otc` no longer carry the "not available on
-   Solana mainnet" notice, the delivery pages still do; the acceptance
+   `/portfolio/deals`, `/portfolio/listings`, `/admin/otc` and
+   `/admin/resell` no longer carry the "not available on Solana mainnet"
+   notice, the delivery pages still do; the acceptance
    dialog asks for the new version; an OTC entry is refused before the
    wallet opens with "Trading through Manci is paused on Manci (emergency
    pause)." because 0x04 is still set.
@@ -3931,13 +3968,21 @@ On 2026-10-10 it read `0x7e`: every area paused except onboarding (0x01).
    everything*, and no other bit with it. A critical `onchain:pause` alert
    "Pause flags cleared (unpause)" follows: confirm who and why (§15
    "Responses") and acknowledge it.
-6. **Read back** (operator): byte 74 = `0x7a` (from `0x7e`: 0x04 clear;
-   0x02, 0x08, 0x10, 0x20 and 0x40 still set); `/api/health/alarms` 200.
-7. **Live check, recommended before D11** (owner, optional): one cheap
-   transaction shape on mainnet with a cooperating holder, an offer of one
-   unit created and then cancelled, so Phantom's mainnet transaction
-   (Lighthouse guards included) has been seen once. Never mint new units for
-   a test.
+6. **Read back** (operator): byte 74 differs from the prerequisite reading
+   only in 0x04, now clear; every other bit as before (from `0x7e`, the
+   2026-10-10 state, that is `0x7a`: 0x02, 0x08, 0x10, 0x20 and 0x40 still
+   set); `/api/health/alarms` 200.
+7. **Live check** (owner, optional): one cheap transaction shape on
+   mainnet, an offer of one unit created and then cancelled in the same
+   sitting, so Phantom's mainnet transaction (Lighthouse guards included)
+   has been seen once. Only from a wallet the owner controls that already
+   holds units, never a third party's: before D11 the site is behind
+   Deployment Protection, and the bypass secret is never shared. Price the
+   unit far above any plausible bid, since anyone can take an open offer
+   directly on the program once 0x04 is clear, and cancel it at once. If no
+   owner-controlled wallet holds units, a cooperating holder does the same
+   on the public site right after D11, before the announcement. Never mint
+   new units for a test.
 8. **First 24 hours** (operator, with §0A D12): sanctions hits on OTC
    signers on `/admin/compliance`; offers and deals created directly on the
    program (the program accepts any supported payment mint, the USDC
@@ -3987,8 +4032,13 @@ What the program does:
   after the registration, leaving the holder with both the units and the
   registered stake. Choose **120–180 days**, never the dialog's 30-day
   default, and realize right after the registration.
-- The realize checks the beneficiary's passport in the pinned registry:
-  Approved (6069), not expired (6070), jurisdiction approved (6071). The
+- The realize checks the beneficiary's passport in the registry pinned on
+  the vault: Approved (6069), not expired (6070), jurisdiction in the
+  registry's approved list and not in its blocked list (6071). A passport
+  that was never issued fails before that, when the front's derived
+  `kyc_entry` account does not exist (AccountNotInitialized). The realize
+  reads no blocklist entry; the holder's blocklist entry matters for the
+  deposit, whose transfer the hook refuses from a blocked owner. The
   trigger checks only its operator (§11, "Accepted program risks").
 - The Admin that opens the vault becomes its **vault authority** and alone
   signs the trigger, the realize and a return before the deadline.
@@ -4005,31 +4055,56 @@ What the program does:
    acceptance and the sanctions screen. Without the gate fix the approve is
    refused before the wallet opens with the physical-delivery notice; never
    work around it with `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=true`.
-2. `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` shipped in the same
+2. Counsel's signed written opinion that the services offered once
+   conversion is on need no licence is on file outside the repository
+   (`~/mancipatio-mainnet/legal/`) and its reference is recorded (§17). It
+   names the operator in `OPERATORS.mainnet` and covers the conversion
+   custody escrow, in which the units stay between the holder's deposit
+   and the realize or return; it may be the same opinion as §20's. Counsel
+   has reviewed the rendered conversion request and deposit screens of the
+   version in force (§20 prerequisite 3).
+3. `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` shipped in the same
    production build as those Terms (§20 steps 1–4 apply). Check:
    `/portfolio/conversion` and `/admin/custody` without the "not available"
    notice, the delivery pages still with it.
-3. The release candidate rehearsed on devnet end to end through the UI with
-   Phantom: `/verify` → `/admin/clients` verified → `/admin/kyc` passport →
-   `/portfolio/conversion` request → 0x08 cleared → *Approve & open vault*
-   (deadline at least 120 days) → the holder's deposit → 0x08 set →
-   *Confirm conversion* succeeds while 0x08 is set → the request
-   `converted` with its outcome evidence. Negative cases: a realize without
-   a passport is refused (6069); a second request is returned with *Cancel
-   & return*; a delivery open is refused before the wallet opens. Devnet has
-   delivery on by default: set `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=false`
-   in the devnet project's Production env and redeploy for the rehearsal,
-   and restore it afterwards. With 0x08 set, the front refuses the approve
-   before the wallet opens; the program's own refusal is proven by group 4
-   of the chain e2e (`CHAIN_NETWORK=devnet E2E_DEVNET_G4_G6=1 E2E_GROUPS=4
-   npm run chain:e2e`, with the runner's devnet variables). Record whether
-   the transactions carry Lighthouse instructions and the size of the
-   trigger + realize transaction, the largest of them.
-4. The site is public (§0A D11): the holder signs in on `www.manci.io`.
-5. The class: `convertible_to` set on chain (`set_convertible_to`, the
+4. Rehearsed on devnet end to end through the UI with Phantom, as soon as
+   the conversion gate fix is on `main` and in parallel with counsel's
+   review of the Terms (devnet renders the devnet Terms, so it does not
+   wait for them), with a short smoke of the release candidate right
+   before the release: `/verify` → `/admin/clients` verified → `/admin/kyc`
+   passport → `/portfolio/conversion` request → 0x08 cleared → *Approve &
+   open vault* (deadline at least 120 days) → the holder's deposit → 0x08
+   set → *Confirm conversion* succeeds while 0x08 is set → the request
+   `converted` with its outcome evidence. Negative cases: for a holder
+   without a passport, *Confirm conversion* is disabled and names the
+   passport reason (the program's refusal, AccountNotInitialized on
+   `kyc_entry`, is steps 4.8 and 4.11d of the chain e2e's group 4); a
+   second request is returned with *Cancel & return*; delivery is not
+   offered: with `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=false`,
+   `/admin/custody` shows no *Approve & open vault* on delivery requests
+   and no DeliveryEscrow type in *+ Open vault*, while reject, cancel,
+   return and confirm stay (the before-wallet refusal of a delivery open
+   built outside the page is proven by `front/tests/pause-gate.test.ts`).
+   Devnet has delivery on by default: set
+   `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY=false` in the devnet project's
+   Production env and redeploy for the rehearsal, and restore it
+   afterwards. With 0x08 set, the front refuses the approve before the
+   wallet opens. The program's own refusal of an open and a deposit under
+   0x08 is proven on localnet only: round 7.5 ("0x08 custody entry") of
+   group 7 of the chain e2e (`CHAIN_NETWORK=localnet E2E_GROUPS=0-7 npm run
+   chain:e2e`, with the runner's localnet variables) and the program test
+   `custody_entry_pause_gates_deposits_while_return_and_revert_stay_open`.
+   Group 4 on devnet (`CHAIN_NETWORK=devnet E2E_DEVNET_G4_G6=1
+   E2E_GROUPS=4 npm run chain:e2e`, with the runner's devnet variables and
+   0x08 clear on devnet) covers the realize without and with a passport
+   and the return. Record whether the transactions carry Lighthouse
+   instructions and the size of the trigger + realize transaction, the
+   largest of them.
+5. The site is public (§0A D11): the holder signs in on `www.manci.io`.
+6. The class: `convertible_to` set on chain (`set_convertible_to`, the
    platform and the issuer); the platform registry
    (`NEXT_PUBLIC_KYC_REGISTRY`) approves the holder's jurisdiction.
-6. Decided before the window: the off-chain procedure for the transfer and
+7. Decided before the window: the off-chain procedure for the transfer and
    its registration (with counsel); the final attestation document, whose
    SHA-256 is fixed at the open and cannot change; which Admin key will be
    the vault authority; the deadline.
@@ -4062,12 +4137,14 @@ What the program does:
 5. **Open the window** (super admin), only with the holder online and ready
    to deposit and the vault-authority wallet at hand: `shasum -a 256` of the
    attestation document first, then `/admin/platform` → *Custody entry* →
-   *Resume* (`set_pause_flags(setMask 0x00, clearMask 0x08)`): `0x7a` →
-   `0x72`. Clear only this bit. The critical `onchain:pause` alert follows.
+   *Resume* (`set_pause_flags(setMask 0x00, clearMask 0x08)`). Clear only
+   this bit: read byte 74 first, and afterwards only 0x08 has changed
+   (`0x7a` → `0x72` with trading through Manci on and no sale open; `0x7e`
+   → `0x76` with it off). The critical `onchain:pause` alert follows.
 6. **Open the vault** (the chosen Admin): `/admin/custody` → Conversion
    requests → *Approve & open vault*. Check the asset label, the
-   beneficiary (the request's wallet), the amount and the *Pinned registry*
-   line (the platform registry); upload the attestation document or paste
+   beneficiary (the request's wallet), the amount and the *KYC registry
+   pinned on the vault* line (the platform registry); upload the attestation document or paste
    its SHA-256 (never zero); set the deadline 120–180 days ahead; take the
    next free vault ID for the class. Sign `open_custody_vault`; the request
    becomes `vault_opened`.
@@ -4075,19 +4152,17 @@ What the program does:
    (`deposit_to_custody_vault`). The request becomes `deposited` with its
    deposit evidence.
 8. **Close the window at once** (any Admin): `/admin/platform` → *Custody
-   entry* → *Pause* (`set_pause_flags(setMask 0x08, clearMask 0x00)`), back
-   to `0x7a`. Time-box it: if the deposit has not landed within the agreed
-   time (for example 30 minutes), set 0x08 anyway; the open vault waits for
-   a later window while its deadline keeps running, or is closed with
-   *Cancel (no deposit)*. Read back: byte 74 = `0x7a`; the vault's escrow
-   holds the amount; the holder's token account is lower by it.
-9. **Off-chain transfer** (owner and counsel; the details follow counsel's
-   procedure and stay outside this repository): the notarized share
-   transfer agreement; the consent of the company's other members, or their
-   waiver of pre-emption, where the founding act or the law requires it,
-   and any amendment of the founding act; the registration of the change of
-   members with the Business Registers Agency (APR), ending with the APR
-   decision and the register extract. Watch the vault deadline throughout.
+   entry* → *Pause* (`set_pause_flags(setMask 0x08, clearMask 0x00)`).
+   Time-box it: if the deposit has not landed within the agreed time (for
+   example 30 minutes), set 0x08 anyway; the open vault waits for a later
+   window while its deadline keeps running, or is closed with *Cancel (no
+   deposit)*. Read back: byte 74 equals the reading taken before step 5
+   (only 0x08 set again); the vault's escrow holds the amount; the
+   holder's token account is lower by it.
+9. **Off-chain transfer** (owner and counsel): the share transfer and its
+   registration with the Business Registers Agency (APR), per counsel's
+   procedure (outside this repository), ending with the APR decision and
+   the register extract. Watch the vault deadline throughout.
    If the registration cannot finish with weeks to spare, return the units
    (rollback) instead of racing the deadline.
 10. **Realize** (the vault authority), after the registration and **before
@@ -4100,10 +4175,14 @@ What the program does:
     the request becomes `converted`. Never realize before the registration
     is complete.
 11. **Anchor the registration** (super admin): `/admin/platform` → *Anchor a
-    document* (`ops/sop-admin.md` "Document anchors") with the APR decision,
-    and the notarized agreement if wanted, under a reference such as
+    document* (`ops/sop-admin.md` "Document anchors") with the APR decision
+    only, a public register act, under a reference such as
     `MANCI-2026-CONV-0001`. The realize carries only the hash fixed at open;
-    the anchor links the registration to the chain.
+    the anchor links the registration to the chain. The anchor is permanent
+    and public and, next to the `CustodyRealized` event, links a wallet to
+    the document: anchor no other document of the conversion (the transfer
+    agreement included) unless counsel confirms it and the Privacy Policy
+    in force covers it.
 12. **Read back** (operator, public endpoint, finalized): the vault
     `Realized`; the class's circulating supply lower by the amount and its
     `lifetime_minted` unchanged; the mint's supply lower by the amount; the
@@ -4117,15 +4196,23 @@ documents in the company's records, never in this repository): the KYC
 decision and its note; the signatures of the passport, of the 0x08 clear
 and re-set, of the open (with the vault PDA, the deadline and the
 attestation hash), the deposit, the realize and the anchor; the request ID;
-the notarized agreement, the consents or waivers, the APR decision and the
-register extract; the read-back results.
+the transfer documents, the APR decision and the register extract; the
+read-back results.
 
 **While a conversion is open:**
 
 - 0x08 is clear only inside its window.
-- Do not change the registry pin (`NEXT_PUBLIC_KYC_REGISTRY`), the
-  registry's approved or blocked jurisdictions, or the holder's blocklist
-  entry: the realize checks them.
+- Do not revoke or close the holder's passport, and keep its expiry past
+  the realize: the realize checks it (Approved, not expired) in the
+  registry pinned on the vault. Do not change that registry's approved or
+  blocked jurisdictions so that the holder's is no longer allowed: the
+  realize checks that too. The realize uses the registry pinned at open,
+  not `NEXT_PUBLIC_KYC_REGISTRY`; leave the pin unchanged anyway, since the
+  passport pages read and issue in the configured registry.
+- A blocklist entry on the holder does not stop the realize or a return
+  (the return's transfer leaves from the vault); it stops a deposit that
+  has not landed yet, whose transfer the hook refuses from a blocked
+  owner.
 - Never `remove_admin` the vault authority, and never rotate its key away,
   before the realize. To change the operator, move the vault first
   (`/admin/custody` → the vault → its authority transfer: proposed by the
