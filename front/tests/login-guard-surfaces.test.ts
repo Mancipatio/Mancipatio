@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startEmailSignIn } from "@/lib/account-login";
-import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
+import { SSC_NOT_APPROVED_LABEL, sscApprovalRef, sscDecisionRef } from "@/lib/whitepaper-approval";
 
 const src = (rel: string) => readFileSync(join(process.cwd(), rel), "utf8");
 
@@ -56,14 +56,28 @@ describe("Securities Commission approval label", () => {
     expect(sscDecisionRef({ whitepaper_status: "ssc_approval_pending", ssc_decision_ref: "KHoV 1/2026" })).toBeNull();
   });
 
+  it("on mainnet, is approved only with the verified decision document as well", () => {
+    const approved = { whitepaper_status: "ssc_approved", ssc_decision_ref: "KHoV 1/2026" } as const;
+    // A bare reference typed into the profile is not the Commission's approval on mainnet.
+    expect(sscApprovalRef({ ...approved, ssc_decision_version_id: null }, "mainnet")).toBeNull();
+    expect(sscApprovalRef({ ...approved, ssc_decision_version_id: "v-1" }, "mainnet")).toBe("KHoV 1/2026");
+    expect(sscApprovalRef({ ...approved, ssc_decision_version_id: null }, "devnet")).toBe("KHoV 1/2026");
+  });
+
   it("labels unapproved whitepapers on the board and the asset page instead of plain 'Published'", () => {
     // Named in full, like the approved badge, so no other regulator is implied.
     expect(SSC_NOT_APPROVED_LABEL).toBe("Not approved by the Serbian Securities Commission");
+    // Every public surface applies the rule of the launchpad and the sale
+    // page (sscApprovalRef): on mainnet no page shows an approval without
+    // the verified decision document.
     const board = src("app/(marketing)/markets/whitepapers/whitepapers-board.tsx");
-    expect(board).toContain("sscDecisionRef(profile)");
+    expect(board).toContain("sscApprovalRef(profile, detectNetwork())");
+    expect(board).not.toContain("sscDecisionRef(");
     expect(board).toContain('decisionRef ? "SSC approved" : whitepaper ? SSC_NOT_APPROVED_LABEL : "Published"');
     const asset = src("app/marketplace/assets/[id]/page.tsx");
-    expect(asset).toContain("const decisionRef = sscDecisionRef(profile);");
+    expect(asset).toContain("const decisionRef = sscApprovalRef(profile, detectNetwork());");
+    expect(asset).not.toContain("sscDecisionRef(");
+    expect(src("app/marketplace/launchpad/page.tsx")).toContain("sscApprovalRef(profile, detectNetwork())");
     expect(asset).toContain("{SSC_NOT_APPROVED_LABEL}");
     expect(asset).toContain("Approved by the Serbian Securities Commission");
     // The disclaimer points at what the board shows (the approved badge, with

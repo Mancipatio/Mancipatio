@@ -9,7 +9,7 @@ import { assetTypeBySlug, CATEGORY_SLUGS } from "@/lib/asset-types";
 import { safeHttpUrl } from "@/lib/format";
 import { assetHref as marketplaceAssetHref } from "@/lib/asset-links";
 import { detectNetwork, networkLabel } from "@/lib/network";
-import { SSC_NOT_APPROVED_LABEL, sscDecisionRef } from "@/lib/whitepaper-approval";
+import { SSC_NOT_APPROVED_LABEL, sscApprovalRef } from "@/lib/whitepaper-approval";
 
 type PublishedProfile = Pick<
   AssetProfile,
@@ -140,7 +140,9 @@ function DocumentRow({ item }: { item: Item }) {
   // still consulted so a profile whose asset is not indexed yet gets no link.
   const assetHref = linkId ? marketplaceAssetHref(profile.asset_pda) : null;
   const date = displayDate(whitepaper ? profile.whitepaper_published_at : profile.updated_at);
-  const decisionRef = whitepaper ? sscDecisionRef(profile) : null;
+  // As on the launchpad and the sale page: on mainnet only an approval backed
+  // by the verified decision document reads as approved.
+  const decisionRef = whitepaper ? sscApprovalRef(profile, detectNetwork()) : null;
   const fingerprint = whitepaper ? profile.whitepaper_sha256?.trim() : null;
 
   return (
