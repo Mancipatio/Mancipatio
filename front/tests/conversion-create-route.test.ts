@@ -3,8 +3,8 @@
 // holder's wallet is screened against the sanctions lists and must have
 // accepted the Terms in force, as on /api/otc/create. A verified dossier does
 // not replace the screen (a wallet can be listed after its dossier was
-// verified). The screen runs before any chain read; the Terms are checked
-// last, right before the write.
+// verified). The screen runs once the request itself is valid and before any
+// chain read; the Terms are checked last, right before the write.
 //
 // The route runs for real against an in-memory database with the REAL
 // lib/server/kyc-gate.ts, lib/server/sanctions.ts and lib/server/tos-gate.ts;
@@ -73,9 +73,9 @@ function accepted(wallet: string, version: string = TOS_VERSION) {
   db.ref!.rows("tos_acceptances").push({ id: `tos-${wallet}-${version}`, wallet, version });
 }
 
-async function post(wallet: string) {
+async function post(wallet: string, over: Record<string, unknown> = {}) {
   signer.wallet = wallet;
-  signer.params = params();
+  signer.params = { ...params(), ...over };
   const res = await conversionCreate(
     new Request("https://manci.test/api/conversion/create", { method: "POST", body: JSON.stringify({ params: signer.params }) }),
   );
@@ -135,6 +135,20 @@ describe("POST /api/conversion/create: sanctions screen and Terms acceptance (ma
     expect(alerts()[0].p_evidence).toMatchObject({ route: "conversion/create", role: "self" });
     expect(chain.resolveShareClassAssetFacts).not.toHaveBeenCalled();
     expect(chain.getToken2022Balance).not.toHaveBeenCalled();
+    expect(written()).toEqual([]);
+  });
+
+  it("validates the request before the screen: invalid parameters from a listed wallet get 400, no screen and no alert", async () => {
+    verified(LISTED);
+    accepted(LISTED);
+    // No list loaded: a screen would answer 503, so a 400 shows it never ran.
+    const unscreened = await post(LISTED, { amount: 0 });
+    expect(unscreened).toEqual({ status: 400, body: { ok: false, error: "amount must be a positive integer" } });
+    // With the list loaded, the listed wallet's invalid request still raises no alert.
+    loadList();
+    expect((await post(LISTED, { mint: "not-an-address" })).status).toBe(400);
+    expect(alerts()).toEqual([]);
+    expect(chain.resolveShareClassAssetFacts).not.toHaveBeenCalled();
     expect(written()).toEqual([]);
   });
 

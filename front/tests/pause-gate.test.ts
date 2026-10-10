@@ -406,17 +406,96 @@ describe("the pilot scope before the wallet (MODULE_FLOWS)", () => {
     expect(pausedInstruction(PAUSE.PAUSE_FLAGS_ALL, exits())).toBeNull();
   });
 
-  it("/admin/custody declares the conversion purpose on the conversion approval only", () => {
-    const page = readFileSync(join(process.cwd(), "app/admin/custody/page.tsx"), "utf8");
-    const declarations = [...page.matchAll(/custodyPurpose: "conversion"/g)];
-    expect(declarations).toHaveLength(1);
-    const start = page.indexOf("function ApproveConversionModal(");
-    const end = page.indexOf("\nfunction ", start + 1);
+  // Source scans of /admin/custody, without its comments (a comment may name anything).
+  const custodyPage = () =>
+    readFileSync(join(process.cwd(), "app/admin/custody/page.tsx"), "utf8")
+      .replace(/(^[ \t]*|\{)\/\*[\s\S]*?\*\//gm, "$1")
+      .replace(/^[ \t]*\/\/.*$/gm, "");
+  /** The top-level function whose body holds `index`. */
+  const functionAt = (code: string, index: number) =>
+    [...code.slice(0, index).matchAll(/^(?:export (?:default )?)?function (\w+)\(/gm)].at(-1)?.[1];
+  /** The source of the top-level function `name`. */
+  const functionSource = (code: string, name: string) => {
+    const start = code.indexOf(`\nfunction ${name}(`);
     expect(start).toBeGreaterThan(-1);
-    expect(declarations[0].index).toBeGreaterThan(start);
-    expect(declarations[0].index).toBeLessThan(end);
-    // The delivery approval and the generic "+ Open vault" form declare nothing.
-    const delivery = page.slice(page.indexOf("function ApproveDeliveryModal("));
-    expect(delivery).not.toContain("withGateFacts(");
+    const end = code.indexOf("\nfunction ", start + 1);
+    return code.slice(start, end < 0 ? undefined : end);
+  };
+  /** Each JSX `{<condition> && (…)}` block whose condition matches `guard`, from its "(" to the matching ")". */
+  const guardedBlocks = (code: string, guard: RegExp) => {
+    const blocks: string[] = [];
+    for (const m of code.matchAll(/\{([^{};]*?)&&\s*\(/g)) {
+      if (!guard.test(m[1])) continue;
+      const open = m.index + m[0].length - 1;
+      let depth = 0;
+      let i = open;
+      for (; i < code.length; i++) {
+        if (code[i] === "(") depth++;
+        else if (code[i] === ")" && --depth === 0) break;
+      }
+      blocks.push(code.slice(open, i + 1));
+    }
+    return blocks;
+  };
+
+  it("/admin/custody declares the conversion purpose once, on the conversion approval only", () => {
+    const code = custodyPage();
+    // One import, under its own name, and one call: a constant or an alias cannot declare elsewhere.
+    expect(code).toContain('import { withGateFacts } from "@/lib/pause-gate";');
+    expect(code).not.toMatch(/withGateFacts\s+as\b/);
+    const calls = [...code.matchAll(/\bwithGateFacts\(/g)];
+    expect(calls).toHaveLength(1);
+    expect(functionAt(code, calls[0].index)).toBe("ApproveConversionModal");
+    expect(functionSource(code, "ApproveConversionModal")).toContain('return withGateFacts(ix, { custodyPurpose: "conversion" });');
+    const purposes = [...code.matchAll(/custodyPurpose/g)];
+    expect(purposes).toHaveLength(1);
+    expect(functionAt(code, purposes[0].index)).toBe("ApproveConversionModal");
+  });
+
+  it("/admin/custody with delivery off hides only the delivery entry: every exit stays outside the delivery condition", () => {
+    const code = custodyPage();
+    // The delivery switch is read by the "+ Open vault" form and the delivery request queue only.
+    const owners = new Set([...code.matchAll(/\bdeliveryOn\b/g)].map((m) => functionAt(code, m.index)));
+    expect(owners).toEqual(new Set(["OpenVaultModal", "DeliveryRequestsSection"]));
+
+    // "+ Open vault": the switch removes the DeliveryEscrow type, nothing else.
+    const openVault = functionSource(code, "OpenVaultModal");
+    expect(openVault.split("\n").filter((l) => /\bdeliveryOn\b/.test(l)).map((l) => l.trim())).toEqual([
+      'const deliveryOn = moduleEnabled("custodyDelivery");',
+      "(i === VaultType.DeliveryEscrow && !deliveryOn) ? null : (",
+    ]);
+
+    // The queue: the switch decides the approve button (or, off, "Finish
+    // recording approval" for an approval this wallet already sent) and the
+    // approve modal (record-only when off), and nothing else.
+    const queue = functionSource(code, "DeliveryRequestsSection");
+    expect(queue.split("\n").filter((l) => /\bdeliveryOn\b/.test(l)).map((l) => l.trim())).toEqual([
+      'const deliveryOn = moduleEnabled("custodyDelivery");',
+      "deliveryOn",
+      "deliveryOn || savedOpens.has(r.id);",
+      "{deliveryOn ? (",
+      "recordOnly={!deliveryOn}",
+    ]);
+    const guarded = guardedBlocks(queue, /\bdeliveryOn\b|\bapprovalOffered\(/);
+    expect(guarded).toHaveLength(2);
+    expect(guarded[0]).toContain("onClick={() => setApproveReq(r)}");
+    expect(guarded[1]).toMatch(/^\(\s*<ApproveDeliveryModal\b/);
+    expect(guarded[1]).toContain("recordOnly={!deliveryOn}");
+    // Reject, cancel, mark in delivery, confirm and cancel & return, and their modals.
+    const exits = [
+      "setRejectReq(r)", "setCancelOpenReq(r)", "markInDelivery(r)", "setConfirmReq(r)", "setReturnReq(r)",
+      "open={rejectReq !== null}", "open={cancelOpenReq !== null}", "open={confirmReq !== null}", "open={returnReq !== null}",
+    ];
+    for (const exit of exits) {
+      expect(queue).toContain(exit);
+      for (const block of guarded) expect(block).not.toContain(exit);
+    }
+
+    // Off, the delivery modal never shows the approval form or "Open vault".
+    const modal = functionSource(code, "ApproveDeliveryModal");
+    expect(modal).toMatch(/async function approve\(\) \{\s*if \(\s*recordOnly \|\|/);
+    const recordOnlyView = modal.slice(modal.indexOf("if (recordOnly)"), modal.indexOf("\n  return (", modal.indexOf("if (recordOnly)")));
+    expect(recordOnlyView).toContain("{recovery.panel}");
+    expect(recordOnlyView).not.toMatch(/approve\(\)|Open vault|setVaultId|AttestationDocSection/);
   });
 });

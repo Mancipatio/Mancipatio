@@ -1,6 +1,9 @@
 "use client";
 
-import { useCustodyOpenRecovery } from "@/lib/use-custody-open-recovery";
+import {
+  useCustodyOpenRecovery,
+  useSavedCustodyOpens,
+} from "@/lib/use-custody-open-recovery";
 import { parseCustodyVaultId, requireCustodyRequestAmount } from "@/lib/custody-open-recovery";
 
 import { useCustodyOutcomeRecovery } from "@/lib/use-custody-outcome-recovery";
@@ -3377,8 +3380,19 @@ function DeliveryRequestsSection({
   const [approveReq, setApproveReq] = useState<DeliveryRequest | null>(null);
   // Pilot scope: with delivery off, only the ENTRY (approving a request,
   // which opens a new escrow) is hidden. Rejecting, cancelling, returning
-  // and confirming what is already open stay (lib/pilot-scope.ts).
+  // and confirming what is already open stay (lib/pilot-scope.ts), and so
+  // does recording an approval this wallet already sent (the vault is open
+  // on-chain but not linked to the request): that sends no transaction.
   const deliveryOn = moduleEnabled("custodyDelivery");
+  const savedOpens = useSavedCustodyOpens(
+    "delivery",
+    deliveryOn
+      ? []
+      : requests.filter((r) => r.status === "requested").map((r) => r.id),
+    wallet?.toString(),
+  );
+  const approvalOffered = (r: DeliveryRequest) =>
+    deliveryOn || savedOpens.has(r.id);
   const [rejectReq, setRejectReq] = useState<DeliveryRequest | null>(null);
   const [confirmReq, setConfirmReq] = useState<DeliveryRequest | null>(null);
   const [returnReq, setReturnReq] = useState<DeliveryRequest | null>(null);
@@ -3986,14 +4000,18 @@ function DeliveryRequestsSection({
                 <td className="space-x-3 px-4 py-3 text-right text-xs">
                   {r.status === "requested" && (
                     <>
-                      {deliveryOn && (
+                      {approvalOffered(r) && (
                         <button
                           type="button"
                           disabled={tx.isSending || busyId === r.id}
                           onClick={() => setApproveReq(r)}
                           className="text-slate-700 underline-offset-2 hover:underline disabled:opacity-50"
                         >
-                          Approve &amp; open vault
+                          {deliveryOn ? (
+                            <>Approve &amp; open vault</>
+                          ) : (
+                            "Finish recording approval"
+                          )}
                         </button>
                       )}
                       <button
@@ -4072,9 +4090,10 @@ function DeliveryRequestsSection({
         </table>
       )}
 
-      {approveReq && deliveryOn && (
+      {approveReq && approvalOffered(approveReq) && (
         <ApproveDeliveryModal
           req={approveReq}
+          recordOnly={!deliveryOn}
           onClose={() => setApproveReq(null)}
           onSuccess={() => {
             setApproveReq(null);
@@ -4178,10 +4197,17 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 function ApproveDeliveryModal({
   req,
+  recordOnly = false,
   onClose,
   onSuccess,
 }: {
   req: DeliveryRequest;
+  /**
+   * Delivery is switched off: no new vault may be opened. The modal only
+   * finishes recording an approval this wallet already sent (the recovery
+   * panel, which sends no transaction).
+   */
+  recordOnly?: boolean;
   onClose: () => void;
   onSuccess: () => void;
 }) {
@@ -4228,6 +4254,7 @@ function ApproveDeliveryModal({
 
   async function approve() {
     if (
+      recordOnly ||
       !wallet ||
       inputError ||
       deadlineError ||
@@ -4308,6 +4335,50 @@ function ApproveDeliveryModal({
   }
 
   if (!wallet) return null;
+
+  if (recordOnly)
+    return (
+      <div
+        className="fixed inset-0 z-40 flex items-center justify-center overflow-y-auto bg-slate-900/40 p-4 backdrop-blur-sm"
+        role="dialog"
+        aria-modal="true"
+        onMouseDown={(e) => {
+          if (e.target === e.currentTarget && !recovery.busy) onClose();
+        }}
+      >
+        <div className="mx-auto w-full max-w-2xl overflow-hidden rounded-lg border border-slate-200 bg-white shadow-xl">
+          <div className="border-b border-slate-100 px-5 py-4">
+            <p className="text-sm font-semibold uppercase tracking-wide text-slate-700">
+              Finish recording delivery approval
+            </p>
+            <p className="mt-1 text-xs text-slate-500">
+              Physical delivery is switched off, so no new vault can be opened
+              here. This only links the vault this wallet already opened for
+              this request; it sends no transaction.
+            </p>
+          </div>
+          <div className="space-y-4 px-5 py-4">
+            {recovery.panel}
+            {recovery.ready && !recovery.pending && (
+              <p className="text-sm text-slate-600">
+                No unrecorded approval of this request is saved in this
+                browser for the connected wallet: there is nothing to record.
+              </p>
+            )}
+          </div>
+          <div className="flex justify-end gap-2 border-t border-slate-100 bg-slate-50 px-5 py-3">
+            <button
+              type="button"
+              onClick={onClose}
+              disabled={recovery.busy}
+              className="rounded-md px-3 py-1.5 text-sm text-slate-700 hover:bg-slate-200 disabled:opacity-50"
+            >
+              Close
+            </button>
+          </div>
+        </div>
+      </div>
+    );
 
   return (
     <div

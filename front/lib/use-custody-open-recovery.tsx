@@ -20,6 +20,45 @@ import {
   type CustodyOpenScope,
 } from "@/lib/custody-open-recovery";
 
+/**
+ * The ids among `requestIds` for which this browser holds a saved approval
+ * of `product` by `wallet` on this network (a vault open that was sent, and
+ * may not be recorded yet), or a saved approval it cannot read (that one
+ * needs review). A page whose module is switched off uses it to keep
+ * "Finish recording" reachable: recording an existing open sends no
+ * transaction, so it is not an entry. Read after mount, so the server
+ * render and the first client render agree.
+ */
+export function useSavedCustodyOpens(
+  product: CustodyOpenScope["product"],
+  requestIds: readonly string[],
+  wallet: string | undefined,
+): ReadonlySet<string> {
+  const network = detectNetwork();
+  const ids = requestIds.join(",");
+  const [saved, setSaved] = useState<ReadonlySet<string>>(() => new Set());
+  useEffect(() => {
+    const reload = () => {
+      const next = new Set<string>();
+      if (wallet)
+        for (const requestId of ids ? ids.split(",") : []) {
+          try {
+            if (readCustodyOpenIntent({ product, requestId, network, wallet }))
+              next.add(requestId);
+          } catch {
+            // Unreadable: the modal shows why and that no new vault may be opened.
+            next.add(requestId);
+          }
+        }
+      setSaved(next);
+    };
+    reload();
+    window.addEventListener("storage", reload);
+    return () => window.removeEventListener("storage", reload);
+  }, [product, ids, network, wallet]);
+  return saved;
+}
+
 export function useCustodyOpenRecovery(
   product: CustodyOpenScope["product"],
   request: { id: string; network: string; share_class_pda: string },

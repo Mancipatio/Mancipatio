@@ -120,7 +120,8 @@ export async function POST(request: Request) {
     }
 
     // Mainnet: the requesting wallet must have accepted the Terms in force —
-    // checked last, right before the write (a no-op on test networks).
+    // checked last, right before the write (on test networks only with
+    // TOS_SERVER_GATE=enforce).
     await requireAcceptedTos(sb, wallet, "requesting a conversion");
 
     const { data, error } = await sb
