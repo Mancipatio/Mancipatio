@@ -136,6 +136,24 @@ and a vault vote protects holders). The switches are the platform's scope;
 the program's pause bits are the on-chain one (runbook: which bits the
 pilot keeps set), and `lib/pause-gate.ts` reads those before a wallet signs.
 
+**The switches follow the Terms.** A mainnet build refuses a module flag
+that reads as on while the mainnet Terms do not offer that module:
+`MAINNET_TERMS.offeredModules` in `lib/legal/mainnet-copy.ts` lists, by
+name, the modules clause 2 offers (none in version 2026-10-03). This
+covers the seven switches above plus `PAYOUT_AIRDROP` and `STARTUP_RAISES`
+(`next.config.ts` `assertBuildMainnetModules`, `TERMS_MODULE_FLAGS`);
+`ISSUER_ROTATION` and `PASSPORT_CLOSE` are operational and not covered.
+The check is one-way: a module the Terms offer may have its flag off, so
+switching a module off again (a rollback) builds without a new version of
+the Terms. Switching one on takes the Terms version that offers it, with
+its flag, in the same production build. That version should also say that
+the Operator may suspend a module at any time: the build allows a
+flag-only rollback, and that sentence keeps the published Terms accurate
+when one happens (without it, the rollback needs a new Terms version too).
+`tests/terms-modules.test.ts` checks `offeredModules` against clause 2's
+"not available" list (payout airdrops are read as part of
+"distributions").
+
 ### Geoblocking
 
 Which countries the platform does not serve is **counsel's decision**

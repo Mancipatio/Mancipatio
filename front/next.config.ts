@@ -1,16 +1,18 @@
 import type { NextConfig } from "next";
-// The runtime imports: the operator and legal slots, and (8.5) the geoblock
-// list's parser, by relative path. lib/legal/* is directive-free and imports
-// nothing but its siblings, lib/geoblock.ts only lib/countries.ts (which
-// imports nothing), so Next's next.config.ts loader (SWC with its require
-// hook) compiles them like this file; no package and no `@/` alias is
-// loaded here.
+// The runtime imports: the operator and legal slots, the modules the mainnet
+// Terms offer, and (8.5) the geoblock list's parser, by relative path.
+// lib/legal/* is directive-free and imports nothing but its siblings,
+// lib/geoblock.ts only lib/countries.ts (which imports nothing), so Next's
+// next.config.ts loader (SWC with its require hook) compiles them like this
+// file; no package and no `@/` alias is loaded here.
 import {
   MAINNET_LEGAL_SLOTS,
   MAINNET_LICENSE_WAIVER,
   mainnetLegalProblems,
   type MainnetLegalSlots,
 } from "./lib/legal/readiness";
+import type { TermsDocument, TermsModule } from "./lib/legal/document";
+import { MAINNET_TERMS } from "./lib/legal/mainnet-copy";
 import { GEOBLOCK_ENV, parseGeoblockList } from "./lib/geoblock";
 
 // `next build`'s phase (next/constants PHASE_PRODUCTION_BUILD). Spelled out
@@ -505,6 +507,79 @@ export function assertBuildFeatureFlags(phase: string, env: Record<string, strin
   }
 }
 
+/** The FEATURE_FLAG_VALUES that read as on (lib/features.ts parseFeatureFlag; a test keeps the two equal). */
+const FEATURE_FLAG_ON_VALUES = ["true", "1", "yes", "on"];
+
+/** True when a NEXT_PUBLIC_FEATURE_* value reads as on: how a mainnet build switches a feature on. */
+export function featureFlagOn(value: string | undefined): boolean {
+  return FEATURE_FLAG_ON_VALUES.includes(value?.trim().toLowerCase() ?? "");
+}
+
+/**
+ * The flag behind each module the Terms can offer (TERMS_MODULES,
+ * lib/legal/document.ts): lib/features.ts PILOT_MODULE_ENV for the pilot
+ * modules, and the payout-airdrop and Startup-raise flags. The issuer
+ * rotation and passport close flags are operational and not listed.
+ * tests/terms-modules.test.ts keeps this map, FEATURE_FLAG_NAMES and
+ * lib/features.ts equal.
+ */
+export const TERMS_MODULE_FLAGS: Readonly<Record<TermsModule, string>> = {
+  secondaryTrading: "NEXT_PUBLIC_FEATURE_SECONDARY_TRADING",
+  governance: "NEXT_PUBLIC_FEATURE_GOVERNANCE",
+  vesting: "NEXT_PUBLIC_FEATURE_VESTING",
+  rights: "NEXT_PUBLIC_FEATURE_RIGHTS",
+  distributions: "NEXT_PUBLIC_FEATURE_DISTRIBUTIONS",
+  custodyConversion: "NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION",
+  custodyDelivery: "NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY",
+  payoutAirdrop: "NEXT_PUBLIC_FEATURE_PAYOUT_AIRDROP",
+  startupRaises: "NEXT_PUBLIC_FEATURE_STARTUP_RAISES",
+};
+
+/**
+ * The module flags follow the Terms. On mainnet a module flag that reads as
+ * on switches the module on for users, so the Terms in the same build must
+ * offer it: a MAINNET production build refuses a flag of TERMS_MODULE_FLAGS
+ * that is on while its module is not in MAINNET_TERMS.offeredModules
+ * (lib/legal/mainnet-copy.ts), and an offeredModules entry that is no module.
+ * One-way on purpose: a module the Terms offer may have its flag off, so a
+ * rollback that switches a module off builds without a new Terms version
+ * (the Terms version that offers a module should also say the Operator may
+ * suspend it: TermsDocument.offeredModules). Spellings are
+ * assertBuildFeatureFlags' check, which runs first. Other networks (they
+ * render the devnet Terms and switch every module on: a pilot module unless
+ * its flag is off, payout airdrops and Startup raises whatever their flags
+ * say), `next dev` and tests are unaffected.
+ */
+export function assertBuildMainnetModules(
+  phase: string,
+  env: Record<string, string | undefined> = process.env,
+  terms: Pick<TermsDocument, "offeredModules"> | null = MAINNET_TERMS,
+): void {
+  if (phase !== PHASE_PRODUCTION_BUILD) return;
+  if (buildNetwork(env) !== "mainnet") return;
+  // An empty Terms slot offers nothing (assertBuildMainnetLegal refuses that build anyway).
+  const offered: readonly string[] = terms?.offeredModules ?? [];
+  const modules = Object.keys(TERMS_MODULE_FLAGS);
+  const unknown = offered.filter((name) => !modules.includes(name));
+  if (unknown.length) {
+    throw new Error(
+      `Refusing a mainnet build: MAINNET_TERMS.offeredModules (lib/legal/mainnet-copy.ts) names no module: ${unknown.join(", ")}. ` +
+        `Modules: ${modules.join(", ")}.`,
+    );
+  }
+  const refused = Object.entries(TERMS_MODULE_FLAGS).filter(
+    ([name, flag]) => featureFlagOn(env[flag]) && !offered.includes(name),
+  );
+  if (refused.length === 0) return;
+  throw new Error(
+    "Refusing a mainnet build: a module flag is on that the mainnet Terms do not offer " +
+      "(MAINNET_TERMS.offeredModules, lib/legal/mainnet-copy.ts):\n" +
+      refused.map(([name, flag]) => `  - ${flag}="${env[flag]}" switches on ${name}, which the mainnet Terms do not offer`).join("\n") +
+      `\nThe Terms offer: ${offered.length ? offered.join(", ") : "no module"}. Unset the flag (or set it to false), ` +
+      "or ship the version of the Terms that offers the module, with counsel's confirmed wording, in the same build.",
+  );
+}
+
 /**
  * Geoblocking (8.5, lib/geoblock.ts, proxy.ts): the countries the platform
  * does not serve are counsel's decision, so a MAINNET production build
@@ -691,6 +766,8 @@ export default function config(phase: string): NextConfig {
   assertBuildRpc(phase);
   assertBuildMainnetOps(phase);
   assertBuildFeatureFlags(phase);
+  // A module flag that is on needs the module in the mainnet Terms (one-way).
+  assertBuildMainnetModules(phase);
   // 8.5: counsel's geoblock list (or an explicit "none") on mainnet.
   assertBuildGeoblock(phase);
   return nextConfig;

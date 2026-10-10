@@ -1,6 +1,7 @@
 // Legal documents as data: the shape counsel's mainnet Terms of Service and
-// Privacy Policy are pasted into (lib/legal/mainnet-copy.ts), and the checks
-// a mainnet build runs on them (lib/legal/readiness.ts).
+// Privacy Policy are pasted into (lib/legal/mainnet-copy.ts), the modules the
+// Terms offer (TERMS_MODULES), and the checks a mainnet build runs on them
+// (lib/legal/readiness.ts, next.config.ts).
 //
 // Directive-free and import-free: next.config.ts loads it through
 // lib/legal/readiness.ts, and server and client pages render it
@@ -29,6 +30,50 @@ export type LegalDocument = {
   /** Optional paragraph under the page title. */
   lede?: string;
   clauses: LegalClause[];
+};
+
+/**
+ * The product modules whose availability the Terms of Service state (clause
+ * 2 of the mainnet Terms): the pilot-scope switches of lib/features.ts
+ * (PILOT_MODULES) and the two feature flags with a meaning for users
+ * (`payoutAirdrop`, `startupRaises`). `issuerRotation` and `passportClose`
+ * are operational switches and have none. Each has a NEXT_PUBLIC_FEATURE_*
+ * flag (next.config.ts TERMS_MODULE_FLAGS); tests/terms-modules.test.ts keeps
+ * this list, those flags and lib/features.ts equal, and checks offeredModules
+ * against the wording of clause 2. Clause 2 of version 2026-10-03 names each
+ * module except payout airdrops (an admin wallet pushing a payout to
+ * holders), which this code reads as part of "distributions".
+ */
+export const TERMS_MODULES = [
+  "secondaryTrading",
+  "governance",
+  "vesting",
+  "rights",
+  "distributions",
+  "custodyConversion",
+  "custodyDelivery",
+  "payoutAirdrop",
+  "startupRaises",
+] as const;
+
+export type TermsModule = (typeof TERMS_MODULES)[number];
+
+/** The Terms of Service: a legal document plus, machine-readable, the modules it offers. */
+export type TermsDocument = LegalDocument & {
+  /**
+   * The modules these Terms offer to users: the "currently offers" list of
+   * clause 2, written as module names. A mainnet build refuses a module flag
+   * that is on while its module is not listed here (next.config.ts
+   * assertBuildMainnetModules). The check is one-way: a listed module may
+   * have its flag off, so switching a module off (a rollback) builds without
+   * a new version of the Terms. The build is only half of it: the Terms
+   * version that first lists a module should also say that the Operator may
+   * suspend a module at any time. Without that sentence, a module switched
+   * off by flag alone stays offered in the published Terms, and the rollback
+   * needs a new Terms version after all. Primary sales and an issuer's
+   * direct transfers have no switch and are not listed.
+   */
+  offeredModules: readonly TermsModule[];
 };
 
 /** A real calendar date written yyyy-mm-dd. */
