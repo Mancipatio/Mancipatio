@@ -6,7 +6,9 @@
 // the program's check is (`x || !platform.is_paused(..)`). A new bit (8.3
 // added 0x40) is its constant in lib/pause-flags.ts plus one entry per check
 // in PAUSE_BIT_FLOWS (with `when` for a conditional one). MODULE_FLOWS maps
-// each pilot-scope module to the on-chain entries it owns.
+// each pilot-scope module to the on-chain entries it owns; a conversion and a
+// delivery open the same DeliveryEscrow, told apart by the purpose the page
+// declares (withGateFacts).
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +19,10 @@ import {
   CANCEL_OFFER_DISCRIMINATOR,
   CREATE_OFFER_DISCRIMINATOR,
   CREATE_PROPOSAL_DISCRIMINATOR,
+  REALIZE_CUSTODY_VAULT_DISCRIMINATOR,
+  RETURN_CUSTODY_VAULT_DISCRIMINATOR,
   TAKE_OFFER_DISCRIMINATOR,
+  TRIGGER_CUSTODY_VAULT_DISCRIMINATOR,
   getOpenCustodyVaultInstructionDataEncoder,
   getOpenSaleInstructionDataEncoder,
   RaiseType,
@@ -30,6 +35,7 @@ import {
   assertInstructionsInScope,
   assertInstructionsNotPaused,
   clearPauseFlagsCache,
+  declaredGateFacts,
   heldBit,
   MODULE_FLOWS,
   ModuleDisabledFlowError,
@@ -44,7 +50,9 @@ import {
   PausedFlowError,
   readPauseFlags,
   type PauseFlow,
+  withGateFacts,
 } from "@/lib/pause-gate";
+import { REGISTRY_ERROR_HINTS } from "@/lib/program-errors";
 import { explainSendError } from "@/lib/tx-error";
 
 const INSTRUCTIONS_DIR = join(process.cwd(), "../program/programs/asset_registry/src/instructions");
@@ -327,12 +335,167 @@ describe("the pilot scope before the wallet (MODULE_FLOWS)", () => {
     expect(() => assertInstructionsInScope([ix(CREATE_OFFER_DISCRIMINATOR)], "devnet")).toThrow(ModuleDisabledFlowError);
   });
 
-  it("custody vaults by type: conversion and delivery are modules, the clawback quarantine vault is not", () => {
+  // Conversions and deliveries both open a DeliveryEscrow with BurnAndAttest
+  // (ConversionPending is retired on-chain, 6142), so the page that opens a
+  // conversion declares its purpose (/admin/custody ApproveConversionModal).
+  const conversionOpen = () => withGateFacts(openVault(VaultType.DeliveryEscrow), { custodyPurpose: "conversion" });
+  const exits = () => [ix(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR), ix(REALIZE_CUSTODY_VAULT_DISCRIMINATOR), ix(RETURN_CUSTODY_VAULT_DISCRIMINATOR)];
+
+  it("custody vaults: a DeliveryEscrow open is a delivery unless declared a conversion; the clawback quarantine vault is in no module", () => {
     clearModules();
-    expect(outOfScopeInstruction([openVault(VaultType.ConversionPending)], "mainnet")?.module).toBe("custodyConversion");
     expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "mainnet")?.module).toBe("custodyDelivery");
+    expect(outOfScopeInstruction([conversionOpen()], "mainnet")?.module).toBe("custodyConversion");
     expect(outOfScopeInstruction([openVault(VaultType.RedemptionQueue)], "mainnet")).toBeNull();
+    expect(outOfScopeInstruction([openVault(VaultType.Vesting)], "mainnet")).toBeNull();
+    // A declared purpose does not move other vault types into a module.
+    expect(outOfScopeInstruction([withGateFacts(openVault(VaultType.RedemptionQueue), { custodyPurpose: "conversion" })], "mainnet")).toBeNull();
+    // Exits of an open escrow (trigger, realize, return) are in no module.
+    expect(outOfScopeInstruction(exits(), "mainnet")).toBeNull();
+  });
+
+  it("conversion alone switched on: the admin's conversion open passes, a delivery open is still refused before the wallet", () => {
+    clearModules();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    expect(() => assertInstructionsInScope([conversionOpen()], "mainnet")).not.toThrow();
+    const err = (() => { try { assertInstructionsInScope([openVault(VaultType.DeliveryEscrow)], "mainnet"); } catch (e) { return e; } })();
+    expect(err).toBeInstanceOf(ModuleDisabledFlowError);
+    expect((err as ModuleDisabledFlowError).module).toBe("custodyDelivery");
+    expect((err as Error).message).toBe(`${moduleDisabledMessage("custodyDelivery", "mainnet")} Nothing was sent to your wallet.`);
+    expect(outOfScopeInstruction(exits(), "mainnet")).toBeNull();
+  });
+
+  it("delivery alone switched on: a delivery open passes, a conversion open is refused; both on: both pass", () => {
+    clearModules();
     vi.stubEnv(PILOT_MODULE_ENV.custodyDelivery, "true");
     expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "mainnet")).toBeNull();
+    expect(outOfScopeInstruction([conversionOpen()], "mainnet")?.module).toBe("custodyConversion");
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow), conversionOpen()], "mainnet")).toBeNull();
+    // Devnet: on unless switched off, per module.
+    clearModules();
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow), conversionOpen()], "devnet")).toBeNull();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyDelivery, "false");
+    expect(outOfScopeInstruction([conversionOpen()], "devnet")).toBeNull();
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "devnet")?.module).toBe("custodyDelivery");
+  });
+
+  it("the retired ConversionPending type is in no module: the program refuses it (VaultTypeRetired, 6142), whatever the switches", () => {
+    clearModules();
+    expect(outOfScopeInstruction([openVault(VaultType.ConversionPending)], "mainnet")).toBeNull();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    expect(outOfScopeInstruction([openVault(VaultType.ConversionPending)], "mainnet")).toBeNull();
+    // The simulation gate shows the program's refusal before the wallet opens.
+    expect(REGISTRY_ERROR_HINTS.get(6142)).toMatch(/^Conversion-pending vaults are retired\. Holder conversions use a delivery escrow/);
+  });
+
+  it("a declaration belongs to the instruction object: the same object is returned, a copy is gated as undeclared", () => {
+    clearModules();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    const original = openVault(VaultType.DeliveryEscrow);
+    const declared = withGateFacts(original, { custodyPurpose: "conversion" });
+    expect(declared).toBe(original);
+    expect(declaredGateFacts(declared)).toEqual({ custodyPurpose: "conversion" });
+    expect(declaredGateFacts(openVault(VaultType.DeliveryEscrow))).toEqual({});
+    // A copy carries no declaration: it is a delivery, refused while delivery is off.
+    expect(outOfScopeInstruction([{ ...declared }], "mainnet")?.module).toBe("custodyDelivery");
+  });
+
+  it("the declaration does not lift the custody-entry pause: a conversion open is held by 0x08, the quarantine vault and the exits are not", () => {
+    expect(pausedInstruction(PAUSE.PAUSE_CUSTODY_ENTRY, [conversionOpen()])?.bit).toBe(PAUSE.PAUSE_CUSTODY_ENTRY);
+    expect(pausedInstruction(PAUSE.PAUSE_CUSTODY_ENTRY, [openVault(VaultType.RedemptionQueue)])).toBeNull();
+    expect(pausedInstruction(PAUSE.PAUSE_FLAGS_ALL, exits())).toBeNull();
+  });
+
+  // Source scans of /admin/custody, without its comments (a comment may name anything).
+  const custodyPage = () =>
+    readFileSync(join(process.cwd(), "app/admin/custody/page.tsx"), "utf8")
+      .replace(/(^[ \t]*|\{)\/\*[\s\S]*?\*\//gm, "$1")
+      .replace(/^[ \t]*\/\/.*$/gm, "");
+  /** The top-level function whose body holds `index`. */
+  const functionAt = (code: string, index: number) =>
+    [...code.slice(0, index).matchAll(/^(?:export (?:default )?)?function (\w+)\(/gm)].at(-1)?.[1];
+  /** The source of the top-level function `name`. */
+  const functionSource = (code: string, name: string) => {
+    const start = code.indexOf(`\nfunction ${name}(`);
+    expect(start).toBeGreaterThan(-1);
+    const end = code.indexOf("\nfunction ", start + 1);
+    return code.slice(start, end < 0 ? undefined : end);
+  };
+  /** Each JSX `{<condition> && (…)}` block whose condition matches `guard`, from its "(" to the matching ")". */
+  const guardedBlocks = (code: string, guard: RegExp) => {
+    const blocks: string[] = [];
+    for (const m of code.matchAll(/\{([^{};]*?)&&\s*\(/g)) {
+      if (!guard.test(m[1])) continue;
+      const open = m.index + m[0].length - 1;
+      let depth = 0;
+      let i = open;
+      for (; i < code.length; i++) {
+        if (code[i] === "(") depth++;
+        else if (code[i] === ")" && --depth === 0) break;
+      }
+      blocks.push(code.slice(open, i + 1));
+    }
+    return blocks;
+  };
+
+  it("/admin/custody declares the conversion purpose once, on the conversion approval only", () => {
+    const code = custodyPage();
+    // One import, under its own name, and one call: a constant or an alias cannot declare elsewhere.
+    expect(code).toContain('import { withGateFacts } from "@/lib/pause-gate";');
+    expect(code).not.toMatch(/withGateFacts\s+as\b/);
+    const calls = [...code.matchAll(/\bwithGateFacts\(/g)];
+    expect(calls).toHaveLength(1);
+    expect(functionAt(code, calls[0].index)).toBe("ApproveConversionModal");
+    expect(functionSource(code, "ApproveConversionModal")).toContain('return withGateFacts(ix, { custodyPurpose: "conversion" });');
+    const purposes = [...code.matchAll(/custodyPurpose/g)];
+    expect(purposes).toHaveLength(1);
+    expect(functionAt(code, purposes[0].index)).toBe("ApproveConversionModal");
+  });
+
+  it("/admin/custody with delivery off hides only the delivery entry: every exit stays outside the delivery condition", () => {
+    const code = custodyPage();
+    // The delivery switch is read by the "+ Open vault" form and the delivery request queue only.
+    const owners = new Set([...code.matchAll(/\bdeliveryOn\b/g)].map((m) => functionAt(code, m.index)));
+    expect(owners).toEqual(new Set(["OpenVaultModal", "DeliveryRequestsSection"]));
+
+    // "+ Open vault": the switch removes the DeliveryEscrow type, nothing else.
+    const openVault = functionSource(code, "OpenVaultModal");
+    expect(openVault.split("\n").filter((l) => /\bdeliveryOn\b/.test(l)).map((l) => l.trim())).toEqual([
+      'const deliveryOn = moduleEnabled("custodyDelivery");',
+      "(i === VaultType.DeliveryEscrow && !deliveryOn) ? null : (",
+    ]);
+
+    // The queue: the switch decides the approve button (or, off, "Finish
+    // recording approval" for an approval this wallet already sent) and the
+    // approve modal (record-only when off), and nothing else.
+    const queue = functionSource(code, "DeliveryRequestsSection");
+    expect(queue.split("\n").filter((l) => /\bdeliveryOn\b/.test(l)).map((l) => l.trim())).toEqual([
+      'const deliveryOn = moduleEnabled("custodyDelivery");',
+      "deliveryOn",
+      "deliveryOn || savedOpens.has(r.id);",
+      "{deliveryOn ? (",
+      "recordOnly={!deliveryOn}",
+    ]);
+    const guarded = guardedBlocks(queue, /\bdeliveryOn\b|\bapprovalOffered\(/);
+    expect(guarded).toHaveLength(2);
+    expect(guarded[0]).toContain("onClick={() => setApproveReq(r)}");
+    expect(guarded[1]).toMatch(/^\(\s*<ApproveDeliveryModal\b/);
+    expect(guarded[1]).toContain("recordOnly={!deliveryOn}");
+    // Reject, cancel, mark in delivery, confirm and cancel & return, and their modals.
+    const exits = [
+      "setRejectReq(r)", "setCancelOpenReq(r)", "markInDelivery(r)", "setConfirmReq(r)", "setReturnReq(r)",
+      "open={rejectReq !== null}", "open={cancelOpenReq !== null}", "open={confirmReq !== null}", "open={returnReq !== null}",
+    ];
+    for (const exit of exits) {
+      expect(queue).toContain(exit);
+      for (const block of guarded) expect(block).not.toContain(exit);
+    }
+
+    // Off, the delivery modal never shows the approval form or "Open vault".
+    const modal = functionSource(code, "ApproveDeliveryModal");
+    expect(modal).toMatch(/async function approve\(\) \{\s*if \(\s*recordOnly \|\|/);
+    const recordOnlyView = modal.slice(modal.indexOf("if (recordOnly)"), modal.indexOf("\n  return (", modal.indexOf("if (recordOnly)")));
+    expect(recordOnlyView).toContain("{recovery.panel}");
+    expect(recordOnlyView).not.toMatch(/approve\(\)|Open vault|setVaultId|AttestationDocSection/);
   });
 });

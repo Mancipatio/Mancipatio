@@ -53,6 +53,9 @@ import { resetPriorityFeeCache } from "@/lib/priority-fee";
 import { setComputeUnitLimitInstruction, setComputeUnitPriceInstruction } from "@/lib/compute-budget";
 import { PROBE_LIFETIME, SimulationRefusedError, SimulationUnavailableError } from "@/lib/simulation-gate";
 import { explainSendError, SALE_AUTHORITY_HINT, SALE_SYNC_SUFFIX } from "@/lib/tx-error";
+import { PILOT_MODULE_ENV } from "@/lib/features";
+import { ModuleDisabledFlowError, withGateFacts } from "@/lib/pause-gate";
+import { getOpenCustodyVaultInstructionDataEncoder, RealizeAction, VaultType } from "@/lib/generated/asset_registry";
 
 const WALLET = address("7Np41oeYqPefeNQEHSv1UDhYrehxin3NStELsSKCT4K2");
 const PROGRAM = address("FJs1EM1ND89L9sUXaS8VBKYXjmoXCkkVSJKRE19hmYxS");
@@ -388,5 +391,57 @@ describe("the simulation gate", () => {
     expect(statuses).toHaveBeenCalledTimes(2);
     expect(events.indexOf("status:signature")).toBeGreaterThan(-1);
     expect(events.lastIndexOf("status:signature")).toBeLessThan(events.indexOf("simulate"));
+  });
+});
+
+describe("the pilot scope on the wallet path: a page's declared purpose reaches the gate", () => {
+  // /admin/custody sends a conversion approval as tx.send({ instructions: [ix],
+  // feePayer }); @solana/react-hooks' useSendTransaction copies only the
+  // request ({ ...request, authority }) and calls this client's
+  // prepareAndSend, which runs the pilot-scope gate on input.instructions
+  // first. The declaration (withGateFacts) belongs to the instruction object,
+  // so it must still be on that object when the gate reads it; if a library
+  // upgrade ever copies instructions before the gate, the second case shows
+  // what happens (a delivery, refused), and this test is where it shows.
+  const conversionOpen = () =>
+    withGateFacts(
+      {
+        programAddress: PROGRAM,
+        data: new Uint8Array(getOpenCustodyVaultInstructionDataEncoder().encode({
+          vaultId: BigInt(1), vaultType: VaultType.DeliveryEscrow, realizeAction: RealizeAction.BurnAndAttest,
+          amount: BigInt(10), deadline: BigInt(0), metadataHash: new Uint8Array(32), beneficiary: WALLET,
+        })),
+      } as Instruction,
+      { custodyPurpose: "conversion" },
+    );
+
+  beforeEach(() => {
+    vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
+    oracle.network = "mainnet";
+    for (const name of Object.values(PILOT_MODULE_ENV)) vi.stubEnv(name, "");
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+  });
+
+  it("mainnet, conversion alone switched on: the declared conversion open passes the gate and reaches the SDK", async () => {
+    const f = fixture("mainnet");
+    const declared = conversionOpen();
+    // As the hook passes it: a shallow copy of the request, the same instruction objects.
+    const sent = { ...request({ instructions: [declared] }) };
+    await expect(f.guarded.transaction.prepareAndSend(sent)).resolves.toBe("signature");
+    expect(f.prepareAndSend).toHaveBeenCalledOnce();
+    expect(events).toContain("simulate");
+    expect(events.at(-1)).toBe("sdk.prepareAndSend");
+  });
+
+  it("a copy of the instruction carries no declaration: it is gated as a delivery and refused before the wallet", async () => {
+    const f = fixture("mainnet");
+    const copied = { ...conversionOpen() };
+    const failure = await f.guarded.transaction.prepareAndSend(request({ instructions: [copied] })).catch((e: unknown) => e);
+    expect(failure).toBeInstanceOf(ModuleDisabledFlowError);
+    expect((failure as ModuleDisabledFlowError).module).toBe("custodyDelivery");
+    expect(explainSendError(failure)).toBe("Physical delivery: not available on Solana mainnet. Nothing was sent to your wallet.");
+    expect(events).not.toContain("simulate");
+    expect(events).not.toContain("authorize");
+    expect(f.prepareAndSend).not.toHaveBeenCalled();
   });
 });

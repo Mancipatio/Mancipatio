@@ -61,9 +61,9 @@ it (`front/next.config.ts`); an operations guard can be waived by name with
 | `GOOGLE_CLIENT_SECRET` | Secret | of that client | set | Google sign-in off | `lib/server/account-google.ts` |
 | `HEALTH_TOKEN` | Secret | ≥ 32, no whitespace (guard `health-token`) | recommended | `/api/health` never shows details | `lib/server/health.ts` |
 | `SENTRY_DSN` | Secret-ish (project key) | `https://<key>@<org>.ingest.de.sentry.io/<project id>` of an EU project: the guard `sentry` applies the runtime parser's rules | recommended | Server errors only in Vercel logs | `lib/request-error-report.ts` |
-| `TOS_SERVER_GATE` | Server, runtime | leave unset: mainnet always enforces the Terms acceptance on the signed buy and sell routes | `enforce` only to rehearse the mainnet behaviour | No server check off mainnet (the client-side dialog only) | `lib/server/tos-gate.ts` |
+| `TOS_SERVER_GATE` | Server, runtime | leave unset: mainnet always enforces the Terms acceptance on the signed buy, sell and conversion-request routes | `enforce` only to rehearse the mainnet behaviour | No server check off mainnet (the client-side dialog only) | `lib/server/tos-gate.ts` |
 | `GEOBLOCK_COUNTRIES` | Server, build + runtime | **counsel's list** (guard): ISO 3166 codes `KP,IR,CU,SY,UA-43,…`, or `none` written down on purpose; see "Geoblocking" | optional (unset blocks nothing) | Mainnet build refused; at runtime mainnet transactional routes answer 451 | `lib/geoblock.ts`, `proxy.ts` |
-| `SANCTIONS_SCREENING` | Server, runtime | leave unset: mainnet always refuses the screened routes (commit, purchase record, OTC request, resell listing, passport, verification) while the OFAC SDN list is older than 3 days, empty or unreadable (503) | `enforce` only to rehearse that on devnet | Off mainnet an unusable list is only logged; a hit is refused on every network | `lib/server/sanctions.ts` |
+| `SANCTIONS_SCREENING` | Server, runtime | leave unset: mainnet always refuses the screened routes (commit, purchase record, OTC request, resell listing, conversion request, passport, verification) while the OFAC SDN list is older than 3 days, empty or unreadable (503) | `enforce` only to rehearse that on devnet | Off mainnet an unusable list is only logged; a hit is refused on every network | `lib/server/sanctions.ts` |
 | `MAINNET_LEGAL_COPY_APPROVED` | Build | `true` only after counsel reviewed the rendered mainnet pages (guard; runbook §17) | — | Mainnet build refused | `next.config.ts` |
 | `MAINNET_LICENSE_NOT_REQUIRED` | Build | `true` **only** on counsel's written opinion that no licence is needed, while `OPERATORS.mainnet.licence` is null; refused together with a recorded licence (guard; runbook §17) | — | Mainnet build refused while no licence is recorded | `lib/legal/readiness.ts` |
 | `MAINNET_OPS_WAIVERS` | Build | empty; see below | — | Every operations guard applies | `next.config.ts` |
@@ -110,8 +110,8 @@ on; on devnet, testnet and localnet it is on unless it reads as off**
 | Vesting series | `NEXT_PUBLIC_FEATURE_VESTING` | `/api/vesting-series/create`, `/prepare-creation`, `/admin-review` (decision `approved` only) | `create_vesting_series` | `/portfolio/vesting`, `/issuer/vesting-series`, `/admin/vesting` |
 | Rights-Token issuances | `NEXT_PUBLIC_FEATURE_RIGHTS` | `/api/vesting/create` (the rights builder) | `create_rights_issuance` | `/portfolio/rights` (with distributions), `/admin/rights`, `/issuer/vesting` |
 | Distributions | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | `/api/distribution-plans/prepare`, `/bind` | `create_distribution`, `route_yield` | `/portfolio/rights` (with rights), `/admin/payouts` |
-| Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type ConversionPending | `/portfolio/conversion`, `/admin/custody` (with delivery) |
-| Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | `open_custody_vault` of type DeliveryEscrow | `/portfolio/delivery`, `/admin/custody` (with conversion) |
+| Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type DeliveryEscrow declared as a conversion (the admin's "Approve & open vault" on a conversion request, `/admin/custody`). ConversionPending is retired on-chain (VaultTypeRetired, 6142) and belongs to no module | `/portfolio/conversion`, `/admin/custody` (with delivery) |
+| Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | every other `open_custody_vault` of type DeliveryEscrow (a delivery request's approval, a DeliveryEscrow from "+ Open vault") | `/portfolio/delivery`, `/admin/custody` (with conversion; with delivery off the page hides "Approve & open vault" on delivery requests and the DeliveryEscrow type in "+ Open vault", and keeps reject, cancel, return, confirm and "Finish recording approval" for a vault already opened) |
 
 Off means: the entry routes answer 403 with "…: not available on Solana
 mainnet." before any database, screening or chain work, the
@@ -121,9 +121,18 @@ hide their entry buttons ("+ Create offer", "Fund escrow", "+ Create
 proposal" and the votes, "+ New issuance"). An on-chain entry without a
 server route (an OTC offer, a proposal, an issuance) is refused by the
 wallet path before the wallet opens (`lib/pause-gate.ts` `MODULE_FLOWS`,
-called from `lib/verified-solana-client.ts`); the program itself still
-accepts it unless a pause bit is set, which is why the pilot also keeps
-0x1c paused (runbook §8). Exits of existing positions stay open everywhere
+called from `lib/verified-solana-client.ts`). A conversion and a delivery
+open the same DeliveryEscrow on-chain, so the conversion approval declares
+its purpose (`withGateFacts`) and is gated by the conversion switch alone:
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` is the only module switch
+conversions need (delivery stays off). It is not the only prerequisite:
+the Terms in force must offer conversion and the program's 0x08 pause
+(custody entry) must be cleared for the open (runbook §8, "Pilot pause
+mask"). The program itself still accepts an on-chain entry unless a pause
+bit is set, which is why the pilot also keeps 0x1c paused (runbook §8).
+With delivery off, `/admin/custody` still lets the wallet that opened a
+delivery vault finish recording it ("Finish recording approval", no
+transaction). Exits of existing positions stay open everywhere
 (cancels, withdrawals, deal declines and archives, claims, refunds, custody
 returns, the batches of an existing distribution, vesting-series send-backs
 and rejections), like the program's emergency pause. Payout airdrops

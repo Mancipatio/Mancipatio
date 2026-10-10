@@ -2348,9 +2348,9 @@ fast-forwarded to a commit that carries it (§15 "Apply migration 0080").
 ### Sanctions list (8.5, migration 0078)
 
 The screened routes (commit, purchase record, OTC request and escrow
-opening, resell listing, passport application and issuance, verification)
-check the wallet against the OFAC SDN list's Solana addresses
-(`front/lib/server/sanctions.ts`). On mainnet they refuse (503) while the
+opening, resell listing, conversion request, passport application and
+issuance, verification) check the wallet against the OFAC SDN list's
+Solana addresses (`front/lib/server/sanctions.ts`). On mainnet they refuse (503) while the
 list is older than 3 days, empty or unreadable, so the list must be loaded
 and its daily job running **before the first sale opens**:
 
@@ -3474,9 +3474,10 @@ Build-time variables (mainnet Vercel project only, never `NEXT_PUBLIC_`):
 
 Server variable (runtime): `TOS_SERVER_GATE=enforce` makes a TEST network
 require a recorded Terms acceptance on `/api/launchpad/commit`,
-`/api/otc/create` and `/api/resell/create` (409 without, 503 when it cannot
-be checked), to rehearse mainnet, where it is always on. The client dialog
-fails closed on mainnet regardless; it is mounted on the marketplace and
+`/api/otc/create`, `/api/resell/create`, `/api/conversion/create` and the
+sale page's pre-buy check `/api/compliance/screen-wallet` (409 without, 503
+when it cannot be checked), to rehearse mainnet, where it is always on.
+The client dialog fails closed on mainnet regardless; it is mounted on the marketplace and
 portfolio pages and on the `/markets/resell` board (whose OTC request is one
 of the gated routes), so every gated route has a page that offers the
 acceptance. Binding the Terms version into the purchase memo is a separate,
