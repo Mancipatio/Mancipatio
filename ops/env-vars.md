@@ -110,8 +110,8 @@ on; on devnet, testnet and localnet it is on unless it reads as off**
 | Vesting series | `NEXT_PUBLIC_FEATURE_VESTING` | `/api/vesting-series/create`, `/prepare-creation`, `/admin-review` (decision `approved` only) | `create_vesting_series` | `/portfolio/vesting`, `/issuer/vesting-series`, `/admin/vesting` |
 | Rights-Token issuances | `NEXT_PUBLIC_FEATURE_RIGHTS` | `/api/vesting/create` (the rights builder) | `create_rights_issuance` | `/portfolio/rights` (with distributions), `/admin/rights`, `/issuer/vesting` |
 | Distributions | `NEXT_PUBLIC_FEATURE_DISTRIBUTIONS` | `/api/distribution-plans/prepare`, `/bind` | `create_distribution`, `route_yield` | `/portfolio/rights` (with rights), `/admin/payouts` |
-| Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type ConversionPending | `/portfolio/conversion`, `/admin/custody` (with delivery) |
-| Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | `open_custody_vault` of type DeliveryEscrow | `/portfolio/delivery`, `/admin/custody` (with conversion) |
+| Conversion into shares | `NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION` | `/api/conversion/create` | `open_custody_vault` of type DeliveryEscrow declared as a conversion (the admin's "Approve & open vault" on a conversion request, `/admin/custody`). ConversionPending is retired on-chain (VaultTypeRetired, 6142) and belongs to no module | `/portfolio/conversion`, `/admin/custody` (with delivery) |
+| Physical delivery | `NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY` | `/api/delivery/create` | every other `open_custody_vault` of type DeliveryEscrow (a delivery request's approval, a DeliveryEscrow from "+ Open vault") | `/portfolio/delivery`, `/admin/custody` (with conversion; with delivery off the page hides "Approve & open vault" on delivery requests and the DeliveryEscrow type in "+ Open vault", and keeps reject, cancel, return and confirm) |
 
 Off means: the entry routes answer 403 with "…: not available on Solana
 mainnet." before any database, screening or chain work, the
@@ -121,8 +121,12 @@ hide their entry buttons ("+ Create offer", "Fund escrow", "+ Create
 proposal" and the votes, "+ New issuance"). An on-chain entry without a
 server route (an OTC offer, a proposal, an issuance) is refused by the
 wallet path before the wallet opens (`lib/pause-gate.ts` `MODULE_FLOWS`,
-called from `lib/verified-solana-client.ts`); the program itself still
-accepts it unless a pause bit is set, which is why the pilot also keeps
+called from `lib/verified-solana-client.ts`). A conversion and a delivery
+open the same DeliveryEscrow on-chain, so the conversion approval declares
+its purpose (`withGateFacts`) and is gated by the conversion switch alone:
+`NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION=true` is enough for conversions,
+and delivery stays off. The program itself still
+accepts such an entry unless a pause bit is set, which is why the pilot also keeps
 0x1c paused (runbook §8). Exits of existing positions stay open everywhere
 (cancels, withdrawals, deal declines and archives, claims, refunds, custody
 returns, the batches of an existing distribution, vesting-series send-backs

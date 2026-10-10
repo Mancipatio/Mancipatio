@@ -30,7 +30,10 @@
 // proposals and votes, issuances, series, distributions, custody vaults).
 // What finishes, closes or pays out what already exists (cancels, expiries,
 // claims, withdrawals, the batches of an existing distribution) is in no
-// module, like the exits of a pause.
+// module, like the exits of a pause. Where the instruction data cannot tell
+// two modules apart (a conversion and a delivery open the same
+// DeliveryEscrow), the page that builds the instruction declares what it is
+// for (withGateFacts), and the gate reads that declaration.
 //
 // Enforcement stays on-chain (the pause) and on the server (the module
 // routes). This is a display gate: the pause read is cached for a few
@@ -78,13 +81,47 @@ import {
 const Ix = AssetRegistryInstruction;
 
 /**
+ * What a custody vault open is for, when the vault type alone cannot say.
+ * Conversion into company shares and physical delivery both open a
+ * DeliveryEscrow with BurnAndAttest (ConversionPending is retired on-chain:
+ * VaultTypeRetired, 6142), so the instruction data is the same for both. The
+ * page that builds a conversion open declares it (withGateFacts); a
+ * DeliveryEscrow open without that declaration is a delivery.
+ */
+export type CustodyPurpose = "conversion";
+
+/**
  * What a conditional check may look at: the instruction's data (null when a
  * page asks about an instruction it has not built yet), and facts a page
- * knows about the accounts the instruction will name (the sale's raise type).
- * A field is added here when a new conditional check needs it.
+ * knows about the accounts the instruction will name (the sale's raise type)
+ * or about what the instruction is for (a custody vault's purpose). A field
+ * is added here when a new conditional check needs it.
  */
-export type GateFacts = { raiseType?: RaiseType };
+export type GateFacts = { raiseType?: RaiseType; custodyPurpose?: CustodyPurpose };
 export type GateSubject = { data: Uint8Array | null; facts: GateFacts };
+
+/** Facts a page declared about one instruction object (withGateFacts). */
+const DECLARED_FACTS = new WeakMap<object, GateFacts>();
+
+/**
+ * Declares `facts` about `instruction` for the gates in this file, which
+ * read them when the transaction goes through lib/verified-solana-client.ts.
+ * Returns the same instruction, so a builder's result can be wrapped where
+ * it is built. The declaration belongs to this object: a copy of the
+ * instruction carries none and is gated as if nothing had been declared.
+ * Display gate only, like the rest of this file: the program and the
+ * server routes stay the authority.
+ */
+export function withGateFacts<T extends object>(instruction: T, facts: GateFacts): T {
+  DECLARED_FACTS.set(instruction, { ...DECLARED_FACTS.get(instruction), ...facts });
+  return instruction;
+}
+
+/** The facts declared about `instruction` (none: {}). */
+export function declaredGateFacts(instruction: object): GateFacts {
+  return DECLARED_FACTS.get(instruction) ?? {};
+}
+
 /** true: held back; false: not; null: cannot tell here (the program decides). */
 export type GateCondition = (subject: GateSubject) => boolean | null;
 
@@ -195,16 +232,16 @@ export function heldBit(
 
 type InstructionLike = { programAddress: Address | string; data?: Uint8Array | ArrayLike<number> };
 
-/** Each instruction of this program in `instructions`, identified, with its data. */
-function registryInstructions(
-  instructions: readonly InstructionLike[],
-): { instruction: AssetRegistryInstruction; data: Uint8Array }[] {
-  const out: { instruction: AssetRegistryInstruction; data: Uint8Array }[] = [];
+type RegistryInstruction = { instruction: AssetRegistryInstruction; data: Uint8Array; declared: GateFacts };
+
+/** Each instruction of this program in `instructions`, identified, with its data and declared facts. */
+function registryInstructions(instructions: readonly InstructionLike[]): RegistryInstruction[] {
+  const out: RegistryInstruction[] = [];
   for (const ix of instructions) {
     if (ix.programAddress !== ASSET_REGISTRY_PROGRAM_ADDRESS || !ix.data) continue;
     const data = ix.data instanceof Uint8Array ? ix.data : Uint8Array.from(ix.data);
     try {
-      out.push({ instruction: identifyAssetRegistryInstruction(data), data });
+      out.push({ instruction: identifyAssetRegistryInstruction(data), data, declared: declaredGateFacts(ix) });
     } catch {
       // Not an instruction of this program version: the program decides.
     }
@@ -222,8 +259,8 @@ export function pausedInstruction(
   instructions: readonly InstructionLike[],
   facts: GateFacts = {},
 ): { instruction: AssetRegistryInstruction; bit: number } | null {
-  for (const { instruction, data } of registryInstructions(instructions)) {
-    const bit = heldBit(flags, instruction, { data, facts });
+  for (const { instruction, data, declared } of registryInstructions(instructions)) {
+    const bit = heldBit(flags, instruction, { data, facts: { ...facts, ...declared } });
     if (bit !== null) return { instruction, bit };
   }
   return null;
@@ -272,6 +309,18 @@ const vaultOfType = (type: VaultType): GateCondition => ({ data }) => {
   }
 };
 
+/**
+ * A DeliveryEscrow open whose declared purpose is (or is not) a conversion
+ * (null: the data could not be read). The admin's approval of a conversion
+ * request declares "conversion" (/admin/custody ApproveConversionModal);
+ * every other DeliveryEscrow open is a physical delivery.
+ */
+const deliveryEscrowFor = (conversion: boolean): GateCondition => (subject) => {
+  const escrow = vaultOfType(VaultType.DeliveryEscrow)(subject);
+  if (escrow !== true) return escrow;
+  return (subject.facts.custodyPurpose === "conversion") === conversion;
+};
+
 /** Module switch → the instructions that start its activity. The one place to add a module's entry. */
 export const MODULE_FLOWS: readonly ModuleFlow[] = [
   {
@@ -282,8 +331,12 @@ export const MODULE_FLOWS: readonly ModuleFlow[] = [
   { module: "vesting", instructions: [Ix.CreateVestingSeries] },
   { module: "rights", instructions: [Ix.CreateRightsIssuance] },
   { module: "distributions", instructions: [Ix.CreateDistribution, Ix.RouteYield] },
-  { module: "custodyConversion", instructions: [Ix.OpenCustodyVault], when: vaultOfType(VaultType.ConversionPending) },
-  { module: "custodyDelivery", instructions: [Ix.OpenCustodyVault], when: vaultOfType(VaultType.DeliveryEscrow) },
+  // Conversion and delivery escrows are the same on-chain (DeliveryEscrow,
+  // BurnAndAttest); the declared purpose tells them apart. A ConversionPending
+  // open is in no module: the program refuses it (VaultTypeRetired, 6142),
+  // and the simulation gate shows that refusal before the wallet opens.
+  { module: "custodyConversion", instructions: [Ix.OpenCustodyVault], when: deliveryEscrowFor(true) },
+  { module: "custodyDelivery", instructions: [Ix.OpenCustodyVault], when: deliveryEscrowFor(false) },
 ];
 
 /** The switched-off module that holds `instruction` back for `subject`, or null. */
@@ -300,13 +353,17 @@ export function heldModule(
   return null;
 }
 
-/** The first instruction a switched-off module holds back, as { instruction, module }, or null. */
+/**
+ * The first instruction a switched-off module holds back, as { instruction,
+ * module }, or null. Each instruction is judged with the facts declared
+ * about it (withGateFacts).
+ */
 export function outOfScopeInstruction(
   instructions: readonly InstructionLike[],
   network: Network = detectNetwork(),
 ): { instruction: AssetRegistryInstruction; module: PilotModule } | null {
-  for (const { instruction, data } of registryInstructions(instructions)) {
-    const held = heldModule(instruction, { data, facts: {} }, network);
+  for (const { instruction, data, declared } of registryInstructions(instructions)) {
+    const held = heldModule(instruction, { data, facts: declared }, network);
     if (held) return { instruction, module: held };
   }
   return null;

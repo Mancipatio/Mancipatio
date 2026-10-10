@@ -6,7 +6,9 @@
 // the program's check is (`x || !platform.is_paused(..)`). A new bit (8.3
 // added 0x40) is its constant in lib/pause-flags.ts plus one entry per check
 // in PAUSE_BIT_FLOWS (with `when` for a conditional one). MODULE_FLOWS maps
-// each pilot-scope module to the on-chain entries it owns.
+// each pilot-scope module to the on-chain entries it owns; a conversion and a
+// delivery open the same DeliveryEscrow, told apart by the purpose the page
+// declares (withGateFacts).
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -17,7 +19,10 @@ import {
   CANCEL_OFFER_DISCRIMINATOR,
   CREATE_OFFER_DISCRIMINATOR,
   CREATE_PROPOSAL_DISCRIMINATOR,
+  REALIZE_CUSTODY_VAULT_DISCRIMINATOR,
+  RETURN_CUSTODY_VAULT_DISCRIMINATOR,
   TAKE_OFFER_DISCRIMINATOR,
+  TRIGGER_CUSTODY_VAULT_DISCRIMINATOR,
   getOpenCustodyVaultInstructionDataEncoder,
   getOpenSaleInstructionDataEncoder,
   RaiseType,
@@ -30,6 +35,7 @@ import {
   assertInstructionsInScope,
   assertInstructionsNotPaused,
   clearPauseFlagsCache,
+  declaredGateFacts,
   heldBit,
   MODULE_FLOWS,
   ModuleDisabledFlowError,
@@ -44,7 +50,9 @@ import {
   PausedFlowError,
   readPauseFlags,
   type PauseFlow,
+  withGateFacts,
 } from "@/lib/pause-gate";
+import { REGISTRY_ERROR_HINTS } from "@/lib/program-errors";
 import { explainSendError } from "@/lib/tx-error";
 
 const INSTRUCTIONS_DIR = join(process.cwd(), "../program/programs/asset_registry/src/instructions");
@@ -327,12 +335,88 @@ describe("the pilot scope before the wallet (MODULE_FLOWS)", () => {
     expect(() => assertInstructionsInScope([ix(CREATE_OFFER_DISCRIMINATOR)], "devnet")).toThrow(ModuleDisabledFlowError);
   });
 
-  it("custody vaults by type: conversion and delivery are modules, the clawback quarantine vault is not", () => {
+  // Conversions and deliveries both open a DeliveryEscrow with BurnAndAttest
+  // (ConversionPending is retired on-chain, 6142), so the page that opens a
+  // conversion declares its purpose (/admin/custody ApproveConversionModal).
+  const conversionOpen = () => withGateFacts(openVault(VaultType.DeliveryEscrow), { custodyPurpose: "conversion" });
+  const exits = () => [ix(TRIGGER_CUSTODY_VAULT_DISCRIMINATOR), ix(REALIZE_CUSTODY_VAULT_DISCRIMINATOR), ix(RETURN_CUSTODY_VAULT_DISCRIMINATOR)];
+
+  it("custody vaults: a DeliveryEscrow open is a delivery unless declared a conversion; the clawback quarantine vault is in no module", () => {
     clearModules();
-    expect(outOfScopeInstruction([openVault(VaultType.ConversionPending)], "mainnet")?.module).toBe("custodyConversion");
     expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "mainnet")?.module).toBe("custodyDelivery");
+    expect(outOfScopeInstruction([conversionOpen()], "mainnet")?.module).toBe("custodyConversion");
     expect(outOfScopeInstruction([openVault(VaultType.RedemptionQueue)], "mainnet")).toBeNull();
+    expect(outOfScopeInstruction([openVault(VaultType.Vesting)], "mainnet")).toBeNull();
+    // A declared purpose does not move other vault types into a module.
+    expect(outOfScopeInstruction([withGateFacts(openVault(VaultType.RedemptionQueue), { custodyPurpose: "conversion" })], "mainnet")).toBeNull();
+    // Exits of an open escrow (trigger, realize, return) are in no module.
+    expect(outOfScopeInstruction(exits(), "mainnet")).toBeNull();
+  });
+
+  it("conversion alone switched on: the admin's conversion open passes, a delivery open is still refused before the wallet", () => {
+    clearModules();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    expect(() => assertInstructionsInScope([conversionOpen()], "mainnet")).not.toThrow();
+    const err = (() => { try { assertInstructionsInScope([openVault(VaultType.DeliveryEscrow)], "mainnet"); } catch (e) { return e; } })();
+    expect(err).toBeInstanceOf(ModuleDisabledFlowError);
+    expect((err as ModuleDisabledFlowError).module).toBe("custodyDelivery");
+    expect((err as Error).message).toBe(`${moduleDisabledMessage("custodyDelivery", "mainnet")} Nothing was sent to your wallet.`);
+    expect(outOfScopeInstruction(exits(), "mainnet")).toBeNull();
+  });
+
+  it("delivery alone switched on: a delivery open passes, a conversion open is refused; both on: both pass", () => {
+    clearModules();
     vi.stubEnv(PILOT_MODULE_ENV.custodyDelivery, "true");
     expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "mainnet")).toBeNull();
+    expect(outOfScopeInstruction([conversionOpen()], "mainnet")?.module).toBe("custodyConversion");
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow), conversionOpen()], "mainnet")).toBeNull();
+    // Devnet: on unless switched off, per module.
+    clearModules();
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow), conversionOpen()], "devnet")).toBeNull();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyDelivery, "false");
+    expect(outOfScopeInstruction([conversionOpen()], "devnet")).toBeNull();
+    expect(outOfScopeInstruction([openVault(VaultType.DeliveryEscrow)], "devnet")?.module).toBe("custodyDelivery");
+  });
+
+  it("the retired ConversionPending type is in no module: the program refuses it (VaultTypeRetired, 6142), whatever the switches", () => {
+    clearModules();
+    expect(outOfScopeInstruction([openVault(VaultType.ConversionPending)], "mainnet")).toBeNull();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    expect(outOfScopeInstruction([openVault(VaultType.ConversionPending)], "mainnet")).toBeNull();
+    // The simulation gate shows the program's refusal before the wallet opens.
+    expect(REGISTRY_ERROR_HINTS.get(6142)).toMatch(/^Conversion-pending vaults are retired\. Holder conversions use a delivery escrow/);
+  });
+
+  it("a declaration belongs to the instruction object: the same object is returned, a copy is gated as undeclared", () => {
+    clearModules();
+    vi.stubEnv(PILOT_MODULE_ENV.custodyConversion, "true");
+    const original = openVault(VaultType.DeliveryEscrow);
+    const declared = withGateFacts(original, { custodyPurpose: "conversion" });
+    expect(declared).toBe(original);
+    expect(declaredGateFacts(declared)).toEqual({ custodyPurpose: "conversion" });
+    expect(declaredGateFacts(openVault(VaultType.DeliveryEscrow))).toEqual({});
+    // A copy carries no declaration: it is a delivery, refused while delivery is off.
+    expect(outOfScopeInstruction([{ ...declared }], "mainnet")?.module).toBe("custodyDelivery");
+  });
+
+  it("the declaration does not lift the custody-entry pause: a conversion open is held by 0x08, the quarantine vault and the exits are not", () => {
+    expect(pausedInstruction(PAUSE.PAUSE_CUSTODY_ENTRY, [conversionOpen()])?.bit).toBe(PAUSE.PAUSE_CUSTODY_ENTRY);
+    expect(pausedInstruction(PAUSE.PAUSE_CUSTODY_ENTRY, [openVault(VaultType.RedemptionQueue)])).toBeNull();
+    expect(pausedInstruction(PAUSE.PAUSE_FLAGS_ALL, exits())).toBeNull();
+  });
+
+  it("/admin/custody declares the conversion purpose on the conversion approval only", () => {
+    const page = readFileSync(join(process.cwd(), "app/admin/custody/page.tsx"), "utf8");
+    const declarations = [...page.matchAll(/custodyPurpose: "conversion"/g)];
+    expect(declarations).toHaveLength(1);
+    const start = page.indexOf("function ApproveConversionModal(");
+    const end = page.indexOf("\nfunction ", start + 1);
+    expect(start).toBeGreaterThan(-1);
+    expect(declarations[0].index).toBeGreaterThan(start);
+    expect(declarations[0].index).toBeLessThan(end);
+    // The delivery approval and the generic "+ Open vault" form declare nothing.
+    const delivery = page.slice(page.indexOf("function ApproveDeliveryModal("));
+    expect(delivery).not.toContain("withGateFacts(");
   });
 });

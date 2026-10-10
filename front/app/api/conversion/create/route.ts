@@ -13,6 +13,16 @@
 // (`convertible_to`, set jointly by platform + issuer — category is NOT the
 // gate, so convertible revenue share works too); and the signer must
 // actually hold the requested amount.
+//
+// Compliance, as on /api/otc/create: the signing wallet is screened against
+// the sanctions lists (lib/server/sanctions.ts: a hit refuses with 403 and
+// raises a compliance alert; on mainnet a list that cannot answer refuses
+// with 503, fail closed), after the request itself is valid and before any
+// chain read. A verified dossier does not replace the screen: a wallet can
+// be listed after its dossier was verified. On mainnet the wallet must also
+// have accepted the Terms in force (lib/server/tos-gate.ts: 409 without an
+// acceptance, 503 when it cannot be checked), checked last, right before
+// the write.
 
 import { NextResponse } from "next/server";
 import { requireModule } from "@/lib/server/feature-gate";
@@ -23,6 +33,8 @@ import {
 } from "@/lib/server/token-holdings";
 import { getSupabaseAdmin } from "@/lib/supabase-server";
 import { requireVerifiedClient } from "@/lib/server/kyc-gate";
+import { requireSanctionsClear } from "@/lib/server/sanctions";
+import { requireAcceptedTos } from "@/lib/server/tos-gate";
 import { detectNetwork } from "@/lib/network";
 
 const BASE58_RE = /^[1-9A-HJ-NP-Za-km-z]{32,44}$/;
@@ -75,6 +87,13 @@ export async function POST(request: Request) {
       throw new SiwsError(400, "note must be at most 4000 characters");
     }
 
+    // Sanctions screen of the signing wallet (see header), before any chain
+    // work.
+    await requireSanctionsClear(sb, {
+      route: "conversion/create",
+      wallets: [{ wallet, role: "self" }],
+    });
+
     // On-chain resolution — verifies mint ↔ share class and derives the
     // label/asset PDA from the chain (throws 400/503; fail closed).
     const facts = await resolveShareClassAssetFacts(shareClassPda, mint);
@@ -99,6 +118,10 @@ export async function POST(request: Request) {
         `Amount exceeds your on-chain balance (${balance.toString()} units)`,
       );
     }
+
+    // Mainnet: the requesting wallet must have accepted the Terms in force —
+    // checked last, right before the write (a no-op on test networks).
+    await requireAcceptedTos(sb, wallet, "requesting a conversion");
 
     const { data, error } = await sb
       .from("conversion_requests")
