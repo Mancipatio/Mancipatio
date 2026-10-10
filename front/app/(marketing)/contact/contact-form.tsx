@@ -6,6 +6,7 @@ import { FieldError, FieldLabel } from "@/components/field";
 import { TurnstileWidget } from "@/components/turnstile-widget";
 import { combine, maxLength, minLength, required, type Validator } from "@/lib/form-validation";
 import { ASSET_TYPES } from "@/lib/asset-types";
+import { assetClassOffered } from "@/lib/pilot-scope";
 import { createInquiry } from "@/lib/inquiries";
 import { useToast } from "@/lib/toast";
 import { TURNSTILE_ACTIONS, turnstileSiteKey } from "@/lib/turnstile";
@@ -20,10 +21,10 @@ const VALIDATORS: Record<string, Validator> = {
   idea: combine(required("Your idea"), minLength(20, "Your idea"), maxLength(5000, "Your idea")),
 };
 
-const ASSET_KIND_OPTIONS = [
-  ...ASSET_TYPES.map((t) => t.title),
-  "Something else",
-];
+/** The offered asset classes (lib/asset-classes.ts), then "Something else". */
+function assetKindOptions(): string[] {
+  return [...ASSET_TYPES.filter((t) => assetClassOffered(t.slug)).map((t) => t.title), "Something else"];
+}
 
 const INPUT_CLASS =
   "mt-1 w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 outline-none focus:border-slate-400";
@@ -172,7 +173,7 @@ export function ContactForm() {
             className={INPUT_CLASS}
           >
             <option value="">Select a category (optional)</option>
-            {ASSET_KIND_OPTIONS.map((o) => (
+            {assetKindOptions().map((o) => (
               <option key={o} value={o}>
                 {o}
               </option>

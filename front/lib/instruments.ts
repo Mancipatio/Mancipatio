@@ -113,7 +113,7 @@ export type InstrumentContent = {
 
 const APPLY: InstrumentCta = { label: "Apply to issue", href: "/apply" };
 const COMPARE: InstrumentCta = {
-  label: "Compare all eight",
+  label: "Compare asset types",
   href: "/markets/types",
   variant: "ghost",
 };

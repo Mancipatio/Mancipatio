@@ -43,6 +43,7 @@ import {
   type Asset,
 } from "@/lib/generated/asset_registry";
 import { fetchMaybeLiveCustodyVault } from "@/lib/closed-account";
+import { kycOnly, moduleEnabled } from "@/lib/features";
 import { loadNetwork, type NetworkData } from "@/lib/enumerate";
 import { loadNetworkPreferIndexer } from "@/lib/indexer";
 import { loadHoldings } from "@/lib/holdings";
@@ -275,6 +276,12 @@ export default function ConversionPage() {
   // Only onboarded (KYC-verified) clients may request conversion.
   const eligible = kycStatus === "verified";
   const canRequest = eligible && convertible.length > 0;
+  // Pilot scope (lib/features.ts): with the module off (and in KYC-only mode)
+  // this is a notice page: no new request; cancels, reclaims and recovery
+  // stay. A deposit into an approved escrow is refused while KYC-only mode is
+  // on (lib/pause-gate.ts KYC_ONLY_FLOWS), so its button says so.
+  const requestsOpen = moduleEnabled("custodyConversion");
+  const depositsPaused = kycOnly();
 
   async function finishDepositRecord(receipt: PendingChainRecord) {
     if (
@@ -697,7 +704,7 @@ export default function ConversionPage() {
             passport. Without one, your deposit is returned to your wallet.
           </p>
         </div>
-        <button
+        {requestsOpen && <button
           type="button"
           disabled={!canRequest}
           onClick={() => setShowRequest(true)}
@@ -711,7 +718,7 @@ export default function ConversionPage() {
           className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white hover:bg-slate-800 disabled:opacity-50"
         >
           + Request conversion
-        </button>
+        </button>}
       </div>
 
       {kycStatus !== undefined && !eligible && (
@@ -761,6 +768,7 @@ export default function ConversionPage() {
           onClick={() => setShowRequest(true)}
           canRequest={canRequest}
           eligible={eligible}
+          paused={!requestsOpen}
         />
       ) : (
         <div className="mt-8 overflow-x-auto rounded-xl border border-slate-200 bg-white shadow-card">
@@ -821,6 +829,8 @@ export default function ConversionPage() {
                           >
                             Vault closed — deposit disabled
                           </span>
+                        ) : depositsPaused ? (
+                          <span className="text-slate-500">Deposits are paused</span>
                         ) : (
                           <button
                             type="button"
@@ -884,7 +894,7 @@ export default function ConversionPage() {
         </div>
       )}
 
-      {showRequest && eligible && (
+      {showRequest && eligible && requestsOpen && (
         <RequestConversionModal
           holdings={convertible}
           onClose={() => setShowRequest(false)}
@@ -1120,17 +1130,20 @@ function Empty({
   onClick,
   canRequest,
   eligible,
+  paused,
 }: {
   onClick: () => void;
   canRequest: boolean;
   eligible: boolean;
+  /** The module is off: no request prompt or eligibility hint. */
+  paused: boolean;
 }) {
   return (
     <div className="mt-8 rounded-xl border border-slate-200 bg-white p-12 text-center shadow-card">
       <p className="text-sm text-slate-600">
         You haven&apos;t requested any conversions yet.
       </p>
-      {canRequest ? (
+      {paused ? null : canRequest ? (
         <button
           type="button"
           onClick={onClick}

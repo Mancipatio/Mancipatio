@@ -13,6 +13,7 @@ import { getMyOnboardingPath } from "@/lib/clients";
 import { isDefaultApprovedJurisdiction } from "@/lib/passport";
 import { signedFetch } from "@/lib/siws-client";
 import { accountFetch, useSignedInAccount } from "@/lib/account-login";
+import { kycOnly } from "@/lib/features";
 
 type Kind = "kyc" | "kyb";
 type Fields = Record<string, string>;
@@ -35,7 +36,12 @@ export function VerificationForm() {
   const search = useSearchParams();
   const next = search.get("next");
   const safeNext = next && SAFE_NEXT.test(next) ? next : null;
-  const [kind, setKind] = useState<Kind>(search.get("type") === "kyb" ? "kyb" : "kyc");
+  // KYC-only mode (lib/features.ts): a person's KYC is the one request open;
+  // a company's KYB is for raising and issuing (paused; the route answers
+  // 403), so it is not offered and ?type=kyb is ignored.
+  const kybOpen = !kycOnly();
+  const kinds: readonly Kind[] = kybOpen ? ["kyc", "kyb"] : ["kyc"];
+  const [kind, setKind] = useState<Kind>(kybOpen && search.get("type") === "kyb" ? "kyb" : "kyc");
   const [fields, setFields] = useState<Fields>(EMPTY);
   const [consent, setConsent] = useState(false);
   const [status, setStatus] = useState<{ kyc: AccountWalletKycStatus; kyb: AccountWalletKycStatus } | null>(null);
@@ -119,7 +125,9 @@ export function VerificationForm() {
 
   return <div className="account-page verify-page">
     <header className="account-heading">
-      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes.</p></div>
+      <div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h1>Get verified<span>.</span></h1><p>{kybOpen
+        ? "Buying and trading tokens does not require verification. You need it to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It takes a few minutes."
+        : "Verify your identity (KYC) now. The services that need verification open later. It takes a few minutes."}</p></div>
     </header>
     {!conn.isReady ? <p className="account-loading" role="status">Checking your wallet connection…</p>
       : signedIn.status === "loading" ? <p className="account-loading" role="status">Checking your sign-in…</p>
@@ -133,10 +141,12 @@ export function VerificationForm() {
         </div>
       : <section className="account-card">
         <div className="verify-kinds" role="group" aria-label="What do you want to verify?">
-          {(["kyc", "kyb"] as const).map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
+          {kinds.map((k) => <button key={k} type="button" className="verify-kind" aria-pressed={kind === k} onClick={() => { setKind(k); setDone(null); setError(null); setEditing(false); }}>
             {k === "kyc" ? <IconUsers size={20} /> : <IconBuilding size={20} />}
             <strong>{k === "kyc" ? "Individual (KYC)" : "Company (KYB)"}</strong>
-            <span>{k === "kyc" ? "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder." : "Verify your company to raise capital or issue assets."}</span>
+            <span>{k === "kyb" ? "Verify your company to raise capital or issue assets."
+              : kybOpen ? "Verify yourself to convert tokens, take delivery, get an investor passport for KYC-gated classes, or apply to raise as an individual founder."
+              : "Verify yourself now; the services that need it open later."}</span>
             {status && <span className={`account-status ${status[k] === "verified" ? "account-status--verified" : ""}`} style={{ marginTop: 10 }}>{VERIFICATION_LABEL[status[k]]}</span>}
           </button>)}
         </div>

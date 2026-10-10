@@ -3,6 +3,7 @@
 import Link from "next/link";
 import type { AccountVerification, AccountWalletKycStatus } from "@/lib/account";
 import { IconArrowUpRight, IconBuilding, IconCheck, IconShield, IconUsers } from "@/components/icons";
+import { kycOnly } from "@/lib/features";
 
 export const VERIFICATION_LABEL: Record<AccountWalletKycStatus, string> = {
   none: "Not started", pending: "In review", more_info: "Documents needed", verified: "Verified",
@@ -18,7 +19,9 @@ function Row({ kind, status, documents }: { kind: "kyc" | "kyb"; status: Account
     <div className="verification-row-text">
       <strong>{company ? "Company verification (KYB)" : "Identity verification (KYC)"}</strong>
       <p>{status === "verified" ? (company ? "Your company is verified for issuing and raising on Manci." : "Your identity is verified for converting tokens into company shares and taking delivery of physical goods, where these are available. To buy KYC-gated classes, request an investor passport for your wallet in Portfolio.")
-        : status === "none" ? (company ? "Needed to create a raise or issue assets as a company." : "Needed to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, or raise as an individual founder. Buying and trading other tokens does not require it.")
+        : status === "none" ? (company ? "Needed to create a raise or issue assets as a company."
+          : kycOnly() ? "Open now. The services that need verification open later."
+          : "Needed to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, or raise as an individual founder. Buying and trading other tokens does not require it.")
         : status === "more_info" ? `We need ${documents || "some"} document${documents === 1 ? "" : "s"} before we can review.`
         : status === "pending" ? "Our compliance team is reviewing your submission."
         : status === "expired" ? "Your verification has expired. Renew it to keep access."
@@ -33,10 +36,14 @@ export function AccountVerificationCard({ verification }: { verification: Accoun
   return <section className="account-card" aria-labelledby="account-verification-heading">
     <div className="account-card-heading"><div><p className="account-eyebrow">TRUST &amp; COMPLIANCE</p><h2 id="account-verification-heading">Verification</h2></div><IconShield size={21} /></div>
     {!verification ? <p className="account-card-description">Verification status is temporarily unavailable. Refresh the page to try again.</p> : <>
-      <p className="account-card-description">Buying and trading tokens does not require verification. It is required to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It applies to the wallet you are connected with.</p>
+      {/* KYC-only mode (lib/features.ts): identity verification (KYC) is the
+          one request open; a company's KYB (raising, issuing) is not offered. */}
+      <p className="account-card-description">{kycOnly()
+        ? "Verify your identity (KYC) now. The services that need verification open later. It applies to the wallet you are connected with."
+        : "Buying and trading tokens does not require verification. It is required to convert tokens into company shares, take delivery of physical goods, get an investor passport for KYC-gated classes, raise capital or issue assets. It applies to the wallet you are connected with."}</p>
       <div className="verification-rows">
         <Row kind="kyc" status={verification.kyc} documents={verification.documents_requested} />
-        <Row kind="kyb" status={verification.kyb} documents={verification.documents_requested} />
+        {!kycOnly() && <Row kind="kyb" status={verification.kyb} documents={verification.documents_requested} />}
       </div>
     </>}
   </section>;

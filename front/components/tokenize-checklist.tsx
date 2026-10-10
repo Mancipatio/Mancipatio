@@ -63,6 +63,7 @@ import { createAbortableLatest } from "@/lib/latest-load";
 import { withRpcReadRetry } from "@/lib/rpc-retry";
 import { LockSupplyButton } from "@/components/lock-supply-button";
 import { DistributeCard } from "@/components/distribute-card";
+import { scopeEnabled } from "@/lib/features";
 import { SkeletonCard } from "@/components/skeleton";
 
 const TITLES: Record<ChecklistId, string> = {
@@ -243,6 +244,9 @@ export function TokenizeChecklist({
   const items = checklistItems(facts);
   const byId = Object.fromEntries(items.map((i) => [i.id, i.state])) as Record<ChecklistId, ChecklistState>;
   const resumeHref = tokenizeLike ? `/issuer/assets/tokenize?asset=${assetPda}` : "/issuer/share-classes";
+  // KYC-only mode (lib/features.ts): the tokenize flow and share classes are
+  // paused issuance entries, so the resume links go (the text stays).
+  const resumeOn = scopeEnabled("issuance");
   // Counted from lifetime_minted: a conversion burn never makes room to re-issue.
   const notCreated = remainingFromLifetime(maxSupply, lifetimeMinted);
   const inTreasury = extras.treasuryBalance;
@@ -275,14 +279,14 @@ export function TokenizeChecklist({
           return (
             <>
               The share class is not created yet.{" "}
-              <Link href={resumeHref} className={linkClass}>Continue →</Link>
+              {resumeOn && <Link href={resumeHref} className={linkClass}>Continue →</Link>}
             </>
           );
         }
         return isIssuerAuthority && permission.canMint ? (
           <>
             The token mint is not created yet.{" "}
-            <Link href={resumeHref} className={linkClass}>Continue (1 wallet signature) →</Link>
+            {resumeOn && <Link href={resumeHref} className={linkClass}>Continue (1 wallet signature) →</Link>}
           </>
         ) : (
           "Waiting for the Super Admin to give this issuer the Mint permission; then the mint is created with one signature."
@@ -294,7 +298,7 @@ export function TokenizeChecklist({
             {profile
               ? "The token's figures (share, tokens, price) are not saved yet; the asset page text stays as it is."
               : "The description of the token is not saved yet."}{" "}
-            <Link href={resumeHref} className={linkClass}>Save details (1 wallet signature) →</Link>
+            {resumeOn && <Link href={resumeHref} className={linkClass}>Save details (1 wallet signature) →</Link>}
           </>
         ) : (
           "No product profile yet — add one with Edit under Product profile."
@@ -385,12 +389,12 @@ export function TokenizeChecklist({
             <>
               Conversion into company shares is not set up yet; its conversion class can only be added while the asset is a
               draft:{" "}
-              <Link href={resumeHref} className={linkClass}>add it now (1 wallet signature) →</Link>
+              {resumeOn && <Link href={resumeHref} className={linkClass}>add it now (1 wallet signature) →</Link>}
             </>
           ) : isIssuerAuthority && permission.canConvert ? (
             <>
               Conversion into company shares is not set up yet:{" "}
-              <Link href={resumeHref} className={linkClass}>set the conversion target (1 wallet signature) →</Link>
+              {resumeOn && <Link href={resumeHref} className={linkClass}>set the conversion target (1 wallet signature) →</Link>}
             </>
           ) : (
             "Conversion into company shares is not set up yet: the conversion target is set once the Super Admin gives this issuer the Conversion permission (then 1 wallet signature)."

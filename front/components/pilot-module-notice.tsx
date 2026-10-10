@@ -15,7 +15,9 @@ export function PilotModuleNotice({ state, gate = false }: { state: ModuleRouteS
       data-pilot-module-notice
       className="mb-4 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900"
     >
-      <strong className="font-semibold">{network === "mainnet" ? "Not available." : "Switched off."}</strong>{" "}
+      {/* A page KYC-only mode pauses (state.kyc: primary sales, issuance) is
+          "Paused."; a module page keeps its label (the Terms do not offer it). */}
+      <strong className="font-semibold">{state.kyc ? "Paused." : network === "mainnet" ? "Not available." : "Switched off."}</strong>{" "}
       <span>{text}</span>
       {!gate && <span className="mt-1 block text-amber-800">{MODULE_EXITS_OPEN}</span>}
     </div>

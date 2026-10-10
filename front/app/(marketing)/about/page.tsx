@@ -143,7 +143,7 @@ export default function AboutPage() {
         <ButtonRow>
           <Button href={MX_ROUTES.apply}>Apply to issue</Button>
           <Button href={MX_ROUTES.instruments} variant="ghost">
-            See the eight instruments
+            See the asset types
           </Button>
         </ButtonRow>
       </Section>

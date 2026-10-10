@@ -30,6 +30,7 @@ import { SendToWalletsPanel } from "@/components/send-to-wallets-panel";
 import { PublicSalePanel } from "@/components/public-sale-panel";
 import { PrimaryReopenLink } from "@/components/primary-reopen-link";
 import { APPROVED_SALE_HOLDS_ROOM, BOTH_MODE_STEPS, roomHeldByApprovedSale } from "@/lib/distribute-guidance";
+import { scopeEnabled } from "@/lib/features";
 
 export type DistributionMode = "wallets" | "sale" | "both";
 
@@ -73,7 +74,12 @@ export function DistributeCard({
 }) {
   const conn = useWalletConnection();
   const session = conn.wallet;
-  const [mode, setMode] = useState<DistributionMode>("wallets");
+  // KYC-only mode (lib/features.ts): "Send to wallets" is an issuance entry
+  // (api/compliance screen-recipients answers 403), so only the public sale
+  // tab stays: its panel keeps the exits of a sale (withdraw the request,
+  // end the sale and collect) and hides its entries itself.
+  const modes = scopeEnabled("issuance") ? DISTRIBUTION_MODES : DISTRIBUTION_MODES.filter((m) => m.id === "sale");
+  const [mode, setMode] = useState<DistributionMode>(() => (scopeEnabled("issuance") ? "wallets" : "sale"));
   /** Units of pending treasury-mint reservations; null until read (or when no session). */
   const [reserved, setReserved] = useState<bigint | null>(null);
   /** Both: the wallet list's total (what it takes from the treasury, then the room). */
@@ -172,7 +178,7 @@ export function DistributeCard({
       {roomHeldByApprovedSale(supply) && <p className="mt-1 text-[12px] text-amber-800">{APPROVED_SALE_HOLDS_ROOM}</p>}
 
       <div role="tablist" className="mt-3 flex gap-2">
-        {DISTRIBUTION_MODES.map((m) => (
+        {modes.map((m) => (
           <button
             key={m.id}
             role="tab"
