@@ -68,9 +68,25 @@ describe("TERMS_MODULES and their flags", () => {
 });
 
 describe("MAINNET_TERMS.offeredModules (committed)", () => {
-  it("offers no switchable module in version 2026-10-03: clause 2 lists them all as not available", () => {
-    expect(MAINNET_TERMS?.version).toBe("2026-10-03");
-    expect(MAINNET_TERMS?.offeredModules).toEqual([]);
+  it("offers trading through Manci and conversion in version 2026-10-10, as clause 2 does", () => {
+    expect(MAINNET_TERMS?.version).toBe("2026-10-10");
+    expect(MAINNET_TERMS?.offeredModules).toEqual(["secondaryTrading", "custodyConversion"]);
+    // Clause 2: the "currently offers" list names both modules (clauses 7A and
+    // 7B); the list of what is not available names neither.
+    const scope = MAINNET_TERMS!.clauses.find((c) => c.title === "2. Scope of the Service")!;
+    const listAfter = (lead: string) => {
+      const at = scope.blocks.findIndex((b) => b.kind === "paragraph" && b.text === lead);
+      const block = scope.blocks[at + 1];
+      return block?.kind === "list" ? block.items.join("\n") : "";
+    };
+    const offered = listAfter("The Service currently offers the following:");
+    const off = listAfter("The following are not available at present, and the pages that carry them say so:");
+    expect(offered).toMatch(/^Trading through Manci: .*\(clause 7A\)/m);
+    expect(offered).toMatch(/^Conversion of tokens into company shares, where the issuer offers it\..*7B\)/m);
+    expect(off).not.toMatch(/trading through Manci|conver/i);
+    for (const named of ["Vested (Startup) raises", "physical delivery", "distributions", "vesting", "governance", "Rights-Token"]) {
+      expect(off, named).toContain(named);
+    }
   });
 
   it("names modules only, each once", () => {
@@ -87,6 +103,20 @@ describe("MAINNET_TERMS.offeredModules (committed)", () => {
       else expect(build, name).toThrow(new RegExp(`switches on ${name}, which the mainnet Terms do not offer`));
     }
     expect(() => assertBuildMainnetModules(BUILD, MAINNET)).not.toThrow();
+  });
+
+  it("builds the committed Terms with trading and conversion on, either one off (a rollback), and refuses delivery", () => {
+    const env = (trading: string, conversion: string) => ({
+      ...MAINNET,
+      NEXT_PUBLIC_FEATURE_SECONDARY_TRADING: trading,
+      NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION: conversion,
+    });
+    expect(() => assertBuildMainnetModules(BUILD, env("true", "true"))).not.toThrow();
+    expect(() => assertBuildMainnetModules(BUILD, env("false", "true"))).not.toThrow();
+    expect(() => assertBuildMainnetModules(BUILD, env("true", ""))).not.toThrow();
+    // Conversion runs through a delivery-type escrow, but the Terms do not offer physical delivery.
+    expect(() => assertBuildMainnetModules(BUILD, { ...env("true", "true"), NEXT_PUBLIC_FEATURE_CUSTODY_DELIVERY: "true" }))
+      .toThrow(/switches on custodyDelivery, which the mainnet Terms do not offer/);
   });
 });
 

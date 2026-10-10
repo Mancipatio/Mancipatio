@@ -89,14 +89,47 @@ const COMPANY: Operator = {
  *  written confirmation of that day. */
 const BVI: Operator = { ...OPERATORS.mainnet };
 
-/** The version and date of the mainnet Terms and Privacy Policy: 2026-10-03,
- *  the owner's decisions D1-D7 (open classes, public sales, platform-linked
- *  wallets, KYC at conversion). It replaced counsel's texts of 2026-10-02;
- *  counsel confirmed its exact wording on 2026-10-03 (PR #57). */
-const MAINNET_VERSION = "2026-10-03";
+/** The version and date of the mainnet Terms and Privacy Policy: 2026-10-10,
+ *  the Terms that offer trading through Manci and conversion into company
+ *  shares. It replaces 2026-10-03 (the owner's decisions D1-D7, whose exact
+ *  wording counsel confirmed on 2026-10-03, PR #57) and is HELD until counsel
+ *  confirms its own exact wording: the risk warning's status is "draft" and
+ *  the Terms carry counsel's placeholders, so a mainnet build refuses it. */
+const MAINNET_VERSION = "2026-10-10";
 
 /** The previous mainnet Terms version, which every wallet must accept again. */
-const PREVIOUS_MAINNET_VERSION = "2026-10-02";
+const PREVIOUS_MAINNET_VERSION = "2026-10-03";
+
+/** What a mainnet build refuses while version 2026-10-10 is held for counsel.
+ *  The commit that records counsel's confirmation empties this list. */
+const HOLD_PROBLEMS = [
+  "Terms of Service: contains wording that must not reach mainnet (placeholder)",
+  'Purchase risk warning: still engineering\'s draft (lib/legal/risk-warning.ts, status "draft")',
+];
+
+/** The facts version 2026-10-10 leaves to counsel, as they stand in the Terms
+ *  (clause 7B). The confirmation commit replaces each with counsel's text. */
+const COUNSEL_PLACEHOLDERS = [
+  "[placeholder for counsel: the target period from your deposit to the registration of the transfer]",
+  "[placeholder for counsel: who bears the notary's fees, the register's fee and any tax on the share transfer, and whether the Operator charges a fee for a conversion]",
+];
+
+const PLACEHOLDER_RE = /\[placeholder for counsel: [^\]]*\]/g;
+
+/** `doc` with every counsel placeholder filled in: what the slots look like
+ *  once counsel's text replaces them (the confirmation commit). */
+function withPlaceholdersFilled<T extends LegalDocument>(doc: T): T {
+  const fill = (text: string) => text.replace(PLACEHOLDER_RE, "the period and the split counsel confirms");
+  return {
+    ...doc,
+    clauses: doc.clauses.map((clause) => ({
+      ...clause,
+      blocks: clause.blocks.map((block) =>
+        block.kind === "paragraph" ? { ...block, text: fill(block.text) } : { ...block, items: block.items.map(fill) },
+      ),
+    })),
+  };
+}
 
 const TAX_ID_UNSET = "operator.taxId (tax identification number, or { notAssigned: <reason> }) is not set";
 
@@ -449,7 +482,7 @@ describe("mainnetLegalProblems", () => {
     ]);
   });
 
-  it("mainnet legal slots report (complete since counsel confirmed 2026-10-03)", () => {
+  it("mainnet legal slots report (held: version 2026-10-10 waits for counsel's exact-text confirmation)", () => {
     // No licence is recorded, on counsel's written opinion that none is
     // needed: a mainnet build sets MAINNET_LICENSE_NOT_REQUIRED=true.
     const problems = mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, MAINNET_LEGAL_SLOTS);
@@ -460,27 +493,34 @@ describe("mainnetLegalProblems", () => {
     );
     // The company (Manci International Ltd., BVI, recorded 2026-09-30, its
     // tax number stated as not assigned on the owner's written confirmation
-    // of 2026-10-02) and the Terms, Privacy Policy and dialog summary are
-    // complete. Counsel confirmed the exact wording of version 2026-10-03
-    // (the owner's decisions D1-D7; owner, 2026-10-03, PR #57): the risk
-    // warning's status is "counsel", so nothing is refused.
-    expect(problems).toEqual([]);
-    // Without counsel's waiver the licence is refused.
+    // of 2026-10-02), the Privacy Policy and the dialog summary are complete.
+    // Version 2026-10-10 of the texts is held until counsel confirms its exact
+    // wording: the risk warning's status is "draft" and the Terms carry
+    // counsel's placeholders, so a mainnet build is refused.
+    expect(problems).toEqual(HOLD_PROBLEMS);
+    // Without counsel's waiver the licence is refused as well.
     expect(mainnetLegalProblems({}, MAINNET_LEGAL_SLOTS)).toEqual([
       expect.stringMatching(/^operator\.licence is not recorded/),
+      ...HOLD_PROBLEMS,
     ]);
-    // Everything else is complete: with counsel's status the slots pass.
+    // Counsel's status alone does not release it while a placeholder remains.
+    const counsel = { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "counsel" as const };
+    expect(
+      mainnetLegalProblems({ [MAINNET_LICENSE_WAIVER]: "true" }, { ...MAINNET_LEGAL_SLOTS, riskWarning: counsel }),
+    ).toEqual([HOLD_PROBLEMS[0]]);
+    // Everything else is complete: with the placeholders filled in and
+    // counsel's status (the confirmation commit) the slots pass.
     expect(
       mainnetLegalProblems(
         { [MAINNET_LICENSE_WAIVER]: "true" },
-        { ...MAINNET_LEGAL_SLOTS, riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "counsel" } },
+        { ...MAINNET_LEGAL_SLOTS, terms: withPlaceholdersFilled(MAINNET_TERMS!), riskWarning: counsel },
       ),
     ).toEqual([]);
   });
 });
 
 describe("assertBuildMainnetLegal (next.config.ts)", () => {
-  it("builds the slots committed today (counsel confirmed the 2026-10-03 wording) and still refuses a draft risk warning", () => {
+  it("refuses the slots committed today (version 2026-10-10, held for counsel) and builds them once confirmed", () => {
     const env = { NEXT_PUBLIC_NETWORK: "mainnet", MAINNET_LEGAL_COPY_APPROVED: "true" };
     const refusal = (vars: Record<string, string>, slots = MAINNET_LEGAL_SLOTS) => {
       try {
@@ -490,13 +530,27 @@ describe("assertBuildMainnetLegal (next.config.ts)", () => {
       }
       return "";
     };
-    // Counsel confirmed the 2026-10-03 wording: with the licence waiver the committed slots build.
-    expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" })).toBe("");
-    // A draft risk warning would still be refused.
-    const draft = { ...MAINNET_LEGAL_SLOTS, riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "draft" as const } };
+    // Held: even with the licence waiver the committed slots are refused, for
+    // the draft risk warning and for counsel's placeholders.
+    const held = refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" });
+    expect(held).toMatch(/^Refusing a mainnet build: the operator and legal slots are not complete/);
+    for (const problem of HOLD_PROBLEMS) expect(held, problem).toContain(problem);
+    expect(held).not.toContain("operator.licence");
+    // A draft risk warning is refused on its own as well.
+    const draft = {
+      ...MAINNET_LEGAL_SLOTS,
+      terms: withPlaceholdersFilled(MAINNET_TERMS!),
+      riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "draft" as const },
+    };
     expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" }, draft)).toContain("Purchase risk warning: still engineering's draft");
-    // Counsel's status (the commit that records the confirmation) lets it through.
-    const confirmed = { ...MAINNET_LEGAL_SLOTS, riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "counsel" as const } };
+    expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" }, draft)).not.toContain("Terms of Service:");
+    // Counsel's text in place of the placeholders and counsel's status (the
+    // commit that records the confirmation) let it through.
+    const confirmed = {
+      ...MAINNET_LEGAL_SLOTS,
+      terms: withPlaceholdersFilled(MAINNET_TERMS!),
+      riskWarning: { ...MAINNET_LEGAL_SLOTS.riskWarning, status: "counsel" as const },
+    };
     expect(refusal({ ...env, [MAINNET_LICENSE_WAIVER]: "true" }, confirmed)).toBe("");
     // Without the waiver the licence is refused as well.
     const message = refusal(env, confirmed);
@@ -549,7 +603,7 @@ describe("next.config.ts runs the legal guard (review 8.1 #9)", () => {
 });
 
 describe("Terms version per network", () => {
-  it("keeps the devnet version and takes the published mainnet Terms' version on mainnet (2026-10-03)", () => {
+  it("keeps the devnet version and takes the mainnet Terms' own version on mainnet (2026-10-10)", () => {
     expect(DEVNET_TOS_VERSION).toBe("2026-07-18");
     for (const network of ["devnet", "testnet", "localnet"] as const) {
       expect(tosVersionFor(network)).toBe(DEVNET_TOS_VERSION);
@@ -557,7 +611,7 @@ describe("Terms version per network", () => {
     expect(MAINNET_TERMS?.version).toBe(MAINNET_VERSION);
     expect(MAINNET_TERMS?.lastUpdated).toBe(MAINNET_VERSION);
     expect(tosVersionFor("mainnet")).toBe(MAINNET_VERSION);
-    // A new version: an acceptance of 2026-10-02 no longer counts, so every
+    // A new version: an acceptance of 2026-10-03 no longer counts, so every
     // mainnet wallet accepts again (Terms clause 20).
     expect(tosVersionFor("mainnet")).not.toBe(PREVIOUS_MAINNET_VERSION);
   });
@@ -568,7 +622,7 @@ describe("Terms version per network", () => {
       vi.resetModules();
     });
 
-    it("is 2026-10-03 on a mainnet build and the pilot's on devnet", async () => {
+    it("is 2026-10-10 on a mainnet build and the pilot's on devnet", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
       expect((await import("@/lib/tos-version")).TOS_VERSION).toBe(MAINNET_VERSION);
@@ -595,30 +649,88 @@ function visibleText(html: string): string {
     .replace(/\s+/g, " ");
 }
 
-describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed per the owner's decisions D1-D7)", () => {
+describe("the mainnet texts (version 2026-10-10: 2026-10-03 plus trading through Manci and conversion, held for counsel)", () => {
   const NEW_CLAUSE_11 =
-    "wallet signatures for administrative actions; our company's hardware wallet, which holds the super administrator, " +
-    "KYC authority and Blocklist Authority roles and the treasury; and a multisig, with a separate hardware wallet as its " +
-    "member, that holds the authority to upgrade the on-chain programs. A second administrator uses a software wallet.";
+    "and wallet signatures for administrative actions. The keys that control the platform are currently held as follows: " +
+    "one company key, a software wallet, holds the super administrator, KYC authority and Blocklist Authority roles and " +
+    "the treasury; a second administrator key, also a software wallet, is also the authority key of one issuer on the " +
+    "platform; and a Squads multisig vault holds the authority to upgrade the on-chain programs.";
 
-  it("are in the slots, dated 2026-10-03, complete and free of test-network wording", () => {
+  /** The clause titles of version 2026-10-03: 2026-10-10 renumbers none of them. */
+  const TITLES_2026_10_03 = [
+    "1. Acceptance and scope",
+    "2. Scope of the Service",
+    "3. Eligibility",
+    "4. What the Operator does and does not do",
+    "5. Your wallet, keys and transactions",
+    "6. Identity verification and the investor passport",
+    "7. Primary sales",
+    "8. Transfers and transfer checks",
+    "9. What the Operator can do without your signature",
+    "10. Sanctions screening and geographic restrictions",
+    "11. Fees",
+    "12. Risks",
+    "13. Issuers",
+    "14. Prohibited use",
+    "15. Suspension, termination and wind-down",
+    "16. Availability of the Service",
+    "17. Liability",
+    "18. Personal data",
+    "19. Complaints and notices",
+    "20. Changes to these Terms",
+    "21. General",
+  ];
+
+  it("are in the slots, dated 2026-10-10, complete but for counsel's placeholders and free of test-network wording", () => {
     expect(MAINNET_TERMS).not.toBeNull();
     expect(MAINNET_PRIVACY).not.toBeNull();
-    expect(legalDocumentProblems("Terms of Service", MAINNET_TERMS)).toEqual([]);
+    // Held: the Terms carry counsel's placeholders, which the guard refuses as drafting leftovers.
+    expect(legalDocumentProblems("Terms of Service", MAINNET_TERMS)).toEqual([HOLD_PROBLEMS[0]]);
+    expect(legalDocumentProblems("Terms of Service", withPlaceholdersFilled(MAINNET_TERMS!))).toEqual([]);
     expect(legalDocumentProblems("Privacy Policy", MAINNET_PRIVACY)).toEqual([]);
-    expect(MAINNET_TERMS!.clauses.map((c) => c.title)).toHaveLength(21);
-    expect(MAINNET_TERMS!.clauses[0].title).toBe("1. Acceptance and scope");
-    expect(MAINNET_TERMS!.clauses[20].title).toBe("21. General");
+    // Two clauses added after clause 7 as 7A and 7B; no clause renumbered, so
+    // every "clause N" reference keeps its meaning.
+    const titles = MAINNET_TERMS!.clauses.map((c) => c.title);
+    expect(titles).toEqual([
+      ...TITLES_2026_10_03.slice(0, 7),
+      "7A. Trading through Manci",
+      "7B. Conversion into company shares",
+      ...TITLES_2026_10_03.slice(7),
+    ]);
     expect(MAINNET_PRIVACY!.clauses).toHaveLength(14);
     expect([MAINNET_PRIVACY!.version, MAINNET_PRIVACY!.lastUpdated]).toEqual([MAINNET_VERSION, MAINNET_VERSION]);
-    expect(MAINNET_TOS_GATE_POINTS).toHaveLength(5);
+    expect(MAINNET_TOS_GATE_POINTS).toHaveLength(6);
     expect(forbiddenMainnetPhrases(MAINNET_TOS_GATE_POINTS!.join("\n"))).toEqual([]);
     // The Terms' risk clause spells out the constant the risk warning uses.
     const risks = MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!;
     expect(risks.blocks).toContainEqual({ kind: "paragraph", text: NO_INVESTOR_PROTECTION });
   });
 
-  it("Privacy clause 11 names which keys a hardware wallet holds, and only that changed", () => {
+  it("every \"clause N\" reference names a clause that exists", () => {
+    const numbers = new Set(MAINNET_TERMS!.clauses.map((c) => c.title.split(".")[0]));
+    const text = legalDocumentText(MAINNET_TERMS!);
+    const refs = [...text.matchAll(/\bclauses? (\d+[AB]?)(?:,? (?:and )?(\d+[AB]?))?/g)].flatMap((m) => [m[1], m[2]]).filter(Boolean);
+    expect(refs.length).toBeGreaterThan(30);
+    for (const ref of refs) expect(numbers.has(ref), `clause ${ref}`).toBe(true);
+    expect(refs).toContain("7A");
+    expect(refs).toContain("7B");
+  });
+
+  it("leave exactly counsel's placeholders open, in the Terms only", () => {
+    expect(legalDocumentText(MAINNET_TERMS!).match(PLACEHOLDER_RE)).toEqual(COUNSEL_PLACEHOLDERS);
+    for (const text of [legalDocumentText(MAINNET_PRIVACY!), MAINNET_TOS_GATE_POINTS!.join("\n"), PURCHASE_RISK_WARNING.points.join("\n")]) {
+      expect(text).not.toMatch(/placeholder/i);
+    }
+    // Both are in clause 7B (conversion: target timing and costs).
+    const conversion = legalDocumentText({
+      version: MAINNET_VERSION,
+      lastUpdated: MAINNET_VERSION,
+      clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "7B. Conversion into company shares")!],
+    });
+    expect(conversion.match(PLACEHOLDER_RE)).toEqual(COUNSEL_PLACEHOLDERS);
+  });
+
+  it("Privacy clause 11 states the keys as they are and claims no hardware wallet", () => {
     const security = MAINNET_PRIVACY!.clauses.find((c) => c.title === "11. Security")!;
     expect(security.blocks).toHaveLength(2);
     const first = security.blocks[0];
@@ -626,13 +738,29 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
     const text = first.kind === "paragraph" ? first.text : "";
     expect(text.startsWith("We protect personal data with technical and organisational measures appropriate to the risk, including: encrypted connections;")).toBe(true);
     expect(text.endsWith(NEW_CLAUSE_11)).toBe(true);
-    expect(text).not.toContain("hardware wallets for the keys that control the platform");
+    expect(text).not.toMatch(/hardware/i);
+    // The Terms describe the same keys (clause 9).
+    const powers = legalDocumentText({
+      version: MAINNET_VERSION,
+      lastUpdated: MAINNET_VERSION,
+      clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "9. What the Operator can do without your signature")!],
+    });
+    expect(powers).toContain(
+      "Currently, one key of the Operator holds the super administrator, administrator, Blocklist Authority and KYC authority roles together; " +
+        "a second key holds the administrator role and is also the issuer authority of one issuer on the Service; " +
+        "and a multisig vault holds the upgrade authority of both programs.",
+    );
+    expect(powers).not.toContain("holds the administrator role only");
   });
 
-  it("the purchase risk warning carries counsel's status (confirmed 2026-10-03)", () => {
-    expect(PURCHASE_RISK_WARNING.status).toBe("counsel");
-    expect(PURCHASE_RISK_WARNING.points).toHaveLength(10);
+  it("the purchase risk warning is engineering's draft until counsel confirms 2026-10-10", () => {
+    expect(PURCHASE_RISK_WARNING.status).toBe("draft");
+    expect(PURCHASE_RISK_WARNING.points).toHaveLength(13);
     expect(PURCHASE_RISK_WARNING.points[1]).toBe(NO_INVESTOR_PROTECTION);
+    // Points 11-13: trades through Manci.
+    expect(PURCHASE_RISK_WARNING.points[10]).toMatch(/^In a trade through Manci \(an offer or an OTC deal\), Manci is not a party/);
+    expect(PURCHASE_RISK_WARNING.points[11]).toMatch(/^When you take an offer, the price goes to the seller/);
+    expect(PURCHASE_RISK_WARNING.points[12]).toMatch(/^In an OTC deal, your deposit stays in the deal's escrow until the other side deposits\./);
     expect(forbiddenMainnetPhrases([PURCHASE_RISK_WARNING.title, ...PURCHASE_RISK_WARNING.points, PURCHASE_RISK_WARNING.acknowledgement].join("\n"))).toEqual([]);
   });
 
@@ -672,12 +800,75 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
     expect(sales).toContain("A confirmed purchase is final");
     // D5: issuer direct transfers from the treasury.
     expect(sales).toContain("An issuer may also transfer units from its treasury directly to wallets it chooses.");
-    // D6: trading through Manci and the other modules stay off; conversion only where the issuer offers it.
+    // D6 as changed in 2026-10-10: trading through Manci and conversion
+    // (where the issuer offers it) are offered; the other modules stay off,
+    // and the Operator may suspend any feature.
     const scope = clause("2. Scope of the Service");
-    expect(scope).toContain("Trading through Manci (OTC deals, offers and the resell board), vested (Startup) raises");
+    expect(scope).toContain("Trading through Manci: offers, OTC deals and the resell board,");
+    expect(scope).toContain("Conversion of tokens into company shares, where the issuer offers it. It requires identity verification (clauses 6 and 7B).");
     expect(scope).not.toMatch(/conversion into company shares, physical delivery/);
     expect(scope).toContain("The following are not available at present, and the pages that carry them say so:");
-    expect(scope).toContain("Conversion of tokens into company shares. Once the Operator switches it on, it will be available where the issuer offers it");
+    expect(scope).toContain(
+      "Vested (Startup) raises and their payout vaults, physical delivery, distributions, vesting, governance and Rights-Token issuances, which are switched off.",
+    );
+    expect(scope).toContain("The Operator may suspend any feature of the Service, including trading through Manci and conversion, at any time");
+    expect(clause("6. Identity verification and the investor passport")).toContain(
+      "For a conversion (clause 7B), the Operator's staff review your verification file themselves before they approve it,",
+    );
+  });
+
+  it("trading through Manci (clause 7A) and conversion (clause 7B) say what the programs and the Service do", () => {
+    const clause = (title: string) => {
+      const found = MAINNET_TERMS!.clauses.find((c) => c.title === title);
+      expect(found, title).toBeDefined();
+      return legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [found!] });
+    };
+    const trading = clause("7A. Trading through Manci");
+    // Offers: the whole quantity at a fixed price, paid straight to the seller in the take transaction.
+    expect(trading).toContain("A seller deposits units into the escrow of an offer at a fixed price for the whole quantity.");
+    expect(trading).toContain("in one transaction the price goes from the taker straight to the seller");
+    // OTC deals: opened by an administrator for at most 90 days (OTC_DEAL_MAX_TTL_SECS), settled on the second deposit.
+    expect(trading).toContain("an expiry of at most 90 days");
+    expect(trading).toContain("The deal settles when the second deposit arrives, in the same transaction");
+    expect(trading).toContain("A listing is not a binding offer");
+    // The platform link as implemented: Terms acceptance on the Service, screening of deal requests and
+    // listings, and offers sent to the programs directly screened only afterwards.
+    expect(trading).toContain("with a wallet connected to the Service that has accepted the version of these Terms in force");
+    expect(trading).toContain("Offers can also be created and taken by sending transactions to the on-chain programs directly, without the Service.");
+    expect(trading).toContain("The Operator screens the wallets that create or take an offer on the blockchain afterwards against sanctions lists");
+    expect(trading).toContain("Trades are paid in USDC");
+    expect(trading).toContain("The Operator is not a party to any trade (clause 4).");
+    expect(trading).toContain("A trade that has settled on-chain is final and cannot be reversed or refunded");
+
+    const conversion = clause("7B. Conversion into company shares");
+    // The DeliveryEscrow deadline bounds (DELIVERY_ESCROW_MIN/MAX_DEADLINE_SECS).
+    expect(conversion).toContain("with a deadline between 24 hours and 365 days after opening");
+    expect(conversion).toContain(
+      "with the signatures certified by a notary, followed by the registration of the transfer with the Serbian Business Registers Agency",
+    );
+    expect(conversion).toContain("Only after the transfer has been registered does the administrator burn the escrowed units");
+    expect(conversion).toContain("The burn cannot be reversed");
+    // Failure: the administrator returns the units; after the deadline the holder can (return_custody_vault).
+    expect(conversion).toContain("an administrator returns your units from the escrow to your wallet");
+    expect(conversion).toContain("Once the deadline has passed, you can also take back yourself any units that have not been burned.");
+
+    const operator = clause("4. What the Operator does and does not do");
+    expect(operator).toContain("It is not a party to the trade and does not act for either party as agent, broker or dealer.");
+    expect(operator).toContain("the Operator does not take title to them at any point");
+    const powers = clause("9. What the Operator can do without your signature");
+    expect(powers).toContain("OTC deals. An administrator can refuse to open an OTC deal and can cancel an open deal at any time before it settles");
+    expect(powers).toContain("Conversion escrows. An administrator opens a conversion escrow");
+    expect(clause("10. Sanctions screening and geographic restrictions")).toContain(
+      "Offers are not screened before they are created or taken: the Operator screens the wallets that create or take them on the blockchain afterwards (clause 7A).",
+    );
+    expect(clause("11. Fees")).toContain("No platform fee is taken on-chain on purchases, trades through Manci or conversions");
+    expect(clause("14. Prohibited use")).toContain("manipulating prices or volumes through offers, OTC deals or listings");
+    // The dialog states the trade and conversion facts, and the OTC cancellation power.
+    expect(MAINNET_TOS_GATE_POINTS![0]).toContain(
+      "converting tokens into company shares does, and ends with your tokens burned once the share transfer is registered.",
+    );
+    expect(MAINNET_TOS_GATE_POINTS![2]).toMatch(/^In trades through Manci \(offers and OTC deals\), Manci is not a party/);
+    expect(MAINNET_TOS_GATE_POINTS![3]).toContain("cancel an OTC deal before it settles (refunding the deposits)");
   });
 
   describe("hold to what the code does on mainnet (review of PR #57)", () => {
@@ -686,24 +877,43 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
       vi.unstubAllEnvs();
     });
 
-    it("conversion is not presented as offered while its module is off", () => {
-      vi.stubEnv(`${PREFIX}CUSTODY_CONVERSION`, "");
-      expect(moduleEnabled("custodyConversion", "mainnet")).toBe(false);
+    it("trading through Manci and conversion are offered: clause 2, offeredModules, the flags and the risk texts agree", () => {
       const scope = MAINNET_TERMS!.clauses.find((c) => c.title === "2. Scope of the Service")!;
-      // The list after "currently offers the following" names primary sales and issuer transfers only.
+      // The list after "currently offers the following": primary sales, issuer transfers, trading, conversion.
       const offeredAt = scope.blocks.findIndex((b) => b.kind === "paragraph" && b.text === "The Service currently offers the following:");
       const offered = scope.blocks[offeredAt + 1];
-      expect(offered.kind === "list" ? offered.items : []).toHaveLength(2);
-      expect(offered.kind === "list" ? offered.items.join("\n") : "").not.toMatch(/conver/i);
-      const risks = legalDocumentText({ version: MAINNET_VERSION, lastUpdated: MAINNET_VERSION, clauses: [MAINNET_TERMS!.clauses.find((c) => c.title === "12. Risks")!] });
-      expect(risks).toContain("Conversion into company shares is not available yet (clause 2); once it is, it will be available only where the issuer offers it");
-      expect(PURCHASE_RISK_WARNING.points[9]).toMatch(/^Converting tokens into company shares, where conversion is available and the issuer offers it, /);
-      // Its page says so (the notice "clause 2" points to).
+      const items = offered.kind === "list" ? offered.items : [];
+      expect(items).toHaveLength(4);
+      expect(items[2]).toMatch(/^Trading through Manci: /);
+      expect(items[3]).toMatch(/^Conversion of tokens into company shares, where the issuer offers it\./);
+      expect(MAINNET_TERMS!.offeredModules).toEqual(["secondaryTrading", "custodyConversion"]);
+      // The list of what is not available names neither.
+      const offAt = scope.blocks.findIndex(
+        (b) => b.kind === "paragraph" && b.text === "The following are not available at present, and the pages that carry them say so:",
+      );
+      const off = scope.blocks[offAt + 1];
+      expect(off.kind === "list" ? off.items.join("\n") : "").not.toMatch(/trading through Manci|conver/i);
+      expect(PURCHASE_RISK_WARNING.points[9]).toMatch(/^Converting tokens into company shares, where the issuer offers it, /);
+      // Their flags switch them on (the same build ships the flags and these Terms).
+      vi.stubEnv(`${PREFIX}SECONDARY_TRADING`, "true");
+      vi.stubEnv(`${PREFIX}CUSTODY_CONVERSION`, "true");
+      expect(moduleEnabled("secondaryTrading", "mainnet")).toBe(true);
+      expect(moduleEnabled("custodyConversion", "mainnet")).toBe(true);
+      // A module switched off again (a rollback) shows its notice; clause 2 lets the Operator suspend any feature.
+      vi.stubEnv(`${PREFIX}CUSTODY_CONVERSION`, "");
+      expect(moduleEnabled("custodyConversion", "mainnet")).toBe(false);
       expect(moduleDisabledMessage("custodyConversion", "mainnet")).toBe("Conversion into company shares: not available on Solana mainnet.");
-      // No mainnet text says conversion is available today.
-      for (const text of [legalDocumentText(MAINNET_TERMS!), legalDocumentText(MAINNET_PRIVACY!), MAINNET_TOS_GATE_POINTS!.join("\n"), PURCHASE_RISK_WARNING.points.join("\n")]) {
-        expect(text).not.toMatch(/Conversion into company shares is available only/);
-        expect(text).not.toMatch(/Conversion of tokens into company shares, where the issuer offers it\./);
+      // No mainnet text still says that conversion or trading through Manci is not available.
+      for (const text of [
+        legalDocumentText(MAINNET_TERMS!),
+        legalDocumentText(MAINNET_PRIVACY!),
+        MAINNET_TOS_GATE_POINTS!.join("\n"),
+        PURCHASE_RISK_WARNING.points.join("\n"),
+      ]) {
+        expect(text).not.toMatch(/Conversion into company shares is not available yet/);
+        expect(text).not.toMatch(/where conversion is available/);
+        expect(text).not.toMatch(/Once the Operator switches it on/);
+        expect(text).not.toMatch(/Trading through Manci \(OTC deals, offers and the resell board\), vested/);
       }
     });
 
@@ -752,7 +962,7 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
       vi.resetModules();
     });
 
-    it("/legal/terms: the operator block, the 21 clauses dated 2026-10-03, governing law and the legal contact", async () => {
+    it("/legal/terms: the operator block, the 23 clauses dated 2026-10-10, governing law and the legal contact", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
       const { default: TermsPage } = await import("@/app/(marketing)/legal/terms/page");
@@ -765,11 +975,14 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
       expect(text).toContain("Disputes are resolved by the courts of the British Virgin Islands.");
       expect(text).toContain("legal@mancipatio.io");
       expect(text).not.toContain("This document has not been published yet.");
-      expect(forbiddenMainnetPhrases(text)).toEqual([]);
+      // Held for counsel: the placeholders of clause 7B are the only drafting
+      // leftovers (the confirmation commit expects [] again).
+      expect(forbiddenMainnetPhrases(text)).toEqual(["placeholder"]);
+      for (const placeholder of COUNSEL_PLACEHOLDERS) expect(text).toContain(placeholder);
       expect(text).not.toMatch(SERBIAN_LABELS);
     });
 
-    it("/legal/privacy: the controller block and the 14 clauses dated 2026-10-03, clause 11 as narrowed", async () => {
+    it("/legal/privacy: the controller block and the 14 clauses dated 2026-10-10, clause 11 with the keys as they are", async () => {
       vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
       vi.resetModules();
       const { default: PrivacyPage } = await import("@/app/(marketing)/legal/privacy/page");
@@ -796,13 +1009,16 @@ describe("the mainnet texts (version 2026-10-03: counsel's of 2026-10-02 changed
 });
 
 describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
-  // The Terms of 2026-10-03 (lib/legal/mainnet-copy.ts): units are bearer
-  // share-class tokens (clause 5); conversion into company shares is not
-  // available yet and, once it is, only where the issuer offers it, after KYC
-  // (clauses 2, 6 and 12); trading through Manci, distributions, delivery,
-  // governance and vesting are switched off (clause 2); EUR 3,000,000 per
-  // issuer over any twelve months (clause 7). Pages shared with devnet must
-  // hold on mainnet too.
+  // The mainnet Terms (lib/legal/mainnet-copy.ts): units are bearer
+  // share-class tokens (clause 5); conversion into company shares only where
+  // the issuer offers it, after KYC (clauses 2, 6 and 7B); distributions,
+  // delivery, governance and vesting are switched off (clause 2); EUR
+  // 3,000,000 per issuer over any twelve months (clause 7). From version
+  // 2026-10-10 the Terms offer trading through Manci and conversion, but the
+  // Operator may suspend any feature (clause 2): a module flag that is off
+  // (unset, or a rollback) must leave its pages saying "not available", which
+  // is what the cases below check. Pages shared with devnet must hold on
+  // mainnet too.
   const MODULE_VARS = ["SECONDARY_TRADING", "GOVERNANCE", "VESTING", "DISTRIBUTIONS", "CUSTODY_CONVERSION", "CUSTODY_DELIVERY"];
   const modulesOff = () => {
     for (const name of MODULE_VARS) vi.stubEnv(`NEXT_PUBLIC_FEATURE_${name}`, "");
