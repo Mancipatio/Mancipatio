@@ -205,10 +205,13 @@ export const OPERATORS: Readonly<{ devnet: Operator; mainnet: Operator }> = {
     contacts: CURRENT_CONTACTS,
     // Owner's decision 2026-09-30: the Terms are governed by the law of the
     // company's jurisdiction. The forum follows it (the BVI courts); change it
-    // here if counsel prefers arbitration. Once Manci opens beyond invited
-    // clients, users are to contract with the group company of their own
-    // jurisdiction (EU, US, UAE entities in formation), each with its own
-    // record.
+    // here if counsel prefers arbitration. This record is the contracting
+    // party for every user of the mainnet Service (Terms clause 1: "the
+    // company named as the operator on this page"), whether or not the site
+    // is open to the public. Moving users of some jurisdictions to another
+    // group company would need that company's own record here, the pages to
+    // pick it, and a new version of the Terms, all confirmed with counsel;
+    // until then nobody contracts with any other entity.
     governingLaw: "the laws of the British Virgin Islands",
     disputeResolution: "the courts of the British Virgin Islands",
     pilotNotice: null,

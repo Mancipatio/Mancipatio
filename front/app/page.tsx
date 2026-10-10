@@ -4,7 +4,7 @@ import { MarketOverview } from "@/components/market-overview";
 
 export const metadata: Metadata = {
   title: "Overview · Manci",
-  description: "Explore real-world assets, primary sales, OTC offers and your vesting on Solana.",
+  description: "Explore tokenized real-world assets and their primary sales on Solana, and follow your holdings in your portfolio.",
 };
 
 export default function HomePage() {

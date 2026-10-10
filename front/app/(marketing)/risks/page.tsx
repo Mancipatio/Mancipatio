@@ -24,7 +24,11 @@ import { NO_INVESTOR_PROTECTION } from "@/lib/legal/risk-warning";
  * hedged with a reassurance. The program-security sentence follows
  * lib/legal/audit.ts (no external audit is claimed before one exists), and
  * the investor-protection sentence is the purchase risk warning's
- * (lib/legal/risk-warning.ts).
+ * (lib/legal/risk-warning.ts). The regulatory section follows the mainnet
+ * Terms (issuers' own licences and approvals, the per-issuer raise limit)
+ * and names no structure every issuance must use. Trading through Manci
+ * and conversion are worded "where available", so the page stays true
+ * whether or not those modules are switched on (lib/features.ts).
  */
 export const metadata: Metadata = {
   title: "Risk disclosure — Manci",
@@ -50,8 +54,9 @@ export default function RisksPage() {
           price to sell against.
         </Body>
         <Body className="mt-3.5">
-          Holders can post what they hold on the resell board, but a posting is
-          not a bid. A sale happens only if a buyer turns up and agrees terms.
+          Where trading through Manci is available, holders can post what they
+          hold on the resell board, but a posting is not a bid. A sale happens
+          only if a buyer turns up and agrees terms.
         </Body>
       </Section>
 
@@ -72,9 +77,11 @@ export default function RisksPage() {
       <Section>
         <SectionHead title="Conversion runs through an off-chain legal process" />
         <Body className="mt-4">
-          Conversion into shares is not automatic and does not happen on-chain.
-          It goes through the standard legal share-transfer procedure, which
-          depends on the issuer and its founders doing their part.
+          Conversion into shares is possible only where the issuer offers
+          conversion and it is available. It is not automatic and does not
+          happen on-chain: it goes through the standard legal share-transfer
+          procedure, which depends on the issuer and its founders doing their
+          part.
         </Body>
         <Body className="mt-3.5">
           If they won&apos;t facilitate the transfer, the holder&apos;s route is
@@ -119,19 +126,27 @@ export default function RisksPage() {
           instruction that returns it. You keep the units you bought.
         </Body>
         <Body className="mt-3.5">
-          An OTC deal cannot expire while one of its parties is on the
-          blocklist: a Manci admin cancels it, which returns the deposits.
-          Until an admin does, your deposit stays in the deal&apos;s escrow.
+          Where trading through Manci is available, an OTC deal cannot expire
+          while one of its parties is on the blocklist: a Manci admin cancels
+          it, which returns the deposits. Until an admin does, your deposit
+          stays in the deal&apos;s escrow.
         </Body>
       </Section>
 
       <Section>
         <SectionHead title="The regulatory position can change" />
         <Body className="mt-4">
-          Company ownership, debt and revenue share are issued through a
-          Serbian SPV, capped at EUR 3 million per SPV per year. Some issues
-          require whitepaper approval from the Serbian Securities Commission,
-          and approval is not guaranteed.
+          Each issuer is responsible for the licences, approvals and consents
+          its offering requires. A whitepaper is shown as approved by a
+          regulator only where the approval and its decision reference are
+          recorded; otherwise it has not been approved. Where an approval is
+          needed, it is not guaranteed.
+        </Body>
+        <Body className="mt-3.5">
+          The operator limits what each issuer may raise through Manci to at
+          most EUR 3,000,000 over any twelve months. Where an issuer issues
+          through a special purpose vehicle, the limit applies to that
+          vehicle.
         </Body>
         <Body className="mt-3.5">
           The rules that apply to tokenized instruments are still developing. A

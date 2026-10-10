@@ -34,7 +34,9 @@ import {
  *
  * The two pieces of the brief that *can* be honoured are here: one paragraph
  * on why the structure comes before the code, and one honest line on where the
- * platform actually is.
+ * platform actually is. What investors can do, and the operator's powers the
+ * mission mentions, follow the mainnet Terms (clauses 2, 7 and 9): public
+ * primary sales the operator approves, and powers the Terms list.
  */
 export const metadata: Metadata = {
   title: "About — Manci",
@@ -100,8 +102,9 @@ export default function AboutPage() {
         <Body className="mt-4">
           Bring the whole lifecycle of asset ownership on-chain — not just the
           easy last mile. Issuance, compliance, custody, primary and secondary
-          markets, governance and vesting, on one platform, enforced by code
-          rather than entrusted to an operator.
+          markets, governance and vesting, on one platform, with the rules
+          enforced by on-chain programs and the operator&apos;s own powers
+          over them set out in the Terms.
         </Body>
 
         <H2 className="mt-10">Why the structure comes first</H2>
@@ -137,8 +140,10 @@ export default function AboutPage() {
       <Section>
         <H2>Two ways in.</H2>
         <Body className="mt-4">
-          Issuers apply and a person reads every application. Investors can join
-          the list and we&apos;ll notify them when the first offering opens.
+          Issuers apply and a person reads every application. Investors buy in
+          primary sales the operator has approved, with no invitation needed,
+          after reading each issuance&apos;s documents and the{" "}
+          <TextLink href={MX_ROUTES.risks}>risk disclosure</TextLink>.
         </Body>
         <ButtonRow>
           <Button href={MX_ROUTES.apply}>Apply to issue</Button>

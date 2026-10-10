@@ -70,13 +70,17 @@ beforeAll(async () => {
 });
 
 describe("deployed release: public access and SIWS boundaries", () => {
-  it("serves the new pilot documentation", async () => {
+  it("serves the public transaction-recovery documentation", async () => {
+    // /docs/pilot is the guide's old address: a release before the move
+    // serves the guide there, a later one redirects it to /docs/recovery
+    // (followed here). Both carry this sentence, so the check holds for the
+    // release on either side of the move.
     const response = await fetch(origin + "/docs/pilot", {
       headers: bypass,
       signal: AbortSignal.timeout(15_000),
     });
     expect(response.status).toBe(200);
-    expect(await response.text()).toContain("Run a controlled pilot");
+    expect(await response.text()).toContain("A pending or unavailable status is not proof of failure.");
   });
   it("reads the public published-profile projection", async () => {
     const response = await post("/api/profiles/public", {});

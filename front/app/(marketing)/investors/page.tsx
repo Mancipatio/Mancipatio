@@ -11,18 +11,27 @@ import {
   Small,
   TextLink,
 } from "@/components/mx";
+import { moduleEnabled } from "@/lib/features";
 import { detectNetwork, isTestNetwork } from "@/lib/network";
+import { navHrefVisible } from "@/lib/pilot-scope";
 
 export const metadata: Metadata = {
   title: "Investor guide — Manci",
   description:
-    "Find an asset, review its documents, connect your wallet and use the sale, OTC and portfolio screens.",
+    "Find an asset, review its documents, connect your wallet, buy in a primary sale and follow your holdings in your portfolio.",
 };
+
+/** OTC offers are named and linked only while trading through Manci is
+ *  switched on for this build (lib/features.ts), so the guide stays true
+ *  before and after the switch. */
+const OTC_ON = moduleEnabled("secondaryTrading");
 
 const STEPS = [
   {
     title: "01 · Explore the market",
-    body: "Browse assets, open sales and funded OTC offers. Open an asset to review its issuer and available share classes.",
+    body: OTC_ON
+      ? "Browse assets, open sales and funded OTC offers. Open an asset to review its issuer and available share classes."
+      : "Browse assets and open sales. Open an asset to review its issuer and available share classes.",
     links: [{ label: "Explore markets", href: MX_ROUTES.home }],
   },
   {
@@ -35,7 +44,7 @@ const STEPS = [
   },
   {
     title: "03 · Connect your wallet",
-    body: "Connect a Solana wallet using the app's wallet control. Buying and trading tokens does not require identity verification. You verify (KYC) later, if you convert tokens into company shares or take delivery of a physical good. A class marked KYC-gated also requires an approved investor passport, shown in Portfolio.",
+    body: "Connect a Solana wallet using the app's wallet control. Buying and trading tokens does not require identity verification. You verify (KYC) later, if you convert tokens into company shares or take delivery of a physical good, where these are available. A class marked KYC-gated also requires an approved investor passport, shown in Portfolio.",
     links: [
       { label: "Open Portfolio", href: "/portfolio" },
       { label: "Verification rules", href: MX_ROUTES.security },
@@ -47,7 +56,7 @@ const STEPS = [
     links: [
       { label: "Primary sales", href: "/marketplace/launchpad" },
       { label: "OTC offers", href: "/marketplace/otc" },
-    ],
+    ].filter((link) => navHrefVisible(link.href)),
   },
 ];
 

@@ -855,19 +855,27 @@ describe("mainnet pages do not contradict the Terms (review of PR #57)", () => {
   it("/about names switched-off modules as built, not shipped", async () => {
     modulesOff();
     expect(modulesFact("mainnet")).toBe(
-      "Launchpad live; OTC settlement, governance and vesting built, not available on Solana mainnet",
+      "Launchpad live; OTC settlement, conversion into company shares, governance and vesting built, not available on Solana mainnet",
     );
-    expect(modulesFact("devnet")).toBe("Launchpad, OTC settlement, governance and vesting shipped");
+    expect(modulesFact("devnet")).toBe(
+      "Launchpad, OTC settlement, conversion into company shares, governance and vesting shipped",
+    );
     vi.stubEnv("NEXT_PUBLIC_FEATURE_SECONDARY_TRADING", "true");
     expect(modulesFact("mainnet")).toBe(
-      "Launchpad and OTC settlement live; governance and vesting built, not available on Solana mainnet",
+      "Launchpad and OTC settlement live; conversion into company shares, governance and vesting built, not available on Solana mainnet",
+    );
+    vi.stubEnv("NEXT_PUBLIC_FEATURE_CUSTODY_CONVERSION", "true");
+    expect(modulesFact("mainnet")).toBe(
+      "Launchpad, OTC settlement and conversion into company shares live; governance and vesting built, not available on Solana mainnet",
     );
     modulesOff();
     vi.stubEnv("NEXT_PUBLIC_NETWORK", "mainnet");
     vi.resetModules();
     const { default: AboutPage } = await import("@/app/(marketing)/about/page");
     const text = visibleText(renderToStaticMarkup(createElement(AboutPage)));
-    expect(text).toContain("Launchpad live; OTC settlement, governance and vesting built, not available on Solana mainnet");
+    expect(text).toContain(
+      "Launchpad live; OTC settlement, conversion into company shares, governance and vesting built, not available on Solana mainnet",
+    );
     expect(text).not.toContain("governance and vesting shipped");
   });
 
